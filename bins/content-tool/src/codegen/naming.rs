@@ -11,6 +11,8 @@ const DIGIT_PREFIX: &str = "n_";
 const EMPTY_NAME: &str = "field";
 /// Keywords that cannot be raw identifiers; they get [`KEYWORD_SUFFIX`] instead.
 const NON_RAW_KEYWORDS: [&str; 3] = ["crate", "self", "super"];
+/// Words reserved by Rust edition 2024 that `syn` still accepts as plain identifiers.
+const EDITION_RESERVED_WORDS: [&str; 1] = ["gen"];
 const KEYWORD_SUFFIX: char = '_';
 /// The second field with the same name gets `_2`, the third `_3`, and so on.
 const FIRST_COLLISION_SUFFIX: usize = 2;
@@ -95,7 +97,7 @@ pub fn field_names<'a>(columns: impl IntoIterator<Item = &'a str>) -> Vec<FieldN
 
 /// True when `name` can be used as a Rust type name as it is.
 pub fn is_valid_type_name(name: &str) -> bool {
-    syn::parse_str::<syn::Ident>(name).is_ok()
+    !EDITION_RESERVED_WORDS.contains(&name) && syn::parse_str::<syn::Ident>(name).is_ok()
 }
 
 /// `syn` refuses keywords as plain identifiers.
@@ -170,6 +172,18 @@ mod tests {
             texts(&["Dungeon", "Dungeon+", "Dungeon-"]),
             vec!["dungeon", "dungeon_plus", "dungeon_minus"]
         );
+    }
+
+    #[test]
+    fn edition_reserved_words_are_marked_raw() {
+        assert_eq!(
+            field_names(["Gen"]),
+            vec![FieldName {
+                text: "gen".into(),
+                raw: true
+            }]
+        );
+        assert!(!is_valid_type_name("gen"));
     }
 
     #[test]
