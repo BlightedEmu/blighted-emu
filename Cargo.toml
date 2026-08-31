@@ -9,10 +9,25 @@ license = "AGPL-3.0-or-later"
 publish = false
 
 [workspace.dependencies]
+clap = { version = "4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "env"] }
+crc32fast = { version = "1.5.2", default-features = false, features = ["std"] }
 figment = { version = "0.10.19", default-features = false, features = ["toml", "env"] }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+oozextract = { version = "0.5.5", default-features = false }
+postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
+prettyplease = { version = "0.3.0", default-features = false }
+proc-macro2 = { version = "1.0.107", default-features = false, features = ["proc-macro"] }
+quick-xml = { version = "0.42.0", default-features = false, features = ["serialize"] }
+quote = { version = "1.0.47", default-features = false, features = ["proc-macro"] }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
+syn = { version = "3.0.9", default-features = false, features = ["full", "parsing", "printing"] }
+tempfile = { version = "3.27.0", default-features = false }
 thiserror = { version = "2.0.21", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "ansi", "env-filter", "std"] }
+zip = { version = "9.0.2", default-features = false }
+
+nw-common = { path = "crates/nw-common" }
+nw-formats = { path = "crates/nw-formats" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -24,3 +39,7 @@ debug = "line-tables-only"
 
 [profile.dev.package."*"]
 debug = false
+
+# Kraken decoding is slow without optimisation; this keeps local-data tests fast in the dev profile.
+[profile.dev.package.oozextract]
+opt-level = 3
