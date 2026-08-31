@@ -99,6 +99,12 @@ pub enum DatasheetError {
         /// Column count.
         columns: usize,
     },
+    /// Rows are declared, but the datasheet has no columns.
+    #[error("datasheet has {rows} rows but no columns")]
+    RowsWithoutColumns {
+        /// Row count.
+        rows: usize,
+    },
     /// A string has no NUL terminator.
     #[error("string at offset {offset} has no NUL terminator")]
     UnterminatedString {
@@ -130,6 +136,10 @@ impl Datasheet {
         let text = |offset: u32| reader.string_at(string_base + offset as usize);
         let column_count = reader.u32_at(HEADER_SIZE + META_COLUMN_COUNT_OFFSET)? as usize;
         let row_count = reader.u32_at(HEADER_SIZE + META_ROW_COUNT_OFFSET)? as usize;
+        // With no columns the cell index is empty, so the index check below cannot bound the rows.
+        if column_count == 0 && row_count > 0 {
+            return Err(DatasheetError::RowsWithoutColumns { rows: row_count });
+        }
         let column_index = HEADER_SIZE + META_SIZE;
         let cell_index = column_index + column_count * COLUMN_ENTRY_SIZE;
         let too_large = DatasheetError::TooLarge {
@@ -141,7 +151,8 @@ impl Datasheet {
             .and_then(|cells| cells.checked_mul(CELL_ENTRY_SIZE))
             .and_then(|size| size.checked_add(cell_index))
             .ok_or(too_large)?;
-        // Check the whole index before allocating, so a hostile count cannot allocate memory.
+        // Check the whole index before allocating. With columns, every row takes at least one
+        // cell entry, so the file length bounds the row and column allocations.
         if index_end > bytes.len() {
             return Err(DatasheetError::Truncated {
                 offset: column_index,
@@ -376,6 +387,16 @@ mod tests {
         assert!(matches!(
             Datasheet::parse(&bytes),
             Err(DatasheetError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn rows_without_columns_are_rejected() {
+        let mut bytes = write_sheet("T", "U", &[], &[]);
+        put_u32(&mut bytes, HEADER_SIZE + META_ROW_COUNT_OFFSET, u32::MAX);
+        assert!(matches!(
+            Datasheet::parse(&bytes),
+            Err(DatasheetError::RowsWithoutColumns { .. })
         ));
     }
 
