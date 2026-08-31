@@ -186,11 +186,6 @@ impl<R: Read + Seek> PakArchive<R> {
         })
     }
 
-    /// The pak path used in errors.
-    pub fn label(&self) -> &Path {
-        &self.label
-    }
-
     /// Lists all entries in central directory order.
     pub fn entries(&mut self) -> Result<Vec<PakEntry>, PakError> {
         let label = &self.label;
