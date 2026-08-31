@@ -1791,3 +1791,5 @@ impl Tables {
         counts
     }
 }
+/// CRC32 of the generated table files (sorted by name) and of this file without this item. The content bundle header stores it.
+pub const SCHEMA_HASH: u32 = 0xba759db0;
