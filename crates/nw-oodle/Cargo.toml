@@ -1,0 +1,19 @@
+[package]
+name = "nw-oodle"
+version = "0.1.0"
+description = "Oodle Kraken decoding for New World pak entries."
+edition.workspace = true
+rust-version.workspace = true
+license = "GPL-3.0-or-later"
+publish.workspace = true
+
+[dependencies]
+nw-formats.workspace = true
+oozextract.workspace = true
+
+[features]
+# Tests that read the user's own New World install (set NW_GAME_DIR).
+local-data = ["nw-formats/local-data"]
+
+[lints]
+workspace = true
