@@ -4,8 +4,12 @@
 use std::path::{Path, PathBuf};
 
 use nw_formats::datasheet::{DATASHEET_EXTENSION, Datasheet, DatasheetError};
+use nw_formats::loc::{LOC_EXTENSION, LocError, LocFile, parse_loc_xml};
 use nw_formats::pak::{PakArchive, PakError, find_paks};
 use nw_oodle::KrakenDecompressor;
+
+/// Path prefix of the English localization files inside the paks.
+pub const EN_US_TEXT_PREFIX: &str = "localization/en-us/";
 
 /// Error from reading the game install.
 #[derive(Debug, thiserror::Error)]
@@ -21,6 +25,15 @@ pub enum SourceError {
         /// Parser error.
         #[source]
         source: DatasheetError,
+    },
+    /// A localization file cannot be parsed.
+    #[error("{path}: {source}")]
+    Loc {
+        /// Entry path.
+        path: String,
+        /// Parser error.
+        #[source]
+        source: LocError,
     },
 }
 
@@ -52,6 +65,24 @@ impl GameSource {
                     source,
                 })?;
                 visit(path, sheet)
+            },
+        )
+    }
+
+    /// Calls `visit` for every `localization/en-us/*.loc.xml` file, in the same order rules as
+    /// [`GameSource::for_each_datasheet`]. Returns the number of files.
+    pub fn for_each_en_us_text<E: From<SourceError>>(
+        &self,
+        mut visit: impl FnMut(&str, LocFile) -> Result<(), E>,
+    ) -> Result<usize, E> {
+        self.for_each_entry(
+            |path| path.starts_with(EN_US_TEXT_PREFIX) && path.ends_with(LOC_EXTENSION),
+            |path, bytes| {
+                let file = parse_loc_xml(&bytes).map_err(|source| SourceError::Loc {
+                    path: path.to_owned(),
+                    source,
+                })?;
+                visit(path, file)
             },
         )
     }

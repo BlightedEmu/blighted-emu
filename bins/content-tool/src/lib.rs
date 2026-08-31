@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Library part of `content-tool`: code generation and bundle building.
 
+pub mod build;
 pub mod client_build;
 pub mod codegen;
 pub mod error;
@@ -13,6 +14,7 @@ mod local_data_tests {
 
     use nw_formats::local_data::*;
 
+    use crate::build::run_build;
     use crate::client_build::load_client_build;
     use crate::codegen::run_codegen;
     use crate::source::GameSource;
@@ -57,5 +59,18 @@ mod local_data_tests {
                 "{name} differs from fresh codegen output"
             );
         }
+    }
+
+    #[test]
+    fn build_holds_every_pinned_row_and_reloads() {
+        let out = tempfile::tempdir().unwrap();
+        let source = GameSource::open(&game_dir()).unwrap();
+        // run_build reloads the bundle and checks table, row and text counts itself.
+        let summary =
+            run_build(&source, PINNED_STEAM_BUILD, &out.path().join("bundle.bin")).unwrap();
+        assert_eq!(summary.datasheet_files, PINNED_DATASHEET_FILES);
+        assert_eq!(summary.rows, PINNED_DATASHEET_ROWS);
+        assert_eq!(summary.text_files, PINNED_EN_US_TEXT_FILES);
+        assert_eq!(summary.keyless_text_entries, PINNED_EN_US_KEYLESS);
     }
 }

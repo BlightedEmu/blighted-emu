@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use content_tool::build::{default_bundle_path, run_build};
 use content_tool::client_build::load_client_build;
 use content_tool::codegen::run_codegen;
 use content_tool::error::ToolError;
@@ -37,6 +38,12 @@ enum Command {
         #[arg(long, default_value = DEFAULT_GENERATED_DIR)]
         out_dir: PathBuf,
     },
+    /// Writes the content bundle and checks it by reloading it.
+    Build {
+        /// Bundle file (default: `local-data/content/bundle-<build>.bin`).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -66,6 +73,20 @@ fn run(cli: Cli) -> Result<(), ToolError> {
                 summary.table_types,
                 summary.files_written,
                 summary.stale_files_removed
+            );
+        }
+        Command::Build { out } => {
+            let out = out.unwrap_or_else(|| default_bundle_path(&client_build));
+            let summary = run_build(&source, &client_build, &out)?;
+            println!(
+                "build: {} datasheets, {} rows, {} text files, {} text entries, {} duplicate text keys, {} keyless text entries -> {}",
+                summary.datasheet_files,
+                summary.rows,
+                summary.text_files,
+                summary.text_entries,
+                summary.duplicate_text_keys,
+                summary.keyless_text_entries,
+                summary.path.display()
             );
         }
     }

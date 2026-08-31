@@ -2,6 +2,7 @@
 //! Top-level error of `content-tool`.
 
 use nw_common::config::ConfigError;
+use nw_content::BundleError;
 use nw_content::fill::FillError;
 
 use crate::codegen::CodegenError;
@@ -22,4 +23,17 @@ pub enum ToolError {
     /// The client build file is missing or invalid.
     #[error(transparent)]
     Config(#[from] ConfigError),
+    /// The bundle cannot be written or read back.
+    #[error(transparent)]
+    Bundle(#[from] BundleError),
+    /// The reloaded bundle does not hold what was written.
+    #[error("bundle check failed: {what} is {found} after reload, expected {expected}")]
+    CountMismatch {
+        /// What was counted.
+        what: &'static str,
+        /// Count before writing.
+        expected: usize,
+        /// Count after reload.
+        found: usize,
+    },
 }
