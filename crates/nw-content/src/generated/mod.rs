@@ -443,7 +443,7 @@ pub use world_event_rule_data::WorldEventRuleData;
 pub use unknown::Unknown;
 use nw_formats::datasheet::Datasheet;
 use crate::fill::FillError;
-use crate::table::{Table, TableCounts};
+use crate::table::{FromDatasheet, Table, TableCounts};
 /// Every table of the content bundle, grouped by table type.
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Tables {
@@ -900,598 +900,662 @@ impl Tables {
         sheet: &Datasheet,
     ) -> Result<(), FillError> {
         match sheet.type_name.as_str() {
-            "AITargetingData" => {
+            AITargetingData::TYPE_NAME => {
                 self.ai_targeting_data.push(Table::fill(source_path, sheet)?)
             }
-            "AbilityData" => self.ability_data.push(Table::fill(source_path, sheet)?),
-            "AchievementData" => {
+            AbilityData::TYPE_NAME => {
+                self.ability_data.push(Table::fill(source_path, sheet)?)
+            }
+            AchievementData::TYPE_NAME => {
                 self.achievement_data.push(Table::fill(source_path, sheet)?)
             }
-            "AchievementMetaData" => {
+            AchievementMetaData::TYPE_NAME => {
                 self.achievement_meta_data.push(Table::fill(source_path, sheet)?)
             }
-            "AffixData" => self.affix_data.push(Table::fill(source_path, sheet)?),
-            "AffixStatData" => {
+            AffixData::TYPE_NAME => {
+                self.affix_data.push(Table::fill(source_path, sheet)?)
+            }
+            AffixStatData::TYPE_NAME => {
                 self.affix_stat_data.push(Table::fill(source_path, sheet)?)
             }
-            "AfflictionData" => {
+            AfflictionData::TYPE_NAME => {
                 self.affliction_data.push(Table::fill(source_path, sheet)?)
             }
-            "AfkModeData" => self.afk_mode_data.push(Table::fill(source_path, sheet)?),
-            "AmmoItemDefinitions" => {
+            AfkModeData::TYPE_NAME => {
+                self.afk_mode_data.push(Table::fill(source_path, sheet)?)
+            }
+            AmmoItemDefinitions::TYPE_NAME => {
                 self.ammo_item_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "AppearanceTransforms" => {
+            AppearanceTransforms::TYPE_NAME => {
                 self.appearance_transforms.push(Table::fill(source_path, sheet)?)
             }
-            "ArchetypeData" => self.archetype_data.push(Table::fill(source_path, sheet)?),
-            "ArenaBalanceData" => {
+            ArchetypeData::TYPE_NAME => {
+                self.archetype_data.push(Table::fill(source_path, sheet)?)
+            }
+            ArenaBalanceData::TYPE_NAME => {
                 self.arena_balance_data.push(Table::fill(source_path, sheet)?)
             }
-            "ArmorAppearanceDefinitions" => {
+            ArmorAppearanceDefinitions::TYPE_NAME => {
                 self.armor_appearance_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "ArmorItemDefinitions" => {
+            ArmorItemDefinitions::TYPE_NAME => {
                 self.armor_item_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "AttributeDefinition" => {
+            AttributeDefinition::TYPE_NAME => {
                 self.attribute_definition.push(Table::fill(source_path, sheet)?)
             }
-            "BackstoryDefinition" => {
+            BackstoryDefinition::TYPE_NAME => {
                 self.backstory_definition.push(Table::fill(source_path, sheet)?)
             }
-            "BeamData" => self.beam_data.push(Table::fill(source_path, sheet)?),
-            "BlueprintItemDefinitions" => {
+            BeamData::TYPE_NAME => self.beam_data.push(Table::fill(source_path, sheet)?),
+            BlueprintItemDefinitions::TYPE_NAME => {
                 self.blueprint_item_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "BuffBucketData" => {
+            BuffBucketData::TYPE_NAME => {
                 self.buff_bucket_data.push(Table::fill(source_path, sheet)?)
             }
-            "CameraShakeData" => {
+            CameraShakeData::TYPE_NAME => {
                 self.camera_shake_data.push(Table::fill(source_path, sheet)?)
             }
-            "CampSkinData" => self.camp_skin_data.push(Table::fill(source_path, sheet)?),
-            "CaptureTheFlagBalanceData" => {
+            CampSkinData::TYPE_NAME => {
+                self.camp_skin_data.push(Table::fill(source_path, sheet)?)
+            }
+            CaptureTheFlagBalanceData::TYPE_NAME => {
                 self.capture_the_flag_balance_data.push(Table::fill(source_path, sheet)?)
             }
-            "CategoricalProgressionData" => {
+            CategoricalProgressionData::TYPE_NAME => {
                 self.categorical_progression_data.push(Table::fill(source_path, sheet)?)
             }
-            "CategoricalProgressionRankData" => {
+            CategoricalProgressionRankData::TYPE_NAME => {
                 self.categorical_progression_rank_data
                     .push(Table::fill(source_path, sheet)?)
             }
-            "CharmFilterData" => {
+            CharmFilterData::TYPE_NAME => {
                 self.charm_filter_data.push(Table::fill(source_path, sheet)?)
             }
-            "CinematicVideoStaticData" => {
+            CinematicVideoStaticData::TYPE_NAME => {
                 self.cinematic_video_static_data.push(Table::fill(source_path, sheet)?)
             }
-            "CollectibleStaticData" => {
+            CollectibleStaticData::TYPE_NAME => {
                 self.collectible_static_data.push(Table::fill(source_path, sheet)?)
             }
-            "CombatProfilesData" => {
+            CombatProfilesData::TYPE_NAME => {
                 self.combat_profiles_data.push(Table::fill(source_path, sheet)?)
             }
-            "CombatSettingsData" => {
+            CombatSettingsData::TYPE_NAME => {
                 self.combat_settings_data.push(Table::fill(source_path, sheet)?)
             }
-            "CombatTextData" => {
+            CombatTextData::TYPE_NAME => {
                 self.combat_text_data.push(Table::fill(source_path, sheet)?)
             }
-            "ConsumableItemDefinitions" => {
+            ConsumableItemDefinitions::TYPE_NAME => {
                 self.consumable_item_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "ContributionData" => {
+            ContributionData::TYPE_NAME => {
                 self.contribution_data.push(Table::fill(source_path, sheet)?)
             }
-            "ConversationStateData" => {
+            ConversationStateData::TYPE_NAME => {
                 self.conversation_state_data.push(Table::fill(source_path, sheet)?)
             }
-            "ConversationTopicData" => {
+            ConversationTopicData::TYPE_NAME => {
                 self.conversation_topic_data.push(Table::fill(source_path, sheet)?)
             }
-            "CooldownData" => self.cooldown_data.push(Table::fill(source_path, sheet)?),
-            "CostumeChangeData" => {
+            CooldownData::TYPE_NAME => {
+                self.cooldown_data.push(Table::fill(source_path, sheet)?)
+            }
+            CostumeChangeData::TYPE_NAME => {
                 self.costume_change_data.push(Table::fill(source_path, sheet)?)
             }
-            "CraftingCategoryData" => {
+            CraftingCategoryData::TYPE_NAME => {
                 self.crafting_category_data.push(Table::fill(source_path, sheet)?)
             }
-            "CraftingRecipeData" => {
+            CraftingRecipeData::TYPE_NAME => {
                 self.crafting_recipe_data.push(Table::fill(source_path, sheet)?)
             }
-            "CrestPartData" => {
+            CrestPartData::TYPE_NAME => {
                 self.crest_part_data.push(Table::fill(source_path, sheet)?)
             }
-            "CurrencyExchangeData" => {
+            CurrencyExchangeData::TYPE_NAME => {
                 self.currency_exchange_data.push(Table::fill(source_path, sheet)?)
             }
-            "CurseMutationStaticData" => {
+            CurseMutationStaticData::TYPE_NAME => {
                 self.curse_mutation_static_data.push(Table::fill(source_path, sheet)?)
             }
-            "CutsceneCameraStaticData" => {
+            CutsceneCameraStaticData::TYPE_NAME => {
                 self.cutscene_camera_static_data.push(Table::fill(source_path, sheet)?)
             }
-            "DamageData" => self.damage_data.push(Table::fill(source_path, sheet)?),
-            "DamageTypeData" => {
+            DamageData::TYPE_NAME => {
+                self.damage_data.push(Table::fill(source_path, sheet)?)
+            }
+            DamageTypeData::TYPE_NAME => {
                 self.damage_type_data.push(Table::fill(source_path, sheet)?)
             }
-            "DarknessData" => self.darkness_data.push(Table::fill(source_path, sheet)?),
-            "DarknessDifficultyData" => {
+            DarknessData::TYPE_NAME => {
+                self.darkness_data.push(Table::fill(source_path, sheet)?)
+            }
+            DarknessDifficultyData::TYPE_NAME => {
                 self.darkness_difficulty_data.push(Table::fill(source_path, sheet)?)
             }
-            "DataPointData" => {
+            DataPointData::TYPE_NAME => {
                 self.data_point_data.push(Table::fill(source_path, sheet)?)
             }
-            "DifficultyScalingData" => {
+            DifficultyScalingData::TYPE_NAME => {
                 self.difficulty_scaling_data.push(Table::fill(source_path, sheet)?)
             }
-            "DiminishingReturnsData" => {
+            DiminishingReturnsData::TYPE_NAME => {
                 self.diminishing_returns_data.push(Table::fill(source_path, sheet)?)
             }
-            "DivertedLootData" => {
+            DivertedLootData::TYPE_NAME => {
                 self.diverted_loot_data.push(Table::fill(source_path, sheet)?)
             }
-            "DuelBalanceData" => {
+            DuelBalanceData::TYPE_NAME => {
                 self.duel_balance_data.push(Table::fill(source_path, sheet)?)
             }
-            "DungeonClusterStaticData" => {
+            DungeonClusterStaticData::TYPE_NAME => {
                 self.dungeon_cluster_static_data.push(Table::fill(source_path, sheet)?)
             }
-            "DungeonGrammarStaticData" => {
+            DungeonGrammarStaticData::TYPE_NAME => {
                 self.dungeon_grammar_static_data.push(Table::fill(source_path, sheet)?)
             }
-            "DungeonRoomStaticData" => {
+            DungeonRoomStaticData::TYPE_NAME => {
                 self.dungeon_room_static_data.push(Table::fill(source_path, sheet)?)
             }
-            "DungeonTileStaticData" => {
+            DungeonTileStaticData::TYPE_NAME => {
                 self.dungeon_tile_static_data.push(Table::fill(source_path, sheet)?)
             }
-            "DyeColorData" => self.dye_color_data.push(Table::fill(source_path, sheet)?),
-            "DyeItemDefinitions" => {
+            DyeColorData::TYPE_NAME => {
+                self.dye_color_data.push(Table::fill(source_path, sheet)?)
+            }
+            DyeItemDefinitions::TYPE_NAME => {
                 self.dye_item_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "DynamicDifficultyStaticData" => {
+            DynamicDifficultyStaticData::TYPE_NAME => {
                 self.dynamic_difficulty_static_data
                     .push(Table::fill(source_path, sheet)?)
             }
-            "EconomyTrackerData" => {
+            EconomyTrackerData::TYPE_NAME => {
                 self.economy_tracker_data.push(Table::fill(source_path, sheet)?)
             }
-            "ElementalMutationStaticData" => {
+            ElementalMutationStaticData::TYPE_NAME => {
                 self.elemental_mutation_static_data
                     .push(Table::fill(source_path, sheet)?)
             }
-            "EmoteData" => self.emote_data.push(Table::fill(source_path, sheet)?),
-            "EncumbranceData" => {
+            EmoteData::TYPE_NAME => {
+                self.emote_data.push(Table::fill(source_path, sheet)?)
+            }
+            EncumbranceData::TYPE_NAME => {
                 self.encumbrance_data.push(Table::fill(source_path, sheet)?)
             }
-            "EntitlementData" => {
+            EntitlementData::TYPE_NAME => {
                 self.entitlement_data.push(Table::fill(source_path, sheet)?)
             }
-            "EquipmentSetData" => {
+            EquipmentSetData::TYPE_NAME => {
                 self.equipment_set_data.push(Table::fill(source_path, sheet)?)
             }
-            "ExpansionData" => self.expansion_data.push(Table::fill(source_path, sheet)?),
-            "ExperienceData" => {
+            ExpansionData::TYPE_NAME => {
+                self.expansion_data.push(Table::fill(source_path, sheet)?)
+            }
+            ExperienceData::TYPE_NAME => {
                 self.experience_data.push(Table::fill(source_path, sheet)?)
             }
-            "FFAZoneBalanceData" => {
+            FFAZoneBalanceData::TYPE_NAME => {
                 self.ffa_zone_balance_data.push(Table::fill(source_path, sheet)?)
             }
-            "FactionControlBuffDefinitions" => {
+            FactionControlBuffDefinitions::TYPE_NAME => {
                 self.faction_control_buff_definitions
                     .push(Table::fill(source_path, sheet)?)
             }
-            "FactionData" => self.faction_data.push(Table::fill(source_path, sheet)?),
-            "FactionStatusEffectData" => {
+            FactionData::TYPE_NAME => {
+                self.faction_data.push(Table::fill(source_path, sheet)?)
+            }
+            FactionStatusEffectData::TYPE_NAME => {
                 self.faction_status_effect_data.push(Table::fill(source_path, sheet)?)
             }
-            "FishData" => self.fish_data.push(Table::fill(source_path, sheet)?),
-            "FishingBaitData" => {
+            FishData::TYPE_NAME => self.fish_data.push(Table::fill(source_path, sheet)?),
+            FishingBaitData::TYPE_NAME => {
                 self.fishing_bait_data.push(Table::fill(source_path, sheet)?)
             }
-            "FishingBehaviorsData" => {
+            FishingBehaviorsData::TYPE_NAME => {
                 self.fishing_behaviors_data.push(Table::fill(source_path, sheet)?)
             }
-            "FishingCatchablesData" => {
+            FishingCatchablesData::TYPE_NAME => {
                 self.fishing_catchables_data.push(Table::fill(source_path, sheet)?)
             }
-            "FishingHotspotsData" => {
+            FishingHotspotsData::TYPE_NAME => {
                 self.fishing_hotspots_data.push(Table::fill(source_path, sheet)?)
             }
-            "FishingPolesData" => {
+            FishingPolesData::TYPE_NAME => {
                 self.fishing_poles_data.push(Table::fill(source_path, sheet)?)
             }
-            "FishingWaterData" => {
+            FishingWaterData::TYPE_NAME => {
                 self.fishing_water_data.push(Table::fill(source_path, sheet)?)
             }
-            "FlexibleMissionBoardData" => {
+            FlexibleMissionBoardData::TYPE_NAME => {
                 self.flexible_mission_board_data.push(Table::fill(source_path, sheet)?)
             }
-            "GameEventData" => {
+            GameEventData::TYPE_NAME => {
                 self.game_event_data.push(Table::fill(source_path, sheet)?)
             }
-            "GameModeData" => self.game_mode_data.push(Table::fill(source_path, sheet)?),
-            "GameModeMapData" => {
+            GameModeData::TYPE_NAME => {
+                self.game_mode_data.push(Table::fill(source_path, sheet)?)
+            }
+            GameModeMapData::TYPE_NAME => {
                 self.game_mode_map_data.push(Table::fill(source_path, sheet)?)
             }
-            "GameModeSchedulerStaticData" => {
+            GameModeSchedulerStaticData::TYPE_NAME => {
                 self.game_mode_scheduler_static_data
                     .push(Table::fill(source_path, sheet)?)
             }
-            "GatherableData" => {
+            GatherableData::TYPE_NAME => {
                 self.gatherable_data.push(Table::fill(source_path, sheet)?)
             }
-            "GearScoreUpgradeDefinition" => {
+            GearScoreUpgradeDefinition::TYPE_NAME => {
                 self.gear_score_upgrade_definition.push(Table::fill(source_path, sheet)?)
             }
-            "GeneratorRecipes" => {
+            GeneratorRecipes::TYPE_NAME => {
                 self.generator_recipes.push(Table::fill(source_path, sheet)?)
             }
-            "GenericInviteData" => {
+            GenericInviteData::TYPE_NAME => {
                 self.generic_invite_data.push(Table::fill(source_path, sheet)?)
             }
-            "HouseTypeData" => {
+            HouseTypeData::TYPE_NAME => {
                 self.house_type_data.push(Table::fill(source_path, sheet)?)
             }
-            "HunterSightData" => {
+            HunterSightData::TYPE_NAME => {
                 self.hunter_sight_data.push(Table::fill(source_path, sheet)?)
             }
-            "ImpactAudioTable" => {
+            ImpactAudioTable::TYPE_NAME => {
                 self.impact_audio_table.push(Table::fill(source_path, sheet)?)
             }
-            "ImpactSurfaceAlignmentTable" => {
+            ImpactSurfaceAlignmentTable::TYPE_NAME => {
                 self.impact_surface_alignment_table
                     .push(Table::fill(source_path, sheet)?)
             }
-            "ImpactTable" => self.impact_table.push(Table::fill(source_path, sheet)?),
-            "InfluenceTowerDefinitions" => {
+            ImpactTable::TYPE_NAME => {
+                self.impact_table.push(Table::fill(source_path, sheet)?)
+            }
+            InfluenceTowerDefinitions::TYPE_NAME => {
                 self.influence_tower_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "InputProfileData" => {
+            InputProfileData::TYPE_NAME => {
                 self.input_profile_data.push(Table::fill(source_path, sheet)?)
             }
-            "InteractionAnimationData" => {
+            InteractionAnimationData::TYPE_NAME => {
                 self.interaction_animation_data.push(Table::fill(source_path, sheet)?)
             }
-            "ItemCurrencyConversionData" => {
+            ItemCurrencyConversionData::TYPE_NAME => {
                 self.item_currency_conversion_data.push(Table::fill(source_path, sheet)?)
             }
-            "ItemPerkSwapData" => {
+            ItemPerkSwapData::TYPE_NAME => {
                 self.item_perk_swap_data.push(Table::fill(source_path, sheet)?)
             }
-            "ItemSkinData" => self.item_skin_data.push(Table::fill(source_path, sheet)?),
-            "ItemSoundEvents" => {
+            ItemSkinData::TYPE_NAME => {
+                self.item_skin_data.push(Table::fill(source_path, sheet)?)
+            }
+            ItemSoundEvents::TYPE_NAME => {
                 self.item_sound_events.push(Table::fill(source_path, sheet)?)
             }
-            "ItemTooltipLayout" => {
+            ItemTooltipLayout::TYPE_NAME => {
                 self.item_tooltip_layout.push(Table::fill(source_path, sheet)?)
             }
-            "ItemTransform" => self.item_transform.push(Table::fill(source_path, sheet)?),
-            "JointAliasData" => {
+            ItemTransform::TYPE_NAME => {
+                self.item_transform.push(Table::fill(source_path, sheet)?)
+            }
+            JointAliasData::TYPE_NAME => {
                 self.joint_alias_data.push(Table::fill(source_path, sheet)?)
             }
-            "LeaderboardData" => {
+            LeaderboardData::TYPE_NAME => {
                 self.leaderboard_data.push(Table::fill(source_path, sheet)?)
             }
-            "LeaderboardRewardsData" => {
+            LeaderboardRewardsData::TYPE_NAME => {
                 self.leaderboard_rewards_data.push(Table::fill(source_path, sheet)?)
             }
-            "LeaderboardStatData" => {
+            LeaderboardStatData::TYPE_NAME => {
                 self.leaderboard_stat_data.push(Table::fill(source_path, sheet)?)
             }
-            "LevelDisparityData" => {
+            LevelDisparityData::TYPE_NAME => {
                 self.level_disparity_data.push(Table::fill(source_path, sheet)?)
             }
-            "LootBucketData" => {
+            LootBucketData::TYPE_NAME => {
                 self.loot_bucket_data.push(Table::fill(source_path, sheet)?)
             }
-            "LootLimitData" => {
+            LootLimitData::TYPE_NAME => {
                 self.loot_limit_data.push(Table::fill(source_path, sheet)?)
             }
-            "LootTablesData" => {
+            LootTablesData::TYPE_NAME => {
                 self.loot_tables_data.push(Table::fill(source_path, sheet)?)
             }
-            "LootTagPresetData" => {
+            LootTagPresetData::TYPE_NAME => {
                 self.loot_tag_preset_data.push(Table::fill(source_path, sheet)?)
             }
-            "LoreData" => self.lore_data.push(Table::fill(source_path, sheet)?),
-            "LoreItemDefinitions" => {
+            LoreData::TYPE_NAME => self.lore_data.push(Table::fill(source_path, sheet)?),
+            LoreItemDefinitions::TYPE_NAME => {
                 self.lore_item_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "ManaData" => self.mana_data.push(Table::fill(source_path, sheet)?),
-            "MasterItemDefinitions" => {
+            ManaData::TYPE_NAME => self.mana_data.push(Table::fill(source_path, sheet)?),
+            MasterItemDefinitions::TYPE_NAME => {
                 self.master_item_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "MetaAchievementData" => {
+            MetaAchievementData::TYPE_NAME => {
                 self.meta_achievement_data.push(Table::fill(source_path, sheet)?)
             }
-            "MissionData" => self.mission_data.push(Table::fill(source_path, sheet)?),
-            "MissionWeightsData" => {
+            MissionData::TYPE_NAME => {
+                self.mission_data.push(Table::fill(source_path, sheet)?)
+            }
+            MissionWeightsData::TYPE_NAME => {
                 self.mission_weights_data.push(Table::fill(source_path, sheet)?)
             }
-            "Moonshot" => self.moonshot.push(Table::fill(source_path, sheet)?),
-            "MountData" => self.mount_data.push(Table::fill(source_path, sheet)?),
-            "MountDyeItemDefinitions" => {
+            Moonshot::TYPE_NAME => self.moonshot.push(Table::fill(source_path, sheet)?),
+            MountData::TYPE_NAME => {
+                self.mount_data.push(Table::fill(source_path, sheet)?)
+            }
+            MountDyeItemDefinitions::TYPE_NAME => {
                 self.mount_dye_item_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "MountItemAppearanceDefinitions" => {
+            MountItemAppearanceDefinitions::TYPE_NAME => {
                 self.mount_item_appearance_definitions
                     .push(Table::fill(source_path, sheet)?)
             }
-            "MountMovementData" => {
+            MountMovementData::TYPE_NAME => {
                 self.mount_movement_data.push(Table::fill(source_path, sheet)?)
             }
-            "MountTypeData" => {
+            MountTypeData::TYPE_NAME => {
                 self.mount_type_data.push(Table::fill(source_path, sheet)?)
             }
-            "MusicalInstrumentSlot" => {
+            MusicalInstrumentSlot::TYPE_NAME => {
                 self.musical_instrument_slot.push(Table::fill(source_path, sheet)?)
             }
-            "MusicalPerformanceRewards" => {
+            MusicalPerformanceRewards::TYPE_NAME => {
                 self.musical_performance_rewards.push(Table::fill(source_path, sheet)?)
             }
-            "MusicalRanking" => {
+            MusicalRanking::TYPE_NAME => {
                 self.musical_ranking.push(Table::fill(source_path, sheet)?)
             }
-            "MusicalScoring" => {
+            MusicalScoring::TYPE_NAME => {
                 self.musical_scoring.push(Table::fill(source_path, sheet)?)
             }
-            "MutationDifficultyStaticData" => {
+            MutationDifficultyStaticData::TYPE_NAME => {
                 self.mutation_difficulty_static_data
                     .push(Table::fill(source_path, sheet)?)
             }
-            "MutationPerksStaticData" => {
+            MutationPerksStaticData::TYPE_NAME => {
                 self.mutation_perks_static_data.push(Table::fill(source_path, sheet)?)
             }
-            "NPAData" => self.npa_data.push(Table::fill(source_path, sheet)?),
-            "NPCData" => self.npc_data.push(Table::fill(source_path, sheet)?),
-            "NotificationData" => {
+            NPAData::TYPE_NAME => self.npa_data.push(Table::fill(source_path, sheet)?),
+            NPCData::TYPE_NAME => self.npc_data.push(Table::fill(source_path, sheet)?),
+            NotificationData::TYPE_NAME => {
                 self.notification_data.push(Table::fill(source_path, sheet)?)
             }
-            "ObjectiveTasks" => {
+            ObjectiveTasks::TYPE_NAME => {
                 self.objective_tasks.push(Table::fill(source_path, sheet)?)
             }
-            "Objectives" => self.objectives.push(Table::fill(source_path, sheet)?),
-            "ObjectivesGlobalReleaseData" => {
+            Objectives::TYPE_NAME => {
+                self.objectives.push(Table::fill(source_path, sheet)?)
+            }
+            ObjectivesGlobalReleaseData::TYPE_NAME => {
                 self.objectives_global_release_data
                     .push(Table::fill(source_path, sheet)?)
             }
-            "OpenWorldBalanceData" => {
+            OpenWorldBalanceData::TYPE_NAME => {
                 self.open_world_balance_data.push(Table::fill(source_path, sheet)?)
             }
-            "OutpostRushBalanceData" => {
+            OutpostRushBalanceData::TYPE_NAME => {
                 self.outpost_rush_balance_data.push(Table::fill(source_path, sheet)?)
             }
-            "OutpostRush_NoPerksBalanceData" => {
+            OutpostRushNoPerksBalanceData::TYPE_NAME => {
                 self.outpost_rush_no_perks_balance_data
                     .push(Table::fill(source_path, sheet)?)
             }
-            "PUGActivityInfo" => {
+            PUGActivityInfo::TYPE_NAME => {
                 self.pug_activity_info.push(Table::fill(source_path, sheet)?)
             }
-            "PUGRewardData" => {
+            PUGRewardData::TYPE_NAME => {
                 self.pug_reward_data.push(Table::fill(source_path, sheet)?)
             }
-            "ParticleContextualPriorityOverrideData" => {
+            ParticleContextualPriorityOverrideData::TYPE_NAME => {
                 self.particle_contextual_priority_override_data
                     .push(Table::fill(source_path, sheet)?)
             }
-            "ParticleData" => self.particle_data.push(Table::fill(source_path, sheet)?),
-            "PerkBucketData" => {
+            ParticleData::TYPE_NAME => {
+                self.particle_data.push(Table::fill(source_path, sheet)?)
+            }
+            PerkBucketData::TYPE_NAME => {
                 self.perk_bucket_data.push(Table::fill(source_path, sheet)?)
             }
-            "PerkData" => self.perk_data.push(Table::fill(source_path, sheet)?),
-            "PerkExclusiveLabelData" => {
+            PerkData::TYPE_NAME => self.perk_data.push(Table::fill(source_path, sheet)?),
+            PerkExclusiveLabelData::TYPE_NAME => {
                 self.perk_exclusive_label_data.push(Table::fill(source_path, sheet)?)
             }
-            "PlayerMilestoneModalStaticData" => {
+            PlayerMilestoneModalStaticData::TYPE_NAME => {
                 self.player_milestone_modal_static_data
                     .push(Table::fill(source_path, sheet)?)
             }
-            "PlayerTitleData" => {
+            PlayerTitleData::TYPE_NAME => {
                 self.player_title_data.push(Table::fill(source_path, sheet)?)
             }
-            "ProgressionPointData" => {
+            ProgressionPointData::TYPE_NAME => {
                 self.progression_point_data.push(Table::fill(source_path, sheet)?)
             }
-            "ProgressionPoolData" => {
+            ProgressionPoolData::TYPE_NAME => {
                 self.progression_pool_data.push(Table::fill(source_path, sheet)?)
             }
-            "PromotionMutationStaticData" => {
+            PromotionMutationStaticData::TYPE_NAME => {
                 self.promotion_mutation_static_data
                     .push(Table::fill(source_path, sheet)?)
             }
-            "PvPRankData" => self.pv_p_rank_data.push(Table::fill(source_path, sheet)?),
-            "PvPStoreData" => self.pv_p_store_data.push(Table::fill(source_path, sheet)?),
-            "QuickCourseData" => {
+            PvPRankData::TYPE_NAME => {
+                self.pv_p_rank_data.push(Table::fill(source_path, sheet)?)
+            }
+            PvPStoreData::TYPE_NAME => {
+                self.pv_p_store_data.push(Table::fill(source_path, sheet)?)
+            }
+            QuickCourseData::TYPE_NAME => {
                 self.quick_course_data.push(Table::fill(source_path, sheet)?)
             }
-            "QuickCourseNodeTypeData" => {
+            QuickCourseNodeTypeData::TYPE_NAME => {
                 self.quick_course_node_type_data.push(Table::fill(source_path, sheet)?)
             }
-            "ResourceItemDefinitions" => {
+            ResourceItemDefinitions::TYPE_NAME => {
                 self.resource_item_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "ReusableScoreboardTabData" => {
+            ReusableScoreboardTabData::TYPE_NAME => {
                 self.reusable_scoreboard_tab_data.push(Table::fill(source_path, sheet)?)
             }
-            "RewardData" => self.reward_data.push(Table::fill(source_path, sheet)?),
-            "RewardMilestoneData" => {
+            RewardData::TYPE_NAME => {
+                self.reward_data.push(Table::fill(source_path, sheet)?)
+            }
+            RewardMilestoneData::TYPE_NAME => {
                 self.reward_milestone_data.push(Table::fill(source_path, sheet)?)
             }
-            "RewardModifierData" => {
+            RewardModifierData::TYPE_NAME => {
                 self.reward_modifier_data.push(Table::fill(source_path, sheet)?)
             }
-            "RewardTrackItemData" => {
+            RewardTrackItemData::TYPE_NAME => {
                 self.reward_track_item_data.push(Table::fill(source_path, sheet)?)
             }
-            "RotationalQueueData" => {
+            RotationalQueueData::TYPE_NAME => {
                 self.rotational_queue_data.push(Table::fill(source_path, sheet)?)
             }
-            "ScheduleData" => self.schedule_data.push(Table::fill(source_path, sheet)?),
-            "SeasonPassRankData" => {
+            ScheduleData::TYPE_NAME => {
+                self.schedule_data.push(Table::fill(source_path, sheet)?)
+            }
+            SeasonPassRankData::TYPE_NAME => {
                 self.season_pass_rank_data.push(Table::fill(source_path, sheet)?)
             }
-            "SeasonsRewardData" => {
+            SeasonsRewardData::TYPE_NAME => {
                 self.seasons_reward_data.push(Table::fill(source_path, sheet)?)
             }
-            "SeasonsRewardsActivitiesConfig" => {
+            SeasonsRewardsActivitiesConfig::TYPE_NAME => {
                 self.seasons_rewards_activities_config
                     .push(Table::fill(source_path, sheet)?)
             }
-            "SeasonsRewardsActivitiesTasksData" => {
+            SeasonsRewardsActivitiesTasksData::TYPE_NAME => {
                 self.seasons_rewards_activities_tasks_data
                     .push(Table::fill(source_path, sheet)?)
             }
-            "SeasonsRewardsCardData" => {
+            SeasonsRewardsCardData::TYPE_NAME => {
                 self.seasons_rewards_card_data.push(Table::fill(source_path, sheet)?)
             }
-            "SeasonsRewardsCardTemplates" => {
+            SeasonsRewardsCardTemplates::TYPE_NAME => {
                 self.seasons_rewards_card_templates
                     .push(Table::fill(source_path, sheet)?)
             }
-            "SeasonsRewardsChapterData" => {
+            SeasonsRewardsChapterData::TYPE_NAME => {
                 self.seasons_rewards_chapter_data.push(Table::fill(source_path, sheet)?)
             }
-            "SeasonsRewardsJourneyData" => {
+            SeasonsRewardsJourneyData::TYPE_NAME => {
                 self.seasons_rewards_journey_data.push(Table::fill(source_path, sheet)?)
             }
-            "SeasonsRewardsSeasonData" => {
+            SeasonsRewardsSeasonData::TYPE_NAME => {
                 self.seasons_rewards_season_data.push(Table::fill(source_path, sheet)?)
             }
-            "SeasonsRewardsStats" => {
+            SeasonsRewardsStats::TYPE_NAME => {
                 self.seasons_rewards_stats.push(Table::fill(source_path, sheet)?)
             }
-            "SeasonsRewardsTasks" => {
+            SeasonsRewardsTasks::TYPE_NAME => {
                 self.seasons_rewards_tasks.push(Table::fill(source_path, sheet)?)
             }
-            "ShopData" => self.shop_data.push(Table::fill(source_path, sheet)?),
-            "SimpleTreeCategoryData" => {
+            ShopData::TYPE_NAME => self.shop_data.push(Table::fill(source_path, sheet)?),
+            SimpleTreeCategoryData::TYPE_NAME => {
                 self.simple_tree_category_data.push(Table::fill(source_path, sheet)?)
             }
-            "SkillData" => self.skill_data.push(Table::fill(source_path, sheet)?),
-            "SkillExperienceData" => {
+            SkillData::TYPE_NAME => {
+                self.skill_data.push(Table::fill(source_path, sheet)?)
+            }
+            SkillExperienceData::TYPE_NAME => {
                 self.skill_experience_data.push(Table::fill(source_path, sheet)?)
             }
-            "SongBookData" => self.song_book_data.push(Table::fill(source_path, sheet)?),
-            "SongBookSheets" => {
+            SongBookData::TYPE_NAME => {
+                self.song_book_data.push(Table::fill(source_path, sheet)?)
+            }
+            SongBookSheets::TYPE_NAME => {
                 self.song_book_sheets.push(Table::fill(source_path, sheet)?)
             }
-            "SpecializationDefinitions" => {
+            SpecializationDefinitions::TYPE_NAME => {
                 self.specialization_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "SpellData" => self.spell_data.push(Table::fill(source_path, sheet)?),
-            "StaminaData" => self.stamina_data.push(Table::fill(source_path, sheet)?),
-            "StatMultiplierData" => {
+            SpellData::TYPE_NAME => {
+                self.spell_data.push(Table::fill(source_path, sheet)?)
+            }
+            StaminaData::TYPE_NAME => {
+                self.stamina_data.push(Table::fill(source_path, sheet)?)
+            }
+            StatMultiplierData::TYPE_NAME => {
                 self.stat_multiplier_data.push(Table::fill(source_path, sheet)?)
             }
-            "StatusEffectCategoryData" => {
+            StatusEffectCategoryData::TYPE_NAME => {
                 self.status_effect_category_data.push(Table::fill(source_path, sheet)?)
             }
-            "StatusEffectData" => {
+            StatusEffectData::TYPE_NAME => {
                 self.status_effect_data.push(Table::fill(source_path, sheet)?)
             }
-            "StoreCategoryProperties" => {
+            StoreCategoryProperties::TYPE_NAME => {
                 self.store_category_properties.push(Table::fill(source_path, sheet)?)
             }
-            "StoreProductData" => {
+            StoreProductData::TYPE_NAME => {
                 self.store_product_data.push(Table::fill(source_path, sheet)?)
             }
-            "StoryProgressData" => {
+            StoryProgressData::TYPE_NAME => {
                 self.story_progress_data.push(Table::fill(source_path, sheet)?)
             }
-            "StructureFootprintData" => {
+            StructureFootprintData::TYPE_NAME => {
                 self.structure_footprint_data.push(Table::fill(source_path, sheet)?)
             }
-            "StructurePieceData" => {
+            StructurePieceData::TYPE_NAME => {
                 self.structure_piece_data.push(Table::fill(source_path, sheet)?)
             }
-            "TerritoryDefinition" => {
+            TerritoryDefinition::TYPE_NAME => {
                 self.territory_definition.push(Table::fill(source_path, sheet)?)
             }
-            "TerritoryProgressionData" => {
+            TerritoryProgressionData::TYPE_NAME => {
                 self.territory_progression_data.push(Table::fill(source_path, sheet)?)
             }
-            "TerritoryUpkeepDefinition" => {
+            TerritoryUpkeepDefinition::TYPE_NAME => {
                 self.territory_upkeep_definition.push(Table::fill(source_path, sheet)?)
             }
-            "ThrowableItemDefinitions" => {
+            ThrowableItemDefinitions::TYPE_NAME => {
                 self.throwable_item_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "TimelineRegistryEntryData" => {
+            TimelineRegistryEntryData::TYPE_NAME => {
                 self.timeline_registry_entry_data.push(Table::fill(source_path, sheet)?)
             }
-            "TradeSkillPostCapData" => {
+            TradeSkillPostCapData::TYPE_NAME => {
                 self.trade_skill_post_cap_data.push(Table::fill(source_path, sheet)?)
             }
-            "TradeskillRankData" => {
+            TradeskillRankData::TYPE_NAME => {
                 self.tradeskill_rank_data.push(Table::fill(source_path, sheet)?)
             }
-            "TutorialConditionData" => {
+            TutorialConditionData::TYPE_NAME => {
                 self.tutorial_condition_data.push(Table::fill(source_path, sheet)?)
             }
-            "TutorialContentData" => {
+            TutorialContentData::TYPE_NAME => {
                 self.tutorial_content_data.push(Table::fill(source_path, sheet)?)
             }
-            "TutorialData" => self.tutorial_data.push(Table::fill(source_path, sheet)?),
-            "TwitchDropsStatDefinitions" => {
+            TutorialData::TYPE_NAME => {
+                self.tutorial_data.push(Table::fill(source_path, sheet)?)
+            }
+            TwitchDropsStatDefinitions::TYPE_NAME => {
                 self.twitch_drops_stat_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "TwitchTagsStatDefinitions" => {
+            TwitchTagsStatDefinitions::TYPE_NAME => {
                 self.twitch_tags_stat_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "VariationData" => self.variation_data.push(Table::fill(source_path, sheet)?),
-            "VitalsBaseData" => {
+            VariationData::TYPE_NAME => {
+                self.variation_data.push(Table::fill(source_path, sheet)?)
+            }
+            VitalsBaseData::TYPE_NAME => {
                 self.vitals_base_data.push(Table::fill(source_path, sheet)?)
             }
-            "VitalsCategoryData" => {
+            VitalsCategoryData::TYPE_NAME => {
                 self.vitals_category_data.push(Table::fill(source_path, sheet)?)
             }
-            "VitalsData" => self.vitals_data.push(Table::fill(source_path, sheet)?),
-            "VitalsLevelData" => {
+            VitalsData::TYPE_NAME => {
+                self.vitals_data.push(Table::fill(source_path, sheet)?)
+            }
+            VitalsLevelData::TYPE_NAME => {
                 self.vitals_level_data.push(Table::fill(source_path, sheet)?)
             }
-            "VitalsLevelVariantData" => {
+            VitalsLevelVariantData::TYPE_NAME => {
                 self.vitals_level_variant_data.push(Table::fill(source_path, sheet)?)
             }
-            "VitalsModifierData" => {
+            VitalsModifierData::TYPE_NAME => {
                 self.vitals_modifier_data.push(Table::fill(source_path, sheet)?)
             }
-            "WarBalanceData" => {
+            WarBalanceData::TYPE_NAME => {
                 self.war_balance_data.push(Table::fill(source_path, sheet)?)
             }
-            "WarboardStatDefinitions" => {
+            WarboardStatDefinitions::TYPE_NAME => {
                 self.warboard_stat_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "WeaponAccessoryDefinitions" => {
+            WeaponAccessoryDefinitions::TYPE_NAME => {
                 self.weapon_accessory_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "WeaponAppearanceDefinitions" => {
+            WeaponAppearanceDefinitions::TYPE_NAME => {
                 self.weapon_appearance_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "WeaponEffectData" => {
+            WeaponEffectData::TYPE_NAME => {
                 self.weapon_effect_data.push(Table::fill(source_path, sheet)?)
             }
-            "WeaponItemDefinitions" => {
+            WeaponItemDefinitions::TYPE_NAME => {
                 self.weapon_item_definitions.push(Table::fill(source_path, sheet)?)
             }
-            "WeaponTiersData" => {
+            WeaponTiersData::TYPE_NAME => {
                 self.weapon_tiers_data.push(Table::fill(source_path, sheet)?)
             }
-            "WhisperData" => self.whisper_data.push(Table::fill(source_path, sheet)?),
-            "WhisperVfxData" => {
+            WhisperData::TYPE_NAME => {
+                self.whisper_data.push(Table::fill(source_path, sheet)?)
+            }
+            WhisperVfxData::TYPE_NAME => {
                 self.whisper_vfx_data.push(Table::fill(source_path, sheet)?)
             }
-            "WorldEventCategoryData" => {
+            WorldEventCategoryData::TYPE_NAME => {
                 self.world_event_category_data.push(Table::fill(source_path, sheet)?)
             }
-            "WorldEventRuleData" => {
+            WorldEventRuleData::TYPE_NAME => {
                 self.world_event_rule_data.push(Table::fill(source_path, sheet)?)
             }
-            "unknown" => self.unknown.push(Table::fill(source_path, sheet)?),
+            Unknown::TYPE_NAME => self.unknown.push(Table::fill(source_path, sheet)?),
             _ => {
                 return Err(FillError::UnknownTableType {
                     source_path: source_path.to_owned(),

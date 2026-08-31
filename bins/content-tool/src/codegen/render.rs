@@ -147,13 +147,9 @@ fn mod_tokens(schemas: &[TableSchema]) -> TokenStream {
         .iter()
         .map(|schema| format_ident!("{}", schema.struct_name))
         .collect();
-    let names: Vec<&str> = schemas
+    let docs: Vec<String> = schemas
         .iter()
-        .map(|schema| schema.type_name.as_str())
-        .collect();
-    let docs: Vec<String> = names
-        .iter()
-        .map(|name| format!(" Tables of type `{name}`."))
+        .map(|schema| format!(" Tables of type `{}`.", schema.type_name))
         .collect();
     quote! {
         #(mod #modules;)*
@@ -162,7 +158,7 @@ fn mod_tokens(schemas: &[TableSchema]) -> TokenStream {
         use nw_formats::datasheet::Datasheet;
 
         use crate::fill::FillError;
-        use crate::table::{Table, TableCounts};
+        use crate::table::{FromDatasheet, Table, TableCounts};
 
         /// Every table of the content bundle, grouped by table type.
         #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -174,7 +170,7 @@ fn mod_tokens(schemas: &[TableSchema]) -> TokenStream {
             /// Fills `sheet` into the table list of its type.
             pub fn insert_datasheet(&mut self, source_path: &str, sheet: &Datasheet) -> Result<(), FillError> {
                 match sheet.type_name.as_str() {
-                    #( #names => self.#modules.push(Table::fill(source_path, sheet)?), )*
+                    #( #types::TYPE_NAME => self.#modules.push(Table::fill(source_path, sheet)?), )*
                     _ => {
                         return Err(FillError::UnknownTableType {
                             source_path: source_path.to_owned(),
@@ -287,7 +283,7 @@ mod tests {
             "mod master_item_definitions;",
             "pub use master_item_definitions::MasterItemDefinitions;",
             "pub struct Tables",
-            r#""MasterItemDefinitions" =>"#,
+            "MasterItemDefinitions::TYPE_NAME =>",
             "self.master_item_definitions",
             "counts.add(&self.affix_data);",
         ] {
@@ -320,7 +316,8 @@ mod tests {
         for expected in [
             "pub use outpost_data::OutpostData;",
             "pub outpost_data: Vec<Table<OutpostData>>",
-            r#""Outpost_Data" => self.outpost_data.push"#,
+            "OutpostData::TYPE_NAME => {",
+            "self.outpost_data.push(Table::fill(source_path, sheet)?)",
             "Tables of type `Outpost_Data`.",
         ] {
             assert!(root.contains(expected), "missing `{expected}` in:\n{root}");
@@ -347,6 +344,16 @@ mod tests {
         ] {
             assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
         }
+    }
+
+    #[test]
+    fn mod_file_dispatch_has_no_type_name_literals() {
+        let files = render(&schemas(), BUILD).unwrap();
+        let text = file(&files, MOD_FILE);
+        assert!(
+            !text.contains(r#""MasterItemDefinitions""#),
+            "type name literal in:\n{text}"
+        );
     }
 
     #[test]
