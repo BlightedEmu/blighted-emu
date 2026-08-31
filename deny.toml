@@ -1,0 +1,38 @@
+# Dependency policy (spec 5.3, 10.6). Run with: cargo deny check
+
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+# Dev-only dependencies are never shipped.
+exclude-dev = true
+
+[advisories]
+unmaintained = "workspace"
+
+[licenses]
+confidence-threshold = 0.93
+# Permissive licences allowed for third-party dependencies.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Zlib",
+]
+# Copyleft is allowed only for our own crates, each listed here (spec 5.3).
+exceptions = [
+    { crate = "nw-common", allow = ["AGPL-3.0-or-later"] },
+]
+
+[bans]
+multiple-versions = "deny"
+wildcards = "deny"
+skip = [
+    { crate = "syn@2.0.119", reason = "figment's env parser (pear_codegen) uses syn 2; serde_derive uses syn 3" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
