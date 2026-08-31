@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "bins/*"]
 
 [workspace.package]
 edition = "2024"
@@ -26,7 +26,7 @@ thiserror = { version = "2.0.21", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "ansi", "env-filter", "std"] }
 zip = { version = "9.0.2", default-features = false }
 
-nw-common = { path = "crates/nw-common" }
+nw-common = { path = "crates/nw-common", version = "0.1.0" }
 nw-content = { path = "crates/nw-content", version = "0.1.0" }
 nw-formats = { path = "crates/nw-formats", version = "0.1.0" }
 nw-oodle = { path = "crates/nw-oodle", version = "0.1.0" }
