@@ -49,6 +49,20 @@ just infra-test
 | `just clean-old` | Deletes build files older than 7 days |
 | `just infra-up` / `just infra-down` | Starts / stops PostgreSQL, Valkey, NATS, Prometheus, Grafana |
 | `just infra-test` | Infrastructure smoke test |
+| `just test-local` | Tests that read your New World install (`NW_GAME_DIR`) |
+| `just codegen` | Regenerates the table structs in `crates/nw-content/src/generated` |
+| `just bundle` | Builds the content bundle into `local-data/content/` |
+
+## Content data
+
+The server reads game rules from your own New World install. Nothing from the game is stored in this repository; only the table shapes (names and types) are generated into `crates/nw-content/src/generated`.
+
+```bash
+export NW_GAME_DIR="/path/to/steamapps/common/New World"
+just bundle
+```
+
+`just bundle` writes `local-data/content/bundle-<build>.bin`, then reloads it and checks every table and row. The pinned client build is in `config/client-build.toml`.
 
 ## Rules for contributors
 

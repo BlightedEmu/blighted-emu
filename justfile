@@ -3,8 +3,9 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 sweep_age_days := "7"
 
-# Run every required check (spec 10.5).
+# Run every required check (spec 10.5) and the game-data guard (M1 spec section 6).
 check:
+    scripts/no-game-data.sh
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
     cargo test --workspace
@@ -14,6 +15,7 @@ check:
 # Run the shell script tests.
 test-scripts:
     scripts/target-size.test.sh
+    scripts/no-game-data.test.sh
 
 # Print the build folder size; fails above 10 GiB (spec 10.6).
 size:
@@ -36,3 +38,15 @@ infra-down:
 # Run the infrastructure smoke test (M0 exit criterion).
 infra-test:
     deploy/smoke-test.sh
+
+# Tests that read your own New World install. Set NW_GAME_DIR first.
+test-local:
+    cargo test -p nw-formats -p nw-oodle -p content-tool --features nw-formats/local-data,nw-oodle/local-data,content-tool/local-data
+
+# Regenerate the table structs in crates/nw-content/src/generated from your install.
+codegen:
+    cargo run -p content-tool -- codegen
+
+# Build the content bundle into local-data/content/ from your install.
+bundle:
+    cargo run -p content-tool -- build
