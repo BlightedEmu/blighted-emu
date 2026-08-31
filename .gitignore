@@ -1,0 +1,11 @@
+# Build output
+/target/
+
+# Secrets for the infrastructure (copy from deploy/.env.example)
+/deploy/.env
+
+# Local Amazon game data and captures (spec 10.2). Never commit these.
+/local-data/
+
+# Superpowers execution workspace (plan ledgers)
+/.superpowers/
