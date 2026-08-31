@@ -2,3 +2,4 @@
 //! Shared configuration loading and logging setup for all emulator programs.
 
 pub mod config;
+pub mod logging;
