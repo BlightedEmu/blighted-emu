@@ -11,6 +11,11 @@ readonly EXIT_FOUND=1
 repo="${1:-.}"
 violations=()
 
+# Git runs before the loop, so a git failure stops the script (set -e).
+tracked_list="$(mktemp)"
+trap 'rm -f "$tracked_list"' EXIT
+git -C "$repo" ls-files -z > "$tracked_list"
+
 while IFS= read -r -d '' path; do
   case "$path" in
     local-data/* | *.pak | *.datasheet | *.loc.xml)
@@ -22,7 +27,7 @@ while IFS= read -r -d '' path; do
   if [[ -f "$file" ]] && [[ "$(head -c "$MAGIC_LENGTH" "$file" | tr -d '\0')" == "$BUNDLE_MAGIC" ]]; then
     violations+=("$path")
   fi
-done < <(git -C "$repo" ls-files -z)
+done < "$tracked_list"
 
 if [[ "${#violations[@]}" -gt 0 ]]; then
   printf 'game data tracked by git: %s\n' "${violations[@]}" >&2

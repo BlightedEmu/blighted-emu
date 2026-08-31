@@ -37,6 +37,18 @@ check_case "datasheet file is refused" "$EXIT_FOUND" "data/x.datasheet" "x"
 check_case "localization file is refused" "$EXIT_FOUND" "data/x.loc.xml" "<resources/>"
 check_case "content bundle is refused" "$EXIT_FOUND" "out/any.bin" "NWCB....body"
 
+# A folder that git does not track must fail the guard, not pass it.
+not_repo="$(mktemp -d)"
+actual_not_repo=0
+"$GUARD" "$not_repo" >/dev/null 2>&1 || actual_not_repo=$?
+rm -rf "$not_repo"
+if [[ "$actual_not_repo" -ne "$EXIT_OK" ]]; then
+  echo "PASS: folder that is not a git repository fails the guard"
+else
+  echo "FAIL: folder that is not a git repository fails the guard (expected non-zero exit, got $actual_not_repo)"
+  failures=$((failures + 1))
+fi
+
 if [[ "$failures" -gt 0 ]]; then
   echo "$failures test(s) failed"
   exit 1
