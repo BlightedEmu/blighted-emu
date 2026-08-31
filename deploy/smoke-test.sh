@@ -16,43 +16,56 @@ readonly PERSIST_ROWS=1
 readonly HTTP_OK=200
 readonly SCRAPE_WAIT_SECONDS=20
 readonly SCRAPE_POLL_SECONDS=2
+readonly REQUIRED_SECRETS=(POSTGRES_USER POSTGRES_PASSWORD POSTGRES_DB GRAFANA_ADMIN_USER GRAFANA_ADMIN_PASSWORD)
 
 compose() { docker compose -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
 # Fetch into a variable first: piping curl into "grep -q" can fail with SIGPIPE under pipefail.
 http_get() { curl -fsS "$1" || true; }
+# Read a value with Compose's own .env parser, so it matches what the containers get.
+env_value() { compose config --environment | sed -n "s/^$1=//p"; }
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 [[ -f "$ENV_FILE" ]] || fail "missing $ENV_FILE (copy deploy/.env.example and set passwords)"
-set -a; source "$ENV_FILE"; set +a
+bind_address="$(env_value BIND_ADDRESS)"
+bind_address="${bind_address:-$LOCALHOST}"
 
-# 1. Compose refuses to run without the secrets file values.
-if env -i PATH="$PATH" HOME="$HOME" docker compose -f "$COMPOSE_FILE" --env-file /dev/null config >/dev/null 2>&1; then
-  fail "compose accepted an empty environment"
-fi
-pass "compose requires secrets"
+# 1. Compose refuses to run when any one secret is missing, and names that secret.
+partial_env="$(mktemp)"
+trap 'rm -f "$partial_env"' EXIT
+for secret in "${REQUIRED_SECRETS[@]}"; do
+  grep -v "^${secret}=" "$ENV_FILE" > "$partial_env"
+  if config_error="$(env -i PATH="$PATH" HOME="$HOME" docker compose -f "$COMPOSE_FILE" --env-file "$partial_env" config 2>&1 >/dev/null)"; then
+    fail "compose accepted an env file without $secret"
+  fi
+  [[ "$config_error" == *"set $secret in deploy/.env"* ]] || fail "missing $secret gave the wrong error: $config_error"
+done
+pass "compose requires each of the ${#REQUIRED_SECRETS[@]} secrets"
 
 # 2. Every published port binds to the configured address (default 127.0.0.1).
 config_text="$(compose config)"
 # grep -c exits 1 when the count is 0; "|| true" keeps set -e from stopping the script.
 published_count="$(grep -c 'published:' <<<"$config_text" || true)"
-bound_count="$(grep -c "host_ip: ${BIND_ADDRESS:-$LOCALHOST}" <<<"$config_text" || true)"
-[[ "$published_count" -eq "$bound_count" ]] || fail "$published_count ports published, $bound_count bound to ${BIND_ADDRESS:-$LOCALHOST}"
-pass "all $published_count ports bind to ${BIND_ADDRESS:-$LOCALHOST}"
+bound_count="$(grep -c "host_ip: $bind_address" <<<"$config_text" || true)"
+[[ "$published_count" -eq "$bound_count" ]] || fail "$published_count ports published, $bound_count bound to $bind_address"
+pass "all $published_count ports bind to $bind_address"
 
 # 3. Every service starts and becomes healthy.
 compose up -d --wait
 pass "all services healthy"
 
-# 4. PostgreSQL data survives a container restart.
-psql_exec() { compose exec -T postgres psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "$1"; }
+# 4. PostgreSQL data survives a new container (only the volume keeps it).
+postgres_user="$(env_value POSTGRES_USER)"
+postgres_db="$(env_value POSTGRES_DB)"
+psql_exec() { compose exec -T postgres psql -U "$postgres_user" -d "$postgres_db" -tAc "$1"; }
 psql_exec "DROP TABLE IF EXISTS $PERSIST_TABLE; CREATE TABLE $PERSIST_TABLE (id int); INSERT INTO $PERSIST_TABLE VALUES (1);" >/dev/null
-compose restart postgres >/dev/null
-compose up -d --wait postgres
-rows="$(psql_exec "SELECT count(*) FROM $PERSIST_TABLE;")"
-psql_exec "DROP TABLE $PERSIST_TABLE;" >/dev/null
-[[ "$rows" -eq "$PERSIST_ROWS" ]] || fail "postgres lost data on restart (rows: $rows)"
-pass "postgres data survives restart"
+# --renew-anon-volumes: the image has its own anonymous volume; only the named volume may keep data.
+compose up -d --wait --force-recreate --renew-anon-volumes postgres
+# A lost table makes the query fail; "|| true" lets the check below report it.
+rows="$(psql_exec "SELECT count(*) FROM $PERSIST_TABLE;" 2>/dev/null || true)"
+psql_exec "DROP TABLE IF EXISTS $PERSIST_TABLE;" >/dev/null
+[[ "$rows" == "$PERSIST_ROWS" ]] || fail "postgres lost data when the container was re-created"
+pass "postgres data survives container re-creation"
 
 # 5. Valkey answers.
 [[ "$(compose exec -T valkey valkey-cli ping)" == "PONG" ]] || fail "valkey did not answer PONG"
@@ -73,7 +86,7 @@ pass "prometheus scrapes itself"
 # 8. Grafana is up and has the Prometheus data source.
 grafana_health="$(http_get "http://$LOCALHOST:$GRAFANA_PORT/api/health")"
 grep -Eq '"database": *"ok"' <<<"$grafana_health" || fail "grafana health check failed"
-status="$(curl -s -o /dev/null -w '%{http_code}' -u "$GRAFANA_ADMIN_USER:$GRAFANA_ADMIN_PASSWORD" \
+status="$(curl -s -o /dev/null -w '%{http_code}' -u "$(env_value GRAFANA_ADMIN_USER):$(env_value GRAFANA_ADMIN_PASSWORD)" \
   "http://$LOCALHOST:$GRAFANA_PORT/api/datasources/name/Prometheus")"
 [[ "$status" -eq "$HTTP_OK" ]] || fail "grafana data source Prometheus missing (HTTP $status)"
 pass "grafana has the Prometheus data source"

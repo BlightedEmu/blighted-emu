@@ -4,6 +4,10 @@
 //! Environment variables use the program prefix, and a double underscore between nested keys.
 //! Example: with the prefix `NW_EDGE_`, `NW_EDGE_DATABASE__URL` overrides `url` in `[database]`.
 //! Config structs must use `#[serde(deny_unknown_fields)]`, so a typo in a key is an error.
+//!
+//! Environment values are parsed as TOML-like values, so `123456` becomes a number and
+//! `true` becomes a bool. To give such a value to a string field, quote it inside the value:
+//! `NW_EDGE_DATABASE__PASSWORD='"123456"'`.
 
 use std::path::{Path, PathBuf};
 
@@ -55,6 +59,7 @@ mod tests {
     const FILE_DATABASE_URL: &str = "postgres://localhost/file";
     const FILE_MAX_CONNECTIONS: u32 = 8;
     const ENV_MAX_CONNECTIONS: u32 = 32;
+    const NUMERIC_TEXT: &str = "123456";
 
     #[derive(Debug, PartialEq, Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -118,6 +123,31 @@ mod tests {
             let config = load(CONFIG_FILE).expect("valid config");
             assert_eq!(config.database.max_connections, ENV_MAX_CONNECTIONS);
             assert_eq!(config.database.url, FILE_DATABASE_URL);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn numeric_environment_value_for_string_field_is_an_error() {
+        Jail::expect_with(|jail| {
+            jail.create_file(CONFIG_FILE, &valid_toml())?;
+            jail.set_env("NW_TEST_DATABASE__URL", NUMERIC_TEXT);
+            let error = load(CONFIG_FILE).expect_err("unquoted digits parse as a number");
+            assert!(
+                matches!(error, ConfigError::Invalid(_)),
+                "unexpected error: {error}"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn quoted_numeric_environment_value_loads_as_string() {
+        Jail::expect_with(|jail| {
+            jail.create_file(CONFIG_FILE, &valid_toml())?;
+            jail.set_env("NW_TEST_DATABASE__URL", format!("\"{NUMERIC_TEXT}\""));
+            let config = load(CONFIG_FILE).expect("quoted digits stay a string");
+            assert_eq!(config.database.url, NUMERIC_TEXT);
             Ok(())
         });
     }
