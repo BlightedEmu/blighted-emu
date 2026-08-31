@@ -24,6 +24,7 @@ allow = [
 # Copyleft is allowed only for our own crates, each listed here (spec 5.3).
 exceptions = [
     { crate = "nw-common", allow = ["AGPL-3.0-or-later"] },
+    { crate = "nw-content", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-oodle", allow = ["GPL-3.0-or-later"] },
 ]
 

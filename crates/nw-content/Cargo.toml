@@ -1,0 +1,21 @@
+[package]
+name = "nw-content"
+version = "0.1.0"
+description = "Typed New World game rule tables and the content bundle file."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+crc32fast.workspace = true
+nw-formats.workspace = true
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -27,6 +27,7 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 zip = { version = "9.0.2", default-features = false }
 
 nw-common = { path = "crates/nw-common" }
+nw-content = { path = "crates/nw-content", version = "0.1.0" }
 nw-formats = { path = "crates/nw-formats", version = "0.1.0" }
 nw-oodle = { path = "crates/nw-oodle", version = "0.1.0" }
 
