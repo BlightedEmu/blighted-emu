@@ -7,5 +7,167 @@
 # Local Amazon game data and captures (spec 10.2). Never commit these.
 /local-data/
 
-# Superpowers execution workspace (plan ledgers)
-/.superpowers/
+# =============================================================================
+# Secrets and signing material: never commit
+# =============================================================================
+
+.env
+.env.*
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
+*.provisionprofile
+
+# =============================================================================
+# PHP tooling
+# =============================================================================
+
+vendor/
+.phpunit.result.cache
+.phpunit.cache/
+
+# =============================================================================
+# IDEs and editors
+# =============================================================================
+
+.vs/
+.vscode/
+.idea/
+.fleet/
+.cursor/
+.windsurf/
+.zed/
+.history/
+*.user
+*.swp
+*.swo
+*~
+
+# =============================================================================
+# AI coding tools: settings, state, instructions, memory, harnesses
+# =============================================================================
+
+# Agent settings and state directories
+.claude/
+.claude-code/
+.codex/
+.aider/
+.aider*
+.cline/
+.continue/
+.kilo/
+.roo/
+.openhands/
+.agents/
+.agent/
+.serena/
+.superpowers/
+.impeccable/
+.pi/
+.pi-desktop/
+.pi-desktop-gui/
+.pi-subagents/
+.gemini/
+.kiro/
+.junie/
+.trae/
+.augment/
+.amazonq/
+.opencode/
+.goose/
+.crush/
+.copilot/
+.sourcegraph/
+.cody/
+.tabnine/
+.devin/
+.factory/
+.hindsight/
+.specstory/
+.same/
+.bolt/
+.lovable/
+.v0/
+.replit
+replit.nix
+
+# Agent instruction files
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+AGENT.md
+GEMINI.md
+.cursorrules
+.cursorignore
+.cursorindexingignore
+.windsurfrules
+.clinerules
+.clinerules/
+.roomodes
+.rooignore
+.aiderignore
+.codeiumignore
+.github/copilot-instructions.md
+.github/instructions/
+.github/prompts/
+.github/agents/
+copilot-instructions.md
+llms.txt
+llms-full.txt
+
+# Agent memory and knowledge stores
+MEMORY.md
+.memory/
+.mem0/
+.openmemory/
+.knowledge/
+.context/
+.context7/
+.hindsight*
+
+# MCP servers and configuration
+.mcp/
+.mcp.json
+mcp.json
+.mcp-server/
+.mcpservers/
+.playwright-mcp/
+
+# Agent design notes, plans and specs
+/docs/superpowers/
+/docs/plans/
+/.plans/
+/plans/
+
+# Agent worktrees and sandboxes
+.worktrees/
+.sandbox/
+.scratch/
+.scratchpad/
+
+# =============================================================================
+# Operating system files
+# =============================================================================
+
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =============================================================================
+# Merge and edit leftovers
+# =============================================================================
+
+*.orig
+*.rej
+*.bak
+*.tmp
+*.log
+
+# =============================================================================
+# Saved web pages: keep the .html, drop the browser "_files" support folders
+# =============================================================================
+
+*_files/
