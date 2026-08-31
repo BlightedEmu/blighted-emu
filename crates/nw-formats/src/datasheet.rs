@@ -8,6 +8,12 @@
 //! - column index: 12 bytes per column = name CRC32, name offset, kind code;
 //! - cell index: 8 bytes per cell, row by row = text offset + 4 value bytes (not read);
 //! - strings: NUL-terminated UTF-8. Every offset is relative to `HEADER_SIZE + body offset`.
+//!
+//! Many cells can point at the same string. Each string is decoded once, and the total text of
+//! the parsed sheet is limited to [`MAX_DECODED_TEXT_BYTES`].
+
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 /// File name ending of datasheets.
 pub const DATASHEET_EXTENSION: &str = ".datasheet";
@@ -25,6 +31,12 @@ const COLUMN_NAME_OFFSET: usize = 4;
 const COLUMN_KIND_OFFSET: usize = 8;
 const CELL_ENTRY_SIZE: usize = 8;
 const STRING_TERMINATOR: u8 = 0;
+/// Smallest string: the terminator alone.
+const MIN_STRING_SIZE: usize = 1;
+/// Largest total of decoded text (all names and cells, each cell counted) in one datasheet.
+/// The largest datasheet of the pinned client decodes to 5,158,304 bytes of text
+/// (`javelindata_itemappearancedefinitions`); this limit is about 13 times that.
+pub const MAX_DECODED_TEXT_BYTES: usize = 64 << 20;
 
 /// Declared kind of a column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +137,12 @@ pub enum DatasheetError {
         /// The code.
         code: u32,
     },
+    /// The decoded text is larger than [`MAX_DECODED_TEXT_BYTES`].
+    #[error("datasheet text is larger than the limit of {limit} bytes")]
+    TextTooLarge {
+        /// The limit.
+        limit: usize,
+    },
 }
 
 impl Datasheet {
@@ -132,8 +150,12 @@ impl Datasheet {
     pub fn parse(bytes: &[u8]) -> Result<Self, DatasheetError> {
         let reader = ByteReader { bytes };
         let header = |index: usize| reader.u32_at(index * U32_SIZE);
-        let string_base = HEADER_SIZE + header(HEADER_BODY_OFFSET_INDEX)? as usize;
-        let text = |offset: u32| reader.string_at(string_base + offset as usize);
+        let mut strings = StringTable {
+            reader: &reader,
+            base: HEADER_SIZE + header(HEADER_BODY_OFFSET_INDEX)? as usize,
+            decoded: HashMap::new(),
+            total_bytes: 0,
+        };
         let column_count = reader.u32_at(HEADER_SIZE + META_COLUMN_COUNT_OFFSET)? as usize;
         let row_count = reader.u32_at(HEADER_SIZE + META_ROW_COUNT_OFFSET)? as usize;
         // With no columns the cell index is empty, so the index check below cannot bound the rows.
@@ -160,12 +182,12 @@ impl Datasheet {
                 len: bytes.len(),
             });
         }
-        let type_name = text(header(HEADER_TYPE_OFFSET_INDEX)?)?;
-        let unique_id = text(header(HEADER_UNIQUE_ID_OFFSET_INDEX)?)?;
+        let type_name = strings.text(header(HEADER_TYPE_OFFSET_INDEX)?)?;
+        let unique_id = strings.text(header(HEADER_UNIQUE_ID_OFFSET_INDEX)?)?;
         let columns = (0..column_count)
             .map(|column| {
                 let entry = column_index + column * COLUMN_ENTRY_SIZE;
-                let name = text(reader.u32_at(entry + COLUMN_NAME_OFFSET)?)?;
+                let name = strings.text(reader.u32_at(entry + COLUMN_NAME_OFFSET)?)?;
                 let code = reader.u32_at(entry + COLUMN_KIND_OFFSET)?;
                 match ColumnKind::from_code(code) {
                     Some(kind) => Ok(Column { name, kind }),
@@ -178,7 +200,7 @@ impl Datasheet {
                 (0..column_count)
                     .map(|column| {
                         let entry = cell_index + (row * column_count + column) * CELL_ENTRY_SIZE;
-                        text(reader.u32_at(entry)?)
+                        strings.text(reader.u32_at(entry)?)
                     })
                     .collect::<Result<Vec<_>, _>>()
             })
@@ -189,6 +211,36 @@ impl Datasheet {
             columns,
             rows,
         })
+    }
+}
+
+/// Decodes each string offset once and counts the text handed out, against
+/// [`MAX_DECODED_TEXT_BYTES`].
+struct StringTable<'a> {
+    reader: &'a ByteReader<'a>,
+    /// Absolute position that string offsets are relative to.
+    base: usize,
+    /// Decoded strings by absolute position.
+    decoded: HashMap<usize, String>,
+    /// Bytes of text handed out so far.
+    total_bytes: usize,
+}
+
+impl StringTable<'_> {
+    fn text(&mut self, offset: u32) -> Result<String, DatasheetError> {
+        let position = self.base + offset as usize;
+        let text = match self.decoded.entry(position) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(self.reader.string_at(position)?),
+        };
+        self.total_bytes = self
+            .total_bytes
+            .checked_add(text.len())
+            .filter(|&total| total <= MAX_DECODED_TEXT_BYTES)
+            .ok_or(DatasheetError::TextTooLarge {
+                limit: MAX_DECODED_TEXT_BYTES,
+            })?;
+        Ok(text.clone())
     }
 }
 
@@ -216,7 +268,7 @@ impl ByteReader<'_> {
     fn string_at(&self, offset: usize) -> Result<String, DatasheetError> {
         let tail = self.bytes.get(offset..).ok_or(DatasheetError::Truncated {
             offset,
-            needed: 1,
+            needed: MIN_STRING_SIZE,
             len: self.bytes.len(),
         })?;
         let length = tail
@@ -240,6 +292,8 @@ mod tests {
     const META_ROW_COUNT_WORD: usize = 3;
     const UNKNOWN_KIND: u32 = 7;
     const NOT_UTF8: u8 = 0xFF;
+    const SHARED_ROWS: usize = 64;
+    const SHARED_TEXT_LEN: usize = 1024;
 
     fn add_string(strings: &mut Vec<u8>, text: &str) -> u32 {
         let offset = u32::try_from(strings.len()).unwrap();
@@ -308,6 +362,46 @@ mod tests {
 
     fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
         bytes[offset..offset + U32_SIZE].copy_from_slice(&value.to_le_bytes());
+    }
+
+    /// A one-column sheet of `rows` cells that all point at the same text of `text_len` bytes.
+    fn sheet_with_shared_text(rows: usize, text_len: usize) -> Vec<u8> {
+        let shared = "x".repeat(text_len);
+        let mut values = vec![""; rows];
+        values[0] = &shared;
+        let rows: Vec<&[&str]> = values.iter().map(std::slice::from_ref).collect();
+        let mut bytes = write_sheet("T", "U", &[("A", ColumnKind::STRING_CODE)], &rows);
+        let cell_index = HEADER_SIZE + META_SIZE + COLUMN_ENTRY_SIZE;
+        let shared_offset =
+            u32::from_le_bytes(bytes[cell_index..cell_index + U32_SIZE].try_into().unwrap());
+        for row in 1..rows.len() {
+            put_u32(
+                &mut bytes,
+                cell_index + row * CELL_ENTRY_SIZE,
+                shared_offset,
+            );
+        }
+        bytes
+    }
+
+    #[test]
+    fn cells_sharing_one_text_parse() {
+        let bytes = sheet_with_shared_text(SHARED_ROWS, SHARED_TEXT_LEN);
+        let sheet = Datasheet::parse(&bytes).unwrap();
+        assert_eq!(sheet.rows.len(), SHARED_ROWS);
+        assert!(sheet.rows.iter().all(|row| row[0].len() == SHARED_TEXT_LEN));
+    }
+
+    #[test]
+    fn shared_text_above_the_limit_is_rejected() {
+        let bytes = sheet_with_shared_text(SHARED_ROWS, MAX_DECODED_TEXT_BYTES / SHARED_ROWS + 1);
+        // `matches!` keeps the 64 MiB of parsed text out of the failure message.
+        assert!(matches!(
+            Datasheet::parse(&bytes),
+            Err(DatasheetError::TextTooLarge {
+                limit: MAX_DECODED_TEXT_BYTES
+            })
+        ));
     }
 
     #[test]
