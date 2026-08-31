@@ -7,7 +7,9 @@ use nw_content::fill::{parse_bool, parse_f64, parse_i64, split_numbered};
 use nw_formats::datasheet::{ColumnKind, Datasheet};
 
 use super::CodegenError;
-use super::naming::{FieldName, field_names, is_valid_type_name, snake_case, struct_name};
+use super::naming::{
+    FieldName, field_names, is_valid_type_name, reserved_name, snake_case, struct_name,
+};
 
 /// A base with at least this many numbered columns in one table type becomes one map field.
 pub const FAMILY_MIN_MEMBERS: usize = 16;
@@ -210,6 +212,12 @@ impl SchemaBuilder {
         for (type_name, table) in self.tables {
             let module = snake_case(&type_name);
             let struct_name = struct_name(&type_name);
+            if let Some(name) = reserved_name(&struct_name, &module) {
+                return Err(CodegenError::ReservedName {
+                    name: name.to_owned(),
+                    type_name,
+                });
+            }
             if !is_valid_type_name(&struct_name) || !is_valid_type_name(&module) {
                 return Err(CodegenError::InvalidTypeName(type_name));
             }
@@ -257,6 +265,7 @@ impl SchemaBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codegen::naming::{RESERVED_MODULE_NAMES, RESERVED_STRUCT_NAMES};
     use nw_formats::datasheet::Column;
 
     const TYPE: &str = "MasterItemDefinitions";
@@ -539,6 +548,33 @@ mod tests {
             .map(|field| (field.name.text.as_str(), field.numbered))
             .collect();
         assert_eq!(names, vec![("item", false), ("item_2", true)]);
+    }
+
+    #[test]
+    fn type_names_that_are_not_plain_identifiers_are_rejected() {
+        for type_name in ["Foo ", "Foo/**/"] {
+            assert!(
+                matches!(
+                    build(&[sheet(type_name, &[("A", ColumnKind::String)], &[])]),
+                    Err(CodegenError::InvalidTypeName(name)) if name == type_name
+                ),
+                "`{type_name}` was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn reserved_struct_and_module_names_are_rejected() {
+        for reserved in RESERVED_STRUCT_NAMES.iter().chain(&RESERVED_MODULE_NAMES) {
+            assert!(
+                matches!(
+                    build(&[sheet(reserved, &[("A", ColumnKind::String)], &[])]),
+                    Err(CodegenError::ReservedName { type_name, name })
+                        if type_name == *reserved && name == *reserved
+                ),
+                "`{reserved}` was accepted"
+            );
+        }
     }
 
     #[test]

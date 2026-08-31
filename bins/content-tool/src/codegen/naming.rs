@@ -14,6 +14,32 @@ const NON_RAW_KEYWORDS: [&str; 3] = ["crate", "self", "super"];
 /// Words reserved by Rust edition 2024 that `syn` still accepts as plain identifiers.
 const EDITION_RESERVED_WORDS: [&str; 1] = ["gen"];
 const KEYWORD_SUFFIX: char = '_';
+/// Struct names that would clash with the names the generated code imports or uses.
+pub const RESERVED_STRUCT_NAMES: [&str; 12] = [
+    "Tables",
+    "Table",
+    "TableCounts",
+    "RowView",
+    "FillError",
+    "FromDatasheet",
+    "Datasheet",
+    "Option",
+    "String",
+    "Vec",
+    "Result",
+    "BTreeMap",
+];
+/// Module names that would clash with the crates and path roots the generated code uses.
+pub const RESERVED_MODULE_NAMES: [&str; 8] = [
+    "serde",
+    "std",
+    "core",
+    "alloc",
+    "nw_formats",
+    "crate",
+    "self",
+    "super",
+];
 /// The second field with the same name gets `_2`, the third `_3`, and so on.
 const FIRST_COLLISION_SUFFIX: usize = 2;
 
@@ -111,12 +137,33 @@ pub fn field_names<'a>(columns: impl IntoIterator<Item = &'a str>) -> Vec<FieldN
         .collect()
 }
 
-/// True when `name` can be used as a Rust type name as it is.
+/// True when `name` can be used as a Rust type or module name as it is: it matches
+/// `[A-Za-z_][A-Za-z0-9_]*` exactly, is not an edition-reserved word, and `syn` accepts it as an
+/// identifier (which refuses keywords).
 pub fn is_valid_type_name(name: &str) -> bool {
-    !EDITION_RESERVED_WORDS.contains(&name) && syn::parse_str::<syn::Ident>(name).is_ok()
+    let mut chars = name.chars();
+    let is_plain = chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == WORD_SEPARATOR)
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == WORD_SEPARATOR);
+    is_plain
+        && !EDITION_RESERVED_WORDS.contains(&name)
+        && syn::parse_str::<syn::Ident>(name).is_ok()
 }
 
-/// `syn` refuses keywords as plain identifiers.
+/// The struct or module name of a table type that is reserved by the generated code, if any.
+pub fn reserved_name<'a>(struct_name: &'a str, module: &'a str) -> Option<&'a str> {
+    if RESERVED_STRUCT_NAMES.contains(&struct_name) {
+        Some(struct_name)
+    } else if RESERVED_MODULE_NAMES.contains(&module) {
+        Some(module)
+    } else {
+        None
+    }
+}
+
+/// Field names only hold ASCII letters, digits and `_` and never start with a digit, so a field
+/// name that is not a valid identifier as it is must be a keyword or an edition-reserved word.
 fn is_keyword(name: &str) -> bool {
     !is_valid_type_name(name)
 }
@@ -228,6 +275,22 @@ mod tests {
                 raw: false
             }]
         );
+    }
+
+    #[test]
+    fn type_names_must_be_plain_ascii_identifiers() {
+        for name in [
+            "Foo ",
+            " Foo",
+            "Foo/**/",
+            "Foo//x",
+            "\u{dc}nder",
+            "2Foo",
+            "Foo-Bar",
+        ] {
+            assert!(!is_valid_type_name(name), "`{name}` was accepted");
+        }
+        assert!(is_valid_type_name("_Foo2"));
     }
 
     #[test]

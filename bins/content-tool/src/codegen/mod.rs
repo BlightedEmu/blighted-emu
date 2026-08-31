@@ -26,6 +26,14 @@ pub enum CodegenError {
     /// A table type name (or its module name) is not a Rust identifier.
     #[error("table type `{0}` is not a valid Rust type or module name")]
     InvalidTypeName(String),
+    /// A table type maps to a struct or module name that the generated code already uses.
+    #[error("table type `{type_name}` maps to `{name}`, a name the generated code already uses")]
+    ReservedName {
+        /// The table type.
+        type_name: String,
+        /// The reserved struct or module name.
+        name: String,
+    },
     /// A table type has no columns in any file.
     #[error("table type `{0}` has no columns")]
     NoColumns(String),

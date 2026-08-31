@@ -64,6 +64,16 @@ just bundle
 
 `just bundle` writes `local-data/content/bundle-<build>.bin`, then reloads it and checks every table and row. The pinned client build is in `config/client-build.toml`.
 
+### Recovery
+
+`content-tool` links `nw-content`, so it cannot run while the generated code does not compile. Removing the `generated` module lines from `crates/nw-content/src/lib.rs` is not enough, because `bundle.rs` and `content-tool build` use `Tables`. Instead:
+
+1. Restore the committed generated files: `git checkout -- crates/nw-content/src/generated`.
+2. Fix the cause (usually a change to `bins/content-tool/src/codegen`).
+3. Run `just codegen` again.
+
+Codegen stops with an error when a table type name would give an invalid Rust name or a name that the generated code already uses, so a new client build cannot write code that does not compile for that reason.
+
 ## Rules for contributors
 
 - Never commit game files, captures, or `deploy/.env`. Put local game data in `local-data/` (ignored by git).
