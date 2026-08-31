@@ -13,6 +13,8 @@
 
 .env
 .env.*
+# Templates without secrets are always kept.
+!.env.example
 secrets/
 *.pem
 *.key
