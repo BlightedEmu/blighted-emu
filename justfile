@@ -22,3 +22,17 @@ size:
 # Delete build files older than 7 days (spec 10.6).
 clean-old:
     cargo sweep --time {{sweep_age_days}}
+
+compose := "docker compose -f deploy/docker-compose.yml --env-file deploy/.env"
+
+# Start the infrastructure and wait until every service is healthy.
+infra-up:
+    {{compose}} up -d --wait
+
+# Stop the infrastructure. Data volumes are kept.
+infra-down:
+    {{compose}} down
+
+# Run the infrastructure smoke test (M0 exit criterion).
+infra-test:
+    deploy/smoke-test.sh

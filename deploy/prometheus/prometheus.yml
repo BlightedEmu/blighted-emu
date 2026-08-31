@@ -1,0 +1,8 @@
+# Scrape config. Emulator programs are added as jobs when they exist (M2 and later).
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
