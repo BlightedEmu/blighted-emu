@@ -2,7 +2,7 @@
 //! Converts datasheet cell text into typed values. These functions are the single definition
 //! of the cell rules; `content-tool codegen` uses the same functions to choose field types.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use nw_formats::datasheet::Datasheet;
 
@@ -14,6 +14,7 @@ pub const FALSE_TEXTS: [&str; 2] = ["0", "false"];
 const EXPECTED_BOOL: &str = "boolean";
 const EXPECTED_I64: &str = "whole number";
 const EXPECTED_F64: &str = "number";
+const EXPECTED_TEXT: &str = "text";
 
 /// Reads `1`/`0`/`TRUE`/`FALSE` (any case).
 pub fn parse_bool(text: &str) -> Option<bool> {
@@ -40,6 +41,19 @@ pub fn parse_i64(text: &str) -> Option<i64> {
 /// Reads a whole or decimal number.
 pub fn parse_f64(text: &str) -> Option<f64> {
     text.parse().ok()
+}
+
+/// Reads a text cell as it is.
+fn parse_text(text: &str) -> Option<String> {
+    Some(text.to_owned())
+}
+
+/// Splits a numbered column name such as `Item12` into its base (`Item`) and number (`12`).
+/// `None` when the name has no trailing digits, no base, or digits too large for `u32`.
+pub fn split_numbered(column: &str) -> Option<(&str, u32)> {
+    let base = column.trim_end_matches(|ch: char| ch.is_ascii_digit());
+    let number = column[base.len()..].parse().ok()?;
+    (!base.is_empty()).then_some((base, number))
 }
 
 /// Error from filling a typed row.
@@ -150,6 +164,26 @@ impl<'a> RowView<'a> {
         self.optional(column, EXPECTED_BOOL, parse_bool)
     }
 
+    /// Texts of the non-empty cells of the columns `<base>1`, `<base>2`, ..., by number.
+    pub fn numbered_string(&self, base: &str) -> Result<BTreeMap<u32, String>, FillError> {
+        self.numbered(base, EXPECTED_TEXT, parse_text)
+    }
+
+    /// Whole numbers of the non-empty cells of the columns `<base>1`, `<base>2`, ..., by number.
+    pub fn numbered_i64(&self, base: &str) -> Result<BTreeMap<u32, i64>, FillError> {
+        self.numbered(base, EXPECTED_I64, parse_i64)
+    }
+
+    /// Numbers of the non-empty cells of the columns `<base>1`, `<base>2`, ..., by number.
+    pub fn numbered_f64(&self, base: &str) -> Result<BTreeMap<u32, f64>, FillError> {
+        self.numbered(base, EXPECTED_F64, parse_f64)
+    }
+
+    /// Booleans of the non-empty cells of the columns `<base>1`, `<base>2`, ..., by number.
+    pub fn numbered_bool(&self, base: &str) -> Result<BTreeMap<u32, bool>, FillError> {
+        self.numbered(base, EXPECTED_BOOL, parse_bool)
+    }
+
     fn cell(&self, column: &str) -> Option<&'a str> {
         let index = *self.columns.get(column)?;
         self.sheet
@@ -206,6 +240,27 @@ impl<'a> RowView<'a> {
         self.convert(column, text, expected, parse)
     }
 
+    fn numbered<T>(
+        &self,
+        base: &str,
+        expected: &'static str,
+        parse: fn(&str) -> Option<T>,
+    ) -> Result<BTreeMap<u32, T>, FillError> {
+        let mut values = BTreeMap::new();
+        for column in &self.sheet.columns {
+            let Some((column_base, number)) = split_numbered(&column.name) else {
+                continue;
+            };
+            if column_base != base {
+                continue;
+            }
+            if let Some(text) = self.optional_text(&column.name) {
+                values.insert(number, self.convert(&column.name, text, expected, parse)?);
+            }
+        }
+        Ok(values)
+    }
+
     fn optional<T>(
         &self,
         column: &str,
@@ -220,7 +275,36 @@ impl<'a> RowView<'a> {
 
 #[cfg(test)]
 mod tests {
+    use nw_formats::datasheet::{Column, ColumnKind};
+
     use super::*;
+
+    const SOURCE: &str = "sheet.datasheet";
+
+    fn sheet(columns: &[&str], row: &[&str]) -> Datasheet {
+        Datasheet {
+            type_name: "Test".to_owned(),
+            unique_id: "test".to_owned(),
+            columns: columns
+                .iter()
+                .map(|name| Column {
+                    name: (*name).to_owned(),
+                    kind: ColumnKind::String,
+                })
+                .collect(),
+            rows: vec![row.iter().map(|value| (*value).to_owned()).collect()],
+        }
+    }
+
+    fn with_row_view<T>(columns: &[&str], row: &[&str], read: impl FnOnce(&RowView<'_>) -> T) -> T {
+        let sheet = sheet(columns, row);
+        let index: HashMap<&str, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(position, name)| (*name, position))
+            .collect();
+        read(&RowView::new(SOURCE, &sheet, &index, 0))
+    }
 
     #[test]
     fn bool_accepts_digits_and_words_in_any_case() {
@@ -240,5 +324,64 @@ mod tests {
         assert_eq!(parse_f64("0.12"), Some(0.12));
         assert_eq!(parse_f64("7"), Some(7.0));
         assert_eq!(parse_f64("abc"), None);
+    }
+
+    #[test]
+    fn split_numbered_reads_trailing_digits() {
+        assert_eq!(split_numbered("Item12"), Some(("Item", 12)));
+        assert_eq!(split_numbered("Tags2D3"), Some(("Tags2D", 3)));
+        assert_eq!(split_numbered("Item"), None);
+        assert_eq!(split_numbered("123"), None);
+        assert_eq!(split_numbered("Item1x"), None);
+        assert_eq!(split_numbered("Item99999999999"), None);
+    }
+
+    #[test]
+    fn numbered_values_skip_gaps_and_empty_cells() {
+        let columns = ["Base1", "Base3", "Base4", "Base10", "Other2"];
+        let row = ["5", "7", "", "-1", "9"];
+        let values = with_row_view(&columns, &row, |view| view.numbered_i64("Base")).unwrap();
+        assert_eq!(values, BTreeMap::from([(1, 5), (3, 7), (10, -1)]));
+    }
+
+    #[test]
+    fn numbered_column_with_a_suffix_is_not_a_member() {
+        let columns = ["Base1", "Base1x", "Base2y3"];
+        let row = ["a", "b", "c"];
+        let values = with_row_view(&columns, &row, |view| view.numbered_string("Base")).unwrap();
+        assert_eq!(values, BTreeMap::from([(1, "a".to_owned())]));
+    }
+
+    #[test]
+    fn numbered_readers_cover_every_type() {
+        let columns = ["Value1", "Value2"];
+        let row = ["1", "0"];
+        with_row_view(&columns, &row, |view| {
+            assert_eq!(
+                view.numbered_bool("Value").unwrap(),
+                BTreeMap::from([(1, true), (2, false)])
+            );
+            assert_eq!(
+                view.numbered_f64("Value").unwrap(),
+                BTreeMap::from([(1, 1.0), (2, 0.0)])
+            );
+        });
+    }
+
+    #[test]
+    fn numbered_bad_value_names_the_full_column() {
+        let columns = ["Base1", "Base2"];
+        let row = ["4", "x"];
+        let error = with_row_view(&columns, &row, |view| view.numbered_i64("Base")).unwrap_err();
+        assert_eq!(
+            error,
+            FillError::BadValue {
+                source_path: SOURCE.to_owned(),
+                row: 0,
+                column: "Base2".to_owned(),
+                value: "x".to_owned(),
+                expected: EXPECTED_I64,
+            }
+        );
     }
 }

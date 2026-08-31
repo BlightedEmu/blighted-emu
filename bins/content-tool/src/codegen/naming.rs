@@ -49,6 +49,22 @@ pub fn snake_case(text: &str) -> String {
         .join(&WORD_SEPARATOR.to_string())
 }
 
+/// The struct name for a table type: splits on `_`, uppercases the first character of each part
+/// and joins the parts (`unknown` becomes `Unknown`, `Foo_BarBaz` becomes `FooBarBaz`).
+pub fn struct_name(type_name: &str) -> String {
+    type_name
+        .split(WORD_SEPARATOR)
+        .flat_map(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .into_iter()
+                .flat_map(char::to_uppercase)
+                .chain(chars)
+        })
+        .collect()
+}
+
 /// The field name for one column, before collision handling.
 pub fn field_base_name(column: &str) -> String {
     let trimmed = column.trim();
@@ -131,6 +147,16 @@ mod tests {
         assert_eq!(snake_case("Idle_VFX"), "idle_vfx");
         assert_eq!(snake_case("IdleVFX"), "idle_vfx");
         assert_eq!(snake_case("Tier2Bonus"), "tier2_bonus");
+    }
+
+    #[test]
+    fn struct_names_are_upper_camel_case() {
+        assert_eq!(struct_name("unknown"), "Unknown");
+        assert_eq!(
+            struct_name("OutpostRush_NoPerksBalanceData"),
+            "OutpostRushNoPerksBalanceData"
+        );
+        assert_eq!(struct_name("AITargetingData"), "AITargetingData");
     }
 
     #[test]

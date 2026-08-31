@@ -8,7 +8,11 @@ pub mod schema;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use render::{GENERATED_MARKER, GeneratedFile, RUST_EXTENSION};
+use render::{GENERATED_MARKER, GeneratedFile, RUST_EXTENSION, render};
+use schema::SchemaBuilder;
+
+use crate::error::ToolError;
+use crate::source::GameSource;
 
 /// The marker is on line 2 of every generated file.
 const MARKER_HEADER_LINES: usize = 2;
@@ -34,6 +38,16 @@ pub enum CodegenError {
         second: String,
         /// The shared module name.
         module: String,
+    },
+    /// Two table types give the same struct name.
+    #[error("table types `{first}` and `{second}` both map to struct `{struct_name}`")]
+    StructCollision {
+        /// First type (sorted order).
+        first: String,
+        /// Second type.
+        second: String,
+        /// The shared struct name.
+        struct_name: String,
     },
     /// Generated tokens do not form a valid Rust file.
     #[error("generated code for `{name}` does not parse: {message}")]
@@ -105,6 +119,41 @@ pub fn write_generated(
     Ok(WriteSummary {
         written: files.len(),
         removed,
+    })
+}
+
+/// Result of [`run_codegen`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CodegenSummary {
+    /// Datasheets read.
+    pub datasheet_files: usize,
+    /// Table types (structs) generated.
+    pub table_types: usize,
+    /// Files written.
+    pub files_written: usize,
+    /// Stale generated files removed.
+    pub stale_files_removed: usize,
+}
+
+/// Reads every datasheet, infers the schemas, and writes the generated code into `out_dir`.
+pub fn run_codegen(
+    source: &GameSource,
+    client_build: &str,
+    out_dir: &Path,
+) -> Result<CodegenSummary, ToolError> {
+    let mut builder = SchemaBuilder::default();
+    let datasheet_files = source.for_each_datasheet(|_, sheet| {
+        builder.add(&sheet);
+        Ok::<(), ToolError>(())
+    })?;
+    let schemas = builder.finish()?;
+    let files = render(&schemas, client_build)?;
+    let written = write_generated(out_dir, &files)?;
+    Ok(CodegenSummary {
+        datasheet_files,
+        table_types: schemas.len(),
+        files_written: written.written,
+        stale_files_removed: written.removed,
     })
 }
 

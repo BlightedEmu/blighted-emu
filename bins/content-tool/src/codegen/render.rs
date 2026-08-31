@@ -78,26 +78,41 @@ fn field_type_tokens(field: &FieldSchema) -> TokenStream {
         FieldType::F64 => quote!(f64),
         FieldType::String => quote!(String),
     };
-    if field.optional {
+    if field.numbered {
+        quote!(std::collections::BTreeMap<u32, #base>)
+    } else if field.optional {
         quote!(Option<#base>)
     } else {
         base
     }
 }
 
+fn field_doc(field: &FieldSchema) -> String {
+    if field.numbered {
+        format!(
+            " Numbered columns `{base}1`, `{base}2`, \u{2026} (key = number).",
+            base = field.column
+        )
+    } else {
+        format!(" Column `{}`.", field.column)
+    }
+}
+
 fn table_tokens(schema: &TableSchema) -> TokenStream {
-    let struct_name = format_ident!("{}", schema.type_name);
+    let struct_name = format_ident!("{}", schema.struct_name);
     let type_name = &schema.type_name;
     let struct_doc = format!(" One row of a `{type_name}` datasheet.");
     let fields = schema.fields.iter().map(|field| {
         let ident = field_ident(&field.name);
         let ty = field_type_tokens(field);
-        let doc = format!(" Column `{}`.", field.column);
+        let doc = field_doc(field);
         quote! { #[doc = #doc] pub #ident: #ty }
     });
     let fills = schema.fields.iter().map(|field| {
         let ident = field_ident(&field.name);
-        let presence = if field.optional {
+        let presence = if field.numbered {
+            "numbered"
+        } else if field.optional {
             "optional"
         } else {
             "required"
@@ -130,7 +145,7 @@ fn mod_tokens(schemas: &[TableSchema]) -> TokenStream {
         .collect();
     let types: Vec<Ident> = schemas
         .iter()
-        .map(|schema| format_ident!("{}", schema.type_name))
+        .map(|schema| format_ident!("{}", schema.struct_name))
         .collect();
     let names: Vec<&str> = schemas
         .iter()
@@ -195,6 +210,7 @@ mod tests {
             },
             ty,
             optional,
+            numbered: false,
         }
     }
 
@@ -202,6 +218,7 @@ mod tests {
         vec![
             TableSchema {
                 type_name: "MasterItemDefinitions".into(),
+                struct_name: "MasterItemDefinitions".into(),
                 module: "master_item_definitions".into(),
                 fields: vec![
                     field("ItemID", "item_id", false, FieldType::String, false),
@@ -211,6 +228,7 @@ mod tests {
             },
             TableSchema {
                 type_name: "AffixData".into(),
+                struct_name: "AffixData".into(),
                 module: "affix_data".into(),
                 fields: vec![field("Ratio", "ratio", false, FieldType::F64, false)],
             },
@@ -272,6 +290,60 @@ mod tests {
             r#""MasterItemDefinitions" =>"#,
             "self.master_item_definitions",
             "counts.add(&self.affix_data);",
+        ] {
+            assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
+        }
+    }
+
+    #[test]
+    fn struct_name_differs_from_type_name() {
+        let schemas = vec![TableSchema {
+            type_name: "Outpost_Data".into(),
+            struct_name: "OutpostData".into(),
+            module: "outpost_data".into(),
+            fields: vec![field("Ratio", "ratio", false, FieldType::F64, false)],
+        }];
+        let files = render(&schemas, BUILD).unwrap();
+        let table = file(&files, "outpost_data.rs");
+        for expected in [
+            "pub struct OutpostData",
+            "impl FromDatasheet for OutpostData",
+            r#"const TYPE_NAME: &'static str = "Outpost_Data";"#,
+            "One row of a `Outpost_Data` datasheet.",
+        ] {
+            assert!(
+                table.contains(expected),
+                "missing `{expected}` in:\n{table}"
+            );
+        }
+        let root = file(&files, MOD_FILE);
+        for expected in [
+            "pub use outpost_data::OutpostData;",
+            "pub outpost_data: Vec<Table<OutpostData>>",
+            r#""Outpost_Data" => self.outpost_data.push"#,
+            "Tables of type `Outpost_Data`.",
+        ] {
+            assert!(root.contains(expected), "missing `{expected}` in:\n{root}");
+        }
+    }
+
+    #[test]
+    fn numbered_field_is_a_map_filled_by_base_name() {
+        let schemas = vec![TableSchema {
+            type_name: "LootBucketData".into(),
+            struct_name: "LootBucketData".into(),
+            module: "loot_bucket_data".into(),
+            fields: vec![FieldSchema {
+                numbered: true,
+                ..field("Item", "item", false, FieldType::I64, false)
+            }],
+        }];
+        let files = render(&schemas, BUILD).unwrap();
+        let text = file(&files, "loot_bucket_data.rs");
+        for expected in [
+            "pub item: std::collections::BTreeMap<u32, i64>",
+            r#"row.numbered_i64("Item")?"#,
+            "Numbered columns `Item1`, `Item2`, \u{2026} (key = number).",
         ] {
             assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
         }
