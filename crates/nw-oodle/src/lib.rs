@@ -6,7 +6,14 @@
 
 use nw_formats::pak::{DecompressError, Decompressor};
 
+/// Error message when `oozextract` panics.
+const DECODER_PANIC_MESSAGE: &str = "the Oodle decoder panicked on invalid input";
+
 /// Decodes Oodle Kraken data (the only Oodle codec in the pinned client).
+///
+/// `oozextract` can panic on invalid input. The panic is caught and returned as a
+/// [`DecompressError`], so hostile pak entries cannot stop the caller. The default panic hook
+/// still prints the panic message to stderr.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct KrakenDecompressor;
 
@@ -17,9 +24,11 @@ impl Decompressor for KrakenDecompressor {
         uncompressed_size: usize,
     ) -> Result<Vec<u8>, DecompressError> {
         let mut output = vec![0u8; uncompressed_size];
-        let written = oozextract::Extractor::new()
-            .read_from_slice(input, &mut output)
-            .map_err(|error| DecompressError(error.to_string()))?;
+        let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            oozextract::Extractor::new().read_from_slice(input, &mut output)
+        }))
+        .map_err(|_| DecompressError(DECODER_PANIC_MESSAGE.to_owned()))?;
+        let written = decoded.map_err(|error| DecompressError(error.to_string()))?;
         if written != uncompressed_size {
             return Err(DecompressError(format!(
                 "decoded {written} bytes, expected {uncompressed_size}"
@@ -37,6 +46,12 @@ mod tests {
     /// Starts like a Kraken block header (low nibble 0xC, decoder type 6) but is not valid data.
     const FAKE_KRAKEN_HEADER: [u8; 2] = [0xCC, 0x06];
     const PATTERN_LEN: usize = 256;
+    /// A BitKnit block that makes `oozextract` 0.5.5 panic (found by fuzzing): a subtraction
+    /// overflow with overflow checks, an out-of-range slice index without them.
+    const DECODER_PANIC_INPUT: [u8; 20] = [
+        0x8C, 0x0B, 0x00, 0x0F, 0xAE, 0x8F, 0x00, 0x5C, 0x00, 0x00, 0xB3, 0x66, 0x00, 0x00, 0x00,
+        0x98, 0x00, 0x45, 0x00, 0x00,
+    ];
 
     #[test]
     fn empty_input_is_an_error() {
@@ -50,6 +65,14 @@ mod tests {
                 .decompress(&FAKE_KRAKEN_HEADER, OUTPUT_SIZE)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn decoder_panic_is_an_error() {
+        let error = KrakenDecompressor
+            .decompress(&DECODER_PANIC_INPUT, OUTPUT_SIZE)
+            .unwrap_err();
+        assert_eq!(error.0, DECODER_PANIC_MESSAGE);
     }
 
     #[test]
