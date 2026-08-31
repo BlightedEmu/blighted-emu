@@ -96,14 +96,14 @@ pub enum PakError {
         /// The method as reported by the `zip` crate.
         method: String,
     },
-    /// The entry is larger than [`MAX_ENTRY_SIZE`].
+    /// The entry, stored or decoded, is larger than [`MAX_ENTRY_SIZE`].
     #[error("{}: entry `{entry}` is {size} bytes, above the limit of {limit} bytes", .pak.display())]
     EntryTooLarge {
         /// The pak.
         pak: PathBuf,
         /// The entry path.
         entry: String,
-        /// Declared uncompressed size.
+        /// Declared compressed or uncompressed size, whichever is above the limit.
         size: u64,
         /// The limit.
         limit: u64,
@@ -222,29 +222,35 @@ impl<R: Read + Seek> PakArchive<R> {
         decompressor: &dyn Decompressor,
     ) -> Result<Vec<u8>, PakError> {
         let pak = self.label.clone();
+        let too_large = |size| PakError::EntryTooLarge {
+            pak: pak.clone(),
+            entry: entry.path.clone(),
+            size,
+            limit: MAX_ENTRY_SIZE,
+        };
         let expected = entry.uncompressed_size;
         if expected > MAX_ENTRY_SIZE {
-            return Err(PakError::EntryTooLarge {
-                pak,
-                entry: entry.path.clone(),
-                size: expected,
-                limit: MAX_ENTRY_SIZE,
-            });
+            return Err(too_large(expected));
         }
         // MAX_ENTRY_SIZE fits in usize on every supported (64-bit) target.
         let expected_len = expected as usize;
-        let mut raw = Vec::new();
-        self.zip
+        let mut file = self
+            .zip
             .by_index_raw(entry.index)
             .map_err(|source| PakError::Zip {
                 path: pak.clone(),
                 source,
-            })?
-            .read_to_end(&mut raw)
-            .map_err(|source| PakError::Io {
-                path: pak.clone(),
-                source,
             })?;
+        // The raw reader reads as many bytes as the central directory declares.
+        let stored_size = file.compressed_size();
+        if stored_size > MAX_ENTRY_SIZE {
+            return Err(too_large(stored_size));
+        }
+        let mut raw = Vec::new();
+        file.read_to_end(&mut raw).map_err(|source| PakError::Io {
+            path: pak.clone(),
+            source,
+        })?;
         let data = match &entry.method {
             EntryMethod::Store => raw,
             EntryMethod::Deflate => {
@@ -359,6 +365,8 @@ mod tests {
         path: &'a str,
         method: u16,
         stored: &'a [u8],
+        /// Size written to the headers; equal to `stored.len()` unless a test forges it.
+        compressed_size: u32,
         uncompressed_size: u32,
         crc32: u32,
     }
@@ -378,7 +386,6 @@ mod tests {
         for entry in entries {
             let offset = u32::try_from(out.len()).unwrap();
             let name_len = u16::try_from(entry.path.len()).unwrap();
-            let stored_len = u32::try_from(entry.stored.len()).unwrap();
             u32le(&mut out, LOCAL_HEADER_SIGNATURE);
             u16le(&mut out, ZIP_VERSION);
             u16le(&mut out, 0);
@@ -386,7 +393,7 @@ mod tests {
             u16le(&mut out, 0);
             u16le(&mut out, DOS_DATE);
             u32le(&mut out, entry.crc32);
-            u32le(&mut out, stored_len);
+            u32le(&mut out, entry.compressed_size);
             u32le(&mut out, entry.uncompressed_size);
             u16le(&mut out, name_len);
             u16le(&mut out, 0);
@@ -401,7 +408,7 @@ mod tests {
             u16le(&mut central, 0);
             u16le(&mut central, DOS_DATE);
             u32le(&mut central, entry.crc32);
-            u32le(&mut central, stored_len);
+            u32le(&mut central, entry.compressed_size);
             u32le(&mut central, entry.uncompressed_size);
             u16le(&mut central, name_len);
             u16le(&mut central, 0);
@@ -432,6 +439,7 @@ mod tests {
             path,
             method: ZIP_STORE,
             stored: data,
+            compressed_size: u32::try_from(data.len()).unwrap(),
             uncompressed_size: u32::try_from(data.len()).unwrap(),
             crc32: crc32fast::hash(data),
         }
@@ -463,6 +471,7 @@ mod tests {
             path: "a.datasheet",
             method: METHOD_OODLE,
             stored,
+            compressed_size: u32::try_from(stored.len()).unwrap(),
             uncompressed_size: u32::try_from(UNPACKED.len()).unwrap(),
             crc32: crc32fast::hash(UNPACKED),
         }
@@ -506,6 +515,7 @@ mod tests {
             path: "a.bin",
             method: ZIP_DEFLATE,
             stored: packed,
+            compressed_size: u32::try_from(packed.len()).unwrap(),
             uncompressed_size: u32::try_from(data.len()).unwrap(),
             crc32: crc32fast::hash(data),
         };
@@ -563,6 +573,17 @@ mod tests {
     fn entry_above_size_limit_is_rejected() {
         let mut entry = oodle_entry(PACKED);
         entry.uncompressed_size = u32::try_from(MAX_ENTRY_SIZE + 1).unwrap();
+        let error = read_first(&[entry]).unwrap_err();
+        assert!(
+            matches!(error, PakError::EntryTooLarge { .. }),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn compressed_size_above_limit_is_rejected() {
+        let mut entry = oodle_entry(PACKED);
+        entry.compressed_size = u32::try_from(MAX_ENTRY_SIZE + 1).unwrap();
         let error = read_first(&[entry]).unwrap_err();
         assert!(
             matches!(error, PakError::EntryTooLarge { .. }),
