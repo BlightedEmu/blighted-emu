@@ -7,4 +7,5 @@ pub mod datasheet;
 pub mod loc;
 #[cfg(feature = "local-data")]
 pub mod local_data;
+pub mod objectstream;
 pub mod pak;
