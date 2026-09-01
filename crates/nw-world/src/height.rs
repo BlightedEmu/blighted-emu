@@ -15,10 +15,10 @@ const LAST_SAMPLE: f64 = (HEIGHTMAP_SIZE - 1) as f64;
 impl WorldFile {
     /// Ground height in metres at world position (`x`, `y`). Column = local x, row =
     /// 2047 - local y, bilinear blend of the 4 samples around the point, clamped inside the
-    /// region. `None` when the level has no terrain or the point is outside every region with a
-    /// height grid.
+    /// region. `None` when the level has no terrain, when `x` or `y` is not finite, or when the
+    /// point is outside every region with a height grid.
     pub fn height_at(&self, x: f32, y: f32) -> Option<f32> {
-        if !self.level.has_terrain {
+        if !self.level.has_terrain || !x.is_finite() || !y.is_finite() {
             return None;
         }
         let size = f64::from(self.level.region_size);
@@ -148,5 +148,14 @@ mod tests {
             samples: vec![0; 2],
         };
         assert_eq!(world(Some(grid), true).height_at(ORIGIN_X, 0.0), None);
+    }
+
+    #[test]
+    fn positions_that_are_not_finite_give_no_height() {
+        let world = world(Some(linear_grid()), true);
+        assert_eq!(world.height_at(f32::NAN, 10.0), None);
+        assert_eq!(world.height_at(ORIGIN_X, f32::NAN), None);
+        assert_eq!(world.height_at(f32::INFINITY, 10.0), None);
+        assert_eq!(world.height_at(ORIGIN_X, f32::NEG_INFINITY), None);
     }
 }
