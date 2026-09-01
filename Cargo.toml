@@ -25,6 +25,7 @@ syn = { version = "3.0.9", default-features = false, features = ["full", "parsin
 tempfile = { version = "3.27.0", default-features = false }
 thiserror = { version = "2.0.21", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "ansi", "env-filter", "std"] }
+weezl = { version = "0.2.1", default-features = false, features = ["alloc"] }
 zip = { version = "9.0.2", default-features = false }
 
 nw-common = { path = "crates/nw-common", version = "0.1.0" }
@@ -47,4 +48,8 @@ debug = false
 
 # Kraken decoding is slow without optimisation; this keeps local-data tests fast in the dev profile.
 [profile.dev.package.oozextract]
+opt-level = 3
+
+# Heightmap tests encode and decode full 2048 x 2048 LZW images; unoptimised LZW is slow.
+[profile.dev.package.weezl]
 opt-level = 3

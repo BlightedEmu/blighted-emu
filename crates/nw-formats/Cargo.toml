@@ -13,6 +13,7 @@ flate2.workspace = true
 quick-xml.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+weezl.workspace = true
 zip.workspace = true
 
 [dev-dependencies]
