@@ -1498,6 +1498,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nw-world"
+version = "0.1.0"
+dependencies = [
+ "nw-content",
+ "nw-formats",
+ "postcard",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
