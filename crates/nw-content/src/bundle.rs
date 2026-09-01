@@ -3,7 +3,8 @@
 //! [`crate::container`] with magic `NWCB` and the generated [`SCHEMA_HASH`], then a postcard
 //! body (tables and text).
 //!
-//! Loading checks every header field before it decodes the body.
+//! Loading checks every header field before it decodes the body. Errors are
+//! [`ContainerError`]s.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -11,7 +12,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::container::{
-    ContainerError, ContainerSpec, decode_container, encode_container, read_file, write_file,
+    ContainerError, ContainerSpec, decode_value, encode_value, read_file, write_file,
 };
 use crate::generated::{SCHEMA_HASH, Tables};
 
@@ -38,59 +39,27 @@ pub struct ContentBundle {
     pub text: BTreeMap<String, String>,
 }
 
-/// Error from bundle reading or writing.
-#[derive(Debug, thiserror::Error)]
-pub enum BundleError {
-    /// The header is not valid or the file cannot be accessed.
-    #[error("content bundle: {0}")]
-    Container(#[from] ContainerError),
-    /// The content cannot be encoded.
-    #[error("cannot encode bundle: {0}")]
-    Encode(postcard::Error),
-    /// The body cannot be decoded.
-    #[error("cannot decode bundle: {0}")]
-    Decode(postcard::Error),
-    /// The body has bytes after the encoded content.
-    #[error("bundle body has {count} bytes after the content")]
-    TrailingBytes {
-        /// Number of extra bytes.
-        count: usize,
-    },
-}
-
 impl ContentBundle {
     /// Encodes the bundle with its header.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, BundleError> {
-        let body = postcard::to_allocvec(self).map_err(BundleError::Encode)?;
-        Ok(encode_container(
-            &BUNDLE_CONTAINER,
-            &self.client_build,
-            &body,
-        )?)
+    pub fn to_bytes(&self) -> Result<Vec<u8>, ContainerError> {
+        encode_value(&BUNDLE_CONTAINER, &self.client_build, self)
     }
 
     /// Checks the header, then decodes the bundle. Refuses another format version, other
     /// generated table code ([`SCHEMA_HASH`]) and another client build before decoding.
-    pub fn from_bytes(bytes: &[u8], expected_build: &str) -> Result<Self, BundleError> {
-        let body = decode_container(&BUNDLE_CONTAINER, bytes, expected_build)?;
-        let (mut bundle, trailing): (Self, _) =
-            postcard::take_from_bytes(body).map_err(BundleError::Decode)?;
-        if !trailing.is_empty() {
-            return Err(BundleError::TrailingBytes {
-                count: trailing.len(),
-            });
-        }
+    pub fn from_bytes(bytes: &[u8], expected_build: &str) -> Result<Self, ContainerError> {
+        let mut bundle: Self = decode_value(&BUNDLE_CONTAINER, bytes, expected_build)?;
         bundle.client_build = expected_build.to_owned();
         Ok(bundle)
     }
 
     /// Writes the bundle to `path`, creating parent folders.
-    pub fn save(&self, path: &Path) -> Result<(), BundleError> {
-        Ok(write_file(path, &self.to_bytes()?)?)
+    pub fn save(&self, path: &Path) -> Result<(), ContainerError> {
+        write_file(path, &self.to_bytes()?)
     }
 
     /// Reads and checks the bundle at `path`.
-    pub fn load(path: &Path, expected_build: &str) -> Result<Self, BundleError> {
+    pub fn load(path: &Path, expected_build: &str) -> Result<Self, ContainerError> {
         Self::from_bytes(&read_file(path)?, expected_build)
     }
 }
@@ -98,10 +67,10 @@ impl ContentBundle {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::container::encode_container;
 
     const BUILD: &str = "22469132";
     const OTHER_BUILD: &str = "1";
-    const EXTRA_BYTE: u8 = 0;
 
     fn bundle() -> ContentBundle {
         let mut bundle = ContentBundle {
@@ -122,11 +91,11 @@ mod tests {
     }
 
     #[test]
-    fn header_errors_come_from_the_container() {
+    fn other_build_is_refused() {
         let bytes = bundle().to_bytes().unwrap();
         assert!(matches!(
             ContentBundle::from_bytes(&bytes, OTHER_BUILD),
-            Err(BundleError::Container(ContainerError::BuildMismatch { .. }))
+            Err(ContainerError::BuildMismatch { .. })
         ));
     }
 
@@ -140,29 +109,7 @@ mod tests {
         let bytes = encode_container(&spec, BUILD, &body).unwrap();
         assert!(matches!(
             ContentBundle::from_bytes(&bytes, BUILD),
-            Err(BundleError::Container(
-                ContainerError::SchemaMismatch { .. }
-            ))
-        ));
-    }
-
-    #[test]
-    fn trailing_bytes_are_refused() {
-        let mut body = postcard::to_allocvec(&bundle()).unwrap();
-        body.push(EXTRA_BYTE);
-        let bytes = encode_container(&BUNDLE_CONTAINER, BUILD, &body).unwrap();
-        assert!(matches!(
-            ContentBundle::from_bytes(&bytes, BUILD),
-            Err(BundleError::TrailingBytes { count: 1 })
-        ));
-    }
-
-    #[test]
-    fn body_that_is_not_a_bundle_is_refused() {
-        let bytes = encode_container(&BUNDLE_CONTAINER, BUILD, &[]).unwrap();
-        assert!(matches!(
-            ContentBundle::from_bytes(&bytes, BUILD),
-            Err(BundleError::Decode(_))
+            Err(ContainerError::SchemaMismatch { .. })
         ));
     }
 

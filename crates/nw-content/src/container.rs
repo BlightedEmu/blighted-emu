@@ -5,9 +5,13 @@
 //! magic (4 bytes), format version (`u16` LE), schema hash (`u32` LE), client build id length
 //! (`u16` LE), client build id (UTF-8), body CRC32 (`u32` LE), body.
 //!
-//! Decoding checks every header field before it returns the body.
+//! Decoding checks every header field before it returns the body. [`encode_value`] and
+//! [`decode_value`] add the postcard body that both file types use.
 
 use std::path::{Path, PathBuf};
+
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 const MAGIC_SIZE: usize = 4;
 const VERSION_SIZE: usize = size_of::<u16>();
@@ -88,6 +92,18 @@ pub enum ContainerError {
         /// CRC32 of the body.
         actual: u32,
     },
+    /// The value cannot be encoded.
+    #[error("cannot encode body: {0}")]
+    Encode(postcard::Error),
+    /// The body cannot be decoded.
+    #[error("cannot decode body: {0}")]
+    Decode(postcard::Error),
+    /// The body has bytes after the encoded value.
+    #[error("body has {count} bytes after the content")]
+    TrailingBytes {
+        /// Number of extra bytes.
+        count: usize,
+    },
 }
 
 /// Puts the header in front of `body`.
@@ -157,6 +173,32 @@ pub fn decode_container<'a>(
     Ok(body)
 }
 
+/// Encodes `value` with postcard and puts the header in front of it.
+pub fn encode_value<T: Serialize>(
+    spec: &ContainerSpec,
+    client_build: &str,
+    value: &T,
+) -> Result<Vec<u8>, ContainerError> {
+    let body = postcard::to_allocvec(value).map_err(ContainerError::Encode)?;
+    encode_container(spec, client_build, &body)
+}
+
+/// Checks the header with [`decode_container`], then decodes the whole body as one `T`.
+pub fn decode_value<T: DeserializeOwned>(
+    spec: &ContainerSpec,
+    bytes: &[u8],
+    expected_build: &str,
+) -> Result<T, ContainerError> {
+    let body = decode_container(spec, bytes, expected_build)?;
+    let (value, trailing) = postcard::take_from_bytes(body).map_err(ContainerError::Decode)?;
+    if !trailing.is_empty() {
+        return Err(ContainerError::TrailingBytes {
+            count: trailing.len(),
+        });
+    }
+    Ok(value)
+}
+
 /// Writes `bytes` to `path`, creating parent folders.
 pub fn write_file(path: &Path, bytes: &[u8]) -> Result<(), ContainerError> {
     let io_error = |source| ContainerError::Io {
@@ -201,6 +243,21 @@ mod tests {
     const BUILD_ID_OFFSET: usize = SCHEMA_HASH_OFFSET + SCHEMA_HASH_SIZE + BUILD_ID_LENGTH_SIZE;
     const CHECKSUM_OFFSET: usize = BUILD_ID_OFFSET + BUILD.len();
     const BODY_OFFSET: usize = CHECKSUM_OFFSET + CHECKSUM_SIZE;
+    const EXTRA_BYTE: u8 = 0;
+    const SAMPLE_COUNT: u32 = 7;
+
+    #[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct Sample {
+        name: String,
+        count: u32,
+    }
+
+    fn sample() -> Sample {
+        Sample {
+            name: "lv".to_owned(),
+            count: SAMPLE_COUNT,
+        }
+    }
 
     fn encoded() -> Vec<u8> {
         encode_container(&SPEC, BUILD, BODY).unwrap()
@@ -293,6 +350,36 @@ mod tests {
         assert!(matches!(
             encode_container(&SPEC, &"1".repeat(length), BODY),
             Err(ContainerError::BuildIdTooLong { length: found }) if found == length
+        ));
+    }
+
+    #[test]
+    fn value_round_trip_keeps_the_value() {
+        let bytes = encode_value(&SPEC, BUILD, &sample()).unwrap();
+        assert_eq!(&bytes[..MAGIC_SIZE], &SPEC.magic);
+        assert_eq!(
+            decode_value::<Sample>(&SPEC, &bytes, BUILD).unwrap(),
+            sample()
+        );
+    }
+
+    #[test]
+    fn value_with_trailing_bytes_is_refused() {
+        let mut body = postcard::to_allocvec(&sample()).unwrap();
+        body.push(EXTRA_BYTE);
+        let bytes = encode_container(&SPEC, BUILD, &body).unwrap();
+        assert!(matches!(
+            decode_value::<Sample>(&SPEC, &bytes, BUILD),
+            Err(ContainerError::TrailingBytes { count: 1 })
+        ));
+    }
+
+    #[test]
+    fn body_that_is_not_the_value_is_refused() {
+        let bytes = encode_container(&SPEC, BUILD, &[]).unwrap();
+        assert!(matches!(
+            decode_value::<Sample>(&SPEC, &bytes, BUILD),
+            Err(ContainerError::Decode(_))
         ));
     }
 

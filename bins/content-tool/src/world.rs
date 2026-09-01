@@ -7,11 +7,10 @@ use std::collections::{BTreeMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
-use nw_content::ContentBundle;
+use nw_content::{ContainerError, ContentBundle};
 use nw_formats::azcs::{AzcsError, decode_azcs, is_azcs};
 use nw_formats::heightmap::{HEIGHTMAP_SIZE, HeightmapError, parse_heightmap};
 use nw_formats::objectstream::{ObjectStreamError, lowercase_crc32, parse_object_stream};
-use nw_world::WorldError;
 use nw_world::capitals::parse_capitals;
 use nw_world::height::TERRAIN_MOUNTAIN_HEIGHT;
 use nw_world::metadata::{MetadataError, MetadataRecords, SkipCounts, read_metadata};
@@ -123,8 +122,8 @@ pub enum WorldBuildError {
         source: MetadataError,
     },
     /// The world file cannot be written or read back.
-    #[error(transparent)]
-    WorldFile(#[from] WorldError),
+    #[error("world file: {0}")]
+    WorldFile(#[from] ContainerError),
     /// The size of a written world file cannot be read.
     #[error("cannot read the size of {}: {source}", .path.display())]
     Io {

@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The world file (M1b spec section 3.3): the shared header of `nw_content::container` with
-//! magic `NWWF`, then a postcard body holding one [`WorldFile`].
+//! magic `NWWF`, then a postcard body holding one [`WorldFile`]. Errors are [`ContainerError`]s.
 
 use std::path::{Path, PathBuf};
 
 use nw_content::container::{
-    ContainerError, ContainerSpec, decode_container, encode_container, read_file, write_file,
+    ContainerError, ContainerSpec, decode_value, encode_value, read_file, write_file,
 };
 
 use crate::records::WorldFile;
@@ -24,26 +24,6 @@ pub const WORLD_CONTAINER: ContainerSpec = ContainerSpec {
     schema_hash: WORLD_SCHEMA_VERSION,
 };
 
-/// Error from world file reading or writing.
-#[derive(Debug, thiserror::Error)]
-pub enum WorldError {
-    /// The header is not valid or the file cannot be accessed.
-    #[error("world file: {0}")]
-    Container(#[from] ContainerError),
-    /// The world cannot be encoded.
-    #[error("cannot encode world file: {0}")]
-    Encode(postcard::Error),
-    /// The body cannot be decoded.
-    #[error("cannot decode world file: {0}")]
-    Decode(postcard::Error),
-    /// The body has bytes after the encoded world.
-    #[error("world file body has {count} bytes after the content")]
-    TrailingBytes {
-        /// Number of extra bytes.
-        count: usize,
-    },
-}
-
 /// The world file path of one level: `<dir>/world-<client_build>-<level>.bin`.
 pub fn world_file_path(dir: &Path, client_build: &str, level: &str) -> PathBuf {
     dir.join(format!("world-{client_build}-{level}.bin"))
@@ -51,43 +31,35 @@ pub fn world_file_path(dir: &Path, client_build: &str, level: &str) -> PathBuf {
 
 impl WorldFile {
     /// Encodes the world with its header.
-    pub fn to_bytes(&self, client_build: &str) -> Result<Vec<u8>, WorldError> {
-        let body = postcard::to_allocvec(self).map_err(WorldError::Encode)?;
-        Ok(encode_container(&WORLD_CONTAINER, client_build, &body)?)
+    pub fn to_bytes(&self, client_build: &str) -> Result<Vec<u8>, ContainerError> {
+        encode_value(&WORLD_CONTAINER, client_build, self)
     }
 
     /// Checks the header, then decodes the world.
-    pub fn from_bytes(bytes: &[u8], expected_build: &str) -> Result<Self, WorldError> {
-        let body = decode_container(&WORLD_CONTAINER, bytes, expected_build)?;
-        let (world, trailing): (Self, _) =
-            postcard::take_from_bytes(body).map_err(WorldError::Decode)?;
-        if !trailing.is_empty() {
-            return Err(WorldError::TrailingBytes {
-                count: trailing.len(),
-            });
-        }
-        Ok(world)
+    pub fn from_bytes(bytes: &[u8], expected_build: &str) -> Result<Self, ContainerError> {
+        decode_value(&WORLD_CONTAINER, bytes, expected_build)
     }
 
     /// Writes the world file to `path`, creating parent folders.
-    pub fn save(&self, path: &Path, client_build: &str) -> Result<(), WorldError> {
-        Ok(write_file(path, &self.to_bytes(client_build)?)?)
+    pub fn save(&self, path: &Path, client_build: &str) -> Result<(), ContainerError> {
+        write_file(path, &self.to_bytes(client_build)?)
     }
 
     /// Reads and checks the world file at `path`.
-    pub fn load(path: &Path, expected_build: &str) -> Result<Self, WorldError> {
+    pub fn load(path: &Path, expected_build: &str) -> Result<Self, ContainerError> {
         Self::from_bytes(&read_file(path)?, expected_build)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use nw_content::container::encode_container;
+
     use super::*;
     use crate::records::*;
 
     const BUILD: &str = "22469132";
     const OTHER_BUILD: &str = "1";
-    const EXTRA_BYTE: u8 = 0;
     /// postcard body of [`sample`]. If this test fails, the record types changed: raise
     /// `WORLD_SCHEMA_VERSION` and replace these bytes with the new body.
     const GOLDEN_BODY: &[u8] = &[
@@ -182,11 +154,11 @@ mod tests {
     }
 
     #[test]
-    fn header_errors_come_from_the_container() {
+    fn other_build_is_refused() {
         let bytes = sample().to_bytes(BUILD).unwrap();
         assert!(matches!(
             WorldFile::from_bytes(&bytes, OTHER_BUILD),
-            Err(WorldError::Container(ContainerError::BuildMismatch { .. }))
+            Err(ContainerError::BuildMismatch { .. })
         ));
     }
 
@@ -199,27 +171,7 @@ mod tests {
         let bytes = encode_container(&spec, BUILD, &[]).unwrap();
         assert!(matches!(
             WorldFile::from_bytes(&bytes, BUILD),
-            Err(WorldError::Container(ContainerError::BadMagic { .. }))
-        ));
-    }
-
-    #[test]
-    fn trailing_bytes_are_refused() {
-        let mut body = postcard::to_allocvec(&sample()).unwrap();
-        body.push(EXTRA_BYTE);
-        let bytes = encode_container(&WORLD_CONTAINER, BUILD, &body).unwrap();
-        assert!(matches!(
-            WorldFile::from_bytes(&bytes, BUILD),
-            Err(WorldError::TrailingBytes { count: 1 })
-        ));
-    }
-
-    #[test]
-    fn body_that_is_not_a_world_is_refused() {
-        let bytes = encode_container(&WORLD_CONTAINER, BUILD, &[]).unwrap();
-        assert!(matches!(
-            WorldFile::from_bytes(&bytes, BUILD),
-            Err(WorldError::Decode(_))
+            Err(ContainerError::BadMagic { .. })
         ));
     }
 

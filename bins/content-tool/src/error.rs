@@ -2,7 +2,7 @@
 //! Top-level error of `content-tool`.
 
 use nw_common::config::ConfigError;
-use nw_content::BundleError;
+use nw_content::ContainerError;
 use nw_content::fill::FillError;
 
 use crate::codegen::CodegenError;
@@ -25,8 +25,8 @@ pub enum ToolError {
     #[error(transparent)]
     Config(#[from] ConfigError),
     /// The bundle cannot be written or read back.
-    #[error(transparent)]
-    Bundle(#[from] BundleError),
+    #[error("content bundle: {0}")]
+    Bundle(#[from] ContainerError),
     /// A world file cannot be built, written or read back.
     #[error(transparent)]
     World(#[from] WorldBuildError),

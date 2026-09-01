@@ -10,5 +10,6 @@ pub mod fill;
 pub mod generated;
 pub mod table;
 
-pub use bundle::{BundleError, ContentBundle};
+pub use bundle::ContentBundle;
+pub use container::ContainerError;
 pub use generated::Tables;
