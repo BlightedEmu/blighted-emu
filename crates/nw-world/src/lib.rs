@@ -2,6 +2,7 @@
 //! Typed New World world data (M1b spec): levels, ground height, spawn and point lists,
 //! capitals, and the world file.
 
+pub mod metadata;
 pub mod records;
 
 pub use records::WorldFile;
