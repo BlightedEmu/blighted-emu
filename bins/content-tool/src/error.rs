@@ -7,6 +7,7 @@ use nw_content::fill::FillError;
 
 use crate::codegen::CodegenError;
 use crate::source::SourceError;
+use crate::world::WorldBuildError;
 
 /// Any error of a `content-tool` command.
 #[derive(Debug, thiserror::Error)]
@@ -26,6 +27,9 @@ pub enum ToolError {
     /// The bundle cannot be written or read back.
     #[error(transparent)]
     Bundle(#[from] BundleError),
+    /// A world file cannot be built, written or read back.
+    #[error(transparent)]
+    World(#[from] WorldBuildError),
     /// The reloaded bundle does not hold what was written.
     #[error("bundle check failed: {what} is {found} after reload, expected {expected}")]
     CountMismatch {

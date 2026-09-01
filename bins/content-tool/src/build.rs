@@ -9,8 +9,8 @@ use nw_content::ContentBundle;
 use crate::error::ToolError;
 use crate::source::GameSource;
 
-/// Folder for bundles. It is inside `local-data/`, which git ignores.
-pub const DEFAULT_BUNDLE_DIR: &str = "local-data/content";
+/// Folder for bundles and world files. It is inside `local-data/`, which git ignores.
+pub const DEFAULT_CONTENT_DIR: &str = "local-data/content";
 
 /// Result of [`run_build`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,7 +33,7 @@ pub struct BuildSummary {
 
 /// The default bundle path for a client build.
 pub fn default_bundle_path(client_build: &str) -> PathBuf {
-    Path::new(DEFAULT_BUNDLE_DIR).join(format!("bundle-{client_build}.bin"))
+    Path::new(DEFAULT_CONTENT_DIR).join(format!("bundle-{client_build}.bin"))
 }
 
 /// Builds the bundle from `source`, writes it to `out`, reloads it and checks the counts.

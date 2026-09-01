@@ -87,7 +87,9 @@ impl GameSource {
         )
     }
 
-    fn for_each_entry<E: From<SourceError>>(
+    /// Calls `visit` for every entry whose path passes `select`, in sorted pak order and sorted
+    /// entry path order. Returns the number of entries.
+    pub fn for_each_entry<E: From<SourceError>>(
         &self,
         select: impl Fn(&str) -> bool,
         mut visit: impl FnMut(&str, Vec<u8>) -> Result<(), E>,

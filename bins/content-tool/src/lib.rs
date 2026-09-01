@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Library part of `content-tool`: code generation and bundle building.
+//! Library part of `content-tool`: code generation, bundle building and world file building.
 
 pub mod build;
 pub mod client_build;
 pub mod codegen;
 pub mod error;
 pub mod source;
+pub mod world;
 
 #[cfg(all(test, feature = "local-data"))]
 mod local_data_tests {
