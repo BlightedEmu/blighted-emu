@@ -1,7 +1,7 @@
 [package]
 name = "nw-formats"
 version = "0.1.0"
-description = "Readers for New World client file formats: pak archives, datasheets, localization."
+description = "Readers for New World client file formats: pak archives, datasheets, localization, AZCS, ObjectStreams, heightmaps."
 edition.workspace = true
 rust-version.workspace = true
 license = "MIT OR Apache-2.0"
