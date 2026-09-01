@@ -3,6 +3,7 @@
 //! capitals, and the world file.
 
 pub mod capitals;
+pub mod height;
 pub mod metadata;
 pub mod records;
 
