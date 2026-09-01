@@ -52,6 +52,7 @@ just infra-test
 | `just test-local` | Tests that read your New World install (`NW_GAME_DIR`) |
 | `just codegen` | Regenerates the table structs in `crates/nw-content/src/generated` |
 | `just bundle` | Builds the content bundle into `local-data/content/` |
+| `just world` | Builds one world file per level into `local-data/content/` (run `just bundle` first) |
 
 ## Content data
 
@@ -60,9 +61,12 @@ The server reads game rules from your own New World install. Nothing from the ga
 ```bash
 export NW_GAME_DIR="/path/to/steamapps/common/New World"
 just bundle
+just world
 ```
 
 `just bundle` writes `local-data/content/bundle-<build>.bin`, then reloads it and checks every table and row. The pinned client build is in `config/client-build.toml`.
+
+`just world` writes `local-data/content/world-<build>-<level>.bin` for each of the 41 levels (about 620 MB in all), reloads each file, and prints the record counts, the skipped metadata fields, and the spawn IDs that no datasheet row has.
 
 ### Recovery
 

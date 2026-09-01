@@ -50,3 +50,7 @@ codegen:
 # Build the content bundle into local-data/content/ from your install.
 bundle:
     cargo run -p content-tool -- build
+
+# Build one world file per level into local-data/content/ from your install. Run `just bundle` first.
+world:
+    cargo run -p content-tool -- world
