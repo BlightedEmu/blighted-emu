@@ -1,0 +1,124 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! Reader for `*.capitals.json` placement files (M1b spec section 3.3). Unknown JSON keys are
+//! ignored; a missing required key is an error.
+
+use serde::Deserialize;
+
+use crate::records::Capital;
+
+#[derive(Deserialize)]
+struct CapitalsFile {
+    #[serde(rename = "Capitals")]
+    capitals: Vec<CapitalJson>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CapitalJson {
+    id: String,
+    world_position: Vector3Json,
+    rotation: QuaternionJson,
+    scale: Option<f32>,
+    slice_name: String,
+    variant_name: Option<String>,
+    slice_asset_id: String,
+}
+
+#[derive(Deserialize)]
+struct Vector3Json {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+#[derive(Deserialize)]
+struct QuaternionJson {
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32,
+}
+
+/// Reads the capitals of one `*.capitals.json` file.
+pub fn parse_capitals(bytes: &[u8]) -> Result<Vec<Capital>, serde_json::Error> {
+    let file: CapitalsFile = serde_json::from_slice(bytes)?;
+    Ok(file
+        .capitals
+        .into_iter()
+        .map(|capital| Capital {
+            id: capital.id,
+            position: [
+                capital.world_position.x,
+                capital.world_position.y,
+                capital.world_position.z,
+            ],
+            rotation: [
+                capital.rotation.x,
+                capital.rotation.y,
+                capital.rotation.z,
+                capital.rotation.w,
+            ],
+            scale: capital.scale,
+            slice_name: capital.slice_name,
+            variant_name: capital.variant_name,
+            slice_asset_id: capital.slice_asset_id,
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FULL: &str = r#"{"Capitals": [{
+        "id": "79091f06-f24f-466f-2641-f8743605f9b7",
+        "worldPosition": {"x": 14174.326171875, "y": 8069.5, "z": 56.98},
+        "rotation": {"x": 0.0, "y": 0.0, "z": -0.25, "w": 0.75},
+        "scale": 0.5,
+        "footprint": {"type": "Circle", "id": "3d7f29bc", "radius": 1.0},
+        "sliceName": "Master_LootContainer",
+        "variantName": "Ancient_T3_M",
+        "sliceAssetId": "{B00A72FE-BA8F-5CD6-A5FC-014F7E771769}:2"
+    }]}"#;
+    const PLOT: &str = r#"{"Capitals": [{
+        "id": "a", "worldPosition": {"x": 1, "y": 2, "z": 3},
+        "rotation": {"x": 0, "y": 0, "z": 0, "w": 1},
+        "footprint": {"type": "Rectangle", "id": "b", "width": 4, "height": 5},
+        "sliceName": "<PLOT>", "sliceAssetId": "{00000000-0000-0000-0000-000000000000}:0"
+    }]}"#;
+    const MISSING_ID: &str = r#"{"Capitals": [{
+        "worldPosition": {"x": 1, "y": 2, "z": 3}, "rotation": {"x": 0, "y": 0, "z": 0, "w": 1},
+        "sliceName": "<PLOT>", "sliceAssetId": "x"
+    }]}"#;
+
+    #[test]
+    fn reads_every_field_and_ignores_unknown_keys() {
+        let capitals = parse_capitals(FULL.as_bytes()).unwrap();
+        assert_eq!(
+            capitals,
+            [Capital {
+                id: "79091f06-f24f-466f-2641-f8743605f9b7".to_owned(),
+                position: [14174.326, 8069.5, 56.98],
+                rotation: [0.0, 0.0, -0.25, 0.75],
+                scale: Some(0.5),
+                slice_name: "Master_LootContainer".to_owned(),
+                variant_name: Some("Ancient_T3_M".to_owned()),
+                slice_asset_id: "{B00A72FE-BA8F-5CD6-A5FC-014F7E771769}:2".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn plot_entry_has_no_scale_or_variant() {
+        let capital = &parse_capitals(PLOT.as_bytes()).unwrap()[0];
+        assert_eq!(capital.slice_name, "<PLOT>");
+        assert_eq!(capital.position, [1.0, 2.0, 3.0]);
+        assert_eq!(capital.scale, None);
+        assert_eq!(capital.variant_name, None);
+    }
+
+    #[test]
+    fn missing_required_key_is_an_error() {
+        assert!(parse_capitals(MISSING_ID.as_bytes()).is_err());
+    }
+}
