@@ -63,62 +63,65 @@ mod tests {
     /// postcard body of [`sample`]. If this test fails, the record types changed: raise
     /// `WORLD_SCHEMA_VERSION` and replace these bytes with the new body.
     const GOLDEN_BODY: &[u8] = &[
-        2, 108, 118, 128, 16, 1, 1, 0, 0, 32, 66, 1, 1, 0, 0, 1, 4, 1, 0, 2, 0, 1, 1, 0, 0, 128,
-        63, 0, 0, 0, 64, 0, 0, 64, 64, 2, 1, 7, 1, 3, 4, 5, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64,
-        64, 1, 1, 7, 1, 6, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 1, 7, 1, 8, 0, 0, 128, 63,
-        0, 0, 0, 64, 0, 0, 64, 64, 1, 7, 1, 9, 1, 100, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0,
-        0, 192, 63, 1, 7, 1, 1, 101, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 7, 1, 1, 99, 0,
-        0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63,
-        1, 0, 0, 0, 63, 1, 115, 0, 1, 97,
+        2, 108, 118, 128, 16, 140, 1, 141, 1, 0, 0, 32, 66, 1, 1, 130, 1, 131, 1, 1, 4, 144, 1,
+        145, 1, 1, 129, 128, 128, 128, 8, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 200, 1, 172, 2,
+        1, 130, 128, 128, 128, 8, 131, 128, 128, 128, 8, 150, 1, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0,
+        64, 64, 1, 1, 172, 2, 1, 132, 128, 128, 128, 8, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64,
+        0, 1, 172, 2, 1, 133, 128, 128, 128, 8, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 172,
+        2, 1, 201, 1, 100, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 192, 63, 1, 172, 2, 1,
+        1, 101, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 172, 2, 1, 1, 99, 0, 0, 128, 63, 0, 0,
+        0, 64, 0, 0, 64, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 1, 0, 0, 0, 63, 1,
+        115, 1, 1, 118, 1, 97,
     ];
 
-    /// One record of every kind, with small values.
+    /// One record of every kind. Every integer is 128 or more and every optional field is set,
+    /// so that a change of integer width or of an `Option` changes the encoded bytes.
     fn sample() -> WorldFile {
         let position = [1.0, 2.0, 3.0];
-        let territory_ids = vec![7];
+        let territory_ids = vec![300];
         WorldFile {
             level: LevelInfo {
                 name: "lv".to_owned(),
                 region_size: 2048,
-                grid_width: 1,
-                grid_height: 1,
+                grid_width: 140,
+                grid_height: 141,
                 ocean_level: 40.0,
                 has_terrain: true,
             },
             regions: vec![Region {
-                x: 0,
-                y: 0,
+                x: 130,
+                y: 131,
                 heights: Some(HeightGrid {
-                    samples: vec![1, 2],
+                    samples: vec![400, 401],
                 }),
             }],
             npcs: vec![NpcPoint {
-                npc_id: 1,
+                npc_id: 0x8000_0001,
                 position,
-                faction_type: 2,
+                faction_type: 200,
                 territory_ids: territory_ids.clone(),
             }],
             vitals: vec![VitalsSpawn {
-                vitals_id: 3,
-                category_id: 4,
-                level: 5,
+                vitals_id: 0x8000_0002,
+                category_id: 0x8000_0003,
+                level: 150,
                 position,
                 is_encounter: true,
                 territory_ids: territory_ids.clone(),
             }],
             gatherables: vec![GatherablePoint {
-                gatherable_id: 6,
+                gatherable_id: 0x8000_0004,
                 position,
                 is_encounter: false,
                 territory_ids: territory_ids.clone(),
             }],
             lore: vec![LorePoint {
-                lore_id: 8,
+                lore_id: 0x8000_0005,
                 position,
                 territory_ids: territory_ids.clone(),
             }],
             landmarks: vec![Landmark {
-                landmark_type: 9,
+                landmark_type: 201,
                 landmark_data: "d".to_owned(),
                 position,
                 radius: 1.5,
@@ -135,7 +138,7 @@ mod tests {
                 rotation: [0.0, 0.0, 0.0, 1.0],
                 scale: Some(0.5),
                 slice_name: "s".to_owned(),
-                variant_name: None,
+                variant_name: Some("v".to_owned()),
                 slice_asset_id: "a".to_owned(),
             }],
         }
