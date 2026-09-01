@@ -208,6 +208,20 @@ impl WorldFile {
     }
 }
 
+impl std::ops::AddAssign for RecordCounts {
+    fn add_assign(&mut self, other: Self) {
+        self.regions += other.regions;
+        self.terrain_regions += other.terrain_regions;
+        self.npcs += other.npcs;
+        self.vitals += other.vitals;
+        self.gatherables += other.gatherables;
+        self.lore += other.lore;
+        self.landmarks += other.landmarks;
+        self.encounters += other.encounters;
+        self.capitals += other.capitals;
+    }
+}
+
 /// Serializes `Vec<u16>` as one byte string of little-endian pairs, so a 2048 x 2048 grid is
 /// 8 MiB in the file instead of up to 12 MiB of varints.
 mod le_u16_bytes {
@@ -271,6 +285,40 @@ mod tests {
     #[test]
     fn odd_height_bytes_are_refused() {
         assert!(postcard::from_bytes::<HeightGrid>(&ODD_LENGTH_BYTES).is_err());
+    }
+
+    #[test]
+    fn counts_add_field_by_field() {
+        let mut total = RecordCounts {
+            regions: 1,
+            vitals: 2,
+            ..RecordCounts::default()
+        };
+        total += RecordCounts {
+            regions: 3,
+            terrain_regions: 1,
+            npcs: 4,
+            vitals: 5,
+            gatherables: 6,
+            lore: 7,
+            landmarks: 8,
+            encounters: 9,
+            capitals: 10,
+        };
+        assert_eq!(
+            total,
+            RecordCounts {
+                regions: 4,
+                terrain_regions: 1,
+                npcs: 4,
+                vitals: 7,
+                gatherables: 6,
+                lore: 7,
+                landmarks: 8,
+                encounters: 9,
+                capitals: 10,
+            }
+        );
     }
 
     #[test]

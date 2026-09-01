@@ -11,7 +11,9 @@ use content_tool::client_build::load_client_build;
 use content_tool::codegen::run_codegen;
 use content_tool::error::ToolError;
 use content_tool::source::GameSource;
-use content_tool::world::{LevelReport, run_world};
+use content_tool::world::{LevelReport, UnmatchedIds, run_world, world_totals};
+use nw_world::metadata::SkipCounts;
+use nw_world::records::RecordCounts;
 
 const DEFAULT_CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
 const DEFAULT_GENERATED_DIR: &str = "crates/nw-content/src/generated";
@@ -110,34 +112,52 @@ fn run(cli: Cli) -> Result<(), ToolError> {
 
 fn print_world(reports: &[LevelReport]) {
     for report in reports {
-        let counts = &report.counts;
-        println!(
-            "world {}: {} regions ({} with terrain), {} npcs, {} vitals, {} gatherables, {} lore, {} landmarks, {} encounters, {} capitals, {} bytes -> {}",
-            report.level,
-            counts.regions,
-            counts.terrain_regions,
-            counts.npcs,
-            counts.vitals,
-            counts.gatherables,
-            counts.lore,
-            counts.landmarks,
-            counts.encounters,
-            counts.capitals,
+        print_level_summary(
+            &format!("world {}", report.level),
+            &report.counts,
             report.file_bytes,
-            report.path.display()
+            &report.skipped,
+            &report.unmatched,
         );
-        for (section, records) in &report.skipped.sections {
-            println!("  skipped section {section:08x}: {records} records");
-        }
-        for ((section, field), count) in &report.skipped.fields {
-            println!("  skipped field {section:08x}/{field:08x}: {count}");
-        }
-        let unmatched = &report.unmatched;
-        println!(
-            "  unmatched ids: {} npcs, {} vitals, {} gatherables, {} lore",
-            unmatched.npcs, unmatched.vitals, unmatched.gatherables, unmatched.lore
-        );
+        println!("  file: {}", report.path.display());
     }
-    let total_bytes: u64 = reports.iter().map(|report| report.file_bytes).sum();
-    println!("world: {} levels, {total_bytes} bytes", reports.len());
+    let totals = world_totals(reports);
+    print_level_summary(
+        &format!("world total ({} levels)", totals.levels),
+        &totals.counts,
+        totals.file_bytes,
+        &totals.skipped,
+        &totals.unmatched,
+    );
+}
+
+fn print_level_summary(
+    label: &str,
+    counts: &RecordCounts,
+    file_bytes: u64,
+    skipped: &SkipCounts,
+    unmatched: &UnmatchedIds,
+) {
+    println!(
+        "{label}: {} regions ({} with terrain), {} npcs, {} vitals, {} gatherables, {} lore, {} landmarks, {} encounters, {} capitals, {file_bytes} bytes",
+        counts.regions,
+        counts.terrain_regions,
+        counts.npcs,
+        counts.vitals,
+        counts.gatherables,
+        counts.lore,
+        counts.landmarks,
+        counts.encounters,
+        counts.capitals,
+    );
+    for (section, records) in &skipped.sections {
+        println!("  skipped section {section:08x}: {records} records");
+    }
+    for ((section, field), count) in &skipped.fields {
+        println!("  skipped field {section:08x}/{field:08x}: {count}");
+    }
+    println!(
+        "  unmatched ids: {} npcs, {} vitals, {} gatherables, {} lore",
+        unmatched.npcs, unmatched.vitals, unmatched.gatherables, unmatched.lore
+    );
 }

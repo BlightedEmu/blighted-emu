@@ -158,6 +158,15 @@ pub struct UnmatchedIds {
     pub lore: usize,
 }
 
+impl std::ops::AddAssign for UnmatchedIds {
+    fn add_assign(&mut self, other: Self) {
+        self.npcs += other.npcs;
+        self.vitals += other.vitals;
+        self.gatherables += other.gatherables;
+        self.lore += other.lore;
+    }
+}
+
 /// The IDs of the content bundle, as crc32 of the lower-case id.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KnownIds {
@@ -258,6 +267,36 @@ pub struct LevelReport {
     pub skipped: SkipCounts,
     /// Records whose ID is in no datasheet row.
     pub unmatched: UnmatchedIds,
+}
+
+/// Sums over every level of a `world` run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorldTotals {
+    /// Levels built.
+    pub levels: usize,
+    /// Size of all world files in bytes.
+    pub file_bytes: u64,
+    /// Record counts of all levels.
+    pub counts: RecordCounts,
+    /// What the metadata readers skipped in all levels.
+    pub skipped: SkipCounts,
+    /// Unmatched IDs of all levels.
+    pub unmatched: UnmatchedIds,
+}
+
+/// Adds up the reports of a `world` run.
+pub fn world_totals(reports: &[LevelReport]) -> WorldTotals {
+    let mut totals = WorldTotals {
+        levels: reports.len(),
+        ..WorldTotals::default()
+    };
+    for report in reports {
+        totals.file_bytes += report.file_bytes;
+        totals.counts += report.counts;
+        totals.skipped.merge(&report.skipped);
+        totals.unmatched += report.unmatched;
+    }
+    totals
 }
 
 /// True for the pak entries that `world` reads.
@@ -738,6 +777,34 @@ mod tests {
             Err(WorldBuildError::ObjectStream { path, .. })
                 if path == format!("{LEVELS_PREFIX}{LEVEL}/{REGION_METADATA}")
         ));
+    }
+
+    #[test]
+    fn totals_sum_every_level() {
+        const UNKNOWN_SECTION: u32 = 0x7cc6_6b4d;
+        let report = |vitals, bytes, skipped_records| LevelReport {
+            level: LEVEL.to_owned(),
+            path: PathBuf::from(LEVEL),
+            file_bytes: bytes,
+            counts: RecordCounts {
+                vitals,
+                ..RecordCounts::default()
+            },
+            skipped: SkipCounts {
+                sections: BTreeMap::from([(UNKNOWN_SECTION, skipped_records)]),
+                ..SkipCounts::default()
+            },
+            unmatched: UnmatchedIds {
+                vitals: 1,
+                ..UnmatchedIds::default()
+            },
+        };
+        let totals = world_totals(&[report(2, 10, 3), report(5, 20, 4)]);
+        assert_eq!(totals.levels, 2);
+        assert_eq!(totals.file_bytes, 30);
+        assert_eq!(totals.counts.vitals, 7);
+        assert_eq!(totals.skipped.sections[&UNKNOWN_SECTION], 7);
+        assert_eq!(totals.unmatched.vitals, 2);
     }
 
     #[test]
