@@ -36,6 +36,10 @@ check_case "pak file is refused" "$EXIT_FOUND" "assets/x.pak" "x"
 check_case "datasheet file is refused" "$EXIT_FOUND" "data/x.datasheet" "x"
 check_case "localization file is refused" "$EXIT_FOUND" "data/x.loc.xml" "<resources/>"
 check_case "content bundle is refused" "$EXIT_FOUND" "out/any.bin" "NWCB....body"
+check_case "world file is refused" "$EXIT_FOUND" "out/world.bin" "NWWF....body"
+check_case "heightmap is refused" "$EXIT_FOUND" "data/region.heightmap" "II*"
+check_case "metadata file is refused" "$EXIT_FOUND" "data/region.metadata" "x"
+check_case "capitals file is refused" "$EXIT_FOUND" "data/a.capitals.json" "{}"
 
 # A folder that git does not track must fail the guard, not pass it.
 not_repo="$(mktemp -d)"
