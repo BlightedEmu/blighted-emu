@@ -539,6 +539,9 @@ mod tests {
             predictor: PREDICTOR_NONE,
         };
         let bytes = write_tiff(&samples(), &layout).unwrap();
+        // Without these tags the reader must use the TIFF defaults (1 sample, predictor 1).
+        let bytes = with_tag_renamed(&bytes, TAG_SAMPLES_PER_PIXEL, UNKNOWN_TAG);
+        let bytes = with_tag_renamed(&bytes, TAG_PREDICTOR, UNKNOWN_TAG);
         assert_eq!(parse_heightmap(&bytes).unwrap().samples, samples());
     }
 
