@@ -6,5 +6,7 @@ pub mod capitals;
 pub mod height;
 pub mod metadata;
 pub mod records;
+pub mod world_file;
 
 pub use records::WorldFile;
+pub use world_file::WorldError;
