@@ -1,0 +1,25 @@
+[package]
+name = "nw-db"
+version = "0.1.0"
+description = "PostgreSQL account and character records for the preservation server."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
+getrandom = { version = "0.3.4", default-features = false, features = ["std"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "tls-none"] }
+thiserror.workspace = true
+uuid = { version = "1.28.0", default-features = false, features = ["std", "v4"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.2", default-features = false, features = ["macros", "rt"] }
+
+[features]
+# Shared database fixture for crate tests. Not enabled by the edge-http release build.
+test-util = []
+
+[lints]
+workspace = true

@@ -7,6 +7,18 @@
 # Local Amazon game data and captures (spec 10.2). Never commit these.
 /local-data/
 
+# Game files and decoded client data. scripts/no-game-data.sh refuses these.
+*.pak
+*.datasheet
+*.loc.xml
+typeindex.json
+
+# Ghidra projects and exported decompiler listings.
+*.gpr
+*.rep/
+*.gbf
+decompiled/
+
 # =============================================================================
 # Secrets and signing material: never commit
 # =============================================================================

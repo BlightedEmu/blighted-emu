@@ -20,6 +20,7 @@ proc-macro2 = { version = "1.0.107", default-features = false, features = ["proc
 quick-xml = { version = "0.42.0", default-features = false, features = ["serialize"] }
 quote = { version = "1.0.47", default-features = false, features = ["proc-macro"] }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1.0.145", default-features = false, features = ["std"] }
 syn = { version = "3.0.9", default-features = false, features = ["full", "parsing", "printing"] }
 tempfile = { version = "3.27.0", default-features = false }
 thiserror = { version = "2.0.21", default-features = false, features = ["std"] }
@@ -28,8 +29,10 @@ zip = { version = "9.0.2", default-features = false }
 
 nw-common = { path = "crates/nw-common", version = "0.1.0" }
 nw-content = { path = "crates/nw-content", version = "0.1.0" }
+nw-edge-config = { path = "crates/nw-edge-config", version = "0.1.0" }
 nw-formats = { path = "crates/nw-formats", version = "0.1.0" }
 nw-oodle = { path = "crates/nw-oodle", version = "0.1.0" }
+nw-protocol = { path = "crates/nw-protocol", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

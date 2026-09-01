@@ -1,0 +1,26 @@
+# Login queue settings for edge-http.
+# Listen address and RepAddress come from config/edge.toml.
+# Change signature_key before use. This file has no production secret.
+# certificate files stay in local-data/. Do not commit them.
+
+log_filter = "info"
+
+[tls]
+certificate_pem_path = "local-data/edge-http/certificate.pem"
+private_key_pem_path = "local-data/edge-http/private-key.pem"
+
+[database]
+# Same PostgreSQL service as deploy/docker-compose.yml. Use the password from deploy/.env.
+url = "postgres://nw:change-me-postgres@127.0.0.1:5432/nw_global"
+max_connections = 5
+
+[valkey]
+url = "redis://127.0.0.1:6379"
+
+[login_queue]
+world_id = "world-1"
+queue_name = "world-1"
+capacity = 100
+refresh_interval_seconds = 5
+estimated_seconds_per_position = 5
+signature_key = "change-me-signature-key"

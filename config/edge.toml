@@ -1,0 +1,17 @@
+# Listen addresses for edge-http (HTTPS) and rep-gateway (UDP).
+# rep_address is the string placed in login-queue Token.RepAddress.
+# The client prints that string as one value. This file does not split host and port.
+https_listen = "0.0.0.0:443"
+udp_listen = "0.0.0.0:33435"
+rep_address = "127.0.0.1:33435"
+
+# The stock client trusts one embedded certificate. These values must match it.
+# This file does not contain the certificate or a private key.
+[trust]
+cipher = "ECDHE-RSA-AES256-GCM-SHA384"
+country = "US"
+state = "California"
+locality = "SNA11"
+organization = "Amazon"
+organizational_unit = "Amazon Game Studios"
+common_name = "New World"

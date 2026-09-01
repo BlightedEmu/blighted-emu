@@ -16,6 +16,7 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
     "ISC",
     "MIT",
     "Unicode-3.0",
@@ -23,9 +24,14 @@ allow = [
 ]
 # Copyleft is allowed only for our own crates, each listed here (spec 5.3).
 exceptions = [
+    { crate = "edge-http", allow = ["AGPL-3.0-or-later"] },
+    { crate = "nw-carrier", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-common", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-content", allow = ["AGPL-3.0-or-later"] },
+    { crate = "nw-db", allow = ["AGPL-3.0-or-later"] },
+    { crate = "nw-edge-config", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-oodle", allow = ["GPL-3.0-or-later"] },
+    { crate = "nw-protocol", allow = ["AGPL-3.0-or-later"] },
     { crate = "content-tool", allow = ["AGPL-3.0-or-later"] },
 ]
 
@@ -34,6 +40,16 @@ multiple-versions = "deny"
 wildcards = "deny"
 skip = [
     { crate = "syn@2.0.119", reason = "figment's env parser (pear_codegen) uses syn 2; serde_derive uses syn 3" },
+    { crate = "block-buffer@0.10.4", reason = "sqlx-core uses sha2 0.10; sqlx-postgres and edge-http use digest 0.11" },
+    { crate = "cpufeatures@0.2.17", reason = "sqlx-core uses sha2 0.10; argon2 and sha2 0.11 use cpufeatures 0.3" },
+    { crate = "crypto-common@0.1.7", reason = "sqlx-core uses digest 0.10; the rest of the graph uses digest 0.11" },
+    { crate = "digest@0.10.7", reason = "sqlx-core uses sha2 0.10; argon2, hmac, and sha2 0.11 use digest 0.11" },
+    { crate = "getrandom@0.2.17", reason = "ring for rustls uses getrandom 0.2; uuid and sqlx use getrandom 0.4" },
+    { crate = "getrandom@0.3.4", reason = "password salt and metrics rand 0.9 use getrandom 0.3; uuid uses 0.4" },
+    { crate = "hashbrown@0.16.1", reason = "sqlx-core and metrics-util use hashbrown 0.16; indexmap uses 0.17" },
+    { crate = "rand@0.9.5", reason = "metrics-exporter-prometheus uses rand 0.9; sqlx-postgres uses rand 0.10" },
+    { crate = "rand_core@0.9.5", reason = "metrics rand 0.9 uses rand_core 0.9; sqlx rand 0.10 uses rand_core 0.10" },
+    { crate = "sha2@0.10.9", reason = "sqlx-core pins sha2 0.10; edge-http and sqlx-postgres use sha2 0.11" },
 ]
 
 [sources]
