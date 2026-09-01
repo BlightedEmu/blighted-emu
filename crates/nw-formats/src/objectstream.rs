@@ -27,6 +27,8 @@ const SIZE_WIDTH_U32: u8 = 4;
 const VEC3_SIZE: usize = 3 * size_of::<f32>();
 /// Elements in the stream body: exactly one root.
 const ROOT_COUNT: usize = 1;
+/// Nesting depth of the root element.
+const ROOT_DEPTH: usize = 1;
 
 /// One element of an ObjectStream.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -238,7 +240,7 @@ pub fn parse_object_stream(bytes: &[u8]) -> Result<Element, ObjectStreamError> {
     if version != OBJECT_STREAM_VERSION {
         return Err(ObjectStreamError::UnsupportedVersion { version });
     }
-    let mut roots = read_list(&mut reader, 1)?;
+    let mut roots = read_list(&mut reader, ROOT_DEPTH)?;
     let trailing = bytes.len() - reader.offset;
     if trailing != 0 {
         return Err(ObjectStreamError::TrailingBytes { count: trailing });

@@ -571,6 +571,7 @@ fn entry_path(level: &str, relative: &str) -> String {
 mod tests {
     use nw_formats::heightmap::{Heightmap, encode_heightmap};
     use nw_formats::objectstream::{Element, write_object_stream};
+    use nw_world::height::HEIGHT_UNITS_PER_METRE;
     use nw_world::metadata::*;
 
     use super::*;
@@ -590,6 +591,9 @@ mod tests {
     const CAPITALS_FILE: &str = "regions/r_+01_+00/capitals/ai/ai.capitals.json";
     const VITALS_ID: u32 = 0xae65_fdc7;
     const RAW_HEIGHT: u16 = 64;
+    /// `regionSize` in `SMALL_TRACTS`.
+    const SMALL_REGION_SIZE: u32 = 1024;
+    const POSITION_BYTES: usize = 3 * size_of::<f32>();
 
     /// A metadata stream with one vitals record.
     fn vitals_metadata() -> Vec<u8> {
@@ -608,7 +612,7 @@ mod tests {
                 crc(FIELD_VITALS_ID, VITALS_ID),
                 crc(FIELD_VITALS_CATEGORY_ID, 0),
                 Element::with_value(FIELD_VITALS_LEVEL, 1_u32.to_be_bytes().to_vec()),
-                Element::with_value(FIELD_WORLD_POSITION, vec![0; 12]),
+                Element::with_value(FIELD_WORLD_POSITION, vec![0; POSITION_BYTES]),
                 Element::with_value(FIELD_IS_ENCOUNTER, vec![0]),
             ],
             ..Element::default()
@@ -708,7 +712,7 @@ mod tests {
         assert_eq!(world.capitals.len(), 1);
         assert_eq!(
             world.height_at(2050.0, 10.0),
-            Some(f32::from(RAW_HEIGHT) / 32.0)
+            Some((f64::from(RAW_HEIGHT) / HEIGHT_UNITS_PER_METRE) as f32)
         );
         assert_eq!(skipped, SkipCounts::default());
     }
@@ -731,7 +735,7 @@ mod tests {
         ]);
         let (world, _) = build_level(LEVEL, &files).unwrap();
         assert!(!world.level.has_terrain);
-        assert_eq!(world.level.region_size, 1024);
+        assert_eq!(world.level.region_size, SMALL_REGION_SIZE);
         assert_eq!(world.regions[0].heights, None);
     }
 
@@ -753,7 +757,10 @@ mod tests {
         files.insert(TRACTS_FILE.to_owned(), SMALL_TRACTS.to_vec());
         assert!(matches!(
             build_level(LEVEL, &files),
-            Err(WorldBuildError::RegionSize { size: 1024, .. })
+            Err(WorldBuildError::RegionSize {
+                size: SMALL_REGION_SIZE,
+                ..
+            })
         ));
     }
 
