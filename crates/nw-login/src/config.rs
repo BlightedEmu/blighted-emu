@@ -6,22 +6,12 @@ use std::net::{SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
 use nw_common::config::{ConfigError, load_config};
-use nw_protocol::launcher_api::{AuthMode, SESSION_PLACEHOLDER};
+use nw_protocol::launcher_api::{AuthMode, SESSION_PLACEHOLDER, is_forbidden_host};
 use serde::Deserialize;
 use uuid::Uuid;
 
 /// Environment variable prefix for overrides of `config/edge.toml`.
 pub const EDGE_ENV_PREFIX: &str = "NW_EDGE_";
-
-/// Domains the server must never use (M2 spec section 3.4). A name equal to one of these or
-/// ending in `.<domain>` is refused.
-pub const FORBIDDEN_DOMAINS: [&str; 5] = [
-    "amazon.com",
-    "amazonaws.com",
-    "amazongames.com",
-    "cloudfront.net",
-    "a2z.com",
-];
 
 /// Host name label of the launcher API and the channel config: `login.<domain>`.
 pub const LOGIN_HOST_LABEL: &str = "login";
@@ -164,14 +154,6 @@ pub fn load_edge_config(path: &Path) -> Result<EdgeConfig, EdgeConfigError> {
     let config: EdgeConfig = load_config(path, EDGE_ENV_PREFIX)?;
     config.validate()?;
     Ok(config)
-}
-
-/// True when `host` is a forbidden domain or a sub-domain of one.
-pub fn is_forbidden_host(host: &str) -> bool {
-    let host = host.trim_end_matches('.').to_ascii_lowercase();
-    FORBIDDEN_DOMAINS
-        .iter()
-        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
 }
 
 impl EdgeConfig {
@@ -346,15 +328,6 @@ max_connections = 5
                 SESSION_PLACEHOLDER
             ]
         );
-    }
-
-    #[test]
-    fn forbidden_hosts_are_detected() {
-        assert!(is_forbidden_host("cloudfront.net"));
-        assert!(is_forbidden_host("d2c74t4zimux3r.CloudFront.net."));
-        assert!(is_forbidden_host("client.amazongames.com"));
-        assert!(!is_forbidden_host("notcloudfront.net"));
-        assert!(!is_forbidden_host("example.org"));
     }
 
     #[test]

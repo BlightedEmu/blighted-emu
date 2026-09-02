@@ -33,24 +33,37 @@ exceptions = [
     { crate = "nw-protocol", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-world", allow = ["AGPL-3.0-or-later"] },
     { crate = "content-tool", allow = ["AGPL-3.0-or-later"] },
+    { crate = "launcher", allow = ["GPL-3.0-or-later"] },
+    # Font files that egui draws text with; OFL and the Ubuntu font licence allow bundling.
+    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
 ]
 
 [bans]
 multiple-versions = "deny"
 wildcards = "deny"
 skip = [
-    { crate = "syn@2.0.119", reason = "figment's env parser (pear_codegen) uses syn 2; serde_derive uses syn 3" },
     { crate = "base64@0.22.1", reason = "sqlx-core and metrics-exporter-prometheus use base64 0.22; hyper-util (reqwest) uses 0.23" },
     { crate = "block-buffer@0.10.4", reason = "sqlx-core uses sha2 0.10; sqlx-postgres and edge-http use digest 0.11" },
+    { crate = "calloop-wayland-source@0.3.0", reason = "launcher: smithay-client-toolkit 0.19 (winit) and 0.20 (clipboard)" },
+    { crate = "calloop@0.13.0", reason = "launcher: winit 0.30 uses calloop 0.13; smithay-clipboard uses 0.14" },
     { crate = "cpufeatures@0.2.17", reason = "sqlx-core uses sha2 0.10; argon2 and sha2 0.11 use cpufeatures 0.3" },
     { crate = "crypto-common@0.1.7", reason = "sqlx-core uses digest 0.10; the rest of the graph uses digest 0.11" },
     { crate = "digest@0.10.7", reason = "sqlx-core uses sha2 0.10; argon2, hmac, and sha2 0.11 use digest 0.11" },
     { crate = "getrandom@0.2.17", reason = "ring for rustls uses getrandom 0.2; uuid and sqlx use getrandom 0.4" },
     { crate = "getrandom@0.3.4", reason = "password salt and metrics rand 0.9 use getrandom 0.3; uuid uses 0.4" },
     { crate = "hashbrown@0.16.1", reason = "sqlx-core and metrics-util use hashbrown 0.16; indexmap uses 0.17" },
+    { crate = "linux-raw-sys@0.4.15", reason = "launcher: rustix 0.38 (winit) beside rustix 1 (tempfile, polling)" },
+    { crate = "miniz_oxide@0.8.9", reason = "launcher: png (window icon) uses miniz_oxide 0.8; flate2 uses 0.9" },
+    { crate = "quick-xml@0.41.0", reason = "launcher: wayland-scanner uses quick-xml 0.41; nw-formats uses 0.42" },
     { crate = "rand@0.9.5", reason = "metrics-exporter-prometheus uses rand 0.9; sqlx-postgres uses rand 0.10" },
     { crate = "rand_core@0.9.5", reason = "metrics rand 0.9 uses rand_core 0.9; sqlx rand 0.10 uses rand_core 0.10" },
+    { crate = "rustix@0.38.44", reason = "launcher: winit 0.30 and calloop 0.13 use rustix 0.38" },
     { crate = "sha2@0.10.9", reason = "sqlx-core pins sha2 0.10; edge-http and sqlx-postgres use sha2 0.11" },
+    { crate = "smithay-client-toolkit@0.19.2", reason = "launcher: winit uses 0.19; smithay-clipboard uses 0.20" },
+    { crate = "syn@2.0.119", reason = "figment's env parser (pear_codegen) uses syn 2; serde_derive uses syn 3" },
+    { crate = "thiserror-impl@1.0.69", reason = "launcher: macro crate of thiserror 1" },
+    { crate = "thiserror@1.0.69", reason = "launcher: winit stack (calloop 0.13, ndk) uses thiserror 1" },
+    { crate = "windows-sys@0.52.0", reason = "ring, glutin and winit use windows-sys 0.52; eframe and tokio use 0.61" },
 ]
 
 [sources]

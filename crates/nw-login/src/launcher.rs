@@ -12,8 +12,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use nw_db::Account;
 use nw_protocol::launcher_api::{
-    AuthMode, DiscordPoll, DiscordPollReply, DiscordStart, LauncherInfo, LauncherSession,
-    PasswordCredentials, PlayReply,
+    AuthMode, DISCORD_POLL_PATH, DISCORD_START_PATH, DiscordPoll, DiscordPollReply, DiscordStart,
+    INFO_PATH, LOGIN_PATH, LOGOUT_PATH, LauncherInfo, LauncherSession, PLAY_PATH,
+    PasswordCredentials, PlayReply, REGISTER_PATH,
 };
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -28,21 +29,6 @@ use crate::store::{
     AccountStore, DiscordAttempt, DiscordStateStore, GameSessionStore, RateLimiter,
 };
 use crate::time::unix_now;
-
-/// `GET` server name, login mode and launch arguments.
-pub const INFO_PATH: &str = "/launcher/info";
-/// `POST` password sign-up.
-pub const REGISTER_PATH: &str = "/launcher/register";
-/// `POST` password login.
-pub const LOGIN_PATH: &str = "/launcher/login";
-/// `POST` new game session key.
-pub const PLAY_PATH: &str = "/launcher/play";
-/// `POST` end the launcher session.
-pub const LOGOUT_PATH: &str = "/launcher/logout";
-/// `POST` start a Discord login.
-pub const DISCORD_START_PATH: &str = "/launcher/discord/start";
-/// `POST` ask whether a Discord login finished.
-pub const DISCORD_POLL_PATH: &str = "/launcher/discord/poll";
 
 /// Lifetime of a launcher session: 30 days.
 pub const LAUNCHER_SESSION_SECONDS: i64 = 30 * 24 * 60 * 60;

@@ -1,0 +1,26 @@
+[package]
+name = "launcher"
+version = "0.1.0"
+description = "Player launcher: logs in to a community server and starts New World through Steam."
+edition.workspace = true
+rust-version.workspace = true
+license = "GPL-3.0-or-later"
+publish.workspace = true
+
+[dependencies]
+eframe.workspace = true
+nw-protocol.workspace = true
+open.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+
+[lints]
+workspace = true

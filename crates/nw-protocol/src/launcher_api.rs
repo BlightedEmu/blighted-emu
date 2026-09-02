@@ -4,9 +4,42 @@
 
 use serde::{Deserialize, Serialize};
 
+/// `GET` server name, login mode and launch arguments.
+pub const INFO_PATH: &str = "/launcher/info";
+/// `POST` password sign-up.
+pub const REGISTER_PATH: &str = "/launcher/register";
+/// `POST` password login.
+pub const LOGIN_PATH: &str = "/launcher/login";
+/// `POST` new game session key.
+pub const PLAY_PATH: &str = "/launcher/play";
+/// `POST` end the launcher session.
+pub const LOGOUT_PATH: &str = "/launcher/logout";
+/// `POST` start a Discord login.
+pub const DISCORD_START_PATH: &str = "/launcher/discord/start";
+/// `POST` ask whether a Discord login finished.
+pub const DISCORD_POLL_PATH: &str = "/launcher/discord/poll";
+
 /// Placeholder in [`LauncherInfo::launch_arguments`] that the launcher replaces with the game
 /// session key.
 pub const SESSION_PLACEHOLDER: &str = "{session}";
+
+/// Domains that a community server, and the launcher, must never use (M2 spec section 3.4). A
+/// host equal to one of these or ending in `.<domain>` is refused.
+pub const FORBIDDEN_DOMAINS: [&str; 5] = [
+    "amazon.com",
+    "amazonaws.com",
+    "amazongames.com",
+    "cloudfront.net",
+    "a2z.com",
+];
+
+/// True when `host` is a forbidden domain or a sub-domain of one.
+pub fn is_forbidden_host(host: &str) -> bool {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    FORBIDDEN_DOMAINS
+        .iter()
+        .any(|domain| host == *domain || host.ends_with(&format!(".{domain}")))
+}
 
 /// How players log in on a server. One mode per server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +151,15 @@ mod tests {
 
     fn json<T: Serialize>(value: &T) -> serde_json::Value {
         serde_json::to_value(value).expect("serialize")
+    }
+
+    #[test]
+    fn forbidden_hosts_are_detected() {
+        assert!(is_forbidden_host("cloudfront.net"));
+        assert!(is_forbidden_host("d2c74t4zimux3r.CloudFront.net."));
+        assert!(is_forbidden_host("client.amazongames.com"));
+        assert!(!is_forbidden_host("notcloudfront.net"));
+        assert!(!is_forbidden_host("example.org"));
     }
 
     #[test]
