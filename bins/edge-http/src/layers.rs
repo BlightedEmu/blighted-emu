@@ -14,12 +14,14 @@ use tower::limit::GlobalConcurrencyLimitLayer;
 pub(crate) const REQUESTS_METRIC: &str = "edge_http_requests_total";
 const STATUS_LABEL: &str = "status";
 
-/// Adds the request counter, the time limit, and the limit on requests in progress.
+/// Adds the limit on requests in progress, the time limit, and the request counter. The time limit
+/// sits outside the limit on requests in progress, so the wait for a free slot counts against it;
+/// the counter sits outside both, so it also counts requests that ran out of time.
 pub(crate) fn with_limits(router: Router, time_limit: Duration, max_in_flight: usize) -> Router {
     router
-        .layer(middleware::from_fn(count_requests))
-        .layer(middleware::from_fn_with_state(time_limit, limit_time))
         .layer(GlobalConcurrencyLimitLayer::new(max_in_flight))
+        .layer(middleware::from_fn_with_state(time_limit, limit_time))
+        .layer(middleware::from_fn(count_requests))
 }
 
 async fn limit_time(State(limit): State<Duration>, request: Request, next: Next) -> Response {
@@ -49,8 +51,11 @@ mod tests {
     const SHORT_LIMIT: Duration = Duration::from_millis(20);
     const SLOW_HANDLER: Duration = Duration::from_millis(500);
     const IN_FLIGHT: usize = 4;
+    const ONE_SLOT: usize = 1;
+    const WAITING_REQUESTS: usize = 5;
+    const WAIT_LIMIT: Duration = Duration::from_millis(100);
 
-    fn app() -> Router {
+    fn app_with(time_limit: Duration, slots: usize) -> Router {
         let router = Router::new().route("/fast", get(|| async { "ok" })).route(
             "/slow",
             get(|| async {
@@ -58,15 +63,47 @@ mod tests {
                 "late"
             }),
         );
-        with_limits(router, SHORT_LIMIT, IN_FLIGHT)
+        with_limits(router, time_limit, slots)
+    }
+
+    fn request(path: &str) -> Request {
+        Request::builder()
+            .uri(path)
+            .body(Body::empty())
+            .expect("request")
     }
 
     async fn status(path: &str) -> StatusCode {
-        let request = Request::builder()
-            .uri(path)
-            .body(Body::empty())
-            .expect("request");
-        app().oneshot(request).await.expect("response").status()
+        app_with(SHORT_LIMIT, IN_FLIGHT)
+            .oneshot(request(path))
+            .await
+            .expect("response")
+            .status()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn waiting_for_a_slot_counts_against_the_time_limit() {
+        let app = app_with(WAIT_LIMIT, ONE_SLOT);
+        let started = tokio::time::Instant::now();
+        let requests: Vec<_> = (0..WAITING_REQUESTS)
+            .map(|_| {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    app.oneshot(request("/slow"))
+                        .await
+                        .expect("response")
+                        .status()
+                })
+            })
+            .collect();
+        for answer in requests {
+            assert_eq!(answer.await.expect("task"), StatusCode::SERVICE_UNAVAILABLE);
+        }
+        assert!(
+            started.elapsed() < WAIT_LIMIT * 2,
+            "waited {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

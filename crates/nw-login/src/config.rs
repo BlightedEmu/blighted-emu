@@ -42,7 +42,8 @@ pub struct EdgeConfig {
     pub rep_address: String,
     /// Time limit for one HTTP request.
     pub request_timeout_seconds: u64,
-    /// Most open HTTPS connections.
+    /// Most requests in progress at one time (spec amendment 6). More requests wait for a free
+    /// slot, within `request_timeout_seconds`.
     pub max_connections: usize,
     /// `tracing` filter, for example `info`.
     pub log_filter: String,
