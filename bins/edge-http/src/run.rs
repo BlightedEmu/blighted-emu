@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `serve` and `migrate`.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,10 +16,12 @@ use nw_common::logging::{LoggingError, init_logging};
 use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 use nw_login::config::{EdgeConfig, EdgeConfigError, load_edge_config};
 use nw_login::discord::{DiscordError, DiscordHttp};
+use nw_login::game::GameState;
+use nw_login::host::edge_router;
 use nw_login::install_crypto_provider;
-use nw_login::launcher::{LauncherState, launcher_router};
+use nw_login::launcher::LauncherState;
 use nw_login::password::{PasswordError, PasswordHasher};
-use nw_login::pg::PgAccounts;
+use nw_login::pg::{PgAccounts, PgCharacters};
 use nw_login::secrets::{SecretError, Secrets, load_database_passwords, load_secrets};
 use nw_login::store::StoreError;
 use nw_login::valkey::Valkey;
@@ -136,17 +139,32 @@ async fn serve_async(config: EdgeConfig, secrets: Secrets) -> Result<(), RunErro
         )?),
         None => None,
     };
-    let state = LauncherState {
-        config: Arc::new(config.clone()),
-        accounts: PgAccounts::new(global),
+    let world_pools: HashMap<_, _> = config
+        .worlds
+        .iter()
+        .map(|world| world.id)
+        .zip(worlds)
+        .collect();
+    let shared_config = Arc::new(config.clone());
+    let launcher = LauncherState {
+        config: Arc::clone(&shared_config),
+        accounts: PgAccounts::new(global.clone()),
         game_sessions: valkey.clone(),
         limits: valkey.clone(),
-        discord_states: valkey,
+        discord_states: valkey.clone(),
         discord,
         hasher: PasswordHasher::new(config.auth.argon2_parallel)?,
     };
+    let game = GameState {
+        config: shared_config,
+        game_sessions: valkey.clone(),
+        characters: PgCharacters::new(global, world_pools),
+        limits: valkey.clone(),
+        queue: valkey,
+        signing_key: secrets.signing_key,
+    };
     let app = with_limits(
-        launcher_router(state),
+        edge_router(launcher, game),
         Duration::from_secs(config.request_timeout_seconds),
         config.max_connections,
     );

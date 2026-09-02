@@ -598,7 +598,7 @@ pub async fn unknown_route(method: Method, uri: Uri) -> ApiError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use axum::body::Bytes;
     use axum::http::StatusCode;
     use nw_db::NewCharacter;
@@ -624,13 +624,13 @@ mod tests {
     const TEST_CHARACTER_LIMIT: u32 = 2;
     const OTHER_KEY: &str = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst";
 
-    type TestState =
+    pub(crate) type TestState =
         GameState<MemoryGameSessions, MemoryCharacters, MemoryRateLimiter, MemoryQueue>;
 
-    struct Fixture {
-        state: TestState,
-        session: String,
-        account: Uuid,
+    pub(crate) struct Fixture {
+        pub(crate) state: TestState,
+        pub(crate) session: String,
+        pub(crate) account: Uuid,
     }
 
     /// A live game session of a new account.
@@ -663,7 +663,7 @@ mod tests {
         }
     }
 
-    async fn fixture() -> Fixture {
+    pub(crate) async fn fixture() -> Fixture {
         fixture_with(valid()).await
     }
 

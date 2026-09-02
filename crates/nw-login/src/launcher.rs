@@ -405,7 +405,7 @@ where
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use axum::extract::connect_info::MockConnectInfo;
     use axum::http::HeaderValue;
 
@@ -424,7 +424,7 @@ mod tests {
     /// Wrong-password logins sent at the same time.
     const PARALLEL_LOGINS: usize = 40;
 
-    type TestState = LauncherState<
+    pub(crate) type TestState = LauncherState<
         MemoryAccounts,
         MemoryGameSessions,
         MemoryRateLimiter,
@@ -432,7 +432,7 @@ mod tests {
         FakeDiscord,
     >;
 
-    fn state(mode: AuthMode) -> TestState {
+    pub(crate) fn state(mode: AuthMode) -> TestState {
         let mut config = valid();
         config.auth.mode = mode;
         config.discord.client_id = "123".to_owned();

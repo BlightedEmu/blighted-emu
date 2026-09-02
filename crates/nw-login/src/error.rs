@@ -63,6 +63,9 @@ pub enum ApiError {
     /// No queue entry of this account with that ticket id.
     #[error("unknown queue ticket")]
     UnknownTicket,
+    /// The request names a host this server does not serve.
+    #[error("unknown host")]
+    UnknownHost,
     /// No route serves this request.
     #[error("unknown route")]
     UnknownRoute,
@@ -88,6 +91,7 @@ impl ApiError {
                 StatusCode::CONFLICT
             }
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::UnknownHost => StatusCode::MISDIRECTED_REQUEST,
             Self::Discord => StatusCode::BAD_GATEWAY,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         }
@@ -111,6 +115,7 @@ impl ApiError {
             Self::UnknownWorld => "unknown_world",
             Self::UnknownCharacter => "unknown_character",
             Self::UnknownTicket => "unknown_ticket",
+            Self::UnknownHost => "unknown_host",
             Self::UnknownRoute => "unknown_route",
             Self::RateLimited => "rate_limited",
             Self::UnknownLogin => "unknown_login",
@@ -169,6 +174,7 @@ mod tests {
             ApiError::UnknownWorld,
             ApiError::UnknownCharacter,
             ApiError::UnknownTicket,
+            ApiError::UnknownHost,
             ApiError::UnknownRoute,
             ApiError::RateLimited,
             ApiError::UnknownLogin,
