@@ -35,6 +35,11 @@ const QUEUE_SCRIPT: &str = include_str!("queue_script.lua");
 /// Lowers a live counter above 0 by one; `DECR` keeps the key's expiry.
 const RELEASE_SCRIPT: &str = "local count = tonumber(redis.call('GET', KEYS[1])) \
 if count and count > 0 then redis.call('DECR', KEYS[1]) end return 0";
+/// Returns a stored PKCE verifier one time: it is replaced by an empty text with the same expiry,
+/// so the attempt stays pending but cannot be used again.
+const TAKE_VERIFIER_SCRIPT: &str = "local verifier = redis.call('GET', KEYS[1]) \
+if verifier and verifier ~= '' then redis.call('SET', KEYS[1], '', 'KEEPTTL') return verifier end \
+return false";
 const JOIN_ACTION: &str = "join";
 const REFRESH_ACTION: &str = "refresh";
 const STATUS_ADMITTED: &str = "admitted";
@@ -137,9 +142,13 @@ impl DiscordStateStore for Valkey {
         .await
     }
 
-    async fn verifier(&self, state: &str) -> Result<Option<String>, StoreError> {
-        self.query(redis::cmd("GET").arg(format!("{DISCORD_VERIFIER_PREFIX}{state}")))
+    async fn take_verifier(&self, state: &str) -> Result<Option<String>, StoreError> {
+        let mut connection = self.connection.clone();
+        redis::Script::new(TAKE_VERIFIER_SCRIPT)
+            .key(format!("{DISCORD_VERIFIER_PREFIX}{state}"))
+            .invoke_async(&mut connection)
             .await
+            .map_err(StoreError::unavailable)
     }
 
     async fn complete(

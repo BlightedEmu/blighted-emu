@@ -155,8 +155,9 @@ pub trait DiscordStateStore: Clone + Send + Sync + 'static {
         ttl_seconds: u64,
     ) -> impl Future<Output = Result<(), StoreError>> + Send;
 
-    /// The PKCE verifier of a started attempt.
-    fn verifier(
+    /// The PKCE verifier of a started attempt, one time only: the attempt stays pending, and a
+    /// second call returns `None`, so a repeated callback cannot finish the login again.
+    fn take_verifier(
         &self,
         state: &str,
     ) -> impl Future<Output = Result<Option<String>, StoreError>> + Send;

@@ -314,12 +314,12 @@ impl DiscordStateStore for MemoryDiscordStates {
         Ok(())
     }
 
-    async fn verifier(&self, state: &str) -> Result<Option<String>, StoreError> {
+    async fn take_verifier(&self, state: &str) -> Result<Option<String>, StoreError> {
         Ok(lock(&self.0)
             .verifiers
-            .get(state)
-            .filter(|entry| entry.live())
-            .map(|entry| entry.value.clone()))
+            .get_mut(state)
+            .filter(|entry| entry.live() && !entry.value.is_empty())
+            .map(|entry| std::mem::take(&mut entry.value)))
     }
 
     async fn complete(
@@ -813,9 +813,14 @@ pub(crate) mod contract {
             .await
             .expect("begin");
         assert_eq!(
-            store.verifier(&state).await.expect("verifier").as_deref(),
+            store
+                .take_verifier(&state)
+                .await
+                .expect("verifier")
+                .as_deref(),
             Some("verifier")
         );
+        assert_eq!(store.take_verifier(&state).await.expect("used"), None);
         assert_eq!(
             store.poll(&state).await.expect("pending"),
             DiscordAttempt::Pending

@@ -366,7 +366,7 @@ where
     };
     let verifier = state
         .discord_states
-        .verifier(&login_state)
+        .take_verifier(&login_state)
         .await?
         .ok_or(ApiError::UnknownLogin)?;
     let user = discord
@@ -754,6 +754,12 @@ pub(crate) mod tests {
             (status, &body[..]),
             (StatusCode::OK, CALLBACK_DONE.as_bytes())
         );
+        let (status, body) = send(&app, "GET", &callback, None, "").await;
+        assert_eq!(
+            (status, &body[..]),
+            (StatusCode::NOT_FOUND, CALLBACK_EXPIRED.as_bytes()),
+            "a second callback with the same state is refused"
+        );
         let (status, body) = send(&app, "POST", DISCORD_POLL_PATH, None, &poll).await;
         assert_eq!(status, StatusCode::OK);
         let DiscordPollReply::Ready(session) = serde_json::from_slice(&body).expect("ready") else {
@@ -778,6 +784,16 @@ pub(crate) mod tests {
         let bad = format!("{DISCORD_CALLBACK_PATH}?code=bad&state={}", start.state);
         let (status, _) = send(&app, "GET", &bad, None, "").await;
         assert_eq!(status, StatusCode::BAD_GATEWAY);
+        let retry = format!(
+            "{DISCORD_CALLBACK_PATH}?code={GOOD_CODE}&state={}",
+            start.state
+        );
+        let (status, _) = send(&app, "GET", &retry, None, "").await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a failed callback uses up its state"
+        );
         let unknown = format!("{DISCORD_CALLBACK_PATH}?code={GOOD_CODE}&state=unknown");
         let (status, body) = send(&app, "GET", &unknown, None, "").await;
         assert_eq!(
@@ -789,9 +805,12 @@ pub(crate) mod tests {
             .await
             .expect("account");
         accounts.set_banned(account.id, true);
+        // The failed callback above used up its state, so the banned login starts again.
+        let (_, body) = send(&app, "POST", DISCORD_START_PATH, None, "").await;
+        let again: DiscordStart = serde_json::from_slice(&body).expect("start again");
         let banned = format!(
             "{DISCORD_CALLBACK_PATH}?code={GOOD_CODE}&state={}",
-            start.state
+            again.state
         );
         let (status, _) = send(&app, "GET", &banned, None, "").await;
         assert_eq!(status, StatusCode::FORBIDDEN);
