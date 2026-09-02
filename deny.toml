@@ -28,6 +28,7 @@ exceptions = [
     { crate = "nw-common", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-content", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-db", allow = ["AGPL-3.0-or-later"] },
+    { crate = "nw-login", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-edge-config", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-oodle", allow = ["GPL-3.0-or-later"] },
     { crate = "nw-protocol", allow = ["AGPL-3.0-or-later"] },

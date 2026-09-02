@@ -14,6 +14,7 @@ axum = { version = "0.8.9", default-features = false, features = ["http1", "json
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
 clap = { version = "4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "env"] }
 crc32fast = { version = "1.5.2", default-features = false, features = ["std"] }
+data-encoding = { version = "2.11.1", default-features = false, features = ["alloc"] }
 figment = { version = "0.10.19", default-features = false, features = ["toml", "env"] }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 getrandom = { version = "0.3.4", default-features = false, features = ["std"] }
@@ -25,8 +26,8 @@ metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 oozextract = { version = "0.5.5", default-features = false }
 postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
 prettyplease = { version = "0.3.0", default-features = false }
-proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 proc-macro2 = { version = "1.0.107", default-features = false, features = ["proc-macro"] }
+proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 quick-xml = { version = "0.42.0", default-features = false, features = ["serialize"] }
 quote = { version = "1.0.47", default-features = false, features = ["proc-macro"] }
 redis = { version = "1.7.1", default-features = false, features = ["tokio-comp", "connection-manager"] }
@@ -51,6 +52,7 @@ nw-content = { path = "crates/nw-content", version = "0.1.0" }
 nw-db = { path = "crates/nw-db", version = "0.1.0" }
 nw-edge-config = { path = "crates/nw-edge-config", version = "0.1.0" }
 nw-formats = { path = "crates/nw-formats", version = "0.1.0" }
+nw-login = { path = "crates/nw-login", version = "0.1.0" }
 nw-oodle = { path = "crates/nw-oodle", version = "0.1.0" }
 nw-protocol = { path = "crates/nw-protocol", version = "0.1.0" }
 nw-world = { path = "crates/nw-world", version = "0.1.0" }
