@@ -57,6 +57,12 @@ pub enum ApiError {
     /// Discord refused or failed.
     #[error("Discord login failed")]
     Discord,
+    /// No character of this account with that id in that world.
+    #[error("unknown character")]
+    UnknownCharacter,
+    /// No queue entry of this account with that ticket id.
+    #[error("unknown queue ticket")]
+    UnknownTicket,
     /// No route serves this request.
     #[error("unknown route")]
     UnknownRoute,
@@ -72,9 +78,12 @@ impl ApiError {
             Self::BadRequest | Self::InvalidName(_) => StatusCode::BAD_REQUEST,
             Self::InvalidCredentials | Self::NoSession => StatusCode::UNAUTHORIZED,
             Self::Banned | Self::RegistrationClosed => StatusCode::FORBIDDEN,
-            Self::WrongMode | Self::UnknownLogin | Self::UnknownWorld | Self::UnknownRoute => {
-                StatusCode::NOT_FOUND
-            }
+            Self::WrongMode
+            | Self::UnknownLogin
+            | Self::UnknownWorld
+            | Self::UnknownCharacter
+            | Self::UnknownTicket
+            | Self::UnknownRoute => StatusCode::NOT_FOUND,
             Self::UsernameTaken | Self::CharacterNameTaken | Self::CharacterLimit => {
                 StatusCode::CONFLICT
             }
@@ -100,6 +109,8 @@ impl ApiError {
             Self::CharacterNameTaken => "character_name_taken",
             Self::CharacterLimit => "character_limit",
             Self::UnknownWorld => "unknown_world",
+            Self::UnknownCharacter => "unknown_character",
+            Self::UnknownTicket => "unknown_ticket",
             Self::UnknownRoute => "unknown_route",
             Self::RateLimited => "rate_limited",
             Self::UnknownLogin => "unknown_login",
@@ -156,6 +167,8 @@ mod tests {
             ApiError::CharacterNameTaken,
             ApiError::CharacterLimit,
             ApiError::UnknownWorld,
+            ApiError::UnknownCharacter,
+            ApiError::UnknownTicket,
             ApiError::UnknownRoute,
             ApiError::RateLimited,
             ApiError::UnknownLogin,

@@ -17,6 +17,15 @@ pub fn unix_now() -> i64 {
         })
 }
 
+/// Milliseconds since the Unix epoch (0 if the clock is before 1970).
+pub fn unix_now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 /// RFC 822 date text in GMT, for example `Tue, 14 Oct 2025 00:00:00 GMT`. The client parses this
 /// form first (follow-up note section 6). Times before 1970 give 1970; times after 9999 give the
 /// last second of 9999.

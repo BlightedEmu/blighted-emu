@@ -21,19 +21,22 @@ use nw_protocol::game_api::{
     Cluster, CreateCharacterReply, CreateCharacterRequestBody, GATEWAY_STAGE, GET_LOGIN_INFO_PATH,
     HTTP_GATEWAY_TAG, LIST_WORLDS_PATH, LOGIN_GATEWAY_TAG, ListWorldsBody, ListWorldsReply,
     LoginInfoList, LoginInfoReply, NameRecord, OMNI_METADATA_MARK, OmniAccount, OmniMetadata,
-    OmniPlatformAccount, OmniTokenReply, PUBLIC_STATUS_OPEN, PublicApi, STEAM_AUTH_PATH,
-    SteamAuthReply, VALIDATOR_SEGMENT, ValidateCharacterRequest, WORLD_STATUS_ACTIVE, WORLDS_PATH,
-    WorldModel,
+    OmniPlatformAccount, OmniTokenReply, PUBLIC_STATUS_OPEN, PublicApi, QUEUE_LOGIN_PATH,
+    STEAM_AUTH_PATH, SteamAuthReply, VALIDATOR_SEGMENT, ValidateCharacterRequest,
+    WORLD_STATUS_ACTIVE, WORLDS_PATH, WorldModel,
 };
+use nw_protocol::{LoginQueueReply, parse_login_queue_request};
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::config::{EdgeConfig, WorldConfig};
 use crate::error::{ApiError, parse_json};
-use crate::keys::is_game_session_key;
+use crate::keys::{is_game_session_key, new_launcher_token};
 use crate::names::check_character_name;
-use crate::store::{CharacterStore, GameSessionStore};
-use crate::time::{http_date, unix_now};
+use crate::queue::{QueueAction, QueueSettings, QueueStore, queue_reply};
+use crate::secrets::SigningKey;
+use crate::store::{CharacterStore, GameSessionStore, RateLimiter};
+use crate::time::{http_date, unix_now, unix_now_millis};
 
 /// Path part in front of the game session key: `/s/<session>`.
 pub const SESSION_PREFIX: &str = "/s";
@@ -60,24 +63,43 @@ const STEAM_PLATFORM: &str = "steam";
 /// Text shown in logs in place of a game session key.
 const SESSION_MASK: &str = "<session>";
 const PATH_SEPARATOR: char = '/';
+/// Rate-limit key prefix of queue joins and refreshes: `<prefix><world>:<account>`.
+const QUEUE_LIMIT_PREFIX: &str = "queue:";
+/// Window of `queue_requests_per_minute`.
+const QUEUE_LIMIT_WINDOW_SECONDS: u64 = 60;
+/// Separator between the world id and the random part of a queue ticket id.
+const TICKET_WORLD_SEPARATOR: char = '.';
 /// Largest game request body. The character create body is stored (M2 spec section 7).
 pub const GAME_BODY_LIMIT_BYTES: usize = 64 * 1024;
 
 /// Everything the game routes need.
 #[derive(Clone)]
-pub struct GameState<G, C> {
+pub struct GameState<G, C, R, Q> {
     /// Server configuration.
     pub config: Arc<EdgeConfig>,
     /// Game session keys.
     pub game_sessions: G,
     /// Characters and names.
     pub characters: C,
+    /// Rate-limit counters.
+    pub limits: R,
+    /// Login queues.
+    pub queue: Q,
+    /// Entry ticket signing key.
+    pub signing_key: SigningKey,
 }
 
 /// Path parameters of a session route.
 #[derive(Debug, Deserialize)]
 struct SessionPath {
     session: String,
+}
+
+/// Path parameters of a queue refresh.
+#[derive(Debug, Deserialize)]
+struct TicketPath {
+    session: String,
+    ticket_id: String,
 }
 
 /// Path parameters of a character route.
@@ -98,36 +120,46 @@ fn gateway_route(operation: &str) -> String {
 }
 
 /// The game routes on `game.<domain>`.
-pub fn game_router<G, C>(state: GameState<G, C>) -> Router
+pub fn game_router<G, C, R, Q>(state: GameState<G, C, R, Q>) -> Router
 where
     G: GameSessionStore,
     C: CharacterStore,
+    R: RateLimiter,
+    Q: QueueStore,
 {
     Router::new()
         .route(
             &session_route(&format!("{AUTH_STACK_STAGE}{STEAM_AUTH_PATH}")),
-            post(steam_auth::<G, C>),
+            post(steam_auth::<G, C, R, Q>),
         )
-        .route(&session_route(TOKEN_PATH), any(token::<G, C>))
+        .route(&session_route(TOKEN_PATH), any(token::<G, C, R, Q>))
         .route(
             &session_route(&format!("{TOKEN_PATH}/{{*rest}}")),
-            any(token::<G, C>),
+            any(token::<G, C, R, Q>),
         )
         .route(
             &gateway_route(GET_LOGIN_INFO_PATH),
-            get(login_info::<G, C>).post(login_info::<G, C>),
+            get(login_info::<G, C, R, Q>).post(login_info::<G, C, R, Q>),
         )
         .route(
             &gateway_route(LIST_WORLDS_PATH),
-            get(list_worlds::<G, C>).post(list_worlds::<G, C>),
+            get(list_worlds::<G, C, R, Q>).post(list_worlds::<G, C, R, Q>),
         )
         .route(
             &gateway_route(&format!("{WORLDS_PATH}/{{world_id}}{CHARACTERS_SEGMENT}")),
-            post(create_character::<G, C>),
+            post(create_character::<G, C, R, Q>),
         )
         .route(
             &gateway_route(&format!("{WORLDS_PATH}/{{world_id}}{VALIDATOR_SEGMENT}")),
-            post(validate_character::<G, C>),
+            post(validate_character::<G, C, R, Q>),
+        )
+        .route(
+            &gateway_route(QUEUE_LOGIN_PATH),
+            post(queue_join::<G, C, R, Q>),
+        )
+        .route(
+            &gateway_route(&format!("{QUEUE_LOGIN_PATH}/{{ticket_id}}")),
+            post(queue_refresh::<G, C, R, Q>),
         )
         .layer(DefaultBodyLimit::max(GAME_BODY_LIMIT_BYTES))
         .fallback(unknown_route)
@@ -135,19 +167,21 @@ where
 }
 
 /// The channel document route on `login.<domain>`: `GET /<key>.json`.
-pub fn channel_router<G, C>(state: GameState<G, C>) -> Router
+pub fn channel_router<G, C, R, Q>(state: GameState<G, C, R, Q>) -> Router
 where
     G: GameSessionStore,
     C: CharacterStore,
+    R: RateLimiter,
+    Q: QueueStore,
 {
     Router::new()
-        .route("/{file}", get(channel::<G, C>))
+        .route("/{file}", get(channel::<G, C, R, Q>))
         .with_state(state)
 }
 
 /// The account of a live game session; extends the session.
-async fn session_account<G: GameSessionStore, C>(
-    state: &GameState<G, C>,
+async fn session_account<G: GameSessionStore, C, R, Q>(
+    state: &GameState<G, C, R, Q>,
     session: &str,
 ) -> Result<Uuid, ApiError> {
     if !is_game_session_key(session) {
@@ -215,8 +249,8 @@ pub fn channel_document(config: &EdgeConfig, channel_key: &str, session: &str) -
     }
 }
 
-async fn channel<G, C>(
-    State(state): State<GameState<G, C>>,
+async fn channel<G, C, R, Q>(
+    State(state): State<GameState<G, C, R, Q>>,
     Path(file): Path<String>,
 ) -> Result<Json<ChannelDocument>, ApiError>
 where
@@ -234,8 +268,8 @@ fn session_seconds(config: &EdgeConfig) -> i64 {
     i64::try_from(config.auth.game_session_ttl_seconds).unwrap_or(i64::MAX)
 }
 
-async fn steam_auth<G, C>(
-    State(state): State<GameState<G, C>>,
+async fn steam_auth<G, C, R, Q>(
+    State(state): State<GameState<G, C, R, Q>>,
     Path(path): Path<SessionPath>,
 ) -> Result<Json<SteamAuthReply>, ApiError>
 where
@@ -251,8 +285,8 @@ where
     }))
 }
 
-async fn token<G, C>(
-    State(state): State<GameState<G, C>>,
+async fn token<G, C, R, Q>(
+    State(state): State<GameState<G, C, R, Q>>,
     Path(path): Path<SessionPath>,
 ) -> Result<Json<OmniTokenReply>, ApiError>
 where
@@ -314,8 +348,8 @@ fn name_record(character: &Character) -> NameRecord {
     }
 }
 
-async fn login_info<G, C>(
-    State(state): State<GameState<G, C>>,
+async fn login_info<G, C, R, Q>(
+    State(state): State<GameState<G, C, R, Q>>,
     Path(path): Path<SessionPath>,
 ) -> Result<Json<LoginInfoReply>, ApiError>
 where
@@ -340,8 +374,8 @@ where
     }))
 }
 
-async fn list_worlds<G, C>(
-    State(state): State<GameState<G, C>>,
+async fn list_worlds<G, C, R, Q>(
+    State(state): State<GameState<G, C, R, Q>>,
     Path(path): Path<SessionPath>,
 ) -> Result<Json<ListWorldsReply>, ApiError>
 where
@@ -366,8 +400,8 @@ fn configured_world<'a>(
         .ok_or(ApiError::UnknownWorld)
 }
 
-async fn create_character<G, C>(
-    State(state): State<GameState<G, C>>,
+async fn create_character<G, C, R, Q>(
+    State(state): State<GameState<G, C, R, Q>>,
     Path(path): Path<WorldPath>,
     body: Bytes,
 ) -> Result<Json<CreateCharacterReply>, ApiError>
@@ -403,8 +437,8 @@ where
 
 /// Checks a name. The reply body model is Unknown (JSON note section 5.4), so a free name gets an
 /// empty JSON object and a refused name gets an error status.
-async fn validate_character<G, C>(
-    State(state): State<GameState<G, C>>,
+async fn validate_character<G, C, R, Q>(
+    State(state): State<GameState<G, C, R, Q>>,
     Path(path): Path<WorldPath>,
     body: Bytes,
 ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, ApiError>
@@ -424,6 +458,123 @@ where
         return Err(ApiError::CharacterNameTaken);
     }
     Ok(Json(serde_json::Map::new()))
+}
+
+/// A new queue ticket id: `<world id><separator><random>`, so a refresh finds its world.
+fn new_ticket_id(world_id: Uuid) -> Result<String, ApiError> {
+    let random = new_launcher_token().map_err(|_| ApiError::Unavailable)?;
+    Ok(format!(
+        "{}{TICKET_WORLD_SEPARATOR}{random}",
+        world_id.simple()
+    ))
+}
+
+/// The configured world of a queue ticket id.
+fn ticket_world<'a>(config: &'a EdgeConfig, ticket_id: &str) -> Option<&'a WorldConfig> {
+    let (world_id, _) = ticket_id.split_once(TICKET_WORLD_SEPARATOR)?;
+    config.world(Uuid::parse_str(world_id).ok()?)
+}
+
+/// Counts one queue request of `account` in `world` (M2 spec section 8).
+async fn limit_queue<G, C, R: RateLimiter, Q>(
+    state: &GameState<G, C, R, Q>,
+    world: &WorldConfig,
+    account: Uuid,
+) -> Result<(), ApiError> {
+    let key = format!("{QUEUE_LIMIT_PREFIX}{}:{account}", world.id);
+    let requests = state
+        .limits
+        .increment(&key, QUEUE_LIMIT_WINDOW_SECONDS)
+        .await?;
+    if requests > u64::from(world.queue_requests_per_minute) {
+        Err(ApiError::RateLimited)
+    } else {
+        Ok(())
+    }
+}
+
+/// Runs one queue step and builds the reply.
+async fn queue_step<G, C, R, Q: QueueStore>(
+    state: &GameState<G, C, R, Q>,
+    world: &WorldConfig,
+    account: Uuid,
+    action: QueueAction,
+) -> Result<Json<LoginQueueReply>, ApiError> {
+    let status = state
+        .queue
+        .update(
+            &QueueSettings::for_world(world),
+            account,
+            action,
+            unix_now_millis(),
+        )
+        .await?
+        .ok_or(ApiError::UnknownTicket)?;
+    Ok(Json(queue_reply(
+        &status,
+        world,
+        &state.config.rep_address,
+        &state.signing_key,
+        unix_now(),
+    )))
+}
+
+/// `QueueLogin`: joins the queue with a character of the session's account (review finding C3).
+async fn queue_join<G, C, R, Q>(
+    State(state): State<GameState<G, C, R, Q>>,
+    Path(path): Path<SessionPath>,
+    body: Bytes,
+) -> Result<Json<LoginQueueReply>, ApiError>
+where
+    G: GameSessionStore,
+    C: CharacterStore,
+    R: RateLimiter,
+    Q: QueueStore,
+{
+    let account = session_account(&state, &path.session).await?;
+    let request = parse_login_queue_request(&body).map_err(|_| ApiError::BadRequest)?;
+    let world = configured_world(
+        &state.config,
+        request.world_id.as_deref().unwrap_or_default(),
+    )?;
+    limit_queue(&state, world, account).await?;
+    let character_id = request
+        .character_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or(ApiError::UnknownCharacter)?;
+    let owned = state
+        .characters
+        .character(world.id, character_id)
+        .await?
+        .is_some_and(|character| character.account_id == account);
+    if !owned {
+        return Err(ApiError::UnknownCharacter);
+    }
+    let action = QueueAction::Join {
+        character_id,
+        new_ticket_id: new_ticket_id(world.id)?,
+    };
+    queue_step(&state, world, account, action).await
+}
+
+/// `RefreshQueuedLogin`: the ticket id in the path is the whole request (JSON note section 5.5).
+async fn queue_refresh<G, C, R, Q>(
+    State(state): State<GameState<G, C, R, Q>>,
+    Path(path): Path<TicketPath>,
+) -> Result<Json<LoginQueueReply>, ApiError>
+where
+    G: GameSessionStore,
+    R: RateLimiter,
+    Q: QueueStore,
+{
+    let account = session_account(&state, &path.session).await?;
+    let world = ticket_world(&state.config, &path.ticket_id).ok_or(ApiError::UnknownTicket)?;
+    limit_queue(&state, world, account).await?;
+    let action = QueueAction::Refresh {
+        ticket_id: path.ticket_id,
+    };
+    queue_step(&state, world, account, action).await
 }
 
 /// `path` with every game session key replaced by [`SESSION_MASK`].
@@ -455,11 +606,16 @@ mod tests {
     use super::*;
     use crate::config::tests::valid;
     use crate::keys::new_game_session_key;
-    use crate::memory::{MemoryCharacters, MemoryGameSessions};
+    use crate::memory::{MemoryCharacters, MemoryGameSessions, MemoryQueue, MemoryRateLimiter};
+    use crate::signature::verify_entry;
     use crate::test_http::{self, error_code};
 
     const CLAIM_SECONDS: u64 = 600;
     const GMT_SUFFIX: &str = " GMT";
+    const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const ONE_SLOT: u32 = 1;
+    const FEW_REQUESTS: u32 = 2;
+    const FIRST_IN_LINE: i64 = 1;
     const NAME: &str = "Ada";
     const SECOND_NAME: &str = "Bea";
     const THIRD_NAME: &str = "Cid";
@@ -468,20 +624,17 @@ mod tests {
     const TEST_CHARACTER_LIMIT: u32 = 2;
     const OTHER_KEY: &str = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst";
 
+    type TestState =
+        GameState<MemoryGameSessions, MemoryCharacters, MemoryRateLimiter, MemoryQueue>;
+
     struct Fixture {
-        state: GameState<MemoryGameSessions, MemoryCharacters>,
+        state: TestState,
         session: String,
         account: Uuid,
     }
 
-    async fn fixture() -> Fixture {
-        let config = valid();
-        let world_ids: Vec<Uuid> = config.worlds.iter().map(|world| world.id).collect();
-        let state = GameState {
-            config: Arc::new(config),
-            game_sessions: MemoryGameSessions::default(),
-            characters: MemoryCharacters::new(&world_ids),
-        };
+    /// A live game session of a new account.
+    async fn new_session(state: &TestState) -> (String, Uuid) {
         let session = new_game_session_key().expect("key");
         let account = Uuid::new_v4();
         state
@@ -489,11 +642,29 @@ mod tests {
             .create(&session, account, CLAIM_SECONDS)
             .await
             .expect("session");
+        (session, account)
+    }
+
+    async fn fixture_with(config: EdgeConfig) -> Fixture {
+        let world_ids: Vec<Uuid> = config.worlds.iter().map(|world| world.id).collect();
+        let state = GameState {
+            config: Arc::new(config),
+            game_sessions: MemoryGameSessions::default(),
+            characters: MemoryCharacters::new(&world_ids),
+            limits: MemoryRateLimiter::default(),
+            queue: MemoryQueue::default(),
+            signing_key: SigningKey::from_hex(KEY_HEX).expect("key"),
+        };
+        let (session, account) = new_session(&state).await;
         Fixture {
             state,
             session,
             account,
         }
+    }
+
+    async fn fixture() -> Fixture {
+        fixture_with(valid()).await
     }
 
     fn game_path(session: &str, rest: &str) -> String {
@@ -792,5 +963,181 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let (status, _) = post(&app, &validator, "{}").await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    fn queue_path(session: &str, ticket: Option<&str>) -> String {
+        let rest = match ticket {
+            Some(ticket) => format!("{GATEWAY_STAGE}{QUEUE_LOGIN_PATH}/{ticket}"),
+            None => format!("{GATEWAY_STAGE}{QUEUE_LOGIN_PATH}"),
+        };
+        game_path(session, &rest)
+    }
+
+    fn queue_body(world: Uuid, character: Uuid) -> String {
+        serde_json::json!({"LoginQueueRequest": {
+            "WorldId": world.to_string(),
+            "CharacterId": character.to_string(),
+            "SteamAuthTicket": STEAM_TICKET,
+        }})
+        .to_string()
+    }
+
+    async fn character_of(state: &TestState, account: Uuid, name: &str) -> Uuid {
+        let world = state.config.worlds[0].id;
+        let new = NewCharacter {
+            id: Uuid::new_v4(),
+            account_id: account,
+            name: name.to_owned(),
+            appearance: serde_json::json!({}),
+        };
+        state
+            .characters
+            .create(world, &new)
+            .await
+            .expect("character")
+            .id
+    }
+
+    fn reply(body: &Bytes) -> nw_protocol::LoginQueueResponse {
+        serde_json::from_slice::<LoginQueueReply>(body)
+            .expect("queue reply")
+            .login_queue_response
+    }
+
+    #[tokio::test]
+    async fn an_admitted_join_carries_a_signed_token() {
+        let fixture = fixture().await;
+        let world = fixture.state.config.worlds[0].id;
+        let character = character_of(&fixture.state, fixture.account, NAME).await;
+        let app = game_router(fixture.state.clone());
+        let (status, body) = post(
+            &app,
+            &queue_path(&fixture.session, None),
+            &queue_body(world, character),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let response = reply(&body);
+        let token = response.token.expect("token");
+        assert_eq!(token.character_id, Some(character.to_string()));
+        assert_eq!(
+            token.rep_address,
+            Some(fixture.state.config.rep_address.clone())
+        );
+        let ticket_id = token.ticket_id.clone().expect("ticket");
+        assert!(ticket_id.starts_with(&world.simple().to_string()));
+        let records = fixture
+            .state
+            .queue
+            .update(
+                &QueueSettings::for_world(&fixture.state.config.worlds[0]),
+                fixture.account,
+                QueueAction::Refresh {
+                    ticket_id: ticket_id.clone(),
+                },
+                unix_now_millis(),
+            )
+            .await
+            .expect("refresh");
+        let Some(crate::queue::QueueStatus::Admitted(record)) = records else {
+            panic!("expected an admitted entry");
+        };
+        let signature = token.signature.expect("signature");
+        assert!(verify_entry(
+            &fixture.state.signing_key,
+            &record.claims(),
+            &signature
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_full_world_keeps_others_waiting() {
+        let mut config = valid();
+        config.worlds[0].capacity = ONE_SLOT;
+        let fixture = fixture_with(config).await;
+        let world = fixture.state.config.worlds[0].id;
+        let app = game_router(fixture.state.clone());
+        let first = character_of(&fixture.state, fixture.account, NAME).await;
+        let (status, _) = post(
+            &app,
+            &queue_path(&fixture.session, None),
+            &queue_body(world, first),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (other_session, other_account) = new_session(&fixture.state).await;
+        let second = character_of(&fixture.state, other_account, SECOND_NAME).await;
+        let (status, body) = post(
+            &app,
+            &queue_path(&other_session, None),
+            &queue_body(world, second),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let waiting = reply(&body);
+        assert_eq!(waiting.position, Some(FIRST_IN_LINE));
+        assert!(waiting.token.is_none());
+        let ticket = waiting.ticket_id.expect("ticket");
+        let (status, body) = post(&app, &queue_path(&other_session, Some(&ticket)), "").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reply(&body).ticket_id, Some(ticket.clone()));
+        let (status, body) = post(&app, &queue_path(&fixture.session, Some(&ticket)), "").await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::NOT_FOUND, "unknown_ticket")
+        );
+    }
+
+    #[tokio::test]
+    async fn queue_joins_need_an_own_character() {
+        let fixture = fixture().await;
+        let world = fixture.state.config.worlds[0].id;
+        let app = game_router(fixture.state.clone());
+        let (_, other_account) = new_session(&fixture.state).await;
+        let foreign = character_of(&fixture.state, other_account, NAME).await;
+        let join = queue_path(&fixture.session, None);
+        for character in [foreign, Uuid::new_v4()] {
+            let (status, body) = post(&app, &join, &queue_body(world, character)).await;
+            assert_eq!(
+                (status, error_code(&body).as_str()),
+                (StatusCode::NOT_FOUND, "unknown_character")
+            );
+        }
+        let (status, body) = post(&app, &join, &queue_body(Uuid::new_v4(), foreign)).await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::NOT_FOUND, "unknown_world")
+        );
+        let (status, _) = post(&app, &join, "not json").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = post(
+            &app,
+            &queue_path(OTHER_KEY, None),
+            &queue_body(world, foreign),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, _) = post(&app, &queue_path(&fixture.session, Some("no-world")), "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn queue_requests_are_rate_limited_per_account() {
+        let mut config = valid();
+        config.worlds[0].queue_requests_per_minute = FEW_REQUESTS;
+        let fixture = fixture_with(config).await;
+        let world = fixture.state.config.worlds[0].id;
+        let character = character_of(&fixture.state, fixture.account, NAME).await;
+        let app = game_router(fixture.state.clone());
+        let join = queue_path(&fixture.session, None);
+        for _ in 0..FEW_REQUESTS {
+            let (status, _) = post(&app, &join, &queue_body(world, character)).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let (status, body) = post(&app, &join, &queue_body(world, character)).await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::TOO_MANY_REQUESTS, "rate_limited")
+        );
     }
 }
