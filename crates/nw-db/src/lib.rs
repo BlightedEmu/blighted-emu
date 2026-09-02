@@ -1,50 +1,69 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Account and character records for the preservation server.
+//! PostgreSQL migrations and records (M2 spec sections 5.1 and 7).
 //!
-//! Both tables live in the one PostgreSQL database started by `deploy/`.
-//! The architecture spec also describes one database per world.
-//! This milestone keeps one database. `world_id` is a column on each character.
+//! The global database holds accounts, logins, launcher sessions and the global character name
+//! table. Each world has its own database with its characters. Migrations run only through
+//! `edge-http migrate`; the server checks the schema version at start.
 
 mod account;
 mod character;
 mod error;
-mod limits;
 mod migrate;
-mod password;
+mod session;
 
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_db;
 
-pub use account::{account_by_id, authenticate, create_account};
-pub use character::{character_by_id, characters_for_account, create_character};
-pub use error::DbError;
-pub use limits::{
-    MAX_CHARACTER_NAME_LEN, MAX_PASSWORD_LEN, MAX_USERNAME_LEN, MAX_WORLD_ID_LEN, MIN_PASSWORD_LEN,
+pub use account::{
+    account_by_id, create_password_account, discord_account, password_login, set_banned,
 };
-pub use migrate::migrate;
+pub use character::{
+    character_by_id, characters_for_account, insert_character, release_character_name,
+    reserve_character_name,
+};
+pub use error::DbError;
+pub use migrate::{GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
+pub use session::{create_launcher_session, delete_launcher_session, launcher_session_account};
+pub use sqlx::PgPool;
+pub use uuid::Uuid;
 
-/// An account row. The password hash stays in the database.
+/// An account row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Account {
-    /// Account id. This server generates it.
-    pub id: String,
-    /// Login name.
-    pub username: String,
-    /// Unix time when the row was inserted, in seconds.
+    /// Account id.
+    pub id: Uuid,
+    /// Name shown to other players and in logs.
+    pub display_name: String,
+    /// Unix time of creation, seconds.
+    pub created_at_unix: i64,
+    /// A banned account cannot log in or play.
+    pub banned: bool,
+}
+
+/// A character row in one world database.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Character {
+    /// Character id.
+    pub id: Uuid,
+    /// Owning account id (global database).
+    pub account_id: Uuid,
+    /// Name as the player typed it.
+    pub name: String,
+    /// The client's create request body, stored as received.
+    pub appearance: serde_json::Value,
+    /// Unix time of creation, seconds.
     pub created_at_unix: i64,
 }
 
-/// A character row in one world.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Character {
-    /// Character id. This server generates it.
-    pub id: String,
+/// A character to insert.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewCharacter {
+    /// New character id.
+    pub id: Uuid,
     /// Owning account id.
-    pub account_id: String,
-    /// World that holds the character.
-    pub world_id: String,
-    /// Display name. Unique inside one world.
+    pub account_id: Uuid,
+    /// Name as the player typed it.
     pub name: String,
-    /// Unix time when the row was inserted, in seconds.
-    pub created_at_unix: i64,
+    /// The client's create request body.
+    pub appearance: serde_json::Value,
 }

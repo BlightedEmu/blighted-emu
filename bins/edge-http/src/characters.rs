@@ -3,7 +3,7 @@
 
 use sqlx::PgPool;
 
-use nw_db::{DbError, character_by_id};
+use nw_db::{DbError, Uuid, character_by_id};
 
 /// The character store could not answer.
 #[derive(Debug, thiserror::Error)]
@@ -23,24 +23,27 @@ pub(crate) trait CharacterLookup: Clone + Send + Sync + 'static {
     ) -> impl std::future::Future<Output = Result<bool, LookupError>> + Send;
 }
 
-/// PostgreSQL character records.
+/// PostgreSQL character records of the one configured world database.
 #[derive(Clone)]
 pub(crate) struct PgCharacters {
     pool: PgPool,
 }
 
 impl PgCharacters {
-    /// Uses the migrated pool.
+    /// Uses the migrated world pool.
     pub(crate) fn new(pool: PgPool) -> Self {
         Self { pool }
     }
 }
 
 impl CharacterLookup for PgCharacters {
-    async fn exists(&self, world_id: &str, character_id: &str) -> Result<bool, LookupError> {
-        match character_by_id(&self.pool, character_id).await {
-            Ok(Some(character)) => Ok(character.world_id == world_id),
-            Ok(None) => Ok(false),
+    /// The pool is the database of the configured world, so a row in it belongs to that world.
+    async fn exists(&self, _world_id: &str, character_id: &str) -> Result<bool, LookupError> {
+        let Ok(id) = Uuid::parse_str(character_id) else {
+            return Ok(false);
+        };
+        match character_by_id(&self.pool, id).await {
+            Ok(found) => Ok(found.is_some()),
             Err(cause) => Err(LookupError { cause }),
         }
     }
@@ -50,31 +53,36 @@ impl CharacterLookup for PgCharacters {
 mod tests {
     use super::*;
     use nw_db::test_db::with_test_schema;
-    use nw_db::{create_account, create_character, migrate};
+    use nw_db::{NewCharacter, WORLD_MIGRATOR, insert_character};
 
-    const USERNAME: &str = "ada";
-    const PASSWORD: &str = "password-ok";
     const WORLD: &str = "world-1";
-    const NAME: &str = "Ada";
 
     #[tokio::test]
-    async fn lookup_matches_the_character_world() {
+    async fn lookup_finds_world_rows_only() {
         let found = with_test_schema(async |pool| {
-            migrate(pool).await.expect("migrate");
-            let account = create_account(pool, USERNAME, PASSWORD)
-                .await
-                .expect("account");
-            let character = create_character(pool, &account.id, WORLD, NAME)
-                .await
-                .expect("character");
+            WORLD_MIGRATOR.run(pool).await.expect("migrate");
+            let character = insert_character(
+                pool,
+                &NewCharacter {
+                    id: Uuid::new_v4(),
+                    account_id: Uuid::new_v4(),
+                    name: "Ada".to_owned(),
+                    appearance: serde_json::json!({}),
+                },
+            )
+            .await
+            .expect("character");
             let lookup = PgCharacters::new(pool.clone());
-            let same = lookup.exists(WORLD, &character.id).await.expect("same");
-            let other = lookup
-                .exists("world-2", &character.id)
+            let same = lookup
+                .exists(WORLD, &character.id.to_string())
                 .await
-                .expect("other");
-            let missing = lookup.exists(WORLD, "missing").await.expect("missing");
-            (same, other, missing)
+                .expect("same");
+            let missing = lookup
+                .exists(WORLD, &Uuid::new_v4().to_string())
+                .await
+                .expect("missing");
+            let not_uuid = lookup.exists(WORLD, "missing").await.expect("not uuid");
+            (same, missing, not_uuid)
         })
         .await;
         assert!(found.0);

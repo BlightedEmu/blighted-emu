@@ -1,108 +1,83 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Applies the account and character tables.
+//! Embedded `sqlx` migrations. `Migrator::run` takes a PostgreSQL advisory lock, so two copies
+//! of `edge-http migrate` never run the same DDL at once (review finding I5).
 
 use sqlx::PgPool;
+use sqlx::migrate::Migrator;
 
-use crate::error::{DbError, database};
+use crate::error::DbError;
 
-const MIGRATION_VERSION: &str = "001_accounts_and_characters";
-const MIGRATION_SQL: &str = include_str!("../sql/001_accounts_and_characters.sql");
-const POSTGRES_UNIQUE_VIOLATION: &str = "23505";
+/// Migrations of the global database.
+pub static GLOBAL_MIGRATOR: Migrator = sqlx::migrate!("./migrations/global");
 
-/// Creates the account and character tables when this version is not recorded yet.
-pub async fn migrate(pool: &PgPool) -> Result<(), DbError> {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS nw_schema_migration (
-            version TEXT PRIMARY KEY,
-            applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )",
-    )
-    .execute(pool)
-    .await
-    .map_err(database)?;
+/// Migrations of every world database.
+pub static WORLD_MIGRATOR: Migrator = sqlx::migrate!("./migrations/world");
 
-    let applied: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM nw_schema_migration WHERE version = $1)")
-            .bind(MIGRATION_VERSION)
+/// Migration version when no migration has run.
+const NO_MIGRATION: i64 = 0;
+
+/// Fails unless every migration of `migrator` is applied to `pool`.
+pub async fn check_schema(pool: &PgPool, migrator: &Migrator) -> Result<(), DbError> {
+    let expected = migrator
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .unwrap_or(NO_MIGRATION);
+    let table_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
             .fetch_one(pool)
-            .await
-            .map_err(database)?;
-    if applied {
-        return Ok(());
+            .await?;
+    let found = if table_exists {
+        sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT MAX(version) FROM _sqlx_migrations WHERE success",
+        )
+        .fetch_one(pool)
+        .await?
+        .unwrap_or(NO_MIGRATION)
+    } else {
+        NO_MIGRATION
+    };
+    if found == expected {
+        Ok(())
+    } else {
+        Err(DbError::SchemaNotCurrent { expected, found })
     }
-
-    let mut tx = pool.begin().await.map_err(database)?;
-    for statement in statements(MIGRATION_SQL) {
-        // The statement text is the embedded migration file, split on `;`.
-        // It does not contain request data.
-        sqlx::query(sqlx::AssertSqlSafe(statement.as_str()))
-            .execute(&mut *tx)
-            .await
-            .map_err(database)?;
-    }
-    sqlx::query(
-        "INSERT INTO nw_schema_migration (version) VALUES ($1)
-         ON CONFLICT (version) DO NOTHING",
-    )
-    .bind(MIGRATION_VERSION)
-    .execute(&mut *tx)
-    .await
-    .map_err(database)?;
-    tx.commit().await.map_err(database)?;
-    Ok(())
 }
 
-fn statements(sql: &str) -> Vec<String> {
-    sql.split(';')
-        .filter_map(|part| {
-            let statement: String = part
-                .lines()
-                .filter(|line| !line.trim().starts_with("--"))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let statement = statement.trim().to_owned();
-            if statement.is_empty() {
-                None
-            } else {
-                Some(statement)
-            }
-        })
-        .collect()
-}
-
-pub(crate) fn is_unique_violation(error: &DbError, constraint: &str) -> bool {
-    let DbError::Database(sql) = error else {
-        return false;
-    };
-    let Some(database_error) = sql.as_database_error() else {
-        return false;
-    };
-    database_error.code().as_deref() == Some(POSTGRES_UNIQUE_VIOLATION)
-        && database_error.constraint() == Some(constraint)
-}
-
-pub(crate) fn is_foreign_key_violation(error: &DbError, constraint: &str) -> bool {
-    const POSTGRES_FOREIGN_KEY_VIOLATION: &str = "23503";
-    let DbError::Database(sql) = error else {
-        return false;
-    };
-    let Some(database_error) = sql.as_database_error() else {
-        return false;
-    };
-    database_error.code().as_deref() == Some(POSTGRES_FOREIGN_KEY_VIOLATION)
-        && database_error.constraint() == Some(constraint)
-}
-
-#[cfg(test)]
+#[cfg(all(test, feature = "infra"))]
 mod tests {
     use super::*;
+    use crate::test_db::with_test_schema;
 
-    #[test]
-    fn migration_text_has_both_tables() {
-        let found = statements(MIGRATION_SQL);
-        assert_eq!(found.len(), 3);
-        assert!(found[0].contains("login_account"));
-        assert!(found[1].contains("player_character"));
-        assert!(found[2].contains("player_character_account_world_idx"));
+    #[tokio::test]
+    async fn schema_check_fails_before_and_passes_after_migration() {
+        let (before, after, again) = with_test_schema(async |pool| {
+            let before = check_schema(pool, &GLOBAL_MIGRATOR).await;
+            GLOBAL_MIGRATOR.run(pool).await.expect("migrate");
+            let after = check_schema(pool, &GLOBAL_MIGRATOR).await;
+            GLOBAL_MIGRATOR.run(pool).await.expect("migrate again");
+            let again = check_schema(pool, &GLOBAL_MIGRATOR).await;
+            (before, after, again)
+        })
+        .await;
+        assert!(matches!(
+            before,
+            Err(DbError::SchemaNotCurrent {
+                found: NO_MIGRATION,
+                ..
+            })
+        ));
+        assert!(after.is_ok());
+        assert!(again.is_ok());
+    }
+
+    #[tokio::test]
+    async fn world_schema_is_separate() {
+        let result = with_test_schema(async |pool| {
+            WORLD_MIGRATOR.run(pool).await.expect("migrate world");
+            check_schema(pool, &WORLD_MIGRATOR).await
+        })
+        .await;
+        assert!(result.is_ok());
     }
 }

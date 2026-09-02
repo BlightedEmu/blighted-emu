@@ -1,16 +1,15 @@
 [package]
 name = "nw-db"
 version = "0.1.0"
-description = "PostgreSQL account and character records for the preservation server."
+description = "PostgreSQL migrations and records for accounts, launcher sessions and characters."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
 [dependencies]
-argon2.workspace = true
-getrandom.workspace = true
-sqlx.workspace = true
+serde_json.workspace = true
+sqlx = { workspace = true, features = ["migrate", "macros", "uuid", "json"] }
 thiserror.workspace = true
 uuid.workspace = true
 
@@ -18,8 +17,10 @@ uuid.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [features]
-# Shared database fixture for crate tests. Not enabled by the edge-http release build.
+# Database fixture for tests in this and other crates.
 test-util = []
+# Tests that need the Docker Compose PostgreSQL (`just test-infra`).
+infra = ["test-util"]
 
 [lints]
 workspace = true

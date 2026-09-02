@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! A private schema on the Docker PostgreSQL database for tests.
+//! A private schema on the Docker PostgreSQL database for tests (`infra` feature).
 //!
 //! The schema is created in the database named by `deploy/.env` and dropped
 //! when the test body returns.

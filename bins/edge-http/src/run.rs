@@ -11,7 +11,7 @@ use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use nw_common::logging::{LoggingError, init_logging};
-use nw_db::migrate;
+use nw_db::WORLD_MIGRATOR;
 use nw_edge_config::server::{EdgeConfigError, load_edge_config};
 use sqlx::postgres::PgPoolOptions;
 
@@ -83,7 +83,7 @@ async fn serve(
         .connect(&login.database_url)
         .await
         .map_err(database_error)?;
-    migrate(&pool).await.map_err(database_error)?;
+    WORLD_MIGRATOR.run(&pool).await.map_err(database_error)?;
     let queue = ValkeyQueue::connect(
         &login.valkey_url,
         PRODUCTION_KEY_PREFIX,

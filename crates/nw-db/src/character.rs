@@ -1,224 +1,169 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Character rows in the global PostgreSQL database.
+//! Character names (global database) and characters (world databases), M2 spec section 7.
+//! `nw-login` checks names, reserves the name first, then inserts the world row, and releases
+//! the name when the insert fails.
 
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::Character;
-use crate::error::{DbError, database};
-use crate::limits::{MAX_CHARACTER_NAME_LEN, MAX_WORLD_ID_LEN};
-use crate::migrate::{is_foreign_key_violation, is_unique_violation};
+use crate::error::{DbError, is_unique_violation};
+use crate::{Character, NewCharacter};
 
-const NAME_CONSTRAINT: &str = "player_character_world_name_unique";
-const ACCOUNT_FK: &str = "player_character_account_fk";
+const CHARACTER_NAME_PKEY: &str = "character_name_pkey";
 
-/// Inserts a character for an account that already exists.
-pub async fn create_character(
-    pool: &PgPool,
-    account_id: &str,
-    world_id: &str,
+type CharacterRow = (Uuid, Uuid, String, serde_json::Value, i64);
+
+const CHARACTER_COLUMNS: &str = "character_id, account_id, name, appearance, \
+     CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT)";
+
+fn character_from_row(
+    (id, account_id, name, appearance, created_at_unix): CharacterRow,
+) -> Character {
+    Character {
+        id,
+        account_id,
+        name,
+        appearance,
+        created_at_unix,
+    }
+}
+
+/// Reserves `name` (compared in lower case) for a character in `world_id`.
+pub async fn reserve_character_name(
+    global: &PgPool,
     name: &str,
-) -> Result<Character, DbError> {
-    let world_id = check_world_id(world_id)?;
-    let name = check_name(name)?;
-    let id = Uuid::new_v4().to_string();
-    let inserted = insert_character(pool, &id, account_id, &world_id, &name).await;
+    world_id: Uuid,
+    character_id: Uuid,
+) -> Result<(), DbError> {
+    let inserted = sqlx::query(
+        "INSERT INTO character_name (name_key, world_id, character_id) VALUES ($1, $2, $3)",
+    )
+    .bind(name.to_lowercase())
+    .bind(world_id)
+    .bind(character_id)
+    .execute(global)
+    .await;
     match inserted {
-        Ok(character) => Ok(character),
-        Err(error) if is_unique_violation(&error, NAME_CONSTRAINT) => {
+        Ok(_) => Ok(()),
+        Err(error) if is_unique_violation(&error, CHARACTER_NAME_PKEY) => {
             Err(DbError::DuplicateCharacterName)
         }
-        Err(error) if is_foreign_key_violation(&error, ACCOUNT_FK) => Err(DbError::UnknownAccount),
-        Err(error) => Err(error),
+        Err(error) => Err(error.into()),
     }
 }
 
-/// Loads one character by id.
-pub async fn character_by_id(
-    pool: &PgPool,
-    character_id: &str,
-) -> Result<Option<Character>, DbError> {
-    let row = fetch_optional(
-        pool,
-        "SELECT character_id, account_id, world_id, name,
-                CAST(EXTRACT(EPOCH FROM created_at) AS bigint)
-         FROM player_character
-         WHERE character_id = $1",
-        character_id,
-    )
+/// Frees the name of a character.
+pub async fn release_character_name(global: &PgPool, character_id: Uuid) -> Result<(), DbError> {
+    sqlx::query("DELETE FROM character_name WHERE character_id = $1")
+        .bind(character_id)
+        .execute(global)
+        .await?;
+    Ok(())
+}
+
+/// Inserts a character into a world database.
+pub async fn insert_character(world: &PgPool, new: &NewCharacter) -> Result<Character, DbError> {
+    let row: CharacterRow = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "INSERT INTO player_character (character_id, account_id, name, appearance) \
+         VALUES ($1, $2, $3, $4) RETURNING {CHARACTER_COLUMNS}"
+    )))
+    .bind(new.id)
+    .bind(new.account_id)
+    .bind(&new.name)
+    .bind(&new.appearance)
+    .fetch_one(world)
     .await?;
-    Ok(row)
-}
-
-/// Lists characters for one account in one world, oldest first.
-pub async fn characters_for_account(
-    pool: &PgPool,
-    account_id: &str,
-    world_id: &str,
-) -> Result<Vec<Character>, DbError> {
-    let rows: Vec<(String, String, String, String, i64)> = sqlx::query_as(
-        "SELECT character_id, account_id, world_id, name,
-                CAST(EXTRACT(EPOCH FROM created_at) AS bigint)
-         FROM player_character
-         WHERE account_id = $1 AND world_id = $2
-         ORDER BY created_at, character_id",
-    )
-    .bind(account_id)
-    .bind(world_id)
-    .fetch_all(pool)
-    .await
-    .map_err(database)?;
-    Ok(rows.into_iter().map(character_from_row).collect())
-}
-
-pub(crate) fn check_world_id(world_id: &str) -> Result<String, DbError> {
-    if world_id.is_empty() || world_id.trim().is_empty() {
-        return Err(DbError::EmptyWorldId);
-    }
-    if world_id.len() > MAX_WORLD_ID_LEN {
-        return Err(DbError::WorldIdTooLong);
-    }
-    if world_id
-        .chars()
-        .any(|character| character.is_whitespace() || character.is_control())
-    {
-        return Err(DbError::WorldIdInvalid);
-    }
-    Ok(world_id.to_owned())
-}
-
-pub(crate) fn check_name(name: &str) -> Result<String, DbError> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err(DbError::EmptyCharacterName);
-    }
-    if name.len() > MAX_CHARACTER_NAME_LEN {
-        return Err(DbError::CharacterNameTooLong);
-    }
-    if name.chars().any(char::is_control) {
-        return Err(DbError::CharacterNameInvalid);
-    }
-    Ok(name.to_owned())
-}
-
-async fn insert_character(
-    pool: &PgPool,
-    character_id: &str,
-    account_id: &str,
-    world_id: &str,
-    name: &str,
-) -> Result<Character, DbError> {
-    let row: (String, String, String, String, i64) = sqlx::query_as(
-        "INSERT INTO player_character (character_id, account_id, world_id, name)
-         VALUES ($1, $2, $3, $4)
-         RETURNING character_id, account_id, world_id, name,
-                   CAST(EXTRACT(EPOCH FROM created_at) AS bigint)",
-    )
-    .bind(character_id)
-    .bind(account_id)
-    .bind(world_id)
-    .bind(name)
-    .fetch_one(pool)
-    .await
-    .map_err(database)?;
     Ok(character_from_row(row))
 }
 
-async fn fetch_optional(
-    pool: &PgPool,
-    sql: &'static str,
-    character_id: &str,
+/// The characters of one account in one world, oldest first.
+pub async fn characters_for_account(
+    world: &PgPool,
+    account_id: Uuid,
+) -> Result<Vec<Character>, DbError> {
+    let rows: Vec<CharacterRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {CHARACTER_COLUMNS} FROM player_character \
+         WHERE account_id = $1 ORDER BY created_at, character_id"
+    )))
+    .bind(account_id)
+    .fetch_all(world)
+    .await?;
+    Ok(rows.into_iter().map(character_from_row).collect())
+}
+
+/// One character of a world database.
+pub async fn character_by_id(
+    world: &PgPool,
+    character_id: Uuid,
 ) -> Result<Option<Character>, DbError> {
-    let row: Option<(String, String, String, String, i64)> = sqlx::query_as(sql)
-        .bind(character_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(database)?;
+    let row: Option<CharacterRow> = sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "SELECT {CHARACTER_COLUMNS} FROM player_character WHERE character_id = $1"
+    )))
+    .bind(character_id)
+    .fetch_optional(world)
+    .await?;
     Ok(row.map(character_from_row))
 }
 
-fn character_from_row(row: (String, String, String, String, i64)) -> Character {
-    Character {
-        id: row.0,
-        account_id: row.1,
-        world_id: row.2,
-        name: row.3,
-        created_at_unix: row.4,
-    }
-}
-
-#[cfg(test)]
+#[cfg(all(test, feature = "infra"))]
 mod tests {
     use super::*;
-    use crate::account::create_account;
-    use crate::migrate::migrate;
+    use crate::migrate::{GLOBAL_MIGRATOR, WORLD_MIGRATOR};
     use crate::test_db::with_test_schema;
 
-    const USERNAME: &str = "ada";
-    const PASSWORD: &str = "password-ok";
-    const WORLD_ID: &str = "world-1";
-    const OTHER_WORLD: &str = "world-2";
     const NAME: &str = "Ada";
 
-    #[test]
-    fn rejects_blank_name_and_world() {
-        assert!(matches!(
-            check_name("   "),
-            Err(DbError::EmptyCharacterName)
-        ));
-        assert!(matches!(check_world_id(""), Err(DbError::EmptyWorldId)));
-        assert!(matches!(
-            check_world_id("world 1"),
-            Err(DbError::WorldIdInvalid)
-        ));
+    fn new_character(account_id: Uuid) -> NewCharacter {
+        NewCharacter {
+            id: Uuid::new_v4(),
+            account_id,
+            name: NAME.to_owned(),
+            appearance: serde_json::json!({"face": 3}),
+        }
     }
 
     #[tokio::test]
-    async fn stores_a_character_and_lists_it() {
-        let found = with_test_schema(async |pool| {
-            migrate(pool).await.expect("migrate");
-            let account = create_account(pool, USERNAME, PASSWORD)
-                .await
-                .expect("account");
-            let character = create_character(pool, &account.id, WORLD_ID, "  Ada  ")
-                .await
-                .expect("character");
-            let loaded = character_by_id(pool, &character.id)
-                .await
-                .expect("load")
-                .expect("row");
-            let listed = characters_for_account(pool, &account.id, WORLD_ID)
-                .await
-                .expect("list");
-            let missing = character_by_id(pool, "missing").await.expect("missing");
-            (character, loaded, listed, missing)
+    async fn names_are_unique_over_worlds_and_case() {
+        let (first, other_world, other_case, after_release) = with_test_schema(async |pool| {
+            GLOBAL_MIGRATOR.run(pool).await.expect("migrate");
+            let id = Uuid::new_v4();
+            let first = reserve_character_name(pool, NAME, Uuid::new_v4(), id).await;
+            let other_world =
+                reserve_character_name(pool, NAME, Uuid::new_v4(), Uuid::new_v4()).await;
+            let other_case =
+                reserve_character_name(pool, "ADA", Uuid::new_v4(), Uuid::new_v4()).await;
+            release_character_name(pool, id).await.expect("release");
+            let after_release =
+                reserve_character_name(pool, NAME, Uuid::new_v4(), Uuid::new_v4()).await;
+            (first, other_world, other_case, after_release)
         })
         .await;
-        let (character, loaded, listed, missing) = found;
-        assert_eq!(loaded, character);
-        assert_eq!(character.name, NAME);
-        assert_eq!(listed, vec![character]);
-        assert!(missing.is_none());
+        assert!(first.is_ok());
+        assert!(matches!(other_world, Err(DbError::DuplicateCharacterName)));
+        assert!(matches!(other_case, Err(DbError::DuplicateCharacterName)));
+        assert!(after_release.is_ok());
     }
 
     #[tokio::test]
-    async fn name_is_unique_per_world_and_account_must_exist() {
-        let errors = with_test_schema(async |pool| {
-            migrate(pool).await.expect("migrate");
-            let account = create_account(pool, USERNAME, PASSWORD)
+    async fn characters_are_listed_per_account() {
+        let (inserted, listed, other, loaded) = with_test_schema(async |pool| {
+            WORLD_MIGRATOR.run(pool).await.expect("migrate");
+            let account = Uuid::new_v4();
+            let inserted = insert_character(pool, &new_character(account))
                 .await
-                .expect("account");
-            create_character(pool, &account.id, WORLD_ID, NAME)
+                .expect("insert");
+            let listed = characters_for_account(pool, account).await.expect("list");
+            let other = characters_for_account(pool, Uuid::new_v4())
                 .await
-                .expect("first");
-            let duplicate = create_character(pool, &account.id, WORLD_ID, NAME).await;
-            let other_world = create_character(pool, &account.id, OTHER_WORLD, NAME).await;
-            let unknown = create_character(pool, "missing-account", WORLD_ID, "Bea").await;
-            (duplicate, other_world, unknown)
+                .expect("other");
+            let loaded = character_by_id(pool, inserted.id).await.expect("load");
+            (inserted, listed, other, loaded)
         })
         .await;
-        assert!(matches!(errors.0, Err(DbError::DuplicateCharacterName)));
-        assert!(errors.1.is_ok());
-        assert!(matches!(errors.2, Err(DbError::UnknownAccount)));
+        assert_eq!(inserted.name, NAME);
+        assert_eq!(inserted.appearance, serde_json::json!({"face": 3}));
+        assert_eq!(listed, vec![inserted.clone()]);
+        assert!(other.is_empty());
+        assert_eq!(loaded, Some(inserted));
     }
 }
