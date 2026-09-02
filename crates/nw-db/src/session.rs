@@ -8,13 +8,17 @@ use crate::Account;
 use crate::account::account_by_id;
 use crate::error::DbError;
 
-/// Stores a launcher session that ends at `expires_at_unix` (seconds).
+/// Stores a launcher session that ends at `expires_at_unix` (seconds). Expired sessions are
+/// deleted first, so the table does not grow with logins (index `launcher_session_expires_at_idx`).
 pub async fn create_launcher_session(
     pool: &PgPool,
     token_hash: &[u8],
     account_id: Uuid,
     expires_at_unix: i64,
 ) -> Result<(), DbError> {
+    sqlx::query("DELETE FROM launcher_session WHERE expires_at <= now()")
+        .execute(pool)
+        .await?;
     sqlx::query(
         "INSERT INTO launcher_session (token_hash, account_id, expires_at) \
          VALUES ($1, $2, to_timestamp($3))",
@@ -94,5 +98,30 @@ mod tests {
         assert_eq!(live, Some(account));
         assert!(expired.is_none());
         assert!(deleted.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_new_session_deletes_expired_ones() {
+        let rows = with_test_schema(async |pool| {
+            GLOBAL_MIGRATOR.run(pool).await.expect("migrate");
+            let account = create_password_account(pool, "ada", "hash")
+                .await
+                .expect("account");
+            create_launcher_session(pool, &HASH_B, account.id, PAST)
+                .await
+                .expect("expired");
+            create_launcher_session(pool, &HASH_A, account.id, FAR_FUTURE)
+                .await
+                .expect("live");
+            let rows: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM launcher_session WHERE token_hash = $1")
+                    .bind(HASH_B.as_slice())
+                    .fetch_one(pool)
+                    .await
+                    .expect("count");
+            rows
+        })
+        .await;
+        assert_eq!(rows, 0);
     }
 }
