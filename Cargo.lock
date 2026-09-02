@@ -1417,13 +1417,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nw-carrier"
-version = "0.1.0"
-dependencies = [
- "thiserror",
-]
-
-[[package]]
 name = "nw-common"
 version = "0.1.0"
 dependencies = [
