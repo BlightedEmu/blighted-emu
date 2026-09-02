@@ -3,9 +3,11 @@
 //! `{"code": "...", "message": "..."}` and a status code.
 
 use axum::Json;
+use axum::body::Bytes;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use nw_protocol::launcher_api::ErrorBody;
+use serde::de::DeserializeOwned;
 
 use crate::names::NameError;
 use crate::store::StoreError;
@@ -40,6 +42,9 @@ pub enum ApiError {
     /// The character name is taken.
     #[error("that character name is taken")]
     CharacterNameTaken,
+    /// The account has the most characters a world allows.
+    #[error("you have the most characters this world allows")]
+    CharacterLimit,
     /// No world with that id.
     #[error("unknown world")]
     UnknownWorld,
@@ -70,7 +75,9 @@ impl ApiError {
             Self::WrongMode | Self::UnknownLogin | Self::UnknownWorld | Self::UnknownRoute => {
                 StatusCode::NOT_FOUND
             }
-            Self::UsernameTaken | Self::CharacterNameTaken => StatusCode::CONFLICT,
+            Self::UsernameTaken | Self::CharacterNameTaken | Self::CharacterLimit => {
+                StatusCode::CONFLICT
+            }
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::Discord => StatusCode::BAD_GATEWAY,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
@@ -91,6 +98,7 @@ impl ApiError {
             Self::WrongMode => "wrong_mode",
             Self::UsernameTaken => "username_taken",
             Self::CharacterNameTaken => "character_name_taken",
+            Self::CharacterLimit => "character_limit",
             Self::UnknownWorld => "unknown_world",
             Self::UnknownRoute => "unknown_route",
             Self::RateLimited => "rate_limited",
@@ -99,6 +107,11 @@ impl ApiError {
             Self::Unavailable => "unavailable",
         }
     }
+}
+
+/// Parses a JSON request body; a body that does not parse is [`ApiError::BadRequest`].
+pub(crate) fn parse_json<T: DeserializeOwned>(body: &Bytes) -> Result<T, ApiError> {
+    serde_json::from_slice(body).map_err(|_| ApiError::BadRequest)
 }
 
 impl From<StoreError> for ApiError {
@@ -141,6 +154,7 @@ mod tests {
             ApiError::WrongMode,
             ApiError::UsernameTaken,
             ApiError::CharacterNameTaken,
+            ApiError::CharacterLimit,
             ApiError::UnknownWorld,
             ApiError::UnknownRoute,
             ApiError::RateLimited,

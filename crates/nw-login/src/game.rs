@@ -6,28 +6,32 @@
 //! path form (JSON note section 7), so the client calls
 //! `https://game.<domain>/s/<session>/Prod/steam` and
 //! `https://game.<domain>/s/<session>/prod/game/...`. Every route checks the session. The Steam
-//! tickets in the request bodies are never read.
+//! tickets in the request bodies are never stored or trusted.
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{Method, Uri};
 use axum::routing::{any, get, post};
 use axum::{Json, Router};
-use nw_db::Character;
+use nw_db::{Character, NewCharacter};
 use nw_protocol::game_api::{
-    AUTH_STACK_STAGE, AUTH_STACK_TAG, ChannelDocument, CharacterSummary, Cluster, GATEWAY_STAGE,
-    GET_LOGIN_INFO_PATH, HTTP_GATEWAY_TAG, LIST_WORLDS_PATH, LOGIN_GATEWAY_TAG, ListWorldsBody,
-    ListWorldsReply, LoginInfoList, LoginInfoReply, NameRecord, OMNI_METADATA_MARK, OmniAccount,
-    OmniMetadata, OmniPlatformAccount, OmniTokenReply, PUBLIC_STATUS_OPEN, PublicApi,
-    STEAM_AUTH_PATH, SteamAuthReply, WORLD_STATUS_ACTIVE, WorldModel,
+    AUTH_STACK_STAGE, AUTH_STACK_TAG, CHARACTERS_SEGMENT, ChannelDocument, CharacterSummary,
+    Cluster, CreateCharacterReply, CreateCharacterRequestBody, GATEWAY_STAGE, GET_LOGIN_INFO_PATH,
+    HTTP_GATEWAY_TAG, LIST_WORLDS_PATH, LOGIN_GATEWAY_TAG, ListWorldsBody, ListWorldsReply,
+    LoginInfoList, LoginInfoReply, NameRecord, OMNI_METADATA_MARK, OmniAccount, OmniMetadata,
+    OmniPlatformAccount, OmniTokenReply, PUBLIC_STATUS_OPEN, PublicApi, STEAM_AUTH_PATH,
+    SteamAuthReply, VALIDATOR_SEGMENT, ValidateCharacterRequest, WORLD_STATUS_ACTIVE, WORLDS_PATH,
+    WorldModel,
 };
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::config::{EdgeConfig, WorldConfig};
-use crate::error::ApiError;
+use crate::error::{ApiError, parse_json};
 use crate::keys::is_game_session_key;
+use crate::names::check_character_name;
 use crate::store::{CharacterStore, GameSessionStore};
 use crate::time::{http_date, unix_now};
 
@@ -56,6 +60,8 @@ const STEAM_PLATFORM: &str = "steam";
 /// Text shown in logs in place of a game session key.
 const SESSION_MASK: &str = "<session>";
 const PATH_SEPARATOR: char = '/';
+/// Largest game request body. The character create body is stored (M2 spec section 7).
+pub const GAME_BODY_LIMIT_BYTES: usize = 64 * 1024;
 
 /// Everything the game routes need.
 #[derive(Clone)]
@@ -72,6 +78,13 @@ pub struct GameState<G, C> {
 #[derive(Debug, Deserialize)]
 struct SessionPath {
     session: String,
+}
+
+/// Path parameters of a character route.
+#[derive(Debug, Deserialize)]
+struct WorldPath {
+    session: String,
+    world_id: String,
 }
 
 /// `/s/{session}<rest>` as an `axum` route.
@@ -108,6 +121,15 @@ where
             &gateway_route(LIST_WORLDS_PATH),
             get(list_worlds::<G, C>).post(list_worlds::<G, C>),
         )
+        .route(
+            &gateway_route(&format!("{WORLDS_PATH}/{{world_id}}{CHARACTERS_SEGMENT}")),
+            post(create_character::<G, C>),
+        )
+        .route(
+            &gateway_route(&format!("{WORLDS_PATH}/{{world_id}}{VALIDATOR_SEGMENT}")),
+            post(validate_character::<G, C>),
+        )
+        .layer(DefaultBodyLimit::max(GAME_BODY_LIMIT_BYTES))
         .fallback(unknown_route)
         .with_state(state)
 }
@@ -333,6 +355,77 @@ where
     }))
 }
 
+/// The configured world of a path's world id.
+fn configured_world<'a>(
+    config: &'a EdgeConfig,
+    world_id: &str,
+) -> Result<&'a WorldConfig, ApiError> {
+    Uuid::parse_str(world_id)
+        .ok()
+        .and_then(|id| config.world(id))
+        .ok_or(ApiError::UnknownWorld)
+}
+
+async fn create_character<G, C>(
+    State(state): State<GameState<G, C>>,
+    Path(path): Path<WorldPath>,
+    body: Bytes,
+) -> Result<Json<CreateCharacterReply>, ApiError>
+where
+    G: GameSessionStore,
+    C: CharacterStore,
+{
+    let account = session_account(&state, &path.session).await?;
+    let world = configured_world(&state.config, &path.world_id)?;
+    let body: CreateCharacterRequestBody = parse_json(&body)?;
+    let mut request = body.create_character_request.ok_or(ApiError::BadRequest)?;
+    let name = request.name.clone().ok_or(ApiError::BadRequest)?;
+    check_character_name(&name)?;
+    let owned = state.characters.characters(world.id, account).await?.len();
+    let limit = usize::try_from(world.max_characters_per_account).unwrap_or(usize::MAX);
+    if owned >= limit {
+        return Err(ApiError::CharacterLimit);
+    }
+    // The stored request keeps everything but the Steam ticket.
+    request.steam_auth_ticket = None;
+    let appearance = serde_json::to_value(&request).map_err(|_| ApiError::BadRequest)?;
+    let new = NewCharacter {
+        id: Uuid::new_v4(),
+        account_id: account,
+        name,
+        appearance,
+    };
+    let character = state.characters.create(world.id, &new).await?;
+    Ok(Json(CreateCharacterReply {
+        character: character_summary(world.id, &character),
+    }))
+}
+
+/// Checks a name. The reply body model is Unknown (JSON note section 5.4), so a free name gets an
+/// empty JSON object and a refused name gets an error status.
+async fn validate_character<G, C>(
+    State(state): State<GameState<G, C>>,
+    Path(path): Path<WorldPath>,
+    body: Bytes,
+) -> Result<Json<serde_json::Map<String, serde_json::Value>>, ApiError>
+where
+    G: GameSessionStore,
+    C: CharacterStore,
+{
+    session_account(&state, &path.session).await?;
+    configured_world(&state.config, &path.world_id)?;
+    let request: ValidateCharacterRequest = parse_json(&body)?;
+    let name = request
+        .validate_character_body
+        .and_then(|body| body.name)
+        .ok_or(ApiError::BadRequest)?;
+    check_character_name(&name)?;
+    if state.characters.name_taken(&name).await? {
+        return Err(ApiError::CharacterNameTaken);
+    }
+    Ok(Json(serde_json::Map::new()))
+}
+
 /// `path` with every game session key replaced by [`SESSION_MASK`].
 pub fn masked_path(path: &str) -> String {
     path.split(PATH_SEPARATOR)
@@ -368,6 +461,11 @@ mod tests {
     const CLAIM_SECONDS: u64 = 600;
     const GMT_SUFFIX: &str = " GMT";
     const NAME: &str = "Ada";
+    const SECOND_NAME: &str = "Bea";
+    const THIRD_NAME: &str = "Cid";
+    const STEAM_TICKET: &str = "ticket";
+    /// `max_characters_per_account` of the test configuration.
+    const TEST_CHARACTER_LIMIT: u32 = 2;
     const OTHER_KEY: &str = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst";
 
     struct Fixture {
@@ -404,6 +502,30 @@ mod tests {
 
     async fn call(app: &Router, method: &str, uri: &str) -> (StatusCode, Bytes) {
         test_http::send(app, test_http::request(method, uri, "")).await
+    }
+
+    async fn post(app: &Router, uri: &str, body: &str) -> (StatusCode, Bytes) {
+        test_http::send(app, test_http::request("POST", uri, body)).await
+    }
+
+    fn character_path(session: &str, world: &str, segment: &str) -> String {
+        game_path(
+            session,
+            &format!("{GATEWAY_STAGE}{WORLDS_PATH}/{world}{segment}"),
+        )
+    }
+
+    fn create_body(name: &str) -> String {
+        serde_json::json!({"CreateCharacterRequest": {
+            "Name": name,
+            "CharacterCreationParams": "{}",
+            "SteamAuthTicket": STEAM_TICKET,
+        }})
+        .to_string()
+    }
+
+    fn validate_body(name: &str) -> String {
+        serde_json::json!({"ValidateCharacterBody": {"Name": name}}).to_string()
     }
 
     #[test]
@@ -570,5 +692,105 @@ mod tests {
             (status, error_code(&body).as_str()),
             (StatusCode::NOT_FOUND, "unknown_route")
         );
+    }
+
+    #[tokio::test]
+    async fn characters_are_created_once_per_name() {
+        let fixture = fixture().await;
+        let world = fixture.state.config.worlds[0].id;
+        let app = game_router(fixture.state.clone());
+        let path = character_path(&fixture.session, &world.to_string(), CHARACTERS_SEGMENT);
+        let (status, body) = post(&app, &path, &create_body(NAME)).await;
+        assert_eq!(status, StatusCode::OK);
+        let reply: CreateCharacterReply = serde_json::from_slice(&body).expect("reply");
+        assert_eq!(reply.character.normalized_name, NAME.to_lowercase());
+        assert_eq!(reply.character.world_id, world.to_string());
+        let stored = fixture
+            .state
+            .characters
+            .characters(world, fixture.account)
+            .await
+            .expect("stored");
+        assert_eq!(stored[0].appearance["Name"], NAME);
+        assert!(stored[0].appearance.get("SteamAuthTicket").is_none());
+        let (status, body) = post(&app, &path, &create_body(&NAME.to_uppercase())).await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::CONFLICT, "character_name_taken")
+        );
+        let (status, body) = post(&app, &path, &create_body("A1")).await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::BAD_REQUEST, "invalid_character_name")
+        );
+        let (status, body) = post(&app, &path, "{}").await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::BAD_REQUEST, "bad_request")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_character_limit_is_kept() {
+        let fixture = fixture().await;
+        let world = &fixture.state.config.worlds[0];
+        assert_eq!(world.max_characters_per_account, TEST_CHARACTER_LIMIT);
+        let app = game_router(fixture.state.clone());
+        let path = character_path(&fixture.session, &world.id.to_string(), CHARACTERS_SEGMENT);
+        for name in [NAME, SECOND_NAME] {
+            let (status, _) = post(&app, &path, &create_body(name)).await;
+            assert_eq!(status, StatusCode::OK, "{name}");
+        }
+        let (status, body) = post(&app, &path, &create_body(THIRD_NAME)).await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::CONFLICT, "character_limit")
+        );
+    }
+
+    #[tokio::test]
+    async fn character_routes_check_session_world_and_size() {
+        let fixture = fixture().await;
+        let world = fixture.state.config.worlds[0].id.to_string();
+        let app = game_router(fixture.state.clone());
+        for segment in [CHARACTERS_SEGMENT, VALIDATOR_SEGMENT] {
+            let path = character_path(OTHER_KEY, &world, segment);
+            let (status, _) = post(&app, &path, &create_body(NAME)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{segment}");
+            for unknown in [Uuid::new_v4().to_string(), "not-a-uuid".to_owned()] {
+                let path = character_path(&fixture.session, &unknown, segment);
+                let (status, body) = post(&app, &path, &validate_body(NAME)).await;
+                assert_eq!(
+                    (status, error_code(&body).as_str()),
+                    (StatusCode::NOT_FOUND, "unknown_world"),
+                    "{segment} {unknown}"
+                );
+            }
+        }
+        let path = character_path(&fixture.session, &world, CHARACTERS_SEGMENT);
+        let huge = "x".repeat(GAME_BODY_LIMIT_BYTES + 1);
+        let (status, _) = post(&app, &path, &huge).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn validator_reports_free_taken_and_bad_names() {
+        let fixture = fixture().await;
+        let world = fixture.state.config.worlds[0].id.to_string();
+        let app = game_router(fixture.state.clone());
+        let validator = character_path(&fixture.session, &world, VALIDATOR_SEGMENT);
+        let (status, body) = post(&app, &validator, &validate_body(NAME)).await;
+        assert_eq!((status, &body[..]), (StatusCode::OK, &b"{}"[..]));
+        let create = character_path(&fixture.session, &world, CHARACTERS_SEGMENT);
+        post(&app, &create, &create_body(NAME)).await;
+        let (status, body) = post(&app, &validator, &validate_body(NAME)).await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::CONFLICT, "character_name_taken")
+        );
+        let (status, _) = post(&app, &validator, &validate_body("no")).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = post(&app, &validator, "{}").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 }

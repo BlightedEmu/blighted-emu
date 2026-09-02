@@ -17,11 +17,10 @@ use nw_protocol::launcher_api::{
     PasswordCredentials, PlayReply, REGISTER_PATH,
 };
 use serde::Deserialize;
-use serde::de::DeserializeOwned;
 
 use crate::config::{AuthConfig, EdgeConfig};
 use crate::discord::{DISCORD_CALLBACK_PATH, DiscordApi, authorize_url};
-use crate::error::ApiError;
+use crate::error::{ApiError, parse_json};
 use crate::keys::{is_launcher_token, new_game_session_key, new_launcher_token, token_hash};
 use crate::names::{check_password, normalize_username};
 use crate::password::PasswordHasher;
@@ -88,10 +87,6 @@ where
         )
         .route(DISCORD_POLL_PATH, post(discord_poll::<A, G, R, D, X>))
         .with_state(state)
-}
-
-fn parse<T: DeserializeOwned>(body: &Bytes) -> Result<T, ApiError> {
-    serde_json::from_slice(body).map_err(|_| ApiError::BadRequest)
 }
 
 fn require_mode<A, G, R, D, X>(
@@ -180,7 +175,7 @@ where
         &format!("{REGISTER_IP_LIMIT_PREFIX}{}", peer.ip()),
     )
     .await?;
-    let credentials: PasswordCredentials = parse(&body)?;
+    let credentials: PasswordCredentials = parse_json(&body)?;
     let username = normalize_username(&credentials.username)?;
     check_password(&credentials.password)?;
     let hash = state
@@ -205,7 +200,7 @@ where
     R: RateLimiter,
 {
     require_mode(&state, AuthMode::Password)?;
-    let credentials: PasswordCredentials = parse(&body)?;
+    let credentials: PasswordCredentials = parse_json(&body)?;
     let username = normalize_username(&credentials.username).ok();
     let mut limit_keys = vec![format!("{LOGIN_IP_LIMIT_PREFIX}{}", peer.ip())];
     limit_keys.extend(
@@ -401,7 +396,7 @@ where
     D: DiscordStateStore,
 {
     require_mode(&state, AuthMode::Discord)?;
-    let poll: DiscordPoll = parse(&body)?;
+    let poll: DiscordPoll = parse_json(&body)?;
     match state.discord_states.poll(&poll.state).await? {
         DiscordAttempt::Unknown => Err(ApiError::UnknownLogin),
         DiscordAttempt::Pending => Ok(Json(DiscordPollReply::Pending)),
