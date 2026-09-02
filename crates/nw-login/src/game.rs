@@ -29,7 +29,7 @@ use nw_protocol::{LoginQueueReply, parse_login_queue_request};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::config::{EdgeConfig, WorldConfig};
+use crate::config::{EdgeConfig, QUEUE_LIMIT_WINDOW_SECONDS, WorldConfig};
 use crate::error::{ApiError, parse_json};
 use crate::keys::{is_game_session_key, new_launcher_token};
 use crate::names::check_character_name;
@@ -60,8 +60,6 @@ const SESSION_MASK: &str = "<session>";
 const PATH_SEPARATOR: char = '/';
 /// Rate-limit key prefix of queue joins and refreshes: `<prefix><world>:<account>`.
 const QUEUE_LIMIT_PREFIX: &str = "queue:";
-/// Window of `queue_requests_per_minute`.
-const QUEUE_LIMIT_WINDOW_SECONDS: u64 = 60;
 /// Separator between the world id and the random part of a queue ticket id.
 const TICKET_WORLD_SEPARATOR: char = '.';
 /// Largest game request body. The character create body is stored (M2 spec section 7).

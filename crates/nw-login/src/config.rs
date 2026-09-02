@@ -20,6 +20,11 @@ pub const LOGIN_HOST_LABEL: &str = "login";
 /// Host name label of the game routes: `game.<domain>`.
 pub const GAME_HOST_LABEL: &str = "game";
 
+/// Window of `queue_requests_per_minute`, in seconds.
+pub const QUEUE_LIMIT_WINDOW_SECONDS: u64 = 60;
+/// Queue requests of one client besides its refreshes in one window: the join.
+const QUEUE_JOIN_REQUESTS: u64 = 1;
+
 /// Launch argument that sets the channel base URL (endpoint RE note).
 pub const CHANNEL_SERVICE_ARGUMENT: &str = "-ChannelService";
 /// Launch argument that sets the channel key (endpoint RE note).
@@ -254,8 +259,17 @@ impl EdgeConfig {
             if world.max_characters_per_account == 0 {
                 return invalid("world.max_characters_per_account", "must be above 0");
             }
-            if world.queue_requests_per_minute == 0 {
-                return invalid("world.queue_requests_per_minute", "must be above 0");
+            // A normal client refreshes once per interval and joins once (review minor m4).
+            let needed = QUEUE_LIMIT_WINDOW_SECONDS.div_ceil(world.refresh_interval_seconds)
+                + QUEUE_JOIN_REQUESTS;
+            if u64::from(world.queue_requests_per_minute) < needed {
+                return invalid(
+                    "world.queue_requests_per_minute",
+                    &format!(
+                        "must be at least {needed} for refresh_interval_seconds = {}",
+                        world.refresh_interval_seconds
+                    ),
+                );
             }
             if !world.database_password_env.starts_with(SECRET_ENV_PREFIX) {
                 return invalid(
@@ -382,6 +396,32 @@ max_connections = 5
                 "max_characters_per_account = 0",
             ),
             "world.max_characters_per_account",
+        );
+    }
+
+    #[test]
+    fn queue_limit_must_allow_normal_refreshes() {
+        // A refresh every second needs 61 requests per minute (60 refreshes and the join).
+        refused(
+            &VALID.replace(
+                "refresh_interval_seconds = 5",
+                "refresh_interval_seconds = 1",
+            ),
+            "world.queue_requests_per_minute",
+        );
+        assert!(
+            load(&VALID.replace(
+                "queue_requests_per_minute = 30",
+                "queue_requests_per_minute = 13"
+            ))
+            .is_ok()
+        );
+        refused(
+            &VALID.replace(
+                "queue_requests_per_minute = 30",
+                "queue_requests_per_minute = 12",
+            ),
+            "world.queue_requests_per_minute",
         );
     }
 
