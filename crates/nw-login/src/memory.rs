@@ -16,7 +16,7 @@ use crate::queue::{
 use crate::store::{
     AccountStore, DiscordAttempt, DiscordStateStore, GameSessionStore, RateLimiter, StoreError,
 };
-use crate::time::unix_now;
+use crate::time::{MILLIS_PER_SECOND, unix_now};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -187,13 +187,6 @@ impl GameSessionStore for MemoryGameSessions {
 pub(crate) struct MemoryRateLimiter(Arc<Mutex<HashMap<String, Expiring<u64>>>>);
 
 impl RateLimiter for MemoryRateLimiter {
-    async fn count(&self, key: &str) -> Result<u64, StoreError> {
-        Ok(lock(&self.0)
-            .get(key)
-            .filter(|entry| entry.live())
-            .map_or(0, |entry| entry.value))
-    }
-
     async fn increment(&self, key: &str, window_seconds: u64) -> Result<u64, StoreError> {
         let mut counters = lock(&self.0);
         match counters.get_mut(key).filter(|entry| entry.live()) {
@@ -206,6 +199,13 @@ impl RateLimiter for MemoryRateLimiter {
                 Ok(1)
             }
         }
+    }
+
+    async fn release(&self, key: &str) -> Result<(), StoreError> {
+        if let Some(entry) = lock(&self.0).get_mut(key).filter(|entry| entry.live()) {
+            entry.value = entry.value.saturating_sub(1);
+        }
+        Ok(())
     }
 }
 
@@ -306,8 +306,6 @@ impl WorldQueue {
             .collect()
     }
 }
-
-const MILLIS_PER_SECOND: u64 = 1000;
 
 impl QueueStore for MemoryQueue {
     async fn update(
@@ -513,10 +511,16 @@ pub(crate) mod contract {
     /// Checks a [`RateLimiter`].
     pub(crate) async fn rate_limiter(store: impl RateLimiter) {
         let key = unique("r");
-        assert_eq!(store.count(&key).await.expect("count"), 0);
         assert_eq!(store.increment(&key, LIMIT_WINDOW).await.expect("one"), 1);
         assert_eq!(store.increment(&key, LIMIT_WINDOW).await.expect("two"), 2);
-        assert_eq!(store.count(&key).await.expect("count"), 2);
+        store.release(&key).await.expect("release");
+        assert_eq!(store.increment(&key, LIMIT_WINDOW).await.expect("again"), 2);
+        let absent = unique("r");
+        store.release(&absent).await.expect("release absent");
+        assert_eq!(
+            store.increment(&absent, LIMIT_WINDOW).await.expect("first"),
+            1
+        );
     }
 
     /// Start time of the queue checks, ms.

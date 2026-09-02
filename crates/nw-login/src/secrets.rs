@@ -8,6 +8,8 @@ use sha2::Sha256;
 
 use crate::config::EdgeConfig;
 
+/// Prefix of every secret environment variable.
+pub const SECRET_ENV_PREFIX: &str = "NW_SECRET_";
 /// Entry ticket signing key, hex.
 pub const SIGNING_KEY_ENV: &str = "NW_SECRET_SIGNING_KEY";
 /// Password of the global database.

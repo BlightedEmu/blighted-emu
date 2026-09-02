@@ -89,15 +89,15 @@ pub trait GameSessionStore: Clone + Send + Sync + 'static {
 
 /// Counters for rate limits (Valkey).
 pub trait RateLimiter: Clone + Send + Sync + 'static {
-    /// The current count of `key` (0 when absent or expired).
-    fn count(&self, key: &str) -> impl Future<Output = Result<u64, StoreError>> + Send;
-
     /// Adds one to `key`; a new counter lives for `window_seconds`. Returns the new count.
     fn increment(
         &self,
         key: &str,
         window_seconds: u64,
     ) -> impl Future<Output = Result<u64, StoreError>> + Send;
+
+    /// Takes one back from a live counter above 0; does nothing when `key` is absent or expired.
+    fn release(&self, key: &str) -> impl Future<Output = Result<(), StoreError>> + Send;
 }
 
 /// State of one Discord login attempt.

@@ -10,6 +10,8 @@ use nw_protocol::launcher_api::{AuthMode, SESSION_PLACEHOLDER, is_forbidden_host
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::secrets::SECRET_ENV_PREFIX;
+
 /// Environment variable prefix for overrides of `config/edge.toml`.
 pub const EDGE_ENV_PREFIX: &str = "NW_EDGE_";
 
@@ -241,6 +243,12 @@ impl EdgeConfig {
             if world.queue_requests_per_minute == 0 {
                 return invalid("world.queue_requests_per_minute", "must be above 0");
             }
+            if !world.database_password_env.starts_with(SECRET_ENV_PREFIX) {
+                return invalid(
+                    "world.database_password_env",
+                    &format!("must start with {SECRET_ENV_PREFIX}"),
+                );
+            }
         }
         Ok(())
     }
@@ -351,6 +359,14 @@ max_connections = 5
         refused(
             &VALID.replace("capacity = 100", "capacity = 0"),
             "world.capacity",
+        );
+    }
+
+    #[test]
+    fn world_password_must_come_from_a_secret_variable() {
+        refused(
+            &VALID.replace("\"NW_SECRET_WORLD_1_DATABASE_PASSWORD\"", "\"HOME\""),
+            "world.database_password_env",
         );
     }
 

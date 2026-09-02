@@ -15,6 +15,7 @@ use crate::config::WorldConfig;
 use crate::secrets::SigningKey;
 use crate::signature::{EntryClaims, sign_entry};
 use crate::store::StoreError;
+use crate::time::MILLIS_PER_SECOND;
 
 /// Lifetime of an entry record (parent spec 4.2).
 pub const ENTRY_TICKET_SECONDS: u64 = 60;
@@ -22,7 +23,6 @@ pub const ENTRY_TICKET_SECONDS: u64 = 60;
 pub const STALE_REFRESH_INTERVALS: u64 = 3;
 /// The queue never offers a transfer to another world.
 const ALLOW_QUEUE_TRANSFER: bool = false;
-const MILLIS_PER_SECOND: u64 = 1000;
 
 /// Queue limits of one world.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,9 +41,10 @@ impl QueueSettings {
         Self {
             world_id: world.id,
             capacity: world.capacity,
-            stale_after_ms: world.refresh_interval_seconds
-                * STALE_REFRESH_INTERVALS
-                * MILLIS_PER_SECOND,
+            stale_after_ms: world
+                .refresh_interval_seconds
+                .saturating_mul(STALE_REFRESH_INTERVALS)
+                .saturating_mul(MILLIS_PER_SECOND),
         }
     }
 }
@@ -205,6 +206,13 @@ mod tests {
             settings.stale_after_ms,
             world.refresh_interval_seconds * STALE_REFRESH_INTERVALS * MILLIS_PER_SECOND
         );
+    }
+
+    #[test]
+    fn huge_refresh_interval_does_not_overflow() {
+        let mut world = valid().worlds[0].clone();
+        world.refresh_interval_seconds = u64::MAX;
+        assert_eq!(QueueSettings::for_world(&world).stale_after_ms, u64::MAX);
     }
 
     #[test]

@@ -19,7 +19,7 @@ use nw_protocol::launcher_api::{
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
-use crate::config::EdgeConfig;
+use crate::config::{AuthConfig, EdgeConfig};
 use crate::discord::{DISCORD_CALLBACK_PATH, DiscordApi, authorize_url};
 use crate::error::ApiError;
 use crate::keys::{is_launcher_token, new_game_session_key, new_launcher_token, token_hash};
@@ -41,6 +41,7 @@ const BEARER_PREFIX: &str = "Bearer ";
 const LOGIN_IP_LIMIT_PREFIX: &str = "login-ip:";
 const LOGIN_USER_LIMIT_PREFIX: &str = "login-user:";
 const REGISTER_IP_LIMIT_PREFIX: &str = "register-ip:";
+const DISCORD_START_IP_LIMIT_PREFIX: &str = "discord-start-ip:";
 const CALLBACK_DONE: &str = "Login finished. Return to the launcher.";
 const CALLBACK_EXPIRED: &str = "This login expired. Start again in the launcher.";
 const CALLBACK_FAILED: &str = "Discord login failed. Start again in the launcher.";
@@ -113,6 +114,22 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
         .ok_or(ApiError::NoSession)
 }
 
+/// Counts one attempt on `key` and refuses it when the count goes above the login limit.
+async fn reserve_attempt<R: RateLimiter>(
+    limits: &R,
+    auth: &AuthConfig,
+    key: &str,
+) -> Result<(), ApiError> {
+    let attempts = limits
+        .increment(key, auth.login_fail_window_seconds)
+        .await?;
+    if attempts > u64::from(auth.login_fail_limit) {
+        Err(ApiError::RateLimited)
+    } else {
+        Ok(())
+    }
+}
+
 /// Starts a launcher session for an account that may log in.
 async fn new_launcher_session<A: AccountStore>(
     accounts: &A,
@@ -157,17 +174,12 @@ where
     if !state.config.auth.allow_registration {
         return Err(ApiError::RegistrationClosed);
     }
-    let auth = &state.config.auth;
-    let attempts = state
-        .limits
-        .increment(
-            &format!("{REGISTER_IP_LIMIT_PREFIX}{}", peer.ip()),
-            auth.login_fail_window_seconds,
-        )
-        .await?;
-    if attempts > u64::from(auth.login_fail_limit) {
-        return Err(ApiError::RateLimited);
-    }
+    reserve_attempt(
+        &state.limits,
+        &state.config.auth,
+        &format!("{REGISTER_IP_LIMIT_PREFIX}{}", peer.ip()),
+    )
+    .await?;
     let credentials: PasswordCredentials = parse(&body)?;
     let username = normalize_username(&credentials.username)?;
     check_password(&credentials.password)?;
@@ -194,19 +206,17 @@ where
 {
     require_mode(&state, AuthMode::Password)?;
     let credentials: PasswordCredentials = parse(&body)?;
-    let auth = &state.config.auth;
     let username = normalize_username(&credentials.username).ok();
-    let ip_key = format!("{LOGIN_IP_LIMIT_PREFIX}{}", peer.ip());
-    let user_key = username
-        .as_ref()
-        .map(|name| format!("{LOGIN_USER_LIMIT_PREFIX}{name}"));
-    let limit = u64::from(auth.login_fail_limit);
-    let mut failures = state.limits.count(&ip_key).await?;
-    if let Some(key) = &user_key {
-        failures = failures.max(state.limits.count(key).await?);
-    }
-    if failures >= limit {
-        return Err(ApiError::RateLimited);
+    let mut limit_keys = vec![format!("{LOGIN_IP_LIMIT_PREFIX}{}", peer.ip())];
+    limit_keys.extend(
+        username
+            .as_ref()
+            .map(|name| format!("{LOGIN_USER_LIMIT_PREFIX}{name}")),
+    );
+    // Every attempt is counted before the hash, so parallel requests cannot pass the limit
+    // (review finding 2). A correct password takes its attempt back.
+    for key in &limit_keys {
+        reserve_attempt(&state.limits, &state.config.auth, key).await?;
     }
     let stored = match &username {
         Some(name) => state.accounts.password_login(name).await?,
@@ -223,16 +233,12 @@ where
         .map_err(|_| ApiError::Unavailable)?;
     match account {
         Some(account) if matches => {
+            for key in &limit_keys {
+                state.limits.release(key).await?;
+            }
             Ok(Json(new_launcher_session(&state.accounts, &account).await?))
         }
-        _ => {
-            let window = auth.login_fail_window_seconds;
-            state.limits.increment(&ip_key, window).await?;
-            if let Some(key) = &user_key {
-                state.limits.increment(key, window).await?;
-            }
-            Err(ApiError::InvalidCredentials)
-        }
+        _ => Err(ApiError::InvalidCredentials),
     }
 }
 
@@ -291,11 +297,19 @@ fn callback_url(config: &EdgeConfig) -> String {
 
 async fn discord_start<A, G, R, D, X>(
     State(state): State<LauncherState<A, G, R, D, X>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
 ) -> Result<Json<DiscordStart>, ApiError>
 where
+    R: RateLimiter,
     D: DiscordStateStore,
 {
     require_mode(&state, AuthMode::Discord)?;
+    reserve_attempt(
+        &state.limits,
+        &state.config.auth,
+        &format!("{DISCORD_START_IP_LIMIT_PREFIX}{}", peer.ip()),
+    )
+    .await?;
     let login_state = new_launcher_token().map_err(|_| ApiError::Unavailable)?;
     let verifier = new_launcher_token().map_err(|_| ApiError::Unavailable)?;
     let url = authorize_url(
@@ -415,6 +429,8 @@ mod tests {
     const USERNAME: &str = "Ada";
     const PASSWORD: &str = "password-ok";
     const ONE_HASH_AT_A_TIME: usize = 1;
+    /// Wrong-password logins sent at the same time.
+    const PARALLEL_LOGINS: usize = 40;
 
     type TestState = LauncherState<
         MemoryAccounts,
@@ -630,6 +646,58 @@ mod tests {
             &credentials(USERNAME, PASSWORD),
         )
         .await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::TOO_MANY_REQUESTS, "rate_limited")
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_failed_logins_are_rate_limited() {
+        let app = app(state(AuthMode::Password));
+        register_ok(&app).await;
+        let mut logins = tokio::task::JoinSet::new();
+        for _ in 0..PARALLEL_LOGINS {
+            let app = app.clone();
+            logins.spawn(async move {
+                let wrong = credentials(USERNAME, "wrong-password");
+                send(&app, "POST", LOGIN_PATH, None, &wrong).await.0
+            });
+        }
+        let statuses = logins.join_all().await;
+        let checked = statuses
+            .iter()
+            .filter(|status| **status == StatusCode::UNAUTHORIZED)
+            .count();
+        let limit = usize::try_from(valid().auth.login_fail_limit).expect("small");
+        assert_eq!(checked, limit);
+    }
+
+    #[tokio::test]
+    async fn successful_logins_do_not_use_up_the_limit() {
+        let app = app(state(AuthMode::Password));
+        register_ok(&app).await;
+        for _ in 0..=valid().auth.login_fail_limit {
+            let (status, _) = send(
+                &app,
+                "POST",
+                LOGIN_PATH,
+                None,
+                &credentials(USERNAME, PASSWORD),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+        }
+    }
+
+    #[tokio::test]
+    async fn discord_starts_are_rate_limited() {
+        let app = app(state(AuthMode::Discord));
+        for _ in 0..valid().auth.login_fail_limit {
+            let (status, _) = send(&app, "POST", DISCORD_START_PATH, None, "").await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let (status, body) = send(&app, "POST", DISCORD_START_PATH, None, "").await;
         assert_eq!(
             (status, error_code(&body).as_str()),
             (StatusCode::TOO_MANY_REQUESTS, "rate_limited")

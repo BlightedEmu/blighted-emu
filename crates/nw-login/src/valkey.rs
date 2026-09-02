@@ -32,6 +32,9 @@ pub const ENTRY_RECORD_PREFIX: &str = "nw:et:";
 /// Entry of an account (`<prefix><world>:<account>`).
 const QUEUE_ACCOUNT_PREFIX: &str = "nw:qa:";
 const QUEUE_SCRIPT: &str = include_str!("queue_script.lua");
+/// Lowers a live counter above 0 by one; `DECR` keeps the key's expiry.
+const RELEASE_SCRIPT: &str = "local count = tonumber(redis.call('GET', KEYS[1])) \
+if count and count > 0 then redis.call('DECR', KEYS[1]) end return 0";
 const JOIN_ACTION: &str = "join";
 const REFRESH_ACTION: &str = "refresh";
 const STATUS_ADMITTED: &str = "admitted";
@@ -94,13 +97,6 @@ impl GameSessionStore for Valkey {
 }
 
 impl RateLimiter for Valkey {
-    async fn count(&self, key: &str) -> Result<u64, StoreError> {
-        let value: Option<u64> = self
-            .query(redis::cmd("GET").arg(format!("{RATE_LIMIT_PREFIX}{key}")))
-            .await?;
-        Ok(value.unwrap_or(0))
-    }
-
     async fn increment(&self, key: &str, window_seconds: u64) -> Result<u64, StoreError> {
         let key = format!("{RATE_LIMIT_PREFIX}{key}");
         let mut connection = self.connection.clone();
@@ -116,6 +112,16 @@ impl RateLimiter for Valkey {
             .await
             .map_err(StoreError::unavailable)?;
         Ok(count)
+    }
+
+    async fn release(&self, key: &str) -> Result<(), StoreError> {
+        let mut connection = self.connection.clone();
+        redis::Script::new(RELEASE_SCRIPT)
+            .key(format!("{RATE_LIMIT_PREFIX}{key}"))
+            .invoke_async::<i64>(&mut connection)
+            .await
+            .map(drop)
+            .map_err(StoreError::unavailable)
     }
 }
 
