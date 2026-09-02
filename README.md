@@ -83,7 +83,12 @@ Codegen stops with an error when a table type name would give an invalid Rust na
 
 `edge-http` is the HTTPS login server. Players log in with the `launcher` program, by username and password or with Discord (one mode per server, `[auth] mode` in `config/edge.toml`).
 
-The server needs a domain name of your own and a normal public certificate for `login.<domain>` (for example from Let's Encrypt with `certbot` or `lego`). Put the PEM files where `[tls]` points.
+The server needs a domain name of your own with two host names that point to the server:
+
+- `login.<domain>`: the launcher API and the channel document that the game downloads first.
+- `game.<domain>`: the game routes. Every game request carries the game session key in its path (`/s/<session>/...`).
+
+Get one normal public certificate that covers both names (for example from Let's Encrypt with `certbot` or `lego`). The DNS challenge works also when the names point to a LAN address. Put the PEM files where `[tls]` points. The game always uses port 443, so `https_listen` must use port 443. On Linux, give the program that right once after each build: `sudo setcap 'cap_net_bind_service=+ep' target/debug/edge-http`.
 
 Secrets come from environment variables, never from the config file:
 
@@ -99,6 +104,23 @@ cargo run -p edge-http -- migrate   # creates missing databases and applies migr
 cargo run -p edge-http -- serve
 cargo run -p launcher
 ```
+
+In Discord mode, add `https://login.<domain>/launcher/discord/callback` as a redirect URL of your Discord application.
+
+`edge-http` logs every request that no route serves (`request for an unknown route`, with the session key masked). These lines show what the client asks for that the server does not answer yet.
+
+### M2 exit test (manual)
+
+Do this once in password mode and once in Discord mode (`[auth] mode`).
+
+1. Start the services (`just infra-up`), set the secrets, then run `edge-http migrate` and `edge-http serve`.
+2. Start Steam. Start the launcher, type your domain, and log in (or make an account).
+3. Click Play. The game starts through Steam with `-ChannelService https://login.<domain>` and `-LoginChannelOverride <game session key>`.
+4. The game must reach the character select screen. Make a character.
+5. Close the game. Click Play again. The new character must be in the list.
+6. Save the `Game.log` lines of the login steps and the `edge-http` log lines of the run in a new note in `docs/re/` as evidence. Remove your account name, Steam ids and IP addresses first.
+
+If the game stops before character select, keep the `Game.log` lines and the `request for an unknown route` lines: they show the next step to build.
 
 ## Rules for contributors
 
