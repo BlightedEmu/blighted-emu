@@ -79,7 +79,8 @@ where
         game_host: game.config.game_host().into(),
         login: launcher_router(launcher)
             .merge(channel_router(game.clone()))
-            .fallback(unknown_route),
+            .fallback(unknown_route)
+            .method_not_allowed_fallback(unknown_route),
         game: game_router(game),
     };
     Router::new().fallback(by_host).with_state(routes)
@@ -90,7 +91,7 @@ mod tests {
     use axum::body::{Body, Bytes};
     use axum::http::{Request as HttpRequest, StatusCode};
     use nw_protocol::game_api::{AUTH_STACK_STAGE, STEAM_AUTH_PATH};
-    use nw_protocol::launcher_api::{AuthMode, INFO_PATH};
+    use nw_protocol::launcher_api::{AuthMode, INFO_PATH, LOGIN_PATH};
 
     use super::*;
     use crate::game::SESSION_PREFIX;
@@ -127,11 +128,14 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let (status, _) = get(&app, "LOGIN.example.org.", &format!("/{session}.json")).await;
         assert_eq!(status, StatusCode::OK);
-        let (status, body) = get(&app, LOGIN_HOST, "/favicon.ico").await;
-        assert_eq!(
-            (status, error_code(&body).as_str()),
-            (StatusCode::NOT_FOUND, "unknown_route")
-        );
+        for path in ["/favicon.ico", LOGIN_PATH] {
+            let (status, body) = get(&app, LOGIN_HOST, path).await;
+            assert_eq!(
+                (status, error_code(&body).as_str()),
+                (StatusCode::NOT_FOUND, "unknown_route"),
+                "{path}"
+            );
+        }
     }
 
     #[tokio::test]

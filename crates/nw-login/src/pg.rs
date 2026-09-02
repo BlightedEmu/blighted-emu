@@ -30,6 +30,27 @@ fn store_error(error: DbError) -> StoreError {
     }
 }
 
+/// Reserves the name, inserts the character, and frees the name when the insert fails.
+async fn create_character(
+    global: &PgPool,
+    world: &PgPool,
+    world_id: Uuid,
+    new: &NewCharacter,
+) -> Result<Character, StoreError> {
+    nw_db::reserve_character_name(global, &new.name, world_id, new.id)
+        .await
+        .map_err(store_error)?;
+    match nw_db::insert_character(world, new).await {
+        Ok(character) => Ok(character),
+        Err(error) => {
+            if let Err(release) = nw_db::release_character_name(global, new.id).await {
+                tracing::error!(error = %release, "character name not released");
+            }
+            Err(store_error(error))
+        }
+    }
+}
+
 /// Characters in the world databases and their names in the global database.
 #[derive(Debug, Clone)]
 pub struct PgCharacters {
@@ -78,20 +99,15 @@ impl CharacterStore for PgCharacters {
             .map_err(store_error)
     }
 
+    /// Runs in its own task, so a dropped request cannot stop between the name reservation and
+    /// the insert or the release (review finding 2 of plan M2-B).
     async fn create(&self, world_id: Uuid, new: &NewCharacter) -> Result<Character, StoreError> {
-        let world = self.world(world_id)?;
-        nw_db::reserve_character_name(&self.global, &new.name, world_id, new.id)
+        let world = self.world(world_id)?.clone();
+        let global = self.global.clone();
+        let new = new.clone();
+        tokio::spawn(async move { create_character(&global, &world, world_id, &new).await })
             .await
-            .map_err(store_error)?;
-        match nw_db::insert_character(world, new).await {
-            Ok(character) => Ok(character),
-            Err(error) => {
-                if let Err(release) = nw_db::release_character_name(&self.global, new.id).await {
-                    tracing::error!(error = %release, "character name not released");
-                }
-                Err(store_error(error))
-            }
-        }
+            .map_err(StoreError::unavailable)?
     }
 }
 
@@ -161,6 +177,12 @@ mod tests {
     use crate::memory::contract;
 
     const NAME: &str = "Ada";
+    /// Time after which the waiting create is dropped.
+    const CANCEL_AFTER: std::time::Duration = std::time::Duration::from_millis(200);
+    /// Longest wait for the dropped create to finish.
+    const FINISH_LIMIT: std::time::Duration = std::time::Duration::from_secs(10);
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+    const LOCK_CHARACTERS: &str = "LOCK TABLE player_character IN ACCESS EXCLUSIVE MODE";
 
     #[tokio::test]
     async fn pg_accounts_follow_the_contract() {
@@ -186,6 +208,51 @@ mod tests {
                     contract::characters(store, first_id, second_id).await;
                 })
                 .await;
+            })
+            .await;
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_dropped_create_still_finishes() {
+        with_test_schema(async |global| {
+            GLOBAL_MIGRATOR.run(global).await.expect("migrate global");
+            with_test_schema(async |world| {
+                WORLD_MIGRATOR.run(world).await.expect("migrate world");
+                let world_id = Uuid::new_v4();
+                let store =
+                    PgCharacters::new(global.clone(), HashMap::from([(world_id, world.clone())]));
+                // A lock in another transaction holds the world insert back.
+                let mut blocker = world.begin().await.expect("begin");
+                sqlx::query(LOCK_CHARACTERS)
+                    .execute(&mut *blocker)
+                    .await
+                    .expect("lock");
+                let account = Uuid::new_v4();
+                let new = NewCharacter {
+                    id: Uuid::new_v4(),
+                    account_id: account,
+                    name: NAME.to_owned(),
+                    appearance: serde_json::json!({}),
+                };
+                let dropped =
+                    tokio::time::timeout(CANCEL_AFTER, store.create(world_id, &new)).await;
+                assert!(dropped.is_err(), "the create must still wait for the lock");
+                blocker.rollback().await.expect("unlock");
+                tokio::time::timeout(FINISH_LIMIT, async {
+                    while store
+                        .characters(world_id, account)
+                        .await
+                        .expect("list")
+                        .is_empty()
+                    {
+                        tokio::time::sleep(POLL_INTERVAL).await;
+                    }
+                })
+                .await
+                .expect("the dropped create finished its insert");
+                assert!(store.name_taken(NAME).await.expect("name"));
             })
             .await;
         })

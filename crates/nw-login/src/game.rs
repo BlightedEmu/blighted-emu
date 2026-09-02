@@ -47,6 +47,10 @@ pub const TOKEN_PATH: &str = "/token";
 pub const CHANNEL_FILE_SUFFIX: &str = ".json";
 /// The client may add dot-separated parts around the channel key (JSON note section 7).
 const CHANNEL_KEY_SEPARATOR: char = '.';
+/// Bytes other than letters, digits and [`CHANNEL_KEY_SEPARATOR`] that a channel key may hold.
+const CHANNEL_KEY_EXTRA_BYTES: [u8; 2] = [b'_', b'-'];
+/// The channel document route: one path segment, `<channel key>.json`.
+const CHANNEL_ROUTE: &str = "/{file}";
 /// Id of the one cluster in the channel document.
 const CLUSTER_ID: &str = "blighted";
 /// Game alias in the Omni settings; the client calls `<token URL>/games/<alias>/tokens`.
@@ -163,6 +167,7 @@ where
         )
         .layer(DefaultBodyLimit::max(GAME_BODY_LIMIT_BYTES))
         .fallback(unknown_route)
+        .method_not_allowed_fallback(unknown_route)
         .with_state(state)
 }
 
@@ -175,7 +180,7 @@ where
     Q: QueueStore,
 {
     Router::new()
-        .route("/{file}", get(channel::<G, C, R, Q>))
+        .route(CHANNEL_ROUTE, get(channel::<G, C, R, Q>))
         .with_state(state)
 }
 
@@ -195,21 +200,21 @@ async fn session_account<G: GameSessionStore, C, R, Q>(
 }
 
 fn is_channel_key_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+    byte.is_ascii_alphanumeric()
+        || char::from(byte) == CHANNEL_KEY_SEPARATOR
+        || CHANNEL_KEY_EXTRA_BYTES.contains(&byte)
 }
 
-/// The channel key and the game session key of a channel file name such as `<key>.json` or
-/// `SANDBOX_ID.x.<key>.CROSSPLAY.off.json` (JSON note section 7). The channel key is the file
-/// name without `.json`; it may hold only ASCII letters, digits, `.`, `_` and `-`.
-pub fn channel_key(file: &str) -> Option<(&str, &str)> {
-    let key = file.strip_suffix(CHANNEL_FILE_SUFFIX)?;
-    if !key.bytes().all(is_channel_key_byte) {
+/// The game session key inside a channel key such as `<key>` or
+/// `SANDBOX_ID.x.<key>.CROSSPLAY.off` (the file name without `.json`, JSON note section 7). The
+/// channel key may hold only ASCII letters, digits, `.`, `_` and `-`.
+pub fn channel_session_key(channel_key: &str) -> Option<&str> {
+    if !channel_key.bytes().all(is_channel_key_byte) {
         return None;
     }
-    let session = key
+    channel_key
         .split(CHANNEL_KEY_SEPARATOR)
-        .find(|part| is_game_session_key(part))?;
-    Some((key, session))
+        .find(|part| is_game_session_key(part))
 }
 
 /// The channel document for one game session: every endpoint is `game.<domain>/s/<session>`.
@@ -252,14 +257,16 @@ pub fn channel_document(config: &EdgeConfig, channel_key: &str, session: &str) -
 async fn channel<G, C, R, Q>(
     State(state): State<GameState<G, C, R, Q>>,
     Path(file): Path<String>,
+    method: Method,
+    uri: Uri,
 ) -> Result<Json<ChannelDocument>, ApiError>
 where
     G: GameSessionStore,
 {
-    if !file.ends_with(CHANNEL_FILE_SUFFIX) {
-        return Err(ApiError::UnknownRoute);
-    }
-    let (key, session) = channel_key(&file).ok_or(ApiError::NoSession)?;
+    let Some(key) = file.strip_suffix(CHANNEL_FILE_SUFFIX) else {
+        return Err(unknown_route(method, uri).await);
+    };
+    let session = channel_session_key(key).ok_or(ApiError::NoSession)?;
     session_account(&state, session).await?;
     Ok(Json(channel_document(&state.config, key, session)))
 }
@@ -577,18 +584,26 @@ where
     queue_step(&state, world, account, action).await
 }
 
-/// `path` with every game session key replaced by [`SESSION_MASK`].
+/// `text` split at `separator`, with `mask` applied to each part.
+fn mask_parts(text: &str, separator: char, mask: impl Fn(&str) -> String) -> String {
+    text.split(separator)
+        .map(mask)
+        .collect::<Vec<_>>()
+        .join(&separator.to_string())
+}
+
+/// `path` with every game session key replaced by [`SESSION_MASK`], also inside a path segment
+/// such as `SANDBOX_ID.x.<key>.json`.
 pub fn masked_path(path: &str) -> String {
-    path.split(PATH_SEPARATOR)
-        .map(|part| {
+    mask_parts(path, PATH_SEPARATOR, |segment| {
+        mask_parts(segment, CHANNEL_KEY_SEPARATOR, |part| {
             if is_game_session_key(part) {
-                SESSION_MASK
+                SESSION_MASK.to_owned()
             } else {
-                part
+                part.to_owned()
             }
         })
-        .collect::<Vec<_>>()
-        .join(&PATH_SEPARATOR.to_string())
+    })
 }
 
 /// Logs a request no route serves, so that the exit test shows what the client asked for.
@@ -608,10 +623,11 @@ pub(crate) mod tests {
     use crate::keys::new_game_session_key;
     use crate::memory::{MemoryCharacters, MemoryGameSessions, MemoryQueue, MemoryRateLimiter};
     use crate::signature::verify_entry;
-    use crate::test_http::{self, error_code};
+    use crate::test_http::{self, LogCapture, error_code};
 
     const CLAIM_SECONDS: u64 = 600;
     const GMT_SUFFIX: &str = " GMT";
+    const UNKNOWN_ROUTE_LOG: &str = "request for an unknown route";
     const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const ONE_SLOT: u32 = 1;
     const FEW_REQUESTS: u32 = 2;
@@ -701,16 +717,11 @@ pub(crate) mod tests {
 
     #[test]
     fn channel_key_is_found_in_the_file_name() {
-        let plain = format!("{OTHER_KEY}.json");
-        assert_eq!(channel_key(&plain), Some((OTHER_KEY, OTHER_KEY)));
+        assert_eq!(channel_session_key(OTHER_KEY), Some(OTHER_KEY));
         let decorated = format!("SANDBOX_ID.test.{OTHER_KEY}.CROSSPLAY.off");
-        assert_eq!(
-            channel_key(&format!("{decorated}.json")),
-            Some((decorated.as_str(), OTHER_KEY))
-        );
-        assert_eq!(channel_key(OTHER_KEY), None);
-        assert_eq!(channel_key("live.json"), None);
-        assert_eq!(channel_key(&format!("{OTHER_KEY}\"x.json")), None);
+        assert_eq!(channel_session_key(&decorated), Some(OTHER_KEY));
+        assert_eq!(channel_session_key("live"), None);
+        assert_eq!(channel_session_key(&format!("{OTHER_KEY}\"x")), None);
     }
 
     #[test]
@@ -751,6 +762,42 @@ pub(crate) mod tests {
             masked_path(&format!("/s/{OTHER_KEY}/prod/game/x")),
             "/s/<session>/prod/game/x"
         );
+        assert_eq!(
+            masked_path(&format!("/x/SANDBOX_ID.y.{OTHER_KEY}.json")),
+            "/x/SANDBOX_ID.y.<session>.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn wrong_methods_are_logged_as_unknown_routes() {
+        let fixture = fixture().await;
+        let app = game_router(fixture.state.clone());
+        let logs = LogCapture::start();
+        let steam = game_path(
+            &fixture.session,
+            &format!("{AUTH_STACK_STAGE}{STEAM_AUTH_PATH}"),
+        );
+        let (status, body) = call(&app, "GET", &steam).await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::NOT_FOUND, "unknown_route")
+        );
+        let text = logs.text();
+        assert!(text.contains(UNKNOWN_ROUTE_LOG), "{text}");
+        assert!(!text.contains(&fixture.session), "{text}");
+    }
+
+    #[tokio::test]
+    async fn channel_requests_that_are_not_json_are_logged() {
+        let fixture = fixture().await;
+        let app = channel_router(fixture.state.clone());
+        let logs = LogCapture::start();
+        let (status, body) = call(&app, "GET", "/favicon.ico").await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::NOT_FOUND, "unknown_route")
+        );
+        assert!(logs.text().contains(UNKNOWN_ROUTE_LOG));
     }
 
     #[tokio::test]
