@@ -10,6 +10,9 @@ use nw_db::Account;
 use nw_protocol::launcher_api::LauncherSession;
 use uuid::Uuid;
 
+use crate::queue::{
+    ENTRY_TICKET_SECONDS, EntryRecord, QueueAction, QueueSettings, QueueStatus, QueueStore,
+};
 use crate::store::{
     AccountStore, DiscordAttempt, DiscordStateStore, GameSessionStore, RateLimiter, StoreError,
 };
@@ -264,6 +267,157 @@ impl DiscordStateStore for MemoryDiscordStates {
     }
 }
 
+#[derive(Debug, Clone)]
+struct MemoryEntry {
+    account_id: Uuid,
+    character_id: Uuid,
+    joined_ms: u64,
+    refreshed_ms: u64,
+}
+
+#[derive(Default)]
+struct WorldQueue {
+    waiting: HashMap<String, MemoryEntry>,
+    admitted: HashMap<String, (EntryRecord, u64)>,
+    accounts: HashMap<Uuid, String>,
+}
+
+/// Login queues in memory, with the rules of the Valkey script.
+#[derive(Clone, Default)]
+pub(crate) struct MemoryQueue(Arc<Mutex<HashMap<Uuid, WorldQueue>>>);
+
+impl WorldQueue {
+    fn forget(&mut self, ticket: &str) {
+        self.waiting.remove(ticket);
+        self.admitted.remove(ticket);
+        self.accounts.retain(|_, owned| owned != ticket);
+    }
+
+    fn order(&self) -> Vec<String> {
+        let mut tickets: Vec<(&String, u64)> = self
+            .waiting
+            .iter()
+            .map(|(ticket, entry)| (ticket, entry.joined_ms))
+            .collect();
+        tickets.sort_by(|left, right| left.1.cmp(&right.1).then(left.0.cmp(right.0)));
+        tickets
+            .into_iter()
+            .map(|(ticket, _)| ticket.clone())
+            .collect()
+    }
+}
+
+const MILLIS_PER_SECOND: u64 = 1000;
+
+impl QueueStore for MemoryQueue {
+    async fn update(
+        &self,
+        settings: &QueueSettings,
+        account_id: Uuid,
+        action: QueueAction,
+        now_ms: u64,
+    ) -> Result<Option<QueueStatus>, StoreError> {
+        let mut worlds = lock(&self.0);
+        let queue = worlds.entry(settings.world_id).or_default();
+        let stale_before = now_ms.saturating_sub(settings.stale_after_ms);
+        let stale: Vec<String> = queue
+            .waiting
+            .iter()
+            .filter(|(_, entry)| entry.refreshed_ms < stale_before)
+            .map(|(ticket, _)| ticket.clone())
+            .collect();
+        for ticket in stale {
+            queue.forget(&ticket);
+        }
+        queue
+            .admitted
+            .retain(|_, (_, expires_ms)| *expires_ms > now_ms);
+        let ticket = match action {
+            QueueAction::Join {
+                character_id,
+                new_ticket_id,
+            } => {
+                let existing = queue.accounts.get(&account_id).cloned();
+                let reuse = existing.as_ref().filter(|ticket| {
+                    queue
+                        .waiting
+                        .get(*ticket)
+                        .map(|entry| entry.character_id)
+                        .or_else(|| {
+                            queue
+                                .admitted
+                                .get(*ticket)
+                                .map(|(record, _)| record.character_id)
+                        })
+                        == Some(character_id)
+                });
+                match reuse {
+                    Some(ticket) => ticket.clone(),
+                    None => {
+                        if let Some(old) = existing {
+                            queue.forget(&old);
+                        }
+                        queue.waiting.insert(
+                            new_ticket_id.clone(),
+                            MemoryEntry {
+                                account_id,
+                                character_id,
+                                joined_ms: now_ms,
+                                refreshed_ms: now_ms,
+                            },
+                        );
+                        queue.accounts.insert(account_id, new_ticket_id.clone());
+                        new_ticket_id
+                    }
+                }
+            }
+            QueueAction::Refresh { ticket_id } => {
+                let owner = queue
+                    .waiting
+                    .get(&ticket_id)
+                    .map(|entry| entry.account_id)
+                    .or_else(|| {
+                        queue
+                            .admitted
+                            .get(&ticket_id)
+                            .map(|(record, _)| record.account_id)
+                    });
+                if owner != Some(account_id) {
+                    return Ok(None);
+                }
+                ticket_id
+            }
+        };
+        if let Some(entry) = queue.waiting.get_mut(&ticket) {
+            entry.refreshed_ms = now_ms;
+        }
+        for head in queue.order() {
+            if queue.admitted.len() >= settings.capacity as usize {
+                break;
+            }
+            if let Some(entry) = queue.waiting.remove(&head) {
+                let expires_ms = now_ms + ENTRY_TICKET_SECONDS * MILLIS_PER_SECOND;
+                let record = EntryRecord {
+                    ticket_id: head.clone(),
+                    account_id: entry.account_id,
+                    world_id: settings.world_id,
+                    character_id: entry.character_id,
+                    expires_at: i64::try_from(expires_ms / MILLIS_PER_SECOND).unwrap_or(i64::MAX),
+                };
+                queue.admitted.insert(head, (record, expires_ms));
+            }
+        }
+        if let Some((record, _)) = queue.admitted.get(&ticket) {
+            return Ok(Some(QueueStatus::Admitted(record.clone())));
+        }
+        let position = queue.order().iter().position(|waiting| *waiting == ticket);
+        Ok(position.map(|index| QueueStatus::Waiting {
+            ticket_id: ticket,
+            position: index as u64 + 1,
+        }))
+    }
+}
+
 /// Contract checks shared by the in-memory and the real stores.
 pub(crate) mod contract {
     use super::*;
@@ -365,6 +519,144 @@ pub(crate) mod contract {
         assert_eq!(store.count(&key).await.expect("count"), 2);
     }
 
+    /// Start time of the queue checks, ms.
+    pub(crate) const START_MS: u64 = 1_760_400_000_000;
+    /// Stale limit of the queue checks.
+    pub(crate) const STALE_AFTER_MS: u64 = 40_000;
+    const SECOND_MS: u64 = 1_000;
+    const ONE_SLOT: u32 = 1;
+
+    fn join(character_id: Uuid) -> QueueAction {
+        QueueAction::Join {
+            character_id,
+            new_ticket_id: unique("t"),
+        }
+    }
+
+    fn refresh(ticket_id: &str) -> QueueAction {
+        QueueAction::Refresh {
+            ticket_id: ticket_id.to_owned(),
+        }
+    }
+
+    fn waiting(status: Option<QueueStatus>) -> (String, u64) {
+        match status {
+            Some(QueueStatus::Waiting {
+                ticket_id,
+                position,
+            }) => (ticket_id, position),
+            other => panic!("expected waiting, got {other:?}"),
+        }
+    }
+
+    fn admitted(status: Option<QueueStatus>) -> EntryRecord {
+        match status {
+            Some(QueueStatus::Admitted(record)) => record,
+            other => panic!("expected admitted, got {other:?}"),
+        }
+    }
+
+    /// Checks a [`QueueStore`] with one slot of capacity. Times are seconds after [`START_MS`].
+    pub(crate) async fn queue(store: impl QueueStore) {
+        let settings = QueueSettings {
+            world_id: Uuid::new_v4(),
+            capacity: ONE_SLOT,
+            stale_after_ms: STALE_AFTER_MS,
+        };
+        let at = |seconds: u64| START_MS + seconds * SECOND_MS;
+        let (first, second, third) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let first_character = Uuid::new_v4();
+
+        // 0 s: the first account takes the only slot.
+        let record = admitted(
+            store
+                .update(&settings, first, join(first_character), at(0))
+                .await
+                .expect("first"),
+        );
+        assert_eq!(
+            (record.account_id, record.character_id),
+            (first, first_character)
+        );
+        assert_eq!(record.world_id, settings.world_id);
+
+        // 1 s: the second account waits; joining again with the same character keeps the entry.
+        let second_character = Uuid::new_v4();
+        let (second_ticket, position) = waiting(
+            store
+                .update(&settings, second, join(second_character), at(1))
+                .await
+                .expect("second"),
+        );
+        assert_eq!(position, 1);
+        let (again, _) = waiting(
+            store
+                .update(&settings, second, join(second_character), at(1))
+                .await
+                .expect("again"),
+        );
+        assert_eq!(again, second_ticket);
+
+        // 2 s: the third account waits behind it; it cannot refresh the second ticket.
+        let (third_ticket, position) = waiting(
+            store
+                .update(&settings, third, join(Uuid::new_v4()), at(2))
+                .await
+                .expect("third"),
+        );
+        assert_eq!(position, 2);
+        assert_eq!(
+            store
+                .update(&settings, third, refresh(&second_ticket), at(2))
+                .await
+                .expect("stolen"),
+            None
+        );
+
+        // 3 s: a new character replaces the second entry and goes to the back.
+        let (replaced, position) = waiting(
+            store
+                .update(&settings, second, join(Uuid::new_v4()), at(3))
+                .await
+                .expect("replace"),
+        );
+        assert_ne!(replaced, second_ticket);
+        assert_eq!(position, 2);
+        assert_eq!(
+            store
+                .update(&settings, second, refresh(&second_ticket), at(3))
+                .await
+                .expect("old"),
+            None
+        );
+
+        // 30 s: the third account refreshes and is first in line.
+        let (_, position) = waiting(
+            store
+                .update(&settings, third, refresh(&third_ticket), at(30))
+                .await
+                .expect("refresh"),
+        );
+        assert_eq!(position, 1);
+
+        // 61 s: the first record has expired, so the third account is admitted. The second
+        // account stopped refreshing at 3 s and is removed as stale.
+        let record = admitted(
+            store
+                .update(&settings, third, refresh(&third_ticket), at(61))
+                .await
+                .expect("admitted"),
+        );
+        assert_eq!(record.ticket_id, third_ticket);
+        assert_eq!(
+            store
+                .update(&settings, second, refresh(&replaced), at(61))
+                .await
+                .expect("stale"),
+            None
+        );
+    }
+
     /// Checks a [`DiscordStateStore`].
     pub(crate) async fn discord_states(store: impl DiscordStateStore) {
         let state = unique("s");
@@ -425,6 +717,11 @@ mod tests {
     #[tokio::test]
     async fn memory_discord_states_follow_the_contract() {
         contract::discord_states(MemoryDiscordStates::default()).await;
+    }
+
+    #[tokio::test]
+    async fn memory_queue_follows_the_contract() {
+        contract::queue(MemoryQueue::default()).await;
     }
 
     const ALREADY_EXPIRED: u64 = 0;

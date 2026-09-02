@@ -6,6 +6,9 @@ use nw_protocol::launcher_api::LauncherSession;
 use redis::aio::ConnectionManager;
 use uuid::Uuid;
 
+use crate::queue::{
+    ENTRY_TICKET_SECONDS, EntryRecord, QueueAction, QueueSettings, QueueStatus, QueueStore,
+};
 use crate::store::{DiscordAttempt, DiscordStateStore, GameSessionStore, RateLimiter, StoreError};
 
 /// Key prefix of game session keys.
@@ -16,6 +19,23 @@ const RATE_LIMIT_PREFIX: &str = "nw:rl:";
 const DISCORD_VERIFIER_PREFIX: &str = "nw:dv:";
 /// Key prefix of finished Discord logins.
 const DISCORD_RESULT_PREFIX: &str = "nw:dr:";
+/// Queue order of a world (`<prefix><world>`).
+const QUEUE_ORDER_PREFIX: &str = "nw:q:";
+/// Last refresh of waiting entries of a world.
+const QUEUE_REFRESH_PREFIX: &str = "nw:qr:";
+/// Live entry records of a world.
+const QUEUE_ADMITTED_PREFIX: &str = "nw:qd:";
+/// Entry hash (`account`, `character`) by ticket.
+const QUEUE_ENTRY_PREFIX: &str = "nw:qe:";
+/// Entry record by ticket; `rep-gateway` reads and deletes it in M3.
+pub const ENTRY_RECORD_PREFIX: &str = "nw:et:";
+/// Entry of an account (`<prefix><world>:<account>`).
+const QUEUE_ACCOUNT_PREFIX: &str = "nw:qa:";
+const QUEUE_SCRIPT: &str = include_str!("queue_script.lua");
+const JOIN_ACTION: &str = "join";
+const REFRESH_ACTION: &str = "refresh";
+const STATUS_ADMITTED: &str = "admitted";
+const STATUS_WAITING: &str = "waiting";
 
 /// A connection to Valkey, shared by every store.
 #[derive(Clone)]
@@ -154,6 +174,68 @@ impl DiscordStateStore for Valkey {
     }
 }
 
+impl QueueStore for Valkey {
+    async fn update(
+        &self,
+        settings: &QueueSettings,
+        account_id: Uuid,
+        action: QueueAction,
+        now_ms: u64,
+    ) -> Result<Option<QueueStatus>, StoreError> {
+        let world = settings.world_id;
+        let (name, character, new_ticket, ticket) = match &action {
+            QueueAction::Join {
+                character_id,
+                new_ticket_id,
+            } => (
+                JOIN_ACTION,
+                character_id.to_string(),
+                new_ticket_id.as_str(),
+                "",
+            ),
+            QueueAction::Refresh { ticket_id } => {
+                (REFRESH_ACTION, String::new(), "", ticket_id.as_str())
+            }
+        };
+        let mut connection = self.connection.clone();
+        let reply: Vec<String> = redis::Script::new(QUEUE_SCRIPT)
+            .key(format!("{QUEUE_ORDER_PREFIX}{world}"))
+            .key(format!("{QUEUE_REFRESH_PREFIX}{world}"))
+            .key(format!("{QUEUE_ADMITTED_PREFIX}{world}"))
+            .arg(now_ms)
+            .arg(now_ms.saturating_sub(settings.stale_after_ms))
+            .arg(settings.capacity)
+            .arg(ENTRY_TICKET_SECONDS)
+            .arg(world.to_string())
+            .arg(QUEUE_ENTRY_PREFIX)
+            .arg(ENTRY_RECORD_PREFIX)
+            .arg(format!("{QUEUE_ACCOUNT_PREFIX}{world}:"))
+            .arg(name)
+            .arg(account_id.to_string())
+            .arg(character)
+            .arg(new_ticket)
+            .arg(ticket)
+            .invoke_async(&mut connection)
+            .await
+            .map_err(StoreError::unavailable)?;
+        match reply.as_slice() {
+            [status, _, record] if status == STATUS_ADMITTED => {
+                let record: EntryRecord =
+                    serde_json::from_str(record).map_err(StoreError::unavailable)?;
+                Ok(Some(QueueStatus::Admitted(record)))
+            }
+            [status, ticket_id, position] if status == STATUS_WAITING => {
+                let position = position.parse().map_err(StoreError::unavailable)?;
+                Ok(Some(QueueStatus::Waiting {
+                    ticket_id: ticket_id.clone(),
+                    position,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+}
+
 #[cfg(all(test, feature = "infra"))]
 pub(crate) mod tests {
     use super::*;
@@ -183,5 +265,65 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn valkey_discord_states_follow_the_contract() {
         contract::discord_states(valkey().await).await;
+    }
+
+    #[tokio::test]
+    async fn valkey_queue_follows_the_contract() {
+        contract::queue(valkey().await).await;
+    }
+
+    /// Parallel joins on one world.
+    const PARALLEL_JOINS: usize = 200;
+    /// Capacity of the parallel test world.
+    const PARALLEL_CAPACITY: u32 = 50;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn parallel_joins_never_exceed_capacity() {
+        let store = valkey().await;
+        let settings = QueueSettings {
+            world_id: Uuid::new_v4(),
+            capacity: PARALLEL_CAPACITY,
+            stale_after_ms: contract::STALE_AFTER_MS,
+        };
+        let accounts: Vec<Uuid> = (0..PARALLEL_JOINS).map(|_| Uuid::new_v4()).collect();
+        let joins = accounts.clone().into_iter().map(|account| {
+            let store = store.clone();
+            tokio::spawn(async move {
+                let action = QueueAction::Join {
+                    character_id: Uuid::new_v4(),
+                    new_ticket_id: contract::unique("t"),
+                };
+                store
+                    .update(&settings, account, action, contract::START_MS)
+                    .await
+                    .expect("join")
+                    .expect("status")
+            })
+        });
+        let mut admitted = 0;
+        let mut waiting = Vec::new();
+        for (account, join) in accounts.into_iter().zip(joins.collect::<Vec<_>>()) {
+            match join.await.expect("task") {
+                QueueStatus::Admitted(_) => admitted += 1,
+                QueueStatus::Waiting { ticket_id, .. } => waiting.push((account, ticket_id)),
+            }
+        }
+        assert_eq!(admitted, PARALLEL_CAPACITY as usize);
+        let mut positions = Vec::new();
+        for (account, ticket_id) in waiting {
+            let action = QueueAction::Refresh { ticket_id };
+            match store
+                .update(&settings, account, action, contract::START_MS)
+                .await
+                .expect("refresh")
+            {
+                Some(QueueStatus::Waiting { position, .. }) => positions.push(position),
+                other => panic!("expected waiting, got {other:?}"),
+            }
+        }
+        positions.sort_unstable();
+        let expected: Vec<u64> =
+            (1..=(PARALLEL_JOINS - PARALLEL_CAPACITY as usize) as u64).collect();
+        assert_eq!(positions, expected);
     }
 }

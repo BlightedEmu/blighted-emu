@@ -12,6 +12,7 @@ mod memory;
 pub mod names;
 pub mod password;
 pub mod pg;
+pub mod queue;
 pub mod secrets;
 pub mod signature;
 pub mod store;
