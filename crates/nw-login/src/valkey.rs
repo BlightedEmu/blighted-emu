@@ -2,12 +2,15 @@
 //! Valkey stores: game sessions, rate limits and Discord login attempts. Nothing here is the only
 //! copy of durable data; losing it means "log in again" (M2 spec section 7).
 
+use std::sync::LazyLock;
+
 use nw_protocol::launcher_api::LauncherSession;
 use redis::aio::ConnectionManager;
 use uuid::Uuid;
 
 use crate::queue::{
     ENTRY_TICKET_SECONDS, EntryRecord, QueueAction, QueueSettings, QueueStatus, QueueStore,
+    QueueTime,
 };
 use crate::store::{DiscordAttempt, DiscordStateStore, GameSessionStore, RateLimiter, StoreError};
 
@@ -41,6 +44,13 @@ const TAKE_VERIFIER_SCRIPT: &str = "local verifier = redis.call('GET', KEYS[1]) 
 if verifier and verifier ~= '' then redis.call('SET', KEYS[1], '', 'KEEPTTL') return verifier end \
 return false";
 const JOIN_ACTION: &str = "join";
+/// Script argument that tells the queue script to use the Valkey clock.
+const STORE_CLOCK_ARGUMENT: &str = "";
+// The scripts are built (and their SHA-1 computed) one time.
+static RELEASE: LazyLock<redis::Script> = LazyLock::new(|| redis::Script::new(RELEASE_SCRIPT));
+static TAKE_VERIFIER: LazyLock<redis::Script> =
+    LazyLock::new(|| redis::Script::new(TAKE_VERIFIER_SCRIPT));
+static QUEUE: LazyLock<redis::Script> = LazyLock::new(|| redis::Script::new(QUEUE_SCRIPT));
 const REFRESH_ACTION: &str = "refresh";
 const STATUS_ADMITTED: &str = "admitted";
 const STATUS_WAITING: &str = "waiting";
@@ -121,7 +131,7 @@ impl RateLimiter for Valkey {
 
     async fn release(&self, key: &str) -> Result<(), StoreError> {
         let mut connection = self.connection.clone();
-        redis::Script::new(RELEASE_SCRIPT)
+        RELEASE
             .key(format!("{RATE_LIMIT_PREFIX}{key}"))
             .invoke_async::<i64>(&mut connection)
             .await
@@ -144,7 +154,7 @@ impl DiscordStateStore for Valkey {
 
     async fn take_verifier(&self, state: &str) -> Result<Option<String>, StoreError> {
         let mut connection = self.connection.clone();
-        redis::Script::new(TAKE_VERIFIER_SCRIPT)
+        TAKE_VERIFIER
             .key(format!("{DISCORD_VERIFIER_PREFIX}{state}"))
             .invoke_async(&mut connection)
             .await
@@ -195,9 +205,13 @@ impl QueueStore for Valkey {
         settings: &QueueSettings,
         account_id: Uuid,
         action: QueueAction,
-        now_ms: u64,
+        time: QueueTime,
     ) -> Result<Option<QueueStatus>, StoreError> {
         let world = settings.world_id;
+        let now = match time {
+            QueueTime::StoreClock => STORE_CLOCK_ARGUMENT.to_owned(),
+            QueueTime::At(ms) => ms.to_string(),
+        };
         let (name, character, new_ticket, ticket) = match &action {
             QueueAction::Join {
                 character_id,
@@ -213,12 +227,12 @@ impl QueueStore for Valkey {
             }
         };
         let mut connection = self.connection.clone();
-        let reply: Vec<String> = redis::Script::new(QUEUE_SCRIPT)
+        let reply: Vec<String> = QUEUE
             .key(format!("{QUEUE_ORDER_PREFIX}{world}"))
             .key(format!("{QUEUE_REFRESH_PREFIX}{world}"))
             .key(format!("{QUEUE_ADMITTED_PREFIX}{world}"))
-            .arg(now_ms)
-            .arg(now_ms.saturating_sub(settings.stale_after_ms))
+            .arg(now)
+            .arg(settings.stale_after_ms)
             .arg(settings.capacity)
             .arg(ENTRY_TICKET_SECONDS)
             .arg(world.to_string())
@@ -285,6 +299,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn valkey_queue_follows_the_contract() {
         contract::queue(valkey().await).await;
+        contract::queue_store_clock(valkey().await).await;
     }
 
     /// Parallel joins on one world.
@@ -309,7 +324,12 @@ pub(crate) mod tests {
                     new_ticket_id: contract::unique("t"),
                 };
                 store
-                    .update(&settings, account, action, contract::START_MS)
+                    .update(
+                        &settings,
+                        account,
+                        action,
+                        QueueTime::At(contract::START_MS),
+                    )
                     .await
                     .expect("join")
                     .expect("status")
@@ -328,7 +348,12 @@ pub(crate) mod tests {
         for (account, ticket_id) in waiting {
             let action = QueueAction::Refresh { ticket_id };
             match store
-                .update(&settings, account, action, contract::START_MS)
+                .update(
+                    &settings,
+                    account,
+                    action,
+                    QueueTime::At(contract::START_MS),
+                )
                 .await
                 .expect("refresh")
             {

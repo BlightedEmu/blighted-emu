@@ -36,11 +36,10 @@ use crate::keys::new_game_session_key;
 use crate::launcher::LauncherState;
 use crate::password::PasswordHasher;
 use crate::pg::{PgAccounts, PgCharacters};
-use crate::queue::{QueueAction, QueueSettings, QueueStatus, QueueStore};
+use crate::queue::{QueueAction, QueueSettings, QueueStatus, QueueStore, QueueTime};
 use crate::secrets::SigningKey;
 use crate::signature::verify_entry;
 use crate::test_http::{self, error_code};
-use crate::time::unix_now_millis;
 use crate::valkey::Valkey;
 use crate::valkey::tests::test_valkey_url;
 
@@ -310,7 +309,7 @@ async fn walk(global: &PgPool, world_pool: &PgPool) {
             QueueAction::Refresh {
                 ticket_id: ticket_id.clone(),
             },
-            unix_now_millis(),
+            QueueTime::StoreClock,
         )
         .await
         .expect("entry record");

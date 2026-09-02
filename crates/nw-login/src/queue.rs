@@ -108,16 +108,25 @@ pub enum QueueAction {
     },
 }
 
+/// The time a queue update runs at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueTime {
+    /// The store's own clock (Valkey `TIME`), so that several `edge-http` copies agree.
+    StoreClock,
+    /// A fixed time in Unix milliseconds (tests).
+    At(u64),
+}
+
 /// The login queues (Valkey; an in-memory version for tests).
 pub trait QueueStore: Clone + Send + Sync + 'static {
-    /// Applies `action` for `account_id` at time `now_ms` and admits what fits. `None` means the
-    /// ticket is unknown or belongs to another account.
+    /// Applies `action` for `account_id` at `time` and admits what fits. `None` means the ticket
+    /// is unknown or belongs to another account.
     fn update(
         &self,
         settings: &QueueSettings,
         account_id: Uuid,
         action: QueueAction,
-        now_ms: u64,
+        time: QueueTime,
     ) -> impl Future<Output = Result<Option<QueueStatus>, StoreError>> + Send;
 }
 

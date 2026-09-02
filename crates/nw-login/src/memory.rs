@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::queue::{
     ENTRY_TICKET_SECONDS, EntryRecord, QueueAction, QueueSettings, QueueStatus, QueueStore,
+    QueueTime,
 };
 use crate::store::{
     AccountStore, CharacterStore, DiscordAttempt, DiscordStateStore, GameSessionStore, RateLimiter,
@@ -393,14 +394,27 @@ impl WorldQueue {
     }
 }
 
+/// Milliseconds since the Unix epoch: the clock of the in-memory store.
+fn unix_now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 impl QueueStore for MemoryQueue {
     async fn update(
         &self,
         settings: &QueueSettings,
         account_id: Uuid,
         action: QueueAction,
-        now_ms: u64,
+        time: QueueTime,
     ) -> Result<Option<QueueStatus>, StoreError> {
+        let now_ms = match time {
+            QueueTime::StoreClock => unix_now_millis(),
+            QueueTime::At(ms) => ms,
+        };
         let mut worlds = lock(&self.0);
         let queue = worlds.entry(settings.world_id).or_default();
         let stale_before = now_ms.saturating_sub(settings.stale_after_ms);
@@ -663,10 +677,42 @@ pub(crate) mod contract {
         );
     }
 
+    /// Checks that a [`QueueStore`] can use its own clock: an admitted entry expires one entry
+    /// lifetime after the current time.
+    pub(crate) async fn queue_store_clock(store: impl QueueStore) {
+        let settings = QueueSettings {
+            world_id: Uuid::new_v4(),
+            capacity: ONE_SLOT,
+            stale_after_ms: STALE_AFTER_MS,
+        };
+        let before = unix_now();
+        let status = store
+            .update(
+                &settings,
+                Uuid::new_v4(),
+                join(Uuid::new_v4()),
+                QueueTime::StoreClock,
+            )
+            .await
+            .expect("join");
+        let Some(QueueStatus::Admitted(record)) = status else {
+            panic!("expected an admitted entry, got {status:?}");
+        };
+        let lifetime = i64::try_from(ENTRY_TICKET_SECONDS).expect("small");
+        assert!(
+            (before + lifetime - CLOCK_SLACK_SECONDS..=unix_now() + lifetime + CLOCK_SLACK_SECONDS)
+                .contains(&record.expires_at),
+            "expiry {} is not one entry lifetime after now",
+            record.expires_at
+        );
+    }
+
     /// Start time of the queue checks, ms.
     pub(crate) const START_MS: u64 = 1_760_400_000_000;
     /// Stale limit of the queue checks.
     pub(crate) const STALE_AFTER_MS: u64 = 40_000;
+    /// Allowed difference between the test clock and the store clock.
+    const CLOCK_SLACK_SECONDS: i64 = 2;
     const SECOND_MS: u64 = 1_000;
     const ONE_SLOT: u32 = 1;
 
@@ -707,7 +753,7 @@ pub(crate) mod contract {
             capacity: ONE_SLOT,
             stale_after_ms: STALE_AFTER_MS,
         };
-        let at = |seconds: u64| START_MS + seconds * SECOND_MS;
+        let at = |seconds: u64| QueueTime::At(START_MS + seconds * SECOND_MS);
         let (first, second, third) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let first_character = Uuid::new_v4();
 
@@ -877,6 +923,7 @@ mod tests {
     #[tokio::test]
     async fn memory_queue_follows_the_contract() {
         contract::queue(MemoryQueue::default()).await;
+        contract::queue_store_clock(MemoryQueue::default()).await;
     }
 
     const ALREADY_EXPIRED: u64 = 0;

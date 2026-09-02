@@ -2,10 +2,16 @@
 -- Login queue update for one world, atomic in Valkey (M2 spec section 8).
 -- KEYS[1] order (zset ticket -> join ms), KEYS[2] refresh (zset ticket -> last refresh ms),
 -- KEYS[3] admitted (zset ticket -> expiry ms).
--- ARGV: 1 now ms, 2 stale-before ms, 3 capacity, 4 entry seconds, 5 world id,
+-- ARGV: 1 now ms (empty: use the Valkey clock), 2 stale-after ms, 3 capacity, 4 entry seconds, 5 world id,
 -- 6 entry hash prefix, 7 record prefix, 8 account pointer prefix (per world),
 -- 9 action ("join" or "refresh"), 10 account id, 11 character id, 12 new ticket id, 13 ticket id.
 local now = tonumber(ARGV[1])
+if not now then
+  -- One clock for every edge-http copy: Valkey's own time.
+  local time = redis.call('TIME')
+  now = tonumber(time[1]) * 1000 + math.floor(tonumber(time[2]) / 1000)
+end
+local stale_before = now - tonumber(ARGV[2])
 local entry_prefix, record_prefix, account_prefix = ARGV[6], ARGV[7], ARGV[8]
 
 local function forget(ticket)
@@ -16,7 +22,7 @@ local function forget(ticket)
 end
 
 -- Remove waiting entries that stopped refreshing.
-for _, ticket in ipairs(redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', '(' .. ARGV[2])) do
+for _, ticket in ipairs(redis.call('ZRANGEBYSCORE', KEYS[2], '-inf', '(' .. stale_before)) do
   local account = redis.call('HGET', entry_prefix .. ticket, 'account')
   forget(ticket)
   if account and redis.call('GET', account_prefix .. account) == ticket then

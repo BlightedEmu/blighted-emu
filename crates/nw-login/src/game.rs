@@ -32,10 +32,10 @@ use crate::config::{EdgeConfig, WorldConfig};
 use crate::error::{ApiError, parse_json};
 use crate::keys::{is_game_session_key, new_launcher_token};
 use crate::names::check_character_name;
-use crate::queue::{QueueAction, QueueSettings, QueueStore, queue_reply};
+use crate::queue::{QueueAction, QueueSettings, QueueStore, QueueTime, queue_reply};
 use crate::secrets::SigningKey;
 use crate::store::{CharacterStore, GameSessionStore, RateLimiter};
-use crate::time::{http_date, unix_now, unix_now_millis};
+use crate::time::{http_date, unix_now};
 
 /// Path part in front of the game session key: `/s/<session>`.
 pub const SESSION_PREFIX: &str = "/s";
@@ -466,7 +466,7 @@ async fn queue_step<G, C, R, Q: QueueStore>(
             &QueueSettings::for_world(world),
             account,
             action,
-            unix_now_millis(),
+            QueueTime::StoreClock,
         )
         .await?
         .ok_or(ApiError::UnknownTicket)?;
@@ -1030,7 +1030,7 @@ pub(crate) mod tests {
                 QueueAction::Refresh {
                     ticket_id: ticket_id.clone(),
                 },
-                unix_now_millis(),
+                QueueTime::StoreClock,
             )
             .await
             .expect("refresh");
