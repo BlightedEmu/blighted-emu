@@ -13,15 +13,14 @@ use std::sync::Arc;
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
 use axum::http::{Method, Uri};
-use axum::routing::{any, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use nw_db::{Character, NewCharacter};
 use nw_protocol::game_api::{
     AUTH_STACK_STAGE, AUTH_STACK_TAG, CHARACTERS_SEGMENT, ChannelDocument, CharacterSummary,
     Cluster, CreateCharacterReply, CreateCharacterRequestBody, GATEWAY_STAGE, GET_LOGIN_INFO_PATH,
     HTTP_GATEWAY_TAG, LIST_WORLDS_PATH, LOGIN_GATEWAY_TAG, ListWorldsBody, ListWorldsReply,
-    LoginInfoList, LoginInfoReply, NameRecord, OMNI_METADATA_MARK, OmniAccount, OmniMetadata,
-    OmniPlatformAccount, OmniTokenReply, PUBLIC_STATUS_OPEN, PublicApi, QUEUE_LOGIN_PATH,
+    LoginInfoList, LoginInfoReply, NameRecord, PUBLIC_STATUS_OPEN, PublicApi, QUEUE_LOGIN_PATH,
     STEAM_AUTH_PATH, SteamAuthReply, VALIDATOR_SEGMENT, ValidateCharacterRequest,
     WORLD_STATUS_ACTIVE, WORLDS_PATH, WorldModel,
 };
@@ -40,9 +39,6 @@ use crate::time::{http_date, unix_now, unix_now_millis};
 
 /// Path part in front of the game session key: `/s/<session>`.
 pub const SESSION_PREFIX: &str = "/s";
-/// Path of the token service under the session. Any longer path below it is also a token call,
-/// because the path the client appends to the token URL is Unknown (JSON note section 4).
-pub const TOKEN_PATH: &str = "/token";
 /// File name ending of the channel document.
 pub const CHANNEL_FILE_SUFFIX: &str = ".json";
 /// The client may add dot-separated parts around the channel key (JSON note section 7).
@@ -53,17 +49,11 @@ const CHANNEL_KEY_EXTRA_BYTES: [u8; 2] = [b'_', b'-'];
 const CHANNEL_ROUTE: &str = "/{file}";
 /// Id of the one cluster in the channel document.
 const CLUSTER_ID: &str = "blighted";
-/// Game alias in the Omni settings; the client calls `<token URL>/games/<alias>/tokens`.
-const OMNI_GAME_ALIAS: &str = "blighted";
 /// Region text in every `publicApis` element; the client only signs requests with it.
 const API_REGION: &str = "us-east-1";
 /// Value of the three `/steam` credentials; the client signs requests with them and the server
 /// ignores the signatures (JSON note section 7).
 const AUTH_STACK_CREDENTIAL: &str = "blighted";
-/// Value of the Omni access and fallback tokens; the client does not check them.
-const OMNI_TOKEN: &str = "blighted";
-/// Platform name in the Omni token reply.
-const STEAM_PLATFORM: &str = "steam";
 /// Text shown in logs in place of a game session key.
 const SESSION_MASK: &str = "<session>";
 const PATH_SEPARATOR: char = '/';
@@ -135,11 +125,6 @@ where
         .route(
             &session_route(&format!("{AUTH_STACK_STAGE}{STEAM_AUTH_PATH}")),
             post(steam_auth::<G, C, R, Q>),
-        )
-        .route(&session_route(TOKEN_PATH), any(token::<G, C, R, Q>))
-        .route(
-            &session_route(&format!("{TOKEN_PATH}/{{*rest}}")),
-            any(token::<G, C, R, Q>),
         )
         .route(
             &gateway_route(GET_LOGIN_INFO_PATH),
@@ -218,11 +203,8 @@ pub fn channel_session_key(channel_key: &str) -> Option<&str> {
 }
 
 /// The channel document for one game session: every endpoint is `game.<domain>/s/<session>`.
-/// The Omni settings key is `OMNI.<channel key>`, because the client looks the settings up by the
-/// key it asked for (follow-up note section 2).
-pub fn channel_document(config: &EdgeConfig, channel_key: &str, session: &str) -> ChannelDocument {
+pub fn channel_document(config: &EdgeConfig, session: &str) -> ChannelDocument {
     let endpoint = format!("{}{SESSION_PREFIX}/{session}", config.game_host());
-    let token_url = format!("https://{endpoint}{TOKEN_PATH}");
     let api = |tag: &str| PublicApi {
         client_tag: tag.to_owned(),
         api_endpoint: endpoint.clone(),
@@ -230,15 +212,6 @@ pub fn channel_document(config: &EdgeConfig, channel_key: &str, session: &str) -
     };
     ChannelDocument {
         channel_name: config.server_name.clone(),
-        platform_metadata: [(
-            format!("{OMNI_METADATA_MARK}{channel_key}"),
-            OmniMetadata {
-                omni_game_alias: OMNI_GAME_ALIAS.to_owned(),
-                omni_token_url: token_url.clone(),
-                nw_token_url: token_url,
-            },
-        )]
-        .into(),
         clusters: [(
             CLUSTER_ID.to_owned(),
             Cluster {
@@ -268,7 +241,7 @@ where
     };
     let session = channel_session_key(key).ok_or(ApiError::NoSession)?;
     session_account(&state, session).await?;
-    Ok(Json(channel_document(&state.config, key, session)))
+    Ok(Json(channel_document(&state.config, session)))
 }
 
 fn session_seconds(config: &EdgeConfig) -> i64 {
@@ -289,27 +262,6 @@ where
         secret_key: AUTH_STACK_CREDENTIAL.to_owned(),
         session_token: AUTH_STACK_CREDENTIAL.to_owned(),
         expiration: http_date(expires_at),
-    }))
-}
-
-async fn token<G, C, R, Q>(
-    State(state): State<GameState<G, C, R, Q>>,
-    Path(path): Path<SessionPath>,
-) -> Result<Json<OmniTokenReply>, ApiError>
-where
-    G: GameSessionStore,
-{
-    session_account(&state, &path.session).await?;
-    Ok(Json(OmniTokenReply {
-        access_token: OMNI_TOKEN.to_owned(),
-        fallback_token: OMNI_TOKEN.to_owned(),
-        platform_account: OmniPlatformAccount {
-            platform: STEAM_PLATFORM.to_owned(),
-        },
-        account: OmniAccount {
-            is_new_account: false,
-        },
-        expires_in: session_seconds(&state.config),
     }))
 }
 
@@ -339,6 +291,7 @@ pub(crate) fn character_summary(world_id: Uuid, character: &Character) -> Charac
     CharacterSummary {
         character_id: character.id.to_string(),
         created_date: http_date(character.created_at_unix),
+        name: character.name.clone(),
         normalized_name: character.name.to_lowercase(),
         persona_id: character.account_id.to_string(),
         world_id: world_id.to_string(),
@@ -627,6 +580,8 @@ pub(crate) mod tests {
 
     const CLAIM_SECONDS: u64 = 600;
     const GMT_SUFFIX: &str = " GMT";
+    /// The token path that earlier builds served.
+    const OLD_TOKEN_PATH: &str = "/token";
     const UNKNOWN_ROUTE_LOG: &str = "request for an unknown route";
     const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const ONE_SLOT: u32 = 1;
@@ -727,8 +682,7 @@ pub(crate) mod tests {
     #[test]
     fn channel_document_points_every_api_at_the_session() {
         let config = valid();
-        let decorated = format!("{OTHER_KEY}.CROSSPLAY.off");
-        let document = channel_document(&config, &decorated, OTHER_KEY);
+        let document = channel_document(&config, OTHER_KEY);
         let endpoint = format!("game.example.org/s/{OTHER_KEY}");
         let cluster = &document.clusters[CLUSTER_ID];
         let tags: Vec<&str> = cluster
@@ -743,17 +697,10 @@ pub(crate) mod tests {
                 .iter()
                 .all(|api| api.api_endpoint == endpoint)
         );
-        let (key, omni) = document
-            .platform_metadata
-            .iter()
-            .next()
-            .expect("omni settings");
-        assert_eq!(key, &format!("{OMNI_METADATA_MARK}{decorated}"));
-        assert_eq!(omni.omni_game_alias, OMNI_GAME_ALIAS);
-        assert_eq!(
-            omni.omni_token_url,
-            format!("https://{endpoint}{TOKEN_PATH}")
-        );
+        // No Omni settings: the client reads them only on the backend that skips `/steam`, and
+        // then calls Amazon's identity host (unknowns note, second pass sections 2 and 8).
+        let value = serde_json::to_value(&document).expect("json");
+        assert!(value.get("platformMetadata").is_none());
     }
 
     #[test]
@@ -818,7 +765,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn steam_and_token_calls_need_a_session() {
+    async fn steam_calls_need_a_session() {
         let fixture = fixture().await;
         let app = game_router(fixture.state.clone());
         let steam = format!("{AUTH_STACK_STAGE}{STEAM_AUTH_PATH}");
@@ -826,16 +773,16 @@ pub(crate) mod tests {
         assert_eq!(status, StatusCode::OK);
         let reply: SteamAuthReply = serde_json::from_slice(&body).expect("steam");
         assert!(reply.expiration.ends_with(GMT_SUFFIX));
-        for rest in [TOKEN_PATH, "/token/v1/tokens"] {
-            let (status, body) = call(&app, "POST", &game_path(&fixture.session, rest)).await;
-            assert_eq!(status, StatusCode::OK, "{rest}");
-            let reply: OmniTokenReply = serde_json::from_slice(&body).expect("token");
-            assert_eq!(reply.platform_account.platform, STEAM_PLATFORM);
-        }
         let (status, _) = call(&app, "POST", &game_path(OTHER_KEY, &steam)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
-        let (status, _) = call(&app, "POST", &game_path("short", TOKEN_PATH)).await;
+        let (status, _) = call(&app, "POST", &game_path("short", &steam)).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // The client never uses a token URL from the channel document (unknowns note section 2).
+        let (status, body) = call(&app, "POST", &game_path(&fixture.session, OLD_TOKEN_PATH)).await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::NOT_FOUND, "unknown_route")
+        );
     }
 
     #[tokio::test]
@@ -867,6 +814,7 @@ pub(crate) mod tests {
             let reply: LoginInfoReply = serde_json::from_slice(&body).expect("login info");
             let list = reply.login_info_list;
             assert_eq!(list.characters, vec![character_summary(world_id, &created)]);
+            assert_eq!(list.characters[0].name, NAME);
             assert_eq!(list.name_reservations[0].display_name, NAME);
             assert_eq!(list.worlds, world_models(&fixture.state.config));
         }

@@ -4,7 +4,7 @@
 //!
 //! The client reads every field through a presence check, so the server leaves out what it does
 //! not know. Serialization omits a key whose value is absent. Gateway models use PascalCase keys;
-//! the channel document and the Omni token reply use camelCase keys.
+//! the channel document uses camelCase keys.
 
 use std::collections::BTreeMap;
 
@@ -35,23 +35,20 @@ pub const AUTH_STACK_TAG: &str = "authStack";
 pub const LOGIN_GATEWAY_TAG: &str = "loginGateway";
 /// `clientTag` of the HTTP gateway API.
 pub const HTTP_GATEWAY_TAG: &str = "JavelinGatewayServiceV2";
-/// Start of the `platformMetadata` key of the Omni settings: `OMNI.<suffix>`. The client looks
-/// the key up by exact match (follow-up note section 2).
-pub const OMNI_METADATA_MARK: &str = "OMNI.";
 /// `WorldStatus` of a world that players may pick (follow-up note section 8).
 pub const WORLD_STATUS_ACTIVE: &str = "ACTIVE";
 /// `PublicStatusCode` of an open world; the client accepts only codes inside the bit mask
 /// `0x1748`, and 0 passes (follow-up note section 8).
 pub const PUBLIC_STATUS_OPEN: i64 = 0;
 
-/// The channel document `<key>.json` (JSON note section 2). Clusters are top-level keys.
+/// The channel document `<key>.json` (JSON note section 2). Clusters are top-level keys. It has
+/// no `platformMetadata`: the client reads Omni settings only on the auth backend that skips
+/// `/steam` (unknowns note, second pass section 2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelDocument {
     /// Channel name, logged by the client.
     pub channel_name: String,
-    /// Omni settings; each key must contain [`OMNI_METADATA_MARK`].
-    pub platform_metadata: BTreeMap<String, OmniMetadata>,
     /// Clusters by cluster id.
     #[serde(flatten)]
     pub clusters: BTreeMap<String, Cluster>,
@@ -79,18 +76,6 @@ pub struct PublicApi {
     pub aws_region: String,
 }
 
-/// Omni settings in `platformMetadata` (JSON note section 2.1).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OmniMetadata {
-    /// Game alias; the token call path is `/games/<alias>/tokens` (follow-up note section 1).
-    pub omni_game_alias: String,
-    /// Omni token service URL.
-    pub omni_token_url: String,
-    /// New World token service URL.
-    pub nw_token_url: String,
-}
-
 /// Reply of the auth stack `/steam` call (JSON note section 3). All four values are strings; the
 /// client signs later gateway calls with them, and the server ignores that signature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,38 +89,6 @@ pub struct SteamAuthReply {
     pub session_token: String,
     /// Expiry as an RFC 822 date in GMT.
     pub expiration: String,
-}
-
-/// Reply of the Omni `GetOrCreateToken` call (JSON note section 4).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OmniTokenReply {
-    /// Opaque token; the client does not check it.
-    pub access_token: String,
-    /// Opaque fallback token.
-    pub fallback_token: String,
-    /// Platform account object (required by the client).
-    pub platform_account: OmniPlatformAccount,
-    /// Account object (required by the client).
-    pub account: OmniAccount,
-    /// Token lifetime in seconds.
-    pub expires_in: i64,
-}
-
-/// `platformAccount` of [`OmniTokenReply`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OmniPlatformAccount {
-    /// Platform name, for example `steam`.
-    pub platform: String,
-}
-
-/// `account` of [`OmniTokenReply`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OmniAccount {
-    /// Whether the account was made by this call.
-    pub is_new_account: bool,
 }
 
 /// Reply of `GetLoginInfo` (JSON note section 5.1).
@@ -167,6 +120,9 @@ pub struct CharacterSummary {
     pub character_id: String,
     /// Creation date, RFC 822 in GMT.
     pub created_date: String,
+    /// Name as the player typed it; the select screen shows it (unknowns note, third pass
+    /// section 2).
+    pub name: String,
     /// Lower-case name.
     pub normalized_name: String,
     /// Account id.
@@ -296,10 +252,8 @@ mod tests {
     const DATE: &str = "Tue, 14 Oct 2025 00:00:00 GMT";
     const ENDPOINT: &str = "game.example.org/s/session";
     const CLUSTER_ID: &str = "blighted";
-    const OMNI_KEY: &str = "OMNI.channel";
     const MAX_CHARACTERS: i64 = 2;
     const CAPACITY: i64 = 100;
-    const TOKEN_SECONDS: i64 = 7200;
     const STEAM_APP_ID: i64 = 1_063_730;
 
     fn keys(value: &serde_json::Value) -> Vec<&str> {
@@ -321,6 +275,7 @@ mod tests {
         CharacterSummary {
             character_id: CHARACTER_ID.to_owned(),
             created_date: DATE.to_owned(),
+            name: "Ada".to_owned(),
             normalized_name: "ada".to_owned(),
             persona_id: ACCOUNT_ID.to_owned(),
             world_id: WORLD_ID.to_owned(),
@@ -349,14 +304,6 @@ mod tests {
         };
         let document = ChannelDocument {
             channel_name: "Test".to_owned(),
-            platform_metadata: BTreeMap::from([(
-                OMNI_KEY.to_owned(),
-                OmniMetadata {
-                    omni_game_alias: "blighted".to_owned(),
-                    omni_token_url: "https://game.example.org/s/session/token".to_owned(),
-                    nw_token_url: "https://game.example.org/s/session/token".to_owned(),
-                },
-            )]),
             clusters: BTreeMap::from([(
                 CLUSTER_ID.to_owned(),
                 Cluster {
@@ -366,14 +313,7 @@ mod tests {
             )]),
         };
         let value = json(&document);
-        assert_eq!(
-            keys(&value),
-            [CLUSTER_ID, "channelName", "platformMetadata"]
-        );
-        assert_eq!(
-            keys(&value["platformMetadata"][OMNI_KEY]),
-            ["nwTokenUrl", "omniGameAlias", "omniTokenUrl"]
-        );
+        assert_eq!(keys(&value), [CLUSTER_ID, "channelName"]);
         assert_eq!(keys(&value[CLUSTER_ID]), ["localizedName", "publicApis"]);
         assert_eq!(
             keys(&value[CLUSTER_ID]["publicApis"][0]),
@@ -390,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn auth_replies_have_the_client_keys() {
+    fn steam_reply_has_the_client_keys() {
         let steam = SteamAuthReply {
             access_key_id: "a".to_owned(),
             secret_key: "b".to_owned(),
@@ -401,30 +341,6 @@ mod tests {
             keys(&json(&steam)),
             ["AccessKeyId", "Expiration", "SecretKey", "SessionToken"]
         );
-        let token = OmniTokenReply {
-            access_token: "a".to_owned(),
-            fallback_token: "b".to_owned(),
-            platform_account: OmniPlatformAccount {
-                platform: "steam".to_owned(),
-            },
-            account: OmniAccount {
-                is_new_account: false,
-            },
-            expires_in: TOKEN_SECONDS,
-        };
-        let value = json(&token);
-        assert_eq!(
-            keys(&value),
-            [
-                "accessToken",
-                "account",
-                "expiresIn",
-                "fallbackToken",
-                "platformAccount"
-            ]
-        );
-        assert!(value["platformAccount"].is_object());
-        assert_eq!(keys(&value["account"]), ["isNewAccount"]);
     }
 
     #[test]
@@ -451,6 +367,7 @@ mod tests {
             [
                 "CharacterId",
                 "CreatedDate",
+                "Name",
                 "NormalizedName",
                 "PersonaId",
                 "WorldId"

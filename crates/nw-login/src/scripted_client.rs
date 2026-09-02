@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The scripted client (M2 spec section 11, `infra` feature). It walks the login steps of the game
 //! client over the real PostgreSQL and Valkey stores and through the host router: launcher login,
-//! channel document, `/steam`, token, `getlogininfo`, world list, validator, character create,
+//! channel document, `/steam`, `getlogininfo`, world list, validator, character create,
 //! queue and entry ticket. Then it repeats every game step with a wrong session and with no
 //! session.
 
@@ -58,8 +58,6 @@ const BEARER_PREFIX: &str = "Bearer ";
 /// The body the client builds by hand for `/steam` (JSON note section 3).
 const STEAM_BODY: &str =
     r#"{"steamAuthTicket":"140000", "steamAppId":"1063730", "branch":"public"}"#;
-/// An Omni `GetOrCreateToken` body (protocol note section 1.2).
-const TOKEN_BODY: &str = r#"{"platformIdentityType":"steam","platformAuth":{"ticket":"140000"}}"#;
 const LOGIN_INFO_BODY: &str = r#"{"channelId":"live","includeNames":"true"}"#;
 const LIST_WORLDS_BODY: &str = r#"{"ListWorldsRequestBody":{}}"#;
 
@@ -201,18 +199,6 @@ async fn walk(global: &PgPool, world_pool: &PgPool) {
     assert_eq!(endpoint(AUTH_STACK_TAG), endpoint(LOGIN_GATEWAY_TAG));
     let (game_host, prefix) = split_endpoint(&endpoint(LOGIN_GATEWAY_TAG));
     assert_eq!(game_host, config.game_host());
-    let token_url = &channel
-        .platform_metadata
-        .values()
-        .next()
-        .expect("omni settings")
-        .omni_token_url;
-    let (token_host, token_path) = split_endpoint(token_url);
-    assert_eq!(token_host, game_host);
-    let token_rest = token_path
-        .strip_prefix(&prefix)
-        .expect("token URL under the session")
-        .to_owned();
 
     let gateway = |operation: &str| format!("{GATEWAY_STAGE}{operation}");
     let world_route = |segment: &str| gateway(&format!("{WORLDS_PATH}/{}{segment}", world.id));
@@ -221,11 +207,6 @@ async fn walk(global: &PgPool, world_pool: &PgPool) {
             name: "steam",
             path: format!("{AUTH_STACK_STAGE}{STEAM_AUTH_PATH}"),
             body: STEAM_BODY.to_owned(),
-        },
-        Step {
-            name: "token",
-            path: token_rest,
-            body: TOKEN_BODY.to_owned(),
         },
         Step {
             name: "login info",
