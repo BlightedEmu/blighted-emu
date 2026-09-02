@@ -8,7 +8,8 @@
 //! `https://game.<domain>/s/<session>/prod/game/...`. Every route checks the session. The Steam
 //! tickets in the request bodies are never stored or trusted.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, State};
@@ -559,9 +560,87 @@ pub fn masked_path(path: &str) -> String {
     })
 }
 
-/// Logs a request no route serves, so that the exit test shows what the client asked for.
+/// What [`LogBudget::decide`] allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LogDecision {
+    /// Write the line; `dropped_before` lines were dropped since the last written line.
+    Write {
+        /// Lines dropped since the last written line.
+        dropped_before: u64,
+    },
+    /// Drop the line.
+    Drop,
+}
+
+#[derive(Debug)]
+struct BudgetState {
+    window_start: Option<Instant>,
+    written: u32,
+    dropped: u64,
+}
+
+/// At most `lines` log lines per `window`; it counts the lines it drops.
+#[derive(Debug)]
+pub(crate) struct LogBudget {
+    lines: u32,
+    window: Duration,
+    state: Mutex<BudgetState>,
+}
+
+impl LogBudget {
+    /// A budget with no line written yet.
+    pub(crate) const fn new(lines: u32, window: Duration) -> Self {
+        Self {
+            lines,
+            window,
+            state: Mutex::new(BudgetState {
+                window_start: None,
+                written: 0,
+                dropped: 0,
+            }),
+        }
+    }
+
+    /// Whether a line at `now` may be written.
+    pub(crate) fn decide(&self, now: Instant) -> LogDecision {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let new_window = state
+            .window_start
+            .is_none_or(|start| now.saturating_duration_since(start) >= self.window);
+        if new_window {
+            state.window_start = Some(now);
+            state.written = 0;
+        }
+        if state.written < self.lines {
+            state.written += 1;
+            LogDecision::Write {
+                dropped_before: std::mem::take(&mut state.dropped),
+            }
+        } else {
+            state.dropped += 1;
+            LogDecision::Drop
+        }
+    }
+}
+
+/// Unknown-route log lines allowed per window, so one client cannot fill the log.
+const UNKNOWN_ROUTE_LOG_LINES: u32 = 60;
+const UNKNOWN_ROUTE_LOG_WINDOW: Duration = Duration::from_secs(60);
+static UNKNOWN_ROUTE_LOGS: LogBudget =
+    LogBudget::new(UNKNOWN_ROUTE_LOG_LINES, UNKNOWN_ROUTE_LOG_WINDOW);
+
+/// Logs a request no route serves, so that the exit test shows what the client asked for. At most
+/// [`UNKNOWN_ROUTE_LOG_LINES`] lines per minute are written; the next written line says how many
+/// were dropped.
 pub async fn unknown_route(method: Method, uri: Uri) -> ApiError {
-    tracing::warn!(%method, path = %masked_path(uri.path()), "request for an unknown route");
+    if let LogDecision::Write { dropped_before } = UNKNOWN_ROUTE_LOGS.decide(Instant::now()) {
+        tracing::warn!(
+            %method,
+            path = %masked_path(uri.path()),
+            dropped_before,
+            "request for an unknown route"
+        );
+    }
     ApiError::UnknownRoute
 }
 
@@ -712,6 +791,37 @@ pub(crate) mod tests {
         assert_eq!(
             masked_path(&format!("/x/SANDBOX_ID.y.{OTHER_KEY}.json")),
             "/x/SANDBOX_ID.y.<session>.json"
+        );
+    }
+
+    const BUDGET_LINES: u32 = 2;
+    const BUDGET_WINDOW: Duration = Duration::from_secs(60);
+    const LATER: Duration = Duration::from_secs(1);
+    const TWO_DROPPED: u64 = 2;
+
+    #[test]
+    fn the_log_budget_drops_lines_above_its_limit() {
+        let budget = LogBudget::new(BUDGET_LINES, BUDGET_WINDOW);
+        let start = Instant::now();
+        assert_eq!(
+            budget.decide(start),
+            LogDecision::Write { dropped_before: 0 }
+        );
+        assert_eq!(
+            budget.decide(start + LATER),
+            LogDecision::Write { dropped_before: 0 }
+        );
+        assert_eq!(budget.decide(start + LATER), LogDecision::Drop);
+        assert_eq!(budget.decide(start + LATER), LogDecision::Drop);
+        assert_eq!(
+            budget.decide(start + BUDGET_WINDOW),
+            LogDecision::Write {
+                dropped_before: TWO_DROPPED
+            }
+        );
+        assert_eq!(
+            budget.decide(start + BUDGET_WINDOW + LATER),
+            LogDecision::Write { dropped_before: 0 }
         );
     }
 
