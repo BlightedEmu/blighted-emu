@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 argon2.workspace = true
+axum.workspace = true
 data-encoding.workspace = true
 getrandom.workspace = true
 hex.workspace = true
@@ -17,15 +18,20 @@ nw-common.workspace = true
 nw-db.workspace = true
 nw-protocol.workspace = true
 redis.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
+tracing.workspace = true
 uuid = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
+http-body-util.workspace = true
 tempfile.workspace = true
+tower.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
 [features]

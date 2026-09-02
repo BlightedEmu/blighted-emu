@@ -33,6 +33,15 @@ struct Accounts {
 #[derive(Clone, Default)]
 pub(crate) struct MemoryAccounts(Arc<Mutex<Accounts>>);
 
+impl MemoryAccounts {
+    /// Sets the ban flag of an account.
+    pub(crate) fn set_banned(&self, account_id: Uuid, banned: bool) {
+        if let Some(account) = lock(&self.0).accounts.get_mut(&account_id) {
+            account.banned = banned;
+        }
+    }
+}
+
 fn new_account(accounts: &mut Accounts, display_name: &str) -> Account {
     let account = Account {
         id: Uuid::new_v4(),

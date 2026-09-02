@@ -10,7 +10,7 @@ publish = false
 
 [workspace.dependencies]
 argon2 = { version = "0.6.0", default-features = false, features = ["alloc", "password-hash"] }
-axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "tracing"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio", "tracing"] }
 axum-server = { version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
 clap = { version = "4.6.7", default-features = false, features = ["derive", "std", "help", "usage", "error-context", "env"] }
 crc32fast = { version = "1.5.2", default-features = false, features = ["std"] }
@@ -31,6 +31,7 @@ proptest = { version = "1.12.0", default-features = false, features = ["std"] }
 quick-xml = { version = "0.42.0", default-features = false, features = ["serialize"] }
 quote = { version = "1.0.47", default-features = false, features = ["proc-macro"] }
 redis = { version = "1.7.1", default-features = false, features = ["tokio-comp", "connection-manager"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "form", "rustls-no-provider"] }
 rustls = { version = "0.23.31", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1.0.145", default-features = false, features = ["std"] }
