@@ -49,6 +49,7 @@ just infra-test
 | `just clean-old` | Deletes build files older than 7 days |
 | `just infra-up` / `just infra-down` | Starts / stops PostgreSQL, Valkey, NATS, Prometheus, Grafana |
 | `just infra-test` | Infrastructure smoke test |
+| `just test-infra` | Tests that need PostgreSQL and Valkey (run `just infra-up` first) |
 | `just test-local` | Tests that read your New World install (`NW_GAME_DIR`) |
 | `just codegen` | Regenerates the table structs in `crates/nw-content/src/generated` |
 | `just bundle` | Builds the content bundle into `local-data/content/` |
@@ -77,6 +78,27 @@ just world
 3. Run `just codegen` again.
 
 Codegen stops with an error when a table type name would give an invalid Rust name or a name that the generated code already uses, so a new client build cannot write code that does not compile for that reason.
+
+## Login server and launcher
+
+`edge-http` is the HTTPS login server. Players log in with the `launcher` program, by username and password or with Discord (one mode per server, `[auth] mode` in `config/edge.toml`).
+
+The server needs a domain name of your own and a normal public certificate for `login.<domain>` (for example from Let's Encrypt with `certbot` or `lego`). Put the PEM files where `[tls]` points.
+
+Secrets come from environment variables, never from the config file:
+
+| Variable | Value |
+|---|---|
+| `NW_SECRET_SIGNING_KEY` | Entry ticket key: `openssl rand -hex 32` |
+| `NW_SECRET_GLOBAL_DATABASE_PASSWORD` | Password of `[global_database]` |
+| `NW_SECRET_WORLD_1_DATABASE_PASSWORD` | Password of the first world database (the name is set by `database_password_env`) |
+| `NW_SECRET_DISCORD_CLIENT_SECRET` | Discord client secret, Discord mode only |
+
+```bash
+cargo run -p edge-http -- migrate   # creates missing databases and applies migrations
+cargo run -p edge-http -- serve
+cargo run -p launcher
+```
 
 ## Rules for contributors
 

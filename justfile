@@ -39,6 +39,10 @@ infra-down:
 infra-test:
     deploy/smoke-test.sh
 
+# Tests that need the Docker Compose PostgreSQL and Valkey. Run `just infra-up` first.
+test-infra:
+    cargo test -p nw-db -p nw-login --features nw-db/infra,nw-login/infra
+
 # Tests that read your own New World install. Set NW_GAME_DIR first.
 test-local:
     cargo test -p nw-formats -p nw-oodle -p content-tool --features nw-formats/local-data,nw-oodle/local-data,content-tool/local-data
