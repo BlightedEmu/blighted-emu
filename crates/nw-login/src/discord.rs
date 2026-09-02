@@ -5,12 +5,11 @@
 use std::future::Future;
 
 use data_encoding::BASE64URL_NOPAD;
+use nw_protocol::launcher_api::DISCORD_AUTHORIZE_URL;
 use reqwest::Url;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-/// Discord login page.
-pub const DISCORD_AUTHORIZE_URL: &str = "https://discord.com/oauth2/authorize";
 /// Discord token endpoint.
 pub const DISCORD_TOKEN_URL: &str = "https://discord.com/api/v10/oauth2/token";
 /// Discord current-user endpoint.

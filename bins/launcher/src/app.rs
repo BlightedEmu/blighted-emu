@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use nw_protocol::launcher_api::{AuthMode, DiscordPollReply, LauncherInfo, PasswordCredentials};
 
-use crate::api::{ApiError, LauncherApi};
+use crate::api::{ApiError, LauncherApi, discord_login_page};
 use crate::game::{DEFAULT_STEAM, game_arguments, start_game};
 use crate::server::api_base_url;
 use crate::settings::Settings;
@@ -25,7 +25,7 @@ const NO_SESSION_CODE: &str = "no_session";
 
 /// Result of a worker job.
 enum Event {
-    Connected(LauncherApi, LauncherInfo),
+    Connected(String, LauncherApi, LauncherInfo),
     LoggedIn(String),
     GameStarted,
     LoggedOut,
@@ -107,9 +107,11 @@ impl LauncherApp {
             }
         };
         self.status = format!("Connecting to {base} ...");
+        self.connection = None;
+        let server = self.server_input.clone();
         self.job = Some(run_job(move || {
             match LauncherApi::new(base).and_then(|api| api.info().map(|info| (api, info))) {
-                Ok((api, info)) => Event::Connected(api, info),
+                Ok((api, info)) => Event::Connected(server, api, info),
                 Err(error) => Event::Failed(error.to_string()),
             }
         }));
@@ -141,7 +143,11 @@ impl LauncherApp {
                 Ok(start) => start,
                 Err(error) => return Event::Failed(error.to_string()),
             };
-            if let Err(error) = open::that(&start.authorize_url) {
+            let page = match discord_login_page(&start.authorize_url) {
+                Ok(page) => page,
+                Err(error) => return Event::Failed(error.to_string()),
+            };
+            if let Err(error) = open::that(page.as_str()) {
                 return Event::Failed(format!("cannot open the browser: {error}"));
             }
             wait_for_discord(&api, &start.state)
@@ -178,10 +184,10 @@ impl LauncherApp {
 
     fn apply(&mut self, event: Event) {
         match event {
-            Event::Connected(api, info) => {
+            Event::Connected(server, api, info) => {
                 self.status = format!("Connected to {}", info.server_name);
                 self.connection = Some((api, info));
-                self.settings.server = self.server_input.clone();
+                self.settings.set_server(&server);
                 self.save();
             }
             Event::LoggedIn(token) => {

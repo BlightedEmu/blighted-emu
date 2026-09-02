@@ -5,10 +5,11 @@
 use std::time::Duration;
 
 use nw_protocol::launcher_api::{
-    DISCORD_POLL_PATH, DISCORD_START_PATH, DiscordPoll, DiscordPollReply, DiscordStart, ErrorBody,
-    INFO_PATH, LOGIN_PATH, LOGOUT_PATH, LauncherInfo, LauncherSession, PLAY_PATH,
-    PasswordCredentials, PlayReply, REGISTER_PATH,
+    DISCORD_AUTHORIZE_URL, DISCORD_POLL_PATH, DISCORD_START_PATH, DiscordPoll, DiscordPollReply,
+    DiscordStart, ErrorBody, INFO_PATH, LOGIN_PATH, LOGOUT_PATH, LauncherInfo, LauncherSession,
+    PLAY_PATH, PasswordCredentials, PlayReply, REGISTER_PATH,
 };
+use reqwest::Url;
 use reqwest::blocking::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
 
@@ -34,6 +35,24 @@ pub enum ApiError {
     /// The reply is not the expected JSON.
     #[error("server reply is not valid: {0}")]
     BadReply(#[source] reqwest::Error),
+    /// The server sent a login link that is not Discord's login page.
+    #[error("the server sent a login link that is not Discord's login page: {0}")]
+    NotDiscord(String),
+}
+
+/// The Discord login page from a server reply. Only `https://discord.com/oauth2/authorize` with a
+/// query is accepted, so a server cannot make the launcher open another program or page (review
+/// finding 1).
+pub fn discord_login_page(authorize_url: &str) -> Result<Url, ApiError> {
+    let not_discord = || ApiError::NotDiscord(authorize_url.to_owned());
+    let page = Url::parse(authorize_url).map_err(|_| not_discord())?;
+    let mut without_query = page.clone();
+    without_query.set_query(None);
+    if page.fragment().is_none() && without_query.as_str() == DISCORD_AUTHORIZE_URL {
+        Ok(page)
+    } else {
+        Err(not_discord())
+    }
 }
 
 /// The launcher API of one server.
@@ -47,7 +66,9 @@ impl LauncherApi {
     /// A client for the API at `base` (for example `https://login.example.org`). Needs the
     /// process crypto provider ([`crate::install_crypto_provider`]).
     pub fn new(base: String) -> Result<Self, ApiError> {
+        // A redirect could send the launcher, and its token, to another host (review finding 10).
         let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(CALL_TIMEOUT)
             .build()
             .map_err(ApiError::Unreachable)?;
@@ -132,15 +153,18 @@ mod tests {
     use std::net::SocketAddr;
 
     use axum::http::{HeaderMap, StatusCode};
+    use axum::response::Redirect;
     use axum::routing::{get, post};
     use axum::{Json, Router};
-    use nw_protocol::launcher_api::AuthMode;
+    use nw_protocol::launcher_api::{AuthMode, DISCORD_AUTHORIZE_URL};
 
     use super::*;
 
     const TOKEN: &str = "launcher-token";
     const KEY: &str = "game-session-key";
     const EXPIRES_AT: i64 = 1_760_400_000;
+    /// Route that the redirect test sends the launcher to.
+    const ELSEWHERE_PATH: &str = "/launcher/elsewhere";
 
     fn session() -> LauncherSession {
         LauncherSession {
@@ -149,48 +173,21 @@ mod tests {
         }
     }
 
-    /// Serves a fake launcher API on a free port in its own thread and returns its base URL.
-    fn fake_server() -> String {
+    fn fake_info() -> Json<LauncherInfo> {
+        Json(LauncherInfo {
+            server_name: "Fake".to_owned(),
+            auth_mode: AuthMode::Password,
+            allow_registration: true,
+            launch_arguments: Vec::new(),
+        })
+    }
+
+    /// Serves `app` on a free port in its own thread and returns its base URL.
+    fn serve(app: Router) -> String {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Runtime::new().expect("runtime");
             runtime.block_on(async move {
-                let app = Router::new()
-                    .route(
-                        INFO_PATH,
-                        get(|| async {
-                            Json(LauncherInfo {
-                                server_name: "Fake".to_owned(),
-                                auth_mode: AuthMode::Password,
-                                allow_registration: true,
-                                launch_arguments: Vec::new(),
-                            })
-                        }),
-                    )
-                    .route(LOGIN_PATH, post(|| async { Json(session()) }))
-                    .route(
-                        PLAY_PATH,
-                        post(|headers: HeaderMap| async move {
-                            let bearer = format!("Bearer {TOKEN}");
-                            if headers
-                                .get("authorization")
-                                .and_then(|value| value.to_str().ok())
-                                == Some(bearer.as_str())
-                            {
-                                Ok(Json(PlayReply {
-                                    game_session_key: KEY.to_owned(),
-                                }))
-                            } else {
-                                Err((
-                                    StatusCode::UNAUTHORIZED,
-                                    Json(ErrorBody {
-                                        code: "no_session".to_owned(),
-                                        message: "log in again".to_owned(),
-                                    }),
-                                ))
-                            }
-                        }),
-                    );
                 let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
                     .await
                     .expect("bind");
@@ -202,6 +199,38 @@ mod tests {
         });
         let address = receiver.recv().expect("address");
         format!("http://{address}")
+    }
+
+    /// A fake launcher API; returns its base URL.
+    fn fake_server() -> String {
+        serve(
+            Router::new()
+                .route(INFO_PATH, get(|| async { fake_info() }))
+                .route(LOGIN_PATH, post(|| async { Json(session()) }))
+                .route(
+                    PLAY_PATH,
+                    post(|headers: HeaderMap| async move {
+                        let bearer = format!("Bearer {TOKEN}");
+                        if headers
+                            .get("authorization")
+                            .and_then(|value| value.to_str().ok())
+                            == Some(bearer.as_str())
+                        {
+                            Ok(Json(PlayReply {
+                                game_session_key: KEY.to_owned(),
+                            }))
+                        } else {
+                            Err((
+                                StatusCode::UNAUTHORIZED,
+                                Json(ErrorBody {
+                                    code: "no_session".to_owned(),
+                                    message: "log in again".to_owned(),
+                                }),
+                            ))
+                        }
+                    }),
+                ),
+        )
     }
 
     #[test]
@@ -220,6 +249,42 @@ mod tests {
                 assert_eq!((status, code.as_str()), (401, "no_session"));
             }
             other => panic!("expected a server error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redirects_are_not_followed() {
+        crate::install_crypto_provider();
+        let base = serve(
+            Router::new()
+                .route(
+                    INFO_PATH,
+                    get(|| async { Redirect::temporary(ELSEWHERE_PATH) }),
+                )
+                .route(ELSEWHERE_PATH, get(|| async { fake_info() })),
+        );
+        let api = LauncherApi::new(base).expect("client");
+        assert!(api.info().is_err());
+    }
+
+    #[test]
+    fn only_discord_login_pages_are_opened() {
+        let good = format!("{DISCORD_AUTHORIZE_URL}?response_type=code&state=abc");
+        assert_eq!(discord_login_page(&good).expect("discord").as_str(), good);
+        for bad in [
+            r"\\host\share\x.exe",
+            "file:///C:/Windows/System32/calc.exe",
+            "http://discord.com/oauth2/authorize?state=abc",
+            "https://discord.com.example.org/oauth2/authorize",
+            "https://user@discord.com/oauth2/authorize",
+            "https://discord.com:8443/oauth2/authorize",
+            "https://discord.com/oauth2/authorize/../../evil",
+            "https://discord.com/oauth2/authorize#fragment",
+        ] {
+            assert!(
+                matches!(discord_login_page(bad), Err(ApiError::NotDiscord(_))),
+                "{bad}"
+            );
         }
     }
 

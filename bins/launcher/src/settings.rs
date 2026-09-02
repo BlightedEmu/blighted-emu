@@ -90,6 +90,15 @@ pub fn default_settings_path() -> Result<PathBuf, SettingsError> {
 }
 
 impl Settings {
+    /// Records the server the launcher is connected to. A launcher token belongs to one server,
+    /// so another server drops it (review finding 5).
+    pub fn set_server(&mut self, server: &str) {
+        if self.server != server {
+            self.server = server.to_owned();
+            self.launcher_token = None;
+        }
+    }
+
     /// Reads the settings; a missing file gives the defaults.
     pub fn load(path: &Path) -> Result<Self, SettingsError> {
         let text = match std::fs::read_to_string(path) {
@@ -172,6 +181,16 @@ mod tests {
             Some(PathBuf::from("/home/a/.config"))
         );
         assert_eq!(config_dir(lookup(&[])), None);
+    }
+
+    #[test]
+    fn a_new_server_drops_the_token() {
+        let mut settings = sample();
+        settings.set_server("example.org");
+        assert_eq!(settings, sample());
+        settings.set_server("other.example.org");
+        assert_eq!(settings.server, "other.example.org");
+        assert_eq!(settings.launcher_token, None);
     }
 
     #[test]

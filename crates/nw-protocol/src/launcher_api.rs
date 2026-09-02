@@ -19,6 +19,10 @@ pub const DISCORD_START_PATH: &str = "/launcher/discord/start";
 /// `POST` ask whether a Discord login finished.
 pub const DISCORD_POLL_PATH: &str = "/launcher/discord/poll";
 
+/// Discord login page. The server builds its login links on it; the launcher opens only links
+/// to this page.
+pub const DISCORD_AUTHORIZE_URL: &str = "https://discord.com/oauth2/authorize";
+
 /// Placeholder in [`LauncherInfo::launch_arguments`] that the launcher replaces with the game
 /// session key.
 pub const SESSION_PLACEHOLDER: &str = "{session}";
