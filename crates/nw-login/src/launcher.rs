@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The launcher API on `login.<domain>` (M2 spec sections 5 and 6).
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -109,6 +109,30 @@ fn bearer_token(headers: &HeaderMap) -> Result<&str, ApiError> {
         .ok_or(ApiError::NoSession)
 }
 
+/// IPv6 segments that name one network block (/64); one home or server usually has a whole block.
+const IPV6_NETWORK_SEGMENTS: usize = 4;
+/// Prefix length written after an IPv6 block in a limit key.
+const IPV6_BLOCK_SUFFIX: &str = "/64";
+
+/// The address a per-IP limit counts: the IPv4 address, or the /64 block of an IPv6 address, so a
+/// client cannot get around the limit by changing the low bits of its IPv6 address.
+fn limit_address(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let mut segments = v6.segments();
+                segments
+                    .iter_mut()
+                    .skip(IPV6_NETWORK_SEGMENTS)
+                    .for_each(|segment| *segment = 0);
+                format!("{}{IPV6_BLOCK_SUFFIX}", Ipv6Addr::from(segments))
+            }
+        },
+    }
+}
+
 /// Counts one attempt on `key` and refuses it when the count goes above the login limit.
 async fn reserve_attempt<R: RateLimiter>(
     limits: &R,
@@ -172,7 +196,7 @@ where
     reserve_attempt(
         &state.limits,
         &state.config.auth,
-        &format!("{REGISTER_IP_LIMIT_PREFIX}{}", peer.ip()),
+        &format!("{REGISTER_IP_LIMIT_PREFIX}{}", limit_address(peer.ip())),
     )
     .await?;
     let credentials: PasswordCredentials = parse_json(&body)?;
@@ -202,7 +226,10 @@ where
     require_mode(&state, AuthMode::Password)?;
     let credentials: PasswordCredentials = parse_json(&body)?;
     let username = normalize_username(&credentials.username).ok();
-    let mut limit_keys = vec![format!("{LOGIN_IP_LIMIT_PREFIX}{}", peer.ip())];
+    let mut limit_keys = vec![format!(
+        "{LOGIN_IP_LIMIT_PREFIX}{}",
+        limit_address(peer.ip())
+    )];
     limit_keys.extend(
         username
             .as_ref()
@@ -302,7 +329,10 @@ where
     reserve_attempt(
         &state.limits,
         &state.config.auth,
-        &format!("{DISCORD_START_IP_LIMIT_PREFIX}{}", peer.ip()),
+        &format!(
+            "{DISCORD_START_IP_LIMIT_PREFIX}{}",
+            limit_address(peer.ip())
+        ),
     )
     .await?;
     let login_state = new_launcher_token().map_err(|_| ApiError::Unavailable)?;
@@ -485,6 +515,21 @@ pub(crate) mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         serde_json::from_slice(&body).expect("session")
+    }
+
+    #[test]
+    fn ipv6_limits_count_per_network_block() {
+        let address = |text: &str| text.parse::<std::net::IpAddr>().expect("address");
+        assert_eq!(limit_address(address("192.0.2.7")), "192.0.2.7");
+        assert_eq!(limit_address(address("::ffff:192.0.2.7")), "192.0.2.7");
+        assert_eq!(
+            limit_address(address("2001:db8:1:2:aaaa::1")),
+            limit_address(address("2001:db8:1:2:bbbb::2"))
+        );
+        assert_ne!(
+            limit_address(address("2001:db8:1:2::1")),
+            limit_address(address("2001:db8:1:3::1"))
+        );
     }
 
     #[tokio::test]
