@@ -52,6 +52,16 @@ pub async fn reserve_character_name(
     }
 }
 
+/// Whether `name` (compared in lower case) belongs to a character in any world.
+pub async fn character_name_taken(global: &PgPool, name: &str) -> Result<bool, DbError> {
+    let taken: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM character_name WHERE name_key = $1)")
+            .bind(name.to_lowercase())
+            .fetch_one(global)
+            .await?;
+    Ok(taken)
+}
+
 /// Frees the name of a character.
 pub async fn release_character_name(global: &PgPool, character_id: Uuid) -> Result<(), DbError> {
     sqlx::query("DELETE FROM character_name WHERE character_id = $1")
@@ -126,8 +136,10 @@ mod tests {
     async fn names_are_unique_over_worlds_and_case() {
         let (first, other_world, other_case, after_release) = with_test_schema(async |pool| {
             GLOBAL_MIGRATOR.run(pool).await.expect("migrate");
+            assert!(!character_name_taken(pool, NAME).await.expect("free"));
             let id = Uuid::new_v4();
             let first = reserve_character_name(pool, NAME, Uuid::new_v4(), id).await;
+            assert!(character_name_taken(pool, "ADA").await.expect("taken"));
             let other_world =
                 reserve_character_name(pool, NAME, Uuid::new_v4(), Uuid::new_v4()).await;
             let other_case =

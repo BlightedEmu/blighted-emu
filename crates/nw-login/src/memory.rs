@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use nw_db::Account;
+use nw_db::{Account, Character, NewCharacter};
 use nw_protocol::launcher_api::LauncherSession;
 use uuid::Uuid;
 
@@ -14,7 +14,8 @@ use crate::queue::{
     ENTRY_TICKET_SECONDS, EntryRecord, QueueAction, QueueSettings, QueueStatus, QueueStore,
 };
 use crate::store::{
-    AccountStore, DiscordAttempt, DiscordStateStore, GameSessionStore, RateLimiter, StoreError,
+    AccountStore, CharacterStore, DiscordAttempt, DiscordStateStore, GameSessionStore, RateLimiter,
+    StoreError,
 };
 use crate::time::{MILLIS_PER_SECOND, unix_now};
 
@@ -179,6 +180,91 @@ impl GameSessionStore for MemoryGameSessions {
         let account_id = entry.value;
         sessions.insert(key.to_owned(), Expiring::new(account_id, ttl_seconds));
         Ok(Some(account_id))
+    }
+}
+
+#[derive(Default)]
+struct Characters {
+    worlds: HashMap<Uuid, Vec<Character>>,
+    names: HashMap<String, Uuid>,
+}
+
+/// Characters and names in memory.
+#[derive(Clone)]
+pub(crate) struct MemoryCharacters(Arc<Mutex<Characters>>);
+
+impl MemoryCharacters {
+    /// A store with these worlds and no characters.
+    pub(crate) fn new(world_ids: &[Uuid]) -> Self {
+        let worlds = world_ids.iter().map(|id| (*id, Vec::new())).collect();
+        Self(Arc::new(Mutex::new(Characters {
+            worlds,
+            names: HashMap::new(),
+        })))
+    }
+}
+
+impl CharacterStore for MemoryCharacters {
+    async fn characters(
+        &self,
+        world_id: Uuid,
+        account_id: Uuid,
+    ) -> Result<Vec<Character>, StoreError> {
+        let characters = lock(&self.0);
+        let world = characters
+            .worlds
+            .get(&world_id)
+            .ok_or(StoreError::UnknownWorld)?;
+        Ok(world
+            .iter()
+            .filter(|character| character.account_id == account_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn character(
+        &self,
+        world_id: Uuid,
+        character_id: Uuid,
+    ) -> Result<Option<Character>, StoreError> {
+        let characters = lock(&self.0);
+        let world = characters
+            .worlds
+            .get(&world_id)
+            .ok_or(StoreError::UnknownWorld)?;
+        Ok(world
+            .iter()
+            .find(|character| character.id == character_id)
+            .cloned())
+    }
+
+    async fn name_taken(&self, name: &str) -> Result<bool, StoreError> {
+        Ok(lock(&self.0).names.contains_key(&name.to_lowercase()))
+    }
+
+    async fn create(&self, world_id: Uuid, new: &NewCharacter) -> Result<Character, StoreError> {
+        let mut characters = lock(&self.0);
+        if !characters.worlds.contains_key(&world_id) {
+            return Err(StoreError::UnknownWorld);
+        }
+        let name_key = new.name.to_lowercase();
+        if characters.names.contains_key(&name_key) {
+            return Err(StoreError::DuplicateCharacterName);
+        }
+        let character = Character {
+            id: new.id,
+            account_id: new.account_id,
+            name: new.name.clone(),
+            appearance: new.appearance.clone(),
+            created_at_unix: unix_now(),
+        };
+        characters.names.insert(name_key, new.id);
+        characters
+            .worlds
+            .entry(world_id)
+            .or_default()
+            .push(character.clone());
+        Ok(character)
     }
 }
 
@@ -489,6 +575,60 @@ pub(crate) mod contract {
         );
     }
 
+    /// Checks a [`CharacterStore`] that knows the worlds `first` and `second`.
+    pub(crate) async fn characters(store: impl CharacterStore, first: Uuid, second: Uuid) {
+        let account = Uuid::new_v4();
+        let name = unique("N");
+        let new = |name: &str| NewCharacter {
+            id: Uuid::new_v4(),
+            account_id: account,
+            name: name.to_owned(),
+            appearance: serde_json::json!({"Name": name}),
+        };
+        assert!(
+            store
+                .characters(first, account)
+                .await
+                .expect("none")
+                .is_empty()
+        );
+        assert!(!store.name_taken(&name).await.expect("free"));
+        let created = store.create(first, &new(&name)).await.expect("create");
+        assert_eq!(created.name, name);
+        assert_eq!(
+            store.characters(first, account).await.expect("list"),
+            vec![created.clone()]
+        );
+        assert!(
+            store
+                .characters(second, account)
+                .await
+                .expect("other")
+                .is_empty()
+        );
+        assert_eq!(
+            store.character(first, created.id).await.expect("load"),
+            Some(created.clone())
+        );
+        assert_eq!(
+            store.character(second, created.id).await.expect("other"),
+            None
+        );
+        assert!(store.name_taken(&name.to_uppercase()).await.expect("taken"));
+        assert!(matches!(
+            store.create(second, &new(&name.to_lowercase())).await,
+            Err(StoreError::DuplicateCharacterName)
+        ));
+        assert!(matches!(
+            store.create(Uuid::new_v4(), &new(&unique("N"))).await,
+            Err(StoreError::UnknownWorld)
+        ));
+        assert!(matches!(
+            store.characters(Uuid::new_v4(), account).await,
+            Err(StoreError::UnknownWorld)
+        ));
+    }
+
     /// Checks a [`GameSessionStore`].
     pub(crate) async fn game_sessions(store: impl GameSessionStore) {
         let key = unique("k");
@@ -706,6 +846,12 @@ mod tests {
     #[tokio::test]
     async fn memory_accounts_follow_the_contract() {
         contract::accounts(MemoryAccounts::default()).await;
+    }
+
+    #[tokio::test]
+    async fn memory_characters_follow_the_contract() {
+        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+        contract::characters(MemoryCharacters::new(&[first, second]), first, second).await;
     }
 
     #[tokio::test]

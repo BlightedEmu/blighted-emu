@@ -4,7 +4,7 @@
 
 use std::future::Future;
 
-use nw_db::Account;
+use nw_db::{Account, Character, NewCharacter};
 use nw_protocol::launcher_api::LauncherSession;
 use uuid::Uuid;
 
@@ -14,6 +14,12 @@ pub enum StoreError {
     /// That username is already registered.
     #[error("username is already registered")]
     DuplicateUsername,
+    /// That character name is used in some world.
+    #[error("character name is taken")]
+    DuplicateCharacterName,
+    /// No world with that id is configured.
+    #[error("unknown world")]
+    UnknownWorld,
     /// PostgreSQL or Valkey failed.
     #[error("store is unavailable")]
     Unavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
@@ -85,6 +91,34 @@ pub trait GameSessionStore: Clone + Send + Sync + 'static {
         key: &str,
         ttl_seconds: u64,
     ) -> impl Future<Output = Result<Option<Uuid>, StoreError>> + Send;
+}
+
+/// Characters (world databases) and their names (global database).
+pub trait CharacterStore: Clone + Send + Sync + 'static {
+    /// The characters of an account in a world, oldest first.
+    fn characters(
+        &self,
+        world_id: Uuid,
+        account_id: Uuid,
+    ) -> impl Future<Output = Result<Vec<Character>, StoreError>> + Send;
+
+    /// One character of a world.
+    fn character(
+        &self,
+        world_id: Uuid,
+        character_id: Uuid,
+    ) -> impl Future<Output = Result<Option<Character>, StoreError>> + Send;
+
+    /// Whether a character name (compared in lower case) is used in any world.
+    fn name_taken(&self, name: &str) -> impl Future<Output = Result<bool, StoreError>> + Send;
+
+    /// Reserves the name over all worlds, then inserts the character into its world; frees the
+    /// name again when the insert fails (M2 spec section 7).
+    fn create(
+        &self,
+        world_id: Uuid,
+        new: &NewCharacter,
+    ) -> impl Future<Output = Result<Character, StoreError>> + Send;
 }
 
 /// Counters for rate limits (Valkey).

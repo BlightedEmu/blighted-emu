@@ -18,8 +18,8 @@ pub use account::{
     account_by_id, create_password_account, discord_account, password_login, set_banned,
 };
 pub use character::{
-    character_by_id, characters_for_account, insert_character, release_character_name,
-    reserve_character_name,
+    character_by_id, character_name_taken, characters_for_account, insert_character,
+    release_character_name, reserve_character_name,
 };
 pub use error::DbError;
 pub use migrate::{GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};

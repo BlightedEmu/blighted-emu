@@ -37,6 +37,12 @@ pub enum ApiError {
     /// The username is taken.
     #[error("username is already registered")]
     UsernameTaken,
+    /// The character name is taken.
+    #[error("that character name is taken")]
+    CharacterNameTaken,
+    /// No world with that id.
+    #[error("unknown world")]
+    UnknownWorld,
     /// Too many attempts.
     #[error("too many attempts, try again later")]
     RateLimited,
@@ -58,8 +64,8 @@ impl ApiError {
             Self::BadRequest | Self::InvalidName(_) => StatusCode::BAD_REQUEST,
             Self::InvalidCredentials | Self::NoSession => StatusCode::UNAUTHORIZED,
             Self::Banned | Self::RegistrationClosed => StatusCode::FORBIDDEN,
-            Self::WrongMode | Self::UnknownLogin => StatusCode::NOT_FOUND,
-            Self::UsernameTaken => StatusCode::CONFLICT,
+            Self::WrongMode | Self::UnknownLogin | Self::UnknownWorld => StatusCode::NOT_FOUND,
+            Self::UsernameTaken | Self::CharacterNameTaken => StatusCode::CONFLICT,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::Discord => StatusCode::BAD_GATEWAY,
             Self::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
@@ -79,6 +85,8 @@ impl ApiError {
             Self::RegistrationClosed => "registration_closed",
             Self::WrongMode => "wrong_mode",
             Self::UsernameTaken => "username_taken",
+            Self::CharacterNameTaken => "character_name_taken",
+            Self::UnknownWorld => "unknown_world",
             Self::RateLimited => "rate_limited",
             Self::UnknownLogin => "unknown_login",
             Self::Discord => "discord_failed",
@@ -91,6 +99,8 @@ impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
         match error {
             StoreError::DuplicateUsername => Self::UsernameTaken,
+            StoreError::DuplicateCharacterName => Self::CharacterNameTaken,
+            StoreError::UnknownWorld => Self::UnknownWorld,
             StoreError::Unavailable(source) => {
                 tracing::error!(error = %source, "store failed");
                 Self::Unavailable
@@ -124,6 +134,8 @@ mod tests {
             ApiError::RegistrationClosed,
             ApiError::WrongMode,
             ApiError::UsernameTaken,
+            ApiError::CharacterNameTaken,
+            ApiError::UnknownWorld,
             ApiError::RateLimited,
             ApiError::UnknownLogin,
             ApiError::Discord,
@@ -138,6 +150,14 @@ mod tests {
         assert_eq!(
             ApiError::from(StoreError::DuplicateUsername).code(),
             "username_taken"
+        );
+        assert_eq!(
+            ApiError::from(StoreError::DuplicateCharacterName).status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            ApiError::from(StoreError::UnknownWorld).status(),
+            StatusCode::NOT_FOUND
         );
     }
 }
