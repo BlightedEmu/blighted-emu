@@ -181,7 +181,7 @@ fn store(error: impl std::error::Error + Send + Sync + 'static) -> QueueError {
 mod tests {
     use super::*;
     use crate::queue::ENTRY_TICKET_TTL_SECONDS;
-    use crate::request::LoginQueueRequest;
+    use nw_protocol::LoginQueueRequest;
 
     const VALKEY_URL: &str = "redis://127.0.0.1:6379";
     const WORLD: &str = "world-1";

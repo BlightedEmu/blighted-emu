@@ -73,6 +73,13 @@ pub enum RegistrationError {
         /// Bytes left after the body.
         remaining: usize,
     },
+    /// A string is at or above [`STRING_LENGTH_OMIT`] bytes where no omit rule applies.
+    /// The client refuses such a string, so this codec refuses it too.
+    #[error("string of {length} bytes is at or above the limit {STRING_LENGTH_OMIT}")]
+    StringTooLong {
+        /// String length in bytes.
+        length: usize,
+    },
     /// A prefix length does not fit in `usize`.
     #[error("prefixed length {length} does not fit in usize")]
     LengthTooLarge {
@@ -179,8 +186,8 @@ pub(crate) fn read_u64(reader: &mut Reader<'_>) -> Result<u64, RegistrationError
 }
 
 pub(crate) fn write_prefix_len(out: &mut Vec<u8>, len: usize) -> Result<(), RegistrationError> {
-    let value = u64::try_from(len).expect("usize fits in u64");
-    out.extend(encode_type_index_prefix(value)?);
+    // usize is at most 64 bits on every supported target.
+    out.extend(encode_type_index_prefix(len as u64)?);
     Ok(())
 }
 
@@ -195,7 +202,12 @@ pub(crate) fn write_length_prefixed(
     bytes: &[u8],
     omit_at_limit: bool,
 ) -> Result<(), RegistrationError> {
-    if omit_at_limit && bytes.len() >= STRING_LENGTH_OMIT {
+    if bytes.len() >= STRING_LENGTH_OMIT {
+        if !omit_at_limit {
+            return Err(RegistrationError::StringTooLong {
+                length: bytes.len(),
+            });
+        }
         write_prefix_len(out, 0)?;
         return Ok(());
     }
@@ -207,6 +219,9 @@ pub(crate) fn write_length_prefixed(
 pub(crate) fn read_length_prefixed(reader: &mut Reader<'_>) -> Result<Vec<u8>, RegistrationError> {
     let length = read_prefix_len(reader)?;
     let len = usize::try_from(length).map_err(|_| RegistrationError::LengthTooLarge { length })?;
+    if len >= STRING_LENGTH_OMIT {
+        return Err(RegistrationError::StringTooLong { length: len });
+    }
     Ok(reader.take(len)?.to_vec())
 }
 
@@ -333,14 +348,27 @@ mod tests {
         let mut reader = Reader::new(&kept_out);
         assert_eq!(read_length_prefixed(&mut reader).expect("kept"), kept);
         reader.finish().expect("kept done");
+    }
 
-        let mut full = Vec::new();
-        write_length_prefixed(&mut full, &omitted, KEEP_FULL_STRING).expect("full");
-        assert!(full.len() > STRING_LENGTH_OMIT);
-        let mut full_reader = Reader::new(&full);
+    #[test]
+    fn string_at_the_limit_without_omit_rule_is_refused() {
+        let long = vec![OMIT_FILL; STRING_LENGTH_OMIT];
+        let mut out = Vec::new();
         assert_eq!(
-            read_length_prefixed(&mut full_reader).expect("full"),
-            omitted
+            write_length_prefixed(&mut out, &long, KEEP_FULL_STRING),
+            Err(RegistrationError::StringTooLong {
+                length: STRING_LENGTH_OMIT
+            })
+        );
+        let mut forged = Vec::new();
+        write_prefix_len(&mut forged, STRING_LENGTH_OMIT).expect("prefix");
+        forged.extend_from_slice(&long);
+        let mut reader = Reader::new(&forged);
+        assert_eq!(
+            read_length_prefixed(&mut reader),
+            Err(RegistrationError::StringTooLong {
+                length: STRING_LENGTH_OMIT
+            })
         );
     }
 

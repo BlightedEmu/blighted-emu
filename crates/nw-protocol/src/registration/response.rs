@@ -101,7 +101,6 @@ impl RegistrationResponseMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::type_index::encode_type_index_prefix;
 
     const UINT32_AT_0X8: u32 = 0x1122_3344;
     const UINT64: u64 = 0x0102_0304_0506_0708;
@@ -137,19 +136,15 @@ mod tests {
     }
 
     #[test]
-    fn response_strings_keep_a_length_at_the_omit_limit() {
+    fn response_strings_at_the_omit_limit_are_refused() {
         let mut message = sample();
-        let long = vec![LONG_FILL; super::super::wire::STRING_LENGTH_OMIT];
-        message.bytes_at_0x38 = long.clone();
-        let encoded = message.encode().expect("encode");
-        let prefix = encode_type_index_prefix(
-            u64::try_from(super::super::wire::STRING_LENGTH_OMIT).expect("len"),
-        )
-        .expect("prefix");
-        assert!(encoded.len() > super::super::wire::STRING_LENGTH_OMIT);
-        assert!(encoded.windows(prefix.len()).any(|window| window == prefix));
-        let decoded = RegistrationResponseMsg::decode(&encoded).expect("decode");
-        assert_eq!(decoded.bytes_at_0x38, long);
+        message.bytes_at_0x38 = vec![LONG_FILL; super::super::wire::STRING_LENGTH_OMIT];
+        assert_eq!(
+            message.encode(),
+            Err(RegistrationError::StringTooLong {
+                length: super::super::wire::STRING_LENGTH_OMIT
+            })
+        );
     }
 
     #[test]
@@ -184,5 +179,32 @@ mod tests {
                 available: 0,
             }
         );
+    }
+
+    /// Byte changes applied to an encoded sample.
+    const MAX_MUTATIONS: usize = 8;
+
+    proptest::proptest! {
+        #[test]
+        fn mutated_bodies_never_panic_and_round_trip(
+            mutations in proptest::collection::vec(
+                (proptest::prelude::any::<usize>(), proptest::prelude::any::<u8>()),
+                0..=MAX_MUTATIONS,
+            ),
+            cut in proptest::option::of(proptest::prelude::any::<usize>()),
+        ) {
+            let mut bytes = sample().encode()?;
+            for (position, value) in mutations {
+                let index = position % bytes.len();
+                bytes[index] = value;
+            }
+            if let Some(cut) = cut {
+                bytes.truncate(cut % (bytes.len() + 1));
+            }
+            if let Ok(message) = RegistrationResponseMsg::decode(&bytes) {
+                let again = RegistrationResponseMsg::decode(&message.encode()?)?;
+                proptest::prop_assert_eq!(again, message);
+            }
+        }
     }
 }

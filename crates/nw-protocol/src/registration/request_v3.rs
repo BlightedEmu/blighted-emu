@@ -752,18 +752,15 @@ mod tests {
             empty_flag.encode().expect("empty flag")
         );
 
-        let mut kept = sample();
-        let long = vec![LONG_STRING_FILL; super::super::wire::STRING_LENGTH_OMIT];
-        kept.block_at_0xc0.next.next.next.string_1 = long.clone();
-        let encoded = kept.encode().expect("keep string_1");
-        assert!(encoded.len() > super::super::wire::STRING_LENGTH_OMIT);
-        let prefix = encode_type_index_prefix(
-            u64::try_from(super::super::wire::STRING_LENGTH_OMIT).expect("len"),
-        )
-        .expect("prefix");
-        assert!(encoded.windows(prefix.len()).any(|window| window == prefix));
-        let decoded = RegistrationRequestV3Msg::decode(&encoded).expect("decode kept");
-        assert_eq!(decoded.block_at_0xc0.next.next.next.string_1, long);
+        let mut refused = sample();
+        refused.block_at_0xc0.next.next.next.string_1 =
+            vec![LONG_STRING_FILL; super::super::wire::STRING_LENGTH_OMIT];
+        assert_eq!(
+            refused.encode(),
+            Err(RegistrationError::StringTooLong {
+                length: super::super::wire::STRING_LENGTH_OMIT
+            })
+        );
     }
 
     #[test]
@@ -836,5 +833,32 @@ mod tests {
                 limit: LIST_COUNT_ABOVE,
             }
         );
+    }
+
+    /// Byte changes applied to an encoded sample.
+    const MAX_MUTATIONS: usize = 8;
+
+    proptest::proptest! {
+        #[test]
+        fn mutated_bodies_never_panic_and_round_trip(
+            mutations in proptest::collection::vec(
+                (proptest::prelude::any::<usize>(), proptest::prelude::any::<u8>()),
+                0..=MAX_MUTATIONS,
+            ),
+            cut in proptest::option::of(proptest::prelude::any::<usize>()),
+        ) {
+            let mut bytes = sample().encode()?;
+            for (position, value) in mutations {
+                let index = position % bytes.len();
+                bytes[index] = value;
+            }
+            if let Some(cut) = cut {
+                bytes.truncate(cut % (bytes.len() + 1));
+            }
+            if let Ok(message) = RegistrationRequestV3Msg::decode(&bytes) {
+                let again = RegistrationRequestV3Msg::decode(&message.encode()?)?;
+                proptest::prop_assert_eq!(again, message);
+            }
+        }
     }
 }

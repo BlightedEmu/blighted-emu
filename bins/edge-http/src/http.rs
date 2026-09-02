@@ -26,7 +26,7 @@ use nw_protocol::LoginQueueReply;
 
 use crate::characters::{CharacterLookup, LookupError};
 use crate::queue::{LoginQueue, QueueError, QueueSettings, prepare_join};
-use crate::request::{MAX_ID_LEN, parse_request};
+use crate::request::MAX_ID_LEN;
 
 /// Join path.
 pub(crate) const PATH_QUEUE: &str = "/game/login/queue/v2";
@@ -111,7 +111,8 @@ where
     C: CharacterLookup,
 {
     metrics::counter!(METRIC_JOIN).increment(1);
-    let request = parse_request(&body).map_err(|_| ApiError::InvalidJson)?;
+    let request =
+        nw_protocol::parse_login_queue_request(&body).map_err(|_| ApiError::InvalidJson)?;
     let prepared = prepare_join(request, &state.settings).map_err(map_queue)?;
     if let Some(character_id) = &prepared.character_id {
         let exists = state

@@ -7,12 +7,10 @@
 
 use std::collections::VecDeque;
 
-use nw_protocol::{LoginQueueResponse, LoginQueueToken};
+use nw_protocol::{LoginQueueRequest, LoginQueueResponse, LoginQueueToken};
 use serde::{Deserialize, Serialize};
 
-use crate::request::{
-    LoginQueueRequest, MAX_CAPABILITY_COUNT, MAX_CAPABILITY_LEN, MAX_ID_LEN, MAX_STEAM_TICKET_LEN,
-};
+use crate::request::{MAX_CAPABILITY_COUNT, MAX_CAPABILITY_LEN, MAX_ID_LEN, MAX_STEAM_TICKET_LEN};
 use crate::signature::{SignatureError, entry_signature};
 
 /// Lifetime of a one-time entry ticket. Source: architecture spec section 4.2.
@@ -354,6 +352,7 @@ fn waiting_response(
         queue_name: Some(settings.queue_name.clone()),
         recommended_transfer_world_id: None,
         refresh_interval: Some(settings.refresh_interval_seconds),
+        ticket_id: Some(entry.ticket_id.clone()),
         token: Some(token_for(&entry.join, &entry.ticket_id, None, None)),
     }
 }
@@ -366,6 +365,7 @@ fn admitted_response(admitted: &AdmittedEntry, settings: &QueueSettings) -> Logi
         queue_name: Some(settings.queue_name.clone()),
         recommended_transfer_world_id: None,
         refresh_interval: Some(settings.refresh_interval_seconds),
+        ticket_id: Some(admitted.entry.ticket_id.clone()),
         token: Some(token_for(
             &admitted.entry.join,
             &admitted.entry.ticket_id,

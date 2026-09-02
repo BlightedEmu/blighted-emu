@@ -218,8 +218,8 @@ pub fn decode_type_index_prefix(input: &[u8]) -> Result<TypeIndexPrefix, TypeInd
 /// Returns [`TypeIndexError::IndexOutOfRange`] when `index` does not fit in five bytes.
 pub fn encode_type_index_prefix(index: u64) -> Result<Vec<u8>, TypeIndexError> {
     if index <= u64::from(ONE_BYTE_MAX) {
-        let byte = u8::try_from(index).expect("one-byte index fits in u8");
-        return Ok(vec![byte]);
+        // The index is at most ONE_BYTE_MAX here, so it fits in one byte.
+        return Ok(vec![index as u8]);
     }
     let form = MULTI_BYTE_FORMS
         .iter()
@@ -304,13 +304,14 @@ fn read_form(input: &[u8], form: &PrefixForm) -> Result<TypeIndexPrefix, TypeInd
 }
 
 fn write_form(index: u64, form: &PrefixForm) -> Vec<u8> {
-    let low = u8::try_from(index & u64::from(low_mask(form.shift))).expect("low bits fit in u8");
+    // The mask keeps fewer than 8 bits.
+    let low = (index & u64::from(low_mask(form.shift))) as u8;
     let mut out = Vec::with_capacity(ONE_BYTE_LEN + form.extra_len);
     out.push(form.first | low);
     let mut rest = index >> form.shift;
     for _ in 0..form.extra_len {
-        let byte = u8::try_from(rest & BYTE_MASK).expect("masked extra byte fits in u8");
-        out.push(byte);
+        // BYTE_MASK keeps 8 bits.
+        out.push((rest & BYTE_MASK) as u8);
         rest >>= EXTRA_BYTE_BITS;
     }
     out
@@ -318,6 +319,8 @@ fn write_form(index: u64, form: &PrefixForm) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     const KNOWN_FILE_SLOTS: [u64; 15] = [
@@ -579,5 +582,27 @@ mod tests {
                 max: FIVE_BYTE_MAX,
             }
         );
+    }
+
+    /// Longest input the decoder can look at: one first byte and four extra bytes.
+    const LONGEST_PREFIX: usize = 5;
+
+    proptest! {
+        #[test]
+        fn every_index_round_trips(index in 0..=FIVE_BYTE_MAX) {
+            let encoded = encode_type_index_prefix(index)?;
+            let decoded = decode_type_index_prefix(&encoded)?;
+            prop_assert_eq!(decoded.index, index);
+            prop_assert_eq!(decoded.len, encoded.len());
+        }
+
+        #[test]
+        fn decoding_any_bytes_never_panics(
+            bytes in proptest::collection::vec(any::<u8>(), 0..=LONGEST_PREFIX)
+        ) {
+            if let Ok(prefix) = decode_type_index_prefix(&bytes) {
+                prop_assert!(prefix.len <= bytes.len());
+            }
+        }
     }
 }

@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Login-queue JSON from protocol note section 1.3.
+//! Login-queue JSON from protocol note section 1.3: the reply the client reads and the request
+//! the client writes.
 //!
-//! The HTTP body is one object. Its key is `LoginQueueResponse`.
+//! The reply body is one object. Its key is `LoginQueueResponse`.
 //! Every field below that key is optional. Serialization omits a key whose value is absent.
 //! `RepAddress` and `Signature` are strings on `Token`. They are not keys of `LoginQueueResponse`.
+//! `GenerateTime` and `IssueTime` are JSON numbers (the client reads them as `double`).
 
 use serde::{Deserialize, Serialize};
 
 /// HTTP body that carries a [`LoginQueueResponse`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct LoginQueueReply {
     /// Queue object. The client looks this key up by name.
@@ -18,7 +20,7 @@ pub struct LoginQueueReply {
 /// Value of the `LoginQueueResponse` key.
 ///
 /// A missing JSON key deserializes as [`None`]. [`None`] is omitted on the way back out.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct LoginQueueResponse {
     /// Whether the client may transfer to another queue.
@@ -39,6 +41,9 @@ pub struct LoginQueueResponse {
     /// How long the client waits before it asks again, as a JSON integer.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_interval: Option<i64>,
+    /// Queue ticket id. The client sends it back on refresh.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ticket_id: Option<String>,
     /// Nested token. Present only when the `Token` key is present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<LoginQueueToken>,
@@ -47,7 +52,7 @@ pub struct LoginQueueResponse {
 /// Value of the `Token` key inside [`LoginQueueResponse`].
 ///
 /// `RepAddress` and `Signature` live here. They are strings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "PascalCase", default)]
 pub struct LoginQueueToken {
     /// Account age, as a JSON integer.
@@ -65,18 +70,24 @@ pub struct LoginQueueToken {
     /// Client capability text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_capabilities: Option<String>,
-    /// Time the token was generated.
+    /// Time the token was generated, Unix seconds as a JSON number.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub generate_time: Option<String>,
+    pub generate_time: Option<f64>,
+    /// Host hash text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_hash: Option<String>,
     /// Whether the account owns the full game.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_permanent_app_owner: Option<bool>,
     /// Whether the account is a trial owner.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_trial_owner: Option<bool>,
-    /// Time the token was issued.
+    /// Time the token was issued, Unix seconds as a JSON number.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub issue_time: Option<String>,
+    pub issue_time: Option<f64>,
+    /// JWT claims text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jwt_claims: Option<String>,
     /// Location group id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub location_group_id: Option<String>,
@@ -109,6 +120,49 @@ pub struct LoginQueueToken {
     pub world_id: Option<String>,
 }
 
+/// Body written by `FUN_1474ecc80` when the request object is present (protocol note 1.3).
+/// Each field is optional; a missing key stays absent.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct LoginQueueRequest {
+    /// Character id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub character_id: Option<String>,
+    /// Capability strings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_capabilities: Option<Vec<String>>,
+    /// Whether the account is a trial owner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_trial_owner: Option<bool>,
+    /// Steam application id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steam_app_id: Option<i64>,
+    /// Steam auth ticket text. The server never trusts or stores it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steam_auth_ticket: Option<String>,
+    /// World id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub world_id: Option<String>,
+}
+
+/// Outer request object. The writer emits `LoginQueueRequest` when its presence flag is set.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, Default)]
+#[serde(rename_all = "PascalCase", default)]
+pub struct LoginQueueRequestBody {
+    /// Present when the client wrote the request object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_queue_request: Option<LoginQueueRequest>,
+}
+
+/// Parses a queue request body. An empty body is a request with every field absent.
+pub fn parse_login_queue_request(bytes: &[u8]) -> Result<LoginQueueRequest, serde_json::Error> {
+    if bytes.is_empty() {
+        return Ok(LoginQueueRequest::default());
+    }
+    let body: LoginQueueRequestBody = serde_json::from_slice(bytes)?;
+    Ok(body.login_queue_request.unwrap_or_default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,10 +178,13 @@ mod tests {
     const CHANNEL_ID: &str = "live";
     const CHARACTER_ID: &str = "char-1";
     const CLIENT_CAPABILITIES: &str = "caps";
-    const GENERATE_TIME: &str = "2026-08-31T00:00:00Z";
+    const GENERATE_TIME: f64 = 1_760_313_600.0;
+    const HOST_HASH: &str = "host-hash";
     const IS_PERMANENT_APP_OWNER: bool = true;
     const IS_TRIAL_OWNER: bool = false;
-    const ISSUE_TIME: &str = "2026-08-31T00:00:01Z";
+    const ISSUE_TIME: f64 = 1_760_313_601.0;
+    const JWT_CLAIMS: &str = "claims";
+    const OUTER_TICKET_ID: &str = "queue-ticket-1";
     const LOCATION_GROUP_ID: &str = "group-1";
     const LOCATION_ID: &str = "loc-1";
     const PERSONA_ID: &str = "persona-1";
@@ -142,25 +199,28 @@ mod tests {
     const PARTIAL_POSITION: i64 = 7;
     const PARTIAL_REP_ADDRESS: &str = "10.1.2.3:4242";
 
-    const RESPONSE_KEYS: [&str; 7] = [
+    const RESPONSE_KEYS: [&str; 8] = [
         "AllowQueueTransfer",
         "EstimatedTime",
         "Position",
         "QueueName",
         "RecommendedTransferWorldId",
         "RefreshInterval",
+        "TicketId",
         "Token",
     ];
-    const TOKEN_KEYS: [&str; 19] = [
+    const TOKEN_KEYS: [&str; 21] = [
         "AccountAge",
         "AccountIsLocked",
         "ChannelId",
         "CharacterId",
         "ClientCapabilities",
         "GenerateTime",
+        "HostHash",
         "IsPermanentAppOwner",
         "IsTrialOwner",
         "IssueTime",
+        "JwtClaims",
         "LocationGroupId",
         "LocationId",
         "PersonaId",
@@ -180,10 +240,12 @@ mod tests {
             channel_id: Some(CHANNEL_ID.to_owned()),
             character_id: Some(CHARACTER_ID.to_owned()),
             client_capabilities: Some(CLIENT_CAPABILITIES.to_owned()),
-            generate_time: Some(GENERATE_TIME.to_owned()),
+            generate_time: Some(GENERATE_TIME),
+            host_hash: Some(HOST_HASH.to_owned()),
             is_permanent_app_owner: Some(IS_PERMANENT_APP_OWNER),
             is_trial_owner: Some(IS_TRIAL_OWNER),
-            issue_time: Some(ISSUE_TIME.to_owned()),
+            issue_time: Some(ISSUE_TIME),
+            jwt_claims: Some(JWT_CLAIMS.to_owned()),
             location_group_id: Some(LOCATION_GROUP_ID.to_owned()),
             location_id: Some(LOCATION_ID.to_owned()),
             persona_id: Some(PERSONA_ID.to_owned()),
@@ -206,6 +268,7 @@ mod tests {
                 queue_name: Some(QUEUE_NAME.to_owned()),
                 recommended_transfer_world_id: Some(RECOMMENDED_TRANSFER_WORLD_ID.to_owned()),
                 refresh_interval: Some(REFRESH_INTERVAL),
+                ticket_id: Some(OUTER_TICKET_ID.to_owned()),
                 token: Some(full_token()),
             },
         }
@@ -259,6 +322,9 @@ mod tests {
         assert_eq!(token["SteamAppId"], STEAM_APP_ID);
         assert_eq!(token["TokenVersion"], TOKEN_VERSION);
         assert_eq!(token["WorldId"], WORLD_ID);
+        assert_eq!(token["GenerateTime"], GENERATE_TIME);
+        assert!(token["IssueTime"].is_f64());
+        assert_eq!(response["TicketId"], OUTER_TICKET_ID);
     }
 
     #[test]
@@ -313,5 +379,46 @@ mod tests {
         let text = r#"{"LoginQueueResponse":{"Position":"7"}}"#;
         let parsed = serde_json::from_str::<LoginQueueReply>(text);
         assert!(parsed.is_err());
+    }
+
+    const REQUEST_TICKET: &str = "steam-ticket";
+    const REQUEST_APP_ID: i64 = 1063730;
+
+    #[test]
+    fn request_absent_keys_stay_absent() {
+        let request = parse_login_queue_request(
+            br#"{"LoginQueueRequest":{"SteamAuthTicket":"steam-ticket"}}"#,
+        )
+        .expect("parse");
+        assert_eq!(request.steam_auth_ticket.as_deref(), Some(REQUEST_TICKET));
+        assert!(request.character_id.is_none());
+        assert!(request.client_capabilities.is_none());
+        assert!(request.is_trial_owner.is_none());
+        assert!(request.steam_app_id.is_none());
+        assert!(request.world_id.is_none());
+    }
+
+    #[test]
+    fn request_writer_fields_parse() {
+        let text = format!(
+            r#"{{"LoginQueueRequest":{{"CharacterId":"{CHARACTER_ID}","ClientCapabilities":["move","chat"],"IsTrialOwner":false,"SteamAppId":{REQUEST_APP_ID},"SteamAuthTicket":"{REQUEST_TICKET}","WorldId":"{WORLD_ID}"}}}}"#
+        );
+        let request = parse_login_queue_request(text.as_bytes()).expect("parse");
+        assert_eq!(request.character_id.as_deref(), Some(CHARACTER_ID));
+        assert_eq!(
+            request.client_capabilities,
+            Some(vec!["move".to_owned(), "chat".to_owned()])
+        );
+        assert_eq!(request.is_trial_owner, Some(false));
+        assert_eq!(request.steam_app_id, Some(REQUEST_APP_ID));
+        assert_eq!(request.world_id.as_deref(), Some(WORLD_ID));
+    }
+
+    #[test]
+    fn empty_request_body_has_no_fields() {
+        assert_eq!(
+            parse_login_queue_request(b"").expect("empty"),
+            LoginQueueRequest::default()
+        );
     }
 }
