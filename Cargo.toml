@@ -51,7 +51,6 @@ zip = { version = "9.0.2", default-features = false }
 nw-common = { path = "crates/nw-common", version = "0.1.0" }
 nw-content = { path = "crates/nw-content", version = "0.1.0" }
 nw-db = { path = "crates/nw-db", version = "0.1.0" }
-nw-edge-config = { path = "crates/nw-edge-config", version = "0.1.0" }
 nw-formats = { path = "crates/nw-formats", version = "0.1.0" }
 nw-login = { path = "crates/nw-login", version = "0.1.0" }
 nw-oodle = { path = "crates/nw-oodle", version = "0.1.0" }

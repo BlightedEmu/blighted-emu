@@ -596,28 +596,17 @@ dependencies = [
  "axum",
  "axum-server",
  "clap",
- "hex",
- "hmac",
  "http-body-util",
  "metrics",
  "metrics-exporter-prometheus",
  "nw-common",
  "nw-db",
- "nw-edge-config",
- "nw-protocol",
- "redis",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.11.1",
+ "nw-login",
  "sqlx",
- "tempfile",
  "thiserror",
  "tokio",
  "tower",
  "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -1587,17 +1576,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "uuid",
-]
-
-[[package]]
-name = "nw-edge-config"
-version = "0.1.0"
-dependencies = [
- "figment",
- "nw-common",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]
@@ -2942,8 +2920,10 @@ dependencies = [
  "pin-project-lite",
  "sync_wrapper",
  "tokio",
+ "tokio-util",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]

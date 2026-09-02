@@ -71,10 +71,8 @@ impl SigningKey {
 pub struct Secrets {
     /// Entry ticket signing key.
     pub signing_key: SigningKey,
-    /// Global database password.
-    pub global_database_password: String,
-    /// World database passwords, in the order of the `[[world]]` blocks.
-    pub world_database_passwords: Vec<String>,
+    /// Database passwords.
+    pub database_passwords: DatabasePasswords,
     /// Discord client secret, in Discord mode.
     pub discord_client_secret: Option<String>,
 }
@@ -99,32 +97,51 @@ pub enum SecretError {
     SigningKeyPlaceholder,
 }
 
+/// Database passwords: the global one, then one per `[[world]]` in config order.
+#[derive(Debug, Clone)]
+pub struct DatabasePasswords {
+    /// Global database password.
+    pub global: String,
+    /// World database passwords.
+    pub worlds: Vec<String>,
+}
+
+fn required(lookup: &impl Fn(&str) -> Option<String>, name: &str) -> Result<String, SecretError> {
+    lookup(name)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| SecretError::Missing(name.to_owned()))
+}
+
+/// Reads the database passwords only (enough for `edge-http migrate`).
+pub fn load_database_passwords(
+    config: &EdgeConfig,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<DatabasePasswords, SecretError> {
+    Ok(DatabasePasswords {
+        global: required(&lookup, GLOBAL_DATABASE_PASSWORD_ENV)?,
+        worlds: config
+            .worlds
+            .iter()
+            .map(|world| required(&lookup, &world.database_password_env))
+            .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
 /// Reads every secret that `config` needs. `lookup` returns an environment variable;
 /// production passes `|name| std::env::var(name).ok()`.
 pub fn load_secrets(
     config: &EdgeConfig,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Result<Secrets, SecretError> {
-    let required = |name: &str| {
-        lookup(name)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| SecretError::Missing(name.to_owned()))
-    };
-    let signing_key = SigningKey::from_hex(&required(SIGNING_KEY_ENV)?)?;
-    let global_database_password = required(GLOBAL_DATABASE_PASSWORD_ENV)?;
-    let world_database_passwords = config
-        .worlds
-        .iter()
-        .map(|world| required(&world.database_password_env))
-        .collect::<Result<Vec<_>, _>>()?;
+    let signing_key = SigningKey::from_hex(&required(&lookup, SIGNING_KEY_ENV)?)?;
+    let passwords = load_database_passwords(config, &lookup)?;
     let discord_client_secret = match config.auth.mode {
-        AuthMode::Discord => Some(required(DISCORD_CLIENT_SECRET_ENV)?),
+        AuthMode::Discord => Some(required(&lookup, DISCORD_CLIENT_SECRET_ENV)?),
         AuthMode::Password => None,
     };
     Ok(Secrets {
         signing_key,
-        global_database_password,
-        world_database_passwords,
+        database_passwords: passwords,
         discord_client_secret,
     })
 }
@@ -159,8 +176,8 @@ mod tests {
         let vars = full_env();
         let secrets = load_secrets(&valid(), |name| vars.get(name).cloned()).expect("secrets");
         assert_eq!(secrets.signing_key.byte_len(), MIN_SIGNING_KEY_BYTES);
-        assert_eq!(secrets.global_database_password, "global-pw");
-        assert_eq!(secrets.world_database_passwords, ["world-pw"]);
+        assert_eq!(secrets.database_passwords.global, "global-pw");
+        assert_eq!(secrets.database_passwords.worlds, ["world-pw"]);
         assert!(secrets.discord_client_secret.is_none());
         assert_eq!(format!("{:?}", secrets.signing_key), "SigningKey(..)");
     }
@@ -173,6 +190,15 @@ mod tests {
             load_secrets(&valid(), |name| vars.get(name).cloned()).unwrap_err(),
             SecretError::Missing(WORLD_PASSWORD_ENV.to_owned())
         );
+    }
+
+    #[test]
+    fn migrate_needs_only_database_passwords() {
+        let mut vars = full_env();
+        vars.remove(SIGNING_KEY_ENV);
+        let passwords =
+            load_database_passwords(&valid(), |name| vars.get(name).cloned()).expect("passwords");
+        assert_eq!(passwords.worlds.len(), 1);
     }
 
     #[test]

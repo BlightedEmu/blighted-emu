@@ -1,29 +1,43 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Starts the login HTTPS listener.
+//! `edge-http`: the HTTPS login server. `serve` runs it; `migrate` updates the databases.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::Parser;
-use edge_http::run;
+use clap::{Parser, Subcommand};
+use edge_http::{migrate, serve};
 
-/// Repo-relative edge file from `nw-edge-config`.
-const DEFAULT_EDGE_CONFIG: &str = nw_edge_config::server::EXAMPLE_EDGE_CONFIG_PATH;
+/// The committed example configuration.
+const DEFAULT_CONFIG: &str = "config/edge.toml";
 
 #[derive(Parser)]
-#[command(name = "edge-http", about = "Preservation server login queue.")]
+#[command(
+    name = "edge-http",
+    about = "Login server of the Blighted New World emulator."
+)]
 struct Cli {
-    /// Edge file with the HTTPS listen address and `RepAddress`.
-    #[arg(long, default_value = DEFAULT_EDGE_CONFIG)]
-    edge_config: PathBuf,
-    /// Login file with the database, Valkey, TLS certificate paths, and queue limits.
-    #[arg(long)]
+    /// Configuration file. Secrets come from `NW_SECRET_*` environment variables.
+    #[arg(long, default_value = DEFAULT_CONFIG)]
     config: PathBuf,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Serves HTTPS.
+    Serve,
+    /// Applies the database migrations of the global and every world database.
+    Migrate,
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(&cli.edge_config, &cli.config) {
+    let result = match cli.command {
+        Command::Serve => serve(&cli.config),
+        Command::Migrate => migrate(&cli.config),
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");

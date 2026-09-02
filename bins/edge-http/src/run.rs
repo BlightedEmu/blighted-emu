@@ -1,110 +1,162 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Process startup for the login HTTPS listener.
+//! `serve` and `migrate`.
 
-use std::error::Error;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
+use axum::routing::get;
 use axum_server::Handle;
 use axum_server::tls_rustls::RustlsConfig;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use nw_common::logging::{LoggingError, init_logging};
-use nw_db::WORLD_MIGRATOR;
-use nw_edge_config::server::{EdgeConfigError, load_edge_config};
-use sqlx::postgres::PgPoolOptions;
+use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
+use nw_login::config::{EdgeConfig, EdgeConfigError, load_edge_config};
+use nw_login::discord::{DiscordError, DiscordHttp};
+use nw_login::install_crypto_provider;
+use nw_login::launcher::{LauncherState, launcher_router};
+use nw_login::password::{PasswordError, PasswordHasher};
+use nw_login::pg::PgAccounts;
+use nw_login::secrets::{SecretError, Secrets, load_database_passwords, load_secrets};
+use nw_login::store::StoreError;
+use nw_login::valkey::Valkey;
 
-use crate::characters::PgCharacters;
-use crate::config::{LoginConfig, LoginConfigError, load_login_config};
-use crate::http::{AppState, router};
-use crate::queue::{QueueError, QueueSettings};
-use crate::valkey::{PRODUCTION_KEY_PREFIX, ValkeyQueue};
+use crate::database::{EnsureDatabaseError, connect_all, ensure_database};
+use crate::layers::with_limits;
 
-/// Seconds to wait for open HTTPS connections after Ctrl-C.
+/// Seconds to finish open requests after Ctrl-C.
 const SHUTDOWN_GRACE_SECONDS: u64 = 10;
+/// Path of the Prometheus scrape route on the metrics listener.
+const METRICS_PATH: &str = "/metrics";
 
-/// Failure while starting or serving the login listener.
+/// Failure while starting or running `edge-http`.
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
-    /// The edge file could not be loaded.
-    #[error("edge config failed")]
-    Edge(#[source] Box<dyn Error + Send + Sync>),
-    /// The login file could not be loaded.
-    #[error("login config failed")]
-    Login(#[source] Box<dyn Error + Send + Sync>),
-    /// The log filter is not valid, or a logger is already installed.
-    #[error("logging failed")]
-    Log(#[source] Box<dyn Error + Send + Sync>),
-    /// PostgreSQL could not be reached or migrated.
-    #[error("database failed")]
-    Database(#[source] Box<dyn Error + Send + Sync>),
-    /// Valkey could not be reached.
-    #[error("login queue failed")]
-    Queue(#[source] Box<dyn Error + Send + Sync>),
-    /// The TLS certificate files could not be read.
-    #[error("tls certificate files failed")]
-    Tls(#[source] std::io::Error),
-    /// The HTTPS listener stopped with an error.
-    #[error("https listener failed")]
-    Serve(#[source] std::io::Error),
-    /// The Prometheus recorder could not be installed.
-    #[error("metrics recorder failed: {0}")]
-    Metrics(String),
+    /// The configuration file is missing or not valid.
+    #[error(transparent)]
+    Config(#[from] EdgeConfigError),
+    /// A secret is missing or not valid.
+    #[error(transparent)]
+    Secret(#[from] SecretError),
+    /// Logging could not start.
+    #[error(transparent)]
+    Logging(#[from] LoggingError),
     /// The async runtime could not start.
     #[error("runtime failed")]
     Runtime(#[source] std::io::Error),
+    /// PostgreSQL could not be reached.
+    #[error("database connection failed")]
+    Database(#[source] sqlx::Error),
+    /// A database schema check or migration failed.
+    #[error(transparent)]
+    Schema(#[from] DbError),
+    /// Valkey could not be reached.
+    #[error("Valkey connection failed")]
+    Valkey(#[source] StoreError),
+    /// The password worker pool could not start.
+    #[error(transparent)]
+    Password(#[from] PasswordError),
+    /// The Discord client could not start.
+    #[error(transparent)]
+    Discord(#[from] DiscordError),
+    /// The certificate files cannot be read.
+    #[error("TLS certificate files failed")]
+    Tls(#[source] std::io::Error),
+    /// A listener failed.
+    #[error("listener failed")]
+    Listen(#[source] std::io::Error),
+    /// A database could not be created.
+    #[error(transparent)]
+    EnsureDatabase(#[from] EnsureDatabaseError),
+    /// The Prometheus recorder could not be installed.
+    #[error("metrics recorder failed: {0}")]
+    Metrics(String),
 }
 
-/// Loads both config files, connects to PostgreSQL and Valkey, and serves HTTPS.
-pub fn run(edge_path: &Path, login_path: &Path) -> Result<(), RunError> {
-    let edge = load_edge_config(edge_path).map_err(edge_error)?;
-    let login = load_login_config(login_path).map_err(login_error)?;
-    init_logging(&login.log_filter).map_err(log_error)?;
-    let settings = login
-        .queue_settings(edge.rep_address)
-        .map_err(login_error)?;
-    install_ring_provider();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_io()
-        .enable_time()
+fn env_lookup(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+fn runtime() -> Result<tokio::runtime::Runtime, RunError> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
         .build()
-        .map_err(RunError::Runtime)?;
-    runtime.block_on(serve(edge.https_listen, login, settings))
+        .map_err(RunError::Runtime)
 }
 
-async fn serve(
-    address: SocketAddr,
-    login: LoginConfig,
-    settings: Arc<QueueSettings>,
-) -> Result<(), RunError> {
-    let pool = PgPoolOptions::new()
-        .max_connections(login.max_connections)
-        .connect(&login.database_url)
+/// Creates missing databases, then applies the migrations of the global and every world
+/// database.
+pub fn migrate(config_path: &Path) -> Result<(), RunError> {
+    let config = load_edge_config(config_path)?;
+    let passwords = load_database_passwords(&config, env_lookup)?;
+    init_logging(&config.log_filter)?;
+    runtime()?.block_on(async {
+        ensure_database(&config.global_database, &passwords.global).await?;
+        for (world, password) in config.worlds.iter().zip(&passwords.worlds) {
+            ensure_database(&world.database, password).await?;
+        }
+        let (global, worlds) = connect_all(&config, &passwords)
+            .await
+            .map_err(RunError::Database)?;
+        GLOBAL_MIGRATOR.run(&global).await.map_err(DbError::from)?;
+        for world in &worlds {
+            WORLD_MIGRATOR.run(world).await.map_err(DbError::from)?;
+        }
+        tracing::info!(worlds = worlds.len(), "migrations applied");
+        Ok(())
+    })
+}
+
+/// Serves HTTPS until Ctrl-C.
+pub fn serve(config_path: &Path) -> Result<(), RunError> {
+    let config = load_edge_config(config_path)?;
+    let secrets = load_secrets(&config, env_lookup)?;
+    init_logging(&config.log_filter)?;
+    install_crypto_provider();
+    runtime()?.block_on(serve_async(config, secrets))
+}
+
+async fn serve_async(config: EdgeConfig, secrets: Secrets) -> Result<(), RunError> {
+    let (global, worlds) = connect_all(&config, &secrets.database_passwords)
         .await
-        .map_err(database_error)?;
-    WORLD_MIGRATOR.run(&pool).await.map_err(database_error)?;
-    let queue = ValkeyQueue::connect(
-        &login.valkey_url,
-        PRODUCTION_KEY_PREFIX,
-        Arc::clone(&settings),
+        .map_err(RunError::Database)?;
+    check_schema(&global, &GLOBAL_MIGRATOR).await?;
+    for world in &worlds {
+        check_schema(world, &WORLD_MIGRATOR).await?;
+    }
+    let valkey = Valkey::connect(&config.valkey.url)
+        .await
+        .map_err(RunError::Valkey)?;
+    let discord = match &secrets.discord_client_secret {
+        Some(secret) => Some(DiscordHttp::new(
+            config.discord.client_id.clone(),
+            secret.clone(),
+        )?),
+        None => None,
+    };
+    let state = LauncherState {
+        config: Arc::new(config.clone()),
+        accounts: PgAccounts::new(global),
+        game_sessions: valkey.clone(),
+        limits: valkey.clone(),
+        discord_states: valkey,
+        discord,
+        hasher: PasswordHasher::new(config.auth.argon2_parallel)?,
+    };
+    let app = with_limits(
+        launcher_router(state),
+        Duration::from_secs(config.request_timeout_seconds),
+        config.max_connections,
+    );
+    spawn_metrics(config.metrics_listen).await?;
+    let tls = RustlsConfig::from_pem_file(
+        &config.tls.certificate_pem_path,
+        &config.tls.private_key_pem_path,
     )
     .await
-    .map_err(queue_error)?;
-    let metrics = PrometheusBuilder::new()
-        .install_recorder()
-        .map_err(|error| RunError::Metrics(error.to_string()))?;
-    let app = router(
-        AppState {
-            queue,
-            characters: PgCharacters::new(pool),
-            settings,
-        },
-        Some(metrics),
-    );
-    let tls = RustlsConfig::from_pem_file(&login.certificate_pem_path, &login.private_key_pem_path)
-        .await
-        .map_err(RunError::Tls)?;
+    .map_err(RunError::Tls)?;
     let handle = Handle::new();
     let shutdown = handle.clone();
     tokio::spawn(async move {
@@ -112,34 +164,58 @@ async fn serve(
             shutdown.graceful_shutdown(Some(Duration::from_secs(SHUTDOWN_GRACE_SECONDS)));
         }
     });
-    axum_server::tls_rustls::bind_rustls(address, tls)
+    tracing::info!(address = %config.https_listen, "serving HTTPS");
+    axum_server::bind_rustls(config.https_listen, tls)
         .handle(handle)
-        .serve(app.into_make_service())
+        .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await
-        .map_err(RunError::Serve)?;
+        .map_err(RunError::Listen)
+}
+
+/// Installs the Prometheus recorder and serves it on the internal address (review finding I1).
+async fn spawn_metrics(address: SocketAddr) -> Result<(), RunError> {
+    let handle = PrometheusBuilder::new()
+        .install_recorder()
+        .map_err(|error| RunError::Metrics(error.to_string()))?;
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .map_err(RunError::Listen)?;
+    let app = Router::new().route(
+        METRICS_PATH,
+        get(move || std::future::ready(handle.render())),
+    );
+    tokio::spawn(async move {
+        if let Err(error) = axum::serve(listener, app).await {
+            tracing::error!(%error, "metrics listener stopped");
+        }
+    });
+    tracing::info!(%address, "serving metrics");
     Ok(())
 }
 
-fn install_ring_provider() {
-    let _ = rustls::crypto::ring::default_provider().install_default();
-}
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
 
-fn edge_error(error: EdgeConfigError) -> RunError {
-    RunError::Edge(Box::new(error))
-}
+    use super::*;
 
-fn login_error(error: LoginConfigError) -> RunError {
-    RunError::Login(Box::new(error))
-}
+    fn committed_config() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../config/edge.toml")
+    }
 
-fn log_error(error: LoggingError) -> RunError {
-    RunError::Log(Box::new(error))
-}
+    #[test]
+    fn committed_example_config_is_valid() {
+        let config = load_edge_config(&committed_config()).expect("config/edge.toml");
+        assert!(config.metrics_listen.ip().is_loopback());
+        assert!(!config.worlds.is_empty());
+    }
 
-fn database_error(error: impl Error + Send + Sync + 'static) -> RunError {
-    RunError::Database(Box::new(error))
-}
-
-fn queue_error(error: QueueError) -> RunError {
-    RunError::Queue(Box::new(error))
+    #[test]
+    fn serve_refuses_to_start_without_secrets() {
+        let config = load_edge_config(&committed_config()).expect("config");
+        assert!(matches!(
+            load_secrets(&config, |_| None),
+            Err(SecretError::Missing(_))
+        ));
+    }
 }
