@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Login server logic (M2 spec): configuration, secrets, keys, entry ticket signatures, name
-//! rules, password hashing, the stores behind them, and the launcher API. `edge-http` runs it.
+//! rules, password hashing, the stores behind them, the launcher API and the game routes.
+//! `edge-http` runs it.
 
 pub mod config;
 pub mod discord;
 pub mod error;
+pub mod game;
 pub mod keys;
 pub mod launcher;
 #[cfg(test)]
@@ -16,6 +18,8 @@ pub mod queue;
 pub mod secrets;
 pub mod signature;
 pub mod store;
+#[cfg(test)]
+mod test_http;
 pub mod time;
 pub mod valkey;
 

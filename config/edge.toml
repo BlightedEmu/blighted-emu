@@ -8,7 +8,8 @@
 # for example NW_EDGE_AUTH__MODE=discord.
 
 server_name = "Blighted test server"
-# Your own domain. The launcher API is https://login.<domain>.
+# Your own domain. The launcher API and the channel config are on https://login.<domain>, the
+# game routes on https://game.<domain>. The certificate must cover both names.
 domain = "example.org"
 https_listen = "0.0.0.0:443"
 # Prometheus metrics. Keep this on an internal address.
@@ -53,6 +54,8 @@ region = "us-east"
 database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
 # Live entry tickets at one time (the world manager replaces this in M5).
 capacity = 100
+# Characters one account may have in this world.
+max_characters_per_account = 2
 refresh_interval_seconds = 5
 queue_requests_per_minute = 30
 

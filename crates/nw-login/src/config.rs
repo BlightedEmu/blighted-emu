@@ -17,6 +17,8 @@ pub const EDGE_ENV_PREFIX: &str = "NW_EDGE_";
 
 /// Host name label of the launcher API and the channel config: `login.<domain>`.
 pub const LOGIN_HOST_LABEL: &str = "login";
+/// Host name label of the game routes: `game.<domain>`.
+pub const GAME_HOST_LABEL: &str = "game";
 
 /// Launch argument that sets the channel base URL (endpoint RE note).
 pub const CHANNEL_SERVICE_ARGUMENT: &str = "-ChannelService";
@@ -29,7 +31,8 @@ pub const LOGIN_CHANNEL_OVERRIDE_ARGUMENT: &str = "-LoginChannelOverride";
 pub struct EdgeConfig {
     /// Name shown in the launcher.
     pub server_name: String,
-    /// The community's own domain; `login.<domain>` is the launcher API host.
+    /// The community's own domain; `login.<domain>` is the launcher API host and `game.<domain>`
+    /// the game route host.
     pub domain: String,
     /// Public HTTPS listener.
     pub https_listen: SocketAddr,
@@ -129,6 +132,8 @@ pub struct WorldConfig {
     pub database_password_env: String,
     /// Live entry tickets allowed at one time (admission until `world-director`, M5).
     pub capacity: u32,
+    /// Characters one account may have in this world.
+    pub max_characters_per_account: u32,
     /// Seconds between queue refreshes of the client.
     pub refresh_interval_seconds: u64,
     /// Queue joins and refreshes allowed per account per minute.
@@ -162,6 +167,11 @@ impl EdgeConfig {
     /// `login.<domain>`.
     pub fn login_host(&self) -> String {
         format!("{LOGIN_HOST_LABEL}.{}", self.domain)
+    }
+
+    /// `game.<domain>`.
+    pub fn game_host(&self) -> String {
+        format!("{GAME_HOST_LABEL}.{}", self.domain)
     }
 
     /// The launch arguments the launcher passes to the game (M2 spec section 6).
@@ -240,6 +250,9 @@ impl EdgeConfig {
                     "capacity and refresh interval must be above 0",
                 );
             }
+            if world.max_characters_per_account == 0 {
+                return invalid("world.max_characters_per_account", "must be above 0");
+            }
             if world.queue_requests_per_minute == 0 {
                 return invalid("world.queue_requests_per_minute", "must be above 0");
             }
@@ -294,6 +307,7 @@ name = "Aeternum"
 region = "us-east"
 database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
 capacity = 100
+max_characters_per_account = 2
 refresh_interval_seconds = 5
 queue_requests_per_minute = 30
 
@@ -325,6 +339,7 @@ max_connections = 5
     fn valid_file_loads() {
         let config = valid();
         assert_eq!(config.login_host(), "login.example.org");
+        assert_eq!(config.game_host(), "game.example.org");
         assert_eq!(config.worlds.len(), 1);
         assert_eq!(config.auth.mode, AuthMode::Password);
         assert_eq!(
@@ -359,6 +374,13 @@ max_connections = 5
         refused(
             &VALID.replace("capacity = 100", "capacity = 0"),
             "world.capacity",
+        );
+        refused(
+            &VALID.replace(
+                "max_characters_per_account = 2",
+                "max_characters_per_account = 0",
+            ),
+            "world.max_characters_per_account",
         );
     }
 

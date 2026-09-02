@@ -2585,6 +2585,7 @@ dependencies = [
  "hex",
  "hmac",
  "http-body-util",
+ "httpdate",
  "nw-common",
  "nw-db",
  "nw-protocol",

@@ -411,12 +411,8 @@ where
 
 #[cfg(test)]
 mod tests {
-    use axum::body::Body;
     use axum::extract::connect_info::MockConnectInfo;
-    use axum::http::Request;
-    use http_body_util::BodyExt;
-    use nw_protocol::launcher_api::ErrorBody;
-    use tower::ServiceExt;
+    use axum::http::HeaderValue;
 
     use super::*;
     use crate::config::tests::valid;
@@ -424,6 +420,7 @@ mod tests {
     use crate::memory::{
         MemoryAccounts, MemoryDiscordStates, MemoryGameSessions, MemoryRateLimiter,
     };
+    use crate::test_http::{self, error_code};
 
     const PEER: ([u8; 4], u16) = ([192, 0, 2, 7], 50_000);
     const USERNAME: &str = "Ada";
@@ -466,29 +463,12 @@ mod tests {
         bearer: Option<&str>,
         body: &str,
     ) -> (StatusCode, Bytes) {
-        let mut request = Request::builder().method(method).uri(uri);
+        let mut request = test_http::request(method, uri, body);
         if let Some(token) = bearer {
-            request = request.header(header::AUTHORIZATION, format!("{BEARER_PREFIX}{token}"));
+            let value = HeaderValue::from_str(&format!("{BEARER_PREFIX}{token}")).expect("header");
+            request.headers_mut().insert(header::AUTHORIZATION, value);
         }
-        let response = app
-            .clone()
-            .oneshot(request.body(Body::from(body.to_owned())).expect("request"))
-            .await
-            .expect("response");
-        let status = response.status();
-        let bytes = response
-            .into_body()
-            .collect()
-            .await
-            .expect("body")
-            .to_bytes();
-        (status, bytes)
-    }
-
-    fn error_code(body: &Bytes) -> String {
-        serde_json::from_slice::<ErrorBody>(body)
-            .expect("error body")
-            .code
+        test_http::send(app, request).await
     }
 
     fn credentials(username: &str, password: &str) -> String {

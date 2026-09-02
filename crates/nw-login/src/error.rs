@@ -52,6 +52,9 @@ pub enum ApiError {
     /// Discord refused or failed.
     #[error("Discord login failed")]
     Discord,
+    /// No route serves this request.
+    #[error("unknown route")]
+    UnknownRoute,
     /// A store or worker failed.
     #[error("service unavailable")]
     Unavailable,
@@ -64,7 +67,9 @@ impl ApiError {
             Self::BadRequest | Self::InvalidName(_) => StatusCode::BAD_REQUEST,
             Self::InvalidCredentials | Self::NoSession => StatusCode::UNAUTHORIZED,
             Self::Banned | Self::RegistrationClosed => StatusCode::FORBIDDEN,
-            Self::WrongMode | Self::UnknownLogin | Self::UnknownWorld => StatusCode::NOT_FOUND,
+            Self::WrongMode | Self::UnknownLogin | Self::UnknownWorld | Self::UnknownRoute => {
+                StatusCode::NOT_FOUND
+            }
             Self::UsernameTaken | Self::CharacterNameTaken => StatusCode::CONFLICT,
             Self::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::Discord => StatusCode::BAD_GATEWAY,
@@ -87,6 +92,7 @@ impl ApiError {
             Self::UsernameTaken => "username_taken",
             Self::CharacterNameTaken => "character_name_taken",
             Self::UnknownWorld => "unknown_world",
+            Self::UnknownRoute => "unknown_route",
             Self::RateLimited => "rate_limited",
             Self::UnknownLogin => "unknown_login",
             Self::Discord => "discord_failed",
@@ -136,6 +142,7 @@ mod tests {
             ApiError::UsernameTaken,
             ApiError::CharacterNameTaken,
             ApiError::UnknownWorld,
+            ApiError::UnknownRoute,
             ApiError::RateLimited,
             ApiError::UnknownLogin,
             ApiError::Discord,
