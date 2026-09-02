@@ -16,6 +16,8 @@ pub mod names;
 pub mod password;
 pub mod pg;
 pub mod queue;
+#[cfg(all(test, feature = "infra"))]
+mod scripted_client;
 pub mod secrets;
 pub mod signature;
 pub mod store;
