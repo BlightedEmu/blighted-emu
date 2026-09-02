@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Shared protocol types for the Blighted New World emulator.
 //!
-//! `launcher_api` is the JSON between our launcher and `edge-http`.
+//! `launcher_api` is the JSON between our launcher and `edge-http`. `game_api` is the JSON the
+//! game client reads and writes before character select.
 //!
 //! The login-queue body is the JSON object `LoginQueueResponse`.
 //! `RepAddress` and `Signature` are strings on the nested `Token` object.
@@ -17,6 +18,7 @@
 //!
 //! This crate does not define the GridMate datagram header.
 
+pub mod game_api;
 pub mod launcher_api;
 pub mod login_queue;
 pub mod registration;
