@@ -21,7 +21,7 @@ use serde::Deserialize;
 use crate::config::{AuthConfig, EdgeConfig};
 use crate::discord::{DISCORD_CALLBACK_PATH, DiscordApi, authorize_url};
 use crate::error::{ApiError, parse_json};
-use crate::keys::{is_launcher_token, new_game_session_key, new_launcher_token, token_hash};
+use crate::keys::{is_launcher_token, new_game_session_key, new_random_token, token_hash};
 use crate::names::{check_password, normalize_username};
 use crate::password::PasswordHasher;
 use crate::store::{
@@ -157,7 +157,7 @@ async fn new_launcher_session<A: AccountStore>(
     if account.banned {
         return Err(ApiError::Banned);
     }
-    let token = new_launcher_token().map_err(|_| ApiError::Unavailable)?;
+    let token = new_random_token().map_err(|_| ApiError::Unavailable)?;
     let expires_at = unix_now() + LAUNCHER_SESSION_SECONDS;
     accounts
         .create_launcher_session(token_hash(&token), account.id, expires_at)
@@ -335,8 +335,8 @@ where
         ),
     )
     .await?;
-    let login_state = new_launcher_token().map_err(|_| ApiError::Unavailable)?;
-    let verifier = new_launcher_token().map_err(|_| ApiError::Unavailable)?;
+    let login_state = new_random_token().map_err(|_| ApiError::Unavailable)?;
+    let verifier = new_random_token().map_err(|_| ApiError::Unavailable)?;
     let url = authorize_url(
         &state.config.discord.client_id,
         &callback_url(&state.config),

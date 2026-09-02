@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use crate::config::{EdgeConfig, QUEUE_LIMIT_WINDOW_SECONDS, WorldConfig};
 use crate::error::{ApiError, parse_json};
-use crate::keys::{is_game_session_key, new_launcher_token};
+use crate::keys::{is_game_session_key, new_random_token};
 use crate::names::check_character_name;
 use crate::queue::{QueueAction, QueueSettings, QueueStore, QueueTime, queue_reply};
 use crate::secrets::SigningKey;
@@ -433,7 +433,7 @@ where
 
 /// A new queue ticket id: `<world id><separator><random>`, so a refresh finds its world.
 fn new_ticket_id(world_id: Uuid) -> Result<String, ApiError> {
-    let random = new_launcher_token().map_err(|_| ApiError::Unavailable)?;
+    let random = new_random_token().map_err(|_| ApiError::Unavailable)?;
     Ok(format!(
         "{}{TICKET_WORLD_SEPARATOR}{random}",
         world_id.simple()

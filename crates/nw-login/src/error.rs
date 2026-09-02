@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! HTTP errors of the launcher API (M2 spec section 10): one JSON body
-//! `{"code": "...", "message": "..."}` and a status code.
+//! HTTP errors of the launcher API and the game routes (M2 spec section 10): one JSON body
+//! `{"code": "...", "message": "..."}` and a status code. On the game routes the client reads only
+//! the status (follow-up note section 4).
 
 use axum::Json;
 use axum::body::Bytes;

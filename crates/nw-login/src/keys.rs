@@ -28,8 +28,9 @@ fn random_bytes() -> Result<[u8; TOKEN_BYTES], RandomError> {
     Ok(bytes)
 }
 
-/// A new launcher token (also used as the Discord login state).
-pub fn new_launcher_token() -> Result<String, RandomError> {
+/// 32 random bytes as base64url text: launcher tokens, Discord login states, PKCE verifiers and the
+/// random part of queue ticket ids.
+pub fn new_random_token() -> Result<String, RandomError> {
     Ok(BASE64URL_NOPAD.encode(&random_bytes()?))
 }
 
@@ -62,8 +63,8 @@ mod tests {
 
     #[test]
     fn launcher_tokens_are_random_base64url() {
-        let first = new_launcher_token().expect("token");
-        let second = new_launcher_token().expect("token");
+        let first = new_random_token().expect("token");
+        let second = new_random_token().expect("token");
         assert_eq!(first.len(), LAUNCHER_TOKEN_LEN);
         assert!(is_launcher_token(&first));
         assert_ne!(first, second);
