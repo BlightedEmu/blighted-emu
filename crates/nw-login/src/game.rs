@@ -12,7 +12,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
-use axum::extract::{DefaultBodyLimit, Path, State};
+use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, State};
+use axum::http::request::Parts;
 use axum::http::{Method, Uri};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -82,24 +83,47 @@ pub struct GameState<G, C, R, Q> {
     pub signing_key: SigningKey,
 }
 
-/// Path parameters of a session route.
+/// The session parameter of a session route; the other path parameters are ignored here.
 #[derive(Debug, Deserialize)]
 struct SessionPath {
     session: String,
 }
 
-/// Path parameters of a queue refresh.
+/// The ticket parameter of a queue refresh.
 #[derive(Debug, Deserialize)]
 struct TicketPath {
-    session: String,
     ticket_id: String,
 }
 
-/// Path parameters of a character route.
+/// The world parameter of a character route.
 #[derive(Debug, Deserialize)]
 struct WorldPath {
-    session: String,
     world_id: String,
+}
+
+/// The account of the live game session named in the path (`/s/{session}/...`). Handlers take it
+/// before the body, so a request without a valid session is refused before its body is read
+/// (review minor m5).
+struct SessionAccount(Uuid);
+
+impl<G, C, R, Q> FromRequestParts<GameState<G, C, R, Q>> for SessionAccount
+where
+    G: GameSessionStore,
+    C: Send + Sync,
+    R: Send + Sync,
+    Q: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &GameState<G, C, R, Q>,
+    ) -> Result<Self, ApiError> {
+        let Path(path) = Path::<SessionPath>::from_request_parts(parts, state)
+            .await
+            .map_err(|_| ApiError::NoSession)?;
+        session_account(state, &path.session).await.map(Self)
+    }
 }
 
 /// `/s/{session}<rest>` as an `axum` route.
@@ -249,12 +273,8 @@ fn session_seconds(config: &EdgeConfig) -> i64 {
 
 async fn steam_auth<G, C, R, Q>(
     State(state): State<GameState<G, C, R, Q>>,
-    Path(path): Path<SessionPath>,
-) -> Result<Json<SteamAuthReply>, ApiError>
-where
-    G: GameSessionStore,
-{
-    session_account(&state, &path.session).await?;
+    _session: SessionAccount,
+) -> Result<Json<SteamAuthReply>, ApiError> {
     let expires_at = unix_now().saturating_add(session_seconds(&state.config));
     Ok(Json(SteamAuthReply {
         access_key_id: AUTH_STACK_CREDENTIAL.to_owned(),
@@ -309,13 +329,11 @@ fn name_record(character: &Character) -> NameRecord {
 
 async fn login_info<G, C, R, Q>(
     State(state): State<GameState<G, C, R, Q>>,
-    Path(path): Path<SessionPath>,
+    SessionAccount(account): SessionAccount,
 ) -> Result<Json<LoginInfoReply>, ApiError>
 where
-    G: GameSessionStore,
     C: CharacterStore,
 {
-    let account = session_account(&state, &path.session).await?;
     let mut characters = Vec::new();
     let mut name_reservations = Vec::new();
     for world in &state.config.worlds {
@@ -335,12 +353,8 @@ where
 
 async fn list_worlds<G, C, R, Q>(
     State(state): State<GameState<G, C, R, Q>>,
-    Path(path): Path<SessionPath>,
-) -> Result<Json<ListWorldsReply>, ApiError>
-where
-    G: GameSessionStore,
-{
-    session_account(&state, &path.session).await?;
+    _session: SessionAccount,
+) -> Result<Json<ListWorldsReply>, ApiError> {
     Ok(Json(ListWorldsReply {
         list_worlds_response_body: ListWorldsBody {
             worlds: world_models(&state.config),
@@ -361,14 +375,13 @@ fn configured_world<'a>(
 
 async fn create_character<G, C, R, Q>(
     State(state): State<GameState<G, C, R, Q>>,
+    SessionAccount(account): SessionAccount,
     Path(path): Path<WorldPath>,
     body: Bytes,
 ) -> Result<Json<CreateCharacterReply>, ApiError>
 where
-    G: GameSessionStore,
     C: CharacterStore,
 {
-    let account = session_account(&state, &path.session).await?;
     let world = configured_world(&state.config, &path.world_id)?;
     let body: CreateCharacterRequestBody = parse_json(&body)?;
     let mut request = body.create_character_request.ok_or(ApiError::BadRequest)?;
@@ -398,14 +411,13 @@ where
 /// empty JSON object and a refused name gets an error status.
 async fn validate_character<G, C, R, Q>(
     State(state): State<GameState<G, C, R, Q>>,
+    _session: SessionAccount,
     Path(path): Path<WorldPath>,
     body: Bytes,
 ) -> Result<Json<serde_json::Map<String, serde_json::Value>>, ApiError>
 where
-    G: GameSessionStore,
     C: CharacterStore,
 {
-    session_account(&state, &path.session).await?;
     configured_world(&state.config, &path.world_id)?;
     let request: ValidateCharacterRequest = parse_json(&body)?;
     let name = request
@@ -481,16 +493,14 @@ async fn queue_step<G, C, R, Q: QueueStore>(
 /// `QueueLogin`: joins the queue with a character of the session's account (review finding C3).
 async fn queue_join<G, C, R, Q>(
     State(state): State<GameState<G, C, R, Q>>,
-    Path(path): Path<SessionPath>,
+    SessionAccount(account): SessionAccount,
     body: Bytes,
 ) -> Result<Json<LoginQueueReply>, ApiError>
 where
-    G: GameSessionStore,
     C: CharacterStore,
     R: RateLimiter,
     Q: QueueStore,
 {
-    let account = session_account(&state, &path.session).await?;
     let request = parse_login_queue_request(&body).map_err(|_| ApiError::BadRequest)?;
     let world = configured_world(
         &state.config,
@@ -520,14 +530,13 @@ where
 /// `RefreshQueuedLogin`: the ticket id in the path is the whole request (JSON note section 5.5).
 async fn queue_refresh<G, C, R, Q>(
     State(state): State<GameState<G, C, R, Q>>,
+    SessionAccount(account): SessionAccount,
     Path(path): Path<TicketPath>,
 ) -> Result<Json<LoginQueueReply>, ApiError>
 where
-    G: GameSessionStore,
     R: RateLimiter,
     Q: QueueStore,
 {
-    let account = session_account(&state, &path.session).await?;
     let world = ticket_world(&state.config, &path.ticket_id).ok_or(ApiError::UnknownTicket)?;
     limit_queue(&state, world, account).await?;
     let action = QueueAction::Refresh {
@@ -1045,6 +1054,27 @@ pub(crate) mod tests {
         let huge = "x".repeat(GAME_BODY_LIMIT_BYTES + 1);
         let (status, _) = post(&app, &path, &huge).await;
         assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn the_session_is_checked_before_the_body_is_read() {
+        let fixture = fixture().await;
+        let world = fixture.state.config.worlds[0].id.to_string();
+        let app = game_router(fixture.state.clone());
+        let huge = "x".repeat(GAME_BODY_LIMIT_BYTES + 1);
+        let paths = [
+            character_path(OTHER_KEY, &world, CHARACTERS_SEGMENT),
+            character_path(OTHER_KEY, &world, VALIDATOR_SEGMENT),
+            queue_path(OTHER_KEY, None),
+        ];
+        for path in paths {
+            let (status, body) = post(&app, &path, &huge).await;
+            assert_eq!(
+                (status, error_code(&body).as_str()),
+                (StatusCode::UNAUTHORIZED, "no_session"),
+                "{path}"
+            );
+        }
     }
 
     #[tokio::test]
