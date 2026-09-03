@@ -5,6 +5,7 @@ use nw_common::config::ConfigError;
 use nw_content::ContainerError;
 use nw_content::fill::FillError;
 
+use crate::capture::CaptureError;
 use crate::codegen::CodegenError;
 use crate::source::SourceError;
 use crate::world::WorldBuildError;
@@ -39,5 +40,14 @@ pub enum ToolError {
         expected: usize,
         /// Count after reload.
         found: usize,
+    },
+    /// A capture ledger or a type name file cannot be read.
+    #[error(transparent)]
+    Capture(#[from] CaptureError),
+    /// The capture check found decode failures.
+    #[error("capture check found {count} decode failures")]
+    CaptureFailures {
+        /// Failures found.
+        count: usize,
     },
 }

@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `content-tool`: builds generated table code, the content bundle and the world files from a
-//! New World install.
+//! New World install, and checks capture ledgers.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use content_tool::build::{DEFAULT_CONTENT_DIR, default_bundle_path, run_build};
+use content_tool::capture::{
+    CLIENT_TO_SERVER, CaptureError, CaptureReport, SERVER_TO_CLIENT, TypeNames,
+};
 use content_tool::client_build::load_client_build;
 use content_tool::codegen::run_codegen;
 use content_tool::error::ToolError;
@@ -17,6 +20,12 @@ use nw_world::records::RecordCounts;
 
 const DEFAULT_CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
 const DEFAULT_GENERATED_DIR: &str = "crates/nw-content/src/generated";
+/// Client type table in the install folder.
+const TYPE_INDEX_FILE: &str = "typeindex.json";
+/// Message types printed per direction by `capture-check`.
+const TOP_TYPES: usize = 30;
+/// Decode failures printed by `capture-check`.
+const SHOWN_FAILURES: usize = 20;
 
 #[derive(Parser)]
 #[command(
@@ -56,6 +65,15 @@ enum Command {
         /// Content bundle for the spawn ID check (default: `local-data/content/bundle-<build>.bin`).
         #[arg(long)]
         bundle: Option<PathBuf>,
+    },
+    /// Decodes capture ledgers with the carrier and message codecs; prints counts only.
+    CaptureCheck {
+        /// `ledger.bin` files (unpacked into `local-data/`).
+        #[arg(required = true)]
+        ledgers: Vec<PathBuf>,
+        /// Aeternum-World `Catalog/uuid_to_class.json`, to print class names next to type indexes.
+        #[arg(long)]
+        names: Option<PathBuf>,
     },
 }
 
@@ -106,8 +124,83 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
             print_world(&run_world(&source, &client_build, &bundle, &out_dir)?);
         }
+        Command::CaptureCheck { ledgers, names } => {
+            let names = match names {
+                Some(names) => TypeNames::load(&cli.game_dir.join(TYPE_INDEX_FILE), &names)?,
+                None => TypeNames::default(),
+            };
+            let report = run_capture_check(&ledgers)?;
+            print_capture(&report, &names);
+            if !report.failures.is_empty() {
+                return Err(ToolError::CaptureFailures {
+                    count: report.failures.len(),
+                });
+            }
+        }
     }
     Ok(())
+}
+
+fn run_capture_check(ledgers: &[PathBuf]) -> Result<CaptureReport, ToolError> {
+    let mut report = CaptureReport::default();
+    for path in ledgers {
+        let bytes = std::fs::read(path).map_err(|source| CaptureError::Io {
+            path: path.clone(),
+            source,
+        })?;
+        report.check_ledger(path, &bytes)?;
+    }
+    Ok(report)
+}
+
+fn print_capture(report: &CaptureReport, names: &TypeNames) {
+    println!(
+        "capture-check: {} files, {} + {} datagrams (server, client), {} + {} messages, {} inline-UUID types, {} decode failures",
+        report.files,
+        report.datagrams[SERVER_TO_CLIENT as usize],
+        report.datagrams[CLIENT_TO_SERVER as usize],
+        report.messages[SERVER_TO_CLIENT as usize],
+        report.messages[CLIENT_TO_SERVER as usize],
+        report.inline_uuid_messages,
+        report.failures.len()
+    );
+    let registration = &report.registration;
+    println!(
+        "registration: {} responses; status {:?}; four bytes {:?}; versions {:?}; token lengths {:?}; clock within {} ms",
+        registration.responses,
+        registration.statuses,
+        registration.flags,
+        registration.versions,
+        registration.token_lengths,
+        registration.max_clock_offset_ms
+    );
+    for (direction, label) in [
+        (SERVER_TO_CLIENT, "server to client"),
+        (CLIENT_TO_SERVER, "client to server"),
+    ] {
+        let mut types: Vec<(u64, u64)> = report
+            .types
+            .iter()
+            .filter(|((from, _), _)| *from == direction)
+            .map(|((_, index), count)| (*index, *count))
+            .collect();
+        types.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+        println!("types {label}: {} kinds", types.len());
+        for (index, count) in types.iter().take(TOP_TYPES) {
+            println!(
+                "  {index:>5} {count:>9} {}",
+                names.name(*index).unwrap_or("")
+            );
+        }
+    }
+    for failure in report.failures.iter().take(SHOWN_FAILURES) {
+        println!(
+            "  failure: {} record {}: {}",
+            failure.file.display(),
+            failure.record,
+            failure.reason
+        );
+    }
 }
 
 fn print_world(reports: &[LevelReport]) {

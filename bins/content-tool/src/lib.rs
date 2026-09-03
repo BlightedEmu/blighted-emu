@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Library part of `content-tool`: code generation, bundle building and world file building.
+//! Library part of `content-tool`: code generation, bundle building, world file building, and the
+//! capture check.
 
 pub mod build;
+pub mod capture;
 pub mod client_build;
 pub mod codegen;
 pub mod error;

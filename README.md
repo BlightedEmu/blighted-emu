@@ -54,6 +54,7 @@ just infra-test
 | `just codegen` | Regenerates the table structs in `crates/nw-content/src/generated` |
 | `just bundle` | Builds the content bundle into `local-data/content/` |
 | `just world` | Builds one world file per level into `local-data/content/` (run `just bundle` first) |
+| `just capture-check` | Decodes every capture ledger under `local-data/captures/` and prints counts |
 
 ## Content data
 
@@ -78,6 +79,19 @@ just world
 3. Run `just codegen` again.
 
 Codegen stops with an error when a table type name would give an invalid Rust name or a name that the generated code already uses, so a new client build cannot write code that does not compile for that reason.
+
+## Capture check
+
+`content-tool capture-check` decodes capture ledgers (`ledger.bin`, decrypted carrier datagrams) with `nw-carrier` and `nw-reflect` and prints counts only: datagrams, messages per type index, registration response values, and decode failures. It exits with an error when any datagram or message does not decode. The facts it checks are in `docs/re/2026-09-02-carrier-captures.md`.
+
+Ledgers hold data of other players. Keep them in git-ignored `local-data/captures/`; never commit them or paste message contents.
+
+```bash
+export NW_GAME_DIR="/path/to/steamapps/common/New World"
+just capture-check
+```
+
+To print class names next to type indexes, add `--names local-data/Aeternum-World-main/Catalog/uuid_to_class.json` (Aeternum-World, AGPL-3.0); the tool joins it to `typeindex.json` in your install by UUID.
 
 ## Login server and launcher
 

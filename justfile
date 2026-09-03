@@ -58,3 +58,7 @@ bundle:
 # Build one world file per level into local-data/content/ from your install. Run `just bundle` first.
 world:
     cargo run -p content-tool -- world
+
+# Decode every capture ledger under local-data/captures (unpack the capture archives there first).
+capture-check:
+    find -L local-data/captures -name ledger.bin -print0 | xargs -0 cargo run -p content-tool -- capture-check
