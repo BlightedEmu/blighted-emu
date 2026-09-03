@@ -49,4 +49,10 @@ pub enum CarrierError {
         /// Payload length.
         length: usize,
     },
+    /// A system message does not fit its opcode.
+    #[error("system message with opcode {opcode} has a bad layout")]
+    BadSystemMessage {
+        /// Opcode (last payload byte).
+        opcode: u8,
+    },
 }

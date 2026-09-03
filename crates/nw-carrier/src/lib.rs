@@ -8,7 +8,9 @@
 pub mod datagram;
 pub mod error;
 pub mod frame;
+pub mod system;
 
 pub use datagram::{Datagram, MAX_DATAGRAM_LEN, decode_datagram, encode_datagram};
 pub use error::CarrierError;
 pub use frame::{Frame, SYSTEM_CHANNEL, decode_frames, encode_frames};
+pub use system::{Acks, SystemMessage};
