@@ -58,6 +58,7 @@ nw-formats = { path = "crates/nw-formats", version = "0.1.0" }
 nw-login = { path = "crates/nw-login", version = "0.1.0" }
 nw-oodle = { path = "crates/nw-oodle", version = "0.1.0" }
 nw-protocol = { path = "crates/nw-protocol", version = "0.1.0" }
+nw-reflect = { path = "crates/nw-reflect", version = "0.1.0" }
 nw-world = { path = "crates/nw-world", version = "0.1.0" }
 
 [workspace.lints.rust]

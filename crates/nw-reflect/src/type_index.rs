@@ -47,8 +47,9 @@ pub const MOVE_ACTOR_MSG_TYPE_INDEX: u64 = 710;
 /// File slot of `StartMovementCommunicationMsg`.
 pub const START_MOVEMENT_COMMUNICATION_MSG_TYPE_INDEX: u64 = 726;
 
-/// File slot of `PingMsg`. The body was not opened. This crate does not encode it.
-pub const PING_MSG_TYPE_INDEX: u64 = 5867;
+/// File slot of `REPClient::PingMsg`: an 8-byte body that the server sends about every second
+/// and the client sends back (carrier captures note section 8).
+pub const PING_MSG_TYPE_INDEX: u64 = 349;
 
 /// File slot of `MoveActorToHubMsg`. The note shows a registrar only. This crate does not encode it.
 pub const MOVE_ACTOR_TO_HUB_MSG_TYPE_INDEX: u64 = 718;
@@ -323,6 +324,16 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn ping_is_the_slot_the_captures_show() {
+        // Carrier captures note sections 6 and 8: `9d 05` on the wire, `REPClient::PingMsg`.
+        assert_eq!(PING_MSG_TYPE_INDEX, 349);
+        assert_eq!(
+            encode_type_index_prefix(PING_MSG_TYPE_INDEX),
+            Ok(vec![0x9d, 0x05])
+        );
+    }
+
     const KNOWN_FILE_SLOTS: [u64; 15] = [
         REGISTRATION_REQUEST_MSG_TYPE_INDEX,
         REGISTRATION_REQUEST_V2_MSG_TYPE_INDEX,
@@ -363,8 +374,8 @@ mod tests {
 
     /// Shortest encoding of `MoveActorMsg` (710 = 11 * 64 + 6).
     const ENCODED_MOVE_ACTOR: [u8; 2] = [0x86, 0x0B];
-    /// Shortest encoding of `PingMsg` (5867 = 91 * 64 + 43).
-    const ENCODED_PING: [u8; 2] = [0xAB, 0x5B];
+    /// Shortest encoding of `PingMsg` (349 = 5 * 64 + 29), as the captures show it.
+    const ENCODED_PING: [u8; 2] = [0x9D, 0x05];
     /// Five-byte maximum. Low 3 bits are 7. Four extra bytes are `0xFF`.
     const ENCODED_FIVE_BYTE_MAX: [u8; 5] = [0xF7, 0xFF, 0xFF, 0xFF, 0xFF];
 

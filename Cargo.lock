@@ -2617,9 +2617,16 @@ dependencies = [
 name = "nw-protocol"
 version = "0.1.0"
 dependencies = [
- "proptest",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "nw-reflect"
+version = "0.1.0"
+dependencies = [
+ "proptest",
  "thiserror 2.0.21",
 ]
 

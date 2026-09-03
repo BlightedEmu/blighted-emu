@@ -1,7 +1,7 @@
 [package]
 name = "nw-protocol"
 version = "0.1.0"
-description = "Login-queue JSON, the type-index prefix, and registration bodies."
+description = "Login, launcher, and login-queue JSON."
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,8 +12,6 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
-[dev-dependencies]
-proptest.workspace = true
 
 [lints]
 workspace = true
