@@ -80,4 +80,10 @@ pub enum CarrierError {
         /// Limit.
         limit: usize,
     },
+    /// A reliable frame was sent the most times without an ack.
+    #[error("reliable frame sent {attempts} times without an ack")]
+    TooManyAttempts {
+        /// Sends so far.
+        attempts: u32,
+    },
 }
