@@ -105,6 +105,9 @@ pub struct LoginInfoReply {
 pub struct LoginInfoList {
     /// Characters of the account in every world.
     pub characters: Vec<CharacterSummary>,
+    /// Characters the account may have on this server. Without it the select screen shows `0/0`
+    /// and offers no slot to create a character (exit test, 2026-09-02).
+    pub max_channel_characters: i64,
     /// Names of those characters (`includeNames`).
     pub name_reservations: Vec<NameRecord>,
     /// Worlds of the server.
@@ -348,6 +351,7 @@ mod tests {
         let reply = LoginInfoReply {
             login_info_list: LoginInfoList {
                 characters: vec![summary()],
+                max_channel_characters: MAX_CHARACTERS,
                 name_reservations: vec![NameRecord {
                     created_date: DATE.to_owned(),
                     display_name: "Ada".to_owned(),
@@ -361,7 +365,15 @@ mod tests {
         let value = json(&reply);
         assert_eq!(keys(&value), ["LoginInfoList"]);
         let list = &value["LoginInfoList"];
-        assert_eq!(keys(list), ["Characters", "NameReservations", "Worlds"]);
+        assert_eq!(
+            keys(list),
+            [
+                "Characters",
+                "MaxChannelCharacters",
+                "NameReservations",
+                "Worlds"
+            ]
+        );
         assert_eq!(
             keys(&list["Characters"][0]),
             [

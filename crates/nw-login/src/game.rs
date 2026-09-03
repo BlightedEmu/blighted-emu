@@ -301,6 +301,15 @@ fn world_model(world: &WorldConfig) -> WorldModel {
     }
 }
 
+/// Character slots of an account on the whole server: the sum of the per-world limits.
+fn channel_character_slots(config: &EdgeConfig) -> i64 {
+    config
+        .worlds
+        .iter()
+        .map(|world| to_json_integer(world.max_characters_per_account))
+        .sum()
+}
+
 fn world_models(config: &EdgeConfig) -> Vec<WorldModel> {
     config.worlds.iter().map(world_model).collect()
 }
@@ -345,6 +354,7 @@ where
     Ok(Json(LoginInfoReply {
         login_info_list: LoginInfoList {
             characters,
+            max_channel_characters: channel_character_slots(&state.config),
             name_reservations,
             worlds: world_models(&state.config),
         },
@@ -932,6 +942,14 @@ pub(crate) mod tests {
             let list = reply.login_info_list;
             assert_eq!(list.characters, vec![character_summary(world_id, &created)]);
             assert_eq!(list.characters[0].name, NAME);
+            let slots: u32 = fixture
+                .state
+                .config
+                .worlds
+                .iter()
+                .map(|world| world.max_characters_per_account)
+                .sum();
+            assert_eq!(list.max_channel_characters, i64::from(slots));
             assert_eq!(list.name_reservations[0].display_name, NAME);
             assert_eq!(list.worlds, world_models(&fixture.state.config));
         }
