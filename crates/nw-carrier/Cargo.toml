@@ -1,0 +1,18 @@
+[package]
+name = "nw-carrier"
+version = "0.1.0"
+description = "GridMate carrier as a library with no sockets: datagrams, frames, acks, chunks, reliable order."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+lz4_flex.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
