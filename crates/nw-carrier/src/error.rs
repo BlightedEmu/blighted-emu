@@ -55,4 +55,29 @@ pub enum CarrierError {
         /// Opcode (last payload byte).
         opcode: u8,
     },
+    /// An unreliable frame has the chunk flag.
+    #[error("unreliable frame has the chunk flag")]
+    UnreliableChunk,
+    /// A chunk count does not follow the previous one.
+    #[error("chunk count {found:?} does not follow {previous:?}")]
+    BadChunkCount {
+        /// Count of the previous chunk on the channel.
+        previous: Option<u16>,
+        /// Count of this frame; `None` for a frame without the chunk flag.
+        found: Option<u16>,
+    },
+    /// A joined message is longer than the limit.
+    #[error("message of {length} bytes is over the limit {limit}")]
+    MessageTooLong {
+        /// Bytes so far.
+        length: usize,
+        /// Limit.
+        limit: usize,
+    },
+    /// Too many reliable frames wait for a missing one.
+    #[error("more than {limit} reliable frames wait for a missing frame")]
+    TooManyHeld {
+        /// Limit.
+        limit: usize,
+    },
 }
