@@ -115,7 +115,7 @@ Do this once in password mode and once in Discord mode (`[auth] mode`).
 
 1. Start the services (`just infra-up`), set the secrets, then run `edge-http migrate` and `edge-http serve`.
 2. Start Steam. Start the launcher, type your domain, and log in (or make an account).
-3. Click Play. The game starts through Steam with `-ChannelService https://login.<domain>` and `-LoginChannelOverride <game session key>`.
+3. Click Play. The game starts through Steam with `-ChannelService https://login.<domain>`, `-LoginChannelOverride <game session key>` and `-AuthBackend nw`. The last one makes the game send its Steam ticket to our `/steam` route; in `Game.log`, `Persona failed to initialize!` or `Omni metadata is NOT present` means the game took another auth path.
 4. The game must reach the character select screen. Make a character.
 5. Close the game. Click Play again. The new character must be in the list.
 6. Save the `Game.log` lines of the login steps and the `edge-http` log lines of the run in a new note in `docs/re/` as evidence. Remove your account name, Steam ids and IP addresses first.

@@ -14,13 +14,14 @@ pub const STEAM_APP_ID: &str = "1063730";
 /// Steam argument that starts an application.
 pub const APPLAUNCH_ARGUMENT: &str = "-applaunch";
 /// The only game arguments a server may ask for (endpoint RE note).
-pub const ALLOWED_ARGUMENTS: [&str; 6] = [
+pub const ALLOWED_ARGUMENTS: [&str; 7] = [
     "-ChannelService",
     "-LoginChannelOverride",
     "-GatewayMode",
     "-GatewayAddr",
     "-HttpGatewayAddr",
     "-AuthEndpoint",
+    "-AuthBackend",
 ];
 /// Default Steam program.
 #[cfg(windows)]
@@ -172,6 +173,21 @@ mod tests {
         .expect("arguments");
         assert_eq!(arguments[3], KEY);
         assert_eq!(arguments[1], "https://login.example.org");
+    }
+
+    #[test]
+    fn the_auth_backend_argument_is_allowed() {
+        let arguments = game_arguments(
+            &template(&[
+                "-LoginChannelOverride",
+                SESSION_PLACEHOLDER,
+                "-AuthBackend",
+                "nw",
+            ]),
+            KEY,
+        )
+        .expect("arguments");
+        assert_eq!(arguments[2..], ["-AuthBackend", "nw"]);
     }
 
     #[test]

@@ -29,6 +29,12 @@ const QUEUE_JOIN_REQUESTS: u64 = 1;
 pub const CHANNEL_SERVICE_ARGUMENT: &str = "-ChannelService";
 /// Launch argument that sets the channel key (endpoint RE note).
 pub const LOGIN_CHANNEL_OVERRIDE_ARGUMENT: &str = "-LoginChannelOverride";
+/// Launch argument that selects the client's auth backend (unknowns note, fifth pass).
+pub const AUTH_BACKEND_ARGUMENT: &str = "-AuthBackend";
+/// Auth backend `nw` (index 0): the only one that sends the Steam ticket to our `/steam` route.
+/// The client compares the name with exact case; its built-in default is `omni`, which skips
+/// `/steam` (unknowns note, fifth pass).
+pub const AUTH_BACKEND_NW: &str = "nw";
 
 /// The whole `edge-http` configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -187,6 +193,8 @@ impl EdgeConfig {
             format!("https://{}", self.login_host()),
             LOGIN_CHANNEL_OVERRIDE_ARGUMENT.to_owned(),
             SESSION_PLACEHOLDER.to_owned(),
+            AUTH_BACKEND_ARGUMENT.to_owned(),
+            AUTH_BACKEND_NW.to_owned(),
         ]
     }
 
@@ -363,7 +371,9 @@ max_connections = 5
                 "-ChannelService",
                 "https://login.example.org",
                 "-LoginChannelOverride",
-                SESSION_PLACEHOLDER
+                SESSION_PLACEHOLDER,
+                "-AuthBackend",
+                "nw"
             ]
         );
     }
