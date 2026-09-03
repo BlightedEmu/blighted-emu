@@ -522,3 +522,90 @@ Status: Decompiler cannot resolve.
 **Observed.** `FUN_14642b130` has no direct call. Data references are `0x1484fdf50` and `0x14abcae9c`. The buffer at `param_4 + 0x20` is an incoming argument. This function has no key literals (`currency`, `visualsBlob`, `position`, `x`, `y`, `z`, `currentLevel`, `worldId`, or any other key).
 
 **Unknown.** The function that writes `param_4 + 0x20`. The search stops at `FUN_14642b130` (`0x14642b130`). A decompiler of that function cannot see the key characters.
+
+## Fifth pass
+
+Status: The name table and the `/steam` test are resolved. The int stored at object `+0x2ec` when both overrides are absent is a static limit.
+
+Method: static only, on the existing Ghidra project, read-only, analysis off (`analyzeHeadless -process NewWorld.exe -noanalysis -readOnly`). REA `binary_session` with `{}` reported `open: false`. `open_binary` was not called. The game was not run. Easy Anti-Cheat was not analyzed. Dumps are under `<re-scratch>/out-fifth/`.
+
+### 1. Default of `client-connection.authorization.backend`
+
+**Observed.** The literal default index is `2`. `FUN_146168bc0` (`0x146168bc0`) passes it with the cvar name and the 3-name table:
+
+```
+0x146168f7d  MOV dword ptr [RSP+0x20], 3
+0x146168f85  LEA R9, [0x149f3fd58]
+0x146168f8c  MOV R8D, 2
+0x146168f96  CALL 0x140571670
+```
+
+`RCX` at that call is `MOV RCX, qword ptr [RBX+0x28]` (`0x146168f71`). `RBX` is the current provider node. The same `2` is passed again at `0x1461690ef`. `0x140571670` is `MOV RAX, [RCX]` / `JMP [RAX+0x90]`.
+
+**Observed.** Index `2` in the table at `0x149f3fd58` is the string `omni` (`0x1484c7fa8`). `FUN_14618e270` (`0x14618e270`) passes the same default `2` at `0x14618e345` into `FUN_1461a91e0` (`0x1461a91e0`) for the key `authorization.backend` (`0x1484c9668`).
+
+**Observed.** A launch argument is not required for that literal to exist. `FUN_14645b520` (`0x14645b520`) calls `FUN_1461a9950` (`0x1461a9950`) only when the `AuthBackend` value length is not zero. A JSON key is not required for the literal either. `FUN_1461a91e0` calls the setter `FUN_14613dc40` (`0x14613dc40`) only after `FUN_1461a54f0` finds `authorization.backend`. If that lookup fails, it jumps to `0x1461a93d8` and does not call the setter.
+
+**Observed.** `FUN_140fc7f90` (`0x140fc7f90`) writes the getter result to the out pointer. It does not write that pointer when both provider lists are empty. The context from `FUN_1406d17b0` (`0x1406d17b0`) is `0xa8` bytes, vtable `0x147f20210`. The constructor stores `0` in the list at `+0x58` (count at `+0x90`) and in the list pointer at `+0x20`. `FUN_145a7f3e0` (`0x145a7f3e0`) does not store `[RDI+0x2ec]` before the call at `0x145a7f9ba`. `FUN_145a88640` (`0x145a88640`) allocates the object with `malloc` (`0xda8` bytes) and does not clear it.
+
+**Unknown. Static limit.** The image does not show a call that enters `FUN_146168bc0`. Its only reference is vtable `0x1484c9618` slot `+0x08` at `0x1484c9620`. `FUN_1461521d0` (`0x1461521d0`) writes that vtable. `FUN_14643f0a0` (`0x14643f0a0`) stores the object at parent `+0x240` (`0x14643f334`). `FUN_14102ee20` (`0x14102ee20`) does the same (`0x14102f11a`). Those two creators have no direct callers. They are slots on parent vtables `0x1484faad0` (`+0x590`) and `0x147fc6118` (`+0x138`). No method of either parent loads `[reg+0x240]` and passes that pointer to a call. Eight same-function calls of slot `+0x08` after a `[reg+0x240]` load are refcount destructors (`LOCK XADD [object+0x08]`), at `0x14373a608`, `0x1441d93d8`, `0x1447a0e41`, `0x1447d9f11`, `0x14499f2b3`, `0x1449a1a89`, `0x14672d1d5`, and `0x14673323b`. Forty-five direct callees that receive the pointer do not call slot `+0x08`. Thunk `0x140571444` has 34 call sites. None of those functions loads `[reg+0x240]` or writes vtable `0x1484c9618`. The concrete function at provider slot `+0x90` was not named, because the qword at node `+0x28` is not an immediate and no store of a vtable into that field was found in the cvar-context callers. The int written to object `+0x2ec` when `-AuthBackend` is absent and `ClientOverride.json` has no `authorization.backend` key is not established. If both provider lists stay empty, `FUN_140fc7f90` leaves the dword as leftover `malloc` bytes.
+
+### 2. How `AuthBackend` text becomes the int
+
+**Observed.** The text is a name. It is not a decimal. The build has the string `AuthBackend` at `0x1484fdd10`. It does not have the literal `-AuthBackend`. `FUN_14645b520` loads that string at `0x14645b9c1`, sets `EDX` to `1`, and calls virtual `+0x18`. When the value length is not zero it calls `FUN_1461a9950` at `0x14645ba05`.
+
+**Observed.** `FUN_1461a9950` calls `FUN_1461622b0` (`0x1461622b0`) at `0x1461a9975`. `R8D` is the count dword `3` at `0x149f40094`. `RDX` is the table at `0x149f3fd58`. The compare is a full-length `memcmp` at `0x146162322`. The lengths must be equal. The match is case-sensitive. On a match, `MOV EAX, EDI` at `0x14616233a` returns the slot index. If no slot matches, the function returns the count, `3`. There is no `atoi`, `strtol`, or `sscanf` on this path. A decimal string such as `0` misses the names, so the value passed onward is `3`.
+
+| Text | Int | String | Table slot |
+|---|---|---|---|
+| `nw` | `0` | `0x1484c7fa4` | `0x149f3fd58` |
+| `persona` | `1` | `0x14844b8b0` | `0x149f3fd60` |
+| `omni` | `2` | `0x1484c7fa8` | `0x149f3fd68` |
+| any other command-line text | `3` | — | past the last slot |
+
+**Observed.** `FUN_1461a9950` passes that index in `R9D` at `0x1461a9a63` and calls `0x140571500` at `0x1461a9a71`. That thunk is `MOV RAX, [RCX]` / `JMP [RAX+0x180]`. `RCX` is again `[RBX+0x28]`.
+
+**Observed.** `ClientOverride.json` uses the same three names through `FUN_1461a91e0`, with `_stricmp`, so `NW`, `Persona`, and `OMNI` match. The call from `FUN_14618e270` passes default index `2`. A key that is present and does not match a name keeps index `2`. A key that is absent does not call the setter.
+
+**Observed.** These texts are not in this table. A NUL-terminated search of this build:
+
+| Text | Where it is used |
+|---|---|
+| `authstack`, `AuthStack`, `AUTHSTACK` | no hit |
+| `authStack` (`0x1485013b0`) | channel tag in `FUN_146450250` only |
+| `steam` (`0x147f48c88`) | platform enum pointer at `0x14a12a090` |
+| `mock` (`0x147fc8184`) | platform enum pointer at `0x14a12a0f8` |
+| `sonic` (`0x147fc815c`) | `FUN_14643f0a0`, `FUN_14102ee20` |
+| `scarlett` (`0x147fc8168`) | `FUN_14102ee20`, `FUN_145f21890` |
+| `prospero` (`0x147fc8178`) | `FUN_14102ee20`, `FUN_145f21890` |
+
+**Unknown. Static limit.** The body of provider slot `+0x180` was not named. The same missing vtable at node `+0x28` blocks it. The index is passed in `R9D`. The store into the container that `FUN_140fc7f90` later reads was not shown as an instruction.
+
+### 3. Which int takes `/steam`, and what else can force `+0x2ec` to `0`
+
+**Observed.** Only the 32-bit value `0` enters the `/steam` arm of `FUN_145a936f0` (`0x145a936f0`). `0x145a9371a` is `MOV RBX, RCX`, and `RBX` is still the object at the compare:
+
+```
+0x145a93cbc  CMP dword ptr [RBX+0x2ec], 0
+0x145a93cc3  JNZ 0x145a9418a
+```
+
+The value `0` falls through. Every other 32-bit value, including `1` and `2`, jumps to `0x145a9418a`. This function has no other compare of `+0x2ec`. The `/steam` bytes are only in the zero arm: `0x145a93e29` loads `0x14844bbb8` (`2f 73 74 65 61 6d 00`, `/steam`) and `0x145a93e3d` sets the length to `6`. A second test in that arm does not read `+0x2ec`. `0x145a93d3e` compares `[R14+0x10]` with `0`, and `0x145a93d43` jumps to the copy only when that qword is not `0`. A zero backend with endpoint length `0` does not copy `/steam`.
+
+**Observed.** On the Steam auth manager, the stores of this dword are:
+
+| Site | Value | When it runs |
+|---|---|---|
+| `FUN_140fc7f90` at `0x140fc80c1` | `EAX` from the getter | first provider loop calls thunk `0x140571548` (`JMP [RAX+0x1d0]`) |
+| `FUN_140fc7f90` at `0x140fc826c` | `EAX` from the getter | second provider loop, the list at provider `+0x20` |
+| `FUN_145a886d0` at `0x145a88ab7` | constant `2` | both OMNI metadata string lengths are non-zero |
+
+`FUN_145a7f3e0` calls the getter at `0x145a7f9ba` with `RCX = object+0x2ec` and the name `client-connection.authorization.backend` (`0x14844b928`). The empty OMNI-metadata path logs `Omni metadata is NOT present for this channel, Persona auth is not supported.` and does not write the int. The provider-not-`2` path reports `@mm_authresult_Error_Steam` and does not write the int. `FUN_145a913e0`, `FUN_145a936f0`, `FUN_145a8c7c0`, `FUN_145a8e8d0`, `FUN_145a825d0`, `FUN_145aa2bf0`, and `FUN_145a8d1a0` only read the dword. The base constructor `FUN_145a7e910` stops at offset `0x178`. The derived constructor writes a byte at `+0x2e8` and a dword at `+0x2f0`. Those accesses do not cover `0x2ec` through `0x2ef`.
+
+**Observed.** No other cvar name is passed with this address. No channel-document store writes `0` to this field. OMNI metadata can replace the value with `2`. It cannot replace the value with `0`. The only writer that can produce `0` is the getter for `client-connection.authorization.backend`, and only when that getter returns `0`.
+
+**Observed.** `FUN_145a7f1d0` at `0x145a7f353` writes a qword at `+0x2e8` on a different object, the Sonic auth manager (size `0x360`, vtable `0x14844a418`). The stored value is an allocator pointer, not this backend int.
+
+**Unknown. Static limit.** The body of getter slot `+0x1d0` was not named. The thunk is `0x140571548`. The call sites are `0x140fc80be` and `0x140fc826a`. The object is the same unnamed pointer at provider node `+0x28`. This pass does not show the int that slot returns for stored index `2`.
+
+Evidence: `<re-scratch>/out-fifth/q1-default/`, `q1-getter/`, `q2-parser/`, `q2-table/`, `q3-steam/`, `q3-writers/`.
