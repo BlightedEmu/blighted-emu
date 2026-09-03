@@ -8,9 +8,20 @@
 //! `RegistrationRequestV3Msg` and `RegistrationResponseMsg` use the byte lists in protocol note
 //! section 3. V1 and V2 stay registered and have no byte list, so this crate does not encode them
 //! and does not choose a version.
+//!
+//! `framing` places messages in a delivered carrier payload; `envelope` reads the header of each
+//! message (carrier captures note section 5).
 
+pub mod envelope;
+pub mod framing;
 pub mod registration;
 pub mod type_index;
+
+pub use envelope::{Envelope, EnvelopeError};
+pub use framing::{
+    CLIENT_HEADER_LEN, CLIENT_SESSION_LEN, ClientMessage, FramingError, decode_client_message,
+    decode_server_messages, encode_client_message, encode_server_messages,
+};
 
 pub use registration::{
     LIST_COUNT_ABOVE, REGISTRATION_REQUEST_MSG_UUID, REGISTRATION_REQUEST_V2_MSG_UUID,

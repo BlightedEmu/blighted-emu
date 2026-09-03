@@ -2626,6 +2626,7 @@ dependencies = [
 name = "nw-reflect"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "proptest",
  "thiserror 2.0.21",
 ]
