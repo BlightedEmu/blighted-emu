@@ -505,6 +505,35 @@ async fn queue_step<G, C, R, Q: QueueStore>(
     )))
 }
 
+/// Whether `character_id` is a character of `account` in `world`.
+async fn owns_character<G, C: CharacterStore, R, Q>(
+    state: &GameState<G, C, R, Q>,
+    world: &WorldConfig,
+    account: Uuid,
+    character_id: Uuid,
+) -> Result<bool, ApiError> {
+    Ok(state
+        .characters
+        .character(world.id, character_id)
+        .await?
+        .is_some_and(|character| character.account_id == account))
+}
+
+/// The world that holds `character_id` of `account`. Right after it creates a character, the
+/// client queues with an empty `WorldId` (exit test, 2026-09-02), so every world is searched.
+async fn world_of_character<G, C: CharacterStore, R, Q>(
+    state: &GameState<G, C, R, Q>,
+    account: Uuid,
+    character_id: Uuid,
+) -> Result<&WorldConfig, ApiError> {
+    for world in &state.config.worlds {
+        if owns_character(state, world, account, character_id).await? {
+            return Ok(world);
+        }
+    }
+    Err(ApiError::UnknownCharacter)
+}
+
 /// `QueueLogin`: joins the queue with a character of the session's account (review finding C3).
 async fn queue_join<G, C, R, Q>(
     State(state): State<GameState<G, C, R, Q>>,
@@ -517,24 +546,26 @@ where
     Q: QueueStore,
 {
     let request = parse_login_queue_request(&body).map_err(|_| ApiError::BadRequest)?;
-    let world = configured_world(
-        &state.config,
-        request.world_id.as_deref().unwrap_or_default(),
-    )?;
-    limit_queue(&state, world, account).await?;
     let character_id = request
         .character_id
         .as_deref()
         .and_then(|id| Uuid::parse_str(id).ok())
         .ok_or(ApiError::UnknownCharacter)?;
-    let owned = state
-        .characters
-        .character(world.id, character_id)
-        .await?
-        .is_some_and(|character| character.account_id == account);
-    if !owned {
-        return Err(ApiError::UnknownCharacter);
-    }
+    let world = match request.world_id.as_deref().filter(|id| !id.is_empty()) {
+        Some(world_id) => {
+            let world = configured_world(&state.config, world_id)?;
+            limit_queue(&state, world, account).await?;
+            if !owns_character(&state, world, account, character_id).await? {
+                return Err(ApiError::UnknownCharacter);
+            }
+            world
+        }
+        None => {
+            let world = world_of_character(&state, account, character_id).await?;
+            limit_queue(&state, world, account).await?;
+            world
+        }
+    };
     let action = QueueAction::Join {
         character_id,
         new_ticket_id: new_ticket_id(world.id)?,
@@ -1277,6 +1308,43 @@ pub(crate) mod tests {
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         let (status, _) = post(&app, &queue_path(&fixture.session, Some("no-world")), "").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_join_without_world_id_uses_the_world_of_the_character() {
+        let fixture = fixture().await;
+        let world = fixture.state.config.worlds[0].id;
+        let character = character_of(&fixture.state, fixture.account, NAME).await;
+        let (_, other_account) = new_session(&fixture.state).await;
+        let foreign = character_of(&fixture.state, other_account, SECOND_NAME).await;
+        let app = game_router(fixture.state.clone());
+        let join = queue_path(&fixture.session, None);
+        let empty_world = serde_json::json!({"LoginQueueRequest": {
+            "WorldId": "",
+            "CharacterId": character.to_string(),
+        }})
+        .to_string();
+        let no_world = serde_json::json!({"LoginQueueRequest": {
+            "CharacterId": character.to_string(),
+        }})
+        .to_string();
+        for body in [empty_world, no_world] {
+            let (status, reply_body) = post(&app, &join, &body).await;
+            assert_eq!(status, StatusCode::OK);
+            let token = reply(&reply_body).token.expect("token");
+            assert_eq!(token.character_id, Some(character.to_string()));
+            assert_eq!(token.world_id, Some(world.to_string()));
+        }
+        let foreign_body = serde_json::json!({"LoginQueueRequest": {
+            "WorldId": "",
+            "CharacterId": foreign.to_string(),
+        }})
+        .to_string();
+        let (status, body) = post(&app, &join, &foreign_body).await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::NOT_FOUND, "unknown_character")
+        );
     }
 
     #[tokio::test]
