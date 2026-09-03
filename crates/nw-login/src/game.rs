@@ -22,9 +22,10 @@ use nw_protocol::game_api::{
     AUTH_STACK_STAGE, AUTH_STACK_TAG, CHARACTERS_SEGMENT, ChannelDocument, CharacterSummary,
     Cluster, CreateCharacterReply, CreateCharacterRequestBody, GATEWAY_STAGE, GET_LOGIN_INFO_PATH,
     HTTP_GATEWAY_TAG, LIST_WORLDS_PATH, LOGIN_GATEWAY_TAG, ListWorldsBody, ListWorldsReply,
-    LoginInfoList, LoginInfoReply, NameRecord, PUBLIC_STATUS_OPEN, PublicApi, QUEUE_LOGIN_PATH,
-    STEAM_AUTH_PATH, SteamAuthReply, VALIDATOR_SEGMENT, ValidateCharacterRequest,
-    WORLD_STATUS_ACTIVE, WORLDS_PATH, WorldModel,
+    LoginInfoList, LoginInfoReply, NO_TRANSFER_REGION, NameRecord, PUBLIC_STATUS_OPEN, PublicApi,
+    QUEUE_LOGIN_PATH, STEAM_AUTH_PATH, SteamAuthReply, VALIDATOR_SEGMENT, ValidateCharacterRequest,
+    WORLD_SET_LIVE, WORLD_STATUS_ACTIVE, WORLD_TYPE_OPEN_WORLD, WORLD_VERSION, WORLDS_PATH,
+    WorldModel,
 };
 use nw_protocol::{LoginQueueReply, parse_login_queue_request};
 use serde::Deserialize;
@@ -295,9 +296,13 @@ fn world_model(world: &WorldConfig) -> WorldModel {
         max_connection_count: to_json_integer(world.capacity),
         public_name: world.name.clone(),
         public_status_code: PUBLIC_STATUS_OPEN,
+        transfer_to_region: NO_TRANSFER_REGION.to_owned(),
         world_id: world.id.to_string(),
         world_name: world.name.clone(),
+        world_set: WORLD_SET_LIVE.to_owned(),
         world_status: WORLD_STATUS_ACTIVE.to_owned(),
+        world_type: WORLD_TYPE_OPEN_WORLD.to_owned(),
+        world_version: WORLD_VERSION.to_owned(),
     }
 }
 
@@ -982,6 +987,8 @@ pub(crate) mod tests {
         );
         assert_eq!(world.world_status, WORLD_STATUS_ACTIVE);
         assert_eq!(world.public_status_code, PUBLIC_STATUS_OPEN);
+        assert_eq!(world.world_type, WORLD_TYPE_OPEN_WORLD);
+        assert_eq!(world.transfer_to_region, NO_TRANSFER_REGION);
     }
 
     #[tokio::test]

@@ -40,6 +40,16 @@ pub const WORLD_STATUS_ACTIVE: &str = "ACTIVE";
 /// `PublicStatusCode` of an open world; the client accepts only codes inside the bit mask
 /// `0x1748`, and 0 passes (follow-up note section 8).
 pub const PUBLIC_STATUS_OPEN: i64 = 0;
+/// `WorldType` of a normal world. The client maps only this text to the open-world type; any
+/// other value keeps the world off the create-character list ("No active worlds in your region").
+/// Source: the first-light archive (`local-data/`), not yet checked in our client build.
+pub const WORLD_TYPE_OPEN_WORLD: &str = "OpenWorld";
+/// `TransferToRegion` of a world that is not a transfer world (character select note, section 2).
+pub const NO_TRANSFER_REGION: &str = "";
+/// `WorldSet` that the first-light archive sent with a selectable world. Meaning Unknown.
+pub const WORLD_SET_LIVE: &str = "live";
+/// `WorldVersion` that the first-light archive sent with a selectable world. Meaning Unknown.
+pub const WORLD_VERSION: &str = "1.0.0";
 
 /// The channel document `<key>.json` (JSON note section 2). Clusters are top-level keys. It has
 /// no `platformMetadata`: the client reads Omni settings only on the auth backend that skips
@@ -151,7 +161,9 @@ pub struct NameRecord {
 }
 
 /// One world (JSON note section 5.2). A player can pick the world only when `WorldStatus` is
-/// [`WORLD_STATUS_ACTIVE`] and `PublicStatusCode` passes (follow-up note section 8).
+/// [`WORLD_STATUS_ACTIVE`], `PublicStatusCode` passes (follow-up note section 8), and
+/// `WorldType` is [`WORLD_TYPE_OPEN_WORLD`]. `WorldMetrics` is left out: its
+/// `WorldPopulationStatus` values are Unknown.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct WorldModel {
@@ -165,12 +177,20 @@ pub struct WorldModel {
     pub public_name: String,
     /// Status code; see [`PUBLIC_STATUS_OPEN`].
     pub public_status_code: i64,
+    /// Region a transfer world moves characters to; see [`NO_TRANSFER_REGION`].
+    pub transfer_to_region: String,
     /// World id.
     pub world_id: String,
     /// World name.
     pub world_name: String,
+    /// World set; see [`WORLD_SET_LIVE`].
+    pub world_set: String,
     /// Status text; see [`WORLD_STATUS_ACTIVE`].
     pub world_status: String,
+    /// World type; see [`WORLD_TYPE_OPEN_WORLD`].
+    pub world_type: String,
+    /// World version; see [`WORLD_VERSION`].
+    pub world_version: String,
 }
 
 /// Reply of `ListWorlds` (JSON note section 5.3).
@@ -292,9 +312,13 @@ mod tests {
             max_connection_count: CAPACITY,
             public_name: "Aeternum".to_owned(),
             public_status_code: PUBLIC_STATUS_OPEN,
+            transfer_to_region: NO_TRANSFER_REGION.to_owned(),
             world_id: WORLD_ID.to_owned(),
             world_name: "Aeternum".to_owned(),
+            world_set: WORLD_SET_LIVE.to_owned(),
             world_status: WORLD_STATUS_ACTIVE.to_owned(),
+            world_type: WORLD_TYPE_OPEN_WORLD.to_owned(),
+            world_version: WORLD_VERSION.to_owned(),
         }
     }
 
@@ -403,12 +427,18 @@ mod tests {
                 "MaxConnectionCount",
                 "PublicName",
                 "PublicStatusCode",
+                "TransferToRegion",
                 "WorldId",
                 "WorldName",
-                "WorldStatus"
+                "WorldSet",
+                "WorldStatus",
+                "WorldType",
+                "WorldVersion"
             ]
         );
         assert_eq!(list["Worlds"][0]["WorldStatus"], WORLD_STATUS_ACTIVE);
+        assert_eq!(list["Worlds"][0]["WorldType"], WORLD_TYPE_OPEN_WORLD);
+        assert_eq!(list["Worlds"][0]["TransferToRegion"], NO_TRANSFER_REGION);
     }
 
     #[test]
