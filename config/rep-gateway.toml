@@ -1,0 +1,33 @@
+# rep-gateway configuration (M3 spec section 6). This file holds no secret.
+# Secret: NW_SECRET_SIGNING_KEY, the same entry ticket key as edge-http.
+# Any key below can be overridden with NW_GATEWAY_<KEY>, nested keys joined by "__",
+# for example NW_GATEWAY_LIMITS__MAX_CONNECTIONS=500.
+
+# Public UDP listener. config/edge.toml rep_address must point here.
+udp_listen = "0.0.0.0:33435"
+# The [[world]] id in config/edge.toml that this gateway serves.
+world_id = "8d0f4c2e-0000-4000-8000-000000000001"
+# Server version text in the registration response (the retail servers sent
+# "[RETAIL].Javelin.1.365.6031.<n>").
+server_version = "[BLIGHTED].Javelin.1.365.6031.6004151"
+# The gateway's own certificate and key. Make them once with
+#   rep-gateway generate-certificate
+# Keep them in local-data/, never in git. Test clients trust exactly this certificate.
+certificate_file = "local-data/rep-gateway/cert.pem"
+private_key_file = "local-data/rep-gateway/key.pem"
+# Valkey with the entry records of edge-http.
+valkey_url = "redis://127.0.0.1:6379"
+# Prometheus metrics. Keep this on an internal address.
+metrics_listen = "127.0.0.1:9101"
+# DTLS MTU in bytes.
+mtu = 1200
+log_filter = "info"
+
+[limits]
+max_connections = 2000
+max_handshakes = 256
+handshakes_per_ip_per_second = 5
+registration_timeout_ms = 10000
+silence_timeout_ms = 10000
+datagrams_per_connection_per_second = 400
+ping_interval_ms = 1000
