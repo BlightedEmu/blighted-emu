@@ -2693,6 +2693,7 @@ name = "nw-sim-core"
 version = "0.1.0"
 dependencies = [
  "nw-world",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

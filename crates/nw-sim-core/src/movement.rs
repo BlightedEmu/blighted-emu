@@ -7,10 +7,17 @@
 //! average speed stays under the limit, and two honest moves that arrive close together after a
 //! network delay are not refused.
 //!
+//! A climb spends the budget like a horizontal move; a fall is free.
+//!
 //! The height grid holds the terrain only, not buildings, stairs or bridges. So a position may be
 //! at most `ground_tolerance_m` below the ground and at most `max_height_above_ground_m` above it.
+//! Where the grid has no height, a fall in one move may be at most `max_height_above_ground_m`.
+//!
+//! Times are the server's own monotonic receive times in milliseconds, never a time that the
+//! client sends: a client time would let a client make its own budget.
 
 use nw_world::WorldFile;
+use thiserror::Error;
 
 const MILLIS_PER_SECOND: f32 = 1000.0;
 
@@ -73,7 +80,9 @@ impl CellBounds {
 pub struct MoveLimits {
     /// Highest average speed: the run speed plus the margin.
     pub max_speed_mps: f32,
-    /// Seconds of movement the distance budget can hold.
+    /// Seconds of movement the distance budget can hold. One move is never longer than
+    /// `max_speed_mps * burst_seconds`, so this must be longer than the longest gap between two
+    /// movement messages of an honest client.
     pub burst_seconds: f32,
     /// How far a position may be below the ground.
     pub ground_tolerance_m: f32,
@@ -81,21 +90,67 @@ pub struct MoveLimits {
     pub max_height_above_ground_m: f32,
 }
 
+/// A movement limit that is not a usable number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("movement limit `{name}` must be a finite number {rule}")]
+pub struct MoveLimitsError {
+    /// The limit.
+    pub name: &'static str,
+    /// What it must be.
+    pub rule: &'static str,
+}
+
+const ABOVE_ZERO: &str = "above 0";
+const NOT_NEGATIVE: &str = "of at least 0";
+
 impl MoveLimits {
     /// Limits with `max_speed_mps = run_speed_mps * (1 + speed_margin)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MoveLimitsError`] for a value that is not finite, a speed or burst of 0 or less,
+    /// or a margin or height below 0. A NaN limit would accept every move.
     pub fn new(
         run_speed_mps: f32,
         speed_margin: f32,
         burst_seconds: f32,
         ground_tolerance_m: f32,
         max_height_above_ground_m: f32,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, MoveLimitsError> {
+        let positive = [
+            ("run_speed_mps", run_speed_mps),
+            ("burst_seconds", burst_seconds),
+        ];
+        let not_negative = [
+            ("speed_margin", speed_margin),
+            ("ground_tolerance_m", ground_tolerance_m),
+            ("max_height_above_ground_m", max_height_above_ground_m),
+        ];
+        let bad = positive
+            .into_iter()
+            .find(|(_, value)| !(value.is_finite() && *value > 0.0))
+            .map(|(name, _)| MoveLimitsError {
+                name,
+                rule: ABOVE_ZERO,
+            })
+            .or_else(|| {
+                not_negative
+                    .into_iter()
+                    .find(|(_, value)| !(value.is_finite() && *value >= 0.0))
+                    .map(|(name, _)| MoveLimitsError {
+                        name,
+                        rule: NOT_NEGATIVE,
+                    })
+            });
+        if let Some(error) = bad {
+            return Err(error);
+        }
+        Ok(Self {
             max_speed_mps: run_speed_mps * (1.0 + speed_margin),
             burst_seconds,
             ground_tolerance_m,
             max_height_above_ground_m,
-        }
+        })
     }
 
     fn max_budget_m(&self) -> f32 {
@@ -114,7 +169,8 @@ pub enum MoveRefusal {
     TimeWentBack,
     /// The move is longer than the distance budget.
     TooFast,
-    /// The position is under the ground or too far above it.
+    /// The position is under the ground or too far above it, or, without height data, falls too
+    /// far in one move.
     OffGround,
 }
 
@@ -149,11 +205,11 @@ pub struct Motion {
 }
 
 impl Motion {
-    /// An entity at `position` at `time_ms`, with a full distance budget.
-    pub fn new(position: Position, time_ms: u64, limits: &MoveLimits) -> Self {
+    /// An entity at `position` at server time `received_ms`, with a full distance budget.
+    pub fn new(position: Position, received_ms: u64, limits: &MoveLimits) -> Self {
         Self {
             position,
-            time_ms,
+            time_ms: received_ms,
             budget_m: limits.max_budget_m(),
         }
     }
@@ -163,8 +219,9 @@ impl Motion {
         self.position
     }
 
-    /// Checks a move to `next` at `time_ms`. An accepted move becomes the last good position; a
-    /// refused move changes nothing.
+    /// Checks a move to `next` that the server received at `received_ms` (its own monotonic clock,
+    /// never the client's). An accepted move becomes the last good position; a refused move
+    /// changes nothing.
     ///
     /// # Errors
     ///
@@ -175,7 +232,7 @@ impl Motion {
         ground: &impl Ground,
         bounds: &CellBounds,
         next: Position,
-        time_ms: u64,
+        received_ms: u64,
     ) -> Result<GroundCheck, MoveRefusal> {
         if !next.is_finite() {
             return Err(MoveRefusal::NotFinite);
@@ -183,13 +240,14 @@ impl Motion {
         if !bounds.contains(next) {
             return Err(MoveRefusal::OutOfBounds);
         }
-        let Some(elapsed_ms) = time_ms.checked_sub(self.time_ms) else {
+        let Some(elapsed_ms) = received_ms.checked_sub(self.time_ms) else {
             return Err(MoveRefusal::TimeWentBack);
         };
         let earned = limits.max_speed_mps * elapsed_ms as f32 / MILLIS_PER_SECOND;
         let budget = (self.budget_m + earned).min(limits.max_budget_m());
-        let distance = self.position.horizontal_distance(next);
-        if distance > budget {
+        let climb = (next.z - self.position.z).max(0.0);
+        let cost = self.position.horizontal_distance(next) + climb;
+        if cost > budget {
             return Err(MoveRefusal::TooFast);
         }
         let check = match ground.height_at(next.x, next.y) {
@@ -200,12 +258,15 @@ impl Motion {
                 return Err(MoveRefusal::OffGround);
             }
             Some(_) => GroundCheck::Checked,
+            None if self.position.z - next.z > limits.max_height_above_ground_m => {
+                return Err(MoveRefusal::OffGround);
+            }
             None => GroundCheck::NoGround,
         };
         *self = Self {
             position: next,
-            time_ms,
-            budget_m: budget - distance,
+            time_ms: received_ms,
+            budget_m: budget - cost,
         };
         Ok(check)
     }
@@ -236,7 +297,7 @@ mod tests {
     }
 
     fn limits() -> MoveLimits {
-        MoveLimits::new(RUN_SPEED, MARGIN, BURST, BELOW, ABOVE)
+        MoveLimits::new(RUN_SPEED, MARGIN, BURST, BELOW, ABOVE).expect("limits")
     }
 
     fn bounds() -> CellBounds {
@@ -305,17 +366,32 @@ mod tests {
 
     #[test]
     fn under_the_ground_and_high_above_it_are_refused() {
-        let mut motion = start();
         let time = START_MS + STEP_MS;
-        for z in [GROUND_HEIGHT - BELOW - 0.5, GROUND_HEIGHT + ABOVE + 0.5] {
-            assert_eq!(
-                motion.try_move(&limits(), &Flat, &bounds(), at(11.0, z), time),
-                Err(MoveRefusal::OffGround)
-            );
-        }
-        let roof = at(11.0, GROUND_HEIGHT + ABOVE - 1.0);
+        let mut low = start();
         assert_eq!(
-            motion.try_move(&limits(), &Flat, &bounds(), roof, time),
+            low.try_move(
+                &limits(),
+                &Flat,
+                &bounds(),
+                at(11.0, GROUND_HEIGHT - BELOW - 0.5),
+                time
+            ),
+            Err(MoveRefusal::OffGround)
+        );
+        let roof = GROUND_HEIGHT + ABOVE - 1.0;
+        let mut high = Motion::new(at(10.0, roof), START_MS, &limits());
+        assert_eq!(
+            high.try_move(
+                &limits(),
+                &Flat,
+                &bounds(),
+                at(11.0, GROUND_HEIGHT + ABOVE + 0.5),
+                time
+            ),
+            Err(MoveRefusal::OffGround)
+        );
+        assert_eq!(
+            high.try_move(&limits(), &Flat, &bounds(), at(11.0, roof), time),
             Ok(GroundCheck::Checked)
         );
     }
@@ -328,11 +404,95 @@ mod tests {
                 &limits(),
                 &Flat,
                 &bounds(),
-                at(1001.0, 500.0),
+                at(1001.0, 3.0),
                 START_MS + STEP_MS
             ),
             Ok(GroundCheck::NoGround)
         );
+    }
+
+    #[test]
+    fn climbing_spends_the_budget_and_falling_does_not() {
+        let mut motion = start();
+        let time = START_MS + STEP_MS;
+        let cliff = at(11.0, GROUND_HEIGHT + 10.0);
+        assert_eq!(
+            motion.try_move(&limits(), &Flat, &bounds(), cliff, time),
+            Err(MoveRefusal::TooFast)
+        );
+        let mut roof = Motion::new(at(10.0, GROUND_HEIGHT + 50.0), START_MS, &limits());
+        let jump_down = at(16.0, GROUND_HEIGHT);
+        assert_eq!(
+            roof.try_move(&limits(), &Flat, &bounds(), jump_down, time),
+            Ok(GroundCheck::Checked)
+        );
+    }
+
+    #[test]
+    fn without_height_data_heights_stay_near_the_last_good_one() {
+        let time = START_MS + STEP_MS;
+        let mut motion = Motion::new(at(1000.0, 0.0), START_MS, &limits());
+        assert_eq!(
+            motion.try_move(&limits(), &Flat, &bounds(), at(1000.0, 500.0), time),
+            Err(MoveRefusal::TooFast)
+        );
+        assert_eq!(
+            motion.try_move(&limits(), &Flat, &bounds(), at(1000.0, -ABOVE - 1.0), time),
+            Err(MoveRefusal::OffGround)
+        );
+        assert_eq!(
+            motion.try_move(&limits(), &Flat, &bounds(), at(1000.0, -ABOVE + 1.0), time),
+            Ok(GroundCheck::NoGround)
+        );
+    }
+
+    #[test]
+    fn the_budget_holds_at_most_one_burst() {
+        let mut motion = start();
+        let idle = START_MS + 10 * STEP_MS;
+        let longer_than_a_burst = at(10.0 + limits().max_speed_mps * BURST + 0.5, GROUND_HEIGHT);
+        assert_eq!(
+            motion.try_move(&limits(), &Flat, &bounds(), longer_than_a_burst, idle),
+            Err(MoveRefusal::TooFast)
+        );
+    }
+
+    #[test]
+    fn a_refused_move_keeps_the_budget() {
+        let mut motion = start();
+        let far = at(30.0, GROUND_HEIGHT);
+        assert!(
+            motion
+                .try_move(&limits(), &Flat, &bounds(), far, START_MS)
+                .is_err()
+        );
+        let run = at(17.0, GROUND_HEIGHT);
+        assert_eq!(
+            motion.try_move(&limits(), &Flat, &bounds(), run, START_MS),
+            Ok(GroundCheck::Checked)
+        );
+    }
+
+    #[test]
+    fn heights_that_are_not_finite_are_refused() {
+        let mut motion = start();
+        for z in [f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                motion.try_move(&limits(), &Flat, &bounds(), at(11.0, z), START_MS + STEP_MS),
+                Err(MoveRefusal::NotFinite)
+            );
+        }
+    }
+
+    #[test]
+    fn limits_must_be_finite_and_in_range() {
+        for bad in [f32::NAN, f32::INFINITY, -1.0, 0.0] {
+            assert!(MoveLimits::new(bad, MARGIN, BURST, BELOW, ABOVE).is_err());
+            assert!(MoveLimits::new(RUN_SPEED, MARGIN, bad, BELOW, ABOVE).is_err());
+        }
+        assert!(MoveLimits::new(RUN_SPEED, f32::NAN, BURST, BELOW, ABOVE).is_err());
+        assert!(MoveLimits::new(RUN_SPEED, MARGIN, BURST, -1.0, ABOVE).is_err());
+        assert!(MoveLimits::new(RUN_SPEED, 0.0, BURST, 0.0, 0.0).is_ok());
     }
 
     #[test]
