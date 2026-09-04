@@ -2689,6 +2689,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "nw-sim-core"
+version = "0.1.0"
+dependencies = [
+ "nw-world",
+]
+
+[[package]]
 name = "nw-testclient"
 version = "0.1.0"
 dependencies = [
