@@ -2653,6 +2653,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nw-messages"
+version = "0.1.0"
+dependencies = [
+ "nw-reflect",
+ "proptest",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nw-oodle"
 version = "0.1.0"
 dependencies = [

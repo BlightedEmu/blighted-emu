@@ -1,0 +1,18 @@
+[package]
+name = "nw-messages"
+version = "0.1.0"
+description = "Body codecs of the game messages that the world simulation sends and reads."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nw-reflect.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
