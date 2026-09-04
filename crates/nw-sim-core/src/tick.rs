@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The fixed 30 Hz tick (parent spec section 4.4, M4 spec section 7.1). Deadlines are computed
 //! from the start time, so they do not drift. A late caller runs every due tick; ticks are never
-//! skipped.
+//! skipped. The due count is computed in one step, so a caller that mixes two clocks gets a large
+//! count at once instead of a long loop.
 
 /// Ticks per second.
 pub const TICKS_PER_SECOND: u64 = 30;
@@ -32,9 +33,12 @@ impl TickClock {
         }
     }
 
-    /// The deadline of tick `tick`.
+    /// The deadline of tick `tick`: `start + floor(tick * 1 s / 30)`.
     fn deadline_us(&self, tick: u64) -> u64 {
-        self.start_us + tick.saturating_mul(MICROS_PER_SECOND) / TICKS_PER_SECOND
+        let offset =
+            u128::from(tick) * u128::from(MICROS_PER_SECOND) / u128::from(TICKS_PER_SECOND);
+        self.start_us
+            .saturating_add(u64::try_from(offset).unwrap_or(u64::MAX))
     }
 
     /// The deadline of the next tick.
@@ -51,11 +55,13 @@ impl TickClock {
                 late_us: 0,
             };
         }
-        let mut count = 0;
-        while self.next_deadline_us() <= now_us {
-            self.next_tick += 1;
-            count += 1;
-        }
+        // deadline(n) <= since  <=>  n * 1 s < 30 * (since + 1)  <=>  n <= (30 * (since + 1) - 1) / 1 s
+        let since = u128::from(now_us - self.start_us);
+        let last_due =
+            (u128::from(TICKS_PER_SECOND) * (since + 1) - 1) / u128::from(MICROS_PER_SECOND);
+        let last_due = u64::try_from(last_due).unwrap_or(u64::MAX);
+        let count = last_due + 1 - self.next_tick;
+        self.next_tick = last_due + 1;
         DueTicks {
             count,
             late_us: now_us - first,
@@ -69,6 +75,9 @@ mod tests {
 
     const START: u64 = 5_000_000;
     const ONE_SECOND: u64 = 1_000_000;
+    const ONE_DAY_SECONDS: u64 = 86_400;
+    /// About 31 years: what a caller sees when it mixes a Unix-epoch time with a monotonic one.
+    const FAR_YEARS_US: u64 = 1_000_000_000_000_000;
     /// Three deadlines (0, 33.3 and 66.7 ms) are past; the fourth (100 ms) is not.
     const LATE: u64 = 99_000;
 
@@ -81,6 +90,30 @@ mod tests {
         }
         assert_eq!(total, TICKS_PER_SECOND + 1);
         assert_eq!(clock.next_deadline_us(), START + ONE_SECOND + 33_333);
+    }
+
+    #[test]
+    fn a_tick_on_time_is_not_late_and_a_day_has_no_drift() {
+        let mut clock = TickClock::new(START);
+        assert_eq!(
+            clock.due(START),
+            DueTicks {
+                count: 1,
+                late_us: 0
+            }
+        );
+        let day = START + ONE_DAY_SECONDS * ONE_SECOND;
+        assert_eq!(clock.due(day).count, TICKS_PER_SECOND * ONE_DAY_SECONDS);
+        assert_eq!(clock.next_deadline_us(), day + 33_333);
+    }
+
+    #[test]
+    fn a_far_time_from_another_clock_returns_at_once() {
+        let mut clock = TickClock::new(START);
+        let far = START + FAR_YEARS_US;
+        let due = clock.due(far);
+        assert!(due.count > TICKS_PER_SECOND * ONE_DAY_SECONDS);
+        assert!(clock.next_deadline_us() > far);
     }
 
     #[test]
