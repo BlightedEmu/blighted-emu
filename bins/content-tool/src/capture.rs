@@ -16,8 +16,8 @@ use nw_carrier::{
 };
 use nw_messages::{BundlePayload, ReplicatedStateBundle, ServerMessage};
 use nw_reflect::{
-    Envelope, REGISTRATION_RESPONSE_MSG_TYPE_INDEX, RegistrationResponseMsg, TypeId,
-    decode_client_message, decode_server_messages,
+    Envelope, REGISTRATION_RESPONSE_MSG_TYPE_INDEX, RegistrationResponseMsg, decode_client_message,
+    decode_server_messages,
 };
 use serde::Deserialize;
 
@@ -279,7 +279,7 @@ pub struct CaptureReport {
     pub bodies: BTreeMap<u64, u64>,
     /// Bundle members with a reader that decode and encode to the same bytes, by class index.
     pub members: BTreeMap<u64, u64>,
-    /// Bundle payloads whose members all have a reader.
+    /// Bundle payloads whose members all have a reader, decoded and encoded to the same bytes.
     pub complete_payloads: u64,
     /// Client connect requests that started new streams in a context that had streams.
     pub connections: u64,
@@ -422,11 +422,15 @@ impl CaptureReport {
             if encoded != bundle.payload[range] {
                 return Err("bundle member: encoded member differs from the capture".to_owned());
             }
-            if let TypeId::FileSlot(class) = member.state.class() {
-                *self.members.entry(class).or_default() += 1;
-            }
+            *self.members.entry(member.state.type_index()).or_default() += 1;
         }
         if known.stopped_at.is_none() {
+            let whole = BundlePayload::decode(&bundle.payload)
+                .and_then(|payload| payload.encode())
+                .map_err(|error| format!("bundle payload: {error}"))?;
+            if whole != bundle.payload {
+                return Err("bundle payload: encoded payload differs from the capture".to_owned());
+            }
             self.complete_payloads += 1;
         }
         Ok(())
@@ -463,6 +467,8 @@ mod tests {
     const BAD_DIRECTION: u32 = 2;
     const NAMED_SLOT: u64 = 2;
     const UNNAMED_SLOT: u64 = 1;
+    /// The integer 1 in the two-byte form of the prefix code.
+    const LONG_FORM_ONE: [u8; 2] = [0x81, 0x00];
 
     fn record(direction: u32, datagram: &[u8]) -> Vec<u8> {
         let mut out = LEDGER_MAGIC.to_vec();
@@ -505,7 +511,7 @@ mod tests {
                 members: vec![BundleMember {
                     u64_at_0: 2,
                     state: MemberState::Position(PositionInTheWorldReplicatedState {
-                        position: Some(WorldPosition::from_metres(1.0, 2.0, 3.0)),
+                        position: WorldPosition::from_metres(1.0, 2.0, 3.0),
                         ..PositionInTheWorldReplicatedState::default()
                     }),
                 }],
@@ -604,6 +610,38 @@ mod tests {
             .encode(),
         };
         encode_datagram(DATAGRAM_SEQUENCE, &encode_frames(&[frame]).expect("frames"))
+    }
+
+    #[test]
+    fn a_whole_payload_must_encode_to_the_same_bytes() {
+        let member = BundleMember {
+            u64_at_0: 2,
+            state: MemberState::Position(PositionInTheWorldReplicatedState::default()),
+        };
+        // The group integer 1 in the two-byte form; the encoder writes the one-byte form.
+        let mut payload = LONG_FORM_ONE.to_vec();
+        payload.push(1);
+        payload.extend(member.encode().expect("member"));
+        let bundle = ReplicatedStateBundle {
+            leading: None,
+            byte_3: 0,
+            byte_4: 0,
+            flag_5: false,
+            index_block: None,
+            payload,
+        };
+        let body = bundle.encode().expect("bundle");
+        let server = encode_server_messages(&[&envelope(REPLICATED_STATE_BUNDLE_TYPE_INDEX, body)])
+            .expect("server");
+        let mut report = CaptureReport::default();
+        report
+            .check_ledger(
+                Path::new("long form"),
+                &record(SERVER_TO_CLIENT, &reliable_datagram(server)),
+            )
+            .expect("check");
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].reason.starts_with("bundle payload:"));
     }
 
     #[test]
