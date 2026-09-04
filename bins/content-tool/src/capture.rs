@@ -8,10 +8,12 @@
 //! registration response values that the RE note records. It never keeps payload bytes, ids,
 //! or tokens.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use nw_carrier::{Inbound, ReceiveLimits, Receiver, decode_datagram};
+use nw_carrier::{
+    Inbound, ReceiveLimits, Receiver, SYSTEM_CHANNEL, SystemMessage, decode_datagram, decode_frames,
+};
 use nw_messages::{BundlePayload, ReplicatedStateBundle, ServerMessage};
 use nw_reflect::{
     Envelope, REGISTRATION_RESPONSE_MSG_TYPE_INDEX, RegistrationResponseMsg, TypeId,
@@ -126,6 +128,23 @@ pub fn parse_ledger(bytes: &[u8]) -> Result<Vec<LedgerRecord<'_>>, CaptureError>
 }
 
 /// A little-endian number from up to 8 bytes.
+/// Whether a datagram carries a carrier connect request.
+fn is_connect_request(datagram: &[u8]) -> bool {
+    let Ok(datagram) = decode_datagram(datagram) else {
+        return false;
+    };
+    let Ok(frames) = decode_frames(&datagram.body) else {
+        return false;
+    };
+    frames.iter().any(|frame| {
+        frame.channel == SYSTEM_CHANNEL
+            && matches!(
+                SystemMessage::decode(&frame.payload),
+                Ok(SystemMessage::ConnectRequest { .. })
+            )
+    })
+}
+
 fn le_u64(bytes: &[u8]) -> u64 {
     bytes
         .iter()
@@ -262,6 +281,8 @@ pub struct CaptureReport {
     pub members: BTreeMap<u64, u64>,
     /// Bundle payloads whose members all have a reader.
     pub complete_payloads: u64,
+    /// Client connect requests that started new streams in a context that had streams.
+    pub connections: u64,
     /// Decode failures.
     pub failures: Vec<DecodeFailure>,
 }
@@ -273,12 +294,27 @@ impl CaptureReport {
     ///
     /// Returns [`CaptureError`] when the ledger structure itself is broken. Carrier and message
     /// failures are recorded in [`CaptureReport::failures`].
+    ///
+    /// One capture context can hold several connections in a row (a move into or out of an
+    /// instance): a client connect request after the server delivered messages starts new
+    /// streams for both directions of that context.
     pub fn check_ledger(&mut self, file: &Path, bytes: &[u8]) -> Result<(), CaptureError> {
         self.files += 1;
         let mut streams: HashMap<(u64, u32), Option<Receiver>> = HashMap::new();
+        let mut established: HashSet<u64> = HashSet::new();
         for (index, record) in parse_ledger(bytes)?.into_iter().enumerate() {
             let direction = record.direction as usize;
             self.datagrams[direction] += 1;
+            if record.direction == CLIENT_TO_SERVER
+                && is_connect_request(record.datagram)
+                && established.remove(&record.context)
+            {
+                self.connections += 1;
+                for direction in [SERVER_TO_CLIENT, CLIENT_TO_SERVER] {
+                    streams.remove(&(record.context, direction));
+                }
+            }
+            let server_messages = self.messages[SERVER_TO_CLIENT as usize];
             let stream = streams
                 .entry((record.context, record.direction))
                 .or_insert_with(|| Some(Receiver::mid_stream(ReceiveLimits::SESSION)));
@@ -292,6 +328,9 @@ impl CaptureReport {
                     reason,
                 });
                 *stream = None;
+            }
+            if self.messages[SERVER_TO_CLIENT as usize] > server_messages {
+                established.insert(record.context);
             }
         }
         Ok(())
@@ -396,6 +435,8 @@ impl CaptureReport {
 
 #[cfg(test)]
 mod tests {
+    use nw_carrier::receiver::FIRST_RELIABLE_SEQUENCE;
+    use nw_carrier::system::CARRIER_VERSION;
     use nw_carrier::{Frame, encode_datagram, encode_frames};
     use nw_reflect::{
         PING_MSG_TYPE_INDEX, REGISTRATION_RESPONSE_OBSERVED_FLAGS, REGISTRATION_STATUS_AUTHORIZED,
@@ -434,13 +475,17 @@ mod tests {
     }
 
     fn reliable_datagram(payload: Vec<u8>) -> Vec<u8> {
+        reliable_datagram_at(RELIABLE_START, payload)
+    }
+
+    fn reliable_datagram_at(reliable_sequence: u16, payload: Vec<u8>) -> Vec<u8> {
         let frame = Frame {
             channel: 0,
             reliable: true,
             connecting: false,
             chunks_remaining: None,
-            sequence: RELIABLE_START,
-            reliable_sequence: RELIABLE_START,
+            sequence: reliable_sequence,
+            reliable_sequence,
             payload,
         };
         encode_datagram(DATAGRAM_SEQUENCE, &encode_frames(&[frame]).expect("frames"))
@@ -541,6 +586,43 @@ mod tests {
         assert_eq!(summary.versions[VERSION], 1);
         assert_eq!(summary.token_lengths[&TOKEN.len()], 1);
         assert_eq!(summary.max_clock_offset_ms, CLOCK_OFFSET_MS);
+    }
+
+    /// A client connect request, as the first datagram of a new connection sends it.
+    fn connect_request_datagram() -> Vec<u8> {
+        let frame = Frame {
+            channel: SYSTEM_CHANNEL,
+            reliable: false,
+            connecting: true,
+            chunks_remaining: None,
+            sequence: 0,
+            reliable_sequence: 0,
+            payload: SystemMessage::ConnectRequest {
+                version: CARRIER_VERSION,
+                extra: Vec::new(),
+            }
+            .encode(),
+        };
+        encode_datagram(DATAGRAM_SEQUENCE, &encode_frames(&[frame]).expect("frames"))
+    }
+
+    #[test]
+    fn a_new_connection_in_the_same_context_starts_new_streams() {
+        let ping = envelope(PING_MSG_TYPE_INDEX, PING_BODY.to_vec());
+        let server = encode_server_messages(&[&ping]).expect("server");
+        let mut ledger = record(SERVER_TO_CLIENT, &reliable_datagram(server.clone()));
+        ledger.extend(record(CLIENT_TO_SERVER, &connect_request_datagram()));
+        ledger.extend(record(
+            SERVER_TO_CLIENT,
+            &reliable_datagram_at(FIRST_RELIABLE_SEQUENCE, server),
+        ));
+        let mut report = CaptureReport::default();
+        report
+            .check_ledger(Path::new("reconnect"), &ledger)
+            .expect("check");
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.messages, [2, 0]);
+        assert_eq!(report.connections, 1);
     }
 
     #[test]
