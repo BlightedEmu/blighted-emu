@@ -7,11 +7,11 @@ use crate::wire::{BodyCodec, MessageError, Reader, Writer};
 /// File slot of `SyncTimeChange`.
 pub const SYNC_TIME_CHANGE_MSG_TYPE_INDEX: u64 = 4246;
 /// Floats at offset 16 on all 43 captured logins: 6, -1, and `0x39f5f5b8` (about 0.00046913).
-pub const OBSERVED_TIME_CHANGE_RATES: [f32; 3] = [6.0, -1.0, f32::from_bits(0x39f5_f5b8)];
+pub const OBSERVED_TIME_CHANGE_F32S_AT_16: [f32; 3] = [6.0, -1.0, f32::from_bits(0x39f5_f5b8)];
 /// `u32` values at offset 28 on all 43 captured logins.
-pub const OBSERVED_TIME_CHANGE_PERIODS: [u32; 6] = [21_300, 0, 65_100, 0, 3600, 1800];
+pub const OBSERVED_TIME_CHANGE_U32S_AT_28: [u32; 6] = [21_300, 0, 65_100, 0, 3600, 1800];
 /// Floats at offset 60 on all 43 captured logins: 1/6, 1/6, 5/6, 5/6.
-pub const OBSERVED_TIME_CHANGE_FRACTIONS: [f32; 4] = [
+pub const OBSERVED_TIME_CHANGE_F32S_AT_60: [f32; 4] = [
     f32::from_bits(0x3e2a_aaab),
     f32::from_bits(0x3e2a_aaab),
     f32::from_bits(0x3f55_5555),
@@ -19,18 +19,18 @@ pub const OBSERVED_TIME_CHANGE_FRACTIONS: [f32; 4] = [
 ];
 
 /// The game clock settings.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SyncTimeChangeMsg {
     /// Offsets 0 and 8: two ids, fixed inside one session.
     pub ids: [u64; 2],
     /// Offset 16.
-    pub rates: [f32; 3],
+    pub f32s_at_16: [f32; 3],
     /// Offset 28.
-    pub periods: [u32; 6],
+    pub u32s_at_28: [u32; 6],
     /// Offset 52: a time.
     pub time: u64,
     /// Offset 60.
-    pub fractions: [f32; 4],
+    pub f32s_at_60: [f32; 4],
 }
 
 impl BodyCodec for SyncTimeChangeMsg {
@@ -41,40 +41,34 @@ impl BodyCodec for SyncTimeChangeMsg {
         for id in self.ids {
             writer.u64(id);
         }
-        for rate in self.rates {
-            writer.f32(rate);
+        for value in self.f32s_at_16 {
+            writer.f32(value);
         }
-        for period in self.periods {
-            writer.u32(period);
+        for value in self.u32s_at_28 {
+            writer.u32(value);
         }
         writer.u64(self.time);
-        for fraction in self.fractions {
-            writer.f32(fraction);
+        for value in self.f32s_at_60 {
+            writer.f32(value);
         }
         Ok(writer.finish())
     }
 
     fn decode(body: &[u8]) -> Result<Self, MessageError> {
         let mut reader = Reader::new(body);
-        let mut message = Self {
-            ids: [0; 2],
-            rates: [0.0; 3],
-            periods: [0; 6],
-            time: 0,
-            fractions: [0.0; 4],
-        };
+        let mut message = Self::default();
         for id in &mut message.ids {
             *id = reader.u64()?;
         }
-        for rate in &mut message.rates {
-            *rate = reader.f32()?;
+        for value in &mut message.f32s_at_16 {
+            *value = reader.f32()?;
         }
-        for period in &mut message.periods {
-            *period = reader.u32()?;
+        for value in &mut message.u32s_at_28 {
+            *value = reader.u32()?;
         }
         message.time = reader.u64()?;
-        for fraction in &mut message.fractions {
-            *fraction = reader.f32()?;
+        for value in &mut message.f32s_at_60 {
+            *value = reader.f32()?;
         }
         reader.finish()?;
         Ok(message)
@@ -92,10 +86,10 @@ mod tests {
     fn observed() -> SyncTimeChangeMsg {
         SyncTimeChangeMsg {
             ids: [1, 2],
-            rates: OBSERVED_TIME_CHANGE_RATES,
-            periods: OBSERVED_TIME_CHANGE_PERIODS,
+            f32s_at_16: OBSERVED_TIME_CHANGE_F32S_AT_16,
+            u32s_at_28: OBSERVED_TIME_CHANGE_U32S_AT_28,
             time: 3,
-            fractions: OBSERVED_TIME_CHANGE_FRACTIONS,
+            f32s_at_60: OBSERVED_TIME_CHANGE_F32S_AT_60,
         }
     }
 

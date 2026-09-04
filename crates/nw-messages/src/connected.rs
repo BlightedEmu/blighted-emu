@@ -49,61 +49,61 @@ impl Block1415acc30 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConnectedBody {
     /// The first block: the same on every captured login, different between the two classes.
-    pub service: Block1415acc30,
+    pub block_at_0: Block1415acc30,
     /// The second block: `value` and `first` are the same in both classes of one session.
-    pub session: Block1415acc30,
+    pub block_at_36: Block1415acc30,
 }
 
 impl ConnectedBody {
     fn encode(&self) -> Vec<u8> {
         let mut writer = Writer::new();
-        self.service.write(&mut writer);
-        self.session.write(&mut writer);
+        self.block_at_0.write(&mut writer);
+        self.block_at_36.write(&mut writer);
         writer.finish()
     }
 
     fn decode(body: &[u8]) -> Result<Self, MessageError> {
         let mut reader = Reader::new(body);
         let message = Self {
-            service: Block1415acc30::read(&mut reader)?,
-            session: Block1415acc30::read(&mut reader)?,
+            block_at_0: Block1415acc30::read(&mut reader)?,
+            block_at_36: Block1415acc30::read(&mut reader)?,
         };
         reader.finish()?;
         Ok(message)
     }
 }
 
-/// `CoatlicueTimingConfigurationConnectedMsg`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TimingConfigurationConnectedMsg(pub ConnectedBody);
+/// One "connected" message class over [`ConnectedBody`].
+macro_rules! connected_message {
+    ($(#[$doc:meta])* $name:ident, $type_index:expr) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct $name(pub ConnectedBody);
 
-/// `CalendarConnectedMsg`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CalendarConnectedMsg(pub ConnectedBody);
+        impl BodyCodec for $name {
+            const TYPE_INDEX: u64 = $type_index;
 
-impl BodyCodec for TimingConfigurationConnectedMsg {
-    const TYPE_INDEX: u64 = TIMING_CONFIGURATION_CONNECTED_MSG_TYPE_INDEX;
+            fn encode(&self) -> Result<Vec<u8>, MessageError> {
+                Ok(self.0.encode())
+            }
 
-    fn encode(&self) -> Result<Vec<u8>, MessageError> {
-        Ok(self.0.encode())
-    }
-
-    fn decode(body: &[u8]) -> Result<Self, MessageError> {
-        ConnectedBody::decode(body).map(Self)
-    }
+            fn decode(body: &[u8]) -> Result<Self, MessageError> {
+                ConnectedBody::decode(body).map(Self)
+            }
+        }
+    };
 }
 
-impl BodyCodec for CalendarConnectedMsg {
-    const TYPE_INDEX: u64 = CALENDAR_CONNECTED_MSG_TYPE_INDEX;
-
-    fn encode(&self) -> Result<Vec<u8>, MessageError> {
-        Ok(self.0.encode())
-    }
-
-    fn decode(body: &[u8]) -> Result<Self, MessageError> {
-        ConnectedBody::decode(body).map(Self)
-    }
-}
+connected_message!(
+    /// `CoatlicueTimingConfigurationConnectedMsg`.
+    TimingConfigurationConnectedMsg,
+    TIMING_CONFIGURATION_CONNECTED_MSG_TYPE_INDEX
+);
+connected_message!(
+    /// `CalendarConnectedMsg`.
+    CalendarConnectedMsg,
+    CALENDAR_CONNECTED_MSG_TYPE_INDEX
+);
 
 #[cfg(test)]
 mod tests {
@@ -119,8 +119,8 @@ mod tests {
             second: [byte + 1; RAW_ID_LEN],
         };
         ConnectedBody {
-            service: block(1, 10),
-            session: block(2, 20),
+            block_at_0: block(1, 10),
+            block_at_36: block(2, 20),
         }
     }
 

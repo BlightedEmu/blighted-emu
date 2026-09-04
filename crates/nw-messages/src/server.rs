@@ -119,8 +119,8 @@ mod tests {
             second: [3; RAW_ID_LEN],
         };
         let connected = ConnectedBody {
-            service: block,
-            session: block,
+            block_at_0: block,
+            block_at_36: block,
         };
         vec![
             ServerMessage::TimingConfigurationConnected(TimingConfigurationConnectedMsg(connected)),
@@ -132,10 +132,10 @@ mod tests {
             ServerMessage::TimeSynch(TimeSynchMsg { time: 5 }),
             ServerMessage::TimeChange(SyncTimeChangeMsg {
                 ids: [6, 7],
-                rates: [1.0; 3],
-                periods: [8; 6],
+                f32s_at_16: [1.0; 3],
+                u32s_at_28: [8; 6],
                 time: 9,
-                fractions: [0.5; 4],
+                f32s_at_60: [0.5; 4],
             }),
             ServerMessage::DayPhase(SyncDayPhaseMsg {
                 u64_at_0: 10,

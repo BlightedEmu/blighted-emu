@@ -27,8 +27,8 @@ pub use day_phase::{OBSERVED_DAY_PHASE, SYNC_DAY_PHASE_MSG_TYPE_INDEX, SyncDayPh
 pub use server::{SERVER_MESSAGE_TYPES, ServerMessage};
 pub use spawn_point::{RECEIVE_PLAYER_SPAWN_POINT_MSG_TYPE_INDEX, ReceivePlayerSpawnPointMsg};
 pub use time_change::{
-    OBSERVED_TIME_CHANGE_FRACTIONS, OBSERVED_TIME_CHANGE_PERIODS, OBSERVED_TIME_CHANGE_RATES,
-    SYNC_TIME_CHANGE_MSG_TYPE_INDEX, SyncTimeChangeMsg,
+    OBSERVED_TIME_CHANGE_F32S_AT_16, OBSERVED_TIME_CHANGE_F32S_AT_60,
+    OBSERVED_TIME_CHANGE_U32S_AT_28, SYNC_TIME_CHANGE_MSG_TYPE_INDEX, SyncTimeChangeMsg,
 };
 pub use time_synch::TimeSynchMsg;
 pub use wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};

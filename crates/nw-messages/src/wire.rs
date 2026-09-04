@@ -179,7 +179,7 @@ impl<'a> Reader<'a> {
     /// Returns [`MessageError::Prefix`] when the prefix is cut off.
     pub fn prefixed(&mut self) -> Result<u64, MessageError> {
         let prefix = decode_type_index_prefix(self.rest)?;
-        self.rest = &self.rest[prefix.len..];
+        self.bytes(prefix.len)?;
         Ok(prefix.index)
     }
 
