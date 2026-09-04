@@ -155,16 +155,24 @@ impl Peer {
         self.carrier.state() == ConnectionState::Closed
     }
 
-    /// Handles one received datagram.
+    /// Handles one received datagram. After the handshake, only datagrams that DTLS accepts count
+    /// against the rate limit and the silence timer, so a spoofer who knows the address can neither
+    /// close the connection nor keep a dead one open.
     ///
     /// # Errors
     ///
     /// Returns [`PeerError`] for a rate breach, a failure of any layer, or an unexpected message.
     pub fn receive(&mut self, now_ms: u64, datagram: &[u8]) -> Result<Vec<PeerEvent>, PeerError> {
-        self.count_datagram(now_ms)?;
-        self.last_received_ms = now_ms;
+        let established = self.dtls.is_established();
+        if !established {
+            self.accept_datagram(now_ms)?;
+        }
+        let plaintexts = self.dtls.receive(datagram)?;
+        if established && !plaintexts.is_empty() {
+            self.accept_datagram(now_ms)?;
+        }
         let mut events = Vec::new();
-        for plaintext in self.dtls.receive(datagram)? {
+        for plaintext in plaintexts {
             for event in self.carrier.receive(now_ms, &plaintext)? {
                 if let Event::Message(message) = event
                     && let Some(event) = self.message(&message)?
@@ -176,7 +184,9 @@ impl Peer {
         Ok(events)
     }
 
-    fn count_datagram(&mut self, now_ms: u64) -> Result<(), PeerError> {
+    /// Counts a datagram from the peer and restarts the silence timer.
+    fn accept_datagram(&mut self, now_ms: u64) -> Result<(), PeerError> {
+        self.last_received_ms = now_ms;
         if now_ms.saturating_sub(self.window_start_ms) >= RATE_WINDOW_MS {
             self.window_start_ms = now_ms;
             self.window_count = 0;
@@ -298,6 +308,9 @@ mod tests {
     const PEER: &str = "192.0.2.30:41000";
     const VERSION: &str = "[TEST].Javelin.1.365.6031.1";
     const VALID_DAYS: u32 = 30;
+    const APPLICATION_DATA_RECORD: u8 = 23;
+    const DTLS_1_2: [u8; 2] = [0xfe, 0xfd];
+    const FORGED_RECORD_BODY_LEN: u8 = 48;
     const SETTINGS: PeerSettings = PeerSettings {
         mtu: MTU,
         registration_timeout_ms: 10_000,
@@ -440,6 +453,47 @@ mod tests {
         let (_, _, now) = run(&mut client, &mut peer, START_MS, Ok(&entry), |events| {
             status(events).is_some()
         });
+        assert!(matches!(
+            peer.poll(now + SETTINGS.silence_timeout_ms),
+            Err(PeerError::Silent)
+        ));
+    }
+
+    /// An application data record in epoch 1 with a wrong MAC, as a spoofer can send it.
+    fn forged_record() -> Vec<u8> {
+        let mut record = vec![
+            APPLICATION_DATA_RECORD,
+            DTLS_1_2[0],
+            DTLS_1_2[1],
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            FORGED_RECORD_BODY_LEN,
+        ];
+        record.resize(record.len() + usize::from(FORGED_RECORD_BODY_LEN), 0);
+        record
+    }
+
+    #[test]
+    fn forged_datagrams_neither_close_nor_keep_alive_a_connection() {
+        let (mut client, mut peer) = sides(SETTINGS);
+        let entry = record();
+        let (_, _, now) = run(&mut client, &mut peer, START_MS, Ok(&entry), |events| {
+            status(events).is_some()
+        });
+        let later = now + SETTINGS.silence_timeout_ms / 2;
+        for _ in 0..2 * SETTINGS.datagrams_per_second {
+            let events = peer
+                .receive(later, &forged_record())
+                .expect("forged datagram ignored");
+            assert!(events.is_empty());
+        }
         assert!(matches!(
             peer.poll(now + SETTINGS.silence_timeout_ms),
             Err(PeerError::Silent)
