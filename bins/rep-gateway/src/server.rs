@@ -143,17 +143,18 @@ impl<Q: QueueStore> Loop<Q> {
     }
 
     /// The first datagram from an address without a peer. The DTLS cookie keeps spoofed
-    /// addresses from costing more than one reply; the limits count only real addresses.
+    /// addresses from costing more than one reply; the limits count only real addresses, and
+    /// they run before the key exchange, so a replayed cookie costs no signature.
     async fn first_datagram(&mut self, address: SocketAddr, bytes: &[u8], now: u64) {
         let mtu = self.gateway.peer_settings.mtu;
-        let session = match self.gateway.dtls.first_datagram(address, mtu, bytes) {
+        let hello = match self.gateway.dtls.first_datagram(address, mtu, bytes) {
             Ok(FirstDatagram::Reply(datagrams)) => {
                 for datagram in datagrams {
                     send(&self.socket, address, &datagram).await;
                 }
                 return;
             }
-            Ok(FirstDatagram::Start(session)) => session,
+            Ok(FirstDatagram::Verified(hello)) => hello,
             Ok(FirstDatagram::Ignore) => {
                 metrics::counter!(METRIC_DROPPED, REASON_LABEL => NO_COOKIE).increment(1);
                 return;
@@ -168,6 +169,14 @@ impl<Q: QueueStore> Loop<Q> {
             metrics::counter!(METRIC_DROPPED, REASON_LABEL => reason).increment(1);
             return;
         }
+        let session = match hello.start(&self.gateway.dtls, mtu) {
+            Ok(session) => session,
+            Err(error) => {
+                tracing::debug!(%error, %address, "handshake refused");
+                metrics::counter!(METRIC_DROPPED, REASON_LABEL => DTLS).increment(1);
+                return;
+            }
+        };
         self.peers
             .insert(address, Peer::new(session, self.gateway.peer_settings, now));
         self.flush(address, now).await;
@@ -346,6 +355,8 @@ pub(crate) mod tests {
     const HOLD_FIRST: Duration = Duration::from_secs(2);
     /// Time for the first client to register before the second one starts.
     const SETTLE: Duration = Duration::from_millis(500);
+    /// Shorter than the first DTLS resend (1 s), so a refused client tries one time only.
+    const ONE_HELLO_WAIT: Duration = Duration::from_millis(700);
     /// The second client gives up after this time without a reply.
     const REFUSED_WAIT: Duration = Duration::from_secs(1);
     const LOOPBACK: &str = "127.0.0.1:0";
@@ -456,6 +467,23 @@ pub(crate) mod tests {
         assert_eq!(second, RepOutcome::default());
         let first = first.await.expect("join").expect("first");
         assert_eq!(first.status, Some(REGISTRATION_STATUS_AUTHORIZED));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_handshake_rate_per_address_refuses_new_peers() {
+        let one = GatewayLimits {
+            handshakes_per_ip_per_second: 1,
+            ..LIMITS
+        };
+        let (gateway, token) = start(one).await;
+        let first = run_rep(gateway, client(token.clone()), HOLD, WAIT)
+            .await
+            .expect("first");
+        assert_eq!(first.status, Some(REGISTRATION_STATUS_AUTHORIZED));
+        let second = run_rep(gateway, client(token), HOLD, ONE_HELLO_WAIT)
+            .await
+            .expect("second");
+        assert_eq!(second, RepOutcome::default());
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -125,7 +125,7 @@ pub struct Peer {
 }
 
 impl Peer {
-    /// A connection over a started DTLS session (see [`nw_dtls::FirstDatagram::Start`]).
+    /// A connection over a started DTLS session (see [`nw_dtls::VerifiedHello::start`]).
     pub fn new(dtls: DtlsSession, settings: PeerSettings, now_ms: u64) -> Self {
         Self {
             settings,

@@ -2,10 +2,12 @@
 //! DTLS 1.2 for the REP connection, with OpenSSL and no sockets (M3 spec section 3.3).
 //!
 //! The cipher is `ECDHE-RSA-AES256-GCM-SHA384`, the one the client allows. The server answers a
-//! first ClientHello with a cookie (HMAC-SHA256 of the peer address with a secret made at start)
-//! and keeps nothing: [`DtlsServerConfig::first_datagram`] starts a session only for a ClientHello
-//! with that address's cookie. So a spoofed source address costs the server one small reply and
-//! no memory. The server does not ask for a client certificate: the login ticket is the identity.
+//! first ClientHello with a cookie (HMAC-SHA256 of the peer address and the current
+//! [`COOKIE_PERIOD`], with a secret made at start) and keeps nothing:
+//! [`DtlsServerConfig::first_datagram`] only checks a ClientHello with a cookie, and the caller
+//! decides with its own limits whether [`VerifiedHello::start`] does the costly key exchange. So a
+//! spoofed source address costs the server one small reply and no memory, and a replayed cookie
+//! costs no signature once the caller's limits refuse it. The server does not ask for a client certificate: the login ticket is the identity.
 //! The client trusts only the certificate it is given.
 //!
 //! A [`DtlsSession`] takes received datagrams and returns decrypted application data; the
@@ -16,6 +18,7 @@
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::SocketAddr;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openssl::asn1::Asn1Time;
 use openssl::bn::BigNum;
@@ -48,6 +51,8 @@ pub const COOKIE_SECRET_LEN: usize = 32;
 pub const MAX_DATAGRAM_LEN: usize = 16 * 1024;
 /// Datagrams one session keeps waiting to be read or sent.
 pub const MAX_QUEUED_DATAGRAMS: usize = 256;
+/// A cookie is made for one period and is accepted in that period and the next one.
+pub const COOKIE_PERIOD: Duration = Duration::from_secs(60);
 /// RSA key size of a generated identity (the client's own certificate uses RSA 2048).
 pub const IDENTITY_KEY_BITS: u32 = 2048;
 /// X.509 version 3 (the field holds the version minus 1).
@@ -127,9 +132,9 @@ pub struct DtlsServerConfig {
 pub enum FirstDatagram {
     /// A ClientHello without a cookie: send these datagrams (the cookie) and keep nothing.
     Reply(Vec<Vec<u8>>),
-    /// A ClientHello with this address's cookie: the session has started, and its reply waits in
-    /// [`DtlsSession::take_transmit`].
-    Start(DtlsSession),
+    /// A ClientHello with this address's cookie. No session exists yet: the caller checks its
+    /// limits, then calls [`VerifiedHello::start`].
+    Verified(VerifiedHello),
     /// Anything else, or a cookie for another address: ignore it.
     Ignore,
 }
@@ -156,14 +161,18 @@ impl DtlsServerConfig {
         let cookie_key = PKey::hmac(&cookie_secret)?;
         let generate_key = cookie_key.clone();
         builder.set_cookie_generate_cb(move |ssl, out| {
-            let cookie = peer_cookie(&generate_key, ssl.ex_data(peer_index))?;
+            let cookie = peer_cookie(&generate_key, ssl.ex_data(peer_index), current_period())?;
             out[..COOKIE_LEN].copy_from_slice(&cookie);
             Ok(COOKIE_LEN)
         });
         let verify_key = cookie_key.clone();
         builder.set_cookie_verify_cb(move |ssl, cookie| {
-            peer_cookie(&verify_key, ssl.ex_data(peer_index))
-                .is_ok_and(|expected| is_cookie(&expected, cookie))
+            cookie_matches(
+                &verify_key,
+                ssl.ex_data(peer_index),
+                cookie,
+                current_period(),
+            )
         });
         Ok(Self {
             context: builder.build(),
@@ -172,12 +181,12 @@ impl DtlsServerConfig {
         })
     }
 
-    /// Handles the first datagram from `peer`, which has no session yet. Only a ClientHello with
-    /// `peer`'s cookie starts a session.
+    /// Handles the first datagram from `peer`, which has no session yet. A ClientHello without a
+    /// cookie gets the cookie; a ClientHello with `peer`'s cookie is only checked.
     ///
     /// # Errors
     ///
-    /// Returns [`DtlsError`] when OpenSSL refuses the ClientHello.
+    /// Returns [`DtlsError`] when OpenSSL refuses a ClientHello without a cookie.
     pub fn first_datagram(
         &self,
         peer: SocketAddr,
@@ -187,21 +196,50 @@ impl DtlsServerConfig {
         let Some(hello) = ClientHello::parse(datagram) else {
             return Ok(FirstDatagram::Ignore);
         };
-        let mut session = DtlsSession::accept(self, peer, mtu)?;
         if hello.cookie().is_empty() {
+            let mut session = DtlsSession::accept(self, peer, mtu)?;
             session.receive(datagram)?;
             return Ok(FirstDatagram::Reply(session.take_transmit()));
         }
-        let expected = peer_cookie(&self.cookie_key, Some(&peer))?;
-        let earlier = hello.without_cookie();
-        let Some(earlier) = earlier.filter(|_| is_cookie(&expected, hello.cookie())) else {
+        let valid = cookie_matches(
+            &self.cookie_key,
+            Some(&peer),
+            hello.cookie(),
+            current_period(),
+        );
+        let Some(earlier) = hello.without_cookie().filter(|_| valid) else {
             return Ok(FirstDatagram::Ignore);
         };
-        session.receive(&earlier)?;
+        Ok(FirstDatagram::Verified(VerifiedHello {
+            peer,
+            earlier,
+            hello: datagram.to_vec(),
+        }))
+    }
+}
+
+/// A ClientHello with its sender's cookie, before any key exchange.
+pub struct VerifiedHello {
+    peer: SocketAddr,
+    /// The client's first ClientHello, rebuilt from this one.
+    earlier: Vec<u8>,
+    hello: Vec<u8>,
+}
+
+impl VerifiedHello {
+    /// Starts the session: OpenSSL signs its key exchange, and the server flight waits in
+    /// [`DtlsSession::take_transmit`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DtlsError`] when OpenSSL refuses the ClientHello.
+    pub fn start(self, config: &DtlsServerConfig, mtu: u32) -> Result<DtlsSession, DtlsError> {
+        let mut session = DtlsSession::accept(config, self.peer, mtu)?;
+        session.receive(&self.earlier)?;
         // The client has this cookie already.
         session.take_transmit();
-        session.receive(datagram)?;
-        Ok(FirstDatagram::Start(session))
+        session.receive(&self.hello)?;
+        Ok(session)
     }
 }
 
@@ -238,21 +276,44 @@ fn dtls_builder() -> Result<SslContextBuilder, ErrorStack> {
     Ok(builder)
 }
 
-/// The cookie of `peer`: the first bytes of HMAC-SHA256 of its address text.
+/// The number of the [`COOKIE_PERIOD`] now.
+fn current_period() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs() / COOKIE_PERIOD.as_secs())
+}
+
+/// The cookie of `peer` in `period`: the first bytes of HMAC-SHA256 of its address text and the
+/// period number.
 fn peer_cookie(
     key: &PKey<Private>,
     peer: Option<&SocketAddr>,
+    period: u64,
 ) -> Result<[u8; COOKIE_LEN], ErrorStack> {
     let peer = peer.map(ToString::to_string).unwrap_or_default();
     let mut signer = Signer::new(MessageDigest::sha256(), key)?;
-    let digest = signer.sign_oneshot_to_vec(peer.as_bytes())?;
+    signer.update(peer.as_bytes())?;
+    signer.update(&period.to_be_bytes())?;
+    let digest = signer.sign_to_vec()?;
     let mut cookie = [0_u8; COOKIE_LEN];
     cookie.copy_from_slice(&digest[..COOKIE_LEN]);
     Ok(cookie)
 }
 
-fn is_cookie(expected: &[u8; COOKIE_LEN], cookie: &[u8]) -> bool {
-    cookie.len() == COOKIE_LEN && memcmp::eq(expected, cookie)
+/// Whether `cookie` is the cookie of `peer` in `period` or in the period before it.
+fn cookie_matches(
+    key: &PKey<Private>,
+    peer: Option<&SocketAddr>,
+    cookie: &[u8],
+    period: u64,
+) -> bool {
+    cookie.len() == COOKIE_LEN
+        && [Some(period), period.checked_sub(1)]
+            .into_iter()
+            .flatten()
+            .any(|made| {
+                peer_cookie(key, peer, made).is_ok_and(|expected| memcmp::eq(&expected, cookie))
+            })
 }
 
 /// In-memory datagram queues between OpenSSL and the caller.
@@ -529,7 +590,9 @@ mod tests {
                             client.receive(&datagram).expect("cookie");
                         }
                     }
-                    FirstDatagram::Start(session) => return Some(session),
+                    FirstDatagram::Verified(hello) => {
+                        return Some(hello.start(server_config, MTU).expect("start"));
+                    }
                     FirstDatagram::Ignore => return None,
                 }
             }
@@ -568,6 +631,45 @@ mod tests {
             client.receive(&datagram).expect("server flight");
         }
         handshake(&mut client, &mut server).expect("handshake");
+    }
+
+    #[test]
+    fn a_cookie_works_in_its_period_and_the_next_one_only() {
+        let key = PKey::hmac(&SECRET).expect("key");
+        let peer: SocketAddr = PEER.parse().expect("peer");
+        let period = 1_000;
+        let cookie = peer_cookie(&key, Some(&peer), period).expect("cookie");
+        assert!(cookie_matches(&key, Some(&peer), &cookie, period));
+        assert!(cookie_matches(&key, Some(&peer), &cookie, period + 1));
+        assert!(!cookie_matches(&key, Some(&peer), &cookie, period + 2));
+        assert!(!cookie_matches(&key, Some(&peer), &cookie, period - 1));
+        let other: SocketAddr = OTHER_PEER.parse().expect("other");
+        assert!(!cookie_matches(&key, Some(&other), &cookie, period));
+    }
+
+    #[test]
+    fn a_verified_hello_is_only_checked_until_it_is_started() {
+        let (certificate, key) = &*REP;
+        let server_config = DtlsServerConfig::new(certificate, key, SECRET).expect("server config");
+        let client_config = DtlsClientConfig::new(certificate).expect("client config");
+        let mut client = DtlsSession::connect(&client_config, MTU).expect("connect");
+        let hello = client.take_transmit();
+        let FirstDatagram::Reply(reply) = server_config
+            .first_datagram(PEER.parse().expect("peer"), MTU, &hello[0])
+            .expect("first")
+        else {
+            panic!("expected a cookie reply");
+        };
+        for datagram in reply {
+            client.receive(&datagram).expect("cookie");
+        }
+        let second = client.take_transmit();
+        for _ in 0..MAX_ROUNDS {
+            let checked = server_config
+                .first_datagram(PEER.parse().expect("peer"), MTU, &second[0])
+                .expect("second");
+            assert!(matches!(checked, FirstDatagram::Verified(_)));
+        }
     }
 
     #[test]
