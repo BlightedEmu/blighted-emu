@@ -40,6 +40,20 @@ pub enum MessageError {
         /// The limit.
         limit: u64,
     },
+    /// Bits that the RE notes do not describe are set.
+    #[error("{field}: unknown bits {bits:#04x}")]
+    UnknownBits {
+        /// The field.
+        field: &'static str,
+        /// The unknown bits that are set.
+        bits: u8,
+    },
+    /// A replicated state class has no reader here, and its body has no length.
+    #[error("no reader for replicated state class {class:?}")]
+    UnknownMemberClass {
+        /// The class type id.
+        class: nw_reflect::TypeId,
+    },
     /// A prefix-coded integer is cut off or too large.
     #[error("prefix-coded integer: {0}")]
     Prefix(#[from] TypeIndexError),
