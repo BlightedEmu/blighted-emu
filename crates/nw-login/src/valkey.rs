@@ -30,7 +30,7 @@ const QUEUE_REFRESH_PREFIX: &str = "nw:qr:";
 const QUEUE_ADMITTED_PREFIX: &str = "nw:qd:";
 /// Entry hash (`account`, `character`) by ticket.
 const QUEUE_ENTRY_PREFIX: &str = "nw:qe:";
-/// Entry record by ticket; `rep-gateway` reads and deletes it in M3.
+/// Entry record by ticket; `rep-gateway` takes it one time with [`QueueStore::take_entry`].
 pub const ENTRY_RECORD_PREFIX: &str = "nw:et:";
 /// Entry of an account (`<prefix><world>:<account>`).
 const QUEUE_ACCOUNT_PREFIX: &str = "nw:qa:";
@@ -43,6 +43,18 @@ if count and count > 0 then redis.call('DECR', KEYS[1]) end return 0";
 const TAKE_VERIFIER_SCRIPT: &str = "local verifier = redis.call('GET', KEYS[1]) \
 if verifier and verifier ~= '' then redis.call('SET', KEYS[1], '', 'KEEPTTL') return verifier end \
 return false";
+/// Takes an entry record one time: deletes it, its entry hash, its admission slot, and the account
+/// pointer when that still names the ticket. ARGV: 1 admitted prefix, 2 entry prefix, 3 account
+/// prefix (without the world).
+const TAKE_ENTRY_SCRIPT: &str = "local record = redis.call('GET', KEYS[1]) \
+if not record then return false end \
+redis.call('DEL', KEYS[1]) \
+local entry = cjson.decode(record) \
+redis.call('ZREM', ARGV[1] .. entry.world_id, entry.ticket_id) \
+redis.call('DEL', ARGV[2] .. entry.ticket_id) \
+local pointer = ARGV[3] .. entry.world_id .. ':' .. entry.account_id \
+if redis.call('GET', pointer) == entry.ticket_id then redis.call('DEL', pointer) end \
+return record";
 const JOIN_ACTION: &str = "join";
 /// Script argument that tells the queue script to use the Valkey clock.
 const STORE_CLOCK_ARGUMENT: &str = "";
@@ -51,6 +63,8 @@ static RELEASE: LazyLock<redis::Script> = LazyLock::new(|| redis::Script::new(RE
 static TAKE_VERIFIER: LazyLock<redis::Script> =
     LazyLock::new(|| redis::Script::new(TAKE_VERIFIER_SCRIPT));
 static QUEUE: LazyLock<redis::Script> = LazyLock::new(|| redis::Script::new(QUEUE_SCRIPT));
+static TAKE_ENTRY: LazyLock<redis::Script> =
+    LazyLock::new(|| redis::Script::new(TAKE_ENTRY_SCRIPT));
 const REFRESH_ACTION: &str = "refresh";
 const STATUS_ADMITTED: &str = "admitted";
 const STATUS_WAITING: &str = "waiting";
@@ -263,6 +277,21 @@ impl QueueStore for Valkey {
             _ => Ok(None),
         }
     }
+
+    async fn take_entry(&self, ticket_id: &str) -> Result<Option<EntryRecord>, StoreError> {
+        let mut connection = self.connection.clone();
+        let record: Option<String> = TAKE_ENTRY
+            .key(format!("{ENTRY_RECORD_PREFIX}{ticket_id}"))
+            .arg(QUEUE_ADMITTED_PREFIX)
+            .arg(QUEUE_ENTRY_PREFIX)
+            .arg(QUEUE_ACCOUNT_PREFIX)
+            .invoke_async(&mut connection)
+            .await
+            .map_err(StoreError::unavailable)?;
+        record
+            .map(|record| serde_json::from_str(&record).map_err(StoreError::unavailable))
+            .transpose()
+    }
 }
 
 #[cfg(all(test, feature = "infra"))]
@@ -300,6 +329,7 @@ pub(crate) mod tests {
     async fn valkey_queue_follows_the_contract() {
         contract::queue(valkey().await).await;
         contract::queue_store_clock(valkey().await).await;
+        contract::take_entry(valkey().await).await;
     }
 
     /// Parallel joins on one world.

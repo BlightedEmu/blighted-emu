@@ -514,6 +514,17 @@ impl QueueStore for MemoryQueue {
             position: index as u64 + 1,
         }))
     }
+
+    async fn take_entry(&self, ticket_id: &str) -> Result<Option<EntryRecord>, StoreError> {
+        let mut worlds = lock(&self.0);
+        for queue in worlds.values_mut() {
+            if let Some((record, _)) = queue.admitted.remove(ticket_id) {
+                queue.accounts.retain(|_, owned| owned != ticket_id);
+                return Ok(Some(record));
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Contract checks shared by the in-memory and the real stores.
@@ -847,6 +858,53 @@ pub(crate) mod contract {
         );
     }
 
+    /// Checks [`QueueStore::take_entry`]: a record is returned one time, and taking it frees
+    /// its admission slot.
+    pub(crate) async fn take_entry(store: impl QueueStore) {
+        let settings = QueueSettings {
+            world_id: Uuid::new_v4(),
+            capacity: ONE_SLOT,
+            stale_after_ms: STALE_AFTER_MS,
+        };
+        let at = |seconds: u64| QueueTime::At(START_MS + seconds * SECOND_MS);
+        let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
+        let record = admitted(
+            store
+                .update(&settings, first, join(Uuid::new_v4()), at(0))
+                .await
+                .expect("first"),
+        );
+        let (second_ticket, _) = waiting(
+            store
+                .update(&settings, second, join(Uuid::new_v4()), at(1))
+                .await
+                .expect("second"),
+        );
+        assert_eq!(
+            store.take_entry(&record.ticket_id).await.expect("take"),
+            Some(record.clone())
+        );
+        assert_eq!(
+            store.take_entry(&record.ticket_id).await.expect("again"),
+            None
+        );
+        assert_eq!(store.take_entry(&unique("t")).await.expect("unknown"), None);
+        let next = admitted(
+            store
+                .update(&settings, second, refresh(&second_ticket), at(2))
+                .await
+                .expect("slot freed"),
+        );
+        assert_eq!(next.ticket_id, second_ticket);
+        assert_eq!(
+            store
+                .update(&settings, first, refresh(&record.ticket_id), at(2))
+                .await
+                .expect("taken ticket"),
+            None
+        );
+    }
+
     /// Checks a [`DiscordStateStore`].
     pub(crate) async fn discord_states(store: impl DiscordStateStore) {
         let state = unique("s");
@@ -924,6 +982,7 @@ mod tests {
     async fn memory_queue_follows_the_contract() {
         contract::queue(MemoryQueue::default()).await;
         contract::queue_store_clock(MemoryQueue::default()).await;
+        contract::take_entry(MemoryQueue::default()).await;
     }
 
     const ALREADY_EXPIRED: u64 = 0;

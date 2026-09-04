@@ -128,6 +128,14 @@ pub trait QueueStore: Clone + Send + Sync + 'static {
         action: QueueAction,
         time: QueueTime,
     ) -> impl Future<Output = Result<Option<QueueStatus>, StoreError>> + Send;
+
+    /// Returns the entry record of `ticket_id` one time and deletes it, with its queue entry and
+    /// its admission slot (M3 spec section 7). `None` when the record is absent or already
+    /// taken. The caller checks `expires_at`.
+    fn take_entry(
+        &self,
+        ticket_id: &str,
+    ) -> impl Future<Output = Result<Option<EntryRecord>, StoreError>> + Send;
 }
 
 /// The reply body for a queue status. A waiting reply has no `Token`, so the client waits and
