@@ -1,0 +1,21 @@
+[package]
+name = "rep-gateway"
+version = "0.1.0"
+description = "UDP entry point of the world: DTLS, GridMate carrier, and the login ticket check."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+getrandom.workspace = true
+hex.workspace = true
+nw-login.workspace = true
+nw-reflect.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true
