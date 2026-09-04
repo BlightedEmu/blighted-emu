@@ -6,13 +6,12 @@
 //! returns [`PeerEvent::RegistrationRequested`]; the loop checks the ticket (an async store call)
 //! and hands the result to [`Peer::complete_registration`]. Any error closes the connection.
 
-use std::net::SocketAddr;
 use std::time::SystemTime;
 
 use nw_carrier::{
     CarrierError, Connection, ConnectionState, Event, MESSAGE_CHANNEL, Message, ReceiveLimits,
 };
-use nw_dtls::{DtlsError, DtlsServerConfig, DtlsSession};
+use nw_dtls::{DtlsError, DtlsSession};
 use nw_login::queue::EntryRecord;
 use nw_reflect::{
     Envelope, EnvelopeError, FramingError, PING_MSG_TYPE_INDEX,
@@ -126,20 +125,11 @@ pub struct Peer {
 }
 
 impl Peer {
-    /// A connection for the peer at `address`; its first datagram follows.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`PeerError::Dtls`] when the DTLS session cannot start.
-    pub fn new(
-        config: &DtlsServerConfig,
-        address: SocketAddr,
-        settings: PeerSettings,
-        now_ms: u64,
-    ) -> Result<Self, PeerError> {
-        Ok(Self {
+    /// A connection over a started DTLS session (see [`nw_dtls::FirstDatagram::Start`]).
+    pub fn new(dtls: DtlsSession, settings: PeerSettings, now_ms: u64) -> Self {
+        Self {
             settings,
-            dtls: DtlsSession::accept(config, address, settings.mtu)?,
+            dtls,
             carrier: Connection::server(now_ms),
             phase: Phase::AwaitingRegistration,
             created_ms: now_ms,
@@ -147,7 +137,7 @@ impl Peer {
             last_ping_ms: now_ms,
             window_start_ms: now_ms,
             window_count: 0,
-        })
+        }
     }
 
     /// Whether the registration was accepted.
@@ -291,7 +281,9 @@ mod tests {
     use std::sync::LazyLock;
     use std::time::UNIX_EPOCH;
 
-    use nw_dtls::{COOKIE_SECRET_LEN, DtlsClientConfig, Identity, self_signed_identity};
+    use nw_dtls::{
+        COOKIE_SECRET_LEN, DtlsClientConfig, DtlsServerConfig, Identity, self_signed_identity,
+    };
     use nw_reflect::LoginToken;
     use nw_testclient::rep::{RepClient, RepEvent};
     use uuid::Uuid;
@@ -342,7 +334,12 @@ mod tests {
         let client = DtlsClientConfig::new(&IDENTITY.certificate_pem).expect("client config");
         (
             RepClient::new(&client, MTU, token(), START_MS).expect("client"),
-            Peer::new(&server, PEER.parse().expect("peer"), settings, START_MS).expect("peer"),
+            Peer::new(
+                DtlsSession::accept(&server, PEER.parse().expect("peer"), settings.mtu)
+                    .expect("accept"),
+                settings,
+                START_MS,
+            ),
         )
     }
 

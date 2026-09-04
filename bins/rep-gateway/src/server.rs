@@ -12,7 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use nw_dtls::DtlsServerConfig;
+use nw_dtls::{DtlsServerConfig, FirstDatagram};
 use nw_login::queue::{EntryRecord, QueueStore};
 use nw_login::secrets::SigningKey;
 use tokio::net::UdpSocket;
@@ -49,6 +49,10 @@ pub const METRIC_DATAGRAMS_OUT: &str = "rep_gateway_datagrams_out_total";
 const RESULT_LABEL: &str = "result";
 const REASON_LABEL: &str = "reason";
 const ACCEPTED: &str = "accepted";
+/// Drop reason: a first datagram that is not a ClientHello, or has a cookie for another address.
+const NO_COOKIE: &str = "no_cookie";
+/// Drop reason: OpenSSL refused a first ClientHello.
+const DTLS: &str = "dtls";
 
 /// What the loop needs besides the socket.
 pub struct Gateway<Q> {
@@ -122,13 +126,8 @@ impl<Q: QueueStore> Loop<Q> {
     async fn datagram(&mut self, address: SocketAddr, bytes: &[u8]) {
         metrics::counter!(METRIC_DATAGRAMS_IN).increment(1);
         let now = self.now_ms();
-        if !self.peers.contains_key(&address) {
-            let Some(peer) = self.admit(address, now) else {
-                return;
-            };
-            self.peers.insert(address, peer);
-        }
         let Some(peer) = self.peers.get_mut(&address) else {
+            self.first_datagram(address, bytes, now).await;
             return;
         };
         match peer.receive(now, bytes) {
@@ -143,15 +142,47 @@ impl<Q: QueueStore> Loop<Q> {
         self.report();
     }
 
-    /// A new peer for `address`, or `None` when a limit refuses it.
-    fn admit(&mut self, address: SocketAddr, now: u64) -> Option<Peer> {
+    /// The first datagram from an address without a peer. The DTLS cookie keeps spoofed
+    /// addresses from costing more than one reply; the limits count only real addresses.
+    async fn first_datagram(&mut self, address: SocketAddr, bytes: &[u8], now: u64) {
+        let mtu = self.gateway.peer_settings.mtu;
+        let session = match self.gateway.dtls.first_datagram(address, mtu, bytes) {
+            Ok(FirstDatagram::Reply(datagrams)) => {
+                for datagram in datagrams {
+                    send(&self.socket, address, &datagram).await;
+                }
+                return;
+            }
+            Ok(FirstDatagram::Start(session)) => session,
+            Ok(FirstDatagram::Ignore) => {
+                metrics::counter!(METRIC_DROPPED, REASON_LABEL => NO_COOKIE).increment(1);
+                return;
+            }
+            Err(error) => {
+                tracing::debug!(%error, %address, "first datagram refused");
+                metrics::counter!(METRIC_DROPPED, REASON_LABEL => DTLS).increment(1);
+                return;
+            }
+        };
+        if let Some(reason) = self.refusal(address) {
+            metrics::counter!(METRIC_DROPPED, REASON_LABEL => reason).increment(1);
+            return;
+        }
+        self.peers
+            .insert(address, Peer::new(session, self.gateway.peer_settings, now));
+        self.flush(address, now).await;
+        self.report();
+    }
+
+    /// The limit that refuses a new peer at `address`, if any.
+    fn refusal(&mut self, address: SocketAddr) -> Option<&'static str> {
         let limits = self.gateway.limits;
         let handshakes = self
             .peers
             .values()
             .filter(|peer| !peer.is_established())
             .count();
-        let refused = if self.peers.len() >= limits.max_connections {
+        if self.peers.len() >= limits.max_connections {
             Some("max_connections")
         } else if handshakes >= limits.max_handshakes {
             Some("max_handshakes")
@@ -159,14 +190,7 @@ impl<Q: QueueStore> Loop<Q> {
             Some("handshake_rate")
         } else {
             None
-        };
-        if let Some(reason) = refused {
-            metrics::counter!(METRIC_DROPPED, REASON_LABEL => reason).increment(1);
-            return None;
         }
-        Peer::new(&self.gateway.dtls, address, self.gateway.peer_settings, now)
-            .inspect_err(|error| tracing::warn!(%error, "cannot start a connection"))
-            .ok()
     }
 
     fn handshake_allowed(&mut self, ip: IpAddr) -> bool {
@@ -239,10 +263,7 @@ impl<Q: QueueStore> Loop<Q> {
         match peer.poll(now) {
             Ok(datagrams) => {
                 for datagram in datagrams {
-                    metrics::counter!(METRIC_DATAGRAMS_OUT).increment(1);
-                    if let Err(error) = self.socket.send_to(&datagram, address).await {
-                        tracing::debug!(%error, %address, "send failed");
-                    }
+                    send(&self.socket, address, &datagram).await;
                 }
                 if peer.is_finished() {
                     self.peers.remove(&address);
@@ -266,6 +287,13 @@ impl<Q: QueueStore> Loop<Q> {
             .count();
         metrics::gauge!(METRIC_CONNECTIONS).set(self.peers.len() as f64);
         metrics::gauge!(METRIC_HANDSHAKES).set(handshakes as f64);
+    }
+}
+
+async fn send(socket: &UdpSocket, address: SocketAddr, datagram: &[u8]) {
+    metrics::counter!(METRIC_DATAGRAMS_OUT).increment(1);
+    if let Err(error) = socket.send_to(datagram, address).await {
+        tracing::debug!(%error, %address, "send failed");
     }
 }
 
@@ -293,7 +321,9 @@ fn unix_now_seconds() -> i64 {
 pub(crate) mod tests {
     use std::sync::LazyLock;
 
-    use nw_dtls::{COOKIE_SECRET_LEN, DtlsClientConfig, Identity, self_signed_identity};
+    use nw_dtls::{
+        COOKIE_SECRET_LEN, DtlsClientConfig, DtlsSession, Identity, self_signed_identity,
+    };
     use nw_login::signature::sign_entry;
     use nw_login::test_support::test_signing_key;
     use nw_reflect::LoginToken;
@@ -319,6 +349,8 @@ pub(crate) mod tests {
     /// The second client gives up after this time without a reply.
     const REFUSED_WAIT: Duration = Duration::from_secs(1);
     const LOOPBACK: &str = "127.0.0.1:0";
+    /// ClientHellos from one address that never answers the cookie.
+    const SPOOFED_HELLOS: usize = 3;
     pub(crate) const LIMITS: GatewayLimits = GatewayLimits {
         max_connections: 16,
         max_handshakes: 16,
@@ -424,6 +456,31 @@ pub(crate) mod tests {
         assert_eq!(second, RepOutcome::default());
         let first = first.await.expect("join").expect("first");
         assert_eq!(first.status, Some(REGISTRATION_STATUS_AUTHORIZED));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hellos_without_a_cookie_take_no_handshake_slot() {
+        let one = GatewayLimits {
+            max_handshakes: 1,
+            ..LIMITS
+        };
+        let (gateway, token) = start(one).await;
+        let hello = DtlsSession::connect(
+            &DtlsClientConfig::new(&IDENTITY.certificate_pem).expect("client config"),
+            MTU,
+        )
+        .expect("connect")
+        .take_transmit();
+        let spoofer = UdpSocket::bind(LOOPBACK).await.expect("bind");
+        for _ in 0..SPOOFED_HELLOS {
+            for datagram in &hello {
+                spoofer.send_to(datagram, gateway).await.expect("send");
+            }
+        }
+        let outcome = run_rep(gateway, client(token), HOLD, WAIT)
+            .await
+            .expect("run");
+        assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
     }
 
     #[test]
