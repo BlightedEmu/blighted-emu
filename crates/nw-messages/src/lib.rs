@@ -10,6 +10,7 @@ pub mod bundle;
 pub mod client_add_entry;
 pub mod connected;
 pub mod day_phase;
+pub mod payload;
 pub mod position;
 pub mod server;
 pub mod spawn_point;
@@ -26,6 +27,7 @@ pub use connected::{
     TIMING_CONFIGURATION_CONNECTED_MSG_TYPE_INDEX, TimingConfigurationConnectedMsg,
 };
 pub use day_phase::{OBSERVED_DAY_PHASE, SYNC_DAY_PHASE_MSG_TYPE_INDEX, SyncDayPhaseMsg};
+pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, MemberState};
 pub use position::{
     POSITION_IN_THE_WORLD_TYPE_INDEX, POSITION_Z_MAX, POSITION_Z_MIN,
     PositionInTheWorldReplicatedState, Rotation, RotationComponent, Scale, WorldPosition,

@@ -197,6 +197,21 @@ impl<'a> Reader<'a> {
         Ok(prefix.index)
     }
 
+    /// Whether no bytes are left.
+    pub const fn is_empty(&self) -> bool {
+        self.rest.is_empty()
+    }
+
+    /// Bytes left.
+    pub const fn remaining(&self) -> usize {
+        self.rest.len()
+    }
+
+    /// The bytes left, without reading them.
+    pub const fn rest(&self) -> &'a [u8] {
+        self.rest
+    }
+
     /// Ends the body.
     ///
     /// # Errors
