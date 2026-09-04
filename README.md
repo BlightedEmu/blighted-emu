@@ -49,7 +49,7 @@ just infra-test
 | `just clean-old` | Deletes build files older than 7 days |
 | `just infra-up` / `just infra-down` | Starts / stops PostgreSQL, Valkey, NATS, Prometheus, Grafana |
 | `just infra-test` | Infrastructure smoke test |
-| `just test-infra` | Tests that need PostgreSQL and Valkey (run `just infra-up` first) |
+| `just test-infra` | Tests that need PostgreSQL and Valkey, with the login and gateway walk (run `just infra-up` first) |
 | `just test-local` | Tests that read your New World install (`NW_GAME_DIR`) |
 | `just codegen` | Regenerates the table structs in `crates/nw-content/src/generated` |
 | `just bundle` | Builds the content bundle into `local-data/content/` |
@@ -135,6 +135,48 @@ Do this once in password mode and once in Discord mode (`[auth] mode`).
 6. Save the `Game.log` lines of the login steps and the `edge-http` log lines of the run in a new note in `docs/re/` as evidence. Remove your account name, Steam ids and IP addresses first.
 
 If the game stops before character select, keep the `Game.log` lines and the `request for an unknown route` lines: they show the next step to build.
+
+## World gateway and test client
+
+`rep-gateway` is the UDP entry point of a world. The game connects to the `rep_address` in `config/edge.toml` after the login queue. The gateway runs DTLS 1.2 and the GridMate carrier, checks the entry ticket in the registration message, answers with a status, and keeps the connection alive with pings. Each ticket works one time only.
+
+`nw-testclient` does what the game does up to that point: it logs in over HTTPS, makes a character when the account has none, waits in the queue, and registers with the gateway.
+
+The game itself cannot connect to the gateway. It trusts only one certificate that is built into the game, and this project does not change that. The test client trusts the gateway's own certificate instead.
+
+Set up the gateway once:
+
+1. In `config/rep-gateway.toml`, set `world_id` to the `[[world]] id` in `config/edge.toml`. The `rep_address` in `config/edge.toml` must reach `udp_listen` (the example files match).
+2. Make the gateway's certificate and key. The files go to `local-data/rep-gateway/` and are never replaced:
+
+```bash
+cargo run -p rep-gateway -- generate-certificate
+```
+
+Secrets come from environment variables:
+
+| Variable | Value |
+|---|---|
+| `NW_SECRET_SIGNING_KEY` | The same entry ticket key as `edge-http` |
+| `NW_SECRET_TESTCLIENT_PASSWORD` | Password of the test account (`nw-testclient` only) |
+
+```bash
+cargo run -p rep-gateway -- serve
+cargo run -p nw-testclient
+```
+
+`nw-testclient` reads `config/nw-testclient.toml`. Set `login_url` and `game_url` to your domain. The account is made on the first run.
+
+The gateway serves Prometheus metrics on `metrics_listen` (`rep_gateway_*`). Keep that address internal.
+
+### M3 exit test
+
+1. `cargo test --workspace` passes.
+2. `just capture-check` reads every local ledger with 0 decode errors.
+3. Start the services (`just infra-up`), set the secrets, then start `edge-http serve` and `rep-gateway serve`.
+4. Run `cargo run -p nw-testclient`. It must print `registration status 0`, then about 60 echoed pings with `closed by server: false`, then a non-zero status for the second registration with the same ticket. The exit code must be 0.
+
+`just test-infra` runs the same walk without the network: the test client logs in through the `edge-http` routes on the Docker PostgreSQL and Valkey, then registers with a gateway on a loopback port.
 
 ## Rules for contributors
 
