@@ -16,7 +16,7 @@ pub mod system;
 pub use connection::{Connection, ConnectionState, Event, Role};
 pub use datagram::{Datagram, MAX_DATAGRAM_LEN, decode_datagram, encode_datagram};
 pub use error::CarrierError;
-pub use frame::{Frame, SYSTEM_CHANNEL, decode_frames, encode_frames};
+pub use frame::{Frame, MESSAGE_CHANNEL, SYSTEM_CHANNEL, decode_frames, encode_frames};
 pub use receiver::{Inbound, Message, ReceiveLimits, Receiver};
 pub use sender::{Delivery, Sender};
 pub use system::{Acks, SystemMessage};

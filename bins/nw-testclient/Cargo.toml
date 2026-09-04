@@ -1,0 +1,17 @@
+[package]
+name = "nw-testclient"
+version = "0.1.0"
+description = "Test client: logs in over HTTPS like the game, then registers with rep-gateway."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nw-carrier.workspace = true
+nw-dtls.workspace = true
+nw-reflect.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

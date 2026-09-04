@@ -2673,6 +2673,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nw-testclient"
+version = "0.1.0"
+dependencies = [
+ "nw-carrier",
+ "nw-dtls",
+ "nw-reflect",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nw-world"
 version = "0.1.0"
 dependencies = [

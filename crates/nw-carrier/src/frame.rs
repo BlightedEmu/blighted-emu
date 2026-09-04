@@ -23,6 +23,8 @@ pub const FLAG_CONNECTING: u8 = 0x80;
 /// Bits that no frame may set (GridMate `MF_UNUSED_FLAGS`).
 pub const UNUSED_FLAGS: u8 = 0x42;
 
+/// The channel of registration, ping and other game messages.
+pub const MESSAGE_CHANNEL: u8 = 0;
 /// The system channel.
 pub const SYSTEM_CHANNEL: u8 = 3;
 /// Channels: 0, 1, 2 for messages and 3 for the system.
