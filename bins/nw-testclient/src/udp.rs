@@ -13,6 +13,10 @@ use crate::rep::{RepClient, RepError, RepEvent};
 pub const TICK: Duration = Duration::from_millis(10);
 /// Largest UDP datagram read.
 pub const MAX_UDP_DATAGRAM: usize = 64 * 1024;
+/// Server pings per second of hold: about one (spec section 15 item 4).
+pub const EXPECTED_PINGS_PER_SECOND: f64 = 1.0;
+/// Share of the expected pings that must arrive, so a delay or a loss does not fail the run.
+pub const MIN_PING_SHARE: f64 = 0.5;
 /// Any local address and port.
 const ANY_LOCAL: &str = "0.0.0.0:0";
 
@@ -25,8 +29,19 @@ pub struct RepOutcome {
     pub server_version: Option<String>,
     /// Pings echoed during the hold.
     pub pings: u32,
+    /// Time from the registration response to the end of the run.
+    pub held: Duration,
     /// Whether the server closed the connection.
     pub closed_by_server: bool,
+}
+
+impl RepOutcome {
+    /// Whether at least [`MIN_PING_SHARE`] of the expected pings arrived during the hold, and at
+    /// least one.
+    pub fn pings_kept_up(&self) -> bool {
+        let expected = self.held.as_secs_f64() * EXPECTED_PINGS_PER_SECOND;
+        self.pings > 0 && f64::from(self.pings) >= expected * MIN_PING_SHARE
+    }
 }
 
 /// A failed REP run.
@@ -86,6 +101,7 @@ pub async fn run_rep(
             }
         }
     }
+    outcome.held = registered_at.map_or(Duration::ZERO, |at| at.elapsed());
     if !outcome.closed_by_server {
         client.close()?;
         for datagram in client.poll(now())? {
@@ -93,4 +109,25 @@ pub async fn run_rep(
         }
     }
     Ok(outcome)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HOLD: Duration = Duration::from_secs(60);
+    const FULL_PINGS: u32 = 60;
+    const EARLY_STOP_PINGS: u32 = 3;
+
+    #[test]
+    fn pings_must_last_the_whole_hold() {
+        let outcome = |pings| RepOutcome {
+            pings,
+            held: HOLD,
+            ..RepOutcome::default()
+        };
+        assert!(outcome(FULL_PINGS).pings_kept_up());
+        assert!(!outcome(EARLY_STOP_PINGS).pings_kept_up());
+        assert!(!outcome(0).pings_kept_up());
+    }
 }

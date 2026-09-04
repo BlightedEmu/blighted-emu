@@ -83,11 +83,13 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
     };
     println!(
         "registration status {status}, server version {}",
-        outcome.server_version.unwrap_or_default()
+        outcome.server_version.as_deref().unwrap_or_default()
     );
     println!(
-        "held {} s: {} pings echoed, closed by server: {}",
-        config.hold_seconds, outcome.pings, outcome.closed_by_server
+        "held {:.1} s: {} pings echoed, closed by server: {}",
+        outcome.held.as_secs_f64(),
+        outcome.pings,
+        outcome.closed_by_server
     );
     // The ticket is single-use: the same token must be refused now.
     let again = run_rep(
@@ -103,7 +105,7 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
     };
     println!("second registration with the same ticket: status {second_status}");
     Ok(status == REGISTRATION_STATUS_AUTHORIZED
-        && outcome.pings > 0
+        && outcome.pings_kept_up()
         && !outcome.closed_by_server
         && second_status != REGISTRATION_STATUS_AUTHORIZED)
 }

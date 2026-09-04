@@ -174,7 +174,7 @@ The gateway serves Prometheus metrics on `metrics_listen` (`rep_gateway_*`). Kee
 1. `cargo test --workspace` passes.
 2. `just capture-check` reads every local ledger with 0 decode errors.
 3. Start the services (`just infra-up`), set the secrets, then start `edge-http serve` and `rep-gateway serve`.
-4. Run `cargo run -p nw-testclient`. It must print `registration status 0`, then about 60 echoed pings with `closed by server: false`, then a non-zero status for the second registration with the same ticket. The exit code must be 0.
+4. Run `cargo run -p nw-testclient`. It must print `registration status 0`, then about 60 echoed pings (at least half of one per second of hold) with `closed by server: false`, then a non-zero status for the second registration with the same ticket. The exit code must be 0.
 
 `just test-infra` runs the same walk without the network: the test client logs in through the `edge-http` routes on the Docker PostgreSQL and Valkey, then registers with a gateway on a loopback port.
 
