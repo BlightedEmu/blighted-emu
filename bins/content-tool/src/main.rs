@@ -174,6 +174,10 @@ fn print_capture(report: &CaptureReport, names: &TypeNames) {
         registration.token_lengths,
         registration.max_clock_offset_ms
     );
+    println!(
+        "M4 bodies decoded and encoded to the same bytes, by type: {:?}",
+        report.bodies
+    );
     for (direction, label) in [
         (SERVER_TO_CLIENT, "server to client"),
         (CLIENT_TO_SERVER, "client to server"),

@@ -653,6 +653,7 @@ dependencies = [
  "nw-common",
  "nw-content",
  "nw-formats",
+ "nw-messages",
  "nw-oodle",
  "nw-reflect",
  "nw-world",

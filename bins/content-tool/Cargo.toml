@@ -11,6 +11,7 @@ publish.workspace = true
 clap.workspace = true
 crc32fast.workspace = true
 nw-carrier.workspace = true
+nw-messages.workspace = true
 nw-common.workspace = true
 nw-content.workspace = true
 nw-formats.workspace = true

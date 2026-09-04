@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `capture-check`: decodes local capture ledgers with `nw-carrier` and `nw-reflect` (M3 spec
-//! section 9; carrier captures note).
+//! section 9; carrier captures note). Server bodies of the M4 types are decoded with
+//! `nw-messages`, encoded again, and compared (M4 spec section 10).
 //!
 //! The ledgers hold other players' data. This module keeps counts, type indexes, and the
 //! registration response values that the RE note records. It never keeps payload bytes, ids,
@@ -10,6 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use nw_carrier::{Inbound, ReceiveLimits, Receiver, decode_datagram};
+use nw_messages::ServerMessage;
 use nw_reflect::{
     Envelope, REGISTRATION_RESPONSE_MSG_TYPE_INDEX, RegistrationResponseMsg, decode_client_message,
     decode_server_messages,
@@ -253,6 +255,8 @@ pub struct CaptureReport {
     pub inline_uuid_messages: u64,
     /// Registration responses.
     pub registration: RegistrationSummary,
+    /// Server bodies of the M4 types that decode and encode to the same bytes, by type index.
+    pub bodies: BTreeMap<u64, u64>,
     /// Decode failures.
     pub failures: Vec<DecodeFailure>,
 }
@@ -343,6 +347,20 @@ impl CaptureReport {
                 .max_clock_offset_ms
                 .max(clock_ms.abs_diff(record.time_ms));
         }
+        if record.direction == SERVER_TO_CLIENT
+            && let Some(decoded) = ServerMessage::decode(index, &envelope.body)
+        {
+            let message = decoded.map_err(|error| format!("type {index}: {error}"))?;
+            let encoded = message
+                .encode()
+                .map_err(|error| format!("type {index}: {error}"))?;
+            if encoded != envelope.body {
+                return Err(format!(
+                    "type {index}: encoded body differs from the capture"
+                ));
+            }
+            *self.bodies.entry(index).or_default() += 1;
+        }
         Ok(())
     }
 }
@@ -352,7 +370,7 @@ mod tests {
     use nw_carrier::{Frame, encode_datagram, encode_frames};
     use nw_reflect::{
         PING_MSG_TYPE_INDEX, REGISTRATION_RESPONSE_OBSERVED_FLAGS, REGISTRATION_STATUS_AUTHORIZED,
-        TypeId, encode_client_message, encode_server_messages,
+        TIME_SYNCH_MSG_TYPE_INDEX, TypeId, encode_client_message, encode_server_messages,
     };
 
     use super::*;
@@ -412,7 +430,8 @@ mod tests {
             response.encode().expect("response"),
         );
         let ping = envelope(PING_MSG_TYPE_INDEX, PING_BODY.to_vec());
-        let server = encode_server_messages(&[&registration, &ping]).expect("server");
+        let time = envelope(TIME_SYNCH_MSG_TYPE_INDEX, PING_BODY.to_vec());
+        let server = encode_server_messages(&[&registration, &ping, &time]).expect("server");
         let client = encode_client_message(&ZERO_SESSION, &ping).expect("client");
         let mut ledger = record(SERVER_TO_CLIENT, &reliable_datagram(server));
         ledger.extend(record(CLIENT_TO_SERVER, &reliable_datagram(client)));
@@ -447,8 +466,9 @@ mod tests {
             .expect("check");
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(report.datagrams, [1, 1]);
-        assert_eq!(report.messages, [2, 1]);
+        assert_eq!(report.messages, [3, 1]);
         assert_eq!(report.types[&(CLIENT_TO_SERVER, PING_MSG_TYPE_INDEX)], 1);
+        assert_eq!(report.bodies[&TIME_SYNCH_MSG_TYPE_INDEX], 1);
         let summary = &report.registration;
         assert_eq!(summary.responses, 1);
         assert_eq!(summary.statuses[&REGISTRATION_STATUS_AUTHORIZED], 1);
@@ -473,6 +493,22 @@ mod tests {
         assert_eq!(report.failures[0].record, 0);
         assert!(report.failures[0].reason.contains("CRC"));
         assert_eq!(report.messages, [0, 0]);
+    }
+
+    #[test]
+    fn a_known_body_that_does_not_decode_is_a_failure() {
+        let short = envelope(TIME_SYNCH_MSG_TYPE_INDEX, PING_BODY[1..].to_vec());
+        let server = encode_server_messages(&[&short]).expect("server");
+        let mut report = CaptureReport::default();
+        report
+            .check_ledger(
+                Path::new("short"),
+                &record(SERVER_TO_CLIENT, &reliable_datagram(server)),
+            )
+            .expect("check");
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].reason.contains("type 335"));
+        assert!(report.bodies.is_empty());
     }
 
     #[test]
