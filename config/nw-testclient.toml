@@ -1,0 +1,19 @@
+# nw-testclient configuration (M3 spec section 8). This file holds no secret.
+# Secret: NW_SECRET_TESTCLIENT_PASSWORD, the password of the test account.
+# Any key below can be overridden with NW_TESTCLIENT_<KEY>.
+
+# The launcher API and the game routes of edge-http.
+login_url = "https://login.example.org"
+game_url = "https://game.example.org"
+# Test account; it is registered on the first run.
+account = "testclient"
+# Character made when the account has none (3 to 16 letters).
+character_name = "Testclient"
+# The gateway's certificate (the file rep-gateway generate-certificate wrote).
+certificate_file = "local-data/rep-gateway/cert.pem"
+# DTLS MTU in bytes.
+mtu = 1200
+# Seconds to stay connected after registration (M3 exit test: 60).
+hold_seconds = 60
+# Seconds to wait for the registration response.
+registration_timeout_seconds = 30

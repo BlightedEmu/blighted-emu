@@ -8,10 +8,17 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+clap.workspace = true
 nw-carrier.workspace = true
+nw-common.workspace = true
 nw-dtls.workspace = true
+nw-login.workspace = true
+nw-protocol.workspace = true
 nw-reflect.workspace = true
+reqwest.workspace = true
+serde.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

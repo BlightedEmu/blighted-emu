@@ -2682,10 +2682,17 @@ dependencies = [
 name = "nw-testclient"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "nw-carrier",
+ "nw-common",
  "nw-dtls",
+ "nw-login",
+ "nw-protocol",
  "nw-reflect",
+ "reqwest",
+ "serde",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

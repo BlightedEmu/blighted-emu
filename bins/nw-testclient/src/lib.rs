@@ -2,4 +2,7 @@
 //! `nw-testclient` (M3 spec section 8): the client side of the REP connection, used by the test
 //! client program and by the `rep-gateway` tests.
 
+pub mod config;
 pub mod rep;
+pub mod udp;
+pub mod walk;

@@ -298,7 +298,8 @@ mod tests {
     use nw_login::signature::sign_entry;
     use nw_login::store::StoreError;
     use nw_reflect::LoginToken;
-    use nw_testclient::rep::{RepClient, RepEvent};
+    use nw_testclient::rep::RepClient;
+    use nw_testclient::udp::{RepOutcome, run_rep};
 
     use super::*;
     use crate::registration::{STATUS_AUTHORIZED, STATUS_REFUSED};
@@ -310,8 +311,13 @@ mod tests {
     const VALID_DAYS: u32 = 30;
     const LIFETIME_SECONDS: i64 = 60;
     const WAIT: Duration = Duration::from_secs(5);
-    /// Shorter than the time the gateway keeps a silent registered connection: 10 unacked ping
-    /// sends, 200 ms apart (about 2 s).
+    /// Long enough for two pings 200 ms apart.
+    const HOLD: Duration = Duration::from_millis(500);
+    /// The first client stays connected while the second one tries.
+    const HOLD_FIRST: Duration = Duration::from_secs(2);
+    /// Time for the first client to register before the second one starts.
+    const SETTLE: Duration = Duration::from_millis(500);
+    /// The second client gives up after this time without a reply.
     const REFUSED_WAIT: Duration = Duration::from_secs(1);
     const LOOPBACK: &str = "127.0.0.1:0";
     const LIMITS: GatewayLimits = GatewayLimits {
@@ -393,51 +399,25 @@ mod tests {
         (address, token)
     }
 
-    /// Connects over UDP and runs until `stop` or until `wait` has passed; returns every event.
-    async fn connect(
-        gateway: SocketAddr,
-        token: LoginToken,
-        wait: Duration,
-        stop: impl Fn(&[RepEvent]) -> bool,
-    ) -> Vec<RepEvent> {
-        let socket = UdpSocket::bind(LOOPBACK).await.expect("client bind");
+    fn client(token: LoginToken) -> RepClient {
         let config = DtlsClientConfig::new(&IDENTITY.certificate_pem).expect("client config");
-        let started = Instant::now();
-        let now = || u64::try_from(started.elapsed().as_millis()).expect("ms");
-        let mut client = RepClient::new(&config, MTU, token, now()).expect("client");
-        let mut events = Vec::new();
-        let mut buffer = vec![0_u8; MAX_UDP_DATAGRAM];
-        while started.elapsed() < wait && !stop(&events) {
-            for datagram in client.poll(now()).expect("poll") {
-                socket.send_to(&datagram, gateway).await.expect("send");
-            }
-            if let Ok(Ok((len, _))) =
-                tokio::time::timeout(TICK, socket.recv_from(&mut buffer)).await
-            {
-                events.extend(client.receive(now(), &buffer[..len]).expect("receive"));
-            }
-        }
-        events
-    }
-
-    fn status(events: &[RepEvent]) -> Option<u32> {
-        events.iter().find_map(|event| match event {
-            RepEvent::Registered(response) => Some(response.uint32_at_0x8),
-            _ => None,
-        })
+        RepClient::new(&config, MTU, token, 0).expect("client")
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_client_registers_once_over_udp_and_gets_pings() {
         let (gateway, token) = start(LIMITS).await;
-        let events = connect(gateway, token.clone(), WAIT, |events| {
-            events.contains(&RepEvent::Pinged)
-        })
-        .await;
-        assert_eq!(status(&events), Some(STATUS_AUTHORIZED));
-        assert!(events.contains(&RepEvent::Pinged));
-        let again = connect(gateway, token, WAIT, |events| status(events).is_some()).await;
-        assert_eq!(status(&again), Some(STATUS_REFUSED));
+        let outcome = run_rep(gateway, client(token.clone()), HOLD, WAIT)
+            .await
+            .expect("run");
+        assert_eq!(outcome.status, Some(STATUS_AUTHORIZED));
+        assert_eq!(outcome.server_version.as_deref(), Some(VERSION));
+        assert!(outcome.pings > 0);
+        let again = run_rep(gateway, client(token), HOLD, WAIT)
+            .await
+            .expect("again");
+        assert_eq!(again.status, Some(STATUS_REFUSED));
+        assert!(again.closed_by_server);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -447,13 +427,14 @@ mod tests {
             ..LIMITS
         };
         let (gateway, token) = start(one).await;
-        let first = connect(gateway, token.clone(), WAIT, |events| {
-            status(events).is_some()
-        })
-        .await;
-        assert_eq!(status(&first), Some(STATUS_AUTHORIZED));
-        let second = connect(gateway, token, REFUSED_WAIT, |events| !events.is_empty()).await;
-        assert!(second.is_empty(), "{second:?}");
+        let first = tokio::spawn(run_rep(gateway, client(token.clone()), HOLD_FIRST, WAIT));
+        tokio::time::sleep(SETTLE).await;
+        let second = run_rep(gateway, client(token), HOLD, REFUSED_WAIT)
+            .await
+            .expect("second");
+        assert_eq!(second, RepOutcome::default());
+        let first = first.await.expect("join").expect("first");
+        assert_eq!(first.status, Some(STATUS_AUTHORIZED));
     }
 
     #[test]
