@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `capture-check`: decodes local capture ledgers with `nw-carrier` and `nw-reflect` (M3 spec
 //! section 9; carrier captures note). Server bodies of the M4 types are decoded with
-//! `nw-messages`, encoded again, and compared (M4 spec section 10).
+//! `nw-messages`, encoded again, and compared (M4 spec section 10); so are the bundle members at
+//! the front of each payload whose class has a reader.
 //!
 //! The ledgers hold other players' data. This module keeps counts, type indexes, and the
 //! registration response values that the RE note records. It never keeps payload bytes, ids,
@@ -11,10 +12,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use nw_carrier::{Inbound, ReceiveLimits, Receiver, decode_datagram};
-use nw_messages::ServerMessage;
+use nw_messages::{BundlePayload, ReplicatedStateBundle, ServerMessage};
 use nw_reflect::{
-    Envelope, REGISTRATION_RESPONSE_MSG_TYPE_INDEX, RegistrationResponseMsg, decode_client_message,
-    decode_server_messages,
+    Envelope, REGISTRATION_RESPONSE_MSG_TYPE_INDEX, RegistrationResponseMsg, TypeId,
+    decode_client_message, decode_server_messages,
 };
 use serde::Deserialize;
 
@@ -257,6 +258,10 @@ pub struct CaptureReport {
     pub registration: RegistrationSummary,
     /// Server bodies of the M4 types that decode and encode to the same bytes, by type index.
     pub bodies: BTreeMap<u64, u64>,
+    /// Bundle members with a reader that decode and encode to the same bytes, by class index.
+    pub members: BTreeMap<u64, u64>,
+    /// Bundle payloads whose members all have a reader.
+    pub complete_payloads: u64,
     /// Decode failures.
     pub failures: Vec<DecodeFailure>,
 }
@@ -360,6 +365,30 @@ impl CaptureReport {
                 ));
             }
             *self.bodies.entry(index).or_default() += 1;
+            if let ServerMessage::Bundle(bundle) = message {
+                self.check_members(&bundle)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Decodes the members at the front of a bundle payload, encodes each again, and compares.
+    fn check_members(&mut self, bundle: &ReplicatedStateBundle) -> Result<(), String> {
+        let known = BundlePayload::decode_known(&bundle.payload)
+            .map_err(|error| format!("bundle payload: {error}"))?;
+        for (member, range) in known.members {
+            let encoded = member
+                .encode()
+                .map_err(|error| format!("bundle member: {error}"))?;
+            if encoded != bundle.payload[range] {
+                return Err("bundle member: encoded member differs from the capture".to_owned());
+            }
+            if let TypeId::FileSlot(class) = member.state.class() {
+                *self.members.entry(class).or_default() += 1;
+            }
+        }
+        if known.stopped_at.is_none() {
+            self.complete_payloads += 1;
         }
         Ok(())
     }
@@ -371,6 +400,12 @@ mod tests {
     use nw_reflect::{
         PING_MSG_TYPE_INDEX, REGISTRATION_RESPONSE_OBSERVED_FLAGS, REGISTRATION_STATUS_AUTHORIZED,
         TIME_SYNCH_MSG_TYPE_INDEX, TypeId, encode_client_message, encode_server_messages,
+    };
+
+    use nw_messages::{
+        BodyCodec, BundleGroup, BundleMember, BundlePayload, MemberState,
+        POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState,
+        REPLICATED_STATE_BUNDLE_TYPE_INDEX, ReplicatedStateBundle, WorldPosition,
     };
 
     use super::*;
@@ -417,6 +452,32 @@ mod tests {
             .expect("envelope")
     }
 
+    /// A bundle whose payload is one group with one position member.
+    fn position_bundle() -> Vec<u8> {
+        let payload = BundlePayload {
+            groups: vec![BundleGroup {
+                leading: 1,
+                members: vec![BundleMember {
+                    u64_at_0: 2,
+                    state: MemberState::Position(PositionInTheWorldReplicatedState {
+                        position: Some(WorldPosition::from_metres(1.0, 2.0, 3.0)),
+                        ..PositionInTheWorldReplicatedState::default()
+                    }),
+                }],
+            }],
+        };
+        ReplicatedStateBundle {
+            leading: None,
+            byte_3: 0,
+            byte_4: 0,
+            flag_5: false,
+            index_block: None,
+            payload: payload.encode().expect("payload"),
+        }
+        .encode()
+        .expect("bundle")
+    }
+
     fn sample_ledger() -> Vec<u8> {
         let response = RegistrationResponseMsg {
             uint32_at_0x8: REGISTRATION_STATUS_AUTHORIZED,
@@ -431,7 +492,9 @@ mod tests {
         );
         let ping = envelope(PING_MSG_TYPE_INDEX, PING_BODY.to_vec());
         let time = envelope(TIME_SYNCH_MSG_TYPE_INDEX, PING_BODY.to_vec());
-        let server = encode_server_messages(&[&registration, &ping, &time]).expect("server");
+        let bundle = envelope(REPLICATED_STATE_BUNDLE_TYPE_INDEX, position_bundle());
+        let server =
+            encode_server_messages(&[&registration, &ping, &time, &bundle]).expect("server");
         let client = encode_client_message(&ZERO_SESSION, &ping).expect("client");
         let mut ledger = record(SERVER_TO_CLIENT, &reliable_datagram(server));
         ledger.extend(record(CLIENT_TO_SERVER, &reliable_datagram(client)));
@@ -466,9 +529,11 @@ mod tests {
             .expect("check");
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(report.datagrams, [1, 1]);
-        assert_eq!(report.messages, [3, 1]);
+        assert_eq!(report.messages, [4, 1]);
         assert_eq!(report.types[&(CLIENT_TO_SERVER, PING_MSG_TYPE_INDEX)], 1);
         assert_eq!(report.bodies[&TIME_SYNCH_MSG_TYPE_INDEX], 1);
+        assert_eq!(report.members[&POSITION_IN_THE_WORLD_TYPE_INDEX], 1);
+        assert_eq!(report.complete_payloads, 1);
         let summary = &report.registration;
         assert_eq!(summary.responses, 1);
         assert_eq!(summary.statuses[&REGISTRATION_STATUS_AUTHORIZED], 1);

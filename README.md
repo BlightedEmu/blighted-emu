@@ -82,7 +82,7 @@ Codegen stops with an error when a table type name would give an invalid Rust na
 
 ## Capture check
 
-`content-tool capture-check` decodes capture ledgers (`ledger.bin`, decrypted carrier datagrams) with `nw-carrier` and `nw-reflect` and prints counts only: datagrams, messages per type index, registration response values, and decode failures. It exits with an error when any datagram or message does not decode. It also decodes the server messages of the M4 types (`nw-messages`), encodes them again, and counts those that give the same bytes; a difference is a failure. The facts it checks are in `docs/re/2026-09-02-carrier-captures.md`.
+`content-tool capture-check` decodes capture ledgers (`ledger.bin`, decrypted carrier datagrams) with `nw-carrier` and `nw-reflect` and prints counts only: datagrams, messages per type index, registration response values, and decode failures. It exits with an error when any datagram or message does not decode. It also decodes the server messages of the M4 types (`nw-messages`), encodes them again, and counts those that give the same bytes; a difference is a failure. Inside each replication bundle it does the same for the members at the front of the payload whose class has a reader (the position class). The facts it checks are in `docs/re/2026-09-02-carrier-captures.md`.
 
 Ledgers hold data of other players. Keep them in git-ignored `local-data/captures/`; never commit them or paste message contents.
 

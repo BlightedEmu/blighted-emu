@@ -178,6 +178,10 @@ fn print_capture(report: &CaptureReport, names: &TypeNames) {
         "M4 bodies decoded and encoded to the same bytes, by type: {:?}",
         report.bodies
     );
+    println!(
+        "bundle members decoded and encoded to the same bytes, by class: {:?}; payloads read to the end: {}",
+        report.members, report.complete_payloads
+    );
     for (direction, label) in [
         (SERVER_TO_CLIENT, "server to client"),
         (CLIENT_TO_SERVER, "client to server"),
