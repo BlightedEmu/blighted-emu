@@ -21,11 +21,16 @@ pub enum MemberState {
 }
 
 impl MemberState {
+    /// The type index of this state's class.
+    pub const fn type_index(&self) -> u64 {
+        match self {
+            Self::Position(_) => POSITION_IN_THE_WORLD_TYPE_INDEX,
+        }
+    }
+
     /// The class type id of this state.
     pub const fn class(&self) -> TypeId {
-        match self {
-            Self::Position(_) => TypeId::FileSlot(POSITION_IN_THE_WORLD_TYPE_INDEX),
-        }
+        TypeId::FileSlot(self.type_index())
     }
 
     fn read(class: TypeId, reader: &mut Reader<'_>) -> Result<Self, MessageError> {
@@ -37,7 +42,7 @@ impl MemberState {
         }
     }
 
-    fn write(&self, writer: &mut Writer) {
+    fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
         match self {
             Self::Position(state) => state.write(writer),
         }
@@ -64,7 +69,7 @@ impl BundleMember {
         writer
             .prefixed(self.u64_at_0)?
             .bytes(&encode_type_id(&self.state.class())?);
-        self.state.write(&mut writer);
+        self.state.write(&mut writer)?;
         Ok(writer.finish())
     }
 }
@@ -131,10 +136,7 @@ impl BundlePayload {
             let count = reader.u8()?;
             let mut members = Vec::new();
             for _ in 0..count {
-                let u64_at_0 = reader.prefixed()?;
-                let class = read_class(&mut reader)?;
-                let state = MemberState::read(class, &mut reader)?;
-                members.push(BundleMember { u64_at_0, state });
+                members.push(read_member(&mut reader)?);
             }
             groups.push(BundleGroup { leading, members });
         }
@@ -155,9 +157,7 @@ impl BundlePayload {
             let count = reader.u8()?;
             for _ in 0..count {
                 let start = payload.len() - reader.remaining();
-                let u64_at_0 = reader.prefixed()?;
-                let class = read_class(&mut reader)?;
-                let state = match MemberState::read(class, &mut reader) {
+                let member = match read_member(&mut reader) {
                     Err(MessageError::UnknownMemberClass { class }) => {
                         known.stopped_at = Some(class);
                         return Ok(known);
@@ -165,13 +165,19 @@ impl BundlePayload {
                     other => other?,
                 };
                 let end = payload.len() - reader.remaining();
-                known
-                    .members
-                    .push((BundleMember { u64_at_0, state }, start..end));
+                known.members.push((member, start..end));
             }
         }
         Ok(known)
     }
+}
+
+/// One member: the integer, the class type id, and the state of that class.
+fn read_member(reader: &mut Reader<'_>) -> Result<BundleMember, MessageError> {
+    let u64_at_0 = reader.prefixed()?;
+    let class = read_class(reader)?;
+    let state = MemberState::read(class, reader)?;
+    Ok(BundleMember { u64_at_0, state })
 }
 
 fn read_class(reader: &mut Reader<'_>) -> Result<TypeId, MessageError> {
@@ -182,6 +188,8 @@ fn read_class(reader: &mut Reader<'_>) -> Result<TypeId, MessageError> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
     use crate::position::WorldPosition;
     use crate::wire::RAW_ID_LEN;
@@ -196,7 +204,7 @@ mod tests {
         BundleMember {
             u64_at_0: ENTITY,
             state: MemberState::Position(PositionInTheWorldReplicatedState {
-                position: Some(WorldPosition::from_metres(x, 2.0, 3.0)),
+                position: Some(WorldPosition::from_metres(x, 2.0, 3.0).expect("finite")),
                 ..PositionInTheWorldReplicatedState::default()
             }),
         }
@@ -252,6 +260,24 @@ mod tests {
         bytes.extend([4; RAW_ID_LEN]);
         let known = BundlePayload::decode_known(&bytes).expect("known");
         assert_eq!(known.stopped_at, Some(TypeId::InlineUuid([4; RAW_ID_LEN])));
+    }
+
+    proptest! {
+        #[test]
+        fn random_payloads_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
+            let _ = BundlePayload::decode(&bytes);
+            let _ = BundlePayload::decode_known(&bytes);
+        }
+
+        #[test]
+        fn random_bytes_after_a_position_member_header_never_panic(
+            tail in proptest::collection::vec(any::<u8>(), 0..48),
+        ) {
+            let mut bytes = vec![LEADING as u8, 1, SMALL_ENTITY, POSITION_IN_THE_WORLD_TYPE_INDEX as u8];
+            bytes.extend(tail);
+            let _ = BundlePayload::decode(&bytes);
+            let _ = BundlePayload::decode_known(&bytes);
+        }
     }
 
     #[test]

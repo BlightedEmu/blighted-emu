@@ -48,6 +48,14 @@ pub enum MessageError {
         /// The unknown bits that are set.
         bits: u8,
     },
+    /// A tag value that the field's form does not allow.
+    #[error("{field}: tag {tag} does not fit this form")]
+    BadTag {
+        /// The field.
+        field: &'static str,
+        /// The tag.
+        tag: u8,
+    },
     /// A replicated state class has no reader here, and its body has no length.
     #[error("no reader for replicated state class {class:?}")]
     UnknownMemberClass {

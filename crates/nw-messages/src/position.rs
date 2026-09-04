@@ -21,7 +21,7 @@ const KNOWN_CHILDREN: u8 = CHILD_POSITION | CHILD_ROTATION | CHILD_SCALE;
 const ROTATION_W_NEGATIVE: u8 = 0x40;
 /// Rotation mask: the bit of component `c` (0, 1, 2) that means 0; the bit three higher means 1.
 const ROTATION_ONE_SHIFT: u8 = 3;
-const ROTATION_COMPONENTS: u8 = 3;
+const ROTATION_COMPONENTS: usize = 3;
 /// Rotation mask bit 7 has no read in the binary and was clear on every captured member.
 const ROTATION_UNKNOWN: u8 = 0x80;
 /// Scale tag: four values of 1, nothing read.
@@ -41,14 +41,19 @@ pub struct WorldPosition {
 }
 
 impl WorldPosition {
-    /// A position from metres; the height is clamped to the encoded range and rounded.
-    pub fn from_metres(x: f32, y: f32, z: f32) -> Self {
+    /// A position from metres; the height is clamped to the encoded range and rounded. `None`
+    /// when a value is not finite: a NaN height would become -100 m without notice.
+    pub fn from_metres(x: f32, y: f32, z: f32) -> Option<Self> {
+        if !(x.is_finite() && y.is_finite() && z.is_finite()) {
+            return None;
+        }
         let share = ((z - POSITION_Z_MIN) / (POSITION_Z_MAX - POSITION_Z_MIN)).clamp(0.0, 1.0);
-        Self {
+        Some(Self {
             x,
             y,
+            // `share` is in [0, 1], so the product is in [0, u16::MAX].
             z_raw: (share * f32::from(u16::MAX)).round() as u16,
-        }
+        })
     }
 
     /// The height in metres: `raw / 65535 * (max - min) + min`.
@@ -73,7 +78,7 @@ pub enum RotationComponent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rotation {
     /// x, y and z.
-    pub components: [RotationComponent; 3],
+    pub components: [RotationComponent; ROTATION_COMPONENTS],
     /// Whether `w` is negative.
     pub w_negative: bool,
 }
@@ -124,6 +129,14 @@ impl PositionInTheWorldReplicatedState {
             return Ok(Self::default());
         }
         let children = reader.u8()?;
+        if children == 0 {
+            // `write` sends a state without children as slot byte 0, so this form cannot be
+            // written again.
+            return Err(MessageError::UnknownBits {
+                field: "position children (none set)",
+                bits: children,
+            });
+        }
         if children & !KNOWN_CHILDREN != 0 {
             return Err(MessageError::UnknownBits {
                 field: "position children",
@@ -164,7 +177,20 @@ impl PositionInTheWorldReplicatedState {
     }
 
     /// Writes the state for the bundle path. A state with no child writes only the slot byte 0.
-    pub fn write(&self, writer: &mut Writer) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError::BadTag`] for a per-axis scale with tag 0 or 1: the client reads
+    /// those tags as the other scale forms.
+    pub fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
+        if let Some(Scale::PerAxis { tag, .. }) = self.scale
+            && matches!(tag, SCALE_ONE | SCALE_UNIFORM)
+        {
+            return Err(MessageError::BadTag {
+                field: "scale",
+                tag,
+            });
+        }
         let children = [
             (self.position.is_some(), CHILD_POSITION),
             (self.rotation.is_some(), CHILD_ROTATION),
@@ -175,7 +201,7 @@ impl PositionInTheWorldReplicatedState {
         .fold(0, |bits, (_, bit)| bits | bit);
         if children == 0 {
             writer.u8(0);
-            return;
+            return Ok(());
         }
         writer.u8(SLOT_0).u8(children);
         if let Some(position) = self.position {
@@ -199,6 +225,7 @@ impl PositionInTheWorldReplicatedState {
                 }
             }
         }
+        Ok(())
     }
 }
 
@@ -210,14 +237,14 @@ fn read_rotation(reader: &mut Reader<'_>) -> Result<Rotation, MessageError> {
             bits: ROTATION_UNKNOWN,
         });
     }
-    let mut components = [RotationComponent::Zero; 3];
-    for (index, component) in (0..ROTATION_COMPONENTS).zip(components.iter_mut()) {
+    let mut components = [RotationComponent::Zero; ROTATION_COMPONENTS];
+    for (index, component) in (0_u8..).zip(components.iter_mut()) {
         let zero = mask & (1 << index) != 0;
         let one = mask & (1 << (index + ROTATION_ONE_SHIFT)) != 0;
         if zero && one {
             return Err(MessageError::UnknownBits {
                 field: "rotation mask",
-                bits: mask,
+                bits: (1 << index) | (1 << (index + ROTATION_ONE_SHIFT)),
             });
         }
         *component = if zero {
@@ -240,7 +267,7 @@ fn write_rotation(rotation: &Rotation, writer: &mut Writer) {
     } else {
         0
     };
-    for (index, component) in (0..ROTATION_COMPONENTS).zip(rotation.components) {
+    for (index, component) in (0_u8..).zip(rotation.components) {
         match component {
             RotationComponent::Zero => mask |= 1 << index,
             RotationComponent::One => mask |= 1 << (index + ROTATION_ONE_SHIFT),
@@ -257,6 +284,8 @@ fn write_rotation(rotation: &Rotation, writer: &mut Writer) {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     const X: f32 = 8000.5;
@@ -266,7 +295,7 @@ mod tests {
 
     fn full() -> PositionInTheWorldReplicatedState {
         PositionInTheWorldReplicatedState {
-            position: Some(WorldPosition::from_metres(X, Y, HEIGHT)),
+            position: Some(at(X, Y, HEIGHT)),
             rotation: Some(Rotation {
                 components: [
                     RotationComponent::Zero,
@@ -284,8 +313,12 @@ mod tests {
 
     fn encode(state: &PositionInTheWorldReplicatedState) -> Vec<u8> {
         let mut writer = Writer::new();
-        state.write(&mut writer);
+        state.write(&mut writer).expect("write");
         writer.finish()
+    }
+
+    fn at(x: f32, y: f32, z: f32) -> WorldPosition {
+        WorldPosition::from_metres(x, y, z).expect("finite")
     }
 
     fn decode(bytes: &[u8]) -> Result<PositionInTheWorldReplicatedState, MessageError> {
@@ -305,7 +338,7 @@ mod tests {
     #[test]
     fn a_position_alone_is_twelve_bytes() {
         let state = PositionInTheWorldReplicatedState {
-            position: Some(WorldPosition::from_metres(X, Y, HEIGHT)),
+            position: Some(at(X, Y, HEIGHT)),
             ..PositionInTheWorldReplicatedState::default()
         };
         let bytes = encode(&state);
@@ -317,16 +350,15 @@ mod tests {
 
     #[test]
     fn the_height_maps_from_minus_100_to_2000() {
-        assert_eq!(
-            WorldPosition::from_metres(0.0, 0.0, POSITION_Z_MIN).z_raw,
-            0
-        );
-        assert_eq!(
-            WorldPosition::from_metres(0.0, 0.0, POSITION_Z_MAX).z_raw,
-            u16::MAX
-        );
-        assert_eq!(WorldPosition::from_metres(0.0, 0.0, 9999.0).z_raw, u16::MAX);
-        let back = WorldPosition::from_metres(X, Y, HEIGHT).z();
+        assert_eq!(at(0.0, 0.0, POSITION_Z_MIN).z_raw, 0);
+        assert_eq!(at(0.0, 0.0, POSITION_Z_MAX).z_raw, u16::MAX);
+        assert_eq!(at(0.0, 0.0, 9999.0).z_raw, u16::MAX);
+        assert_eq!(at(0.0, 0.0, -500.0).z_raw, 0);
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert_eq!(WorldPosition::from_metres(bad, 0.0, 0.0), None);
+            assert_eq!(WorldPosition::from_metres(0.0, 0.0, bad), None);
+        }
+        let back = at(X, Y, HEIGHT).z();
         assert!((back - HEIGHT).abs() < TOLERANCE_M);
     }
 
@@ -345,5 +377,57 @@ mod tests {
             Err(MessageError::UnknownBits { .. })
         ));
         assert!(decode(&[SLOT_0, CHILD_POSITION, 0]).is_err());
+    }
+
+    #[test]
+    fn a_component_marked_zero_and_one_is_refused() {
+        let zero_and_one_for_x = 0x01 | 0x08;
+        assert_eq!(
+            decode(&[SLOT_0, CHILD_ROTATION, zero_and_one_for_x]),
+            Err(MessageError::UnknownBits {
+                field: "rotation mask",
+                bits: zero_and_one_for_x
+            })
+        );
+    }
+
+    #[test]
+    fn a_slot_without_children_is_refused_because_it_cannot_be_written_again() {
+        assert!(matches!(
+            decode(&[SLOT_0, 0]),
+            Err(MessageError::UnknownBits { .. })
+        ));
+    }
+
+    #[test]
+    fn a_per_axis_scale_must_not_use_the_tags_of_the_other_forms() {
+        for tag in [SCALE_ONE, SCALE_UNIFORM] {
+            let state = PositionInTheWorldReplicatedState {
+                scale: Some(Scale::PerAxis {
+                    tag,
+                    values: [1, 2, 3],
+                }),
+                ..PositionInTheWorldReplicatedState::default()
+            };
+            assert_eq!(
+                state.write(&mut Writer::new()),
+                Err(MessageError::BadTag {
+                    field: "scale",
+                    tag
+                })
+            );
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn random_children_never_panic(
+            children in any::<u8>(),
+            tail in proptest::collection::vec(any::<u8>(), 0..32),
+        ) {
+            let mut bytes = vec![SLOT_0, children];
+            bytes.extend(tail);
+            let _ = decode(&bytes);
+        }
     }
 }
