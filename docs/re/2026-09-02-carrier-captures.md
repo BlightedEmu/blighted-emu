@@ -88,6 +88,8 @@ Totals (`content-tool capture-check`): 7,211,869 datagrams (4,917,149 server to 
 
 **Observed.** V3 request: type 19, 2,711-byte envelope, reliable, channel 0, in chunks.
 
+**Observed.** Group 4 of every V3 request (43) holds the login-queue `Token` fields in the order of the `Token` struct (protocol note section 3). Shapes, no values: `Signature` 512 hexadecimal characters; `RepAddress` `host:port`; `WorldId`, `CharacterId`, and `TicketId` 36-character UUID text; `PersonaId` `amzn1.` text; `SteamAppId` 1063730; `TokenVersion` 10; `ClientCapabilities` and `JwtClaims` empty; the three time values non-zero; `AccountIsLocked` present.
+
 **Observed.** Response: type 3, reliable, channel 0, frame flags `0x21`. In all 43 responses:
 
 | Field | Value |

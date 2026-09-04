@@ -7,6 +7,7 @@
 
 mod request_v3;
 mod response;
+mod token;
 mod wire;
 
 pub use request_v3::{
@@ -25,6 +26,7 @@ pub use response::{
     REGISTRATION_RESPONSE_STRING_1_OFFSET, REGISTRATION_RESPONSE_UINT32_OFFSET,
     RegistrationResponseMsg,
 };
+pub use token::LoginToken;
 pub use wire::{
     FLAG_BIT_0_MASK, LIST_COUNT_ABOVE, LIST_STRING_LONGER_THAN, RegistrationError,
     SIXTEEN_RAW_OCTETS, STRING_LENGTH_OMIT,
