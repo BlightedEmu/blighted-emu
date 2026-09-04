@@ -113,6 +113,7 @@ enum Phase {
 
 /// One player connection.
 pub struct Peer {
+    id: u64,
     settings: PeerSettings,
     dtls: DtlsSession,
     carrier: Connection,
@@ -125,9 +126,11 @@ pub struct Peer {
 }
 
 impl Peer {
-    /// A connection over a started DTLS session (see [`nw_dtls::VerifiedHello::start`]).
-    pub fn new(dtls: DtlsSession, settings: PeerSettings, now_ms: u64) -> Self {
+    /// Connection `id` over a started DTLS session (see [`nw_dtls::VerifiedHello::start`]). The
+    /// caller gives each connection its own id.
+    pub fn new(id: u64, dtls: DtlsSession, settings: PeerSettings, now_ms: u64) -> Self {
         Self {
+            id,
             settings,
             dtls,
             carrier: Connection::server(now_ms),
@@ -148,6 +151,11 @@ impl Peer {
     /// Whether DTLS is done (the handshake no longer counts against the handshake limit).
     pub fn is_established(&self) -> bool {
         self.dtls.is_established()
+    }
+
+    /// The connection id given to [`Peer::new`].
+    pub const fn id(&self) -> u64 {
+        self.id
     }
 
     /// Whether the connection is over and its last datagrams are sent.
@@ -217,7 +225,7 @@ impl Peer {
     }
 
     /// Sends the registration response for the checked ticket. A refused connection sends status
-    /// 1 and then a disconnect.
+    /// 1 and then a disconnect. A result for a peer that is not waiting for one is ignored.
     ///
     /// # Errors
     ///
@@ -228,6 +236,9 @@ impl Peer {
         result: Result<&EntryRecord, Refusal>,
         server_version: &str,
     ) -> Result<(), PeerError> {
+        if self.phase != Phase::Checking {
+            return Ok(());
+        }
         let status = if result.is_ok() {
             REGISTRATION_STATUS_AUTHORIZED
         } else {
@@ -308,6 +319,7 @@ mod tests {
     const PEER: &str = "192.0.2.30:41000";
     const VERSION: &str = "[TEST].Javelin.1.365.6031.1";
     const VALID_DAYS: u32 = 30;
+    const CONNECTION_ID: u64 = 1;
     const APPLICATION_DATA_RECORD: u8 = 23;
     const DTLS_1_2: [u8; 2] = [0xfe, 0xfd];
     const FORGED_RECORD_BODY_LEN: u8 = 48;
@@ -348,6 +360,7 @@ mod tests {
         (
             RepClient::new(&client, MTU, token(), START_MS).expect("client"),
             Peer::new(
+                CONNECTION_ID,
                 DtlsSession::accept(&server, PEER.parse().expect("peer"), settings.mtu)
                     .expect("accept"),
                 settings,
@@ -498,6 +511,28 @@ mod tests {
             peer.poll(now + SETTINGS.silence_timeout_ms),
             Err(PeerError::Silent)
         ));
+    }
+
+    #[test]
+    fn a_result_for_a_peer_that_is_not_checking_is_ignored() {
+        let (mut client, mut peer) = sides(SETTINGS);
+        let (_, _, now) = run(
+            &mut client,
+            &mut peer,
+            START_MS,
+            Err(Refusal::Expired),
+            |events| events.contains(&RepEvent::Connected),
+        );
+        assert!(!peer.is_registered());
+        let entry = record();
+        peer.complete_registration(SystemTime::now(), Ok(&entry), VERSION)
+            .expect("ignored");
+        assert!(!peer.is_registered());
+        let mut events = Vec::new();
+        for datagram in peer.poll(now).expect("poll") {
+            events.extend(client.receive(now, &datagram).expect("client"));
+        }
+        assert_eq!(status(&events), None);
     }
 
     #[test]

@@ -72,7 +72,8 @@ pub struct Gateway<Q> {
     pub limits: GatewayLimits,
 }
 
-type TicketResult = (SocketAddr, Result<EntryRecord, Refusal>);
+/// A ticket check result for one connection: address, connection id, result.
+type TicketResult = (SocketAddr, u64, Result<EntryRecord, Refusal>);
 
 struct Loop<Q> {
     gateway: Gateway<Q>,
@@ -81,6 +82,8 @@ struct Loop<Q> {
     handshake_windows: HashMap<IpAddr, (Instant, u32)>,
     results: mpsc::Sender<TicketResult>,
     started: Instant,
+    /// Id of the next connection; a ticket result goes only to the connection that asked.
+    next_connection: u64,
 }
 
 /// Serves `socket` until `shutdown` finishes.
@@ -101,6 +104,7 @@ pub async fn serve<Q: QueueStore>(
         handshake_windows: HashMap::new(),
         results,
         started: Instant::now(),
+        next_connection: 0,
     };
     let mut buffer = vec![0_u8; MAX_UDP_DATAGRAM];
     let mut tick = tokio::time::interval(TICK);
@@ -112,7 +116,9 @@ pub async fn serve<Q: QueueStore>(
                 let (len, address) = received?;
                 state.datagram(address, &buffer[..len]).await;
             }
-            Some((address, result)) = incoming.recv() => state.ticket_result(address, result).await,
+            Some((address, connection, result)) = incoming.recv() => {
+                state.ticket_result(address, connection, result).await;
+            }
             _ = tick.tick() => state.poll_all().await,
         }
     }
@@ -132,8 +138,9 @@ impl<Q: QueueStore> Loop<Q> {
         };
         match peer.receive(now, bytes) {
             Ok(events) => {
+                let connection = peer.id();
                 for PeerEvent::RegistrationRequested(claims) in events {
-                    self.check(address, claims);
+                    self.check(address, connection, claims);
                 }
                 self.flush(address, now).await;
             }
@@ -177,8 +184,16 @@ impl<Q: QueueStore> Loop<Q> {
                 return;
             }
         };
-        self.peers
-            .insert(address, Peer::new(session, self.gateway.peer_settings, now));
+        self.peers.insert(
+            address,
+            Peer::new(
+                self.next_connection,
+                session,
+                self.gateway.peer_settings,
+                now,
+            ),
+        );
+        self.next_connection += 1;
         self.flush(address, now).await;
         self.report();
     }
@@ -212,7 +227,7 @@ impl<Q: QueueStore> Loop<Q> {
         *count <= self.gateway.limits.handshakes_per_ip_per_second
     }
 
-    fn check(&self, address: SocketAddr, claims: TicketClaims) {
+    fn check(&self, address: SocketAddr, connection: u64, claims: TicketClaims) {
         let store = self.gateway.store.clone();
         let key = Arc::clone(&self.gateway.signing_key);
         let world = self.gateway.world_id;
@@ -232,16 +247,25 @@ impl<Q: QueueStore> Loop<Q> {
                 ),
             }
             // The loop may have stopped; then nobody waits for the result.
-            let _ = results.send((address, result)).await;
+            let _ = results.send((address, connection, result)).await;
         });
     }
 
-    async fn ticket_result(&mut self, address: SocketAddr, result: Result<EntryRecord, Refusal>) {
+    async fn ticket_result(
+        &mut self,
+        address: SocketAddr,
+        connection: u64,
+        result: Result<EntryRecord, Refusal>,
+    ) {
         let label = result
             .as_ref()
             .map_or_else(|refusal| refusal.reason(), |_| ACCEPTED);
         metrics::counter!(METRIC_REGISTRATIONS, RESULT_LABEL => label).increment(1);
-        let Some(peer) = self.peers.get_mut(&address) else {
+        let Some(peer) = self
+            .peers
+            .get_mut(&address)
+            .filter(|peer| peer.id() == connection)
+        else {
             return;
         };
         let completed = peer.complete_registration(
