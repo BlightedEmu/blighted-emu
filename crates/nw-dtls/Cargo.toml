@@ -1,0 +1,18 @@
+[package]
+name = "nw-dtls"
+version = "0.1.0"
+description = "DTLS 1.2 sessions for the REP connection, with OpenSSL and no sockets."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+openssl.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true
