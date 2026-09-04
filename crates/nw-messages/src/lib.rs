@@ -5,20 +5,26 @@
 //! `docs/re/2026-09-04-bootstrap-message-bodies.md` for the messages here. A field without a
 //! name in the notes keeps a neutral name. `decode` fails on missing bytes and on bytes left over.
 
+pub mod bundle;
 pub mod client_add_entry;
 pub mod connected;
 pub mod day_phase;
+pub mod server;
 pub mod spawn_point;
 pub mod time_change;
 pub mod time_synch;
 pub mod wire;
 
+pub use bundle::{
+    IndexBlock, MAX_BUNDLE_INDEXES, REPLICATED_STATE_BUNDLE_TYPE_INDEX, ReplicatedStateBundle,
+};
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use connected::{
     Block1415acc30, CALENDAR_CONNECTED_MSG_TYPE_INDEX, CalendarConnectedMsg, ConnectedBody,
     TIMING_CONFIGURATION_CONNECTED_MSG_TYPE_INDEX, TimingConfigurationConnectedMsg,
 };
 pub use day_phase::{OBSERVED_DAY_PHASE, SYNC_DAY_PHASE_MSG_TYPE_INDEX, SyncDayPhaseMsg};
+pub use server::{SERVER_MESSAGE_TYPES, ServerMessage};
 pub use spawn_point::{RECEIVE_PLAYER_SPAWN_POINT_MSG_TYPE_INDEX, ReceivePlayerSpawnPointMsg};
 pub use time_change::{
     OBSERVED_TIME_CHANGE_FRACTIONS, OBSERVED_TIME_CHANGE_PERIODS, OBSERVED_TIME_CHANGE_RATES,
