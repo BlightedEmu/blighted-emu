@@ -31,6 +31,9 @@ pub const ACK_KEEP_ALIVE: u8 = 0x20;
 pub const ACK_BITMAP_LEN_MASK: u8 = 0x7F;
 /// Largest bitmap in bytes (512 datagrams of history).
 pub const MAX_ACK_BITMAP_LEN: usize = 64;
+/// Widest range ack: the same 512 datagrams of history a bitmap can name. A wider range is
+/// refused, because no sender keeps that many datagrams unacked.
+pub const MAX_ACK_RANGE: u16 = 512;
 
 const OPCODE_LEN: usize = 1;
 const VERSION_LEN: usize = 4;
@@ -61,29 +64,21 @@ pub enum Acks {
 }
 
 impl Acks {
-    /// Every datagram sequence number this ack confirms.
-    pub fn acked(&self) -> Vec<u16> {
+    /// Whether this ack confirms datagram `sequence`. The check never lists the datagrams, so
+    /// its cost does not depend on the width of a range.
+    pub fn contains(&self, sequence: u16) -> bool {
         match self {
-            Self::KeepAlive => Vec::new(),
-            Self::Last(last) => vec![*last],
+            Self::KeepAlive => false,
+            Self::Last(last) => *last == sequence,
             Self::Range { last, first } => {
-                let count = last.wrapping_sub(*first);
-                (0..=count)
-                    .map(|offset| first.wrapping_add(offset))
-                    .collect()
+                sequence.wrapping_sub(*first) <= last.wrapping_sub(*first)
             }
             Self::Bitmap { last, history } => {
-                let mut acked = vec![*last];
-                let mut back: u16 = 1;
-                for byte in history {
-                    for bit in 0..BITS_PER_BYTE {
-                        if byte >> bit & 1 == 1 {
-                            acked.push(last.wrapping_sub(back));
-                        }
-                        back = back.wrapping_add(1);
-                    }
-                }
-                acked
+                let distance = usize::from(last.wrapping_sub(sequence));
+                distance == 0
+                    || history
+                        .get((distance - 1) / BITS_PER_BYTE)
+                        .is_some_and(|byte| byte >> ((distance - 1) % BITS_PER_BYTE) & 1 == 1)
             }
         }
     }
@@ -227,10 +222,11 @@ fn decode_acks(data: &[u8]) -> Option<Acks> {
     }
     match (flags, rest) {
         (ACK_KEEP_ALIVE, []) => Some(Acks::KeepAlive),
-        (ACK_RANGE, [l0, l1, f0, f1]) => Some(Acks::Range {
-            last: u16::from_be_bytes([*l0, *l1]),
-            first: u16::from_be_bytes([*f0, *f1]),
-        }),
+        (ACK_RANGE, [l0, l1, f0, f1]) => {
+            let last = u16::from_be_bytes([*l0, *l1]);
+            let first = u16::from_be_bytes([*f0, *f1]);
+            (last.wrapping_sub(first) <= MAX_ACK_RANGE).then_some(Acks::Range { last, first })
+        }
         (0, [l0, l1]) => Some(Acks::Last(u16::from_be_bytes([*l0, *l1]))),
         _ => None,
     }
@@ -330,8 +326,38 @@ mod tests {
             let message = SystemMessage::decode(bytes).expect("decode");
             assert_eq!(message, SystemMessage::Acks(acks.clone()));
             assert_eq!(message.encode(), bytes);
-            assert_eq!(acks.acked(), acked);
+            for sequence in acked {
+                assert!(acks.contains(sequence));
+            }
         }
+    }
+
+    #[test]
+    fn a_range_wider_than_the_ack_history_is_refused() {
+        let widest = [ACK_RANGE, 0x00, 0x10, 0x00, 0x11, OP_ACKS];
+        assert_eq!(
+            SystemMessage::decode(&widest),
+            Err(CarrierError::BadSystemMessage { opcode: OP_ACKS })
+        );
+    }
+
+    #[test]
+    fn contains_names_the_acked_datagrams_without_listing_them() {
+        let range = Acks::Range {
+            last: WRAP_LAST,
+            first: WRAP_FIRST,
+        };
+        assert!(range.contains(WRAP_FIRST) && range.contains(0) && range.contains(WRAP_LAST));
+        assert!(!range.contains(WRAP_LAST + 1) && !range.contains(WRAP_FIRST - 1));
+        let bitmap = Acks::Bitmap {
+            last: BITMAP_LAST,
+            history: vec![0b0000_0101],
+        };
+        assert!(bitmap.contains(BITMAP_LAST) && bitmap.contains(BITMAP_LAST - 1));
+        assert!(bitmap.contains(BITMAP_LAST - 3) && !bitmap.contains(BITMAP_LAST - 2));
+        assert!(!bitmap.contains(BITMAP_LAST + 1));
+        assert!(Acks::Last(SINGLE).contains(SINGLE) && !Acks::Last(SINGLE).contains(SINGLE + 1));
+        assert!(!Acks::KeepAlive.contains(SINGLE));
     }
 
     #[test]
@@ -340,7 +366,9 @@ mod tests {
             last: WRAP_LAST,
             first: WRAP_FIRST,
         };
-        assert_eq!(acks.acked(), vec![WRAP_FIRST, 0, WRAP_LAST]);
+        for sequence in [WRAP_FIRST, 0, WRAP_LAST] {
+            assert!(acks.contains(sequence));
+        }
     }
 
     #[test]

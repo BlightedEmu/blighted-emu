@@ -104,10 +104,12 @@ impl Connection {
     }
 
     fn new(role: Role, now_ms: u64) -> Self {
+        let mut receiver = Receiver::new(ReceiveLimits::REGISTRATION);
+        receiver.accept_data(false);
         Self {
             role,
             state: ConnectionState::Connecting,
-            receiver: Receiver::new(ReceiveLimits::REGISTRATION),
+            receiver,
             sender: Sender::new(),
             connect_attempts: 0,
             next_connect_ms: now_ms,
@@ -151,12 +153,7 @@ impl Connection {
         let mut events = Vec::new();
         for item in inbound {
             match item {
-                Inbound::Message(message) => {
-                    if self.state != ConnectionState::Connected {
-                        return Err(CarrierError::NotConnected);
-                    }
-                    events.push(Event::Message(message));
-                }
+                Inbound::Message(message) => events.push(Event::Message(message)),
                 Inbound::System(system) => self.handle_system(system, &mut events)?,
             }
             if self.state == ConnectionState::Closed {
@@ -181,12 +178,14 @@ impl Connection {
                 };
                 self.sender.send(SYSTEM_RELIABLE, &ack.encode())?;
                 self.state = ConnectionState::Connected;
+                self.receiver.accept_data(true);
                 events.push(Event::Connected);
             }
             SystemMessage::ConnectAck { .. }
                 if self.role == Role::Client && self.state == ConnectionState::Connecting =>
             {
                 self.state = ConnectionState::Connected;
+                self.receiver.accept_data(true);
                 events.push(Event::Connected);
             }
             SystemMessage::Acks(acks) => self.sender.handle_acks(&acks),
@@ -462,6 +461,25 @@ mod tests {
         );
         assert_eq!(
             client.send(DATA_CHANNEL, true, HELLO),
+            Err(CarrierError::NotConnected)
+        );
+    }
+
+    #[test]
+    fn data_before_the_handshake_is_refused_before_it_is_held() {
+        let (mut talker, _) = connected_pair();
+        talker.send(DATA_CHANNEL, true, HELLO).expect("first");
+        talker.send(DATA_CHANNEL, true, HELLO).expect("second");
+        let bytes = talker.poll(START + STEP).expect("poll");
+        let frames =
+            decode_frames(&decode_datagram(&bytes[0]).expect("decode").body).expect("frames");
+        let ahead = crate::datagram::encode_datagram(
+            crate::sender::FIRST_DATAGRAM_SEQUENCE,
+            &crate::frame::encode_frames(&frames[1..]).expect("encode"),
+        );
+        let mut fresh = Connection::server(START);
+        assert_eq!(
+            fresh.receive(START + STEP, &ahead),
             Err(CarrierError::NotConnected)
         );
     }

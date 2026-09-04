@@ -126,9 +126,8 @@ impl Sender {
 
     /// Removes the acked datagrams from the in-flight list.
     pub fn handle_acks(&mut self, acks: &Acks) {
-        for sequence in acks.acked() {
-            self.in_flight.remove(&sequence);
-        }
+        self.in_flight
+            .retain(|sequence, _| !acks.contains(*sequence));
     }
 
     /// Whether any frame is queued or waits for an ack.

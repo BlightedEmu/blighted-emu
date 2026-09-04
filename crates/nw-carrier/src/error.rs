@@ -86,6 +86,9 @@ pub enum CarrierError {
         /// Sends so far.
         attempts: u32,
     },
+    /// A plain datagram body is longer than the limit.
+    #[error("datagram body is longer than the limit")]
+    BodyTooLong,
     /// A message was sent or received before the handshake or after close.
     #[error("connection is not connected")]
     NotConnected,

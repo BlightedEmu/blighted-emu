@@ -16,7 +16,7 @@ pub const HEADER_VERSION: u8 = 0x01;
 pub const DATAGRAM_HEADER_LEN: usize = 4;
 /// Largest datagram in the captures, plain or after LZ4 decoding (1,128 bytes).
 pub const MAX_DATAGRAM_LEN: usize = 1128;
-/// Largest body this decoder unpacks from an LZ4 datagram.
+/// Largest body this decoder takes, plain or unpacked from LZ4.
 pub const MAX_BODY_LEN: usize = 4096;
 
 /// One decoded datagram.
@@ -66,6 +66,7 @@ pub fn decode_datagram(bytes: &[u8]) -> Result<Datagram, CarrierError> {
     }
     let sequence = u16::from_be_bytes([header[2], header[3]]);
     let body = match header[0] {
+        MODE_PLAIN if rest.len() > MAX_BODY_LEN => return Err(CarrierError::BodyTooLong),
         MODE_PLAIN => rest.to_vec(),
         MODE_LZ4 => {
             let mut out = vec![0_u8; MAX_BODY_LEN];
@@ -130,6 +131,13 @@ mod tests {
             decode_datagram(&[MODE_PLAIN, 0, 0, 0]),
             Err(CarrierError::BadHeader { .. })
         ));
+    }
+
+    #[test]
+    fn oversized_plain_bodies_are_an_error() {
+        let mut datagram = vec![MODE_PLAIN, HEADER_VERSION, 0, 0];
+        datagram.extend(vec![0_u8; MAX_BODY_LEN + 1]);
+        assert_eq!(decode_datagram(&datagram), Err(CarrierError::BodyTooLong));
     }
 
     #[test]

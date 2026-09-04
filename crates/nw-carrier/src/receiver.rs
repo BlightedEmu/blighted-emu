@@ -21,8 +21,11 @@ use crate::system::{Acks, MAX_ACK_BITMAP_LEN, SystemMessage};
 pub const MAX_REGISTRATION_MESSAGE_LEN: usize = 16 * 1024;
 /// Largest message after registration (M3 spec section 5; the captures hold messages over 128 KiB).
 pub const MAX_SESSION_MESSAGE_LEN: usize = 1024 * 1024;
-/// Most reliable frames held while an earlier one is missing (M3 spec section 5).
+/// Most reliable frames one connection holds while earlier ones are missing, over all channels
+/// (M3 spec section 5).
 pub const MAX_HELD_FRAMES: usize = 1024;
+/// Most held frames before registration: the V3 request is 3 chunks.
+pub const MAX_REGISTRATION_HELD_FRAMES: usize = 64;
 /// Reliable sequence number of the first reliable frame on each channel of a new connection.
 pub const FIRST_RELIABLE_SEQUENCE: u16 = 0;
 /// Datagram sequence numbers remembered to find repeats.
@@ -41,7 +44,7 @@ const ACK_HISTORY_DATAGRAMS: usize = MAX_ACK_BITMAP_LEN * BITS_PER_BYTE;
 pub struct ReceiveLimits {
     /// Largest joined message.
     pub max_message_len: usize,
-    /// Most reliable frames held per channel.
+    /// Most reliable frames held over all channels.
     pub max_held_frames: usize,
 }
 
@@ -49,7 +52,7 @@ impl ReceiveLimits {
     /// Limits before registration.
     pub const REGISTRATION: Self = Self {
         max_message_len: MAX_REGISTRATION_MESSAGE_LEN,
-        max_held_frames: MAX_HELD_FRAMES,
+        max_held_frames: MAX_REGISTRATION_HELD_FRAMES,
     };
     /// Limits after registration.
     pub const SESSION: Self = Self {
@@ -94,6 +97,8 @@ pub struct Receiver {
     recent: VecDeque<u16>,
     recent_set: HashSet<u16>,
     unacked: Vec<u16>,
+    held_total: usize,
+    accept_data: bool,
 }
 
 impl Receiver {
@@ -118,7 +123,15 @@ impl Receiver {
             recent: VecDeque::with_capacity(RECENT_DATAGRAMS),
             recent_set: HashSet::with_capacity(RECENT_DATAGRAMS),
             unacked: Vec::new(),
+            held_total: 0,
+            accept_data: true,
         }
+    }
+
+    /// Whether frames on channels 0 to 2 are taken; a connection refuses them before its
+    /// handshake, so they are never held. A new receiver takes them.
+    pub fn accept_data(&mut self, accept: bool) {
+        self.accept_data = accept;
     }
 
     /// Changes the limits, for example after registration.
@@ -144,6 +157,9 @@ impl Receiver {
         }
         let mut delivered = Vec::new();
         for frame in frames {
+            if frame.channel != SYSTEM_CHANNEL && !self.accept_data {
+                return Err(CarrierError::NotConnected);
+            }
             if frame.channel == SYSTEM_CHANNEL {
                 delivered.push(Inbound::System(SystemMessage::decode(&frame.payload)?));
             } else if frame.reliable {
@@ -169,12 +185,18 @@ impl Receiver {
     /// An ack of every datagram with a reliable frame received since the last call, or `None`
     /// when there is none.
     pub fn take_acks(&mut self) -> Option<Acks> {
-        let reference = *self.unacked.first()?;
+        let first = *self.unacked.first()?;
         let last = self
             .unacked
             .iter()
             .copied()
-            .max_by_key(|sequence| sequence.wrapping_sub(reference))?;
+            .fold(first, |newest, sequence| {
+                if is_newer(sequence, newest) {
+                    sequence
+                } else {
+                    newest
+                }
+            });
         let behind: HashSet<u16> = self
             .unacked
             .drain(..)
@@ -220,14 +242,17 @@ impl Receiver {
         if frame.reliable_sequence.wrapping_sub(next) >= HALF_SEQUENCE_SPACE {
             return Ok(());
         }
-        state.held.insert(frame.reliable_sequence, frame);
-        if state.held.len() > limits.max_held_frames {
+        if state.held.insert(frame.reliable_sequence, frame).is_none() {
+            self.held_total += 1;
+        }
+        if self.held_total > limits.max_held_frames {
             return Err(CarrierError::TooManyHeld {
                 limit: limits.max_held_frames,
             });
         }
         let mut expected = next;
         while let Some(ready) = state.held.remove(&expected) {
+            self.held_total -= 1;
             expected = expected.wrapping_add(1);
             if let Some(payload) = join(state, ready, limits.max_message_len)? {
                 delivered.push(Inbound::Message(Message {
@@ -240,6 +265,12 @@ impl Receiver {
         state.next_reliable = Some(expected);
         Ok(())
     }
+}
+
+/// Whether datagram `candidate` is newer than `other` in serial-number order.
+fn is_newer(candidate: u16, other: u16) -> bool {
+    let distance = candidate.wrapping_sub(other);
+    distance != 0 && distance < HALF_SEQUENCE_SPACE
 }
 
 /// Adds an in-order reliable frame to the channel's chunk run; returns a complete message.
@@ -501,6 +532,54 @@ mod tests {
     }
 
     #[test]
+    fn acks_name_the_newest_datagram_when_an_older_one_comes_last() {
+        let mut receiver = Receiver::mid_stream(ReceiveLimits::SESSION);
+        let mut next = START;
+        let newer = reliable_datagram(&mut next, DATAGRAM + 1);
+        let older = reliable_datagram(&mut next, DATAGRAM);
+        receiver.receive(&newer).expect("newer");
+        receiver.receive(&older).expect("older");
+        assert_eq!(
+            receiver.take_acks(),
+            Some(Acks::Range {
+                last: DATAGRAM + 1,
+                first: DATAGRAM
+            })
+        );
+    }
+
+    #[test]
+    fn the_held_limit_covers_all_channels() {
+        let limits = ReceiveLimits {
+            max_message_len: MAX_SESSION_MESSAGE_LEN,
+            max_held_frames: HELD_LIMIT,
+        };
+        let mut receiver = Receiver::new(limits);
+        let ahead: Vec<Frame> = [0, 1, 2]
+            .into_iter()
+            .map(|channel| Frame {
+                channel,
+                ..frame(FIRST_RELIABLE_SEQUENCE + 1, None, b"x")
+            })
+            .collect();
+        assert!(matches!(
+            receiver.receive(&datagram(DATAGRAM, &ahead)),
+            Err(CarrierError::TooManyHeld { .. })
+        ));
+    }
+
+    #[test]
+    fn data_frames_are_refused_while_data_is_not_accepted() {
+        let mut receiver = Receiver::new(ReceiveLimits::REGISTRATION);
+        receiver.accept_data(false);
+        let ahead = frame(FIRST_RELIABLE_SEQUENCE + 1, None, b"x");
+        assert_eq!(
+            receiver.receive(&datagram(DATAGRAM, &[ahead])),
+            Err(CarrierError::NotConnected)
+        );
+    }
+
+    #[test]
     fn ack_only_datagrams_are_not_acked() {
         let mut receiver = Receiver::mid_stream(ReceiveLimits::SESSION);
         let mut ack = frame(0, None, &[0x20, 0x06]);
@@ -545,7 +624,8 @@ mod tests {
                 history: vec![0b0000_0100]
             }
         );
-        assert_eq!(acks.acked(), vec![DATAGRAM + 9, DATAGRAM + 6]);
+        assert!(acks.contains(DATAGRAM + 9) && acks.contains(DATAGRAM + 6));
+        assert!(!acks.contains(DATAGRAM + 7) && !acks.contains(DATAGRAM + 8));
         receiver
             .receive(&datagram(DATAGRAM + 9, &[]))
             .expect("repeat");
