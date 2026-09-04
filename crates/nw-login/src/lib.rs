@@ -23,6 +23,8 @@ pub mod signature;
 pub mod store;
 #[cfg(test)]
 mod test_http;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_support;
 pub mod time;
 pub mod valkey;
 

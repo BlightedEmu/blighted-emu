@@ -38,8 +38,10 @@ tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 [features]
+# Test helpers for this and other crates.
+test-util = []
 # Tests that need the Docker Compose PostgreSQL and Valkey (`just test-infra`).
-infra = ["nw-db/infra"]
+infra = ["nw-db/infra", "test-util"]
 
 [lints]
 workspace = true

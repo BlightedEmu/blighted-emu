@@ -350,7 +350,10 @@ impl CaptureReport {
 #[cfg(test)]
 mod tests {
     use nw_carrier::{Frame, encode_datagram, encode_frames};
-    use nw_reflect::{PING_MSG_TYPE_INDEX, TypeId, encode_client_message, encode_server_messages};
+    use nw_reflect::{
+        PING_MSG_TYPE_INDEX, REGISTRATION_RESPONSE_OBSERVED_FLAGS, REGISTRATION_STATUS_AUTHORIZED,
+        TypeId, encode_client_message, encode_server_messages,
+    };
 
     use super::*;
 
@@ -360,8 +363,6 @@ mod tests {
     const RELIABLE_START: u16 = 10;
     const PING_BODY: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 1];
     const ZERO_SESSION: [u8; 16] = [0; 16];
-    const STATUS_OK: u32 = 0;
-    const OBSERVED_FLAGS: [u8; 4] = [1, 0, 0, 1];
     const TOKEN: &[u8; 32] = b"0123456789ABCDEF0123456789ABCDEF";
     const VERSION: &str = "[TEST].Javelin.1.365.6031.1";
     const CLOCK_OFFSET_MS: u64 = 250;
@@ -400,11 +401,11 @@ mod tests {
 
     fn sample_ledger() -> Vec<u8> {
         let response = RegistrationResponseMsg {
-            uint32_at_0x8: STATUS_OK,
+            uint32_at_0x8: REGISTRATION_STATUS_AUTHORIZED,
             uint64: (TIME_MS - CLOCK_EPOCH_UNIX_MS + CLOCK_OFFSET_MS) * NANOS_PER_MILLI,
             bytes_at_0x18: TOKEN.to_vec(),
             bytes_at_0x38: VERSION.as_bytes().to_vec(),
-            bytes_at_0x58: OBSERVED_FLAGS,
+            bytes_at_0x58: REGISTRATION_RESPONSE_OBSERVED_FLAGS,
         };
         let registration = envelope(
             REGISTRATION_RESPONSE_MSG_TYPE_INDEX,
@@ -450,8 +451,8 @@ mod tests {
         assert_eq!(report.types[&(CLIENT_TO_SERVER, PING_MSG_TYPE_INDEX)], 1);
         let summary = &report.registration;
         assert_eq!(summary.responses, 1);
-        assert_eq!(summary.statuses[&STATUS_OK], 1);
-        assert_eq!(summary.flags[&OBSERVED_FLAGS], 1);
+        assert_eq!(summary.statuses[&REGISTRATION_STATUS_AUTHORIZED], 1);
+        assert_eq!(summary.flags[&REGISTRATION_RESPONSE_OBSERVED_FLAGS], 1);
         assert_eq!(summary.versions[VERSION], 1);
         assert_eq!(summary.token_lengths[&TOKEN.len()], 1);
         assert_eq!(summary.max_clock_offset_ms, CLOCK_OFFSET_MS);

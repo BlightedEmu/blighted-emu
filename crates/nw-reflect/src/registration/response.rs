@@ -27,6 +27,16 @@ pub const REGISTRATION_RESPONSE_FLAGS_LAST_OFFSET: usize = 0x5b;
 /// Four bytes at object +0x58 through +0x5b. Each is 0 or 1.
 pub const REGISTRATION_RESPONSE_FLAG_COUNT: usize = 4;
 
+/// Status of an accepted registration (all 43 captured responses).
+pub const REGISTRATION_STATUS_AUTHORIZED: u32 = 0;
+
+/// Status of a refused registration. Any value other than 0 refuses; the emulator sends 1.
+pub const REGISTRATION_STATUS_REFUSED: u32 = 1;
+
+/// The four bytes of all 43 captured responses (meanings Unknown).
+pub const REGISTRATION_RESPONSE_OBSERVED_FLAGS: [u8; REGISTRATION_RESPONSE_FLAG_COUNT] =
+    [1, 0, 0, 1];
+
 const _: () = {
     assert!(
         REGISTRATION_RESPONSE_FLAGS_OFFSET + REGISTRATION_RESPONSE_FLAG_COUNT - 1

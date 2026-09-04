@@ -6,12 +6,10 @@
 //! session.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::connect_info::MockConnectInfo;
 use axum::http::header::{AUTHORIZATION, HOST};
 use axum::http::{Request, StatusCode};
 use nw_db::test_db::with_test_schema;
@@ -29,28 +27,18 @@ use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use crate::config::tests::valid;
-use crate::discord::tests::FakeDiscord;
-use crate::game::{CHANNEL_FILE_SUFFIX, GameState};
-use crate::host::edge_router;
+use crate::game::CHANNEL_FILE_SUFFIX;
 use crate::keys::new_game_session_key;
-use crate::launcher::LauncherState;
-use crate::password::PasswordHasher;
-use crate::pg::{PgAccounts, PgCharacters};
 use crate::queue::{QueueAction, QueueSettings, QueueStatus, QueueStore, QueueTime};
-use crate::secrets::SigningKey;
 use crate::signature::verify_entry;
 use crate::test_http::{self, error_code};
+use crate::test_support::{edge_app, test_signing_key, test_valkey_url};
 use crate::valkey::Valkey;
-use crate::valkey::tests::test_valkey_url;
 
-const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-const ONE_HASH_AT_A_TIME: usize = 1;
 const USERNAME: &str = "scripted";
 const PASSWORD: &str = "password-ok";
 const CHARACTER_NAME: &str = "Scripta";
 const STEAM_TICKET: &str = "140000";
-const PEER_PORT: u16 = 50_000;
-const PRIVATE_NETWORK: u8 = 10;
 const HTTPS_PREFIX: &str = "https://";
 const ENDPOINT_PATH_START: char = '/';
 const BEARER_PREFIX: &str = "Bearer ";
@@ -59,12 +47,6 @@ const STEAM_BODY: &str =
     r#"{"steamAuthTicket":"140000", "steamAppId":"1063730", "branch":"public"}"#;
 const LOGIN_INFO_BODY: &str = r#"{"channelId":"live","includeNames":"true"}"#;
 const LIST_WORLDS_BODY: &str = r#"{"ListWorldsRequestBody":{}}"#;
-
-/// A peer address no other test run uses, so the per-IP limits in the shared Valkey stay low.
-fn random_peer() -> SocketAddr {
-    let bytes = Uuid::new_v4().into_bytes();
-    SocketAddr::from(([PRIVATE_NETWORK, bytes[0], bytes[1], bytes[2]], PEER_PORT))
-}
 
 async fn call(
     app: &Router,
@@ -126,27 +108,7 @@ async fn walk(global: &PgPool, world_pool: &PgPool) {
     let valkey = Valkey::connect(&test_valkey_url())
         .await
         .expect("connect to Valkey");
-    let launcher = LauncherState {
-        config: Arc::clone(&config),
-        accounts: PgAccounts::new(global.clone()),
-        game_sessions: valkey.clone(),
-        limits: valkey.clone(),
-        discord_states: valkey.clone(),
-        discord: None::<FakeDiscord>,
-        hasher: PasswordHasher::new(ONE_HASH_AT_A_TIME).expect("hasher"),
-    };
-    let game = GameState {
-        config: Arc::clone(&config),
-        game_sessions: valkey.clone(),
-        characters: PgCharacters::new(
-            global.clone(),
-            HashMap::from([(world.id, world_pool.clone())]),
-        ),
-        limits: valkey.clone(),
-        queue: valkey,
-        signing_key: SigningKey::from_hex(KEY_HEX).expect("key"),
-    };
-    let app = edge_router(launcher, game.clone()).layer(MockConnectInfo(random_peer()));
+    let app = edge_app(Arc::clone(&config), global, world_pool, valkey.clone());
     let login_host = config.login_host();
 
     // Launcher: sign up, log in again, ask for a game session key.
@@ -301,8 +263,7 @@ async fn walk(global: &PgPool, world_pool: &PgPool) {
         Some(ticket_id.clone())
     );
     let account = Uuid::parse_str(token.persona_id.as_deref().expect("persona")).expect("uuid");
-    let status = game
-        .queue
+    let status = valkey
         .update(
             &QueueSettings::for_world(&world),
             account,
@@ -318,7 +279,7 @@ async fn walk(global: &PgPool, world_pool: &PgPool) {
     };
     let signature = token.signature.expect("signature");
     assert!(verify_entry(
-        &game.signing_key,
+        &test_signing_key(),
         &record.claims(),
         &signature
     ));

@@ -298,11 +298,7 @@ impl QueueStore for Valkey {
 pub(crate) mod tests {
     use super::*;
     use crate::memory::contract;
-
-    /// Valkey URL for infrastructure tests (`NW_TEST_VALKEY_URL` or the Docker Compose default).
-    pub(crate) fn test_valkey_url() -> String {
-        std::env::var("NW_TEST_VALKEY_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_owned())
-    }
+    use crate::test_support::test_valkey_url;
 
     async fn valkey() -> Valkey {
         Valkey::connect(&test_valkey_url())

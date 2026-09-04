@@ -171,7 +171,10 @@ pub(crate) mod tests {
 
     use nw_carrier::ReceiveLimits;
     use nw_dtls::{COOKIE_SECRET_LEN, DtlsServerConfig, Identity, self_signed_identity};
-    use nw_reflect::{decode_client_message, encode_server_messages};
+    use nw_reflect::{
+        REGISTRATION_RESPONSE_OBSERVED_FLAGS, REGISTRATION_STATUS_AUTHORIZED,
+        decode_client_message, encode_server_messages,
+    };
 
     use super::*;
 
@@ -182,8 +185,6 @@ pub(crate) mod tests {
     const SECRET: [u8; COOKIE_SECRET_LEN] = [3; COOKIE_SECRET_LEN];
     const PEER: &str = "192.0.2.20:50000";
     const PING_BODY: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 42];
-    const STATUS_OK: u32 = 0;
-    const FLAGS: [u8; 4] = [1, 0, 0, 1];
     const TEST_NAME: &str = "test-rep";
     const VALID_DAYS: u32 = 30;
     /// One server identity for every test (RSA key generation is slow).
@@ -290,11 +291,11 @@ pub(crate) mod tests {
         let mut client = RepClient::new(&config, MTU, token(), START_MS).expect("client");
         let mut server = Server::new();
         let response = RegistrationResponseMsg {
-            uint32_at_0x8: STATUS_OK,
+            uint32_at_0x8: REGISTRATION_STATUS_AUTHORIZED,
             uint64: 1,
             bytes_at_0x18: b"TOKEN".to_vec(),
             bytes_at_0x38: b"version".to_vec(),
-            bytes_at_0x58: FLAGS,
+            bytes_at_0x58: REGISTRATION_RESPONSE_OBSERVED_FLAGS,
         };
         let reply = response.encode().expect("response");
         let (events, envelopes) = run(

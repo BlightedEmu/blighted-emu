@@ -10,15 +10,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use nw_login::queue::{EntryRecord, QueueStore};
 use nw_login::secrets::SigningKey;
 use nw_login::signature::verify_entry;
-use nw_reflect::{LoginToken, RegistrationResponseMsg};
+use nw_reflect::{
+    LoginToken, REGISTRATION_RESPONSE_OBSERVED_FLAGS, REGISTRATION_STATUS_AUTHORIZED,
+    RegistrationResponseMsg,
+};
 use uuid::Uuid;
 
-/// Response status of an accepted registration.
-pub const STATUS_AUTHORIZED: u32 = 0;
-/// Response status of a refused registration; the gateway then disconnects.
-pub const STATUS_REFUSED: u32 = 1;
-/// The four bytes of all 43 captured responses (meanings Unknown).
-pub const OBSERVED_RESPONSE_FLAGS: [u8; 4] = [1, 0, 0, 1];
 /// Random bytes of a session token; it is sent as 32 upper-case hexadecimal characters.
 pub const SESSION_TOKEN_BYTES: usize = 16;
 /// Start of the response clock: 2000-01-01 00:00:00 UTC.
@@ -131,7 +128,7 @@ pub fn response(
     now: SystemTime,
     server_version: &str,
 ) -> Result<RegistrationResponseMsg, getrandom::Error> {
-    let session_token = if status == STATUS_AUTHORIZED {
+    let session_token = if status == REGISTRATION_STATUS_AUTHORIZED {
         let mut bytes = [0_u8; SESSION_TOKEN_BYTES];
         getrandom::fill(&mut bytes)?;
         hex::encode_upper(bytes).into_bytes()
@@ -143,7 +140,7 @@ pub fn response(
         uint64: clock_nanos(now),
         bytes_at_0x18: session_token,
         bytes_at_0x38: server_version.as_bytes().to_vec(),
-        bytes_at_0x58: OBSERVED_RESPONSE_FLAGS,
+        bytes_at_0x58: REGISTRATION_RESPONSE_OBSERVED_FLAGS,
     })
 }
 
@@ -158,17 +155,18 @@ fn clock_nanos(now: SystemTime) -> u64 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     use nw_login::queue::{QueueAction, QueueSettings, QueueStatus, QueueTime};
     use nw_login::signature::sign_entry;
     use nw_login::store::StoreError;
+    use nw_login::test_support::test_signing_key;
+    use nw_reflect::REGISTRATION_STATUS_REFUSED;
 
     use super::*;
 
-    const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const OTHER_KEY_HEX: &str = "ff0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const NOW: i64 = 1_800_000_000;
     const LIFETIME: i64 = 60;
@@ -181,9 +179,9 @@ mod tests {
 
     /// A queue store that holds entry records only.
     #[derive(Clone, Default)]
-    struct Records {
-        records: Arc<Mutex<HashMap<String, EntryRecord>>>,
-        down: bool,
+    pub(crate) struct Records {
+        pub(crate) records: Arc<Mutex<HashMap<String, EntryRecord>>>,
+        pub(crate) down: bool,
     }
 
     impl QueueStore for Records {
@@ -203,10 +201,6 @@ mod tests {
             }
             Ok(self.records.lock().expect("lock").remove(ticket_id))
         }
-    }
-
-    fn key() -> SigningKey {
-        SigningKey::from_hex(KEY_HEX).expect("key")
     }
 
     fn record(world_id: Uuid, character_id: Uuid) -> EntryRecord {
@@ -239,13 +233,13 @@ mod tests {
     async fn a_good_ticket_is_accepted_once() {
         let world = Uuid::new_v4();
         let entry = record(world, Uuid::new_v4());
-        let (store, claims) = setup(&entry, &key());
+        let (store, claims) = setup(&entry, &test_signing_key());
         assert_eq!(
-            check_ticket(&store, &key(), world, &claims, NOW).await,
+            check_ticket(&store, &test_signing_key(), world, &claims, NOW).await,
             Ok(entry)
         );
         assert_eq!(
-            check_ticket(&store, &key(), world, &claims, NOW).await,
+            check_ticket(&store, &test_signing_key(), world, &claims, NOW).await,
             Err(Refusal::UnknownTicket)
         );
     }
@@ -265,7 +259,7 @@ mod tests {
             ),
             (
                 record(Uuid::new_v4(), Uuid::new_v4()),
-                key(),
+                test_signing_key(),
                 world,
                 None,
                 NOW,
@@ -273,7 +267,7 @@ mod tests {
             ),
             (
                 record(world, Uuid::new_v4()),
-                key(),
+                test_signing_key(),
                 world,
                 Some(Uuid::new_v4()),
                 NOW,
@@ -281,7 +275,7 @@ mod tests {
             ),
             (
                 record(world, Uuid::new_v4()),
-                key(),
+                test_signing_key(),
                 world,
                 None,
                 NOW + LIFETIME + 1,
@@ -294,11 +288,11 @@ mod tests {
                 claims.character_id = character.to_string();
             }
             assert_eq!(
-                check_ticket(&store, &key(), gateway_world, &claims, now).await,
+                check_ticket(&store, &test_signing_key(), gateway_world, &claims, now).await,
                 Err(refusal)
             );
             assert_eq!(
-                check_ticket(&store, &key(), gateway_world, &claims, now).await,
+                check_ticket(&store, &test_signing_key(), gateway_world, &claims, now).await,
                 Err(Refusal::UnknownTicket)
             );
         }
@@ -307,10 +301,10 @@ mod tests {
     #[tokio::test]
     async fn a_store_failure_refuses() {
         let world = Uuid::new_v4();
-        let (mut store, claims) = setup(&record(world, Uuid::new_v4()), &key());
+        let (mut store, claims) = setup(&record(world, Uuid::new_v4()), &test_signing_key());
         store.down = true;
         assert_eq!(
-            check_ticket(&store, &key(), world, &claims, NOW).await,
+            check_ticket(&store, &test_signing_key(), world, &claims, NOW).await,
             Err(Refusal::StoreUnavailable)
         );
     }
@@ -318,8 +312,8 @@ mod tests {
     #[test]
     fn an_accepted_response_has_the_captured_shape() {
         let now = UNIX_EPOCH + Duration::from_secs(NEW_YEAR_2026);
-        let accepted = response(STATUS_AUTHORIZED, now, VERSION).expect("response");
-        assert_eq!(accepted.uint32_at_0x8, STATUS_AUTHORIZED);
+        let accepted = response(REGISTRATION_STATUS_AUTHORIZED, now, VERSION).expect("response");
+        assert_eq!(accepted.uint32_at_0x8, REGISTRATION_STATUS_AUTHORIZED);
         assert_eq!(accepted.uint64, NEW_YEAR_2026_CLOCK);
         assert_eq!(accepted.bytes_at_0x18.len(), 2 * SESSION_TOKEN_BYTES);
         assert!(
@@ -329,8 +323,8 @@ mod tests {
                 .all(|byte| byte.is_ascii_digit() || byte.is_ascii_uppercase())
         );
         assert_eq!(accepted.bytes_at_0x38, VERSION.as_bytes());
-        assert_eq!(accepted.bytes_at_0x58, OBSERVED_RESPONSE_FLAGS);
-        let refused = response(STATUS_REFUSED, now, VERSION).expect("refused");
+        assert_eq!(accepted.bytes_at_0x58, REGISTRATION_RESPONSE_OBSERVED_FLAGS);
+        let refused = response(REGISTRATION_STATUS_REFUSED, now, VERSION).expect("refused");
         assert!(refused.bytes_at_0x18.is_empty());
         assert_eq!(clock_nanos(UNIX_EPOCH), 0);
     }

@@ -290,29 +290,28 @@ fn unix_now_seconds() -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::sync::{LazyLock, Mutex};
+pub(crate) mod tests {
+    use std::sync::LazyLock;
 
     use nw_dtls::{COOKIE_SECRET_LEN, DtlsClientConfig, Identity, self_signed_identity};
-    use nw_login::queue::{QueueAction, QueueSettings, QueueStatus, QueueTime};
     use nw_login::signature::sign_entry;
-    use nw_login::store::StoreError;
+    use nw_login::test_support::test_signing_key;
     use nw_reflect::LoginToken;
     use nw_testclient::rep::RepClient;
     use nw_testclient::udp::{RepOutcome, run_rep};
 
     use super::*;
-    use crate::registration::{STATUS_AUTHORIZED, STATUS_REFUSED};
+    use crate::registration::tests::Records;
+    use nw_reflect::{REGISTRATION_STATUS_AUTHORIZED, REGISTRATION_STATUS_REFUSED};
 
-    const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const SECRET: [u8; COOKIE_SECRET_LEN] = [5; COOKIE_SECRET_LEN];
     const MTU: u32 = 1200;
-    const VERSION: &str = "[TEST].Javelin.1.365.6031.1";
+    pub(crate) const VERSION: &str = "[TEST].Javelin.1.365.6031.1";
     const VALID_DAYS: u32 = 30;
     const LIFETIME_SECONDS: i64 = 60;
-    const WAIT: Duration = Duration::from_secs(5);
+    pub(crate) const WAIT: Duration = Duration::from_secs(5);
     /// Long enough for two pings 200 ms apart.
-    const HOLD: Duration = Duration::from_millis(500);
+    pub(crate) const HOLD: Duration = Duration::from_millis(500);
     /// The first client stays connected while the second one tries.
     const HOLD_FIRST: Duration = Duration::from_secs(2);
     /// Time for the first client to register before the second one starts.
@@ -320,7 +319,7 @@ mod tests {
     /// The second client gives up after this time without a reply.
     const REFUSED_WAIT: Duration = Duration::from_secs(1);
     const LOOPBACK: &str = "127.0.0.1:0";
-    const LIMITS: GatewayLimits = GatewayLimits {
+    pub(crate) const LIMITS: GatewayLimits = GatewayLimits {
         max_connections: 16,
         max_handshakes: 16,
         handshakes_per_ip_per_second: 16,
@@ -332,56 +331,19 @@ mod tests {
     static IDENTITY: LazyLock<Identity> =
         LazyLock::new(|| self_signed_identity("test-gateway", VALID_DAYS).expect("identity"));
 
-    #[derive(Clone, Default)]
-    struct Records(Arc<Mutex<HashMap<String, EntryRecord>>>);
-
-    impl QueueStore for Records {
-        async fn update(
-            &self,
-            _: &QueueSettings,
-            _: Uuid,
-            _: QueueAction,
-            _: QueueTime,
-        ) -> Result<Option<QueueStatus>, StoreError> {
-            Ok(None)
-        }
-
-        async fn take_entry(&self, ticket_id: &str) -> Result<Option<EntryRecord>, StoreError> {
-            Ok(self.0.lock().expect("lock").remove(ticket_id))
-        }
-    }
-
-    /// Starts a gateway on a loopback port with one live ticket; returns its address and the
-    /// token a client registers with.
-    async fn start(limits: GatewayLimits) -> (SocketAddr, LoginToken) {
-        let key = SigningKey::from_hex(KEY_HEX).expect("key");
-        let world_id = Uuid::new_v4();
-        let record = EntryRecord {
-            ticket_id: Uuid::new_v4().to_string(),
-            account_id: Uuid::new_v4(),
-            world_id,
-            character_id: Uuid::new_v4(),
-            expires_at: unix_now_seconds() + LIFETIME_SECONDS,
-        };
-        let token = LoginToken {
-            ticket_id: record.ticket_id.clone().into_bytes(),
-            signature: sign_entry(&key, &record.claims()).into_bytes(),
-            character_id: record.character_id.to_string().into_bytes(),
-            ..LoginToken::default()
-        };
-        let store = Records::default();
-        store
-            .0
-            .lock()
-            .expect("lock")
-            .insert(record.ticket_id.clone(), record);
+    /// Starts a gateway for `world_id` with `store` on a loopback port; returns its address.
+    pub(crate) async fn spawn_gateway<Q: QueueStore>(
+        store: Q,
+        world_id: Uuid,
+        limits: GatewayLimits,
+    ) -> SocketAddr {
         let gateway = Gateway {
             dtls: Arc::new(
                 DtlsServerConfig::new(&IDENTITY.certificate_pem, &IDENTITY.private_key_pem, SECRET)
                     .expect("dtls"),
             ),
             store,
-            signing_key: Arc::new(key),
+            signing_key: Arc::new(test_signing_key()),
             world_id,
             server_version: VERSION.to_owned(),
             peer_settings: PeerSettings {
@@ -396,10 +358,37 @@ mod tests {
         let socket = UdpSocket::bind(LOOPBACK).await.expect("bind");
         let address = socket.local_addr().expect("address");
         tokio::spawn(serve(gateway, socket, std::future::pending()));
-        (address, token)
+        address
     }
 
-    fn client(token: LoginToken) -> RepClient {
+    /// Starts a gateway with one live ticket; returns its address and the token a client
+    /// registers with.
+    async fn start(limits: GatewayLimits) -> (SocketAddr, LoginToken) {
+        let world_id = Uuid::new_v4();
+        let record = EntryRecord {
+            ticket_id: Uuid::new_v4().to_string(),
+            account_id: Uuid::new_v4(),
+            world_id,
+            character_id: Uuid::new_v4(),
+            expires_at: unix_now_seconds() + LIFETIME_SECONDS,
+        };
+        let token = LoginToken {
+            ticket_id: record.ticket_id.clone().into_bytes(),
+            signature: sign_entry(&test_signing_key(), &record.claims()).into_bytes(),
+            character_id: record.character_id.to_string().into_bytes(),
+            ..LoginToken::default()
+        };
+        let store = Records::default();
+        store
+            .records
+            .lock()
+            .expect("lock")
+            .insert(record.ticket_id.clone(), record);
+        (spawn_gateway(store, world_id, limits).await, token)
+    }
+
+    /// A client that trusts the test gateway.
+    pub(crate) fn client(token: LoginToken) -> RepClient {
         let config = DtlsClientConfig::new(&IDENTITY.certificate_pem).expect("client config");
         RepClient::new(&config, MTU, token, 0).expect("client")
     }
@@ -410,13 +399,13 @@ mod tests {
         let outcome = run_rep(gateway, client(token.clone()), HOLD, WAIT)
             .await
             .expect("run");
-        assert_eq!(outcome.status, Some(STATUS_AUTHORIZED));
+        assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
         assert_eq!(outcome.server_version.as_deref(), Some(VERSION));
         assert!(outcome.pings > 0);
         let again = run_rep(gateway, client(token), HOLD, WAIT)
             .await
             .expect("again");
-        assert_eq!(again.status, Some(STATUS_REFUSED));
+        assert_eq!(again.status, Some(REGISTRATION_STATUS_REFUSED));
         assert!(again.closed_by_server);
     }
 
@@ -434,7 +423,7 @@ mod tests {
             .expect("second");
         assert_eq!(second, RepOutcome::default());
         let first = first.await.expect("join").expect("first");
-        assert_eq!(first.status, Some(STATUS_AUTHORIZED));
+        assert_eq!(first.status, Some(REGISTRATION_STATUS_AUTHORIZED));
     }
 
     #[test]

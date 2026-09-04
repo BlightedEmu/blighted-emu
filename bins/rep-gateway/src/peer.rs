@@ -17,12 +17,12 @@ use nw_login::queue::EntryRecord;
 use nw_reflect::{
     Envelope, EnvelopeError, FramingError, PING_MSG_TYPE_INDEX,
     REGISTRATION_REQUEST_V3_MSG_TYPE_INDEX, REGISTRATION_RESPONSE_MSG_TYPE_INDEX,
-    RegistrationError, RegistrationRequestV3Msg, TypeId, decode_client_message,
-    encode_server_messages,
+    REGISTRATION_STATUS_AUTHORIZED, REGISTRATION_STATUS_REFUSED, RegistrationError,
+    RegistrationRequestV3Msg, TypeId, decode_client_message, encode_server_messages,
 };
 use thiserror::Error;
 
-use crate::registration::{Refusal, STATUS_AUTHORIZED, STATUS_REFUSED, TicketClaims, response};
+use crate::registration::{Refusal, TicketClaims, response};
 
 /// Length of the rate window.
 pub const RATE_WINDOW_MS: u64 = 1000;
@@ -229,9 +229,9 @@ impl Peer {
         server_version: &str,
     ) -> Result<(), PeerError> {
         let status = if result.is_ok() {
-            STATUS_AUTHORIZED
+            REGISTRATION_STATUS_AUTHORIZED
         } else {
-            STATUS_REFUSED
+            REGISTRATION_STATUS_REFUSED
         };
         let body = response(status, now, server_version)
             .map_err(PeerError::Random)?
@@ -398,7 +398,7 @@ mod tests {
                 &token()
             ))]
         );
-        assert_eq!(status(&events), Some(STATUS_AUTHORIZED));
+        assert_eq!(status(&events), Some(REGISTRATION_STATUS_AUTHORIZED));
         assert!(peer.is_registered());
         assert!(events.contains(&RepEvent::Pinged));
     }
@@ -417,7 +417,7 @@ mod tests {
                     .any(|event| matches!(event, RepEvent::Closed { .. }))
             },
         );
-        assert_eq!(status(&events), Some(STATUS_REFUSED));
+        assert_eq!(status(&events), Some(REGISTRATION_STATUS_REFUSED));
         assert!(
             events
                 .iter()
