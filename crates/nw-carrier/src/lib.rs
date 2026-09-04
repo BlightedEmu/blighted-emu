@@ -5,6 +5,7 @@
 //! the time, and take out bytes to send and delivered messages. Nothing here reads a clock,
 //! opens a socket, or starts a task.
 
+pub mod connection;
 pub mod datagram;
 pub mod error;
 pub mod frame;
@@ -12,6 +13,7 @@ pub mod receiver;
 pub mod sender;
 pub mod system;
 
+pub use connection::{Connection, ConnectionState, Event, Role};
 pub use datagram::{Datagram, MAX_DATAGRAM_LEN, decode_datagram, encode_datagram};
 pub use error::CarrierError;
 pub use frame::{Frame, SYSTEM_CHANNEL, decode_frames, encode_frames};

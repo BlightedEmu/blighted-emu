@@ -86,4 +86,10 @@ pub enum CarrierError {
         /// Sends so far.
         attempts: u32,
     },
+    /// A message was sent or received before the handshake or after close.
+    #[error("connection is not connected")]
+    NotConnected,
+    /// The client got no connect ack.
+    #[error("no connect ack after the last connect request")]
+    ConnectTimeout,
 }
