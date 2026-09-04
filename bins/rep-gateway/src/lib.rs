@@ -3,4 +3,5 @@
 //! GridMate carrier, checks the login ticket in the V3 registration, and keeps registered
 //! connections alive with pings.
 
+pub mod peer;
 pub mod registration;

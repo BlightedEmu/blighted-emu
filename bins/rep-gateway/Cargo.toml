@@ -10,11 +10,15 @@ publish.workspace = true
 [dependencies]
 getrandom.workspace = true
 hex.workspace = true
+nw-carrier.workspace = true
+nw-dtls.workspace = true
 nw-login.workspace = true
 nw-reflect.workspace = true
+thiserror.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+nw-testclient.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
