@@ -51,6 +51,8 @@ const REASON_LABEL: &str = "reason";
 const ACCEPTED: &str = "accepted";
 /// Drop reason: a first datagram that is not a ClientHello, or has a cookie for another address.
 const NO_COOKIE: &str = "no_cookie";
+/// Drop reason: receiving one datagram failed.
+const RECEIVE: &str = "receive";
 /// Drop reason: OpenSSL refused a first ClientHello.
 const DTLS: &str = "dtls";
 
@@ -86,11 +88,12 @@ struct Loop<Q> {
     next_connection: u64,
 }
 
-/// Serves `socket` until `shutdown` finishes.
+/// Serves `socket` until `shutdown` finishes. An error that belongs to one datagram (for example
+/// an ICMP "port unreachable" on Windows) is logged and the loop goes on.
 ///
 /// # Errors
 ///
-/// Returns the socket's error when receiving fails.
+/// Returns the socket's error when the socket itself fails.
 pub async fn serve<Q: QueueStore>(
     gateway: Gateway<Q>,
     socket: UdpSocket,
@@ -112,10 +115,14 @@ pub async fn serve<Q: QueueStore>(
     loop {
         tokio::select! {
             () = &mut shutdown => return Ok(()),
-            received = state.socket.recv_from(&mut buffer) => {
-                let (len, address) = received?;
-                state.datagram(address, &buffer[..len]).await;
-            }
+            received = state.socket.recv_from(&mut buffer) => match received {
+                Ok((len, address)) => state.datagram(address, &buffer[..len]).await,
+                Err(error) if is_datagram_error(&error) => {
+                    tracing::debug!(%error, "receive failed for one datagram");
+                    metrics::counter!(METRIC_DROPPED, REASON_LABEL => RECEIVE).increment(1);
+                }
+                Err(error) => return Err(error),
+            },
             Some((address, connection, result)) = incoming.recv() => {
                 state.ticket_result(address, connection, result).await;
             }
@@ -330,6 +337,18 @@ async fn send(socket: &UdpSocket, address: SocketAddr, datagram: &[u8]) {
     }
 }
 
+/// Whether a receive error belongs to one datagram, so the socket still works.
+fn is_datagram_error(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        error.kind(),
+        ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionRefused
+            | ErrorKind::Interrupted
+            | ErrorKind::WouldBlock
+    )
+}
+
 /// The address an IP counts against: itself for IPv4, its /64 for IPv6.
 fn rate_key(ip: IpAddr) -> IpAddr {
     match ip {
@@ -533,6 +552,22 @@ pub(crate) mod tests {
             .await
             .expect("run");
         assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
+    }
+
+    #[test]
+    fn only_errors_of_one_datagram_keep_the_loop_running() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionRefused,
+            ErrorKind::Interrupted,
+            ErrorKind::WouldBlock,
+        ] {
+            assert!(is_datagram_error(&Error::from(kind)), "{kind:?}");
+        }
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::Other] {
+            assert!(!is_datagram_error(&Error::from(kind)), "{kind:?}");
+        }
     }
 
     #[test]
