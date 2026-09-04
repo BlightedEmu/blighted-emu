@@ -310,6 +310,14 @@ mod tests {
     }
 
     #[test]
+    fn a_value_beyond_the_prefix_code_is_an_error() {
+        assert!(matches!(
+            Writer::new().prefixed(u64::MAX),
+            Err(MessageError::Prefix(_))
+        ));
+    }
+
+    #[test]
     fn short_bodies_flags_and_leftovers_are_errors() {
         assert_eq!(
             Reader::new(&[1, 2]).u32(),

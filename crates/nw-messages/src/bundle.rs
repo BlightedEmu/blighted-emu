@@ -118,6 +118,8 @@ mod tests {
 
     const PAYLOAD_LEN: usize = 300;
     const LEADING: u64 = 1000;
+    /// One more than [`MAX_BUNDLE_INDEXES`], in one prefix byte.
+    const TOO_MANY_INDEXES: u8 = 101;
 
     fn full() -> ReplicatedStateBundle {
         ReplicatedStateBundle {
@@ -170,9 +172,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_huge_payload_length_is_a_short_body_not_an_allocation() {
+        let body = [0, 3, 4, 0, 0, 0xF7, 0xFF, 0xFF, 0xFF, 0xFF];
+        assert!(matches!(
+            ReplicatedStateBundle::decode(&body),
+            Err(MessageError::Truncated { .. })
+        ));
+    }
+
+    #[test]
+    fn an_index_count_above_the_limit_is_refused_on_decode() {
+        let body = [0, 3, 4, 0, 1, 0, TOO_MANY_INDEXES];
+        assert_eq!(
+            ReplicatedStateBundle::decode(&body),
+            Err(MessageError::CountTooLarge {
+                count: u64::from(TOO_MANY_INDEXES),
+                limit: MAX_BUNDLE_INDEXES
+            })
+        );
+    }
+
     proptest! {
         #[test]
         fn random_bodies_never_panic(body in proptest::collection::vec(any::<u8>(), 0..64)) {
+            let _ = ReplicatedStateBundle::decode(&body);
+        }
+
+        #[test]
+        fn random_bytes_after_valid_flags_never_panic(
+            leading in any::<bool>(),
+            flag in any::<bool>(),
+            has_block in any::<bool>(),
+            tail in proptest::collection::vec(any::<u8>(), 0..256),
+        ) {
+            let mut body = vec![u8::from(leading)];
+            body.extend_from_slice(&tail[..tail.len().min(1)]);
+            body.extend_from_slice(&[3, 4, u8::from(flag), u8::from(has_block)]);
+            body.extend_from_slice(&tail);
             let _ = ReplicatedStateBundle::decode(&body);
         }
     }
