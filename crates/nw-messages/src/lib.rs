@@ -19,7 +19,8 @@ pub mod time_synch;
 pub mod wire;
 
 pub use bundle::{
-    IndexBlock, MAX_BUNDLE_INDEXES, REPLICATED_STATE_BUNDLE_TYPE_INDEX, ReplicatedStateBundle,
+    IndexBlock, MAX_BUNDLE_INDEXES, OBSERVED_BUNDLE_BYTE_3, OBSERVED_BUNDLE_BYTE_4,
+    OBSERVED_BUNDLE_GROUP, REPLICATED_STATE_BUNDLE_TYPE_INDEX, ReplicatedStateBundle,
 };
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use connected::{

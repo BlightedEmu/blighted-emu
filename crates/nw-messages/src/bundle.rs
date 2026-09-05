@@ -1,14 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `Amazon::Hub::ReplicatedStateBundle` (bodies note, section 8): the outer header only. Reader
 //! `FUN_14646c2b0`, header `FUN_146b07870`. The payload bytes after the header are kept as they
-//! are; their member layout is not decoded here.
+//! are; [`crate::payload`] reads their members.
 
+use crate::payload::{BundleGroup, BundleMember, BundlePayload, MemberState};
+use crate::position::{PositionInTheWorldReplicatedState, WorldPosition};
 use crate::wire::{BodyCodec, MessageError, Reader, Writer};
 
 /// File slot of `ReplicatedStateBundle`.
 pub const REPLICATED_STATE_BUNDLE_TYPE_INDEX: u64 = 8;
 /// Most `u16` values in the index block (`FUN_146a6ddb0`).
 pub const MAX_BUNDLE_INDEXES: u64 = 100;
+/// The group integer of the captured bundles: one value per connection; its meaning is Unknown.
+pub const OBSERVED_BUNDLE_GROUP: u64 = 1;
+/// Header byte 3 of every captured bundle.
+pub const OBSERVED_BUNDLE_BYTE_3: u8 = 1;
+/// The most common header byte 4 in the captures; its meaning is Unknown.
+pub const OBSERVED_BUNDLE_BYTE_4: u8 = 1;
 
 /// The optional block of step 7: a prefix-coded count, then a list of big-endian `u16`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +42,47 @@ pub struct ReplicatedStateBundle {
     pub index_block: Option<IndexBlock>,
     /// Steps 8 and 9: the payload, after its prefix-coded length.
     pub payload: Vec<u8>,
+}
+
+impl ReplicatedStateBundle {
+    /// A bundle with the captured header values (`sequence` as the leading integer, an empty
+    /// index block) and one group: a position member for each `(entity number, position)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when a member cannot be encoded.
+    pub fn of_positions(
+        sequence: u64,
+        positions: &[(u64, WorldPosition)],
+    ) -> Result<Self, MessageError> {
+        let members = positions
+            .iter()
+            .map(|(number, position)| BundleMember {
+                u64_at_0: *number,
+                state: MemberState::Position(PositionInTheWorldReplicatedState {
+                    position: Some(*position),
+                    ..PositionInTheWorldReplicatedState::default()
+                }),
+            })
+            .collect();
+        let payload = BundlePayload {
+            groups: vec![BundleGroup {
+                leading: OBSERVED_BUNDLE_GROUP,
+                members,
+            }],
+        };
+        Ok(Self {
+            leading: Some(sequence),
+            byte_3: OBSERVED_BUNDLE_BYTE_3,
+            byte_4: OBSERVED_BUNDLE_BYTE_4,
+            flag_5: true,
+            index_block: Some(IndexBlock {
+                count: 0,
+                indexes: Vec::new(),
+            }),
+            payload: payload.encode()?,
+        })
+    }
 }
 
 impl BodyCodec for ReplicatedStateBundle {
@@ -120,6 +169,42 @@ mod tests {
     const LEADING: u64 = 1000;
     /// One more than [`MAX_BUNDLE_INDEXES`], in one prefix byte.
     const TOO_MANY_INDEXES: u8 = 101;
+
+    const SEQUENCE: u64 = 7;
+    const FIRST: u64 = 1;
+    const SECOND: u64 = 2;
+
+    #[test]
+    fn a_position_bundle_has_the_captured_header_and_one_member_per_entity() {
+        let here = WorldPosition::from_metres(1.0, 2.0, 3.0).expect("finite");
+        let there = WorldPosition::from_metres(4.0, 5.0, 6.0).expect("finite");
+        let bundle =
+            ReplicatedStateBundle::of_positions(SEQUENCE, &[(FIRST, here), (SECOND, there)])
+                .expect("bundle");
+        assert_eq!(bundle.leading, Some(SEQUENCE));
+        assert_eq!(
+            (bundle.byte_3, bundle.byte_4, bundle.flag_5),
+            (OBSERVED_BUNDLE_BYTE_3, OBSERVED_BUNDLE_BYTE_4, true)
+        );
+        assert_eq!(
+            bundle.index_block,
+            Some(IndexBlock {
+                count: 0,
+                indexes: Vec::new()
+            })
+        );
+        let payload = BundlePayload::decode(&bundle.payload).expect("payload");
+        assert_eq!(payload.groups.len(), 1);
+        assert_eq!(payload.groups[0].leading, OBSERVED_BUNDLE_GROUP);
+        let members: Vec<(u64, Option<WorldPosition>)> = payload.groups[0]
+            .members
+            .iter()
+            .map(|member| match &member.state {
+                MemberState::Position(state) => (member.u64_at_0, state.position),
+            })
+            .collect();
+        assert_eq!(members, vec![(FIRST, Some(here)), (SECOND, Some(there))]);
+    }
 
     fn full() -> ReplicatedStateBundle {
         ReplicatedStateBundle {

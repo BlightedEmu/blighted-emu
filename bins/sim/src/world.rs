@@ -15,9 +15,7 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use nw_bus::{BusId, ConnectionRef};
 use nw_messages::{
-    BundleGroup, BundleMember, BundlePayload, IndexBlock, MemberState, MessageError,
-    PositionInTheWorldReplicatedState, ReplicatedStateBundle, ServerMessage, TimeSynchMsg,
-    WorldPosition,
+    MessageError, ReplicatedStateBundle, ServerMessage, TimeSynchMsg, WorldPosition,
 };
 use nw_sim_core::{Interest, Position};
 use thiserror::Error;
@@ -31,13 +29,6 @@ pub const MESSAGE_CHANNEL: u8 = 0;
 pub const REPLICATION_CHANNEL: u8 = 1;
 /// Time between two `TimeSynchMsg` of one player (about 3 s in the captures).
 pub const TIME_SYNCH_INTERVAL_MS: u64 = 3000;
-/// The group integer of every bundle: one value per connection in the captures; its meaning is
-/// Unknown.
-pub const BUNDLE_GROUP: u64 = 1;
-/// Header byte 3 of every captured bundle.
-pub const BUNDLE_BYTE_3: u8 = 1;
-/// The most common header byte 4 in the captures; its meaning is Unknown.
-pub const BUNDLE_BYTE_4: u8 = 1;
 /// Most members in one bundle. An unreliable carrier message must fit one datagram (it is never
 /// chunked), and a member takes at most 18 bytes (a 5-byte entity number, a 1-byte class, a
 /// 12-byte position), so 48 members leave room for the headers.
@@ -282,46 +273,25 @@ impl SimWorld {
     }
 }
 
-/// One bundle envelope: the header as in the captures and one group of position members. Every
-/// position in the world is finite (`join` refuses others), so no member is left out.
+/// One bundle envelope ([`ReplicatedStateBundle::of_positions`]). Every position in the world is
+/// finite (`join` refuses others), so no member is left out.
 fn bundle(sequence: u64, visible: &[(u64, Position)]) -> Result<Vec<u8>, MessageError> {
-    let members: Vec<BundleMember> = visible
+    let positions: Vec<(u64, WorldPosition)> = visible
         .iter()
         .filter_map(|(number, position)| {
-            Some(BundleMember {
-                u64_at_0: *number,
-                state: MemberState::Position(PositionInTheWorldReplicatedState {
-                    position: Some(WorldPosition::from_metres(
-                        position.x, position.y, position.z,
-                    )?),
-                    ..PositionInTheWorldReplicatedState::default()
-                }),
-            })
+            Some((
+                *number,
+                WorldPosition::from_metres(position.x, position.y, position.z)?,
+            ))
         })
         .collect();
-    let payload = BundlePayload {
-        groups: vec![BundleGroup {
-            leading: BUNDLE_GROUP,
-            members,
-        }],
-    };
-    ServerMessage::Bundle(ReplicatedStateBundle {
-        leading: Some(sequence),
-        byte_3: BUNDLE_BYTE_3,
-        byte_4: BUNDLE_BYTE_4,
-        flag_5: true,
-        index_block: Some(IndexBlock {
-            count: 0,
-            indexes: Vec::new(),
-        }),
-        payload: payload.encode()?,
-    })
-    .envelope()
+    ServerMessage::Bundle(ReplicatedStateBundle::of_positions(sequence, &positions)?).envelope()
 }
 
 #[cfg(test)]
 mod tests {
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
+    use nw_messages::BundlePayload;
     use nw_reflect::{Envelope, encode_server_messages};
 
     use super::*;
