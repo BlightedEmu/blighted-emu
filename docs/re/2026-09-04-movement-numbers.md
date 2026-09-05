@@ -130,6 +130,22 @@ The action lists are in `SharedDataStrm-part7.pak`. Encumbrance limits are in `S
 
 **Unknown.** What the samples at 7 m/s and more are. Mounts and speed effects are two candidates; this check does not tell them apart.
 
+**Observed.** A second run of the same type 1589 script followed the client's own positions per capture context (last bit 7 position of each message, height from the raw `u16` over -100 to 1,000 m). It printed statistics only.
+
+| Item | Result |
+|---|---|
+| `arvaysa_running_forward` (clean capture), speed of moving samples | median 5.38 m/s, 90 % at most 5.55 m/s |
+| `arvaysa_walking_forward` (clean capture), speed of moving samples | median 3.19 m/s, 90 % at most 3.51 m/s |
+| Gaps between messages while the player moves, 15 clean movement files | largest 101 ms |
+| Gaps while the player moves, all 695 ledgers | 5,572,712 gaps; 99 % at most 65 ms |
+| Falls of at least 1 m (height never rises, no step faster than 30 m/s) | 29,251; median drop 1.9 m, 99 % at most 27.9 m, largest 128.6 m |
+| Average fall speed of those falls | median 1.6 m/s, 99 % at most 10.0 m/s |
+| Jumps (a rise of at least 0.3 m at 2 m/s or more, back within 0.3 m in 2 s) | 56,517; median 0.47 m, 99 % at most 2.90 m |
+
+**Inferred.** Section 2's open items have answers from the player's own positions: the sustained run speed (3.2 m/s, the datasheet 3.25), the sprint (5.4 m/s, the datasheet 5.5), the gaps while moving, falls and jumps. The largest "jump" (85 m) and the largest fall speed (107 m/s) are lifts or teleports, not jumps or falls.
+
+**Inferred.** A fall can start more than 64 m above the ground below it (the largest is 128.6 m). A server that refuses positions more than 64 m above the terrain can refuse such a fall.
+
 ## Files read
 
 - `playeractions_nav.actionlist`, `playeractions_sprint.actionlist`, and `playeractions_swim.actionlist` in `SharedDataStrm-part7.pak`
@@ -139,3 +155,15 @@ The action lists are in `SharedDataStrm-part7.pak`. Encumbrance limits are in `S
 - `docs/re/2026-09-02-carrier-captures.md`
 - 695 ledgers under `local-data/captures/`
 - Ghidra program `NewWorld.exe` in `<re-scratch>/ghidra`, read-only
+
+## Height fields pass
+
+This pass searched only the two height fields. It did not redo speeds, gaps, falls, or jumps.
+
+**Observed.** `m_EffectiveHeightAboveGround` is bound in `FUN_140d3aa50` (`0x140d3aa50`) at offset `0x30`. `m_stepUpMaxDetectionHeight` is bound in `FUN_14416afd0` (`0x14416afd0`) at offset `0x18`. Each call passes a cleared default holder. The same holder is cleared for the other fields in those functions. The holder is not a stored height.
+
+**Observed.** Those two strings have no other code reference. A search of float loads in `FUN_140d3aa50`, `FUN_14416afd0`, and the functions from `0x140d00000` to `0x140d40000` and from `0x144150000` to `0x144180000` found no constant stored into these fields. The text `CharacterController` is not in the image. The names `groundTolerance`, `stepOffset`, `stepHeight`, and `maxJumpHeight` are not in the image.
+
+**Observed.** `FUN_14416d520` (`0x14416d520`) uses the constant `0.5` in a reciprocal step. It does not store that constant into offset `0x18`. `FUN_14416c200` (`0x14416c200`) writes a sum of two runtime floats to offset `0x30` of a different object.
+
+**Unknown.** The number of `m_EffectiveHeightAboveGround`, and the number of `m_stepUpMaxDetectionHeight`. A static read cannot give either number. The only functions that name the fields record the name and the offset. They do not record a constant, and this pass did not find a function that computes the value.

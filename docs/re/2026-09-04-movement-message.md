@@ -154,3 +154,35 @@ The cursor starts at bit 9. A clear mask bit consumes 0 bytes. The prefix bits b
 - Decompile files under `<re-scratch>/scratch-replication/out2`, `out5`, and `out-widths`
 - `NewWorld.exe` at `<game-dir>/Bin64/NewWorld.exe`
 - Ledgers under `local-data/captures/**/ledger.bin` and `local-data/captures/open-world/**/ledger.bin`
+
+## Type 11 pass
+
+The game was not run. This pass used the existing read-only Ghidra project and the clean running ledgers. It did not redo speeds, gaps, falls, or jumps.
+
+**Observed.** Virtual `+0x90` on the type 11 instance is `FUN_142a436b0` (`0x142a436b0`). The instance vtable is `0x1480ff900`. The bundle path calls this slot only.
+
+**Observed.** The body starts with one byte. Bit 0 and bit 1 select two slots. The other bits of that byte are not tested. A selected slot then has one wide prefix integer (`FUN_14087b770`). The low 54 bits of that integer are child presence bits. Slot 0 has 54 children. Slot 1 has 9 children. A set bit reads that child. A clear bit reads 0 bytes.
+
+**Observed.** Child sizes, in constructor order. `u8` is 1 byte. `u16` is 2 bytes. `f32` is 4 bytes big-endian. `u64` is 8 bytes big-endian. `pos3` is 3 bytes. `pos10` is `f32`, `f32`, and `u16` big-endian. `half` is 2 bytes. `prefix` is the short prefix integer. `blob33` is a short prefix count below 33, then that many bytes. `blob177` is a short prefix count below 177, then that many bytes. `frag` is 12 bytes. `bounds` is 1 flag byte. Value 0 stops. Value 1 reads 16 bytes, one `u8`, and one more flag byte. `quat` is the reader `FUN_14087a8d0` (`0x14087a8d0`): 1 tag byte, then 0 to 3 bytes. The extra count is 3 when tag bit 1 is clear and 2 when it is set, then minus 1 when bit 2 is set, then minus 1 when bit 3 is set, then minus 1 when bit 4 is set and the count is not 0.
+
+Slot 0: `u8`, `u8`, then four times `u8` `half`, then `pos3`, `quat`, `quat`, then four times `prefix` `u16` `prefix`, then `u8`, `u8`, `pos10`, `u8`, `blob33`, `u8`, `u8`, `prefix`, `blob177`, `frag`, `f32`, `half`, `half`, `u8`, `u8`, `u64`, `u8`, `u8`, `u8`, `u8`, `u8`, `prefix`, `u8`, `prefix`, `u8`, `u8`, `u8`, `u8`, `f32`.
+
+Slot 1: `u8`, `u8`, `blob177`, `blob33`, `u8`, `u8`, `u8`, `bounds`, `u8`.
+
+**Observed.** On the clean running ledgers this skip accepts 21,384 type 11 bodies. Failures: 0. The next member header, when one exists, is a real class index.
+
+**Observed.** Type 13 members that sit after type 11 in the same group: 0. 21,069 of those groups end at type 11. 315 groups have another class next. That next class is not type 13.
+
+**Observed.** Every type 11 group in this session uses one group id. That same group id is also the first member of other payloads, including the player component (39 payloads). The player-component body skip accepts all 39. The member after that component is not type 13.
+
+**Unknown.** The horizontal distance from bit 7 to that player's type 13. No type 13 position was reached. The same-context member after the player component still has an unread body, so the walk cannot get to a later type 13. There is no distance bin.
+
+**Unknown.** Rotation mask bit 7. This pass did not search it again. The binary has no read for it, and the bit was clear on all 1,538 reached members.
+
+**Observed.** The member after the player component is type 4355, `ChatBrokerActor::InitMsg`, on 21 of the 39 payloads, and type 3133, `MB::EntitlementComponentReplicatedState`, on 18. The index is the `typeindex.json` list position. The name is the `uuid_to_class.json` join for that UUID.
+
+**Observed.** Type 3133 virtual `+0x90` is `FUN_1417b4110` (`0x1417b4110`). The instance vtable is `0x148174800`. The body is one slot byte. Bit 0 selects the only slot. That slot has three children: two counted lists, then one byte that is `0` or `1`. This skip accepts all 18 bodies. Failures: 0.
+
+**Observed.** The member after those 18 bodies is not type 13. It is type 4236, `MB::StatusEffectsComponentReplicatedState`, on 10 payloads, type 5485, `Javelin::SeasonsRewardsReplicatedState`, on 6 payloads, and type 1525, `MB::StatMultiplierTableComponentReplicatedState`, on 2 payloads. Reached type 13 members: 0. There is no distance bin. The walk cannot reach type 13 without the body reader of that next member.
+
+**Observed.** Type 4355 virtual `+0x90` is `FUN_14437ba10` (`0x14437ba10`). It does not read a sized body. It asks the cursor for `ChatBroker` and then calls virtual `+0x68`. Those 21 payloads stay unread. The walk cannot reach a later type 13 in them without that reader.
