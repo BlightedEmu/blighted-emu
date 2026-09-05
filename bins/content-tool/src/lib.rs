@@ -4,7 +4,6 @@
 
 pub mod build;
 pub mod capture;
-pub mod client_build;
 pub mod codegen;
 pub mod error;
 pub mod source;
@@ -23,10 +22,10 @@ mod local_data_tests {
     use nw_world::records::RecordCounts;
 
     use crate::build::{default_bundle_path, run_build};
-    use crate::client_build::load_client_build;
     use crate::codegen::run_codegen;
     use crate::source::{GameSource, SourceError};
     use crate::world::{LEVELS_PREFIX, run_world};
+    use nw_content::client_build::load_client_build;
 
     const TIMELINE_EXTENSION: &str = ".timeline";
     const METADATA_EXTENSION: &str = ".metadata";
