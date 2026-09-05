@@ -4,6 +4,7 @@
 //! `sim` border. Each bot follows the ground of the world file. The checks read what each bot saw
 //! of itself, and the handoffs, refused moves and tick times from the metrics of every sim.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -252,6 +253,15 @@ impl SwarmReport {
     /// Whether every check passed.
     pub fn passed(&self, settings: &SwarmSettings) -> bool {
         self.checks(settings).iter().all(|check| check.passed)
+    }
+
+    /// How many bots stopped with each error, by error text.
+    pub fn error_kinds(&self) -> BTreeMap<&str, usize> {
+        let mut kinds = BTreeMap::new();
+        for error in self.bots.iter().filter_map(|bot| bot.error.as_deref()) {
+            *kinds.entry(error).or_default() += 1;
+        }
+        kinds
     }
 
     /// One line of numbers for the operator.
@@ -903,6 +913,22 @@ mod tests {
             !good_report().passed(&no_metrics),
             "no metrics read is no pass"
         );
+    }
+
+    #[test]
+    fn bot_errors_are_counted_by_kind() {
+        const REFUSED: &str = "no registration response";
+        const QUEUE: &str = "login queue timed out";
+        let mut report = good_report();
+        for error in [REFUSED, QUEUE, REFUSED] {
+            report.bots.push(BotReport {
+                error: Some(error.to_owned()),
+                ..BotReport::default()
+            });
+        }
+        let kinds: Vec<(&str, usize)> = report.error_kinds().into_iter().collect();
+        assert_eq!(kinds, vec![(QUEUE, 1), (REFUSED, 2)]);
+        assert!(good_report().error_kinds().is_empty());
     }
 
     #[test]

@@ -132,6 +132,9 @@ async fn swarm(
     })
     .await;
     println!("{}", report.summary());
+    for (error, bots) in report.error_kinds() {
+        println!("{bots} bots failed to start: {error}");
+    }
     match (errors_before, receive_errors()) {
         (Some(before), Some(after)) => println!(
             "UDP receive buffer errors of the PC during the step: {}",

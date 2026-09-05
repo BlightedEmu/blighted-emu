@@ -250,6 +250,7 @@ Known gaps:
 ### M5 load test
 
 1. Start `edge-http serve`, `world-director` with `cell_size_m = 1024` and a list of `start_positions` on the `sim` borders, eight `sim` processes, and `rep-gateway serve` with several `workers`, all release builds.
+   The gateway refuses connections above `limits.max_connections` (2,000 in the committed config). Raise it above the largest step, for example `NW_GATEWAY_LIMITS__MAX_CONNECTIONS=12000`.
 2. Run `nw-testclient swarm --bots 1000`, then 2,500, 5,000 and 10,000, with `mpstat 5` beside it. A step passes when every check prints `pass`. A step that fails while the PC has less than 5 % idle CPU shows the limit of the PC.
 
 ### M5 exit test
