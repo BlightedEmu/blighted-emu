@@ -41,6 +41,7 @@ exceptions = [
     { crate = "content-tool", allow = ["AGPL-3.0-or-later"] },
     { crate = "rep-gateway", allow = ["AGPL-3.0-or-later"] },
     { crate = "sim", allow = ["AGPL-3.0-or-later"] },
+    { crate = "world-director", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-testclient", allow = ["AGPL-3.0-or-later"] },
     { crate = "launcher", allow = ["GPL-3.0-or-later"] },
     # Font files that egui draws text with; OFL and the Ubuntu font licence allow bundling.
