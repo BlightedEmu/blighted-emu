@@ -123,7 +123,7 @@ pub struct BotReport {
     pub worst_off_route_m: f32,
     /// Own bundles that arrived.
     pub bundles_received: u64,
-    /// Own bundles that the ticks between the first and the last one hold.
+    /// Own bundles that the ticks from the first one to the end of the run hold.
     pub bundles_expected: u64,
     /// Why the bot could not run, if it could not.
     pub error: Option<String>,
@@ -413,17 +413,26 @@ impl BotTrack {
         }
     }
 
-    /// Own bundles received, and those the ticks between the first and the last one hold.
-    pub fn bundles(&self) -> (u64, u64) {
-        let expected = match (self.first_bundle, self.last_bundle) {
-            (Some(first), Some(last)) => {
-                let ticks = (last - first).as_secs_f64() * TICKS_PER_SECOND as f64;
+    /// Own bundles received, and those the ticks from the first one to `end` (the end of the
+    /// bot's run, after its registration) hold.
+    pub fn bundles(&self, end: Duration) -> (u64, u64) {
+        let expected = match self.first_bundle {
+            Some(first) => {
+                let ticks = end.saturating_sub(first).as_secs_f64() * TICKS_PER_SECOND as f64;
                 // A run is minutes long, so the tick count fits u64.
                 ticks.round() as u64 + 1
             }
-            _ => 0,
+            None => 0,
         };
         (self.bundles_received, expected)
+    }
+
+    /// The longest time without an own bundle, also from the last one to `end`.
+    pub fn max_gap(&self, end: Duration) -> Duration {
+        let tail = self
+            .last_bundle
+            .map_or(Duration::ZERO, |last| end.saturating_sub(last));
+        self.max_gap.max(tail)
     }
 }
 
@@ -609,12 +618,12 @@ async fn run_bot(
     match ran {
         Ok(outcome) => {
             let track = track.unwrap_or_else(|| BotTrack::new(NO_START));
-            let (bundles_received, bundles_expected) = track.bundles();
+            let (bundles_received, bundles_expected) = track.bundles(outcome.held);
             BotReport {
                 registered: outcome.status == Some(REGISTRATION_STATUS_AUTHORIZED),
                 closed: outcome.closed_by_server,
                 crossings: track.crossings,
-                max_gap: track.max_gap,
+                max_gap: track.max_gap(outcome.held),
                 worst_off_route_m: track.worst_off_route_m,
                 bundles_received,
                 bundles_expected,
@@ -916,7 +925,15 @@ mod tests {
         for tick in 1..TICKS_PER_SECOND {
             track.saw(&route, &[at(ORIGIN, ORIGIN)], second + TICK * tick as u32);
         }
-        assert_eq!(track.bundles(), (TICKS_PER_SECOND, TICKS_PER_SECOND));
+        let end = second + TICK * (TICKS_PER_SECOND - 1) as u32;
+        assert_eq!(track.bundles(end), (TICKS_PER_SECOND, TICKS_PER_SECOND));
+        assert!(track.max_gap(end) <= TICK);
+        // The bundles stop halfway through the run: they count as lost, and as a gap.
+        let later = end + Duration::from_secs(1);
+        let (received, expected) = track.bundles(later);
+        assert_eq!(received, TICKS_PER_SECOND);
+        assert!(expected >= 2 * TICKS_PER_SECOND - 1);
+        assert!(track.max_gap(later) >= Duration::from_secs(1));
     }
 
     #[test]
