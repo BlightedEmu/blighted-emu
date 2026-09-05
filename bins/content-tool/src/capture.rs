@@ -14,7 +14,10 @@ use std::path::{Path, PathBuf};
 use nw_carrier::{
     Inbound, ReceiveLimits, Receiver, SYSTEM_CHANNEL, SystemMessage, decode_datagram, decode_frames,
 };
-use nw_messages::{BundlePayload, ReplicatedStateBundle, ServerMessage};
+use nw_messages::{
+    BodyCodec, BundlePayload, ClientInputMsg, MessageError, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+    ReplicatedStateBundle, ServerMessage,
+};
 use nw_reflect::{
     Envelope, REGISTRATION_RESPONSE_MSG_TYPE_INDEX, RegistrationResponseMsg, decode_client_message,
     decode_server_messages,
@@ -275,7 +278,8 @@ pub struct CaptureReport {
     pub inline_uuid_messages: u64,
     /// Registration responses.
     pub registration: RegistrationSummary,
-    /// Server bodies of the M4 types that decode and encode to the same bytes, by type index.
+    /// Bodies of the M4 types (server messages and the client input, type 1589) that decode and
+    /// encode to the same bytes, by type index.
     pub bodies: BTreeMap<u64, u64>,
     /// Bundle members with a reader that decode and encode to the same bytes, by class index.
     pub members: BTreeMap<u64, u64>,
@@ -395,19 +399,33 @@ impl CaptureReport {
             && let Some(decoded) = ServerMessage::decode(index, &envelope.body)
         {
             let message = decoded.map_err(|error| format!("type {index}: {error}"))?;
-            let encoded = message
-                .encode()
-                .map_err(|error| format!("type {index}: {error}"))?;
-            if encoded != envelope.body {
-                return Err(format!(
-                    "type {index}: encoded body differs from the capture"
-                ));
-            }
-            *self.bodies.entry(index).or_default() += 1;
+            self.same_bytes(index, message.encode(), &envelope.body)?;
             if let ServerMessage::Bundle(bundle) = message {
                 self.check_members(&bundle)?;
             }
         }
+        if record.direction == CLIENT_TO_SERVER && index == RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX {
+            let input = ClientInputMsg::decode(&envelope.body)
+                .map_err(|error| format!("type {index}: {error}"))?;
+            self.same_bytes(index, input.encode(), &envelope.body)?;
+        }
+        Ok(())
+    }
+
+    /// Counts a body of type `index` whose encoding is the captured `body`.
+    fn same_bytes(
+        &mut self,
+        index: u64,
+        encoded: Result<Vec<u8>, MessageError>,
+        body: &[u8],
+    ) -> Result<(), String> {
+        let encoded = encoded.map_err(|error| format!("type {index}: {error}"))?;
+        if encoded != body {
+            return Err(format!(
+                "type {index}: encoded body differs from the capture"
+            ));
+        }
+        *self.bodies.entry(index).or_default() += 1;
         Ok(())
     }
 
@@ -448,9 +466,10 @@ mod tests {
     };
 
     use nw_messages::{
-        BodyCodec, BundleGroup, BundleMember, BundlePayload, MemberState,
-        POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState,
-        REPLICATED_STATE_BUNDLE_TYPE_INDEX, ReplicatedStateBundle, WorldPosition,
+        BodyCodec, BundleGroup, BundleMember, BundlePayload, ClientInputMsg, InputPosition,
+        MemberState, POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState,
+        RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REPLICATED_STATE_BUNDLE_TYPE_INDEX,
+        ReplicatedStateBundle, WorldPosition,
     };
 
     use super::*;
@@ -694,6 +713,38 @@ mod tests {
         assert_eq!(report.failures.len(), 1);
         assert!(report.failures[0].reason.contains("type 335"));
         assert!(report.bodies.is_empty());
+    }
+
+    #[test]
+    fn client_inputs_are_decoded_and_compared() {
+        let position = InputPosition::from_metres(1.0, 2.0, 3.0).expect("finite");
+        let input = ClientInputMsg::position(position).encode().expect("input");
+        let good = envelope(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, input.clone());
+        let short = envelope(
+            RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+            input[..input.len() - 1].to_vec(),
+        );
+        let frames: Vec<Frame> = [good, short]
+            .iter()
+            .zip(RELIABLE_START..)
+            .map(|(envelope, reliable_sequence)| Frame {
+                channel: 0,
+                reliable: true,
+                connecting: false,
+                chunks_remaining: None,
+                sequence: reliable_sequence,
+                reliable_sequence,
+                payload: encode_client_message(&ZERO_SESSION, envelope).expect("client"),
+            })
+            .collect();
+        let datagram = encode_datagram(DATAGRAM_SEQUENCE, &encode_frames(&frames).expect("frames"));
+        let mut report = CaptureReport::default();
+        report
+            .check_ledger(Path::new("inputs"), &record(CLIENT_TO_SERVER, &datagram))
+            .expect("check");
+        assert_eq!(report.bodies[&RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX], 1);
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].reason.contains("type 1589"));
     }
 
     #[test]
