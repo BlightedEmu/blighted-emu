@@ -150,7 +150,7 @@ impl SimWorld {
         self.by_connection.len()
     }
 
-    /// Adds a player at `position` and returns its login messages.
+    /// Adds a player at `position` and returns its entity number and its login messages.
     ///
     /// # Errors
     ///
@@ -162,7 +162,7 @@ impl SimWorld {
         position: Position,
         now_ms: u64,
         server_time: u64,
-    ) -> Result<Outgoing, WorldError> {
+    ) -> Result<(u64, Outgoing), WorldError> {
         if self.by_connection.contains_key(&connection) {
             return Err(WorldError::AlreadyJoined(connection));
         }
@@ -192,12 +192,15 @@ impl SimWorld {
             ))
             .id();
         self.by_connection.insert(connection.clone(), entity);
-        Ok(Outgoing {
-            connection,
-            channel: MESSAGE_CHANNEL,
-            reliable: true,
-            envelopes,
-        })
+        Ok((
+            number,
+            Outgoing {
+                connection,
+                channel: MESSAGE_CHANNEL,
+                reliable: true,
+                envelopes,
+            },
+        ))
     }
 
     /// Moves the player of `connection` to `next`, received at `now_ms`, when the movement checks
@@ -492,9 +495,10 @@ mod tests {
     #[test]
     fn a_join_sends_the_login_messages_reliably_on_channel_0() {
         let mut world = world();
-        let login = world
+        let (number, login) = world
             .join(connection(1), Uuid::new_v4(), at(0.0), NOW, SERVER_TIME)
             .expect("join");
+        assert_eq!(number, 1);
         assert_eq!(login.channel, MESSAGE_CHANNEL);
         assert!(login.reliable);
         assert_eq!(login.envelopes.len(), LOGIN_MESSAGE_TYPES.len());

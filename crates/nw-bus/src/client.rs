@@ -169,7 +169,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::message::{Heartbeat, JoinReply};
+    use crate::message::{AdmitReply, Heartbeat};
     use crate::test_support::test_bus;
 
     const TIMEOUT: Duration = Duration::from_secs(2);
@@ -202,22 +202,22 @@ mod tests {
         tokio::spawn(async move {
             let request = requests.next().await.expect("one").expect("decode");
             answerer
-                .reply(&request, &JoinReply::Joined)
+                .reply(&request, &AdmitReply::Admitted)
                 .await
                 .expect("reply");
         });
-        let reply: JoinReply = bus
+        let reply: AdmitReply = bus
             .request(request_subject, &beat, TIMEOUT)
             .await
             .expect("request");
-        assert_eq!(reply, JoinReply::Joined);
+        assert_eq!(reply, AdmitReply::Admitted);
     }
 
     #[tokio::test]
     async fn a_request_without_a_responder_fails_fast() {
         let bus = test_bus().await;
         let subject = format!("nw.test.{}", Uuid::new_v4());
-        let result: Result<JoinReply, _> = bus
+        let result: Result<AdmitReply, _> = bus
             .request(
                 subject,
                 &Heartbeat {

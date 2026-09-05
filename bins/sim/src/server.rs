@@ -228,13 +228,17 @@ impl Loop {
                 .map_err(|error| error.to_string())
         });
         let reply = match joined {
-            Ok(login) => {
+            Ok((entity, login)) => {
                 metrics::counter!(METRIC_JOINS, RESULT_LABEL => JOINED).increment(1);
                 tracing::info!(character = %message.character, "joined");
                 self.gateways
                     .joined(&message.connection.gateway, Instant::now());
                 self.send(login);
-                JoinReply::Joined
+                JoinReply::Joined {
+                    sim: self.settings.sim_id.clone(),
+                    generation: self.started_at_ms,
+                    entity,
+                }
             }
             Err(reason) => {
                 metrics::counter!(METRIC_JOINS, RESULT_LABEL => REFUSED).increment(1);
@@ -663,8 +667,12 @@ mod tests {
                 connection: connection.clone(),
                 account,
                 character,
+                resume: None,
             };
-            assert_eq!(sim.join(&join(account)).await, JoinReply::Joined);
+            assert!(matches!(
+                sim.join(&join(account)).await,
+                JoinReply::Joined { .. }
+            ));
             let (channel, reliable, login) = sim.next_messages().await;
             assert_eq!(
                 (channel, reliable, login.len()),
@@ -740,8 +748,9 @@ mod tests {
                 connection: connection.clone(),
                 account,
                 character,
+                resume: None,
             };
-            assert_eq!(sim.join(&join).await, JoinReply::Joined);
+            assert!(matches!(sim.join(&join).await, JoinReply::Joined { .. }));
             let start = start();
             let target =
                 InputPosition::from_metres(start.x + STEP_M, start.y, start.z).expect("finite");
@@ -785,8 +794,9 @@ mod tests {
                 },
                 account,
                 character,
+                resume: None,
             };
-            assert_eq!(sim.join(&join).await, JoinReply::Joined);
+            assert!(matches!(sim.join(&join).await, JoinReply::Joined { .. }));
             sim.stop().await;
             let saved = character_position(db, character).await.expect("load");
             assert!(saved.is_some(), "the shutdown save is missing");
@@ -813,8 +823,9 @@ mod tests {
                 },
                 account,
                 character,
+                resume: None,
             };
-            assert_eq!(sim.join(&join).await, JoinReply::Joined);
+            assert!(matches!(sim.join(&join).await, JoinReply::Joined { .. }));
             let close = async {
                 loop {
                     if let GatewayOutput::Close { connection } = sim.next_output().await {

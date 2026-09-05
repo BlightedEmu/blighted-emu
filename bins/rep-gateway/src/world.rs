@@ -145,6 +145,7 @@ impl World for BusWorld {
             connection: self.connection(connection),
             account: record.account_id,
             character: record.character_id,
+            resume: None,
         };
         let subject = subject::sim_join(self.settings.world_id, &self.settings.sim_id);
         match self
@@ -152,7 +153,7 @@ impl World for BusWorld {
             .request::<Join, JoinReply>(subject, &join, self.settings.join_timeout)
             .await
         {
-            Ok(JoinReply::Joined) => Ok(()),
+            Ok(JoinReply::Joined { .. }) => Ok(()),
             Ok(JoinReply::Refused { reason }) => {
                 tracing::warn!(%reason, "world refused the character");
                 Err(Refusal::WorldRefused)
@@ -352,6 +353,8 @@ mod bus_tests {
     const SETTLE: Duration = Duration::from_millis(200);
     const WAIT: Duration = Duration::from_secs(5);
     const CONNECTION: u64 = 3;
+    /// A sim generation (its start time).
+    const STARTED_AT_MS: u64 = 1_800_000_000_000;
     const SIM_STARTED_AT_MS: u64 = 10;
     const ENVELOPE: [u8; 2] = [4, 5];
 
@@ -410,7 +413,12 @@ mod bus_tests {
             world.join(CONNECTION, &record()).await,
             Err(Refusal::WorldUnavailable)
         );
-        answer_joins(&bus, &settings, JoinReply::Joined).await;
+        let joined = JoinReply::Joined {
+            sim: settings.sim_id.clone(),
+            generation: STARTED_AT_MS,
+            entity: CONNECTION,
+        };
+        answer_joins(&bus, &settings, joined).await;
         assert_eq!(world.join(CONNECTION, &record()).await, Ok(()));
 
         let refusing = self::settings();

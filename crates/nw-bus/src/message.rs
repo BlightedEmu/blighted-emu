@@ -21,7 +21,8 @@ pub struct ConnectionRef {
     pub connection: u64,
 }
 
-/// A player with a checked ticket joins the world.
+/// Gateway to director: a player with a checked ticket joins the world, or a player of a lost
+/// sim resumes on another (M5 spec sections 3.1 and 3.6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Join {
     /// The connection.
@@ -30,13 +31,22 @@ pub struct Join {
     pub account: Uuid,
     /// The character.
     pub character: Uuid,
+    /// The entity number of a resumed player; `None` for a new login.
+    pub resume: Option<u64>,
 }
 
 /// The answer to [`Join`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JoinReply {
     /// The character is in the world.
-    Joined,
+    Joined {
+        /// The sim that has the player.
+        sim: BusId,
+        /// That sim's generation.
+        generation: u64,
+        /// The player's entity number.
+        entity: u64,
+    },
     /// The character cannot join; the gateway sends registration status 1.
     Refused {
         /// Why, for the log.
@@ -295,8 +305,13 @@ mod tests {
             connection: connection(),
             account: Uuid::new_v4(),
             character: Uuid::new_v4(),
+            resume: Some(CONNECTION),
         });
-        round_trip(JoinReply::Joined);
+        round_trip(JoinReply::Joined {
+            sim: connection().gateway,
+            generation: STARTED_AT_MS,
+            entity: CONNECTION,
+        });
         round_trip(JoinReply::Refused {
             reason: "no position".to_owned(),
         });
