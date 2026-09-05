@@ -10,6 +10,9 @@ pub enum DbError {
     /// That character name is already used in some world.
     #[error("character name is already used")]
     DuplicateCharacterName,
+    /// The world database has no character with that id.
+    #[error("no such character")]
+    NoSuchCharacter,
     /// The database schema is not at the version this program needs.
     #[error(
         "database schema is at migration {found}, this program needs {expected}; run `edge-http migrate`"
