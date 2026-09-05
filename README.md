@@ -182,7 +182,7 @@ The gateway serves Prometheus metrics on `metrics_listen` (`rep_gateway_*`). Kee
 
 The open map (`newworld_vitaeeterna`) runs on one or more `sim` processes at 30 ticks per second. `world-director` cuts the map into square cells of `cell_size_m` and gives each live `sim` a stripe of cell columns. Every second it publishes this cell table, and it writes the free player slots of the world to Valkey; the login queue admits players only while there are free slots.
 
-After the gateway checks a ticket, it asks the director to place the character. The director loads the saved position (or uses `start_position` the first time, on the ground of the world file), takes a new entity number, and asks the `sim` that owns that cell to take the player. The `sim` sends the login messages. Only then does the gateway send registration status 0.
+After the gateway checks a ticket, it asks the director to place the character. The director loads the saved position (or, the first time, the next of its `start_positions` in turn, on the ground of the world file), takes a new entity number, and asks the `sim` that owns that cell to take the player. The `sim` sends the login messages. Only then does the gateway send registration status 0.
 
 Every tick, each player gets its own position and the nearest `max_visible_players` players inside `interest_radius_m`, also players of other `sim` processes near a border (ghosts). A client moves by sending its input (type 1589); the `sim` checks the position: finite, inside the level, not faster than `run_speed_mps` x (1 + `speed_margin`) over a budget of `burst_seconds`, and not under the ground or more than `max_height_above_ground_m` above it. A refused move keeps the last good position, which the player's next bundle shows.
 
@@ -194,7 +194,7 @@ NATS carries the messages between the gateway, the director and the `sim` proces
 
 Set up once:
 
-1. Build the world files from your install: `just bundle`, then `just world`. The director reads the ground height for `start_position`; each `sim` reads it for the move checks.
+1. Build the world files from your install: `just bundle`, then `just world`. The director reads the ground height for `start_positions`; each `sim` reads it for the move checks.
 2. `world_id` in `config/world-director.toml`, `config/sim.toml` and `config/rep-gateway.toml` must be the `[[world]] id` in `config/edge.toml` (the example files match).
 3. Run the world database migrations with `edge-http migrate` after an update (M5 adds the entity numbers).
 
@@ -220,7 +220,9 @@ The director logs the x range of each `sim` (`cells assigned`). The same ids alw
 
 `nw-testclient pair` logs in two accounts (`account` and `second_account`) and keeps both in the world for `hold_seconds`. Each client must see the other. The first walks `route_m` (points east and north of where it stands) at `route_speed_mps`, and the second must see it on the route within `path_tolerance_m`. Then the first sends one move `jump_m` east, which `sim` must refuse. Then the first account logs in again and must appear at its saved position, within `position_tolerance_m`. It prints `pass` or `FAIL` for each check, and the exit code is 0 only when every check passed. `hold_seconds` must be longer than the walk.
 
-`nw-testclient swarm` runs `[swarm] bots` bots. Each walks from where it appears to its own lane north or south of `start_m`, then east and west across the line x = `start_m[0]` for `duration_seconds`, on the ground of the world file. Set `start_m` to the director's `start_position` and put that on a `sim` border, so every crossing is a handoff. It checks that every bot registered, crossed the line at least `min_crossings` times, stayed on its route, was not closed, and got its bundles with no gap above `max_bundle_gap_ms`. From the metrics of every `sim` in `metrics_urls` it checks the handoffs (enough, none refused or late), that no move was refused, that 99 % of the handoffs and of the ticks took at most one tick (33 ms), and that every metrics page was read.
+`nw-testclient swarm` runs `[swarm] bots` bots (`--bots <n>` sets another count). Each bot takes the entry of `starts_m` nearest to where it appears, walks to its own lane north or south of that start, then east and west across the line through it for `duration_seconds`, on the ground of the world file. Set `starts_m` to the director's `start_positions` and put each on a `sim` border, so every crossing is a handoff. It checks that every bot registered, crossed its line at least `min_crossings` times, stayed on its route, was not closed, got its bundles with no gap above `max_bundle_gap_ms`, and got at least 99 % of its bundles (one per tick). From the metrics of every `sim` in `metrics_urls` it checks the handoffs (enough, none refused or late), that no move was refused, that 99 % of the handoffs and of the ticks took at most one tick (33 ms), and that every metrics page was read. It also prints the PC's UDP receive buffer errors of the step.
+
+For many players on one PC (M5 load spec): give the gateway one `workers` per core you can spare (they share `udp_listen`), keep `udp_buffer_bytes` at 4 MiB (Linux caps it at `net.core.rmem_max`), and set `tick_threads` of each `sim` so that the sims together do not ask for more cores than the PC has.
 
 The bots register their accounts on the first run. `edge-http` counts every registration per IP address against `auth.login_fail_limit`, so raise it for that run, for example `NW_EDGE_AUTH__LOGIN_FAIL_LIMIT=5000`. The gateway counts new connections per IP address too: raise `limits.handshakes_per_ip_per_second` (for example `NW_GATEWAY_LIMITS__HANDSHAKES_PER_IP_PER_SECOND=200`).
 
@@ -243,12 +245,17 @@ Known gaps:
 3. Start the services (`just infra-up`), set the secrets, then start `edge-http serve`, `world-director`, `sim`, and `rep-gateway serve`.
 4. Run `cargo run -p nw-testclient -- pair`. Every check must print `pass`, and the exit code must be 0.
 
-`just test-infra` runs the same pair check without the network, on the Docker PostgreSQL, Valkey and NATS, with a level without height data and two `sim` processes; the walk crosses their border and back. It also writes a saved position to the database and checks that the next login appears there, and it stops one `sim` while a client is on it. On the real level, the walk of `pair` must stay inside the ground band: keep `route_m` short and on flat ground near `start_position`.
+`just test-infra` runs the same pair check without the network, on the Docker PostgreSQL, Valkey and NATS, with a level without height data and two `sim` processes; the walk crosses their border and back. It also writes a saved position to the database and checks that the next login appears there, and it stops one `sim` while a client is on it. On the real level, the walk of `pair` must stay inside the ground band: keep `route_m` short and on flat ground near the start position.
+
+### M5 load test
+
+1. Start `edge-http serve`, `world-director` with `cell_size_m = 1024` and a list of `start_positions` on the `sim` borders, eight `sim` processes, and `rep-gateway serve` with several `workers`, all release builds.
+2. Run `nw-testclient swarm --bots 1000`, then 2,500, 5,000 and 10,000, with `mpstat 5` beside it. A step passes when every check prints `pass`. A step that fails while the PC has less than 5 % idle CPU shows the limit of the PC.
 
 ### M5 exit test
 
 1. `cargo test --workspace` and `just test-infra` pass.
-2. Start the services, set the secrets, then start `edge-http serve`, `world-director`, four `sim` processes, and `rep-gateway serve` on one PC, with the director's `start_position` on a `sim` border.
+2. Start the services, set the secrets, then start `edge-http serve`, `world-director`, four `sim` processes, and `rep-gateway serve` on one PC, with the director's `start_positions` on a `sim` border.
 3. `cargo run -p nw-testclient -- pair` passes every check.
 4. `cargo run -p nw-testclient -- swarm` with 1,000 bots and the `metrics_urls` of the four `sim` processes passes every check.
 
