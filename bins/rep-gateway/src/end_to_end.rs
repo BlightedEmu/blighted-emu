@@ -24,12 +24,12 @@ use nw_login::valkey::Valkey;
 use nw_messages::WorldPosition;
 use nw_reflect::{REGISTRATION_STATUS_AUTHORIZED, REGISTRATION_STATUS_REFUSED};
 use nw_sim_core::Position;
+use nw_sim_core::test_support::NoGround;
 use nw_testclient::pair::{PairSettings, distance, run_pair, session};
 use nw_testclient::udp::run_rep;
 use nw_testclient::walk::{WalkSettings, login_token, walk};
-use sim::config::load_sim_config;
+use sim::config::{SimConfig, load_sim_config};
 use sim::server::{LoopSettings, serve as serve_sim};
-use sim::world::WorldSettings;
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
@@ -49,7 +49,6 @@ const LEVEL: &str = "newworld_vitaeeterna";
 const SIM_CONFIG: &str = "../../config/sim.toml";
 /// A saved position away from the start, inside the interest radius.
 const SAVED_OFFSET_M: f32 = 25.0;
-const INTEREST_RADIUS_M: f32 = 100.0;
 const SAVE_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT: Duration = Duration::from_millis(200);
 const HEARTBEAT_MISSES: u32 = 3;
@@ -161,13 +160,15 @@ async fn a_client_logs_in_and_registers_with_the_gateway_once() {
     .await;
 }
 
-/// The start position of the committed `config/sim.toml`.
-fn start() -> Position {
+/// The committed `config/sim.toml`.
+fn sim_config() -> SimConfig {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(SIM_CONFIG);
-    load_sim_config(&path)
-        .expect("sim config")
-        .start_position
-        .position()
+    load_sim_config(&path).expect("sim config")
+}
+
+/// Its start position.
+fn start() -> Position {
+    sim_config().start_position.position()
 }
 
 /// Starts `sim` for `world_id` on the world database and waits for its first heartbeat.
@@ -183,15 +184,14 @@ async fn start_sim(world_id: Uuid, sim_id: &BusId, world_pool: &PgPool) {
         world_id,
         level: LEVEL.to_owned(),
         start: start(),
-        world: WorldSettings {
-            interest_radius_m: INTEREST_RADIUS_M,
-        },
+        world: sim_config().world_settings().expect("world settings"),
         save_interval: SAVE_INTERVAL,
         heartbeat_interval: HEARTBEAT,
         heartbeat_misses: HEARTBEAT_MISSES,
     };
     tokio::spawn(serve_sim(
         settings,
+        Arc::new(NoGround),
         bus,
         world_pool.clone(),
         std::future::pending(),

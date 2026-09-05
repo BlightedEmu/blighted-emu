@@ -7,9 +7,11 @@ use std::path::{Path, PathBuf};
 use nw_bus::BusId;
 use nw_common::config::{ConfigError, SECRET_ENV_PREFIX, load_config};
 use nw_db::DatabaseConfig;
-use nw_sim_core::{Ground, Position};
+use nw_sim_core::{CellBounds, Ground, MoveLimits, MoveLimitsError, Position};
 use serde::Deserialize;
 use uuid::Uuid;
+
+use crate::world::WorldSettings;
 
 /// Environment prefix of `sim` overrides.
 pub const SIM_ENV_PREFIX: &str = "NW_SIM_";
@@ -42,6 +44,14 @@ pub struct SimConfig {
     pub ground_tolerance_m: f32,
     /// How far a position may be above the ground, in metres.
     pub max_height_above_ground_m: f32,
+    /// The run speed of the datasheets (`ServerValidatedCanRun`), in metres per second.
+    pub run_speed_mps: f32,
+    /// How much faster than `run_speed_mps` a move may be, as a share (1.2 is 120 % more).
+    pub speed_margin: f32,
+    /// Longest burst of movement that the distance budget holds, in seconds.
+    pub burst_seconds: f32,
+    /// `[cell]`: the area of this cell.
+    pub cell: CellArea,
     /// Time between position saves.
     pub save_interval_ms: u64,
     /// Time between heartbeats.
@@ -75,6 +85,20 @@ impl StartPosition {
             z: self.z,
         }
     }
+}
+
+/// `[cell]`, in metres.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CellArea {
+    /// Smallest x.
+    pub min_x: f32,
+    /// Smallest y.
+    pub min_y: f32,
+    /// Largest x.
+    pub max_x: f32,
+    /// Largest y.
+    pub max_y: f32,
 }
 
 /// A value of the configuration that is not allowed.
@@ -137,7 +161,63 @@ impl SimConfig {
         if self.heartbeat_misses == 0 {
             return invalid("heartbeat_misses", "must be above 0");
         }
+        self.world_settings()?;
+        let cell = self.cell;
+        let edges = [cell.min_x, cell.min_y, cell.max_x, cell.max_y];
+        if !edges.iter().all(|edge| edge.is_finite())
+            || cell.min_x >= cell.max_x
+            || cell.min_y >= cell.max_y
+        {
+            return invalid(
+                "cell",
+                "edges must be finite, each minimum below its maximum",
+            );
+        }
         Ok(())
+    }
+
+    /// The settings of the world state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimConfigError::Invalid`] for a movement limit that is not usable.
+    pub fn world_settings(&self) -> Result<WorldSettings, SimConfigError> {
+        let limits = self
+            .move_limits()
+            .map_err(|error| SimConfigError::Invalid {
+                key: error.name,
+                reason: error.rule,
+            })?;
+        Ok(WorldSettings {
+            interest_radius_m: self.interest_radius_m,
+            limits,
+            bounds: self.cell_bounds(),
+        })
+    }
+
+    /// The movement limits (M4 spec section 7.2 with sections 15 and 16).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MoveLimitsError`] for a value that is not usable.
+    pub fn move_limits(&self) -> Result<MoveLimits, MoveLimitsError> {
+        MoveLimits::new(
+            self.run_speed_mps,
+            self.speed_margin,
+            self.burst_seconds,
+            self.ground_tolerance_m,
+            self.max_height_above_ground_m,
+        )
+    }
+
+    /// The area of this cell.
+    pub const fn cell_bounds(&self) -> CellBounds {
+        CellBounds {
+            min_x: self.cell.min_x,
+            min_y: self.cell.min_y,
+            max_x: self.cell.max_x,
+            max_y: self.cell.max_y,
+        }
     }
 
     /// Checks that the start position is on the ground of `ground` (M4 spec section 7.4).
@@ -168,24 +248,20 @@ impl SimConfig {
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use nw_sim_core::test_support::NoGround;
+
     use super::*;
 
     const COMMITTED_CONFIG: &str = "../../config/sim.toml";
     const GROUND_HEIGHT: f32 = 168.0;
+    /// Sprint (5.5 m/s) with the 15 % road boost (movement numbers note, Check section).
+    const BOOSTED_SPRINT_MPS: f32 = 6.325;
 
     struct Flat;
 
     impl Ground for Flat {
         fn height_at(&self, _: f32, _: f32) -> Option<f32> {
             Some(GROUND_HEIGHT)
-        }
-    }
-
-    struct NoGround;
-
-    impl Ground for NoGround {
-        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
-            None
         }
     }
 
@@ -220,5 +296,28 @@ pub(crate) mod tests {
         let mut config = committed();
         config.start_position.z = GROUND_HEIGHT - config.ground_tolerance_m - 1.0;
         assert!(config.check_start(&Flat).is_err());
+        let mut config = committed();
+        config.speed_margin = -1.0;
+        assert!(matches!(
+            config.validate(),
+            Err(SimConfigError::Invalid {
+                key: "speed_margin",
+                ..
+            })
+        ));
+        let mut config = committed();
+        config.cell.max_x = config.cell.min_x;
+        assert!(matches!(
+            config.validate(),
+            Err(SimConfigError::Invalid { key: "cell", .. })
+        ));
+    }
+
+    #[test]
+    fn the_speed_limit_is_above_boosted_sprint() {
+        let limits = committed().move_limits().expect("limits");
+        assert!(limits.max_speed_mps > BOOSTED_SPRINT_MPS);
+        let cell = committed().cell_bounds();
+        assert!(cell.min_x < cell.max_x && cell.min_y < cell.max_y);
     }
 }

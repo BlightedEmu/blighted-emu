@@ -11,5 +11,9 @@ publish.workspace = true
 nw-world.workspace = true
 thiserror.workspace = true
 
+[features]
+# `test_support`: grounds for other crates' tests.
+test-util = []
+
 [lints]
 workspace = true

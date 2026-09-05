@@ -229,7 +229,7 @@ impl Motion {
     pub fn try_move(
         &mut self,
         limits: &MoveLimits,
-        ground: &impl Ground,
+        ground: &(impl Ground + ?Sized),
         bounds: &CellBounds,
         next: Position,
         received_ms: u64,

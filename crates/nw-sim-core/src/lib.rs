@@ -4,8 +4,12 @@
 
 pub mod interest;
 pub mod movement;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_support;
 pub mod tick;
 
 pub use interest::{Interest, InterestChanges};
-pub use movement::{CellBounds, Ground, GroundCheck, Motion, MoveLimits, MoveRefusal, Position};
+pub use movement::{
+    CellBounds, Ground, GroundCheck, Motion, MoveLimits, MoveLimitsError, MoveRefusal, Position,
+};
 pub use tick::{DueTicks, TICKS_PER_SECOND, TickClock};

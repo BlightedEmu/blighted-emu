@@ -18,6 +18,7 @@ nw-common.workspace = true
 nw-content.workspace = true
 nw-db.workspace = true
 nw-messages.workspace = true
+nw-reflect.workspace = true
 nw-sim-core.workspace = true
 nw-world.workspace = true
 serde.workspace = true
@@ -28,10 +29,10 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+nw-sim-core = { workspace = true, features = ["test-util"] }
 nw-bus = { workspace = true, features = ["test-util"] }
 nw-carrier.workspace = true
 nw-db = { workspace = true, features = ["test-util"] }
-nw-reflect.workspace = true
 serde_json.workspace = true
 
 [features]

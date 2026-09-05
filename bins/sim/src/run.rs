@@ -3,6 +3,7 @@
 //! the world database and NATS, and runs the loop until Ctrl-C.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
 use nw_bus::{Bus, BusError};
@@ -16,7 +17,6 @@ use nw_world::world_file::world_file_path;
 
 use crate::config::{SimConfig, SimConfigError, load_sim_config};
 use crate::server::{LoopSettings, ServeError, serve as serve_loop};
-use crate::world::WorldSettings;
 
 /// Failure while starting or running `sim`.
 #[derive(Debug, thiserror::Error)]
@@ -71,15 +71,20 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
     init_logging(&config.log_filter)?;
     let build = load_client_build(&config.client_build_config).map_err(RunError::ClientBuild)?;
     let path = world_file_path(&config.content_dir, &build, &config.level);
-    config.check_start(&WorldFile::load(&path, &build)?)?;
+    let world_file = Arc::new(WorldFile::load(&path, &build)?);
+    config.check_start(&*world_file)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(RunError::Runtime)?
-        .block_on(serve_async(config, password))
+        .block_on(serve_async(config, password, world_file))
 }
 
-async fn serve_async(config: SimConfig, password: String) -> Result<(), RunError> {
+async fn serve_async(
+    config: SimConfig,
+    password: String,
+    ground: Arc<WorldFile>,
+) -> Result<(), RunError> {
     let db = nw_db::connect(&config.world_database, &password)
         .await
         .map_err(RunError::Database)?;
@@ -95,9 +100,7 @@ async fn serve_async(config: SimConfig, password: String) -> Result<(), RunError
         world_id: config.world_id,
         level: config.level.clone(),
         start: config.start_position.position(),
-        world: WorldSettings {
-            interest_radius_m: config.interest_radius_m,
-        },
+        world: config.world_settings()?,
         save_interval: std::time::Duration::from_millis(config.save_interval_ms),
         heartbeat_interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
         heartbeat_misses: config.heartbeat_misses,
@@ -106,5 +109,5 @@ async fn serve_async(config: SimConfig, password: String) -> Result<(), RunError
         // A failed signal handler means sim runs until killed.
         let _ = tokio::signal::ctrl_c().await;
     };
-    Ok(serve_loop(settings, bus, db, shutdown).await?)
+    Ok(serve_loop(settings, ground, bus, db, shutdown).await?)
 }

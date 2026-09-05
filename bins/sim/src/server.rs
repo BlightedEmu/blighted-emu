@@ -5,14 +5,18 @@
 //! database nor a lost NATS connection stops the tick.
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nw_bus::{
-    Bus, BusError, BusId, GatewayOutput, Heartbeat, Incoming, Join, JoinReply, Publisher, SimInput,
+    Bus, BusError, BusId, ConnectionRef, GatewayOutput, Heartbeat, Incoming, Join, JoinReply,
+    Publisher, SimInput,
 };
 use nw_common::time::unix_ms;
 use nw_db::{PgPool, SavedPosition, character_by_id, character_position, save_character_position};
-use nw_sim_core::{Position, TickClock};
+use nw_messages::{BodyCodec, ClientInputMsg, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX};
+use nw_reflect::Envelope;
+use nw_sim_core::{Ground, GroundCheck, Position, TickClock};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -20,7 +24,7 @@ use uuid::Uuid;
 use crate::gateways::GatewayTracker;
 use crate::login::WorldIds;
 use crate::saves::SaveQueue;
-use crate::world::{Departure, Outgoing, SimWorld, WorldSettings};
+use crate::world::{Departure, MoveError, Outgoing, SimWorld, WorldSettings};
 
 /// Time between checks of the tick clock.
 pub const POLL: Duration = Duration::from_millis(5);
@@ -42,8 +46,15 @@ pub const METRIC_LATE_TICKS: &str = "sim_late_ticks_total";
 pub const METRIC_JOINS: &str = "sim_joins_total";
 /// Metric: failed saves.
 pub const METRIC_FAILED_SAVES: &str = "sim_failed_saves_total";
-/// Metric: client messages that `sim` does not read yet.
+/// Metric: client messages of a type that `sim` does not read yet.
 pub const METRIC_IGNORED_MESSAGES: &str = "sim_ignored_client_messages_total";
+/// Metric: client messages that do not decode.
+pub const METRIC_BAD_MESSAGES: &str = "sim_bad_client_messages_total";
+/// Metric: refused moves by `reason`.
+pub const METRIC_REFUSED_MOVES: &str = "sim_moves_refused_total";
+/// Metric: accepted moves where the level has no height data.
+pub const METRIC_MOVES_WITHOUT_GROUND: &str = "sim_moves_without_ground_total";
+const REASON_LABEL: &str = "reason";
 /// Metric: gateway messages dropped because NATS is behind.
 pub const METRIC_DROPPED_OUTPUTS: &str = "sim_dropped_outputs_total";
 const RESULT_LABEL: &str = "result";
@@ -102,14 +113,16 @@ struct Loop {
     started_at_ms: u64,
 }
 
-/// Serves joins, inputs, ticks, saves and heartbeats until `shutdown` finishes; then saves every
-/// player once more and waits at most [`SHUTDOWN_SAVE_WAIT`] for the saves.
+/// Serves joins, inputs, ticks, saves and heartbeats on the ground of `ground` until `shutdown`
+/// finishes; then saves every player once more and waits at most [`SHUTDOWN_SAVE_WAIT`] for the
+/// saves.
 ///
 /// # Errors
 ///
 /// Returns [`ServeError`] when a subscription cannot start.
 pub async fn serve(
     settings: LoopSettings,
+    ground: Arc<dyn Ground + Send + Sync>,
     bus: Bus,
     db: PgPool,
     shutdown: impl Future<Output = ()>,
@@ -128,7 +141,7 @@ pub async fn serve(
     let started_at_ms = unix_ms();
     let (join_results, mut joined) = mpsc::channel(RESULT_QUEUE);
     let mut state = Loop {
-        world: SimWorld::new(settings.world, WorldIds::random(started_at_ms)?),
+        world: SimWorld::new(settings.world, WorldIds::random(started_at_ms)?, ground),
         gateways: GatewayTracker::new(settings.heartbeat_interval, settings.heartbeat_misses),
         outputs: Publisher::start(bus.clone(), OUTPUT_QUEUE),
         beats: Publisher::start(bus.clone(), HEARTBEAT_QUEUE),
@@ -234,14 +247,51 @@ impl Loop {
 
     fn input(&mut self, input: SimInput) {
         match input {
-            SimInput::ClientMessage { .. } => {
-                metrics::counter!(METRIC_IGNORED_MESSAGES).increment(1);
-            }
+            SimInput::ClientMessage {
+                connection,
+                envelope,
+            } => self.client_message(&connection, &envelope),
             SimInput::Left { connection } => {
                 if let Some(departure) = self.world.leave(&connection) {
                     self.save(&departure);
                 }
                 metrics::gauge!(METRIC_PLAYERS).set(self.world.players() as f64);
+            }
+        }
+    }
+
+    /// Reads one client message. Type 1589 moves the player to the position of its last record
+    /// that has one (M4 spec section 5.3); every other type is counted and ignored. Bad bytes
+    /// are counted and never close the connection.
+    fn client_message(&mut self, connection: &ConnectionRef, bytes: &[u8]) {
+        let Ok(envelope) = Envelope::decode(bytes) else {
+            metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
+            return;
+        };
+        if envelope.type_index() != Some(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX) {
+            metrics::counter!(METRIC_IGNORED_MESSAGES).increment(1);
+            return;
+        }
+        let Ok(input) = ClientInputMsg::decode(&envelope.body) else {
+            metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
+            return;
+        };
+        let Some(position) = input.last_position() else {
+            return;
+        };
+        let next = Position {
+            x: position.x,
+            y: position.y,
+            z: position.z(),
+        };
+        match self.world.move_to(connection, next, self.now_ms()) {
+            Ok(GroundCheck::Checked) | Err(MoveError::NotInWorld) => {}
+            Ok(GroundCheck::NoGround) => {
+                metrics::counter!(METRIC_MOVES_WITHOUT_GROUND).increment(1);
+            }
+            Err(MoveError::Refused(refusal)) => {
+                metrics::counter!(METRIC_REFUSED_MOVES, REASON_LABEL => refusal.reason())
+                    .increment(1);
             }
         }
     }
@@ -436,19 +486,22 @@ mod tests {
     use nw_bus::{ConnectionRef, GatewayOutput, Subscription};
     use nw_db::test_db::with_test_schema;
     use nw_db::{NewCharacter, WORLD_MIGRATOR, insert_character};
-    use nw_messages::{BundlePayload, LOGIN_MESSAGE_TYPES, ServerMessage};
-    use nw_reflect::Envelope;
+    use nw_messages::{
+        BundlePayload, InputPosition, LOGIN_MESSAGE_TYPES, MemberState, ServerMessage,
+    };
+    use nw_reflect::TypeId;
     use tokio::sync::oneshot;
     use tokio::task::JoinHandle;
 
     use super::*;
+    use nw_sim_core::test_support::NoGround;
+
     use crate::config::tests::committed;
     use crate::world::{MESSAGE_CHANNEL, REPLICATION_CHANNEL};
 
     const WAIT: Duration = Duration::from_secs(5);
     const LEVEL: &str = "newworld_vitaeeterna";
     const CONNECTION: u64 = 9;
-    const RADIUS: f32 = 100.0;
     const SAVE_INTERVAL: Duration = Duration::from_secs(10);
     const HEARTBEAT: Duration = Duration::from_secs(1);
     const MISSES: u32 = 3;
@@ -460,6 +513,10 @@ mod tests {
     const PAUSE: Duration = Duration::from_millis(100);
     const SAVE_TOLERANCE_M: f64 = 0.01;
     const CHARACTER_NAME: &str = "Ada";
+    /// A step the limits allow after [`STEP_WAIT`].
+    const STEP_M: f32 = 2.0;
+    const STEP_WAIT: Duration = Duration::from_millis(500);
+    const MOVE_TOLERANCE_M: f32 = 0.01;
 
     fn start() -> Position {
         committed().start_position.position()
@@ -471,9 +528,7 @@ mod tests {
             world_id,
             level: LEVEL.to_owned(),
             start: start(),
-            world: WorldSettings {
-                interest_radius_m: RADIUS,
-            },
+            world: committed().world_settings().expect("world settings"),
             save_interval: SAVE_INTERVAL,
             heartbeat_interval: HEARTBEAT,
             heartbeat_misses: MISSES,
@@ -514,9 +569,15 @@ mod tests {
             .expect("outputs");
         bus.flush().await.expect("flush");
         let (stop, stopped) = oneshot::channel::<()>();
-        let server = tokio::spawn(serve(settings.clone(), bus.clone(), db.clone(), async {
-            let _ = stopped.await;
-        }));
+        let server = tokio::spawn(serve(
+            settings.clone(),
+            Arc::new(NoGround),
+            bus.clone(),
+            db.clone(),
+            async {
+                let _ = stopped.await;
+            },
+        ));
         Running {
             bus,
             settings,
@@ -636,6 +697,70 @@ mod tests {
             let saved = saved_position(db, character).await;
             assert_eq!(saved.level, LEVEL);
             assert!((saved.x - f64::from(start().x)).abs() < SAVE_TOLERANCE_M);
+            sim.stop().await;
+        })
+        .await;
+    }
+
+    /// The own x of the next bundle on the replication channel.
+    async fn next_own_x(sim: &mut Running) -> f32 {
+        loop {
+            let (channel, _, envelopes) = sim.next_messages().await;
+            if channel != REPLICATION_CHANNEL {
+                continue;
+            }
+            let envelope = Envelope::decode(&envelopes[0]).expect("envelope");
+            let Some(Ok(ServerMessage::Bundle(bundle))) = ServerMessage::from_envelope(&envelope)
+            else {
+                panic!("expected a bundle");
+            };
+            let payload = BundlePayload::decode(&bundle.payload).expect("payload");
+            let MemberState::Position(state) = &payload.groups[0].members[0].state;
+            return state.position.expect("position").x;
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_client_input_moves_the_player() {
+        with_test_schema(async |db| {
+            WORLD_MIGRATOR.run(db).await.expect("migrate");
+            let (account, character) = character(db).await;
+            let gateway = gateway();
+            let mut sim = run(settings(Uuid::new_v4()), &gateway, db).await;
+            let connection = ConnectionRef {
+                gateway,
+                connection: CONNECTION,
+            };
+            let join = Join {
+                connection: connection.clone(),
+                account,
+                character,
+            };
+            assert_eq!(sim.join(&join).await, JoinReply::Joined);
+            let start = start();
+            let target =
+                InputPosition::from_metres(start.x + STEP_M, start.y, start.z).expect("finite");
+            let body = ClientInputMsg::position(target).encode().expect("input");
+            let envelope =
+                Envelope::message(TypeId::FileSlot(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX), body)
+                    .encode()
+                    .expect("envelope");
+            tokio::time::sleep(STEP_WAIT).await;
+            sim.bus
+                .publish(
+                    nw_bus::subject::sim_input(sim.settings.world_id, &sim.settings.sim_id),
+                    &SimInput::ClientMessage {
+                        connection,
+                        envelope,
+                    },
+                )
+                .await
+                .expect("input");
+            let moved =
+                async { while (next_own_x(&mut sim).await - target.x).abs() > MOVE_TOLERANCE_M {} };
+            tokio::time::timeout(WAIT, moved)
+                .await
+                .expect("moved in time");
             sim.stop().await;
         })
         .await;
