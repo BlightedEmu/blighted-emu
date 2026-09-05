@@ -2,16 +2,17 @@
 //! The link from the gateway to the world, `sim` (M4 spec sections 3.1, 6 and 11): joins, client
 //! messages and departures go out; server messages, closes and the loss of the world come in.
 //!
-//! [`World`] is what the server loop uses; [`BusWorld`] is the NATS version. Inputs go through one
-//! publishing task, so `sim` gets them in the order the clients sent them.
+//! [`World`] is what the server loop uses; [`BusWorld`] is the NATS version. Inputs and heartbeats
+//! go through publishing queues ([`Publisher`]), so `sim` gets the inputs in the order the clients
+//! sent them, and a lost NATS connection never blocks the loop or the silence check.
 
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nw_bus::{
-    Bus, BusError, BusId, ConnectionRef, GatewayOutput, Heartbeat, Join, JoinReply, SimInput,
-    Subscription, subject,
+    Bus, BusError, BusId, ConnectionRef, GatewayOutput, Heartbeat, Join, JoinReply, Publisher,
+    SimInput, Subscription, heartbeat_silence, subject,
 };
 use nw_common::time::unix_ms;
 use nw_login::queue::EntryRecord;
@@ -24,6 +25,8 @@ use crate::registration::Refusal;
 pub const INPUT_QUEUE: usize = 4096;
 /// World events that may wait for the server loop.
 pub const EVENT_QUEUE: usize = 4096;
+/// Heartbeats that may wait for NATS.
+const HEARTBEAT_QUEUE: usize = 16;
 /// Metric: inputs dropped because the publishing task is behind.
 pub const METRIC_INPUTS_DROPPED: &str = "rep_gateway_world_inputs_dropped_total";
 
@@ -79,7 +82,8 @@ pub struct WorldLinkSettings {
 pub struct BusWorld {
     bus: Bus,
     settings: Arc<WorldLinkSettings>,
-    inputs: mpsc::Sender<SimInput>,
+    input_subject: String,
+    inputs: Publisher<SimInput>,
 }
 
 impl BusWorld {
@@ -103,24 +107,19 @@ impl BusWorld {
         bus.flush().await?;
         let settings = Arc::new(settings);
         let (events, receiver) = mpsc::channel(EVENT_QUEUE);
-        let (inputs, pending) = mpsc::channel(INPUT_QUEUE);
-        tokio::spawn(publish_inputs(
-            bus.clone(),
-            subject::sim_input(world_id, &settings.sim_id),
-            pending,
-        ));
         tokio::spawn(forward_outputs(outputs, events.clone()));
         tokio::spawn(heartbeats(
-            bus.clone(),
+            Publisher::start(bus.clone(), HEARTBEAT_QUEUE),
             Arc::clone(&settings),
             sim_beats,
             events,
         ));
         Ok((
             Self {
+                input_subject: subject::sim_input(world_id, &settings.sim_id),
+                inputs: Publisher::start(bus.clone(), INPUT_QUEUE),
                 bus,
                 settings,
-                inputs,
             },
             receiver,
         ))
@@ -134,7 +133,7 @@ impl BusWorld {
     }
 
     fn input(&self, input: SimInput) {
-        if self.inputs.try_send(input).is_err() {
+        if !self.inputs.send(self.input_subject.clone(), input) {
             metrics::counter!(METRIC_INPUTS_DROPPED).increment(1);
         }
     }
@@ -179,14 +178,6 @@ impl World for BusWorld {
     }
 }
 
-async fn publish_inputs(bus: Bus, subject: String, mut pending: mpsc::Receiver<SimInput>) {
-    while let Some(input) = pending.recv().await {
-        if let Err(error) = bus.publish(subject.clone(), &input).await {
-            tracing::warn!(%error, "world input publish failed");
-        }
-    }
-}
-
 async fn forward_outputs(
     mut outputs: Subscription<GatewayOutput>,
     events: mpsc::Sender<WorldEvent>,
@@ -207,10 +198,10 @@ async fn forward_outputs(
     }
 }
 
-/// Publishes this gateway's heartbeat and reports [`WorldEvent::Lost`] once when the sim misses
-/// `heartbeat_misses` beats, and when it restarts. Ends when the server loop is gone.
+/// Reports [`WorldEvent::Lost`] once when the sim misses `heartbeat_misses` beats, and when it
+/// restarts, and queues this gateway's heartbeat. Ends when the server loop is gone.
 async fn heartbeats(
-    bus: Bus,
+    beats: Publisher<Heartbeat>,
     settings: Arc<WorldLinkSettings>,
     mut sim_beats: Subscription<Heartbeat>,
     events: mpsc::Sender<WorldEvent>,
@@ -220,7 +211,7 @@ async fn heartbeats(
         id: settings.gateway_id.clone(),
         started_at_ms: unix_ms(),
     };
-    let silence = settings.heartbeat_interval * settings.heartbeat_misses;
+    let silence = heartbeat_silence(settings.heartbeat_interval, settings.heartbeat_misses);
     let mut sim_started_at_ms: Option<u64> = None;
     let mut last_seen = Instant::now();
     let mut lost = false;
@@ -231,13 +222,13 @@ async fn heartbeats(
                 if events.is_closed() {
                     return;
                 }
-                if let Err(error) = bus.publish(beat_subject.clone(), &own).await {
-                    tracing::warn!(%error, "heartbeat failed");
-                }
                 let silent = !lost && last_seen.elapsed() > silence;
                 if silent {
                     tracing::warn!(sim = %settings.sim_id, "world silent; its players close");
                     lost = true;
+                }
+                if !beats.send(beat_subject.clone(), own.clone()) {
+                    tracing::warn!("heartbeat dropped; NATS is behind");
                 }
                 silent
             }
@@ -432,6 +423,25 @@ mod bus_tests {
             world.join(CONNECTION, &record()).await,
             Err(Refusal::WorldRefused)
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_join_that_gets_no_answer_times_out() {
+        let bus = test_bus().await;
+        let settings = settings();
+        let mut joins = bus
+            .subscribe::<Join>(subject::sim_join(settings.world_id, &settings.sim_id))
+            .await
+            .expect("subscribe");
+        bus.flush().await.expect("flush");
+        tokio::spawn(async move { while joins.next().await.is_some() {} });
+        let (world, _events) = BusWorld::start(bus, settings).await.expect("start");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            world.join(CONNECTION, &record()).await,
+            Err(Refusal::WorldUnavailable)
+        );
+        assert!(started.elapsed() >= JOIN_TIMEOUT);
     }
 
     #[tokio::test(flavor = "multi_thread")]
