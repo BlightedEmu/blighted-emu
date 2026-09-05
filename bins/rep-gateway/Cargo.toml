@@ -30,8 +30,11 @@ axum.workspace = true
 nw-bus = { workspace = true, features = ["test-util"] }
 nw-db = { workspace = true, features = ["test-util"] }
 nw-login = { workspace = true, features = ["test-util"] }
+nw-messages.workspace = true
+nw-sim-core.workspace = true
 nw-testclient.workspace = true
 reqwest.workspace = true
+sim.workspace = true
 tempfile.workspace = true
 
 [features]
