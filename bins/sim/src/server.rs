@@ -395,6 +395,7 @@ fn server_time() -> u64 {
 
 #[cfg(all(test, feature = "infra"))]
 mod tests {
+    use nw_bus::test_support::test_bus;
     use nw_bus::{ConnectionRef, GatewayOutput};
     use nw_db::test_db::with_test_schema;
     use nw_db::{NewCharacter, WORLD_MIGRATOR, insert_character};
@@ -404,8 +405,6 @@ mod tests {
     use super::*;
     use crate::world::{MESSAGE_CHANNEL, REPLICATION_CHANNEL};
 
-    const NATS_URL_ENV: &str = "NW_TEST_NATS_URL";
-    const DEFAULT_NATS_URL: &str = "nats://127.0.0.1:4222";
     const WAIT: Duration = Duration::from_secs(5);
     const LEVEL: &str = "newworld_vitaeeterna";
     const LOGIN_MESSAGES: usize = 7;
@@ -474,8 +473,7 @@ mod tests {
             )
             .await
             .expect("character");
-            let url = std::env::var(NATS_URL_ENV).unwrap_or_else(|_| DEFAULT_NATS_URL.to_owned());
-            let bus = Bus::connect(&url).await.expect("bus");
+            let bus = test_bus().await;
             let world_id = Uuid::new_v4();
             let settings = settings(world_id);
             let sim_id = settings.sim_id.clone();

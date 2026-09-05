@@ -28,6 +28,7 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+nw-bus = { workspace = true, features = ["test-util"] }
 nw-carrier.workspace = true
 nw-db = { workspace = true, features = ["test-util"] }
 nw-reflect.workspace = true

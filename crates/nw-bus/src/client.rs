@@ -170,20 +170,14 @@ mod tests {
 
     use super::*;
     use crate::message::{Heartbeat, JoinReply};
+    use crate::test_support::test_bus;
 
-    const NATS_URL_ENV: &str = "NW_TEST_NATS_URL";
-    const DEFAULT_NATS_URL: &str = "nats://127.0.0.1:4222";
     const TIMEOUT: Duration = Duration::from_secs(2);
     const STARTED_AT_MS: u64 = 5;
 
-    async fn bus() -> Bus {
-        let url = std::env::var(NATS_URL_ENV).unwrap_or_else(|_| DEFAULT_NATS_URL.to_owned());
-        Bus::connect(&url).await.expect("connect to NATS")
-    }
-
     #[tokio::test]
     async fn publish_subscribe_and_request_reply_work() {
-        let bus = bus().await;
+        let bus = test_bus().await;
         let subject = format!("nw.test.{}", Uuid::new_v4());
         let mut subscription = bus
             .subscribe::<Heartbeat>(subject.clone())
@@ -221,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_request_without_a_responder_fails_fast() {
-        let bus = bus().await;
+        let bus = test_bus().await;
         let subject = format!("nw.test.{}", Uuid::new_v4());
         let result: Result<JoinReply, _> = bus
             .request(

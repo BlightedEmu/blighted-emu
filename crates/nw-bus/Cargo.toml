@@ -21,8 +21,10 @@ uuid.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [features]
+# `test_support`: the test NATS address, for other crates' tests.
+test-util = []
 # Tests that need the Docker Compose NATS (`just test-infra`).
-infra = []
+infra = ["test-util"]
 
 [lints]
 workspace = true
