@@ -7,6 +7,7 @@
 
 use std::collections::BTreeSet;
 
+use nw_world::records::LevelInfo;
 use thiserror::Error;
 
 use crate::movement::{CellBounds, Position};
@@ -69,6 +70,21 @@ impl CellGrid {
             columns: columns as u32,
             rows: rows as u32,
         })
+    }
+
+    /// The grid of a level from its world file frame: `region_size` times the region counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CellGridError`] as [`CellGrid::new`] does, for example for a level without
+    /// regions.
+    pub fn of_level(level: &LevelInfo, cell_size_m: f32) -> Result<Self, CellGridError> {
+        let length = |regions: u32| (f64::from(level.region_size) * f64::from(regions)) as f32;
+        Self::new(
+            length(level.grid_width),
+            length(level.grid_height),
+            cell_size_m,
+        )
     }
 
     /// Columns of cells.
@@ -281,6 +297,19 @@ mod tests {
         assert_eq!((bounds.max_x, bounds.max_y), (LEVEL_M, LEVEL_M));
         let uneven = CellGrid::new(LEVEL_M, LEVEL_M, 3000.0).expect("grid");
         assert_eq!(uneven.columns(), 5);
+    }
+
+    #[test]
+    fn a_level_frame_gives_its_grid() {
+        let level = LevelInfo {
+            region_size: 2048,
+            grid_width: 7,
+            grid_height: 7,
+            ..LevelInfo::default()
+        };
+        assert_eq!(CellGrid::of_level(&level, CELL_M), Ok(grid()));
+        let empty = LevelInfo::default();
+        assert!(CellGrid::of_level(&empty, CELL_M).is_err());
     }
 
     #[test]
