@@ -8,6 +8,7 @@
 mod account;
 mod character;
 mod connect;
+mod entity;
 mod error;
 mod migrate;
 mod position;
@@ -24,9 +25,10 @@ pub use character::{
     release_character_name, reserve_character_name,
 };
 pub use connect::{DatabaseConfig, connect, connect_options};
+pub use entity::{MAX_ENTITY_NUMBER, next_entity_number};
 pub use error::DbError;
 pub use migrate::{GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
-pub use position::{SavedPosition, character_position, save_character_position};
+pub use position::{SaveOutcome, SavedPosition, character_position, save_character_position};
 pub use session::{create_launcher_session, delete_launcher_session, launcher_session_account};
 pub use sqlx::PgPool;
 pub use uuid::Uuid;

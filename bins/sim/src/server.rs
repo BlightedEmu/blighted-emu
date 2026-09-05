@@ -13,7 +13,10 @@ use nw_bus::{
     Publisher, SimInput,
 };
 use nw_common::time::unix_ms;
-use nw_db::{PgPool, SavedPosition, character_by_id, character_position, save_character_position};
+use nw_db::{
+    PgPool, SaveOutcome, SavedPosition, character_by_id, character_position,
+    save_character_position,
+};
 use nw_messages::{BodyCodec, ClientInputMsg, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX};
 use nw_reflect::Envelope;
 use nw_sim_core::{Ground, GroundCheck, Position, TickClock};
@@ -392,6 +395,7 @@ impl Loop {
             y: f64::from(departure.position.y),
             z: f64::from(departure.position.z),
             yaw: NO_YAW,
+            saved_at_ms: unix_ms(),
         };
         if let Some(position) = self.queue.want(departure.character, position) {
             self.spawn_save(departure.character, position);
@@ -401,8 +405,9 @@ impl Loop {
     fn spawn_save(&mut self, character: Uuid, position: SavedPosition) {
         let db = self.db.clone();
         self.saves.spawn(async move {
+            // A newer stored position is a finished save too.
             let ok = match save_character_position(&db, character, &position).await {
-                Ok(()) => true,
+                Ok(SaveOutcome::Saved | SaveOutcome::Older) => true,
                 Err(error) => {
                     tracing::error!(%error, %character, "position save failed");
                     false

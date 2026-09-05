@@ -91,6 +91,7 @@ mod tests {
             y: x,
             z: x,
             yaw: 0.0,
+            saved_at_ms: 0,
         }
     }
 

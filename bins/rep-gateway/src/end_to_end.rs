@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use nw_bus::test_support::test_bus;
 use nw_bus::{BusId, Heartbeat, subject};
+use nw_common::time::unix_ms;
 use nw_db::test_db::with_test_schema;
 use nw_db::{GLOBAL_MIGRATOR, PgPool, SavedPosition, WORLD_MIGRATOR, save_character_position};
 use nw_login::config::load_edge_config;
@@ -269,6 +270,7 @@ async fn two_clients_see_each_other_and_a_saved_position_returns() {
             y: f64::from(start.y),
             z: f64::from(start.z),
             yaw: NO_YAW,
+            saved_at_ms: unix_ms(),
         };
         save_character_position(world_pool, character, &saved)
             .await
