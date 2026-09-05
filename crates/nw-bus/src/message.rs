@@ -82,6 +82,160 @@ pub enum GatewayOutput {
     },
 }
 
+/// A world position in metres, as `sim` keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Point {
+    /// East.
+    pub x: f32,
+    /// North.
+    pub y: f32,
+    /// Up.
+    pub z: f32,
+}
+
+impl Point {
+    /// Whether every coordinate is a finite number.
+    pub const fn is_finite(&self) -> bool {
+        self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
+    }
+}
+
+/// Director to sim: take a player (M5 spec section 3.1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Admit {
+    /// The connection.
+    pub connection: ConnectionRef,
+    /// The account.
+    pub account: Uuid,
+    /// The character.
+    pub character: Uuid,
+    /// The entity number the director chose.
+    pub entity: u64,
+    /// Where the player appears.
+    pub position: Point,
+    /// Whether to send the login messages; a resumed player already has them.
+    pub login: bool,
+}
+
+/// The answer to [`Admit`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AdmitReply {
+    /// The player is in the world.
+    Admitted,
+    /// The sim cannot take the player.
+    Refused {
+        /// Why, for the log.
+        reason: String,
+    },
+}
+
+/// A live sim in the cell table. `generation` is its `started_at_ms`; a restart is a new one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SimSlot {
+    /// The sim.
+    pub id: BusId,
+    /// Its start time, Unix milliseconds.
+    pub generation: u64,
+}
+
+/// The director's cell table (M5 spec section 4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CellTable {
+    /// Rises with every change of one director run.
+    pub version: u64,
+    /// Edge length of a cell, in metres.
+    pub cell_size_m: f32,
+    /// Columns of the grid.
+    pub columns: u32,
+    /// Rows of the grid.
+    pub rows: u32,
+    /// The live sims.
+    pub sims: Vec<SimSlot>,
+    /// The owner of every cell, row by row, as an index into `sims`.
+    pub owners: Vec<Option<u16>>,
+}
+
+/// One player moving to another sim (M5 spec section 3.3).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HandoffOffer {
+    /// The connection.
+    pub connection: ConnectionRef,
+    /// The character.
+    pub character: Uuid,
+    /// The entity number; it stays the same.
+    pub entity: u64,
+    /// The last good position.
+    pub position: Point,
+    /// Milliseconds since the last good move.
+    pub move_age_ms: u64,
+    /// The movement budget left, in metres.
+    pub budget_m: f32,
+    /// Bundles sent to the player so far; the sequence goes on.
+    pub bundles_sent: u64,
+    /// Milliseconds since the last `TimeSynchMsg`.
+    pub time_synch_age_ms: u64,
+    /// Handoffs of this player so far, this one included; the gateway's route sequence.
+    pub handoffs: u64,
+}
+
+/// Sim to sim, on the taker's handoff subject. Both go on one subject, so NATS keeps their order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum HandoffMessage {
+    /// Take this player (request/reply).
+    Offer(HandoffOffer),
+    /// The offer of this connection timed out or its player left; undo a late take.
+    Cancel {
+        /// The connection.
+        connection: ConnectionRef,
+    },
+}
+
+/// The answer to [`HandoffMessage::Offer`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HandoffReply {
+    /// The player is in the taker's world.
+    Accepted,
+    /// The taker cannot take the player.
+    Refused {
+        /// Why, for the log.
+        reason: String,
+    },
+}
+
+/// Most bytes of one [`Ghost`] in `postcard`: a 10-byte entity number and three 4-byte floats.
+pub const MAX_GHOST_BYTES: usize = 22;
+
+/// A read-only copy of an entity near a border.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Ghost {
+    /// The entity number.
+    pub entity: u64,
+    /// Its position.
+    pub position: Point,
+}
+
+/// The ghosts of one sim for another, every tick (M5 spec section 3.4).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Ghosts {
+    /// The sender.
+    pub from: BusId,
+    /// Its players near the receiver's cells; an empty list clears the last one.
+    pub entities: Vec<Ghost>,
+}
+
+/// A sim is alive, with its load for the director.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SimHeartbeat {
+    /// The sim.
+    pub id: BusId,
+    /// Unix milliseconds when the sim started.
+    pub started_at_ms: u64,
+    /// Players in its world.
+    pub players: u32,
+    /// Players it takes at most.
+    pub max_players: u32,
+}
+
 /// A process is alive. `started_at_ms` changes when the process restarts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Heartbeat {
@@ -166,6 +320,100 @@ mod tests {
             id: connection().gateway,
             started_at_ms: STARTED_AT_MS,
         });
+    }
+
+    fn sim() -> BusId {
+        BusId::try_from("sim-1".to_owned()).expect("id")
+    }
+
+    const POINT: Point = Point {
+        x: 1.5,
+        y: -2.0,
+        z: 300.25,
+    };
+
+    #[test]
+    fn every_m5_message_round_trips() {
+        round_trip(Admit {
+            connection: connection(),
+            account: Uuid::new_v4(),
+            character: Uuid::new_v4(),
+            entity: CONNECTION,
+            position: POINT,
+            login: true,
+        });
+        round_trip(AdmitReply::Admitted);
+        round_trip(AdmitReply::Refused {
+            reason: "full".to_owned(),
+        });
+        round_trip(CellTable {
+            version: 3,
+            cell_size_m: 2048.0,
+            columns: 2,
+            rows: 1,
+            sims: vec![SimSlot {
+                id: sim(),
+                generation: STARTED_AT_MS,
+            }],
+            owners: vec![Some(0), None],
+        });
+        let offer = HandoffOffer {
+            connection: connection(),
+            character: Uuid::new_v4(),
+            entity: CONNECTION,
+            position: POINT,
+            move_age_ms: 40,
+            budget_m: 3.5,
+            bundles_sent: 900,
+            time_synch_age_ms: 1200,
+            handoffs: 2,
+        };
+        round_trip(HandoffMessage::Offer(offer));
+        round_trip(HandoffMessage::Cancel {
+            connection: connection(),
+        });
+        round_trip(HandoffReply::Accepted);
+        round_trip(HandoffReply::Refused {
+            reason: "already here".to_owned(),
+        });
+        round_trip(Ghosts {
+            from: sim(),
+            entities: vec![Ghost {
+                entity: CONNECTION,
+                position: POINT,
+            }],
+        });
+        round_trip(SimHeartbeat {
+            id: sim(),
+            started_at_ms: STARTED_AT_MS,
+            players: 10,
+            max_players: 2000,
+        });
+    }
+
+    #[test]
+    fn the_largest_ghost_fits_its_byte_limit() {
+        let ghost = Ghost {
+            entity: u64::MAX,
+            position: Point {
+                x: f32::MAX,
+                y: f32::MIN,
+                z: f32::NAN,
+            },
+        };
+        assert!(encode(&ghost).expect("encode").len() <= MAX_GHOST_BYTES);
+    }
+
+    #[test]
+    fn a_point_is_finite_only_with_three_numbers() {
+        assert!(POINT.is_finite());
+        assert!(
+            !Point {
+                z: f32::INFINITY,
+                ..POINT
+            }
+            .is_finite()
+        );
     }
 
     #[test]

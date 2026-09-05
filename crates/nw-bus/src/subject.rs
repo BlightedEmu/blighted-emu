@@ -35,6 +35,36 @@ pub fn all_gateway_heartbeats(world: Uuid) -> String {
     format!("nw.{world}.gateway.*.heartbeat")
 }
 
+/// Gateway to director, request/reply: a player joins or resumes.
+pub fn director_join(world: Uuid) -> String {
+    format!("nw.{world}.director.join")
+}
+
+/// Director, every heartbeat and on change: the cell table.
+pub fn director_table(world: Uuid) -> String {
+    format!("nw.{world}.director.table")
+}
+
+/// Director to sim, request/reply: take a player.
+pub fn sim_admit(world: Uuid, sim: &BusId) -> String {
+    format!("nw.{world}.sim.{sim}.admit")
+}
+
+/// Sim to sim: handoff offers and cancels.
+pub fn sim_handoff(world: Uuid, sim: &BusId) -> String {
+    format!("nw.{world}.sim.{sim}.handoff")
+}
+
+/// Sim to sim, every tick: ghosts.
+pub fn sim_ghosts(world: Uuid, sim: &BusId) -> String {
+    format!("nw.{world}.sim.{sim}.ghosts")
+}
+
+/// Every sim heartbeat of a world (a NATS wildcard), for the director.
+pub fn all_sim_heartbeats(world: Uuid) -> String {
+    format!("nw.{world}.sim.*.heartbeat")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,6 +92,21 @@ mod tests {
         assert_eq!(
             all_gateway_heartbeats(world),
             format!("{prefix}.gateway.*.heartbeat")
+        );
+        assert_eq!(director_join(world), format!("{prefix}.director.join"));
+        assert_eq!(director_table(world), format!("{prefix}.director.table"));
+        assert_eq!(sim_admit(world, &sim), format!("{prefix}.sim.sim-1.admit"));
+        assert_eq!(
+            sim_handoff(world, &sim),
+            format!("{prefix}.sim.sim-1.handoff")
+        );
+        assert_eq!(
+            sim_ghosts(world, &sim),
+            format!("{prefix}.sim.sim-1.ghosts")
+        );
+        assert_eq!(
+            all_sim_heartbeats(world),
+            format!("{prefix}.sim.*.heartbeat")
         );
     }
 }
