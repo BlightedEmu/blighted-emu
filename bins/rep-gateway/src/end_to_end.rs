@@ -54,9 +54,9 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT: Duration = Duration::from_millis(200);
 const HEARTBEAT_MISSES: u32 = 3;
 const JOIN_TIMEOUT: Duration = Duration::from_secs(2);
-/// Time in the world per session: the walk (about 2 s), the settle time, the far move, and
-/// many bundles at 30 Hz after it.
-const PAIR_HOLD: Duration = Duration::from_secs(4);
+/// Time in the world per session: the walk (about 2 s), the settle time and the far move (0.5 s
+/// each), and many bundles at 30 Hz after them.
+const PAIR_HOLD: Duration = Duration::from_secs(5);
 /// Time in the world of the last check.
 const SHORT_HOLD: Duration = Duration::from_secs(1);
 /// The walk: 3 m east at the datasheet walking speed.
