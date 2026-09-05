@@ -1,4 +1,4 @@
-# rep-gateway configuration (M3 spec section 6). This file holds no secret.
+# rep-gateway configuration (M3 spec section 6, M4 spec section 6.3). This file holds no secret.
 # Secret: NW_SECRET_SIGNING_KEY, the same entry ticket key as edge-http.
 # Any key below can be overridden with NW_GATEWAY_<KEY>, nested keys joined by "__",
 # for example NW_GATEWAY_LIMITS__MAX_CONNECTIONS=500.
@@ -22,6 +22,17 @@ metrics_listen = "127.0.0.1:9101"
 # DTLS MTU in bytes.
 mtu = 1200
 log_filter = "info"
+# This gateway's id in bus subjects.
+gateway_id = "gw-1"
+# The sim of this world; config/sim.toml sim_id must be the same.
+sim_id = "sim-1"
+# NATS. Keep it on an internal address.
+nats_url = "nats://127.0.0.1:4222"
+# Longest wait for sim to take a character; below limits.registration_timeout_ms.
+join_timeout_ms = 5000
+heartbeat_interval_ms = 1000
+# Missed sim heartbeats before its players are closed.
+heartbeat_misses = 3
 
 [limits]
 max_connections = 2000

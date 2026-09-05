@@ -46,6 +46,14 @@ pub struct PeerSettings {
 pub enum PeerEvent {
     /// A V3 request arrived; check the ticket and call [`Peer::complete_registration`].
     RegistrationRequested(TicketClaims),
+    /// A registered client sent a game message; forward its envelope bytes to the world.
+    ClientMessage(Vec<u8>),
+}
+
+/// Server messages that wait for the registration response.
+struct HeldMessages {
+    channel: u8,
+    envelopes: Vec<Vec<u8>>,
 }
 
 /// Why a connection ends.
@@ -123,6 +131,7 @@ pub struct Peer {
     last_ping_ms: u64,
     window_start_ms: u64,
     window_count: u32,
+    held: Vec<HeldMessages>,
 }
 
 impl Peer {
@@ -140,6 +149,7 @@ impl Peer {
             last_ping_ms: now_ms,
             window_start_ms: now_ms,
             window_count: 0,
+            held: Vec::new(),
         }
     }
 
@@ -217,8 +227,9 @@ impl Peer {
                     TicketClaims::from_token(&request.login_token()),
                 )))
             }
+            (Phase::Registered, Some(PING_MSG_TYPE_INDEX)) => Ok(None),
             (Phase::Registered, Some(index)) if index != REGISTRATION_REQUEST_V3_MSG_TYPE_INDEX => {
-                Ok(None)
+                Ok(Some(PeerEvent::ClientMessage(client.envelope.to_vec())))
             }
             (_, type_index) => Err(PeerError::UnexpectedMessage { type_index }),
         }
@@ -248,9 +259,13 @@ impl Peer {
             .map_err(PeerError::Random)?
             .encode()?;
         self.send_message(REGISTRATION_RESPONSE_MSG_TYPE_INDEX, body)?;
+        let held = std::mem::take(&mut self.held);
         if result.is_ok() {
             self.phase = Phase::Registered;
             self.carrier.set_receive_limits(ReceiveLimits::SESSION);
+            for messages in held {
+                self.send_now(messages.channel, true, &messages.envelopes)?;
+            }
         } else {
             self.phase = Phase::Refused;
             self.carrier.close()?;
@@ -260,8 +275,55 @@ impl Peer {
 
     fn send_message(&mut self, type_index: u64, body: Vec<u8>) -> Result<(), PeerError> {
         let envelope = Envelope::message(TypeId::FileSlot(type_index), body).encode()?;
-        let payload = encode_server_messages(&[&envelope])?;
-        self.carrier.send(MESSAGE_CHANNEL, true, &payload)?;
+        self.send_now(MESSAGE_CHANNEL, true, &[envelope])
+    }
+
+    fn send_now(
+        &mut self,
+        channel: u8,
+        reliable: bool,
+        envelopes: &[Vec<u8>],
+    ) -> Result<(), PeerError> {
+        let envelopes: Vec<&[u8]> = envelopes.iter().map(Vec::as_slice).collect();
+        let payload = encode_server_messages(&envelopes)?;
+        self.carrier.send(channel, reliable, &payload)?;
+        Ok(())
+    }
+
+    /// Sends server message envelopes from the world on a carrier `channel`. While the ticket is
+    /// checked, reliable messages wait for the registration response and unreliable ones are
+    /// dropped (the world sends the full state again every tick). A refused or closed connection
+    /// takes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PeerError`] for a channel above 3 or a payload that does not encode.
+    pub fn send_envelopes(
+        &mut self,
+        channel: u8,
+        reliable: bool,
+        envelopes: &[Vec<u8>],
+    ) -> Result<(), PeerError> {
+        match self.phase {
+            Phase::Registered => self.send_now(channel, reliable, envelopes),
+            Phase::Checking if reliable => {
+                self.held.push(HeldMessages {
+                    channel,
+                    envelopes: envelopes.to_vec(),
+                });
+                Ok(())
+            }
+            Phase::AwaitingRegistration | Phase::Checking | Phase::Refused => Ok(()),
+        }
+    }
+
+    /// Closes the connection; the next poll sends the disconnect.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PeerError::Carrier`] when the disconnect cannot be queued.
+    pub fn close(&mut self) -> Result<(), PeerError> {
+        self.carrier.close()?;
         Ok(())
     }
 
@@ -323,6 +385,14 @@ mod tests {
     const APPLICATION_DATA_RECORD: u8 = 23;
     const DTLS_1_2: [u8; 2] = [0xfe, 0xfd];
     const FORGED_RECORD_BODY_LEN: u8 = 48;
+    /// Client movement (type 1589) goes on channel 1, unreliable.
+    const INPUT_CHANNEL: u8 = 1;
+    const INPUT_TYPE_INDEX: u64 = 1589;
+    /// A login message (type 446, channel 0, reliable).
+    const LOGIN_TYPE_INDEX: u64 = 446;
+    /// A replication bundle (type 8, channel 1, unreliable).
+    const BUNDLE_TYPE_INDEX: u64 = 8;
+    const BODY: [u8; 2] = [1, 2];
     const SETTINGS: PeerSettings = PeerSettings {
         mtu: MTU,
         registration_timeout_ms: 10_000,
@@ -377,6 +447,19 @@ mod tests {
         answer: Result<&EntryRecord, Refusal>,
         stop: impl Fn(&[RepEvent]) -> bool,
     ) -> (Vec<RepEvent>, Vec<PeerEvent>, u64) {
+        run_with(client, peer, start, answer, |_| {}, stop)
+    }
+
+    /// [`run`], and `before_answer` runs on the peer between a registration request and its
+    /// answer.
+    fn run_with(
+        client: &mut RepClient,
+        peer: &mut Peer,
+        start: u64,
+        answer: Result<&EntryRecord, Refusal>,
+        before_answer: impl Fn(&mut Peer),
+        stop: impl Fn(&[RepEvent]) -> bool,
+    ) -> (Vec<RepEvent>, Vec<PeerEvent>, u64) {
         let mut client_events = Vec::new();
         let mut peer_events = Vec::new();
         let mut now = start;
@@ -384,9 +467,11 @@ mod tests {
             now += STEP_MS;
             for datagram in client.poll(now).expect("client poll") {
                 for event in peer.receive(now, &datagram).expect("peer receive") {
-                    let PeerEvent::RegistrationRequested(_) = &event;
-                    peer.complete_registration(UNIX_EPOCH, answer, VERSION)
-                        .expect("complete");
+                    if let PeerEvent::RegistrationRequested(_) = &event {
+                        before_answer(peer);
+                        peer.complete_registration(UNIX_EPOCH, answer, VERSION)
+                            .expect("complete");
+                    }
                     peer_events.push(event);
                 }
             }
@@ -533,6 +618,126 @@ mod tests {
             events.extend(client.receive(now, &datagram).expect("client"));
         }
         assert_eq!(status(&events), None);
+    }
+
+    /// An envelope of `type_index` with a short body.
+    fn envelope(type_index: u64) -> Vec<u8> {
+        Envelope::message(TypeId::FileSlot(type_index), BODY.to_vec())
+            .encode()
+            .expect("envelope")
+    }
+
+    fn messages(events: &[RepEvent]) -> Vec<(u8, Option<u64>)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                RepEvent::Message(received) => {
+                    Some((received.channel, received.envelope.type_index()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn registered_client_messages_are_forwarded_but_pings_are_not() {
+        let (mut client, mut peer) = sides(SETTINGS);
+        let entry = record();
+        let (events, _, now) = run(&mut client, &mut peer, START_MS, Ok(&entry), |events| {
+            events.contains(&RepEvent::Pinged)
+        });
+        assert!(events.contains(&RepEvent::Pinged));
+        client
+            .send_message(INPUT_CHANNEL, false, INPUT_TYPE_INDEX, BODY.to_vec())
+            .expect("send");
+        let (_, peer_events, _) = run(&mut client, &mut peer, now, Ok(&entry), |_| false);
+        let forwarded: Vec<Option<u64>> = peer_events
+            .iter()
+            .map(|event| match event {
+                PeerEvent::ClientMessage(bytes) => {
+                    Envelope::decode(bytes).expect("envelope").type_index()
+                }
+                PeerEvent::RegistrationRequested(_) => None,
+            })
+            .collect();
+        assert_eq!(forwarded, vec![Some(INPUT_TYPE_INDEX)]);
+    }
+
+    #[test]
+    fn server_messages_wait_for_the_registration_response() {
+        let (mut client, mut peer) = sides(SETTINGS);
+        let entry = record();
+        let (events, _, now) = run_with(
+            &mut client,
+            &mut peer,
+            START_MS,
+            Ok(&entry),
+            |peer| {
+                peer.send_envelopes(MESSAGE_CHANNEL, true, &[envelope(LOGIN_TYPE_INDEX)])
+                    .expect("held");
+                peer.send_envelopes(INPUT_CHANNEL, false, &[envelope(BUNDLE_TYPE_INDEX)])
+                    .expect("dropped");
+            },
+            |events| !messages(events).is_empty(),
+        );
+        assert!(matches!(events.first(), Some(RepEvent::Connected)));
+        assert!(matches!(events.get(1), Some(RepEvent::Registered(_))));
+        assert_eq!(
+            messages(&events),
+            vec![(MESSAGE_CHANNEL, Some(LOGIN_TYPE_INDEX))]
+        );
+        peer.send_envelopes(INPUT_CHANNEL, false, &[envelope(BUNDLE_TYPE_INDEX)])
+            .expect("sent");
+        let (events, _, _) = run(&mut client, &mut peer, now, Ok(&entry), |events| {
+            !messages(events).is_empty()
+        });
+        assert_eq!(
+            messages(&events),
+            vec![(INPUT_CHANNEL, Some(BUNDLE_TYPE_INDEX))]
+        );
+    }
+
+    #[test]
+    fn a_refused_registration_drops_the_held_messages() {
+        let (mut client, mut peer) = sides(SETTINGS);
+        let (events, _, _) = run_with(
+            &mut client,
+            &mut peer,
+            START_MS,
+            Err(Refusal::WorldRefused),
+            |peer| {
+                peer.send_envelopes(MESSAGE_CHANNEL, true, &[envelope(LOGIN_TYPE_INDEX)])
+                    .expect("held");
+            },
+            |events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, RepEvent::Closed { .. }))
+            },
+        );
+        assert_eq!(status(&events), Some(REGISTRATION_STATUS_REFUSED));
+        assert!(messages(&events).is_empty());
+    }
+
+    #[test]
+    fn close_ends_a_registered_connection() {
+        let (mut client, mut peer) = sides(SETTINGS);
+        let entry = record();
+        let (_, _, now) = run(&mut client, &mut peer, START_MS, Ok(&entry), |events| {
+            status(events).is_some()
+        });
+        peer.close().expect("close");
+        let (events, _, _) = run(&mut client, &mut peer, now, Ok(&entry), |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, RepEvent::Closed { .. }))
+        });
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RepEvent::Closed { .. }))
+        );
+        assert!(peer.is_finished());
     }
 
     #[test]

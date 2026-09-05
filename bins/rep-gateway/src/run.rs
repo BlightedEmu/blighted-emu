@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use metrics_exporter_prometheus::PrometheusBuilder;
+use nw_bus::{Bus, BusError};
 use nw_common::logging::{LoggingError, init_logging};
 use nw_dtls::{COOKIE_SECRET_LEN, DtlsError, DtlsServerConfig, self_signed_identity};
 use nw_login::secrets::{SIGNING_KEY_ENV, SecretError, SigningKey};
@@ -16,6 +17,7 @@ use tokio::net::UdpSocket;
 
 use crate::config::{GatewayConfig, GatewayConfigError, load_gateway_config};
 use crate::server::{Gateway, serve as serve_udp};
+use crate::world::BusWorld;
 
 /// Common name of a generated gateway certificate.
 pub const CERTIFICATE_NAME: &str = "blighted-rep-gateway";
@@ -53,6 +55,9 @@ pub enum RunError {
     /// Valkey could not be reached.
     #[error("Valkey connection failed")]
     Valkey(#[source] StoreError),
+    /// NATS could not be reached, or a subscription failed.
+    #[error(transparent)]
+    Bus(#[from] BusError),
     /// The UDP socket failed.
     #[error("UDP socket failed")]
     Socket(#[source] std::io::Error),
@@ -102,6 +107,8 @@ async fn serve_async(config: GatewayConfig, key: SigningKey) -> Result<(), RunEr
     let store = Valkey::connect(&config.valkey_url)
         .await
         .map_err(RunError::Valkey)?;
+    let bus = Bus::connect(&config.nats_url).await?;
+    let (world, events) = BusWorld::start(bus, config.world_link()).await?;
     PrometheusBuilder::new()
         .with_http_listener(config.metrics_listen)
         .install()
@@ -119,12 +126,13 @@ async fn serve_async(config: GatewayConfig, key: SigningKey) -> Result<(), RunEr
         server_version: config.server_version.clone(),
         peer_settings: config.peer_settings(),
         limits: config.limits,
+        world,
     };
     let shutdown = async {
         // A failed signal handler means the gateway runs until killed.
         let _ = tokio::signal::ctrl_c().await;
     };
-    serve_udp(gateway, socket, shutdown)
+    serve_udp(gateway, socket, events, shutdown)
         .await
         .map_err(RunError::Socket)
 }

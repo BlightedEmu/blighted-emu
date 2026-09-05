@@ -17,7 +17,7 @@ use nw_testclient::walk::{WalkSettings, login_token, walk};
 use tokio::net::TcpListener;
 use uuid::Uuid;
 
-use crate::server::tests::{HOLD, LIMITS, VERSION, WAIT, client, spawn_gateway};
+use crate::server::tests::{HOLD, LIMITS, VERSION, WAIT, accepting, client, spawn_gateway};
 use nw_reflect::{REGISTRATION_STATUS_AUTHORIZED, REGISTRATION_STATUS_REFUSED};
 
 const EDGE_CONFIG: &str = "../../config/edge.toml";
@@ -51,7 +51,8 @@ async fn log_in_and_register(global: &PgPool, world_pool: &PgPool) {
     let valkey = Valkey::connect(&test_valkey_url())
         .await
         .expect("connect to Valkey");
-    let gateway = spawn_gateway(valkey.clone(), world_id, LIMITS).await;
+    let (world, events) = accepting();
+    let gateway = spawn_gateway(valkey.clone(), world_id, LIMITS, world, events).await;
     config.rep_address = gateway.to_string();
     let config = Arc::new(config);
     let app = edge_app(Arc::clone(&config), global, world_pool, valkey);

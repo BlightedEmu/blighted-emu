@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `config/rep-gateway.toml` with `NW_GATEWAY_` overrides (M3 spec section 6).
+//! `config/rep-gateway.toml` with `NW_GATEWAY_` overrides (M3 spec section 6, M4 spec section
+//! 6.3).
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use nw_bus::BusId;
 use nw_common::config::{ConfigError, load_config};
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::peer::PeerSettings;
+use crate::world::WorldLinkSettings;
 
 /// Environment prefix of `rep-gateway` overrides.
 pub const GATEWAY_ENV_PREFIX: &str = "NW_GATEWAY_";
@@ -39,6 +43,18 @@ pub struct GatewayConfig {
     pub mtu: u32,
     /// `tracing` filter, for example `info`.
     pub log_filter: String,
+    /// This gateway's id in bus subjects.
+    pub gateway_id: BusId,
+    /// The sim of the world; `config/sim.toml` `sim_id` names the same id.
+    pub sim_id: BusId,
+    /// NATS, internal only.
+    pub nats_url: String,
+    /// Longest wait for the world to take a character; below `limits.registration_timeout_ms`.
+    pub join_timeout_ms: u64,
+    /// Time between heartbeats.
+    pub heartbeat_interval_ms: u64,
+    /// Missed sim heartbeats before its players are closed.
+    pub heartbeat_misses: u32,
     /// Connection limits and timers.
     pub limits: GatewayLimits,
 }
@@ -124,7 +140,28 @@ impl GatewayConfig {
                 "must be below silence_timeout_ms",
             );
         }
+        if self.join_timeout_ms == 0 || self.join_timeout_ms >= limits.registration_timeout_ms {
+            return invalid(
+                "join_timeout_ms",
+                "must be above 0 and below limits.registration_timeout_ms",
+            );
+        }
+        if self.heartbeat_interval_ms == 0 || self.heartbeat_misses == 0 {
+            return invalid("heartbeat_interval_ms", "heartbeat values must be above 0");
+        }
         Ok(())
+    }
+
+    /// The settings of the link to the world.
+    pub fn world_link(&self) -> WorldLinkSettings {
+        WorldLinkSettings {
+            world_id: self.world_id,
+            gateway_id: self.gateway_id.clone(),
+            sim_id: self.sim_id.clone(),
+            join_timeout: Duration::from_millis(self.join_timeout_ms),
+            heartbeat_interval: Duration::from_millis(self.heartbeat_interval_ms),
+            heartbeat_misses: self.heartbeat_misses,
+        }
     }
 
     /// The settings of one connection.
@@ -157,6 +194,13 @@ pub(crate) mod tests {
         let config = committed();
         assert_eq!(config.limits.ping_interval_ms, 1000);
         assert_eq!(config.peer_settings().mtu, config.mtu);
+        let link = config.world_link();
+        assert_eq!(link.world_id, config.world_id);
+        assert_eq!(
+            link.join_timeout,
+            Duration::from_millis(config.join_timeout_ms)
+        );
+        assert_eq!(link.heartbeat_misses, config.heartbeat_misses);
     }
 
     #[test]
@@ -175,6 +219,21 @@ pub(crate) mod tests {
         assert!(config.validate().is_err());
         let mut config = committed();
         config.server_version.clear();
+        assert!(config.validate().is_err());
+        let mut config = committed();
+        config.join_timeout_ms = config.limits.registration_timeout_ms;
+        assert!(matches!(
+            config.validate(),
+            Err(GatewayConfigError::Invalid {
+                key: "join_timeout_ms",
+                ..
+            })
+        ));
+        let mut config = committed();
+        config.heartbeat_misses = 0;
+        assert!(config.validate().is_err());
+        let mut config = committed();
+        config.heartbeat_interval_ms = 0;
         assert!(config.validate().is_err());
     }
 }

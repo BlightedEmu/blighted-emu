@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The UDP loop (M3 spec sections 3.1 and 6): one socket, one [`Peer`] per remote address, the
-//! connection limits, and the ticket checks.
+//! The UDP loop (M3 spec sections 3.1 and 6, M4 spec section 6): one socket, one [`Peer`] per
+//! remote address, the connection limits, the ticket checks, and the forwarding to the world.
 //!
-//! One task owns every peer. Ticket checks run as their own tasks and send their result back, so
-//! a slow store never stops the loop. Every [`TICK`] the loop polls each peer for timers, pings,
-//! and resends.
+//! One task owns every peer. Ticket checks and world joins run as their own tasks and send their
+//! result back, so a slow store or world never stops the loop. Every [`TICK`] the loop polls each
+//! peer for timers, pings, and resends. World events arrive on their own channel.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -12,6 +12,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use nw_bus::GatewayOutput;
 use nw_dtls::{DtlsServerConfig, FirstDatagram};
 use nw_login::queue::{EntryRecord, QueueStore};
 use nw_login::secrets::SigningKey;
@@ -22,6 +23,7 @@ use uuid::Uuid;
 use crate::config::GatewayLimits;
 use crate::peer::{Peer, PeerError, PeerEvent, PeerSettings};
 use crate::registration::{Refusal, TicketClaims, check_ticket};
+use crate::world::{World, WorldEvent};
 
 /// Time between polls of every peer.
 pub const TICK: Duration = Duration::from_millis(10);
@@ -56,8 +58,8 @@ const RECEIVE: &str = "receive";
 /// Drop reason: OpenSSL refused a first ClientHello.
 const DTLS: &str = "dtls";
 
-/// What the loop needs besides the socket.
-pub struct Gateway<Q> {
+/// What the loop needs besides the socket and the world events.
+pub struct Gateway<Q, W> {
     /// DTLS identity and cookie secret.
     pub dtls: Arc<DtlsServerConfig>,
     /// Entry records.
@@ -72,15 +74,19 @@ pub struct Gateway<Q> {
     pub peer_settings: PeerSettings,
     /// Gateway-wide limits.
     pub limits: GatewayLimits,
+    /// The world the players join.
+    pub world: W,
 }
 
 /// A ticket check result for one connection: address, connection id, result.
 type TicketResult = (SocketAddr, u64, Result<EntryRecord, Refusal>);
 
-struct Loop<Q> {
-    gateway: Gateway<Q>,
+struct Loop<Q, W> {
+    gateway: Gateway<Q, W>,
     socket: UdpSocket,
     peers: HashMap<SocketAddr, Peer>,
+    /// The address of each connection id, for world events.
+    connections: HashMap<u64, SocketAddr>,
     handshake_windows: HashMap<IpAddr, (Instant, u32)>,
     results: mpsc::Sender<TicketResult>,
     started: Instant,
@@ -88,15 +94,16 @@ struct Loop<Q> {
     next_connection: u64,
 }
 
-/// Serves `socket` until `shutdown` finishes. An error that belongs to one datagram (for example
-/// an ICMP "port unreachable" on Windows) is logged and the loop goes on.
+/// Serves `socket` and the world `events` until `shutdown` finishes. An error that belongs to one
+/// datagram (for example an ICMP "port unreachable" on Windows) is logged and the loop goes on.
 ///
 /// # Errors
 ///
 /// Returns the socket's error when the socket itself fails.
-pub async fn serve<Q: QueueStore>(
-    gateway: Gateway<Q>,
+pub async fn serve<Q: QueueStore, W: World>(
+    gateway: Gateway<Q, W>,
     socket: UdpSocket,
+    mut events: mpsc::Receiver<WorldEvent>,
     shutdown: impl Future<Output = ()>,
 ) -> std::io::Result<()> {
     let (results, mut incoming) = mpsc::channel(RESULT_QUEUE);
@@ -104,6 +111,7 @@ pub async fn serve<Q: QueueStore>(
         gateway,
         socket,
         peers: HashMap::new(),
+        connections: HashMap::new(),
         handshake_windows: HashMap::new(),
         results,
         started: Instant::now(),
@@ -126,12 +134,13 @@ pub async fn serve<Q: QueueStore>(
             Some((address, connection, result)) = incoming.recv() => {
                 state.ticket_result(address, connection, result).await;
             }
+            Some(event) = events.recv() => state.world_event(event).await,
             _ = tick.tick() => state.poll_all().await,
         }
     }
 }
 
-impl<Q: QueueStore> Loop<Q> {
+impl<Q: QueueStore, W: World> Loop<Q, W> {
     fn now_ms(&self) -> u64 {
         u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
@@ -146,8 +155,15 @@ impl<Q: QueueStore> Loop<Q> {
         match peer.receive(now, bytes) {
             Ok(events) => {
                 let connection = peer.id();
-                for PeerEvent::RegistrationRequested(claims) in events {
-                    self.check(address, connection, claims);
+                for event in events {
+                    match event {
+                        PeerEvent::RegistrationRequested(claims) => {
+                            self.check(address, connection, claims);
+                        }
+                        PeerEvent::ClientMessage(envelope) => {
+                            self.gateway.world.client_message(connection, envelope);
+                        }
+                    }
                 }
                 self.flush(address, now).await;
             }
@@ -200,6 +216,7 @@ impl<Q: QueueStore> Loop<Q> {
                 now,
             ),
         );
+        self.connections.insert(self.next_connection, address);
         self.next_connection += 1;
         self.flush(address, now).await;
         self.report();
@@ -234,13 +251,19 @@ impl<Q: QueueStore> Loop<Q> {
         *count <= self.gateway.limits.handshakes_per_ip_per_second
     }
 
+    /// Checks the ticket, then asks the world to take the character.
     fn check(&self, address: SocketAddr, connection: u64, claims: TicketClaims) {
         let store = self.gateway.store.clone();
         let key = Arc::clone(&self.gateway.signing_key);
-        let world = self.gateway.world_id;
+        let world_id = self.gateway.world_id;
+        let world = self.gateway.world.clone();
         let results = self.results.clone();
         tokio::spawn(async move {
-            let result = check_ticket(&store, &key, world, &claims, unix_now_seconds()).await;
+            let result =
+                match check_ticket(&store, &key, world_id, &claims, unix_now_seconds()).await {
+                    Ok(record) => world.join(connection, &record).await.map(|()| record),
+                    Err(refusal) => Err(refusal),
+                };
             match &result {
                 Ok(record) => tracing::info!(
                     account = %record.account_id,
@@ -306,7 +329,7 @@ impl<Q: QueueStore> Loop<Q> {
                     send(&self.socket, address, &datagram).await;
                 }
                 if peer.is_finished() {
-                    self.peers.remove(&address);
+                    self.remove_peer(address);
                 }
             }
             Err(error) => self.drop_peer(address, &error),
@@ -316,7 +339,69 @@ impl<Q: QueueStore> Loop<Q> {
     fn drop_peer(&mut self, address: SocketAddr, error: &PeerError) {
         tracing::debug!(%error, %address, "connection dropped");
         metrics::counter!(METRIC_DROPPED, REASON_LABEL => error.reason()).increment(1);
-        self.peers.remove(&address);
+        self.remove_peer(address);
+    }
+
+    /// Removes a peer; the world hears that a registered player left.
+    fn remove_peer(&mut self, address: SocketAddr) {
+        if let Some(peer) = self.peers.remove(&address) {
+            self.connections.remove(&peer.id());
+            if peer.is_registered() {
+                self.gateway.world.left(peer.id());
+            }
+        }
+    }
+
+    async fn world_event(&mut self, event: WorldEvent) {
+        match event {
+            WorldEvent::Output(GatewayOutput::ServerMessages {
+                connection,
+                channel,
+                reliable,
+                envelopes,
+            }) => {
+                self.apply(connection, |peer| {
+                    peer.send_envelopes(channel, reliable, &envelopes)
+                })
+                .await;
+            }
+            WorldEvent::Output(GatewayOutput::Close { connection }) => {
+                self.apply(connection, Peer::close).await;
+            }
+            WorldEvent::Lost => {
+                let registered: Vec<u64> = self
+                    .peers
+                    .values()
+                    .filter(|peer| peer.is_registered())
+                    .map(Peer::id)
+                    .collect();
+                for connection in registered {
+                    self.apply(connection, Peer::close).await;
+                }
+            }
+        }
+    }
+
+    /// Runs `action` on the peer of `connection` and sends what it queued. The world still has a
+    /// player on a connection this gateway no longer has (for example after a join that timed
+    /// out); it hears that the player left.
+    async fn apply(
+        &mut self,
+        connection: u64,
+        action: impl FnOnce(&mut Peer) -> Result<(), PeerError>,
+    ) {
+        let Some(&address) = self.connections.get(&connection) else {
+            tracing::debug!(connection, "world message for a connection that is gone");
+            self.gateway.world.left(connection);
+            return;
+        };
+        let Some(peer) = self.peers.get_mut(&address) else {
+            return;
+        };
+        match action(peer) {
+            Ok(()) => self.flush(address, self.now_ms()).await,
+            Err(error) => self.drop_peer(address, &error),
+        }
     }
 
     fn report(&self) {
@@ -382,8 +467,12 @@ pub(crate) mod tests {
     use nw_testclient::rep::RepClient;
     use nw_testclient::udp::{RepOutcome, run_rep};
 
+    use nw_carrier::MESSAGE_CHANNEL;
+    use nw_reflect::{Envelope, TypeId};
+
     use super::*;
     use crate::registration::tests::Records;
+    use crate::world::tests::{Sent, TestWorld};
     use nw_reflect::{REGISTRATION_STATUS_AUTHORIZED, REGISTRATION_STATUS_REFUSED};
 
     const SECRET: [u8; COOKIE_SECRET_LEN] = [5; COOKIE_SECRET_LEN];
@@ -405,6 +494,11 @@ pub(crate) mod tests {
     const LOOPBACK: &str = "127.0.0.1:0";
     /// ClientHellos from one address that never answers the cookie.
     const SPOOFED_HELLOS: usize = 3;
+    /// A login message (type 446).
+    const LOGIN_TYPE_INDEX: u64 = 446;
+    const LOGIN_BODY: [u8; 2] = [1, 2];
+    /// A connection id the gateway never gave out.
+    const UNKNOWN_CONNECTION: u64 = 999_999;
     pub(crate) const LIMITS: GatewayLimits = GatewayLimits {
         max_connections: 16,
         max_handshakes: 16,
@@ -417,11 +511,14 @@ pub(crate) mod tests {
     static IDENTITY: LazyLock<Identity> =
         LazyLock::new(|| self_signed_identity("test-gateway", VALID_DAYS).expect("identity"));
 
-    /// Starts a gateway for `world_id` with `store` on a loopback port; returns its address.
-    pub(crate) async fn spawn_gateway<Q: QueueStore>(
+    /// Starts a gateway for `world_id` with `store` and `world` on a loopback port; returns its
+    /// address.
+    pub(crate) async fn spawn_gateway<Q: QueueStore, W: World>(
         store: Q,
         world_id: Uuid,
         limits: GatewayLimits,
+        world: W,
+        events: mpsc::Receiver<WorldEvent>,
     ) -> SocketAddr {
         let gateway = Gateway {
             dtls: Arc::new(
@@ -440,16 +537,25 @@ pub(crate) mod tests {
                 datagrams_per_second: limits.datagrams_per_connection_per_second,
             },
             limits,
+            world,
         };
         let socket = UdpSocket::bind(LOOPBACK).await.expect("bind");
         let address = socket.local_addr().expect("address");
-        tokio::spawn(serve(gateway, socket, std::future::pending()));
+        tokio::spawn(serve(gateway, socket, events, std::future::pending()));
         address
     }
 
-    /// Starts a gateway with one live ticket; returns its address and the token a client
-    /// registers with.
-    async fn start(limits: GatewayLimits) -> (SocketAddr, LoginToken) {
+    /// A world that takes every character and sends no login messages.
+    pub(crate) fn accepting() -> (TestWorld, mpsc::Receiver<WorldEvent>) {
+        TestWorld::new(false, Vec::new())
+    }
+
+    /// Starts a gateway with `world` and one live ticket; returns its address and the token a
+    /// client registers with.
+    async fn start_with(
+        limits: GatewayLimits,
+        (world, events): (TestWorld, mpsc::Receiver<WorldEvent>),
+    ) -> (SocketAddr, LoginToken) {
         let world_id = Uuid::new_v4();
         let record = EntryRecord {
             ticket_id: Uuid::new_v4().to_string(),
@@ -470,7 +576,40 @@ pub(crate) mod tests {
             .lock()
             .expect("lock")
             .insert(record.ticket_id.clone(), record);
-        (spawn_gateway(store, world_id, limits).await, token)
+        (
+            spawn_gateway(store, world_id, limits, world, events).await,
+            token,
+        )
+    }
+
+    /// [`start_with`] an accepting world.
+    async fn start(limits: GatewayLimits) -> (SocketAddr, LoginToken) {
+        start_with(limits, accepting()).await
+    }
+
+    /// Waits until `done` is true.
+    async fn wait_for(done: impl Fn() -> bool) {
+        let deadline = Instant::now() + WAIT;
+        while !done() {
+            assert!(Instant::now() < deadline, "condition not met in time");
+            tokio::time::sleep(TICK).await;
+        }
+    }
+
+    /// The connection of the first join.
+    async fn first_join(world: &TestWorld) -> u64 {
+        wait_for(|| !world.joins.lock().expect("lock").is_empty()).await;
+        world.joins.lock().expect("lock")[0]
+    }
+
+    fn sent(world: &TestWorld) -> Vec<Sent> {
+        world.sent.lock().expect("lock").clone()
+    }
+
+    fn login_envelope() -> Vec<u8> {
+        Envelope::message(TypeId::FileSlot(LOGIN_TYPE_INDEX), LOGIN_BODY.to_vec())
+            .encode()
+            .expect("envelope")
     }
 
     /// A client that trusts the test gateway.
@@ -552,6 +691,78 @@ pub(crate) mod tests {
             .await
             .expect("run");
         assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn world_messages_follow_the_response_and_the_world_hears_the_departure() {
+        let (world, events) = TestWorld::new(false, vec![login_envelope()]);
+        let (gateway, token) = start_with(LIMITS, (world.clone(), events)).await;
+        let outcome = run_rep(gateway, client(token), HOLD, WAIT)
+            .await
+            .expect("run");
+        assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
+        assert!(outcome.pings > 0);
+        let received: Vec<(u8, Option<u64>)> = outcome
+            .messages
+            .iter()
+            .map(|received| (received.channel, received.envelope.type_index()))
+            .collect();
+        assert_eq!(received, vec![(MESSAGE_CHANNEL, Some(LOGIN_TYPE_INDEX))]);
+        let connection = first_join(&world).await;
+        wait_for(|| !sent(&world).is_empty()).await;
+        assert_eq!(sent(&world), vec![Sent::Left(connection)]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_join_gets_status_1() {
+        let (world, events) = TestWorld::new(true, Vec::new());
+        let (gateway, token) = start_with(LIMITS, (world.clone(), events)).await;
+        let outcome = run_rep(gateway, client(token), HOLD, WAIT)
+            .await
+            .expect("run");
+        assert_eq!(outcome.status, Some(REGISTRATION_STATUS_REFUSED));
+        assert!(outcome.closed_by_server);
+        assert_eq!(world.joins.lock().expect("lock").len(), 1);
+        assert!(sent(&world).is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_world_close_ends_the_connection_and_unknown_connections_are_left() {
+        let (world, events) = TestWorld::new(false, Vec::new());
+        let (gateway, token) = start_with(LIMITS, (world.clone(), events)).await;
+        let run = tokio::spawn(run_rep(gateway, client(token), HOLD_FIRST, WAIT));
+        let connection = first_join(&world).await;
+        tokio::time::sleep(SETTLE).await;
+        world
+            .emit(WorldEvent::Output(GatewayOutput::Close { connection }))
+            .await;
+        let outcome = run.await.expect("join").expect("run");
+        assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
+        assert!(outcome.closed_by_server);
+        wait_for(|| sent(&world).contains(&Sent::Left(connection))).await;
+        world
+            .emit(WorldEvent::Output(GatewayOutput::ServerMessages {
+                connection: UNKNOWN_CONNECTION,
+                channel: MESSAGE_CHANNEL,
+                reliable: true,
+                envelopes: vec![login_envelope()],
+            }))
+            .await;
+        wait_for(|| sent(&world).contains(&Sent::Left(UNKNOWN_CONNECTION))).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_lost_world_closes_registered_connections() {
+        let (world, events) = TestWorld::new(false, Vec::new());
+        let (gateway, token) = start_with(LIMITS, (world.clone(), events)).await;
+        let run = tokio::spawn(run_rep(gateway, client(token), HOLD_FIRST, WAIT));
+        first_join(&world).await;
+        tokio::time::sleep(SETTLE).await;
+        world.emit(WorldEvent::Lost).await;
+        let outcome = run.await.expect("join").expect("run");
+        assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
+        assert!(outcome.closed_by_server);
+        assert!(outcome.held < HOLD_FIRST);
     }
 
     #[test]

@@ -66,6 +66,10 @@ pub enum Refusal {
     Expired,
     /// The queue store could not be reached.
     StoreUnavailable,
+    /// The world refused the character.
+    WorldRefused,
+    /// The world did not answer in time.
+    WorldUnavailable,
 }
 
 impl Refusal {
@@ -78,6 +82,8 @@ impl Refusal {
             Self::OtherCharacter => "other_character",
             Self::Expired => "expired",
             Self::StoreUnavailable => "store_unavailable",
+            Self::WorldRefused => "world_refused",
+            Self::WorldUnavailable => "world_unavailable",
         }
     }
 }

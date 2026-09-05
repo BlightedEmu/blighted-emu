@@ -13,6 +13,7 @@ getrandom.workspace = true
 hex.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
+nw-bus.workspace = true
 nw-carrier.workspace = true
 nw-common.workspace = true
 nw-dtls.workspace = true
@@ -26,6 +27,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+nw-bus = { workspace = true, features = ["test-util"] }
 nw-db = { workspace = true, features = ["test-util"] }
 nw-login = { workspace = true, features = ["test-util"] }
 nw-testclient.workspace = true
@@ -33,7 +35,7 @@ reqwest.workspace = true
 tempfile.workspace = true
 
 [features]
-# The end-to-end test on the Docker Compose PostgreSQL and Valkey (`just test-infra`).
+# Tests on the Docker Compose PostgreSQL, Valkey and NATS (`just test-infra`).
 infra = []
 
 [lints]

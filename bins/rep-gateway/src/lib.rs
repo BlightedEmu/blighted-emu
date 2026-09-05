@@ -10,3 +10,4 @@ pub mod peer;
 pub mod registration;
 pub mod run;
 pub mod server;
+pub mod world;
