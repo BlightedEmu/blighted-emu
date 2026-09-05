@@ -19,9 +19,14 @@ struct Live {
 }
 
 /// The sims that beat in time.
+///
+/// When every sim is silent at once, the director most likely lost its own NATS link: it keeps
+/// every sim, and after the beats come back it waits one more silence window before it drops
+/// the sims that are still silent (M5 spec section 12, "Director down").
 pub struct SimRegistry {
     silence: Duration,
     sims: BTreeMap<BusId, Live>,
+    hold_until: Option<Instant>,
 }
 
 impl SimRegistry {
@@ -30,7 +35,17 @@ impl SimRegistry {
         Self {
             silence: heartbeat_silence(interval, misses),
             sims: BTreeMap::new(),
+            hold_until: None,
         }
+    }
+
+    /// Whether at least one sim is known and none beat inside the silence window at `now`.
+    pub fn all_silent(&self, now: Instant) -> bool {
+        !self.sims.is_empty() && self.sims.values().all(|live| self.is_silent(live, now))
+    }
+
+    fn is_silent(&self, live: &Live, now: Instant) -> bool {
+        now.saturating_duration_since(live.last_seen) > self.silence
     }
 
     /// A heartbeat at `now`. Returns `true` when the set of live sims changed: a new sim or a
@@ -46,12 +61,20 @@ impl SimRegistry {
         before.is_none_or(|known| known.generation != beat.started_at_ms)
     }
 
-    /// Removes the sims silent for longer than the limit at `now`, and returns them.
+    /// Removes the sims silent for longer than the limit at `now`, and returns them. While every
+    /// sim is silent, and for one window after that, nobody is removed.
     pub fn drop_silent(&mut self, now: Instant) -> Vec<BusId> {
+        if self.all_silent(now) {
+            self.hold_until = Some(now + self.silence);
+        }
+        if self.hold_until.is_some_and(|until| now <= until) {
+            return Vec::new();
+        }
+        self.hold_until = None;
         let silent: Vec<BusId> = self
             .sims
             .iter()
-            .filter(|(_, live)| now.saturating_duration_since(live.last_seen) > self.silence)
+            .filter(|(_, live)| self.is_silent(live, now))
             .map(|(id, _)| id.clone())
             .collect();
         for id in &silent {
@@ -212,6 +235,36 @@ mod tests {
             vec![id("sim-1")]
         );
         assert_eq!(sims.slots(), vec![slot("sim-2")]);
+    }
+
+    #[test]
+    fn all_sims_silent_at_once_keeps_them() {
+        let start = Instant::now();
+        let mut sims = SimRegistry::new(INTERVAL, MISSES);
+        sims.beat(&beat("sim-1", STARTED_AT_MS, 0), start);
+        sims.beat(&beat("sim-2", STARTED_AT_MS, 0), start);
+        let limit = INTERVAL * MISSES;
+        let quiet = start + limit + INTERVAL;
+        assert!(sims.all_silent(quiet));
+        assert!(
+            sims.drop_silent(quiet).is_empty(),
+            "the director lost its link"
+        );
+        assert_eq!(sims.slots().len(), 2);
+        // Beats come back from one sim only; the other is dropped one window later.
+        let back = quiet + INTERVAL;
+        sims.beat(&beat("sim-1", STARTED_AT_MS, 0), back);
+        assert!(!sims.all_silent(back));
+        assert!(
+            sims.drop_silent(back).is_empty(),
+            "a window to hear every sim"
+        );
+        sims.beat(&beat("sim-1", STARTED_AT_MS, 0), quiet + limit);
+        assert_eq!(
+            sims.drop_silent(quiet + limit + INTERVAL),
+            vec![id("sim-2")]
+        );
+        assert!(!SimRegistry::new(INTERVAL, MISSES).all_silent(start));
     }
 
     #[test]

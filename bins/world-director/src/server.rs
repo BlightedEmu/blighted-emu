@@ -193,6 +193,11 @@ impl<Q: QueueStore> Loop<Q> {
         if self.assignment.is_none() && self.started.elapsed() >= self.silence() {
             self.reassign_now();
         }
+        if self.sims.all_silent(Instant::now()) {
+            // Most likely this director lost NATS: the sims keep their last table.
+            tracing::warn!("no sim heartbeat in the silence window; the table stays");
+            return;
+        }
         let Some(assignment) = &self.assignment else {
             return;
         };
