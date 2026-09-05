@@ -41,6 +41,8 @@ handoff_retry_ms = 1000
 forward_ttl_ms = 10000
 # Ghosts of another sim that are not renewed for this long are dropped.
 ghost_ttl_ms = 1000
+# Threads of the bundle step; 0 = every core. Several sims on one PC can share the cores.
+tick_threads = 0
 save_interval_ms = 10000
 heartbeat_interval_ms = 1000
 heartbeat_misses = 3

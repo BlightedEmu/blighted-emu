@@ -2,6 +2,7 @@
 //! `config/sim.toml` with `NW_SIM_` overrides (M4 spec sections 6.3 and 7, M5 spec section 7.1).
 
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 use nw_bus::{BusId, MAX_BUS_MESSAGE_BYTES, MAX_GHOST_BYTES};
@@ -17,6 +18,8 @@ use crate::world::{MAX_BUNDLE_MEMBERS, WorldSettings};
 pub const SIM_ENV_PREFIX: &str = "NW_SIM_";
 /// Room in one ghost message for everything but the ghosts (the sender id and the list length).
 pub const GHOSTS_HEADER_BYTES: usize = 128;
+/// `tick_threads` value for every core of the PC.
+pub const ALL_CORES: usize = 0;
 /// One tick, rounded up to whole milliseconds: the shortest ghost lifetime.
 pub const TICK_MS: u64 = 1000_u64.div_ceil(TICKS_PER_SECOND);
 
@@ -66,6 +69,8 @@ pub struct SimConfig {
     pub forward_ttl_ms: u64,
     /// Ghosts of another sim not renewed for this long are dropped.
     pub ghost_ttl_ms: u64,
+    /// Threads of the bundle step; 0 means every core of the PC.
+    pub tick_threads: usize,
     /// Time between position saves.
     pub save_interval_ms: u64,
     /// Time between heartbeats.
@@ -196,7 +201,17 @@ impl SimConfig {
             handoff_margin_m: self.handoff_margin_m,
             handoff_retry_ms: self.handoff_retry_ms,
             ghost_ttl_ms: self.ghost_ttl_ms,
+            tick_threads: self.tick_threads(),
         })
+    }
+
+    /// Threads of the bundle step: `tick_threads`, or every core when it is 0.
+    pub fn tick_threads(&self) -> usize {
+        if self.tick_threads == ALL_CORES {
+            std::thread::available_parallelism().map_or(1, NonZeroUsize::get)
+        } else {
+            self.tick_threads
+        }
     }
 
     /// The movement limits (M4 spec section 7.2 with sections 15 and 16).
@@ -287,6 +302,15 @@ pub(crate) mod tests {
         let mut config = committed();
         config.forward_ttl_ms = config.handoff_timeout_ms;
         assert!(config.validate().is_err(), "forwards outlive a handoff");
+    }
+
+    #[test]
+    fn zero_tick_threads_means_every_core() {
+        let mut config = committed();
+        config.tick_threads = ALL_CORES;
+        assert!(config.tick_threads() >= 1);
+        config.tick_threads = 3;
+        assert_eq!(config.tick_threads(), 3);
     }
 
     #[test]

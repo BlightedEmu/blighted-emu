@@ -1,18 +1,22 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The loop of `sim` (M4 spec sections 6, 7.1, 7.5, 11; M5 spec sections 3, 7): admits, inputs,
-//! the cell table, handoffs, ghosts, the 30 Hz tick, position saves, and heartbeats. One task
-//! owns the world. Database work and handoff requests run in their own tasks and send the result
-//! back, and bus messages go out through queues, so neither a slow database, a slow sim nor a lost
-//! NATS connection stops the tick.
+//! The loop of `sim` (M4 spec sections 6, 7.1, 7.5, 11; M5 spec sections 3, 7; M5 load spec
+//! sections 4, 5, 8): admits, inputs, the cell table, handoffs, ghosts, the 30 Hz tick, position
+//! saves, and heartbeats. One task owns the world. Database work, handoff requests and replies
+//! run in their own tasks, and bus messages go out through queues, so neither a slow database, a
+//! slow sim nor a lost NATS connection stops the tick.
+//!
+//! Gateway outputs and forwarded inputs wait in batches and go out once per tick, one batch per
+//! receiver (split at [`nw_bus::MAX_BATCH_BYTES`]).
 
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nw_bus::{
     Admit, AdmitReply, Bus, BusError, BusId, CellTable, ConnectionRef, GatewayOutput, Ghosts,
-    HandoffMessage, HandoffReply, Heartbeat, Incoming, Point, Publisher, SimHeartbeat, SimInput,
-    SimSlot, subject,
+    HandoffMessage, HandoffReply, Heartbeat, Incoming, InputBatch, OutputBatch, Point, Publisher,
+    SimHeartbeat, SimInput, SimSlot, split_batches, subject,
 };
 use nw_common::time::unix_ms;
 use nw_db::{PgPool, SaveOutcome, SavedPosition, save_character_position};
@@ -75,6 +79,8 @@ pub const METRIC_HANDOFFS: &str = "sim_handoffs_total";
 pub const METRIC_HANDOFF_SECONDS: &str = "sim_handoff_seconds";
 /// Metric: inputs sent on to the sim that took their player.
 pub const METRIC_FORWARDED_INPUTS: &str = "sim_forwarded_inputs_total";
+/// Metric: forwarded client messages dropped because a direct one came first.
+pub const METRIC_STALE_FORWARDS: &str = "sim_stale_forwards_total";
 /// Metric: failed saves.
 pub const METRIC_FAILED_SAVES: &str = "sim_failed_saves_total";
 /// Metric: client messages of a type that `sim` does not read yet.
@@ -152,7 +158,7 @@ struct HandoffResult {
 /// The subscriptions of one sim.
 struct Inbox {
     admits: nw_bus::Subscription<Admit>,
-    inputs: nw_bus::Subscription<SimInput>,
+    inputs: nw_bus::Subscription<InputBatch>,
     handoffs: nw_bus::Subscription<HandoffMessage>,
     ghosts: nw_bus::Subscription<Ghosts>,
     tables: nw_bus::Subscription<CellTable>,
@@ -179,8 +185,14 @@ impl Inbox {
 struct Loop {
     settings: LoopSettings,
     bus: Bus,
-    outputs: Publisher<GatewayOutput>,
-    sims: Publisher<SimInput>,
+    outputs: Publisher<OutputBatch>,
+    sims: Publisher<InputBatch>,
+    /// Gateway outputs of this tick, per gateway, in order.
+    pending_outputs: BTreeMap<BusId, Vec<GatewayOutput>>,
+    /// Inputs to send on, per sim, in order.
+    pending_forwards: BTreeMap<BusId, Vec<SimInput>>,
+    /// Connections with a direct input since they came here.
+    direct: HashSet<ConnectionRef>,
     ghosts: Publisher<Ghosts>,
     cancels: Publisher<HandoffMessage>,
     beats: Publisher<SimHeartbeat>,
@@ -222,6 +234,9 @@ pub async fn serve(
         forwards: ForwardTable::new(settings.forward_ttl_ms),
         outputs: Publisher::start(bus.clone(), OUTPUT_QUEUE),
         sims: Publisher::start(bus.clone(), SIM_QUEUE),
+        pending_outputs: BTreeMap::new(),
+        pending_forwards: BTreeMap::new(),
+        direct: HashSet::new(),
         ghosts: Publisher::start(bus.clone(), SIM_QUEUE),
         cancels: Publisher::start(bus.clone(), SIM_QUEUE),
         beats: Publisher::start(bus.clone(), HEARTBEAT_QUEUE),
@@ -243,15 +258,15 @@ pub async fn serve(
         tokio::select! {
             () = &mut shutdown => break,
             Some(admit) = inbox.admits.next() => match admit {
-                Ok(admit) => state.admit(admit).await,
+                Ok(admit) => state.admit(admit),
                 Err(error) => tracing::warn!(%error, "bad admit message"),
             },
-            Some(input) = inbox.inputs.next() => match input {
-                Ok(input) => state.input(input.message),
-                Err(error) => tracing::warn!(%error, "bad input message"),
+            Some(batch) = inbox.inputs.next() => match batch {
+                Ok(batch) => state.inputs(batch.message),
+                Err(error) => tracing::warn!(%error, "bad input batch"),
             },
             Some(handoff) = inbox.handoffs.next() => match handoff {
-                Ok(handoff) => state.handoff(handoff).await,
+                Ok(handoff) => state.handoff(handoff),
                 Err(error) => tracing::warn!(%error, "bad handoff message"),
             },
             Some(ghosts) = inbox.ghosts.next() => match ghosts {
@@ -284,7 +299,7 @@ impl Loop {
 
     /// Adds the player of an admit. A position of this sim that is still waiting to be saved is
     /// newer than the database, so it wins.
-    async fn admit(&mut self, admit: Incoming<Admit>) {
+    fn admit(&mut self, admit: Incoming<Admit>) {
         let mut message = admit.message.clone();
         if let Some(unsaved) = self.queue.latest(message.character) {
             let [x, y, z] = unsaved.metres();
@@ -310,10 +325,38 @@ impl Loop {
                 }
             }
         };
-        if let Err(error) = self.bus.reply(&admit, &reply).await {
-            tracing::warn!(%error, "admit reply failed");
-        }
+        self.reply(admit, reply);
         self.count_players();
+    }
+
+    /// Answers a request from its own task, so a slow NATS link never stops the tick.
+    fn reply<T: Send + Sync + 'static, R: serde::Serialize + Send + Sync + 'static>(
+        &self,
+        request: Incoming<T>,
+        answer: R,
+    ) {
+        let bus = self.bus.clone();
+        tokio::spawn(async move {
+            if let Err(error) = bus.reply(&request, &answer).await {
+                tracing::warn!(%error, "reply failed");
+            }
+        });
+    }
+
+    /// The inputs of one batch, in order. A forwarded client message of a connection that has
+    /// had a direct input is older than that input, so it is dropped.
+    fn inputs(&mut self, batch: InputBatch) {
+        for input in batch.inputs {
+            if let SimInput::ClientMessage { connection, .. } = &input {
+                if !batch.forwarded {
+                    self.direct.insert(connection.clone());
+                } else if self.direct.contains(connection) {
+                    metrics::counter!(METRIC_STALE_FORWARDS).increment(1);
+                    continue;
+                }
+            }
+            self.input(input);
+        }
     }
 
     /// A client message or a departure. Those of a handed-off connection go on to its new sim.
@@ -328,10 +371,10 @@ impl Loop {
                 self.forwards.remove(&connection);
             }
             metrics::counter!(METRIC_FORWARDED_INPUTS).increment(1);
-            let subject = subject::sim_input(self.settings.world_id, &forward.sim.id);
-            if !self.sims.send(subject, input) {
-                metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
-            }
+            self.pending_forwards
+                .entry(forward.sim.id.clone())
+                .or_default()
+                .push(input);
             // The gateway still sends here, so it may have lost the route: send it again.
             self.route(&connection, &forward);
             return;
@@ -388,27 +431,22 @@ impl Loop {
     }
 
     /// A handoff offer from another sim, or the cancel of one that this sim took too late.
-    async fn handoff(&mut self, handoff: Incoming<HandoffMessage>) {
-        match &handoff.message {
-            HandoffMessage::Offer(offer) => {
-                let reply = match self.world.take(offer, self.now_ms()) {
-                    Ok(()) => {
-                        self.forwards.remove(&offer.connection);
-                        self.gateways
-                            .joined(&offer.connection.gateway, Instant::now());
-                        HandoffReply::Accepted
-                    }
-                    Err(error) => {
-                        tracing::warn!(character = %offer.character, %error, "handoff refused");
-                        HandoffReply::Refused {
-                            reason: error.to_string(),
-                        }
-                    }
-                };
-                if let Err(error) = self.bus.reply(&handoff, &reply).await {
-                    tracing::warn!(%error, "handoff reply failed");
+    fn handoff(&mut self, handoff: Incoming<HandoffMessage>) {
+        let reply = match &handoff.message {
+            HandoffMessage::Offer(offer) => Some(match self.world.take(offer, self.now_ms()) {
+                Ok(()) => {
+                    self.forwards.remove(&offer.connection);
+                    self.gateways
+                        .joined(&offer.connection.gateway, Instant::now());
+                    HandoffReply::Accepted
                 }
-            }
+                Err(error) => {
+                    tracing::warn!(character = %offer.character, %error, "handoff refused");
+                    HandoffReply::Refused {
+                        reason: error.to_string(),
+                    }
+                }
+            }),
             HandoffMessage::Cancel {
                 connection,
                 handoffs,
@@ -416,7 +454,11 @@ impl Loop {
                 if self.world.cancel(connection, *handoffs) {
                     tracing::info!(?connection, "late handoff undone");
                 }
+                None
             }
+        };
+        if let Some(reply) = reply {
+            self.reply(handoff, reply);
         }
         self.count_players();
     }
@@ -496,6 +538,7 @@ impl Loop {
         for start in output.handoffs {
             self.offer(start);
         }
+        self.flush();
         for (target, entities) in output.ghosts {
             let subject = subject::sim_ghosts(self.settings.world_id, &target);
             let ghosts = Ghosts {
@@ -577,7 +620,7 @@ impl Loop {
     }
 
     /// Tells the gateway of `connection` that its player moved by `forward`.
-    fn route(&self, connection: &ConnectionRef, forward: &Forward) {
+    fn route(&mut self, connection: &ConnectionRef, forward: &Forward) {
         self.publish(
             &connection.gateway,
             GatewayOutput::Route {
@@ -605,6 +648,8 @@ impl Loop {
             self.drop_gateway(&gateway);
         }
         self.forwards.expire(self.now_ms());
+        let world = &self.world;
+        self.direct.retain(|connection| world.has(connection));
         metrics::gauge!(METRIC_GHOSTS).set(self.world.ghosts() as f64);
     }
 
@@ -612,11 +657,10 @@ impl Loop {
         metrics::gauge!(METRIC_PLAYERS).set(self.world.players() as f64);
     }
 
-    fn send(&self, outgoing: Outgoing) {
+    fn send(&mut self, outgoing: Outgoing) {
         self.publish(
             &outgoing.connection.gateway,
             GatewayOutput::ServerMessages {
-                sim: self.settings.sim_id.clone(),
                 connection: outgoing.connection.connection,
                 channel: outgoing.channel,
                 reliable: outgoing.reliable,
@@ -625,10 +669,39 @@ impl Loop {
         );
     }
 
-    fn publish(&self, gateway: &BusId, message: GatewayOutput) {
-        let subject = subject::gateway_output(self.settings.world_id, gateway);
-        if !self.outputs.send(subject, message) {
-            metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
+    /// Queues `message` for the batch of `gateway`.
+    fn publish(&mut self, gateway: &BusId, message: GatewayOutput) {
+        self.pending_outputs
+            .entry(gateway.clone())
+            .or_default()
+            .push(message);
+    }
+
+    /// Sends the waiting gateway outputs and forwarded inputs, one batch per receiver.
+    fn flush(&mut self) {
+        for (gateway, outputs) in std::mem::take(&mut self.pending_outputs) {
+            let subject = subject::gateway_output(self.settings.world_id, &gateway);
+            for outputs in split_batches(outputs, GatewayOutput::size_bytes) {
+                let batch = OutputBatch {
+                    sim: self.settings.sim_id.clone(),
+                    outputs,
+                };
+                if !self.outputs.send(subject.clone(), batch) {
+                    metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
+                }
+            }
+        }
+        for (sim, inputs) in std::mem::take(&mut self.pending_forwards) {
+            let subject = subject::sim_input(self.settings.world_id, &sim);
+            for inputs in split_batches(inputs, SimInput::size_bytes) {
+                let batch = InputBatch {
+                    forwarded: true,
+                    inputs,
+                };
+                if !self.sims.send(subject.clone(), batch) {
+                    metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
+                }
+            }
         }
     }
 
@@ -714,10 +787,10 @@ fn server_time() -> u64 {
 
 #[cfg(all(test, feature = "infra"))]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
 
-    use nw_bus::Subscription;
     use nw_bus::test_support::test_bus;
+    use nw_bus::{HandoffOffer, Subscription};
     use nw_db::test_db::with_test_schema;
     use nw_db::{NewCharacter, WORLD_MIGRATOR, character_position, insert_character};
     use nw_messages::{
@@ -848,10 +921,12 @@ mod tests {
         }
     }
 
-    /// The test's gateway: its outputs, and a task that beats for it.
+    /// The test's gateway: its output batches, read one output at a time, and a task that beats
+    /// for it.
     struct TestGateway {
         id: BusId,
-        outputs: Subscription<GatewayOutput>,
+        outputs: Subscription<OutputBatch>,
+        waiting: VecDeque<(BusId, GatewayOutput)>,
         beats: JoinHandle<()>,
     }
 
@@ -859,7 +934,7 @@ mod tests {
         async fn start(bus: &Bus, world_id: Uuid, beating: bool) -> Self {
             let id = id("gw");
             let outputs = bus
-                .subscribe::<GatewayOutput>(subject::gateway_output(world_id, &id))
+                .subscribe::<OutputBatch>(subject::gateway_output(world_id, &id))
                 .await
                 .expect("outputs");
             bus.flush().await.expect("flush");
@@ -878,7 +953,12 @@ mod tests {
                     tokio::time::sleep(HEARTBEAT).await;
                 }
             });
-            Self { id, outputs, beats }
+            Self {
+                id,
+                outputs,
+                waiting: VecDeque::new(),
+                beats,
+            }
         }
 
         fn connection(&self, number: u64) -> ConnectionRef {
@@ -888,31 +968,60 @@ mod tests {
             }
         }
 
-        async fn next(&mut self) -> GatewayOutput {
-            tokio::time::timeout(WAIT, self.outputs.next())
-                .await
-                .expect("output in time")
-                .expect("open")
-                .expect("decode")
-                .message
+        /// The next output and the sim that sent it.
+        async fn next_from(&mut self) -> (BusId, GatewayOutput) {
+            while self.waiting.is_empty() {
+                let batch = tokio::time::timeout(WAIT, self.outputs.next())
+                    .await
+                    .expect("output in time")
+                    .expect("open")
+                    .expect("decode")
+                    .message;
+                let sim = batch.sim;
+                self.waiting.extend(
+                    batch
+                        .outputs
+                        .into_iter()
+                        .map(|output| (sim.clone(), output)),
+                );
+            }
+            self.waiting.pop_front().expect("an output waits")
         }
 
-        /// The next output that `wanted` picks, within [`WAIT`].
-        async fn until<T>(&mut self, mut wanted: impl FnMut(GatewayOutput) -> Option<T>) -> T {
+        /// The next output (with its sender) that `wanted` picks, within [`WAIT`].
+        async fn until_from<T>(
+            &mut self,
+            mut wanted: impl FnMut(BusId, GatewayOutput) -> Option<T>,
+        ) -> T {
             let deadline = Instant::now() + WAIT;
             loop {
                 assert!(Instant::now() < deadline, "no wanted output in time");
-                if let Some(found) = wanted(self.next().await) {
+                let (sim, output) = self.next_from().await;
+                if let Some(found) = wanted(sim, output) {
                     return found;
                 }
             }
         }
 
+        /// Drops the outputs of the next [`PAUSE`]: every older output that waits, and some new.
+        async fn drain(&mut self) {
+            self.waiting.clear();
+            let deadline = tokio::time::Instant::now() + PAUSE;
+            while tokio::time::timeout_at(deadline, self.outputs.next())
+                .await
+                .is_ok()
+            {}
+        }
+
+        /// The next output that `wanted` picks, within [`WAIT`].
+        async fn until<T>(&mut self, mut wanted: impl FnMut(GatewayOutput) -> Option<T>) -> T {
+            self.until_from(|_, output| wanted(output)).await
+        }
+
         /// The entity numbers of the next bundle that `sim` sends to `connection`.
         async fn bundle_from(&mut self, sim: &BusId, connection: u64) -> Vec<u64> {
-            self.until(|output| match output {
+            self.until_from(|from, output| match output {
                 GatewayOutput::ServerMessages {
-                    sim: from,
                     connection: to,
                     channel: REPLICATION_CHANNEL,
                     envelopes,
@@ -1045,8 +1154,20 @@ mod tests {
         }
     }
 
+    /// Sends `input` to `sim` as the gateway does, in a batch.
     async fn input(bus: &Bus, world_id: Uuid, sim: &BusId, input: &SimInput) {
-        bus.publish(subject::sim_input(world_id, sim), input)
+        send_inputs(bus, world_id, sim, false, vec![input.clone()]).await;
+    }
+
+    async fn send_inputs(
+        bus: &Bus,
+        world_id: Uuid,
+        sim: &BusId,
+        forwarded: bool,
+        inputs: Vec<SimInput>,
+    ) {
+        let batch = InputBatch { forwarded, inputs };
+        bus.publish(subject::sim_input(world_id, sim), &batch)
             .await
             .expect("input");
     }
@@ -1262,9 +1383,8 @@ mod tests {
                 .await;
             assert_eq!(again, (east.clone(), FIRST_HANDOFF));
             pair.gateway
-                .until(|output| match output {
+                .until_from(|sim, output| match output {
                     GatewayOutput::ServerMessages {
-                        sim,
                         channel: REPLICATION_CHANNEL,
                         envelopes,
                         ..
@@ -1475,6 +1595,101 @@ mod tests {
             assert!(close.is_err(), "the gateways resume the players; no close");
             tables.abort();
             sim.stop().await;
+        })
+        .await;
+    }
+
+    /// The own x of the next bundle of `sim` for the test's connection.
+    async fn own_x_from(gateway: &mut TestGateway, sim: &BusId) -> f32 {
+        gateway
+            .until_from(|from, output| match output {
+                GatewayOutput::ServerMessages {
+                    connection: CONNECTION,
+                    channel: REPLICATION_CHANNEL,
+                    envelopes,
+                    ..
+                } if from == *sim => Some(member_positions(&envelopes[0])[0].1),
+                _ => None,
+            })
+            .await
+    }
+
+    /// Reads bundles of `sim` until the own x is `x`.
+    async fn wait_for_x(gateway: &mut TestGateway, sim: &BusId, x: f32) {
+        while (own_x_from(gateway, sim).await - x).abs() > MOVE_TOLERANCE_M {}
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_forwarded_input_after_a_direct_one_is_dropped() {
+        with_test_schema(async |db| {
+            WORLD_MIGRATOR.run(db).await.expect("migrate");
+            let bus = test_bus().await;
+            let world_id = Uuid::new_v4();
+            let mut gateway = TestGateway::start(&bus, world_id, true).await;
+            let sim = Running::start(&bus, settings(world_id, "sim"), db).await;
+            let connection = gateway.connection(CONNECTION);
+            let player = admit_at(connection.clone(), character(db).await, BORDER_X);
+            admit(&bus, world_id, sim.id(), &player).await;
+            let id = sim.id().clone();
+            let step = |metres: f32| move_to(connection.clone(), BORDER_X + metres);
+            send_inputs(&bus, world_id, &id, true, vec![step(1.0)]).await;
+            wait_for_x(&mut gateway, &id, BORDER_X + 1.0).await;
+            send_inputs(&bus, world_id, &id, false, vec![step(2.0)]).await;
+            wait_for_x(&mut gateway, &id, BORDER_X + 2.0).await;
+            send_inputs(&bus, world_id, &id, true, vec![step(3.0)]).await;
+            tokio::time::sleep(QUIET).await;
+            gateway.drain().await;
+            assert!(
+                (own_x_from(&mut gateway, &id).await - (BORDER_X + 2.0)).abs() < MOVE_TOLERANCE_M
+            );
+            sim.stop().await;
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancel_after_a_take_removes_the_player() {
+        with_test_schema(async |db| {
+            WORLD_MIGRATOR.run(db).await.expect("migrate");
+            let bus = test_bus().await;
+            let world_id = Uuid::new_v4();
+            let mut gateway = TestGateway::start(&bus, world_id, true).await;
+            let taker = Running::start(&bus, settings(world_id, "sim"), db).await;
+            let id = taker.id().clone();
+            let offer = HandoffOffer {
+                connection: gateway.connection(CONNECTION),
+                character: character(db).await.1,
+                entity: CONNECTION,
+                position: at(BORDER_X),
+                move_age_ms: 0,
+                budget_m: 0.0,
+                bundles_sent: 0,
+                time_synch_age_ms: 0,
+                handoffs: FIRST_HANDOFF,
+            };
+            let subject = subject::sim_handoff(world_id, &id);
+            let mut reply: Result<HandoffReply, BusError> = Err(BusError::NoReplySubject);
+            for _ in 0..TRIES {
+                reply = bus
+                    .request(subject.clone(), &HandoffMessage::Offer(offer.clone()), WAIT)
+                    .await;
+                if reply.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(PAUSE).await;
+            }
+            assert_eq!(reply.expect("offer reply"), HandoffReply::Accepted);
+            own_x_from(&mut gateway, &id).await;
+            let cancel = HandoffMessage::Cancel {
+                connection: offer.connection.clone(),
+                handoffs: FIRST_HANDOFF,
+            };
+            bus.publish(subject, &cancel).await.expect("cancel");
+            tokio::time::sleep(QUIET).await;
+            gateway.drain().await;
+            let bundle = tokio::time::timeout(QUIET, own_x_from(&mut gateway, &id)).await;
+            assert!(bundle.is_err(), "no bundle after the cancel");
+            taker.stop().await;
         })
         .await;
     }

@@ -16,6 +16,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
+use bevy_ecs::change_detection::Mut;
 use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
@@ -25,7 +26,7 @@ use nw_messages::{
 };
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Ground, GroundCheck, Interest, Motion, MotionState,
-    MoveLimits, MoveRefusal, Position,
+    MoveLimits, MoveRefusal, Position, SpatialGrid,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -62,7 +63,13 @@ pub struct WorldSettings {
     pub handoff_retry_ms: u64,
     /// Ghosts not renewed for this long are dropped.
     pub ghost_ttl_ms: u64,
+    /// Threads of the bundle step.
+    pub tick_threads: usize,
 }
+
+/// Fewest players for which the bundle step uses more than one thread; below that, starting
+/// threads costs more than it saves.
+pub const MIN_PLAYERS_PER_THREAD: usize = 64;
 
 /// Why a move did not happen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -236,6 +243,11 @@ impl SimWorld {
             ghosts: HashMap::new(),
             ghost_targets: BTreeSet::new(),
         }
+    }
+
+    /// Whether the player of `connection` is here.
+    pub fn has(&self, connection: &ConnectionRef) -> bool {
+        self.by_connection.contains_key(connection)
     }
 
     /// Players in the world.
@@ -577,6 +589,7 @@ impl SimWorld {
         lists.into_iter().collect()
     }
 
+    /// A bundle for every player that is not frozen, on `tick_threads` threads for a large world.
     fn bundles(&mut self, now_ms: u64, server_time: u64) -> Result<Vec<Outgoing>, MessageError> {
         let mut bodies = self.world.query::<(&Player, &Body)>();
         let mut everyone: Vec<(u64, Position)> = bodies
@@ -590,49 +603,47 @@ impl SimWorld {
                 .flat_map(|ghosts| ghosts.entities.iter().copied())
                 .filter(|(number, _)| !own.contains(number)),
         );
-        let positions: HashMap<u64, Position> = everyone.iter().copied().collect();
-        let mut players = self.world.query::<(&mut Player, &Body)>();
+        // The radius is checked at start to be a finite number above 0.
+        let Some(mut grid) = SpatialGrid::new(self.settings.interest_radius_m) else {
+            return Ok(Vec::new());
+        };
+        for (number, position) in &everyone {
+            grid.insert(*number, *position);
+        }
+        let near = Neighbourhood {
+            grid: &grid,
+            positions: everyone.iter().copied().collect(),
+            now_ms,
+            server_time,
+        };
+        let mut query = self.world.query::<(&mut Player, &Body)>();
+        let mut players: Vec<(Mut<Player>, &Body)> = query.iter_mut(&mut self.world).collect();
+        let threads = self
+            .settings
+            .tick_threads
+            .min(players.len() / MIN_PLAYERS_PER_THREAD)
+            .max(1);
+        if threads == 1 {
+            return near.bundles_of(&mut players);
+        }
+        let chunk = players.len().div_ceil(threads);
+        let parts: Vec<Result<Vec<Outgoing>, MessageError>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = players
+                .chunks_mut(chunk)
+                .map(|part| scope.spawn(|| near.bundles_of(part)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                })
+                .collect()
+        });
         let mut outgoing = Vec::new();
-        for (mut player, body) in players.iter_mut(&mut self.world) {
-            if player.frozen {
-                continue;
-            }
-            let own = player.number;
-            let others = everyone
-                .iter()
-                .copied()
-                .filter(|(number, _)| *number != own);
-            let own_position = body.motion.position();
-            let seen = player.interest.update(own_position, others);
-            let mut numbers: Vec<u64> = seen.entered.into_iter().chain(seen.stayed).collect();
-            numbers.sort_unstable();
-            let mut visible: Vec<(u64, Position)> = vec![(own, own_position)];
-            visible.extend(
-                numbers
-                    .into_iter()
-                    .filter_map(|number| Some((number, *positions.get(&number)?))),
-            );
-            for members in visible.chunks(MAX_BUNDLE_MEMBERS) {
-                let bundle = bundle(player.bundles_sent, members)?;
-                player.bundles_sent = player.bundles_sent.saturating_add(1);
-                outgoing.push(Outgoing {
-                    connection: player.connection.clone(),
-                    channel: REPLICATION_CHANNEL,
-                    reliable: false,
-                    envelopes: vec![bundle],
-                });
-            }
-            if now_ms.saturating_sub(player.last_time_synch_ms) >= TIME_SYNCH_INTERVAL_MS {
-                player.last_time_synch_ms = now_ms;
-                outgoing.push(Outgoing {
-                    connection: player.connection.clone(),
-                    channel: MESSAGE_CHANNEL,
-                    reliable: true,
-                    envelopes: vec![
-                        ServerMessage::TimeSynch(TimeSynchMsg { time: server_time }).envelope()?,
-                    ],
-                });
-            }
+        for part in parts {
+            outgoing.extend(part?);
         }
         Ok(outgoing)
     }
@@ -718,6 +729,69 @@ fn departure_of(player: &Player, body: &Body) -> Departure {
     }
 }
 
+/// What the bundle step of one tick reads: everyone's position, in a grid.
+struct Neighbourhood<'a> {
+    grid: &'a SpatialGrid<u64>,
+    positions: HashMap<u64, Position>,
+    now_ms: u64,
+    server_time: u64,
+}
+
+impl Neighbourhood<'_> {
+    /// The bundles and time messages of `players`, in their order.
+    fn bundles_of(
+        &self,
+        players: &mut [(Mut<Player>, &Body)],
+    ) -> Result<Vec<Outgoing>, MessageError> {
+        let mut outgoing = Vec::new();
+        for (player, body) in players.iter_mut() {
+            if player.frozen {
+                continue;
+            }
+            let own = player.number;
+            let own_position = body.motion.position();
+            let others = self
+                .grid
+                .near(own_position)
+                .filter(|(number, _)| *number != own);
+            let seen = player.interest.update(own_position, others);
+            let mut numbers: Vec<u64> = seen.entered.into_iter().chain(seen.stayed).collect();
+            numbers.sort_unstable();
+            let mut visible: Vec<(u64, Position)> = vec![(own, own_position)];
+            visible.extend(
+                numbers
+                    .into_iter()
+                    .filter_map(|number| Some((number, *self.positions.get(&number)?))),
+            );
+            for members in visible.chunks(MAX_BUNDLE_MEMBERS) {
+                let bundle = bundle(player.bundles_sent, members)?;
+                player.bundles_sent = player.bundles_sent.saturating_add(1);
+                outgoing.push(Outgoing {
+                    connection: player.connection.clone(),
+                    channel: REPLICATION_CHANNEL,
+                    reliable: false,
+                    envelopes: vec![bundle],
+                });
+            }
+            if self.now_ms.saturating_sub(player.last_time_synch_ms) >= TIME_SYNCH_INTERVAL_MS {
+                player.last_time_synch_ms = self.now_ms;
+                outgoing.push(Outgoing {
+                    connection: player.connection.clone(),
+                    channel: MESSAGE_CHANNEL,
+                    reliable: true,
+                    envelopes: vec![
+                        ServerMessage::TimeSynch(TimeSynchMsg {
+                            time: self.server_time,
+                        })
+                        .envelope()?,
+                    ],
+                });
+            }
+        }
+        Ok(outgoing)
+    }
+}
+
 /// One bundle envelope ([`ReplicatedStateBundle::of_positions`]). Every position in the world is
 /// finite (`admit`, `take` and `set_ghosts` refuse others), so no member is left out.
 fn bundle(sequence: u64, visible: &[(u64, Position)]) -> Result<Vec<u8>, MessageError> {
@@ -735,6 +809,8 @@ fn bundle(sequence: u64, visible: &[(u64, Position)]) -> Result<Vec<u8>, Message
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use nw_bus::CellTable;
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
     use nw_messages::{BundlePayload, LOGIN_MESSAGE_TYPES, MemberState};
@@ -797,6 +873,7 @@ mod tests {
             handoff_margin_m: MARGIN_M,
             handoff_retry_ms: RETRY_MS,
             ghost_ttl_ms: GHOST_TTL_MS,
+            tick_threads: 1,
         }
     }
 
@@ -1048,6 +1125,42 @@ mod tests {
                 .iter()
                 .all(|out| out.channel != REPLICATION_CHANNEL || !out.reliable)
         );
+    }
+
+    /// What every connection saw in one tick: its bundle members by entity number and x.
+    fn seen_by_all(outgoing: &[Outgoing]) -> BTreeMap<u64, Vec<(u64, f32)>> {
+        outgoing
+            .iter()
+            .filter(|out| out.channel == REPLICATION_CHANNEL)
+            .map(|out| {
+                (
+                    out.connection.connection,
+                    positions_seen_by(outgoing, &out.connection),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_bundle_step_on_many_threads_gives_the_same_bundles() {
+        const PLAYERS: u64 = 300;
+        const SPACING_M: f32 = 7.0;
+        let crowd = |threads| {
+            let mut world = world_of(
+                "sim-a",
+                WorldSettings {
+                    tick_threads: threads,
+                    ..settings(MANY, PLAYERS as u32)
+                },
+            );
+            for number in 1..=PLAYERS {
+                join(&mut world, number, number as f32 * SPACING_M);
+            }
+            seen_by_all(&tick(&mut world, NOW).messages)
+        };
+        let one = crowd(1);
+        assert_eq!(one.len(), PLAYERS as usize);
+        assert_eq!(crowd(4), one);
     }
 
     #[test]
