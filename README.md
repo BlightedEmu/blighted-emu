@@ -82,7 +82,7 @@ Codegen stops with an error when a table type name would give an invalid Rust na
 
 ## Capture check
 
-`content-tool capture-check` decodes capture ledgers (`ledger.bin`, decrypted carrier datagrams) with `nw-carrier` and `nw-reflect` and prints counts only: datagrams, messages per type index, registration response values, and decode failures. It exits with an error when any datagram or message does not decode. It also decodes the server messages of the M4 types (`nw-messages`), encodes them again, and counts those that give the same bytes; a difference is a failure. Inside each replication bundle it does the same for the members at the front of the payload whose class has a reader (the position class). The facts it checks are in `docs/re/2026-09-02-carrier-captures.md`.
+`content-tool capture-check` decodes capture ledgers (`ledger.bin`, decrypted carrier datagrams) with `nw-carrier` and `nw-reflect` and prints counts only: datagrams, messages per type index, registration response values, and decode failures. It exits with an error when any datagram or message does not decode. It also decodes the server messages of the M4 types and the client input (type 1589) with `nw-messages`, encodes them again, and counts those that give the same bytes; a difference is a failure. Inside each replication bundle it does the same for the members at the front of the payload whose class has a reader (the position class). The facts it checks are in `docs/re/2026-09-02-carrier-captures.md`.
 
 Ledgers hold data of other players. Keep them in git-ignored `local-data/captures/`; never commit them or paste message contents.
 
@@ -180,7 +180,7 @@ The gateway serves Prometheus metrics on `metrics_listen` (`rep_gateway_*`). Kee
 
 ## World simulation
 
-`sim` runs one cell of the main map (`newworld_vitaeeterna`) at 30 ticks per second. After the gateway checks a ticket, it asks `sim` over NATS to take the character. `sim` puts the character at its saved position, or at `start_position` the first time, and sends the login messages. Only then does the gateway send registration status 0. Every tick, each player gets the positions of the players within `interest_radius_m`. When a player leaves, `sim` saves the position. It also saves every player every `save_interval_ms`.
+`sim` runs one cell of the main map (`newworld_vitaeeterna`) at 30 ticks per second. After the gateway checks a ticket, it asks `sim` over NATS to take the character. `sim` puts the character at its saved position, or at `start_position` the first time, and sends the login messages. Only then does the gateway send registration status 0. Every tick, each player gets the positions of the players within `interest_radius_m`. A client moves by sending its input (type 1589); `sim` takes the position of the input and checks it: finite, inside `[cell]`, not faster than `run_speed_mps` x (1 + `speed_margin`) over a budget of `burst_seconds`, and not under the ground or more than `max_height_above_ground_m` above it. A refused move keeps the last good position, which the player's next bundle shows. When a player leaves, `sim` saves the position. It also saves every player every `save_interval_ms`.
 
 NATS carries the messages between the gateway and `sim`. NATS has no login in this setup, so keep it on an internal address.
 
@@ -202,24 +202,26 @@ cargo run -p rep-gateway -- serve
 cargo run -p nw-testclient -- pair
 ```
 
-`nw-testclient pair` logs in two accounts (`account` and `second_account`) and keeps both in the world for `hold_seconds`. Each client must see the other. Then the first account logs in again and must appear at its saved position, within `position_tolerance_m`. It prints `pass` or `FAIL` for each check, and the exit code is 0 only when every check passed.
+`nw-testclient pair` logs in two accounts (`account` and `second_account`) and keeps both in the world for `hold_seconds`. Each client must see the other. The first walks `route_m` (points east and north of where it stands) at `route_speed_mps`, and the second must see it on the route within `path_tolerance_m`. Then the first sends one move `jump_m` east, which `sim` must refuse. Then the first account logs in again and must appear at its saved position, within `position_tolerance_m`. It prints `pass` or `FAIL` for each check, and the exit code is 0 only when every check passed. `hold_seconds` must be longer than the walk.
 
 `sim` serves Prometheus metrics on `metrics_listen` (`sim_*`). Keep that address internal.
 
 Known gaps:
 
 - `sim` does not send the messages whose layout is still open: types 1628, 3236, 1635 and 6310.
-- `sim` does not read client movement (type 1589) yet, because its layout is still open. Players stay where they joined.
+- `sim` reads only the position of the client input. What the other fields of type 1589 mean is mostly Unknown; they are kept as raw bytes.
+- The client's reaction to a refused move is Unknown: `sim` only keeps the last good position in the player's bundles.
+- The speed limit allows sprint with the road boost (6.3 m/s), not mounts or speed effects: `sim` has neither yet.
 - How the retail server removes an entity from a client is Unknown. A player who leaves the interest radius is not in the next bundles.
 
-### M4 checks without movement
+### M4 exit test
 
 1. `cargo test --workspace` and `just test-infra` pass.
 2. `just capture-check` reads every local ledger with 0 decode errors.
 3. Start the services (`just infra-up`), set the secrets, then start `edge-http serve`, `sim`, and `rep-gateway serve`.
 4. Run `cargo run -p nw-testclient -- pair`. Every check must print `pass`, and the exit code must be 0.
 
-`just test-infra` runs the same pair check without the network, on the Docker PostgreSQL, Valkey and NATS. It also writes a saved position to the database and checks that the next login appears there. The checks that need movement (walking a path, a refused fast move) wait for the type 1589 layout.
+`just test-infra` runs the same pair check without the network, on the Docker PostgreSQL, Valkey and NATS, with a level without height data. It also writes a saved position to the database and checks that the next login appears there. On the real level, the walk must stay inside the ground band: keep `route_m` short and on flat ground near `start_position`.
 
 ## Rules for contributors
 
