@@ -749,6 +749,11 @@ pub(crate) mod tests {
         (session, account)
     }
 
+    /// Free player slots of each test world: more than any test uses.
+    const FIXTURE_FREE_SLOTS: u32 = 1_000;
+    /// The slot count lives longer than any test.
+    const FIXTURE_SLOTS_TTL_MS: u64 = 3_600_000;
+
     async fn fixture_with(config: EdgeConfig) -> Fixture {
         let world_ids: Vec<Uuid> = config.worlds.iter().map(|world| world.id).collect();
         let state = GameState {
@@ -759,6 +764,14 @@ pub(crate) mod tests {
             queue: MemoryQueue::default(),
             signing_key: SigningKey::from_hex(KEY_HEX).expect("key"),
         };
+        // The director reports free player slots for every world.
+        for world in &world_ids {
+            state
+                .queue
+                .set_free_slots(*world, FIXTURE_FREE_SLOTS, FIXTURE_SLOTS_TTL_MS)
+                .await
+                .expect("free slots");
+        }
         let (session, account) = new_session(&state).await;
         Fixture {
             state,

@@ -32,6 +32,8 @@ const QUEUE_ADMITTED_PREFIX: &str = "nw:qd:";
 const QUEUE_ENTRY_PREFIX: &str = "nw:qe:";
 /// Entry record by ticket; `rep-gateway` takes it one time with [`QueueStore::take_entry`].
 pub const ENTRY_RECORD_PREFIX: &str = "nw:et:";
+/// Free player slots of a world (`<prefix><world>`), written by `world-director`.
+const QUEUE_FREE_SLOTS_PREFIX: &str = "nw:qs:";
 /// Entry of an account (`<prefix><world>:<account>`).
 const QUEUE_ACCOUNT_PREFIX: &str = "nw:qa:";
 const QUEUE_SCRIPT: &str = include_str!("queue_script.lua");
@@ -245,6 +247,7 @@ impl QueueStore for Valkey {
             .key(format!("{QUEUE_ORDER_PREFIX}{world}"))
             .key(format!("{QUEUE_REFRESH_PREFIX}{world}"))
             .key(format!("{QUEUE_ADMITTED_PREFIX}{world}"))
+            .key(format!("{QUEUE_FREE_SLOTS_PREFIX}{world}"))
             .arg(now)
             .arg(settings.stale_after_ms)
             .arg(settings.capacity)
@@ -276,6 +279,22 @@ impl QueueStore for Valkey {
             }
             _ => Ok(None),
         }
+    }
+
+    async fn set_free_slots(
+        &self,
+        world_id: Uuid,
+        slots: u32,
+        ttl_ms: u64,
+    ) -> Result<(), StoreError> {
+        self.query(
+            redis::cmd("SET")
+                .arg(format!("{QUEUE_FREE_SLOTS_PREFIX}{world_id}"))
+                .arg(slots)
+                .arg("PX")
+                .arg(ttl_ms),
+        )
+        .await
     }
 
     async fn take_entry(&self, ticket_id: &str) -> Result<Option<EntryRecord>, StoreError> {
@@ -326,6 +345,7 @@ pub(crate) mod tests {
         contract::queue(valkey().await).await;
         contract::queue_store_clock(valkey().await).await;
         contract::take_entry(valkey().await).await;
+        contract::free_slots(valkey().await).await;
     }
 
     /// Parallel joins on one world.
@@ -341,6 +361,14 @@ pub(crate) mod tests {
             capacity: PARALLEL_CAPACITY,
             stale_after_ms: contract::STALE_AFTER_MS,
         };
+        store
+            .set_free_slots(
+                settings.world_id,
+                PARALLEL_JOINS as u32,
+                contract::SLOTS_TTL_MS,
+            )
+            .await
+            .expect("free slots");
         let accounts: Vec<Uuid> = (0..PARALLEL_JOINS).map(|_| Uuid::new_v4()).collect();
         let joins = accounts.clone().into_iter().map(|account| {
             let store = store.clone();

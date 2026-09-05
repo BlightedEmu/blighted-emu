@@ -2,8 +2,9 @@
 //! Login queue and entry tickets (M2 spec section 8; review findings C1, C2, C3, I3).
 //!
 //! One entry per account and world. Waiting entries that stop refreshing are removed. Entries are
-//! admitted from the front while fewer than `capacity` entry records are live; an entry record
-//! lives [`ENTRY_TICKET_SECONDS`]. The Steam ticket is never stored.
+//! admitted from the front while the live entry records are fewer than both `capacity` and the
+//! free player slots that `world-director` reports (M5 spec section 9); an entry record lives
+//! [`ENTRY_TICKET_SECONDS`]. With no report, nobody is admitted. The Steam ticket is never stored.
 
 use std::future::Future;
 
@@ -29,7 +30,7 @@ const ALLOW_QUEUE_TRANSFER: bool = false;
 pub struct QueueSettings {
     /// World of the queue.
     pub world_id: Uuid,
-    /// Live entry records allowed at one time.
+    /// Live entry records allowed at one time (the entry ticket limit).
     pub capacity: u32,
     /// A waiting entry not refreshed for this long is removed.
     pub stale_after_ms: u64,
@@ -128,6 +129,14 @@ pub trait QueueStore: Clone + Send + Sync + 'static {
         action: QueueAction,
         time: QueueTime,
     ) -> impl Future<Output = Result<Option<QueueStatus>, StoreError>> + Send;
+
+    /// Sets the free player slots of `world_id` for `ttl_ms`; after that the world has none.
+    fn set_free_slots(
+        &self,
+        world_id: Uuid,
+        slots: u32,
+        ttl_ms: u64,
+    ) -> impl Future<Output = Result<(), StoreError>> + Send;
 
     /// Returns the entry record of `ticket_id` one time and deletes it, with its queue entry and
     /// its admission slot (M3 spec section 7). `None` when the record is absent or already

@@ -38,6 +38,10 @@ use crate::valkey::Valkey;
 const USERNAME: &str = "scripted";
 const PASSWORD: &str = "password-ok";
 const CHARACTER_NAME: &str = "Scripta";
+/// Free player slots that the director would report: the world has room.
+const FREE_SLOTS: u32 = 10;
+/// The slot count outlives the test.
+const FREE_SLOTS_TTL_MS: u64 = 600_000;
 const STEAM_TICKET: &str = "140000";
 const HTTPS_PREFIX: &str = "https://";
 const ENDPOINT_PATH_START: char = '/';
@@ -108,6 +112,10 @@ async fn walk(global: &PgPool, world_pool: &PgPool) {
     let valkey = Valkey::connect(&test_valkey_url())
         .await
         .expect("connect to Valkey");
+    valkey
+        .set_free_slots(world.id, FREE_SLOTS, FREE_SLOTS_TTL_MS)
+        .await
+        .expect("free slots");
     let app = edge_app(Arc::clone(&config), global, world_pool, valkey.clone());
     let login_host = config.login_host();
 

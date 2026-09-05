@@ -201,6 +201,10 @@ pub(crate) mod tests {
             Ok(None)
         }
 
+        async fn set_free_slots(&self, _: Uuid, _: u32, _: u64) -> Result<(), StoreError> {
+            Ok(())
+        }
+
         async fn take_entry(&self, ticket_id: &str) -> Result<Option<EntryRecord>, StoreError> {
             if self.down {
                 return Err(StoreError::unavailable(std::io::Error::other("down")));

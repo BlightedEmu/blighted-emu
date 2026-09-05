@@ -52,7 +52,8 @@ id = "8d0f4c2e-0000-4000-8000-000000000001"
 name = "Aeternum"
 region = "us-east"
 database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
-# Live entry tickets at one time (the world manager replaces this in M5).
+# Live entry tickets at one time. Players are admitted only while world-director also reports
+# free player slots (M5).
 capacity = 100
 # Characters one account may have in this world.
 max_characters_per_account = 2

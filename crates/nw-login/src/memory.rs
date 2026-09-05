@@ -368,6 +368,8 @@ struct WorldQueue {
     waiting: HashMap<String, MemoryEntry>,
     admitted: HashMap<String, (EntryRecord, u64)>,
     accounts: HashMap<Uuid, String>,
+    /// Free player slots and their end, Unix ms of the real clock (like the Valkey key expiry).
+    free_slots: Option<(u32, u64)>,
 }
 
 /// Login queues in memory, with the rules of the Valkey script.
@@ -481,8 +483,13 @@ impl QueueStore for MemoryQueue {
         if let Some(entry) = queue.waiting.get_mut(&ticket) {
             entry.refreshed_ms = now_ms;
         }
+        let free_slots = queue
+            .free_slots
+            .filter(|(_, ends_ms)| *ends_ms > unix_ms())
+            .map_or(0, |(slots, _)| slots);
+        let limit = settings.capacity.min(free_slots) as usize;
         for head in queue.order() {
-            if queue.admitted.len() >= settings.capacity as usize {
+            if queue.admitted.len() >= limit {
                 break;
             }
             if let Some(entry) = queue.waiting.remove(&head) {
@@ -505,6 +512,17 @@ impl QueueStore for MemoryQueue {
             ticket_id: ticket,
             position: index as u64 + 1,
         }))
+    }
+
+    async fn set_free_slots(
+        &self,
+        world_id: Uuid,
+        slots: u32,
+        ttl_ms: u64,
+    ) -> Result<(), StoreError> {
+        lock(&self.0).entry(world_id).or_default().free_slots =
+            Some((slots, unix_ms().saturating_add(ttl_ms)));
+        Ok(())
     }
 
     async fn take_entry(&self, ticket_id: &str) -> Result<Option<EntryRecord>, StoreError> {
@@ -688,6 +706,7 @@ pub(crate) mod contract {
             capacity: ONE_SLOT,
             stale_after_ms: STALE_AFTER_MS,
         };
+        open_slots(&store, &settings).await;
         let before = unix_seconds();
         let status = store
             .update(
@@ -708,6 +727,65 @@ pub(crate) mod contract {
                 .contains(&record.expires_at),
             "expiry {} is not one entry lifetime after now",
             record.expires_at
+        );
+    }
+
+    /// Free player slots of the queue checks that are not about free slots.
+    const MANY_SLOTS: u32 = 1_000;
+    /// Lifetime of the free-slot count in the checks.
+    pub(crate) const SLOTS_TTL_MS: u64 = 60_000;
+    const TWO_SLOTS: u32 = 2;
+    const FIVE_SLOTS: u32 = 5;
+
+    async fn open_slots(store: &impl QueueStore, settings: &QueueSettings) {
+        store
+            .set_free_slots(settings.world_id, MANY_SLOTS, SLOTS_TTL_MS)
+            .await
+            .expect("free slots");
+    }
+
+    /// Checks that a [`QueueStore`] admits only while the director reports free player slots,
+    /// and never more than the entry ticket limit.
+    pub(crate) async fn free_slots(store: impl QueueStore) {
+        let settings = QueueSettings {
+            world_id: Uuid::new_v4(),
+            capacity: TWO_SLOTS,
+            stale_after_ms: STALE_AFTER_MS,
+        };
+        let at = |seconds: u64| QueueTime::At(START_MS + seconds * SECOND_MS);
+        let (first_ticket, _) = waiting(
+            store
+                .update(&settings, Uuid::new_v4(), join(Uuid::new_v4()), at(0))
+                .await
+                .expect("no slots"),
+        );
+        let slots = |count| store.set_free_slots(settings.world_id, count, SLOTS_TTL_MS);
+        slots(ONE_SLOT).await.expect("one slot");
+        let first = store
+            .update(&settings, Uuid::new_v4(), refresh(&first_ticket), at(1))
+            .await
+            .expect("refresh");
+        assert_eq!(first, None, "only the owner refreshes");
+        let second = Uuid::new_v4();
+        let (second_ticket, position) = waiting(
+            store
+                .update(&settings, second, join(Uuid::new_v4()), at(1))
+                .await
+                .expect("second"),
+        );
+        assert_eq!(position, 1, "the first entry took the one slot");
+        slots(FIVE_SLOTS).await.expect("five slots");
+        admitted(
+            store
+                .update(&settings, second, refresh(&second_ticket), at(2))
+                .await
+                .expect("second admitted"),
+        );
+        waiting(
+            store
+                .update(&settings, Uuid::new_v4(), join(Uuid::new_v4()), at(2))
+                .await
+                .expect("third"),
         );
     }
 
@@ -757,6 +835,7 @@ pub(crate) mod contract {
             capacity: ONE_SLOT,
             stale_after_ms: STALE_AFTER_MS,
         };
+        open_slots(&store, &settings).await;
         let at = |seconds: u64| QueueTime::At(START_MS + seconds * SECOND_MS);
         let (first, second, third) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let first_character = Uuid::new_v4();
@@ -859,6 +938,7 @@ pub(crate) mod contract {
             capacity: ONE_SLOT,
             stale_after_ms: STALE_AFTER_MS,
         };
+        open_slots(&store, &settings).await;
         let at = |seconds: u64| QueueTime::At(START_MS + seconds * SECOND_MS);
         let (first, second) = (Uuid::new_v4(), Uuid::new_v4());
         let record = admitted(
@@ -976,6 +1056,7 @@ mod tests {
         contract::queue(MemoryQueue::default()).await;
         contract::queue_store_clock(MemoryQueue::default()).await;
         contract::take_entry(MemoryQueue::default()).await;
+        contract::free_slots(MemoryQueue::default()).await;
     }
 
     const ALREADY_EXPIRED: u64 = 0;

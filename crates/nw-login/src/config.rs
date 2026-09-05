@@ -133,7 +133,7 @@ pub struct WorldConfig {
     pub database: DatabaseConfig,
     /// Environment variable that holds the world database password.
     pub database_password_env: String,
-    /// Live entry tickets allowed at one time (admission until `world-director`, M5).
+    /// Live entry tickets allowed at one time; `world-director` also limits by free player slots.
     pub capacity: u32,
     /// Characters one account may have in this world.
     pub max_characters_per_account: u32,

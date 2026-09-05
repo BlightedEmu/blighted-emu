@@ -20,6 +20,7 @@ use nw_db::test_db::with_test_schema;
 use nw_db::{GLOBAL_MIGRATOR, PgPool, SavedPosition, WORLD_MIGRATOR, save_character_position};
 use nw_login::config::load_edge_config;
 use nw_login::install_crypto_provider;
+use nw_login::queue::QueueStore;
 use nw_login::test_support::{edge_app, test_valkey_url};
 use nw_login::valkey::Valkey;
 use nw_messages::WorldPosition;
@@ -69,6 +70,10 @@ const PATH_TOLERANCE_M: f32 = 1.0;
 /// M4 spec section 1.2 criterion 3.5.
 const TOLERANCE_M: f32 = 0.1;
 const NO_YAW: f32 = 0.0;
+/// Free player slots of the test world: more than the tests use.
+const FREE_SLOTS: u32 = 100;
+/// The slot count outlives every test.
+const FREE_SLOTS_TTL_MS: u64 = 600_000;
 
 /// `edge-http` on a loopback port, for one world and one gateway.
 struct Edge {
@@ -90,6 +95,10 @@ impl Edge {
         config.worlds[0].id = world_id;
         config.rep_address = gateway.to_string();
         let config = Arc::new(config);
+        valkey
+            .set_free_slots(world_id, FREE_SLOTS, FREE_SLOTS_TTL_MS)
+            .await
+            .expect("free slots");
         let app = edge_app(Arc::clone(&config), global, world_pool, valkey);
         let listener = TcpListener::bind(LOOPBACK).await.expect("bind HTTP");
         let http_address = listener.local_addr().expect("HTTP address");

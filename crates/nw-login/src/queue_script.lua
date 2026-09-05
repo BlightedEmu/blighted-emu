@@ -1,7 +1,7 @@
 -- SPDX-License-Identifier: AGPL-3.0-or-later
 -- Login queue update for one world, atomic in Valkey (M2 spec section 8).
 -- KEYS[1] order (zset ticket -> join ms), KEYS[2] refresh (zset ticket -> last refresh ms),
--- KEYS[3] admitted (zset ticket -> expiry ms).
+-- KEYS[3] admitted (zset ticket -> expiry ms), KEYS[4] free player slots (from world-director).
 -- ARGV: 1 now ms (empty: use the Valkey clock), 2 stale-after ms, 3 capacity, 4 entry seconds, 5 world id,
 -- 6 entry hash prefix, 7 record prefix, 8 account pointer prefix (per world),
 -- 9 action ("join" or "refresh"), 10 account id, 11 character id, 12 new ticket id, 13 ticket id.
@@ -58,10 +58,11 @@ if redis.call('ZSCORE', KEYS[1], ticket) then
   redis.call('ZADD', KEYS[2], now, ticket)
 end
 
--- Admit from the front while capacity is free.
+-- Admit from the front while the entry ticket limit and the free player slots allow it. No
+-- report from the director means no free slot.
 redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', now)
 local live = redis.call('ZCARD', KEYS[3])
-local capacity = tonumber(ARGV[3])
+local capacity = math.min(tonumber(ARGV[3]), tonumber(redis.call('GET', KEYS[4])) or 0)
 local entry_seconds = tonumber(ARGV[4])
 while live < capacity do
   local head = redis.call('ZRANGE', KEYS[1], 0, 0)
