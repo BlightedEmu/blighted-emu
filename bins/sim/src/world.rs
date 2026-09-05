@@ -184,7 +184,7 @@ impl SimWorld {
                     number,
                     bundles_sent: 0,
                     last_time_synch_ms: now_ms,
-                    interest: Interest::new(self.settings.interest_radius_m),
+                    interest: Interest::new(self.settings.interest_radius_m, usize::MAX),
                 },
                 Body {
                     motion: Motion::new(position, now_ms, &self.settings.limits),

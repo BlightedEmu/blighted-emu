@@ -196,6 +196,18 @@ pub enum GroundCheck {
     NoGround,
 }
 
+/// The movement state that crosses a handoff (M5 spec section 7.4). Each `sim` has its own
+/// monotonic clock, so the time of the last good move travels as an age.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionState {
+    /// The last good position.
+    pub position: Position,
+    /// Milliseconds since the last good move.
+    pub move_age_ms: u64,
+    /// The distance budget left, in metres.
+    pub budget_m: f32,
+}
+
 /// The checked movement of one entity.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Motion {
@@ -217,6 +229,30 @@ impl Motion {
     /// The last good position.
     pub const fn position(&self) -> Position {
         self.position
+    }
+
+    /// The state at server time `now_ms`, for another `sim`.
+    pub const fn export(&self, now_ms: u64) -> MotionState {
+        MotionState {
+            position: self.position,
+            move_age_ms: now_ms.saturating_sub(self.time_ms),
+            budget_m: self.budget_m,
+        }
+    }
+
+    /// The motion of `state` on this `sim`'s clock at `now_ms`. A budget above the limit is
+    /// lowered to it, and a budget that is not a number is 0, so no state can buy a longer move.
+    pub fn import(state: MotionState, now_ms: u64, limits: &MoveLimits) -> Self {
+        let budget_m = if state.budget_m.is_finite() {
+            state.budget_m.clamp(0.0, limits.max_budget_m())
+        } else {
+            0.0
+        };
+        Self {
+            position: state.position,
+            time_ms: now_ms.saturating_sub(state.move_age_ms),
+            budget_m,
+        }
     }
 
     /// Checks a move to `next` that the server received at `received_ms` (its own monotonic clock,
@@ -315,6 +351,62 @@ mod tests {
 
     fn start() -> Motion {
         Motion::new(at(10.0, GROUND_HEIGHT), START_MS, &limits())
+    }
+
+    /// A clock of another `sim`, far from [`START_MS`].
+    const OTHER_CLOCK_MS: u64 = 50_000;
+    const EXPORT_DELAY_MS: u64 = 100;
+    const HUGE_BUDGET_M: f32 = 1000.0;
+
+    #[test]
+    fn a_motion_continues_after_export_and_import() {
+        let mut motion = start();
+        let half = START_MS + STEP_MS / 2;
+        let first = at(13.0, GROUND_HEIGHT);
+        motion
+            .try_move(&limits(), &Flat, &bounds(), first, half)
+            .expect("first");
+        let state = motion.export(half + EXPORT_DELAY_MS);
+        assert_eq!(state.position, first);
+        assert_eq!(state.move_age_ms, EXPORT_DELAY_MS);
+        // Left: 7.2 - 3 m; earned since: 0.72 m per 100 ms.
+        let reach = 13.0 + (7.2 - 3.0) + 0.72;
+        let fresh = || Motion::import(state, OTHER_CLOCK_MS, &limits());
+        let inside = at(reach - 0.05, GROUND_HEIGHT);
+        assert_eq!(
+            fresh().try_move(&limits(), &Flat, &bounds(), inside, OTHER_CLOCK_MS),
+            Ok(GroundCheck::Checked)
+        );
+        let outside = at(reach + 0.05, GROUND_HEIGHT);
+        assert_eq!(
+            fresh().try_move(&limits(), &Flat, &bounds(), outside, OTHER_CLOCK_MS),
+            Err(MoveRefusal::TooFast)
+        );
+    }
+
+    #[test]
+    fn an_imported_budget_is_clamped_and_an_old_age_saturates() {
+        let state = MotionState {
+            position: at(10.0, GROUND_HEIGHT),
+            move_age_ms: u64::MAX,
+            budget_m: HUGE_BUDGET_M,
+        };
+        let motion = Motion::import(state, OTHER_CLOCK_MS, &limits());
+        assert_eq!(
+            motion.export(OTHER_CLOCK_MS).budget_m,
+            limits().max_speed_mps * BURST
+        );
+        assert_eq!(motion.export(OTHER_CLOCK_MS).move_age_ms, OTHER_CLOCK_MS);
+        let broken = MotionState {
+            budget_m: f32::NAN,
+            ..state
+        };
+        assert_eq!(
+            Motion::import(broken, OTHER_CLOCK_MS, &limits())
+                .export(OTHER_CLOCK_MS)
+                .budget_m,
+            0.0
+        );
     }
 
     #[test]

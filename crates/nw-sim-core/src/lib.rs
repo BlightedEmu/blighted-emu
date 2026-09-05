@@ -12,6 +12,7 @@ pub mod tick;
 pub use cells::{CellGrid, CellGridError, CellId, CellOwners, MAX_CELLS, assign_columns};
 pub use interest::{Interest, InterestChanges};
 pub use movement::{
-    CellBounds, Ground, GroundCheck, Motion, MoveLimits, MoveLimitsError, MoveRefusal, Position,
+    CellBounds, Ground, GroundCheck, Motion, MotionState, MoveLimits, MoveLimitsError, MoveRefusal,
+    Position,
 };
 pub use tick::{DueTicks, TICKS_PER_SECOND, TickClock};

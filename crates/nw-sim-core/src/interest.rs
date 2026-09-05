@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Who sees whom (M4 spec section 7.3). An observer sees the entities within a radius in the
-//! ground plane. Each update says which entities entered, left, or stayed, so the caller sends a
+//! Who sees whom (M4 spec section 7.3, M5 spec section 7.3). An observer sees the nearest
+//! `max_visible` entities within a radius in the ground plane; at equal distance the lower id
+//! wins. Each update says which entities entered, left, or stayed, so the caller sends a
 //! full state, a removal, or changes only.
 
 use std::collections::BTreeSet;
@@ -22,14 +23,16 @@ pub struct InterestChanges<Id> {
 #[derive(Debug, Clone)]
 pub struct Interest<Id> {
     radius_m: f32,
+    max_visible: usize,
     seen: BTreeSet<Id>,
 }
 
 impl<Id: Copy + Ord> Interest<Id> {
-    /// An observer that sees nothing yet.
-    pub const fn new(radius_m: f32) -> Self {
+    /// An observer that sees nothing yet, and later at most `max_visible` entities.
+    pub const fn new(radius_m: f32, max_visible: usize) -> Self {
         Self {
             radius_m,
+            max_visible,
             seen: BTreeSet::new(),
         }
     }
@@ -41,11 +44,16 @@ impl<Id: Copy + Ord> Interest<Id> {
         observer: Position,
         others: impl IntoIterator<Item = (Id, Position)>,
     ) -> InterestChanges<Id> {
-        let now: BTreeSet<Id> = others
+        let mut near: Vec<(f32, Id)> = others
             .into_iter()
-            .filter(|(_, position)| observer.horizontal_distance(*position) <= self.radius_m)
-            .map(|(id, _)| id)
+            .map(|(id, position)| (observer.horizontal_distance(position), id))
+            .filter(|(distance, _)| *distance <= self.radius_m)
             .collect();
+        if near.len() > self.max_visible {
+            near.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            near.truncate(self.max_visible);
+        }
+        let now: BTreeSet<Id> = near.into_iter().map(|(_, id)| id).collect();
         let changes = InterestChanges {
             entered: now.difference(&self.seen).copied().collect(),
             left: self.seen.difference(&now).copied().collect(),
@@ -61,6 +69,8 @@ mod tests {
     use super::*;
 
     const RADIUS: f32 = 100.0;
+    const MANY: usize = 1000;
+    const TWO: usize = 2;
 
     fn at(x: f32) -> Position {
         Position { x, y: 0.0, z: 0.0 }
@@ -68,7 +78,7 @@ mod tests {
 
     #[test]
     fn entities_enter_stay_and_leave() {
-        let mut interest = Interest::new(RADIUS);
+        let mut interest = Interest::new(RADIUS, MANY);
         let first = interest.update(at(0.0), [(1, at(50.0)), (2, at(150.0))]);
         assert_eq!(first.entered, vec![1]);
         assert!(first.left.is_empty() && first.stayed.is_empty());
@@ -81,8 +91,26 @@ mod tests {
     }
 
     #[test]
+    fn only_the_nearest_are_seen() {
+        let mut interest = Interest::new(RADIUS, TWO);
+        let first = interest.update(at(0.0), [(1, at(90.0)), (2, at(10.0)), (3, at(20.0))]);
+        assert_eq!(first.entered, vec![2, 3]);
+        let second = interest.update(at(0.0), [(1, at(5.0)), (2, at(10.0)), (3, at(20.0))]);
+        assert_eq!(second.entered, vec![1]);
+        assert_eq!(second.left, vec![3]);
+        assert_eq!(second.stayed, vec![2]);
+    }
+
+    #[test]
+    fn ties_go_to_the_lower_id() {
+        let mut interest = Interest::new(RADIUS, TWO);
+        let seen = interest.update(at(0.0), [(9, at(10.0)), (4, at(10.0)), (7, at(10.0))]);
+        assert_eq!(seen.entered, vec![4, 7]);
+    }
+
+    #[test]
     fn the_radius_is_inclusive_and_ignores_height() {
-        let mut interest = Interest::new(RADIUS);
+        let mut interest = Interest::new(RADIUS, MANY);
         let high = Position {
             x: RADIUS,
             y: 0.0,
