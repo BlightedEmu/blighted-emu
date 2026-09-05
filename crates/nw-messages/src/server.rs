@@ -8,6 +8,8 @@ use crate::day_phase::SyncDayPhaseMsg;
 use crate::spawn_point::ReceivePlayerSpawnPointMsg;
 use crate::time_change::SyncTimeChangeMsg;
 use crate::time_synch::TimeSynchMsg;
+use nw_reflect::{Envelope, TypeId};
+
 use crate::wire::{BodyCodec, MessageError};
 
 /// Type indexes of [`ServerMessage`], in the order of the captured login.
@@ -83,6 +85,20 @@ impl ServerMessage {
             Self::DayPhase(_) => SyncDayPhaseMsg::TYPE_INDEX,
             Self::Bundle(_) => ReplicatedStateBundle::TYPE_INDEX,
         }
+    }
+
+    /// The whole envelope: header, type index and body.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when a value does not fit its field.
+    pub fn envelope(&self) -> Result<Vec<u8>, MessageError> {
+        Ok(Envelope::message(TypeId::FileSlot(self.type_index()), self.encode()?).encode()?)
+    }
+
+    /// The message in an envelope; `None` for an envelope of another type.
+    pub fn from_envelope(envelope: &Envelope) -> Option<Result<Self, MessageError>> {
+        Self::decode(envelope.type_index()?, &envelope.body)
     }
 
     /// The body bytes.
@@ -164,6 +180,15 @@ mod tests {
                 ServerMessage::decode(message.type_index(), &body),
                 Some(Ok(message))
             );
+        }
+    }
+
+    #[test]
+    fn a_message_round_trips_through_its_envelope() {
+        for message in samples() {
+            let bytes = message.envelope().expect("envelope");
+            let envelope = Envelope::decode(&bytes).expect("decode");
+            assert_eq!(ServerMessage::from_envelope(&envelope), Some(Ok(message)));
         }
     }
 

@@ -40,6 +40,7 @@ exceptions = [
     { crate = "nw-world", allow = ["AGPL-3.0-or-later"] },
     { crate = "content-tool", allow = ["AGPL-3.0-or-later"] },
     { crate = "rep-gateway", allow = ["AGPL-3.0-or-later"] },
+    { crate = "sim", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-testclient", allow = ["AGPL-3.0-or-later"] },
     { crate = "launcher", allow = ["GPL-3.0-or-later"] },
     # Font files that egui draws text with; OFL and the Ubuntu font licence allow bundling.
@@ -50,6 +51,9 @@ exceptions = [
 multiple-versions = "deny"
 wildcards = "deny"
 skip = [
+    { crate = "toml_datetime@0.6.11", reason = "figment 0.10 (config) uses toml 0.8; bevy_ecs macros (build time only) use toml_edit 0.25" },
+    { crate = "toml_edit@0.22.27", reason = "figment 0.10 (config) uses toml 0.8; bevy_ecs macros (build time only) use toml_edit 0.25" },
+    { crate = "winnow@0.7.15", reason = "figment 0.10 (config) uses toml 0.8; bevy_ecs macros (build time only) use toml_edit 0.25" },
     { crate = "base64@0.22.1", reason = "sqlx-core and metrics-exporter-prometheus use base64 0.22; hyper-util (reqwest) uses 0.23" },
     { crate = "block-buffer@0.10.4", reason = "sqlx-core uses sha2 0.10; sqlx-postgres and edge-http use digest 0.11" },
     { crate = "calloop-wayland-source@0.3.0", reason = "launcher: smithay-client-toolkit 0.19 (winit) and 0.20 (clipboard)" },

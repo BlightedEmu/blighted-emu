@@ -62,6 +62,9 @@ pub enum MessageError {
         /// The class type id.
         class: nw_reflect::TypeId,
     },
+    /// The envelope around a body cannot be built or read.
+    #[error("envelope: {0}")]
+    Envelope(#[from] nw_reflect::EnvelopeError),
     /// A prefix-coded integer is cut off or too large.
     #[error("prefix-coded integer: {0}")]
     Prefix(#[from] TypeIndexError),

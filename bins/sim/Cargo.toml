@@ -1,0 +1,24 @@
+[package]
+name = "sim"
+version = "0.1.0"
+description = "World simulation: one cell of a level, 30 Hz, movement checks and replication."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bevy_ecs.workspace = true
+getrandom.workspace = true
+nw-bus.workspace = true
+nw-messages.workspace = true
+nw-sim-core.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+nw-carrier.workspace = true
+nw-reflect.workspace = true
+
+[lints]
+workspace = true
