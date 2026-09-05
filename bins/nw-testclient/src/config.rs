@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use nw_common::config::{ConfigError, load_config};
 use serde::Deserialize;
 
+use crate::route::{Route, RouteError};
+
 /// Environment prefix of overrides.
 pub const TESTCLIENT_ENV_PREFIX: &str = "NW_TESTCLIENT_";
 /// Environment variable with the account password.
@@ -40,6 +42,25 @@ pub struct TestClientConfig {
     pub registration_timeout_seconds: u64,
     /// Largest distance between the saved position and the next login, in metres (`pair`).
     pub position_tolerance_m: f32,
+    /// The walk of `pair`: points east and north of where the first client stands, in metres.
+    pub route_m: Vec<[f32; 2]>,
+    /// Walking speed of `pair`, in metres per second.
+    pub route_speed_mps: f32,
+    /// The far move of `pair` after the walk, east, in metres; the world must refuse it.
+    pub jump_m: f32,
+    /// Largest distance of a seen position from the route, in metres (`pair`).
+    pub path_tolerance_m: f32,
+}
+
+impl TestClientConfig {
+    /// The walk of `pair`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RouteError`] when the points or the speed cannot be walked.
+    pub fn route(&self) -> Result<Route, RouteError> {
+        Route::new(self.route_m.clone(), self.route_speed_mps)
+    }
 }
 
 /// Reads the configuration.
@@ -59,6 +80,8 @@ mod tests {
     const HOLD_SECONDS: u64 = 60;
     /// M4 spec section 1.2 criterion 3.5.
     const SPEC_TOLERANCE_M: f32 = 0.1;
+    /// M4 spec section 1.2 criterion 3.3 (`path_tolerance_m`, default 1.0).
+    const SPEC_PATH_TOLERANCE_M: f32 = 1.0;
 
     #[test]
     fn committed_example_config_loads() {
@@ -67,5 +90,9 @@ mod tests {
         assert_eq!(config.hold_seconds, HOLD_SECONDS);
         assert_ne!(config.second_account, config.account);
         assert!((config.position_tolerance_m - SPEC_TOLERANCE_M).abs() < f32::EPSILON);
+        assert!((config.path_tolerance_m - SPEC_PATH_TOLERANCE_M).abs() < f32::EPSILON);
+        let route = config.route().expect("route");
+        assert!(route.length() > 0.0);
+        assert!(config.jump_m > 0.0);
     }
 }

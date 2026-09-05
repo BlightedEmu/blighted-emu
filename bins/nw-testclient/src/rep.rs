@@ -37,6 +37,9 @@ pub enum RepError {
     /// A registration body did not decode or encode.
     #[error(transparent)]
     Registration(#[from] RegistrationError),
+    /// A game message body cannot be built.
+    #[error(transparent)]
+    Message(#[from] nw_messages::MessageError),
 }
 
 /// Something the caller must know about.

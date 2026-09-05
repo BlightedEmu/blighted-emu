@@ -23,3 +23,10 @@ hold_seconds = 60
 registration_timeout_seconds = 30
 # pair: largest distance between the saved position and the next login, in metres.
 position_tolerance_m = 0.1
+# pair: the first client walks these points (east, north of where it stands, in metres) at the
+# walking speed of the datasheets, then sends one move this far east, which sim must refuse.
+route_m = [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]]
+route_speed_mps = 1.65
+jump_m = 50.0
+# pair: largest distance of a seen position from the route, in metres.
+path_tolerance_m = 1.0

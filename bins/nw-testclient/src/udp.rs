@@ -66,9 +66,25 @@ pub enum RunError {
 /// Returns [`RunError`] when the socket or a protocol layer fails.
 pub async fn run_rep(
     gateway: SocketAddr,
+    client: RepClient,
+    hold: Duration,
+    timeout: Duration,
+) -> Result<RepOutcome, RunError> {
+    run_rep_with(gateway, client, hold, timeout, |_, _, _| Ok(())).await
+}
+
+/// [`run_rep`], and after the registration response `on_tick` runs about every [`TICK`] with the
+/// client, the outcome so far, and the time since the response; it may queue client messages.
+///
+/// # Errors
+///
+/// Returns [`RunError`] when the socket, a protocol layer, or `on_tick` fails.
+pub async fn run_rep_with(
+    gateway: SocketAddr,
     mut client: RepClient,
     hold: Duration,
     timeout: Duration,
+    mut on_tick: impl FnMut(&mut RepClient, &RepOutcome, Duration) -> Result<(), RepError>,
 ) -> Result<RepOutcome, RunError> {
     let socket = UdpSocket::bind(ANY_LOCAL).await?;
     let started = Instant::now();
@@ -81,6 +97,9 @@ pub async fn run_rep(
         let waited = registered_at.is_none() && started.elapsed() >= timeout;
         if outcome.closed_by_server || held || waited {
             break;
+        }
+        if let Some(at) = registered_at {
+            on_tick(&mut client, &outcome, at.elapsed())?;
         }
         for datagram in client.poll(now())? {
             socket.send_to(&datagram, gateway).await?;

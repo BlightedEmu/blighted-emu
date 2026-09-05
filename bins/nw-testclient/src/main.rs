@@ -116,6 +116,8 @@ async fn pair(
     let settings = PairSettings {
         first,
         second,
+        route: config.route()?,
+        jump_m: config.jump_m,
         hold: Duration::from_secs(config.hold_seconds),
         registration_timeout: Duration::from_secs(config.registration_timeout_seconds),
     };
@@ -126,11 +128,12 @@ async fn pair(
         |line| println!("{line}"),
     )
     .await?;
-    for check in report.checks(config.position_tolerance_m) {
+    let tolerances = (config.path_tolerance_m, config.position_tolerance_m);
+    for check in report.checks(tolerances.0, tolerances.1) {
         let result = if check.passed { "pass" } else { "FAIL" };
         println!("{}: {result}", check.name);
     }
-    Ok(report.passed(config.position_tolerance_m))
+    Ok(report.passed(tolerances.0, tolerances.1))
 }
 
 async fn registration(
