@@ -49,7 +49,7 @@ just infra-test
 | `just clean-old` | Deletes build files older than 7 days |
 | `just infra-up` / `just infra-down` | Starts / stops PostgreSQL, Valkey, NATS, Prometheus, Grafana |
 | `just infra-test` | Infrastructure smoke test |
-| `just test-infra` | Tests that need PostgreSQL and Valkey, with the login and gateway walk (run `just infra-up` first) |
+| `just test-infra` | Tests that need PostgreSQL, Valkey and NATS, with the login, gateway and world walk (run `just infra-up` first) |
 | `just test-local` | Tests that read your New World install (`NW_GAME_DIR`) |
 | `just codegen` | Regenerates the table structs in `crates/nw-content/src/generated` |
 | `just bundle` | Builds the content bundle into `local-data/content/` |
@@ -177,6 +177,49 @@ The gateway serves Prometheus metrics on `metrics_listen` (`rep_gateway_*`). Kee
 4. Run `cargo run -p nw-testclient`. It must print `registration status 0`, then about 60 echoed pings (at least half of one per second of hold) with `closed by server: false`, then a non-zero status for the second registration with the same ticket. The exit code must be 0.
 
 `just test-infra` runs the same walk without the network: the test client logs in through the `edge-http` routes on the Docker PostgreSQL and Valkey, then registers with a gateway on a loopback port.
+
+## World simulation
+
+`sim` runs one cell of the main map (`newworld_vitaeeterna`) at 30 ticks per second. After the gateway checks a ticket, it asks `sim` over NATS to take the character. `sim` puts the character at its saved position, or at `start_position` the first time, and sends the login messages. Only then does the gateway send registration status 0. Every tick, each player gets the positions of the players within `interest_radius_m`. When a player leaves, `sim` saves the position. It also saves every player every `save_interval_ms`.
+
+NATS carries the messages between the gateway and `sim`. NATS has no login in this setup, so keep it on an internal address.
+
+Set up `sim` once:
+
+1. Build the world files from your install: `just bundle`, then `just world`. `sim` reads the ground height to check `start_position`.
+2. `world_id` in `config/sim.toml` and in `config/rep-gateway.toml` must be the `[[world]] id` in `config/edge.toml`. `sim_id` must be the same in both files (the example files match).
+
+Secrets:
+
+| Variable | Value |
+|---|---|
+| `NW_SECRET_WORLD_1_DATABASE_PASSWORD` | Password of the world database (`sim` uses the variable named by `world_database_password_env`) |
+| `NW_SECRET_TESTCLIENT_PASSWORD_B` | Password of the second test account (`nw-testclient pair` only) |
+
+```bash
+cargo run -p sim
+cargo run -p rep-gateway -- serve
+cargo run -p nw-testclient -- pair
+```
+
+`nw-testclient pair` logs in two accounts (`account` and `second_account`) and keeps both in the world for `hold_seconds`. Each client must see the other. Then the first account logs in again and must appear at its saved position, within `position_tolerance_m`. It prints `pass` or `FAIL` for each check, and the exit code is 0 only when every check passed.
+
+`sim` serves Prometheus metrics on `metrics_listen` (`sim_*`). Keep that address internal.
+
+Known gaps:
+
+- `sim` does not send the messages whose layout is still open: types 1628, 3236, 1635 and 6310.
+- `sim` does not read client movement (type 1589) yet, because its layout is still open. Players stay where they joined.
+- How the retail server removes an entity from a client is Unknown. A player who leaves the interest radius is not in the next bundles.
+
+### M4 checks without movement
+
+1. `cargo test --workspace` and `just test-infra` pass.
+2. `just capture-check` reads every local ledger with 0 decode errors.
+3. Start the services (`just infra-up`), set the secrets, then start `edge-http serve`, `sim`, and `rep-gateway serve`.
+4. Run `cargo run -p nw-testclient -- pair`. Every check must print `pass`, and the exit code must be 0.
+
+`just test-infra` runs the same pair check without the network, on the Docker PostgreSQL, Valkey and NATS. It also writes a saved position to the database and checks that the next login appears there. The checks that need movement (walking a path, a refused fast move) wait for the type 1589 layout.
 
 ## Rules for contributors
 
