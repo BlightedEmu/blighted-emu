@@ -7,16 +7,18 @@ use std::path::{Path, PathBuf};
 use nw_bus::{BusId, MAX_BUS_MESSAGE_BYTES, MAX_GHOST_BYTES};
 use nw_common::config::{ConfigError, SECRET_ENV_PREFIX, load_config};
 use nw_db::DatabaseConfig;
-use nw_sim_core::{CellBounds, MoveLimits, MoveLimitsError};
+use nw_sim_core::{CellBounds, MoveLimits, MoveLimitsError, TICKS_PER_SECOND};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::world::WorldSettings;
+use crate::world::{MAX_BUNDLE_MEMBERS, WorldSettings};
 
 /// Environment prefix of `sim` overrides.
 pub const SIM_ENV_PREFIX: &str = "NW_SIM_";
 /// Room in one ghost message for everything but the ghosts (the sender id and the list length).
 pub const GHOSTS_HEADER_BYTES: usize = 128;
+/// One tick, rounded up to whole milliseconds: the shortest ghost lifetime.
+pub const TICK_MS: u64 = 1000_u64.div_ceil(TICKS_PER_SECOND);
 
 /// The whole `sim` configuration.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -136,6 +138,18 @@ impl SimConfig {
         ];
         if times.contains(&0) {
             return invalid("handoff", "times must be above 0");
+        }
+        if self.max_visible_players >= MAX_BUNDLE_MEMBERS {
+            return invalid(
+                "max_visible_players",
+                "must leave room for the player itself in one bundle (at most 47)",
+            );
+        }
+        if self.ghost_ttl_ms < TICK_MS {
+            return invalid("ghost_ttl_ms", "must be at least one tick (34 ms)");
+        }
+        if self.forward_ttl_ms <= self.handoff_timeout_ms {
+            return invalid("forward_ttl_ms", "must be longer than handoff_timeout_ms");
         }
         if !(self.interest_radius_m.is_finite() && self.interest_radius_m > 0.0) {
             return invalid("interest_radius_m", "must be a finite number above 0");
@@ -261,6 +275,18 @@ pub(crate) mod tests {
         let mut config = committed();
         config.handoff_timeout_ms = 0;
         assert!(config.validate().is_err());
+        let mut config = committed();
+        config.max_visible_players = MAX_BUNDLE_MEMBERS;
+        assert!(
+            config.validate().is_err(),
+            "the player and the others fill one bundle"
+        );
+        let mut config = committed();
+        config.ghost_ttl_ms = 1;
+        assert!(config.validate().is_err(), "ghosts live at least one tick");
+        let mut config = committed();
+        config.forward_ttl_ms = config.handoff_timeout_ms;
+        assert!(config.validate().is_err(), "forwards outlive a handoff");
     }
 
     #[test]
