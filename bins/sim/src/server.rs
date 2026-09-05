@@ -41,10 +41,11 @@ pub const POLL: Duration = Duration::from_millis(5);
 pub const SERVER_EPOCH_UNIX_MS: u64 = 946_684_800_000;
 /// Handoff answers that may wait for the loop.
 const RESULT_QUEUE: usize = 1024;
-/// Gateway messages that may wait for NATS; more are dropped and counted.
-pub const OUTPUT_QUEUE: usize = 4096;
-/// Ghost lists, forwarded inputs and cancels that may wait for NATS.
-const SIM_QUEUE: usize = 4096;
+/// Output batches that may wait for NATS (one per gateway per tick); more are dropped and
+/// counted, so a NATS outage never sends minutes of old bundles.
+pub const OUTPUT_QUEUE: usize = 256;
+/// Ghost lists, forwarded input batches and cancels that may wait for NATS.
+const SIM_QUEUE: usize = 256;
 /// Heartbeats that may wait for NATS.
 const HEARTBEAT_QUEUE: usize = 16;
 /// Longest wait at shutdown for the last saves.
@@ -762,8 +763,10 @@ impl Loop {
         }
     }
 
-    /// Saves every player once more and waits at most [`SHUTDOWN_SAVE_WAIT`] for every save.
+    /// Sends what waits, saves every player once more, and waits at most [`SHUTDOWN_SAVE_WAIT`]
+    /// for every save.
     async fn finish(&mut self) {
+        self.flush();
         self.save_all();
         let drained = tokio::time::timeout(SHUTDOWN_SAVE_WAIT, async {
             while let Some(saved) = self.saves.join_next().await {
