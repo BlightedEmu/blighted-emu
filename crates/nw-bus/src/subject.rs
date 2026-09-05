@@ -5,11 +5,6 @@ use uuid::Uuid;
 
 use crate::id::BusId;
 
-/// Gateway to sim, request/reply: a player joins.
-pub fn sim_join(world: Uuid, sim: &BusId) -> String {
-    format!("nw.{world}.sim.{sim}.join")
-}
-
 /// Gateway to sim: client messages and departures.
 pub fn sim_input(world: Uuid, sim: &BusId) -> String {
     format!("nw.{world}.sim.{sim}.input")
@@ -75,7 +70,6 @@ mod tests {
         let sim = BusId::try_from("sim-1".to_owned()).expect("id");
         let gateway = BusId::try_from("gw-1".to_owned()).expect("id");
         let prefix = "nw.00000000-0000-0000-0000-000000000000";
-        assert_eq!(sim_join(world, &sim), format!("{prefix}.sim.sim-1.join"));
         assert_eq!(sim_input(world, &sim), format!("{prefix}.sim.sim-1.input"));
         assert_eq!(
             sim_heartbeat(world, &sim),

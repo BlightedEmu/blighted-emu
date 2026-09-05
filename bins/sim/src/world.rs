@@ -270,7 +270,7 @@ impl SimWorld {
             connection: admit.connection.clone(),
             character: admit.character,
             number: admit.entity,
-            position: position_of(admit.position),
+            position: Position::from(admit.position),
         };
         self.check(&arrival)?;
         let login = if admit.login {
@@ -301,7 +301,7 @@ impl SimWorld {
             connection: offer.connection.clone(),
             character: offer.character,
             number: offer.entity,
-            position: position_of(offer.position),
+            position: Position::from(offer.position),
         };
         self.check(&arrival)?;
         let state = MotionState {
@@ -462,7 +462,7 @@ impl SimWorld {
         let entities = entities
             .into_iter()
             .filter(|ghost| ghost.position.is_finite())
-            .map(|ghost| (ghost.entity, position_of(ghost.position)))
+            .map(|ghost| (ghost.entity, Position::from(ghost.position)))
             .collect();
         self.ghosts.insert(
             from.clone(),
@@ -537,7 +537,7 @@ impl SimWorld {
                     connection: player.connection.clone(),
                     character: player.character,
                     entity: player.number,
-                    position: point_of(state.position),
+                    position: Point::from(state.position),
                     move_age_ms: state.move_age_ms,
                     budget_m: state.budget_m,
                     bundles_sent: player.bundles_sent,
@@ -560,7 +560,7 @@ impl SimWorld {
                     if let Some(sim) = cells.sims.get(usize::from(owner)) {
                         lists.entry(sim.id.clone()).or_default().push(Ghost {
                             entity: player.number,
-                            position: point_of(position),
+                            position: Point::from(position),
                         });
                     }
                 }
@@ -715,24 +715,6 @@ fn departure_of(player: &Player, body: &Body) -> Departure {
         character: player.character,
         position: body.motion.position(),
         moved_at_ms: body.motion.moved_ms(),
-    }
-}
-
-/// A bus point as a simulation position.
-const fn position_of(point: Point) -> Position {
-    Position {
-        x: point.x,
-        y: point.y,
-        z: point.z,
-    }
-}
-
-/// A simulation position as a bus point.
-const fn point_of(position: Position) -> Point {
-    Point {
-        x: position.x,
-        y: position.y,
-        z: position.z,
     }
 }
 

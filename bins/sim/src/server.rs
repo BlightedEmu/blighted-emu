@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 
 use nw_bus::{
     Admit, AdmitReply, Bus, BusError, BusId, CellTable, ConnectionRef, GatewayOutput, Ghosts,
-    HandoffMessage, HandoffReply, Heartbeat, Incoming, Publisher, SimHeartbeat, SimInput, SimSlot,
-    subject,
+    HandoffMessage, HandoffReply, Heartbeat, Incoming, Point, Publisher, SimHeartbeat, SimInput,
+    SimSlot, subject,
 };
 use nw_common::time::unix_ms;
 use nw_db::{PgPool, SaveOutcome, SavedPosition, save_character_position};
@@ -287,10 +287,8 @@ impl Loop {
     async fn admit(&mut self, admit: Incoming<Admit>) {
         let mut message = admit.message.clone();
         if let Some(unsaved) = self.queue.latest(message.character) {
-            // f64 to f32: world positions are below 2^24 metres.
-            message.position.x = unsaved.x as f32;
-            message.position.y = unsaved.y as f32;
-            message.position.z = unsaved.z as f32;
+            let [x, y, z] = unsaved.metres();
+            message.position = Point { x, y, z };
         }
         let reply = match self.world.admit(&message, self.now_ms(), server_time()) {
             Ok(login) => {
@@ -718,8 +716,8 @@ fn server_time() -> u64 {
 mod tests {
     use std::collections::BTreeMap;
 
+    use nw_bus::Subscription;
     use nw_bus::test_support::test_bus;
-    use nw_bus::{Point, Subscription};
     use nw_db::test_db::with_test_schema;
     use nw_db::{NewCharacter, WORLD_MIGRATOR, character_position, insert_character};
     use nw_messages::{

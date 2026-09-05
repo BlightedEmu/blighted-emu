@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use nw_sim_core::Position;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -131,6 +132,26 @@ impl Point {
     /// Whether every coordinate is a finite number.
     pub const fn is_finite(&self) -> bool {
         self.x.is_finite() && self.y.is_finite() && self.z.is_finite()
+    }
+}
+
+impl From<Position> for Point {
+    fn from(position: Position) -> Self {
+        Self {
+            x: position.x,
+            y: position.y,
+            z: position.z,
+        }
+    }
+}
+
+impl From<Point> for Position {
+    fn from(point: Point) -> Self {
+        Self {
+            x: point.x,
+            y: point.y,
+            z: point.z,
+        }
     }
 }
 
@@ -460,6 +481,16 @@ mod tests {
             },
         };
         assert!(encode(&ghost).expect("encode").len() <= MAX_GHOST_BYTES);
+    }
+
+    #[test]
+    fn a_point_and_a_position_convert_both_ways() {
+        let position = Position::from(POINT);
+        assert_eq!(
+            (position.x, position.y, position.z),
+            (POINT.x, POINT.y, POINT.z)
+        );
+        assert_eq!(Point::from(position), POINT);
     }
 
     #[test]

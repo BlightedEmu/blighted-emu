@@ -31,6 +31,14 @@ pub struct SavedPosition {
     pub saved_at_ms: u64,
 }
 
+impl SavedPosition {
+    /// East, north and up as `f32`, the precision of the simulation; world positions are below
+    /// 2^24 metres.
+    pub const fn metres(&self) -> [f32; 3] {
+        [self.x as f32, self.y as f32, self.z as f32]
+    }
+}
+
 /// The result of a save.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveOutcome {
@@ -94,7 +102,8 @@ pub async fn save_character_position(
     character_id: Uuid,
     position: &SavedPosition,
 ) -> Result<SaveOutcome, DbError> {
-    // Unix milliseconds stay below 2^53, so the f64 is exact.
+    // Seconds with a fraction; `to_timestamp` keeps microseconds, so whole milliseconds come
+    // back unchanged.
     let saved_at_seconds = position.saved_at_ms as f64 / MILLIS_PER_SECOND;
     let updated = sqlx::query(
         "UPDATE player_character SET level_name = $2, pos_x = $3, pos_y = $4, pos_z = $5, \
@@ -159,6 +168,11 @@ mod tests {
         .await
         .expect("insert")
         .id
+    }
+
+    #[test]
+    fn a_saved_position_gives_metres_as_f32() {
+        assert_eq!(spot().metres(), [8000.5, 3000.25, 120.0]);
     }
 
     #[tokio::test]

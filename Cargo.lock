@@ -2904,6 +2904,7 @@ dependencies = [
  "async-nats",
  "bytes",
  "futures-util",
+ "nw-sim-core",
  "postcard",
  "serde",
  "thiserror 2.0.21",

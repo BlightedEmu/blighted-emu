@@ -91,12 +91,10 @@ pub async fn route_join(
         .await
         .map_err(database)?;
     let position = match saved {
-        // f64 to f32: world positions are below 2^24 metres.
-        Some(saved) if saved.level == context.level => Position {
-            x: saved.x as f32,
-            y: saved.y as f32,
-            z: saved.z as f32,
-        },
+        Some(saved) if saved.level == context.level => {
+            let [x, y, z] = saved.metres();
+            Position { x, y, z }
+        }
         _ => context.start,
     };
     let sim = assignment
@@ -115,11 +113,7 @@ pub async fn route_join(
         account: join.account,
         character: join.character,
         entity,
-        position: Point {
-            x: position.x,
-            y: position.y,
-            z: position.z,
-        },
+        position: Point::from(position),
         login: join.resume.is_none(),
         handoffs,
     };
