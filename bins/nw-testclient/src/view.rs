@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! What one test client learns from the world messages (M4 spec section 9): the order of the
-//! login messages, its own entity number (from `ClientAddEntryMsg`), and the last position of
-//! every entity in the replication bundles.
+//! login messages, its own entity number (from `ClientAddEntryMsg`), and every position of every
+//! entity in the replication bundles, in order.
 
 use std::collections::BTreeMap;
 
 use nw_messages::{
     BundlePayload, LOGIN_MESSAGE_TYPES, MemberState, MessageError, ServerMessage, WorldPosition,
 };
-use nw_reflect::Envelope;
 use thiserror::Error;
 
 use crate::rep::Received;
@@ -35,7 +34,7 @@ pub struct WorldView {
     /// How many of them came before the first bundle.
     login_before_first_bundle: Option<usize>,
     own: Option<u64>,
-    positions: BTreeMap<u64, WorldPosition>,
+    tracks: BTreeMap<u64, Vec<WorldPosition>>,
 }
 
 impl WorldView {
@@ -47,12 +46,18 @@ impl WorldView {
     pub fn from_messages(messages: &[Received]) -> Result<Self, ViewError> {
         let mut view = Self::default();
         for received in messages {
-            view.read(&received.envelope)?;
+            view.read(received)?;
         }
         Ok(view)
     }
 
-    fn read(&mut self, envelope: &Envelope) -> Result<(), ViewError> {
+    /// Reads one more message. Messages of other types are skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ViewError`] for a world message or a bundle payload that does not decode.
+    pub fn read(&mut self, received: &Received) -> Result<(), ViewError> {
+        let envelope = &received.envelope;
         let Some(decoded) = ServerMessage::from_envelope(envelope) else {
             return Ok(());
         };
@@ -66,7 +71,10 @@ impl WorldView {
                 for member in payload.groups.iter().flat_map(|group| &group.members) {
                     let MemberState::Position(state) = &member.state;
                     if let Some(position) = state.position {
-                        self.positions.insert(member.u64_at_0, position);
+                        self.tracks
+                            .entry(member.u64_at_0)
+                            .or_default()
+                            .push(position);
                     }
                 }
             }
@@ -94,7 +102,12 @@ impl WorldView {
 
     /// The last position of entity `number`.
     pub fn position(&self, number: u64) -> Option<WorldPosition> {
-        self.positions.get(&number).copied()
+        self.track(number).last().copied()
+    }
+
+    /// Every position of entity `number`, in order.
+    pub fn track(&self, number: u64) -> &[WorldPosition] {
+        self.tracks.get(&number).map_or(&[], Vec::as_slice)
     }
 
     /// The client's own last position.
@@ -104,7 +117,7 @@ impl WorldView {
 
     /// Every other entity number the client saw, in ascending order.
     pub fn others(&self) -> Vec<u64> {
-        self.positions
+        self.tracks
             .keys()
             .copied()
             .filter(|number| Some(*number) != self.own)
@@ -116,7 +129,7 @@ impl WorldView {
 mod tests {
     use nw_messages::test_support::login_samples;
     use nw_messages::{BodyCodec, ClientAddEntryMsg, ReplicatedStateBundle};
-    use nw_reflect::TypeId;
+    use nw_reflect::{Envelope, TypeId};
 
     use super::*;
 
@@ -166,7 +179,20 @@ mod tests {
         assert_eq!(view.own_number(), Some(OWN));
         assert_eq!(view.own_position(), Some(at(1.0)));
         assert_eq!(view.position(OTHER), Some(at(3.0)));
+        assert_eq!(view.track(OTHER), [at(2.0), at(3.0)]);
+        assert!(view.track(OTHER + 1).is_empty());
         assert_eq!(view.others(), vec![OTHER]);
+    }
+
+    #[test]
+    fn messages_can_be_read_one_by_one() {
+        let mut messages = login();
+        messages.push(bundle(0, &[(OWN, at(1.0))]));
+        let mut view = WorldView::default();
+        for received in &messages {
+            view.read(received).expect("read");
+        }
+        assert_eq!(view, WorldView::from_messages(&messages).expect("view"));
     }
 
     #[test]
