@@ -87,9 +87,6 @@ pub enum SimInput {
 pub enum GatewayOutput {
     /// Server message envelopes for one connection, on one carrier channel.
     ServerMessages {
-        /// The sim that sends them; it hears `Left` when the gateway no longer has the
-        /// connection.
-        sim: BusId,
         /// The connection id inside the gateway.
         connection: u64,
         /// The carrier channel.
@@ -298,6 +295,74 @@ pub struct SimHeartbeat {
     pub max_players: u32,
 }
 
+/// Largest batch, in envelope bytes: well below [`MAX_BUS_MESSAGE_BYTES`] (M5 load spec
+/// section 4).
+pub const MAX_BATCH_BYTES: usize = 256 * 1024;
+/// Bytes of one batch item besides its envelopes: ids, flags and lengths.
+const ITEM_OVERHEAD_BYTES: usize = 96;
+
+/// Sim to gateway: the outputs of one tick for one gateway, in order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutputBatch {
+    /// The sim that sends them; it hears `Left` for a connection the gateway no longer has.
+    pub sim: BusId,
+    /// The outputs.
+    pub outputs: Vec<GatewayOutput>,
+}
+
+/// Gateway (or an old sim, after a handoff) to sim: inputs in order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputBatch {
+    /// Inputs that an old sim sends on after a handoff; a client message among them is dropped
+    /// once the new sim has a direct input of that connection.
+    pub forwarded: bool,
+    /// The inputs.
+    pub inputs: Vec<SimInput>,
+}
+
+impl GatewayOutput {
+    /// About the bytes of this output in a batch.
+    pub fn size_bytes(&self) -> usize {
+        let envelopes = match self {
+            Self::ServerMessages { envelopes, .. } => envelopes.iter().map(Vec::len).sum(),
+            Self::Close { .. } | Self::Route { .. } => 0,
+        };
+        envelopes + ITEM_OVERHEAD_BYTES
+    }
+}
+
+impl SimInput {
+    /// About the bytes of this input in a batch.
+    pub fn size_bytes(&self) -> usize {
+        let envelope = match self {
+            Self::ClientMessage { envelope, .. } => envelope.len(),
+            Self::Left { .. } => 0,
+        };
+        envelope + ITEM_OVERHEAD_BYTES
+    }
+}
+
+/// `items` in order, cut into batches of at most [`MAX_BATCH_BYTES`] by `size`. An item larger
+/// than that is a batch of its own.
+pub fn split_batches<T>(items: Vec<T>, size: impl Fn(&T) -> usize) -> Vec<Vec<T>> {
+    let mut batches: Vec<Vec<T>> = Vec::new();
+    let mut bytes = 0;
+    for item in items {
+        let item_bytes = size(&item);
+        match batches.last_mut() {
+            Some(batch) if bytes + item_bytes <= MAX_BATCH_BYTES => {
+                bytes += item_bytes;
+                batch.push(item);
+            }
+            _ => {
+                bytes = item_bytes;
+                batches.push(vec![item]);
+            }
+        }
+    }
+    batches
+}
+
 /// A process is alive. `started_at_ms` changes when the process restarts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Heartbeat {
@@ -378,7 +443,6 @@ mod tests {
             connection: connection(),
         });
         round_trip(GatewayOutput::ServerMessages {
-            sim: connection().gateway,
             connection: CONNECTION,
             channel: 1,
             reliable: false,
@@ -468,6 +532,54 @@ mod tests {
             players: 10,
             max_players: 2000,
         });
+    }
+
+    #[test]
+    fn batches_round_trip() {
+        round_trip(OutputBatch {
+            sim: sim(),
+            outputs: vec![GatewayOutput::Close {
+                connection: CONNECTION,
+            }],
+        });
+        round_trip(InputBatch {
+            forwarded: true,
+            inputs: vec![SimInput::Left {
+                connection: connection(),
+            }],
+        });
+    }
+
+    fn output_of(bytes: usize, connection: u64) -> GatewayOutput {
+        GatewayOutput::ServerMessages {
+            connection,
+            channel: 1,
+            reliable: false,
+            envelopes: vec![vec![0; bytes]],
+        }
+    }
+
+    #[test]
+    fn a_batch_splits_in_order() {
+        let third = MAX_BATCH_BYTES / 3;
+        let outputs: Vec<GatewayOutput> = (0..7).map(|n| output_of(third, n)).collect();
+        let batches = split_batches(outputs.clone(), GatewayOutput::size_bytes);
+        assert_eq!(batches.len(), 4, "two outputs per batch");
+        assert!(batches.iter().all(|batch| {
+            batch.iter().map(GatewayOutput::size_bytes).sum::<usize>() <= MAX_BATCH_BYTES
+        }));
+        assert_eq!(batches.concat(), outputs, "the order stays");
+        let huge = vec![output_of(MAX_BATCH_BYTES * 2, 0), output_of(1, 1)];
+        assert_eq!(
+            split_batches(huge.clone(), GatewayOutput::size_bytes).len(),
+            2
+        );
+        assert!(split_batches(Vec::<GatewayOutput>::new(), GatewayOutput::size_bytes).is_empty());
+        let input = SimInput::ClientMessage {
+            connection: connection(),
+            envelope: vec![0; third],
+        };
+        assert!(input.size_bytes() >= third);
     }
 
     #[test]

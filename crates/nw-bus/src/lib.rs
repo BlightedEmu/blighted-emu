@@ -16,7 +16,8 @@ pub use client::{Bus, BusError, Incoming, Subscription};
 pub use id::{BusId, BusIdError, MAX_BUS_ID_LEN};
 pub use message::{
     Admit, AdmitReply, CellTable, ConnectionRef, GatewayOutput, Ghost, Ghosts, HandoffMessage,
-    HandoffOffer, HandoffReply, Heartbeat, Join, JoinReply, MAX_BUS_MESSAGE_BYTES, MAX_GHOST_BYTES,
-    Point, ResumeOf, SimHeartbeat, SimInput, SimSlot, decode, encode, heartbeat_silence,
+    HandoffOffer, HandoffReply, Heartbeat, InputBatch, Join, JoinReply, MAX_BATCH_BYTES,
+    MAX_BUS_MESSAGE_BYTES, MAX_GHOST_BYTES, OutputBatch, Point, ResumeOf, SimHeartbeat, SimInput,
+    SimSlot, decode, encode, heartbeat_silence, split_batches,
 };
 pub use publisher::Publisher;
