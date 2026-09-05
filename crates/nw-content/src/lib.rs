@@ -3,6 +3,7 @@
 
 pub mod bundle;
 pub mod client_build;
+pub mod combat;
 pub mod container;
 pub mod fill;
 /// Typed row structs and `Tables`, written by `content-tool codegen`. Do not edit by hand.
