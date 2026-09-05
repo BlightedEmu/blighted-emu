@@ -5,6 +5,7 @@ use std::collections::btree_map::Entry;
 use std::path::{Path, PathBuf};
 
 use nw_content::ContentBundle;
+use nw_content::bundle::bundle_path;
 
 use crate::error::ToolError;
 use crate::source::GameSource;
@@ -33,7 +34,7 @@ pub struct BuildSummary {
 
 /// The default bundle path for a client build.
 pub fn default_bundle_path(client_build: &str) -> PathBuf {
-    Path::new(DEFAULT_CONTENT_DIR).join(format!("bundle-{client_build}.bin"))
+    bundle_path(Path::new(DEFAULT_CONTENT_DIR), client_build)
 }
 
 /// Builds the bundle from `source`, writes it to `out`, reloads it and checks the counts.

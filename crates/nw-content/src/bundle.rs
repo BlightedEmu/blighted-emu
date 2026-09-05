@@ -7,7 +7,7 @@
 //! [`ContainerError`]s.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -64,9 +64,22 @@ impl ContentBundle {
     }
 }
 
+/// The bundle path of a client build: `<dir>/bundle-<client_build>.bin`.
+pub fn bundle_path(dir: &Path, client_build: &str) -> PathBuf {
+    dir.join(format!("bundle-{client_build}.bin"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bundle_path_names_the_build() {
+        assert_eq!(
+            bundle_path(Path::new("content"), BUILD),
+            Path::new("content").join("bundle-22469132.bin")
+        );
+    }
     use crate::container::encode_container;
 
     const BUILD: &str = "22469132";
