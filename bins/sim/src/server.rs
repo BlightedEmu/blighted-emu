@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
-use crate::forward::ForwardTable;
+use crate::forward::{Forward, ForwardTable};
 use crate::gateways::GatewayTracker;
 use crate::login::WorldIds;
 use crate::saves::SaveQueue;
@@ -325,15 +325,17 @@ impl Loop {
                 connection.clone()
             }
         };
-        if let Some(sim) = self.forwards.target(&connection, self.now_ms()).cloned() {
+        if let Some(forward) = self.forwards.target(&connection, self.now_ms()).cloned() {
             if matches!(input, SimInput::Left { .. }) {
                 self.forwards.remove(&connection);
             }
             metrics::counter!(METRIC_FORWARDED_INPUTS).increment(1);
-            let subject = subject::sim_input(self.settings.world_id, &sim);
+            let subject = subject::sim_input(self.settings.world_id, &forward.sim.id);
             if !self.sims.send(subject, input) {
                 metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
             }
+            // The gateway still sends here, so it may have lost the route: send it again.
+            self.route(&connection, &forward);
             return;
         }
         match input {
@@ -409,8 +411,11 @@ impl Loop {
                     tracing::warn!(%error, "handoff reply failed");
                 }
             }
-            HandoffMessage::Cancel { connection } => {
-                if self.world.cancel(connection) {
+            HandoffMessage::Cancel {
+                connection,
+                handoffs,
+            } => {
+                if self.world.cancel(connection, *handoffs) {
                     tracing::info!(?connection, "late handoff undone");
                 }
             }
@@ -545,20 +550,13 @@ impl Loop {
             .handoff_done(&result.connection, accepted, self.now_ms());
         let label = match end {
             HandoffEnd::Moved => {
-                self.forwards.insert(
-                    result.connection.clone(),
-                    result.target.id.clone(),
-                    self.now_ms(),
-                );
-                self.publish(
-                    &result.connection.gateway,
-                    GatewayOutput::Route {
-                        connection: result.connection.connection,
-                        sim: result.target.id.clone(),
-                        generation: result.target.generation,
-                        sequence: result.sequence,
-                    },
-                );
+                let forward = Forward {
+                    sim: result.target.clone(),
+                    sequence: result.sequence,
+                };
+                self.route(&result.connection, &forward);
+                self.forwards
+                    .insert(result.connection.clone(), forward, self.now_ms());
                 HANDOFF_MOVED
             }
             HandoffEnd::Kept if late => HANDOFF_TIMEOUT,
@@ -570,6 +568,7 @@ impl Loop {
             let subject = subject::sim_handoff(self.settings.world_id, &result.target.id);
             let cancel = HandoffMessage::Cancel {
                 connection: result.connection,
+                handoffs: result.sequence,
             };
             if !self.cancels.send(subject, cancel) {
                 metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
@@ -577,6 +576,19 @@ impl Loop {
         }
         metrics::counter!(METRIC_HANDOFFS, RESULT_LABEL => label).increment(1);
         self.count_players();
+    }
+
+    /// Tells the gateway of `connection` that its player moved by `forward`.
+    fn route(&self, connection: &ConnectionRef, forward: &Forward) {
+        self.publish(
+            &connection.gateway,
+            GatewayOutput::Route {
+                connection: connection.connection,
+                sim: forward.sim.id.clone(),
+                generation: forward.sim.generation,
+                sequence: forward.sequence,
+            },
+        );
     }
 
     fn heartbeat(&mut self) {
@@ -746,6 +758,8 @@ mod tests {
     const MOVE_TOLERANCE_M: f32 = 0.01;
     /// A crossing the full budget allows (21.45 m): from 10 m west to 10 m east of the border.
     const CROSSING_M: f32 = 10.0;
+    /// A step the budget left after the crossing allows at once.
+    const LATE_STEP_M: f32 = 1.0;
     /// Time to watch for a message that must not come.
     const QUIET: Duration = Duration::from_millis(500);
     const FIRST_HANDOFF: u64 = 1;
@@ -885,9 +899,11 @@ mod tests {
                 .message
         }
 
-        /// The next output that `wanted` picks.
+        /// The next output that `wanted` picks, within [`WAIT`].
         async fn until<T>(&mut self, mut wanted: impl FnMut(GatewayOutput) -> Option<T>) -> T {
+            let deadline = Instant::now() + WAIT;
             loop {
+                assert!(Instant::now() < deadline, "no wanted output in time");
                 if let Some(found) = wanted(self.next().await) {
                     return found;
                 }
@@ -1234,10 +1250,36 @@ mod tests {
                 vec![CONNECTION]
             );
             assert!(character_position(db, ada.1).await.expect("load").is_none());
+            // The gateway still sends to the west sim: it forwards the move, and the route again.
+            let further = BORDER_X + CROSSING_M + LATE_STEP_M;
+            let late_move = move_to(connection.clone(), further);
+            input(&bus, world_id, pair.west.id(), &late_move).await;
+            let again = pair
+                .gateway
+                .until(|output| match output {
+                    GatewayOutput::Route { sim, sequence, .. } => Some((sim, sequence)),
+                    _ => None,
+                })
+                .await;
+            assert_eq!(again, (east.clone(), FIRST_HANDOFF));
+            pair.gateway
+                .until(|output| match output {
+                    GatewayOutput::ServerMessages {
+                        sim,
+                        channel: REPLICATION_CHANNEL,
+                        envelopes,
+                        ..
+                    } if sim == east => {
+                        let own_x = member_positions(&envelopes[0])[0].1;
+                        ((own_x - further).abs() < MOVE_TOLERANCE_M).then_some(())
+                    }
+                    _ => None,
+                })
+                .await;
             let left = SimInput::Left { connection };
             input(&bus, world_id, pair.west.id(), &left).await;
             let saved = saved_position(db, ada.1).await;
-            assert!((saved.x - f64::from(BORDER_X + CROSSING_M)).abs() < SAVE_TOLERANCE_M);
+            assert!((saved.x - f64::from(further)).abs() < SAVE_TOLERANCE_M);
             pair.stop().await;
         })
         .await;
@@ -1394,7 +1436,8 @@ mod tests {
             assert_eq!(
                 next_handoff(&mut messages).await,
                 HandoffMessage::Cancel {
-                    connection: offer.connection
+                    connection: offer.connection,
+                    handoffs: offer.handoffs,
                 }
             );
             assert_eq!(

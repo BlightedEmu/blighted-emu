@@ -370,13 +370,22 @@ impl SimWorld {
         self.leave_all(&connections)
     }
 
-    /// Removes a player that this sim took by a handoff that the sender then cancelled. The
-    /// sender kept the player, so nothing is saved here. Returns whether it was here.
-    pub fn cancel(&mut self, connection: &ConnectionRef) -> bool {
-        self.by_connection
-            .remove(connection)
-            .map(|entity| self.world.despawn(entity))
-            .is_some()
+    /// Removes a player that this sim took by the handoff `handoffs` that the sender then
+    /// cancelled. The sender kept the player, so nothing is saved here. A player of another
+    /// attempt stays. Returns whether it was removed.
+    pub fn cancel(&mut self, connection: &ConnectionRef, handoffs: u64) -> bool {
+        let Some(&entity) = self.by_connection.get(connection) else {
+            return false;
+        };
+        let same_attempt = self
+            .world
+            .get::<Player>(entity)
+            .is_some_and(|player| player.handoffs == handoffs);
+        if same_attempt {
+            self.by_connection.remove(connection);
+            self.world.despawn(entity);
+        }
+        same_attempt
     }
 
     /// The answer to the handoff of the player of `connection` at `now_ms`.
@@ -1212,9 +1221,13 @@ mod tests {
             new.take(&offer, NOW),
             Err(WorldError::AlreadyJoined(_))
         ));
-        assert!(new.cancel(&mover));
+        assert!(
+            !new.cancel(&mover, offer.handoffs + 1),
+            "a cancel of another attempt"
+        );
+        assert!(new.cancel(&mover, offer.handoffs));
         assert_eq!(new.players(), 0);
-        assert!(!new.cancel(&mover));
+        assert!(!new.cancel(&mover, offer.handoffs));
     }
 
     /// The offer of the frozen player of a border world.

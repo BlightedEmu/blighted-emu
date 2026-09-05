@@ -211,6 +211,8 @@ pub enum HandoffMessage {
     Cancel {
         /// The connection.
         connection: ConnectionRef,
+        /// The `handoffs` of that offer; a take of another attempt stays.
+        handoffs: u64,
     },
 }
 
@@ -410,6 +412,7 @@ mod tests {
         round_trip(HandoffMessage::Offer(offer));
         round_trip(HandoffMessage::Cancel {
             connection: connection(),
+            handoffs: 2,
         });
         round_trip(HandoffReply::Accepted);
         round_trip(HandoffReply::Refused {
