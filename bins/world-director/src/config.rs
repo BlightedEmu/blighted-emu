@@ -33,8 +33,8 @@ pub struct DirectorConfig {
     pub content_dir: PathBuf,
     /// The open map level.
     pub level: String,
-    /// `[start_position]`: where a character that was never in the world appears.
-    pub start_position: StartPosition,
+    /// Where characters that were never in the world appear, in turn.
+    pub start_positions: Vec<StartPosition>,
     /// Edge length of a cell, in metres.
     pub cell_size_m: f32,
     /// Longest wait for a sim to take a player.
@@ -49,7 +49,7 @@ pub struct DirectorConfig {
     pub log_filter: String,
 }
 
-/// `[start_position]`, in metres. The height comes from the ground of the level.
+/// A start position, in metres. The height comes from the ground of the level.
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StartPosition {
@@ -99,8 +99,9 @@ impl DirectorConfig {
         if self.level.is_empty() {
             return invalid("level", "must not be empty");
         }
-        if !(self.start_position.x.is_finite() && self.start_position.y.is_finite()) {
-            return invalid("start_position", "must be finite");
+        let finite = |start: &StartPosition| start.x.is_finite() && start.y.is_finite();
+        if self.start_positions.is_empty() || !self.start_positions.iter().all(finite) {
+            return invalid("start_positions", "must hold at least one finite position");
         }
         if !(self.cell_size_m.is_finite() && self.cell_size_m > 0.0) {
             return invalid("cell_size_m", "must be a finite number above 0");
@@ -114,18 +115,22 @@ impl DirectorConfig {
         Ok(())
     }
 
-    /// The start position on the ground of `ground`.
+    /// The start positions on the ground of `ground`.
     ///
     /// # Errors
     ///
-    /// Returns [`DirectorConfigError::Invalid`] when the level has no height there.
-    pub fn start(&self, ground: &impl Ground) -> Result<Position, DirectorConfigError> {
-        let StartPosition { x, y } = self.start_position;
-        let z = ground.height_at(x, y).ok_or(DirectorConfigError::Invalid {
-            key: "start_position",
-            reason: "the level has no ground height there",
-        })?;
-        Ok(Position { x, y, z })
+    /// Returns [`DirectorConfigError::Invalid`] when the level has no height at one of them.
+    pub fn starts(&self, ground: &impl Ground) -> Result<Vec<Position>, DirectorConfigError> {
+        self.start_positions
+            .iter()
+            .map(|&StartPosition { x, y }| {
+                let z = ground.height_at(x, y).ok_or(DirectorConfigError::Invalid {
+                    key: "start_positions",
+                    reason: "the level has no ground height at one of them",
+                })?;
+                Ok(Position { x, y, z })
+            })
+            .collect()
     }
 }
 
@@ -163,10 +168,10 @@ mod tests {
     fn the_committed_config_is_valid_and_starts_on_the_ground() {
         let config = committed();
         assert_eq!(config.level, "newworld_vitaeeterna");
-        let start = config.start(&Flat).expect("start");
-        assert_eq!(start.z, GROUND_HEIGHT);
-        assert_eq!(start.x, config.start_position.x);
-        assert!(config.start(&Nothing).is_err());
+        let starts = config.starts(&Flat).expect("starts");
+        assert_eq!(starts[0].z, GROUND_HEIGHT);
+        assert_eq!(starts[0].x, config.start_positions[0].x);
+        assert!(config.starts(&Nothing).is_err());
         assert!(config.admit_timeout_ms > 0);
     }
 
@@ -176,7 +181,10 @@ mod tests {
         config.world_database_password_env = "PASSWORD".to_owned();
         assert!(config.validate().is_err());
         let mut config = committed();
-        config.start_position.y = f32::NAN;
+        config.start_positions[0].y = f32::NAN;
+        assert!(config.validate().is_err());
+        let mut config = committed();
+        config.start_positions.clear();
         assert!(config.validate().is_err());
         let mut config = committed();
         config.cell_size_m = 0.0;

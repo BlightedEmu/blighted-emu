@@ -84,7 +84,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let settings = DirectorSettings {
         world_id: config.world_id,
         level: config.level.clone(),
-        start: config.start(&world_file)?,
+        starts: config.starts(&world_file)?,
         grid: CellGrid::of_level(&world_file.level, config.cell_size_m)?,
         admit_timeout: Duration::from_millis(config.admit_timeout_ms),
         heartbeat_interval: Duration::from_millis(config.heartbeat_interval_ms),

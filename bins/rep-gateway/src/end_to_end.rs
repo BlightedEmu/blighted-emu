@@ -243,7 +243,7 @@ impl Stack {
         let director = DirectorSettings {
             world_id,
             level: LEVEL.to_owned(),
-            start: START,
+            starts: vec![START],
             grid: CellGrid::new(LEVEL_M, LEVEL_M, CELL_M).expect("grid"),
             admit_timeout: ADMIT_TIMEOUT,
             heartbeat_interval: HEARTBEAT,

@@ -21,8 +21,8 @@ pub struct JoinContext {
     pub world_id: Uuid,
     /// The open map level.
     pub level: String,
-    /// Where a character that was never in the world appears.
-    pub start: Position,
+    /// Where characters that were never in the world appear, in turn.
+    pub starts: Vec<Position>,
     /// Longest wait for the sim.
     pub admit_timeout: Duration,
     /// The world database.
@@ -46,6 +46,9 @@ pub enum JoinRefusal {
     /// No live sim owns the player's cell.
     #[error("no sim owns the cell")]
     NoOwner,
+    /// The director has no start position.
+    #[error("no start position")]
+    NoStart,
     /// The sim refused the player.
     #[error("the sim refused: {0}")]
     SimRefused(String),
@@ -62,10 +65,21 @@ impl JoinRefusal {
             Self::OtherAccount => "other_account",
             Self::Database(_) => "database",
             Self::NoOwner => "no_owner",
+            Self::NoStart => "no_start",
             Self::SimRefused(_) => "sim_refused",
             Self::SimSilent(_) => "sim_silent",
         }
     }
+}
+
+/// The start position of a new character with entity number `entity`: the start positions in
+/// turn (M5 load spec section 6).
+pub fn start_for(starts: &[Position], entity: u64) -> Option<Position> {
+    let count = u64::try_from(starts.len())
+        .ok()
+        .filter(|count| *count > 0)?;
+    // The remainder is below the length, so it fits usize.
+    starts.get((entity % count) as usize).copied()
 }
 
 /// Routes `join` to the owner of the player's cell in `assignment`. Returns the sim and the
@@ -90,17 +104,6 @@ pub async fn route_join(
     let saved = character_position(&context.db, join.character)
         .await
         .map_err(database)?;
-    let position = match saved {
-        Some(saved) if saved.level == context.level => {
-            let [x, y, z] = saved.metres();
-            Position { x, y, z }
-        }
-        _ => context.start,
-    };
-    let sim = assignment
-        .owner_at(position)
-        .ok_or(JoinRefusal::NoOwner)?
-        .clone();
     let (entity, handoffs) = match join.resume {
         Some(resume) => (resume.entity, resume.handoffs),
         None => (
@@ -108,6 +111,17 @@ pub async fn route_join(
             NEW_PLAYER_HANDOFFS,
         ),
     };
+    let position = match saved {
+        Some(saved) if saved.level == context.level => {
+            let [x, y, z] = saved.metres();
+            Position { x, y, z }
+        }
+        _ => start_for(&context.starts, entity).ok_or(JoinRefusal::NoStart)?,
+    };
+    let sim = assignment
+        .owner_at(position)
+        .ok_or(JoinRefusal::NoOwner)?
+        .clone();
     let admit = Admit {
         connection: join.connection.clone(),
         account: join.account,
@@ -129,5 +143,38 @@ pub async fn route_join(
     match reply {
         AdmitReply::Admitted => Ok((sim, entity)),
         AdmitReply::Refused { reason } => Err(JoinRefusal::SimRefused(reason)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const STARTS: [Position; 3] = [
+        Position {
+            x: 1.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        Position {
+            x: 2.0,
+            y: 0.0,
+            z: 0.0,
+        },
+        Position {
+            x: 3.0,
+            y: 0.0,
+            z: 0.0,
+        },
+    ];
+
+    #[test]
+    fn new_characters_take_the_start_points_in_turn() {
+        let xs: Vec<f32> = (1..=6)
+            .map(|entity| start_for(&STARTS, entity).map(|start| start.x))
+            .collect::<Option<_>>()
+            .expect("starts");
+        assert_eq!(xs, vec![2.0, 3.0, 1.0, 2.0, 3.0, 1.0]);
+        assert_eq!(start_for(&[], 1), None);
     }
 }

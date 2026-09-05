@@ -14,9 +14,10 @@ client_build_config = "config/client-build.toml"
 content_dir = "local-data/content"
 # The open map level; every sim of this world runs it.
 level = "newworld_vitaeeterna"
-# Where a character that was never in the world appears: next to a fast travel shrine near
-# Edengrove. The height comes from the ground of the world file.
-start_position = { x = 11132.5, y = 7305.9 }
+# Where characters that were never in the world appear, in turn (by entity number): next to a
+# fast travel shrine near Edengrove. The height comes from the ground of the world file. Add
+# more { x, y } entries to spread new players over the map.
+start_positions = [{ x = 11132.5, y = 7305.9 }]
 # Edge length of a cell in metres; 2048 is one region of the world file.
 cell_size_m = 2048.0
 # Longest wait for a sim to take a player; below join_timeout_ms of config/rep-gateway.toml.

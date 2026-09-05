@@ -10,12 +10,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nw_bus::{
-    Bus, BusError, CellTable, Incoming, Join, JoinReply, Publisher, SimHeartbeat,
+    Bus, BusError, BusId, CellTable, Incoming, Join, JoinReply, Publisher, SimHeartbeat,
     heartbeat_silence, subject,
 };
 use nw_db::PgPool;
 use nw_login::queue::QueueStore;
 use nw_sim_core::{CellGrid, Position};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::join::{JoinContext, route_join};
@@ -23,6 +24,8 @@ use crate::sims::{Assignment, SimRegistry};
 
 /// Tables that may wait for NATS.
 const TABLE_QUEUE: usize = 16;
+/// Admit reports that may wait for the loop.
+const ADMIT_QUEUE: usize = 1024;
 /// Metric: live sims.
 pub const METRIC_SIMS: &str = "director_sims";
 /// Metric: players in the world.
@@ -43,8 +46,8 @@ pub struct DirectorSettings {
     pub world_id: Uuid,
     /// The open map level.
     pub level: String,
-    /// Where a character that was never in the world appears.
-    pub start: Position,
+    /// Where characters that were never in the world appear, in turn.
+    pub starts: Vec<Position>,
     /// The cells of the level.
     pub grid: CellGrid,
     /// Longest wait for a sim to take a player.
@@ -71,6 +74,8 @@ struct Loop<Q> {
     assignment: Option<Arc<Assignment>>,
     version: u64,
     tables: Publisher<CellTable>,
+    /// Join tasks report each sim that took a player here.
+    admits: mpsc::Sender<BusId>,
     started: Instant,
 }
 
@@ -95,11 +100,12 @@ pub async fn serve<Q: QueueStore>(
         .subscribe::<SimHeartbeat>(subject::all_sim_heartbeats(world_id))
         .await?;
     bus.flush().await?;
+    let (admits, mut admitted) = mpsc::channel(ADMIT_QUEUE);
     let mut state = Loop {
         context: Arc::new(JoinContext {
             world_id,
             level: settings.level.clone(),
-            start: settings.start,
+            starts: settings.starts.clone(),
             admit_timeout: settings.admit_timeout,
             db,
             bus: bus.clone(),
@@ -110,6 +116,7 @@ pub async fn serve<Q: QueueStore>(
         store,
         assignment: None,
         version: 0,
+        admits,
         started: Instant::now(),
     };
     let mut timer = tokio::time::interval(state.settings.heartbeat_interval);
@@ -125,6 +132,7 @@ pub async fn serve<Q: QueueStore>(
                 Ok(beat) => state.beat(&beat.message),
                 Err(error) => tracing::warn!(%error, "bad sim heartbeat"),
             },
+            Some(sim) = admitted.recv() => state.sims.admitted(&sim),
             _ = timer.tick() => state.timer(),
         }
     }
@@ -142,12 +150,15 @@ impl<Q: QueueStore> Loop<Q> {
     fn join(&self, join: Incoming<Join>) {
         let context = Arc::clone(&self.context);
         let assignment = self.assignment.clone();
+        let admits = self.admits.clone();
         tokio::spawn(async move {
             let reply = match assignment {
                 Some(assignment) => match route_join(&context, &assignment, &join.message).await {
                     Ok((sim, entity)) => {
                         metrics::counter!(METRIC_JOINS, RESULT_LABEL => JOINED).increment(1);
                         tracing::info!(character = %join.message.character, sim = %sim.id, "joined");
+                        // The loop may have stopped; then the count no longer matters.
+                        let _ = admits.send(sim.id.clone()).await;
                         JoinReply::Joined {
                             sim: sim.id,
                             generation: sim.generation,
@@ -298,7 +309,7 @@ mod tests {
         DirectorSettings {
             world_id,
             level: LEVEL.to_owned(),
-            start: WEST,
+            starts: vec![WEST],
             grid: CellGrid::new(LEVEL_M, LEVEL_M, CELL_M).expect("grid"),
             admit_timeout: ADMIT_TIMEOUT,
             heartbeat_interval: HEARTBEAT,

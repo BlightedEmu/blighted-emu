@@ -15,6 +15,8 @@ struct Live {
     generation: u64,
     players: u32,
     max_players: u32,
+    /// Admits since the last heartbeat, which its player count does not hold yet.
+    pending: u32,
     last_seen: Instant,
 }
 
@@ -55,6 +57,7 @@ impl SimRegistry {
             generation: beat.started_at_ms,
             players: beat.players,
             max_players: beat.max_players,
+            pending: 0,
             last_seen: now,
         };
         let before = self.sims.insert(beat.id.clone(), live);
@@ -101,10 +104,19 @@ impl SimRegistry {
             .fold(0, |sum, live| sum.saturating_add(live.players))
     }
 
-    /// Players the live sims can still take; a sim above its own limit counts as full.
+    /// `sim` took a player after its last heartbeat (M5 load spec section 8 item 3).
+    pub fn admitted(&mut self, sim: &BusId) {
+        if let Some(live) = self.sims.get_mut(sim) {
+            live.pending = live.pending.saturating_add(1);
+        }
+    }
+
+    /// Players the live sims can still take, admits in flight counted; a sim above its own limit
+    /// counts as full.
     pub fn free_slots(&self) -> u32 {
         self.sims.values().fold(0, |sum, live| {
-            sum.saturating_add(live.max_players.saturating_sub(live.players))
+            let taken = live.players.saturating_add(live.pending);
+            sum.saturating_add(live.max_players.saturating_sub(taken))
         })
     }
 }
@@ -280,6 +292,23 @@ mod tests {
         over.max_players = MAX_PLAYERS;
         sims.beat(&over, now);
         assert_eq!(sims.free_slots(), MAX_PLAYERS - 30);
+    }
+
+    #[test]
+    fn free_slots_count_admits_in_flight() {
+        let now = Instant::now();
+        let mut sims = SimRegistry::new(INTERVAL, MISSES);
+        sims.beat(&beat("sim-1", STARTED_AT_MS, 10), now);
+        sims.admitted(&id("sim-1"));
+        sims.admitted(&id("sim-1"));
+        sims.admitted(&id("sim-9"));
+        assert_eq!(sims.free_slots(), MAX_PLAYERS - 12);
+        sims.beat(&beat("sim-1", STARTED_AT_MS, 12), now);
+        assert_eq!(
+            sims.free_slots(),
+            MAX_PLAYERS - 12,
+            "the heartbeat counts them now"
+        );
     }
 
     #[test]
