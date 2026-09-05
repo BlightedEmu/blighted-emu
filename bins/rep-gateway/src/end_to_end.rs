@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nw_bus::test_support::test_bus;
-use nw_bus::{BusId, CellTable, GatewayOutput, SimHeartbeat, subject};
+use nw_bus::{BusId, CellTable, GatewayOutput, OutputBatch, SimHeartbeat, subject};
 use nw_common::time::unix_ms;
 use nw_db::test_db::with_test_schema;
 use nw_db::{GLOBAL_MIGRATOR, PgPool, SavedPosition, WORLD_MIGRATOR, save_character_position};
@@ -41,7 +41,9 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 use world_director::server::{DirectorSettings, serve as serve_director};
 
-use crate::server::tests::{HOLD, LIMITS, VERSION, WAIT, accepting, client, spawn_gateway};
+use crate::server::tests::{
+    HOLD, LIMITS, VERSION, WAIT, accepting, client, spawn_gateway, spawn_workers,
+};
 use crate::world::{BusWorld, WorldLinkSettings};
 
 const EDGE_CONFIG: &str = "../../config/edge.toml";
@@ -74,6 +76,8 @@ const HEARTBEAT: Duration = Duration::from_millis(200);
 const HEARTBEAT_MISSES: u32 = 3;
 const JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 const SIM_NAMES: [&str; 2] = ["sim-a", "sim-b"];
+/// Gateway workers of the end-to-end stack (M5 load spec section 3).
+const GATEWAY_WORKERS: usize = 2;
 /// Time in the world per session: the walk (about 5.6 s), the settle time and the far move
 /// (0.5 s each), and many bundles at 30 Hz after them.
 const PAIR_HOLD: Duration = Duration::from_secs(8);
@@ -218,7 +222,7 @@ struct Stack {
     edge: Edge,
     gateway: SocketAddr,
     sims: Vec<JoinHandle<()>>,
-    routes: nw_bus::Subscription<GatewayOutput>,
+    routes: nw_bus::Subscription<OutputBatch>,
 }
 
 impl Stack {
@@ -232,7 +236,7 @@ impl Stack {
             .expect("tables");
         let gateway_id = BusId::try_from(format!("gw-{unique}")).expect("id");
         let routes = bus
-            .subscribe::<GatewayOutput>(subject::gateway_output(world_id, &gateway_id))
+            .subscribe::<OutputBatch>(subject::gateway_output(world_id, &gateway_id))
             .await
             .expect("outputs");
         bus.flush().await.expect("flush");
@@ -276,11 +280,12 @@ impl Stack {
                 join_timeout: JOIN_TIMEOUT,
                 heartbeat_interval: HEARTBEAT,
             },
+            GATEWAY_WORKERS,
         )
         .await
         .expect("world link");
         let valkey = valkey().await;
-        let gateway = spawn_gateway(valkey.clone(), world_id, LIMITS, world, events).await;
+        let gateway = spawn_workers(valkey.clone(), world_id, LIMITS, world, events).await;
         let edge = Edge::start(global, world_pool, valkey, world_id, gateway).await;
         Self {
             edge,
@@ -293,11 +298,13 @@ impl Stack {
     /// The route messages that reached the gateway so far.
     async fn handoffs(&mut self) -> usize {
         let mut count = 0;
-        while let Ok(Some(Ok(output))) = tokio::time::timeout(SHORT_HOLD, self.routes.next()).await
-        {
-            if matches!(output.message, GatewayOutput::Route { .. }) {
-                count += 1;
-            }
+        while let Ok(Some(Ok(batch))) = tokio::time::timeout(SHORT_HOLD, self.routes.next()).await {
+            count += batch
+                .message
+                .outputs
+                .iter()
+                .filter(|output| matches!(output, GatewayOutput::Route { .. }))
+                .count();
         }
         count
     }

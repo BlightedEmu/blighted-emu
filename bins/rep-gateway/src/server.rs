@@ -23,6 +23,7 @@ use uuid::Uuid;
 use crate::config::GatewayLimits;
 use crate::peer::{Peer, PeerError, PeerEvent, PeerSettings};
 use crate::registration::{Refusal, TicketClaims, check_ticket};
+use crate::workers::first_connection;
 use crate::world::{World, WorldEvent};
 
 /// Time between polls of every peer.
@@ -58,7 +59,8 @@ const RECEIVE: &str = "receive";
 /// Drop reason: OpenSSL refused a first ClientHello.
 const DTLS: &str = "dtls";
 
-/// What the loop needs besides the socket and the world events.
+/// What the loop needs besides the socket and the world events; each worker has a copy.
+#[derive(Clone)]
 pub struct Gateway<Q, W> {
     /// DTLS identity and cookie secret.
     pub dtls: Arc<DtlsServerConfig>,
@@ -94,7 +96,7 @@ struct Loop<Q, W> {
     next_connection: u64,
 }
 
-/// Serves `socket` and the world `events` until `shutdown` finishes. An error that belongs to one
+/// Serves `socket` and the world `events` of worker `worker` until `shutdown` finishes. An error that belongs to one
 /// datagram (for example an ICMP "port unreachable" on Windows) is logged and the loop goes on.
 ///
 /// # Errors
@@ -104,6 +106,7 @@ pub async fn serve<Q: QueueStore, W: World>(
     gateway: Gateway<Q, W>,
     socket: UdpSocket,
     mut events: mpsc::Receiver<WorldEvent>,
+    worker: u16,
     shutdown: impl Future<Output = ()>,
 ) -> std::io::Result<()> {
     let (results, mut incoming) = mpsc::channel(RESULT_QUEUE);
@@ -115,7 +118,7 @@ pub async fn serve<Q: QueueStore, W: World>(
         handshake_windows: HashMap::new(),
         results,
         started: Instant::now(),
-        next_connection: 0,
+        next_connection: first_connection(worker),
     };
     let mut buffer = vec![0_u8; MAX_UDP_DATAGRAM];
     let mut tick = tokio::time::interval(TICK);
@@ -458,6 +461,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::registration::tests::Records;
+    use crate::workers::bind_workers;
     use crate::world::tests::{Sent, TestWorld, test_sim};
     use nw_reflect::{REGISTRATION_STATUS_AUTHORIZED, REGISTRATION_STATUS_REFUSED};
 
@@ -478,6 +482,8 @@ pub(crate) mod tests {
     /// The second client gives up after this time without a reply.
     const REFUSED_WAIT: Duration = Duration::from_secs(1);
     const LOOPBACK: &str = "127.0.0.1:0";
+    /// Socket buffers of test gateways.
+    const TEST_BUFFER_BYTES: usize = 1 << 20;
     /// ClientHellos from one address that never answers the cookie.
     const SPOOFED_HELLOS: usize = 3;
     /// A login message (type 446).
@@ -506,6 +512,17 @@ pub(crate) mod tests {
         world: W,
         events: mpsc::Receiver<WorldEvent>,
     ) -> SocketAddr {
+        spawn_workers(store, world_id, limits, world, vec![events]).await
+    }
+
+    /// A gateway on a loopback port with one worker per receiver of `events`.
+    pub(crate) async fn spawn_workers<Q: QueueStore, W: World>(
+        store: Q,
+        world_id: Uuid,
+        limits: GatewayLimits,
+        world: W,
+        events: Vec<mpsc::Receiver<WorldEvent>>,
+    ) -> SocketAddr {
         let gateway = Gateway {
             dtls: Arc::new(
                 DtlsServerConfig::new(&IDENTITY.certificate_pem, &IDENTITY.private_key_pem, SECRET)
@@ -525,9 +542,18 @@ pub(crate) mod tests {
             limits,
             world,
         };
-        let socket = UdpSocket::bind(LOOPBACK).await.expect("bind");
-        let address = socket.local_addr().expect("address");
-        tokio::spawn(serve(gateway, socket, events, std::future::pending()));
+        let loopback = LOOPBACK.parse().expect("address");
+        let sockets = bind_workers(loopback, events.len(), TEST_BUFFER_BYTES).expect("bind");
+        let address = sockets[0].local_addr().expect("address");
+        for (worker, (socket, events)) in (0_u16..).zip(sockets.into_iter().zip(events)) {
+            tokio::spawn(serve(
+                gateway.clone(),
+                socket,
+                events,
+                worker,
+                std::future::pending(),
+            ));
+        }
         address
     }
 

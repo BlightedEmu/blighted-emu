@@ -12,6 +12,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::peer::PeerSettings;
+use crate::workers::share;
 use crate::world::WorldLinkSettings;
 
 /// Environment prefix of `rep-gateway` overrides.
@@ -20,6 +21,8 @@ pub const GATEWAY_ENV_PREFIX: &str = "NW_GATEWAY_";
 pub const MIN_MTU: u32 = 576;
 /// Largest DTLS MTU on Ethernet.
 pub const MAX_MTU: u32 = 1500;
+/// Most workers: the worker number has 16 bits in a connection id.
+pub const MAX_WORKERS: usize = 1 << 16;
 
 /// The whole `rep-gateway` configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -52,7 +55,11 @@ pub struct GatewayConfig {
     pub join_timeout_ms: u64,
     /// Time between heartbeats.
     pub heartbeat_interval_ms: u64,
-    /// Connection limits and timers.
+    /// Workers on `udp_listen`, one per core given to the gateway.
+    pub workers: usize,
+    /// Receive and send buffer of each worker socket, in bytes.
+    pub udp_buffer_bytes: usize,
+    /// Connection limits and timers; the counts are shared out over the workers.
     pub limits: GatewayLimits,
 }
 
@@ -146,6 +153,15 @@ impl GatewayConfig {
         if self.heartbeat_interval_ms == 0 {
             return invalid("heartbeat_interval_ms", "must be above 0");
         }
+        if !(1..=MAX_WORKERS).contains(&self.workers) || (self.workers > 1 && !cfg!(unix)) {
+            return invalid(
+                "workers",
+                "must be 1 to 65536; more than 1 needs SO_REUSEPORT (Unix)",
+            );
+        }
+        if self.udp_buffer_bytes == 0 {
+            return invalid("udp_buffer_bytes", "must be above 0");
+        }
         Ok(())
     }
 
@@ -156,6 +172,15 @@ impl GatewayConfig {
             gateway_id: self.gateway_id.clone(),
             join_timeout: Duration::from_millis(self.join_timeout_ms),
             heartbeat_interval: Duration::from_millis(self.heartbeat_interval_ms),
+        }
+    }
+
+    /// The limits of one worker: the counts shared out.
+    pub const fn worker_limits(&self) -> GatewayLimits {
+        GatewayLimits {
+            max_connections: share(self.limits.max_connections, self.workers),
+            max_handshakes: share(self.limits.max_handshakes, self.workers),
+            ..self.limits
         }
     }
 
@@ -199,6 +224,12 @@ pub(crate) mod tests {
             link.heartbeat_interval,
             Duration::from_millis(config.heartbeat_interval_ms)
         );
+        let mut many = config.clone();
+        many.workers = 4;
+        assert_eq!(
+            many.worker_limits().max_connections,
+            config.limits.max_connections / 4
+        );
     }
 
     #[test]
@@ -229,6 +260,12 @@ pub(crate) mod tests {
         ));
         let mut config = committed();
         config.heartbeat_interval_ms = 0;
+        assert!(config.validate().is_err());
+        let mut config = committed();
+        config.workers = 0;
+        assert!(config.validate().is_err());
+        let mut config = committed();
+        config.udp_buffer_bytes = 0;
         assert!(config.validate().is_err());
     }
 }

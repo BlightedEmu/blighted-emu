@@ -13,9 +13,12 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use std::collections::BTreeMap;
+
 use nw_bus::{
-    Bus, BusError, BusId, CellTable, ConnectionRef, GatewayOutput, Heartbeat, Join, JoinReply,
-    Publisher, ResumeOf, SimInput, Subscription, subject,
+    Bus, BusError, BusId, CellTable, ConnectionRef, GatewayOutput, Heartbeat, InputBatch, Join,
+    JoinReply, MAX_BATCH_BYTES, OutputBatch, Publisher, ResumeOf, SimInput, Subscription,
+    split_batches, subject,
 };
 use nw_common::time::unix_ms;
 use nw_login::queue::EntryRecord;
@@ -24,9 +27,12 @@ use uuid::Uuid;
 
 use crate::registration::Refusal;
 use crate::routes::{Resume, Routes, Stray};
+use crate::workers::worker_of;
 
-/// Client messages and departures that may wait for the publishing task.
+/// Input batches that may wait for the publishing task.
 pub const INPUT_QUEUE: usize = 4096;
+/// Time between two input batches to one sim (the gateway loop tick).
+pub const INPUT_FLUSH: Duration = Duration::from_millis(10);
 /// World events that may wait for the server loop.
 pub const EVENT_QUEUE: usize = 4096;
 /// Heartbeats that may wait for NATS.
@@ -103,19 +109,24 @@ pub struct WorldLinkSettings {
     pub heartbeat_interval: Duration,
 }
 
+/// The inputs of each sim that wait for the next batch, and their bytes.
+type PendingInputs = BTreeMap<BusId, (Vec<SimInput>, usize)>;
+
 /// The world over NATS.
 #[derive(Debug, Clone)]
 pub struct BusWorld {
     bus: Bus,
     settings: Arc<WorldLinkSettings>,
-    inputs: Publisher<SimInput>,
+    inputs: Publisher<InputBatch>,
+    pending: Arc<Mutex<PendingInputs>>,
     routes: Arc<Mutex<Routes>>,
-    events: mpsc::Sender<WorldEvent>,
+    /// The events of each worker, by worker number.
+    events: Arc<Vec<mpsc::Sender<WorldEvent>>>,
 }
 
 impl BusWorld {
     /// Subscribes to this gateway's output and the cell table, and starts the tasks that publish
-    /// inputs and heartbeats. Returns the link and its events for the server loop.
+    /// inputs and heartbeats. Returns the link and the events of each of `workers` workers.
     ///
     /// # Errors
     ///
@@ -123,32 +134,82 @@ impl BusWorld {
     pub async fn start(
         bus: Bus,
         settings: WorldLinkSettings,
-    ) -> Result<(Self, mpsc::Receiver<WorldEvent>), BusError> {
+        workers: usize,
+    ) -> Result<(Self, Vec<mpsc::Receiver<WorldEvent>>), BusError> {
         let world_id = settings.world_id;
         let outputs = bus
-            .subscribe::<GatewayOutput>(subject::gateway_output(world_id, &settings.gateway_id))
+            .subscribe::<OutputBatch>(subject::gateway_output(world_id, &settings.gateway_id))
             .await?;
         let tables = bus
             .subscribe::<CellTable>(subject::director_table(world_id))
             .await?;
         bus.flush().await?;
         let settings = Arc::new(settings);
-        let (events, receiver) = mpsc::channel(EVENT_QUEUE);
+        let (events, receivers): (Vec<_>, Vec<_>) = (0..workers.max(1))
+            .map(|_| mpsc::channel(EVENT_QUEUE))
+            .unzip();
         let world = Self {
             inputs: Publisher::start(bus.clone(), INPUT_QUEUE),
+            pending: Arc::default(),
             routes: Arc::default(),
             bus: bus.clone(),
             settings: Arc::clone(&settings),
-            events,
+            events: Arc::new(events),
         };
         tokio::spawn(world.clone().forward_outputs(outputs));
         tokio::spawn(world.clone().follow_tables(tables));
+        tokio::spawn(world.clone().flush_inputs());
         tokio::spawn(heartbeats(
             Publisher::start(bus, HEARTBEAT_QUEUE),
             settings,
-            world.events.clone(),
+            Arc::clone(&world.events),
         ));
-        Ok((world, receiver))
+        Ok((world, receivers))
+    }
+
+    /// Sends `event` to the worker of `connection`. Returns `false` when that worker is gone.
+    async fn event(&self, connection: u64, event: WorldEvent) -> bool {
+        match self.events.get(worker_of(connection)) {
+            Some(worker) => worker.send(event).await.is_ok(),
+            None => {
+                tracing::warn!(connection, "world event for a worker this gateway lacks");
+                true
+            }
+        }
+    }
+
+    fn pending(&self) -> MutexGuard<'_, PendingInputs> {
+        // A panic while the lock was held leaves at worst some inputs unsent.
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Sends the inputs that wait for `sim` (or for every sim), in batches.
+    fn send_inputs(&self, batches: PendingInputs) {
+        for (sim, (inputs, _)) in batches {
+            let subject = subject::sim_input(self.settings.world_id, &sim);
+            for inputs in split_batches(inputs, SimInput::size_bytes) {
+                let batch = InputBatch {
+                    forwarded: false,
+                    inputs,
+                };
+                if !self.inputs.send(subject.clone(), batch) {
+                    metrics::counter!(METRIC_INPUTS_DROPPED).increment(1);
+                }
+            }
+        }
+    }
+
+    /// Sends the waiting inputs every [`INPUT_FLUSH`]. Ends when every worker is gone.
+    async fn flush_inputs(self) {
+        let mut timer = tokio::time::interval(INPUT_FLUSH);
+        loop {
+            timer.tick().await;
+            if self.events.iter().all(mpsc::Sender::is_closed) {
+                return;
+            }
+            let waiting = std::mem::take(&mut *self.pending());
+            self.send_inputs(waiting);
+        }
     }
 
     fn routes(&self) -> MutexGuard<'_, Routes> {
@@ -163,10 +224,21 @@ impl BusWorld {
         }
     }
 
+    /// Queues `input` for the next batch of `sim`; a full batch goes out at once.
     fn input(&self, sim: &BusId, input: SimInput) {
-        let subject = subject::sim_input(self.settings.world_id, sim);
-        if !self.inputs.send(subject, input) {
-            metrics::counter!(METRIC_INPUTS_DROPPED).increment(1);
+        let full = {
+            let mut pending = self.pending();
+            let (inputs, bytes) = pending.entry(sim.clone()).or_default();
+            *bytes += input.size_bytes();
+            inputs.push(input);
+            if *bytes >= MAX_BATCH_BYTES {
+                pending.remove_entry(sim)
+            } else {
+                None
+            }
+        };
+        if let Some((sim, waiting)) = full {
+            self.send_inputs(BTreeMap::from([(sim, waiting)]));
         }
     }
 
@@ -204,51 +276,61 @@ impl BusWorld {
 
     /// Server messages and closes go to the loop; route messages change the routes here. A
     /// stray copy past its grace is told that the connection left.
-    async fn forward_outputs(self, mut outputs: Subscription<GatewayOutput>) {
-        while let Some(output) = outputs.next().await {
-            let event = match output.map(|output| output.message) {
-                Ok(GatewayOutput::ServerMessages {
-                    sim,
+    async fn forward_outputs(self, mut batches: Subscription<OutputBatch>) {
+        while let Some(batch) = batches.next().await {
+            let batch = match batch {
+                Ok(batch) => batch.message,
+                Err(error) => {
+                    tracing::warn!(%error, "bad world output batch");
+                    continue;
+                }
+            };
+            for output in batch.outputs {
+                if !self.output(&batch.sim, output).await {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// One output of `sim`. Returns `false` when the worker of its connection is gone.
+    async fn output(&self, sim: &BusId, output: GatewayOutput) -> bool {
+        let (connection, event) = match output {
+            GatewayOutput::ServerMessages {
+                connection,
+                channel,
+                reliable,
+                envelopes,
+            } => {
+                let stray = self.routes().stray(connection, sim, Instant::now());
+                if stray == Stray::Evict {
+                    metrics::counter!(METRIC_STRAYS_EVICTED).increment(1);
+                    tracing::warn!(connection, %sim, "a sim keeps a copy; it drops it");
+                    self.send_left(connection, sim);
+                    return true;
+                }
+                let event = WorldEvent::Messages {
+                    sim: sim.clone(),
                     connection,
                     channel,
                     reliable,
                     envelopes,
-                }) => {
-                    let stray = self.routes().stray(connection, &sim, Instant::now());
-                    if stray == Stray::Evict {
-                        metrics::counter!(METRIC_STRAYS_EVICTED).increment(1);
-                        tracing::warn!(connection, %sim, "a sim keeps a copy; it drops it");
-                        self.send_left(connection, &sim);
-                        continue;
-                    }
-                    WorldEvent::Messages {
-                        sim,
-                        connection,
-                        channel,
-                        reliable,
-                        envelopes,
-                    }
-                }
-                Ok(GatewayOutput::Close { connection }) => WorldEvent::Close { connection },
-                Ok(GatewayOutput::Route {
-                    connection,
-                    sim,
-                    generation,
-                    sequence,
-                }) => {
-                    self.routes()
-                        .apply_route(connection, sim, generation, sequence);
-                    continue;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "bad world output");
-                    continue;
-                }
-            };
-            if self.events.send(event).await.is_err() {
-                return;
+                };
+                (connection, event)
             }
-        }
+            GatewayOutput::Close { connection } => (connection, WorldEvent::Close { connection }),
+            GatewayOutput::Route {
+                connection,
+                sim,
+                generation,
+                sequence,
+            } => {
+                self.routes()
+                    .apply_route(connection, sim, generation, sequence);
+                return true;
+            }
+        };
+        self.event(connection, event).await
     }
 
     /// Resumes the connections whose sim left the cell table.
@@ -298,8 +380,9 @@ impl BusWorld {
         metrics::counter!(METRIC_RESUMES, RESULT_LABEL => CLOSED).increment(1);
         tracing::warn!(connection, reason, "resume failed; the connection closes");
         self.routes().left(connection);
-        // The loop may have stopped; then nobody needs the close.
-        let _ = self.events.send(WorldEvent::Close { connection }).await;
+        // The worker may have stopped; then nobody needs the close.
+        self.event(connection, WorldEvent::Close { connection })
+            .await;
     }
 }
 
@@ -356,11 +439,11 @@ impl World for BusWorld {
     }
 }
 
-/// Queues this gateway's heartbeat every interval. Ends when the server loop is gone.
+/// Queues this gateway's heartbeat every interval. Ends when every worker is gone.
 async fn heartbeats(
     beats: Publisher<Heartbeat>,
     settings: Arc<WorldLinkSettings>,
-    events: mpsc::Sender<WorldEvent>,
+    events: Arc<Vec<mpsc::Sender<WorldEvent>>>,
 ) {
     let subject = subject::gateway_heartbeat(settings.world_id, &settings.gateway_id);
     let own = Heartbeat {
@@ -370,7 +453,7 @@ async fn heartbeats(
     let mut timer = tokio::time::interval(settings.heartbeat_interval);
     loop {
         timer.tick().await;
-        if events.is_closed() {
+        if events.iter().all(mpsc::Sender::is_closed) {
             return;
         }
         if !beats.send(subject.clone(), own.clone()) {
@@ -471,6 +554,7 @@ mod bus_tests {
     use nw_bus::test_support::test_bus;
 
     use super::*;
+    use crate::workers::first_connection;
 
     const JOIN_TIMEOUT: Duration = Duration::from_millis(500);
     const HEARTBEAT: Duration = Duration::from_millis(50);
@@ -540,30 +624,96 @@ mod bus_tests {
         });
     }
 
-    async fn inputs_of(bus: &Bus, world_id: Uuid, sim: &BusId) -> Subscription<SimInput> {
-        let inputs = bus
-            .subscribe::<SimInput>(subject::sim_input(world_id, sim))
+    /// One output of `sim` as the sim sends it.
+    fn batch_of(sim: &BusId, output: GatewayOutput) -> OutputBatch {
+        OutputBatch {
+            sim: sim.clone(),
+            outputs: vec![output],
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn events_reach_the_worker_of_the_connection() {
+        const WORKERS: usize = 2;
+        let bus = test_bus().await;
+        let settings = settings();
+        let (_world, mut events) = BusWorld::start(bus.clone(), settings.clone(), WORKERS)
+            .await
+            .expect("start");
+        let ids = [first_connection(0) + 5, first_connection(1) + 5];
+        let outputs: Vec<GatewayOutput> = ids
+            .iter()
+            .map(|connection| GatewayOutput::Close {
+                connection: *connection,
+            })
+            .collect();
+        let batch = OutputBatch {
+            sim: id("sim"),
+            outputs,
+        };
+        let subject = subject::gateway_output(settings.world_id, &settings.gateway_id);
+        bus.publish(subject, &batch).await.expect("publish");
+        for (worker, connection) in ids.into_iter().enumerate() {
+            assert_eq!(
+                next(&mut events[worker]).await,
+                WorldEvent::Close { connection }
+            );
+            assert!(
+                events[worker].try_recv().is_err(),
+                "nothing of the other worker"
+            );
+        }
+    }
+
+    /// A link with one worker, and that worker's events.
+    async fn start_one(
+        bus: &Bus,
+        settings: WorldLinkSettings,
+    ) -> (BusWorld, mpsc::Receiver<WorldEvent>) {
+        let (world, mut events) = BusWorld::start(bus.clone(), settings, 1)
+            .await
+            .expect("start");
+        (world, events.remove(0))
+    }
+
+    /// The inputs that reach one sim, one at a time.
+    struct Inputs {
+        batches: Subscription<InputBatch>,
+        waiting: std::collections::VecDeque<SimInput>,
+    }
+
+    async fn inputs_of(bus: &Bus, world_id: Uuid, sim: &BusId) -> Inputs {
+        let batches = bus
+            .subscribe::<InputBatch>(subject::sim_input(world_id, sim))
             .await
             .expect("subscribe");
         bus.flush().await.expect("flush");
-        inputs
+        Inputs {
+            batches,
+            waiting: std::collections::VecDeque::new(),
+        }
     }
 
-    async fn next_input(inputs: &mut Subscription<SimInput>) -> SimInput {
-        tokio::time::timeout(WAIT, inputs.next())
-            .await
-            .expect("in time")
-            .expect("open")
-            .expect("decode")
-            .message
+    async fn next_input(inputs: &mut Inputs) -> SimInput {
+        while inputs.waiting.is_empty() {
+            let batch = tokio::time::timeout(WAIT, inputs.batches.next())
+                .await
+                .expect("in time")
+                .expect("open")
+                .expect("decode")
+                .message;
+            assert!(!batch.forwarded, "the gateway sends direct inputs");
+            inputs.waiting.extend(batch.inputs);
+        }
+        inputs.waiting.pop_front().expect("an input waits")
     }
 
     /// Sends client messages until one reaches `inputs`; the route changes in another task.
-    async fn message_reaches(world: &BusWorld, inputs: &mut Subscription<SimInput>) {
+    async fn message_reaches(world: &BusWorld, inputs: &mut Inputs) {
         let reached = async {
             loop {
                 world.client_message(CONNECTION, ENVELOPE.to_vec());
-                if let Ok(Some(Ok(_))) = tokio::time::timeout(PAUSE, inputs.next()).await {
+                if let Ok(Some(Ok(_))) = tokio::time::timeout(PAUSE, inputs.batches.next()).await {
                     return;
                 }
             }
@@ -594,9 +744,7 @@ mod bus_tests {
     async fn a_join_goes_through_the_director_or_times_out() {
         let bus = test_bus().await;
         let settings = settings();
-        let (world, _events) = BusWorld::start(bus.clone(), settings.clone())
-            .await
-            .expect("start");
+        let (world, _events) = start_one(&bus, settings.clone()).await;
         assert_eq!(
             world.join(CONNECTION, &record()).await,
             Err(Refusal::WorldUnavailable)
@@ -609,9 +757,7 @@ mod bus_tests {
         assert_eq!(world.join(CONNECTION, &record()).await, Ok(()));
 
         let refusing = self::settings();
-        let (world, _events) = BusWorld::start(bus.clone(), refusing.clone())
-            .await
-            .expect("start");
+        let (world, _events) = start_one(&bus, refusing.clone()).await;
         let reason = "no".to_owned();
         director(
             &bus,
@@ -635,9 +781,7 @@ mod bus_tests {
         let sim = id("sim");
         director(&bus, settings.world_id, joined(&sim), joined(&sim)).await;
         let mut inputs = inputs_of(&bus, settings.world_id, &sim).await;
-        let (world, mut events) = BusWorld::start(bus.clone(), settings.clone())
-            .await
-            .expect("start");
+        let (world, mut events) = start_one(&bus, settings.clone()).await;
         world.client_message(CONNECTION, ENVELOPE.to_vec());
         world.join(CONNECTION, &record()).await.expect("join");
         world.client_message(CONNECTION, ENVELOPE.to_vec());
@@ -667,14 +811,12 @@ mod bus_tests {
             }
         );
         let output = subject::gateway_output(settings.world_id, &settings.gateway_id);
-        bus.publish(
-            output,
-            &GatewayOutput::Close {
-                connection: CONNECTION,
-            },
-        )
-        .await
-        .expect("publish");
+        let close = GatewayOutput::Close {
+            connection: CONNECTION,
+        };
+        bus.publish(output, &batch_of(&sim, close))
+            .await
+            .expect("publish");
         assert_eq!(
             next(&mut events).await,
             WorldEvent::Close {
@@ -690,9 +832,7 @@ mod bus_tests {
         let (first, second) = (id("sim-a"), id("sim-b"));
         director(&bus, settings.world_id, joined(&first), joined(&first)).await;
         let mut inputs = inputs_of(&bus, settings.world_id, &second).await;
-        let (world, _events) = BusWorld::start(bus.clone(), settings.clone())
-            .await
-            .expect("start");
+        let (world, _events) = start_one(&bus, settings.clone()).await;
         world.join(CONNECTION, &record()).await.expect("join");
         let route = GatewayOutput::Route {
             connection: CONNECTION,
@@ -701,7 +841,9 @@ mod bus_tests {
             sequence: 1,
         };
         let output = subject::gateway_output(settings.world_id, &settings.gateway_id);
-        bus.publish(output, &route).await.expect("publish");
+        bus.publish(output, &batch_of(&first, route))
+            .await
+            .expect("publish");
         message_reaches(&world, &mut inputs).await;
     }
 
@@ -712,9 +854,7 @@ mod bus_tests {
         let (lost, other) = (id("sim-a"), id("sim-b"));
         director(&bus, settings.world_id, joined(&lost), joined(&other)).await;
         let mut inputs = inputs_of(&bus, settings.world_id, &other).await;
-        let (world, _events) = BusWorld::start(bus.clone(), settings.clone())
-            .await
-            .expect("start");
+        let (world, _events) = start_one(&bus, settings.clone()).await;
         world.join(CONNECTION, &record()).await.expect("join");
         let tables = subject::director_table(settings.world_id);
         bus.publish(tables, &table_of(&[&other]))
@@ -727,9 +867,7 @@ mod bus_tests {
             reason: "no cell".to_owned(),
         };
         director(&bus, refusing.world_id, joined(&lost), refused).await;
-        let (world, mut events) = BusWorld::start(bus.clone(), refusing.clone())
-            .await
-            .expect("start");
+        let (world, mut events) = start_one(&bus, refusing.clone()).await;
         world.join(CONNECTION, &record()).await.expect("join");
         let tables = subject::director_table(refusing.world_id);
         bus.publish(tables, &table_of(&[])).await.expect("table");
@@ -753,9 +891,7 @@ mod bus_tests {
             .await
             .expect("subscribe");
         bus.flush().await.expect("flush");
-        let (_world, _events) = BusWorld::start(bus.clone(), settings.clone())
-            .await
-            .expect("start");
+        let (_world, _events) = start_one(&bus, settings.clone()).await;
         let beat = tokio::time::timeout(WAIT, beats.next())
             .await
             .expect("in time");

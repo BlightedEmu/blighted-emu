@@ -11,4 +11,5 @@ pub mod registration;
 pub mod routes;
 pub mod run;
 pub mod server;
+pub mod workers;
 pub mod world;
