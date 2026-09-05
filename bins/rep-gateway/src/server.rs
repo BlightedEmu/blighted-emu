@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::config::GatewayLimits;
 use crate::peer::{Peer, PeerError, PeerEvent, PeerSettings};
 use crate::registration::{Refusal, TicketClaims, check_ticket};
-use crate::workers::first_connection;
+use crate::workers::{ConnectionCount, first_connection};
 use crate::world::{World, WorldEvent};
 
 /// Time between polls of every peer.
@@ -58,6 +58,8 @@ const NO_COOKIE: &str = "no_cookie";
 const RECEIVE: &str = "receive";
 /// Drop reason: OpenSSL refused a first ClientHello.
 const DTLS: &str = "dtls";
+/// Drop reason: the gateway has `max_connections` connections.
+const MAX_CONNECTIONS: &str = "max_connections";
 
 /// What the loop needs besides the socket and the world events; each worker has a copy.
 #[derive(Clone)]
@@ -74,8 +76,10 @@ pub struct Gateway<Q, W> {
     pub server_version: String,
     /// Settings of one connection.
     pub peer_settings: PeerSettings,
-    /// Gateway-wide limits.
+    /// The limits of one worker.
     pub limits: GatewayLimits,
+    /// The open connections of every worker, below the gateway-wide limit.
+    pub connections: ConnectionCount,
     /// The world the players join.
     pub world: W,
 }
@@ -202,9 +206,15 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
             metrics::counter!(METRIC_DROPPED, REASON_LABEL => reason).increment(1);
             return;
         }
+        // Another worker may have taken the last place since the check.
+        if !self.gateway.connections.try_add() {
+            metrics::counter!(METRIC_DROPPED, REASON_LABEL => MAX_CONNECTIONS).increment(1);
+            return;
+        }
         let session = match hello.start(&self.gateway.dtls, mtu) {
             Ok(session) => session,
             Err(error) => {
+                self.gateway.connections.remove();
                 tracing::debug!(%error, %address, "handshake refused");
                 metrics::counter!(METRIC_DROPPED, REASON_LABEL => DTLS).increment(1);
                 return;
@@ -233,8 +243,8 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
             .values()
             .filter(|peer| !peer.is_established())
             .count();
-        if self.peers.len() >= limits.max_connections {
-            Some("max_connections")
+        if self.gateway.connections.live() >= limits.max_connections {
+            Some(MAX_CONNECTIONS)
         } else if handshakes >= limits.max_handshakes {
             Some("max_handshakes")
         } else if !self.handshake_allowed(address.ip()) {
@@ -347,6 +357,7 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
     /// Removes a peer; the world hears that a registered player left.
     fn remove_peer(&mut self, address: SocketAddr) {
         if let Some(peer) = self.peers.remove(&address) {
+            self.gateway.connections.remove();
             self.connections.remove(&peer.id());
             if peer.is_registered() {
                 self.gateway.world.left(peer.id());
@@ -539,6 +550,7 @@ pub(crate) mod tests {
                 ping_interval_ms: limits.ping_interval_ms,
                 datagrams_per_second: limits.datagrams_per_connection_per_second,
             },
+            connections: ConnectionCount::new(limits.max_connections),
             limits,
             world,
         };

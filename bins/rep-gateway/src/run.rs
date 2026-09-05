@@ -16,7 +16,7 @@ use nw_login::valkey::Valkey;
 
 use crate::config::{GatewayConfig, GatewayConfigError, load_gateway_config};
 use crate::server::{Gateway, serve as serve_udp};
-use crate::workers::bind_workers;
+use crate::workers::{ConnectionCount, bind_workers};
 use crate::world::BusWorld;
 
 /// Common name of a generated gateway certificate.
@@ -130,6 +130,7 @@ async fn serve_async(config: GatewayConfig, key: SigningKey) -> Result<(), RunEr
         server_version: config.server_version.clone(),
         peer_settings: config.peer_settings(),
         limits: config.worker_limits(),
+        connections: ConnectionCount::new(config.limits.max_connections),
         world,
     };
     let mut workers = tokio::task::JoinSet::new();

@@ -21,8 +21,8 @@ pub const GATEWAY_ENV_PREFIX: &str = "NW_GATEWAY_";
 pub const MIN_MTU: u32 = 576;
 /// Largest DTLS MTU on Ethernet.
 pub const MAX_MTU: u32 = 1500;
-/// Most workers: the worker number has 16 bits in a connection id.
-pub const MAX_WORKERS: usize = 1 << 16;
+/// Most workers: the worker number is a `u16`.
+pub const MAX_WORKERS: usize = u16::MAX as usize;
 
 /// The whole `rep-gateway` configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -158,14 +158,14 @@ impl GatewayConfig {
         if !(1..=MAX_WORKERS).contains(&self.workers) || (self.workers > 1 && !cfg!(unix)) {
             return invalid(
                 "workers",
-                "must be 1 to 65536; more than 1 needs SO_REUSEPORT (Unix)",
+                "must be 1 to 65535; more than 1 needs SO_REUSEPORT (Unix)",
             );
         }
-        if self.udp_buffer_bytes == 0 || self.max_resumes_in_flight == 0 {
-            return invalid(
-                "udp_buffer_bytes",
-                "the buffer and the resumes in flight must be above 0",
-            );
+        if self.udp_buffer_bytes == 0 {
+            return invalid("udp_buffer_bytes", "must be above 0");
+        }
+        if self.max_resumes_in_flight == 0 {
+            return invalid("max_resumes_in_flight", "must be above 0");
         }
         Ok(())
     }
@@ -181,10 +181,10 @@ impl GatewayConfig {
         }
     }
 
-    /// The limits of one worker: the counts shared out.
+    /// The limits of one worker: the handshakes in progress shared out. The connection limit is
+    /// one count for every worker ([`ConnectionCount`](crate::workers::ConnectionCount)).
     pub const fn worker_limits(&self) -> GatewayLimits {
         GatewayLimits {
-            max_connections: share(self.limits.max_connections, self.workers),
             max_handshakes: share(self.limits.max_handshakes, self.workers),
             ..self.limits
         }
@@ -233,8 +233,12 @@ pub(crate) mod tests {
         let mut many = config.clone();
         many.workers = 4;
         assert_eq!(
+            many.worker_limits().max_handshakes,
+            config.limits.max_handshakes.div_ceil(4)
+        );
+        assert_eq!(
             many.worker_limits().max_connections,
-            config.limits.max_connections / 4
+            config.limits.max_connections
         );
     }
 

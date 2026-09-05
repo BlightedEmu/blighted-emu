@@ -29,8 +29,10 @@ use crate::registration::Refusal;
 use crate::routes::{Resume, Routes, Stray};
 use crate::workers::worker_of;
 
-/// Input batches that may wait for the publishing task.
-pub const INPUT_QUEUE: usize = 4096;
+/// Input batches that may wait for the publishing task: about 0.3 s of batches of eight sims.
+pub const INPUT_QUEUE: usize = 256;
+/// Metric: world events lost because a worker's queue was full.
+pub const METRIC_EVENTS_DROPPED: &str = "rep_gateway_world_events_dropped_total";
 /// Tries of one resume: the first and one more after a request without an answer.
 const RESUME_ATTEMPTS: usize = 2;
 /// Time between two input batches to one sim (the gateway loop tick).
@@ -174,14 +176,21 @@ impl BusWorld {
         Ok((world, receivers))
     }
 
-    /// Sends `event` to the worker of `connection`. Returns `false` when that worker is gone.
-    async fn event(&self, connection: u64, event: WorldEvent) -> bool {
-        match self.events.get(worker_of(connection)) {
-            Some(worker) => worker.send(event).await.is_ok(),
-            None => {
-                tracing::warn!(connection, "world event for a worker this gateway lacks");
+    /// Sends `event` to the worker of `connection`. A worker whose queue is full loses the event
+    /// (counted), so one slow worker never stops the others. Returns `false` when that worker is
+    /// gone.
+    fn event(&self, connection: u64, event: WorldEvent) -> bool {
+        let Some(worker) = self.events.get(worker_of(connection)) else {
+            tracing::warn!(connection, "world event for a worker this gateway lacks");
+            return true;
+        };
+        match worker.try_send(event) {
+            Ok(()) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                metrics::counter!(METRIC_EVENTS_DROPPED).increment(1);
                 true
             }
+            Err(mpsc::error::TrySendError::Closed(_)) => false,
         }
     }
 
@@ -293,7 +302,7 @@ impl BusWorld {
                 }
             };
             for output in batch.outputs {
-                if !self.output(&batch.sim, output).await {
+                if !self.output(&batch.sim, output) {
                     return;
                 }
             }
@@ -301,7 +310,7 @@ impl BusWorld {
     }
 
     /// One output of `sim`. Returns `false` when the worker of its connection is gone.
-    async fn output(&self, sim: &BusId, output: GatewayOutput) -> bool {
+    fn output(&self, sim: &BusId, output: GatewayOutput) -> bool {
         let (connection, event) = match output {
             GatewayOutput::ServerMessages {
                 connection,
@@ -345,7 +354,7 @@ impl BusWorld {
                 return true;
             }
         };
-        self.event(connection, event).await
+        self.event(connection, event)
     }
 
     /// Resumes the connections whose sim left the cell table.
@@ -408,8 +417,7 @@ impl BusWorld {
         tracing::warn!(connection, reason, "resume failed; the connection closes");
         self.routes().left(connection);
         // The worker may have stopped; then nobody needs the close.
-        self.event(connection, WorldEvent::Close { connection })
-            .await;
+        self.event(connection, WorldEvent::Close { connection });
     }
 }
 
@@ -692,6 +700,37 @@ mod bus_tests {
                 "nothing of the other worker"
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_full_worker_does_not_stop_the_others() {
+        const WORKERS: usize = 2;
+        let bus = test_bus().await;
+        let settings = settings();
+        let (_world, mut events) = BusWorld::start(bus.clone(), settings.clone(), WORKERS)
+            .await
+            .expect("start");
+        let close = |connection| GatewayOutput::Close { connection };
+        let mut outputs: Vec<GatewayOutput> = (0..=EVENT_QUEUE as u64)
+            .map(|offset| close(first_connection(0) + offset))
+            .collect();
+        outputs.push(close(first_connection(1)));
+        let subject = subject::gateway_output(settings.world_id, &settings.gateway_id);
+        bus.publish(
+            subject,
+            &OutputBatch {
+                sim: id("sim"),
+                outputs,
+            },
+        )
+        .await
+        .expect("publish");
+        assert_eq!(
+            next(&mut events[1]).await,
+            WorldEvent::Close {
+                connection: first_connection(1)
+            }
+        );
     }
 
     /// A link with one worker, and that worker's events.

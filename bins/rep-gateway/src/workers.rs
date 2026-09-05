@@ -5,6 +5,9 @@
 
 use std::net::SocketAddr;
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use nw_common::net::bind_udp;
 use tokio::net::UdpSocket;
 
@@ -19,6 +22,48 @@ pub const fn first_connection(worker: u16) -> u64 {
 /// The worker of connection id `connection`.
 pub const fn worker_of(connection: u64) -> usize {
     (connection >> WORKER_SHIFT) as usize
+}
+
+/// The open connections of every worker of a gateway, below one limit. The kernel does not
+/// spread clients evenly over the workers, so the limit is shared, not cut in parts.
+#[derive(Debug, Clone)]
+pub struct ConnectionCount {
+    live: Arc<AtomicUsize>,
+    max: usize,
+}
+
+impl ConnectionCount {
+    /// No connection yet, at most `max`.
+    pub fn new(max: usize) -> Self {
+        Self {
+            live: Arc::default(),
+            max,
+        }
+    }
+
+    /// Takes a place for one more connection; `false` when all places are taken.
+    pub fn try_add(&self) -> bool {
+        self.live
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
+                (live < self.max).then_some(live + 1)
+            })
+            .is_ok()
+    }
+
+    /// Gives a place back.
+    pub fn remove(&self) {
+        // The count never goes below 0: a place is given back only after it was taken.
+        let _ = self
+            .live
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |live| {
+                live.checked_sub(1)
+            });
+    }
+
+    /// Open connections of every worker.
+    pub fn live(&self) -> usize {
+        self.live.load(Ordering::Acquire)
+    }
 }
 
 /// One worker's part of a gateway-wide `limit`, rounded up.
@@ -71,6 +116,19 @@ mod tests {
         assert_eq!(share(10, WORKERS), 3);
         assert_eq!(share(1, WORKERS), 1);
         assert_eq!(share(7, 1), 7);
+    }
+
+    #[test]
+    fn the_connection_limit_counts_every_worker() {
+        let first = ConnectionCount::new(2);
+        let second = first.clone();
+        assert!(first.try_add());
+        assert!(second.try_add());
+        assert!(!first.try_add(), "two connections in all");
+        assert!(!second.try_add());
+        second.remove();
+        assert!(first.try_add());
+        assert_eq!(first.live(), 2);
     }
 
     #[tokio::test]
