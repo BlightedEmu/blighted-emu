@@ -8,6 +8,10 @@ use thiserror::Error;
 
 /// Bytes of a raw id field.
 pub const RAW_ID_LEN: usize = 16;
+/// Bits in one byte.
+const BYTE_BITS: u32 = 8;
+/// Value bits of a wide prefix-coded integer with `n` extra bytes, for `n` from 0 to 8.
+const WIDE_VALUE_BITS: [u32; 9] = [7, 14, 21, 28, 35, 42, 49, 56, 64];
 
 /// A body that does not match its layout.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -119,7 +123,12 @@ impl<'a> Reader<'a> {
         Ok(field)
     }
 
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], MessageError> {
+    /// The next `N` bytes as an array.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError::Truncated`] when fewer bytes are left.
+    pub fn array<const N: usize>(&mut self) -> Result<[u8; N], MessageError> {
         let Some((field, rest)) = self.rest.split_first_chunk::<N>() else {
             return Err(MessageError::Truncated {
                 needed: N,
@@ -195,6 +204,26 @@ impl<'a> Reader<'a> {
     /// Returns [`MessageError::Truncated`] when fewer bytes are left.
     pub fn raw_id(&mut self) -> Result<[u8; RAW_ID_LEN], MessageError> {
         self.array()
+    }
+
+    /// A wide prefix-coded integer (`FUN_14087b770`, movement message note section 1): the
+    /// count of leading 1 bits of the first byte is the count of extra bytes (0 to 8). The extra
+    /// bytes are little-endian, above the low bits of the first byte that are left.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError::Truncated`] when the integer is cut off.
+    pub fn wide_prefixed(&mut self) -> Result<u64, MessageError> {
+        let first = self.u8()?;
+        let extra = first.leading_ones();
+        let low_bits = WIDE_VALUE_BITS[extra as usize] - extra * BYTE_BITS;
+        let mut high = 0_u64;
+        for (index, byte) in self.bytes(extra as usize)?.iter().enumerate() {
+            // `index` is below 8.
+            high |= u64::from(*byte) << (BYTE_BITS * index as u32);
+        }
+        let low = u64::from(first) & ((1_u64 << low_bits) - 1);
+        Ok(high.checked_shl(low_bits).unwrap_or(0) | low)
     }
 
     /// A prefix-coded integer.
@@ -297,6 +326,22 @@ impl Writer {
         Ok(self.bytes(&prefix))
     }
 
+    /// Adds a wide prefix-coded integer in its shortest form (see [`Reader::wide_prefixed`]).
+    pub fn wide_prefixed(&mut self, value: u64) -> &mut Self {
+        let extra = WIDE_VALUE_BITS
+            .iter()
+            .position(|bits| *bits == u64::BITS || value >> bits == 0)
+            .unwrap_or(WIDE_VALUE_BITS.len() - 1);
+        // `extra` is at most 8.
+        let extra_bits = extra as u32 * BYTE_BITS;
+        let low_bits = WIDE_VALUE_BITS[extra] - extra_bits;
+        let tag = u8::MAX.checked_shl(BYTE_BITS - extra as u32).unwrap_or(0);
+        // The low bits fit below the tag bits.
+        let first = tag | (value & ((1_u64 << low_bits) - 1)) as u8;
+        let high = value.checked_shr(low_bits).unwrap_or(0).to_le_bytes();
+        self.u8(first).bytes(&high[..extra])
+    }
+
     /// The finished body.
     pub fn finish(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.body)
@@ -308,6 +353,53 @@ mod tests {
     use super::*;
 
     const PREFIXED_VALUES: [u64; 4] = [0, 127, 128, 12_702];
+
+    /// The first value of each wide form: 1, 2, 3, 4, 5, 6, 7 and 8 extra bytes.
+    const WIDE_FORM_STARTS: [u64; 8] = [
+        1 << 7,
+        1 << 14,
+        1 << 21,
+        1 << 28,
+        1 << 35,
+        1 << 42,
+        1 << 49,
+        1 << 56,
+    ];
+
+    #[test]
+    fn wide_prefixed_integers_use_up_to_nine_bytes() {
+        for (extra, start) in WIDE_FORM_STARTS.into_iter().enumerate() {
+            for value in [start - 1, start] {
+                let body = Writer::new().wide_prefixed(value).finish();
+                let expected_len = if value == start { extra + 2 } else { extra + 1 };
+                assert_eq!(body.len(), expected_len, "{value:#x}");
+                let mut reader = Reader::new(&body);
+                assert_eq!(reader.wide_prefixed(), Ok(value));
+                assert!(reader.is_empty());
+            }
+        }
+        let largest = Writer::new().wide_prefixed(u64::MAX).finish();
+        assert_eq!(largest[0], u8::MAX);
+        assert_eq!(Reader::new(&largest).wide_prefixed(), Ok(u64::MAX));
+    }
+
+    #[test]
+    fn a_wide_form_below_five_bytes_matches_the_narrow_form() {
+        for value in [0, 127, 128, 12_702, (1 << 35) - 1] {
+            let wide = Writer::new().wide_prefixed(value).finish();
+            let narrow = Writer::new().prefixed(value).expect("narrow").finish();
+            assert_eq!(wide, narrow);
+        }
+    }
+
+    #[test]
+    fn a_short_wide_form_is_an_error() {
+        let body = Writer::new().wide_prefixed(u64::MAX).finish();
+        assert!(matches!(
+            Reader::new(&body[..body.len() - 1]).wide_prefixed(),
+            Err(MessageError::Truncated { .. })
+        ));
+    }
     const FLOAT: f32 = 6.0;
 
     #[test]
