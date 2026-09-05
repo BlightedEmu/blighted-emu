@@ -18,7 +18,8 @@ use crate::store::{
     AccountStore, CharacterStore, DiscordAttempt, DiscordStateStore, GameSessionStore, RateLimiter,
     StoreError,
 };
-use crate::time::{MILLIS_PER_SECOND, unix_now};
+use crate::time::MILLIS_PER_SECOND;
+use nw_common::time::{unix_ms, unix_seconds};
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
@@ -51,7 +52,7 @@ fn new_account(accounts: &mut Accounts, display_name: &str) -> Account {
     let account = Account {
         id: Uuid::new_v4(),
         display_name: display_name.to_owned(),
-        created_at_unix: unix_now(),
+        created_at_unix: unix_seconds(),
         banned: false,
     };
     accounts.accounts.insert(account.id, account.clone());
@@ -128,7 +129,7 @@ impl AccountStore for MemoryAccounts {
         Ok(accounts
             .sessions
             .get(&token_hash)
-            .filter(|(_, expires_at)| *expires_at > unix_now())
+            .filter(|(_, expires_at)| *expires_at > unix_seconds())
             .and_then(|(id, _)| accounts.accounts.get(id).cloned()))
     }
 
@@ -257,7 +258,7 @@ impl CharacterStore for MemoryCharacters {
             account_id: new.account_id,
             name: new.name.clone(),
             appearance: new.appearance.clone(),
-            created_at_unix: unix_now(),
+            created_at_unix: unix_seconds(),
         };
         characters.names.insert(name_key, new.id);
         characters
@@ -394,15 +395,6 @@ impl WorldQueue {
     }
 }
 
-/// Milliseconds since the Unix epoch: the clock of the in-memory store.
-fn unix_now_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-        })
-}
-
 impl QueueStore for MemoryQueue {
     async fn update(
         &self,
@@ -412,7 +404,7 @@ impl QueueStore for MemoryQueue {
         time: QueueTime,
     ) -> Result<Option<QueueStatus>, StoreError> {
         let now_ms = match time {
-            QueueTime::StoreClock => unix_now_millis(),
+            QueueTime::StoreClock => unix_ms(),
             QueueTime::At(ms) => ms,
         };
         let mut worlds = lock(&self.0);
@@ -696,7 +688,7 @@ pub(crate) mod contract {
             capacity: ONE_SLOT,
             stale_after_ms: STALE_AFTER_MS,
         };
-        let before = unix_now();
+        let before = unix_seconds();
         let status = store
             .update(
                 &settings,
@@ -711,7 +703,8 @@ pub(crate) mod contract {
         };
         let lifetime = i64::try_from(ENTRY_TICKET_SECONDS).expect("small");
         assert!(
-            (before + lifetime - CLOCK_SLACK_SECONDS..=unix_now() + lifetime + CLOCK_SLACK_SECONDS)
+            (before + lifetime - CLOCK_SLACK_SECONDS
+                ..=unix_seconds() + lifetime + CLOCK_SLACK_SECONDS)
                 .contains(&record.expires_at),
             "expiry {} is not one entry lifetime after now",
             record.expires_at

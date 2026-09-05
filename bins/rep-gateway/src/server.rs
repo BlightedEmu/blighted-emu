@@ -10,9 +10,10 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime};
 
 use nw_bus::GatewayOutput;
+use nw_common::time::unix_seconds;
 use nw_dtls::{DtlsServerConfig, FirstDatagram};
 use nw_login::queue::{EntryRecord, QueueStore};
 use nw_login::secrets::SigningKey;
@@ -259,11 +260,10 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
         let world = self.gateway.world.clone();
         let results = self.results.clone();
         tokio::spawn(async move {
-            let result =
-                match check_ticket(&store, &key, world_id, &claims, unix_now_seconds()).await {
-                    Ok(record) => world.join(connection, &record).await.map(|()| record),
-                    Err(refusal) => Err(refusal),
-                };
+            let result = match check_ticket(&store, &key, world_id, &claims, unix_seconds()).await {
+                Ok(record) => world.join(connection, &record).await.map(|()| record),
+                Err(refusal) => Err(refusal),
+            };
             match &result {
                 Ok(record) => tracing::info!(
                     account = %record.account_id,
@@ -446,14 +446,6 @@ fn rate_key(ip: IpAddr) -> IpAddr {
     }
 }
 
-fn unix_now_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
-        })
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use std::sync::LazyLock;
@@ -562,7 +554,7 @@ pub(crate) mod tests {
             account_id: Uuid::new_v4(),
             world_id,
             character_id: Uuid::new_v4(),
-            expires_at: unix_now_seconds() + LIFETIME_SECONDS,
+            expires_at: unix_seconds() + LIFETIME_SECONDS,
         };
         let token = LoginToken {
             ticket_id: record.ticket_id.clone().into_bytes(),

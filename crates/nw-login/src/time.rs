@@ -1,21 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Wall-clock time in Unix seconds, and the date text of the game replies.
+//! The date text of the game replies.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 /// Milliseconds in one second.
 pub(crate) const MILLIS_PER_SECOND: u64 = 1000;
 /// 9999-12-31 23:59:59 GMT, the last time an HTTP date can show.
 const LAST_HTTP_DATE_SECONDS: u64 = 253_402_300_799;
-
-/// Seconds since the Unix epoch (0 if the clock is before 1970).
-pub fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
-        })
-}
 
 /// RFC 822 date text in GMT, for example `Tue, 14 Oct 2025 00:00:00 GMT`. The client parses this
 /// form first (follow-up note section 6). Times before 1970 give 1970; times after 9999 give the

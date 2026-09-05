@@ -27,7 +27,7 @@ use crate::password::PasswordHasher;
 use crate::store::{
     AccountStore, DiscordAttempt, DiscordStateStore, GameSessionStore, RateLimiter,
 };
-use crate::time::unix_now;
+use nw_common::time::unix_seconds;
 
 /// Lifetime of a launcher session: 30 days.
 pub const LAUNCHER_SESSION_SECONDS: i64 = 30 * 24 * 60 * 60;
@@ -158,7 +158,7 @@ async fn new_launcher_session<A: AccountStore>(
         return Err(ApiError::Banned);
     }
     let token = new_random_token().map_err(|_| ApiError::Unavailable)?;
-    let expires_at = unix_now() + LAUNCHER_SESSION_SECONDS;
+    let expires_at = unix_seconds() + LAUNCHER_SESSION_SECONDS;
     accounts
         .create_launcher_session(token_hash(&token), account.id, expires_at)
         .await?;

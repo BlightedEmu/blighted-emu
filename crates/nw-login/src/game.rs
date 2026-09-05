@@ -38,7 +38,8 @@ use crate::names::check_character_name;
 use crate::queue::{QueueAction, QueueSettings, QueueStore, QueueTime, queue_reply};
 use crate::secrets::SigningKey;
 use crate::store::{CharacterStore, GameSessionStore, RateLimiter};
-use crate::time::{http_date, unix_now};
+use crate::time::http_date;
+use nw_common::time::unix_seconds;
 
 /// Path part in front of the game session key: `/s/<session>`.
 pub const SESSION_PREFIX: &str = "/s";
@@ -276,7 +277,7 @@ async fn steam_auth<G, C, R, Q>(
     State(state): State<GameState<G, C, R, Q>>,
     _session: SessionAccount,
 ) -> Result<Json<SteamAuthReply>, ApiError> {
-    let expires_at = unix_now().saturating_add(session_seconds(&state.config));
+    let expires_at = unix_seconds().saturating_add(session_seconds(&state.config));
     Ok(Json(SteamAuthReply {
         access_key_id: AUTH_STACK_CREDENTIAL.to_owned(),
         secret_key: AUTH_STACK_CREDENTIAL.to_owned(),
@@ -501,7 +502,7 @@ async fn queue_step<G, C, R, Q: QueueStore>(
         world,
         &state.config.rep_address,
         &state.signing_key,
-        unix_now(),
+        unix_seconds(),
     )))
 }
 
