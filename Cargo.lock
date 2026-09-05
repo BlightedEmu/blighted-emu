@@ -2928,7 +2928,9 @@ version = "0.1.0"
 dependencies = [
  "figment",
  "serde",
+ "socket2",
  "thiserror 2.0.21",
+ "tokio",
  "tracing-subscriber",
 ]
 
@@ -4043,7 +4045,6 @@ dependencies = [
  "reqwest",
  "serde",
  "sim",
- "socket2",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

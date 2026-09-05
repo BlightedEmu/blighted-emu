@@ -19,7 +19,7 @@ use nw_testclient::config::{
 };
 use nw_testclient::pair::{PairSettings, run_pair};
 use nw_testclient::rep::RepClient;
-use nw_testclient::swarm::{NewClient, run_swarm};
+use nw_testclient::swarm::{NewClient, run_swarm, udp_receive_errors};
 use nw_testclient::udp::run_rep;
 use nw_testclient::walk::{WalkSettings, login_token, walk};
 use nw_world::WorldFile;
@@ -27,6 +27,8 @@ use nw_world::world_file::world_file_path;
 
 /// The committed example configuration.
 const DEFAULT_CONFIG: &str = "config/nw-testclient.toml";
+/// The kernel's network counters (Linux).
+const SNMP_PATH: &str = "/proc/net/snmp";
 
 #[derive(Parser)]
 #[command(
@@ -51,7 +53,11 @@ enum Command {
     Pair,
     /// Many bots across a sim border (`[swarm]`). The bot password comes from
     /// `NW_SECRET_TESTCLIENT_SWARM_PASSWORD`.
-    Swarm,
+    Swarm {
+        /// Bots of this step instead of `[swarm] bots`.
+        #[arg(long)]
+        bots: Option<usize>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -86,7 +92,13 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
     match cli.command.unwrap_or(Command::Registration) {
         Command::Registration => registration(&config, &http, &trusted, &own(&config)?).await,
         Command::Pair => pair(&config, &http, &trusted, own(&config)?).await,
-        Command::Swarm => swarm(&config, &http, trusted).await,
+        Command::Swarm { bots } => {
+            let mut config = config;
+            if let Some(bots) = bots {
+                config.swarm.bots = bots;
+            }
+            swarm(&config, &http, trusted).await
+        }
     }
 }
 
@@ -114,16 +126,30 @@ async fn swarm(
     let mtu = config.mtu;
     let trusted = Arc::new(trusted);
     let new_client: NewClient = Arc::new(move |token| RepClient::new(&trusted, mtu, token, 0));
+    let errors_before = receive_errors();
     let report = run_swarm(http, Arc::clone(&settings), ground, new_client, |line| {
         println!("{line}");
     })
     .await;
     println!("{}", report.summary());
+    match (errors_before, receive_errors()) {
+        (Some(before), Some(after)) => println!(
+            "UDP receive buffer errors of the PC during the step: {}",
+            after.saturating_sub(before)
+        ),
+        _ => println!("UDP receive buffer errors of the PC: Unknown"),
+    }
     for check in report.checks(&settings) {
         let result = if check.passed { "pass" } else { "FAIL" };
         println!("{}: {result}", check.name);
     }
     Ok(report.passed(&settings))
+}
+
+/// The PC's count of UDP datagrams dropped for a full receive buffer (Linux).
+fn receive_errors() -> Option<u64> {
+    let snmp = std::fs::read_to_string(SNMP_PATH).ok()?;
+    udp_receive_errors(&snmp)
 }
 
 fn secret(name: &str) -> Result<String, String> {

@@ -18,7 +18,7 @@ pub const EXPECTED_PINGS_PER_SECOND: f64 = 1.0;
 /// Share of the expected pings that must arrive, so a delay or a loss does not fail the run.
 pub const MIN_PING_SHARE: f64 = 0.5;
 /// Any local address and port.
-const ANY_LOCAL: &str = "0.0.0.0:0";
+pub const ANY_LOCAL: &str = "0.0.0.0:0";
 
 /// What happened on the connection.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -82,12 +82,28 @@ pub async fn run_rep(
 /// Returns [`RunError`] when the socket, a protocol layer, or `on_tick` fails.
 pub async fn run_rep_with(
     gateway: SocketAddr,
+    client: RepClient,
+    hold: Duration,
+    timeout: Duration,
+    on_tick: impl FnMut(&mut RepClient, &mut RepOutcome, Duration) -> Result<(), RepError>,
+) -> Result<RepOutcome, RunError> {
+    let socket = UdpSocket::bind(ANY_LOCAL).await?;
+    run_rep_on(socket, gateway, client, hold, timeout, on_tick).await
+}
+
+/// [`run_rep_with`] on `socket`.
+///
+/// # Errors
+///
+/// Returns [`RunError`] when the socket, a protocol layer, or `on_tick` fails.
+pub async fn run_rep_on(
+    socket: UdpSocket,
+    gateway: SocketAddr,
     mut client: RepClient,
     hold: Duration,
     timeout: Duration,
     mut on_tick: impl FnMut(&mut RepClient, &mut RepOutcome, Duration) -> Result<(), RepError>,
 ) -> Result<RepOutcome, RunError> {
-    let socket = UdpSocket::bind(ANY_LOCAL).await?;
     let started = Instant::now();
     let now = || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let mut outcome = RepOutcome::default();

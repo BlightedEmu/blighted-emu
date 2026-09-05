@@ -10,11 +10,14 @@ publish.workspace = true
 [dependencies]
 figment.workspace = true
 serde.workspace = true
+socket2.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["net"] }
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
+tokio = { workspace = true, features = ["macros", "net", "rt"] }
 
 [lints]
 workspace = true

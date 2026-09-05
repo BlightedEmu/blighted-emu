@@ -5,7 +5,7 @@
 
 use std::net::SocketAddr;
 
-use socket2::{Domain, Protocol, Socket, Type};
+use nw_common::net::bind_udp;
 use tokio::net::UdpSocket;
 
 /// Bit position of the worker number in a connection id.
@@ -37,42 +37,14 @@ pub fn bind_workers(
     workers: usize,
     buffer_bytes: usize,
 ) -> std::io::Result<Vec<UdpSocket>> {
-    let first = bind(address, workers, buffer_bytes)?;
+    let share_port = workers > 1;
+    let first = bind_udp(address, buffer_bytes, share_port)?;
     let shared = first.local_addr()?;
     let mut sockets = vec![first];
     for _ in 1..workers {
-        sockets.push(bind(shared, workers, buffer_bytes)?);
+        sockets.push(bind_udp(shared, buffer_bytes, share_port)?);
     }
     Ok(sockets)
-}
-
-fn bind(address: SocketAddr, workers: usize, buffer_bytes: usize) -> std::io::Result<UdpSocket> {
-    let socket = Socket::new(
-        Domain::for_address(address),
-        Type::DGRAM,
-        Some(Protocol::UDP),
-    )?;
-    if workers > 1 {
-        reuse_port(&socket)?;
-    }
-    socket.set_recv_buffer_size(buffer_bytes)?;
-    socket.set_send_buffer_size(buffer_bytes)?;
-    socket.set_nonblocking(true)?;
-    socket.bind(&address.into())?;
-    UdpSocket::from_std(socket.into())
-}
-
-#[cfg(unix)]
-fn reuse_port(socket: &Socket) -> std::io::Result<()> {
-    socket.set_reuse_port(true)
-}
-
-#[cfg(not(unix))]
-fn reuse_port(_: &Socket) -> std::io::Result<()> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "more than one gateway worker needs SO_REUSEPORT",
-    ))
 }
 
 #[cfg(test)]

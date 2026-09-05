@@ -65,8 +65,11 @@ pub struct TestClientConfig {
 pub struct SwarmConfig {
     /// Bots to run.
     pub bots: usize,
-    /// world-director's `start_position`, east and north, in metres; its x must be a sim border.
-    pub start_m: [f32; 2],
+    /// world-director's `start_positions`, east and north, in metres; their x must be sim
+    /// borders.
+    pub starts_m: Vec<[f32; 2]>,
+    /// Receive and send buffer of each bot socket, in bytes.
+    pub udp_buffer_bytes: usize,
     /// Account names are this and five digits.
     pub account_prefix: String,
     /// Character names are this and three letters; letters only.
@@ -140,8 +143,12 @@ impl TestClientConfig {
         if swarm.min_crossings == 0 {
             return invalid("min_crossings", "must be at least 1");
         }
-        if !swarm.start_m.iter().all(|value| value.is_finite()) {
-            return invalid("start_m", "must be finite");
+        let finite = |start: &[f32; 2]| start.iter().all(|value| value.is_finite());
+        if swarm.starts_m.is_empty() || !swarm.starts_m.iter().all(finite) {
+            return invalid("starts_m", "must hold at least one finite position");
+        }
+        if swarm.udp_buffer_bytes == 0 {
+            return invalid("udp_buffer_bytes", "must be above 0");
         }
         let positive = |value: f32| value.is_finite() && value > 0.0;
         if !(positive(swarm.swing_m) && positive(swarm.speed_mps)) {
@@ -173,7 +180,8 @@ impl TestClientConfig {
             max_bundle_gap: Duration::from_millis(swarm.max_bundle_gap_ms),
             path_tolerance_m: self.path_tolerance_m,
             metrics_urls: swarm.metrics_urls.clone(),
-            start: swarm.start_m,
+            starts: swarm.starts_m.clone(),
+            udp_buffer_bytes: swarm.udp_buffer_bytes,
         })
     }
 }
@@ -240,6 +248,8 @@ mod tests {
         assert!(refused(
             |swarm| swarm.character_prefix = "Abcdefghijklmn".to_owned()
         ));
-        assert!(refused(|swarm| swarm.start_m = [f32::NAN, 0.0]));
+        assert!(refused(|swarm| swarm.starts_m = vec![[f32::NAN, 0.0]]));
+        assert!(refused(|swarm| swarm.starts_m.clear()));
+        assert!(refused(|swarm| swarm.udp_buffer_bytes = 0));
     }
 }

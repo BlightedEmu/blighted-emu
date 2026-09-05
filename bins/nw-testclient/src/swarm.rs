@@ -7,10 +7,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nw_common::net::bind_udp;
 use nw_messages::WorldPosition;
 use nw_messages::{BodyCodec, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX};
 use nw_reflect::{LoginToken, REGISTRATION_STATUS_AUTHORIZED};
-use nw_sim_core::Ground;
+use nw_sim_core::{Ground, TICKS_PER_SECOND};
 use reqwest::Client;
 use sim::server::{
     HANDOFF_MOVED, HANDOFF_REFUSED, HANDOFF_TIMEOUT, METRIC_HANDOFF_SECONDS, METRIC_HANDOFFS,
@@ -22,8 +23,8 @@ use crate::metrics::Scrape;
 use crate::pair::{Check, INPUT_CHANNEL, SEND_INTERVAL};
 use crate::rep::{RepClient, RepError};
 use crate::route::{Route, RouteError};
-use crate::udp::{RepOutcome, run_rep_with};
-use crate::view::WorldView;
+use crate::udp::{ANY_LOCAL, RepOutcome, RunError, run_rep_on};
+use crate::view::OwnView;
 use crate::walk::{WalkSettings, login_token, walk};
 
 /// Check: every bot got registration status 0.
@@ -46,6 +47,14 @@ pub const TICKS_FAST: &str = "tick p99 within one tick";
 pub const NO_REFUSED_MOVES: &str = "no move was refused";
 /// Check: the metrics of every sim were read before and after the run.
 pub const METRICS_READ: &str = "the metrics of every sim were read";
+/// Check: every bot got at least [`MIN_BUNDLE_SHARE`] of its bundles.
+pub const BUNDLES_ARRIVED: &str = "every bot got 99 % of its bundles";
+/// Share of the own bundles (one per tick) that must arrive (M5 load spec section 7.3).
+pub const MIN_BUNDLE_SHARE: f64 = 0.99;
+/// The row name of the UDP counters in `/proc/net/snmp`.
+const SNMP_UDP_ROW: &str = "Udp:";
+/// The counter of datagrams dropped for a full receive buffer.
+const SNMP_RECEIVE_ERRORS: &str = "RcvbufErrors";
 /// The share of the p99 checks.
 pub const P99_SHARE: f64 = 0.99;
 /// Letters of a character name suffix: `aaa` to `zzz`.
@@ -93,8 +102,10 @@ pub struct SwarmSettings {
     pub path_tolerance_m: f32,
     /// The metrics URL of every sim.
     pub metrics_urls: Vec<String>,
-    /// The director's start position, east and north, in metres; its x is the sim border.
-    pub start: [f32; 2],
+    /// The director's start positions, east and north, in metres; their x are sim borders.
+    pub starts: Vec<[f32; 2]>,
+    /// Receive and send buffer of each bot socket, in bytes.
+    pub udp_buffer_bytes: usize,
 }
 
 /// What one bot saw.
@@ -110,6 +121,10 @@ pub struct BotReport {
     pub max_gap: Duration,
     /// Largest distance of an own position from the route, in metres.
     pub worst_off_route_m: f32,
+    /// Own bundles that arrived.
+    pub bundles_received: u64,
+    /// Own bundles that the ticks between the first and the last one hold.
+    pub bundles_expected: u64,
     /// Why the bot could not run, if it could not.
     pub error: Option<String>,
 }
@@ -223,6 +238,14 @@ impl SwarmReport {
                 name: METRICS_READ,
                 passed: !settings.metrics_urls.is_empty() && self.unread_metrics == 0,
             },
+            Check {
+                name: BUNDLES_ARRIVED,
+                passed: all(&|bot| {
+                    bot.bundles_expected > 0
+                        && bot.bundles_received as f64
+                            >= bot.bundles_expected as f64 * MIN_BUNDLE_SHARE
+                }),
+            },
         ]
     }
 
@@ -234,11 +257,17 @@ impl SwarmReport {
     /// One line of numbers for the operator.
     pub fn summary(&self) -> String {
         let worst_gap = self.bots.iter().map(|bot| bot.max_gap).max();
+        let worst_share = self
+            .bots
+            .iter()
+            .map(|bot| ratio(bot.bundles_received as f64, bot.bundles_expected as f64))
+            .fold(1.0, f64::min);
         let fewest = self.bots.iter().map(|bot| bot.crossings).min();
         let errors = self.bots.iter().filter(|bot| bot.error.is_some()).count();
         format!(
             "bots {}, failed to start {errors}, fewest crossings {}, worst bundle gap {} ms, \
-             handoffs {} (failed {}), within one tick: handoffs {:.4}, ticks {:.4}",
+             fewest bundles {worst_share:.4}, handoffs {} (failed {}), within one tick: handoffs \
+             {:.4}, ticks {:.4}",
             self.bots.len(),
             fewest.unwrap_or_default(),
             worst_gap.unwrap_or_default().as_millis(),
@@ -313,12 +342,35 @@ pub fn target(
     InputPosition::from_metres(x, y, z)
 }
 
+/// The start of `starts` nearest to `position`.
+pub fn nearest_start(starts: &[[f32; 2]], position: WorldPosition) -> Option<[f32; 2]> {
+    let distance = |start: &[f32; 2]| (start[0] - position.x).hypot(start[1] - position.y);
+    starts
+        .iter()
+        .copied()
+        .min_by(|a, b| distance(a).total_cmp(&distance(b)))
+}
+
+/// The datagrams the PC dropped for a full UDP receive buffer, from the text of
+/// `/proc/net/snmp`.
+pub fn udp_receive_errors(snmp: &str) -> Option<u64> {
+    let mut rows = snmp.lines().filter(|line| line.starts_with(SNMP_UDP_ROW));
+    let names = rows.next()?;
+    let values = rows.next()?;
+    let column = names
+        .split_whitespace()
+        .position(|name| name == SNMP_RECEIVE_ERRORS)?;
+    values.split_whitespace().nth(column)?.parse().ok()
+}
+
 /// The numbers one bot collects from its own positions, against the start.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BotTrack {
     start: [f32; 2],
     east_of_start: Option<bool>,
+    first_bundle: Option<Duration>,
     last_bundle: Option<Duration>,
+    bundles_received: u64,
     crossings: u32,
     max_gap: Duration,
     worst_off_route_m: f32,
@@ -330,7 +382,9 @@ impl BotTrack {
         Self {
             start,
             east_of_start: None,
+            first_bundle: None,
             last_bundle: None,
+            bundles_received: 0,
             crossings: 0,
             max_gap: Duration::ZERO,
             worst_off_route_m: 0.0,
@@ -345,7 +399,9 @@ impl BotTrack {
         if let Some(last) = self.last_bundle {
             self.max_gap = self.max_gap.max(since.saturating_sub(last));
         }
+        self.first_bundle.get_or_insert(since);
         self.last_bundle = Some(since);
+        self.bundles_received += positions.len() as u64;
         for position in positions {
             let offset = [position.x - self.start[0], position.y - self.start[1]];
             self.worst_off_route_m = self.worst_off_route_m.max(route.distance_to(offset));
@@ -356,16 +412,27 @@ impl BotTrack {
             self.east_of_start = Some(east);
         }
     }
+
+    /// Own bundles received, and those the ticks between the first and the last one hold.
+    pub fn bundles(&self) -> (u64, u64) {
+        let expected = match (self.first_bundle, self.last_bundle) {
+            (Some(first), Some(last)) => {
+                let ticks = (last - first).as_secs_f64() * TICKS_PER_SECOND as f64;
+                // A run is minutes long, so the tick count fits u64.
+                ticks.round() as u64 + 1
+            }
+            _ => 0,
+        };
+        (self.bundles_received, expected)
+    }
 }
 
-/// One bot during its run. Its route starts where it first sees itself.
+/// One bot during its run. Its route and its start line come from where it first sees itself.
 struct Bot<'a> {
     settings: &'a SwarmSettings,
     n: usize,
     ground: &'a (dyn Ground + Send + Sync),
-    view: WorldView,
-    own_seen: usize,
-    track: BotTrack,
+    view: OwnView,
     walk: Option<Walk>,
     last_sent: Option<Duration>,
 }
@@ -373,6 +440,8 @@ struct Bot<'a> {
 /// The route of a bot that has seen itself.
 struct Walk {
     route: Route,
+    start: [f32; 2],
+    track: BotTrack,
     started: Duration,
     height: f32,
 }
@@ -384,22 +453,23 @@ impl Bot<'_> {
         outcome: &mut RepOutcome,
         since: Duration,
     ) -> Result<(), RepError> {
+        let mut seen = Vec::new();
         for received in outcome.messages.drain(..) {
             // A message that does not decode is not a position; the checks miss it.
-            let _ = self.view.read(&received);
+            if let Ok(Some(position)) = self.view.read(&received) {
+                seen.push(position);
+            }
         }
-        let Some(own) = self.view.own_number() else {
-            return Ok(());
-        };
-        let track = self.view.track(own);
-        let Some(first) = track.first() else {
-            return Ok(());
-        };
         if self.walk.is_none() {
+            let Some(first) = seen.first() else {
+                return Ok(());
+            };
             let settings = self.settings;
-            let from = [first.x - settings.start[0], first.y - settings.start[1]];
+            let Some(start) = nearest_start(&settings.starts, *first) else {
+                return Ok(());
+            };
             let route = bot_route(
-                from,
+                [first.x - start[0], first.y - start[1]],
                 self.n,
                 settings.bots,
                 settings.lane_spread_m,
@@ -409,15 +479,16 @@ impl Bot<'_> {
             )?;
             self.walk = Some(Walk {
                 route,
+                start,
+                track: BotTrack::new(start),
                 started: since,
                 height: first.z(),
             });
         }
-        let Some(walk) = &self.walk else {
+        let Some(walk) = &mut self.walk else {
             return Ok(());
         };
-        self.track.saw(&walk.route, &track[self.own_seen..], since);
-        self.own_seen = track.len();
+        walk.track.saw(&walk.route, &seen, since);
         if self
             .last_sent
             .is_some_and(|sent| since.saturating_sub(sent) < SEND_INTERVAL)
@@ -426,8 +497,8 @@ impl Bot<'_> {
         }
         self.last_sent = Some(since);
         let walked = since.saturating_sub(walk.started);
-        let start = self.settings.start;
-        let Some(position) = target(&walk.route, start, walk.height, walked, self.ground) else {
+        let Some(position) = target(&walk.route, walk.start, walk.height, walked, self.ground)
+        else {
             return Ok(());
         };
         let body = ClientInputMsg::position(position).encode()?;
@@ -517,13 +588,16 @@ async fn run_bot(
         settings,
         n,
         ground,
-        view: WorldView::default(),
-        own_seen: 0,
-        track: BotTrack::new(settings.start),
+        view: OwnView::default(),
         walk: None,
         last_sent: None,
     };
-    let ran = run_rep_with(
+    let socket = match socket(settings.udp_buffer_bytes) {
+        Ok(socket) => socket,
+        Err(error) => return failed(error.to_string()),
+    };
+    let ran = run_rep_on(
+        socket,
         admission.rep_address,
         client,
         settings.duration,
@@ -531,17 +605,33 @@ async fn run_bot(
         |client, outcome, since| bot.tick(client, outcome, since),
     )
     .await;
+    let track = bot.walk.map(|walk| walk.track);
     match ran {
-        Ok(outcome) => BotReport {
-            registered: outcome.status == Some(REGISTRATION_STATUS_AUTHORIZED),
-            closed: outcome.closed_by_server,
-            crossings: bot.track.crossings,
-            max_gap: bot.track.max_gap,
-            worst_off_route_m: bot.track.worst_off_route_m,
-            error: None,
-        },
+        Ok(outcome) => {
+            let track = track.unwrap_or_else(|| BotTrack::new(NO_START));
+            let (bundles_received, bundles_expected) = track.bundles();
+            BotReport {
+                registered: outcome.status == Some(REGISTRATION_STATUS_AUTHORIZED),
+                closed: outcome.closed_by_server,
+                crossings: track.crossings,
+                max_gap: track.max_gap,
+                worst_off_route_m: track.worst_off_route_m,
+                bundles_received,
+                bundles_expected,
+                error: None,
+            }
+        }
         Err(error) => failed(error.to_string()),
     }
+}
+
+/// The start of a bot that never saw itself: its report has no bundle and fails.
+const NO_START: [f32; 2] = [0.0, 0.0];
+
+/// A bot socket with `buffer_bytes` buffers.
+fn socket(buffer_bytes: usize) -> Result<tokio::net::UdpSocket, RunError> {
+    let any = ANY_LOCAL.parse().map_err(std::io::Error::other)?;
+    Ok(bind_udp(any, buffer_bytes, false)?)
 }
 
 /// The metrics of every sim at one time.
@@ -615,7 +705,8 @@ mod tests {
             max_bundle_gap: Duration::from_millis(250),
             path_tolerance_m: 1.0,
             metrics_urls: vec!["http://127.0.0.1:9102/metrics".to_owned()],
-            start: [ORIGIN, ORIGIN],
+            starts: vec![[ORIGIN, ORIGIN]],
+            udp_buffer_bytes: 1 << 20,
         }
     }
 
@@ -733,6 +824,8 @@ mod tests {
             crossings: MIN_CROSSINGS,
             max_gap: Duration::from_millis(100),
             worst_off_route_m: 0.5,
+            bundles_received: 299,
+            bundles_expected: 300,
             error: None,
         }
     }
@@ -757,7 +850,7 @@ mod tests {
     fn the_swarm_checks_fail_on_each_fault() {
         let settings = settings();
         assert!(good_report().passed(&settings));
-        let faults: [Fault; 10] = [
+        let faults: [Fault; 11] = [
             (BOTS_REGISTERED, |report| report.bots[0].registered = false),
             (BOTS_CROSSED, |report| report.bots[1].crossings = 1),
             (BOTS_ON_ROUTE, |report| {
@@ -774,6 +867,9 @@ mod tests {
             (TICKS_FAST, |report| report.sims.ticks_within_tick = 900.0),
             (NO_REFUSED_MOVES, |report| report.sims.refused_moves = 1.0),
             (METRICS_READ, |report| report.unread_metrics = 1),
+            (BUNDLES_ARRIVED, |report| {
+                report.bots[1].bundles_received = 290
+            }),
         ];
         for (name, fault) in faults {
             let mut report = good_report();
@@ -798,6 +894,38 @@ mod tests {
             !good_report().passed(&no_metrics),
             "no metrics read is no pass"
         );
+    }
+
+    #[test]
+    fn the_nearest_start_is_the_line() {
+        let starts = [[0.0, 0.0], [1000.0, 0.0], [0.0, 1000.0]];
+        assert_eq!(
+            nearest_start(&starts, at(900.0, 100.0)),
+            Some([1000.0, 0.0])
+        );
+        assert_eq!(nearest_start(&starts, at(10.0, 700.0)), Some([0.0, 1000.0]));
+        assert_eq!(nearest_start(&[], at(0.0, 0.0)), None);
+    }
+
+    #[test]
+    fn bundles_are_counted_against_the_ticks() {
+        let route = single();
+        let mut track = BotTrack::new([ORIGIN, ORIGIN]);
+        let second = Duration::from_secs(1);
+        track.saw(&route, &[at(ORIGIN, ORIGIN)], second);
+        for tick in 1..TICKS_PER_SECOND {
+            track.saw(&route, &[at(ORIGIN, ORIGIN)], second + TICK * tick as u32);
+        }
+        assert_eq!(track.bundles(), (TICKS_PER_SECOND, TICKS_PER_SECOND));
+    }
+
+    #[test]
+    fn the_udp_receive_errors_are_read() {
+        let snmp = "Ip: Forwarding DefaultTTL\nIp: 1 64\n\
+                    Udp: InDatagrams NoPorts InErrors OutDatagrams RcvbufErrors SndbufErrors\n\
+                    Udp: 147 1 50 123 49 0\n";
+        assert_eq!(udp_receive_errors(snmp), Some(49));
+        assert_eq!(udp_receive_errors("nothing"), None);
     }
 
     #[test]

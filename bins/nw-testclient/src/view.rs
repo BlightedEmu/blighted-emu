@@ -26,6 +26,75 @@ pub enum ViewError {
     },
 }
 
+/// One world message, read.
+enum Read {
+    /// Not a world message.
+    Skipped,
+    /// A bundle: the entity numbers and positions of its members.
+    Bundle(Vec<(u64, WorldPosition)>),
+    /// `ClientAddEntryMsg`, with the client's own entity number.
+    Entry { type_index: u64, own: Option<u64> },
+    /// Another world message.
+    Other { type_index: u64 },
+}
+
+fn decode(received: &Received) -> Result<Read, ViewError> {
+    let envelope = &received.envelope;
+    let Some(decoded) = ServerMessage::from_envelope(envelope) else {
+        return Ok(Read::Skipped);
+    };
+    let type_index = envelope.type_index().unwrap_or_default();
+    let failed = |source| ViewError::Message { type_index, source };
+    Ok(match decoded.map_err(failed)? {
+        ServerMessage::Bundle(bundle) => {
+            let payload = BundlePayload::decode(&bundle.payload).map_err(failed)?;
+            let members = payload
+                .groups
+                .iter()
+                .flat_map(|group| &group.members)
+                .filter_map(|member| {
+                    let MemberState::Position(state) = &member.state;
+                    Some((member.u64_at_0, state.position?))
+                })
+                .collect();
+            Read::Bundle(members)
+        }
+        ServerMessage::ClientAddEntry(entry) => Read::Entry {
+            type_index,
+            own: entry.entity_number(),
+        },
+        _ => Read::Other { type_index },
+    })
+}
+
+/// What a bot keeps of the world messages: its own entity number only. Many bots run in one
+/// process, so the others' positions are read and dropped (M5 load spec section 7.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OwnView {
+    own: Option<u64>,
+}
+
+impl OwnView {
+    /// Reads one more message; returns the client's own position when it is a bundle with it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ViewError`] for a world message or a bundle payload that does not decode.
+    pub fn read(&mut self, received: &Received) -> Result<Option<WorldPosition>, ViewError> {
+        Ok(match decode(received)? {
+            Read::Bundle(members) => members
+                .into_iter()
+                .find(|(number, _)| Some(*number) == self.own)
+                .map(|(_, position)| position),
+            Read::Entry { own, .. } => {
+                self.own = own;
+                None
+            }
+            Read::Skipped | Read::Other { .. } => None,
+        })
+    }
+}
+
 /// The world as one client saw it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WorldView {
@@ -57,32 +126,20 @@ impl WorldView {
     ///
     /// Returns [`ViewError`] for a world message or a bundle payload that does not decode.
     pub fn read(&mut self, received: &Received) -> Result<(), ViewError> {
-        let envelope = &received.envelope;
-        let Some(decoded) = ServerMessage::from_envelope(envelope) else {
-            return Ok(());
-        };
-        let failed = |type_index| move |source| ViewError::Message { type_index, source };
-        let type_index = envelope.type_index().unwrap_or_default();
-        match decoded.map_err(failed(type_index))? {
-            ServerMessage::Bundle(bundle) => {
+        match decode(received)? {
+            Read::Skipped => {}
+            Read::Bundle(members) => {
                 self.login_before_first_bundle
                     .get_or_insert(self.login.len());
-                let payload = BundlePayload::decode(&bundle.payload).map_err(failed(type_index))?;
-                for member in payload.groups.iter().flat_map(|group| &group.members) {
-                    let MemberState::Position(state) = &member.state;
-                    if let Some(position) = state.position {
-                        self.tracks
-                            .entry(member.u64_at_0)
-                            .or_default()
-                            .push(position);
-                    }
+                for (number, position) in members {
+                    self.tracks.entry(number).or_default().push(position);
                 }
             }
-            ServerMessage::ClientAddEntry(entry) => {
-                self.own = entry.entity_number();
+            Read::Entry { type_index, own } => {
+                self.own = own;
                 self.login.push(type_index);
             }
-            _ => self.login.push(type_index),
+            Read::Other { type_index } => self.login.push(type_index),
         }
         Ok(())
     }
@@ -182,6 +239,24 @@ mod tests {
         assert_eq!(view.track(OTHER), [at(2.0), at(3.0)]);
         assert!(view.track(OTHER + 1).is_empty());
         assert_eq!(view.others(), vec![OTHER]);
+    }
+
+    #[test]
+    fn the_light_view_keeps_only_the_own_position() {
+        let mut view = OwnView::default();
+        let before = bundle(0, &[(OWN, at(1.0))]);
+        assert_eq!(
+            view.read(&before).expect("read"),
+            None,
+            "the own number is not known yet"
+        );
+        for message in login() {
+            assert_eq!(view.read(&message).expect("read"), None);
+        }
+        let seen = bundle(1, &[(OTHER, at(2.0)), (OWN, at(3.0))]);
+        assert_eq!(view.read(&seen).expect("read"), Some(at(3.0)));
+        let others_only = bundle(2, &[(OTHER, at(4.0))]);
+        assert_eq!(view.read(&others_only).expect("read"), None);
     }
 
     #[test]
