@@ -14,7 +14,8 @@ futures-util.workspace = true
 postcard.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 uuid.workspace = true
 
 [dev-dependencies]

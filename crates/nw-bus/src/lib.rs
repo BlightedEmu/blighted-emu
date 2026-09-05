@@ -6,6 +6,7 @@
 pub mod client;
 pub mod id;
 pub mod message;
+pub mod publisher;
 pub mod subject;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
@@ -14,4 +15,6 @@ pub use client::{Bus, BusError, Incoming, Subscription};
 pub use id::{BusId, BusIdError, MAX_BUS_ID_LEN};
 pub use message::{
     ConnectionRef, GatewayOutput, Heartbeat, Join, JoinReply, SimInput, decode, encode,
+    heartbeat_silence,
 };
+pub use publisher::Publisher;

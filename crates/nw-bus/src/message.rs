@@ -2,6 +2,8 @@
 //! Bus message types (M4 spec section 6.1). Game messages travel as envelope bytes; the gateway
 //! does not read them.
 
+use std::time::Duration;
+
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -89,6 +91,12 @@ pub struct Heartbeat {
     pub started_at_ms: u64,
 }
 
+/// How long a process may stay silent before it counts as gone: `misses` heartbeat intervals. A
+/// huge setting saturates instead of overflowing.
+pub fn heartbeat_silence(interval: Duration, misses: u32) -> Duration {
+    interval.saturating_mul(misses)
+}
+
 /// The `postcard` bytes of a bus message.
 ///
 /// # Errors
@@ -113,6 +121,7 @@ mod tests {
 
     const CONNECTION: u64 = 7;
     const STARTED_AT_MS: u64 = 1_800_000_000_000;
+    const MISSES: u32 = 3;
 
     fn connection() -> ConnectionRef {
         ConnectionRef {
@@ -157,6 +166,13 @@ mod tests {
             id: connection().gateway,
             started_at_ms: STARTED_AT_MS,
         });
+    }
+
+    #[test]
+    fn the_silence_limit_is_the_missed_intervals_and_saturates() {
+        let second = Duration::from_secs(1);
+        assert_eq!(heartbeat_silence(second, MISSES), second * MISSES);
+        assert_eq!(heartbeat_silence(Duration::MAX, MISSES), Duration::MAX);
     }
 
     #[test]
