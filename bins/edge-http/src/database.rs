@@ -1,20 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! PostgreSQL pools of the global and the world databases.
 
-use std::str::FromStr;
-
-use nw_login::config::{DatabaseConfig, EdgeConfig};
+use nw_db::{DatabaseConfig, connect, connect_options};
+use nw_login::config::EdgeConfig;
 use nw_login::secrets::DatabasePasswords;
 use sqlx::PgPool;
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
-
-/// Connection options: the URL from the config file and the password from the environment.
-pub(crate) fn connect_options(
-    database: &DatabaseConfig,
-    password: &str,
-) -> Result<PgConnectOptions, sqlx::Error> {
-    Ok(PgConnectOptions::from_str(&database.url)?.password(password))
-}
+use sqlx::postgres::PgPoolOptions;
 
 /// Maintenance database that every PostgreSQL server has.
 const MAINTENANCE_DATABASE: &str = "postgres";
@@ -71,17 +62,6 @@ pub(crate) async fn ensure_database(
     Ok(())
 }
 
-/// A pool for one database.
-pub(crate) async fn connect(
-    database: &DatabaseConfig,
-    password: &str,
-) -> Result<PgPool, sqlx::Error> {
-    PgPoolOptions::new()
-        .max_connections(database.max_connections)
-        .connect_with(connect_options(database, password)?)
-        .await
-}
-
 /// The global pool and one pool per world, in config order.
 pub(crate) async fn connect_all(
     config: &EdgeConfig,
@@ -99,20 +79,7 @@ pub(crate) async fn connect_all(
 mod tests {
     use super::*;
 
-    const URL: &str = "postgres://nw@127.0.0.1:5432/nw_global";
     const MAX_CONNECTIONS: u32 = 5;
-
-    #[test]
-    fn password_comes_from_the_secret() {
-        let database = DatabaseConfig {
-            url: URL.to_owned(),
-            max_connections: MAX_CONNECTIONS,
-        };
-        let options = connect_options(&database, "s3cret").expect("options");
-        assert_eq!(options.get_username(), "nw");
-        assert_eq!(options.get_database(), Some("nw_global"));
-        assert_eq!(options.get_port(), 5432);
-    }
 
     #[tokio::test]
     async fn unsafe_database_name_is_refused_before_connecting() {
@@ -124,14 +91,5 @@ mod tests {
             ensure_database(&database, "pw").await,
             Err(EnsureDatabaseError::BadName(name)) if name == "World-1"
         ));
-    }
-
-    #[test]
-    fn bad_url_is_an_error() {
-        let database = DatabaseConfig {
-            url: "not a url".to_owned(),
-            max_connections: MAX_CONNECTIONS,
-        };
-        assert!(connect_options(&database, "pw").is_err());
     }
 }

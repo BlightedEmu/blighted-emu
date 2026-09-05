@@ -7,6 +7,7 @@
 
 mod account;
 mod character;
+mod connect;
 mod error;
 mod migrate;
 mod position;
@@ -22,6 +23,7 @@ pub use character::{
     character_by_id, character_name_taken, characters_for_account, insert_character,
     release_character_name, reserve_character_name,
 };
+pub use connect::{DatabaseConfig, connect, connect_options};
 pub use error::DbError;
 pub use migrate::{GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 pub use position::{SavedPosition, character_position, save_character_position};

@@ -6,6 +6,7 @@ use std::net::{SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
 use nw_common::config::{ConfigError, load_config};
+pub use nw_db::DatabaseConfig;
 use nw_protocol::launcher_api::{AuthMode, SESSION_PLACEHOLDER, is_forbidden_host};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -108,16 +109,6 @@ pub struct AuthConfig {
 pub struct DiscordConfig {
     /// Discord application (client) id.
     pub client_id: String,
-}
-
-/// A PostgreSQL connection. The password comes from the environment.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DatabaseConfig {
-    /// URL without a password.
-    pub url: String,
-    /// Pool size.
-    pub max_connections: u32,
 }
 
 /// `[valkey]`.
