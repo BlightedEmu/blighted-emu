@@ -27,6 +27,7 @@ use nw_sim_core::Position;
 use nw_testclient::pair::{PairSettings, distance, run_pair, session};
 use nw_testclient::udp::run_rep;
 use nw_testclient::walk::{WalkSettings, login_token, walk};
+use sim::config::load_sim_config;
 use sim::server::{LoopSettings, serve as serve_sim};
 use sim::world::WorldSettings;
 use tokio::net::TcpListener;
@@ -45,12 +46,7 @@ const SECOND_CHARACTER_NAME: &str = "Pairtwo";
 const ACCOUNT_PREFIX: &str = "e2e";
 const ACCOUNT_RANDOM_DIGITS: usize = 12;
 const LEVEL: &str = "newworld_vitaeeterna";
-/// The start position of `config/sim.toml`.
-const START: Position = Position {
-    x: 11132.5,
-    y: 7305.9,
-    z: 170.0,
-};
+const SIM_CONFIG: &str = "../../config/sim.toml";
 /// A saved position away from the start, inside the interest radius.
 const SAVED_OFFSET_M: f32 = 25.0;
 const INTEREST_RADIUS_M: f32 = 100.0;
@@ -165,6 +161,15 @@ async fn a_client_logs_in_and_registers_with_the_gateway_once() {
     .await;
 }
 
+/// The start position of the committed `config/sim.toml`.
+fn start() -> Position {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(SIM_CONFIG);
+    load_sim_config(&path)
+        .expect("sim config")
+        .start_position
+        .position()
+}
+
 /// Starts `sim` for `world_id` on the world database and waits for its first heartbeat.
 async fn start_sim(world_id: Uuid, sim_id: &BusId, world_pool: &PgPool) {
     let bus = test_bus().await;
@@ -177,7 +182,7 @@ async fn start_sim(world_id: Uuid, sim_id: &BusId, world_pool: &PgPool) {
         sim_id: sim_id.clone(),
         world_id,
         level: LEVEL.to_owned(),
-        start: START,
+        start: start(),
         world: WorldSettings {
             interest_radius_m: INTEREST_RADIUS_M,
         },
@@ -245,11 +250,12 @@ async fn two_clients_see_each_other_and_a_saved_position_returns() {
         let token = login_token(&admission.token);
         let character = String::from_utf8(token.character_id.clone()).expect("text");
         let character = Uuid::parse_str(&character).expect("character id");
+        let start = start();
         let saved = SavedPosition {
             level: LEVEL.to_owned(),
-            x: f64::from(START.x + SAVED_OFFSET_M),
-            y: f64::from(START.y),
-            z: f64::from(START.z),
+            x: f64::from(start.x + SAVED_OFFSET_M),
+            y: f64::from(start.y),
+            z: f64::from(start.z),
             yaw: NO_YAW,
         };
         save_character_position(world_pool, character, &saved)
@@ -259,7 +265,7 @@ async fn two_clients_see_each_other_and_a_saved_position_returns() {
             .await
             .expect("session");
         let expected =
-            WorldPosition::from_metres(START.x + SAVED_OFFSET_M, START.y, START.z).expect("finite");
+            WorldPosition::from_metres(start.x + SAVED_OFFSET_M, start.y, start.z).expect("finite");
         let own = back.view.own_position().expect("own position");
         assert!(distance(own, expected) <= TOLERANCE_M);
     })
