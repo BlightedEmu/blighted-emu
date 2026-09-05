@@ -639,7 +639,8 @@ impl Loop {
             y: f64::from(departure.position.y),
             z: f64::from(departure.position.z),
             yaw: NO_YAW,
-            saved_at_ms: unix_ms(),
+            // The Unix time of the last good move, so a stale copy loses (M5 spec section 7.5).
+            saved_at_ms: self.started_at_ms.saturating_add(departure.moved_at_ms),
         };
         if let Some(position) = self.queue.want(departure.character, position) {
             self.spawn_save(departure.character, position);

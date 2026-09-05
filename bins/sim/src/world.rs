@@ -100,6 +100,8 @@ pub struct Departure {
     pub character: Uuid,
     /// The last good position.
     pub position: Position,
+    /// Server time of the last good move: a save of an older move never overwrites a newer one.
+    pub moved_at_ms: u64,
 }
 
 /// A handoff that a tick started: the player is frozen until [`SimWorld::handoff_done`].
@@ -465,11 +467,7 @@ impl SimWorld {
         let mut query = self.world.query::<(&Player, &Body)>();
         query
             .iter(&self.world)
-            .map(|(player, body)| Departure {
-                connection: player.connection.clone(),
-                character: player.character,
-                position: body.motion.position(),
-            })
+            .map(|(player, body)| departure_of(player, body))
             .collect()
     }
 
@@ -688,11 +686,16 @@ impl SimWorld {
     fn departure(&self, entity: Entity) -> Option<Departure> {
         let player = self.world.get::<Player>(entity)?;
         let body = self.world.get::<Body>(entity)?;
-        Some(Departure {
-            connection: player.connection.clone(),
-            character: player.character,
-            position: body.motion.position(),
-        })
+        Some(departure_of(player, body))
+    }
+}
+
+fn departure_of(player: &Player, body: &Body) -> Departure {
+    Departure {
+        connection: player.connection.clone(),
+        character: player.character,
+        position: body.motion.position(),
+        moved_at_ms: body.motion.moved_ms(),
     }
 }
 
@@ -933,6 +936,21 @@ mod tests {
     }
 
     #[test]
+    fn a_departure_carries_the_time_of_the_last_good_move() {
+        let mut world = world();
+        let a = connection(1);
+        join(&mut world, 1, 0.0);
+        assert_eq!(world.positions()[0].moved_at_ms, NOW);
+        world
+            .move_to(&a, at(SPEED_MPS), NOW + ONE_SECOND_MS)
+            .expect("move");
+        let refused = world.move_to(&a, at(SPEED_MPS * 10.0), NOW + ONE_SECOND_MS + 1);
+        assert!(refused.is_err());
+        let departure = world.leave(&a).expect("left");
+        assert_eq!(departure.moved_at_ms, NOW + ONE_SECOND_MS);
+    }
+
+    #[test]
     fn an_admit_uses_the_given_entity_number() {
         let mut world = world();
         let login = world
@@ -1008,6 +1026,7 @@ mod tests {
         assert_eq!(departure.connection, b);
         assert_eq!(departure.character, admit.character);
         assert_eq!(departure.position, at(10.0));
+        assert_eq!(departure.moved_at_ms, NOW);
         let outgoing = tick(&mut world, NOW).messages;
         assert_eq!(seen_by(&outgoing, &a), vec![1]);
         assert_eq!(world.leave(&b), None);
@@ -1171,6 +1190,11 @@ mod tests {
         let mut new = world_of("sim-b", settings(MANY, MAX_PLAYERS));
         new.set_table(&table(&["sim-a", "sim-b"])).expect("table");
         new.take(&offer, NOW).expect("take");
+        assert_eq!(
+            new.positions()[0].moved_at_ms,
+            NOW - offer.move_age_ms,
+            "the move time crosses as an age"
+        );
         let output = tick(&mut new, NOW);
         let bundle = bundle_of(&output.messages, &mover).expect("bundle");
         assert_eq!(bundle.leading, Some(BUNDLES_BEFORE));

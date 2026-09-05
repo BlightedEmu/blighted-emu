@@ -231,6 +231,11 @@ impl Motion {
         self.position
     }
 
+    /// Server time of the last good move (or of the start).
+    pub const fn moved_ms(&self) -> u64 {
+        self.time_ms
+    }
+
     /// The state at server time `now_ms`, for another `sim`.
     pub const fn export(&self, now_ms: u64) -> MotionState {
         MotionState {
