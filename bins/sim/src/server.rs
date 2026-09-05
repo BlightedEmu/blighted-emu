@@ -1,31 +1,42 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The loop of `sim` (M4 spec sections 3.1, 6, 7.1, 7.5, 11): bus joins and inputs, the 30 Hz
-//! tick, position saves, and heartbeats. One task owns the world; database work runs in its own
-//! tasks and sends the result back, so a slow database never stops the tick.
+//! tick, position saves, and heartbeats. One task owns the world. Database work runs in its own
+//! tasks and sends the result back, and bus messages go out through queues, so neither a slow
+//! database nor a lost NATS connection stops the tick.
 
-use std::collections::HashMap;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use nw_bus::{Bus, BusError, BusId, GatewayOutput, Heartbeat, Incoming, Join, JoinReply, SimInput};
+use nw_bus::{
+    Bus, BusError, BusId, GatewayOutput, Heartbeat, Incoming, Join, JoinReply, Publisher, SimInput,
+};
 use nw_common::time::unix_ms;
 use nw_db::{PgPool, SavedPosition, character_by_id, character_position, save_character_position};
 use nw_sim_core::{Position, TickClock};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use uuid::Uuid;
 
+use crate::gateways::GatewayTracker;
 use crate::login::WorldIds;
+use crate::saves::SaveQueue;
 use crate::world::{Departure, Outgoing, SimWorld, WorldSettings};
 
 /// Time between checks of the tick clock.
 pub const POLL: Duration = Duration::from_millis(5);
 /// Unix milliseconds of 2000-01-01, the epoch of the server clock in time messages.
 pub const SERVER_EPOCH_UNIX_MS: u64 = 946_684_800_000;
-/// Results of database work that may wait for the loop.
+/// Results of database loads that may wait for the loop.
 const RESULT_QUEUE: usize = 1024;
+/// Gateway messages that may wait for NATS; more are dropped and counted.
+pub const OUTPUT_QUEUE: usize = 4096;
+/// Heartbeats that may wait for NATS.
+const HEARTBEAT_QUEUE: usize = 16;
+/// Longest wait at shutdown for the last saves.
+pub const SHUTDOWN_SAVE_WAIT: Duration = Duration::from_secs(10);
 /// Metric: players in the world.
 pub const METRIC_PLAYERS: &str = "sim_players";
-/// Metric: ticks that started late.
+/// Metric: ticks that were due but not run on time.
 pub const METRIC_LATE_TICKS: &str = "sim_late_ticks_total";
 /// Metric: joins by `result`.
 pub const METRIC_JOINS: &str = "sim_joins_total";
@@ -33,6 +44,8 @@ pub const METRIC_JOINS: &str = "sim_joins_total";
 pub const METRIC_FAILED_SAVES: &str = "sim_failed_saves_total";
 /// Metric: client messages that `sim` does not read yet.
 pub const METRIC_IGNORED_MESSAGES: &str = "sim_ignored_client_messages_total";
+/// Metric: gateway messages dropped because NATS is behind.
+pub const METRIC_DROPPED_OUTPUTS: &str = "sim_dropped_outputs_total";
 const RESULT_LABEL: &str = "result";
 const JOINED: &str = "joined";
 const REFUSED: &str = "refused";
@@ -71,29 +84,26 @@ pub enum ServeError {
     Random(#[from] getrandom::Error),
 }
 
-struct GatewayState {
-    started_at_ms: u64,
-    last_seen: Instant,
-}
-
 type JoinResult = (Incoming<Join>, Result<Position, String>);
-type SaveResult = (Uuid, SavedPosition, bool);
+type SaveResult = (Uuid, bool);
 
 struct Loop {
     settings: LoopSettings,
     bus: Bus,
+    outputs: Publisher<GatewayOutput>,
+    beats: Publisher<Heartbeat>,
     db: PgPool,
     world: SimWorld,
-    gateways: HashMap<BusId, GatewayState>,
-    unsaved: HashMap<Uuid, SavedPosition>,
+    gateways: GatewayTracker,
+    queue: SaveQueue,
+    saves: JoinSet<SaveResult>,
     joins: mpsc::Sender<JoinResult>,
-    saves: mpsc::Sender<SaveResult>,
     started: Instant,
     started_at_ms: u64,
 }
 
 /// Serves joins, inputs, ticks, saves and heartbeats until `shutdown` finishes; then saves every
-/// player once more.
+/// player once more and waits at most [`SHUTDOWN_SAVE_WAIT`] for the saves.
 ///
 /// # Errors
 ///
@@ -117,16 +127,17 @@ pub async fn serve(
     bus.flush().await?;
     let started_at_ms = unix_ms();
     let (join_results, mut joined) = mpsc::channel(RESULT_QUEUE);
-    let (save_results, mut saved) = mpsc::channel(RESULT_QUEUE);
     let mut state = Loop {
         world: SimWorld::new(settings.world, WorldIds::random(started_at_ms)?),
+        gateways: GatewayTracker::new(settings.heartbeat_interval, settings.heartbeat_misses),
+        outputs: Publisher::start(bus.clone(), OUTPUT_QUEUE),
+        beats: Publisher::start(bus.clone(), HEARTBEAT_QUEUE),
         settings,
         bus,
         db,
-        gateways: HashMap::new(),
-        unsaved: HashMap::new(),
+        queue: SaveQueue::default(),
+        saves: JoinSet::new(),
         joins: join_results,
-        saves: save_results,
         started: Instant::now(),
         started_at_ms,
     };
@@ -148,16 +159,16 @@ pub async fn serve(
                 Err(error) => tracing::warn!(%error, "bad input message"),
             },
             Some(beat) = beats.next() => match beat {
-                Ok(beat) => state.gateway_beat(beat.message),
+                Ok(beat) => state.gateway_beat(&beat.message),
                 Err(error) => tracing::warn!(%error, "bad heartbeat"),
             },
-            Some((character, position, ok)) = saved.recv() => state.saved(character, position, ok),
-            _ = poll.tick() => state.tick(&mut clock).await,
+            Some(saved) = state.saves.join_next() => state.saved(saved),
+            _ = poll.tick() => state.tick(&mut clock),
             _ = save_timer.tick() => state.save_all(),
-            _ = beat_timer.tick() => state.heartbeat().await,
+            _ = beat_timer.tick() => state.heartbeat(),
         }
     }
-    state.save_all();
+    state.finish().await;
     Ok(())
 }
 
@@ -179,14 +190,22 @@ impl Loop {
         });
     }
 
+    /// Adds the loaded character. A position that is still waiting to be saved is newer than the
+    /// database, so it wins.
     async fn complete_join(&mut self, join: Incoming<Join>, result: Result<Position, String>) {
         let message = &join.message;
-        let joined = result.and_then(|position| {
+        let unsaved = self.queue.latest(message.character).map(|saved| Position {
+            // f64 to f32: world positions are below 2^24 metres.
+            x: saved.x as f32,
+            y: saved.y as f32,
+            z: saved.z as f32,
+        });
+        let joined = result.and_then(|loaded| {
             self.world
                 .join(
                     message.connection.clone(),
                     message.character,
-                    position,
+                    unsaved.unwrap_or(loaded),
                     self.now_ms(),
                     server_time(),
                 )
@@ -196,7 +215,9 @@ impl Loop {
             Ok(login) => {
                 metrics::counter!(METRIC_JOINS, RESULT_LABEL => JOINED).increment(1);
                 tracing::info!(character = %message.character, "joined");
-                self.send(login).await;
+                self.gateways
+                    .joined(&message.connection.gateway, Instant::now());
+                self.send(login);
                 JoinReply::Joined
             }
             Err(reason) => {
@@ -218,106 +239,103 @@ impl Loop {
             }
             SimInput::Left { connection } => {
                 if let Some(departure) = self.world.leave(&connection) {
-                    self.save(departure);
+                    self.save(&departure);
                 }
                 metrics::gauge!(METRIC_PLAYERS).set(self.world.players() as f64);
             }
         }
     }
 
-    fn gateway_beat(&mut self, beat: Heartbeat) {
-        let restarted = self
-            .gateways
-            .get(&beat.id)
-            .is_some_and(|known| known.started_at_ms != beat.started_at_ms);
-        if restarted {
+    fn gateway_beat(&mut self, beat: &Heartbeat) {
+        if self.gateways.beat(beat, Instant::now()) {
+            tracing::warn!(gateway = %beat.id, "gateway restarted; its players leave");
             self.drop_gateway(&beat.id);
         }
-        self.gateways.insert(
-            beat.id,
-            GatewayState {
-                started_at_ms: beat.started_at_ms,
-                last_seen: Instant::now(),
-            },
-        );
     }
 
+    /// Saves and removes every player of `gateway`, and tells the gateway to close them.
     fn drop_gateway(&mut self, gateway: &BusId) {
         for departure in self.world.leave_gateway(gateway) {
-            self.save(departure);
+            self.save(&departure);
+            self.publish(
+                gateway,
+                GatewayOutput::Close {
+                    connection: departure.connection.connection,
+                },
+            );
         }
         metrics::gauge!(METRIC_PLAYERS).set(self.world.players() as f64);
     }
 
-    async fn tick(&mut self, clock: &mut TickClock) {
+    /// Runs the world once when ticks are due. The world changes only on joins, inputs and
+    /// departures, so a late call sends the current state once instead of every missed tick.
+    fn tick(&mut self, clock: &mut TickClock) {
         let now_ms = self.now_ms();
         let now_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
         let due = clock.due(now_us);
-        if due.count > 1 {
-            metrics::counter!(METRIC_LATE_TICKS).increment(due.count - 1);
+        if due.count == 0 {
+            return;
         }
-        for _ in 0..due.count {
-            match self.world.tick(now_ms, server_time()) {
-                Ok(outgoing) => {
-                    for message in outgoing {
-                        self.send(message).await;
-                    }
+        let missed = due.count - 1;
+        if missed > 0 {
+            metrics::counter!(METRIC_LATE_TICKS).increment(missed);
+            tracing::warn!(missed, "ticks ran late");
+        }
+        match self.world.tick(now_ms, server_time()) {
+            Ok(outgoing) => {
+                for message in outgoing {
+                    self.send(message);
                 }
-                Err(error) => tracing::error!(%error, "tick failed"),
             }
+            Err(error) => tracing::error!(%error, "tick failed"),
         }
     }
 
-    async fn heartbeat(&mut self) {
+    fn heartbeat(&mut self) {
         let beat = Heartbeat {
             id: self.settings.sim_id.clone(),
             started_at_ms: self.started_at_ms,
         };
         let subject = nw_bus::subject::sim_heartbeat(self.settings.world_id, &self.settings.sim_id);
-        if let Err(error) = self.bus.publish(subject, &beat).await {
-            tracing::warn!(%error, "heartbeat failed");
+        if !self.beats.send(subject, beat) {
+            tracing::warn!("heartbeat dropped; NATS is behind");
         }
-        let limit = self.settings.heartbeat_interval * self.settings.heartbeat_misses;
-        let silent: Vec<BusId> = self
-            .gateways
-            .iter()
-            .filter(|(_, state)| state.last_seen.elapsed() > limit)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for gateway in silent {
+        for gateway in self.gateways.silent(Instant::now()) {
             tracing::warn!(%gateway, "gateway silent; its players leave");
-            self.gateways.remove(&gateway);
             self.drop_gateway(&gateway);
         }
     }
 
-    async fn send(&self, outgoing: Outgoing) {
-        let subject =
-            nw_bus::subject::gateway_output(self.settings.world_id, &outgoing.connection.gateway);
-        let message = GatewayOutput::ServerMessages {
-            connection: outgoing.connection.connection,
-            channel: outgoing.channel,
-            reliable: outgoing.reliable,
-            envelopes: outgoing.envelopes,
-        };
-        if let Err(error) = self.bus.publish(subject, &message).await {
-            tracing::warn!(%error, "output publish failed");
+    fn send(&self, outgoing: Outgoing) {
+        self.publish(
+            &outgoing.connection.gateway,
+            GatewayOutput::ServerMessages {
+                connection: outgoing.connection.connection,
+                channel: outgoing.channel,
+                reliable: outgoing.reliable,
+                envelopes: outgoing.envelopes,
+            },
+        );
+    }
+
+    fn publish(&self, gateway: &BusId, message: GatewayOutput) {
+        let subject = nw_bus::subject::gateway_output(self.settings.world_id, gateway);
+        if !self.outputs.send(subject, message) {
+            metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
         }
     }
 
-    /// Saves every player and every save that failed before.
+    /// Saves every player and retries every save that failed before.
     fn save_all(&mut self) {
-        let players: Vec<Departure> = self.world.positions();
-        for departure in players {
-            self.save(departure);
+        for departure in self.world.positions() {
+            self.save(&departure);
         }
-        let retries: Vec<(Uuid, SavedPosition)> = self.unsaved.drain().collect();
-        for (character, position) in retries {
+        for (character, position) in self.queue.retry() {
             self.spawn_save(character, position);
         }
     }
 
-    fn save(&self, departure: Departure) {
+    fn save(&mut self, departure: &Departure) {
         let position = SavedPosition {
             level: self.settings.level.clone(),
             x: f64::from(departure.position.x),
@@ -325,13 +343,14 @@ impl Loop {
             z: f64::from(departure.position.z),
             yaw: NO_YAW,
         };
-        self.spawn_save(departure.character, position);
+        if let Some(position) = self.queue.want(departure.character, position) {
+            self.spawn_save(departure.character, position);
+        }
     }
 
-    fn spawn_save(&self, character: Uuid, position: SavedPosition) {
+    fn spawn_save(&mut self, character: Uuid, position: SavedPosition) {
         let db = self.db.clone();
-        let results = self.saves.clone();
-        tokio::spawn(async move {
+        self.saves.spawn(async move {
             let ok = match save_character_position(&db, character, &position).await {
                 Ok(()) => true,
                 Err(error) => {
@@ -339,16 +358,41 @@ impl Loop {
                     false
                 }
             };
-            // The loop may have stopped; then nobody retries.
-            let _ = results.send((character, position, ok)).await;
+            (character, ok)
         });
     }
 
-    /// Keeps a failed save for the next save round.
-    fn saved(&mut self, character: Uuid, position: SavedPosition, ok: bool) {
+    /// A save ended; the next wanted position of that character starts now.
+    fn saved(&mut self, result: Result<SaveResult, tokio::task::JoinError>) {
+        let (character, ok) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::error!(%error, "save task failed");
+                return;
+            }
+        };
         if !ok {
             metrics::counter!(METRIC_FAILED_SAVES).increment(1);
-            self.unsaved.insert(character, position);
+        }
+        if let Some(next) = self.queue.finished(character, ok) {
+            self.spawn_save(character, next);
+        }
+    }
+
+    /// Saves every player once more and waits at most [`SHUTDOWN_SAVE_WAIT`] for every save.
+    async fn finish(&mut self) {
+        self.save_all();
+        let drained = tokio::time::timeout(SHUTDOWN_SAVE_WAIT, async {
+            while let Some(saved) = self.saves.join_next().await {
+                self.saved(saved);
+            }
+        })
+        .await;
+        if drained.is_err() || self.queue.waiting() > 0 {
+            tracing::error!(
+                waiting = self.queue.waiting(),
+                "positions not saved at shutdown"
+            );
         }
     }
 }
@@ -389,38 +433,44 @@ fn server_time() -> u64 {
 #[cfg(all(test, feature = "infra"))]
 mod tests {
     use nw_bus::test_support::test_bus;
-    use nw_bus::{ConnectionRef, GatewayOutput};
+    use nw_bus::{ConnectionRef, GatewayOutput, Subscription};
     use nw_db::test_db::with_test_schema;
     use nw_db::{NewCharacter, WORLD_MIGRATOR, insert_character};
     use nw_messages::{BundlePayload, LOGIN_MESSAGE_TYPES, ServerMessage};
     use nw_reflect::Envelope;
+    use tokio::sync::oneshot;
+    use tokio::task::JoinHandle;
 
     use super::*;
+    use crate::config::tests::committed;
     use crate::world::{MESSAGE_CHANNEL, REPLICATION_CHANNEL};
 
     const WAIT: Duration = Duration::from_secs(5);
     const LEVEL: &str = "newworld_vitaeeterna";
     const CONNECTION: u64 = 9;
-    const START: Position = Position {
-        x: 11132.5,
-        y: 7305.9,
-        z: 170.0,
-    };
     const RADIUS: f32 = 100.0;
     const SAVE_INTERVAL: Duration = Duration::from_secs(10);
     const HEARTBEAT: Duration = Duration::from_secs(1);
     const MISSES: u32 = 3;
+    /// A gateway that never beats is silent after 0.2 s.
+    const SHORT_HEARTBEAT: Duration = Duration::from_millis(100);
+    const SHORT_MISSES: u32 = 2;
     /// The sim subscribes at start; a join may come before that.
     const TRIES: usize = 50;
     const PAUSE: Duration = Duration::from_millis(100);
     const SAVE_TOLERANCE_M: f64 = 0.01;
+    const CHARACTER_NAME: &str = "Ada";
+
+    fn start() -> Position {
+        committed().start_position.position()
+    }
 
     fn settings(world_id: Uuid) -> LoopSettings {
         LoopSettings {
             sim_id: BusId::try_from(format!("sim-{}", Uuid::new_v4().simple())).expect("id"),
             world_id,
             level: LEVEL.to_owned(),
-            start: START,
+            start: start(),
             world: WorldSettings {
                 interest_radius_m: RADIUS,
             },
@@ -430,55 +480,115 @@ mod tests {
         }
     }
 
-    async fn next_output(
-        outputs: &mut nw_bus::Subscription<GatewayOutput>,
-    ) -> (u8, bool, Vec<Vec<u8>>) {
-        let incoming = tokio::time::timeout(WAIT, outputs.next())
+    /// A character of a new account: (account, character).
+    async fn character(db: &PgPool) -> (Uuid, Uuid) {
+        let account = Uuid::new_v4();
+        let character = insert_character(
+            db,
+            &NewCharacter {
+                id: Uuid::new_v4(),
+                account_id: account,
+                name: CHARACTER_NAME.to_owned(),
+                appearance: serde_json::json!({}),
+            },
+        )
+        .await
+        .expect("character");
+        (account, character.id)
+    }
+
+    /// A running sim and the sender that stops it.
+    struct Running {
+        bus: Bus,
+        settings: LoopSettings,
+        outputs: Subscription<GatewayOutput>,
+        stop: oneshot::Sender<()>,
+        server: JoinHandle<Result<(), ServeError>>,
+    }
+
+    async fn run(settings: LoopSettings, gateway: &BusId, db: &PgPool) -> Running {
+        let bus = test_bus().await;
+        let outputs = bus
+            .subscribe::<GatewayOutput>(nw_bus::subject::gateway_output(settings.world_id, gateway))
             .await
-            .expect("output in time")
-            .expect("open")
-            .expect("decode");
-        match incoming.message {
-            GatewayOutput::ServerMessages {
-                channel,
-                reliable,
-                envelopes,
-                ..
-            } => (channel, reliable, envelopes),
-            GatewayOutput::Close { .. } => panic!("unexpected close"),
+            .expect("outputs");
+        bus.flush().await.expect("flush");
+        let (stop, stopped) = oneshot::channel::<()>();
+        let server = tokio::spawn(serve(settings.clone(), bus.clone(), db.clone(), async {
+            let _ = stopped.await;
+        }));
+        Running {
+            bus,
+            settings,
+            outputs,
+            stop,
+            server,
         }
+    }
+
+    impl Running {
+        /// Sends `join` until the sim answers.
+        async fn join(&self, join: &Join) -> JoinReply {
+            let subject = nw_bus::subject::sim_join(self.settings.world_id, &self.settings.sim_id);
+            let mut reply: Result<JoinReply, BusError> = Err(BusError::NoReplySubject);
+            for _ in 0..TRIES {
+                reply = self.bus.request(subject.clone(), join, WAIT).await;
+                if reply.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(PAUSE).await;
+            }
+            reply.expect("join reply")
+        }
+
+        async fn next_output(&mut self) -> GatewayOutput {
+            tokio::time::timeout(WAIT, self.outputs.next())
+                .await
+                .expect("output in time")
+                .expect("open")
+                .expect("decode")
+                .message
+        }
+
+        async fn next_messages(&mut self) -> (u8, bool, Vec<Vec<u8>>) {
+            match self.next_output().await {
+                GatewayOutput::ServerMessages {
+                    channel,
+                    reliable,
+                    envelopes,
+                    ..
+                } => (channel, reliable, envelopes),
+                GatewayOutput::Close { .. } => panic!("unexpected close"),
+            }
+        }
+
+        async fn stop(self) {
+            let _ = self.stop.send(());
+            self.server.await.expect("join").expect("serve");
+        }
+    }
+
+    fn gateway() -> BusId {
+        BusId::try_from(format!("gw-{}", Uuid::new_v4().simple())).expect("id")
+    }
+
+    async fn saved_position(db: &PgPool, character: Uuid) -> SavedPosition {
+        for _ in 0..TRIES {
+            if let Some(saved) = character_position(db, character).await.expect("load") {
+                return saved;
+            }
+            tokio::time::sleep(PAUSE).await;
+        }
+        panic!("no saved position");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_join_gets_login_messages_bundles_and_a_saved_position() {
         with_test_schema(async |db| {
             WORLD_MIGRATOR.run(db).await.expect("migrate");
-            let account = Uuid::new_v4();
-            let character = insert_character(
-                db,
-                &NewCharacter {
-                    id: Uuid::new_v4(),
-                    account_id: account,
-                    name: "Ada".to_owned(),
-                    appearance: serde_json::json!({}),
-                },
-            )
-            .await
-            .expect("character");
-            let bus = test_bus().await;
-            let world_id = Uuid::new_v4();
-            let settings = settings(world_id);
-            let sim_id = settings.sim_id.clone();
-            let gateway = BusId::try_from("gw-test".to_owned()).expect("id");
-            let mut outputs = bus
-                .subscribe::<GatewayOutput>(nw_bus::subject::gateway_output(world_id, &gateway))
-                .await
-                .expect("outputs");
-            bus.flush().await.expect("flush");
-            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-            let server = tokio::spawn(serve(settings, bus.clone(), db.clone(), async {
-                let _ = stopped.await;
-            }));
+            let (account, character) = character(db).await;
+            let gateway = gateway();
+            let mut sim = run(settings(Uuid::new_v4()), &gateway, db).await;
             let connection = ConnectionRef {
                 gateway,
                 connection: CONNECTION,
@@ -486,24 +596,15 @@ mod tests {
             let join = |account| Join {
                 connection: connection.clone(),
                 account,
-                character: character.id,
+                character,
             };
-            let subject = nw_bus::subject::sim_join(world_id, &sim_id);
-            let mut reply: Result<JoinReply, BusError> = Err(BusError::NoReplySubject);
-            for _ in 0..TRIES {
-                reply = bus.request(subject.clone(), &join(account), WAIT).await;
-                if reply.is_ok() {
-                    break;
-                }
-                tokio::time::sleep(PAUSE).await;
-            }
-            assert_eq!(reply.expect("joined"), JoinReply::Joined);
-            let (channel, reliable, login) = next_output(&mut outputs).await;
+            assert_eq!(sim.join(&join(account)).await, JoinReply::Joined);
+            let (channel, reliable, login) = sim.next_messages().await;
             assert_eq!(
                 (channel, reliable, login.len()),
                 (MESSAGE_CHANNEL, true, LOGIN_MESSAGE_TYPES.len())
             );
-            let (channel, reliable, bundle) = next_output(&mut outputs).await;
+            let (channel, reliable, bundle) = sim.next_messages().await;
             assert_eq!((channel, reliable), (REPLICATION_CHANNEL, false));
             let envelope = Envelope::decode(&bundle[0]).expect("envelope");
             let Some(Ok(ServerMessage::Bundle(bundle))) = ServerMessage::from_envelope(&envelope)
@@ -512,42 +613,91 @@ mod tests {
             };
             let payload = BundlePayload::decode(&bundle.payload).expect("payload");
             assert_eq!(payload.groups[0].members.len(), 1);
-            let other_account: JoinReply = bus
-                .request(
-                    subject.clone(),
-                    &Join {
-                        connection: ConnectionRef {
-                            gateway: connection.gateway.clone(),
-                            connection: CONNECTION + 1,
-                        },
-                        ..join(Uuid::new_v4())
+            let other_account = Join {
+                connection: ConnectionRef {
+                    gateway: connection.gateway.clone(),
+                    connection: CONNECTION + 1,
+                },
+                ..join(Uuid::new_v4())
+            };
+            assert!(matches!(
+                sim.join(&other_account).await,
+                JoinReply::Refused { .. }
+            ));
+            sim.bus
+                .publish(
+                    nw_bus::subject::sim_input(sim.settings.world_id, &sim.settings.sim_id),
+                    &SimInput::Left {
+                        connection: connection.clone(),
                     },
-                    WAIT,
                 )
                 .await
-                .expect("reply");
-            assert!(matches!(other_account, JoinReply::Refused { .. }));
-            bus.publish(
-                nw_bus::subject::sim_input(world_id, &sim_id),
-                &SimInput::Left {
-                    connection: connection.clone(),
-                },
-            )
-            .await
-            .expect("left");
-            let mut saved = None;
-            for _ in 0..TRIES {
-                saved = character_position(db, character.id).await.expect("load");
-                if saved.is_some() {
-                    break;
-                }
-                tokio::time::sleep(PAUSE).await;
-            }
-            let saved = saved.expect("saved position");
+                .expect("left");
+            let saved = saved_position(db, character).await;
             assert_eq!(saved.level, LEVEL);
-            assert!((saved.x - f64::from(START.x)).abs() < SAVE_TOLERANCE_M);
-            let _ = stop.send(());
-            server.await.expect("join").expect("serve");
+            assert!((saved.x - f64::from(start().x)).abs() < SAVE_TOLERANCE_M);
+            sim.stop().await;
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_last_saves_finish_before_serve_returns() {
+        with_test_schema(async |db| {
+            WORLD_MIGRATOR.run(db).await.expect("migrate");
+            let (account, character) = character(db).await;
+            let gateway = gateway();
+            let sim = run(settings(Uuid::new_v4()), &gateway, db).await;
+            let join = Join {
+                connection: ConnectionRef {
+                    gateway,
+                    connection: CONNECTION,
+                },
+                account,
+                character,
+            };
+            assert_eq!(sim.join(&join).await, JoinReply::Joined);
+            sim.stop().await;
+            let saved = character_position(db, character).await.expect("load");
+            assert!(saved.is_some(), "the shutdown save is missing");
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_silent_gateway_loses_its_players_and_hears_close() {
+        with_test_schema(async |db| {
+            WORLD_MIGRATOR.run(db).await.expect("migrate");
+            let (account, character) = character(db).await;
+            let gateway = gateway();
+            let settings = LoopSettings {
+                heartbeat_interval: SHORT_HEARTBEAT,
+                heartbeat_misses: SHORT_MISSES,
+                ..settings(Uuid::new_v4())
+            };
+            let mut sim = run(settings, &gateway, db).await;
+            let join = Join {
+                connection: ConnectionRef {
+                    gateway,
+                    connection: CONNECTION,
+                },
+                account,
+                character,
+            };
+            assert_eq!(sim.join(&join).await, JoinReply::Joined);
+            let close = async {
+                loop {
+                    if let GatewayOutput::Close { connection } = sim.next_output().await {
+                        return connection;
+                    }
+                }
+            };
+            let closed = tokio::time::timeout(WAIT, close)
+                .await
+                .expect("close in time");
+            assert_eq!(closed, CONNECTION);
+            saved_position(db, character).await;
+            sim.stop().await;
         })
         .await;
     }

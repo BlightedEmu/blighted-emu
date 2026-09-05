@@ -55,8 +55,10 @@ pub struct Outgoing {
 }
 
 /// A player who left, for the last save.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Departure {
+    /// The connection the player had.
+    pub connection: ConnectionRef,
     /// The character.
     pub character: Uuid,
     /// The last good position.
@@ -200,6 +202,7 @@ impl SimWorld {
         query
             .iter(&self.world)
             .map(|(player, body)| Departure {
+                connection: player.connection.clone(),
                 character: player.character,
                 position: body.position,
             })
@@ -217,6 +220,7 @@ impl SimWorld {
             .iter(&self.world)
             .map(|(player, body)| (player.number, body.position))
             .collect();
+        let positions: HashMap<u64, Position> = everyone.iter().copied().collect();
         let mut players = self.world.query::<(&mut Player, &Body)>();
         let mut outgoing = Vec::new();
         for (mut player, body) in players.iter_mut(&mut self.world) {
@@ -226,10 +230,14 @@ impl SimWorld {
                 .copied()
                 .filter(|(number, _)| *number != own);
             let seen = player.interest.update(body.position, others);
+            let mut numbers: Vec<u64> = seen.entered.into_iter().chain(seen.stayed).collect();
+            numbers.sort_unstable();
             let mut visible: Vec<(u64, Position)> = vec![(own, body.position)];
-            visible.extend(everyone.iter().copied().filter(|(number, _)| {
-                seen.entered.contains(number) || seen.stayed.contains(number)
-            }));
+            visible.extend(
+                numbers
+                    .into_iter()
+                    .filter_map(|number| Some((number, *positions.get(&number)?))),
+            );
             for members in visible.chunks(MAX_BUNDLE_MEMBERS) {
                 let bundle = bundle(player.bundles_sent, members)?;
                 player.bundles_sent += 1;
@@ -267,6 +275,7 @@ impl SimWorld {
         let player = self.world.get::<Player>(entity)?;
         let body = self.world.get::<Body>(entity)?;
         Some(Departure {
+            connection: player.connection.clone(),
             character: player.character,
             position: body.position,
         })
@@ -291,7 +300,7 @@ fn bundle(sequence: u64, visible: &[(u64, Position)]) -> Result<Vec<u8>, Message
 #[cfg(test)]
 mod tests {
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
-    use nw_messages::BundlePayload;
+    use nw_messages::{BundlePayload, LOGIN_MESSAGE_TYPES};
     use nw_reflect::{Envelope, encode_server_messages};
 
     use super::*;
@@ -354,7 +363,7 @@ mod tests {
             .expect("join");
         assert_eq!(login.channel, MESSAGE_CHANNEL);
         assert!(login.reliable);
-        assert_eq!(login.envelopes.len(), 7);
+        assert_eq!(login.envelopes.len(), LOGIN_MESSAGE_TYPES.len());
         assert_eq!(world.players(), 1);
     }
 
@@ -394,6 +403,7 @@ mod tests {
             .join(b.clone(), character, at(10.0), NOW, SERVER_TIME)
             .expect("b");
         let departure = world.leave(&b).expect("left");
+        assert_eq!(departure.connection, b);
         assert_eq!(departure.character, character);
         assert_eq!(departure.position, at(10.0));
         let outgoing = world.tick(NOW, SERVER_TIME).expect("tick");
@@ -473,7 +483,13 @@ mod tests {
             .join(connection(2), Uuid::new_v4(), at(0.0), NOW, SERVER_TIME)
             .expect("two");
         let gateway = BusId::try_from("gw-1".to_owned()).expect("id");
-        assert_eq!(world.leave_gateway(&gateway).len(), 2);
+        let mut gone: Vec<u64> = world
+            .leave_gateway(&gateway)
+            .into_iter()
+            .map(|departure| departure.connection.connection)
+            .collect();
+        gone.sort_unstable();
+        assert_eq!(gone, vec![1, 2]);
         assert_eq!(world.players(), 0);
         assert_eq!(world.positions(), Vec::new());
     }

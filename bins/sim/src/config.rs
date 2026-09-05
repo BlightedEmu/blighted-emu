@@ -167,7 +167,7 @@ impl SimConfig {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const COMMITTED_CONFIG: &str = "../../config/sim.toml";
@@ -189,7 +189,8 @@ mod tests {
         }
     }
 
-    fn committed() -> SimConfig {
+    /// The committed example configuration.
+    pub(crate) fn committed() -> SimConfig {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(COMMITTED_CONFIG);
         load_sim_config(&path).expect("committed config")
     }

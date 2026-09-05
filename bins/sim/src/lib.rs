@@ -3,7 +3,9 @@
 //! the login messages, see the players near them in replication bundles, and leave.
 
 pub mod config;
+pub mod gateways;
 pub mod login;
 pub mod run;
+pub mod saves;
 pub mod server;
 pub mod world;
