@@ -60,6 +60,12 @@ pub enum MessageError {
         /// The tag.
         tag: u8,
     },
+    /// A fixed field is present without its mask bit, or the other way round.
+    #[error("mask bit {bit} does not match its field")]
+    MaskMismatch {
+        /// The mask bit.
+        bit: u8,
+    },
     /// A replicated state class has no reader here, and its body has no length.
     #[error("no reader for replicated state class {class:?}")]
     UnknownMemberClass {

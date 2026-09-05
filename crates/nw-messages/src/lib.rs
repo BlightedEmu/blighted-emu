@@ -8,6 +8,7 @@
 
 pub mod bundle;
 pub mod client_add_entry;
+pub mod client_input;
 pub mod connected;
 pub mod day_phase;
 pub mod payload;
@@ -25,6 +26,10 @@ pub use bundle::{
     OBSERVED_BUNDLE_GROUP, REPLICATED_STATE_BUNDLE_TYPE_INDEX, ReplicatedStateBundle,
 };
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
+pub use client_input::{
+    Bit8, ClientInputMsg, HeadStep9, INPUT_Z_MAX, INPUT_Z_MIN, InputHead, InputPosition,
+    InputRecord, InputSlots, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+};
 pub use connected::{
     Block1415acc30, CALENDAR_CONNECTED_MSG_TYPE_INDEX, CalendarConnectedMsg, ConnectedBody,
     TIMING_CONFIGURATION_CONNECTED_MSG_TYPE_INDEX, TimingConfigurationConnectedMsg,

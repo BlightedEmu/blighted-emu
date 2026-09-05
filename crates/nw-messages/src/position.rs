@@ -47,20 +47,29 @@ impl WorldPosition {
         if !(x.is_finite() && y.is_finite() && z.is_finite()) {
             return None;
         }
-        let share = ((z - POSITION_Z_MIN) / (POSITION_Z_MAX - POSITION_Z_MIN)).clamp(0.0, 1.0);
         Some(Self {
             x,
             y,
-            // `share` is in [0, 1], so the product is in [0, u16::MAX].
-            z_raw: (share * f32::from(u16::MAX)).round() as u16,
+            z_raw: height_to_raw(z, POSITION_Z_MIN, POSITION_Z_MAX),
         })
     }
 
-    /// The height in metres: `raw / 65535 * (max - min) + min`.
+    /// The height in metres.
     pub fn z(&self) -> f32 {
-        f32::from(self.z_raw) / f32::from(u16::MAX) * (POSITION_Z_MAX - POSITION_Z_MIN)
-            + POSITION_Z_MIN
+        height_from_raw(self.z_raw, POSITION_Z_MIN, POSITION_Z_MAX)
     }
+}
+
+/// The raw `u16` of a finite height `z` in `[min, max]`: clamped, then rounded.
+pub(crate) fn height_to_raw(z: f32, min: f32, max: f32) -> u16 {
+    let share = ((z - min) / (max - min)).clamp(0.0, 1.0);
+    // `share` is in [0, 1], so the product is in [0, u16::MAX].
+    (share * f32::from(u16::MAX)).round() as u16
+}
+
+/// The height of a raw `u16` in `[min, max]`: `raw / 65535 * (max - min) + min`.
+pub(crate) fn height_from_raw(raw: u16, min: f32, max: f32) -> f32 {
+    f32::from(raw) / f32::from(u16::MAX) * (max - min) + min
 }
 
 /// One rotation component on the wire.
