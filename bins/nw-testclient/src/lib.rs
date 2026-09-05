@@ -5,4 +5,5 @@
 pub mod config;
 pub mod rep;
 pub mod udp;
+pub mod view;
 pub mod walk;

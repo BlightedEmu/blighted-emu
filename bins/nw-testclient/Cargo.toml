@@ -13,12 +13,16 @@ nw-carrier.workspace = true
 nw-common.workspace = true
 nw-dtls.workspace = true
 nw-login.workspace = true
+nw-messages.workspace = true
 nw-protocol.workspace = true
 nw-reflect.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+
+[dev-dependencies]
+nw-messages = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

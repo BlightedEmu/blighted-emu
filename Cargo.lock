@@ -3061,6 +3061,7 @@ dependencies = [
  "nw-common",
  "nw-dtls",
  "nw-login",
+ "nw-messages",
  "nw-protocol",
  "nw-reflect",
  "reqwest",
