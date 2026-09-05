@@ -21,10 +21,13 @@ ground_tolerance_m = 2.0
 max_height_above_ground_m = 64.0
 # Movement (M4 spec section 7.2 with sections 15 and 16). run_speed_mps is the datasheet
 # ServerValidatedCanRun speed. The limit is 3.25 x (1 + 1.2) = 7.15 m/s: above sprint (5.5 m/s)
-# with the 15 % road boost (6.3 m/s), the fastest steady speed in the captures without mounts.
+# with the 15 % road boost (6.3 m/s). Faster captured speeds have an Unknown cause (mounts,
+# speed effects); sim has none of them yet. Watch sim_moves_refused_total in live tests.
 run_speed_mps = 3.25
 speed_margin = 1.2
-burst_seconds = 1.0
+# Longer than the longest gap between captured movement messages (1.5 to 2.5 s), so a player
+# who moved on during a stall is not refused when its next message comes.
+burst_seconds = 3.0
 save_interval_ms = 10000
 heartbeat_interval_ms = 1000
 heartbeat_misses = 3

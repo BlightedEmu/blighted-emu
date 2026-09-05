@@ -173,6 +173,11 @@ impl SimConfig {
                 "edges must be finite, each minimum below its maximum",
             );
         }
+        let inside = (cell.min_x..=cell.max_x).contains(&start.x)
+            && (cell.min_y..=cell.max_y).contains(&start.y);
+        if !inside {
+            return invalid("start_position", "must be inside [cell]");
+        }
         Ok(())
     }
 
@@ -256,6 +261,8 @@ pub(crate) mod tests {
     const GROUND_HEIGHT: f32 = 168.0;
     /// Sprint (5.5 m/s) with the 15 % road boost (movement numbers note, Check section).
     const BOOSTED_SPRINT_MPS: f32 = 6.325;
+    /// The longest gap between two captured movement messages (movement numbers note, section 3).
+    const LONGEST_HONEST_GAP_S: f32 = 2.5;
 
     struct Flat;
 
@@ -306,6 +313,15 @@ pub(crate) mod tests {
             })
         ));
         let mut config = committed();
+        config.start_position.x = config.cell.max_x + 1.0;
+        assert!(matches!(
+            config.validate(),
+            Err(SimConfigError::Invalid {
+                key: "start_position",
+                ..
+            })
+        ));
+        let mut config = committed();
         config.cell.max_x = config.cell.min_x;
         assert!(matches!(
             config.validate(),
@@ -317,6 +333,7 @@ pub(crate) mod tests {
     fn the_speed_limit_is_above_boosted_sprint() {
         let limits = committed().move_limits().expect("limits");
         assert!(limits.max_speed_mps > BOOSTED_SPRINT_MPS);
+        assert!(committed().burst_seconds > LONGEST_HONEST_GAP_S);
         let cell = committed().cell_bounds();
         assert!(cell.min_x < cell.max_x && cell.min_y < cell.max_y);
     }
