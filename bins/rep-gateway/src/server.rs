@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::config::GatewayLimits;
+use crate::events::EventReceiver;
 use crate::peer::{Peer, PeerError, PeerEvent, PeerSettings};
 use crate::registration::{Refusal, TicketClaims, check_ticket};
 use crate::workers::{ConnectionCount, first_connection};
@@ -37,9 +38,9 @@ pub const HANDSHAKE_WINDOW: Duration = Duration::from_secs(1);
 /// IPv6 addresses are counted per /64: the first 4 of 8 segments.
 const IPV6_PREFIX_SEGMENTS: usize = 4;
 
-/// Metric: open connections.
+/// Metric: open connections of each `worker`.
 pub const METRIC_CONNECTIONS: &str = "rep_gateway_connections";
-/// Metric: DTLS handshakes in progress.
+/// Metric: DTLS handshakes in progress in each `worker`.
 pub const METRIC_HANDSHAKES: &str = "rep_gateway_handshakes";
 /// Metric: registrations by `result`.
 pub const METRIC_REGISTRATIONS: &str = "rep_gateway_registrations_total";
@@ -51,6 +52,8 @@ pub const METRIC_DATAGRAMS_IN: &str = "rep_gateway_datagrams_in_total";
 pub const METRIC_DATAGRAMS_OUT: &str = "rep_gateway_datagrams_out_total";
 const RESULT_LABEL: &str = "result";
 const REASON_LABEL: &str = "reason";
+/// Label of the per-worker gauges.
+const WORKER_LABEL: &str = "worker";
 const ACCEPTED: &str = "accepted";
 /// Drop reason: a first datagram that is not a ClientHello, or has a cookie for another address.
 const NO_COOKIE: &str = "no_cookie";
@@ -98,6 +101,8 @@ struct Loop<Q, W> {
     started: Instant,
     /// Id of the next connection; a ticket result goes only to the connection that asked.
     next_connection: u64,
+    /// The number of this worker.
+    worker: u16,
 }
 
 /// Serves `socket` and the world `events` of worker `worker` until `shutdown` finishes. An error that belongs to one
@@ -109,7 +114,7 @@ struct Loop<Q, W> {
 pub async fn serve<Q: QueueStore, W: World>(
     gateway: Gateway<Q, W>,
     socket: UdpSocket,
-    mut events: mpsc::Receiver<WorldEvent>,
+    mut events: EventReceiver,
     worker: u16,
     shutdown: impl Future<Output = ()>,
 ) -> std::io::Result<()> {
@@ -123,6 +128,7 @@ pub async fn serve<Q: QueueStore, W: World>(
         results,
         started: Instant::now(),
         next_connection: first_connection(worker),
+        worker,
     };
     let mut buffer = vec![0_u8; MAX_UDP_DATAGRAM];
     let mut tick = tokio::time::interval(TICK);
@@ -176,7 +182,6 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
             }
             Err(error) => self.drop_peer(address, &error),
         }
-        self.report();
     }
 
     /// The first datagram from an address without a peer. The DTLS cookie keeps spoofed
@@ -232,7 +237,6 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
         self.connections.insert(self.next_connection, address);
         self.next_connection += 1;
         self.flush(address, now).await;
-        self.report();
     }
 
     /// The limit that refuses a new peer at `address`, if any.
@@ -327,7 +331,7 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
         for address in addresses {
             self.flush(address, now).await;
         }
-        self.report();
+        report_peers(self.worker, &self.peers);
     }
 
     /// Sends what a peer has to send, and removes it when it is over.
@@ -411,16 +415,14 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
         }
         true
     }
+}
 
-    fn report(&self) {
-        let handshakes = self
-            .peers
-            .values()
-            .filter(|peer| !peer.is_established())
-            .count();
-        metrics::gauge!(METRIC_CONNECTIONS).set(self.peers.len() as f64);
-        metrics::gauge!(METRIC_HANDSHAKES).set(handshakes as f64);
-    }
+/// Sets the gauges of worker `worker` from its `peers`.
+fn report_peers(worker: u16, peers: &HashMap<SocketAddr, Peer>) {
+    let handshakes = peers.values().filter(|peer| !peer.is_established()).count();
+    let worker = worker.to_string();
+    metrics::gauge!(METRIC_CONNECTIONS, WORKER_LABEL => worker.clone()).set(peers.len() as f64);
+    metrics::gauge!(METRIC_HANDSHAKES, WORKER_LABEL => worker).set(handshakes as f64);
 }
 
 async fn send(socket: &UdpSocket, address: SocketAddr, datagram: &[u8]) {
@@ -521,7 +523,7 @@ pub(crate) mod tests {
         world_id: Uuid,
         limits: GatewayLimits,
         world: W,
-        events: mpsc::Receiver<WorldEvent>,
+        events: EventReceiver,
     ) -> SocketAddr {
         spawn_workers(store, world_id, limits, world, vec![events]).await
     }
@@ -532,7 +534,7 @@ pub(crate) mod tests {
         world_id: Uuid,
         limits: GatewayLimits,
         world: W,
-        events: Vec<mpsc::Receiver<WorldEvent>>,
+        events: Vec<EventReceiver>,
     ) -> SocketAddr {
         let gateway = Gateway {
             dtls: Arc::new(
@@ -570,7 +572,7 @@ pub(crate) mod tests {
     }
 
     /// A world that takes every character and sends no login messages.
-    pub(crate) fn accepting() -> (TestWorld, mpsc::Receiver<WorldEvent>) {
+    pub(crate) fn accepting() -> (TestWorld, EventReceiver) {
         TestWorld::new(false, Vec::new())
     }
 
@@ -578,7 +580,7 @@ pub(crate) mod tests {
     /// client registers with.
     async fn start_with(
         limits: GatewayLimits,
-        (world, events): (TestWorld, mpsc::Receiver<WorldEvent>),
+        (world, events): (TestWorld, EventReceiver),
     ) -> (SocketAddr, LoginToken) {
         let world_id = Uuid::new_v4();
         let record = EntryRecord {
@@ -757,21 +759,36 @@ pub(crate) mod tests {
         let run = tokio::spawn(run_rep(gateway, client(token), HOLD_FIRST, WAIT));
         let connection = first_join(&world).await;
         tokio::time::sleep(SETTLE).await;
-        world.emit(WorldEvent::Close { connection }).await;
+        world.emit(WorldEvent::Close { connection });
         let outcome = run.await.expect("join").expect("run");
         assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
         assert!(outcome.closed_by_server);
         wait_for(|| sent(&world).contains(&Sent::Left(connection))).await;
-        world
-            .emit(WorldEvent::Messages {
-                sim: test_sim(),
-                connection: UNKNOWN_CONNECTION,
-                channel: MESSAGE_CHANNEL,
-                reliable: true,
-                envelopes: vec![login_envelope()],
-            })
-            .await;
+        world.emit(WorldEvent::Messages {
+            sim: test_sim(),
+            connection: UNKNOWN_CONNECTION,
+            channel: MESSAGE_CHANNEL,
+            reliable: true,
+            envelopes: vec![login_envelope()],
+        });
         wait_for(|| sent(&world).contains(&Sent::Left(UNKNOWN_CONNECTION))).await;
+    }
+
+    #[test]
+    fn each_worker_reports_its_own_connections() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            report_peers(0, &HashMap::new());
+            report_peers(1, &HashMap::new());
+        });
+        let text = handle.render();
+        for worker in ["0", "1"] {
+            for metric in [METRIC_CONNECTIONS, METRIC_HANDSHAKES] {
+                let series = format!("{metric}{{{WORKER_LABEL}=\"{worker}\"}} 0");
+                assert!(text.contains(&series), "{series} in {text}");
+            }
+        }
     }
 
     #[test]

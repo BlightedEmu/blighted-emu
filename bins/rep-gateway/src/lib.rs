@@ -6,6 +6,7 @@
 pub mod config;
 #[cfg(all(test, feature = "infra"))]
 mod end_to_end;
+pub mod events;
 pub mod peer;
 pub mod registration;
 pub mod routes;

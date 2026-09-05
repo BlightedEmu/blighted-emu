@@ -22,22 +22,23 @@ use nw_bus::{
 };
 use nw_common::time::unix_ms;
 use nw_login::queue::EntryRecord;
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+use crate::events::{Delivery, EventReceiver, EventSender, event_queue};
 use crate::registration::Refusal;
 use crate::routes::{Resume, Routes, Stray};
 use crate::workers::worker_of;
 
 /// Input batches that may wait for the publishing task: about 0.3 s of batches of eight sims.
 pub const INPUT_QUEUE: usize = 256;
-/// Metric: world events lost because a worker's queue was full.
+/// Metric: bundles lost because a worker's queue held the most bundles.
 pub const METRIC_EVENTS_DROPPED: &str = "rep_gateway_world_events_dropped_total";
 /// Tries of one resume: the first and one more after a request without an answer.
 const RESUME_ATTEMPTS: usize = 2;
 /// Time between two input batches to one sim (the gateway loop tick).
 pub const INPUT_FLUSH: Duration = Duration::from_millis(10);
-/// World events that may wait for the server loop.
+/// Bundles that may wait for one worker; other events always wait.
 pub const EVENT_QUEUE: usize = 4096;
 /// Heartbeats that may wait for NATS.
 const HEARTBEAT_QUEUE: usize = 16;
@@ -129,7 +130,7 @@ pub struct BusWorld {
     /// Permits of the resumes in flight.
     resumes: Arc<Semaphore>,
     /// The events of each worker, by worker number.
-    events: Arc<Vec<mpsc::Sender<WorldEvent>>>,
+    events: Arc<Vec<EventSender>>,
 }
 
 impl BusWorld {
@@ -143,7 +144,7 @@ impl BusWorld {
         bus: Bus,
         settings: WorldLinkSettings,
         workers: usize,
-    ) -> Result<(Self, Vec<mpsc::Receiver<WorldEvent>>), BusError> {
+    ) -> Result<(Self, Vec<EventReceiver>), BusError> {
         let world_id = settings.world_id;
         let outputs = bus
             .subscribe::<OutputBatch>(subject::gateway_output(world_id, &settings.gateway_id))
@@ -154,7 +155,7 @@ impl BusWorld {
         bus.flush().await?;
         let settings = Arc::new(settings);
         let (events, receivers): (Vec<_>, Vec<_>) = (0..workers.max(1))
-            .map(|_| mpsc::channel(EVENT_QUEUE))
+            .map(|_| event_queue(EVENT_QUEUE))
             .unzip();
         let world = Self {
             inputs: Publisher::start(bus.clone(), INPUT_QUEUE),
@@ -176,7 +177,7 @@ impl BusWorld {
         Ok((world, receivers))
     }
 
-    /// Sends `event` to the worker of `connection`. A worker whose queue is full loses the event
+    /// Sends `event` to the worker of `connection`. A worker that is behind loses bundles
     /// (counted), so one slow worker never stops the others. Returns `false` when that worker is
     /// gone.
     fn event(&self, connection: u64, event: WorldEvent) -> bool {
@@ -184,13 +185,13 @@ impl BusWorld {
             tracing::warn!(connection, "world event for a worker this gateway lacks");
             return true;
         };
-        match worker.try_send(event) {
-            Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(_)) => {
+        match worker.send(event) {
+            Delivery::Queued => true,
+            Delivery::Dropped => {
                 metrics::counter!(METRIC_EVENTS_DROPPED).increment(1);
                 true
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => false,
+            Delivery::Gone => false,
         }
     }
 
@@ -220,7 +221,7 @@ impl BusWorld {
         let mut timer = tokio::time::interval(INPUT_FLUSH);
         loop {
             timer.tick().await;
-            if self.events.iter().all(mpsc::Sender::is_closed) {
+            if self.events.iter().all(EventSender::is_closed) {
                 return;
             }
             let waiting = std::mem::take(&mut *self.pending());
@@ -478,7 +479,7 @@ impl World for BusWorld {
 async fn heartbeats(
     beats: Publisher<Heartbeat>,
     settings: Arc<WorldLinkSettings>,
-    events: Arc<Vec<mpsc::Sender<WorldEvent>>>,
+    events: Arc<Vec<EventSender>>,
 ) {
     let subject = subject::gateway_heartbeat(settings.world_id, &settings.gateway_id);
     let own = Heartbeat {
@@ -488,7 +489,7 @@ async fn heartbeats(
     let mut timer = tokio::time::interval(settings.heartbeat_interval);
     loop {
         timer.tick().await;
-        if events.iter().all(mpsc::Sender::is_closed) {
+        if events.iter().all(EventSender::is_closed) {
             return;
         }
         if !beats.send(subject.clone(), own.clone()) {
@@ -521,15 +522,15 @@ pub(crate) mod tests {
     pub(crate) struct TestWorld {
         refuse: bool,
         login: Vec<Vec<u8>>,
-        events: mpsc::Sender<WorldEvent>,
+        events: EventSender,
         pub(crate) joins: Arc<Mutex<Vec<u64>>>,
         pub(crate) sent: Arc<Mutex<Vec<Sent>>>,
     }
 
     impl TestWorld {
         /// A world and the events it sends to the gateway loop.
-        pub(crate) fn new(refuse: bool, login: Vec<Vec<u8>>) -> (Self, mpsc::Receiver<WorldEvent>) {
-            let (events, receiver) = mpsc::channel(EVENT_QUEUE);
+        pub(crate) fn new(refuse: bool, login: Vec<Vec<u8>>) -> (Self, EventReceiver) {
+            let (events, receiver) = event_queue(EVENT_QUEUE);
             let world = Self {
                 refuse,
                 login,
@@ -541,8 +542,12 @@ pub(crate) mod tests {
         }
 
         /// Sends `event` to the gateway loop.
-        pub(crate) async fn emit(&self, event: WorldEvent) {
-            self.events.send(event).await.expect("gateway loop runs");
+        pub(crate) fn emit(&self, event: WorldEvent) {
+            assert_eq!(
+                self.events.send(event),
+                Delivery::Queued,
+                "gateway loop runs"
+            );
         }
     }
 
@@ -558,8 +563,7 @@ pub(crate) mod tests {
                 channel: LOGIN_CHANNEL,
                 reliable: true,
                 envelopes: self.login.clone(),
-            })
-            .await;
+            });
             Ok(())
         }
 
@@ -634,7 +638,7 @@ mod bus_tests {
         }
     }
 
-    async fn next<T>(receiver: &mut mpsc::Receiver<T>) -> T {
+    async fn next(receiver: &mut EventReceiver) -> WorldEvent {
         tokio::time::timeout(WAIT, receiver.recv())
             .await
             .expect("in time")
@@ -696,25 +700,32 @@ mod bus_tests {
                 WorldEvent::Close { connection }
             );
             assert!(
-                events[worker].try_recv().is_err(),
+                events[worker].try_recv().is_none(),
                 "nothing of the other worker"
             );
         }
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_full_worker_does_not_stop_the_others() {
+    async fn a_worker_behind_loses_bundles_only_and_never_stops_the_others() {
         const WORKERS: usize = 2;
         let bus = test_bus().await;
         let settings = settings();
         let (_world, mut events) = BusWorld::start(bus.clone(), settings.clone(), WORKERS)
             .await
             .expect("start");
-        let close = |connection| GatewayOutput::Close { connection };
-        let mut outputs: Vec<GatewayOutput> = (0..=EVENT_QUEUE as u64)
-            .map(|offset| close(first_connection(0) + offset))
-            .collect();
-        outputs.push(close(first_connection(1)));
+        let behind = first_connection(0);
+        let messages = |reliable| GatewayOutput::ServerMessages {
+            connection: behind,
+            channel: 0,
+            reliable,
+            envelopes: vec![vec![u8::from(reliable)]],
+        };
+        let mut outputs: Vec<GatewayOutput> = (0..=EVENT_QUEUE).map(|_| messages(false)).collect();
+        outputs.push(messages(true));
+        outputs.push(GatewayOutput::Close {
+            connection: first_connection(1),
+        });
         let subject = subject::gateway_output(settings.world_id, &settings.gateway_id);
         bus.publish(
             subject,
@@ -731,13 +742,20 @@ mod bus_tests {
                 connection: first_connection(1)
             }
         );
+        let reliable =
+            |event: &WorldEvent| matches!(event, WorldEvent::Messages { reliable: true, .. });
+        for _ in 0..EVENT_QUEUE {
+            assert!(!reliable(&next(&mut events[0]).await));
+        }
+        assert!(
+            reliable(&next(&mut events[0]).await),
+            "the reliable message comes after the bundles that had a place"
+        );
+        assert!(events[0].try_recv().is_none(), "one bundle was lost");
     }
 
     /// A link with one worker, and that worker's events.
-    async fn start_one(
-        bus: &Bus,
-        settings: WorldLinkSettings,
-    ) -> (BusWorld, mpsc::Receiver<WorldEvent>) {
+    async fn start_one(bus: &Bus, settings: WorldLinkSettings) -> (BusWorld, EventReceiver) {
         let (world, mut events) = BusWorld::start(bus.clone(), settings, 1)
             .await
             .expect("start");
