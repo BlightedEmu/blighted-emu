@@ -5,9 +5,10 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use nw_bus::{Bus, BusError, BusId, GatewayOutput, Heartbeat, Incoming, Join, JoinReply, SimInput};
+use nw_common::time::unix_ms;
 use nw_db::{PgPool, SavedPosition, character_by_id, character_position, save_character_position};
 use nw_sim_core::{Position, TickClock};
 use tokio::sync::mpsc;
@@ -378,14 +379,6 @@ async fn load_position(
         },
         _ => start,
     })
-}
-
-fn unix_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
 }
 
 /// Milliseconds since 2000-01-01. The unit of the retail `TimeSynchMsg` is Unknown.
