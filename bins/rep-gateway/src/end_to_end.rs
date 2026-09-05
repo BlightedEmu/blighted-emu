@@ -4,9 +4,9 @@
 //! - M3 (M3 spec section 12): the test client logs in over HTTP through the `edge-http` routes,
 //!   waits in the queue, and registers with the gateway over UDP. The same token is refused the
 //!   second time.
-//! - M4 (M4 spec section 1.2, criteria 3.1, 3.2 and 3.5): `sim` serves the world over NATS. Two
-//!   clients are in the world together and see each other; a client that logs in again appears at
-//!   its saved position.
+//! - M4 (M4 spec section 1.2, criteria 3.1 to 3.5): `sim` serves the world over NATS. Two clients
+//!   are in the world together and see each other; the first walks a route that the second sees,
+//!   its far move is refused, and a client that logs in again appears at its saved position.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -26,6 +26,7 @@ use nw_reflect::{REGISTRATION_STATUS_AUTHORIZED, REGISTRATION_STATUS_REFUSED};
 use nw_sim_core::Position;
 use nw_sim_core::test_support::NoGround;
 use nw_testclient::pair::{PairSettings, distance, run_pair, session};
+use nw_testclient::route::Route;
 use nw_testclient::udp::run_rep;
 use nw_testclient::walk::{WalkSettings, login_token, walk};
 use sim::config::{SimConfig, load_sim_config};
@@ -53,8 +54,17 @@ const SAVE_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT: Duration = Duration::from_millis(200);
 const HEARTBEAT_MISSES: u32 = 3;
 const JOIN_TIMEOUT: Duration = Duration::from_secs(2);
-/// Time in the world per session: many bundles at 30 Hz.
-const PAIR_HOLD: Duration = Duration::from_secs(1);
+/// Time in the world per session: the walk (about 2 s), the settle time, the far move, and
+/// many bundles at 30 Hz after it.
+const PAIR_HOLD: Duration = Duration::from_secs(4);
+/// Time in the world of the last check.
+const SHORT_HOLD: Duration = Duration::from_secs(1);
+/// The walk: 3 m east at the datasheet walking speed.
+const ROUTE_M: [[f32; 2]; 2] = [[0.0, 0.0], [3.0, 0.0]];
+const WALK_SPEED_MPS: f32 = 1.65;
+const JUMP_M: f32 = 50.0;
+/// M4 spec section 1.2 criterion 3.3.
+const PATH_TOLERANCE_M: f32 = 1.0;
 /// M4 spec section 1.2 criterion 3.5.
 const TOLERANCE_M: f32 = 0.1;
 const NO_YAW: f32 = 0.0;
@@ -232,6 +242,8 @@ async fn two_clients_see_each_other_and_a_saved_position_returns() {
         let settings = PairSettings {
             first: edge.new_account(FIRST_CHARACTER_NAME),
             second: second.clone(),
+            route: Route::new(ROUTE_M.to_vec(), WALK_SPEED_MPS).expect("route"),
+            jump_m: JUMP_M,
             hold: PAIR_HOLD,
             registration_timeout: WAIT,
         };
@@ -239,9 +251,9 @@ async fn two_clients_see_each_other_and_a_saved_position_returns() {
             .await
             .expect("pair");
         assert!(
-            report.passed(TOLERANCE_M),
+            report.passed(PATH_TOLERANCE_M, TOLERANCE_M),
             "{:?}",
-            report.checks(TOLERANCE_M)
+            report.checks(PATH_TOLERANCE_M, TOLERANCE_M)
         );
 
         // The second client left before the first one's second session (one hold ago), so its
@@ -261,7 +273,7 @@ async fn two_clients_see_each_other_and_a_saved_position_returns() {
         save_character_position(world_pool, character, &saved)
             .await
             .expect("save");
-        let back = session(gateway, client(token), PAIR_HOLD, WAIT)
+        let back = session(gateway, client(token), SHORT_HOLD, WAIT)
             .await
             .expect("session");
         let expected =
