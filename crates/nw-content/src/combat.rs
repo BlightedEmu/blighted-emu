@@ -4,7 +4,8 @@
 //!
 //! A mob type is found by the crc32 of its lower-case vitals id, as the world file stores it: in
 //! `VitalsBaseData` first, then `VitalsData` (no mods: 1.0), then `VitalsLevelVariantData`, whose
-//! row names the base type it varies.
+//! row names the base type it varies. A type's mods are its own times the category mods of its
+//! creature type (`VitalsModifierData`, for example `Solo+`: health 2, damage 1.2).
 
 use std::collections::HashMap;
 
@@ -15,6 +16,13 @@ use crate::Tables;
 
 /// Health and damage mod of a type without them.
 const PLAIN_MOD: f64 = 1.0;
+
+/// The player row of `VitalsBaseData` (M6-A spec section 9).
+pub const DEFAULT_PLAYER_VITALS_ID: &str = "Player";
+/// The player sword of `WeaponItemDefinitions`.
+pub const DEFAULT_WEAPON_ID: &str = "SwordT1";
+/// The light and heavy sword attacks of `DamageData`.
+pub const DEFAULT_ATTACK_DAMAGE_IDS: [&str; 2] = ["1H_Sword_Attack1", "1H_Sword_Attack2"];
 
 /// The config rows a `sim` needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,12 +35,31 @@ pub struct CombatRows {
     pub attack_damage_ids: Vec<String>,
 }
 
+impl Default for CombatRows {
+    fn default() -> Self {
+        Self {
+            player_vitals_id: DEFAULT_PLAYER_VITALS_ID.to_owned(),
+            weapon_id: DEFAULT_WEAPON_ID.to_owned(),
+            attack_damage_ids: DEFAULT_ATTACK_DAMAGE_IDS.map(str::to_owned).to_vec(),
+        }
+    }
+}
+
+/// The `VitalsModifierData` mods of one creature type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CategoryMods {
+    /// Health multiplier.
+    pub health: f64,
+    /// Damage multiplier.
+    pub damage: f64,
+}
+
 /// A mob type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MobType {
-    /// Multiplies the level's base health.
+    /// Multiplies the level's base health (with the creature type's category mod).
     pub health_mod: f64,
-    /// Multiplies the level's base damage.
+    /// Multiplies the level's base damage (with the creature type's category mod).
     pub damage_mod: f64,
     /// The creature type, for the vision offset.
     pub creature_type: Option<String>,
@@ -99,6 +126,8 @@ pub struct CombatSource {
     pub vision_offsets: Vec<(String, f32)>,
     /// `VitalsBaseData` initial health by id (rows whose cell is a whole number).
     pub player_health: Vec<(String, u32)>,
+    /// `VitalsModifierData` by category (creature type).
+    pub categories: Vec<(String, CategoryMods)>,
 }
 
 impl CombatSource {
@@ -186,6 +215,20 @@ impl CombatSource {
                     )
                 })
                 .collect(),
+            categories: tables
+                .vitals_modifier_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .map(|row| {
+                    (
+                        row.category_id.clone(),
+                        CategoryMods {
+                            health: row.category_health_mod,
+                            damage: row.category_damage_mod,
+                        },
+                    )
+                })
+                .collect(),
             player_health: base_rows()
                 .filter_map(|row| {
                     Some((
@@ -263,10 +306,21 @@ impl CombatData {
                     .ok_or_else(|| CombatDataError::MissingAttack(wanted.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let categories: HashMap<String, CategoryMods> = source.categories.into_iter().collect();
         let base: HashMap<u32, MobType> = source
             .base_types
             .into_iter()
-            .map(|(id, kind)| (lowercase_crc32(&id), kind))
+            .map(|(id, mut kind)| {
+                if let Some(mods) = kind
+                    .creature_type
+                    .as_ref()
+                    .and_then(|kind| categories.get(kind))
+                {
+                    kind.health_mod *= mods.health;
+                    kind.damage_mod *= mods.damage;
+                }
+                (lowercase_crc32(&id), kind)
+            })
             .collect();
         let mut mob_types = base.clone();
         for id in source.plain_types {
@@ -299,6 +353,11 @@ impl CombatData {
     /// The row of `level`.
     pub fn level(&self, level: u32) -> Option<&LevelRow> {
         self.levels.get(&level)
+    }
+
+    /// Every level row.
+    pub fn levels(&self) -> impl Iterator<Item = (u32, &LevelRow)> {
+        self.levels.iter().map(|(level, row)| (*level, row))
     }
 
     /// The player weapon.
@@ -392,6 +451,7 @@ mod tests {
             ],
             vision_offsets: vec![("Beast".to_owned(), VISION_OFFSET)],
             player_health: vec![("Player".to_owned(), PLAYER_HEALTH)],
+            categories: Vec::new(),
         }
     }
 
@@ -404,6 +464,26 @@ mod tests {
         let data = data();
         assert_eq!(data.mob_type(lowercase_crc32("boar_20")), Some(&boar()));
         assert_eq!(data.mob_type(lowercase_crc32("BOAR_20")), Some(&boar()));
+    }
+
+    #[test]
+    fn a_creature_type_multiplies_the_mods() {
+        let mut source = source();
+        source.categories = vec![(
+            "Beast".to_owned(),
+            CategoryMods {
+                health: 2.0,
+                damage: 1.5,
+            },
+        )];
+        let data = CombatData::build(source, &rows()).expect("data");
+        let boar = data.mob_type(lowercase_crc32("Boar_20")).expect("boar");
+        assert_eq!(boar.health_mod, BOAR_HEALTH_MOD * 2.0);
+        assert_eq!(boar.damage_mod, BOAR_DAMAGE_MOD * 1.5);
+        let elite = data
+            .mob_type(lowercase_crc32("Boar_20_Elite"))
+            .expect("variant");
+        assert_eq!(elite.health_mod, BOAR_HEALTH_MOD * 2.0, "a variant too");
     }
 
     #[test]
