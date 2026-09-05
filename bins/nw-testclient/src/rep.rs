@@ -53,6 +53,17 @@ pub enum RepEvent {
         /// Reason byte.
         reason: u8,
     },
+    /// Any other server message.
+    Message(Received),
+}
+
+/// A server message and the carrier channel it came on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Received {
+    /// The carrier channel.
+    pub channel: u8,
+    /// The message.
+    pub envelope: Envelope,
 }
 
 /// The client side of one REP connection.
@@ -97,9 +108,8 @@ impl RepClient {
                     }
                     Event::Message(message) => {
                         for bytes in decode_server_messages(&message.payload)? {
-                            if let Some(event) = self.message(Envelope::decode(bytes)?)? {
-                                events.push(event);
-                            }
+                            let envelope = Envelope::decode(bytes)?;
+                            events.push(self.message(message.channel, envelope)?);
                         }
                     }
                     Event::Closed { reason } => events.push(RepEvent::Closed { reason }),
@@ -118,23 +128,38 @@ impl RepClient {
         self.send(REGISTRATION_REQUEST_V3_MSG_TYPE_INDEX, body)
     }
 
-    fn message(&mut self, envelope: Envelope) -> Result<Option<RepEvent>, RepError> {
-        match envelope.type_index() {
-            Some(REGISTRATION_RESPONSE_MSG_TYPE_INDEX) => Ok(Some(RepEvent::Registered(
-                RegistrationResponseMsg::decode(&envelope.body)?,
-            ))),
+    fn message(&mut self, channel: u8, envelope: Envelope) -> Result<RepEvent, RepError> {
+        Ok(match envelope.type_index() {
+            Some(REGISTRATION_RESPONSE_MSG_TYPE_INDEX) => {
+                RepEvent::Registered(RegistrationResponseMsg::decode(&envelope.body)?)
+            }
             Some(PING_MSG_TYPE_INDEX) => {
                 self.send(PING_MSG_TYPE_INDEX, envelope.body)?;
-                Ok(Some(RepEvent::Pinged))
+                RepEvent::Pinged
             }
-            _ => Ok(None),
-        }
+            _ => RepEvent::Message(Received { channel, envelope }),
+        })
     }
 
     fn send(&mut self, type_index: u64, body: Vec<u8>) -> Result<(), RepError> {
+        self.send_message(MESSAGE_CHANNEL, true, type_index, body)
+    }
+
+    /// Queues one client message of `type_index` on a carrier `channel`; the next poll sends it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RepError`] when the carrier is not connected or the message does not encode.
+    pub fn send_message(
+        &mut self,
+        channel: u8,
+        reliable: bool,
+        type_index: u64,
+        body: Vec<u8>,
+    ) -> Result<(), RepError> {
         let envelope = Envelope::message(TypeId::FileSlot(type_index), body).encode()?;
         let message = encode_client_message(&ZERO_SESSION, &envelope)?;
-        self.carrier.send(MESSAGE_CHANNEL, true, &message)?;
+        self.carrier.send(channel, reliable, &message)?;
         Ok(())
     }
 
@@ -185,6 +210,10 @@ pub(crate) mod tests {
     const SECRET: [u8; COOKIE_SECRET_LEN] = [3; COOKIE_SECRET_LEN];
     const PEER: &str = "192.0.2.20:50000";
     const PING_BODY: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 42];
+    /// A game message the client does not read: channel 1, unreliable, as the replication.
+    const OTHER_CHANNEL: u8 = 1;
+    const OTHER_TYPE_INDEX: u64 = 446;
+    const OTHER_BODY: [u8; 3] = [7, 8, 9];
     const TEST_NAME: &str = "test-rep";
     const VALID_DAYS: u32 = 30;
     /// One server identity for every test (RSA key generation is slow).
@@ -230,12 +259,16 @@ pub(crate) mod tests {
         }
 
         fn send(&mut self, type_index: u64, body: Vec<u8>) {
+            self.send_on(MESSAGE_CHANNEL, true, type_index, body);
+        }
+
+        fn send_on(&mut self, channel: u8, reliable: bool, type_index: u64, body: Vec<u8>) {
             let envelope = Envelope::message(TypeId::FileSlot(type_index), body)
                 .encode()
                 .expect("envelope");
             let payload = encode_server_messages(&[&envelope]).expect("payload");
             self.carrier
-                .send(MESSAGE_CHANNEL, true, &payload)
+                .send(channel, reliable, &payload)
                 .expect("send");
         }
 
@@ -316,6 +349,53 @@ pub(crate) mod tests {
         assert_eq!(events.last(), Some(&RepEvent::Registered(response)));
         let v3 = RegistrationRequestV3Msg::decode(&envelopes[0].body).expect("v3");
         assert_eq!(v3.login_token(), token());
+    }
+
+    #[test]
+    fn the_client_reports_other_messages_with_their_channel() {
+        let config = DtlsClientConfig::new(&IDENTITY.certificate_pem).expect("client config");
+        let mut client = RepClient::new(&config, MTU, token(), START_MS).expect("client");
+        let mut server = Server::new();
+        let (events, _) = run(
+            &mut client,
+            &mut server,
+            |server, envelope| {
+                if envelope.type_index() == Some(REGISTRATION_REQUEST_V3_MSG_TYPE_INDEX) {
+                    server.send_on(OTHER_CHANNEL, false, OTHER_TYPE_INDEX, OTHER_BODY.to_vec());
+                }
+            },
+            |events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, RepEvent::Message(_)))
+            },
+        );
+        let expected = Received {
+            channel: OTHER_CHANNEL,
+            envelope: Envelope::message(TypeId::FileSlot(OTHER_TYPE_INDEX), OTHER_BODY.to_vec()),
+        };
+        assert_eq!(events.last(), Some(&RepEvent::Message(expected)));
+    }
+
+    #[test]
+    fn the_client_sends_a_message_on_any_channel() {
+        let config = DtlsClientConfig::new(&IDENTITY.certificate_pem).expect("client config");
+        let mut client = RepClient::new(&config, MTU, token(), START_MS).expect("client");
+        let mut server = Server::new();
+        let (events, _) = run(
+            &mut client,
+            &mut server,
+            |_, _| {},
+            |events| events.contains(&RepEvent::Connected),
+        );
+        assert_eq!(events.last(), Some(&RepEvent::Connected));
+        client
+            .send_message(OTHER_CHANNEL, false, OTHER_TYPE_INDEX, OTHER_BODY.to_vec())
+            .expect("send");
+        let (_, envelopes) = run(&mut client, &mut server, |_, _| {}, |_| false);
+        assert!(envelopes.iter().any(|envelope| {
+            envelope.type_index() == Some(OTHER_TYPE_INDEX) && envelope.body == OTHER_BODY
+        }));
     }
 
     #[test]

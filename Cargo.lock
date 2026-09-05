@@ -4452,13 +4452,25 @@ name = "sim"
 version = "0.1.0"
 dependencies = [
  "bevy_ecs",
+ "clap",
  "getrandom 0.3.4",
+ "metrics",
+ "metrics-exporter-prometheus",
  "nw-bus",
  "nw-carrier",
+ "nw-common",
+ "nw-content",
+ "nw-db",
  "nw-messages",
  "nw-reflect",
  "nw-sim-core",
+ "nw-world",
+ "serde",
+ "serde_json",
+ "sqlx",
  "thiserror 2.0.21",
+ "tokio",
+ "tracing",
  "uuid",
 ]
 

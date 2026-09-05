@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::net::UdpSocket;
 
-use crate::rep::{RepClient, RepError, RepEvent};
+use crate::rep::{Received, RepClient, RepError, RepEvent};
 
 /// Time between polls of the client.
 pub const TICK: Duration = Duration::from_millis(10);
@@ -33,6 +33,8 @@ pub struct RepOutcome {
     pub held: Duration,
     /// Whether the server closed the connection.
     pub closed_by_server: bool,
+    /// The other server messages, in order.
+    pub messages: Vec<Received>,
 }
 
 impl RepOutcome {
@@ -98,6 +100,7 @@ pub async fn run_rep(
                 }
                 RepEvent::Pinged => outcome.pings += 1,
                 RepEvent::Closed { .. } => outcome.closed_by_server = true,
+                RepEvent::Message(received) => outcome.messages.push(received),
             }
         }
     }
