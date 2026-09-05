@@ -9,7 +9,9 @@ pub mod movement;
 pub mod test_support;
 pub mod tick;
 
-pub use cells::{CellGrid, CellGridError, CellId, CellOwners, MAX_CELLS, assign_columns};
+pub use cells::{
+    CellGrid, CellGridError, CellId, CellOwners, MAX_CELLS, assign_columns, level_bounds,
+};
 pub use interest::{Interest, InterestChanges};
 pub use movement::{
     CellBounds, Ground, GroundCheck, Motion, MotionState, MoveLimits, MoveLimitsError, MoveRefusal,

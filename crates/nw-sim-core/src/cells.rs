@@ -79,12 +79,8 @@ impl CellGrid {
     /// Returns [`CellGridError`] as [`CellGrid::new`] does, for example for a level without
     /// regions.
     pub fn of_level(level: &LevelInfo, cell_size_m: f32) -> Result<Self, CellGridError> {
-        let length = |regions: u32| (f64::from(level.region_size) * f64::from(regions)) as f32;
-        Self::new(
-            length(level.grid_width),
-            length(level.grid_height),
-            cell_size_m,
-        )
+        let bounds = level_bounds(level);
+        Self::new(bounds.max_x, bounds.max_y, cell_size_m)
     }
 
     /// Columns of cells.
@@ -165,6 +161,17 @@ impl CellGrid {
         let dx = gap(x, span(cell.column, self.width_m));
         let dy = gap(y, span(cell.row, self.height_m));
         dx.hypot(dy)
+    }
+}
+
+/// The area of a level from its world file frame: `region_size` times the region counts.
+pub fn level_bounds(level: &LevelInfo) -> CellBounds {
+    let length = |regions: u32| (f64::from(level.region_size) * f64::from(regions)) as f32;
+    CellBounds {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: length(level.grid_width),
+        max_y: length(level.grid_height),
     }
 }
 
@@ -308,6 +315,7 @@ mod tests {
             ..LevelInfo::default()
         };
         assert_eq!(CellGrid::of_level(&level, CELL_M), Ok(grid()));
+        assert_eq!(level_bounds(&level), grid().bounds());
         let empty = LevelInfo::default();
         assert!(CellGrid::of_level(&empty, CELL_M).is_err());
     }
