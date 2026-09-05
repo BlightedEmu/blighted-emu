@@ -1137,6 +1137,7 @@ mod tests {
             position: at(x),
             login: true,
             handoffs: 0,
+            bundles_sent: 0,
         }
     }
 

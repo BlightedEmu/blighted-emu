@@ -44,6 +44,8 @@ pub struct ResumeOf {
     /// The handoff count its new sim starts from: far above the count of the lost sim, so a late
     /// route of the lost sim loses at the gateway.
     pub handoffs: u64,
+    /// Bundles the gateway sent to the player so far; the new sim goes on with the sequence.
+    pub bundles_sent: u64,
 }
 
 /// The answer to [`Join`].
@@ -169,6 +171,8 @@ pub struct Admit {
     pub login: bool,
     /// The handoff count the player starts with: 0, or the count of a resume.
     pub handoffs: u64,
+    /// The bundle sequence the player starts with: 0, or the count of a resume.
+    pub bundles_sent: u64,
 }
 
 /// The answer to [`Admit`].
@@ -425,6 +429,7 @@ mod tests {
             resume: Some(ResumeOf {
                 entity: CONNECTION,
                 handoffs: 1 << 32,
+                bundles_sent: 7,
             }),
         });
         round_trip(JoinReply::Joined {
@@ -483,6 +488,7 @@ mod tests {
             position: POINT,
             login: true,
             handoffs: 0,
+            bundles_sent: 0,
         });
         round_trip(AdmitReply::Admitted);
         round_trip(AdmitReply::Refused {

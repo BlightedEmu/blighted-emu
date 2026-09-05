@@ -43,6 +43,7 @@ struct Route {
     account: Uuid,
     character: Uuid,
     entity: u64,
+    bundles_sent: u64,
     resuming: bool,
 }
 
@@ -59,6 +60,8 @@ pub struct Resume {
     pub entity: u64,
     /// The handoff sequence it continues from.
     pub handoffs: u64,
+    /// Bundles sent to it so far.
+    pub bundles_sent: u64,
 }
 
 /// The routes of one gateway.
@@ -87,6 +90,7 @@ impl Routes {
                 account: record.account_id,
                 character: record.character_id,
                 entity,
+                bundles_sent: 0,
                 resuming: false,
             },
         );
@@ -143,6 +147,7 @@ impl Routes {
                     character: route.character,
                     entity: route.entity,
                     handoffs: route.sequence.saturating_add(RESUME_SEQUENCE_STEP),
+                    bundles_sent: route.bundles_sent,
                 }
             })
             .collect();
@@ -162,6 +167,13 @@ impl Routes {
         route.sequence = job.handoffs;
         route.resuming = false;
         true
+    }
+
+    /// One bundle (an unreliable server message) went to `connection`.
+    pub fn bundle_sent(&mut self, connection: u64) {
+        if let Some(route) = self.routes.get_mut(&connection) {
+            route.bundles_sent = route.bundles_sent.saturating_add(1);
+        }
     }
 
     /// Forgets `connection`; returns the sim it had.
@@ -256,6 +268,7 @@ mod tests {
                 character: first.character_id,
                 entity: ENTITY,
                 handoffs: RESUME_SEQUENCE_STEP,
+                bundles_sent: 0,
             }]
         );
         assert!(routes.lost(&table(&[("sim-b", GENERATION)])).is_empty());
@@ -281,6 +294,19 @@ mod tests {
         assert_eq!(routes.left(1), Some(sim("sim-d")));
         assert_eq!(routes.left(1), None);
         assert!(!routes.resumed(&jobs[0], sim("sim-c"), GENERATION));
+    }
+
+    #[test]
+    fn a_resume_carries_the_bundle_count() {
+        const BUNDLES: u64 = 5;
+        let mut routes = Routes::default();
+        routes.joined(1, &record(), sim("sim-a"), GENERATION, ENTITY);
+        for _ in 0..BUNDLES {
+            routes.bundle_sent(1);
+        }
+        routes.bundle_sent(9);
+        let jobs = routes.lost(&table(&[]));
+        assert_eq!(jobs[0].bundles_sent, BUNDLES);
     }
 
     #[test]

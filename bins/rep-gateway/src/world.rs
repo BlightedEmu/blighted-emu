@@ -22,7 +22,7 @@ use nw_bus::{
 };
 use nw_common::time::unix_ms;
 use nw_login::queue::EntryRecord;
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use uuid::Uuid;
 
 use crate::registration::Refusal;
@@ -31,6 +31,8 @@ use crate::workers::worker_of;
 
 /// Input batches that may wait for the publishing task.
 pub const INPUT_QUEUE: usize = 4096;
+/// Tries of one resume: the first and one more after a request without an answer.
+const RESUME_ATTEMPTS: usize = 2;
 /// Time between two input batches to one sim (the gateway loop tick).
 pub const INPUT_FLUSH: Duration = Duration::from_millis(10);
 /// World events that may wait for the server loop.
@@ -107,6 +109,8 @@ pub struct WorldLinkSettings {
     pub join_timeout: Duration,
     /// Time between heartbeats.
     pub heartbeat_interval: Duration,
+    /// Most resumes that wait for the director at one time.
+    pub max_resumes_in_flight: usize,
 }
 
 /// The inputs of each sim that wait for the next batch, and their bytes.
@@ -120,6 +124,8 @@ pub struct BusWorld {
     inputs: Publisher<InputBatch>,
     pending: Arc<Mutex<PendingInputs>>,
     routes: Arc<Mutex<Routes>>,
+    /// Permits of the resumes in flight.
+    resumes: Arc<Semaphore>,
     /// The events of each worker, by worker number.
     events: Arc<Vec<mpsc::Sender<WorldEvent>>>,
 }
@@ -152,6 +158,7 @@ impl BusWorld {
             inputs: Publisher::start(bus.clone(), INPUT_QUEUE),
             pending: Arc::default(),
             routes: Arc::default(),
+            resumes: Arc::new(Semaphore::new(settings.max_resumes_in_flight)),
             bus: bus.clone(),
             settings: Arc::clone(&settings),
             events: Arc::new(events),
@@ -302,7 +309,15 @@ impl BusWorld {
                 reliable,
                 envelopes,
             } => {
-                let stray = self.routes().stray(connection, sim, Instant::now());
+                let stray = {
+                    let mut routes = self.routes();
+                    let stray = routes.stray(connection, sim, Instant::now());
+                    if stray != Stray::Evict && !reliable {
+                        // Only bundles go unreliable: they carry the bundle sequence.
+                        routes.bundle_sent(connection);
+                    }
+                    stray
+                };
                 if stray == Stray::Evict {
                     metrics::counter!(METRIC_STRAYS_EVICTED).increment(1);
                     tracing::warn!(connection, %sim, "a sim keeps a copy; it drops it");
@@ -350,16 +365,28 @@ impl BusWorld {
         }
     }
 
-    /// Puts a player of a lost sim on the owner of its cell (M5 spec section 3.6); a refusal
-    /// closes the connection.
+    /// Puts a player of a lost sim on the owner of its cell (M5 spec section 3.6), at most
+    /// `max_resumes_in_flight` at one time; a request without an answer is sent once more, and a
+    /// refusal closes the connection.
     async fn resume(self, job: Resume) {
+        // The semaphore is never closed.
+        let Ok(_permit) = Arc::clone(&self.resumes).acquire_owned().await else {
+            return;
+        };
         let resume = ResumeOf {
             entity: job.entity,
             handoffs: job.handoffs,
+            bundles_sent: job.bundles_sent,
         };
-        let reply = self
-            .ask_director(job.connection, job.account, job.character, Some(resume))
-            .await;
+        let mut reply = Err(BusError::NoReplySubject);
+        for _ in 0..RESUME_ATTEMPTS {
+            reply = self
+                .ask_director(job.connection, job.account, job.character, Some(resume))
+                .await;
+            if reply.is_ok() {
+                break;
+            }
+        }
         match reply {
             Ok(JoinReply::Joined {
                 sim, generation, ..
@@ -557,6 +584,7 @@ mod bus_tests {
     use crate::workers::first_connection;
 
     const JOIN_TIMEOUT: Duration = Duration::from_millis(500);
+    const RESUMES_IN_FLIGHT: usize = 64;
     const HEARTBEAT: Duration = Duration::from_millis(50);
     const WAIT: Duration = Duration::from_secs(5);
     const PAUSE: Duration = Duration::from_millis(50);
@@ -576,6 +604,7 @@ mod bus_tests {
             gateway_id: id("gw"),
             join_timeout: JOIN_TIMEOUT,
             heartbeat_interval: HEARTBEAT,
+            max_resumes_in_flight: RESUMES_IN_FLIGHT,
         }
     }
 
@@ -710,9 +739,14 @@ mod bus_tests {
 
     /// Sends client messages until one reaches `inputs`; the route changes in another task.
     async fn message_reaches(world: &BusWorld, inputs: &mut Inputs) {
+        reaches(world, inputs, CONNECTION).await;
+    }
+
+    /// Sends client messages of `connection` until one reaches `inputs`.
+    async fn reaches(world: &BusWorld, inputs: &mut Inputs, connection: u64) {
         let reached = async {
             loop {
-                world.client_message(CONNECTION, ENVELOPE.to_vec());
+                world.client_message(connection, ENVELOPE.to_vec());
                 if let Ok(Some(Ok(_))) = tokio::time::timeout(PAUSE, inputs.batches.next()).await {
                     return;
                 }
@@ -876,6 +910,82 @@ mod bus_tests {
             WorldEvent::Close {
                 connection: CONNECTION
             }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resumes_are_paced_and_retried_once() {
+        const CONNECTIONS: [u64; 3] = [1, 2, 3];
+        const ANSWER_DELAY: Duration = Duration::from_millis(100);
+        let bus = test_bus().await;
+        let settings = WorldLinkSettings {
+            max_resumes_in_flight: 1,
+            ..settings()
+        };
+        let (lost, other) = (id("sim-a"), id("sim-b"));
+        let mut joins = bus
+            .subscribe::<Join>(subject::director_join(settings.world_id))
+            .await
+            .expect("subscribe");
+        bus.flush().await.expect("flush");
+        let attempts: Arc<Mutex<BTreeMap<u64, usize>>> = Arc::default();
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let most = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let answerer = bus.clone();
+        let (seen, now, peak) = (
+            Arc::clone(&attempts),
+            Arc::clone(&active),
+            Arc::clone(&most),
+        );
+        let (first, resumed) = (joined(&lost), joined(&other));
+        tokio::spawn(async move {
+            while let Some(Ok(join)) = joins.next().await {
+                if join.message.resume.is_none() {
+                    answerer.reply(&join, &first).await.expect("reply");
+                    continue;
+                }
+                let connection = join.message.connection.connection;
+                let attempt = {
+                    let mut seen = seen.lock().expect("lock");
+                    let count = seen.entry(connection).or_default();
+                    *count += 1;
+                    *count
+                };
+                if connection == CONNECTIONS[0] && attempt == 1 {
+                    continue;
+                }
+                let running = now.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                peak.fetch_max(running, std::sync::atomic::Ordering::SeqCst);
+                let (answerer, resumed, now) =
+                    (answerer.clone(), resumed.clone(), Arc::clone(&now));
+                tokio::spawn(async move {
+                    tokio::time::sleep(ANSWER_DELAY).await;
+                    now.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    answerer.reply(&join, &resumed).await.expect("reply");
+                });
+            }
+        });
+        let mut inputs = inputs_of(&bus, settings.world_id, &other).await;
+        let (world, _events) = start_one(&bus, settings.clone()).await;
+        for connection in CONNECTIONS {
+            world.join(connection, &record()).await.expect("join");
+        }
+        let tables = subject::director_table(settings.world_id);
+        bus.publish(tables, &table_of(&[&other]))
+            .await
+            .expect("table");
+        for connection in CONNECTIONS {
+            reaches(&world, &mut inputs, connection).await;
+        }
+        assert_eq!(
+            attempts.lock().expect("lock")[&CONNECTIONS[0]],
+            2,
+            "one retry"
+        );
+        assert_eq!(
+            most.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "one at a time"
         );
     }
 

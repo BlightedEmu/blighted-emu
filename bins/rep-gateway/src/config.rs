@@ -59,6 +59,8 @@ pub struct GatewayConfig {
     pub workers: usize,
     /// Receive and send buffer of each worker socket, in bytes.
     pub udp_buffer_bytes: usize,
+    /// Most resumes that wait for the director at one time.
+    pub max_resumes_in_flight: usize,
     /// Connection limits and timers; the counts are shared out over the workers.
     pub limits: GatewayLimits,
 }
@@ -159,8 +161,11 @@ impl GatewayConfig {
                 "must be 1 to 65536; more than 1 needs SO_REUSEPORT (Unix)",
             );
         }
-        if self.udp_buffer_bytes == 0 {
-            return invalid("udp_buffer_bytes", "must be above 0");
+        if self.udp_buffer_bytes == 0 || self.max_resumes_in_flight == 0 {
+            return invalid(
+                "udp_buffer_bytes",
+                "the buffer and the resumes in flight must be above 0",
+            );
         }
         Ok(())
     }
@@ -172,6 +177,7 @@ impl GatewayConfig {
             gateway_id: self.gateway_id.clone(),
             join_timeout: Duration::from_millis(self.join_timeout_ms),
             heartbeat_interval: Duration::from_millis(self.heartbeat_interval_ms),
+            max_resumes_in_flight: self.max_resumes_in_flight,
         }
     }
 

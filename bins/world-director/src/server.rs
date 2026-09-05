@@ -289,6 +289,7 @@ mod tests {
     const MAX_PLAYERS: u32 = 50;
     const RESUMED_ENTITY: u64 = 42;
     const RESUMED_HANDOFFS: u64 = 1 << 32;
+    const RESUMED_BUNDLES: u64 = 900;
     const CONNECTION: u64 = 7;
     /// West of the border between two sims (column 3 starts at 6144 m).
     const WEST: Position = Position {
@@ -535,6 +536,7 @@ mod tests {
             let resume = ResumeOf {
                 entity: RESUMED_ENTITY,
                 handoffs: RESUMED_HANDOFFS,
+                bundles_sent: RESUMED_BUNDLES,
             };
             let reply = director.join(&join(account, character, Some(resume))).await;
             assert!(matches!(
@@ -548,6 +550,7 @@ mod tests {
             assert!(!admit.login);
             assert_eq!(admit.entity, RESUMED_ENTITY);
             assert_eq!(admit.handoffs, RESUMED_HANDOFFS);
+            assert_eq!(admit.bundles_sent, RESUMED_BUNDLES);
             director.stop().await;
         })
         .await;

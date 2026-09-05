@@ -27,10 +27,13 @@ use nw_login::queue::QueueStore;
 use nw_login::test_support::{edge_app, test_valkey_url};
 use nw_login::valkey::Valkey;
 use nw_messages::WorldPosition;
+use nw_messages::{BodyCodec, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX};
 use nw_reflect::{REGISTRATION_STATUS_AUTHORIZED, REGISTRATION_STATUS_REFUSED};
 use nw_sim_core::test_support::NoGround;
 use nw_sim_core::{CellGrid, Position};
-use nw_testclient::pair::{PairSettings, distance, run_pair, session, session_with};
+use nw_testclient::pair::{
+    INPUT_CHANNEL, PairSettings, SEND_INTERVAL, distance, run_pair, session, session_with,
+};
 use nw_testclient::route::Route;
 use nw_testclient::udp::run_rep;
 use nw_testclient::walk::{WalkSettings, login_token, walk};
@@ -78,6 +81,8 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(2);
 const SIM_NAMES: [&str; 2] = ["sim-a", "sim-b"];
 /// Gateway workers of the end-to-end stack (M5 load spec section 3).
 const GATEWAY_WORKERS: usize = 2;
+/// Resumes in flight of the end-to-end gateway.
+const RESUMES_IN_FLIGHT: usize = 64;
 /// Time in the world per session: the walk (about 5.6 s), the settle time and the far move
 /// (0.5 s each), and many bundles at 30 Hz after them.
 const PAIR_HOLD: Duration = Duration::from_secs(8);
@@ -92,8 +97,10 @@ const HANDOFFS: usize = 2;
 const STOP_HOLD: Duration = Duration::from_secs(5);
 /// When its sim stops, after its registration.
 const STOP_AFTER: Duration = Duration::from_millis(1500);
-/// Bundles must come again this long after the stop: the silence window and the resume.
+/// The client moves this long after its registration: after the silence window and the resume.
 const RESUMED_AFTER: Duration = Duration::from_millis(3500);
+/// The move after the resume, east of the start.
+const RESUME_STEP_M: f32 = 1.0;
 const JUMP_M: f32 = 50.0;
 /// M4 spec section 1.2 criterion 3.3.
 const PATH_TOLERANCE_M: f32 = 1.0;
@@ -279,6 +286,7 @@ impl Stack {
                 gateway_id,
                 join_timeout: JOIN_TIMEOUT,
                 heartbeat_interval: HEARTBEAT,
+                max_resumes_in_flight: RESUMES_IN_FLIGHT,
             },
             GATEWAY_WORKERS,
         )
@@ -293,6 +301,20 @@ impl Stack {
             sims,
             routes,
         }
+    }
+
+    /// Whether a sim whose id starts with `name` sent server messages to the gateway.
+    async fn sends_from(&mut self, name: &str) -> bool {
+        let mut sent = false;
+        while let Ok(Some(Ok(batch))) = tokio::time::timeout(SHORT_HOLD, self.routes.next()).await {
+            let messages = batch
+                .message
+                .outputs
+                .iter()
+                .any(|output| matches!(output, GatewayOutput::ServerMessages { .. }));
+            sent |= messages && batch.message.sim.as_str().starts_with(name);
+        }
+        sent
     }
 
     /// The route messages that reached the gateway so far.
@@ -413,7 +435,7 @@ async fn two_clients_see_each_other_across_the_border_and_a_saved_position_retur
 #[tokio::test(flavor = "multi_thread")]
 async fn a_player_of_a_stopped_sim_continues_on_the_other() {
     with_schemas(async |global, world_pool| {
-        let stack = Stack::start(global, world_pool).await;
+        let mut stack = Stack::start(global, world_pool).await;
         let account = stack.edge.new_account(FIRST_CHARACTER_NAME);
         let admission = walk(&stack.edge.http, &account, |_| {})
             .await
@@ -421,19 +443,31 @@ async fn a_player_of_a_stopped_sim_continues_on_the_other() {
         let token = login_token(&admission.token);
         // The start is in the west, so "sim-a" has the player.
         let west = &stack.sims[0];
-        let mut counts: Vec<(Duration, usize)> = Vec::new();
         let mut stopped = false;
+        let mut last_sent: Option<Duration> = None;
+        let moved =
+            InputPosition::from_metres(START.x + RESUME_STEP_M, START.y, START.z).expect("finite");
         let ran = session_with(
             stack.gateway,
             client(token),
             STOP_HOLD,
             WAIT,
-            |_, outcome, since| {
+            |client, _, since| {
                 if since >= STOP_AFTER && !stopped {
                     west.abort();
                     stopped = true;
                 }
-                counts.push((since, outcome.messages.len()));
+                let due = last_sent.is_none_or(|sent| since.saturating_sub(sent) >= SEND_INTERVAL);
+                if since >= RESUMED_AFTER && due {
+                    last_sent = Some(since);
+                    let body = ClientInputMsg::position(moved).encode()?;
+                    client.send_message(
+                        INPUT_CHANNEL,
+                        false,
+                        RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+                        body,
+                    )?;
+                }
                 Ok(())
             },
         )
@@ -441,13 +475,15 @@ async fn a_player_of_a_stopped_sim_continues_on_the_other() {
         .expect("session");
         assert_eq!(ran.outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
         assert!(!ran.outcome.closed_by_server, "the player stays connected");
-        let at_resume = counts
-            .iter()
-            .find(|(since, _)| *since >= RESUMED_AFTER)
-            .map(|(_, count)| *count)
-            .expect("ran past the resume");
-        let at_end = counts.last().map(|(_, count)| *count).expect("ticks");
-        assert!(at_end > at_resume, "bundles come from the other sim");
+        let own = ran.view.own_position().expect("own position");
+        assert!(
+            (own.x - (START.x + RESUME_STEP_M)).abs() <= TOLERANCE_M,
+            "the same entity moves after the resume"
+        );
+        assert!(
+            stack.sends_from(SIM_NAMES[1]).await,
+            "bundles come from the other sim"
+        );
     })
     .await;
 }

@@ -298,7 +298,14 @@ impl SimWorld {
             None
         };
         let motion = Motion::new(arrival.position, now_ms, &self.settings.limits);
-        self.spawn(arrival, motion, 0, now_ms, admit.handoffs, now_ms);
+        self.spawn(
+            arrival,
+            motion,
+            admit.bundles_sent,
+            now_ms,
+            admit.handoffs,
+            now_ms,
+        );
         Ok(login)
     }
 
@@ -936,6 +943,7 @@ mod tests {
             },
             login,
             handoffs: 0,
+            bundles_sent: 0,
         }
     }
 
@@ -1095,6 +1103,19 @@ mod tests {
         world.admit(&resumed, NOW, SERVER_TIME).expect("admit");
         let output = tick(&mut world, NOW);
         assert_eq!(output.handoffs[0].offer.handoffs, RESUME_BASE + 1);
+    }
+
+    #[test]
+    fn a_resumed_player_goes_on_with_the_bundle_sequence() {
+        let mut world = world();
+        let resumed = Admit {
+            bundles_sent: BUNDLES_BEFORE,
+            ..admit_at(1, 0.0, false)
+        };
+        world.admit(&resumed, NOW, SERVER_TIME).expect("admit");
+        let output = tick(&mut world, NOW);
+        let bundle = bundle_of(&output.messages, &connection(1)).expect("bundle");
+        assert_eq!(bundle.leading, Some(BUNDLES_BEFORE));
     }
 
     #[test]
