@@ -268,6 +268,73 @@ const fn mask_bit(mask: u32, bit: u32) -> bool {
     (mask >> bit) & 1 == 1
 }
 
+/// Which rows after bit 8 a record holds (`FUN_142a25d90`, the bit cursor): from its mask, its
+/// prefix integer and the gate byte after row 4. `decode` reads by it and `encode` checks by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct RowLayout {
+    row_1: bool,
+    row_2: bool,
+    row_3_position: bool,
+    row_3_id: bool,
+    row_4: bool,
+    row_5_position: bool,
+    row_5_block: bool,
+    row_6: bool,
+    row_10: bool,
+    row_11: bool,
+    row_12: bool,
+    row_13: bool,
+    row_14: bool,
+    row_15: bool,
+    row_16: bool,
+}
+
+impl RowLayout {
+    /// The rows of a record with `mask`, the prefix integer `prefix` and the gate byte `gate`
+    /// that row 5 sees. Rows 1 to 4 do not depend on `gate`.
+    fn new(mask: u32, prefix: u64, gate: u8) -> Self {
+        let bit = |n: u32| mask_bit(mask, n);
+        let carried = Carried { prefix, gate };
+        let mut layout = Self {
+            row_1: carried.prefix_bit(PREFIX_ROW_1),
+            ..Self::default()
+        };
+        let mut cursor = FIRST_CURSOR;
+        if carried.prefix_bit(PREFIX_ROW_2) {
+            cursor = ROW_2_CURSOR;
+            layout.row_2 = bit(FIRST_CURSOR);
+        }
+        if carried.prefix_bit(PREFIX_ROW_3) {
+            layout.row_3_position = bit(cursor);
+            layout.row_3_id = bit(cursor + 1);
+            cursor += 2;
+        }
+        layout.row_4 = bit(cursor);
+        let mut next = cursor + 1;
+        if gate != 0 {
+            layout.row_5_position = bit(cursor + 1);
+            layout.row_5_block = bit(cursor + 2);
+            next = cursor + 3;
+        }
+        let mut cursor = next;
+        if carried.prefix_bit(PREFIX_ROW_6) {
+            layout.row_6 = bit(cursor);
+            cursor += 1;
+        }
+        if carried.prefix_bit(PREFIX_ROW_10) {
+            layout.row_10 = bit(cursor);
+            cursor += 1;
+        }
+        layout.row_11 = bit(cursor);
+        layout.row_12 = carried.prefix_bit(PREFIX_ROW_12);
+        layout.row_13 = carried.prefix_bit(PREFIX_ROW_13);
+        layout.row_14 = bit(cursor + 1);
+        layout.row_15 = bit(cursor + 2);
+        layout.row_16 = carried.prefix_bit(PREFIX_ROW_16) && bit(cursor + 3);
+        layout
+    }
+}
+
 impl ClientInputMsg {
     /// An input with an empty head and one record that holds only `position`, as the test client
     /// sends it.
@@ -300,8 +367,9 @@ impl BodyCodec for ClientInputMsg {
             limit: u64::from(u8::MAX),
         })?;
         writer.u8(count);
+        let mut carried = Carried::default();
         for record in &self.records {
-            record.write(&mut writer)?;
+            record.write(&mut writer, &mut carried)?;
         }
         Ok(writer.finish())
     }
@@ -428,10 +496,7 @@ impl InputSlots {
     fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
         let expected = usize::from(self.count).div_ceil(2);
         if self.values.len() != expected {
-            return Err(MessageError::CountTooLarge {
-                count: u64::try_from(self.values.len()).unwrap_or(u64::MAX),
-                limit: u64::try_from(expected).unwrap_or(u64::MAX),
-            });
+            return Err(MessageError::LengthMismatch { field: "slots" });
         }
         writer.u8(self.count);
         let odd = self.count % 2 == 1;
@@ -471,9 +536,7 @@ impl InputRecord {
         record.bit_6 = bit(BIT_6)
             .then(|| Ok::<_, MessageError>([reader.f32()?, reader.f32()?]))
             .transpose()?;
-        record.bit_7 = bit(BIT_7)
-            .then(|| InputPosition::read(reader))
-            .transpose()?;
+        record.bit_7 = read_position(reader, bit(BIT_7))?;
         let tag = reader.u8()?;
         if tag != AFTER_POSITION_END {
             record.after_position = Some((tag, reader.array()?));
@@ -489,82 +552,82 @@ impl InputRecord {
         Ok(record)
     }
 
-    /// The rows after bit 8, with the bit cursor of the reader.
+    /// The rows after bit 8, as [`RowLayout`] gives them.
     fn read_rows(
         &mut self,
         reader: &mut Reader<'_>,
         carried: &mut Carried,
     ) -> Result<(), MessageError> {
-        let mask = self.mask;
-        let bit = |n: u32| mask_bit(mask, n);
-        let mut cursor = FIRST_CURSOR;
-        if carried.prefix_bit(PREFIX_ROW_1) {
+        let first = RowLayout::new(self.mask, carried.prefix, carried.gate);
+        if first.row_1 {
             self.row_1 = Some([reader.prefixed()?, reader.prefixed()?, reader.prefixed()?]);
         }
-        if carried.prefix_bit(PREFIX_ROW_2) {
-            cursor = ROW_2_CURSOR;
-            self.row_2 = bit(FIRST_CURSOR)
-                .then(|| InputPosition::read(reader))
-                .transpose()?;
-        }
-        if carried.prefix_bit(PREFIX_ROW_3) {
-            self.row_3_position = bit(cursor)
-                .then(|| InputPosition::read(reader))
-                .transpose()?;
-            self.row_3_id = bit(cursor + 1)
-                .then(|| Ok::<_, MessageError>((reader.array()?, reader.u64()?)))
-                .transpose()?;
-            cursor += 2;
-        }
-        let mut next = cursor + 1;
-        if bit(cursor) {
+        self.row_2 = read_position(reader, first.row_2)?;
+        self.row_3_position = read_position(reader, first.row_3_position)?;
+        self.row_3_id = first
+            .row_3_id
+            .then(|| Ok::<_, MessageError>((reader.array()?, reader.u64()?)))
+            .transpose()?;
+        if first.row_4 {
             let gate = reader.u8()?;
             self.row_4 = Some(gate);
             carried.gate = gate;
         }
-        if carried.gate != 0 {
-            self.row_5_position = bit(cursor + 1)
-                .then(|| InputPosition::read(reader))
-                .transpose()?;
-            self.row_5_block = bit(cursor + 2).then(|| reader.array()).transpose()?;
-            next = cursor + 3;
-        }
-        let mut cursor = next;
-        if carried.prefix_bit(PREFIX_ROW_6) {
-            self.row_6 = bit(cursor).then(|| reader.array()).transpose()?;
-            cursor += 1;
-        }
+        let layout = RowLayout::new(self.mask, carried.prefix, carried.gate);
+        self.row_5_position = read_position(reader, layout.row_5_position)?;
+        self.row_5_block = layout.row_5_block.then(|| reader.array()).transpose()?;
+        self.row_6 = layout.row_6.then(|| reader.array()).transpose()?;
         let [len_104, len_192, len_96] = ELEMENT_LENS;
         self.elements_104 = read_elements(reader, len_104)?;
         self.elements_192 = read_elements(reader, len_192)?;
         self.elements_96 = read_elements(reader, len_96)?;
-        if carried.prefix_bit(PREFIX_ROW_10) {
-            self.row_10 = bit(cursor)
-                .then(|| InputPosition::read(reader))
-                .transpose()?;
-            cursor += 1;
-        }
-        self.row_11 = bit(cursor)
+        self.row_10 = read_position(reader, layout.row_10)?;
+        self.row_11 = layout
+            .row_11
             .then(|| Ok::<_, MessageError>([reader.u16()?, reader.u16()?, reader.u16()?]))
             .transpose()?;
-        self.row_12 = carried
-            .prefix_bit(PREFIX_ROW_12)
-            .then(|| reader.u64())
-            .transpose()?;
-        self.row_13 = carried
-            .prefix_bit(PREFIX_ROW_13)
-            .then(|| reader.u8())
-            .transpose()?;
-        self.row_14 = bit(cursor + 1).then(|| reader.u8()).transpose()?;
-        self.row_15 = bit(cursor + 2).then(|| reader.u32()).transpose()?;
-        self.row_16 = (carried.prefix_bit(PREFIX_ROW_16) && bit(cursor + 3))
-            .then(|| reader.u16())
-            .transpose()?;
+        self.row_12 = layout.row_12.then(|| reader.u64()).transpose()?;
+        self.row_13 = layout.row_13.then(|| reader.u8()).transpose()?;
+        self.row_14 = layout.row_14.then(|| reader.u8()).transpose()?;
+        self.row_15 = layout.row_15.then(|| reader.u32()).transpose()?;
+        self.row_16 = layout.row_16.then(|| reader.u16()).transpose()?;
         Ok(())
     }
 
-    fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
+    /// The rows this record holds, in the shape of [`RowLayout`].
+    fn present_rows(&self) -> RowLayout {
+        RowLayout {
+            row_1: self.row_1.is_some(),
+            row_2: self.row_2.is_some(),
+            row_3_position: self.row_3_position.is_some(),
+            row_3_id: self.row_3_id.is_some(),
+            row_4: self.row_4.is_some(),
+            row_5_position: self.row_5_position.is_some(),
+            row_5_block: self.row_5_block.is_some(),
+            row_6: self.row_6.is_some(),
+            row_10: self.row_10.is_some(),
+            row_11: self.row_11.is_some(),
+            row_12: self.row_12.is_some(),
+            row_13: self.row_13.is_some(),
+            row_14: self.row_14.is_some(),
+            row_15: self.row_15.is_some(),
+            row_16: self.row_16.is_some(),
+        }
+    }
+
+    /// Writes the record after the records that left `carried`. Refuses a record whose fields
+    /// do not match its mask, or whose rows are not the ones `decode` would read.
+    fn write(&self, writer: &mut Writer, carried: &mut Carried) -> Result<(), MessageError> {
         self.check_mask()?;
+        if let Some(prefix) = self.bit_0 {
+            carried.prefix = prefix & u64::from(u32::MAX);
+        }
+        if let Some(gate) = self.row_4 {
+            carried.gate = gate;
+        }
+        if self.present_rows() != RowLayout::new(self.mask, carried.prefix, carried.gate) {
+            return Err(MessageError::RowsMismatch);
+        }
         let mask_bytes = self.mask.to_le_bytes();
         writer
             .bytes(&mask_bytes[..MASK_LEN])
@@ -699,6 +762,13 @@ impl InputRecord {
     }
 }
 
+fn read_position(
+    reader: &mut Reader<'_>,
+    present: bool,
+) -> Result<Option<InputPosition>, MessageError> {
+    present.then(|| InputPosition::read(reader)).transpose()
+}
+
 fn read_elements(reader: &mut Reader<'_>, len: usize) -> Result<Vec<u8>, MessageError> {
     let count = reader.prefixed()?;
     if count > MAX_ELEMENTS {
@@ -719,9 +789,7 @@ fn read_elements(reader: &mut Reader<'_>, len: usize) -> Result<Vec<u8>, Message
 
 fn write_elements(writer: &mut Writer, elements: &[u8], len: usize) -> Result<(), MessageError> {
     if !elements.len().is_multiple_of(len) {
-        return Err(MessageError::TrailingBytes {
-            left: elements.len() % len,
-        });
+        return Err(MessageError::LengthMismatch { field: "elements" });
     }
     writer.prefixed(u64::try_from(elements.len() / len).unwrap_or(u64::MAX))?;
     writer.bytes(elements);
@@ -799,8 +867,8 @@ mod tests {
     const Y: f32 = 7_305.9;
     const Z: f32 = 170.0;
     const HEIGHT_STEP_M: f32 = 0.02;
-    const PREFIX_ROW_1: u64 = 1;
-    const PREFIX_ROW_2: u64 = 1 << 11;
+    const PREFIX_MASK_ROW_1: u64 = 1;
+    const PREFIX_MASK_ROW_2: u64 = 1 << 11;
     const GATE: u8 = 5;
     const ELEMENT_COUNT: usize = 2;
 
@@ -813,7 +881,7 @@ mod tests {
         InputRecord {
             mask: 0x1FF | (1 << 9) | (1 << 10),
             u16_after_mask: 7,
-            bit_0: Some(PREFIX_ROW_1 | PREFIX_ROW_2),
+            bit_0: Some(PREFIX_MASK_ROW_1 | PREFIX_MASK_ROW_2),
             bit_1: Some(1),
             bit_2: Some(true),
             bit_3: Some(3),
@@ -963,6 +1031,51 @@ mod tests {
             ..InputRecord::default()
         };
         assert!(message(vec![bad_end]).encode().is_err());
+    }
+
+    #[test]
+    fn rows_that_the_mask_prefix_and_gate_do_not_hold_are_refused() {
+        let position_only = || InputRecord {
+            mask: 1 << 7,
+            bit_7: Some(position()),
+            ..InputRecord::default()
+        };
+        let gate_without_bit = InputRecord {
+            row_4: Some(1),
+            ..position_only()
+        };
+        assert_eq!(
+            message(vec![gate_without_bit]).encode(),
+            Err(MessageError::RowsMismatch)
+        );
+        let row_1_without_prefix = InputRecord {
+            row_1: Some([1, 2, 3]),
+            ..position_only()
+        };
+        assert_eq!(
+            message(vec![row_1_without_prefix]).encode(),
+            Err(MessageError::RowsMismatch)
+        );
+        let short_slots = InputRecord {
+            slots: InputSlots {
+                count: 3,
+                values: vec![1],
+                bytes: [0; 4],
+            },
+            ..position_only()
+        };
+        assert_eq!(
+            message(vec![short_slots]).encode(),
+            Err(MessageError::LengthMismatch { field: "slots" })
+        );
+        let odd_elements = InputRecord {
+            elements_96: vec![0; ELEMENT_LENS[2] + 1],
+            ..position_only()
+        };
+        assert_eq!(
+            message(vec![odd_elements]).encode(),
+            Err(MessageError::LengthMismatch { field: "elements" })
+        );
     }
 
     #[test]

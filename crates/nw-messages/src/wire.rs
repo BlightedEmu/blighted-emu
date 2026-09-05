@@ -12,6 +12,8 @@ pub const RAW_ID_LEN: usize = 16;
 const BYTE_BITS: u32 = 8;
 /// Value bits of a wide prefix-coded integer with `n` extra bytes, for `n` from 0 to 8.
 const WIDE_VALUE_BITS: [u32; 9] = [7, 14, 21, 28, 35, 42, 49, 56, 64];
+/// The form with 8 extra bytes (first byte 0xFF), which holds every value.
+const WIDE_LAST_FORM: usize = 8;
 
 /// A body that does not match its layout.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -65,6 +67,16 @@ pub enum MessageError {
     MaskMismatch {
         /// The mask bit.
         bit: u8,
+    },
+    /// The rows after mask bit 8 are not the ones that the mask, the prefix integer and the gate
+    /// byte select, so a decoder would read the body differently.
+    #[error("the rows do not match the mask, the prefix and the gate")]
+    RowsMismatch,
+    /// A list does not have the length its count or element size needs.
+    #[error("{field}: the length does not match")]
+    LengthMismatch {
+        /// The field.
+        field: &'static str,
     },
     /// A replicated state class has no reader here, and its body has no length.
     #[error("no reader for replicated state class {class:?}")]
@@ -229,7 +241,8 @@ impl<'a> Reader<'a> {
             high |= u64::from(*byte) << (BYTE_BITS * index as u32);
         }
         let low = u64::from(first) & ((1_u64 << low_bits) - 1);
-        Ok(high.checked_shl(low_bits).unwrap_or(0) | low)
+        // `low_bits` is at most 7.
+        Ok((high << low_bits) | low)
     }
 
     /// A prefix-coded integer.
@@ -334,10 +347,12 @@ impl Writer {
 
     /// Adds a wide prefix-coded integer in its shortest form (see [`Reader::wide_prefixed`]).
     pub fn wide_prefixed(&mut self, value: u64) -> &mut Self {
-        let extra = WIDE_VALUE_BITS
+        // Below the last form, a value fits the first form with room for it; else it needs
+        // all 8 extra bytes.
+        let extra = WIDE_VALUE_BITS[..WIDE_LAST_FORM]
             .iter()
-            .position(|bits| *bits == u64::BITS || value >> bits == 0)
-            .unwrap_or(WIDE_VALUE_BITS.len() - 1);
+            .position(|bits| value >> bits == 0)
+            .unwrap_or(WIDE_LAST_FORM);
         // `extra` is at most 8.
         let extra_bits = extra as u32 * BYTE_BITS;
         let low_bits = WIDE_VALUE_BITS[extra] - extra_bits;
