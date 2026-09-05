@@ -14,6 +14,8 @@ pub mod payload;
 pub mod position;
 pub mod server;
 pub mod spawn_point;
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_support;
 pub mod time_change;
 pub mod time_synch;
 pub mod wire;

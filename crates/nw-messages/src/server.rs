@@ -129,50 +129,23 @@ impl ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connected::{Block1415acc30, ConnectedBody};
-    use crate::wire::RAW_ID_LEN;
+    use crate::test_support::login_samples;
+
+    const ENTITY: u64 = 4;
 
     const OTHER_TYPE: u64 = 349;
 
     fn samples() -> Vec<ServerMessage> {
-        let block = Block1415acc30 {
-            value: 1,
-            first: [2; RAW_ID_LEN],
-            second: [3; RAW_ID_LEN],
-        };
-        let connected = ConnectedBody {
-            block_at_0: block,
-            block_at_36: block,
-        };
-        vec![
-            ServerMessage::TimingConfigurationConnected(TimingConfigurationConnectedMsg(connected)),
-            ServerMessage::CalendarConnected(CalendarConnectedMsg(connected)),
-            ServerMessage::ClientAddEntry(ClientAddEntryMsg {
-                entry_id: [4; RAW_ID_LEN],
-            }),
-            ServerMessage::PlayerSpawnPoint(ReceivePlayerSpawnPointMsg),
-            ServerMessage::TimeSynch(TimeSynchMsg { time: 5 }),
-            ServerMessage::TimeChange(SyncTimeChangeMsg {
-                ids: [6, 7],
-                f32s_at_16: [1.0; 3],
-                u32s_at_28: [8; 6],
-                time: 9,
-                f32s_at_60: [0.5; 4],
-            }),
-            ServerMessage::DayPhase(SyncDayPhaseMsg {
-                u64_at_0: 10,
-                u64_at_8: 11,
-                u32_at_16: 2,
-            }),
-            ServerMessage::Bundle(ReplicatedStateBundle {
-                leading: None,
-                byte_3: 0,
-                byte_4: 1,
-                flag_5: false,
-                index_block: None,
-                payload: vec![12; 3],
-            }),
-        ]
+        let mut samples = login_samples(ENTITY);
+        samples.push(ServerMessage::Bundle(ReplicatedStateBundle {
+            leading: None,
+            byte_3: 0,
+            byte_4: 1,
+            flag_5: false,
+            index_block: None,
+            payload: vec![12; 3],
+        }));
+        samples
     }
 
     #[test]

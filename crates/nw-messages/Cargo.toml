@@ -14,5 +14,9 @@ thiserror.workspace = true
 [dev-dependencies]
 proptest.workspace = true
 
+[features]
+# `test_support`: sample messages, for other crates' tests.
+test-util = []
+
 [lints]
 workspace = true
