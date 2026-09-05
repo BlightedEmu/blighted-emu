@@ -3,6 +3,7 @@
 //! passes positions and times in. `sim` runs them.
 
 pub mod cells;
+pub mod grid;
 pub mod interest;
 pub mod movement;
 #[cfg(any(test, feature = "test-util"))]
@@ -12,6 +13,7 @@ pub mod tick;
 pub use cells::{
     CellGrid, CellGridError, CellId, CellOwners, MAX_CELLS, assign_columns, level_bounds,
 };
+pub use grid::SpatialGrid;
 pub use interest::{Interest, InterestChanges};
 pub use movement::{
     CellBounds, Ground, GroundCheck, Motion, MotionState, MoveLimits, MoveLimitsError, MoveRefusal,

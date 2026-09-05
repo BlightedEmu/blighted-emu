@@ -17,3 +17,6 @@ test-util = []
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

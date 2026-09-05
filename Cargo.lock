@@ -3051,6 +3051,7 @@ name = "nw-sim-core"
 version = "0.1.0"
 dependencies = [
  "nw-world",
+ "proptest",
  "thiserror 2.0.21",
 ]
 
