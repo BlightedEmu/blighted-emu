@@ -4,9 +4,9 @@
 //! 6310) are not sent.
 //!
 //! Every id field holds a value this server chooses; no byte comes from a capture. The meaning of
-//! most of these ids in the retail service is Unknown. One choice is ours alone: the 16-byte
-//! entry id of `ClientAddEntryMsg` holds the player's entity number (8 zero bytes, then the
-//! number as a big-endian `u64`), so a test client knows which bundle member it is.
+//! most of these ids in the retail service is Unknown. One choice is ours alone: the entry id of
+//! `ClientAddEntryMsg` holds the player's entity number ([`ClientAddEntryMsg::for_entity`]), so a
+//! test client knows which bundle member it is.
 
 use nw_messages::{
     Block1415acc30, CalendarConnectedMsg, ClientAddEntryMsg, ConnectedBody, MessageError,
@@ -14,9 +14,6 @@ use nw_messages::{
     OBSERVED_TIME_CHANGE_U32S_AT_28, RAW_ID_LEN, ReceivePlayerSpawnPointMsg, ServerMessage,
     SyncDayPhaseMsg, SyncTimeChangeMsg, TimeSynchMsg, TimingConfigurationConnectedMsg,
 };
-
-/// Bytes of the entity number at the end of an entry id.
-const ENTITY_NUMBER_LEN: usize = 8;
 
 /// Ids that stay the same for every player of one `sim` run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,23 +80,6 @@ impl SessionIds {
     }
 }
 
-/// The entry id that carries `number` (see the module note).
-pub fn entry_id(number: u64) -> [u8; RAW_ID_LEN] {
-    let mut id = [0; RAW_ID_LEN];
-    id[RAW_ID_LEN - ENTITY_NUMBER_LEN..].copy_from_slice(&number.to_be_bytes());
-    id
-}
-
-/// The entity number in an entry id that [`entry_id`] made; `None` for another id.
-pub fn entity_number(entry_id: &[u8; RAW_ID_LEN]) -> Option<u64> {
-    let (zeros, number) = entry_id.split_at(RAW_ID_LEN - ENTITY_NUMBER_LEN);
-    let number: [u8; ENTITY_NUMBER_LEN] = number.try_into().ok()?;
-    zeros
-        .iter()
-        .all(|byte| *byte == 0)
-        .then_some(u64::from_be_bytes(number))
-}
-
 /// The login messages for one player, as envelopes, in the captured order.
 ///
 /// # Errors
@@ -127,9 +107,7 @@ pub fn login_messages(
             block_at_0: world.calendar_block,
             block_at_36: session_block,
         })),
-        ServerMessage::ClientAddEntry(ClientAddEntryMsg {
-            entry_id: entry_id(entity),
-        }),
+        ServerMessage::ClientAddEntry(ClientAddEntryMsg::for_entity(entity)),
         ServerMessage::PlayerSpawnPoint(ReceivePlayerSpawnPointMsg),
         ServerMessage::TimeSynch(TimeSynchMsg { time: server_time }),
         ServerMessage::TimeChange(SyncTimeChangeMsg {
@@ -164,12 +142,8 @@ fn random_u64() -> Result<u64, getrandom::Error> {
 
 #[cfg(test)]
 mod tests {
-    use nw_messages::{
-        CALENDAR_CONNECTED_MSG_TYPE_INDEX, CLIENT_ADD_ENTRY_MSG_TYPE_INDEX,
-        RECEIVE_PLAYER_SPAWN_POINT_MSG_TYPE_INDEX, SYNC_DAY_PHASE_MSG_TYPE_INDEX,
-        SYNC_TIME_CHANGE_MSG_TYPE_INDEX, TIMING_CONFIGURATION_CONNECTED_MSG_TYPE_INDEX,
-    };
-    use nw_reflect::{Envelope, TIME_SYNCH_MSG_TYPE_INDEX};
+    use nw_messages::LOGIN_MESSAGE_TYPES;
+    use nw_reflect::Envelope;
 
     use super::*;
 
@@ -191,24 +165,13 @@ mod tests {
                     .expect("slot")
             })
             .collect();
-        assert_eq!(
-            types,
-            [
-                TIMING_CONFIGURATION_CONNECTED_MSG_TYPE_INDEX,
-                CALENDAR_CONNECTED_MSG_TYPE_INDEX,
-                CLIENT_ADD_ENTRY_MSG_TYPE_INDEX,
-                RECEIVE_PLAYER_SPAWN_POINT_MSG_TYPE_INDEX,
-                TIME_SYNCH_MSG_TYPE_INDEX,
-                SYNC_TIME_CHANGE_MSG_TYPE_INDEX,
-                SYNC_DAY_PHASE_MSG_TYPE_INDEX,
-            ]
-        );
+        assert_eq!(types, LOGIN_MESSAGE_TYPES);
         let entry = Envelope::decode(&envelopes[2]).expect("entry");
         let Some(Ok(ServerMessage::ClientAddEntry(message))) = ServerMessage::from_envelope(&entry)
         else {
             panic!("expected the entry message");
         };
-        assert_eq!(entity_number(&message.entry_id), Some(ENTITY));
+        assert_eq!(message.entity_number(), Some(ENTITY));
     }
 
     #[test]
@@ -224,11 +187,5 @@ mod tests {
             other => panic!("unexpected {other:?}"),
         };
         assert_eq!(second_block(&envelopes[0]), second_block(&envelopes[1]));
-    }
-
-    #[test]
-    fn an_id_that_is_not_an_entity_number_is_refused() {
-        assert_eq!(entity_number(&entry_id(ENTITY)), Some(ENTITY));
-        assert_eq!(entity_number(&[1; RAW_ID_LEN]), None);
     }
 }

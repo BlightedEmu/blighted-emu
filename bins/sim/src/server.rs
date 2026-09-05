@@ -392,7 +392,7 @@ mod tests {
     use nw_bus::{ConnectionRef, GatewayOutput};
     use nw_db::test_db::with_test_schema;
     use nw_db::{NewCharacter, WORLD_MIGRATOR, insert_character};
-    use nw_messages::{BundlePayload, ServerMessage};
+    use nw_messages::{BundlePayload, LOGIN_MESSAGE_TYPES, ServerMessage};
     use nw_reflect::Envelope;
 
     use super::*;
@@ -400,7 +400,6 @@ mod tests {
 
     const WAIT: Duration = Duration::from_secs(5);
     const LEVEL: &str = "newworld_vitaeeterna";
-    const LOGIN_MESSAGES: usize = 7;
     const CONNECTION: u64 = 9;
     const START: Position = Position {
         x: 11132.5,
@@ -502,7 +501,7 @@ mod tests {
             let (channel, reliable, login) = next_output(&mut outputs).await;
             assert_eq!(
                 (channel, reliable, login.len()),
-                (MESSAGE_CHANNEL, true, LOGIN_MESSAGES)
+                (MESSAGE_CHANNEL, true, LOGIN_MESSAGE_TYPES.len())
             );
             let (channel, reliable, bundle) = next_output(&mut outputs).await;
             assert_eq!((channel, reliable), (REPLICATION_CHANNEL, false));

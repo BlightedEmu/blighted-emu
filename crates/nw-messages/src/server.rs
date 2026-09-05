@@ -24,6 +24,12 @@ pub const SERVER_MESSAGE_TYPES: [u64; 8] = [
     ReplicatedStateBundle::TYPE_INDEX,
 ];
 
+/// Type indexes of the login messages, in the captured order: every type of
+/// [`SERVER_MESSAGE_TYPES`] but the bundle, which comes after them.
+pub const LOGIN_MESSAGE_TYPES: &[u64] = SERVER_MESSAGE_TYPES
+    .split_at(SERVER_MESSAGE_TYPES.len() - 1)
+    .0;
+
 /// One server message of M4.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerMessage {
@@ -174,6 +180,10 @@ mod tests {
         let samples = samples();
         let order: Vec<u64> = samples.iter().map(ServerMessage::type_index).collect();
         assert_eq!(order, SERVER_MESSAGE_TYPES);
+        assert_eq!(
+            LOGIN_MESSAGE_TYPES.last(),
+            Some(&SyncDayPhaseMsg::TYPE_INDEX)
+        );
         for message in samples {
             let body = message.encode().expect("encode");
             assert_eq!(
