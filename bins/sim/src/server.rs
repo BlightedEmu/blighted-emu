@@ -1029,6 +1029,7 @@ mod tests {
             entity: CONNECTION,
             position: at(x),
             login: true,
+            handoffs: 0,
         }
     }
 

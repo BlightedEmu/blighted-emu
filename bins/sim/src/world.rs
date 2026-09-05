@@ -244,7 +244,9 @@ impl SimWorld {
     }
 
     /// Adds the player of `admit` and returns its login messages, or `None` for a resumed
-    /// player, which has them already.
+    /// player, which has them already. A resume of a player that this sim already has on that
+    /// connection with that entity number (it took the player in a handoff that its lost sender
+    /// never ended) keeps the player as it is.
     ///
     /// # Errors
     ///
@@ -256,6 +258,14 @@ impl SimWorld {
         now_ms: u64,
         server_time: u64,
     ) -> Result<Option<Outgoing>, WorldError> {
+        let here = self
+            .by_connection
+            .get(&admit.connection)
+            .and_then(|entity| self.world.get::<Player>(*entity))
+            .is_some_and(|player| player.number == admit.entity);
+        if here && !admit.login {
+            return Ok(None);
+        }
         let arrival = Arrival {
             connection: admit.connection.clone(),
             character: admit.character,
@@ -276,7 +286,7 @@ impl SimWorld {
             None
         };
         let motion = Motion::new(arrival.position, now_ms, &self.settings.limits);
-        self.spawn(arrival, motion, 0, now_ms, 0, now_ms);
+        self.spawn(arrival, motion, 0, now_ms, admit.handoffs, now_ms);
         Ok(login)
     }
 
@@ -532,7 +542,7 @@ impl SimWorld {
                     budget_m: state.budget_m,
                     bundles_sent: player.bundles_sent,
                     time_synch_age_ms: now_ms.saturating_sub(player.last_time_synch_ms),
-                    handoffs: player.handoffs + 1,
+                    handoffs: player.handoffs.saturating_add(1),
                 },
             });
         }
@@ -604,7 +614,7 @@ impl SimWorld {
             );
             for members in visible.chunks(MAX_BUNDLE_MEMBERS) {
                 let bundle = bundle(player.bundles_sent, members)?;
-                player.bundles_sent += 1;
+                player.bundles_sent = player.bundles_sent.saturating_add(1);
                 outgoing.push(Outgoing {
                     connection: player.connection.clone(),
                     channel: REPLICATION_CHANNEL,
@@ -779,6 +789,7 @@ mod tests {
     const GENERATION: u64 = 5;
     const BUNDLES_BEFORE: u64 = 900;
     const GHOST_NUMBER: u64 = 99;
+    const RESUME_BASE: u64 = 1 << 32;
 
     fn slot(name: &str) -> SimSlot {
         SimSlot {
@@ -865,6 +876,7 @@ mod tests {
                 z: 50.0,
             },
             login,
+            handoffs: 0,
         }
     }
 
@@ -981,6 +993,49 @@ mod tests {
             .expect("admit");
         assert_eq!(login, None);
         assert_eq!(world.players(), 1);
+    }
+
+    #[test]
+    fn a_resume_of_a_player_that_is_here_keeps_it() {
+        let mut world = world();
+        let first = admit_at(1, 0.0, true);
+        world.admit(&first, NOW, SERVER_TIME).expect("admit");
+        world
+            .move_to(&connection(1), at(SPEED_MPS), NOW + ONE_SECOND_MS)
+            .expect("move");
+        let resume = Admit {
+            login: false,
+            position: Point {
+                x: 100.0,
+                y: 10.0,
+                z: 50.0,
+            },
+            ..first.clone()
+        };
+        assert_eq!(
+            world.admit(&resume, NOW, SERVER_TIME).expect("resume"),
+            None
+        );
+        assert_eq!(world.players(), 1);
+        assert_eq!(world.positions()[0].position, at(SPEED_MPS));
+        let other_entity = Admit {
+            entity: 2,
+            ..resume
+        };
+        assert!(world.admit(&other_entity, NOW, SERVER_TIME).is_err());
+    }
+
+    #[test]
+    fn a_resumed_player_counts_its_handoffs_from_the_given_base() {
+        let mut world = world();
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        let resumed = Admit {
+            handoffs: RESUME_BASE,
+            ..admit_at(1, BORDER_X + 50.0, false)
+        };
+        world.admit(&resumed, NOW, SERVER_TIME).expect("admit");
+        let output = tick(&mut world, NOW);
+        assert_eq!(output.handoffs[0].offer.handoffs, RESUME_BASE + 1);
     }
 
     #[test]

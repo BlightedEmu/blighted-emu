@@ -11,11 +11,11 @@
 
 use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nw_bus::{
     Bus, BusError, BusId, CellTable, ConnectionRef, GatewayOutput, Heartbeat, Join, JoinReply,
-    Publisher, SimInput, Subscription, subject,
+    Publisher, ResumeOf, SimInput, Subscription, subject,
 };
 use nw_common::time::unix_ms;
 use nw_login::queue::EntryRecord;
@@ -23,7 +23,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::registration::Refusal;
-use crate::routes::{Resume, Routes};
+use crate::routes::{Resume, Routes, Stray};
 
 /// Client messages and departures that may wait for the publishing task.
 pub const INPUT_QUEUE: usize = 4096;
@@ -35,6 +35,8 @@ const HEARTBEAT_QUEUE: usize = 16;
 pub const METRIC_INPUTS_DROPPED: &str = "rep_gateway_world_inputs_dropped_total";
 /// Metric: inputs of a connection without a route (resuming, or gone).
 pub const METRIC_INPUTS_WITHOUT_ROUTE: &str = "rep_gateway_inputs_without_route_total";
+/// Metric: sims told to drop a copy that nobody routes to.
+pub const METRIC_STRAYS_EVICTED: &str = "rep_gateway_strays_evicted_total";
 /// Metric: resumes by `result`.
 pub const METRIC_RESUMES: &str = "rep_gateway_resumes_total";
 const RESULT_LABEL: &str = "result";
@@ -177,13 +179,13 @@ impl BusWorld {
         );
     }
 
-    /// Asks the director; `resume` is the entity number of a resumed player.
+    /// Asks the director; `resume` is set for a resumed player.
     async fn ask_director(
         &self,
         connection: u64,
         account: Uuid,
         character: Uuid,
-        resume: Option<u64>,
+        resume: Option<ResumeOf>,
     ) -> Result<JoinReply, BusError> {
         let join = Join {
             connection: self.connection(connection),
@@ -200,7 +202,8 @@ impl BusWorld {
             .await
     }
 
-    /// Server messages and closes go to the loop; route messages change the routes here.
+    /// Server messages and closes go to the loop; route messages change the routes here. A
+    /// stray copy past its grace is told that the connection left.
     async fn forward_outputs(self, mut outputs: Subscription<GatewayOutput>) {
         while let Some(output) = outputs.next().await {
             let event = match output.map(|output| output.message) {
@@ -210,13 +213,22 @@ impl BusWorld {
                     channel,
                     reliable,
                     envelopes,
-                }) => WorldEvent::Messages {
-                    sim,
-                    connection,
-                    channel,
-                    reliable,
-                    envelopes,
-                },
+                }) => {
+                    let stray = self.routes().stray(connection, &sim, Instant::now());
+                    if stray == Stray::Evict {
+                        metrics::counter!(METRIC_STRAYS_EVICTED).increment(1);
+                        tracing::warn!(connection, %sim, "a sim keeps a copy; it drops it");
+                        self.send_left(connection, &sim);
+                        continue;
+                    }
+                    WorldEvent::Messages {
+                        sim,
+                        connection,
+                        channel,
+                        reliable,
+                        envelopes,
+                    }
+                }
                 Ok(GatewayOutput::Close { connection }) => WorldEvent::Close { connection },
                 Ok(GatewayOutput::Route {
                     connection,
@@ -259,8 +271,12 @@ impl BusWorld {
     /// Puts a player of a lost sim on the owner of its cell (M5 spec section 3.6); a refusal
     /// closes the connection.
     async fn resume(self, job: Resume) {
+        let resume = ResumeOf {
+            entity: job.entity,
+            handoffs: job.handoffs,
+        };
         let reply = self
-            .ask_director(job.connection, job.account, job.character, Some(job.entity))
+            .ask_director(job.connection, job.account, job.character, Some(resume))
             .await;
         match reply {
             Ok(JoinReply::Joined {
@@ -268,9 +284,7 @@ impl BusWorld {
             }) => {
                 metrics::counter!(METRIC_RESUMES, RESULT_LABEL => RESUMED).increment(1);
                 tracing::info!(connection = job.connection, %sim, "player resumed");
-                let still_here = self
-                    .routes()
-                    .resumed(job.connection, sim.clone(), generation);
+                let still_here = self.routes().resumed(&job, sim.clone(), generation);
                 if !still_here {
                     self.send_left(job.connection, &sim);
                 }

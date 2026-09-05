@@ -11,6 +11,9 @@ use uuid::Uuid;
 
 use crate::sims::Assignment;
 
+/// The handoff count of a new player.
+const NEW_PLAYER_HANDOFFS: u64 = 0;
+
 /// What every join needs.
 #[derive(Debug, Clone)]
 pub struct JoinContext {
@@ -100,9 +103,12 @@ pub async fn route_join(
         .owner_at(position)
         .ok_or(JoinRefusal::NoOwner)?
         .clone();
-    let entity = match join.resume {
-        Some(entity) => entity,
-        None => next_entity_number(&context.db).await.map_err(database)?,
+    let (entity, handoffs) = match join.resume {
+        Some(resume) => (resume.entity, resume.handoffs),
+        None => (
+            next_entity_number(&context.db).await.map_err(database)?,
+            NEW_PLAYER_HANDOFFS,
+        ),
     };
     let admit = Admit {
         connection: join.connection.clone(),
@@ -115,6 +121,7 @@ pub async fn route_join(
             z: position.z,
         },
         login: join.resume.is_none(),
+        handoffs,
     };
     let reply = context
         .bus

@@ -31,8 +31,18 @@ pub struct Join {
     pub account: Uuid,
     /// The character.
     pub character: Uuid,
-    /// The entity number of a resumed player; `None` for a new login.
-    pub resume: Option<u64>,
+    /// A resumed player; `None` for a new login.
+    pub resume: Option<ResumeOf>,
+}
+
+/// What a resumed player keeps (M5 spec section 3.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeOf {
+    /// Its entity number.
+    pub entity: u64,
+    /// The handoff count its new sim starts from: far above the count of the lost sim, so a late
+    /// route of the lost sim loses at the gateway.
+    pub handoffs: u64,
 }
 
 /// The answer to [`Join`].
@@ -139,6 +149,8 @@ pub struct Admit {
     pub position: Point,
     /// Whether to send the login messages; a resumed player already has them.
     pub login: bool,
+    /// The handoff count the player starts with: 0, or the count of a resume.
+    pub handoffs: u64,
 }
 
 /// The answer to [`Admit`].
@@ -324,7 +336,10 @@ mod tests {
             connection: connection(),
             account: Uuid::new_v4(),
             character: Uuid::new_v4(),
-            resume: Some(CONNECTION),
+            resume: Some(ResumeOf {
+                entity: CONNECTION,
+                handoffs: 1 << 32,
+            }),
         });
         round_trip(JoinReply::Joined {
             sim: connection().gateway,
@@ -382,6 +397,7 @@ mod tests {
             entity: CONNECTION,
             position: POINT,
             login: true,
+            handoffs: 0,
         });
         round_trip(AdmitReply::Admitted);
         round_trip(AdmitReply::Refused {

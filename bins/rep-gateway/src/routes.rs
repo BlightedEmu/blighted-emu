@@ -4,13 +4,36 @@
 //! A join sets the route. A handoff changes it only with a higher sequence, so two route messages
 //! that arrive out of order cannot leave an old sim. A connection whose sim and generation leave
 //! the cell table is resumed through the director; until the answer it has no route, and its
-//! inputs are dropped. A resumed player starts a new handoff count on its new sim.
+//! inputs are dropped. A resume raises the sequence by [`RESUME_SEQUENCE_STEP`], so a late route
+//! of the lost sim loses.
+//!
+//! A sim that is not a connection's route and still sends messages for it after
+//! [`STRAY_GRACE`] holds a copy that nobody routes to (a handoff that its lost sender never ended):
+//! it is told that the connection left.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use nw_bus::{BusId, CellTable};
 use nw_login::queue::EntryRecord;
 use uuid::Uuid;
+
+/// How far a resume raises the handoff sequence; no session hands off this often.
+pub const RESUME_SEQUENCE_STEP: u64 = 1 << 32;
+/// How long a sim that is not the route may send for a connection: longer than a handoff with
+/// its route message.
+pub const STRAY_GRACE: Duration = Duration::from_secs(2);
+
+/// What to do with messages from a sim for a connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stray {
+    /// The sim is the route, or the gateway has no route to compare: deliver.
+    No,
+    /// Another sim, inside the grace (a handoff in progress): deliver.
+    Waiting,
+    /// Another sim, past the grace: tell it the connection left, and drop the messages.
+    Evict,
+}
 
 #[derive(Debug)]
 struct Route {
@@ -34,12 +57,15 @@ pub struct Resume {
     pub character: Uuid,
     /// The entity number it keeps.
     pub entity: u64,
+    /// The handoff sequence it continues from.
+    pub handoffs: u64,
 }
 
 /// The routes of one gateway.
 #[derive(Debug, Default)]
 pub struct Routes {
     routes: HashMap<u64, Route>,
+    strays: HashMap<(u64, BusId), Instant>,
 }
 
 impl Routes {
@@ -90,6 +116,7 @@ impl Routes {
         else {
             return false;
         };
+        self.strays.remove(&(connection, sim.clone()));
         route.sim = sim;
         route.generation = generation;
         route.sequence = sequence;
@@ -115,6 +142,7 @@ impl Routes {
                     account: route.account,
                     character: route.character,
                     entity: route.entity,
+                    handoffs: route.sequence.saturating_add(RESUME_SEQUENCE_STEP),
                 }
             })
             .collect();
@@ -122,33 +150,53 @@ impl Routes {
         jobs
     }
 
-    /// The director put the resumed `connection` on `sim`. Returns `false` when the connection
-    /// left during the resume.
-    pub fn resumed(&mut self, connection: u64, sim: BusId, generation: u64) -> bool {
-        let Some(route) = self.routes.get_mut(&connection) else {
+    /// The director put the player of `job` on `sim`. Returns `false` when the connection left
+    /// during the resume.
+    pub fn resumed(&mut self, job: &Resume, sim: BusId, generation: u64) -> bool {
+        let Some(route) = self.routes.get_mut(&job.connection) else {
             return false;
         };
+        self.strays.remove(&(job.connection, sim.clone()));
         route.sim = sim;
         route.generation = generation;
-        route.sequence = 0;
+        route.sequence = job.handoffs;
         route.resuming = false;
         true
     }
 
     /// Forgets `connection`; returns the sim it had.
     pub fn left(&mut self, connection: u64) -> Option<BusId> {
+        self.strays.retain(|(stray, _), _| *stray != connection);
         self.routes.remove(&connection).map(|route| route.sim)
+    }
+
+    /// Whether messages of `sim` for `connection` at `now` come from a stray copy.
+    pub fn stray(&mut self, connection: u64, sim: &BusId, now: Instant) -> Stray {
+        let routed = self.routes.get(&connection).filter(|route| !route.resuming);
+        if routed.is_none_or(|route| route.sim == *sim) {
+            return Stray::No;
+        }
+        let key = (connection, sim.clone());
+        let first = *self.strays.entry(key.clone()).or_insert(now);
+        if now.saturating_duration_since(first) <= STRAY_GRACE {
+            return Stray::Waiting;
+        }
+        self.strays.remove(&key);
+        Stray::Evict
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use nw_bus::{CellTable, SimSlot};
 
     use super::*;
 
     const GENERATION: u64 = 5;
     const ENTITY: u64 = 40;
+    const PAUSE: Duration = Duration::from_millis(1);
 
     fn sim(name: &str) -> BusId {
         BusId::try_from(name.to_owned()).expect("id")
@@ -207,6 +255,7 @@ mod tests {
                 account: first.account_id,
                 character: first.character_id,
                 entity: ENTITY,
+                handoffs: RESUME_SEQUENCE_STEP,
             }]
         );
         assert!(routes.lost(&table(&[("sim-b", GENERATION)])).is_empty());
@@ -214,18 +263,55 @@ mod tests {
     }
 
     #[test]
-    fn inputs_during_a_resume_are_dropped_and_a_resume_starts_a_new_sequence() {
+    fn inputs_during_a_resume_are_dropped_and_a_late_route_of_the_lost_sim_loses() {
         let mut routes = Routes::default();
         routes.joined(1, &record(), sim("sim-a"), GENERATION, ENTITY);
         routes.apply_route(1, sim("sim-a"), GENERATION, 3);
-        routes.lost(&table(&[]));
+        let jobs = routes.lost(&table(&[]));
+        assert_eq!(jobs[0].handoffs, 3 + RESUME_SEQUENCE_STEP);
         assert_eq!(routes.target(1), None);
         assert!(!routes.apply_route(1, sim("sim-b"), GENERATION, 4));
-        assert!(routes.resumed(1, sim("sim-c"), GENERATION));
+        assert!(routes.resumed(&jobs[0], sim("sim-c"), GENERATION));
         assert_eq!(routes.target(1), Some(&sim("sim-c")));
-        assert!(routes.apply_route(1, sim("sim-d"), GENERATION, 1));
+        assert!(
+            !routes.apply_route(1, sim("sim-b"), GENERATION, 4),
+            "late route"
+        );
+        assert!(routes.apply_route(1, sim("sim-d"), GENERATION, jobs[0].handoffs + 1));
         assert_eq!(routes.left(1), Some(sim("sim-d")));
         assert_eq!(routes.left(1), None);
-        assert!(!routes.resumed(1, sim("sim-c"), GENERATION));
+        assert!(!routes.resumed(&jobs[0], sim("sim-c"), GENERATION));
+    }
+
+    #[test]
+    fn a_stray_sim_is_told_to_drop_the_player_after_the_grace() {
+        let start = Instant::now();
+        let mut routes = Routes::default();
+        routes.joined(1, &record(), sim("sim-a"), GENERATION, ENTITY);
+        assert_eq!(routes.stray(1, &sim("sim-a"), start), Stray::No);
+        assert_eq!(routes.stray(9, &sim("sim-a"), start), Stray::No, "unknown");
+        assert_eq!(routes.stray(1, &sim("sim-b"), start), Stray::Waiting);
+        assert_eq!(
+            routes.stray(1, &sim("sim-b"), start + STRAY_GRACE),
+            Stray::Waiting
+        );
+        assert_eq!(
+            routes.stray(1, &sim("sim-b"), start + STRAY_GRACE + PAUSE),
+            Stray::Evict
+        );
+        assert_eq!(
+            routes.stray(1, &sim("sim-b"), start + STRAY_GRACE + PAUSE),
+            Stray::Waiting,
+            "a new grace after the eviction"
+        );
+        assert!(routes.apply_route(1, sim("sim-b"), GENERATION, 1));
+        assert_eq!(
+            routes.stray(1, &sim("sim-b"), start + STRAY_GRACE * 3),
+            Stray::No,
+            "a handoff makes it the route"
+        );
+        assert_eq!(routes.stray(1, &sim("sim-a"), start), Stray::Waiting);
+        routes.left(1);
+        assert_eq!(routes.stray(1, &sim("sim-a"), start), Stray::No);
     }
 }

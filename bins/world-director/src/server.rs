@@ -245,8 +245,8 @@ mod tests {
 
     use nw_bus::test_support::test_bus;
     use nw_bus::{
-        Admit, AdmitReply, BusId, CellTable, ConnectionRef, Join, JoinReply, SimHeartbeat,
-        Subscription, subject,
+        Admit, AdmitReply, BusId, CellTable, ConnectionRef, Join, JoinReply, ResumeOf,
+        SimHeartbeat, Subscription, subject,
     };
     use nw_db::test_db::with_test_schema;
     use nw_db::{
@@ -272,6 +272,7 @@ mod tests {
     const WAIT: Duration = Duration::from_secs(5);
     const MAX_PLAYERS: u32 = 50;
     const RESUMED_ENTITY: u64 = 42;
+    const RESUMED_HANDOFFS: u64 = 1 << 32;
     const CONNECTION: u64 = 7;
     /// West of the border between two sims (column 3 starts at 6144 m).
     const WEST: Position = Position {
@@ -445,7 +446,7 @@ mod tests {
         (account, character.id)
     }
 
-    fn join(account: Uuid, character: Uuid, resume: Option<u64>) -> Join {
+    fn join(account: Uuid, character: Uuid, resume: Option<ResumeOf>) -> Join {
         Join {
             connection: ConnectionRef {
                 gateway: BusId::try_from("gw-1".to_owned()).expect("id"),
@@ -515,9 +516,11 @@ mod tests {
             let sim = FakeSim::start(&director.bus, director.world_id, "sim-a", 1).await;
             director.table_with(&[&sim.id]).await;
             let (account, character) = character(db, "Resuma").await;
-            let reply = director
-                .join(&join(account, character, Some(RESUMED_ENTITY)))
-                .await;
+            let resume = ResumeOf {
+                entity: RESUMED_ENTITY,
+                handoffs: RESUMED_HANDOFFS,
+            };
+            let reply = director.join(&join(account, character, Some(resume))).await;
             assert!(matches!(
                 reply,
                 JoinReply::Joined {
@@ -528,6 +531,7 @@ mod tests {
             let admit = sim.admits()[0].clone();
             assert!(!admit.login);
             assert_eq!(admit.entity, RESUMED_ENTITY);
+            assert_eq!(admit.handoffs, RESUMED_HANDOFFS);
             director.stop().await;
         })
         .await;
