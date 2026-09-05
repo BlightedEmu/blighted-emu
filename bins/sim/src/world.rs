@@ -1,25 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The world state of `sim` (M4 spec sections 3.1, 7.3), in a `bevy_ecs` world, with no I/O: the
-//! caller passes times in and sends the [`Outgoing`] messages.
+//! The world state of `sim` (M4 spec sections 3.1, 7.3; M5 spec sections 3.3, 3.4, 7), in a
+//! `bevy_ecs` world, with no I/O: the caller passes times in and sends what a tick returns.
 //!
 //! Every tick, each player gets replication bundles on channel 1, unreliable, as in the captures:
-//! the player's own position first, then the position of every player inside the interest radius,
-//! by entity number, at most [`MAX_BUNDLE_MEMBERS`] members per bundle and one group per bundle. The full position goes out every tick, so a lost
-//! datagram costs nothing. How the retail service removes an entity from a client is Unknown, so a
-//! player who leaves the radius is simply not in the next bundles.
+//! the player's own position first, then the nearest players and ghosts inside the interest
+//! radius, by entity number, at most [`MAX_BUNDLE_MEMBERS`] members per bundle and one group per
+//! bundle. The full position goes out every tick, so a lost datagram costs nothing. How the retail
+//! service removes an entity from a client is Unknown, so a player who leaves the radius is simply
+//! not in the next bundles.
+//!
+//! With a cell table, a tick also starts the handoff of each player that is past the margin into
+//! another sim's cells (the player is frozen until the answer), and lists the players near each
+//! other sim's cells as ghosts for that sim.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use nw_bus::{BusId, ConnectionRef};
+use nw_bus::{Admit, BusId, CellTable, ConnectionRef, Ghost, HandoffOffer, Point, SimSlot};
 use nw_messages::{
     MessageError, ReplicatedStateBundle, ServerMessage, TimeSynchMsg, WorldPosition,
 };
 use nw_sim_core::{
-    CellBounds, Ground, GroundCheck, Interest, Motion, MoveLimits, MoveRefusal, Position,
+    CellBounds, CellGrid, CellOwners, Ground, GroundCheck, Interest, Motion, MotionState,
+    MoveLimits, MoveRefusal, Position,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -42,10 +48,20 @@ pub const MAX_BUNDLE_MEMBERS: usize = 48;
 pub struct WorldSettings {
     /// Players see each other inside this radius, in metres.
     pub interest_radius_m: f32,
+    /// Most other players and ghosts in a player's bundles: the nearest.
+    pub max_visible_players: usize,
+    /// Most players in this world.
+    pub max_players: u32,
     /// The movement limits.
     pub limits: MoveLimits,
-    /// The area of the cell.
+    /// The edges of the level.
     pub bounds: CellBounds,
+    /// How far into another sim's cells a player goes before its handoff starts.
+    pub handoff_margin_m: f32,
+    /// Wait after a refused or late handoff, and after a take, before the next handoff.
+    pub handoff_retry_ms: u64,
+    /// Ghosts not renewed for this long are dropped.
+    pub ghost_ttl_ms: u64,
 }
 
 /// Why a move did not happen.
@@ -54,6 +70,9 @@ pub enum MoveError {
     /// The connection has no player in the world.
     #[error("no player on this connection")]
     NotInWorld,
+    /// The player waits for the answer to its handoff; its moves are ignored.
+    #[error("the player is frozen for a handoff")]
+    Frozen,
     /// The movement checks refused the move; the player keeps its last good position.
     #[error("move refused: {}", .0.reason())]
     Refused(MoveRefusal),
@@ -83,6 +102,37 @@ pub struct Departure {
     pub position: Position,
 }
 
+/// A handoff that a tick started: the player is frozen until [`SimWorld::handoff_done`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandoffStart {
+    /// The sim that owns the player's cell.
+    pub target: SimSlot,
+    /// What the target needs.
+    pub offer: HandoffOffer,
+}
+
+/// The end of a handoff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffEnd {
+    /// The target took the player; it is gone from this world.
+    Moved,
+    /// The target refused or did not answer; the player stays and may move again.
+    Kept,
+    /// The player left during the handoff.
+    Gone,
+}
+
+/// What one tick sends.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct TickOutput {
+    /// Bundles and time messages.
+    pub messages: Vec<Outgoing>,
+    /// Handoffs to ask for.
+    pub handoffs: Vec<HandoffStart>,
+    /// Ghost lists for other sims; an empty list clears the receiver's last one.
+    pub ghosts: Vec<(BusId, Vec<Ghost>)>,
+}
+
 /// A refused world change.
 #[derive(Debug, Error)]
 pub enum WorldError {
@@ -95,12 +145,23 @@ pub enum WorldError {
     /// The character is already in the world on another connection.
     #[error("character {0} is already in the world")]
     CharacterInWorld(Uuid),
+    /// The world has `max_players` players.
+    #[error("the sim is full")]
+    Full,
     /// No random bytes for the session ids.
     #[error("no random bytes: {0}")]
     Random(#[from] getrandom::Error),
     /// A message cannot be encoded.
     #[error(transparent)]
     Message(#[from] MessageError),
+}
+
+/// A cell table that does not fit the level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum TableError {
+    /// Its grid is not the grid of this level, or its owner list has another length.
+    #[error("the cell table does not fit the level")]
+    WrongSize,
 }
 
 #[derive(Component)]
@@ -111,6 +172,9 @@ struct Player {
     bundles_sent: u64,
     last_time_synch_ms: u64,
     interest: Interest<u64>,
+    frozen: bool,
+    handoffs: u64,
+    no_handoff_before_ms: u64,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -118,30 +182,57 @@ struct Body {
     motion: Motion,
 }
 
-/// The players of one cell.
+/// The cells as this sim sees them.
+struct Cells {
+    owners: CellOwners<u16>,
+    sims: Vec<SimSlot>,
+    me: u16,
+}
+
+struct ReceivedGhosts {
+    received_ms: u64,
+    entities: Vec<(u64, Position)>,
+}
+
+/// The players of one sim.
 pub struct SimWorld {
     world: World,
     by_connection: HashMap<ConnectionRef, Entity>,
-    next_number: u64,
     settings: WorldSettings,
     ids: WorldIds,
     ground: Arc<dyn Ground + Send + Sync>,
+    me: SimSlot,
+    cells: Option<Cells>,
+    ghosts: HashMap<BusId, ReceivedGhosts>,
+    ghost_targets: BTreeSet<BusId>,
+}
+
+/// A new player before it is in the world.
+struct Arrival {
+    connection: ConnectionRef,
+    character: Uuid,
+    number: u64,
+    position: Position,
 }
 
 impl SimWorld {
-    /// An empty world on the ground of `ground`.
+    /// An empty world of the sim `me` on the ground of `ground`.
     pub fn new(
         settings: WorldSettings,
         ids: WorldIds,
         ground: Arc<dyn Ground + Send + Sync>,
+        me: SimSlot,
     ) -> Self {
         Self {
             world: World::new(),
             by_connection: HashMap::new(),
-            next_number: 1,
             settings,
             ids,
             ground,
+            me,
+            cells: None,
+            ghosts: HashMap::new(),
+            ghost_targets: BTreeSet::new(),
         }
     }
 
@@ -150,57 +241,73 @@ impl SimWorld {
         self.by_connection.len()
     }
 
-    /// Adds a player at `position` and returns its entity number and its login messages.
+    /// Adds the player of `admit` and returns its login messages, or `None` for a resumed
+    /// player, which has them already.
     ///
     /// # Errors
     ///
-    /// Returns [`WorldError`] when the connection or the character is already in the world.
-    pub fn join(
+    /// Returns [`WorldError`] when the world is full, the connection or the character is already
+    /// in the world, or the position is not finite.
+    pub fn admit(
         &mut self,
-        connection: ConnectionRef,
-        character: Uuid,
-        position: Position,
+        admit: &Admit,
         now_ms: u64,
         server_time: u64,
-    ) -> Result<(u64, Outgoing), WorldError> {
-        if self.by_connection.contains_key(&connection) {
-            return Err(WorldError::AlreadyJoined(connection));
-        }
-        if self.player_of(character).is_some() {
-            return Err(WorldError::CharacterInWorld(character));
-        }
-        if WorldPosition::from_metres(position.x, position.y, position.z).is_none() {
-            return Err(WorldError::NotFinite);
-        }
-        let number = self.next_number;
-        let envelopes = login_messages(&self.ids, SessionIds::random()?, number, server_time)?;
-        self.next_number += 1;
-        let entity = self
-            .world
-            .spawn((
-                Player {
-                    connection: connection.clone(),
-                    character,
-                    number,
-                    bundles_sent: 0,
-                    last_time_synch_ms: now_ms,
-                    interest: Interest::new(self.settings.interest_radius_m, usize::MAX),
-                },
-                Body {
-                    motion: Motion::new(position, now_ms, &self.settings.limits),
-                },
-            ))
-            .id();
-        self.by_connection.insert(connection.clone(), entity);
-        Ok((
-            number,
-            Outgoing {
-                connection,
+    ) -> Result<Option<Outgoing>, WorldError> {
+        let arrival = Arrival {
+            connection: admit.connection.clone(),
+            character: admit.character,
+            number: admit.entity,
+            position: position_of(admit.position),
+        };
+        self.check(&arrival)?;
+        let login = if admit.login {
+            let envelopes =
+                login_messages(&self.ids, SessionIds::random()?, admit.entity, server_time)?;
+            Some(Outgoing {
+                connection: admit.connection.clone(),
                 channel: MESSAGE_CHANNEL,
                 reliable: true,
                 envelopes,
-            },
-        ))
+            })
+        } else {
+            None
+        };
+        let motion = Motion::new(arrival.position, now_ms, &self.settings.limits);
+        self.spawn(arrival, motion, 0, now_ms, 0, now_ms);
+        Ok(login)
+    }
+
+    /// Takes the player of `offer` from another sim, with the same entity number, bundle
+    /// sequence and movement budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorldError`] as [`SimWorld::admit`] does.
+    pub fn take(&mut self, offer: &HandoffOffer, now_ms: u64) -> Result<(), WorldError> {
+        let arrival = Arrival {
+            connection: offer.connection.clone(),
+            character: offer.character,
+            number: offer.entity,
+            position: position_of(offer.position),
+        };
+        self.check(&arrival)?;
+        let state = MotionState {
+            position: arrival.position,
+            move_age_ms: offer.move_age_ms,
+            budget_m: offer.budget_m,
+        };
+        let motion = Motion::import(state, now_ms, &self.settings.limits);
+        let retry_at = now_ms.saturating_add(self.settings.handoff_retry_ms);
+        self.spawn(
+            arrival,
+            motion,
+            offer.bundles_sent,
+            now_ms.saturating_sub(offer.time_synch_age_ms),
+            offer.handoffs,
+            retry_at,
+        );
+        Ok(())
     }
 
     /// Moves the player of `connection` to `next`, received at `now_ms`, when the movement checks
@@ -208,8 +315,8 @@ impl SimWorld {
     ///
     /// # Errors
     ///
-    /// Returns [`MoveError`] when there is no such player or a check refuses the move; then the
-    /// player keeps its last good position, which its next bundle shows.
+    /// Returns [`MoveError`] when there is no such player, it is frozen, or a check refuses the
+    /// move; then the player keeps its last good position, which its next bundle shows.
     pub fn move_to(
         &mut self,
         connection: &ConnectionRef,
@@ -220,6 +327,13 @@ impl SimWorld {
             .by_connection
             .get(connection)
             .ok_or(MoveError::NotInWorld)?;
+        if self
+            .world
+            .get::<Player>(entity)
+            .is_some_and(|player| player.frozen)
+        {
+            return Err(MoveError::Frozen);
+        }
         let mut body = self
             .world
             .get_mut::<Body>(entity)
@@ -251,10 +365,99 @@ impl SimWorld {
             .filter(|connection| connection.gateway == *gateway)
             .cloned()
             .collect();
-        connections
+        self.leave_all(&connections)
+    }
+
+    /// Removes a player that this sim took by a handoff that the sender then cancelled. The
+    /// sender kept the player, so nothing is saved here. Returns whether it was here.
+    pub fn cancel(&mut self, connection: &ConnectionRef) -> bool {
+        self.by_connection
+            .remove(connection)
+            .map(|entity| self.world.despawn(entity))
+            .is_some()
+    }
+
+    /// The answer to the handoff of the player of `connection` at `now_ms`.
+    pub fn handoff_done(
+        &mut self,
+        connection: &ConnectionRef,
+        accepted: bool,
+        now_ms: u64,
+    ) -> HandoffEnd {
+        let Some(&entity) = self.by_connection.get(connection) else {
+            return HandoffEnd::Gone;
+        };
+        if accepted {
+            self.by_connection.remove(connection);
+            self.world.despawn(entity);
+            return HandoffEnd::Moved;
+        }
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            player.frozen = false;
+            player.no_handoff_before_ms = now_ms.saturating_add(self.settings.handoff_retry_ms);
+        }
+        HandoffEnd::Kept
+    }
+
+    /// Takes a new cell table. When it does not name this sim with its generation, the sim owns
+    /// no cell and every player leaves (M5 spec section 3.6); their departures are returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TableError::WrongSize`] for a table that does not fit the level; the last table
+    /// stays.
+    pub fn set_table(&mut self, table: &CellTable) -> Result<Vec<Departure>, TableError> {
+        let bounds = self.settings.bounds;
+        let grid = CellGrid::new(bounds.max_x, bounds.max_y, table.cell_size_m)
+            .ok()
+            .filter(|grid| grid.columns() == table.columns && grid.rows() == table.rows)
+            .ok_or(TableError::WrongSize)?;
+        let owners =
+            CellOwners::from_cells(grid, table.owners.clone()).ok_or(TableError::WrongSize)?;
+        let me = table
+            .sims
             .iter()
-            .filter_map(|connection| self.leave(connection))
-            .collect()
+            .position(|slot| *slot == self.me)
+            .and_then(|index| u16::try_from(index).ok());
+        let Some(me) = me else {
+            self.cells = None;
+            let everyone: Vec<ConnectionRef> = self.by_connection.keys().cloned().collect();
+            return Ok(self.leave_all(&everyone));
+        };
+        self.cells = Some(Cells {
+            owners,
+            sims: table.sims.clone(),
+            me,
+        });
+        Ok(Vec::new())
+    }
+
+    /// The ghosts of another sim, received at `now_ms`; positions that are not finite are left
+    /// out.
+    pub fn set_ghosts(&mut self, from: &BusId, entities: Vec<Ghost>, now_ms: u64) {
+        if *from == self.me.id {
+            return;
+        }
+        let entities = entities
+            .into_iter()
+            .filter(|ghost| ghost.position.is_finite())
+            .map(|ghost| (ghost.entity, position_of(ghost.position)))
+            .collect();
+        self.ghosts.insert(
+            from.clone(),
+            ReceivedGhosts {
+                received_ms: now_ms,
+                entities,
+            },
+        );
+    }
+
+    /// Ghosts of other sims.
+    pub fn ghosts(&self) -> usize {
+        self.ghosts
+            .values()
+            .map(|ghosts| ghosts.entities.len())
+            .sum()
     }
 
     /// Every player's character and position, for the periodic save.
@@ -270,21 +473,113 @@ impl SimWorld {
             .collect()
     }
 
-    /// One tick: a bundle for every player, and a `TimeSynchMsg` when one is due.
+    /// One tick: handoffs to start, ghost lists for other sims, a bundle for every player that
+    /// is not frozen, and a `TimeSynchMsg` when one is due.
     ///
     /// # Errors
     ///
     /// Returns [`MessageError`] when a message cannot be encoded.
-    pub fn tick(&mut self, now_ms: u64, server_time: u64) -> Result<Vec<Outgoing>, MessageError> {
+    pub fn tick(&mut self, now_ms: u64, server_time: u64) -> Result<TickOutput, MessageError> {
+        let ttl = self.settings.ghost_ttl_ms;
+        self.ghosts
+            .retain(|_, ghosts| now_ms.saturating_sub(ghosts.received_ms) <= ttl);
+        let handoffs = self.start_handoffs(now_ms);
+        let ghosts = self.ghosts_out();
+        let messages = self.bundles(now_ms, server_time)?;
+        Ok(TickOutput {
+            messages,
+            handoffs,
+            ghosts,
+        })
+    }
+
+    fn start_handoffs(&mut self, now_ms: u64) -> Vec<HandoffStart> {
+        let Some(cells) = &self.cells else {
+            return Vec::new();
+        };
+        let margin = self.settings.handoff_margin_m;
+        let mut query = self.world.query::<(&mut Player, &Body)>();
+        let mut starts = Vec::new();
+        for (mut player, body) in query.iter_mut(&mut self.world) {
+            if player.frozen || now_ms < player.no_handoff_before_ms {
+                continue;
+            }
+            let position = body.motion.position();
+            let target = cells
+                .owners
+                .handoff_target(cells.me, position, margin)
+                .and_then(|owner| cells.sims.get(usize::from(owner)));
+            let Some(target) = target else {
+                continue;
+            };
+            player.frozen = true;
+            let state = body.motion.export(now_ms);
+            starts.push(HandoffStart {
+                target: target.clone(),
+                offer: HandoffOffer {
+                    connection: player.connection.clone(),
+                    character: player.character,
+                    entity: player.number,
+                    position: point_of(state.position),
+                    move_age_ms: state.move_age_ms,
+                    budget_m: state.budget_m,
+                    bundles_sent: player.bundles_sent,
+                    time_synch_age_ms: now_ms.saturating_sub(player.last_time_synch_ms),
+                    handoffs: player.handoffs + 1,
+                },
+            });
+        }
+        starts
+    }
+
+    fn ghosts_out(&mut self) -> Vec<(BusId, Vec<Ghost>)> {
+        let mut lists: BTreeMap<BusId, Vec<Ghost>> = BTreeMap::new();
+        if let Some(cells) = &self.cells {
+            let radius = self.settings.interest_radius_m;
+            let mut query = self.world.query::<(&Player, &Body)>();
+            for (player, body) in query.iter(&self.world) {
+                let position = body.motion.position();
+                for owner in cells.owners.others_within(cells.me, position, radius) {
+                    if let Some(sim) = cells.sims.get(usize::from(owner)) {
+                        lists.entry(sim.id.clone()).or_default().push(Ghost {
+                            entity: player.number,
+                            position: point_of(position),
+                        });
+                    }
+                }
+            }
+        }
+        for target in &self.ghost_targets {
+            lists.entry(target.clone()).or_default();
+        }
+        self.ghost_targets = lists
+            .iter()
+            .filter(|(_, ghosts)| !ghosts.is_empty())
+            .map(|(target, _)| target.clone())
+            .collect();
+        lists.into_iter().collect()
+    }
+
+    fn bundles(&mut self, now_ms: u64, server_time: u64) -> Result<Vec<Outgoing>, MessageError> {
         let mut bodies = self.world.query::<(&Player, &Body)>();
-        let everyone: Vec<(u64, Position)> = bodies
+        let mut everyone: Vec<(u64, Position)> = bodies
             .iter(&self.world)
             .map(|(player, body)| (player.number, body.motion.position()))
             .collect();
+        let own: HashSet<u64> = everyone.iter().map(|(number, _)| *number).collect();
+        everyone.extend(
+            self.ghosts
+                .values()
+                .flat_map(|ghosts| ghosts.entities.iter().copied())
+                .filter(|(number, _)| !own.contains(number)),
+        );
         let positions: HashMap<u64, Position> = everyone.iter().copied().collect();
         let mut players = self.world.query::<(&mut Player, &Body)>();
         let mut outgoing = Vec::new();
         for (mut player, body) in players.iter_mut(&mut self.world) {
+            if player.frozen {
+                continue;
+            }
             let own = player.number;
             let others = everyone
                 .iter()
@@ -325,6 +620,63 @@ impl SimWorld {
         Ok(outgoing)
     }
 
+    /// Refuses a new player that would break a world rule.
+    fn check(&mut self, arrival: &Arrival) -> Result<(), WorldError> {
+        if self.by_connection.contains_key(&arrival.connection) {
+            return Err(WorldError::AlreadyJoined(arrival.connection.clone()));
+        }
+        if self.player_of(arrival.character).is_some() {
+            return Err(WorldError::CharacterInWorld(arrival.character));
+        }
+        if self.players() >= self.settings.max_players as usize {
+            return Err(WorldError::Full);
+        }
+        let position = arrival.position;
+        if WorldPosition::from_metres(position.x, position.y, position.z).is_none() {
+            return Err(WorldError::NotFinite);
+        }
+        Ok(())
+    }
+
+    fn spawn(
+        &mut self,
+        arrival: Arrival,
+        motion: Motion,
+        bundles_sent: u64,
+        last_time_synch_ms: u64,
+        handoffs: u64,
+        no_handoff_before_ms: u64,
+    ) {
+        let entity = self
+            .world
+            .spawn((
+                Player {
+                    connection: arrival.connection.clone(),
+                    character: arrival.character,
+                    number: arrival.number,
+                    bundles_sent,
+                    last_time_synch_ms,
+                    interest: Interest::new(
+                        self.settings.interest_radius_m,
+                        self.settings.max_visible_players,
+                    ),
+                    frozen: false,
+                    handoffs,
+                    no_handoff_before_ms,
+                },
+                Body { motion },
+            ))
+            .id();
+        self.by_connection.insert(arrival.connection, entity);
+    }
+
+    fn leave_all(&mut self, connections: &[ConnectionRef]) -> Vec<Departure> {
+        connections
+            .iter()
+            .filter_map(|connection| self.leave(connection))
+            .collect()
+    }
+
     fn player_of(&mut self, character: Uuid) -> Option<Entity> {
         let mut query = self.world.query::<(Entity, &Player)>();
         query
@@ -344,8 +696,26 @@ impl SimWorld {
     }
 }
 
+/// A bus point as a simulation position.
+const fn position_of(point: Point) -> Position {
+    Position {
+        x: point.x,
+        y: point.y,
+        z: point.z,
+    }
+}
+
+/// A simulation position as a bus point.
+const fn point_of(position: Position) -> Point {
+    Point {
+        x: position.x,
+        y: position.y,
+        z: position.z,
+    }
+}
+
 /// One bundle envelope ([`ReplicatedStateBundle::of_positions`]). Every position in the world is
-/// finite (`join` refuses others), so no member is left out.
+/// finite (`admit`, `take` and `set_ghosts` refuse others), so no member is left out.
 fn bundle(sequence: u64, visible: &[(u64, Position)]) -> Result<Vec<u8>, MessageError> {
     let positions: Vec<(u64, WorldPosition)> = visible
         .iter()
@@ -361,12 +731,12 @@ fn bundle(sequence: u64, visible: &[(u64, Position)]) -> Result<Vec<u8>, Message
 
 #[cfg(test)]
 mod tests {
+    use nw_bus::CellTable;
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
     use nw_messages::{BundlePayload, LOGIN_MESSAGE_TYPES, MemberState};
     use nw_reflect::{Envelope, encode_server_messages};
-    use nw_sim_core::{CellBounds, GroundCheck, MoveLimits, MoveRefusal};
-
     use nw_sim_core::test_support::NoGround;
+    use nw_sim_core::{CellGrid, CellOwners, GroundCheck, MoveLimits, MoveRefusal};
 
     use super::*;
 
@@ -380,35 +750,80 @@ mod tests {
     const SPEED_MPS: f32 = 5.0;
     const BURST_SECONDS: f32 = 1.0;
     const GROUND_TOLERANCE_M: f32 = 2.0;
-    const MAX_ABOVE_GROUND_M: f32 = 64.0;
-    const BOUNDS: CellBounds = CellBounds {
-        min_x: 0.0,
-        min_y: 0.0,
-        max_x: 14_336.0,
-        max_y: 14_336.0,
-    };
+    const MAX_ABOVE_GROUND_M: f32 = 150.0;
+    const LEVEL_M: f32 = 14_336.0;
+    const CELL_M: f32 = 2048.0;
+    /// The first column of the second sim of two (columns 3 to 6).
+    const BORDER_X: f32 = 3.0 * CELL_M;
+    const MARGIN_M: f32 = 5.0;
+    const RETRY_MS: u64 = 1000;
+    const GHOST_TTL_MS: u64 = 1000;
+    const MAX_PLAYERS: u32 = 3;
+    const MANY: usize = 1000;
+    const TWO: usize = 2;
     const ONE_SECOND_MS: u64 = 1000;
     const A_BIT_LATER_MS: u64 = 100;
     const CLOSE_M: f32 = 0.01;
+    const GENERATION: u64 = 5;
+    const BUNDLES_BEFORE: u64 = 900;
+    const GHOST_NUMBER: u64 = 99;
 
-    fn world() -> SimWorld {
-        let limits = MoveLimits::new(
-            SPEED_MPS,
-            0.0,
-            BURST_SECONDS,
-            GROUND_TOLERANCE_M,
-            MAX_ABOVE_GROUND_M,
-        )
-        .expect("limits");
+    fn slot(name: &str) -> SimSlot {
+        SimSlot {
+            id: BusId::try_from(name.to_owned()).expect("id"),
+            generation: GENERATION,
+        }
+    }
+
+    fn settings(max_visible_players: usize, max_players: u32) -> WorldSettings {
+        WorldSettings {
+            interest_radius_m: RADIUS,
+            max_visible_players,
+            max_players,
+            limits: MoveLimits::new(
+                SPEED_MPS,
+                0.0,
+                BURST_SECONDS,
+                GROUND_TOLERANCE_M,
+                MAX_ABOVE_GROUND_M,
+            )
+            .expect("limits"),
+            bounds: grid().bounds(),
+            handoff_margin_m: MARGIN_M,
+            handoff_retry_ms: RETRY_MS,
+            ghost_ttl_ms: GHOST_TTL_MS,
+        }
+    }
+
+    fn world_of(name: &str, settings: WorldSettings) -> SimWorld {
         SimWorld::new(
-            WorldSettings {
-                interest_radius_m: RADIUS,
-                limits,
-                bounds: BOUNDS,
-            },
+            settings,
             WorldIds::random(0).expect("ids"),
             Arc::new(NoGround),
+            slot(name),
         )
+    }
+
+    fn world() -> SimWorld {
+        world_of("sim-a", settings(MANY, MAX_PLAYERS))
+    }
+
+    fn grid() -> CellGrid {
+        CellGrid::new(LEVEL_M, LEVEL_M, CELL_M).expect("grid")
+    }
+
+    /// The table of `names` in column stripes.
+    fn table(names: &[&str]) -> CellTable {
+        let indexes: Vec<u16> = (0..).take(names.len()).collect();
+        let owners = CellOwners::columns(grid(), &indexes);
+        CellTable {
+            version: 1,
+            cell_size_m: CELL_M,
+            columns: grid().columns(),
+            rows: grid().rows(),
+            sims: names.iter().map(|name| slot(name)).collect(),
+            owners: owners.cells().to_vec(),
+        }
     }
 
     fn connection(number: u64) -> ConnectionRef {
@@ -426,6 +841,27 @@ mod tests {
         }
     }
 
+    fn admit_at(number: u64, x: f32, login: bool) -> Admit {
+        Admit {
+            connection: connection(number),
+            account: Uuid::new_v4(),
+            character: Uuid::new_v4(),
+            entity: number,
+            position: Point {
+                x,
+                y: 10.0,
+                z: 50.0,
+            },
+            login,
+        }
+    }
+
+    fn join(world: &mut SimWorld, number: u64, x: f32) {
+        world
+            .admit(&admit_at(number, x, true), NOW, SERVER_TIME)
+            .expect("admit");
+    }
+
     /// The entity numbers in the bundle of one connection.
     fn seen_by(outgoing: &[Outgoing], who: &ConnectionRef) -> Vec<u64> {
         positions_seen_by(outgoing, who)
@@ -434,17 +870,21 @@ mod tests {
             .collect()
     }
 
-    /// The entity numbers and x positions in the bundle of one connection.
-    fn positions_seen_by(outgoing: &[Outgoing], who: &ConnectionRef) -> Vec<(u64, f32)> {
+    fn bundle_of(outgoing: &[Outgoing], who: &ConnectionRef) -> Option<ReplicatedStateBundle> {
         let message = outgoing
             .iter()
-            .find(|out| out.connection == *who && out.channel == REPLICATION_CHANNEL)
-            .expect("bundle");
+            .find(|out| out.connection == *who && out.channel == REPLICATION_CHANNEL)?;
         let envelope = Envelope::decode(&message.envelopes[0]).expect("envelope");
         let Some(Ok(ServerMessage::Bundle(bundle))) = ServerMessage::from_envelope(&envelope)
         else {
             panic!("expected a bundle");
         };
+        Some(bundle)
+    }
+
+    /// The entity numbers and x positions in the bundle of one connection.
+    fn positions_seen_by(outgoing: &[Outgoing], who: &ConnectionRef) -> Vec<(u64, f32)> {
+        let bundle = bundle_of(outgoing, who).expect("bundle");
         BundlePayload::decode(&bundle.payload)
             .expect("payload")
             .groups
@@ -458,21 +898,21 @@ mod tests {
             .collect()
     }
 
+    fn tick(world: &mut SimWorld, now: u64) -> TickOutput {
+        world.tick(now, SERVER_TIME).expect("tick")
+    }
+
     #[test]
     fn a_move_inside_the_limits_is_seen_and_a_fast_one_is_refused() {
         let mut world = world();
         let (a, b) = (connection(1), connection(2));
-        world
-            .join(a.clone(), Uuid::new_v4(), at(0.0), NOW, SERVER_TIME)
-            .expect("a");
-        world
-            .join(b.clone(), Uuid::new_v4(), at(10.0), NOW, SERVER_TIME)
-            .expect("b");
+        join(&mut world, 1, 0.0);
+        join(&mut world, 2, 10.0);
         assert_eq!(
             world.move_to(&a, at(SPEED_MPS), NOW + ONE_SECOND_MS),
             Ok(GroundCheck::NoGround)
         );
-        let outgoing = world.tick(NOW + ONE_SECOND_MS, SERVER_TIME).expect("tick");
+        let outgoing = tick(&mut world, NOW + ONE_SECOND_MS).messages;
         let (_, seen_x) = positions_seen_by(&outgoing, &b)[1];
         assert!((seen_x - SPEED_MPS).abs() < CLOSE_M);
         let far = at(SPEED_MPS * 10.0);
@@ -481,7 +921,7 @@ mod tests {
             world.move_to(&a, far, later),
             Err(MoveError::Refused(MoveRefusal::TooFast))
         );
-        let outgoing = world.tick(later, SERVER_TIME).expect("tick");
+        let outgoing = tick(&mut world, later).messages;
         let (_, own_x) = positions_seen_by(&outgoing, &a)[0];
         assert!((own_x - SPEED_MPS).abs() < CLOSE_M);
         assert_eq!(
@@ -493,32 +933,49 @@ mod tests {
     }
 
     #[test]
-    fn a_join_sends_the_login_messages_reliably_on_channel_0() {
+    fn an_admit_uses_the_given_entity_number() {
         let mut world = world();
-        let (number, login) = world
-            .join(connection(1), Uuid::new_v4(), at(0.0), NOW, SERVER_TIME)
-            .expect("join");
-        assert_eq!(number, 1);
+        let login = world
+            .admit(&admit_at(77, 0.0, true), NOW, SERVER_TIME)
+            .expect("admit")
+            .expect("login messages");
         assert_eq!(login.channel, MESSAGE_CHANNEL);
         assert!(login.reliable);
         assert_eq!(login.envelopes.len(), LOGIN_MESSAGE_TYPES.len());
+        let outgoing = tick(&mut world, NOW).messages;
+        assert_eq!(seen_by(&outgoing, &connection(77)), vec![77]);
+    }
+
+    #[test]
+    fn a_resume_sends_no_login_messages() {
+        let mut world = world();
+        let login = world
+            .admit(&admit_at(5, 0.0, false), NOW, SERVER_TIME)
+            .expect("admit");
+        assert_eq!(login, None);
         assert_eq!(world.players(), 1);
+    }
+
+    #[test]
+    fn a_full_sim_refuses() {
+        let mut world = world();
+        for number in 1..=u64::from(MAX_PLAYERS) {
+            join(&mut world, number, 0.0);
+        }
+        assert!(matches!(
+            world.admit(&admit_at(9, 0.0, true), NOW, SERVER_TIME),
+            Err(WorldError::Full)
+        ));
     }
 
     #[test]
     fn players_see_themselves_first_and_others_inside_the_radius() {
         let mut world = world();
         let (a, b, c) = (connection(1), connection(2), connection(3));
-        world
-            .join(a.clone(), Uuid::new_v4(), at(0.0), NOW, SERVER_TIME)
-            .expect("a");
-        world
-            .join(b.clone(), Uuid::new_v4(), at(50.0), NOW, SERVER_TIME)
-            .expect("b");
-        world
-            .join(c.clone(), Uuid::new_v4(), at(500.0), NOW, SERVER_TIME)
-            .expect("c");
-        let outgoing = world.tick(NOW, SERVER_TIME).expect("tick");
+        join(&mut world, 1, 0.0);
+        join(&mut world, 2, 50.0);
+        join(&mut world, 3, 500.0);
+        let outgoing = tick(&mut world, NOW).messages;
         assert_eq!(seen_by(&outgoing, &a), vec![1, 2]);
         assert_eq!(seen_by(&outgoing, &b), vec![2, 1]);
         assert_eq!(seen_by(&outgoing, &c), vec![3]);
@@ -530,21 +987,28 @@ mod tests {
     }
 
     #[test]
+    fn only_the_nearest_are_in_the_bundle() {
+        let mut world = world_of("sim-a", settings(TWO, MAX_PLAYERS + 1));
+        join(&mut world, 1, 0.0);
+        join(&mut world, 2, 30.0);
+        join(&mut world, 3, 10.0);
+        join(&mut world, 4, 20.0);
+        let outgoing = tick(&mut world, NOW).messages;
+        assert_eq!(seen_by(&outgoing, &connection(1)), vec![1, 3, 4]);
+    }
+
+    #[test]
     fn a_player_who_leaves_is_gone_from_the_next_bundles() {
         let mut world = world();
         let (a, b) = (connection(1), connection(2));
-        let character = Uuid::new_v4();
-        world
-            .join(a.clone(), Uuid::new_v4(), at(0.0), NOW, SERVER_TIME)
-            .expect("a");
-        world
-            .join(b.clone(), character, at(10.0), NOW, SERVER_TIME)
-            .expect("b");
+        let admit = admit_at(2, 10.0, true);
+        join(&mut world, 1, 0.0);
+        world.admit(&admit, NOW, SERVER_TIME).expect("b");
         let departure = world.leave(&b).expect("left");
         assert_eq!(departure.connection, b);
-        assert_eq!(departure.character, character);
+        assert_eq!(departure.character, admit.character);
         assert_eq!(departure.position, at(10.0));
-        let outgoing = world.tick(NOW, SERVER_TIME).expect("tick");
+        let outgoing = tick(&mut world, NOW).messages;
         assert_eq!(seen_by(&outgoing, &a), vec![1]);
         assert_eq!(world.leave(&b), None);
     }
@@ -552,16 +1016,19 @@ mod tests {
     #[test]
     fn a_connection_or_character_joins_once() {
         let mut world = world();
-        let character = Uuid::new_v4();
-        world
-            .join(connection(1), character, at(0.0), NOW, SERVER_TIME)
-            .expect("first");
+        let first = admit_at(1, 0.0, true);
+        world.admit(&first, NOW, SERVER_TIME).expect("first");
         assert!(matches!(
-            world.join(connection(1), Uuid::new_v4(), at(0.0), NOW, SERVER_TIME),
+            world.admit(&admit_at(1, 0.0, true), NOW, SERVER_TIME),
             Err(WorldError::AlreadyJoined(_))
         ));
+        let same_character = Admit {
+            connection: connection(2),
+            entity: 2,
+            ..first
+        };
         assert!(matches!(
-            world.join(connection(2), character, at(0.0), NOW, SERVER_TIME),
+            world.admit(&same_character, NOW, SERVER_TIME),
             Err(WorldError::CharacterInWorld(_))
         ));
     }
@@ -569,28 +1036,13 @@ mod tests {
     #[test]
     fn a_time_synch_goes_out_every_three_seconds() {
         let mut world = world();
-        world
-            .join(connection(1), Uuid::new_v4(), at(0.0), NOW, SERVER_TIME)
-            .expect("join");
-        let reliable = |outgoing: &[Outgoing]| outgoing.iter().filter(|out| out.reliable).count();
+        join(&mut world, 1, 0.0);
+        let reliable =
+            |output: TickOutput| output.messages.iter().filter(|out| out.reliable).count();
+        assert_eq!(reliable(tick(&mut world, NOW + 1)), 0);
+        assert_eq!(reliable(tick(&mut world, NOW + TIME_SYNCH_INTERVAL_MS)), 1);
         assert_eq!(
-            reliable(&world.tick(NOW + 1, SERVER_TIME).expect("tick")),
-            0
-        );
-        assert_eq!(
-            reliable(
-                &world
-                    .tick(NOW + TIME_SYNCH_INTERVAL_MS, SERVER_TIME)
-                    .expect("tick")
-            ),
-            1
-        );
-        assert_eq!(
-            reliable(
-                &world
-                    .tick(NOW + TIME_SYNCH_INTERVAL_MS + 1, SERVER_TIME)
-                    .expect("tick")
-            ),
+            reliable(tick(&mut world, NOW + TIME_SYNCH_INTERVAL_MS + 1)),
             0
         );
     }
@@ -599,13 +1051,7 @@ mod tests {
     fn a_position_that_is_not_finite_cannot_join() {
         let mut world = world();
         assert!(matches!(
-            world.join(
-                connection(1),
-                Uuid::new_v4(),
-                at(f32::NAN),
-                NOW,
-                SERVER_TIME
-            ),
+            world.admit(&admit_at(1, f32::NAN, true), NOW, SERVER_TIME),
             Err(WorldError::NotFinite)
         ));
         assert_eq!(world.players(), 0);
@@ -614,12 +1060,8 @@ mod tests {
     #[test]
     fn a_gateway_that_stops_takes_its_players_out() {
         let mut world = world();
-        world
-            .join(connection(1), Uuid::new_v4(), at(0.0), NOW, SERVER_TIME)
-            .expect("one");
-        world
-            .join(connection(2), Uuid::new_v4(), at(0.0), NOW, SERVER_TIME)
-            .expect("two");
+        join(&mut world, 1, 0.0);
+        join(&mut world, 2, 0.0);
         let gateway = BusId::try_from("gw-1".to_owned()).expect("id");
         let mut gone: Vec<u64> = world
             .leave_gateway(&gateway)
@@ -634,28 +1076,18 @@ mod tests {
 
     #[test]
     fn many_visible_players_go_out_in_bundles_that_fit_one_datagram() {
-        let mut world = world();
+        const PLAYERS: u64 = 100;
+        let mut world = world_of("sim-a", settings(MANY, PLAYERS as u32));
         let viewer = connection(1);
-        world
-            .join(viewer.clone(), Uuid::new_v4(), at(0.0), NOW, SERVER_TIME)
-            .expect("viewer");
-        for number in 2..=100 {
-            world
-                .join(
-                    connection(number),
-                    Uuid::new_v4(),
-                    at(1.0),
-                    NOW,
-                    SERVER_TIME,
-                )
-                .expect("other");
+        for number in 1..=PLAYERS {
+            join(&mut world, number, 1.0);
         }
-        let outgoing = world.tick(NOW, SERVER_TIME).expect("tick");
-        let bundles: Vec<&Outgoing> = outgoing
+        let outgoing = tick(&mut world, NOW).messages;
+        let bundles = outgoing
             .iter()
             .filter(|out| out.connection == viewer && out.channel == REPLICATION_CHANNEL)
-            .collect();
-        assert_eq!(bundles.len(), 100_usize.div_ceil(MAX_BUNDLE_MEMBERS));
+            .count();
+        assert_eq!(bundles, (PLAYERS as usize).div_ceil(MAX_BUNDLE_MEMBERS));
         let largest_number = u64::MAX >> LARGEST_NUMBER_SHIFT;
         let full: Vec<(u64, Position)> = (0..MAX_BUNDLE_MEMBERS as u64)
             .map(|offset| (largest_number - offset, at(0.0)))
@@ -663,5 +1095,191 @@ mod tests {
         let envelope = bundle(u64::MAX >> LARGEST_NUMBER_SHIFT, &full).expect("bundle");
         let payload = encode_server_messages(&[&envelope]).expect("payload");
         assert!(payload.len() <= MAX_CHUNK_PAYLOAD, "{}", payload.len());
+    }
+
+    /// A world of the first of two sims, with a player 50 m inside the second sim's cells and
+    /// a viewer near it on this side.
+    fn border_world() -> (SimWorld, ConnectionRef, ConnectionRef) {
+        let mut world = world();
+        assert!(
+            world
+                .set_table(&table(&["sim-a", "sim-b"]))
+                .expect("table")
+                .is_empty()
+        );
+        join(&mut world, 1, BORDER_X + 50.0);
+        join(&mut world, 2, BORDER_X - 20.0);
+        (world, connection(1), connection(2))
+    }
+
+    #[test]
+    fn a_player_past_the_margin_is_handed_off_and_frozen() {
+        let (mut world, mover, viewer) = border_world();
+        let first = tick(&mut world, NOW);
+        assert_eq!(first.handoffs.len(), 1);
+        let start = &first.handoffs[0];
+        assert_eq!(start.target, slot("sim-b"));
+        assert_eq!(start.offer.connection, mover);
+        assert_eq!(start.offer.entity, 1);
+        assert_eq!(start.offer.handoffs, 1);
+        assert_eq!(start.offer.position.x, BORDER_X + 50.0);
+        assert!(bundle_of(&first.messages, &mover).is_none(), "frozen");
+        assert_eq!(seen_by(&first.messages, &viewer), vec![2, 1]);
+        assert_eq!(
+            world.move_to(&mover, at(BORDER_X + 51.0), NOW + ONE_SECOND_MS),
+            Err(MoveError::Frozen)
+        );
+        assert!(tick(&mut world, NOW + 1).handoffs.is_empty());
+        let near = world_with_one_near_the_border();
+        assert!(near.is_empty());
+    }
+
+    /// A player 3 m past the border (inside the margin) is not handed off.
+    fn world_with_one_near_the_border() -> Vec<HandoffStart> {
+        let mut world = world();
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, BORDER_X + MARGIN_M - 2.0);
+        tick(&mut world, NOW).handoffs
+    }
+
+    #[test]
+    fn an_answered_handoff_moves_or_keeps_the_player() {
+        let (mut world, mover, _) = border_world();
+        tick(&mut world, NOW);
+        assert_eq!(world.handoff_done(&mover, false, NOW), HandoffEnd::Kept);
+        assert_eq!(
+            world.move_to(&mover, at(BORDER_X + 51.0), NOW + A_BIT_LATER_MS),
+            Ok(GroundCheck::NoGround)
+        );
+        assert!(tick(&mut world, NOW + A_BIT_LATER_MS).handoffs.is_empty());
+        let again = tick(&mut world, NOW + RETRY_MS);
+        assert_eq!(again.handoffs.len(), 1);
+        assert_eq!(
+            world.handoff_done(&mover, true, NOW + RETRY_MS),
+            HandoffEnd::Moved
+        );
+        assert_eq!(world.players(), 1);
+        assert_eq!(world.handoff_done(&mover, true, NOW), HandoffEnd::Gone);
+    }
+
+    #[test]
+    fn a_taken_player_keeps_its_number_sequence_and_budget() {
+        let (mut old, mover, _) = border_world();
+        tick(&mut old, NOW);
+        let mut offer = tick_offer(&mut old);
+        offer.bundles_sent = BUNDLES_BEFORE;
+        let mut new = world_of("sim-b", settings(MANY, MAX_PLAYERS));
+        new.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        new.take(&offer, NOW).expect("take");
+        let output = tick(&mut new, NOW);
+        let bundle = bundle_of(&output.messages, &mover).expect("bundle");
+        assert_eq!(bundle.leading, Some(BUNDLES_BEFORE));
+        assert_eq!(seen_by(&output.messages, &mover), vec![1]);
+        let reach = BORDER_X + 50.0 + offer.budget_m;
+        assert_eq!(
+            new.move_to(&mover, at(reach + 1.0), NOW),
+            Err(MoveError::Refused(MoveRefusal::TooFast))
+        );
+        assert_eq!(
+            new.move_to(&mover, at(reach - 0.5), NOW),
+            Ok(GroundCheck::NoGround)
+        );
+        assert!(matches!(
+            new.take(&offer, NOW),
+            Err(WorldError::AlreadyJoined(_))
+        ));
+        assert!(new.cancel(&mover));
+        assert_eq!(new.players(), 0);
+        assert!(!new.cancel(&mover));
+    }
+
+    /// The offer of the frozen player of a border world.
+    fn tick_offer(world: &mut SimWorld) -> HandoffOffer {
+        let mover = connection(1);
+        world.handoff_done(&mover, false, NOW);
+        tick(world, NOW + RETRY_MS).handoffs[0].offer.clone()
+    }
+
+    #[test]
+    fn ghosts_are_seen_and_expire() {
+        let mut world = world();
+        join(&mut world, 1, 0.0);
+        let ghost = |entity, x| Ghost {
+            entity,
+            position: Point {
+                x,
+                y: 10.0,
+                z: 50.0,
+            },
+        };
+        world.set_ghosts(
+            &slot("sim-b").id,
+            vec![
+                ghost(GHOST_NUMBER, 10.0),
+                ghost(1, 20.0),
+                ghost(7, f32::NAN),
+            ],
+            NOW,
+        );
+        let outgoing = tick(&mut world, NOW).messages;
+        assert_eq!(
+            positions_seen_by(&outgoing, &connection(1)),
+            vec![(1, 0.0), (GHOST_NUMBER, 10.0)]
+        );
+        let later = tick(&mut world, NOW + GHOST_TTL_MS + 1).messages;
+        assert_eq!(seen_by(&later, &connection(1)), vec![1]);
+    }
+
+    #[test]
+    fn players_near_a_border_become_ghosts_of_the_neighbour() {
+        let mut world = world();
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, BORDER_X - 50.0);
+        join(&mut world, 2, 100.0);
+        let ghosts = tick(&mut world, NOW).ghosts;
+        assert_eq!(ghosts.len(), 1);
+        let (target, entities) = &ghosts[0];
+        assert_eq!(target, &slot("sim-b").id);
+        let numbers: Vec<u64> = entities.iter().map(|ghost| ghost.entity).collect();
+        assert_eq!(numbers, vec![1]);
+    }
+
+    #[test]
+    fn an_empty_ghost_list_follows_a_full_one() {
+        let mut world = world();
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, BORDER_X - 50.0);
+        assert_eq!(tick(&mut world, NOW).ghosts.len(), 1);
+        world.leave(&connection(1));
+        let cleared = tick(&mut world, NOW + 1).ghosts;
+        assert_eq!(cleared, vec![(slot("sim-b").id, Vec::new())]);
+        assert!(tick(&mut world, NOW + 2).ghosts.is_empty());
+    }
+
+    #[test]
+    fn a_sim_missing_from_the_table_drops_its_players() {
+        let mut world = world();
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, 0.0);
+        join(&mut world, 2, 0.0);
+        let mut restarted = table(&["sim-a", "sim-b"]);
+        restarted.sims[0].generation = GENERATION + 1;
+        assert_eq!(world.set_table(&restarted).expect("table").len(), 2);
+        assert_eq!(world.players(), 0);
+        join(&mut world, 3, BORDER_X + 50.0);
+        assert!(
+            tick(&mut world, NOW).handoffs.is_empty(),
+            "no table, no handoff"
+        );
+    }
+
+    #[test]
+    fn a_table_of_another_size_is_ignored() {
+        let mut world = world();
+        let mut wrong = table(&["sim-a", "sim-b"]);
+        wrong.owners.pop();
+        assert_eq!(world.set_table(&wrong), Err(TableError::WrongSize));
+        join(&mut world, 1, BORDER_X + 50.0);
+        assert!(tick(&mut world, NOW).handoffs.is_empty());
     }
 }

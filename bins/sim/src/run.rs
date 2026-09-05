@@ -1,22 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `serve`: reads the configuration and the world file, checks the start position, connects to
-//! the world database and NATS, and runs the loop until Ctrl-C.
+//! `serve`: reads the configuration and the world file, connects to the world database and NATS,
+//! and runs the loop until Ctrl-C.
 
 use std::path::Path;
 use std::sync::Arc;
 
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use nw_bus::{Bus, BusError};
 use nw_common::config::ConfigError;
 use nw_common::logging::{LoggingError, init_logging};
 use nw_content::client_build::load_client_build;
 use nw_content::container::ContainerError;
 use nw_db::{DbError, WORLD_MIGRATOR, check_schema};
+use nw_sim_core::level_bounds;
 use nw_world::WorldFile;
 use nw_world::world_file::world_file_path;
 
 use crate::config::{SimConfig, SimConfigError, load_sim_config};
-use crate::server::{LoopSettings, ServeError, serve as serve_loop};
+use crate::server::{
+    LATENCY_BUCKETS_SECONDS, LoopSettings, METRIC_HANDOFF_SECONDS, METRIC_TICK_SECONDS, ServeError,
+    serve as serve_loop,
+};
 
 /// Failure while starting or running `sim`.
 #[derive(Debug, thiserror::Error)]
@@ -60,8 +64,8 @@ pub enum RunError {
 ///
 /// # Errors
 ///
-/// Returns [`RunError`] when the configuration, the world file, the start position, a secret,
-/// the database, NATS, or the loop fails.
+/// Returns [`RunError`] when the configuration, the world file, a secret, the database, NATS, or
+/// the loop fails.
 pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let config = load_sim_config(config_path)?;
     let password = std::env::var(&config.world_database_password_env)
@@ -72,7 +76,6 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let build = load_client_build(&config.client_build_config).map_err(RunError::ClientBuild)?;
     let path = world_file_path(&config.content_dir, &build, &config.level);
     let world_file = Arc::new(WorldFile::load(&path, &build)?);
-    config.check_start(&*world_file)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -92,15 +95,26 @@ async fn serve_async(
     let bus = Bus::connect(&config.nats_url).await?;
     PrometheusBuilder::new()
         .with_http_listener(config.metrics_listen)
-        .install()
+        .set_buckets_for_metric(
+            Matcher::Full(METRIC_HANDOFF_SECONDS.to_owned()),
+            &LATENCY_BUCKETS_SECONDS,
+        )
+        .and_then(|builder| {
+            builder.set_buckets_for_metric(
+                Matcher::Full(METRIC_TICK_SECONDS.to_owned()),
+                &LATENCY_BUCKETS_SECONDS,
+            )
+        })
+        .and_then(PrometheusBuilder::install)
         .map_err(|error| RunError::Metrics(error.to_string()))?;
     tracing::info!(sim = %config.sim_id, world = %config.world_id, level = %config.level, "serving");
     let settings = LoopSettings {
         sim_id: config.sim_id.clone(),
         world_id: config.world_id,
         level: config.level.clone(),
-        start: config.start_position.position(),
-        world: config.world_settings()?,
+        world: config.world_settings(level_bounds(&ground.level))?,
+        handoff_timeout: std::time::Duration::from_millis(config.handoff_timeout_ms),
+        forward_ttl_ms: config.forward_ttl_ms,
         save_interval: std::time::Duration::from_millis(config.save_interval_ms),
         heartbeat_interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
         heartbeat_misses: config.heartbeat_misses,

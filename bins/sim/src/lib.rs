@@ -3,6 +3,7 @@
 //! the login messages, see the players near them in replication bundles, and leave.
 
 pub mod config;
+pub mod forward;
 pub mod gateways;
 pub mod login;
 pub mod run;

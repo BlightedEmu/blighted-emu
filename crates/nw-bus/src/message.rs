@@ -76,6 +76,9 @@ pub enum SimInput {
 pub enum GatewayOutput {
     /// Server message envelopes for one connection, on one carrier channel.
     ServerMessages {
+        /// The sim that sends them; it hears `Left` when the gateway no longer has the
+        /// connection.
+        sim: BusId,
         /// The connection id inside the gateway.
         connection: u64,
         /// The carrier channel.
@@ -89,6 +92,17 @@ pub enum GatewayOutput {
     Close {
         /// The connection id inside the gateway.
         connection: u64,
+    },
+    /// The connection's player moved to another sim by a handoff (M5 spec section 3.3).
+    Route {
+        /// The connection id inside the gateway.
+        connection: u64,
+        /// The sim that has the player now.
+        sim: BusId,
+        /// That sim's generation.
+        generation: u64,
+        /// The player's handoff count; only a higher one changes the route.
+        sequence: u64,
     },
 }
 
@@ -212,6 +226,9 @@ pub enum HandoffReply {
     },
 }
 
+/// Largest bus message: the NATS default payload limit (M4 spec section 6.3).
+pub const MAX_BUS_MESSAGE_BYTES: usize = 1024 * 1024;
+
 /// Most bytes of one [`Ghost`] in `postcard`: a 10-byte entity number and three 4-byte floats.
 pub const MAX_GHOST_BYTES: usize = 22;
 
@@ -323,6 +340,7 @@ mod tests {
             connection: connection(),
         });
         round_trip(GatewayOutput::ServerMessages {
+            sim: connection().gateway,
             connection: CONNECTION,
             channel: 1,
             reliable: false,
@@ -330,6 +348,12 @@ mod tests {
         });
         round_trip(GatewayOutput::Close {
             connection: CONNECTION,
+        });
+        round_trip(GatewayOutput::Route {
+            connection: CONNECTION,
+            sim: connection().gateway,
+            generation: STARTED_AT_MS,
+            sequence: 2,
         });
         round_trip(Heartbeat {
             id: connection().gateway,

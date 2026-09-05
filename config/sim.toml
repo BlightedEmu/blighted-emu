@@ -1,8 +1,8 @@
-# sim configuration (M4 spec section 7). This file holds no secret.
+# sim configuration (M4 spec section 7, M5 spec section 7.1). This file holds no secret.
 # Secret: the world database password, in the variable named by world_database_password_env.
 # Any key below can be overridden with NW_SIM_<KEY>, nested keys joined by "__".
 
-# This sim's id; config/rep-gateway.toml sim_id must name it.
+# This sim's id; unique in the world. world-director gives it cells.
 sim_id = "sim-1"
 # The [[world]] id in config/edge.toml.
 world_id = "8d0f4c2e-0000-4000-8000-000000000001"
@@ -12,13 +12,18 @@ world_database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
 client_build_config = "config/client-build.toml"
 # World files from `just world`.
 content_dir = "local-data/content"
+# The open map level; the same as in config/world-director.toml.
 level = "newworld_vitaeeterna"
-# Next to a fast travel shrine near Edengrove; checked against the ground at start.
-start_position = { x = 11132.5, y = 7305.9, z = 170.0 }
+# Most players in this sim; the director adds the free ones to the login queue.
+max_players = 2000
 # Our own choice; the retail range is Unknown.
 interest_radius_m = 100.0
+# The nearest others in a player's bundles: with the player itself they fill one bundle. The
+# retail limit is Unknown.
+max_visible_players = 47
 ground_tolerance_m = 2.0
-max_height_above_ground_m = 64.0
+# Above the largest captured fall (128.6 m, movement numbers note, Check section).
+max_height_above_ground_m = 150.0
 # Movement (M4 spec section 7.2 with sections 15 and 16). run_speed_mps is the datasheet
 # ServerValidatedCanRun speed. The limit is 3.25 x (1 + 1.2) = 7.15 m/s: above sprint (5.5 m/s)
 # with the 15 % road boost (6.3 m/s). Faster captured speeds have an Unknown cause (mounts,
@@ -28,18 +33,19 @@ speed_margin = 1.2
 # Longer than the longest gap between captured movement messages (1.5 to 2.5 s), so a player
 # who moved on during a stall is not refused when its next message comes.
 burst_seconds = 3.0
+# Handoff (M5 spec section 3.3): a player this far into another sim's cells moves to that sim.
+handoff_margin_m = 5.0
+handoff_timeout_ms = 250
+handoff_retry_ms = 1000
+# Inputs that reach this sim after a handoff go on to the new sim for this long.
+forward_ttl_ms = 10000
+# Ghosts of another sim that are not renewed for this long are dropped.
+ghost_ttl_ms = 1000
 save_interval_ms = 10000
 heartbeat_interval_ms = 1000
 heartbeat_misses = 3
 metrics_listen = "127.0.0.1:9102"
 log_filter = "info"
-
-# The area of this cell, in metres: the whole map.
-[cell]
-min_x = 0.0
-min_y = 0.0
-max_x = 14336.0
-max_y = 14336.0
 
 [world_database]
 url = "postgres://nw@127.0.0.1:5432/nw_world_1"
