@@ -17,6 +17,8 @@ use serde::de::DeserializeOwned;
 
 /// Separator between nested keys in environment variable names.
 pub const ENV_NESTING_SEPARATOR: &str = "__";
+/// Prefix of every secret environment variable. Secrets never come from a config file.
+pub const SECRET_ENV_PREFIX: &str = "NW_SECRET_";
 
 /// Error returned by [`load_config`].
 #[derive(Debug, thiserror::Error)]

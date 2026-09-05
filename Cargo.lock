@@ -2935,6 +2935,7 @@ name = "nw-content"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
+ "nw-common",
  "nw-formats",
  "postcard",
  "serde",

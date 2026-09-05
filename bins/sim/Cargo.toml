@@ -9,16 +9,33 @@ publish.workspace = true
 
 [dependencies]
 bevy_ecs.workspace = true
+clap.workspace = true
 getrandom.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
 nw-bus.workspace = true
+nw-common.workspace = true
+nw-content.workspace = true
+nw-db.workspace = true
 nw-messages.workspace = true
 nw-sim-core.workspace = true
+nw-world.workspace = true
+serde.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 nw-carrier.workspace = true
+nw-db = { workspace = true, features = ["test-util"] }
 nw-reflect.workspace = true
+serde_json.workspace = true
+
+[features]
+# Tests that need the Docker Compose NATS and PostgreSQL (`just test-infra`).
+infra = []
 
 [lints]
 workspace = true
