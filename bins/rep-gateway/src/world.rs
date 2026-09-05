@@ -1,18 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The link from the gateway to the world, `sim` (M4 spec sections 3.1, 6 and 11): joins, client
-//! messages and departures go out; server messages, closes and the loss of the world come in.
+//! The link from the gateway to the world (M4 spec sections 3.1, 6 and 11; M5 spec sections 3 and
+//! 8): joins go to `world-director`; client messages and departures go to the sim of each
+//! connection; server messages and closes come in.
 //!
-//! [`World`] is what the server loop uses; [`BusWorld`] is the NATS version. Inputs and heartbeats
-//! go through publishing queues ([`Publisher`]), so `sim` gets the inputs in the order the clients
-//! sent them, and a lost NATS connection never blocks the loop or the silence check.
+//! [`World`] is what the server loop uses; [`BusWorld`] is the NATS version. It keeps the route of
+//! each connection: a join sets it, a route message of a handoff changes it, and a connection
+//! whose sim leaves the cell table is resumed through the director. Inputs and heartbeats go
+//! through publishing queues ([`Publisher`]), so each sim gets the inputs in the order the clients
+//! sent them, and a lost NATS connection never blocks the loop.
 
 use std::future::Future;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use nw_bus::{
-    Bus, BusError, BusId, ConnectionRef, GatewayOutput, Heartbeat, Join, JoinReply, Publisher,
-    SimInput, Subscription, heartbeat_silence, subject,
+    Bus, BusError, BusId, CellTable, ConnectionRef, GatewayOutput, Heartbeat, Join, JoinReply,
+    Publisher, SimInput, Subscription, subject,
 };
 use nw_common::time::unix_ms;
 use nw_login::queue::EntryRecord;
@@ -20,6 +23,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::registration::Refusal;
+use crate::routes::{Resume, Routes};
 
 /// Client messages and departures that may wait for the publishing task.
 pub const INPUT_QUEUE: usize = 4096;
@@ -29,14 +33,35 @@ pub const EVENT_QUEUE: usize = 4096;
 const HEARTBEAT_QUEUE: usize = 16;
 /// Metric: inputs dropped because the publishing task is behind.
 pub const METRIC_INPUTS_DROPPED: &str = "rep_gateway_world_inputs_dropped_total";
+/// Metric: inputs of a connection without a route (resuming, or gone).
+pub const METRIC_INPUTS_WITHOUT_ROUTE: &str = "rep_gateway_inputs_without_route_total";
+/// Metric: resumes by `result`.
+pub const METRIC_RESUMES: &str = "rep_gateway_resumes_total";
+const RESULT_LABEL: &str = "result";
+const RESUMED: &str = "resumed";
+const CLOSED: &str = "closed";
 
 /// What the world tells the server loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorldEvent {
-    /// Server messages for a connection, or a close.
-    Output(GatewayOutput),
-    /// The world is gone (silent or restarted); its players must be closed.
-    Lost,
+    /// Server message envelopes for one connection, on one carrier channel.
+    Messages {
+        /// The sim that sent them.
+        sim: BusId,
+        /// The connection id.
+        connection: u64,
+        /// The carrier channel.
+        channel: u8,
+        /// Whether the carrier sends them reliably.
+        reliable: bool,
+        /// The envelopes, in order.
+        envelopes: Vec<Vec<u8>>,
+    },
+    /// Close the connection.
+    Close {
+        /// The connection id.
+        connection: u64,
+    },
 }
 
 /// The world as the server loop sees it.
@@ -57,24 +82,23 @@ pub trait World: Clone + Send + Sync + 'static {
 
     /// Tells the world that a connection is gone, without waiting.
     fn left(&self, connection: u64);
+
+    /// `sim` sent messages for a connection this gateway does not have (for example after a
+    /// join that timed out); it hears that the connection left.
+    fn unknown(&self, connection: u64, sim: &BusId);
 }
 
-/// The link settings (config keys `gateway_id`, `sim_id`, `join_timeout_ms`,
-/// `heartbeat_interval_ms`, `heartbeat_misses`).
+/// The link settings (config keys `gateway_id`, `join_timeout_ms`, `heartbeat_interval_ms`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorldLinkSettings {
     /// The world.
     pub world_id: Uuid,
     /// This gateway in bus subjects.
     pub gateway_id: BusId,
-    /// The sim of the world.
-    pub sim_id: BusId,
-    /// Longest wait for a join answer.
+    /// Longest wait for a join or resume answer.
     pub join_timeout: Duration,
     /// Time between heartbeats.
     pub heartbeat_interval: Duration,
-    /// Missed sim heartbeats before the world is lost.
-    pub heartbeat_misses: u32,
 }
 
 /// The world over NATS.
@@ -82,13 +106,14 @@ pub struct WorldLinkSettings {
 pub struct BusWorld {
     bus: Bus,
     settings: Arc<WorldLinkSettings>,
-    input_subject: String,
     inputs: Publisher<SimInput>,
+    routes: Arc<Mutex<Routes>>,
+    events: mpsc::Sender<WorldEvent>,
 }
 
 impl BusWorld {
-    /// Subscribes to this gateway's output and the sim heartbeat, and starts the tasks that
-    /// publish inputs and heartbeats. Returns the link and its events for the server loop.
+    /// Subscribes to this gateway's output and the cell table, and starts the tasks that publish
+    /// inputs and heartbeats. Returns the link and its events for the server loop.
     ///
     /// # Errors
     ///
@@ -101,28 +126,32 @@ impl BusWorld {
         let outputs = bus
             .subscribe::<GatewayOutput>(subject::gateway_output(world_id, &settings.gateway_id))
             .await?;
-        let sim_beats = bus
-            .subscribe::<Heartbeat>(subject::sim_heartbeat(world_id, &settings.sim_id))
+        let tables = bus
+            .subscribe::<CellTable>(subject::director_table(world_id))
             .await?;
         bus.flush().await?;
         let settings = Arc::new(settings);
         let (events, receiver) = mpsc::channel(EVENT_QUEUE);
-        tokio::spawn(forward_outputs(outputs, events.clone()));
-        tokio::spawn(heartbeats(
-            Publisher::start(bus.clone(), HEARTBEAT_QUEUE),
-            Arc::clone(&settings),
-            sim_beats,
+        let world = Self {
+            inputs: Publisher::start(bus.clone(), INPUT_QUEUE),
+            routes: Arc::default(),
+            bus: bus.clone(),
+            settings: Arc::clone(&settings),
             events,
+        };
+        tokio::spawn(world.clone().forward_outputs(outputs));
+        tokio::spawn(world.clone().follow_tables(tables));
+        tokio::spawn(heartbeats(
+            Publisher::start(bus, HEARTBEAT_QUEUE),
+            settings,
+            world.events.clone(),
         ));
-        Ok((
-            Self {
-                input_subject: subject::sim_input(world_id, &settings.sim_id),
-                inputs: Publisher::start(bus.clone(), INPUT_QUEUE),
-                bus,
-                settings,
-            },
-            receiver,
-        ))
+        Ok((world, receiver))
+    }
+
+    fn routes(&self) -> MutexGuard<'_, Routes> {
+        // A panic while the lock was held cannot leave a route half written.
+        self.routes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn connection(&self, connection: u64) -> ConnectionRef {
@@ -132,28 +161,149 @@ impl BusWorld {
         }
     }
 
-    fn input(&self, input: SimInput) {
-        if !self.inputs.send(self.input_subject.clone(), input) {
+    fn input(&self, sim: &BusId, input: SimInput) {
+        let subject = subject::sim_input(self.settings.world_id, sim);
+        if !self.inputs.send(subject, input) {
             metrics::counter!(METRIC_INPUTS_DROPPED).increment(1);
         }
+    }
+
+    fn send_left(&self, connection: u64, sim: &BusId) {
+        self.input(
+            sim,
+            SimInput::Left {
+                connection: self.connection(connection),
+            },
+        );
+    }
+
+    /// Asks the director; `resume` is the entity number of a resumed player.
+    async fn ask_director(
+        &self,
+        connection: u64,
+        account: Uuid,
+        character: Uuid,
+        resume: Option<u64>,
+    ) -> Result<JoinReply, BusError> {
+        let join = Join {
+            connection: self.connection(connection),
+            account,
+            character,
+            resume,
+        };
+        self.bus
+            .request::<Join, JoinReply>(
+                subject::director_join(self.settings.world_id),
+                &join,
+                self.settings.join_timeout,
+            )
+            .await
+    }
+
+    /// Server messages and closes go to the loop; route messages change the routes here.
+    async fn forward_outputs(self, mut outputs: Subscription<GatewayOutput>) {
+        while let Some(output) = outputs.next().await {
+            let event = match output.map(|output| output.message) {
+                Ok(GatewayOutput::ServerMessages {
+                    sim,
+                    connection,
+                    channel,
+                    reliable,
+                    envelopes,
+                }) => WorldEvent::Messages {
+                    sim,
+                    connection,
+                    channel,
+                    reliable,
+                    envelopes,
+                },
+                Ok(GatewayOutput::Close { connection }) => WorldEvent::Close { connection },
+                Ok(GatewayOutput::Route {
+                    connection,
+                    sim,
+                    generation,
+                    sequence,
+                }) => {
+                    self.routes()
+                        .apply_route(connection, sim, generation, sequence);
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "bad world output");
+                    continue;
+                }
+            };
+            if self.events.send(event).await.is_err() {
+                return;
+            }
+        }
+    }
+
+    /// Resumes the connections whose sim left the cell table.
+    async fn follow_tables(self, mut tables: Subscription<CellTable>) {
+        while let Some(table) = tables.next().await {
+            let table = match table {
+                Ok(table) => table.message,
+                Err(error) => {
+                    tracing::warn!(%error, "bad cell table");
+                    continue;
+                }
+            };
+            let jobs = self.routes().lost(&table);
+            for job in jobs {
+                tokio::spawn(self.clone().resume(job));
+            }
+        }
+    }
+
+    /// Puts a player of a lost sim on the owner of its cell (M5 spec section 3.6); a refusal
+    /// closes the connection.
+    async fn resume(self, job: Resume) {
+        let reply = self
+            .ask_director(job.connection, job.account, job.character, Some(job.entity))
+            .await;
+        match reply {
+            Ok(JoinReply::Joined {
+                sim, generation, ..
+            }) => {
+                metrics::counter!(METRIC_RESUMES, RESULT_LABEL => RESUMED).increment(1);
+                tracing::info!(connection = job.connection, %sim, "player resumed");
+                let still_here = self
+                    .routes()
+                    .resumed(job.connection, sim.clone(), generation);
+                if !still_here {
+                    self.send_left(job.connection, &sim);
+                }
+            }
+            Ok(JoinReply::Refused { reason }) => self.close(job.connection, &reason).await,
+            Err(error) => self.close(job.connection, &error.to_string()).await,
+        }
+    }
+
+    async fn close(&self, connection: u64, reason: &str) {
+        metrics::counter!(METRIC_RESUMES, RESULT_LABEL => CLOSED).increment(1);
+        tracing::warn!(connection, reason, "resume failed; the connection closes");
+        self.routes().left(connection);
+        // The loop may have stopped; then nobody needs the close.
+        let _ = self.events.send(WorldEvent::Close { connection }).await;
     }
 }
 
 impl World for BusWorld {
     async fn join(&self, connection: u64, record: &EntryRecord) -> Result<(), Refusal> {
-        let join = Join {
-            connection: self.connection(connection),
-            account: record.account_id,
-            character: record.character_id,
-            resume: None,
-        };
-        let subject = subject::sim_join(self.settings.world_id, &self.settings.sim_id);
-        match self
-            .bus
-            .request::<Join, JoinReply>(subject, &join, self.settings.join_timeout)
-            .await
-        {
-            Ok(JoinReply::Joined { .. }) => Ok(()),
+        let reply = self
+            .ask_director(connection, record.account_id, record.character_id, None)
+            .await;
+        match reply {
+            Ok(JoinReply::Joined {
+                sim,
+                generation,
+                entity,
+            }) => {
+                self.routes()
+                    .joined(connection, record, sim, generation, entity);
+                Ok(())
+            }
             Ok(JoinReply::Refused { reason }) => {
                 tracing::warn!(%reason, "world refused the character");
                 Err(Refusal::WorldRefused)
@@ -166,94 +316,51 @@ impl World for BusWorld {
     }
 
     fn client_message(&self, connection: u64, envelope: Vec<u8>) {
-        self.input(SimInput::ClientMessage {
-            connection: self.connection(connection),
-            envelope,
-        });
+        let Some(sim) = self.routes().target(connection).cloned() else {
+            metrics::counter!(METRIC_INPUTS_WITHOUT_ROUTE).increment(1);
+            return;
+        };
+        self.input(
+            &sim,
+            SimInput::ClientMessage {
+                connection: self.connection(connection),
+                envelope,
+            },
+        );
     }
 
     fn left(&self, connection: u64) {
-        self.input(SimInput::Left {
-            connection: self.connection(connection),
-        });
-    }
-}
-
-async fn forward_outputs(
-    mut outputs: Subscription<GatewayOutput>,
-    events: mpsc::Sender<WorldEvent>,
-) {
-    while let Some(output) = outputs.next().await {
-        match output {
-            Ok(output) => {
-                if events
-                    .send(WorldEvent::Output(output.message))
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-            }
-            Err(error) => tracing::warn!(%error, "bad world output"),
+        let sim = self.routes().left(connection);
+        if let Some(sim) = sim {
+            self.send_left(connection, &sim);
         }
     }
+
+    fn unknown(&self, connection: u64, sim: &BusId) {
+        self.routes().left(connection);
+        self.send_left(connection, sim);
+    }
 }
 
-/// Reports [`WorldEvent::Lost`] once when the sim misses `heartbeat_misses` beats, and when it
-/// restarts, and queues this gateway's heartbeat. Ends when the server loop is gone.
+/// Queues this gateway's heartbeat every interval. Ends when the server loop is gone.
 async fn heartbeats(
     beats: Publisher<Heartbeat>,
     settings: Arc<WorldLinkSettings>,
-    mut sim_beats: Subscription<Heartbeat>,
     events: mpsc::Sender<WorldEvent>,
 ) {
-    let beat_subject = subject::gateway_heartbeat(settings.world_id, &settings.gateway_id);
+    let subject = subject::gateway_heartbeat(settings.world_id, &settings.gateway_id);
     let own = Heartbeat {
         id: settings.gateway_id.clone(),
         started_at_ms: unix_ms(),
     };
-    let silence = heartbeat_silence(settings.heartbeat_interval, settings.heartbeat_misses);
-    let mut sim_started_at_ms: Option<u64> = None;
-    let mut last_seen = Instant::now();
-    let mut lost = false;
     let mut timer = tokio::time::interval(settings.heartbeat_interval);
     loop {
-        let lost_now = tokio::select! {
-            _ = timer.tick() => {
-                if events.is_closed() {
-                    return;
-                }
-                let silent = !lost && last_seen.elapsed() > silence;
-                if silent {
-                    tracing::warn!(sim = %settings.sim_id, "world silent; its players close");
-                    lost = true;
-                }
-                if !beats.send(beat_subject.clone(), own.clone()) {
-                    tracing::warn!("heartbeat dropped; NATS is behind");
-                }
-                silent
-            }
-            beat = sim_beats.next() => match beat {
-                None => return,
-                Some(Ok(beat)) => {
-                    let started_at_ms = beat.message.started_at_ms;
-                    let restarted = sim_started_at_ms.is_some_and(|known| known != started_at_ms);
-                    if restarted {
-                        tracing::warn!(sim = %settings.sim_id, "world restarted; its players close");
-                    }
-                    sim_started_at_ms = Some(started_at_ms);
-                    last_seen = Instant::now();
-                    lost = false;
-                    restarted
-                }
-                Some(Err(error)) => {
-                    tracing::warn!(%error, "bad sim heartbeat");
-                    false
-                }
-            },
-        };
-        if lost_now && events.send(WorldEvent::Lost).await.is_err() {
+        timer.tick().await;
+        if events.is_closed() {
             return;
+        }
+        if !beats.send(subject.clone(), own.clone()) {
+            tracing::warn!("heartbeat dropped; NATS is behind");
         }
     }
 }
@@ -263,6 +370,11 @@ pub(crate) mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+
+    /// The sim of a [`TestWorld`].
+    pub(crate) fn test_sim() -> BusId {
+        BusId::try_from("sim-test".to_owned()).expect("id")
+    }
 
     /// What a [`TestWorld`] was sent.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -308,12 +420,13 @@ pub(crate) mod tests {
             if self.refuse {
                 return Err(Refusal::WorldRefused);
             }
-            self.emit(WorldEvent::Output(GatewayOutput::ServerMessages {
+            self.emit(WorldEvent::Messages {
+                sim: test_sim(),
                 connection,
                 channel: LOGIN_CHANNEL,
                 reliable: true,
                 envelopes: self.login.clone(),
-            }))
+            })
             .await;
             Ok(())
         }
@@ -328,6 +441,10 @@ pub(crate) mod tests {
         fn left(&self, connection: u64) {
             self.sent.lock().expect("lock").push(Sent::Left(connection));
         }
+
+        fn unknown(&self, connection: u64, _: &BusId) {
+            self.sent.lock().expect("lock").push(Sent::Left(connection));
+        }
     }
 
     /// The carrier channel of the login messages.
@@ -336,37 +453,31 @@ pub(crate) mod tests {
 
 #[cfg(all(test, feature = "infra"))]
 mod bus_tests {
-    use std::time::Duration;
-
+    use nw_bus::SimSlot;
     use nw_bus::test_support::test_bus;
-    use nw_bus::{Heartbeat, Join, JoinReply, SimInput};
-    use uuid::Uuid;
 
     use super::*;
 
     const JOIN_TIMEOUT: Duration = Duration::from_millis(500);
     const HEARTBEAT: Duration = Duration::from_millis(50);
-    const MISSES: u32 = 2;
-    /// Silence of 50 s: longer than any wait of these tests.
-    const PATIENT_MISSES: u32 = 1000;
-    /// Time for the link to handle the beats before the check.
-    const SETTLE: Duration = Duration::from_millis(200);
     const WAIT: Duration = Duration::from_secs(5);
+    const PAUSE: Duration = Duration::from_millis(50);
     const CONNECTION: u64 = 3;
-    /// A sim generation (its start time).
-    const STARTED_AT_MS: u64 = 1_800_000_000_000;
-    const SIM_STARTED_AT_MS: u64 = 10;
+    const UNKNOWN_CONNECTION: u64 = 77;
+    const GENERATION: u64 = 1_800_000_000_000;
+    const ENTITY: u64 = 12;
     const ENVELOPE: [u8; 2] = [4, 5];
 
+    fn id(prefix: &str) -> BusId {
+        BusId::try_from(format!("{prefix}-{}", Uuid::new_v4().simple())).expect("id")
+    }
+
     fn settings() -> WorldLinkSettings {
-        let unique = Uuid::new_v4().simple().to_string();
         WorldLinkSettings {
             world_id: Uuid::new_v4(),
-            gateway_id: BusId::try_from(format!("gw-{unique}")).expect("id"),
-            sim_id: BusId::try_from(format!("sim-{unique}")).expect("id"),
+            gateway_id: id("gw"),
             join_timeout: JOIN_TIMEOUT,
             heartbeat_interval: HEARTBEAT,
-            heartbeat_misses: MISSES,
         }
     }
 
@@ -380,6 +491,14 @@ mod bus_tests {
         }
     }
 
+    fn joined(sim: &BusId) -> JoinReply {
+        JoinReply::Joined {
+            sim: sim.clone(),
+            generation: GENERATION,
+            entity: ENTITY,
+        }
+    }
+
     async fn next<T>(receiver: &mut mpsc::Receiver<T>) -> T {
         tokio::time::timeout(WAIT, receiver.recv())
             .await
@@ -387,23 +506,78 @@ mod bus_tests {
             .expect("open")
     }
 
-    /// A sim that answers every join with `reply`.
-    async fn answer_joins(bus: &Bus, settings: &WorldLinkSettings, reply: JoinReply) {
+    /// A director that answers new joins with `first` and resumes with `resume`.
+    async fn director(bus: &Bus, world_id: Uuid, first: JoinReply, resume: JoinReply) {
         let mut joins = bus
-            .subscribe::<Join>(subject::sim_join(settings.world_id, &settings.sim_id))
+            .subscribe::<Join>(subject::director_join(world_id))
             .await
             .expect("subscribe");
         bus.flush().await.expect("flush");
         let answerer = bus.clone();
         tokio::spawn(async move {
             while let Some(Ok(join)) = joins.next().await {
-                answerer.reply(&join, &reply).await.expect("reply");
+                let reply = if join.message.resume.is_some() {
+                    &resume
+                } else {
+                    &first
+                };
+                answerer.reply(&join, reply).await.expect("reply");
             }
         });
     }
 
+    async fn inputs_of(bus: &Bus, world_id: Uuid, sim: &BusId) -> Subscription<SimInput> {
+        let inputs = bus
+            .subscribe::<SimInput>(subject::sim_input(world_id, sim))
+            .await
+            .expect("subscribe");
+        bus.flush().await.expect("flush");
+        inputs
+    }
+
+    async fn next_input(inputs: &mut Subscription<SimInput>) -> SimInput {
+        tokio::time::timeout(WAIT, inputs.next())
+            .await
+            .expect("in time")
+            .expect("open")
+            .expect("decode")
+            .message
+    }
+
+    /// Sends client messages until one reaches `inputs`; the route changes in another task.
+    async fn message_reaches(world: &BusWorld, inputs: &mut Subscription<SimInput>) {
+        let reached = async {
+            loop {
+                world.client_message(CONNECTION, ENVELOPE.to_vec());
+                if let Ok(Some(Ok(_))) = tokio::time::timeout(PAUSE, inputs.next()).await {
+                    return;
+                }
+            }
+        };
+        tokio::time::timeout(WAIT, reached)
+            .await
+            .expect("routed in time");
+    }
+
+    fn table_of(sims: &[&BusId]) -> CellTable {
+        CellTable {
+            version: 1,
+            cell_size_m: 2048.0,
+            columns: 0,
+            rows: 0,
+            sims: sims
+                .iter()
+                .map(|sim| SimSlot {
+                    id: (*sim).clone(),
+                    generation: GENERATION,
+                })
+                .collect(),
+            owners: Vec::new(),
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn joins_get_the_sim_answer_or_time_out() {
+    async fn a_join_goes_through_the_director_or_times_out() {
         let bus = test_bus().await;
         let settings = settings();
         let (world, _events) = BusWorld::start(bus.clone(), settings.clone())
@@ -413,12 +587,11 @@ mod bus_tests {
             world.join(CONNECTION, &record()).await,
             Err(Refusal::WorldUnavailable)
         );
-        let joined = JoinReply::Joined {
-            sim: settings.sim_id.clone(),
-            generation: STARTED_AT_MS,
-            entity: CONNECTION,
+        let sim = id("sim");
+        let refused = JoinReply::Refused {
+            reason: "no".to_owned(),
         };
-        answer_joins(&bus, &settings, joined).await;
+        director(&bus, settings.world_id, joined(&sim), refused).await;
         assert_eq!(world.join(CONNECTION, &record()).await, Ok(()));
 
         let refusing = self::settings();
@@ -426,7 +599,15 @@ mod bus_tests {
             .await
             .expect("start");
         let reason = "no".to_owned();
-        answer_joins(&bus, &refusing, JoinReply::Refused { reason }).await;
+        director(
+            &bus,
+            refusing.world_id,
+            JoinReply::Refused {
+                reason: reason.clone(),
+            },
+            JoinReply::Refused { reason },
+        )
+        .await;
         assert_eq!(
             world.join(CONNECTION, &record()).await,
             Err(Refusal::WorldRefused)
@@ -434,73 +615,120 @@ mod bus_tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_join_that_gets_no_answer_times_out() {
+    async fn inputs_follow_the_route_in_order_and_outputs_come_back() {
         let bus = test_bus().await;
         let settings = settings();
-        let mut joins = bus
-            .subscribe::<Join>(subject::sim_join(settings.world_id, &settings.sim_id))
-            .await
-            .expect("subscribe");
-        bus.flush().await.expect("flush");
-        tokio::spawn(async move { while joins.next().await.is_some() {} });
-        let (world, _events) = BusWorld::start(bus, settings).await.expect("start");
-        let started = std::time::Instant::now();
-        assert_eq!(
-            world.join(CONNECTION, &record()).await,
-            Err(Refusal::WorldUnavailable)
-        );
-        assert!(started.elapsed() >= JOIN_TIMEOUT);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn inputs_go_to_the_sim_in_order_and_outputs_come_back() {
-        let bus = test_bus().await;
-        let settings = settings();
-        let mut inputs = bus
-            .subscribe::<SimInput>(subject::sim_input(settings.world_id, &settings.sim_id))
-            .await
-            .expect("subscribe");
-        bus.flush().await.expect("flush");
+        let sim = id("sim");
+        director(&bus, settings.world_id, joined(&sim), joined(&sim)).await;
+        let mut inputs = inputs_of(&bus, settings.world_id, &sim).await;
         let (world, mut events) = BusWorld::start(bus.clone(), settings.clone())
             .await
             .expect("start");
         world.client_message(CONNECTION, ENVELOPE.to_vec());
+        world.join(CONNECTION, &record()).await.expect("join");
+        world.client_message(CONNECTION, ENVELOPE.to_vec());
         world.left(CONNECTION);
-        let connection = ConnectionRef {
+        world.unknown(UNKNOWN_CONNECTION, &sim);
+        let connection = |number| ConnectionRef {
             gateway: settings.gateway_id.clone(),
-            connection: CONNECTION,
+            connection: number,
         };
-        let first = tokio::time::timeout(WAIT, inputs.next())
-            .await
-            .expect("in time");
         assert_eq!(
-            first.expect("open").expect("decode").message,
+            next_input(&mut inputs).await,
             SimInput::ClientMessage {
-                connection: connection.clone(),
+                connection: connection(CONNECTION),
                 envelope: ENVELOPE.to_vec(),
             }
         );
-        let second = tokio::time::timeout(WAIT, inputs.next())
-            .await
-            .expect("in time");
         assert_eq!(
-            second.expect("open").expect("decode").message,
-            SimInput::Left { connection }
+            next_input(&mut inputs).await,
+            SimInput::Left {
+                connection: connection(CONNECTION)
+            }
         );
-        let output = GatewayOutput::Close {
-            connection: CONNECTION,
-        };
+        assert_eq!(
+            next_input(&mut inputs).await,
+            SimInput::Left {
+                connection: connection(UNKNOWN_CONNECTION)
+            }
+        );
+        let output = subject::gateway_output(settings.world_id, &settings.gateway_id);
         bus.publish(
-            subject::gateway_output(settings.world_id, &settings.gateway_id),
-            &output,
+            output,
+            &GatewayOutput::Close {
+                connection: CONNECTION,
+            },
         )
         .await
         .expect("publish");
-        assert_eq!(next(&mut events).await, WorldEvent::Output(output));
+        assert_eq!(
+            next(&mut events).await,
+            WorldEvent::Close {
+                connection: CONNECTION
+            }
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_gateway_beats_and_a_silent_sim_is_lost() {
+    async fn a_route_moves_the_inputs() {
+        let bus = test_bus().await;
+        let settings = settings();
+        let (first, second) = (id("sim-a"), id("sim-b"));
+        director(&bus, settings.world_id, joined(&first), joined(&first)).await;
+        let mut inputs = inputs_of(&bus, settings.world_id, &second).await;
+        let (world, _events) = BusWorld::start(bus.clone(), settings.clone())
+            .await
+            .expect("start");
+        world.join(CONNECTION, &record()).await.expect("join");
+        let route = GatewayOutput::Route {
+            connection: CONNECTION,
+            sim: second.clone(),
+            generation: GENERATION,
+            sequence: 1,
+        };
+        let output = subject::gateway_output(settings.world_id, &settings.gateway_id);
+        bus.publish(output, &route).await.expect("publish");
+        message_reaches(&world, &mut inputs).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_resume_moves_the_inputs_and_a_refused_one_closes() {
+        let bus = test_bus().await;
+        let settings = settings();
+        let (lost, other) = (id("sim-a"), id("sim-b"));
+        director(&bus, settings.world_id, joined(&lost), joined(&other)).await;
+        let mut inputs = inputs_of(&bus, settings.world_id, &other).await;
+        let (world, _events) = BusWorld::start(bus.clone(), settings.clone())
+            .await
+            .expect("start");
+        world.join(CONNECTION, &record()).await.expect("join");
+        let tables = subject::director_table(settings.world_id);
+        bus.publish(tables, &table_of(&[&other]))
+            .await
+            .expect("table");
+        message_reaches(&world, &mut inputs).await;
+
+        let refusing = self::settings();
+        let refused = JoinReply::Refused {
+            reason: "no cell".to_owned(),
+        };
+        director(&bus, refusing.world_id, joined(&lost), refused).await;
+        let (world, mut events) = BusWorld::start(bus.clone(), refusing.clone())
+            .await
+            .expect("start");
+        world.join(CONNECTION, &record()).await.expect("join");
+        let tables = subject::director_table(refusing.world_id);
+        bus.publish(tables, &table_of(&[])).await.expect("table");
+        assert_eq!(
+            next(&mut events).await,
+            WorldEvent::Close {
+                connection: CONNECTION
+            }
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_gateway_beats() {
         let bus = test_bus().await;
         let settings = settings();
         let mut beats = bus
@@ -511,7 +739,7 @@ mod bus_tests {
             .await
             .expect("subscribe");
         bus.flush().await.expect("flush");
-        let (_world, mut events) = BusWorld::start(bus.clone(), settings.clone())
+        let (_world, _events) = BusWorld::start(bus.clone(), settings.clone())
             .await
             .expect("start");
         let beat = tokio::time::timeout(WAIT, beats.next())
@@ -521,34 +749,5 @@ mod bus_tests {
             beat.expect("open").expect("decode").message.id,
             settings.gateway_id
         );
-        assert_eq!(next(&mut events).await, WorldEvent::Lost);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_restarted_sim_is_lost() {
-        let bus = test_bus().await;
-        let settings = WorldLinkSettings {
-            heartbeat_misses: PATIENT_MISSES,
-            ..settings()
-        };
-        let (_world, mut events) = BusWorld::start(bus.clone(), settings.clone())
-            .await
-            .expect("start");
-        let sim_beat = |started_at_ms| Heartbeat {
-            id: settings.sim_id.clone(),
-            started_at_ms,
-        };
-        let subject = subject::sim_heartbeat(settings.world_id, &settings.sim_id);
-        for started_at_ms in [SIM_STARTED_AT_MS, SIM_STARTED_AT_MS] {
-            bus.publish(subject.clone(), &sim_beat(started_at_ms))
-                .await
-                .expect("publish");
-        }
-        tokio::time::sleep(SETTLE).await;
-        assert!(events.try_recv().is_err());
-        bus.publish(subject, &sim_beat(SIM_STARTED_AT_MS + 1))
-            .await
-            .expect("publish");
-        assert_eq!(next(&mut events).await, WorldEvent::Lost);
     }
 }

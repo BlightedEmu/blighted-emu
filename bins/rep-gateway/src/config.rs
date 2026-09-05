@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `config/rep-gateway.toml` with `NW_GATEWAY_` overrides (M3 spec section 6, M4 spec section
-//! 6.3).
+//! 6.3, M5 spec section 8).
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -45,16 +45,13 @@ pub struct GatewayConfig {
     pub log_filter: String,
     /// This gateway's id in bus subjects.
     pub gateway_id: BusId,
-    /// The sim of the world; `config/sim.toml` `sim_id` names the same id.
-    pub sim_id: BusId,
     /// NATS, internal only.
     pub nats_url: String,
-    /// Longest wait for the world to take a character; below `limits.registration_timeout_ms`.
+    /// Longest wait for the director to place a character; below
+    /// `limits.registration_timeout_ms`.
     pub join_timeout_ms: u64,
     /// Time between heartbeats.
     pub heartbeat_interval_ms: u64,
-    /// Missed sim heartbeats before its players are closed.
-    pub heartbeat_misses: u32,
     /// Connection limits and timers.
     pub limits: GatewayLimits,
 }
@@ -146,8 +143,8 @@ impl GatewayConfig {
                 "must be above 0 and below limits.registration_timeout_ms",
             );
         }
-        if self.heartbeat_interval_ms == 0 || self.heartbeat_misses == 0 {
-            return invalid("heartbeat_interval_ms", "heartbeat values must be above 0");
+        if self.heartbeat_interval_ms == 0 {
+            return invalid("heartbeat_interval_ms", "must be above 0");
         }
         Ok(())
     }
@@ -157,10 +154,8 @@ impl GatewayConfig {
         WorldLinkSettings {
             world_id: self.world_id,
             gateway_id: self.gateway_id.clone(),
-            sim_id: self.sim_id.clone(),
             join_timeout: Duration::from_millis(self.join_timeout_ms),
             heartbeat_interval: Duration::from_millis(self.heartbeat_interval_ms),
-            heartbeat_misses: self.heartbeat_misses,
         }
     }
 
@@ -200,7 +195,10 @@ pub(crate) mod tests {
             link.join_timeout,
             Duration::from_millis(config.join_timeout_ms)
         );
-        assert_eq!(link.heartbeat_misses, config.heartbeat_misses);
+        assert_eq!(
+            link.heartbeat_interval,
+            Duration::from_millis(config.heartbeat_interval_ms)
+        );
     }
 
     #[test]
@@ -229,9 +227,6 @@ pub(crate) mod tests {
                 ..
             })
         ));
-        let mut config = committed();
-        config.heartbeat_misses = 0;
-        assert!(config.validate().is_err());
         let mut config = committed();
         config.heartbeat_interval_ms = 0;
         assert!(config.validate().is_err());

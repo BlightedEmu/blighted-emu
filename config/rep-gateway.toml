@@ -24,15 +24,12 @@ mtu = 1200
 log_filter = "info"
 # This gateway's id in bus subjects.
 gateway_id = "gw-1"
-# The sim of this world; config/sim.toml sim_id must be the same.
-sim_id = "sim-1"
 # NATS. Keep it on an internal address.
 nats_url = "nats://127.0.0.1:4222"
-# Longest wait for sim to take a character; below limits.registration_timeout_ms.
+# Longest wait for world-director to place a character; below limits.registration_timeout_ms
+# and above admit_timeout_ms of config/world-director.toml.
 join_timeout_ms = 5000
 heartbeat_interval_ms = 1000
-# Missed sim heartbeats before its players are closed.
-heartbeat_misses = 3
 
 [limits]
 max_connections = 2000

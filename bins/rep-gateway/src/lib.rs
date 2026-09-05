@@ -8,6 +8,7 @@ pub mod config;
 mod end_to_end;
 pub mod peer;
 pub mod registration;
+pub mod routes;
 pub mod run;
 pub mod server;
 pub mod world;

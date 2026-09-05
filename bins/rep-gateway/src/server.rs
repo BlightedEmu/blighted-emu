@@ -12,7 +12,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use nw_bus::GatewayOutput;
 use nw_common::time::unix_seconds;
 use nw_dtls::{DtlsServerConfig, FirstDatagram};
 use nw_login::queue::{EntryRecord, QueueStore};
@@ -354,54 +353,49 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
 
     async fn world_event(&mut self, event: WorldEvent) {
         match event {
-            WorldEvent::Output(GatewayOutput::ServerMessages {
+            WorldEvent::Messages {
+                sim,
                 connection,
                 channel,
                 reliable,
                 envelopes,
-            }) => {
-                self.apply(connection, |peer| {
-                    peer.send_envelopes(channel, reliable, &envelopes)
-                })
-                .await;
-            }
-            WorldEvent::Output(GatewayOutput::Close { connection }) => {
-                self.apply(connection, Peer::close).await;
-            }
-            WorldEvent::Lost => {
-                let registered: Vec<u64> = self
-                    .peers
-                    .values()
-                    .filter(|peer| peer.is_registered())
-                    .map(Peer::id)
-                    .collect();
-                for connection in registered {
-                    self.apply(connection, Peer::close).await;
+            } => {
+                let known = self
+                    .apply(connection, |peer| {
+                        peer.send_envelopes(channel, reliable, &envelopes)
+                    })
+                    .await;
+                if !known {
+                    // The sim still has a player on a connection this gateway no longer has (for
+                    // example after a join that timed out); it hears that the player left.
+                    tracing::debug!(connection, "world message for a connection that is gone");
+                    self.gateway.world.unknown(connection, &sim);
                 }
+            }
+            WorldEvent::Close { connection } => {
+                self.apply(connection, Peer::close).await;
             }
         }
     }
 
-    /// Runs `action` on the peer of `connection` and sends what it queued. The world still has a
-    /// player on a connection this gateway no longer has (for example after a join that timed
-    /// out); it hears that the player left.
+    /// Runs `action` on the peer of `connection` and sends what it queued. Returns `false` when
+    /// this gateway has no such connection.
     async fn apply(
         &mut self,
         connection: u64,
         action: impl FnOnce(&mut Peer) -> Result<(), PeerError>,
-    ) {
+    ) -> bool {
         let Some(&address) = self.connections.get(&connection) else {
-            tracing::debug!(connection, "world message for a connection that is gone");
-            self.gateway.world.left(connection);
-            return;
+            return false;
         };
         let Some(peer) = self.peers.get_mut(&address) else {
-            return;
+            return false;
         };
         match action(peer) {
             Ok(()) => self.flush(address, self.now_ms()).await,
             Err(error) => self.drop_peer(address, &error),
         }
+        true
     }
 
     fn report(&self) {
@@ -464,7 +458,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::registration::tests::Records;
-    use crate::world::tests::{Sent, TestWorld};
+    use crate::world::tests::{Sent, TestWorld, test_sim};
     use nw_reflect::{REGISTRATION_STATUS_AUTHORIZED, REGISTRATION_STATUS_REFUSED};
 
     const SECRET: [u8; COOKIE_SECRET_LEN] = [5; COOKIE_SECRET_LEN];
@@ -725,36 +719,21 @@ pub(crate) mod tests {
         let run = tokio::spawn(run_rep(gateway, client(token), HOLD_FIRST, WAIT));
         let connection = first_join(&world).await;
         tokio::time::sleep(SETTLE).await;
-        world
-            .emit(WorldEvent::Output(GatewayOutput::Close { connection }))
-            .await;
+        world.emit(WorldEvent::Close { connection }).await;
         let outcome = run.await.expect("join").expect("run");
         assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
         assert!(outcome.closed_by_server);
         wait_for(|| sent(&world).contains(&Sent::Left(connection))).await;
         world
-            .emit(WorldEvent::Output(GatewayOutput::ServerMessages {
+            .emit(WorldEvent::Messages {
+                sim: test_sim(),
                 connection: UNKNOWN_CONNECTION,
                 channel: MESSAGE_CHANNEL,
                 reliable: true,
                 envelopes: vec![login_envelope()],
-            }))
+            })
             .await;
         wait_for(|| sent(&world).contains(&Sent::Left(UNKNOWN_CONNECTION))).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_lost_world_closes_registered_connections() {
-        let (world, events) = TestWorld::new(false, Vec::new());
-        let (gateway, token) = start_with(LIMITS, (world.clone(), events)).await;
-        let run = tokio::spawn(run_rep(gateway, client(token), HOLD_FIRST, WAIT));
-        first_join(&world).await;
-        tokio::time::sleep(SETTLE).await;
-        world.emit(WorldEvent::Lost).await;
-        let outcome = run.await.expect("join").expect("run");
-        assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
-        assert!(outcome.closed_by_server);
-        assert!(outcome.held < HOLD_FIRST);
     }
 
     #[test]
