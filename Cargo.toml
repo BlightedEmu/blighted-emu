@@ -73,6 +73,7 @@ nw-reflect = { path = "crates/nw-reflect", version = "0.1.0" }
 nw-sim-core = { path = "crates/nw-sim-core", version = "0.1.0" }
 nw-world = { path = "crates/nw-world", version = "0.1.0" }
 sim = { path = "bins/sim", version = "0.1.0" }
+world-director = { path = "bins/world-director", version = "0.1.0" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

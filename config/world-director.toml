@@ -1,0 +1,32 @@
+# world-director configuration (M5 spec section 6). This file holds no secret.
+# Secret: the world database password, in the variable named by world_database_password_env.
+# Any key below can be overridden with NW_DIRECTOR_<KEY>, nested keys joined by "__".
+
+# The [[world]] id in config/edge.toml.
+world_id = "8d0f4c2e-0000-4000-8000-000000000001"
+# NATS. Keep it on an internal address.
+nats_url = "nats://127.0.0.1:4222"
+# Valkey of edge-http: the director writes the free player slots there.
+valkey_url = "redis://127.0.0.1:6379"
+world_database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
+client_build_config = "config/client-build.toml"
+# World files from `just world`.
+content_dir = "local-data/content"
+# The open map level; every sim of this world runs it.
+level = "newworld_vitaeeterna"
+# Where a character that was never in the world appears: next to a fast travel shrine near
+# Edengrove. The height comes from the ground of the world file.
+start_position = { x = 11132.5, y = 7305.9 }
+# Edge length of a cell in metres; 2048 is one region of the world file.
+cell_size_m = 2048.0
+# Longest wait for a sim to take a player; below join_timeout_ms of config/rep-gateway.toml.
+admit_timeout_ms = 3000
+heartbeat_interval_ms = 1000
+# Missed sim heartbeats before its cells go to the other sims.
+heartbeat_misses = 3
+metrics_listen = "127.0.0.1:9103"
+log_filter = "info"
+
+[world_database]
+url = "postgres://nw@127.0.0.1:5432/nw_world_1"
+max_connections = 5

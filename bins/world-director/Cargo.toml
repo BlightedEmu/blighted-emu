@@ -1,0 +1,39 @@
+[package]
+name = "world-director"
+version = "0.1.0"
+description = "World director: cells to sims, joins, entity numbers and admission slots."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+metrics.workspace = true
+metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
+nw-bus.workspace = true
+nw-common.workspace = true
+nw-content.workspace = true
+nw-db.workspace = true
+nw-login.workspace = true
+nw-sim-core.workspace = true
+nw-world.workspace = true
+serde.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+nw-bus = { workspace = true, features = ["test-util"] }
+nw-db = { workspace = true, features = ["test-util"] }
+nw-login = { workspace = true, features = ["test-util"] }
+serde_json.workspace = true
+
+[features]
+# Tests that need the Docker Compose NATS, PostgreSQL and Valkey (`just test-infra`).
+infra = []
+
+[lints]
+workspace = true

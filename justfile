@@ -41,7 +41,7 @@ infra-test:
 
 # Tests that need the Docker Compose PostgreSQL, Valkey and NATS. Run `just infra-up` first.
 test-infra:
-    cargo test -p nw-db -p nw-login -p nw-bus -p sim -p rep-gateway --features nw-db/infra,nw-login/infra,nw-bus/infra,sim/infra,rep-gateway/infra
+    cargo test -p nw-db -p nw-login -p nw-bus -p sim -p rep-gateway -p world-director --features nw-db/infra,nw-login/infra,nw-bus/infra,sim/infra,rep-gateway/infra,world-director/infra
 
 # Tests that read your own New World install. Set NW_GAME_DIR first.
 test-local:
