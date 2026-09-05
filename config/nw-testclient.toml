@@ -1,5 +1,6 @@
-# nw-testclient configuration (M3 spec section 8). This file holds no secret.
-# Secret: NW_SECRET_TESTCLIENT_PASSWORD, the password of the test account.
+# nw-testclient configuration (M3 spec section 8, M4 spec section 9). This file holds no secret.
+# Secrets: NW_SECRET_TESTCLIENT_PASSWORD, the password of the test account, and
+# NW_SECRET_TESTCLIENT_PASSWORD_B, the password of the second account (pair only).
 # Any key below can be overridden with NW_TESTCLIENT_<KEY>.
 
 # The launcher API and the game routes of edge-http.
@@ -9,6 +10,9 @@ game_url = "https://game.example.org"
 account = "testclient"
 # Character made when the account has none (3 to 16 letters).
 character_name = "Testclient"
+# Second account and character of `nw-testclient pair`.
+second_account = "testclient_b"
+second_character_name = "Testclientb"
 # The gateway's certificate (the file rep-gateway generate-certificate wrote).
 certificate_file = "local-data/rep-gateway/cert.pem"
 # DTLS MTU in bytes.
@@ -17,3 +21,5 @@ mtu = 1200
 hold_seconds = 60
 # Seconds to wait for the registration response.
 registration_timeout_seconds = 30
+# pair: largest distance between the saved position and the next login, in metres.
+position_tolerance_m = 0.1

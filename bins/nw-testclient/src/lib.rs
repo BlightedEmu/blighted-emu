@@ -3,6 +3,7 @@
 //! client program and by the `rep-gateway` tests.
 
 pub mod config;
+pub mod pair;
 pub mod rep;
 pub mod udp;
 pub mod view;
