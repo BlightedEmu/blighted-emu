@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::rep::{RepClient, RepError};
 use crate::route::Route;
-use crate::udp::{RepOutcome, RunError, run_rep, run_rep_with};
+use crate::udp::{RepOutcome, RunError, run_rep_with};
 use crate::view::{ViewError, WorldView};
 use crate::walk::{WalkError, WalkSettings, login_token, walk};
 
@@ -39,6 +39,8 @@ pub const INPUT_CHANNEL: u8 = 1;
 pub const SEND_INTERVAL: Duration = Duration::from_millis(33);
 /// Time at the end of the route before the far move.
 pub const SETTLE: Duration = Duration::from_millis(500);
+/// Time the far move is sent: every message in it, so one lost datagram cannot hide the move.
+pub const JUMP_WINDOW: Duration = Duration::from_millis(500);
 
 /// The two accounts, the walk and the timers.
 #[derive(Debug, Clone, PartialEq)]
@@ -209,13 +211,35 @@ pub async fn session(
     hold: Duration,
     registration_timeout: Duration,
 ) -> Result<Session, PairError> {
-    let outcome = run_rep(gateway, client, hold, registration_timeout).await?;
+    session_with(
+        gateway,
+        client,
+        hold,
+        registration_timeout,
+        |_, _, _| Ok(()),
+    )
+    .await
+}
+
+/// [`session`] with the per-tick hook of [`run_rep_with`].
+///
+/// # Errors
+///
+/// Returns [`PairError`] when the run fails or a world message does not decode.
+pub async fn session_with(
+    gateway: SocketAddr,
+    client: RepClient,
+    hold: Duration,
+    registration_timeout: Duration,
+    on_tick: impl FnMut(&mut RepClient, &RepOutcome, Duration) -> Result<(), RepError>,
+) -> Result<Session, PairError> {
+    let outcome = run_rep_with(gateway, client, hold, registration_timeout, on_tick).await?;
     let view = WorldView::from_messages(&outcome.messages)?;
     Ok(Session { outcome, view })
 }
 
-/// The first client during its walk: it follows its own position in the bundles, walks the
-/// route from where it first stood, waits [`SETTLE`], sends one far move, then stays at the end.
+/// The first client during its walk: it follows its own position in the bundles and sends
+/// [`walk_offset`] from where it first stood, every [`SEND_INTERVAL`].
 struct Walker<'a> {
     route: &'a Route,
     jump_m: f32,
@@ -223,7 +247,20 @@ struct Walker<'a> {
     read: usize,
     origin: Option<(WorldPosition, Duration)>,
     last_sent: Option<Duration>,
-    jumped: bool,
+}
+
+/// Where the first client is `walked` after it started: on the route, then [`SETTLE`] at its
+/// end, then `jump_m` east of the end for [`JUMP_WINDOW`], then at the end again.
+pub fn walk_offset(route: &Route, jump_m: f32, walked: Duration) -> [f32; 2] {
+    let jump_start = route.duration() + SETTLE;
+    let [end_east, end_north] = route.end();
+    if walked < jump_start {
+        route.offset_at(walked)
+    } else if walked < jump_start + JUMP_WINDOW {
+        [end_east + jump_m, end_north]
+    } else {
+        route.end()
+    }
 }
 
 impl Walker<'_> {
@@ -250,13 +287,7 @@ impl Walker<'_> {
         }
         self.last_sent = Some(since_registration);
         let walked = since_registration.saturating_sub(started);
-        let [east, north] = if walked < self.route.duration() + SETTLE || self.jumped {
-            self.route.offset_at(walked)
-        } else {
-            self.jumped = true;
-            let [end_east, end_north] = self.route.end();
-            [end_east + self.jump_m, end_north]
-        };
+        let [east, north] = walk_offset(self.route, self.jump_m, walked);
         let Some(position) =
             InputPosition::from_metres(origin.x + east, origin.y + north, origin.z())
         else {
@@ -293,9 +324,8 @@ pub async fn run_pair(
         read: 0,
         origin: None,
         last_sent: None,
-        jumped: false,
     };
-    let walking = run_rep_with(
+    let walking = session_with(
         first.rep_address,
         new_client(login_token(&first.token))?,
         settings.hold,
@@ -311,12 +341,7 @@ pub async fn run_pair(
             settings.registration_timeout,
         ),
     );
-    let first = first?;
-    let first = Session {
-        view: WorldView::from_messages(&first.messages)?,
-        outcome: first,
-    };
-    let second = second?;
+    let (first, second) = (first?, second?);
     let again = walk(http, &settings.first, &mut report).await?;
     let again = session(
         again.rep_address,
@@ -458,6 +483,25 @@ mod tests {
         assert_eq!(failed(&report), vec![SNAPPED_BACK]);
         let report = pair_report(&walked(), &walked(), at(0.0, 0.0));
         assert_eq!(failed(&report), vec![KEPT_POSITION]);
+    }
+
+    #[test]
+    fn the_far_move_follows_the_walk_for_a_while_then_the_end_again() {
+        let route = route();
+        let end = route.duration() + SETTLE;
+        assert_eq!(walk_offset(&route, JUMP_M, Duration::ZERO), [0.0, 0.0]);
+        assert_eq!(
+            walk_offset(&route, JUMP_M, end),
+            [ROUTE_END_M + JUMP_M, 0.0]
+        );
+        assert_eq!(
+            walk_offset(&route, JUMP_M, end + JUMP_WINDOW - SEND_INTERVAL),
+            [ROUTE_END_M + JUMP_M, 0.0]
+        );
+        assert_eq!(
+            walk_offset(&route, JUMP_M, end + JUMP_WINDOW),
+            [ROUTE_END_M, 0.0]
+        );
     }
 
     #[test]

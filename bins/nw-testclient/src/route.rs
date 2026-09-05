@@ -15,13 +15,20 @@ pub enum RouteError {
     /// A point or the speed is not a finite number, or the speed is not above 0.
     #[error("route points must be finite and the speed above 0")]
     BadNumber,
+    /// The walk would take longer than [`MAX_ROUTE_DURATION`].
+    #[error("the walk takes too long")]
+    TooLong,
 }
+
+/// Longest walk.
+pub const MAX_ROUTE_DURATION: Duration = Duration::from_secs(3600);
 
 /// Points east and north of the start, in metres, walked in order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Route {
     points: Vec<[f32; 2]>,
     speed_mps: f32,
+    duration: Duration,
 }
 
 impl Route {
@@ -29,8 +36,8 @@ impl Route {
     ///
     /// # Errors
     ///
-    /// Returns [`RouteError`] for fewer than two points, a number that is not finite, or a speed
-    /// of 0 or less.
+    /// Returns [`RouteError`] for fewer than two points, a number that is not finite, a speed of
+    /// 0 or less, or a walk longer than [`MAX_ROUTE_DURATION`].
     pub fn new(points: Vec<[f32; 2]>, speed_mps: f32) -> Result<Self, RouteError> {
         if points.len() < 2 {
             return Err(RouteError::TooShort);
@@ -39,7 +46,19 @@ impl Route {
         if !(finite && speed_mps.is_finite() && speed_mps > 0.0) {
             return Err(RouteError::BadNumber);
         }
-        Ok(Self { points, speed_mps })
+        let length: f32 = points
+            .windows(2)
+            .map(|pair| distance(pair[0], pair[1]))
+            .sum();
+        let duration = Duration::try_from_secs_f32(length / speed_mps)
+            .ok()
+            .filter(|duration| *duration <= MAX_ROUTE_DURATION)
+            .ok_or(RouteError::TooLong)?;
+        Ok(Self {
+            points,
+            speed_mps,
+            duration,
+        })
     }
 
     fn segments(&self) -> impl Iterator<Item = ([f32; 2], [f32; 2])> + '_ {
@@ -52,8 +71,8 @@ impl Route {
     }
 
     /// Time to walk the route.
-    pub fn duration(&self) -> Duration {
-        Duration::from_secs_f32(self.length() / self.speed_mps)
+    pub const fn duration(&self) -> Duration {
+        self.duration
     }
 
     /// The offset reached after `elapsed`; the last point after [`Route::duration`].
@@ -148,6 +167,10 @@ mod tests {
         assert_eq!(
             Route::new(vec![[0.0, 0.0], [1.0, 0.0]], 0.0),
             Err(RouteError::BadNumber)
+        );
+        assert_eq!(
+            Route::new(vec![[0.0, 0.0], [f32::MAX, 0.0]], f32::MIN_POSITIVE),
+            Err(RouteError::TooLong)
         );
     }
 }
