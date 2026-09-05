@@ -1,0 +1,28 @@
+[package]
+name = "nw-bus"
+version = "0.1.0"
+description = "NATS subjects and bus messages between rep-gateway and sim."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-nats.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[features]
+# Tests that need the Docker Compose NATS (`just test-infra`).
+infra = []
+
+[lints]
+workspace = true

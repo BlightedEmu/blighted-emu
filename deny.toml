@@ -25,6 +25,7 @@ allow = [
 # Copyleft is allowed only for our own crates, each listed here (spec 5.3).
 exceptions = [
     { crate = "edge-http", allow = ["AGPL-3.0-or-later"] },
+    { crate = "nw-bus", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-carrier", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-common", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-content", allow = ["AGPL-3.0-or-later"] },
