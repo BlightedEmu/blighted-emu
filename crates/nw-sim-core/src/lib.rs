@@ -3,6 +3,7 @@
 //! passes positions and times in. `sim` runs them.
 
 pub mod cells;
+pub mod combat;
 pub mod grid;
 pub mod interest;
 pub mod movement;
@@ -12,6 +13,10 @@ pub mod tick;
 
 pub use cells::{
     CellGrid, CellGridError, CellId, CellOwners, MAX_CELLS, assign_columns, level_bounds,
+};
+pub use combat::{
+    Damage, Dice, Health, Hit, MIN_HIT, MobAttack, PlayerAttack, Threat, mob_hit, mob_max_health,
+    player_hit,
 };
 pub use grid::SpatialGrid;
 pub use interest::{Interest, InterestChanges};
