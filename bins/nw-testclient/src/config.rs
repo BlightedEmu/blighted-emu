@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use nw_common::config::{ConfigError, load_config};
+use nw_login::names::CHARACTER_NAME_MAX_LEN;
 use serde::Deserialize;
 
 use crate::route::{Route, RouteError};
-use crate::swarm::{MAX_BOTS, SwarmSettings};
+use crate::swarm::{MAX_BOTS, NAME_SUFFIX_LETTERS, SwarmSettings};
 
 /// Environment prefix of overrides.
 pub const TESTCLIENT_ENV_PREFIX: &str = "NW_TESTCLIENT_";
@@ -64,6 +65,8 @@ pub struct TestClientConfig {
 pub struct SwarmConfig {
     /// Bots to run.
     pub bots: usize,
+    /// world-director's `start_position`, east and north, in metres; its x must be a sim border.
+    pub start_m: [f32; 2],
     /// Account names are this and five digits.
     pub account_prefix: String,
     /// Character names are this and three letters; letters only.
@@ -123,12 +126,22 @@ impl TestClientConfig {
         if !(1..=MAX_BOTS).contains(&swarm.bots) {
             return invalid("bots", "must be 1 to 17576");
         }
-        if !swarm
+        let name_length = swarm.character_prefix.len() + NAME_SUFFIX_LETTERS as usize;
+        let letters = swarm
             .character_prefix
             .bytes()
-            .all(|byte| byte.is_ascii_alphabetic())
-        {
-            return invalid("character_prefix", "must be letters only");
+            .all(|byte| byte.is_ascii_alphabetic());
+        if !letters || name_length > CHARACTER_NAME_MAX_LEN {
+            return invalid(
+                "character_prefix",
+                "must be letters only, at most 13 of them",
+            );
+        }
+        if swarm.min_crossings == 0 {
+            return invalid("min_crossings", "must be at least 1");
+        }
+        if !swarm.start_m.iter().all(|value| value.is_finite()) {
+            return invalid("start_m", "must be finite");
         }
         let positive = |value: f32| value.is_finite() && value > 0.0;
         if !(positive(swarm.swing_m) && positive(swarm.speed_mps)) {
@@ -160,6 +173,7 @@ impl TestClientConfig {
             max_bundle_gap: Duration::from_millis(swarm.max_bundle_gap_ms),
             path_tolerance_m: self.path_tolerance_m,
             metrics_urls: swarm.metrics_urls.clone(),
+            start: swarm.start_m,
         })
     }
 }
@@ -222,5 +236,10 @@ mod tests {
         assert!(refused(|swarm| swarm.speed_mps = f32::NAN));
         assert!(refused(|swarm| swarm.lane_spread_m = -1.0));
         assert!(refused(|swarm| swarm.bots_per_second = 0));
+        assert!(refused(|swarm| swarm.min_crossings = 0));
+        assert!(refused(
+            |swarm| swarm.character_prefix = "Abcdefghijklmn".to_owned()
+        ));
+        assert!(refused(|swarm| swarm.start_m = [f32::NAN, 0.0]));
     }
 }

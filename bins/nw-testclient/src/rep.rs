@@ -40,6 +40,9 @@ pub enum RepError {
     /// A game message body cannot be built.
     #[error(transparent)]
     Message(#[from] nw_messages::MessageError),
+    /// The route of a walking client cannot be walked.
+    #[error(transparent)]
+    Route(#[from] crate::route::RouteError),
 }
 
 /// Something the caller must know about.

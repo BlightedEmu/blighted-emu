@@ -36,6 +36,8 @@ path_tolerance_m = 1.0
 # world-director's start_position on a sim border (the director logs the x range of each sim).
 [swarm]
 bots = 1000
+# world-director's start_position (config/world-director.toml); bots cross its x.
+start_m = [11132.5, 7305.9]
 # Accounts bot00000, bot00001, ...; characters Swarmaaa, Swarmaab, ... They are registered on the
 # first run; raise edge-http's auth.login_fail_limit for that run (one registration per bot).
 account_prefix = "bot"

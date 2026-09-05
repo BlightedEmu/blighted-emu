@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `nw-testclient swarm` (M5 spec section 11): many bots log in, walk to their own lane and then
-//! back and forth across the start line, which the operator puts on a `sim` border. Each bot
-//! follows the ground of the world file. The checks read what each bot saw of itself, and the
-//! handoff and tick times from the metrics of every sim.
+//! `nw-testclient swarm` (M5 spec section 11): many bots log in, walk from where they appear to
+//! their own lane and then back and forth across the start line, which the operator puts on a
+//! `sim` border. Each bot follows the ground of the world file. The checks read what each bot saw
+//! of itself, and the handoffs, refused moves and tick times from the metrics of every sim.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ use nw_sim_core::Ground;
 use reqwest::Client;
 use sim::server::{
     HANDOFF_MOVED, HANDOFF_REFUSED, HANDOFF_TIMEOUT, METRIC_HANDOFF_SECONDS, METRIC_HANDOFFS,
-    METRIC_TICK_SECONDS, ONE_TICK_SECONDS, RESULT_LABEL,
+    METRIC_REFUSED_MOVES, METRIC_TICK_SECONDS, ONE_TICK_SECONDS, RESULT_LABEL,
 };
 use tokio::task::JoinSet;
 
@@ -42,6 +42,10 @@ pub const HANDOFFS_DONE: &str = "enough handoffs and none failed";
 pub const HANDOFFS_FAST: &str = "handoff p99 within one tick";
 /// Check: 99 % of the ticks took at most one tick.
 pub const TICKS_FAST: &str = "tick p99 within one tick";
+/// Check: no sim refused a move.
+pub const NO_REFUSED_MOVES: &str = "no move was refused";
+/// Check: the metrics of every sim were read before and after the run.
+pub const METRICS_READ: &str = "the metrics of every sim were read";
 /// The share of the p99 checks.
 pub const P99_SHARE: f64 = 0.99;
 /// Letters of a character name suffix: `aaa` to `zzz`.
@@ -89,6 +93,8 @@ pub struct SwarmSettings {
     pub path_tolerance_m: f32,
     /// The metrics URL of every sim.
     pub metrics_urls: Vec<String>,
+    /// The director's start position, east and north, in metres; its x is the sim border.
+    pub start: [f32; 2],
 }
 
 /// What one bot saw.
@@ -123,6 +129,8 @@ pub struct SimTotals {
     pub ticks_within_tick: f64,
     /// Every tick.
     pub ticks: f64,
+    /// Moves that a sim refused.
+    pub refused_moves: f64,
 }
 
 impl SimTotals {
@@ -138,6 +146,7 @@ impl SimTotals {
             handoffs: count(METRIC_HANDOFF_SECONDS),
             ticks_within_tick: scrape.bucket(METRIC_TICK_SECONDS, ONE_TICK_SECONDS),
             ticks: count(METRIC_TICK_SECONDS),
+            refused_moves: scrape.total(METRIC_REFUSED_MOVES, None),
         }
     }
 
@@ -150,6 +159,7 @@ impl SimTotals {
             handoffs: self.handoffs - before.handoffs,
             ticks_within_tick: self.ticks_within_tick - before.ticks_within_tick,
             ticks: self.ticks - before.ticks,
+            refused_moves: self.refused_moves - before.refused_moves,
         }
     }
 }
@@ -161,6 +171,8 @@ pub struct SwarmReport {
     pub bots: Vec<BotReport>,
     /// The sim metrics of the run.
     pub sims: SimTotals,
+    /// Metrics pages that could not be read, before and after the run.
+    pub unread_metrics: usize,
 }
 
 impl SwarmReport {
@@ -202,6 +214,14 @@ impl SwarmReport {
             Check {
                 name: TICKS_FAST,
                 passed: share(self.sims.ticks_within_tick, self.sims.ticks),
+            },
+            Check {
+                name: NO_REFUSED_MOVES,
+                passed: self.sims.refused_moves == 0.0,
+            },
+            Check {
+                name: METRICS_READ,
+                passed: !settings.metrics_urls.is_empty() && self.unread_metrics == 0,
             },
         ]
     }
@@ -247,13 +267,15 @@ pub fn bot_names(account_prefix: &str, character_prefix: &str, n: usize) -> (Str
     (account, format!("{character_prefix}{suffix}"))
 }
 
-/// The route of bot `n` of `bots`: north or south to its lane, then west and east of the start
-/// line, long enough for `duration` at `speed_mps`.
+/// The route of bot `n` of `bots`, east and north of the start: from `from`, where the bot
+/// appears, to its lane north or south of the start, then west and east of the start line, long
+/// enough for `duration` at `speed_mps`.
 ///
 /// # Errors
 ///
 /// Returns [`RouteError`] for numbers that cannot be walked.
 pub fn bot_route(
+    from: [f32; 2],
     n: usize,
     bots: usize,
     lane_spread_m: f32,
@@ -268,7 +290,7 @@ pub fn bot_route(
     };
     let walk_m = speed_mps * duration.as_secs_f32();
     let legs = (walk_m / (2.0 * swing_m)).ceil() as usize + 1;
-    let mut points = vec![[0.0, 0.0], [0.0, lane]];
+    let mut points = vec![from, [0.0, lane]];
     for leg in 0..legs {
         let side = if leg % 2 == 0 { -swing_m } else { swing_m };
         points.push([side, lane]);
@@ -276,24 +298,25 @@ pub fn bot_route(
     Route::new(points, speed_mps)
 }
 
-/// Where a bot sends itself: the route offset from `origin` after `walked`, on the ground where
-/// the level has a height, else at the origin's height.
+/// Where a bot sends itself: the route offset from `start` after `walked`, on the ground where
+/// the level has a height, else at `fallback_z`.
 pub fn target(
     route: &Route,
-    origin: WorldPosition,
+    start: [f32; 2],
+    fallback_z: f32,
     walked: Duration,
     ground: &(impl Ground + ?Sized),
 ) -> Option<InputPosition> {
     let [east, north] = route.offset_at(walked);
-    let (x, y) = (origin.x + east, origin.y + north);
-    let z = ground.height_at(x, y).unwrap_or(origin.z());
+    let (x, y) = (start[0] + east, start[1] + north);
+    let z = ground.height_at(x, y).unwrap_or(fallback_z);
     InputPosition::from_metres(x, y, z)
 }
 
-/// The numbers one bot collects from its own positions.
-#[derive(Debug, Clone, Default, PartialEq)]
+/// The numbers one bot collects from its own positions, against the start.
+#[derive(Debug, Clone, PartialEq)]
 pub struct BotTrack {
-    origin: Option<WorldPosition>,
+    start: [f32; 2],
     east_of_start: Option<bool>,
     last_bundle: Option<Duration>,
     crossings: u32,
@@ -302,6 +325,18 @@ pub struct BotTrack {
 }
 
 impl BotTrack {
+    /// A bot that saw nothing yet; crossings count against the x of `start`.
+    pub const fn new(start: [f32; 2]) -> Self {
+        Self {
+            start,
+            east_of_start: None,
+            last_bundle: None,
+            crossings: 0,
+            max_gap: Duration::ZERO,
+            worst_off_route_m: 0.0,
+        }
+    }
+
     /// New own positions that arrived `since` the registration.
     pub fn saw(&mut self, route: &Route, positions: &[WorldPosition], since: Duration) {
         if positions.is_empty() {
@@ -312,32 +347,34 @@ impl BotTrack {
         }
         self.last_bundle = Some(since);
         for position in positions {
-            let origin = *self.origin.get_or_insert(*position);
-            let offset = [position.x - origin.x, position.y - origin.y];
+            let offset = [position.x - self.start[0], position.y - self.start[1]];
             self.worst_off_route_m = self.worst_off_route_m.max(route.distance_to(offset));
-            let east = position.x > origin.x;
+            let east = position.x > self.start[0];
             if self.east_of_start.is_some_and(|before| before != east) {
                 self.crossings += 1;
             }
             self.east_of_start = Some(east);
         }
     }
-
-    /// The start position: the first own position.
-    pub const fn origin(&self) -> Option<WorldPosition> {
-        self.origin
-    }
 }
 
-/// One bot during its run.
+/// One bot during its run. Its route starts where it first sees itself.
 struct Bot<'a> {
-    route: &'a Route,
+    settings: &'a SwarmSettings,
+    n: usize,
     ground: &'a (dyn Ground + Send + Sync),
     view: WorldView,
     own_seen: usize,
     track: BotTrack,
-    started: Option<Duration>,
+    walk: Option<Walk>,
     last_sent: Option<Duration>,
+}
+
+/// The route of a bot that has seen itself.
+struct Walk {
+    route: Route,
+    started: Duration,
+    height: f32,
 }
 
 impl Bot<'_> {
@@ -351,15 +388,36 @@ impl Bot<'_> {
             // A message that does not decode is not a position; the checks miss it.
             let _ = self.view.read(&received);
         }
-        if let Some(own) = self.view.own_number() {
-            let track = self.view.track(own);
-            self.track.saw(self.route, &track[self.own_seen..], since);
-            self.own_seen = track.len();
-        }
-        let Some(origin) = self.track.origin() else {
+        let Some(own) = self.view.own_number() else {
             return Ok(());
         };
-        let started = *self.started.get_or_insert(since);
+        let track = self.view.track(own);
+        let Some(first) = track.first() else {
+            return Ok(());
+        };
+        if self.walk.is_none() {
+            let settings = self.settings;
+            let from = [first.x - settings.start[0], first.y - settings.start[1]];
+            let route = bot_route(
+                from,
+                self.n,
+                settings.bots,
+                settings.lane_spread_m,
+                settings.swing_m,
+                settings.speed_mps,
+                settings.duration,
+            )?;
+            self.walk = Some(Walk {
+                route,
+                started: since,
+                height: first.z(),
+            });
+        }
+        let Some(walk) = &self.walk else {
+            return Ok(());
+        };
+        self.track.saw(&walk.route, &track[self.own_seen..], since);
+        self.own_seen = track.len();
         if self
             .last_sent
             .is_some_and(|sent| since.saturating_sub(sent) < SEND_INTERVAL)
@@ -367,8 +425,9 @@ impl Bot<'_> {
             return Ok(());
         }
         self.last_sent = Some(since);
-        let walked = since.saturating_sub(started);
-        let Some(position) = target(self.route, origin, walked, self.ground) else {
+        let walked = since.saturating_sub(walk.started);
+        let start = self.settings.start;
+        let Some(position) = target(&walk.route, start, walk.height, walked, self.ground) else {
             return Ok(());
         };
         let body = ClientInputMsg::position(position).encode()?;
@@ -421,7 +480,8 @@ pub async fn run_swarm(
     let after = scrape(http, &settings.metrics_urls, &mut report).await;
     SwarmReport {
         bots: reports,
-        sims: after.since(&before),
+        sims: after.totals.since(&before.totals),
+        unread_metrics: before.unread + after.unread,
     }
 }
 
@@ -445,17 +505,6 @@ async fn run_bot(
         password: settings.password.clone(),
         character_name,
     };
-    let route = match bot_route(
-        n,
-        settings.bots,
-        settings.lane_spread_m,
-        settings.swing_m,
-        settings.speed_mps,
-        settings.duration,
-    ) {
-        Ok(route) => route,
-        Err(error) => return failed(error.to_string()),
-    };
     let admission = match walk(http, &walk_settings, |_| {}).await {
         Ok(admission) => admission,
         Err(error) => return failed(error.to_string()),
@@ -465,12 +514,13 @@ async fn run_bot(
         Err(error) => return failed(error.to_string()),
     };
     let mut bot = Bot {
-        route: &route,
+        settings,
+        n,
         ground,
         view: WorldView::default(),
         own_seen: 0,
-        track: BotTrack::default(),
-        started: None,
+        track: BotTrack::new(settings.start),
+        walk: None,
         last_sent: None,
     };
     let ran = run_rep_with(
@@ -494,20 +544,38 @@ async fn run_bot(
     }
 }
 
-/// The totals of every sim's metrics; a sim that cannot be read is reported and counts as 0.
-async fn scrape(http: &Client, urls: &[String], report: &mut impl FnMut(String)) -> SimTotals {
+/// The metrics of every sim at one time.
+struct Scraped {
+    totals: SimTotals,
+    unread: usize,
+}
+
+/// The totals of every sim's metrics; a page that cannot be read is reported and counted.
+async fn scrape(http: &Client, urls: &[String], report: &mut impl FnMut(String)) -> Scraped {
     let mut sum = Scrape::default();
+    let mut unread = 0;
     for url in urls {
-        let text = match http.get(url).send().await {
+        let text = match http
+            .get(url)
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+        {
             Ok(response) => response.text().await,
             Err(error) => Err(error),
         };
         match text {
             Ok(text) => sum.add(&Scrape::parse(&text)),
-            Err(error) => report(format!("metrics of {url} not read: {error}")),
+            Err(error) => {
+                unread += 1;
+                report(format!("metrics of {url} not read: {error}"));
+            }
         }
     }
-    SimTotals::of(&sum)
+    Scraped {
+        totals: SimTotals::of(&sum),
+        unread,
+    }
 }
 
 #[cfg(test)]
@@ -546,7 +614,8 @@ mod tests {
             min_crossings: MIN_CROSSINGS,
             max_bundle_gap: Duration::from_millis(250),
             path_tolerance_m: 1.0,
-            metrics_urls: Vec::new(),
+            metrics_urls: vec!["http://127.0.0.1:9102/metrics".to_owned()],
+            start: [ORIGIN, ORIGIN],
         }
     }
 
@@ -579,15 +648,33 @@ mod tests {
         );
     }
 
+    fn lanes(n: usize) -> Route {
+        bot_route([0.0, 0.0], n, BOTS, SPREAD_M, SWING_M, SPEED_MPS, DURATION).expect("route")
+    }
+
     #[test]
     fn bot_routes_cross_the_start_line() {
-        let first = bot_route(0, BOTS, SPREAD_M, SWING_M, SPEED_MPS, DURATION).expect("route");
-        let last =
-            bot_route(BOTS - 1, BOTS, SPREAD_M, SWING_M, SPEED_MPS, DURATION).expect("route");
+        let first = lanes(0);
+        let last = lanes(BOTS - 1);
         assert!(first.duration() >= DURATION);
         assert_eq!(first.offset_at(DURATION * 2)[1], -SPREAD_M);
         assert_eq!(last.offset_at(DURATION * 2)[1], SPREAD_M);
-        let mut track = BotTrack::default();
+        let elsewhere = bot_route(
+            [SWING_M, 3.0],
+            0,
+            BOTS,
+            SPREAD_M,
+            SWING_M,
+            SPEED_MPS,
+            DURATION,
+        )
+        .expect("route");
+        assert_eq!(
+            elsewhere.offset_at(Duration::ZERO),
+            [SWING_M, 3.0],
+            "starts where it is"
+        );
+        let mut track = BotTrack::new([ORIGIN, ORIGIN]);
         let steps = (DURATION.as_millis() / TICK.as_millis()) as u32;
         for step in 0..steps {
             let walked = TICK * step;
@@ -599,22 +686,26 @@ mod tests {
         assert!(track.max_gap <= TICK);
     }
 
-    #[test]
-    fn a_route_follows_the_ground() {
-        let route = bot_route(0, 1, SPREAD_M, SWING_M, SPEED_MPS, DURATION).expect("route");
-        let origin = at(ORIGIN, ORIGIN);
-        let walked = Duration::from_secs(1);
-        let on_ground = target(&route, origin, walked, &Flat).expect("finite");
-        assert!((on_ground.z() - GROUND_HEIGHT).abs() < 0.01);
-        assert!((on_ground.x - (ORIGIN - SPEED_MPS)).abs() < 0.01);
-        let no_ground = target(&route, origin, walked, &NoGround).expect("finite");
-        assert!((no_ground.z() - origin.z()).abs() < 0.01);
+    fn single() -> Route {
+        bot_route([0.0, 0.0], 0, 1, SPREAD_M, SWING_M, SPEED_MPS, DURATION).expect("route")
     }
 
     #[test]
-    fn crossings_and_gaps_are_counted() {
-        let route = bot_route(0, 1, SPREAD_M, SWING_M, SPEED_MPS, DURATION).expect("route");
-        let mut track = BotTrack::default();
+    fn a_route_follows_the_ground() {
+        let route = single();
+        let walked = Duration::from_secs(1);
+        let on_ground = target(&route, [ORIGIN, ORIGIN], ORIGIN, walked, &Flat).expect("finite");
+        assert!((on_ground.z() - GROUND_HEIGHT).abs() < 0.01);
+        assert!((on_ground.x - (ORIGIN - SPEED_MPS)).abs() < 0.01);
+        let no_ground =
+            target(&route, [ORIGIN, ORIGIN], ORIGIN, walked, &NoGround).expect("finite");
+        assert!((no_ground.z() - ORIGIN).abs() < 0.01);
+    }
+
+    #[test]
+    fn crossings_count_against_the_start_line_and_gaps_are_counted() {
+        let route = single();
+        let mut track = BotTrack::new([ORIGIN, ORIGIN]);
         track.saw(&route, &[at(ORIGIN, ORIGIN)], TICK);
         track.saw(
             &route,
@@ -656,7 +747,9 @@ mod tests {
                 handoffs: 100.0,
                 ticks_within_tick: 999.0,
                 ticks: 1000.0,
+                refused_moves: 0.0,
             },
+            unread_metrics: 0,
         }
     }
 
@@ -664,7 +757,7 @@ mod tests {
     fn the_swarm_checks_fail_on_each_fault() {
         let settings = settings();
         assert!(good_report().passed(&settings));
-        let faults: [Fault; 8] = [
+        let faults: [Fault; 10] = [
             (BOTS_REGISTERED, |report| report.bots[0].registered = false),
             (BOTS_CROSSED, |report| report.bots[1].crossings = 1),
             (BOTS_ON_ROUTE, |report| {
@@ -679,6 +772,8 @@ mod tests {
                 report.sims.handoffs_within_tick = 90.0
             }),
             (TICKS_FAST, |report| report.sims.ticks_within_tick = 900.0),
+            (NO_REFUSED_MOVES, |report| report.sims.refused_moves = 1.0),
+            (METRICS_READ, |report| report.unread_metrics = 1),
         ];
         for (name, fault) in faults {
             let mut report = good_report();
@@ -695,6 +790,14 @@ mod tests {
         missing.bots.pop();
         assert!(!missing.passed(&settings));
         assert!(!SwarmReport::default().passed(&settings));
+        let no_metrics = SwarmSettings {
+            metrics_urls: Vec::new(),
+            ..settings
+        };
+        assert!(
+            !good_report().passed(&no_metrics),
+            "no metrics read is no pass"
+        );
     }
 
     #[test]
@@ -703,10 +806,12 @@ mod tests {
             "{METRIC_HANDOFFS}{{{RESULT_LABEL}=\"{HANDOFF_MOVED}\"}} 10\n\
              {METRIC_HANDOFFS}{{{RESULT_LABEL}=\"{HANDOFF_TIMEOUT}\"}} 1\n\
              {METRIC_HANDOFF_SECONDS}_bucket{{le=\"0.033\"}} 9\n\
-             {METRIC_HANDOFF_SECONDS}_count 11\n"
+             {METRIC_HANDOFF_SECONDS}_count 11\n\
+             {METRIC_REFUSED_MOVES}{{reason=\"too_fast\"}} 2\n"
         );
         let totals = SimTotals::of(&Scrape::parse(&text));
         assert_eq!((totals.moved, totals.failed), (10.0, 1.0));
+        assert_eq!(totals.refused_moves, 2.0);
         assert_eq!((totals.handoffs_within_tick, totals.handoffs), (9.0, 11.0));
         assert_eq!(totals.since(&totals), SimTotals::default());
     }
