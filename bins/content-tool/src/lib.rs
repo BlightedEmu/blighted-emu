@@ -5,6 +5,7 @@
 pub mod build;
 pub mod capture;
 pub mod codegen;
+pub mod combat;
 pub mod error;
 pub mod source;
 pub mod world;

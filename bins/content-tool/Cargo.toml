@@ -17,6 +17,7 @@ nw-content.workspace = true
 nw-formats.workspace = true
 nw-oodle.workspace = true
 nw-reflect.workspace = true
+nw-sim-core.workspace = true
 nw-world.workspace = true
 prettyplease.workspace = true
 proc-macro2.workspace = true

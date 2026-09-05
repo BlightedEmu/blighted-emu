@@ -3,10 +3,12 @@
 
 use nw_common::config::ConfigError;
 use nw_content::ContainerError;
+use nw_content::combat::CombatDataError;
 use nw_content::fill::FillError;
 
 use crate::capture::CaptureError;
 use crate::codegen::CodegenError;
+use crate::combat::NwdbError;
 use crate::source::SourceError;
 use crate::world::WorldBuildError;
 
@@ -44,6 +46,12 @@ pub enum ToolError {
     /// A capture ledger or a type name file cannot be read.
     #[error(transparent)]
     Capture(#[from] CaptureError),
+    /// A config row of the combat check is not in the bundle.
+    #[error(transparent)]
+    Combat(#[from] CombatDataError),
+    /// The nwdb.info records cannot be read.
+    #[error(transparent)]
+    Nwdb(#[from] NwdbError),
     /// The capture check found decode failures.
     #[error("capture check found {count} decode failures")]
     CaptureFailures {

@@ -2,7 +2,7 @@
 //! `content-tool`: builds generated table code, the content bundle and the world files from a
 //! New World install, and checks capture ledgers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -11,12 +11,17 @@ use content_tool::capture::{
     CLIENT_TO_SERVER, CaptureError, CaptureReport, SERVER_TO_CLIENT, TypeNames,
 };
 use content_tool::codegen::run_codegen;
+use content_tool::combat::{CombatCheck, DEFAULT_LEVEL, DEFAULT_NWDB_DIR, check, read_nwdb};
 use content_tool::error::ToolError;
 use content_tool::source::GameSource;
 use content_tool::world::{LevelReport, UnmatchedIds, run_world, world_totals};
+use nw_content::ContentBundle;
 use nw_content::client_build::load_client_build;
+use nw_content::combat::{CombatData, CombatRows};
+use nw_world::WorldFile;
 use nw_world::metadata::SkipCounts;
 use nw_world::records::RecordCounts;
+use nw_world::world_file::world_file_path;
 
 const DEFAULT_CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
 const DEFAULT_GENERATED_DIR: &str = "crates/nw-content/src/generated";
@@ -75,6 +80,18 @@ enum Command {
         #[arg(long)]
         names: Option<PathBuf>,
     },
+    /// Checks that every vitals spawn finds its combat rows, and our mob health against nwdb.info.
+    CombatCheck {
+        /// Level whose world file is checked.
+        #[arg(long, default_value = DEFAULT_LEVEL)]
+        level: String,
+        /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+        /// Folder of nwdb.info creature records.
+        #[arg(long, default_value = DEFAULT_NWDB_DIR)]
+        nwdb_dir: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -94,9 +111,9 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), ToolError> {
     let client_build = load_client_build(&cli.client_build_config)?;
-    let source = GameSource::open(&cli.game_dir)?;
     match cli.command {
         Command::Codegen { out_dir } => {
+            let source = GameSource::open(&cli.game_dir)?;
             let summary = run_codegen(&source, &client_build, &out_dir)?;
             println!(
                 "codegen: {} datasheets, {} table types, {} files written, {} stale files removed",
@@ -108,6 +125,7 @@ fn run(cli: Cli) -> Result<(), ToolError> {
         }
         Command::Build { out } => {
             let out = out.unwrap_or_else(|| default_bundle_path(&client_build));
+            let source = GameSource::open(&cli.game_dir)?;
             let summary = run_build(&source, &client_build, &out)?;
             println!(
                 "build: {} datasheets, {} rows, {} text files, {} text entries, {} duplicate text keys, {} keyless text entries -> {}",
@@ -122,6 +140,7 @@ fn run(cli: Cli) -> Result<(), ToolError> {
         }
         Command::World { out_dir, bundle } => {
             let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
+            let source = GameSource::open(&cli.game_dir)?;
             print_world(&run_world(&source, &client_build, &bundle, &out_dir)?);
         }
         Command::CaptureCheck { ledgers, names } => {
@@ -137,8 +156,45 @@ fn run(cli: Cli) -> Result<(), ToolError> {
                 });
             }
         }
+        Command::CombatCheck {
+            level,
+            bundle,
+            nwdb_dir,
+        } => {
+            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
+            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
+            let data = CombatData::from_tables(&tables, &CombatRows::default())?;
+            drop(tables);
+            let world_path = world_file_path(Path::new(DEFAULT_CONTENT_DIR), &client_build, &level);
+            let world = WorldFile::load(&world_path, &client_build)?;
+            let nwdb = read_nwdb(&nwdb_dir)?;
+            print_combat(
+                &check(&data, &world.vitals, &nwdb.creatures),
+                nwdb.unreadable,
+            );
+        }
     }
     Ok(())
+}
+
+fn print_combat(report: &CombatCheck, unreadable: usize) {
+    println!(
+        "combat-check: {} spawns, {} without a mob type row, {} without a level row",
+        report.spawns, report.without_type, report.without_level
+    );
+    println!(
+        "nwdb: {} of {} creature records match our max health, {} more match it at another level ({} files unreadable)",
+        report.nwdb_matched, report.nwdb_records, report.nwdb_other_level, unreadable
+    );
+    for mismatch in &report.mismatches {
+        let ours = mismatch
+            .ours
+            .map_or_else(|| "no rows".to_owned(), |ours| ours.to_string());
+        println!(
+            "  {} level {}: nwdb {}, ours {ours}",
+            mismatch.vitals_id, mismatch.level, mismatch.nwdb
+        );
+    }
 }
 
 fn run_capture_check(ledgers: &[PathBuf]) -> Result<CaptureReport, ToolError> {
