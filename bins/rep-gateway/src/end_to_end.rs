@@ -4,9 +4,12 @@
 //! - M3 (M3 spec section 12): the test client logs in over HTTP through the `edge-http` routes,
 //!   waits in the queue, and registers with the gateway over UDP. The same token is refused the
 //!   second time.
-//! - M4 (M4 spec section 1.2, criteria 3.1 to 3.5): `sim` serves the world over NATS. Two clients
-//!   are in the world together and see each other; the first walks a route that the second sees,
-//!   its far move is refused, and a client that logs in again appears at its saved position.
+//! - M4 (M4 spec section 1.2, criteria 3.1 to 3.5) through M5 (M5 spec section 13):
+//!   `world-director` and two `sim` processes serve the world over NATS. Two clients are in the
+//!   world together and see each other; the first walks across the border of the two sims and
+//!   back, which the second sees the whole way; its far move is refused, and a client that logs
+//!   in again appears at its saved position. A client of a sim that stops goes on, connected, on
+//!   the other sim.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -14,7 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use nw_bus::test_support::test_bus;
-use nw_bus::{BusId, Heartbeat, subject};
+use nw_bus::{BusId, CellTable, GatewayOutput, SimHeartbeat, subject};
 use nw_common::time::unix_ms;
 use nw_db::test_db::with_test_schema;
 use nw_db::{GLOBAL_MIGRATOR, PgPool, SavedPosition, WORLD_MIGRATOR, save_character_position};
@@ -25,16 +28,18 @@ use nw_login::test_support::{edge_app, test_valkey_url};
 use nw_login::valkey::Valkey;
 use nw_messages::WorldPosition;
 use nw_reflect::{REGISTRATION_STATUS_AUTHORIZED, REGISTRATION_STATUS_REFUSED};
-use nw_sim_core::Position;
 use nw_sim_core::test_support::NoGround;
-use nw_testclient::pair::{PairSettings, distance, run_pair, session};
+use nw_sim_core::{CellGrid, Position};
+use nw_testclient::pair::{PairSettings, distance, run_pair, session, session_with};
 use nw_testclient::route::Route;
 use nw_testclient::udp::run_rep;
 use nw_testclient::walk::{WalkSettings, login_token, walk};
 use sim::config::{SimConfig, load_sim_config};
 use sim::server::{LoopSettings, serve as serve_sim};
 use tokio::net::TcpListener;
+use tokio::task::JoinHandle;
 use uuid::Uuid;
+use world_director::server::{DirectorSettings, serve as serve_director};
 
 use crate::server::tests::{HOLD, LIMITS, VERSION, WAIT, accepting, client, spawn_gateway};
 use crate::world::{BusWorld, WorldLinkSettings};
@@ -50,20 +55,41 @@ const ACCOUNT_PREFIX: &str = "e2e";
 const ACCOUNT_RANDOM_DIGITS: usize = 12;
 const LEVEL: &str = "newworld_vitaeeterna";
 const SIM_CONFIG: &str = "../../config/sim.toml";
+const LEVEL_M: f32 = 14_336.0;
+const CELL_M: f32 = 2048.0;
+/// The first column of the second of two sims.
+const BORDER_X: f32 = 3.0 * CELL_M;
+/// Where new characters appear: west of the border by more than the handoff margin.
+const START: Position = Position {
+    x: BORDER_X - 6.0,
+    y: 7305.9,
+    z: 170.0,
+};
+/// Below the gateway's join timeout.
+const ADMIT_TIMEOUT: Duration = Duration::from_secs(1);
 /// A saved position away from the start, inside the interest radius.
 const SAVED_OFFSET_M: f32 = 25.0;
 const SAVE_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT: Duration = Duration::from_millis(200);
 const HEARTBEAT_MISSES: u32 = 3;
 const JOIN_TIMEOUT: Duration = Duration::from_secs(2);
-/// Time in the world per session: the walk (about 2 s), the settle time and the far move (0.5 s
-/// each), and many bundles at 30 Hz after them.
-const PAIR_HOLD: Duration = Duration::from_secs(5);
+const SIM_NAMES: [&str; 2] = ["sim-a", "sim-b"];
+/// Time in the world per session: the walk (about 5.6 s), the settle time and the far move
+/// (0.5 s each), and many bundles at 30 Hz after them.
+const PAIR_HOLD: Duration = Duration::from_secs(8);
 /// Time in the world of the last check.
 const SHORT_HOLD: Duration = Duration::from_secs(1);
-/// The walk: 3 m east at the datasheet walking speed.
-const ROUTE_M: [[f32; 2]; 2] = [[0.0, 0.0], [3.0, 0.0]];
-const WALK_SPEED_MPS: f32 = 1.65;
+/// The walk: 14 m east, past the border and the margin, and back, at a run below the limit.
+const ROUTE_M: [[f32; 2]; 3] = [[0.0, 0.0], [14.0, 0.0], [0.0, 0.0]];
+const WALK_SPEED_MPS: f32 = 5.0;
+/// One handoff east, one back.
+const HANDOFFS: usize = 2;
+/// Time in the world of the client whose sim stops.
+const STOP_HOLD: Duration = Duration::from_secs(5);
+/// When its sim stops, after its registration.
+const STOP_AFTER: Duration = Duration::from_millis(1500);
+/// Bundles must come again this long after the stop: the silence window and the resume.
+const RESUMED_AFTER: Duration = Duration::from_millis(3500);
 const JUMP_M: f32 = 50.0;
 /// M4 spec section 1.2 criterion 3.3.
 const PATH_TOLERANCE_M: f32 = 1.0;
@@ -186,60 +212,69 @@ fn sim_config() -> SimConfig {
     load_sim_config(&path).expect("sim config")
 }
 
-/// Its start position.
-fn start() -> Position {
-    sim_config().start_position.position()
+/// The world of an end-to-end test: the director, two sims in two stripes (west "sim-a", east
+/// "sim-b") and the gateway behind the edge routes.
+struct Stack {
+    edge: Edge,
+    gateway: SocketAddr,
+    sims: Vec<JoinHandle<()>>,
+    routes: nw_bus::Subscription<GatewayOutput>,
 }
 
-/// Starts `sim` for `world_id` on the world database and waits for its first heartbeat.
-async fn start_sim(world_id: Uuid, sim_id: &BusId, world_pool: &PgPool) {
-    let bus = test_bus().await;
-    let mut beats = bus
-        .subscribe::<Heartbeat>(subject::sim_heartbeat(world_id, sim_id))
-        .await
-        .expect("subscribe");
-    bus.flush().await.expect("flush");
-    let settings = LoopSettings {
-        sim_id: sim_id.clone(),
-        world_id,
-        level: LEVEL.to_owned(),
-        start: start(),
-        world: sim_config().world_settings().expect("world settings"),
-        save_interval: SAVE_INTERVAL,
-        heartbeat_interval: HEARTBEAT,
-        heartbeat_misses: HEARTBEAT_MISSES,
-    };
-    tokio::spawn(serve_sim(
-        settings,
-        Arc::new(NoGround),
-        bus,
-        world_pool.clone(),
-        std::future::pending(),
-    ));
-    tokio::time::timeout(WAIT, beats.next())
-        .await
-        .expect("sim heartbeat in time")
-        .expect("open")
-        .expect("decode");
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn two_clients_see_each_other_and_a_saved_position_returns() {
-    with_schemas(async |global, world_pool| {
+impl Stack {
+    async fn start(global: &PgPool, world_pool: &PgPool) -> Self {
         let world_id = Uuid::new_v4();
         let unique = Uuid::new_v4().simple().to_string();
-        let sim_id = BusId::try_from(format!("sim-{unique}")).expect("id");
+        let bus = test_bus().await;
+        let mut tables = bus
+            .subscribe::<CellTable>(subject::director_table(world_id))
+            .await
+            .expect("tables");
         let gateway_id = BusId::try_from(format!("gw-{unique}")).expect("id");
-        start_sim(world_id, &sim_id, world_pool).await;
+        let routes = bus
+            .subscribe::<GatewayOutput>(subject::gateway_output(world_id, &gateway_id))
+            .await
+            .expect("outputs");
+        bus.flush().await.expect("flush");
+        let director = DirectorSettings {
+            world_id,
+            level: LEVEL.to_owned(),
+            start: START,
+            grid: CellGrid::new(LEVEL_M, LEVEL_M, CELL_M).expect("grid"),
+            admit_timeout: ADMIT_TIMEOUT,
+            heartbeat_interval: HEARTBEAT,
+            heartbeat_misses: HEARTBEAT_MISSES,
+        };
+        tokio::spawn(serve_director(
+            director,
+            test_bus().await,
+            world_pool.clone(),
+            valkey().await,
+            std::future::pending(),
+        ));
+        let mut sims = Vec::new();
+        for name in SIM_NAMES {
+            let sim_id = BusId::try_from(format!("{name}-{unique}")).expect("id");
+            sims.push(start_sim(world_id, sim_id, world_pool).await);
+        }
+        let both = async {
+            loop {
+                let table = tables.next().await.expect("open").expect("decode").message;
+                if table.sims.len() == SIM_NAMES.len() {
+                    return;
+                }
+            }
+        };
+        tokio::time::timeout(WAIT, both)
+            .await
+            .expect("both sims in the table");
         let (world, events) = BusWorld::start(
             test_bus().await,
             WorldLinkSettings {
                 world_id,
                 gateway_id,
-                sim_id,
                 join_timeout: JOIN_TIMEOUT,
                 heartbeat_interval: HEARTBEAT,
-                heartbeat_misses: HEARTBEAT_MISSES,
             },
         )
         .await
@@ -247,50 +282,165 @@ async fn two_clients_see_each_other_and_a_saved_position_returns() {
         let valkey = valkey().await;
         let gateway = spawn_gateway(valkey.clone(), world_id, LIMITS, world, events).await;
         let edge = Edge::start(global, world_pool, valkey, world_id, gateway).await;
+        Self {
+            edge,
+            gateway,
+            sims,
+            routes,
+        }
+    }
 
-        let second = edge.new_account(SECOND_CHARACTER_NAME);
+    /// The route messages that reached the gateway so far.
+    async fn handoffs(&mut self) -> usize {
+        let mut count = 0;
+        while let Ok(Some(Ok(output))) = tokio::time::timeout(SHORT_HOLD, self.routes.next()).await
+        {
+            if matches!(output.message, GatewayOutput::Route { .. }) {
+                count += 1;
+            }
+        }
+        count
+    }
+}
+
+/// Starts a sim for `world_id` on the world database and waits for its first heartbeat; the
+/// handle stops it as a crash would, with no last save.
+async fn start_sim(world_id: Uuid, sim_id: BusId, world_pool: &PgPool) -> JoinHandle<()> {
+    let bus = test_bus().await;
+    let mut beats = bus
+        .subscribe::<SimHeartbeat>(subject::sim_heartbeat(world_id, &sim_id))
+        .await
+        .expect("subscribe");
+    bus.flush().await.expect("flush");
+    let config = sim_config();
+    let bounds = CellGrid::new(LEVEL_M, LEVEL_M, CELL_M)
+        .expect("grid")
+        .bounds();
+    let settings = LoopSettings {
+        sim_id,
+        world_id,
+        level: LEVEL.to_owned(),
+        world: config.world_settings(bounds).expect("world settings"),
+        handoff_timeout: Duration::from_millis(config.handoff_timeout_ms),
+        forward_ttl_ms: config.forward_ttl_ms,
+        save_interval: SAVE_INTERVAL,
+        heartbeat_interval: HEARTBEAT,
+        heartbeat_misses: HEARTBEAT_MISSES,
+    };
+    let db = world_pool.clone();
+    let sim = tokio::spawn(async move {
+        let served = serve_sim(
+            settings,
+            Arc::new(NoGround),
+            bus,
+            db,
+            std::future::pending(),
+        );
+        // A serve error ends the sim like a crash; the tests see it as a silent sim.
+        let _ = served.await;
+    });
+    tokio::time::timeout(WAIT, beats.next())
+        .await
+        .expect("sim heartbeat in time")
+        .expect("open")
+        .expect("decode");
+    sim
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_clients_see_each_other_across_the_border_and_a_saved_position_returns() {
+    with_schemas(async |global, world_pool| {
+        let mut stack = Stack::start(global, world_pool).await;
+        let second = stack.edge.new_account(SECOND_CHARACTER_NAME);
         let settings = PairSettings {
-            first: edge.new_account(FIRST_CHARACTER_NAME),
+            first: stack.edge.new_account(FIRST_CHARACTER_NAME),
             second: second.clone(),
             route: Route::new(ROUTE_M.to_vec(), WALK_SPEED_MPS).expect("route"),
             jump_m: JUMP_M,
             hold: PAIR_HOLD,
             registration_timeout: WAIT,
         };
-        let report = run_pair(&edge.http, &settings, |token| Ok(client(token)), |_| {})
-            .await
-            .expect("pair");
+        let report = run_pair(
+            &stack.edge.http,
+            &settings,
+            |token| Ok(client(token)),
+            |_| {},
+        )
+        .await
+        .expect("pair");
         assert!(
             report.passed(PATH_TOLERANCE_M, TOLERANCE_M),
             "{:?}",
             report.checks(PATH_TOLERANCE_M, TOLERANCE_M)
         );
+        assert!(stack.handoffs().await >= HANDOFFS, "east and back");
 
         // The second client left before the first one's second session (one hold ago), so its
         // last save is done. A position written now is what its next login must show.
-        let admission = walk(&edge.http, &second, |_| {}).await.expect("walk");
+        let admission = walk(&stack.edge.http, &second, |_| {}).await.expect("walk");
         let token = login_token(&admission.token);
         let character = String::from_utf8(token.character_id.clone()).expect("text");
         let character = Uuid::parse_str(&character).expect("character id");
-        let start = start();
         let saved = SavedPosition {
             level: LEVEL.to_owned(),
-            x: f64::from(start.x + SAVED_OFFSET_M),
-            y: f64::from(start.y),
-            z: f64::from(start.z),
+            x: f64::from(START.x + SAVED_OFFSET_M),
+            y: f64::from(START.y),
+            z: f64::from(START.z),
             yaw: NO_YAW,
             saved_at_ms: unix_ms(),
         };
         save_character_position(world_pool, character, &saved)
             .await
             .expect("save");
-        let back = session(gateway, client(token), SHORT_HOLD, WAIT)
+        let back = session(stack.gateway, client(token), SHORT_HOLD, WAIT)
             .await
             .expect("session");
         let expected =
-            WorldPosition::from_metres(start.x + SAVED_OFFSET_M, start.y, start.z).expect("finite");
+            WorldPosition::from_metres(START.x + SAVED_OFFSET_M, START.y, START.z).expect("finite");
         let own = back.view.own_position().expect("own position");
         assert!(distance(own, expected) <= TOLERANCE_M);
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_player_of_a_stopped_sim_continues_on_the_other() {
+    with_schemas(async |global, world_pool| {
+        let stack = Stack::start(global, world_pool).await;
+        let account = stack.edge.new_account(FIRST_CHARACTER_NAME);
+        let admission = walk(&stack.edge.http, &account, |_| {})
+            .await
+            .expect("walk");
+        let token = login_token(&admission.token);
+        // The start is in the west, so "sim-a" has the player.
+        let west = &stack.sims[0];
+        let mut counts: Vec<(Duration, usize)> = Vec::new();
+        let mut stopped = false;
+        let ran = session_with(
+            stack.gateway,
+            client(token),
+            STOP_HOLD,
+            WAIT,
+            |_, outcome, since| {
+                if since >= STOP_AFTER && !stopped {
+                    west.abort();
+                    stopped = true;
+                }
+                counts.push((since, outcome.messages.len()));
+                Ok(())
+            },
+        )
+        .await
+        .expect("session");
+        assert_eq!(ran.outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
+        assert!(!ran.outcome.closed_by_server, "the player stays connected");
+        let at_resume = counts
+            .iter()
+            .find(|(since, _)| *since >= RESUMED_AFTER)
+            .map(|(_, count)| *count)
+            .expect("ran past the resume");
+        let at_end = counts.last().map(|(_, count)| *count).expect("ticks");
+        assert!(at_end > at_resume, "bundles come from the other sim");
     })
     .await;
 }

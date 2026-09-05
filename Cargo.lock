@@ -4042,6 +4042,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "world-director",
 ]
 
 [[package]]

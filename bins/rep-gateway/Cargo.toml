@@ -35,6 +35,7 @@ nw-sim-core = { workspace = true, features = ["test-util"] }
 nw-testclient.workspace = true
 reqwest.workspace = true
 sim.workspace = true
+world-director.workspace = true
 tempfile.workspace = true
 
 [features]
