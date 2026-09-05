@@ -11,18 +11,23 @@ publish.workspace = true
 clap.workspace = true
 nw-carrier.workspace = true
 nw-common.workspace = true
+nw-content.workspace = true
 nw-dtls.workspace = true
 nw-login.workspace = true
 nw-messages.workspace = true
 nw-protocol.workspace = true
 nw-reflect.workspace = true
+nw-sim-core.workspace = true
+nw-world.workspace = true
 reqwest.workspace = true
 serde.workspace = true
+sim.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 
 [dev-dependencies]
 nw-messages = { workspace = true, features = ["test-util"] }
+nw-sim-core = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

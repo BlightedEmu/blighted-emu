@@ -1,6 +1,7 @@
 # nw-testclient configuration (M3 spec section 8, M4 spec section 9). This file holds no secret.
-# Secrets: NW_SECRET_TESTCLIENT_PASSWORD, the password of the test account, and
-# NW_SECRET_TESTCLIENT_PASSWORD_B, the password of the second account (pair only).
+# Secrets: NW_SECRET_TESTCLIENT_PASSWORD, the password of the test account,
+# NW_SECRET_TESTCLIENT_PASSWORD_B, the password of the second account (pair only), and
+# NW_SECRET_TESTCLIENT_SWARM_PASSWORD, the password of every bot account (swarm only).
 # Any key below can be overridden with NW_TESTCLIENT_<KEY>.
 
 # The launcher API and the game routes of edge-http.
@@ -28,5 +29,27 @@ position_tolerance_m = 0.1
 route_m = [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]]
 route_speed_mps = 1.65
 jump_m = 50.0
-# pair: largest distance of a seen position from the route, in metres.
+# pair and swarm: largest distance of a seen position from the route, in metres.
 path_tolerance_m = 1.0
+
+# swarm (M5 exit test): bots walk to their lane, then east and west across the start line. Put
+# world-director's start_position on a sim border (the director logs the x range of each sim).
+[swarm]
+bots = 1000
+# Accounts bot00000, bot00001, ...; characters Swarmaaa, Swarmaab, ... They are registered on the
+# first run; raise edge-http's auth.login_fail_limit for that run (one registration per bot).
+account_prefix = "bot"
+character_prefix = "Swarm"
+bots_per_second = 50
+lane_spread_m = 150.0
+swing_m = 20.0
+# Below the sim limit of 7.15 m/s, also on a slope.
+speed_mps = 4.0
+duration_seconds = 120
+min_crossings = 4
+max_bundle_gap_ms = 250
+# The metrics listener of every sim.
+metrics_urls = ["http://127.0.0.1:9102/metrics"]
+client_build_config = "config/client-build.toml"
+content_dir = "local-data/content"
+level = "newworld_vitaeeterna"

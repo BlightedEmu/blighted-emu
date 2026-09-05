@@ -231,7 +231,7 @@ pub async fn session_with(
     client: RepClient,
     hold: Duration,
     registration_timeout: Duration,
-    on_tick: impl FnMut(&mut RepClient, &RepOutcome, Duration) -> Result<(), RepError>,
+    on_tick: impl FnMut(&mut RepClient, &mut RepOutcome, Duration) -> Result<(), RepError>,
 ) -> Result<Session, PairError> {
     let outcome = run_rep_with(gateway, client, hold, registration_timeout, on_tick).await?;
     let view = WorldView::from_messages(&outcome.messages)?;
@@ -267,7 +267,7 @@ impl Walker<'_> {
     fn tick(
         &mut self,
         client: &mut RepClient,
-        outcome: &RepOutcome,
+        outcome: &mut RepOutcome,
         since_registration: Duration,
     ) -> Result<(), RepError> {
         for received in &outcome.messages[self.read..] {

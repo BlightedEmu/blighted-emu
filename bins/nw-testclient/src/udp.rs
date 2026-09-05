@@ -74,7 +74,8 @@ pub async fn run_rep(
 }
 
 /// [`run_rep`], and after the registration response `on_tick` runs about every [`TICK`] with the
-/// client, the outcome so far, and the time since the response; it may queue client messages.
+/// client, the outcome so far, and the time since the response; it may queue client messages and
+/// take the messages it has read out of the outcome.
 ///
 /// # Errors
 ///
@@ -84,7 +85,7 @@ pub async fn run_rep_with(
     mut client: RepClient,
     hold: Duration,
     timeout: Duration,
-    mut on_tick: impl FnMut(&mut RepClient, &RepOutcome, Duration) -> Result<(), RepError>,
+    mut on_tick: impl FnMut(&mut RepClient, &mut RepOutcome, Duration) -> Result<(), RepError>,
 ) -> Result<RepOutcome, RunError> {
     let socket = UdpSocket::bind(ANY_LOCAL).await?;
     let started = Instant::now();
@@ -99,7 +100,7 @@ pub async fn run_rep_with(
             break;
         }
         if let Some(at) = registered_at {
-            on_tick(&mut client, &outcome, at.elapsed())?;
+            on_tick(&mut client, &mut outcome, at.elapsed())?;
         }
         for datagram in client.poll(now())? {
             socket.send_to(&datagram, gateway).await?;

@@ -1,23 +1,29 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! `nw-testclient`: logs in over HTTPS like the game, then registers with `rep-gateway`.
 //! `registration` (the default) stays connected, then checks that the same ticket is refused a
-//! second time. `pair` runs two clients in the world (M4 spec section 9). Prints one line per
-//! step; exits with 0 only when every step passed.
+//! second time. `pair` runs two clients in the world (M4 spec section 9). `swarm` runs many bots
+//! across a sim border (M5 spec section 11). Prints one line per step; exits with 0 only when
+//! every step passed.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use nw_content::client_build::load_client_build;
 use nw_dtls::DtlsClientConfig;
 use nw_reflect::REGISTRATION_STATUS_AUTHORIZED;
 use nw_testclient::config::{
-    PASSWORD_ENV, SECOND_PASSWORD_ENV, TestClientConfig, load_testclient_config,
+    PASSWORD_ENV, SECOND_PASSWORD_ENV, SWARM_PASSWORD_ENV, TestClientConfig, load_testclient_config,
 };
 use nw_testclient::pair::{PairSettings, run_pair};
 use nw_testclient::rep::RepClient;
+use nw_testclient::swarm::{NewClient, run_swarm};
 use nw_testclient::udp::run_rep;
 use nw_testclient::walk::{WalkSettings, login_token, walk};
+use nw_world::WorldFile;
+use nw_world::world_file::world_file_path;
 
 /// The committed example configuration.
 const DEFAULT_CONFIG: &str = "config/nw-testclient.toml";
@@ -43,6 +49,9 @@ enum Command {
     /// Two clients in the world: each sees the other, and the first logs in again at its saved
     /// position. The second password comes from `NW_SECRET_TESTCLIENT_PASSWORD_B`.
     Pair,
+    /// Many bots across a sim border (`[swarm]`). The bot password comes from
+    /// `NW_SECRET_TESTCLIENT_SWARM_PASSWORD`.
+    Swarm,
 }
 
 fn main() -> ExitCode {
@@ -71,15 +80,50 @@ async fn run(cli: Cli) -> ExitCode {
 
 async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
     let config = load_testclient_config(&cli.config)?;
-    let password = secret(PASSWORD_ENV)?;
     nw_login::install_crypto_provider();
     let http = reqwest::Client::builder().build()?;
     let trusted = DtlsClientConfig::new(&std::fs::read(&config.certificate_file)?)?;
-    let settings = walk_settings(&config, &config.account, &config.character_name, password);
     match cli.command.unwrap_or(Command::Registration) {
-        Command::Registration => registration(&config, &http, &trusted, &settings).await,
-        Command::Pair => pair(&config, &http, &trusted, settings).await,
+        Command::Registration => registration(&config, &http, &trusted, &own(&config)?).await,
+        Command::Pair => pair(&config, &http, &trusted, own(&config)?).await,
+        Command::Swarm => swarm(&config, &http, trusted).await,
     }
+}
+
+/// The test account of `registration` and `pair`.
+fn own(config: &TestClientConfig) -> Result<WalkSettings, String> {
+    let password = secret(PASSWORD_ENV)?;
+    Ok(walk_settings(
+        config,
+        &config.account,
+        &config.character_name,
+        password,
+    ))
+}
+
+async fn swarm(
+    config: &TestClientConfig,
+    http: &reqwest::Client,
+    trusted: DtlsClientConfig,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let settings = Arc::new(config.swarm_settings(secret(SWARM_PASSWORD_ENV)?)?);
+    let swarm = &config.swarm;
+    let build = load_client_build(&swarm.client_build_config)?;
+    let path = world_file_path(&swarm.content_dir, &build, &swarm.level);
+    let ground = Arc::new(WorldFile::load(&path, &build)?);
+    let mtu = config.mtu;
+    let trusted = Arc::new(trusted);
+    let new_client: NewClient = Arc::new(move |token| RepClient::new(&trusted, mtu, token, 0));
+    let report = run_swarm(http, Arc::clone(&settings), ground, new_client, |line| {
+        println!("{line}");
+    })
+    .await;
+    println!("{}", report.summary());
+    for check in report.checks(&settings) {
+        let result = if check.passed { "pass" } else { "FAIL" };
+        println!("{}: {result}", check.name);
+    }
+    Ok(report.passed(&settings))
 }
 
 fn secret(name: &str) -> Result<String, String> {

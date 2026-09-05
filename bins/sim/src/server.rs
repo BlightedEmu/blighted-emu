@@ -45,9 +45,19 @@ const SIM_QUEUE: usize = 4096;
 const HEARTBEAT_QUEUE: usize = 16;
 /// Longest wait at shutdown for the last saves.
 pub const SHUTDOWN_SAVE_WAIT: Duration = Duration::from_secs(10);
+/// One tick at 30 Hz, rounded down to whole milliseconds: the M5 limit of a handoff and a tick.
+pub const ONE_TICK_SECONDS: f64 = 0.033;
 /// Buckets of the handoff and tick time histograms, in seconds (M5 spec section 7.6).
 pub const LATENCY_BUCKETS_SECONDS: [f64; 9] = [
-    0.001, 0.002, 0.005, 0.010, 0.020, 0.033, 0.050, 0.100, 0.250,
+    0.001,
+    0.002,
+    0.005,
+    0.010,
+    0.020,
+    ONE_TICK_SECONDS,
+    0.050,
+    0.100,
+    0.250,
 ];
 /// Metric: players in the world.
 pub const METRIC_PLAYERS: &str = "sim_players";
@@ -80,13 +90,16 @@ pub const METRIC_MOVES_WITHOUT_GROUND: &str = "sim_moves_without_ground_total";
 /// Metric: bus messages dropped because NATS is behind.
 pub const METRIC_DROPPED_OUTPUTS: &str = "sim_dropped_outputs_total";
 const REASON_LABEL: &str = "reason";
-const RESULT_LABEL: &str = "result";
+/// Label of the handoff result.
+pub const RESULT_LABEL: &str = "result";
 const ADMITTED: &str = "admitted";
 const REFUSED: &str = "refused";
 /// Handoff result: the other sim took the player.
 pub const HANDOFF_MOVED: &str = "moved";
-const HANDOFF_REFUSED: &str = "refused";
-const HANDOFF_TIMEOUT: &str = "timeout";
+/// Handoff result: the other sim refused the player.
+pub const HANDOFF_REFUSED: &str = "refused";
+/// Handoff result: the other sim did not answer in time.
+pub const HANDOFF_TIMEOUT: &str = "timeout";
 const HANDOFF_GONE: &str = "gone";
 /// Yaw of a saved position; the sim has no facing yet.
 const NO_YAW: f32 = 0.0;

@@ -3,9 +3,11 @@
 //! client program and by the `rep-gateway` tests.
 
 pub mod config;
+pub mod metrics;
 pub mod pair;
 pub mod rep;
 pub mod route;
+pub mod swarm;
 pub mod udp;
 pub mod view;
 pub mod walk;
