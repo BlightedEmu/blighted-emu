@@ -47,6 +47,14 @@ pub enum CaptureError {
         /// Direction value.
         direction: u32,
     },
+    /// A record did not deliver the envelope asked for.
+    #[error("record {record} has no message {slot}")]
+    NoMessage {
+        /// Record number.
+        record: u32,
+        /// Envelope number.
+        slot: u16,
+    },
     /// A type name file is not valid JSON of the expected shape.
     #[error("cannot parse {path}: {source}")]
     Json {

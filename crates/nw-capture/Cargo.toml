@@ -9,12 +9,19 @@ publish.workspace = true
 
 [dependencies]
 nw-carrier.workspace = true
+nw-messages.workspace = true
+nw-reflect.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+nw-messages = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+
+[features]
+# `test_support`: made-up ledgers for other crates' tests.
+test-util = []
 
 [lints]
 workspace = true

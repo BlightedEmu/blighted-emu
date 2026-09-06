@@ -8,22 +8,17 @@
 //! registration response values that the RE note records. It never keeps payload bytes, ids,
 //! or tokens.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use nw_capture::{
-    CLIENT_TO_SERVER, CaptureError, LedgerRecord, SERVER_TO_CLIENT, is_connect_request,
-    parse_ledger,
+    CLIENT_TO_SERVER, CaptureError, Decoder, LedgerRecord, SERVER_TO_CLIENT, parse_ledger,
 };
-use nw_carrier::{Inbound, ReceiveLimits, Receiver, decode_datagram};
 use nw_messages::{
     BodyCodec, BundlePayload, ClientInputMsg, MessageError, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
     REQUEST_RESPAWN_TYPE_INDEX, ReplicatedStateBundle, RequestRespawnMsg, ServerMessage,
 };
-use nw_reflect::{
-    Envelope, REGISTRATION_RESPONSE_MSG_TYPE_INDEX, RegistrationResponseMsg, decode_client_message,
-    decode_server_messages,
-};
+use nw_reflect::{Envelope, REGISTRATION_RESPONSE_MSG_TYPE_INDEX, RegistrationResponseMsg};
 /// Unix milliseconds at 2000-01-01 00:00:00 UTC, the zero of the registration clock.
 pub const CLOCK_EPOCH_UNIX_MS: u64 = 946_684_800_000;
 /// Nanoseconds per millisecond.
@@ -100,67 +95,24 @@ impl CaptureReport {
     /// streams for both directions of that context.
     pub fn check_ledger(&mut self, file: &Path, bytes: &[u8]) -> Result<(), CaptureError> {
         self.files += 1;
-        let mut streams: HashMap<(u64, u32), Option<Receiver>> = HashMap::new();
-        let mut established: HashSet<u64> = HashSet::new();
+        let mut decoder = Decoder::new();
         for (index, record) in parse_ledger(bytes)?.into_iter().enumerate() {
-            let direction = record.direction as usize;
-            self.datagrams[direction] += 1;
-            if record.direction == CLIENT_TO_SERVER
-                && is_connect_request(record.datagram)
-                && established.remove(&record.context)
-            {
+            self.datagrams[record.direction as usize] += 1;
+            let output = decoder.record(&record);
+            if output.new_connection {
                 self.connections += 1;
-                for direction in [SERVER_TO_CLIENT, CLIENT_TO_SERVER] {
-                    streams.remove(&(record.context, direction));
-                }
             }
-            let server_messages = self.messages[SERVER_TO_CLIENT as usize];
-            let stream = streams
-                .entry((record.context, record.direction))
-                .or_insert_with(|| Some(Receiver::mid_stream(ReceiveLimits::SESSION)));
-            let Some(receiver) = stream else {
-                continue;
-            };
-            if let Err(reason) = self.check_record(receiver, &record) {
+            let counted = output
+                .envelopes
+                .iter()
+                .try_for_each(|delivered| self.count(&record, &delivered.envelope));
+            if let Some(reason) = counted.err().or(output.error) {
                 self.failures.push(DecodeFailure {
                     file: file.to_path_buf(),
                     record: index,
                     reason,
                 });
-                *stream = None;
-            }
-            if self.messages[SERVER_TO_CLIENT as usize] > server_messages {
-                established.insert(record.context);
-            }
-        }
-        Ok(())
-    }
-
-    fn check_record(
-        &mut self,
-        receiver: &mut Receiver,
-        record: &LedgerRecord<'_>,
-    ) -> Result<(), String> {
-        let datagram = decode_datagram(record.datagram).map_err(|error| error.to_string())?;
-        let delivered = receiver
-            .receive(&datagram)
-            .map_err(|error| error.to_string())?;
-        for item in delivered {
-            let Inbound::Message(message) = item else {
-                continue;
-            };
-            let envelopes = if record.direction == CLIENT_TO_SERVER {
-                vec![
-                    decode_client_message(&message.payload)
-                        .map_err(|error| error.to_string())?
-                        .envelope,
-                ]
-            } else {
-                decode_server_messages(&message.payload).map_err(|error| error.to_string())?
-            };
-            for bytes in envelopes {
-                let envelope = Envelope::decode(bytes).map_err(|error| error.to_string())?;
-                self.count(record, &envelope)?;
+                decoder.stop(record.context, record.direction);
             }
         }
         Ok(())
@@ -258,102 +210,40 @@ impl CaptureReport {
 
 #[cfg(test)]
 mod tests {
-    use nw_capture::LEDGER_MAGIC;
+    use nw_capture::test_support::{
+        DATAGRAM_SEQUENCE, RELIABLE_START, TEST_TIME_MS, ZERO_SESSION, connect_request_datagram,
+        envelope, position_bundle, record, reliable_datagram, reliable_datagram_at,
+        server_datagram,
+    };
     use nw_carrier::receiver::FIRST_RELIABLE_SEQUENCE;
-    use nw_carrier::system::CARRIER_VERSION;
-    use nw_carrier::{Frame, SYSTEM_CHANNEL, SystemMessage, encode_datagram, encode_frames};
+    use nw_carrier::{Frame, encode_datagram, encode_frames};
     use nw_reflect::{
         PING_MSG_TYPE_INDEX, REGISTRATION_RESPONSE_OBSERVED_FLAGS, REGISTRATION_STATUS_AUTHORIZED,
         TIME_SYNCH_MSG_TYPE_INDEX, TypeId, encode_client_message, encode_server_messages,
     };
 
     use nw_messages::{
-        ALC_TYPE_INDEX, BodyCodec, BundleGroup, BundleMember, BundlePayload, ClientInputMsg,
-        DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, DamageDealtMsg, DeathRecapMsg,
-        InputPosition, MemberState, ON_DAMAGE_TYPE_INDEX, OnDamageMsg,
-        POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState,
-        RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REPLICATED_STATE_BUNDLE_TYPE_INDEX,
-        REQUEST_RESPAWN_TYPE_INDEX, ReplicatedStateBundle, RequestRespawnMsg, VITALS_TYPE_INDEX,
-        WorldPosition, Writer,
+        ALC_TYPE_INDEX, BodyCodec, BundleMember, ClientInputMsg, DAMAGE_DEALT_TYPE_INDEX,
+        DEATH_RECAP_TYPE_INDEX, DamageDealtMsg, DeathRecapMsg, InputPosition, MemberState,
+        ON_DAMAGE_TYPE_INDEX, OnDamageMsg, POSITION_IN_THE_WORLD_TYPE_INDEX,
+        PositionInTheWorldReplicatedState, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+        REPLICATED_STATE_BUNDLE_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX, ReplicatedStateBundle,
+        RequestRespawnMsg, VITALS_TYPE_INDEX, Writer,
     };
 
     use super::*;
 
-    const CONTEXT: u64 = 7;
-    const TIME_MS: u64 = 1_782_067_831_638;
-    const DATAGRAM_SEQUENCE: u16 = 2;
-    const RELIABLE_START: u16 = 10;
     const PING_BODY: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 1];
-    const ZERO_SESSION: [u8; 16] = [0; 16];
     const TOKEN: &[u8; 32] = b"0123456789ABCDEF0123456789ABCDEF";
     const VERSION: &str = "[TEST].Javelin.1.365.6031.1";
     const CLOCK_OFFSET_MS: u64 = 250;
     /// The integer 1 in the two-byte form of the prefix code.
     const LONG_FORM_ONE: [u8; 2] = [0x81, 0x00];
 
-    fn record(direction: u32, datagram: &[u8]) -> Vec<u8> {
-        let mut out = LEDGER_MAGIC.to_vec();
-        out.extend_from_slice(&TIME_MS.to_le_bytes());
-        out.extend_from_slice(&direction.to_le_bytes());
-        out.extend_from_slice(&CONTEXT.to_le_bytes());
-        out.extend_from_slice(&u32::try_from(datagram.len()).expect("small").to_le_bytes());
-        out.extend_from_slice(datagram);
-        out
-    }
-
-    fn reliable_datagram(payload: Vec<u8>) -> Vec<u8> {
-        reliable_datagram_at(RELIABLE_START, payload)
-    }
-
-    fn reliable_datagram_at(reliable_sequence: u16, payload: Vec<u8>) -> Vec<u8> {
-        let frame = Frame {
-            channel: 0,
-            reliable: true,
-            connecting: false,
-            chunks_remaining: None,
-            sequence: reliable_sequence,
-            reliable_sequence,
-            payload,
-        };
-        encode_datagram(DATAGRAM_SEQUENCE, &encode_frames(&[frame]).expect("frames"))
-    }
-
-    fn envelope(index: u64, body: Vec<u8>) -> Vec<u8> {
-        Envelope::message(TypeId::FileSlot(index), body)
-            .encode()
-            .expect("envelope")
-    }
-
-    /// A bundle whose payload is one group with one position member.
-    fn position_bundle() -> Vec<u8> {
-        let payload = BundlePayload {
-            groups: vec![BundleGroup {
-                leading: 1,
-                members: vec![BundleMember {
-                    u64_at_0: 2,
-                    state: MemberState::Position(PositionInTheWorldReplicatedState {
-                        position: WorldPosition::from_metres(1.0, 2.0, 3.0),
-                        ..PositionInTheWorldReplicatedState::default()
-                    }),
-                }],
-            }],
-        };
-        ReplicatedStateBundle {
-            leading: None,
-            byte_3: 0,
-            byte_4: 0,
-            flag_5: false,
-            index_block: None,
-            payload: payload.encode().expect("payload"),
-        }
-        .encode()
-        .expect("bundle")
-    }
-
     fn sample_ledger() -> Vec<u8> {
         let response = RegistrationResponseMsg {
             uint32_at_0x8: REGISTRATION_STATUS_AUTHORIZED,
-            uint64: (TIME_MS - CLOCK_EPOCH_UNIX_MS + CLOCK_OFFSET_MS) * NANOS_PER_MILLI,
+            uint64: (TEST_TIME_MS - CLOCK_EPOCH_UNIX_MS + CLOCK_OFFSET_MS) * NANOS_PER_MILLI,
             bytes_at_0x18: TOKEN.to_vec(),
             bytes_at_0x38: VERSION.as_bytes().to_vec(),
             bytes_at_0x58: REGISTRATION_RESPONSE_OBSERVED_FLAGS,
@@ -393,24 +283,6 @@ mod tests {
         assert_eq!(summary.versions[VERSION], 1);
         assert_eq!(summary.token_lengths[&TOKEN.len()], 1);
         assert_eq!(summary.max_clock_offset_ms, CLOCK_OFFSET_MS);
-    }
-
-    /// A client connect request, as the first datagram of a new connection sends it.
-    fn connect_request_datagram() -> Vec<u8> {
-        let frame = Frame {
-            channel: SYSTEM_CHANNEL,
-            reliable: false,
-            connecting: true,
-            chunks_remaining: None,
-            sequence: 0,
-            reliable_sequence: 0,
-            payload: SystemMessage::ConnectRequest {
-                version: CARRIER_VERSION,
-                extra: Vec::new(),
-            }
-            .encode(),
-        };
-        encode_datagram(DATAGRAM_SEQUENCE, &encode_frames(&[frame]).expect("frames"))
     }
 
     #[test]
@@ -495,12 +367,6 @@ mod tests {
         assert_eq!(report.failures.len(), 1);
         assert!(report.failures[0].reason.contains("type 335"));
         assert!(report.bodies.is_empty());
-    }
-
-    /// One server datagram that carries `envelopes`, reliable, in order.
-    fn server_datagram(envelopes: &[Vec<u8>]) -> Vec<u8> {
-        let slices: Vec<&[u8]> = envelopes.iter().map(Vec::as_slice).collect();
-        reliable_datagram(encode_server_messages(&slices).expect("server"))
     }
 
     #[test]
