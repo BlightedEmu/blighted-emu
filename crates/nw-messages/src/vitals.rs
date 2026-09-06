@@ -2,18 +2,23 @@
 //! `MB::VitalsComponentReplicatedState` (type 15), slot 0, on the bundle path (vitals note,
 //! second pass). The eight children of slot 0, in order: `vitalsData`, `healthChangeFlags`,
 //! `vitalsId`, `vitalsCategoryId`, `vitalsLevel`, `invulnerability`,
-//! `displayImmuneWhenInvulnerable`, `maxHealth`. Current health is not a wire child. A body that
-//! uses another slot is refused: those slots are not sized.
+//! `displayImmuneWhenInvulnerable`, `maxHealth`. A body that uses another slot is refused: those
+//! slots are not sized.
+//!
+//! `vitalsData` and `healthChangeFlags` are not sized either. The note gives them 18 bytes
+//! (`FUN_1469515b0`: a byte, two `u64`, a byte) and 1 byte, but small captured bundles hold each
+//! in 4 bytes, whose first byte is in the `f32` range. What selects the form is Unknown, so a body
+//! with child 0 or 1 is [`MessageError::Unsized`] and the server sends neither.
 
-use crate::slots::{read_slot_0, write_slot_0};
+use crate::slots::{CHILD_BITS, read_slot_0, write_slot_0};
 use crate::wire::{MessageError, Reader, Writer};
 
 /// Type index of the class.
 pub const VITALS_TYPE_INDEX: u64 = 15;
 const CHILDREN: u8 = 8;
 const FIELD: &str = "vitals";
-const CHILD_DATA: u16 = 1 << 0;
-const CHILD_FLAGS: u16 = 1 << 1;
+/// `vitalsData` and `healthChangeFlags`: children 0 and 1.
+const UNSIZED_CHILDREN: u16 = 0b11;
 const CHILD_ID: u16 = 1 << 2;
 const CHILD_CATEGORY: u16 = 1 << 3;
 const CHILD_LEVEL: u16 = 1 << 4;
@@ -21,27 +26,10 @@ const CHILD_INVULNERABILITY: u16 = 1 << 5;
 const CHILD_DISPLAY_IMMUNE: u16 = 1 << 6;
 const CHILD_MAX_HEALTH: u16 = 1 << 7;
 
-/// The `vitalsData` child (reader `FUN_1469515b0`): a byte, two big-endian `u64`, a byte. The
-/// meaning is Unknown; the `u64` values are not a health.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct VitalsData {
-    /// The first byte.
-    pub head: u8,
-    /// The first `u64`.
-    pub a: u64,
-    /// The second `u64`.
-    pub b: u64,
-    /// The last byte.
-    pub tail: u8,
-}
-
-/// Slot 0 of the vitals state; every child is optional.
+/// Slot 0 of the vitals state without `vitalsData` and `healthChangeFlags`; every child is
+/// optional.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct VitalsSlot0 {
-    /// `vitalsData`.
-    pub vitals_data: Option<VitalsData>,
-    /// `healthChangeFlags`.
-    pub health_change_flags: Option<u8>,
     /// `vitalsId`.
     pub vitals_id: Option<u32>,
     /// `vitalsCategoryId`.
@@ -61,29 +49,21 @@ impl VitalsSlot0 {
     ///
     /// # Errors
     ///
-    /// Returns [`MessageError`] when the body ends early, uses a slot other than 0, or has a form
-    /// `write` cannot make.
+    /// Returns [`MessageError`] when the body ends early, uses a slot other than 0 or an
+    /// unsized child, or has a form `write` cannot make.
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         let Some(children) = read_slot_0(reader, FIELD, CHILDREN)? else {
             return Ok(Self::default());
         };
         let has = |child| children & child != 0;
+        if has(UNSIZED_CHILDREN) {
+            return Err(MessageError::Unsized {
+                field: FIELD,
+                // The child bits of the first child byte.
+                byte: children.to_le_bytes()[0] & CHILD_BITS,
+            });
+        }
         Ok(Self {
-            vitals_data: if has(CHILD_DATA) {
-                Some(VitalsData {
-                    head: reader.u8()?,
-                    a: reader.u64()?,
-                    b: reader.u64()?,
-                    tail: reader.u8()?,
-                })
-            } else {
-                None
-            },
-            health_change_flags: if has(CHILD_FLAGS) {
-                Some(reader.u8()?)
-            } else {
-                None
-            },
             vitals_id: if has(CHILD_ID) {
                 Some(reader.u32()?)
             } else {
@@ -120,8 +100,6 @@ impl VitalsSlot0 {
     /// Writes the state for the bundle path.
     pub fn write(&self, writer: &mut Writer) {
         let flags = [
-            (self.vitals_data.is_some(), CHILD_DATA),
-            (self.health_change_flags.is_some(), CHILD_FLAGS),
             (self.vitals_id.is_some(), CHILD_ID),
             (self.vitals_category_id.is_some(), CHILD_CATEGORY),
             (self.vitals_level.is_some(), CHILD_LEVEL),
@@ -134,12 +112,6 @@ impl VitalsSlot0 {
             .filter(|(present, _)| *present)
             .fold(0, |bits, (_, child)| bits | child);
         write_slot_0(writer, Some(children), CHILDREN);
-        if let Some(data) = &self.vitals_data {
-            writer.u8(data.head).u64(data.a).u64(data.b).u8(data.tail);
-        }
-        for byte in [self.health_change_flags].into_iter().flatten() {
-            writer.u8(byte);
-        }
         for value in [self.vitals_id, self.vitals_category_id, self.vitals_level]
             .into_iter()
             .flatten()
@@ -174,37 +146,48 @@ mod tests {
         read
     }
 
-    fn data() -> impl Strategy<Value = Option<VitalsData>> {
-        proptest::option::of(
-            (any::<u8>(), any::<u64>(), any::<u64>(), any::<u8>())
-                .prop_map(|(head, a, b, tail)| VitalsData { head, a, b, tail }),
-        )
-    }
-
     proptest! {
-        #[test]
-        fn vitals_slot_0_round_trips(
-            vitals_data in data(),
-            health_change_flags in proptest::option::of(any::<u8>()),
-            vitals_id in proptest::option::of(any::<u32>()),
-            vitals_category_id in proptest::option::of(any::<u32>()),
-            vitals_level in proptest::option::of(any::<u32>()),
-            invulnerability in proptest::option::of(any::<u8>()),
-            display_immune in proptest::option::of(any::<u8>()),
-            max_health in proptest::option::of(any::<u16>()),
-        ) {
-            let state = VitalsSlot0 {
-                vitals_data, health_change_flags, vitals_id, vitals_category_id, vitals_level,
-                invulnerability, display_immune, max_health,
-            };
-            prop_assert_eq!(round(&state), state);
-        }
-    }
+           #[test]
+           fn vitals_slot_0_round_trips(
+               vitals_id in proptest::option::of(any::<u32>()),
+               vitals_category_id in proptest::option::of(any::<u32>()),
+               vitals_level in proptest::option::of(any::<u32>()),
+               invulnerability in proptest::option::of(any::<u8>()),
+               display_immune in proptest::option::of(any::<u8>()),
+               max_health in proptest::option::of(any::<u16>()),
+           ) {
+               let state = VitalsSlot0 {
+    vitals_id, vitals_category_id, vitals_level,
+                   invulnerability, display_immune, max_health,
+               };
+               prop_assert_eq!(round(&state), state);
+           }
+       }
 
     #[test]
     fn a_vitals_body_on_another_slot_is_refused() {
         let mut reader = Reader::new(&[0b10, 0x01, 0]);
         assert!(VitalsSlot0::read(&mut reader).is_err());
+    }
+
+    #[test]
+    fn the_vitals_data_child_is_not_sized() {
+        // Child 0 then four bytes, as the short form in the captures.
+        let mut reader = Reader::new(&[0x01, 0x01, 0x44, 0, 0, 0]);
+        assert!(matches!(
+            VitalsSlot0::read(&mut reader),
+            Err(MessageError::Unsized { .. })
+        ));
+    }
+
+    #[test]
+    fn the_health_change_flags_child_is_not_sized() {
+        // Child 1 then four bytes, as the short form in the captures.
+        let mut reader = Reader::new(&[0x01, 0x02, 0x3e, 0, 0, 0]);
+        assert!(matches!(
+            VitalsSlot0::read(&mut reader),
+            Err(MessageError::Unsized { .. })
+        ));
     }
 
     #[test]

@@ -3,10 +3,12 @@
 //! `FUN_1417b4110` reads one byte per group of up to 8 slots, and `FUN_1417b43c0` one byte per
 //! group of up to 7 children of a slot, where bit 7 means that another child byte follows.
 //!
-//! These members use slot 0 only. A form that `write` would not produce (a slot other than 0, a
-//! slot without children, a last child byte that sets no child) is refused, so every body that
-//! reads encodes back to the same bytes. A child byte before the last may set none: that is how
-//! only a later child is sent.
+//! These members use slot 0 only, with the children the notes size. A slot other than 0, a
+//! child beyond those, or a last child byte that sets no child is [`MessageError::Unsized`]: the
+//! captures have such bodies (the vitals of live play have 6 more children on slot 0), and a
+//! bundle walk stops there. A slot without children is refused. So every body that reads encodes
+//! back to the same bytes. A child byte before the last may set none: that is how only a later
+//! child is sent.
 
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -17,7 +19,7 @@ pub(crate) const CONTINUE: u8 = 0x80;
 /// Children in one child byte.
 const CHILDREN_PER_BYTE: u8 = 7;
 /// The child bits of one child byte.
-const CHILD_BITS: u8 = 0x7f;
+pub(crate) const CHILD_BITS: u8 = 0x7f;
 
 /// Reads the slot byte and, when slot 0 is set, the child bitmap of `count` children (bit `n`
 /// is child `n`). `None` when slot 0 is not set.
@@ -28,7 +30,7 @@ pub(crate) fn read_slot_0(
 ) -> Result<Option<u16>, MessageError> {
     let slot = reader.u8()?;
     if slot & !SLOT_0 != 0 {
-        return Err(MessageError::OtherSlot { field, slots: slot });
+        return Err(MessageError::Unsized { field, byte: slot });
     }
     if slot == 0 {
         return Ok(None);
@@ -46,8 +48,11 @@ pub(crate) fn read_slot_0(
             (1_u8 << in_group) - 1
         };
         let more_allowed = count > first + CHILDREN_PER_BYTE;
-        if bits & !known != 0 || (bits == 0 && last) || (!last && !more_allowed) {
+        if first == 0 && bits == 0 && last {
             return Err(MessageError::UnknownBits { field, bits: byte });
+        }
+        if bits & !known != 0 || (bits == 0 && last) || (!last && !more_allowed) {
+            return Err(MessageError::Unsized { field, byte });
         }
         children |= u16::from(bits) << first;
         if last {

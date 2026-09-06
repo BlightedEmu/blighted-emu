@@ -197,10 +197,14 @@ fn read_member(reader: &mut Reader<'_>) -> Result<BundleMember, MessageError> {
     let u64_at_0 = reader.prefixed()?;
     let class = read_class(reader)?;
     // A slot whose children are not sized cannot be passed: the walk stops there, as at a class
-    // without a reader.
+    // without a reader. Any other failure names the member's class.
     let state = MemberState::read(class, reader).map_err(|error| match error {
-        MessageError::OtherSlot { .. } => MessageError::UnknownMemberClass { class },
-        other => other,
+        MessageError::Unsized { .. } => MessageError::UnknownMemberClass { class },
+        unknown @ MessageError::UnknownMemberClass { .. } => unknown,
+        other => MessageError::InMember {
+            class,
+            source: Box::new(other),
+        },
     })?;
     Ok(BundleMember { u64_at_0, state })
 }
@@ -297,6 +301,50 @@ mod tests {
         let known = BundlePayload::decode_known(&payload).expect("known");
         assert_eq!(known.members.len(), 1);
         assert_eq!(known.stopped_at, Some(TypeId::FileSlot(VITALS_TYPE_INDEX)));
+    }
+
+    #[test]
+    fn a_vitals_member_with_unsized_children_stops_the_walk() {
+        for second in [0x46_u8, 0x00] {
+            let mut bytes = Writer::new();
+            bytes.prefixed(LEADING).expect("leading").u8(2);
+            bytes.bytes(&position_member(1.0).encode().expect("member"));
+            bytes.prefixed(ENTITY).expect("entity");
+            bytes.bytes(
+                &nw_reflect::encode_type_id(&TypeId::FileSlot(VITALS_TYPE_INDEX)).expect("class"),
+            );
+            bytes.u8(0x01).u8(0x80).u8(second).bytes(&[0; 8]);
+            let payload = bytes.finish();
+            let known = BundlePayload::decode_known(&payload).expect("known");
+            assert_eq!(known.members.len(), 1, "second child byte {second:#04x}");
+            assert_eq!(known.stopped_at, Some(TypeId::FileSlot(VITALS_TYPE_INDEX)));
+        }
+    }
+
+    #[test]
+    fn a_member_that_ends_early_names_its_class() {
+        let mut bytes = Writer::new();
+        bytes
+            .prefixed(LEADING)
+            .expect("leading")
+            .u8(1)
+            .prefixed(ENTITY)
+            .expect("entity");
+        bytes.bytes(
+            &nw_reflect::encode_type_id(&TypeId::FileSlot(VITALS_TYPE_INDEX)).expect("class"),
+        );
+        bytes.u8(0x01).u8(0x04).u8(0);
+        let error = BundlePayload::decode_known(&bytes.finish()).expect_err("ends early");
+        assert!(
+            matches!(
+                error,
+                MessageError::InMember {
+                    class: TypeId::FileSlot(VITALS_TYPE_INDEX),
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
     }
 
     #[test]

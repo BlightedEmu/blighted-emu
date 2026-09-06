@@ -46,14 +46,23 @@ pub enum MessageError {
         /// The limit.
         limit: u64,
     },
-    /// A member body uses a slot whose children are not sized in the notes; the walk cannot pass
-    /// it (a bundle reader treats it like a class without a reader).
-    #[error("{field}: slots {slots:#04x} other than 0 are not sized")]
-    OtherSlot {
+    /// A bundle member's body does not match its class's layout.
+    #[error("member of class {class:?}: {source}")]
+    InMember {
+        /// The member's class.
+        class: nw_reflect::TypeId,
+        /// What went wrong.
+        source: Box<MessageError>,
+    },
+    /// A member body uses a slot or a child whose size the notes do not give (a slot other than
+    /// 0, a child beyond the known ones, an empty last child byte); the walk cannot pass it, and
+    /// a bundle reader treats it like a class without a reader.
+    #[error("{field}: byte {byte:#04x} names a slot or child that is not sized")]
+    Unsized {
         /// The member class.
         field: &'static str,
-        /// The slot byte.
-        slots: u8,
+        /// The slot or child byte.
+        byte: u8,
     },
     /// Bits that the RE notes do not describe are set.
     #[error("{field}: unknown bits {bits:#04x}")]
