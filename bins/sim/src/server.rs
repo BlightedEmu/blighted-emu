@@ -100,6 +100,16 @@ pub const METRIC_MOVES_WITHOUT_GROUND: &str = "sim_moves_without_ground_total";
 pub const METRIC_DROPPED_OUTPUTS: &str = "sim_dropped_outputs_total";
 /// Metric: mobs by `state` (M6-A spec section 10).
 pub const METRIC_MOBS: &str = "sim_mobs";
+/// Metric: attacks by `result`.
+pub const METRIC_ATTACKS: &str = "sim_attacks_total";
+/// Metric: deaths by `kind`.
+pub const METRIC_DEATHS: &str = "sim_deaths_total";
+/// Label of a death's kind.
+const KIND_LABEL: &str = "kind";
+/// A player's death.
+const PLAYER_KIND: &str = "player";
+/// Reason of a move of a dead player.
+const DEAD_REASON: &str = "dead";
 /// Metric: owned spawns without a mob type or level row.
 pub const METRIC_MOBS_UNSPAWNED: &str = "sim_mobs_unspawned_total";
 /// Metric: time of the mob part of a tick.
@@ -446,6 +456,9 @@ impl Loop {
                 metrics::counter!(METRIC_REFUSED_MOVES, REASON_LABEL => refusal.reason())
                     .increment(1);
             }
+            Err(MoveError::Dead) => {
+                metrics::counter!(METRIC_REFUSED_MOVES, REASON_LABEL => DEAD_REASON).increment(1);
+            }
         }
     }
 
@@ -565,6 +578,13 @@ impl Loop {
         metrics::histogram!(METRIC_MOB_TICK_SECONDS).record(output.mob_seconds);
         for (state, count) in self.world.mob_counts() {
             metrics::gauge!(METRIC_MOBS, STATE_LABEL => state.label()).set(count as f64);
+        }
+        for hit in &output.mob_hits {
+            metrics::counter!(METRIC_ATTACKS, RESULT_LABEL => hit.label()).increment(1);
+        }
+        for death in &output.deaths {
+            metrics::counter!(METRIC_DEATHS, KIND_LABEL => PLAYER_KIND).increment(1);
+            self.save(death);
         }
         for message in output.messages {
             self.send(message);
@@ -839,7 +859,7 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
-    use crate::combat::tests::test_combat;
+    use crate::combat::tests::{TEST_PLAYER_HEALTH, test_combat};
     use crate::config::tests::committed;
     use crate::world::{MESSAGE_CHANNEL, REPLICATION_CHANNEL};
 
@@ -1705,6 +1725,7 @@ mod tests {
                 bundles_sent: 0,
                 time_synch_age_ms: 0,
                 handoffs: FIRST_HANDOFF,
+                health: TEST_PLAYER_HEALTH,
             };
             let subject = subject::sim_handoff(world_id, &id);
             let mut reply: Result<HandoffReply, BusError> = Err(BusError::NoReplySubject);

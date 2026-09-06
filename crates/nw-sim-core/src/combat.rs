@@ -77,6 +77,14 @@ impl Health {
         Self { current: max, max }
     }
 
+    /// Health at `current`, at most `max` (a player that arrives from another sim).
+    pub fn at(current: u32, max: u32) -> Self {
+        Self {
+            current: current.min(max),
+            max,
+        }
+    }
+
     /// Takes `amount` of health.
     pub fn take(&mut self, amount: u32) -> Damage {
         if self.current == 0 {
@@ -319,6 +327,14 @@ mod tests {
         assert_eq!(health.take(1), Damage::AlreadyDead);
         health.refill();
         assert_eq!(health.current(), health.max());
+    }
+
+    #[test]
+    fn a_health_can_start_below_its_max() {
+        let health = Health::at(30, 100);
+        assert_eq!((health.current(), health.max()), (30, 100));
+        assert_eq!(Health::at(500, 100).current(), 100, "never above the max");
+        assert!(Health::at(0, 100).is_dead());
     }
 
     #[test]

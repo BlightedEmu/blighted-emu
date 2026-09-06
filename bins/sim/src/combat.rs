@@ -8,6 +8,78 @@ use nw_sim_core::BrainSettings;
 
 use crate::mobs::VitalsSpawn;
 
+/// Why an attack did not happen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AttackRefusal {
+    /// The connection has no player in the world.
+    #[error("no player on this connection")]
+    NotInWorld,
+    /// The attacker is dead.
+    #[error("the attacker is dead")]
+    Dead,
+    /// No such target here (players are no targets: there is no PvP in M6-A).
+    #[error("no such target")]
+    UnknownTarget,
+    /// The target is dead.
+    #[error("the target is dead")]
+    TargetDead,
+    /// The target walks back to its spawn and takes no damage.
+    #[error("the target is returning")]
+    Returning,
+    /// The attack is not one of the weapon's.
+    #[error("not an attack of the weapon")]
+    NotWeaponAttack,
+    /// The target is out of reach (parent spec section 9: range).
+    #[error("out of reach")]
+    OutOfReach,
+    /// Attacks come faster than the weapon allows (parent spec section 9: attack rate).
+    #[error("faster than the weapon allows")]
+    TooFast,
+}
+
+impl AttackRefusal {
+    /// The metric label.
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::NotInWorld => "not_in_world",
+            Self::Dead => "dead",
+            Self::UnknownTarget => "unknown_target",
+            Self::TargetDead => "target_dead",
+            Self::Returning => "returning",
+            Self::NotWeaponAttack => "not_weapon_attack",
+            Self::OutOfReach => "out_of_reach",
+            Self::TooFast => "too_fast",
+        }
+    }
+}
+
+/// What a hit did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttackOutcome {
+    /// The target lost `amount` of health.
+    Hit {
+        /// The target.
+        target: u64,
+        /// Health taken.
+        amount: u32,
+    },
+    /// The hit killed the target.
+    Killed {
+        /// The target.
+        target: u64,
+    },
+}
+
+impl AttackOutcome {
+    /// The metric label.
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Hit { .. } => "hit",
+            Self::Killed { .. } => "killed",
+        }
+    }
+}
+
 /// What combat needs from the configuration and the datasheets.
 #[derive(Debug, Clone)]
 pub struct CombatSettings {

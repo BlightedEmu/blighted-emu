@@ -234,6 +234,8 @@ pub struct HandoffOffer {
     pub time_synch_age_ms: u64,
     /// Handoffs of this player so far, this one included; the gateway's route sequence.
     pub handoffs: u64,
+    /// The player's health; a handoff never heals (M6-A).
+    pub health: u32,
 }
 
 /// Sim to sim, on the taker's handoff subject. Both go on one subject, so NATS keeps their order.
@@ -520,6 +522,7 @@ mod tests {
             bundles_sent: 900,
             time_synch_age_ms: 1200,
             handoffs: 2,
+            health: 500,
         };
         round_trip(HandoffMessage::Offer(offer));
         round_trip(HandoffMessage::Cancel {

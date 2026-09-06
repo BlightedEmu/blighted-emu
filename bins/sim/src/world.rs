@@ -26,13 +26,17 @@ use nw_messages::{
     MessageError, ReplicatedStateBundle, ServerMessage, TimeSynchMsg, WorldPosition,
 };
 use nw_sim_core::{
-    CellBounds, CellGrid, CellOwners, Ground, GroundCheck, Interest, MobState, Motion, MotionState,
-    MoveLimits, MoveRefusal, Position, Seen, SpatialGrid,
+    CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
+    Motion, MotionState, MoveLimits, MoveRefusal, Position, Seen, SpatialGrid,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::combat::CombatSettings;
+mod attack;
+
+use attack::Vitals;
+
+use crate::combat::{AttackOutcome, CombatSettings};
 use crate::login::{SessionIds, WorldIds, login_messages};
 use crate::mobs::{MobAttackIntent, MobChanges, Mobs, spawn_index};
 
@@ -86,6 +90,9 @@ pub enum MoveError {
     /// The movement checks refused the move; the player keeps its last good position.
     #[error("move refused: {}", .0.reason())]
     Refused(MoveRefusal),
+    /// The player is dead.
+    #[error("the player is dead")]
+    Dead,
 }
 
 /// Messages for one connection.
@@ -143,8 +150,10 @@ pub struct TickOutput {
     pub handoffs: Vec<HandoffStart>,
     /// Ghost lists for other sims; an empty list clears the receiver's last one.
     pub ghosts: Vec<(BusId, Vec<Ghost>)>,
-    /// Hits that mobs make this tick.
-    pub mob_attacks: Vec<MobAttackIntent>,
+    /// What the mobs' hits on players did this tick.
+    pub mob_hits: Vec<AttackOutcome>,
+    /// Players who died since the last tick, to save at once (M6-A spec section 8).
+    pub deaths: Vec<Departure>,
     /// Time of the mob part of the tick, in seconds.
     pub mob_seconds: f64,
 }
@@ -223,6 +232,9 @@ pub struct SimWorld {
     ghost_targets: BTreeSet<BusId>,
     mobs: Mobs,
     mob_changes: MobChanges,
+    combat: CombatSettings,
+    dice: Dice,
+    deaths: Vec<Departure>,
 }
 
 /// A new player before it is in the world.
@@ -231,6 +243,7 @@ struct Arrival {
     character: Uuid,
     number: u64,
     position: Position,
+    health: Health,
 }
 
 impl SimWorld {
@@ -245,6 +258,9 @@ impl SimWorld {
         Self {
             mobs: Mobs::new(Arc::clone(&combat.spawns), &combat),
             mob_changes: MobChanges::default(),
+            dice: Dice::new(combat.seed),
+            deaths: Vec::new(),
+            combat,
             world: World::new(),
             by_connection: HashMap::new(),
             settings,
@@ -295,6 +311,7 @@ impl SimWorld {
             character: admit.character,
             number: admit.entity,
             position: Position::from(admit.position),
+            health: Health::full(self.combat.data.player_max_health()),
         };
         self.check(&arrival)?;
         let login = if admit.login {
@@ -333,6 +350,7 @@ impl SimWorld {
             character: offer.character,
             number: offer.entity,
             position: Position::from(offer.position),
+            health: Health::at(offer.health, self.combat.data.player_max_health()),
         };
         self.check(&arrival)?;
         let state = MotionState {
@@ -376,6 +394,13 @@ impl SimWorld {
             .is_some_and(|player| player.frozen)
         {
             return Err(MoveError::Frozen);
+        }
+        if self
+            .world
+            .get::<Vitals>(entity)
+            .is_some_and(|vitals| vitals.health.is_dead())
+        {
+            return Err(MoveError::Dead);
         }
         let mut body = self
             .world
@@ -546,26 +571,32 @@ impl SimWorld {
         let ttl = self.settings.ghost_ttl_ms;
         self.ghosts
             .retain(|_, ghosts| now_ms.saturating_sub(ghosts.received_ms) <= ttl);
+        self.respawn_players(now_ms);
         let handoffs = self.start_handoffs(now_ms);
         let ghosts = self.ghosts_out();
         let mobs_started = Instant::now();
-        let mob_attacks = self.tick_mobs(now_ms);
+        let intents = self.tick_mobs(now_ms);
+        let mob_hits = self.mob_hits(intents, now_ms);
         let mob_seconds = mobs_started.elapsed().as_secs_f64();
         let messages = self.bundles(now_ms, server_time)?;
         Ok(TickOutput {
             messages,
             handoffs,
             ghosts,
-            mob_attacks,
+            mob_hits,
+            deaths: std::mem::take(&mut self.deaths),
             mob_seconds,
         })
     }
 
-    /// Runs the mobs with the players of this sim and the player ghosts of others.
+    /// Runs the mobs with the living players of this sim and the player ghosts of others.
     fn tick_mobs(&mut self, now_ms: u64) -> Vec<MobAttackIntent> {
         let mut seen: Vec<Seen> = Vec::new();
-        let mut query = self.world.query::<(&Player, &Body)>();
-        for (player, body) in query.iter(&self.world) {
+        let mut query = self.world.query::<(&Player, &Body, &Vitals)>();
+        for (player, body, vitals) in query.iter(&self.world) {
+            if vitals.health.is_dead() {
+                continue;
+            }
             seen.push(Seen {
                 entity: player.number,
                 position: body.motion.position(),
@@ -588,9 +619,9 @@ impl SimWorld {
             return Vec::new();
         };
         let margin = self.settings.handoff_margin_m;
-        let mut query = self.world.query::<(&mut Player, &Body)>();
+        let mut query = self.world.query::<(&mut Player, &Body, &Vitals)>();
         let mut starts = Vec::new();
-        for (mut player, body) in query.iter_mut(&mut self.world) {
+        for (mut player, body, vitals) in query.iter_mut(&mut self.world) {
             if player.frozen || now_ms < player.no_handoff_before_ms {
                 continue;
             }
@@ -616,6 +647,7 @@ impl SimWorld {
                     bundles_sent: player.bundles_sent,
                     time_synch_age_ms: now_ms.saturating_sub(player.last_time_synch_ms),
                     handoffs: player.handoffs.saturating_add(1),
+                    health: vitals.health.current(),
                 },
             });
         }
@@ -754,6 +786,7 @@ impl SimWorld {
                     no_handoff_before_ms,
                 },
                 Body { motion },
+                Vitals::new(arrival.health),
             ))
             .id();
         self.by_connection.insert(arrival.connection, entity);
@@ -887,17 +920,17 @@ mod tests {
     const LARGEST_NUMBER_SHIFT: u32 = 29;
 
     const RADIUS: f32 = 100.0;
-    const NOW: u64 = 10_000;
-    const SERVER_TIME: u64 = 7;
+    pub(super) const NOW: u64 = 10_000;
+    pub(super) const SERVER_TIME: u64 = 7;
     /// 5 m/s with no margin and a burst of 1 s: at most 5 m in one move.
     const SPEED_MPS: f32 = 5.0;
     const BURST_SECONDS: f32 = 1.0;
     const GROUND_TOLERANCE_M: f32 = 2.0;
     const MAX_ABOVE_GROUND_M: f32 = 150.0;
     const LEVEL_M: f32 = 14_336.0;
-    const CELL_M: f32 = 2048.0;
+    pub(super) const CELL_M: f32 = 2048.0;
     /// The first column of the second sim of two (columns 3 to 6).
-    const BORDER_X: f32 = 3.0 * CELL_M;
+    pub(super) const BORDER_X: f32 = 3.0 * CELL_M;
     const MARGIN_M: f32 = 5.0;
     const RETRY_MS: u64 = 1000;
     const GHOST_TTL_MS: u64 = 1000;
@@ -955,7 +988,7 @@ mod tests {
     }
 
     /// A spawn of the test mob type at (`x`, 10).
-    fn test_spawn(x: f32) -> VitalsSpawn {
+    pub(super) fn test_spawn(x: f32) -> VitalsSpawn {
         VitalsSpawn {
             vitals_id: nw_formats::objectstream::lowercase_crc32(TEST_MOB),
             level: TEST_LEVEL,
@@ -965,7 +998,7 @@ mod tests {
     }
 
     /// A world of `sim-a` with the test mob spawns `spawns`.
-    fn world_with_spawns(spawns: Vec<VitalsSpawn>) -> SimWorld {
+    pub(super) fn world_with_spawns(spawns: Vec<VitalsSpawn>) -> SimWorld {
         let mut combat = test_combat();
         combat.spawns = spawns.into();
         SimWorld::new(
@@ -982,7 +1015,7 @@ mod tests {
     }
 
     /// The table of `names` in column stripes.
-    fn table(names: &[&str]) -> CellTable {
+    pub(super) fn table(names: &[&str]) -> CellTable {
         let indexes: Vec<u16> = (0..).take(names.len()).collect();
         let owners = CellOwners::columns(grid(), &indexes);
         CellTable {
@@ -995,7 +1028,7 @@ mod tests {
         }
     }
 
-    fn connection(number: u64) -> ConnectionRef {
+    pub(super) fn connection(number: u64) -> ConnectionRef {
         ConnectionRef {
             gateway: BusId::try_from("gw-1".to_owned()).expect("id"),
             connection: number,
@@ -1027,7 +1060,7 @@ mod tests {
         }
     }
 
-    fn join(world: &mut SimWorld, number: u64, x: f32) {
+    pub(super) fn join(world: &mut SimWorld, number: u64, x: f32) {
         world
             .admit(&admit_at(number, x, true), NOW, SERVER_TIME)
             .expect("admit");
@@ -1069,7 +1102,7 @@ mod tests {
             .collect()
     }
 
-    fn tick(world: &mut SimWorld, now: u64) -> TickOutput {
+    pub(super) fn tick(world: &mut SimWorld, now: u64) -> TickOutput {
         world.tick(now, SERVER_TIME).expect("tick")
     }
 
