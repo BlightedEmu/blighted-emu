@@ -116,6 +116,8 @@ pub struct CombatSettings {
     pub player_respawn_ms: u64,
     /// Seed of the combat dice.
     pub seed: u64,
+    /// The `u32` of a mob's spawn card `AssetId` (M6-B spec section 5.4).
+    pub asset_sub_id: u32,
 }
 
 /// Hand-made combat rows for tests (feature `test-util`).

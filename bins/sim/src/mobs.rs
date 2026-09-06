@@ -261,10 +261,12 @@ impl Mobs {
         }
     }
 
-    /// Every awake mob as a ghost: entity number, position and state (M6-A spec section 6.3).
-    pub fn awake_ghosts(&self) -> impl Iterator<Item = (u64, Position, MobGhost)> + '_ {
+    /// Every awake mob: entity number, position and state (M6-A spec section 6.3, M6-B spec
+    /// section 5); the ghosts for other sims and the mobs of the bundles both come from here.
+    pub fn awake_states(&self) -> impl Iterator<Item = (u64, Position, MobGhost)> + '_ {
         self.awake.iter().filter_map(|index| {
             let mob = self.live.get(index)?;
+            let spawn = self.spawns.get(*index as usize)?;
             Some((
                 mob_entity(*index),
                 mob.brain.position(),
@@ -272,6 +274,9 @@ impl Mobs {
                     health: mob.health.current(),
                     max_health: mob.health.max(),
                     returning: mob.brain.state() == MobState::Return,
+                    vitals_id: spawn.vitals_id,
+                    category_id: spawn.category_id,
+                    level: spawn.level,
                 },
             ))
         })

@@ -273,8 +273,8 @@ pub const MAX_BUS_MESSAGE_BYTES: usize = 1024 * 1024;
 pub const MOB_ENTITY_BASE: u64 = 1 << 34;
 
 /// Most bytes of one [`Ghost`] in `postcard`: a 10-byte entity number, three 4-byte floats, and
-/// a mob's state (a 1-byte option tag, two 5-byte numbers and a 1-byte flag).
-pub const MAX_GHOST_BYTES: usize = 34;
+/// a mob's state (a 1-byte option tag, five 5-byte numbers and a 1-byte flag).
+pub const MAX_GHOST_BYTES: usize = 49;
 
 /// The state of a mob ghost (M6-A spec section 6.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -285,6 +285,12 @@ pub struct MobGhost {
     pub max_health: u32,
     /// The mob walks back to its spawn and takes no damage.
     pub returning: bool,
+    /// crc32 of the lower-case vitals id (the world file's value).
+    pub vitals_id: u32,
+    /// crc32 of the lower-case vitals category id.
+    pub category_id: u32,
+    /// The spawn level.
+    pub level: u32,
 }
 
 /// A read-only copy of an entity near a border.
@@ -639,6 +645,9 @@ mod tests {
                 health: u32::MAX,
                 max_health: u32::MAX,
                 returning: true,
+                vitals_id: u32::MAX,
+                category_id: u32::MAX,
+                level: u32::MAX,
             }),
         };
         assert!(encode(&ghost).expect("encode").len() <= MAX_GHOST_BYTES);

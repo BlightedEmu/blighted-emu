@@ -24,9 +24,7 @@ use bevy_ecs::world::World;
 use nw_bus::{
     Admit, BusId, CellTable, ConnectionRef, Ghost, HandoffOffer, MobGhost, Point, SimSlot,
 };
-use nw_messages::{
-    MessageError, ReplicatedStateBundle, ServerMessage, TimeSynchMsg, WorldPosition,
-};
+use nw_messages::{BundleMember, MessageError, ServerMessage, TimeSynchMsg, WorldPosition};
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
     Motion, MotionState, MoveLimits, MoveRefusal, Position, Seen, SpatialGrid,
@@ -35,6 +33,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 mod attack;
+mod members;
+
+use members::{MobCard, bundles, card_of, mob_members, position_member};
 
 use attack::Vitals;
 
@@ -705,7 +706,7 @@ impl SimWorld {
                     }
                 }
             }
-            for (entity, position, state) in self.mobs.awake_ghosts() {
+            for (entity, position, state) in self.mobs.awake_states() {
                 for owner in cells.owners.others_within(cells.me, position, radius) {
                     if let Some(sim) = cells.sims.get(usize::from(owner)) {
                         lists.entry(sim.id.clone()).or_default().push(Ghost {
@@ -736,14 +737,27 @@ impl SimWorld {
             .map(|(player, body)| (player.number, body.motion.position()))
             .collect();
         let own: HashSet<u64> = everyone.iter().map(|(number, _)| *number).collect();
-        everyone.extend(
-            self.ghosts
-                .values()
-                .flat_map(|ghosts| &ghosts.entities)
-                // Mobs are not in bundles before M6-B (M6-A spec section 1.1).
-                .filter(|ghost| ghost.mob.is_none() && !own.contains(&ghost.entity))
-                .map(|ghost| (ghost.entity, ghost.position)),
-        );
+        let mut cards: HashMap<u64, MobCard> = HashMap::new();
+        for ghost in self.ghosts.values().flat_map(|ghosts| &ghosts.entities) {
+            if own.contains(&ghost.entity) {
+                continue;
+            }
+            match ghost.mob {
+                None => everyone.push((ghost.entity, ghost.position)),
+                Some(state) if state.health > 0 => {
+                    everyone.push((ghost.entity, ghost.position));
+                    cards.insert(ghost.entity, card_of(ghost.entity, ghost.position, state));
+                }
+                // A dead mob is not sent (M6-B spec section 5.6).
+                Some(_) => {}
+            }
+        }
+        for (entity, position, state) in self.mobs.awake_states() {
+            if state.health > 0 {
+                everyone.push((entity, position));
+                cards.insert(entity, card_of(entity, position, state));
+            }
+        }
         // The radius is checked at start to be a finite number above 0.
         let Some(mut grid) = SpatialGrid::new(self.settings.interest_radius_m) else {
             return Ok(Vec::new());
@@ -754,6 +768,8 @@ impl SimWorld {
         let near = Neighbourhood {
             grid: &grid,
             positions: everyone.iter().copied().collect(),
+            cards,
+            asset_sub_id: self.combat.asset_sub_id,
             now_ms,
             server_time,
         };
@@ -871,10 +887,13 @@ fn departure_of(player: &Player, body: &Body) -> Departure {
     }
 }
 
-/// What the bundle step of one tick reads: everyone's position, in a grid.
+/// What the bundle step of one tick reads: everyone's position, in a grid, and the cards of the
+/// living mobs.
 struct Neighbourhood<'a> {
     grid: &'a SpatialGrid<u64>,
     positions: HashMap<u64, Position>,
+    cards: HashMap<u64, MobCard>,
+    asset_sub_id: u32,
     now_ms: u64,
     server_time: u64,
 }
@@ -897,16 +916,20 @@ impl Neighbourhood<'_> {
                 .near(own_position)
                 .filter(|(number, _)| *number != own);
             let seen = player.interest.update(own_position, others);
+            let entered: HashSet<u64> = seen.entered.iter().copied().collect();
             let mut numbers: Vec<u64> = seen.entered.into_iter().chain(seen.stayed).collect();
             numbers.sort_unstable();
-            let mut visible: Vec<(u64, Position)> = vec![(own, own_position)];
-            visible.extend(
-                numbers
-                    .into_iter()
-                    .filter_map(|number| Some((number, *self.positions.get(&number)?))),
-            );
-            for members in visible.chunks(MAX_BUNDLE_MEMBERS) {
-                let bundle = bundle(player.bundles_sent, members)?;
+            let mut members: Vec<BundleMember> =
+                position_member(own, own_position).into_iter().collect();
+            for number in numbers {
+                if let Some(card) = self.cards.get(&number) {
+                    let first = entered.contains(&number);
+                    members.extend(mob_members(card, first, self.asset_sub_id));
+                } else if let Some(position) = self.positions.get(&number) {
+                    members.extend(position_member(number, *position));
+                }
+            }
+            for bundle in bundles(player.bundles_sent, members)? {
                 player.bundles_sent = player.bundles_sent.saturating_add(1);
                 outgoing.push(Outgoing {
                     connection: player.connection.clone(),
@@ -934,28 +957,16 @@ impl Neighbourhood<'_> {
     }
 }
 
-/// One bundle envelope ([`ReplicatedStateBundle::of_positions`]). Every position in the world is
-/// finite (`admit`, `take` and `set_ghosts` refuse others), so no member is left out.
-fn bundle(sequence: u64, visible: &[(u64, Position)]) -> Result<Vec<u8>, MessageError> {
-    let positions: Vec<(u64, WorldPosition)> = visible
-        .iter()
-        .filter_map(|(number, position)| {
-            Some((
-                *number,
-                WorldPosition::from_metres(position.x, position.y, position.z)?,
-            ))
-        })
-        .collect();
-    ServerMessage::Bundle(ReplicatedStateBundle::of_positions(sequence, &positions)?).envelope()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
     use nw_bus::CellTable;
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
-    use nw_messages::{BundlePayload, LOGIN_MESSAGE_TYPES, MemberState};
+    use nw_messages::{
+        BundlePayload, GDE_METADATA_TYPE_INDEX, LOGIN_MESSAGE_TYPES, MemberState,
+        POSITION_IN_THE_WORLD_TYPE_INDEX, ReplicatedStateBundle, VITALS_TYPE_INDEX,
+    };
     use nw_reflect::{Envelope, encode_server_messages};
     use nw_sim_core::test_support::NoGround;
     use nw_sim_core::{CellGrid, CellOwners, GroundCheck, MoveLimits, MoveRefusal};
@@ -1191,6 +1202,132 @@ mod tests {
             .expect("the mob is a ghost");
         assert_eq!(mob.entity, crate::mobs::mob_entity(0));
         assert_eq!(mob.mob.map(|state| state.returning), Some(false));
+    }
+
+    /// The member classes of `entity` in every bundle of `who`, in order.
+    fn classes_of(outgoing: &[Outgoing], who: &ConnectionRef, entity: u64) -> Vec<u64> {
+        outgoing
+            .iter()
+            .filter(|out| out.connection == *who && out.channel == REPLICATION_CHANNEL)
+            .flat_map(|out| &out.envelopes)
+            .flat_map(|bytes| {
+                let envelope = Envelope::decode(bytes).expect("envelope");
+                let Some(Ok(ServerMessage::Bundle(bundle))) =
+                    ServerMessage::from_envelope(&envelope)
+                else {
+                    panic!("expected a bundle");
+                };
+                BundlePayload::decode(&bundle.payload)
+                    .expect("payload")
+                    .groups
+            })
+            .flat_map(|group| group.members)
+            .filter(|member| member.u64_at_0 == entity)
+            .map(|member| member.state.type_index())
+            .collect()
+    }
+
+    const CARD_CLASSES: [u64; 3] = [
+        GDE_METADATA_TYPE_INDEX,
+        VITALS_TYPE_INDEX,
+        POSITION_IN_THE_WORLD_TYPE_INDEX,
+    ];
+
+    #[test]
+    fn a_mob_entering_view_sends_its_card_and_vitals_once() {
+        let x = CELL_M / 2.0;
+        let mut world = world_with_spawns(vec![test_spawn(x)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, x + 5.0);
+        let mob = crate::mobs::mob_entity(0);
+        assert_eq!(
+            classes_of(&tick(&mut world, NOW).messages, &connection(1), mob),
+            CARD_CLASSES
+        );
+        assert_eq!(
+            classes_of(&tick(&mut world, NOW + 33).messages, &connection(1), mob),
+            [POSITION_IN_THE_WORLD_TYPE_INDEX]
+        );
+    }
+
+    #[test]
+    fn a_dead_mob_leaves_the_bundles_and_returns_with_a_new_card() {
+        const LETHAL: u32 = 100_000;
+        const MOB_RESPAWN_MS: u64 = 360_000;
+        let x = CELL_M / 2.0;
+        let mut world = world_with_spawns(vec![test_spawn(x)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, x + 50.0);
+        let mob = crate::mobs::mob_entity(0);
+        tick(&mut world, NOW);
+        world.apply_hit(mob, 1, LETHAL, 0, NOW);
+        assert!(classes_of(&tick(&mut world, NOW + 33).messages, &connection(1), mob).is_empty());
+        let back = tick(&mut world, NOW + MOB_RESPAWN_MS).messages;
+        assert_eq!(classes_of(&back, &connection(1), mob), CARD_CLASSES);
+    }
+
+    #[test]
+    fn a_mob_that_returns_to_view_gets_a_new_spawn_card() {
+        let x = CELL_M / 2.0;
+        let mut combat = test_combat();
+        combat.spawns = vec![test_spawn(x)].into();
+        let mut world = SimWorld::new(
+            settings(1, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            combat,
+        );
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, x + 5.0);
+        join(&mut world, 2, x + 4.0);
+        let mob = crate::mobs::mob_entity(0);
+        assert!(
+            classes_of(&tick(&mut world, NOW).messages, &connection(1), mob).is_empty(),
+            "the nearer player takes the one place"
+        );
+        world.leave(&connection(2));
+        assert_eq!(
+            classes_of(&tick(&mut world, NOW + 33).messages, &connection(1), mob),
+            CARD_CLASSES
+        );
+        join(&mut world, 2, x + 4.0);
+        assert!(classes_of(&tick(&mut world, NOW + 66).messages, &connection(1), mob).is_empty());
+        world.leave(&connection(2));
+        assert_eq!(
+            classes_of(&tick(&mut world, NOW + 99).messages, &connection(1), mob),
+            CARD_CLASSES,
+            "a new card after it was out of view"
+        );
+    }
+
+    #[test]
+    fn a_ghost_mob_is_in_the_bundles() {
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, BORDER_X - 5.0);
+        let mob = crate::mobs::mob_entity(3);
+        let ghost = Ghost {
+            entity: mob,
+            position: Point {
+                x: BORDER_X + 5.0,
+                y: 10.0,
+                z: 50.0,
+            },
+            mob: Some(MobGhost {
+                health: 900,
+                max_health: 1000,
+                returning: false,
+                vitals_id: 1,
+                category_id: 2,
+                level: 3,
+            }),
+        };
+        world.set_ghosts(&slot("sim-b").id, vec![ghost], NOW);
+        assert_eq!(
+            classes_of(&tick(&mut world, NOW).messages, &connection(1), mob),
+            CARD_CLASSES
+        );
     }
 
     #[test]
@@ -1498,13 +1635,18 @@ mod tests {
             .iter()
             .filter(|out| out.connection == viewer && out.channel == REPLICATION_CHANNEL)
             .count();
-        assert_eq!(bundles, (PLAYERS as usize).div_ceil(MAX_BUNDLE_MEMBERS));
+        assert!(bundles > 1 && bundles <= (PLAYERS as usize).div_ceil(MAX_BUNDLE_MEMBERS));
         let largest_number = u64::MAX >> LARGEST_NUMBER_SHIFT;
-        let full: Vec<(u64, Position)> = (0..MAX_BUNDLE_MEMBERS as u64)
-            .map(|offset| (largest_number - offset, at(0.0)))
+        let full: Vec<BundleMember> = (0..MAX_BUNDLE_MEMBERS as u64)
+            .filter_map(|offset| members::position_member(largest_number - offset, at(0.0)))
             .collect();
-        let envelope = bundle(u64::MAX >> LARGEST_NUMBER_SHIFT, &full).expect("bundle");
-        let payload = encode_server_messages(&[&envelope]).expect("payload");
+        let envelopes = members::bundles(u64::MAX >> LARGEST_NUMBER_SHIFT, full).expect("bundle");
+        assert_eq!(
+            envelopes.len(),
+            1,
+            "48 of the largest members fill one bundle"
+        );
+        let payload = encode_server_messages(&[&envelopes[0]]).expect("payload");
         assert!(payload.len() <= MAX_CHUNK_PAYLOAD, "{}", payload.len());
     }
 

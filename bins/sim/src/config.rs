@@ -59,6 +59,8 @@ pub const DEFAULT_MOB_RESPAWN_MS: u64 = 360_000;
 pub const DEFAULT_PLAYER_RESPAWN_MS: u64 = 10_000;
 /// Default seed of the combat dice.
 pub const DEFAULT_COMBAT_SEED: u64 = 1;
+/// Default `u32` of a spawn card's `AssetId` (always 2 per the Azoth catalog field note).
+pub const DEFAULT_ASSET_SUB_ID: u32 = 2;
 
 /// Section `[combat]` (M6-A spec section 9).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -104,6 +106,8 @@ pub struct CombatConfig {
     pub player_respawn_ms: u64,
     /// Seed of the combat dice.
     pub seed: u64,
+    /// The `u32` of a mob's spawn card `AssetId`.
+    pub asset_sub_id: u32,
 }
 
 impl Default for CombatConfig {
@@ -130,6 +134,7 @@ impl Default for CombatConfig {
             mob_respawn_ms: DEFAULT_MOB_RESPAWN_MS,
             player_respawn_ms: DEFAULT_PLAYER_RESPAWN_MS,
             seed: DEFAULT_COMBAT_SEED,
+            asset_sub_id: DEFAULT_ASSET_SUB_ID,
         }
     }
 }
@@ -425,6 +430,7 @@ impl SimConfig {
             min_attack_interval_ms: combat.min_attack_interval_ms,
             player_respawn_ms: combat.player_respawn_ms,
             seed: combat.seed,
+            asset_sub_id: combat.asset_sub_id,
         }
     }
 

@@ -84,3 +84,5 @@ mob_respawn_ms = 360000
 # Unknown.
 player_respawn_ms = 10000
 seed = 1
+# The u32 of a mob spawn card AssetId (Azoth catalog field note: always 2).
+asset_sub_id = 2

@@ -65,6 +65,15 @@ impl ReplicatedStateBundle {
                 }),
             })
             .collect();
+        Self::of_members(sequence, members)
+    }
+
+    /// A bundle with the captured header values and one group of `members`, in order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when a member cannot be encoded.
+    pub fn of_members(sequence: u64, members: Vec<BundleMember>) -> Result<Self, MessageError> {
         let payload = BundlePayload {
             groups: vec![BundleGroup {
                 leading: OBSERVED_BUNDLE_GROUP,

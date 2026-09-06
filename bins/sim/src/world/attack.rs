@@ -553,6 +553,9 @@ mod tests {
                 health,
                 max_health: MOB_HEALTH,
                 returning,
+                vitals_id: 0,
+                category_id: 0,
+                level: 0,
             }),
         }
     }
