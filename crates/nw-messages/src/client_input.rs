@@ -169,6 +169,10 @@ pub enum Bit8 {
     Body(Vec<u8>),
 }
 
+/// The mask bits that are 0 in every movement-only record and set in fights (attack input
+/// note); which one is a light attack, a heavy attack or an ability is Unknown.
+pub const ATTACK_MASK_BITS: [u32; 4] = [9, 10, 13, 15];
+
 /// One record (`FUN_142a25d90`). `None` means the field is not in the record.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct InputRecord {
@@ -335,6 +339,17 @@ impl RowLayout {
     }
 }
 
+impl InputRecord {
+    /// The attack bits of the mask: bit `n` of the result is [`ATTACK_MASK_BITS`]`[n]`.
+    pub fn attack_bits(&self) -> u8 {
+        ATTACK_MASK_BITS
+            .iter()
+            .enumerate()
+            .filter(|(_, bit)| mask_bit(self.mask, **bit))
+            .fold(0, |bits, (index, _)| bits | 1 << index)
+    }
+}
+
 impl ClientInputMsg {
     /// An input with an empty head and one record that holds only `position`, as the test client
     /// sends it.
@@ -343,6 +358,21 @@ impl ClientInputMsg {
             records: vec![InputRecord {
                 mask: 1 << BIT_7,
                 bit_7: Some(position),
+                ..InputRecord::default()
+            }],
+            ..Self::default()
+        }
+    }
+
+    /// An input with one record that holds `position` and attack bit 9: with no prefix integer,
+    /// bit 9 is the cursor bit of row 4, so the record carries a gate byte of 0 (M6-B spec
+    /// section 9.2).
+    pub fn attack(position: InputPosition) -> Self {
+        Self {
+            records: vec![InputRecord {
+                mask: 1 << BIT_7 | 1 << ATTACK_MASK_BITS[0],
+                bit_7: Some(position),
+                row_4: Some(0),
                 ..InputRecord::default()
             }],
             ..Self::default()
@@ -936,6 +966,34 @@ mod tests {
         assert_eq!(decoded, input);
         assert_eq!(decoded.last_position(), Some(position()));
         assert_eq!(decoded.encode().expect("again"), body);
+    }
+
+    #[test]
+    fn attack_bits_read_bits_9_10_13_15() {
+        let record = |mask| InputRecord {
+            mask,
+            ..InputRecord::default()
+        };
+        assert_eq!(record(0).attack_bits(), 0);
+        assert_eq!(record(1 << 9).attack_bits(), 0b0001);
+        assert_eq!(record(1 << 10).attack_bits(), 0b0010);
+        assert_eq!(record(1 << 13).attack_bits(), 0b0100);
+        assert_eq!(record(1 << 15).attack_bits(), 0b1000);
+        assert_eq!(
+            record(1 << 7 | 1 << 8 | 1 << 11).attack_bits(),
+            0,
+            "not attack bits"
+        );
+    }
+
+    #[test]
+    fn an_attack_input_sets_bit_9_and_the_position() {
+        let input = ClientInputMsg::attack(position());
+        let body = input.encode().expect("encode");
+        let decoded = ClientInputMsg::decode(&body).expect("decode");
+        assert_eq!(decoded, input);
+        assert_eq!(decoded.last_position(), Some(position()));
+        assert_eq!(decoded.records[0].attack_bits(), 0b0001);
     }
 
     #[test]

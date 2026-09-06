@@ -3,6 +3,7 @@
 
 use crate::bundle::ReplicatedStateBundle;
 use crate::client_add_entry::ClientAddEntryMsg;
+use crate::combat::{DamageDealtMsg, DeathRecapMsg, OnDamageMsg};
 use crate::connected::{CalendarConnectedMsg, TimingConfigurationConnectedMsg};
 use crate::day_phase::SyncDayPhaseMsg;
 use crate::spawn_point::ReceivePlayerSpawnPointMsg;
@@ -22,6 +23,13 @@ pub const SERVER_MESSAGE_TYPES: [u64; 8] = [
     SyncTimeChangeMsg::TYPE_INDEX,
     SyncDayPhaseMsg::TYPE_INDEX,
     ReplicatedStateBundle::TYPE_INDEX,
+];
+
+/// Type indexes of the combat messages of M6-B.
+pub const COMBAT_MESSAGE_TYPES: [u64; 3] = [
+    DamageDealtMsg::TYPE_INDEX,
+    OnDamageMsg::TYPE_INDEX,
+    DeathRecapMsg::TYPE_INDEX,
 ];
 
 /// Type indexes of the login messages, in the captured order: every type of
@@ -49,10 +57,17 @@ pub enum ServerMessage {
     DayPhase(SyncDayPhaseMsg),
     /// 8.
     Bundle(ReplicatedStateBundle),
+    /// 2071.
+    DamageDealt(DamageDealtMsg),
+    /// 3601.
+    OnDamage(OnDamageMsg),
+    /// 4299.
+    DeathRecap(DeathRecapMsg),
 }
 
 impl ServerMessage {
-    /// Decodes `body` when `type_index` is one of [`SERVER_MESSAGE_TYPES`]; `None` otherwise.
+    /// Decodes `body` when `type_index` is one of [`SERVER_MESSAGE_TYPES`] or
+    /// [`COMBAT_MESSAGE_TYPES`]; `None` otherwise.
     pub fn decode(type_index: u64, body: &[u8]) -> Option<Result<Self, MessageError>> {
         let message = match type_index {
             TimingConfigurationConnectedMsg::TYPE_INDEX => {
@@ -74,6 +89,9 @@ impl ServerMessage {
             ReplicatedStateBundle::TYPE_INDEX => {
                 ReplicatedStateBundle::decode(body).map(Self::Bundle)
             }
+            DamageDealtMsg::TYPE_INDEX => DamageDealtMsg::decode(body).map(Self::DamageDealt),
+            OnDamageMsg::TYPE_INDEX => OnDamageMsg::decode(body).map(Self::OnDamage),
+            DeathRecapMsg::TYPE_INDEX => DeathRecapMsg::decode(body).map(Self::DeathRecap),
             _ => return None,
         };
         Some(message)
@@ -90,6 +108,9 @@ impl ServerMessage {
             Self::TimeChange(_) => SyncTimeChangeMsg::TYPE_INDEX,
             Self::DayPhase(_) => SyncDayPhaseMsg::TYPE_INDEX,
             Self::Bundle(_) => ReplicatedStateBundle::TYPE_INDEX,
+            Self::DamageDealt(_) => DamageDealtMsg::TYPE_INDEX,
+            Self::OnDamage(_) => OnDamageMsg::TYPE_INDEX,
+            Self::DeathRecap(_) => DeathRecapMsg::TYPE_INDEX,
         }
     }
 
@@ -122,6 +143,9 @@ impl ServerMessage {
             Self::TimeChange(message) => message.encode(),
             Self::DayPhase(message) => message.encode(),
             Self::Bundle(message) => message.encode(),
+            Self::DamageDealt(message) => message.encode(),
+            Self::OnDamage(message) => message.encode(),
+            Self::DeathRecap(message) => message.encode(),
         }
     }
 }
@@ -157,6 +181,24 @@ mod tests {
             LOGIN_MESSAGE_TYPES.last(),
             Some(&SyncDayPhaseMsg::TYPE_INDEX)
         );
+        for message in samples {
+            let body = message.encode().expect("encode");
+            assert_eq!(
+                ServerMessage::decode(message.type_index(), &body),
+                Some(Ok(message))
+            );
+        }
+    }
+
+    #[test]
+    fn combat_messages_decode_by_their_index() {
+        let samples = [
+            ServerMessage::DamageDealt(DamageDealtMsg::hit(ENTITY, ENTITY + 1, 5.0)),
+            ServerMessage::OnDamage(OnDamageMsg::hit(ENTITY, ENTITY + 1, 5.0)),
+            ServerMessage::DeathRecap(DeathRecapMsg::of(ENTITY, ENTITY + 1)),
+        ];
+        let order: Vec<u64> = samples.iter().map(ServerMessage::type_index).collect();
+        assert_eq!(order, COMBAT_MESSAGE_TYPES);
         for message in samples {
             let body = message.encode().expect("encode");
             assert_eq!(

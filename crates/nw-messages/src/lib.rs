@@ -9,6 +9,7 @@
 pub mod bundle;
 pub mod client_add_entry;
 pub mod client_input;
+pub mod combat;
 pub mod connected;
 pub mod day_phase;
 pub mod gde;
@@ -30,8 +31,13 @@ pub use bundle::{
 };
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use client_input::{
-    Bit8, ClientInputMsg, HeadStep9, INPUT_Z_MAX, INPUT_Z_MIN, InputHead, InputPosition,
-    InputRecord, InputSlots, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+    ATTACK_MASK_BITS, Bit8, ClientInputMsg, HeadStep9, INPUT_Z_MAX, INPUT_Z_MIN, InputHead,
+    InputPosition, InputRecord, InputSlots, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+};
+pub use combat::{
+    DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, DamageDealtMsg, DamageItem, DeathRecapMsg,
+    HIT_TAG, MAX_RESPAWN_PAYLOAD, NEUTRAL_SCALE, ON_DAMAGE_TYPE_INDEX, OnDamageMsg,
+    REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
 };
 pub use connected::{
     Block1415acc30, CALENDAR_CONNECTED_MSG_TYPE_INDEX, CalendarConnectedMsg, ConnectedBody,
@@ -44,7 +50,7 @@ pub use position::{
     POSITION_IN_THE_WORLD_TYPE_INDEX, POSITION_Z_MAX, POSITION_Z_MIN,
     PositionInTheWorldReplicatedState, Rotation, RotationComponent, Scale, WorldPosition,
 };
-pub use server::{LOGIN_MESSAGE_TYPES, SERVER_MESSAGE_TYPES, ServerMessage};
+pub use server::{COMBAT_MESSAGE_TYPES, LOGIN_MESSAGE_TYPES, SERVER_MESSAGE_TYPES, ServerMessage};
 pub use spawn_point::{RECEIVE_PLAYER_SPAWN_POINT_MSG_TYPE_INDEX, ReceivePlayerSpawnPointMsg};
 pub use time_change::{
     OBSERVED_TIME_CHANGE_F32S_AT_16, OBSERVED_TIME_CHANGE_F32S_AT_60,
