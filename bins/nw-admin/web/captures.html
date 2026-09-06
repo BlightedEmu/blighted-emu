@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Capture viewer</title>
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body class="viewer-page">
+  <header>
+    <h1><a href="/">nw-admin</a> · Capture viewer</h1>
+    <span class="status" id="session-title">No session open</span>
+  </header>
+  <div class="viewer">
+    <aside class="pane" id="left">
+      <div class="pane-head">
+        <input type="search" id="search" placeholder="Search sessions" aria-label="Search sessions">
+      </div>
+      <ul class="list" id="sessions"></ul>
+      <div class="pane-head" id="entities-head" hidden>
+        <strong>Entities</strong>
+        <button type="button" id="show-all">Draw all</button>
+      </div>
+      <ul class="list" id="entities" hidden></ul>
+    </aside>
+    <section class="centre">
+      <div class="facts" id="summary"></div>
+      <canvas id="map" class="map"></canvas>
+      <div class="timeline">
+        <input type="range" id="time" min="0" max="0" value="0" aria-label="Time">
+        <span class="status" id="time-label">—</span>
+      </div>
+    </section>
+    <aside class="pane" id="right">
+      <div class="pane-head"><strong>Selection</strong></div>
+      <pre class="detail" id="selection">Click a path, an entity or a message.</pre>
+    </aside>
+  </div>
+  <nav class="tabs" id="tabs">
+    <button type="button" data-tab="types" class="active">Message types</button>
+    <button type="button" data-tab="messages">Messages</button>
+    <button type="button" data-tab="bytes">Bytes</button>
+    <button type="button" data-tab="coverage">Walk stops</button>
+    <button type="button" data-tab="compare">Compare</button>
+  </nav>
+  <section class="tab-body">
+    <div data-panel="types"><table class="grid" id="types-table"></table><canvas id="rate" class="rate" height="80"></canvas></div>
+    <div data-panel="messages" hidden><table class="grid" id="messages-table"></table></div>
+    <div data-panel="bytes" hidden><ul class="list inline" id="members"></ul><pre class="hex" id="hex"></pre></div>
+    <div data-panel="coverage" hidden><table class="grid" id="coverage-table"></table></div>
+    <div data-panel="compare" hidden>
+      <div class="pane-head">
+        <input type="search" id="compare-search" placeholder="Session to compare" aria-label="Session to compare" list="compare-ids">
+        <datalist id="compare-ids"></datalist>
+        <button type="button" id="compare-open">Compare</button>
+        <span class="status" id="compare-status"></span>
+      </div>
+      <table class="grid" id="compare-table"></table>
+    </div>
+  </section>
+  <script type="module" src="/web/captures.js"></script>
+</body>
+</html>

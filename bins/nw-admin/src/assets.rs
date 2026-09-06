@@ -26,6 +26,9 @@ pub fn asset(name: &str) -> Option<Asset> {
         "map.js" => (JS, include_str!("../web/map.js")),
         "view.js" => (JS, include_str!("../web/view.js")),
         "hex.js" => (JS, include_str!("../web/hex.js")),
+        "tables.js" => (JS, include_str!("../web/tables.js")),
+        "captures.html" => (HTML, include_str!("../web/captures.html")),
+        "captures.js" => (JS, include_str!("../web/captures.js")),
         _ => return None,
     };
     Some(Asset { content_type, body })
@@ -42,10 +45,11 @@ mod tests {
             Some(HTML)
         );
         assert_eq!(asset("style.css").map(|file| file.content_type), Some(CSS));
-        for script in ["map.js", "view.js", "hex.js"] {
+        for script in ["map.js", "view.js", "hex.js", "tables.js", "captures.js"] {
             assert_eq!(asset(script).map(|file| file.content_type), Some(JS));
         }
         assert_eq!(asset("map.html").map(|file| file.content_type), Some(HTML));
+        assert_eq!(asset("captures.html").map(|file| file.content_type), Some(HTML));
         assert!(asset("view.test.mjs").is_none());
         assert!(asset("../Cargo.toml").is_none());
         assert!(asset("missing.js").is_none());
