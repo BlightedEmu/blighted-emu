@@ -1,0 +1,25 @@
+# nw-admin configuration (admin tools spec section 6). This file holds no secret.
+# Any key below can be overridden with NW_ADMIN_<KEY>, nested keys joined by "__".
+
+# The admin pages. Only a loopback address is allowed: the tools have no login.
+listen = "127.0.0.1:9180"
+log_filter = "info"
+client_build_config = "config/client-build.toml"
+# World files from `just world`, the content bundle from `just bundle`, and the map tiles from
+# `just map-tiles` (in <content_dir>/map/).
+content_dir = "local-data/content"
+level = "newworld_vitaeeterna"
+# Most spawn points one map request returns.
+max_spawns_per_request = 5000
+
+[captures]
+# Capture ledgers (`ledger.bin`) in any folder below this one.
+captures_dir = "local-data/captures"
+# The saved Discord threads that name the open-world sessions.
+discord_dir = "local-data/open world captures"
+# The archive that local-data/azoth-catalog/archive.py saves from the Azoth catalog site.
+azoth_dir = "local-data/azoth-catalog"
+# The client type table, in the install folder (NW_GAME_DIR).
+type_index = "typeindex.json"
+# Aeternum-World class names (AGPL-3.0).
+type_names = "local-data/Aeternum-World-main/Catalog/uuid_to_class.json"

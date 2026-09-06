@@ -2907,6 +2907,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "nw-admin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "http-body-util",
+ "nw-common",
+ "nw-content",
+ "nw-formats",
+ "nw-world",
+ "png",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "nw-bus"
 version = "0.1.0"
 dependencies = [

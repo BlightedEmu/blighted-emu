@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
+use nw_content::ids::{gatherable_ids, lore_ids, npc_ids, vitals_ids};
 use nw_content::{ContainerError, ContentBundle};
 use nw_formats::azcs::{AzcsError, decode_azcs, is_azcs};
 use nw_formats::heightmap::{HEIGHTMAP_SIZE, HeightmapError, parse_heightmap};
@@ -182,48 +183,10 @@ impl KnownIds {
     pub fn from_bundle(bundle: &ContentBundle) -> Self {
         let tables = &bundle.tables;
         Self {
-            npcs: crc_set(
-                tables
-                    .npc_data
-                    .iter()
-                    .flat_map(|table| &table.rows)
-                    .map(|row| row.npc_id.as_str()),
-            ),
-            vitals: crc_set(
-                tables
-                    .vitals_data
-                    .iter()
-                    .flat_map(|table| &table.rows)
-                    .map(|row| row.vitals_id.as_str())
-                    .chain(
-                        tables
-                            .vitals_base_data
-                            .iter()
-                            .flat_map(|table| &table.rows)
-                            .map(|row| row.vitals_id.as_str()),
-                    )
-                    .chain(
-                        tables
-                            .vitals_level_variant_data
-                            .iter()
-                            .flat_map(|table| &table.rows)
-                            .map(|row| row.vitals_id.as_str()),
-                    ),
-            ),
-            gatherables: crc_set(
-                tables
-                    .gatherable_data
-                    .iter()
-                    .flat_map(|table| &table.rows)
-                    .map(|row| row.gatherable_id.as_str()),
-            ),
-            lore: crc_set(
-                tables
-                    .lore_data
-                    .iter()
-                    .flat_map(|table| &table.rows)
-                    .map(|row| row.lore_id.as_str()),
-            ),
+            npcs: crc_set(npc_ids(tables)),
+            vitals: crc_set(vitals_ids(tables)),
+            gatherables: crc_set(gatherable_ids(tables)),
+            lore: crc_set(lore_ids(tables)),
         }
     }
 

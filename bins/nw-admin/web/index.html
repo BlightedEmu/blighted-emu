@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nw-admin</title>
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body>
+  <header>
+    <h1>nw-admin</h1>
+    <nav id="tools"></nav>
+  </header>
+  <main>
+    <div class="facts" id="facts">Loading the world facts.</div>
+  </main>
+  <script type="module">
+    const facts = document.getElementById('facts');
+    try {
+      const info = await (await fetch('/api/world/info')).json();
+      const levels = info.tiles.levels.length;
+      facts.innerHTML = '';
+      for (const [label, value] of [
+        ['Level', info.tiles.level],
+        ['World size', `${info.world_m} m`],
+        ['Ocean level', `${info.ocean_level} m`],
+        ['Map tiles', info.map_tiles ? `${levels} levels` : 'not written (run just map-tiles)'],
+      ]) {
+        const fact = document.createElement('div');
+        fact.className = 'fact';
+        const name = document.createElement('span');
+        name.textContent = label;
+        fact.append(name, String(value));
+        facts.append(fact);
+      }
+    } catch (error) {
+      facts.textContent = `The world facts cannot be read: ${error}`;
+    }
+  </script>
+</body>
+</html>

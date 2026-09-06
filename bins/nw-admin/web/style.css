@@ -1,0 +1,47 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+:root {
+  --bg: #f4f2ee;
+  --panel: #ffffff;
+  --text: #1d1f22;
+  --muted: #5d636b;
+  --line: #d9d5ce;
+  --accent: #2f6f8f;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171a;
+    --panel: #1e2125;
+    --text: #e6e3de;
+    --muted: #9aa0a8;
+    --line: #33373d;
+    --accent: #6fb0cf;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 system-ui, sans-serif;
+}
+header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 16px;
+  align-items: baseline;
+}
+header h1 { font-size: 16px; margin: 0; }
+nav a { color: var(--accent); margin-right: 12px; text-decoration: none; }
+main { padding: 16px; }
+.facts { display: flex; flex-wrap: wrap; gap: 12px; }
+.fact {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 12px;
+  min-width: 140px;
+}
+.fact span { display: block; color: var(--muted); font-size: 12px; }
