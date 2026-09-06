@@ -274,10 +274,10 @@ mod tests {
     use crate::combat::test_support::TEST_PLAYER_HEALTH;
     use crate::combat::tests::test_combat;
     use crate::mobs::mob_entity;
-    use crate::world::MoveError;
     use crate::world::tests::{
         BORDER_X, CELL_M, NOW, connection, join, slot, table, test_spawn, tick, world_with_spawns,
     };
+    use crate::world::{MoveError, WorldSettings};
     use nw_bus::{Ghost, MobGhost, Point};
 
     const LIGHT: &str = "1H_Sword_Attack1";
@@ -655,6 +655,82 @@ mod tests {
         let mut world = fight();
         world.apply_hit(mob(), 1, LETHAL, 0, NOW);
         assert_eq!(world.apply_hit(mob(), 1, SWORD_HIT, 0, NOW), None);
+    }
+
+    /// Ground at one height everywhere.
+    struct Flat;
+
+    impl nw_sim_core::Ground for Flat {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(STRESS_HEIGHT)
+        }
+    }
+
+    const STRESS_HEIGHT: f32 = 50.0;
+    const STRESS_FIGHTS: u32 = 1000;
+    /// Fights along one row, this far apart: a mob sees the players of its neighbours too.
+    const STRESS_SPACING_M: f32 = 14.0;
+    const STRESS_TICKS: u64 = 1800;
+    const STRESS_THREADS: usize = 4;
+    const STRESS_MOB_RESPAWN_MS: u64 = 5_000;
+    const STRESS_VISIBLE: usize = 47;
+    const ONE_TICK_MS: f64 = 33.0;
+    const P99: f64 = 0.99;
+
+    /// M6-A spec section 12.2: run with
+    /// `cargo test --release -p sim fight_stress -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "release-mode stress test of the M6-A exit"]
+    fn fight_stress_keeps_ticks_under_one_tick() {
+        let mut combat = test_combat();
+        combat.brain.mob_respawn_ms = STRESS_MOB_RESPAWN_MS;
+        let x_of = |fight: u32| STRESS_SPACING_M * (1.0 + fight as f32);
+        combat.spawns = (0..STRESS_FIGHTS)
+            .map(|fight| test_spawn(x_of(fight)))
+            .collect();
+        let mut world = SimWorld::new(
+            WorldSettings {
+                tick_threads: STRESS_THREADS,
+                ..crate::world::tests::settings(STRESS_VISIBLE, STRESS_FIGHTS * 2)
+            },
+            crate::login::WorldIds::random(0).expect("ids"),
+            std::sync::Arc::new(Flat),
+            slot("sim-a"),
+            combat,
+        );
+        world.set_table(&table(&["sim-a"])).expect("table");
+        for fight in 0..STRESS_FIGHTS {
+            join(&mut world, u64::from(fight) + 1, x_of(fight) + 2.0);
+        }
+        let mut next_attack = vec![NOW; STRESS_FIGHTS as usize];
+        let mut times: Vec<f64> = Vec::new();
+        let (mut hits, mut kills) = (0_u64, 0_u64);
+        for tick_number in 0..STRESS_TICKS {
+            let now = NOW + tick_number * TICK_MS;
+            let started = std::time::Instant::now();
+            for fight in 0..STRESS_FIGHTS {
+                if next_attack[fight as usize] > now {
+                    continue;
+                }
+                next_attack[fight as usize] = now + INTERVAL_MS;
+                let attacker = connection(u64::from(fight) + 1);
+                match world.attack(&attacker, mob_entity(fight), LIGHT, now) {
+                    Ok(AttackOutcome::Killed { .. }) => kills += 1,
+                    Ok(_) => hits += 1,
+                    Err(_) => {}
+                }
+            }
+            world.tick(now, 0).expect("tick");
+            times.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        times.sort_by(f64::total_cmp);
+        let at = |share: f64| times[((times.len() - 1) as f64 * share) as usize];
+        let (p50, p99, max) = (at(0.5), at(P99), times[times.len() - 1]);
+        println!(
+            "fight stress: {STRESS_FIGHTS} fights, {STRESS_TICKS} ticks, {hits} hits, {kills} kills; tick ms p50 {p50:.2}, p99 {p99:.2}, max {max:.2}"
+        );
+        assert!(kills > 0, "mobs died and respawned");
+        assert!(p99 < ONE_TICK_MS, "tick p99 {p99:.2} ms");
     }
 
     #[test]

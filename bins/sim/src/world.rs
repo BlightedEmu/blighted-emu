@@ -991,7 +991,7 @@ mod tests {
         }
     }
 
-    fn settings(max_visible_players: usize, max_players: u32) -> WorldSettings {
+    pub(super) fn settings(max_visible_players: usize, max_players: u32) -> WorldSettings {
         WorldSettings {
             interest_radius_m: RADIUS,
             max_visible_players,
