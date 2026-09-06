@@ -268,7 +268,7 @@ mod tests {
     };
 
     use nw_messages::{
-        BodyCodec, BundleGroup, BundleMember, BundlePayload, ClientInputMsg,
+        ALC_TYPE_INDEX, BodyCodec, BundleGroup, BundleMember, BundlePayload, ClientInputMsg,
         DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, DamageDealtMsg, DeathRecapMsg,
         InputPosition, MemberState, ON_DAMAGE_TYPE_INDEX, OnDamageMsg,
         POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState,
@@ -629,6 +629,44 @@ mod tests {
             .expect("check");
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(report.complete_payloads, 0);
+    }
+
+    #[test]
+    fn type_11_bodies_are_counted_and_byte_checked() {
+        let mut payload = Writer::new();
+        payload
+            .prefixed(1)
+            .expect("leading")
+            .u8(1)
+            .prefixed(2)
+            .expect("entity");
+        payload
+            .bytes(&nw_reflect::encode_type_id(&TypeId::FileSlot(ALC_TYPE_INDEX)).expect("class"));
+        // Slot 0 with only its first child, a `u8`.
+        payload.u8(1).wide_prefixed(1).u8(7);
+        let bundle = ReplicatedStateBundle {
+            leading: None,
+            byte_3: 0,
+            byte_4: 0,
+            flag_5: false,
+            index_block: None,
+            payload: payload.finish(),
+        }
+        .encode()
+        .expect("bundle");
+        let mut report = CaptureReport::default();
+        report
+            .check_ledger(
+                Path::new("alc"),
+                &record(
+                    SERVER_TO_CLIENT,
+                    &server_datagram(&[envelope(REPLICATED_STATE_BUNDLE_TYPE_INDEX, bundle)]),
+                ),
+            )
+            .expect("check");
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.members.get(&ALC_TYPE_INDEX), Some(&1));
+        assert_eq!(report.complete_payloads, 1);
     }
 
     #[test]

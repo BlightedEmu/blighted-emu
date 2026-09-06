@@ -6,6 +6,7 @@
 //! `docs/re/2026-09-02-replication-and-movement.md` for the replicated states. A field without a
 //! name in the notes keeps a neutral name. `decode` fails on missing bytes and on bytes left over.
 
+pub mod alc;
 pub mod bundle;
 pub mod client_add_entry;
 pub mod client_input;
@@ -25,6 +26,7 @@ pub mod time_synch;
 pub mod vitals;
 pub mod wire;
 
+pub use alc::{ALC_TYPE_INDEX, AlcChild, AlcState, POS10_CHILD, SLOT0_CHILDREN, SLOT1_CHILDREN};
 pub use bundle::{
     IndexBlock, MAX_BUNDLE_INDEXES, OBSERVED_BUNDLE_BYTE_3, OBSERVED_BUNDLE_BYTE_4,
     OBSERVED_BUNDLE_GROUP, REPLICATED_STATE_BUNDLE_TYPE_INDEX, ReplicatedStateBundle,

@@ -10,6 +10,7 @@ use std::ops::Range;
 
 use nw_reflect::{TypeId, decode_type_id, encode_type_id};
 
+use crate::alc::{ALC_TYPE_INDEX, AlcState};
 use crate::gde::{GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
 use crate::position::{POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState};
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsSlot0};
@@ -24,6 +25,8 @@ pub enum MemberState {
     GdeMetadata(GdeMetadataReplicatedState),
     /// `MB::VitalsComponentReplicatedState`, slot 0.
     Vitals(VitalsSlot0),
+    /// `MB::ALCReplicatedState`: kept as bytes, with its position.
+    Alc(AlcState),
 }
 
 impl MemberState {
@@ -33,6 +36,7 @@ impl MemberState {
             Self::Position(_) => POSITION_IN_THE_WORLD_TYPE_INDEX,
             Self::GdeMetadata(_) => GDE_METADATA_TYPE_INDEX,
             Self::Vitals(_) => VITALS_TYPE_INDEX,
+            Self::Alc(_) => ALC_TYPE_INDEX,
         }
     }
 
@@ -50,6 +54,7 @@ impl MemberState {
                 GdeMetadataReplicatedState::read(reader).map(Self::GdeMetadata)
             }
             TypeId::FileSlot(VITALS_TYPE_INDEX) => VitalsSlot0::read(reader).map(Self::Vitals),
+            TypeId::FileSlot(ALC_TYPE_INDEX) => AlcState::read(reader).map(Self::Alc),
             _ => Err(MessageError::UnknownMemberClass { class }),
         }
     }
@@ -62,6 +67,10 @@ impl MemberState {
                 Ok(())
             }
             Self::Vitals(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::Alc(state) => {
                 state.write(writer);
                 Ok(())
             }
@@ -227,7 +236,8 @@ mod tests {
 
     const ENTITY: u64 = 300;
     const LEADING: u64 = 7;
-    const OTHER_CLASS: u64 = 11;
+    /// A class without a reader here.
+    const OTHER_CLASS: u64 = 12;
     /// An entity integer that fits one prefix byte.
     const SMALL_ENTITY: u8 = 5;
 

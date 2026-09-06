@@ -100,7 +100,7 @@ impl InputPosition {
         height_from_raw(self.z_raw, INPUT_Z_MIN, INPUT_Z_MAX)
     }
 
-    fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+    pub(crate) fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         Ok(Self {
             x: reader.f32()?,
             y: reader.f32()?,
