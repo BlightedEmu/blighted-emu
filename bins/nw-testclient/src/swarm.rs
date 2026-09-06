@@ -543,6 +543,7 @@ mod tests {
                 ticks_within_tick: 999.0,
                 ticks: 1000.0,
                 refused_moves: 0.0,
+                dead_moves: 0.0,
                 mob_deaths: 0.0,
             },
             unread_metrics: 0,

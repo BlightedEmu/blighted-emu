@@ -344,12 +344,13 @@ impl HuntReport {
         let errors = self.bots.iter().filter(|bot| bot.error.is_some()).count();
         format!(
             "bots {}, failed to start {errors}, hits {}, deaths {}, lived again {}, mob deaths \
-             {}, worst bundle gap {} ms, ticks within one tick {:.4}",
+             {}, moves after a death {}, worst bundle gap {} ms, ticks within one tick {:.4}",
             self.bots.len(),
             sum(|bot| bot.hits_dealt),
             sum(|bot| bot.deaths),
             sum(|bot| bot.lived_again),
             self.sims.mob_deaths,
+            self.sims.dead_moves,
             worst_gap.unwrap_or_default().as_millis(),
             ratio(self.sims.ticks_within_tick, self.sims.ticks),
         )

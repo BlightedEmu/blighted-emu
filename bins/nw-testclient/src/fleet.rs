@@ -12,9 +12,9 @@ use nw_reflect::LoginToken;
 use nw_sim_core::TICKS_PER_SECOND;
 use reqwest::Client;
 use sim::server::{
-    HANDOFF_MOVED, HANDOFF_REFUSED, HANDOFF_TIMEOUT, KIND_LABEL, METRIC_DEATHS,
+    DEAD_REASON, HANDOFF_MOVED, HANDOFF_REFUSED, HANDOFF_TIMEOUT, KIND_LABEL, METRIC_DEATHS,
     METRIC_HANDOFF_SECONDS, METRIC_HANDOFFS, METRIC_REFUSED_MOVES, METRIC_TICK_SECONDS, MOB_KIND,
-    ONE_TICK_SECONDS, RESULT_LABEL,
+    ONE_TICK_SECONDS, REASON_LABEL, RESULT_LABEL,
 };
 use tokio::task::JoinSet;
 
@@ -124,8 +124,11 @@ pub struct SimTotals {
     pub ticks_within_tick: f64,
     /// Every tick.
     pub ticks: f64,
-    /// Moves that a sim refused.
+    /// Moves of living players that a sim refused.
     pub refused_moves: f64,
+    /// Moves that arrived after the player's death: the client learns of a death only when its
+    /// 4299 arrives, so these are not faults.
+    pub dead_moves: f64,
     /// Mobs that died.
     pub mob_deaths: f64,
 }
@@ -135,6 +138,7 @@ impl SimTotals {
     pub fn of(scrape: &Scrape) -> Self {
         let result = |value| Some((RESULT_LABEL, value));
         let count = |histogram: &str| scrape.total(&format!("{histogram}{COUNT_SUFFIX}"), None);
+        let dead_moves = scrape.total(METRIC_REFUSED_MOVES, Some((REASON_LABEL, DEAD_REASON)));
         Self {
             moved: scrape.total(METRIC_HANDOFFS, result(HANDOFF_MOVED)),
             failed: scrape.total(METRIC_HANDOFFS, result(HANDOFF_REFUSED))
@@ -143,7 +147,8 @@ impl SimTotals {
             handoffs: count(METRIC_HANDOFF_SECONDS),
             ticks_within_tick: scrape.bucket(METRIC_TICK_SECONDS, ONE_TICK_SECONDS),
             ticks: count(METRIC_TICK_SECONDS),
-            refused_moves: scrape.total(METRIC_REFUSED_MOVES, None),
+            refused_moves: scrape.total(METRIC_REFUSED_MOVES, None) - dead_moves,
+            dead_moves,
             mob_deaths: scrape.total(METRIC_DEATHS, Some((KIND_LABEL, MOB_KIND))),
         }
     }
@@ -158,11 +163,13 @@ impl SimTotals {
             ticks_within_tick: self.ticks_within_tick - before.ticks_within_tick,
             ticks: self.ticks - before.ticks,
             refused_moves: self.refused_moves - before.refused_moves,
+            dead_moves: self.dead_moves - before.dead_moves,
             mob_deaths: self.mob_deaths - before.mob_deaths,
         }
     }
 
-    /// The checks of the sim metrics: ticks, refused moves, and every page read.
+    /// The checks of the sim metrics: ticks, refused moves of living players, and every page
+    /// read.
     pub fn checks(&self, unread_metrics: usize, metrics_urls: &[String]) -> [Check; 3] {
         [
             Check {
@@ -511,12 +518,17 @@ mod tests {
              {METRIC_HANDOFF_SECONDS}_bucket{{le=\"0.033\"}} 9\n\
              {METRIC_HANDOFF_SECONDS}_count 11\n\
              {METRIC_REFUSED_MOVES}{{reason=\"too_fast\"}} 2\n\
+             {METRIC_REFUSED_MOVES}{{reason=\"dead\"}} 4\n\
              {METRIC_DEATHS}{{{KIND_LABEL}=\"{MOB_KIND}\"}} 5\n\
              {METRIC_DEATHS}{{{KIND_LABEL}=\"player\"}} 3\n"
         );
         let totals = SimTotals::of(&Scrape::parse(&text));
         assert_eq!((totals.moved, totals.failed), (10.0, 1.0));
-        assert_eq!(totals.refused_moves, 2.0);
+        assert_eq!(
+            (totals.refused_moves, totals.dead_moves),
+            (2.0, 4.0),
+            "a move that arrives after the death is not a refused live move"
+        );
         assert_eq!((totals.handoffs_within_tick, totals.handoffs), (9.0, 11.0));
         assert_eq!(totals.mob_deaths, 5.0, "mob deaths only");
         assert_eq!(totals.since(&totals), SimTotals::default());

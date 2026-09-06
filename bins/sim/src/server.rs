@@ -124,7 +124,7 @@ const PLAYER_KIND: &str = "player";
 /// A mob's death.
 pub const MOB_KIND: &str = "mob";
 /// Reason of a move of a dead player.
-const DEAD_REASON: &str = "dead";
+pub const DEAD_REASON: &str = "dead";
 /// Metric: owned spawns without a mob type or level row.
 pub const METRIC_MOBS_UNSPAWNED: &str = "sim_mobs_unspawned_total";
 /// Metric: mob brain steps.
@@ -135,7 +135,8 @@ pub const METRIC_MOB_WAKE_SCANS: &str = "sim_mob_wake_scans_total";
 pub const METRIC_MOB_TICK_SECONDS: &str = "sim_mob_tick_seconds";
 /// Label of a mob's state.
 const STATE_LABEL: &str = "state";
-const REASON_LABEL: &str = "reason";
+/// Label of a refused move's reason.
+pub const REASON_LABEL: &str = "reason";
 /// Label of the handoff result.
 pub const RESULT_LABEL: &str = "result";
 const ADMITTED: &str = "admitted";
