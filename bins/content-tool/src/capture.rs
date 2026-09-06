@@ -16,7 +16,7 @@ use nw_carrier::{
 };
 use nw_messages::{
     BodyCodec, BundlePayload, ClientInputMsg, MessageError, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
-    ReplicatedStateBundle, ServerMessage,
+    REQUEST_RESPAWN_TYPE_INDEX, ReplicatedStateBundle, RequestRespawnMsg, ServerMessage,
 };
 use nw_reflect::{
     Envelope, REGISTRATION_RESPONSE_MSG_TYPE_INDEX, RegistrationResponseMsg, decode_client_message,
@@ -278,8 +278,8 @@ pub struct CaptureReport {
     pub inline_uuid_messages: u64,
     /// Registration responses.
     pub registration: RegistrationSummary,
-    /// Bodies of the M4 types (server messages and the client input, type 1589) that decode and
-    /// encode to the same bytes, by type index.
+    /// Bodies of the M4 and M6-B types (server messages, the client input 1589 and the respawn
+    /// request 1938) that decode and encode to the same bytes, by type index.
     pub bodies: BTreeMap<u64, u64>,
     /// Bundle members with a reader that decode and encode to the same bytes, by class index.
     pub members: BTreeMap<u64, u64>,
@@ -409,6 +409,11 @@ impl CaptureReport {
                 .map_err(|error| format!("type {index}: {error}"))?;
             self.same_bytes(index, input.encode(), &envelope.body)?;
         }
+        if record.direction == CLIENT_TO_SERVER && index == REQUEST_RESPAWN_TYPE_INDEX {
+            let request = RequestRespawnMsg::decode(&envelope.body)
+                .map_err(|error| format!("type {index}: {error}"))?;
+            self.same_bytes(index, request.encode(), &envelope.body)?;
+        }
         Ok(())
     }
 
@@ -466,10 +471,13 @@ mod tests {
     };
 
     use nw_messages::{
-        BodyCodec, BundleGroup, BundleMember, BundlePayload, ClientInputMsg, InputPosition,
-        MemberState, POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState,
+        BodyCodec, BundleGroup, BundleMember, BundlePayload, ClientInputMsg,
+        DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, DamageDealtMsg, DeathRecapMsg,
+        InputPosition, MemberState, ON_DAMAGE_TYPE_INDEX, OnDamageMsg,
+        POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState,
         RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REPLICATED_STATE_BUNDLE_TYPE_INDEX,
-        ReplicatedStateBundle, WorldPosition,
+        REQUEST_RESPAWN_TYPE_INDEX, ReplicatedStateBundle, RequestRespawnMsg, VITALS_TYPE_INDEX,
+        WorldPosition, Writer,
     };
 
     use super::*;
@@ -713,6 +721,110 @@ mod tests {
         assert_eq!(report.failures.len(), 1);
         assert!(report.failures[0].reason.contains("type 335"));
         assert!(report.bodies.is_empty());
+    }
+
+    /// One server datagram that carries `envelopes`, reliable, in order.
+    fn server_datagram(envelopes: &[Vec<u8>]) -> Vec<u8> {
+        let slices: Vec<&[u8]> = envelopes.iter().map(Vec::as_slice).collect();
+        reliable_datagram(encode_server_messages(&slices).expect("server"))
+    }
+
+    #[test]
+    fn new_messages_are_byte_checked() {
+        const TARGET: u64 = (1 << 34) + 3;
+        const ATTACKER: u64 = 7;
+        let envelopes = [
+            envelope(
+                DAMAGE_DEALT_TYPE_INDEX,
+                DamageDealtMsg::hit(TARGET, ATTACKER, 42.0)
+                    .encode()
+                    .expect("2071"),
+            ),
+            envelope(
+                ON_DAMAGE_TYPE_INDEX,
+                OnDamageMsg::hit(ATTACKER, TARGET, 9.0)
+                    .encode()
+                    .expect("3601"),
+            ),
+            envelope(
+                DEATH_RECAP_TYPE_INDEX,
+                DeathRecapMsg::of(ATTACKER, TARGET).encode().expect("4299"),
+            ),
+        ];
+        let mut report = CaptureReport::default();
+        report
+            .check_ledger(
+                Path::new("combat"),
+                &record(SERVER_TO_CLIENT, &server_datagram(&envelopes)),
+            )
+            .expect("check");
+        for index in [
+            DAMAGE_DEALT_TYPE_INDEX,
+            ON_DAMAGE_TYPE_INDEX,
+            DEATH_RECAP_TYPE_INDEX,
+        ] {
+            assert_eq!(report.bodies.get(&index), Some(&1), "type {index}");
+        }
+        let respawn = RequestRespawnMsg {
+            head_a: ATTACKER,
+            head_b: 0,
+            flag: false,
+            payload: vec![1; 22],
+        };
+        let request = envelope(REQUEST_RESPAWN_TYPE_INDEX, respawn.encode().expect("1938"));
+        let frame = Frame {
+            channel: 0,
+            reliable: true,
+            connecting: false,
+            chunks_remaining: None,
+            sequence: RELIABLE_START,
+            reliable_sequence: RELIABLE_START,
+            payload: encode_client_message(&ZERO_SESSION, &request).expect("client"),
+        };
+        let datagram =
+            encode_datagram(DATAGRAM_SEQUENCE, &encode_frames(&[frame]).expect("frames"));
+        report
+            .check_ledger(Path::new("respawn"), &record(CLIENT_TO_SERVER, &datagram))
+            .expect("check");
+        assert_eq!(report.bodies.get(&REQUEST_RESPAWN_TYPE_INDEX), Some(&1));
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+    }
+
+    #[test]
+    fn a_vitals_member_on_another_slot_is_skipped_not_failed() {
+        let mut payload = Writer::new();
+        payload
+            .prefixed(1)
+            .expect("leading")
+            .u8(1)
+            .prefixed(2)
+            .expect("entity");
+        payload.bytes(
+            &nw_reflect::encode_type_id(&TypeId::FileSlot(VITALS_TYPE_INDEX)).expect("class"),
+        );
+        payload.u8(0b10).u8(0);
+        let bundle = ReplicatedStateBundle {
+            leading: None,
+            byte_3: 0,
+            byte_4: 0,
+            flag_5: false,
+            index_block: None,
+            payload: payload.finish(),
+        }
+        .encode()
+        .expect("bundle");
+        let mut report = CaptureReport::default();
+        report
+            .check_ledger(
+                Path::new("vitals"),
+                &record(
+                    SERVER_TO_CLIENT,
+                    &server_datagram(&[envelope(REPLICATED_STATE_BUNDLE_TYPE_INDEX, bundle)]),
+                ),
+            )
+            .expect("check");
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.complete_payloads, 0);
     }
 
     #[test]

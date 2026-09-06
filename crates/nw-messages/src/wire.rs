@@ -46,6 +46,15 @@ pub enum MessageError {
         /// The limit.
         limit: u64,
     },
+    /// A member body uses a slot whose children are not sized in the notes; the walk cannot pass
+    /// it (a bundle reader treats it like a class without a reader).
+    #[error("{field}: slots {slots:#04x} other than 0 are not sized")]
+    OtherSlot {
+        /// The member class.
+        field: &'static str,
+        /// The slot byte.
+        slots: u8,
+    },
     /// Bits that the RE notes do not describe are set.
     #[error("{field}: unknown bits {bits:#04x}")]
     UnknownBits {

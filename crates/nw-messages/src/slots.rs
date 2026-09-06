@@ -28,10 +28,7 @@ pub(crate) fn read_slot_0(
 ) -> Result<Option<u16>, MessageError> {
     let slot = reader.u8()?;
     if slot & !SLOT_0 != 0 {
-        return Err(MessageError::UnknownBits {
-            field,
-            bits: slot & !SLOT_0,
-        });
+        return Err(MessageError::OtherSlot { field, slots: slot });
     }
     if slot == 0 {
         return Ok(None);

@@ -196,7 +196,12 @@ impl BundlePayload {
 fn read_member(reader: &mut Reader<'_>) -> Result<BundleMember, MessageError> {
     let u64_at_0 = reader.prefixed()?;
     let class = read_class(reader)?;
-    let state = MemberState::read(class, reader)?;
+    // A slot whose children are not sized cannot be passed: the walk stops there, as at a class
+    // without a reader.
+    let state = MemberState::read(class, reader).map_err(|error| match error {
+        MessageError::OtherSlot { .. } => MessageError::UnknownMemberClass { class },
+        other => other,
+    })?;
     Ok(BundleMember { u64_at_0, state })
 }
 
@@ -213,7 +218,7 @@ mod tests {
     use super::*;
     use crate::gde::{AssetId, GDE_ID_LEN, GdeMetadataReplicatedState};
     use crate::position::WorldPosition;
-    use crate::vitals::VitalsSlot0;
+    use crate::vitals::{VITALS_TYPE_INDEX, VitalsSlot0};
     use crate::wire::RAW_ID_LEN;
 
     const ENTITY: u64 = 300;
@@ -275,6 +280,23 @@ mod tests {
         };
         let bytes = mixed.encode().expect("encode");
         assert_eq!(BundlePayload::decode(&bytes), Ok(mixed));
+    }
+
+    #[test]
+    fn a_vitals_member_on_another_slot_stops_the_walk() {
+        let mut bytes = Writer::new();
+        bytes.prefixed(LEADING).expect("leading").u8(2);
+        let first = position_member(1.0).encode().expect("member");
+        bytes.bytes(&first);
+        bytes.prefixed(ENTITY).expect("entity");
+        bytes.bytes(
+            &nw_reflect::encode_type_id(&TypeId::FileSlot(VITALS_TYPE_INDEX)).expect("class"),
+        );
+        bytes.u8(0b10).u8(0);
+        let payload = bytes.finish();
+        let known = BundlePayload::decode_known(&payload).expect("known");
+        assert_eq!(known.members.len(), 1);
+        assert_eq!(known.stopped_at, Some(TypeId::FileSlot(VITALS_TYPE_INDEX)));
     }
 
     #[test]
