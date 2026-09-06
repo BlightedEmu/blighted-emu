@@ -36,6 +36,9 @@ pub enum AttackRefusal {
     /// Attacks come faster than the weapon allows (parent spec section 9: attack rate).
     #[error("faster than the weapon allows")]
     TooFast,
+    /// No living, not returning mob is in reach (M6-B spec section 6.2).
+    #[error("no target in reach")]
+    NoTarget,
 }
 
 impl AttackRefusal {
@@ -50,6 +53,7 @@ impl AttackRefusal {
             Self::NotWeaponAttack => "not_weapon_attack",
             Self::OutOfReach => "out_of_reach",
             Self::TooFast => "too_fast",
+            Self::NoTarget => "no_target",
         }
     }
 }

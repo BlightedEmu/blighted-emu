@@ -365,6 +365,11 @@ impl CombatData {
         &self.weapon
     }
 
+    /// The first of the config's weapon attacks.
+    pub fn first_attack(&self) -> Option<&AttackRow> {
+        self.attacks.first()
+    }
+
     /// The weapon attack `damage_id`, if it is one of the config's.
     pub fn attack(&self, damage_id: &str) -> Option<&AttackRow> {
         self.attacks.iter().find(|row| row.damage_id == damage_id)
@@ -457,6 +462,17 @@ mod tests {
 
     fn data() -> CombatData {
         CombatData::build(source(), &rows()).expect("data")
+    }
+
+    #[test]
+    fn the_first_attack_is_the_first_config_id() {
+        let mut heavy_first = rows();
+        heavy_first.attack_damage_ids.reverse();
+        let data = CombatData::build(source(), &heavy_first).expect("data");
+        assert_eq!(
+            data.first_attack().map(|row| row.damage_id.as_str()),
+            Some(HEAVY)
+        );
     }
 
     #[test]

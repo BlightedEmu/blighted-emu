@@ -20,14 +20,14 @@ use nw_bus::{
 };
 use nw_common::time::unix_ms;
 use nw_db::{PgPool, SaveOutcome, SavedPosition, save_character_position};
-use nw_messages::{BodyCodec, ClientInputMsg, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX};
+use nw_messages::{BodyCodec, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX};
 use nw_reflect::Envelope;
 use nw_sim_core::{Ground, GroundCheck, Position, TickClock};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
-use crate::combat::{AttackOutcome, CombatSettings, RemoteHit};
+use crate::combat::{AttackOutcome, AttackRefusal, CombatSettings, RemoteHit};
 use crate::forward::{Forward, ForwardTable};
 use crate::gateways::GatewayTracker;
 use crate::login::WorldIds;
@@ -100,7 +100,7 @@ pub const METRIC_MOVES_WITHOUT_GROUND: &str = "sim_moves_without_ground_total";
 pub const METRIC_DROPPED_OUTPUTS: &str = "sim_dropped_outputs_total";
 /// Metric: mobs by `state` (M6-A spec section 10).
 pub const METRIC_MOBS: &str = "sim_mobs";
-/// Metric: attacks by `result`.
+/// Metric: attacks of players and mobs by `result`: an outcome or a refusal reason.
 pub const METRIC_ATTACKS: &str = "sim_attacks_total";
 /// Metric: hits from other sims by `result`.
 pub const METRIC_REMOTE_HITS: &str = "sim_remote_hits_total";
@@ -441,8 +441,9 @@ impl Loop {
     }
 
     /// Reads one client message. Type 1589 moves the player to the position of its last record
-    /// that has one (M4 spec section 5.3); every other type is counted and ignored. Bad bytes
-    /// are counted and never close the connection.
+    /// that has one (M4 spec section 5.3), then attacks once per rising edge of its attack bits
+    /// (M6-B spec section 6); every other type is counted and ignored. Bad bytes are counted and
+    /// never close the connection.
     fn client_message(&mut self, connection: &ConnectionRef, bytes: &[u8]) {
         let Ok(envelope) = Envelope::decode(bytes) else {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
@@ -456,9 +457,17 @@ impl Loop {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
             return;
         };
-        let Some(position) = input.last_position() else {
-            return;
-        };
+        if let Some(position) = input.last_position() {
+            self.move_player(connection, position);
+        }
+        let now_ms = self.now_ms();
+        for result in self.world.attack_input(connection, &input.records, now_ms) {
+            self.attack_result(result);
+        }
+    }
+
+    /// Moves the player of `connection` to `position` and counts a refusal.
+    fn move_player(&mut self, connection: &ConnectionRef, position: InputPosition) {
         let next = Position {
             x: position.x,
             y: position.y,
@@ -530,6 +539,18 @@ impl Loop {
         );
         let result = if applied.is_some() { APPLIED } else { DROPPED };
         metrics::counter!(METRIC_REMOTE_HITS, RESULT_LABEL => result).increment(1);
+    }
+
+    /// Counts an attack of a player or a mob; a hit on a target of another sim goes there.
+    fn attack_result(&self, result: Result<AttackOutcome, AttackRefusal>) {
+        let label = match &result {
+            Ok(outcome) => outcome.label(),
+            Err(refusal) => refusal.reason(),
+        };
+        metrics::counter!(METRIC_ATTACKS, RESULT_LABEL => label).increment(1);
+        if let Ok(AttackOutcome::Remote(remote)) = result {
+            self.send_hit(remote);
+        }
     }
 
     /// Sends a hit to the sim that owns its target.
@@ -623,10 +644,7 @@ impl Loop {
         metrics::counter!(METRIC_MOB_BRAIN_RUNS).absolute(brain_runs);
         metrics::counter!(METRIC_MOB_WAKE_SCANS).absolute(wake_scans);
         for hit in output.mob_hits {
-            metrics::counter!(METRIC_ATTACKS, RESULT_LABEL => hit.label()).increment(1);
-            if let AttackOutcome::Remote(remote) = hit {
-                self.send_hit(remote);
-            }
+            self.attack_result(Ok(hit));
         }
         for death in &output.deaths {
             metrics::counter!(METRIC_DEATHS, KIND_LABEL => PLAYER_KIND).increment(1);

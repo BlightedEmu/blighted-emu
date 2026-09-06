@@ -561,6 +561,16 @@ impl SimWorld {
         })
     }
 
+    /// Every awake mob of this sim and every mob ghost: entity number, position and state. An
+    /// asleep mob has no player within its wake radius, so it is in no player's view or reach.
+    fn mob_states(&self) -> impl Iterator<Item = (u64, Position, MobGhost)> + '_ {
+        self.ghosts
+            .values()
+            .flat_map(|ghosts| &ghosts.entities)
+            .filter_map(|ghost| ghost.mob.map(|state| (ghost.entity, ghost.position, state)))
+            .chain(self.mobs.awake_states())
+    }
+
     /// What the cell tables did to the mobs since the last call.
     pub fn take_mob_changes(&mut self) -> MobChanges {
         std::mem::take(&mut self.mob_changes)
@@ -739,24 +749,15 @@ impl SimWorld {
         let own: HashSet<u64> = everyone.iter().map(|(number, _)| *number).collect();
         let mut cards: HashMap<u64, MobCard> = HashMap::new();
         for ghost in self.ghosts.values().flat_map(|ghosts| &ghosts.entities) {
-            if own.contains(&ghost.entity) {
-                continue;
-            }
-            match ghost.mob {
-                None => everyone.push((ghost.entity, ghost.position)),
-                Some(state) if state.health > 0 => {
-                    everyone.push((ghost.entity, ghost.position));
-                    cards.insert(ghost.entity, card_of(ghost.entity, ghost.position, state));
-                }
-                // A dead mob is not sent (M6-B spec section 5.6).
-                Some(_) => {}
+            if ghost.mob.is_none() && !own.contains(&ghost.entity) {
+                everyone.push((ghost.entity, ghost.position));
             }
         }
-        for (entity, position, state) in self.mobs.awake_states() {
-            if state.health > 0 {
-                everyone.push((entity, position));
-                cards.insert(entity, card_of(entity, position, state));
-            }
+        // A dead mob is not sent (M6-B spec section 5.6).
+        for (entity, position, state) in self.mob_states().filter(|(_, _, state)| state.health > 0)
+        {
+            everyone.push((entity, position));
+            cards.insert(entity, card_of(entity, position, state));
         }
         // The radius is checked at start to be a finite number above 0.
         let Some(mut grid) = SpatialGrid::new(self.settings.interest_radius_m) else {

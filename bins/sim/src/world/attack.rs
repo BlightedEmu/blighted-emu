@@ -6,10 +6,14 @@
 //! mob attacks and hits from other sims use too. A player at 0 health is dead: it cannot move or
 //! attack, every mob forgets it, its character is saved at once, and after the respawn time it
 //! lives again with full health where it died.
+//!
+//! [`SimWorld::attack_input`] turns the attack bits of a client's input records into attacks on
+//! the nearest mob (M6-B spec section 6).
 
 use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use nw_bus::{BusId, ConnectionRef, Hit};
+use nw_messages::InputRecord;
 use nw_sim_core::{Damage, Health, MobState, PlayerAttack, died, hurt, mob_hit, player_hit};
 
 use super::{Body, Player, Position, SimWorld};
@@ -22,6 +26,8 @@ pub(super) struct Vitals {
     pub(super) health: Health,
     pub(super) dead_since_ms: Option<u64>,
     last_attack_ms: Option<u64>,
+    /// The attack bits of the last input record.
+    attack_bits: u8,
 }
 
 impl Vitals {
@@ -30,6 +36,7 @@ impl Vitals {
             health,
             dead_since_ms: None,
             last_attack_ms: None,
+            attack_bits: 0,
         }
     }
 }
@@ -127,6 +134,83 @@ impl SimWorld {
                 self.remote_hit(owner, target, number, hit.amount, threat),
             )),
         }
+    }
+
+    /// One attack per rising edge of the attack bits in `records`, in record order: a record that
+    /// sets any attack bit the record before it did not set (M6-B spec section 6.1). The bits of
+    /// the last record carry over to the next message. Nothing for a connection without a player.
+    pub fn attack_input(
+        &mut self,
+        connection: &ConnectionRef,
+        records: &[InputRecord],
+        now_ms: u64,
+    ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
+        let Some(mut vitals) = self
+            .by_connection
+            .get(connection)
+            .copied()
+            .and_then(|entity| self.world.get_mut::<Vitals>(entity))
+        else {
+            return Vec::new();
+        };
+        let mut edges = 0;
+        for bits in records.iter().map(InputRecord::attack_bits) {
+            if bits & !vitals.attack_bits != 0 {
+                edges += 1;
+            }
+            vitals.attack_bits = bits;
+        }
+        (0..edges)
+            .map(|_| self.attack_nearest(connection, now_ms))
+            .collect()
+    }
+
+    /// The player of `attacker` attacks the nearest living, not returning mob in reach, here or
+    /// a ghost, with the first weapon attack (M6-B spec sections 6.2 and 6.3).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AttackRefusal::NoTarget`] without such a mob, or the refusal of
+    /// [`SimWorld::attack`].
+    pub fn attack_nearest(
+        &mut self,
+        attacker: &ConnectionRef,
+        now_ms: u64,
+    ) -> Result<AttackOutcome, AttackRefusal> {
+        let entity = *self
+            .by_connection
+            .get(attacker)
+            .ok_or(AttackRefusal::NotInWorld)?;
+        if self
+            .world
+            .get::<Vitals>(entity)
+            .is_some_and(|vitals| vitals.health.is_dead())
+        {
+            return Err(AttackRefusal::Dead);
+        }
+        let position = self
+            .world
+            .get::<Body>(entity)
+            .ok_or(AttackRefusal::NotInWorld)?
+            .motion
+            .position();
+        let reach_m = self.combat.brain.attack_reach_m + self.combat.reach_margin_m;
+        let target = self
+            .mob_states()
+            .filter(|(_, _, state)| state.health > 0 && !state.returning)
+            .map(|(mob, at, _)| (mob, at.horizontal_distance(position)))
+            .filter(|(_, distance)| *distance <= reach_m)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(mob, _)| mob)
+            .ok_or(AttackRefusal::NoTarget)?;
+        let damage_id = self
+            .combat
+            .data
+            .first_attack()
+            .ok_or(AttackRefusal::NotWeaponAttack)?
+            .damage_id
+            .clone();
+        self.attack(attacker, target, &damage_id, now_ms)
     }
 
     /// What an attack sees of the mob `target`: here, or a ghost of its owner.
@@ -314,6 +398,121 @@ mod tests {
 
     fn mob_health(world: &mut SimWorld) -> Health {
         world.mobs.get_mut(mob()).expect("mob").health
+    }
+
+    /// Mask bits 9 and 10, the first two attack bits.
+    const FIRST_ATTACK_BIT: u32 = 1 << 9;
+    const SECOND_ATTACK_BIT: u32 = 1 << 10;
+
+    fn record(mask: u32) -> InputRecord {
+        InputRecord {
+            mask,
+            ..InputRecord::default()
+        }
+    }
+
+    /// A fight after one tick, which wakes the mob.
+    fn awake_fight() -> SimWorld {
+        let mut world = fight();
+        tick(&mut world, NOW);
+        world
+    }
+
+    #[test]
+    fn a_rising_edge_attacks_once() {
+        let mut world = awake_fight();
+        let results = world.attack_input(&connection(1), &[record(FIRST_ATTACK_BIT)], NOW);
+        assert_eq!(
+            results,
+            vec![Ok(AttackOutcome::Hit {
+                target: mob(),
+                amount: SWORD_HIT
+            })]
+        );
+    }
+
+    #[test]
+    fn a_held_bit_does_not_attack_again() {
+        let mut world = awake_fight();
+        let held = [record(FIRST_ATTACK_BIT)];
+        assert_eq!(world.attack_input(&connection(1), &held, NOW).len(), 1);
+        assert!(
+            world
+                .attack_input(&connection(1), &held, NOW + INTERVAL_MS)
+                .is_empty()
+        );
+        let again = [record(0), record(FIRST_ATTACK_BIT)];
+        assert_eq!(
+            world
+                .attack_input(&connection(1), &again, NOW + 2 * INTERVAL_MS)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn edges_inside_one_message_count_once_each() {
+        let mut world = awake_fight();
+        let records = [
+            record(FIRST_ATTACK_BIT | SECOND_ATTACK_BIT),
+            record(0),
+            record(FIRST_ATTACK_BIT),
+            record(FIRST_ATTACK_BIT),
+        ];
+        let results = world.attack_input(&connection(1), &records, NOW);
+        assert_eq!(results.len(), 2, "{results:?}");
+        assert!(results[0].is_ok());
+        assert_eq!(results[1], Err(AttackRefusal::TooFast));
+    }
+
+    #[test]
+    fn no_mob_in_reach_is_no_target() {
+        let mut world = awake_fight();
+        join(&mut world, 2, MOB_X + 10.0);
+        assert_eq!(
+            world.attack_nearest(&connection(2), NOW),
+            Err(AttackRefusal::NoTarget)
+        );
+        assert_eq!(
+            world.attack_nearest(&connection(7), NOW),
+            Err(AttackRefusal::NotInWorld)
+        );
+    }
+
+    #[test]
+    fn the_nearest_mob_is_the_target() {
+        let mut world = world_with_spawns(vec![test_spawn(MOB_X), test_spawn(MOB_X + 3.0)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, MOB_X + 2.0);
+        tick(&mut world, NOW);
+        assert!(matches!(
+            world.attack_nearest(&connection(1), NOW),
+            Ok(AttackOutcome::Hit { target, .. }) if target == mob_entity(1)
+        ));
+    }
+
+    #[test]
+    fn a_ghost_mob_in_reach_is_a_target() {
+        let mut world = border();
+        world.set_ghosts(
+            &sim_b(),
+            vec![mob_ghost(BORDER_X + 1.0, MOB_HEALTH, true)],
+            NOW,
+        );
+        assert_eq!(
+            world.attack_nearest(&connection(1), NOW),
+            Err(AttackRefusal::NoTarget),
+            "a returning mob is no target"
+        );
+        world.set_ghosts(
+            &sim_b(),
+            vec![mob_ghost(BORDER_X + 1.0, MOB_HEALTH, false)],
+            NOW,
+        );
+        let Ok(AttackOutcome::Remote(remote)) = world.attack_nearest(&connection(1), NOW) else {
+            panic!("a remote hit");
+        };
+        assert_eq!(remote.hit.target, mob());
     }
 
     #[test]
