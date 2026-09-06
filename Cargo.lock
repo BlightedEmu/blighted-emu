@@ -873,6 +873,7 @@ dependencies = [
  "nw-messages",
  "nw-oodle",
  "nw-reflect",
+ "nw-sim-core",
  "nw-world",
  "prettyplease",
  "proc-macro2",
