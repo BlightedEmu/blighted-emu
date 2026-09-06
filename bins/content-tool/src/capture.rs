@@ -791,6 +791,36 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_byte_is_a_difference() {
+        /// The item count of a 2071: after two u64, 16 bytes, a u64, two u32 and 2 bytes.
+        const COUNT_AT: usize = 50;
+        /// The count 1 in the two-byte wide form: it decodes, but encodes to one byte.
+        const LONG_ONE: [u8; 2] = [0x81, 0x00];
+        let mut body = DamageDealtMsg::hit((1 << 34) + 3, 7, 42.0)
+            .encode()
+            .expect("2071");
+        assert_eq!(body[COUNT_AT], 1, "one item");
+        body.splice(COUNT_AT..=COUNT_AT, LONG_ONE);
+        assert!(
+            DamageDealtMsg::decode(&body).is_ok(),
+            "a form the reader takes"
+        );
+        let mut report = CaptureReport::default();
+        report
+            .check_ledger(
+                Path::new("combat"),
+                &record(
+                    SERVER_TO_CLIENT,
+                    &server_datagram(&[envelope(DAMAGE_DEALT_TYPE_INDEX, body)]),
+                ),
+            )
+            .expect("check");
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert!(report.failures[0].reason.contains("differs"));
+        assert_eq!(report.bodies.get(&DAMAGE_DEALT_TYPE_INDEX), None);
+    }
+
+    #[test]
     fn a_vitals_member_on_another_slot_is_skipped_not_failed() {
         let mut payload = Writer::new();
         payload
