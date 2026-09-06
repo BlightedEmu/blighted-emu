@@ -55,6 +55,7 @@ just infra-test
 | `just bundle` | Builds the content bundle into `local-data/content/` |
 | `just world` | Builds one world file per level into `local-data/content/` (run `just bundle` first) |
 | `just capture-check` | Decodes every capture ledger under `local-data/captures/` and prints counts |
+| `just map-tiles` | Writes the open world map tiles into `local-data/content/map/` from your install |
 
 ## Content data
 
@@ -275,6 +276,17 @@ Checks:
 - `content-tool combat-check` (local data, see Capture check): every spawn finds its rows, and our mob health is compared with nwdb.info.
 - The fight stress test: `cargo test --release -p sim fight_stress -- --ignored --nocapture` (1,000 players each fighting one mob in one `sim`; tick p99 under 33 ms).
 - `nw-testclient hunt` runs `[hunt] bots` bots (`--bots <n>` sets another count) with the accounts, walking speed and ground of `[swarm]`. Each bot walks to the nearest mob it sees (with none in view, to its own point on an 8 m ring around entry `n` modulo the count of `starts_m`; at most 30 bots per start, because each player sees its 47 nearest entities, bots and mobs together), stops within `reach_m`, and attacks every `attack_interval_ms`. After a 4299 it waits `respawn_wait_ms`, sends a 1938, and steps 1 m to show that it lives again. It checks that every bot registered, was not closed, hit a mob (a 2071), lived again after each request, and got its bundles with no gap above `max_bundle_gap_ms`; from the metrics of every `sim` in `metrics_urls`, that at least one mob died per 10 bots, that no move of a living player was refused (a move that arrives after a death, before the bot has its 4299, is counted apart), that 99 % of the ticks took at most one tick, and that every metrics page was read.
+
+## Admin tools
+
+### World map tiles
+
+`content-tool map-tiles` reads the world map tiles of a level from your install (`lyshineui/worldtiles/<level>/map_l{L}_y{Y}_x{X}.dds`, default level `newworld_vitaeeterna`), decodes them (BC1 and BC3 in the pinned client), and writes `local-data/content/map/<level>/<L>/<row>_<column>.png` with an index `tiles.json`. Level 1 tiles are 256 m; each level above halves the grid (8 levels). A tile row counts from the south edge (`--y-index south-up`, the default): joined that way, the tiles of one level form the whole continent. The Oodle decoder cannot read 2 of the 3,031 tiles of the pinned client; the tool lists them and leaves them out. The tiles are game data: they stay in git-ignored `local-data/`, and `scripts/no-game-data.sh` refuses `*.dds` files.
+
+```bash
+export NW_GAME_DIR="/path/to/steamapps/common/New World"
+just map-tiles
+```
 
 ## Rules for contributors
 

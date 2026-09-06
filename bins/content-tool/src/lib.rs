@@ -7,6 +7,7 @@ pub mod capture;
 pub mod codegen;
 pub mod combat;
 pub mod error;
+pub mod map_tiles;
 pub mod source;
 pub mod world;
 
@@ -24,6 +25,7 @@ mod local_data_tests {
 
     use crate::build::{default_bundle_path, run_build};
     use crate::codegen::run_codegen;
+    use crate::map_tiles::{YIndex, parse_tile_name, run_map_tiles};
     use crate::source::{GameSource, SourceError};
     use crate::world::{LEVELS_PREFIX, run_world};
     use nw_content::client_build::load_client_build;
@@ -38,6 +40,13 @@ mod local_data_tests {
     /// Largest absolute median of (capital z - ground height) in the open world.
     const MAX_MEDIAN_HEIGHT_ERROR_METRES: f32 = 0.01;
 
+    /// World map tile levels of the open world.
+    const MAP_TILE_LEVELS: usize = 8;
+    /// Level 1 map tiles of the open world, readable or not.
+    const LEVEL_1_MAP_TILES: u64 = 2_156;
+    /// Highest level 1 tile index: 56 tiles of 256 m over 14,336 m.
+    const LAST_LEVEL_1_INDEX: u16 = 55;
+
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
     }
@@ -51,6 +60,52 @@ mod local_data_tests {
                 (name, std::fs::read_to_string(&path).unwrap())
             })
             .collect()
+    }
+
+    #[test]
+    fn the_install_has_level_1_tiles_of_256_m() {
+        let source = GameSource::open(&game_dir()).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let report = run_map_tiles(
+            &source,
+            PINNED_OPEN_WORLD_LEVEL,
+            out.path(),
+            YIndex::SouthUp,
+            true,
+        )
+        .unwrap();
+        assert_eq!(report.per_level.len(), MAP_TILE_LEVELS);
+        assert!(
+            report
+                .formats
+                .keys()
+                .all(|format| format == "Bc1" || format == "Bc3"),
+            "{:?}",
+            report.formats
+        );
+        let unreadable_level_1 = report
+            .unreadable
+            .iter()
+            .filter(|(path, _)| {
+                parse_tile_name(path, PINNED_OPEN_WORLD_LEVEL).is_some_and(|name| name.level == 1)
+            })
+            .count() as u64;
+        assert_eq!(report.per_level[&1] + unreadable_level_1, LEVEL_1_MAP_TILES);
+        let mut last = 0;
+        source
+            .for_each_entry_read(
+                |path| {
+                    parse_tile_name(path, PINNED_OPEN_WORLD_LEVEL)
+                        .is_some_and(|name| name.level == 1)
+                },
+                |path, _| {
+                    let name = parse_tile_name(path, PINNED_OPEN_WORLD_LEVEL).unwrap();
+                    last = last.max(name.x).max(name.y);
+                    Ok::<(), SourceError>(())
+                },
+            )
+            .unwrap();
+        assert_eq!(last, LAST_LEVEL_1_INDEX);
     }
 
     #[test]

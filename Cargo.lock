@@ -375,6 +375,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bcdec_rs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f09c37bc0e9f0924b7dae9988265ef3c76c88538f41a3b06caf4bed07cee5226"
+
+[[package]]
 name = "bevy_ecs"
 version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -876,6 +882,7 @@ dependencies = [
  "nw-reflect",
  "nw-sim-core",
  "nw-world",
+ "png",
  "prettyplease",
  "proc-macro2",
  "quote",
@@ -2987,6 +2994,7 @@ dependencies = [
 name = "nw-formats"
 version = "0.1.0"
 dependencies = [
+ "bcdec_rs",
  "crc32fast",
  "flate2",
  "quick-xml 0.42.0",

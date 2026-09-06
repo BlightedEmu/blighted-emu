@@ -11,6 +11,7 @@ use content_tool::capture::CaptureReport;
 use content_tool::codegen::run_codegen;
 use content_tool::combat::{CombatCheck, DEFAULT_LEVEL, DEFAULT_NWDB_DIR, check, read_nwdb};
 use content_tool::error::ToolError;
+use content_tool::map_tiles::{DEFAULT_MAP_DIR, MapTilesReport, YIndex, run_map_tiles};
 use content_tool::source::GameSource;
 use content_tool::world::{LevelReport, UnmatchedIds, run_world, world_totals};
 use nw_capture::{CLIENT_TO_SERVER, CaptureError, SERVER_TO_CLIENT, TypeNames};
@@ -78,6 +79,21 @@ enum Command {
         /// Aeternum-World `Catalog/uuid_to_class.json`, to print class names next to type indexes.
         #[arg(long)]
         names: Option<PathBuf>,
+    },
+    /// Writes the world map tiles of a level as PNG files with a `tiles.json` index.
+    MapTiles {
+        /// Level whose map tiles are written.
+        #[arg(long, default_value = DEFAULT_LEVEL)]
+        level: String,
+        /// Output folder; the level gets a folder in it.
+        #[arg(long, default_value = DEFAULT_MAP_DIR)]
+        out_dir: PathBuf,
+        /// Which edge tile row 0 is (README, "Admin tools").
+        #[arg(long, value_enum, default_value_t = YIndex::SouthUp)]
+        y_index: YIndex,
+        /// Only count the pixel formats of the tiles; write nothing.
+        #[arg(long)]
+        formats_only: bool,
     },
     /// Checks that every vitals spawn finds its combat rows, and our mob health against nwdb.info.
     CombatCheck {
@@ -155,6 +171,21 @@ fn run(cli: Cli) -> Result<(), ToolError> {
                 });
             }
         }
+        Command::MapTiles {
+            level,
+            out_dir,
+            y_index,
+            formats_only,
+        } => {
+            let source = GameSource::open(&cli.game_dir)?;
+            print_map_tiles(&run_map_tiles(
+                &source,
+                &level,
+                &out_dir,
+                y_index,
+                formats_only,
+            )?);
+        }
         Command::CombatCheck {
             level,
             bundle,
@@ -174,6 +205,15 @@ fn run(cli: Cli) -> Result<(), ToolError> {
         }
     }
     Ok(())
+}
+
+fn print_map_tiles(report: &MapTilesReport) {
+    println!("map-tiles: tiles per level {:?}", report.per_level);
+    println!("formats: {:?}", report.formats);
+    println!("unreadable tiles (left out): {}", report.unreadable.len());
+    for (path, reason) in &report.unreadable {
+        println!("  {path}: {reason}");
+    }
 }
 
 fn print_combat(report: &CombatCheck, unreadable: usize) {

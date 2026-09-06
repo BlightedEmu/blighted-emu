@@ -59,6 +59,10 @@ bundle:
 world:
     cargo run -p content-tool -- world
 
+# Write the open world map tiles into local-data/content/map/ from your install (README "Admin tools").
+map-tiles:
+    cargo run --release -p content-tool -- map-tiles
+
 # Decode every capture ledger under local-data/captures (unpack the capture archives there first).
 capture-check:
     find -L local-data/captures -name ledger.bin -print0 | xargs -0 cargo run -p content-tool -- capture-check

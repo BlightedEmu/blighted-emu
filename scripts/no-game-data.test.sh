@@ -40,6 +40,8 @@ check_case "world file is refused" "$EXIT_FOUND" "out/world.bin" "NWWF....body"
 check_case "heightmap is refused" "$EXIT_FOUND" "data/region.heightmap" "II*"
 check_case "metadata file is refused" "$EXIT_FOUND" "data/region.metadata" "x"
 check_case "capitals file is refused" "$EXIT_FOUND" "data/a.capitals.json" "{}"
+check_case "texture file is refused" "$EXIT_FOUND" "map/tile.dds" "DDS "
+check_case "upper-case texture file is refused" "$EXIT_FOUND" "map/TILE.DDS" "DDS "
 
 # A folder that git does not track must fail the guard, not pass it.
 not_repo="$(mktemp -d)"

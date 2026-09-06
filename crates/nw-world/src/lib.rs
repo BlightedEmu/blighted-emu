@@ -4,6 +4,7 @@
 
 pub mod capitals;
 pub mod height;
+pub mod map_tiles;
 pub mod metadata;
 pub mod records;
 pub mod world_file;

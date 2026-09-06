@@ -94,6 +94,18 @@ impl GameSource {
         select: impl Fn(&str) -> bool,
         mut visit: impl FnMut(&str, Vec<u8>) -> Result<(), E>,
     ) -> Result<usize, E> {
+        self.for_each_entry_read(select, |path, bytes| {
+            visit(path, bytes.map_err(SourceError::from)?)
+        })
+    }
+
+    /// As [`GameSource::for_each_entry`], but an entry that cannot be read is passed to `visit`
+    /// as its error, and the walk goes on.
+    pub fn for_each_entry_read<E: From<SourceError>>(
+        &self,
+        select: impl Fn(&str) -> bool,
+        mut visit: impl FnMut(&str, Result<Vec<u8>, PakError>) -> Result<(), E>,
+    ) -> Result<usize, E> {
         let mut count = 0;
         for pak_path in &self.paks {
             let mut pak = PakArchive::open(pak_path).map_err(SourceError::from)?;
@@ -101,10 +113,7 @@ impl GameSource {
             entries.retain(|entry| select(&entry.path));
             entries.sort_by(|left, right| left.path.cmp(&right.path));
             for entry in &entries {
-                let bytes = pak
-                    .read(entry, &KrakenDecompressor)
-                    .map_err(SourceError::from)?;
-                visit(&entry.path, bytes)?;
+                visit(&entry.path, pak.read(entry, &KrakenDecompressor))?;
                 count += 1;
             }
         }

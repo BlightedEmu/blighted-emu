@@ -8,6 +8,7 @@ use nw_content::fill::FillError;
 
 use crate::codegen::CodegenError;
 use crate::combat::NwdbError;
+use crate::map_tiles::MapTilesError;
 use crate::source::SourceError;
 use crate::world::WorldBuildError;
 use nw_capture::CaptureError;
@@ -15,6 +16,9 @@ use nw_capture::CaptureError;
 /// Any error of a `content-tool` command.
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
+    /// A map tile cannot be decoded or written.
+    #[error(transparent)]
+    MapTiles(#[from] MapTilesError),
     /// Reading the install failed.
     #[error(transparent)]
     Source(#[from] SourceError),

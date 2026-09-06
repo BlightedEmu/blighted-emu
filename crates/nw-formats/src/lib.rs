@@ -4,6 +4,7 @@
 
 pub mod azcs;
 pub mod datasheet;
+pub mod dds;
 pub mod heightmap;
 pub mod loc;
 #[cfg(feature = "local-data")]

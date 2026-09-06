@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Fails when git tracks game files, content bundles or world files (M1 spec section 6,
+# Fails when git tracks game files, content bundles, world files or textures (M1 spec section 6,
 # M1b spec section 9).
 # Usage: no-game-data.sh [repository-folder]   (default: current folder)
 set -euo pipefail
@@ -20,7 +20,7 @@ git -C "$repo" ls-files -z > "$tracked_list"
 
 while IFS= read -r -d '' path; do
   case "$path" in
-    local-data/* | *.pak | *.datasheet | *.loc.xml | *.heightmap | *.metadata | *.capitals.json)
+    local-data/* | *.pak | *.datasheet | *.loc.xml | *.heightmap | *.metadata | *.capitals.json | *.[dD][dD][sS])
       violations+=("$path")
       continue
       ;;
