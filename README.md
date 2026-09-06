@@ -296,6 +296,8 @@ just map-tiles
 cargo run --release -p nw-admin -- serve
 ```
 
+For the capture viewer it lists every `ledger.bin` under `local-data/captures/` with the name of its `metadata.json` and, for an open-world session, the title of the saved Discord post that holds its archive. Message type names come from the install's `typeindex.json` joined with the Aeternum-World names (set `NW_GAME_DIR`), then from the local Azoth catalog archive (`local-data/azoth-catalog/types.json`, saved by its `archive.py` from their public API).
+
 The world map page (`/web/map.html`) shows the map tiles, the relief, or the relief over the tiles at half strength (the check that both line up), and, closer than 4 m per pixel, the mob spawns, gatherables and landmarks of the world file. The page code is plain JavaScript modules built into the program; `just test-web` runs their tests with Node's built-in test runner.
 
 ## Rules for contributors

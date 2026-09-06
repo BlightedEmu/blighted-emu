@@ -3,6 +3,7 @@
 //! and the capture viewer.
 
 pub mod assets;
+pub mod captures;
 pub mod config;
 pub mod guard;
 pub mod relief;

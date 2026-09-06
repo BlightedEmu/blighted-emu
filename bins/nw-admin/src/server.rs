@@ -13,6 +13,8 @@ use axum::routing::get;
 use serde::Deserialize;
 
 use crate::assets::asset;
+use crate::captures::Captures;
+use crate::captures::catalog::search;
 use crate::guard::{AdminOrigin, admin_guard};
 use crate::relief::relief_tile;
 use crate::world::{SpawnKind, SpawnQuery, WorldLayer};
@@ -27,15 +29,23 @@ pub struct AppState {
     world: Arc<WorldLayer>,
     map_dir: Arc<PathBuf>,
     origin: AdminOrigin,
+    captures: Arc<Captures>,
 }
 
 impl AppState {
-    /// The state of a server on `listen` with `world` and the map tiles in `map_dir`.
-    pub fn new(world: WorldLayer, map_dir: PathBuf, listen: SocketAddr) -> Self {
+    /// The state of a server on `listen` with `world`, the map tiles in `map_dir`, and the
+    /// capture sessions.
+    pub fn new(
+        world: WorldLayer,
+        map_dir: PathBuf,
+        listen: SocketAddr,
+        captures: Captures,
+    ) -> Self {
         Self {
             world: Arc::new(world),
             map_dir: Arc::new(map_dir),
             origin: AdminOrigin::of(listen),
+            captures: Arc::new(captures),
         }
     }
 }
@@ -49,6 +59,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/world/tiles/{level}/{row}/{column}", get(map_tile))
         .route("/api/world/relief/{level}/{row}/{column}", get(relief))
         .route("/api/world/spawns", get(spawns))
+        .route("/api/captures/sessions", get(sessions))
+        .route("/api/captures/types/{idx}", get(type_label))
         .layer(axum::middleware::from_fn_with_state(
             state.origin.clone(),
             admin_guard,
@@ -119,6 +131,20 @@ async fn spawns(State(state): State<AppState>, Query(params): Query<SpawnParams>
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct SessionParams {
+    #[serde(default)]
+    q: String,
+}
+
+async fn sessions(State(state): State<AppState>, Query(params): Query<SessionParams>) -> Response {
+    Json(search(&state.captures.sessions, &params.q)).into_response()
+}
+
+async fn type_label(State(state): State<AppState>, UrlPath(idx): UrlPath<u64>) -> Response {
+    Json(state.captures.labels.label(idx)).into_response()
+}
+
 fn tile_path(map_dir: &Path, level: u8, row: u32, column: u32) -> PathBuf {
     map_dir
         .join(level.to_string())
@@ -137,16 +163,23 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
+    use crate::captures::Captures;
+    use crate::captures::catalog::SessionEntry;
     use crate::world::tests::{REGION_M, test_layer};
 
     const CAP: usize = 5_000;
     const LISTEN: &str = "127.0.0.1:9180";
 
     fn app(map_dir: &Path) -> Router {
+        app_with(map_dir, Captures::default())
+    }
+
+    fn app_with(map_dir: &Path, captures: Captures) -> Router {
         router(AppState::new(
             test_layer(CAP),
             map_dir.to_path_buf(),
             LISTEN.parse().expect("address"),
+            captures,
         ))
     }
 
@@ -247,5 +280,41 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn sessions_are_listed_and_searched() {
+        let dir = tempfile::tempdir().expect("dir");
+        let entry = |id: &str| SessionEntry {
+            id: id.to_owned(),
+            path: dir.path().join(id),
+            bytes: 1,
+            name: None,
+            started_at: None,
+            post_title: None,
+        };
+        let captures = Captures {
+            sessions: vec![entry("dummy/ledger.bin"), entry("raid/ledger.bin")],
+            ..Captures::default()
+        };
+        let (status, _, body) = get(
+            app_with(dir.path(), captures),
+            "/api/captures/sessions?q=raid",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let sessions: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(sessions[0]["id"], "raid/ledger.bin");
+        assert_eq!(sessions.as_array().map(Vec::len), Some(1));
+        assert!(sessions[0].get("path").is_none(), "no local path is sent");
+    }
+
+    #[tokio::test]
+    async fn a_type_label_comes_as_json() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (status, _, body) = get(app(dir.path()), "/api/captures/types/8").await;
+        assert_eq!(status, StatusCode::OK);
+        let label: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert!(label["name"].is_null());
     }
 }

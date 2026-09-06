@@ -2913,6 +2913,7 @@ dependencies = [
  "axum",
  "clap",
  "http-body-util",
+ "nw-capture",
  "nw-common",
  "nw-content",
  "nw-formats",
