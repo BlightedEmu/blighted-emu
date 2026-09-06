@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `config/sim.toml` with `NW_SIM_` overrides (M4 spec sections 6.3 and 7, M5 spec section 7.1).
+//! `config/sim.toml` with `NW_SIM_` overrides (M4 spec sections 6.3 and 7, M5 spec section 7.1,
+//! M6-A spec section 9).
 
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
@@ -8,10 +9,14 @@ use std::path::{Path, PathBuf};
 use nw_bus::{BusId, MAX_BUS_MESSAGE_BYTES, MAX_GHOST_BYTES};
 use nw_common::config::{ConfigError, SECRET_ENV_PREFIX, load_config};
 use nw_db::DatabaseConfig;
-use nw_sim_core::{CellBounds, MoveLimits, MoveLimitsError, TICKS_PER_SECOND};
+use std::sync::Arc;
+
+use nw_content::combat::{CombatData, CombatRows};
+use nw_sim_core::{BrainSettings, CellBounds, MoveLimits, MoveLimitsError, TICKS_PER_SECOND};
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::combat::CombatSettings;
 use crate::world::{MAX_BUNDLE_MEMBERS, WorldSettings};
 
 /// Environment prefix of `sim` overrides.
@@ -22,6 +27,181 @@ pub const GHOSTS_HEADER_BYTES: usize = 128;
 pub const ALL_CORES: usize = 0;
 /// One tick, rounded up to whole milliseconds: the shortest ghost lifetime.
 pub const TICK_MS: u64 = 1000_u64.div_ceil(TICKS_PER_SECOND);
+
+/// Default share of a player's damage that mob armor takes off (nwdb, M6-A spec F7).
+pub const DEFAULT_ARMOR_SHARE: f64 = 0.35;
+/// Default factor of a mob's attack row.
+pub const DEFAULT_MOB_ATTACK_FACTOR: f64 = 1.0;
+/// Default quiet time before an idle mob sleeps.
+pub const DEFAULT_SLEEP_AFTER_MS: u64 = 30_000;
+/// Default sight before the creature type's offset.
+pub const DEFAULT_BASE_SIGHT_M: f32 = 20.0;
+/// Default wander radius.
+pub const DEFAULT_WANDER_RADIUS_M: f32 = 10.0;
+/// Default pause between two wander walks.
+pub const DEFAULT_WANDER_PAUSE_MS: u64 = 5_000;
+/// Default leash radius.
+pub const DEFAULT_LEASH_RADIUS_M: f32 = 50.0;
+/// Default melee reach.
+pub const DEFAULT_ATTACK_REACH_M: f32 = 3.0;
+/// Default reach margin for the lag between client and server.
+pub const DEFAULT_REACH_MARGIN_M: f32 = 1.0;
+/// Default shortest time between two attacks of a player.
+pub const DEFAULT_MIN_ATTACK_INTERVAL_MS: u64 = 500;
+/// Default time between two hits of a mob.
+pub const DEFAULT_MOB_ATTACK_INTERVAL_MS: u64 = 2_000;
+/// Default mob speed: the player combat run (M6-A spec F8).
+pub const DEFAULT_MOB_SPEED_MPS: f32 = 3.25;
+/// Default mob respawn: the one decoded spawner (M6-A spec F6).
+pub const DEFAULT_MOB_RESPAWN_MS: u64 = 360_000;
+/// Default player respawn.
+pub const DEFAULT_PLAYER_RESPAWN_MS: u64 = 10_000;
+/// Default seed of the combat dice.
+pub const DEFAULT_COMBAT_SEED: u64 = 1;
+
+/// Section `[combat]` (M6-A spec section 9).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CombatConfig {
+    /// The player row of `VitalsBaseData`.
+    pub player_vitals_id: String,
+    /// The player weapon row of `WeaponItemDefinitions`.
+    pub weapon_id: String,
+    /// The `DamageData` rows of the weapon's attacks.
+    pub attack_damage_ids: Vec<String>,
+    /// Share of a player's damage that mob armor takes off, 0 to below 1.
+    pub armor_share: f64,
+    /// Share of a mob's damage that player armor takes off, 0 to below 1.
+    pub player_armor_share: f64,
+    /// Factor of a mob's attack.
+    pub mob_attack_factor: f64,
+    /// A player this near wakes a mob; absent means `interest_radius_m`.
+    pub wake_radius_m: Option<f32>,
+    /// Quiet time before an idle mob sleeps.
+    pub sleep_after_ms: u64,
+    /// Sight before the creature type's offset.
+    pub base_sight_m: f32,
+    /// Wander radius around the spawn.
+    pub wander_radius_m: f32,
+    /// Pause between two wander walks.
+    pub wander_pause_ms: u64,
+    /// Leash radius around the spawn.
+    pub leash_radius_m: f32,
+    /// Melee reach.
+    pub attack_reach_m: f32,
+    /// Extra reach allowed for lag.
+    pub reach_margin_m: f32,
+    /// Shortest time between two attacks of a player.
+    pub min_attack_interval_ms: u64,
+    /// Time between two hits of a mob.
+    pub mob_attack_interval_ms: u64,
+    /// Mob speed.
+    pub mob_speed_mps: f32,
+    /// Time from a mob's death to its respawn.
+    pub mob_respawn_ms: u64,
+    /// Time from a player's death to its respawn.
+    pub player_respawn_ms: u64,
+    /// Seed of the combat dice.
+    pub seed: u64,
+}
+
+impl Default for CombatConfig {
+    fn default() -> Self {
+        let rows = CombatRows::default();
+        Self {
+            player_vitals_id: rows.player_vitals_id,
+            weapon_id: rows.weapon_id,
+            attack_damage_ids: rows.attack_damage_ids,
+            armor_share: DEFAULT_ARMOR_SHARE,
+            player_armor_share: 0.0,
+            mob_attack_factor: DEFAULT_MOB_ATTACK_FACTOR,
+            wake_radius_m: None,
+            sleep_after_ms: DEFAULT_SLEEP_AFTER_MS,
+            base_sight_m: DEFAULT_BASE_SIGHT_M,
+            wander_radius_m: DEFAULT_WANDER_RADIUS_M,
+            wander_pause_ms: DEFAULT_WANDER_PAUSE_MS,
+            leash_radius_m: DEFAULT_LEASH_RADIUS_M,
+            attack_reach_m: DEFAULT_ATTACK_REACH_M,
+            reach_margin_m: DEFAULT_REACH_MARGIN_M,
+            min_attack_interval_ms: DEFAULT_MIN_ATTACK_INTERVAL_MS,
+            mob_attack_interval_ms: DEFAULT_MOB_ATTACK_INTERVAL_MS,
+            mob_speed_mps: DEFAULT_MOB_SPEED_MPS,
+            mob_respawn_ms: DEFAULT_MOB_RESPAWN_MS,
+            player_respawn_ms: DEFAULT_PLAYER_RESPAWN_MS,
+            seed: DEFAULT_COMBAT_SEED,
+        }
+    }
+}
+
+impl CombatConfig {
+    /// The datasheet rows of this config.
+    pub fn rows(&self) -> CombatRows {
+        CombatRows {
+            player_vitals_id: self.player_vitals_id.clone(),
+            weapon_id: self.weapon_id.clone(),
+            attack_damage_ids: self.attack_damage_ids.clone(),
+        }
+    }
+
+    fn validate(&self, interest_radius_m: f32) -> Result<(), SimConfigError> {
+        let invalid = |key, reason| Err(SimConfigError::Invalid { key, reason });
+        let positive = |value: f32| value.is_finite() && value > 0.0;
+        let distances = [
+            ("combat.base_sight_m", self.base_sight_m),
+            ("combat.wander_radius_m", self.wander_radius_m),
+            ("combat.leash_radius_m", self.leash_radius_m),
+            ("combat.attack_reach_m", self.attack_reach_m),
+            ("combat.mob_speed_mps", self.mob_speed_mps),
+        ];
+        if let Some((key, _)) = distances.iter().find(|(_, value)| !positive(*value)) {
+            return invalid(key, "must be a finite number above 0");
+        }
+        if !(self.reach_margin_m.is_finite() && self.reach_margin_m >= 0.0) {
+            return invalid(
+                "combat.reach_margin_m",
+                "must be a finite number of at least 0",
+            );
+        }
+        let times = [
+            self.sleep_after_ms,
+            self.wander_pause_ms,
+            self.min_attack_interval_ms,
+            self.mob_attack_interval_ms,
+            self.mob_respawn_ms,
+            self.player_respawn_ms,
+        ];
+        if times.contains(&0) {
+            return invalid("combat.times", "must be above 0");
+        }
+        let share = |value: f64| (0.0..1.0).contains(&value);
+        if !share(self.armor_share) {
+            return invalid("combat.armor_share", "must be at least 0 and below 1");
+        }
+        if !share(self.player_armor_share) {
+            return invalid(
+                "combat.player_armor_share",
+                "must be at least 0 and below 1",
+            );
+        }
+        if !(self.mob_attack_factor.is_finite() && self.mob_attack_factor >= 0.0) {
+            return invalid(
+                "combat.mob_attack_factor",
+                "must be a finite number of at least 0",
+            );
+        }
+        let wake = self.wake_radius_m.unwrap_or(interest_radius_m);
+        if !(wake.is_finite() && wake >= self.base_sight_m) {
+            return invalid("combat.wake_radius_m", "must be at least base_sight_m");
+        }
+        if self.wander_radius_m > self.leash_radius_m {
+            return invalid("combat.wander_radius_m", "must be at most leash_radius_m");
+        }
+        if self.attack_damage_ids.is_empty() {
+            return invalid("combat.attack_damage_ids", "must name at least one attack");
+        }
+        Ok(())
+    }
+}
 
 /// The whole `sim` configuration.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -81,6 +261,9 @@ pub struct SimConfig {
     pub metrics_listen: SocketAddr,
     /// `tracing` filter, for example `info`.
     pub log_filter: String,
+    /// Mobs and combat.
+    #[serde(default)]
+    pub combat: CombatConfig,
 }
 
 /// A value of the configuration that is not allowed.
@@ -156,6 +339,7 @@ impl SimConfig {
         if self.forward_ttl_ms <= self.handoff_timeout_ms {
             return invalid("forward_ttl_ms", "must be longer than handoff_timeout_ms");
         }
+        self.combat.validate(self.interest_radius_m)?;
         if !(self.interest_radius_m.is_finite() && self.interest_radius_m > 0.0) {
             return invalid("interest_radius_m", "must be a finite number above 0");
         }
@@ -203,6 +387,39 @@ impl SimConfig {
             ghost_ttl_ms: self.ghost_ttl_ms,
             tick_threads: self.tick_threads(),
         })
+    }
+
+    /// The numbers of the mob brain.
+    pub fn brain_settings(&self) -> BrainSettings {
+        let combat = &self.combat;
+        BrainSettings {
+            wake_radius_m: combat.wake_radius_m.unwrap_or(self.interest_radius_m),
+            sleep_after_ms: combat.sleep_after_ms,
+            base_sight_m: combat.base_sight_m,
+            wander_radius_m: combat.wander_radius_m,
+            wander_pause_ms: combat.wander_pause_ms,
+            leash_radius_m: combat.leash_radius_m,
+            attack_reach_m: combat.attack_reach_m,
+            mob_attack_interval_ms: combat.mob_attack_interval_ms,
+            mob_speed_mps: combat.mob_speed_mps,
+            mob_respawn_ms: combat.mob_respawn_ms,
+        }
+    }
+
+    /// The combat settings on the rows of `data`.
+    pub fn combat_settings(&self, data: Arc<CombatData>) -> CombatSettings {
+        let combat = &self.combat;
+        CombatSettings {
+            data,
+            brain: self.brain_settings(),
+            armor_share: combat.armor_share,
+            player_armor_share: combat.player_armor_share,
+            mob_attack_factor: combat.mob_attack_factor,
+            reach_margin_m: combat.reach_margin_m,
+            min_attack_interval_ms: combat.min_attack_interval_ms,
+            player_respawn_ms: combat.player_respawn_ms,
+            seed: combat.seed,
+        }
     }
 
     /// Threads of the bundle step: `tick_threads`, or every core when it is 0.
@@ -302,6 +519,58 @@ pub(crate) mod tests {
         let mut config = committed();
         config.forward_ttl_ms = config.handoff_timeout_ms;
         assert!(config.validate().is_err(), "forwards outlive a handoff");
+    }
+
+    #[test]
+    fn the_combat_section_has_its_defaults() {
+        let config = committed();
+        assert_eq!(config.combat, CombatConfig::default());
+        assert_eq!(
+            config.combat.rows(),
+            nw_content::combat::CombatRows::default()
+        );
+        let brain = config.brain_settings();
+        assert_eq!(
+            brain.wake_radius_m, config.interest_radius_m,
+            "wake defaults to interest"
+        );
+        assert_eq!(brain.leash_radius_m, DEFAULT_LEASH_RADIUS_M);
+        let mut set = committed();
+        set.combat.wake_radius_m = Some(DEFAULT_BASE_SIGHT_M * 2.0);
+        assert_eq!(
+            set.brain_settings().wake_radius_m,
+            DEFAULT_BASE_SIGHT_M * 2.0
+        );
+    }
+
+    /// A config key and the fault that must make the check refuse it.
+    type CombatFault = (&'static str, fn(&mut CombatConfig));
+
+    #[test]
+    fn bad_combat_values_are_refused() {
+        let cases: [CombatFault; 8] = [
+            ("combat.leash_radius_m", |c| c.leash_radius_m = -1.0),
+            ("combat.attack_reach_m", |c| c.attack_reach_m = 0.0),
+            ("combat.mob_speed_mps", |c| c.mob_speed_mps = f32::NAN),
+            ("combat.times", |c| c.mob_respawn_ms = 0),
+            ("combat.armor_share", |c| c.armor_share = 1.5),
+            ("combat.player_armor_share", |c| c.player_armor_share = -0.1),
+            ("combat.wake_radius_m", |c| {
+                c.wake_radius_m = Some(DEFAULT_BASE_SIGHT_M - 1.0)
+            }),
+            ("combat.wander_radius_m", |c| {
+                c.wander_radius_m = DEFAULT_LEASH_RADIUS_M + 1.0
+            }),
+        ];
+        for (key, fault) in cases {
+            let mut config = committed();
+            fault(&mut config.combat);
+            assert!(
+                matches!(config.validate(), Err(SimConfigError::Invalid { key: found, .. }) if found == key),
+                "{key}: {:?}",
+                config.validate()
+            );
+        }
     }
 
     #[test]

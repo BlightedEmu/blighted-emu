@@ -52,3 +52,35 @@ log_filter = "info"
 [world_database]
 url = "postgres://nw@127.0.0.1:5432/nw_world_1"
 max_connections = 5
+
+# Mobs and combat (M6-A spec section 9). Values marked Unknown are not in the game files yet;
+# the study notes of M6-B replace them with numbers from the captures.
+[combat]
+player_vitals_id = "Player"
+weapon_id = "SwordT1"
+attack_damage_ids = ["1H_Sword_Attack1", "1H_Sword_Attack2"]
+armor_share = 0.35
+player_armor_share = 0.0
+mob_attack_factor = 1.0
+# wake_radius_m: absent means interest_radius_m.
+sleep_after_ms = 30000
+# Unknown.
+base_sight_m = 20.0
+# Unknown.
+wander_radius_m = 10.0
+# Unknown.
+wander_pause_ms = 5000
+# Unknown.
+leash_radius_m = 50.0
+# Unknown.
+attack_reach_m = 3.0
+reach_margin_m = 1.0
+# Unknown.
+min_attack_interval_ms = 500
+# Unknown.
+mob_attack_interval_ms = 2000
+mob_speed_mps = 3.25
+mob_respawn_ms = 360000
+# Unknown.
+player_respawn_ms = 10000
+seed = 1

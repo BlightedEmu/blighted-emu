@@ -27,6 +27,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
+use crate::combat::CombatSettings;
 use crate::forward::{Forward, ForwardTable};
 use crate::gateways::GatewayTracker;
 use crate::login::WorldIds;
@@ -132,6 +133,8 @@ pub struct LoopSettings {
     pub heartbeat_interval: Duration,
     /// Missed gateway heartbeats before its players leave.
     pub heartbeat_misses: u32,
+    /// Mobs and combat.
+    pub combat: CombatSettings,
 }
 
 /// The loop's failure.
@@ -806,6 +809,7 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
+    use crate::combat::tests::test_combat;
     use crate::config::tests::committed;
     use crate::world::{MESSAGE_CHANNEL, REPLICATION_CHANNEL};
 
@@ -864,6 +868,7 @@ mod tests {
             save_interval: SAVE_INTERVAL,
             heartbeat_interval: HEARTBEAT,
             heartbeat_misses: MISSES,
+            combat: test_combat(),
         }
     }
 

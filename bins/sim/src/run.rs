@@ -9,7 +9,10 @@ use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
 use nw_bus::{Bus, BusError};
 use nw_common::config::ConfigError;
 use nw_common::logging::{LoggingError, init_logging};
+use nw_content::ContentBundle;
+use nw_content::bundle::bundle_path;
 use nw_content::client_build::load_client_build;
+use nw_content::combat::{CombatData, CombatDataError};
 use nw_content::container::ContainerError;
 use nw_db::{DbError, WORLD_MIGRATOR, check_schema};
 use nw_sim_core::level_bounds;
@@ -34,6 +37,12 @@ pub enum RunError {
     /// The world file cannot be read.
     #[error("world file: {0}")]
     WorldFile(#[from] ContainerError),
+    /// The content bundle cannot be read.
+    #[error("content bundle: {0}")]
+    Bundle(#[source] ContainerError),
+    /// A combat row of the config is not in the bundle.
+    #[error(transparent)]
+    Combat(#[from] CombatDataError),
     /// The database password variable is missing or empty.
     #[error("environment variable {0} is not set")]
     MissingSecret(String),
@@ -76,17 +85,26 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let build = load_client_build(&config.client_build_config).map_err(RunError::ClientBuild)?;
     let path = world_file_path(&config.content_dir, &build, &config.level);
     let world_file = Arc::new(WorldFile::load(&path, &build)?);
+    let bundle = ContentBundle::load(&bundle_path(&config.content_dir, &build), &build)
+        .map_err(RunError::Bundle)?;
+    // Only the combat rows stay; the rest of the bundle is dropped here.
+    let combat = Arc::new(CombatData::from_tables(
+        &bundle.tables,
+        &config.combat.rows(),
+    )?);
+    drop(bundle);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(RunError::Runtime)?
-        .block_on(serve_async(config, password, world_file))
+        .block_on(serve_async(config, password, world_file, combat))
 }
 
 async fn serve_async(
     config: SimConfig,
     password: String,
     ground: Arc<WorldFile>,
+    combat: Arc<CombatData>,
 ) -> Result<(), RunError> {
     let db = nw_db::connect(&config.world_database, &password)
         .await
@@ -118,6 +136,7 @@ async fn serve_async(
         save_interval: std::time::Duration::from_millis(config.save_interval_ms),
         heartbeat_interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
         heartbeat_misses: config.heartbeat_misses,
+        combat: config.combat_settings(combat),
     };
     let shutdown = async {
         // A failed signal handler means sim runs until killed.

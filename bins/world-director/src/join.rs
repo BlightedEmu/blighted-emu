@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use nw_bus::{Admit, AdmitReply, Bus, Join, Point, SimSlot, subject};
+use nw_bus::{Admit, AdmitReply, Bus, Join, MOB_ENTITY_BASE, Point, SimSlot, subject};
 use nw_db::{PgPool, character_by_id, character_position, next_entity_number};
 use nw_sim_core::Position;
 use uuid::Uuid;
@@ -55,6 +55,9 @@ pub enum JoinRefusal {
     /// The sim did not answer in time.
     #[error("the sim did not answer: {0}")]
     SimSilent(String),
+    /// The entity number is in the mob range.
+    #[error("entity number {0} is in the mob range")]
+    EntityRange(u64),
 }
 
 impl JoinRefusal {
@@ -68,8 +71,17 @@ impl JoinRefusal {
             Self::NoStart => "no_start",
             Self::SimRefused(_) => "sim_refused",
             Self::SimSilent(_) => "sim_silent",
+            Self::EntityRange(_) => "entity_range",
         }
     }
+}
+
+/// `entity` as a player's entity number: refused in the mob range (M6-A spec section 6.1).
+pub fn player_entity(entity: u64) -> Result<u64, JoinRefusal> {
+    if entity >= MOB_ENTITY_BASE {
+        return Err(JoinRefusal::EntityRange(entity));
+    }
+    Ok(entity)
 }
 
 /// The start position of a new character with entity number `entity`: the start positions in
@@ -105,9 +117,13 @@ pub async fn route_join(
         .await
         .map_err(database)?;
     let (entity, handoffs, bundles_sent) = match join.resume {
-        Some(resume) => (resume.entity, resume.handoffs, resume.bundles_sent),
+        Some(resume) => (
+            player_entity(resume.entity)?,
+            resume.handoffs,
+            resume.bundles_sent,
+        ),
         None => (
-            next_entity_number(&context.db).await.map_err(database)?,
+            player_entity(next_entity_number(&context.db).await.map_err(database)?)?,
             NEW_PLAYER_COUNT,
             NEW_PLAYER_COUNT,
         ),
@@ -151,6 +167,15 @@ pub async fn route_join(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_number_in_the_mob_range_is_refused() {
+        assert_eq!(player_entity(MOB_ENTITY_BASE - 1), Ok(MOB_ENTITY_BASE - 1));
+        assert_eq!(
+            player_entity(MOB_ENTITY_BASE),
+            Err(JoinRefusal::EntityRange(MOB_ENTITY_BASE))
+        );
+    }
 
     const STARTS: [Position; 3] = [
         Position {
