@@ -1516,6 +1516,58 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn a_player_killed_by_a_mob_lives_again_and_is_saved() {
+        /// A mob hit of 100 x 100: more than a player's health.
+        const LETHAL_FACTOR: f64 = 100.0;
+        const RESPAWN: Duration = Duration::from_millis(300);
+        const MOB_X: f32 = 1000.0;
+        const PLAYER_X: f32 = MOB_X + 2.0;
+        with_test_schema(async |db| {
+            WORLD_MIGRATOR.run(db).await.expect("migrate");
+            let ada = character(db).await;
+            let bus = test_bus().await;
+            let world_id = Uuid::new_v4();
+            let mut gateway = TestGateway::start(&bus, world_id, true).await;
+            let mut combat = test_combat();
+            combat.mob_attack_factor = LETHAL_FACTOR;
+            combat.player_respawn_ms = u64::try_from(RESPAWN.as_millis()).expect("ms");
+            combat.spawns = vec![VitalsSpawn {
+                vitals_id: lowercase_crc32(TEST_MOB),
+                level: TEST_LEVEL,
+                position: [MOB_X, Y, Z],
+                ..VitalsSpawn::default()
+            }]
+            .into();
+            let sim = Running::start(
+                &bus,
+                LoopSettings {
+                    combat,
+                    ..settings(world_id, "sim")
+                },
+                db,
+            )
+            .await;
+            let tables = publish_tables(&bus, world_id, slots(&bus, world_id, &[sim.id()]).await);
+            let player = admit_at(gateway.connection(CONNECTION), ada, PLAYER_X);
+            admit(&bus, world_id, sim.id(), &player).await;
+            let saved = saved_position(db, ada.1).await;
+            assert!(
+                (saved.x - f64::from(PLAYER_X)).abs() < SAVE_TOLERANCE_M,
+                "saved at once where it died"
+            );
+            tokio::time::sleep(RESPAWN + PAUSE).await;
+            let step = move_to(gateway.connection(CONNECTION), PLAYER_X + STEP_M);
+            input(&bus, world_id, sim.id(), &step).await;
+            tokio::time::timeout(WAIT, wait_for_x(&mut gateway, sim.id(), PLAYER_X + STEP_M))
+                .await
+                .expect("it moves again after its respawn");
+            tables.abort();
+            sim.stop().await;
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn a_mob_of_the_other_sim_kills_a_player_through_the_bus() {
         /// A mob hit of 100 x 100: more than a player's health.
         const LETHAL_FACTOR: f64 = 100.0;
