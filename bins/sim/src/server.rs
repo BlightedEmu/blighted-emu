@@ -450,8 +450,8 @@ impl Loop {
     }
 
     /// Reads one client message: an input (1589) or a respawn request (1938); every other type
-    /// is counted and ignored. The hit and death messages it makes go with the next flush. Bad
-    /// bytes are counted and never close the connection.
+    /// is counted and ignored. The hit and death messages it makes wait in the world for the
+    /// next tick. Bad bytes are counted and never close the connection.
     fn client_message(&mut self, connection: &ConnectionRef, bytes: &[u8]) {
         let Ok(envelope) = Envelope::decode(bytes) else {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
@@ -464,7 +464,6 @@ impl Loop {
             Some(REQUEST_RESPAWN_TYPE_INDEX) => self.respawn_request(connection, &envelope.body),
             _ => metrics::counter!(METRIC_IGNORED_MESSAGES).increment(1),
         }
-        self.send_combat_messages();
     }
 
     /// Moves the player to the position of the input's last record that has one (M4 spec section
@@ -494,13 +493,6 @@ impl Loop {
             Err(refusal) => refusal.reason(),
         };
         metrics::counter!(METRIC_RESPAWNS, RESULT_LABEL => result).increment(1);
-    }
-
-    /// Queues the world's hit and death messages for the next flush.
-    fn send_combat_messages(&mut self) {
-        for message in self.world.take_messages() {
-            self.send(message);
-        }
     }
 
     /// Moves the player of `connection` to `position` and counts a refusal.
@@ -579,7 +571,6 @@ impl Loop {
         }
         let result = if applied.is_some() { APPLIED } else { DROPPED };
         metrics::counter!(METRIC_REMOTE_HITS, RESULT_LABEL => result).increment(1);
-        self.send_combat_messages();
     }
 
     /// Counts an attack of a player or a mob; a hit on a target of another sim goes there.
@@ -996,8 +987,9 @@ mod tests {
     use nw_db::test_db::with_test_schema;
     use nw_db::{NewCharacter, WORLD_MIGRATOR, character_position, insert_character};
     use nw_messages::{
-        BundlePayload, DEATH_RECAP_TYPE_INDEX, InputPosition, LOGIN_MESSAGE_TYPES, MemberState,
-        ServerMessage,
+        BundlePayload, DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, GDE_METADATA_TYPE_INDEX,
+        InputPosition, LOGIN_MESSAGE_TYPES, MemberState, POSITION_IN_THE_WORLD_TYPE_INDEX,
+        ServerMessage, VITALS_TYPE_INDEX,
     };
     use nw_reflect::TypeId;
     use nw_sim_core::test_support::NoGround;
@@ -1012,6 +1004,7 @@ mod tests {
     use crate::combat::tests::test_combat;
     use crate::config::tests::committed;
     use crate::mobs::VitalsSpawn;
+    use crate::mobs::mob_entity;
     use crate::world::{MESSAGE_CHANNEL, REPLICATION_CHANNEL};
 
     const WAIT: Duration = Duration::from_secs(5);
@@ -1359,14 +1352,172 @@ mod tests {
     fn move_to(connection: ConnectionRef, x: f32) -> SimInput {
         let target = InputPosition::from_metres(x, Y, Z).expect("finite");
         let body = ClientInputMsg::position(target).encode().expect("input");
-        let envelope =
-            Envelope::message(TypeId::FileSlot(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX), body)
-                .encode()
-                .expect("envelope");
+        client_message(connection, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, body)
+    }
+
+    /// An attack input at `x`.
+    fn attack_at(connection: ConnectionRef, x: f32) -> SimInput {
+        let at = InputPosition::from_metres(x, Y, Z).expect("finite");
+        let body = ClientInputMsg::attack(at).encode().expect("input");
+        client_message(connection, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, body)
+    }
+
+    /// A client message of `type_index` with `body`, as the gateway forwards it.
+    fn client_message(connection: ConnectionRef, type_index: u64, body: Vec<u8>) -> SimInput {
+        let envelope = Envelope::message(TypeId::FileSlot(type_index), body)
+            .encode()
+            .expect("envelope");
         SimInput::ClientMessage {
             connection,
             envelope,
         }
+    }
+
+    /// One test mob at `x`.
+    fn one_mob(x: f32) -> Arc<[VitalsSpawn]> {
+        vec![VitalsSpawn {
+            vitals_id: lowercase_crc32(TEST_MOB),
+            level: TEST_LEVEL,
+            position: [x, Y, Z],
+            ..VitalsSpawn::default()
+        }]
+        .into()
+    }
+
+    /// The entity numbers and class type indexes of the members of every bundle in `envelopes`.
+    fn member_classes(envelopes: &[Vec<u8>]) -> Vec<(u64, u64)> {
+        envelopes
+            .iter()
+            .flat_map(|bytes| {
+                let envelope = Envelope::decode(bytes).expect("envelope");
+                let Some(Ok(ServerMessage::Bundle(bundle))) =
+                    ServerMessage::from_envelope(&envelope)
+                else {
+                    panic!("expected a bundle");
+                };
+                BundlePayload::decode(&bundle.payload)
+                    .expect("payload")
+                    .groups
+                    .into_iter()
+                    .flat_map(|group| group.members)
+                    .map(|member| (member.u64_at_0, member.state.type_index()))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// The member classes of the next bundles of the test's connection that `wanted` picks.
+    async fn bundle_classes(
+        gateway: &mut TestGateway,
+        mut wanted: impl FnMut(&[(u64, u64)]) -> bool,
+    ) -> Vec<(u64, u64)> {
+        gateway
+            .until(|output| match output {
+                GatewayOutput::ServerMessages {
+                    connection: CONNECTION,
+                    channel: REPLICATION_CHANNEL,
+                    envelopes,
+                    ..
+                } => {
+                    let classes = member_classes(&envelopes);
+                    wanted(&classes).then_some(classes)
+                }
+                _ => None,
+            })
+            .await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mob_enters_a_players_bundles_with_its_card() {
+        const MOB_X: f32 = 1000.0;
+        with_test_schema(async |db| {
+            WORLD_MIGRATOR.run(db).await.expect("migrate");
+            let ada = character(db).await;
+            let bus = test_bus().await;
+            let world_id = Uuid::new_v4();
+            let mut gateway = TestGateway::start(&bus, world_id, true).await;
+            let mut combat = test_combat();
+            combat.spawns = one_mob(MOB_X);
+            let sim = Running::start(
+                &bus,
+                LoopSettings {
+                    combat,
+                    ..settings(world_id, "sim")
+                },
+                db,
+            )
+            .await;
+            let tables = publish_tables(&bus, world_id, slots(&bus, world_id, &[sim.id()]).await);
+            let player = admit_at(gateway.connection(CONNECTION), ada, MOB_X + 2.0);
+            admit(&bus, world_id, sim.id(), &player).await;
+            let mob = mob_entity(0);
+            let first = bundle_classes(&mut gateway, |classes| {
+                classes.contains(&(mob, GDE_METADATA_TYPE_INDEX))
+            })
+            .await;
+            assert!(first.contains(&(mob, VITALS_TYPE_INDEX)), "{first:?}");
+            assert!(first.contains(&(mob, POSITION_IN_THE_WORLD_TYPE_INDEX)));
+            let later = bundle_classes(&mut gateway, |_| true).await;
+            assert!(
+                later.contains(&(mob, POSITION_IN_THE_WORLD_TYPE_INDEX)),
+                "{later:?}"
+            );
+            assert!(
+                !later.contains(&(mob, GDE_METADATA_TYPE_INDEX)),
+                "the card once"
+            );
+            tables.abort();
+            sim.stop().await;
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_attack_input_hits_a_mob_and_the_gateway_gets_a_2071() {
+        const MOB_X: f32 = 1000.0;
+        const PLAYER_X: f32 = MOB_X + 2.0;
+        with_test_schema(async |db| {
+            WORLD_MIGRATOR.run(db).await.expect("migrate");
+            let ada = character(db).await;
+            let bus = test_bus().await;
+            let world_id = Uuid::new_v4();
+            let mut gateway = TestGateway::start(&bus, world_id, true).await;
+            let mut combat = test_combat();
+            combat.spawns = one_mob(MOB_X);
+            let sim = Running::start(
+                &bus,
+                LoopSettings {
+                    combat,
+                    ..settings(world_id, "sim")
+                },
+                db,
+            )
+            .await;
+            let tables = publish_tables(&bus, world_id, slots(&bus, world_id, &[sim.id()]).await);
+            let player = admit_at(gateway.connection(CONNECTION), ada, PLAYER_X);
+            admit(&bus, world_id, sim.id(), &player).await;
+            let mob = mob_entity(0);
+            bundle_classes(&mut gateway, |classes| {
+                classes.contains(&(mob, GDE_METADATA_TYPE_INDEX))
+            })
+            .await;
+            let attack = attack_at(gateway.connection(CONNECTION), PLAYER_X);
+            input(&bus, world_id, sim.id(), &attack).await;
+            gateway
+                .until(|output| match output {
+                    GatewayOutput::ServerMessages {
+                        connection: CONNECTION,
+                        channel: MESSAGE_CHANNEL,
+                        reliable: true,
+                        envelopes,
+                    } => has_type(&envelopes, DAMAGE_DEALT_TYPE_INDEX).then_some(()),
+                    _ => None,
+                })
+                .await;
+            tables.abort();
+            sim.stop().await;
+        })
+        .await;
     }
 
     /// Sends `input` to `sim` as the gateway does, in a batch.
@@ -1631,13 +1782,7 @@ mod tests {
     /// A respawn request (1938) with an empty payload.
     fn respawn_request(connection: ConnectionRef) -> SimInput {
         let body = RequestRespawnMsg::default().encode().expect("request");
-        let envelope = Envelope::message(TypeId::FileSlot(REQUEST_RESPAWN_TYPE_INDEX), body)
-            .encode()
-            .expect("envelope");
-        SimInput::ClientMessage {
-            connection,
-            envelope,
-        }
+        client_message(connection, REQUEST_RESPAWN_TYPE_INDEX, body)
     }
 
     /// Whether `envelopes` hold a message of type `type_index`.
@@ -1663,13 +1808,7 @@ mod tests {
             let mut combat = test_combat();
             combat.mob_attack_factor = LETHAL_FACTOR;
             combat.min_respawn_ms = u64::try_from(RESPAWN.as_millis()).expect("ms");
-            combat.spawns = vec![VitalsSpawn {
-                vitals_id: lowercase_crc32(TEST_MOB),
-                level: TEST_LEVEL,
-                position: [MOB_X, Y, Z],
-                ..VitalsSpawn::default()
-            }]
-            .into();
+            combat.spawns = one_mob(MOB_X);
             let sim = Running::start(
                 &bus,
                 LoopSettings {
@@ -1728,13 +1867,7 @@ mod tests {
             WORLD_MIGRATOR.run(db).await.expect("migrate");
             let mut combat = test_combat();
             combat.mob_attack_factor = LETHAL_FACTOR;
-            combat.spawns = vec![VitalsSpawn {
-                vitals_id: lowercase_crc32(TEST_MOB),
-                level: TEST_LEVEL,
-                position: [BORDER_X + 2.0, Y, Z],
-                ..VitalsSpawn::default()
-            }]
-            .into();
+            combat.spawns = one_mob(BORDER_X + 2.0);
             let pair = Pair::start_with(db, combat).await;
             let ada = character(db).await;
             let west_player = admit_at(pair.gateway.connection(CONNECTION), ada, BORDER_X - 1.0);
