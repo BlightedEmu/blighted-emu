@@ -364,17 +364,20 @@ impl ClientInputMsg {
         }
     }
 
-    /// An input with one record that holds `position` and attack bit 9: with no prefix integer,
-    /// bit 9 is the cursor bit of row 4, so the record carries a gate byte of 0 (M6-B spec
-    /// section 9.2).
+    /// An input with a record that holds `position` and attack bit 9, then a record with only
+    /// `position` that releases the bit, so that the next attack input is a rising edge again
+    /// (M6-B spec sections 6.1 and 9.2). With no prefix integer, bit 9 is the cursor bit of row
+    /// 4, so the first record carries a gate byte of 0: the light attack.
     pub fn attack(position: InputPosition) -> Self {
+        let press = InputRecord {
+            mask: 1 << BIT_7 | 1 << ATTACK_MASK_BITS[0],
+            bit_7: Some(position),
+            row_4: Some(0),
+            ..InputRecord::default()
+        };
+        let release = Self::position(position).records;
         Self {
-            records: vec![InputRecord {
-                mask: 1 << BIT_7 | 1 << ATTACK_MASK_BITS[0],
-                bit_7: Some(position),
-                row_4: Some(0),
-                ..InputRecord::default()
-            }],
+            records: [vec![press], release].concat(),
             ..Self::default()
         }
     }
@@ -994,6 +997,20 @@ mod tests {
         assert_eq!(decoded, input);
         assert_eq!(decoded.last_position(), Some(position()));
         assert_eq!(decoded.records[0].attack_bits(), 0b0001);
+    }
+
+    #[test]
+    fn an_attack_input_ends_with_a_release() {
+        let decoded =
+            ClientInputMsg::decode(&ClientInputMsg::attack(position()).encode().expect("encode"))
+                .expect("decode");
+        let bits: Vec<u8> = decoded
+            .records
+            .iter()
+            .map(InputRecord::attack_bits)
+            .collect();
+        assert_eq!(bits, vec![0b0001, 0], "the next attack input rises again");
+        assert_eq!(decoded.records[1].bit_7, Some(position()));
     }
 
     #[test]

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! What one test client learns from the world messages (M4 spec section 9): the order of the
 //! login messages, its own entity number (from `ClientAddEntryMsg`), and every position of every
-//! entity in the replication bundles, in order.
+//! entity in the replication bundles, in order. A hunt bot also keeps the mobs it is sent and
+//! counts the combat messages for it (M6-B spec section 9.1).
 
 use std::collections::BTreeMap;
 
@@ -26,12 +27,28 @@ pub enum ViewError {
     },
 }
 
+/// A combat message, by the entity it is for.
+enum CombatEvent {
+    /// 2071: a hit the entity made.
+    Dealt { attacker: u64 },
+    /// 3601: a hit the entity took.
+    Taken { target: u64 },
+    /// 4299: the entity died.
+    Died { player: u64 },
+}
+
 /// One world message, read.
 enum Read {
     /// Not a world message.
     Skipped,
-    /// A bundle: the entity numbers and positions of its members.
-    Bundle(Vec<(u64, WorldPosition)>),
+    /// A bundle: the entity numbers and positions of its members, and the entity numbers of its
+    /// spawn cards.
+    Bundle {
+        positions: Vec<(u64, WorldPosition)>,
+        cards: Vec<u64>,
+    },
+    /// A combat message.
+    Combat { type_index: u64, event: CombatEvent },
     /// `ClientAddEntryMsg`, with the client's own entity number.
     Entry { type_index: u64, own: Option<u64> },
     /// Another world message.
@@ -48,17 +65,35 @@ fn decode(received: &Received) -> Result<Read, ViewError> {
     Ok(match decoded.map_err(failed)? {
         ServerMessage::Bundle(bundle) => {
             let payload = BundlePayload::decode(&bundle.payload).map_err(failed)?;
-            let members = payload
-                .groups
-                .iter()
-                .flat_map(|group| &group.members)
+            let members = || payload.groups.iter().flat_map(|group| &group.members);
+            let positions = members()
                 .filter_map(|member| match &member.state {
                     MemberState::Position(state) => Some((member.u64_at_0, state.position?)),
                     _ => None,
                 })
                 .collect();
-            Read::Bundle(members)
+            let cards = members()
+                .filter(|member| matches!(member.state, MemberState::GdeMetadata(_)))
+                .map(|member| member.u64_at_0)
+                .collect();
+            Read::Bundle { positions, cards }
         }
+        ServerMessage::DamageDealt(hit) => Read::Combat {
+            type_index,
+            event: CombatEvent::Dealt {
+                attacker: hit.head_b,
+            },
+        },
+        ServerMessage::OnDamage(hit) => Read::Combat {
+            type_index,
+            event: CombatEvent::Taken { target: hit.head_a },
+        },
+        ServerMessage::DeathRecap(death) => Read::Combat {
+            type_index,
+            event: CombatEvent::Died {
+                player: death.head_a,
+            },
+        },
         ServerMessage::ClientAddEntry(entry) => Read::Entry {
             type_index,
             own: entry.entity_number(),
@@ -81,17 +116,128 @@ impl OwnView {
     ///
     /// Returns [`ViewError`] for a world message or a bundle payload that does not decode.
     pub fn read(&mut self, received: &Received) -> Result<Option<WorldPosition>, ViewError> {
-        Ok(match decode(received)? {
-            Read::Bundle(members) => members
-                .into_iter()
+        Ok(self.apply(&decode(received)?))
+    }
+
+    /// Learns the own number from `read`; returns the own position when it is in a bundle.
+    fn apply(&mut self, read: &Read) -> Option<WorldPosition> {
+        match read {
+            Read::Bundle { positions, .. } => positions
+                .iter()
                 .find(|(number, _)| Some(*number) == self.own)
-                .map(|(_, position)| position),
+                .map(|(_, position)| *position),
             Read::Entry { own, .. } => {
-                self.own = own;
+                self.own = *own;
                 None
             }
-            Read::Skipped | Read::Other { .. } => None,
-        })
+            Read::Skipped | Read::Combat { .. } | Read::Other { .. } => None,
+        }
+    }
+
+    /// Whether `number` is the own entity number.
+    fn is_own(&self, number: u64) -> bool {
+        self.own == Some(number)
+    }
+}
+
+/// Bundles with the own position that a mob may miss before the view drops it: each tick sends
+/// the own position once, and a mob in view in every tick.
+pub const MAX_MISSED_ROUNDS: u64 = 2;
+
+/// A mob the bot is sent.
+#[derive(Debug, Clone, Copy)]
+struct SeenMob {
+    /// `None` until its first position member.
+    position: Option<WorldPosition>,
+    /// The round it was last sent in.
+    round: u64,
+}
+
+/// What a hunt bot keeps: its own position, the mobs it is sent, and counts of the combat
+/// messages for it. An entity is a mob from its spawn card on; a mob that is not sent for more
+/// than [`MAX_MISSED_ROUNDS`] rounds (one round per bundle with the own position) is dead or out
+/// of view, and it comes back with a new card.
+#[derive(Debug, Clone, Default)]
+pub struct CombatView {
+    own: OwnView,
+    round: u64,
+    mobs: BTreeMap<u64, SeenMob>,
+    hits_dealt: u64,
+    hits_taken: u64,
+    deaths: u64,
+}
+
+impl CombatView {
+    /// Reads one more message; returns the client's own position when it is a bundle with it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ViewError`] for a world message or a bundle payload that does not decode.
+    pub fn read(&mut self, received: &Received) -> Result<Option<WorldPosition>, ViewError> {
+        let read = decode(received)?;
+        let own_position = self.own.apply(&read);
+        match read {
+            Read::Bundle { positions, cards } => {
+                let round = self.round;
+                for card in cards {
+                    self.mobs.insert(
+                        card,
+                        SeenMob {
+                            position: None,
+                            round,
+                        },
+                    );
+                }
+                for (number, position) in positions {
+                    if let Some(mob) = self.mobs.get_mut(&number) {
+                        *mob = SeenMob {
+                            position: Some(position),
+                            round,
+                        };
+                    }
+                }
+                if own_position.is_some() {
+                    self.round += 1;
+                    let now = self.round;
+                    self.mobs
+                        .retain(|_, mob| now - mob.round <= MAX_MISSED_ROUNDS);
+                }
+            }
+            Read::Combat { event, .. } => {
+                let (counter, number) = match event {
+                    CombatEvent::Dealt { attacker } => (&mut self.hits_dealt, attacker),
+                    CombatEvent::Taken { target } => (&mut self.hits_taken, target),
+                    CombatEvent::Died { player } => (&mut self.deaths, player),
+                };
+                if self.own.is_own(number) {
+                    *counter += 1;
+                }
+            }
+            Read::Skipped | Read::Entry { .. } | Read::Other { .. } => {}
+        }
+        Ok(own_position)
+    }
+
+    /// The mobs with a position, by entity number.
+    pub fn mobs(&self) -> impl Iterator<Item = (u64, WorldPosition)> + '_ {
+        self.mobs
+            .iter()
+            .filter_map(|(number, mob)| Some((*number, mob.position?)))
+    }
+
+    /// 2071 messages for hits this bot made.
+    pub const fn hits_dealt(&self) -> u64 {
+        self.hits_dealt
+    }
+
+    /// 3601 messages for hits this bot took.
+    pub const fn hits_taken(&self) -> u64 {
+        self.hits_taken
+    }
+
+    /// 4299 messages for this bot's deaths.
+    pub const fn deaths(&self) -> u64 {
+        self.deaths
     }
 }
 
@@ -128,10 +274,10 @@ impl WorldView {
     pub fn read(&mut self, received: &Received) -> Result<(), ViewError> {
         match decode(received)? {
             Read::Skipped => {}
-            Read::Bundle(members) => {
+            Read::Bundle { positions, .. } => {
                 self.login_before_first_bundle
                     .get_or_insert(self.login.len());
-                for (number, position) in members {
+                for (number, position) in positions {
                     self.tracks.entry(number).or_default().push(position);
                 }
             }
@@ -139,7 +285,9 @@ impl WorldView {
                 self.own = own;
                 self.login.push(type_index);
             }
-            Read::Other { type_index } => self.login.push(type_index),
+            Read::Combat { type_index, .. } | Read::Other { type_index } => {
+                self.login.push(type_index);
+            }
         }
         Ok(())
     }
@@ -185,7 +333,11 @@ impl WorldView {
 #[cfg(test)]
 mod tests {
     use nw_messages::test_support::login_samples;
-    use nw_messages::{BodyCodec, ClientAddEntryMsg, ReplicatedStateBundle};
+    use nw_messages::{
+        AssetId, BodyCodec, BundleMember, ClientAddEntryMsg, DamageDealtMsg, DeathRecapMsg,
+        GDE_ID_LEN, GdeMetadataReplicatedState, OnDamageMsg, PositionInTheWorldReplicatedState,
+        ReplicatedStateBundle,
+    };
     use nw_reflect::{Envelope, TypeId};
 
     use super::*;
@@ -291,6 +443,101 @@ mod tests {
             !WorldView::from_messages(&login())
                 .expect("view")
                 .in_captured_order()
+        );
+    }
+
+    const MOB: u64 = (1 << 34) + 5;
+    const HIT: f32 = 42.0;
+
+    /// A bundle with the spawn card of `card` (if any), then `positions`.
+    fn mob_bundle(
+        sequence: u64,
+        card: Option<u64>,
+        positions: &[(u64, WorldPosition)],
+    ) -> Received {
+        let cards = card.map(|number| BundleMember {
+            u64_at_0: number,
+            state: MemberState::GdeMetadata(GdeMetadataReplicatedState {
+                asset: Some(AssetId {
+                    id: [0; GDE_ID_LEN],
+                    sub_id: 2,
+                }),
+                gde_ref: None,
+            }),
+        });
+        let members = cards
+            .into_iter()
+            .chain(positions.iter().map(|(number, position)| BundleMember {
+                u64_at_0: *number,
+                state: MemberState::Position(PositionInTheWorldReplicatedState {
+                    position: Some(*position),
+                    ..PositionInTheWorldReplicatedState::default()
+                }),
+            }))
+            .collect();
+        let bundle = ReplicatedStateBundle::of_members(sequence, members).expect("bundle");
+        received(BUNDLE_CHANNEL, &ServerMessage::Bundle(bundle))
+    }
+
+    fn combat_view() -> CombatView {
+        let mut view = CombatView::default();
+        for message in login() {
+            view.read(&message).expect("read");
+        }
+        view
+    }
+
+    #[test]
+    fn the_view_keeps_mobs_while_they_are_sent() {
+        let mut view = combat_view();
+        let first = mob_bundle(
+            0,
+            Some(MOB),
+            &[(OWN, at(1.0)), (MOB, at(2.0)), (OTHER, at(3.0))],
+        );
+        assert_eq!(view.read(&first).expect("read"), Some(at(1.0)));
+        assert_eq!(
+            view.mobs().collect::<Vec<_>>(),
+            vec![(MOB, at(2.0))],
+            "a player is no mob"
+        );
+        let moved = mob_bundle(1, None, &[(OWN, at(1.0)), (MOB, at(4.0))]);
+        view.read(&moved).expect("read");
+        assert_eq!(view.mobs().collect::<Vec<_>>(), vec![(MOB, at(4.0))]);
+        for sequence in 2..=2 + MAX_MISSED_ROUNDS {
+            view.read(&mob_bundle(sequence, None, &[(OWN, at(1.0))]))
+                .expect("read");
+        }
+        assert_eq!(
+            view.mobs().count(),
+            0,
+            "no longer sent: dead or out of view"
+        );
+        let back = mob_bundle(9, None, &[(OWN, at(1.0)), (MOB, at(4.0))]);
+        view.read(&back).expect("read");
+        assert_eq!(view.mobs().count(), 0, "a mob comes back with a new card");
+    }
+
+    #[test]
+    fn the_view_counts_hits_damage_and_deaths() {
+        let mut view = combat_view();
+        let messages = [
+            ServerMessage::DamageDealt(DamageDealtMsg::hit(MOB, OWN, HIT)),
+            ServerMessage::DamageDealt(DamageDealtMsg::hit(MOB, OTHER, HIT)),
+            ServerMessage::OnDamage(OnDamageMsg::hit(OWN, MOB, HIT)),
+            ServerMessage::OnDamage(OnDamageMsg::hit(OTHER, MOB, HIT)),
+            ServerMessage::DeathRecap(DeathRecapMsg::of(OWN, MOB)),
+            ServerMessage::DeathRecap(DeathRecapMsg::of(OTHER, MOB)),
+        ];
+        for message in &messages {
+            assert_eq!(
+                view.read(&received(LOGIN_CHANNEL, message)).expect("read"),
+                None
+            );
+        }
+        assert_eq!(
+            (view.hits_dealt(), view.hits_taken(), view.deaths()),
+            (1, 1, 1)
         );
     }
 
