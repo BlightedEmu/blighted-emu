@@ -31,6 +31,7 @@ use crate::combat::CombatSettings;
 use crate::forward::{Forward, ForwardTable};
 use crate::gateways::GatewayTracker;
 use crate::login::WorldIds;
+use crate::mobs::MobChanges;
 use crate::saves::SaveQueue;
 use crate::world::{
     Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
@@ -97,6 +98,14 @@ pub const METRIC_FROZEN_MOVES: &str = "sim_moves_while_frozen_total";
 pub const METRIC_MOVES_WITHOUT_GROUND: &str = "sim_moves_without_ground_total";
 /// Metric: bus messages dropped because NATS is behind.
 pub const METRIC_DROPPED_OUTPUTS: &str = "sim_dropped_outputs_total";
+/// Metric: mobs by `state` (M6-A spec section 10).
+pub const METRIC_MOBS: &str = "sim_mobs";
+/// Metric: owned spawns without a mob type or level row.
+pub const METRIC_MOBS_UNSPAWNED: &str = "sim_mobs_unspawned_total";
+/// Metric: time of the mob part of a tick.
+pub const METRIC_MOB_TICK_SECONDS: &str = "sim_mob_tick_seconds";
+/// Label of a mob's state.
+const STATE_LABEL: &str = "state";
 const REASON_LABEL: &str = "reason";
 /// Label of the handoff result.
 pub const RESULT_LABEL: &str = "result";
@@ -233,7 +242,13 @@ pub async fn serve(
     };
     let (handoff_results, mut answers) = mpsc::channel(RESULT_QUEUE);
     let mut state = Loop {
-        world: SimWorld::new(settings.world, WorldIds::random(started_at_ms)?, ground, me),
+        world: SimWorld::new(
+            settings.world,
+            WorldIds::random(started_at_ms)?,
+            ground,
+            me,
+            settings.combat.clone(),
+        ),
         gateways: GatewayTracker::new(settings.heartbeat_interval, settings.heartbeat_misses),
         forwards: ForwardTable::new(settings.forward_ttl_ms),
         outputs: Publisher::start(bus.clone(), OUTPUT_QUEUE),
@@ -475,7 +490,18 @@ impl Loop {
     /// A new cell table. A table without this sim makes its players leave without `Close`: the
     /// gateways resume them on other sims (M5 spec section 3.6).
     fn table(&mut self, table: &CellTable) {
-        match self.world.set_table(table) {
+        let result = self.world.set_table(table);
+        let mobs = self.world.take_mob_changes();
+        if mobs != MobChanges::default() {
+            tracing::info!(
+                spawned = mobs.spawned,
+                removed = mobs.removed,
+                unspawned = mobs.unspawned,
+                "mobs follow the cells"
+            );
+            metrics::counter!(METRIC_MOBS_UNSPAWNED).increment(mobs.unspawned as u64);
+        }
+        match result {
             Ok(departures) => {
                 if !departures.is_empty() {
                     tracing::warn!(
@@ -536,6 +562,10 @@ impl Loop {
             }
         };
         metrics::histogram!(METRIC_TICK_SECONDS).record(started.elapsed().as_secs_f64());
+        metrics::histogram!(METRIC_MOB_TICK_SECONDS).record(output.mob_seconds);
+        for (state, count) in self.world.mob_counts() {
+            metrics::gauge!(METRIC_MOBS, STATE_LABEL => state.label()).set(count as f64);
+        }
         for message in output.messages {
             self.send(message);
         }

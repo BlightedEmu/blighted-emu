@@ -15,6 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use bevy_ecs::change_detection::Mut;
 use bevy_ecs::component::Component;
@@ -25,13 +26,15 @@ use nw_messages::{
     MessageError, ReplicatedStateBundle, ServerMessage, TimeSynchMsg, WorldPosition,
 };
 use nw_sim_core::{
-    CellBounds, CellGrid, CellOwners, Ground, GroundCheck, Interest, Motion, MotionState,
-    MoveLimits, MoveRefusal, Position, SpatialGrid,
+    CellBounds, CellGrid, CellOwners, Ground, GroundCheck, Interest, MobState, Motion, MotionState,
+    MoveLimits, MoveRefusal, Position, Seen, SpatialGrid,
 };
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::combat::CombatSettings;
 use crate::login::{SessionIds, WorldIds, login_messages};
+use crate::mobs::{MobAttackIntent, MobChanges, Mobs, spawn_index};
 
 /// Carrier channel of the login messages and the time messages.
 pub const MESSAGE_CHANNEL: u8 = 0;
@@ -140,6 +143,10 @@ pub struct TickOutput {
     pub handoffs: Vec<HandoffStart>,
     /// Ghost lists for other sims; an empty list clears the receiver's last one.
     pub ghosts: Vec<(BusId, Vec<Ghost>)>,
+    /// Hits that mobs make this tick.
+    pub mob_attacks: Vec<MobAttackIntent>,
+    /// Time of the mob part of the tick, in seconds.
+    pub mob_seconds: f64,
 }
 
 /// A refused world change.
@@ -214,6 +221,8 @@ pub struct SimWorld {
     cells: Option<Cells>,
     ghosts: HashMap<BusId, ReceivedGhosts>,
     ghost_targets: BTreeSet<BusId>,
+    mobs: Mobs,
+    mob_changes: MobChanges,
 }
 
 /// A new player before it is in the world.
@@ -225,14 +234,17 @@ struct Arrival {
 }
 
 impl SimWorld {
-    /// An empty world of the sim `me` on the ground of `ground`.
+    /// An empty world of the sim `me` on the ground of `ground`, with the mobs of `combat`.
     pub fn new(
         settings: WorldSettings,
         ids: WorldIds,
         ground: Arc<dyn Ground + Send + Sync>,
         me: SimSlot,
+        combat: CombatSettings,
     ) -> Self {
         Self {
+            mobs: Mobs::new(Arc::clone(&combat.spawns), &combat),
+            mob_changes: MobChanges::default(),
             world: World::new(),
             by_connection: HashMap::new(),
             settings,
@@ -461,9 +473,14 @@ impl SimWorld {
             .and_then(|index| u16::try_from(index).ok());
         let Some(me) = me else {
             self.cells = None;
+            self.mob_changes.add(self.mobs.set_cells(|_| false));
             let everyone: Vec<ConnectionRef> = self.by_connection.keys().cloned().collect();
             return Ok(self.leave_all(&everyone));
         };
+        self.mob_changes.add(
+            self.mobs
+                .set_cells(|position| owners.owner_at(position) == Some(me)),
+        );
         self.cells = Some(Cells {
             owners,
             sims: table.sims.clone(),
@@ -490,6 +507,16 @@ impl SimWorld {
                 entities,
             },
         );
+    }
+
+    /// What the cell tables did to the mobs since the last call.
+    pub fn take_mob_changes(&mut self) -> MobChanges {
+        std::mem::take(&mut self.mob_changes)
+    }
+
+    /// Mobs by state.
+    pub fn mob_counts(&self) -> [(MobState, usize); MobState::ALL.len()] {
+        self.mobs.counts()
     }
 
     /// Ghosts of other sims.
@@ -521,12 +548,39 @@ impl SimWorld {
             .retain(|_, ghosts| now_ms.saturating_sub(ghosts.received_ms) <= ttl);
         let handoffs = self.start_handoffs(now_ms);
         let ghosts = self.ghosts_out();
+        let mobs_started = Instant::now();
+        let mob_attacks = self.tick_mobs(now_ms);
+        let mob_seconds = mobs_started.elapsed().as_secs_f64();
         let messages = self.bundles(now_ms, server_time)?;
         Ok(TickOutput {
             messages,
             handoffs,
             ghosts,
+            mob_attacks,
+            mob_seconds,
         })
+    }
+
+    /// Runs the mobs with the players of this sim and the player ghosts of others.
+    fn tick_mobs(&mut self, now_ms: u64) -> Vec<MobAttackIntent> {
+        let mut seen: Vec<Seen> = Vec::new();
+        let mut query = self.world.query::<(&Player, &Body)>();
+        for (player, body) in query.iter(&self.world) {
+            seen.push(Seen {
+                entity: player.number,
+                position: body.motion.position(),
+            });
+        }
+        let ghosts = self.ghosts.values().flat_map(|ghosts| &ghosts.entities);
+        for (entity, position) in ghosts {
+            if spawn_index(*entity).is_none() {
+                seen.push(Seen {
+                    entity: *entity,
+                    position: *position,
+                });
+            }
+        }
+        self.mobs.tick(&seen, now_ms, &*self.ground)
     }
 
     fn start_handoffs(&mut self, now_ms: u64) -> Vec<HandoffStart> {
@@ -826,6 +880,8 @@ mod tests {
     use nw_sim_core::{CellGrid, CellOwners, GroundCheck, MoveLimits, MoveRefusal};
 
     use super::*;
+    use crate::combat::tests::{TEST_LEVEL, TEST_MOB, test_combat};
+    use crate::mobs::VitalsSpawn;
 
     /// The largest entity number that fits the 5-byte prefix code (35 bits).
     const LARGEST_NUMBER_SHIFT: u32 = 29;
@@ -890,11 +946,35 @@ mod tests {
             WorldIds::random(0).expect("ids"),
             Arc::new(NoGround),
             slot(name),
+            test_combat(),
         )
     }
 
     fn world() -> SimWorld {
         world_of("sim-a", settings(MANY, MAX_PLAYERS))
+    }
+
+    /// A spawn of the test mob type at (`x`, 10).
+    fn test_spawn(x: f32) -> VitalsSpawn {
+        VitalsSpawn {
+            vitals_id: nw_formats::objectstream::lowercase_crc32(TEST_MOB),
+            level: TEST_LEVEL,
+            position: [x, 10.0, 50.0],
+            ..VitalsSpawn::default()
+        }
+    }
+
+    /// A world of `sim-a` with the test mob spawns `spawns`.
+    fn world_with_spawns(spawns: Vec<VitalsSpawn>) -> SimWorld {
+        let mut combat = test_combat();
+        combat.spawns = spawns.into();
+        SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            combat,
+        )
     }
 
     fn grid() -> CellGrid {
@@ -991,6 +1071,34 @@ mod tests {
 
     fn tick(world: &mut SimWorld, now: u64) -> TickOutput {
         world.tick(now, SERVER_TIME).expect("tick")
+    }
+
+    #[test]
+    fn the_cell_table_spawns_the_mobs_of_this_sims_cells() {
+        let west = CELL_M / 2.0;
+        let east = LEVEL_M - CELL_M / 2.0;
+        let spawns = [west, west + 1.0, east].map(test_spawn).to_vec();
+        let mut world = world_with_spawns(spawns);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        let changes = world.take_mob_changes();
+        assert_eq!((changes.spawned, changes.removed), (2, 0));
+        let total: usize = world.mob_counts().iter().map(|(_, count)| count).sum();
+        assert_eq!(total, 2);
+        world.set_table(&table(&["sim-b", "sim-a"])).expect("table");
+        let changes = world.take_mob_changes();
+        assert_eq!((changes.spawned, changes.removed), (1, 2));
+    }
+
+    #[test]
+    fn a_player_wakes_the_mobs_near_it() {
+        let x = CELL_M / 2.0;
+        let mut world = world_with_spawns(vec![test_spawn(x)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        world.tick(NOW, SERVER_TIME).expect("tick");
+        assert_eq!(world.mob_counts()[0], (MobState::Asleep, 1));
+        join(&mut world, 1, x + 5.0);
+        world.tick(NOW + 33, SERVER_TIME).expect("tick");
+        assert_eq!(world.mob_counts()[0], (MobState::Asleep, 0));
     }
 
     #[test]

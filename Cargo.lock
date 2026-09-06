@@ -4477,6 +4477,7 @@ dependencies = [
  "nw-common",
  "nw-content",
  "nw-db",
+ "nw-formats",
  "nw-messages",
  "nw-reflect",
  "nw-sim-core",

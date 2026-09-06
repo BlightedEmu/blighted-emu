@@ -17,6 +17,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::combat::CombatSettings;
+use crate::mobs::VitalsSpawn;
 use crate::world::{MAX_BUNDLE_MEMBERS, WorldSettings};
 
 /// Environment prefix of `sim` overrides.
@@ -406,11 +407,16 @@ impl SimConfig {
         }
     }
 
-    /// The combat settings on the rows of `data`.
-    pub fn combat_settings(&self, data: Arc<CombatData>) -> CombatSettings {
+    /// The combat settings on the rows of `data` with the vitals `spawns` of the level.
+    pub fn combat_settings(
+        &self,
+        data: Arc<CombatData>,
+        spawns: Arc<[VitalsSpawn]>,
+    ) -> CombatSettings {
         let combat = &self.combat;
         CombatSettings {
             data,
+            spawns,
             brain: self.brain_settings(),
             armor_share: combat.armor_share,
             player_armor_share: combat.player_armor_share,

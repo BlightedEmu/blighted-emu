@@ -6,11 +6,15 @@ use std::sync::Arc;
 use nw_content::combat::CombatData;
 use nw_sim_core::BrainSettings;
 
+use crate::mobs::VitalsSpawn;
+
 /// What combat needs from the configuration and the datasheets.
 #[derive(Debug, Clone)]
 pub struct CombatSettings {
     /// The combat rows.
     pub data: Arc<CombatData>,
+    /// The vitals spawns of the level.
+    pub spawns: Arc<[VitalsSpawn]>,
     /// The numbers of the mob brain.
     pub brain: BrainSettings,
     /// Share of a player's damage that mob armor takes off.
@@ -86,6 +90,6 @@ pub(crate) mod tests {
 
     /// The committed config's combat settings on the test rows.
     pub(crate) fn test_combat() -> CombatSettings {
-        committed().combat_settings(Arc::new(test_data()))
+        committed().combat_settings(Arc::new(test_data()), Arc::from([]))
     }
 }

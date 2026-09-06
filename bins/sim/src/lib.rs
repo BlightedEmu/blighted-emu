@@ -7,6 +7,7 @@ pub mod config;
 pub mod forward;
 pub mod gateways;
 pub mod login;
+pub mod mobs;
 pub mod run;
 pub mod saves;
 pub mod server;

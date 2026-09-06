@@ -266,8 +266,9 @@ pub enum HandoffReply {
 pub const MAX_BUS_MESSAGE_BYTES: usize = 1024 * 1024;
 
 /// First entity number of mobs (M6-A spec section 6.1): a mob is this plus its spawn index, and
-/// players stay below it.
-pub const MOB_ENTITY_BASE: u64 = 1 << 40;
+/// players stay below it. Every mob number stays below 2^35, the most that the 5-byte prefix code
+/// of a bundle member holds.
+pub const MOB_ENTITY_BASE: u64 = 1 << 34;
 
 /// Most bytes of one [`Ghost`] in `postcard`: a 10-byte entity number and three 4-byte floats.
 pub const MAX_GHOST_BYTES: usize = 22;
