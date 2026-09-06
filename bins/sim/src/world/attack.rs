@@ -196,8 +196,9 @@ impl SimWorld {
         Ok(())
     }
 
-    /// One attack per rising edge of the attack bits in `records`, in record order: a record that
-    /// sets any attack bit the record before it did not set (M6-B spec section 6.1). The bits of
+    /// One result per rising edge of the attack bits in `records`, in record order: a record that
+    /// sets any attack bit the record before it did not set (M6-B spec section 6.1). The first
+    /// edge attacks; the others of the same message are [`AttackRefusal::TooFast`]. The bits of
     /// the last record carry over to the next message. Nothing for a connection without a player.
     pub fn attack_input(
         &mut self,
@@ -220,8 +221,13 @@ impl SimWorld {
             }
             vitals.attack_bits = bits;
         }
-        (0..edges)
-            .map(|_| self.attack_nearest(connection, now_ms))
+        // Every edge of one message has the same receive time, so only the first can attack: the
+        // others are too fast, and a client cannot make the loop search for targets per record.
+        if edges == 0 {
+            return Vec::new();
+        }
+        std::iter::once(self.attack_nearest(connection, now_ms))
+            .chain((1..edges).map(|_| Err(AttackRefusal::TooFast)))
             .collect()
     }
 
@@ -527,6 +533,27 @@ mod tests {
         assert_eq!(results.len(), 2, "{results:?}");
         assert!(results[0].is_ok());
         assert_eq!(results[1], Err(AttackRefusal::TooFast));
+    }
+
+    #[test]
+    fn extra_edges_in_one_message_are_too_fast_without_a_search() {
+        let mut world = awake_fight();
+        join(&mut world, 2, MOB_X + 10.0);
+        let records = [
+            record(FIRST_ATTACK_BIT),
+            record(0),
+            record(FIRST_ATTACK_BIT),
+            record(0),
+            record(FIRST_ATTACK_BIT),
+        ];
+        assert_eq!(
+            world.attack_input(&connection(2), &records, NOW),
+            vec![
+                Err(AttackRefusal::NoTarget),
+                Err(AttackRefusal::TooFast),
+                Err(AttackRefusal::TooFast)
+            ]
+        );
     }
 
     #[test]
