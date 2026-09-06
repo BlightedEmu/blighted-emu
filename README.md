@@ -262,13 +262,13 @@ Known gaps:
 3. `cargo run -p nw-testclient -- pair` passes every check.
 4. `cargo run -p nw-testclient -- swarm` with 1,000 bots and the `metrics_urls` of the four `sim` processes passes every check.
 
-## Mobs and combat (M6-A)
+## Mobs and combat (M6-A, M6-B)
 
 Each `sim` loads the content bundle at start (`content_dir`, the pinned build), keeps only the combat rows, and spawns the vitals spawns of the world file that lie in its cells. Each mob belongs to the `sim` of its spawn. A mob sleeps until a player comes within `wake_radius_m` (default: `interest_radius_m`). Then it wanders, chases a player in sight, attacks in reach, walks back to its spawn when its target is out of the leash circle (and heals there), and respawns after `mob_respawn_ms` when it dies. Mob health and damage come from `VitalsLevelData` (by level) times the mob type's mods and the category mods of its creature type (`VitalsModifierData`).
 
-Players have health (the `Player` row of `VitalsBaseData`). A mob that kills a player makes it dead: it cannot move or attack, the character is saved at once, and after `player_respawn_ms` it lives again with full health where it died. A handoff keeps the player's health. Awake mobs near a border are ghosts in the next `sim`; a hit on a ghost goes to the owner `sim` as a bus message.
+Players have health (the `Player` row of `VitalsBaseData`). A mob that kills a player makes it dead: it cannot move or attack, and the character is saved at once. When its client sends a respawn request (type 1938) at least `min_respawn_ms` after the death, it lives again with full health where it died. A handoff keeps the player's health. Awake mobs near a border are ghosts in the next `sim`; a hit on a ghost goes to the owner `sim` as a bus message.
 
-M6-A has no client message for combat: the client does not see mobs yet, and players attack only through the server's attack function (tests). M6-B adds the client messages from the study notes. The numbers marked Unknown in `config/sim.toml` section `[combat]` are not in the game files; M6-B replaces them with numbers measured from the captures.
+Combat on the wire (M6-B): a mob that comes into a player's view is sent once with its spawn card (type 10) and vitals block (type 15), then its position. An input record that sets an attack bit (9, 10, 13 or 15) the record before it did not set attacks the nearest living mob in reach with the first weapon attack. The attacker gets a 2071 for each hit it makes, a player hit by a mob gets a 3601, and a killed player gets a 4299. The numbers marked Unknown in `config/sim.toml` section `[combat]` are not in the game files or the captures.
 
 Checks:
 

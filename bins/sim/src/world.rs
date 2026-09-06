@@ -147,7 +147,7 @@ pub enum HandoffEnd {
 /// What one tick sends.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TickOutput {
-    /// Bundles and time messages.
+    /// Hit and death messages, then bundles and time messages.
     pub messages: Vec<Outgoing>,
     /// Handoffs to ask for.
     pub handoffs: Vec<HandoffStart>,
@@ -247,6 +247,8 @@ pub struct SimWorld {
     combat: CombatSettings,
     dice: Dice,
     deaths: Vec<Departure>,
+    /// Hit and death messages since the last [`SimWorld::take_messages`].
+    combat_messages: Vec<Outgoing>,
 }
 
 /// A new player before it is in the world.
@@ -272,6 +274,7 @@ impl SimWorld {
             mob_changes: MobChanges::default(),
             dice: Dice::new(combat.seed),
             deaths: Vec::new(),
+            combat_messages: Vec::new(),
             combat,
             world: World::new(),
             by_connection: HashMap::new(),
@@ -613,14 +616,14 @@ impl SimWorld {
         let ttl = self.settings.ghost_ttl_ms;
         self.ghosts
             .retain(|_, ghosts| now_ms.saturating_sub(ghosts.received_ms) <= ttl);
-        self.respawn_players(now_ms);
         let handoffs = self.start_handoffs(now_ms);
         let ghosts = self.ghosts_out();
         let mobs_started = Instant::now();
         let intents = self.tick_mobs(now_ms);
         let mob_hits = self.mob_hits(intents, now_ms);
         let mob_seconds = mobs_started.elapsed().as_secs_f64();
-        let messages = self.bundles(now_ms, server_time)?;
+        let mut messages = self.take_messages();
+        messages.extend(self.bundles(now_ms, server_time)?);
         Ok(TickOutput {
             messages,
             handoffs,

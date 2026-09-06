@@ -81,8 +81,9 @@ min_attack_interval_ms = 500
 mob_attack_interval_ms = 2000
 mob_speed_mps = 3.25
 mob_respawn_ms = 360000
-# Unknown.
-player_respawn_ms = 10000
+# Shortest time from a death to a respawn request (the client asks, type 1938): below the
+# lowest captured gap.
+min_respawn_ms = 2000
 seed = 1
 # The u32 of a mob spawn card AssetId (Azoth catalog field note: always 2).
 asset_sub_id = 2

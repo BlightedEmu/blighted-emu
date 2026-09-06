@@ -219,8 +219,8 @@ impl BodyCodec for OnDamageMsg {
     }
 }
 
-/// Type 1938: the client asks to respawn.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Type 1938: the client asks to respawn. The default is zero heads, flag 0 and no payload.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RequestRespawnMsg {
     /// The first big-endian `u64`; Unknown.
     pub head_a: u64,

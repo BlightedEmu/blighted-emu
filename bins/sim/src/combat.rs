@@ -58,6 +58,31 @@ impl AttackRefusal {
     }
 }
 
+/// Why a respawn request did not respawn (M6-B spec section 8.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RespawnRefusal {
+    /// The connection has no player in the world.
+    #[error("no player on this connection")]
+    NotInWorld,
+    /// The player is alive.
+    #[error("the player is not dead")]
+    NotDead,
+    /// The player died less than `min_respawn_ms` ago.
+    #[error("too soon after the death")]
+    TooSoon,
+}
+
+impl RespawnRefusal {
+    /// The metric label.
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::NotInWorld => "not_in_world",
+            Self::NotDead => "not_dead",
+            Self::TooSoon => "too_soon",
+        }
+    }
+}
+
 /// A hit for the sim that owns the target (M6-A spec section 7.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteHit {
@@ -116,8 +141,8 @@ pub struct CombatSettings {
     pub reach_margin_m: f32,
     /// Shortest time between two attacks of a player.
     pub min_attack_interval_ms: u64,
-    /// Time from a player's death to its respawn.
-    pub player_respawn_ms: u64,
+    /// Shortest time from a player's death to a respawn on its request.
+    pub min_respawn_ms: u64,
     /// Seed of the combat dice.
     pub seed: u64,
     /// The `u32` of a mob's spawn card `AssetId` (M6-B spec section 5.4).

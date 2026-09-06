@@ -20,7 +20,10 @@ use nw_bus::{
 };
 use nw_common::time::unix_ms;
 use nw_db::{PgPool, SaveOutcome, SavedPosition, save_character_position};
-use nw_messages::{BodyCodec, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX};
+use nw_messages::{
+    BodyCodec, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+    REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
+};
 use nw_reflect::Envelope;
 use nw_sim_core::{Ground, GroundCheck, Position, TickClock};
 use tokio::sync::mpsc;
@@ -104,6 +107,10 @@ pub const METRIC_MOBS: &str = "sim_mobs";
 pub const METRIC_ATTACKS: &str = "sim_attacks_total";
 /// Metric: hits from other sims by `result`.
 pub const METRIC_REMOTE_HITS: &str = "sim_remote_hits_total";
+/// Metric: respawn requests by `result`.
+pub const METRIC_RESPAWNS: &str = "sim_respawns_total";
+/// A respawn request that respawned.
+const RESPAWNED: &str = "respawned";
 /// A remote hit that landed.
 const APPLIED: &str = "applied";
 /// A remote hit whose target is gone, dead or returning.
@@ -440,20 +447,28 @@ impl Loop {
         }
     }
 
-    /// Reads one client message. Type 1589 moves the player to the position of its last record
-    /// that has one (M4 spec section 5.3), then attacks once per rising edge of its attack bits
-    /// (M6-B spec section 6); every other type is counted and ignored. Bad bytes are counted and
-    /// never close the connection.
+    /// Reads one client message: an input (1589) or a respawn request (1938); every other type
+    /// is counted and ignored. The hit and death messages it makes go with the next flush. Bad
+    /// bytes are counted and never close the connection.
     fn client_message(&mut self, connection: &ConnectionRef, bytes: &[u8]) {
         let Ok(envelope) = Envelope::decode(bytes) else {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
             return;
         };
-        if envelope.type_index() != Some(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX) {
-            metrics::counter!(METRIC_IGNORED_MESSAGES).increment(1);
-            return;
+        match envelope.type_index() {
+            Some(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX) => {
+                self.client_input(connection, &envelope.body);
+            }
+            Some(REQUEST_RESPAWN_TYPE_INDEX) => self.respawn_request(connection, &envelope.body),
+            _ => metrics::counter!(METRIC_IGNORED_MESSAGES).increment(1),
         }
-        let Ok(input) = ClientInputMsg::decode(&envelope.body) else {
+        self.send_combat_messages();
+    }
+
+    /// Moves the player to the position of the input's last record that has one (M4 spec section
+    /// 5.3), then attacks once per rising edge of its attack bits (M6-B spec section 6).
+    fn client_input(&mut self, connection: &ConnectionRef, body: &[u8]) {
+        let Ok(input) = ClientInputMsg::decode(body) else {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
             return;
         };
@@ -463,6 +478,26 @@ impl Loop {
         let now_ms = self.now_ms();
         for result in self.world.attack_input(connection, &input.records, now_ms) {
             self.attack_result(result);
+        }
+    }
+
+    /// The dead player asks to live again (M6-B spec section 8.2).
+    fn respawn_request(&mut self, connection: &ConnectionRef, body: &[u8]) {
+        if RequestRespawnMsg::decode(body).is_err() {
+            metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
+            return;
+        }
+        let result = match self.world.request_respawn(connection, self.now_ms()) {
+            Ok(()) => RESPAWNED,
+            Err(refusal) => refusal.reason(),
+        };
+        metrics::counter!(METRIC_RESPAWNS, RESULT_LABEL => result).increment(1);
+    }
+
+    /// Queues the world's hit and death messages for the next flush.
+    fn send_combat_messages(&mut self) {
+        for message in self.world.take_messages() {
+            self.send(message);
         }
     }
 
@@ -539,6 +574,7 @@ impl Loop {
         );
         let result = if applied.is_some() { APPLIED } else { DROPPED };
         metrics::counter!(METRIC_REMOTE_HITS, RESULT_LABEL => result).increment(1);
+        self.send_combat_messages();
     }
 
     /// Counts an attack of a player or a mob; a hit on a target of another sim goes there.
@@ -914,7 +950,8 @@ mod tests {
     use nw_db::test_db::with_test_schema;
     use nw_db::{NewCharacter, WORLD_MIGRATOR, character_position, insert_character};
     use nw_messages::{
-        BundlePayload, InputPosition, LOGIN_MESSAGE_TYPES, MemberState, ServerMessage,
+        BundlePayload, DEATH_RECAP_TYPE_INDEX, InputPosition, LOGIN_MESSAGE_TYPES, MemberState,
+        ServerMessage,
     };
     use nw_reflect::TypeId;
     use nw_sim_core::test_support::NoGround;
@@ -1545,8 +1582,27 @@ mod tests {
         .await;
     }
 
+    /// A respawn request (1938) with an empty payload.
+    fn respawn_request(connection: ConnectionRef) -> SimInput {
+        let body = RequestRespawnMsg::default().encode().expect("request");
+        let envelope = Envelope::message(TypeId::FileSlot(REQUEST_RESPAWN_TYPE_INDEX), body)
+            .encode()
+            .expect("envelope");
+        SimInput::ClientMessage {
+            connection,
+            envelope,
+        }
+    }
+
+    /// Whether `envelopes` hold a message of type `type_index`.
+    fn has_type(envelopes: &[Vec<u8>], type_index: u64) -> bool {
+        envelopes.iter().any(|bytes| {
+            Envelope::decode(bytes).is_ok_and(|envelope| envelope.type_index() == Some(type_index))
+        })
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_player_killed_by_a_mob_lives_again_and_is_saved() {
+    async fn a_killed_player_gets_a_4299_and_respawns_on_request() {
         /// A mob hit of 100 x 100: more than a player's health.
         const LETHAL_FACTOR: f64 = 100.0;
         const RESPAWN: Duration = Duration::from_millis(300);
@@ -1560,7 +1616,7 @@ mod tests {
             let mut gateway = TestGateway::start(&bus, world_id, true).await;
             let mut combat = test_combat();
             combat.mob_attack_factor = LETHAL_FACTOR;
-            combat.player_respawn_ms = u64::try_from(RESPAWN.as_millis()).expect("ms");
+            combat.min_respawn_ms = u64::try_from(RESPAWN.as_millis()).expect("ms");
             combat.spawns = vec![VitalsSpawn {
                 vitals_id: lowercase_crc32(TEST_MOB),
                 level: TEST_LEVEL,
@@ -1585,8 +1641,29 @@ mod tests {
                 (saved.x - f64::from(PLAYER_X)).abs() < SAVE_TOLERANCE_M,
                 "saved at once where it died"
             );
+            gateway
+                .until(|output| match output {
+                    GatewayOutput::ServerMessages {
+                        connection: CONNECTION,
+                        channel: MESSAGE_CHANNEL,
+                        envelopes,
+                        ..
+                    } => has_type(&envelopes, DEATH_RECAP_TYPE_INDEX).then_some(()),
+                    _ => None,
+                })
+                .await;
             tokio::time::sleep(RESPAWN + PAUSE).await;
             let step = move_to(gateway.connection(CONNECTION), PLAYER_X + STEP_M);
+            input(&bus, world_id, sim.id(), &step).await;
+            gateway.drain().await;
+            assert!(
+                tokio::time::timeout(PAUSE, wait_for_x(&mut gateway, sim.id(), PLAYER_X + STEP_M))
+                    .await
+                    .is_err(),
+                "dead until it asks"
+            );
+            let request = respawn_request(gateway.connection(CONNECTION));
+            input(&bus, world_id, sim.id(), &request).await;
             input(&bus, world_id, sim.id(), &step).await;
             tokio::time::timeout(WAIT, wait_for_x(&mut gateway, sim.id(), PLAYER_X + STEP_M))
                 .await

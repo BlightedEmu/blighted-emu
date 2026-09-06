@@ -55,8 +55,9 @@ pub const DEFAULT_MOB_ATTACK_INTERVAL_MS: u64 = 2_000;
 pub const DEFAULT_MOB_SPEED_MPS: f32 = 3.25;
 /// Default mob respawn: the one decoded spawner (M6-A spec F6).
 pub const DEFAULT_MOB_RESPAWN_MS: u64 = 360_000;
-/// Default player respawn.
-pub const DEFAULT_PLAYER_RESPAWN_MS: u64 = 10_000;
+/// Default shortest time from a death to a respawn request: below the lowest captured gap
+/// (M6-B spec F7).
+pub const DEFAULT_MIN_RESPAWN_MS: u64 = 2_000;
 /// Default seed of the combat dice.
 pub const DEFAULT_COMBAT_SEED: u64 = 1;
 /// Default `u32` of a spawn card's `AssetId` (always 2 per the Azoth catalog field note).
@@ -102,8 +103,8 @@ pub struct CombatConfig {
     pub mob_speed_mps: f32,
     /// Time from a mob's death to its respawn.
     pub mob_respawn_ms: u64,
-    /// Time from a player's death to its respawn.
-    pub player_respawn_ms: u64,
+    /// Shortest time from a player's death to a respawn on its request.
+    pub min_respawn_ms: u64,
     /// Seed of the combat dice.
     pub seed: u64,
     /// The `u32` of a mob's spawn card `AssetId`.
@@ -132,7 +133,7 @@ impl Default for CombatConfig {
             mob_attack_interval_ms: DEFAULT_MOB_ATTACK_INTERVAL_MS,
             mob_speed_mps: DEFAULT_MOB_SPEED_MPS,
             mob_respawn_ms: DEFAULT_MOB_RESPAWN_MS,
-            player_respawn_ms: DEFAULT_PLAYER_RESPAWN_MS,
+            min_respawn_ms: DEFAULT_MIN_RESPAWN_MS,
             seed: DEFAULT_COMBAT_SEED,
             asset_sub_id: DEFAULT_ASSET_SUB_ID,
         }
@@ -174,7 +175,7 @@ impl CombatConfig {
             self.min_attack_interval_ms,
             self.mob_attack_interval_ms,
             self.mob_respawn_ms,
-            self.player_respawn_ms,
+            self.min_respawn_ms,
         ];
         if times.contains(&0) {
             return invalid("combat.times", "must be above 0");
@@ -428,7 +429,7 @@ impl SimConfig {
             mob_attack_factor: combat.mob_attack_factor,
             reach_margin_m: combat.reach_margin_m,
             min_attack_interval_ms: combat.min_attack_interval_ms,
-            player_respawn_ms: combat.player_respawn_ms,
+            min_respawn_ms: combat.min_respawn_ms,
             seed: combat.seed,
             asset_sub_id: combat.asset_sub_id,
         }
