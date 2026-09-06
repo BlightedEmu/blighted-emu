@@ -11,6 +11,7 @@ publish.workspace = true
 bcdec_rs.workspace = true
 crc32fast.workspace = true
 flate2.workspace = true
+png.workspace = true
 quick-xml.workspace = true
 serde.workspace = true
 thiserror.workspace = true

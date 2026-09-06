@@ -126,6 +126,8 @@ pub struct KnownMembers {
     pub members: Vec<(BundleMember, Range<usize>)>,
     /// The class of the first member without a reader; `None` when the whole payload was read.
     pub stopped_at: Option<TypeId>,
+    /// The class and the error of a member whose reader failed; the walk ends there.
+    pub failed: Option<(TypeId, String)>,
 }
 
 impl BundlePayload {
@@ -172,8 +174,9 @@ impl BundlePayload {
         Ok(Self { groups })
     }
 
-    /// Reads the members at the front of a payload until the end or until a member of a class
-    /// without a reader.
+    /// Reads the members at the front of a payload until the end, a member of a class without a
+    /// reader ([`KnownMembers::stopped_at`]), or a member whose reader fails
+    /// ([`KnownMembers::failed`]); the members before it are kept.
     ///
     /// # Errors
     ///
@@ -189,6 +192,11 @@ impl BundlePayload {
                 let member = match read_member(&mut reader) {
                     Err(MessageError::UnknownMemberClass { class }) => {
                         known.stopped_at = Some(class);
+                        return Ok(known);
+                    }
+                    Err(MessageError::InMember { class, source }) => {
+                        let error = MessageError::InMember { class, source };
+                        known.failed = Some((class, error.to_string()));
                         return Ok(known);
                     }
                     other => other?,
@@ -344,17 +352,10 @@ mod tests {
             &nw_reflect::encode_type_id(&TypeId::FileSlot(VITALS_TYPE_INDEX)).expect("class"),
         );
         bytes.u8(0x01).u8(0x04).u8(0);
-        let error = BundlePayload::decode_known(&bytes.finish()).expect_err("ends early");
-        assert!(
-            matches!(
-                error,
-                MessageError::InMember {
-                    class: TypeId::FileSlot(VITALS_TYPE_INDEX),
-                    ..
-                }
-            ),
-            "{error:?}"
-        );
+        let known = BundlePayload::decode_known(&bytes.finish()).expect("known");
+        let (class, error) = known.failed.expect("ends early");
+        assert_eq!(class, TypeId::FileSlot(VITALS_TYPE_INDEX));
+        assert!(error.starts_with("member of class"), "{error}");
     }
 
     #[test]
@@ -368,6 +369,31 @@ mod tests {
         for (member, range) in known.members {
             assert_eq!(member.encode().expect("member"), bytes[range]);
         }
+    }
+
+    #[test]
+    fn a_failing_member_keeps_the_members_before_it() {
+        let mut bytes = vec![LEADING as u8, 2];
+        bytes.extend(position_member(1.0).encode().expect("member"));
+        // A type 11 member whose `blob33` count is over its limit.
+        let mut broken = Writer::new();
+        broken
+            .prefixed(ENTITY)
+            .expect("entity")
+            .bytes(
+                &nw_reflect::encode_type_id(&TypeId::FileSlot(crate::alc::ALC_TYPE_INDEX))
+                    .expect("class"),
+            )
+            .u8(1)
+            .wide_prefixed(1 << 29)
+            .prefixed(40)
+            .expect("count");
+        bytes.extend(broken.finish());
+        let known = BundlePayload::decode_known(&bytes).expect("known");
+        assert_eq!(known.members.len(), 1);
+        assert_eq!(known.stopped_at, None);
+        let failed = known.failed.expect("the failing member");
+        assert_eq!(failed.0, TypeId::FileSlot(crate::alc::ALC_TYPE_INDEX));
     }
 
     #[test]
@@ -427,7 +453,9 @@ mod tests {
         ));
         let bytes = payload().encode().expect("encode");
         assert!(BundlePayload::decode(&bytes[..bytes.len() - 1]).is_err());
-        assert!(BundlePayload::decode_known(&bytes[..bytes.len() - 1]).is_err());
+        let known = BundlePayload::decode_known(&bytes[..bytes.len() - 1]).expect("known");
+        assert_eq!(known.members.len(), 2, "the members before the cut one");
+        assert!(known.failed.is_some());
         assert_eq!(BundlePayload::decode(&[]), Ok(BundlePayload::default()));
     }
 }

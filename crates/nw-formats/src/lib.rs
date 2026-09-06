@@ -11,3 +11,4 @@ pub mod loc;
 pub mod local_data;
 pub mod objectstream;
 pub mod pak;
+pub mod png_image;

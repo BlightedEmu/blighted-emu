@@ -364,7 +364,13 @@ fn message_view(state: &AppState, n: usize, message: &Decoded) -> MessageView {
         Detail::Bundle {
             members,
             stopped_at,
-        } => (members.len(), *stopped_at, None, None),
+            failed,
+        } => (
+            members.len(),
+            *stopped_at,
+            None,
+            failed.as_ref().map(|failure| failure.reason.clone()),
+        ),
         Detail::Input { position } => (0, None, *position, None),
         Detail::Failed(reason) => (0, None, None, Some(reason.clone())),
         Detail::None => (0, None, None, None),
@@ -435,6 +441,9 @@ struct BytesView {
     members: Vec<MemberView>,
     stopped_at: Option<u64>,
     stopped_name: Option<String>,
+    failed_class: Option<u64>,
+    failed_name: Option<String>,
+    failed_reason: Option<String>,
 }
 
 async fn bytes(
@@ -462,10 +471,11 @@ async fn bytes(
         // Writing to a String does not fail.
         let _ = write!(hex, "{byte:02x}");
     }
-    let (members, stopped_at) = match &session.index.messages[n].detail {
+    let (members, stopped_at, failed) = match &session.index.messages[n].detail {
         Detail::Bundle {
             members,
             stopped_at,
+            failed,
         } => (
             members
                 .iter()
@@ -479,14 +489,20 @@ async fn bytes(
                 })
                 .collect(),
             *stopped_at,
+            failed.clone(),
         ),
-        Detail::Input { .. } | Detail::Failed(_) | Detail::None => (Vec::new(), None),
+        Detail::Input { .. } | Detail::Failed(_) | Detail::None => (Vec::new(), None, None),
     };
     Json(BytesView {
         hex,
         members,
         stopped_name: stopped_at.and_then(|class| type_name(&state, class)),
         stopped_at,
+        failed_name: failed
+            .as_ref()
+            .and_then(|failure| type_name(&state, failure.class)),
+        failed_class: failed.as_ref().map(|failure| failure.class),
+        failed_reason: failed.map(|failure| failure.reason),
     })
     .into_response()
 }
@@ -570,7 +586,8 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use nw_capture::test_support::{
-        RELIABLE_START, TEST_TIME_MS, envelope, position_bundle, record_at, server_datagram_at,
+        RELIABLE_START, TEST_TIME_MS, bundle_with_a_failing_member, envelope, position_bundle,
+        record_at, server_datagram_at,
     };
     use nw_capture::{LEDGER_MAGIC, SERVER_TO_CLIENT};
     use nw_messages::REPLICATED_STATE_BUNDLE_TYPE_INDEX;
@@ -661,7 +678,10 @@ mod tests {
         Fixture { _dir: dir, app }
     }
 
-    async fn call(app: &axum::Router, request: Request<Body>) -> (StatusCode, Value) {
+    async fn call(app: &axum::Router, mut request: Request<Body>) -> (StatusCode, Value) {
+        request
+            .headers_mut()
+            .insert("host", LISTEN.parse().expect("host"));
         let response = app.clone().oneshot(request).await.expect("response");
         let status = response.status();
         let bytes = response
@@ -774,6 +794,31 @@ mod tests {
         assert!(start < end && end * 2 <= hex.len());
         let (status, _) = get(&fixture.app, "/api/captures/main/messages/99/bytes").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_failing_member_shows_with_the_members_before_it() {
+        let ledger = record_at(
+            TEST_TIME_MS,
+            SERVER_TO_CLIENT,
+            &server_datagram_at(
+                RELIABLE_START,
+                &[envelope(
+                    REPLICATED_STATE_BUNDLE_TYPE_INDEX,
+                    bundle_with_a_failing_member(),
+                )],
+            ),
+        );
+        let fixture = fixture(&[("a.bin", ledger)], OpenSessions::default());
+        open(&fixture.app, "a.bin", "main").await;
+        ready(&fixture.app, "main").await;
+        let (_, messages) = get(&fixture.app, "/api/captures/main/messages").await;
+        assert_eq!(messages[0]["members"], 1);
+        assert!(messages[0]["failed"].is_string());
+        let (_, bytes) = get(&fixture.app, "/api/captures/main/messages/0/bytes").await;
+        assert_eq!(bytes["members"].as_array().map(Vec::len), Some(1));
+        assert_eq!(bytes["failed_class"], nw_messages::ALC_TYPE_INDEX);
+        assert!(bytes["failed_reason"].is_string());
     }
 
     #[tokio::test]

@@ -18,6 +18,9 @@ use nw_reflect::{Envelope, TypeId, decode_client_message, decode_server_messages
 
 use crate::{CLIENT_TO_SERVER, LedgerRecord, SERVER_TO_CLIENT, is_connect_request};
 
+/// The class index of a member whose class is an inline UUID (index 0 on the wire).
+pub const INLINE_UUID_CLASS: u64 = 0;
+
 /// One envelope a record delivered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeliveredEnvelope {
@@ -158,6 +161,8 @@ pub enum Detail {
         members: Vec<MemberRef>,
         /// The class of the first member without a reader.
         stopped_at: Option<u64>,
+        /// The member whose reader failed; the walk ends there.
+        failed: Option<MemberFailure>,
     },
     /// The client input (type 1589).
     Input {
@@ -166,6 +171,15 @@ pub enum Detail {
     },
     /// A body of a type with a reader that does not decode.
     Failed(String),
+}
+
+/// A bundle member whose reader failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberFailure {
+    /// Class type index; 0 for an inline UUID class.
+    pub class: u64,
+    /// The error.
+    pub reason: String,
 }
 
 /// One bundle member.
@@ -242,9 +256,17 @@ fn bundle_detail(body: &[u8]) -> Detail {
         TypeId::FileSlot(index) => Some(index),
         TypeId::InlineUuid(_) => None,
     });
+    let failed = known.failed.map(|(class, reason)| MemberFailure {
+        class: match class {
+            TypeId::FileSlot(index) => index,
+            TypeId::InlineUuid(_) => INLINE_UUID_CLASS,
+        },
+        reason,
+    });
     Detail::Bundle {
         members,
         stopped_at,
+        failed,
     }
 }
 
@@ -364,6 +386,7 @@ mod tests {
         let Detail::Bundle {
             members,
             stopped_at,
+            ..
         } = decoded.detail
         else {
             panic!("a bundle");
@@ -409,8 +432,32 @@ mod tests {
         let decoded = described(&ledger);
         assert!(matches!(
             &decoded[0].detail,
-            Detail::Bundle { members, stopped_at: Some(UNREAD_CLASS) } if members.is_empty()
+            Detail::Bundle { members, stopped_at: Some(UNREAD_CLASS), .. } if members.is_empty()
         ));
+    }
+
+    #[test]
+    fn a_failing_member_keeps_the_members_before_it() {
+        let ledger = record(
+            SERVER_TO_CLIENT,
+            &server_datagram(&[envelope(
+                REPLICATED_STATE_BUNDLE_TYPE_INDEX,
+                crate::test_support::bundle_with_a_failing_member(),
+            )]),
+        );
+        let Detail::Bundle {
+            members,
+            stopped_at,
+            failed,
+        } = &described(&ledger)[0].detail
+        else {
+            panic!("a bundle");
+        };
+        assert_eq!(members.len(), 1);
+        assert_eq!(*stopped_at, None);
+        let failed = failed.as_ref().expect("the failing member");
+        assert_eq!(failed.class, nw_messages::ALC_TYPE_INDEX);
+        assert!(failed.reason.starts_with("member of class"));
     }
 
     #[test]

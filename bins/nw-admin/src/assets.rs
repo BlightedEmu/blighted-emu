@@ -27,6 +27,7 @@ pub fn asset(name: &str) -> Option<Asset> {
         "view.js" => (JS, include_str!("../web/view.js")),
         "hex.js" => (JS, include_str!("../web/hex.js")),
         "tables.js" => (JS, include_str!("../web/tables.js")),
+        "slots.js" => (JS, include_str!("../web/slots.js")),
         "captures.html" => (HTML, include_str!("../web/captures.html")),
         "captures.js" => (JS, include_str!("../web/captures.js")),
         _ => return None,
@@ -45,7 +46,14 @@ mod tests {
             Some(HTML)
         );
         assert_eq!(asset("style.css").map(|file| file.content_type), Some(CSS));
-        for script in ["map.js", "view.js", "hex.js", "tables.js", "captures.js"] {
+        for script in [
+            "map.js",
+            "view.js",
+            "hex.js",
+            "tables.js",
+            "slots.js",
+            "captures.js",
+        ] {
             assert_eq!(asset(script).map(|file| file.content_type), Some(JS));
         }
         assert_eq!(asset("map.html").map(|file| file.content_type), Some(HTML));

@@ -186,6 +186,9 @@ impl CaptureReport {
     fn check_members(&mut self, bundle: &ReplicatedStateBundle) -> Result<(), String> {
         let known = BundlePayload::decode_known(&bundle.payload)
             .map_err(|error| format!("bundle payload: {error}"))?;
+        if let Some((_, error)) = &known.failed {
+            return Err(format!("bundle payload: {error}"));
+        }
         for (member, range) in known.members {
             let encoded = member
                 .encode()
@@ -533,6 +536,63 @@ mod tests {
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(report.members.get(&ALC_TYPE_INDEX), Some(&1));
         assert_eq!(report.complete_payloads, 1);
+    }
+
+    #[test]
+    fn a_failing_member_is_still_a_failure() {
+        let mut payload = Writer::new();
+        payload
+            .prefixed(1)
+            .expect("leading")
+            .u8(2)
+            .bytes(
+                &BundleMember {
+                    u64_at_0: 2,
+                    state: MemberState::Position(PositionInTheWorldReplicatedState::default()),
+                }
+                .encode()
+                .expect("member"),
+            )
+            .prefixed(3)
+            .expect("entity");
+        payload
+            .bytes(&nw_reflect::encode_type_id(&TypeId::FileSlot(ALC_TYPE_INDEX)).expect("class"));
+        // Slot 0 with only its `blob33` child, whose count is over the limit.
+        payload
+            .u8(1)
+            .wide_prefixed(1 << 29)
+            .prefixed(40)
+            .expect("count");
+        let bundle = ReplicatedStateBundle {
+            leading: None,
+            byte_3: 0,
+            byte_4: 0,
+            flag_5: false,
+            index_block: None,
+            payload: payload.finish(),
+        }
+        .encode()
+        .expect("bundle");
+        let mut report = CaptureReport::default();
+        report
+            .check_ledger(
+                Path::new("failing member"),
+                &record(
+                    SERVER_TO_CLIENT,
+                    &server_datagram(&[envelope(REPLICATED_STATE_BUNDLE_TYPE_INDEX, bundle)]),
+                ),
+            )
+            .expect("check");
+        assert_eq!(report.failures.len(), 1);
+        assert!(
+            report.failures[0]
+                .reason
+                .starts_with("bundle payload: member of class")
+        );
+        assert!(
+            report.members.is_empty(),
+            "no member of a failed payload is counted"
+        );
     }
 
     #[test]

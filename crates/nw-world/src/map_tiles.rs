@@ -3,10 +3,22 @@
 //! section 3.1): per level, the tile size in metres and the grid. Level 1 is the finest; each
 //! level above it halves the grid.
 
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 
 /// File name of the index in a level's map folder.
 pub const TILES_FILE: &str = "tiles.json";
+/// File extension of a written tile.
+const TILE_EXTENSION: &str = "png";
+
+/// The file of tile (`row`, `column`) of `level` in a level's map folder:
+/// `<dir>/<level>/<row>_<column>.png`.
+pub fn tile_file(dir: &Path, level: u8, row: u32, column: u32) -> PathBuf {
+    dir.join(level.to_string())
+        .join(format!("{row}_{column}.{TILE_EXTENSION}"))
+}
+
 /// Metres of a level 1 tile (14,336 m over 56 tiles; admin tools spec F7, Inferred).
 pub const LEVEL_1_TILE_M: u32 = 256;
 
@@ -97,6 +109,14 @@ mod tests {
         );
         assert_eq!(index.level(4).map(|level| level.tile_m), Some(2_048));
         assert_eq!(index.level(9), None);
+    }
+
+    #[test]
+    fn a_tile_file_is_level_then_row_and_column() {
+        assert_eq!(
+            tile_file(Path::new("map"), 2, 3, 4),
+            Path::new("map").join("2").join("3_4.png")
+        );
     }
 
     #[test]

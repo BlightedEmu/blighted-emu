@@ -3,6 +3,7 @@
 //! height, light from the north-west, blue under the ocean level. Same tile grid as the map
 //! tiles, so the page can lay one over the other to check them (section 3.3).
 
+use nw_formats::png_image::encode_rgba_png;
 use nw_world::WorldFile;
 use nw_world::map_tiles::TilesIndex;
 
@@ -52,7 +53,7 @@ pub fn relief_tile(
         let y = north - ((index / side) as f32 + 0.5) * pixel_m;
         pixel.copy_from_slice(&shade(world, x, y, pixel_m, ocean));
     }
-    encode_png(&rgba)
+    encode_rgba_png(RELIEF_TILE_PX, RELIEF_TILE_PX, &rgba).ok()
 }
 
 fn shade(world: &WorldFile, x: f32, y: f32, step: f32, ocean: f32) -> [u8; 4] {
@@ -71,18 +72,6 @@ fn shade(world: &WorldFile, x: f32, y: f32, step: f32, ocean: f32) -> [u8; 4] {
     let grey = GREY_LOW + GREY_SPAN * (height / TOP_M).clamp(0.0, 1.0);
     let value = (grey * (AMBIENT + (1.0 - AMBIENT) * light.max(0.0))).clamp(0.0, 255.0) as u8;
     [value, value, value, OPAQUE]
-}
-
-fn encode_png(rgba: &[u8]) -> Option<Vec<u8>> {
-    let mut bytes = Vec::new();
-    let mut encoder = png::Encoder::new(&mut bytes, RELIEF_TILE_PX, RELIEF_TILE_PX);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Fast);
-    let mut writer = encoder.write_header().ok()?;
-    writer.write_image_data(rgba).ok()?;
-    writer.finish().ok()?;
-    Some(bytes)
 }
 
 #[cfg(test)]

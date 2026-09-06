@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  boxAround,
   boxOf,
   parentTile,
   screenToWorld,
@@ -95,4 +96,10 @@ test('tileAt and parentTile place a tile and its coarser tile', () => {
   assert.equal(parentTile(tiles, tileAt(tiles, 8, 0, 0)), null);
   const north = tilesIndex(true);
   assert.equal(tileAt(north, 1, 0, 0).south, WORLD_M - 256);
+});
+
+test('boxAround takes a very long point list', () => {
+  const points = Array.from({ length: 400000 }, (_, index) => ({ x: index, y: -index }));
+  assert.deepEqual(boxAround(points, 10), { minX: -10, minY: -399999 - 10, maxX: 399999 + 10, maxY: 10 });
+  assert.equal(boxAround([], 10), null);
 });

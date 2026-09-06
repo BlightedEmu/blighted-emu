@@ -4,10 +4,10 @@
 use nw_carrier::system::CARRIER_VERSION;
 use nw_carrier::{Frame, SYSTEM_CHANNEL, SystemMessage, encode_datagram, encode_frames};
 use nw_messages::{
-    BundleGroup, BundleMember, BundlePayload, MemberState, PositionInTheWorldReplicatedState,
-    ReplicatedStateBundle, WorldPosition,
+    ALC_TYPE_INDEX, BundleGroup, BundleMember, BundlePayload, MemberState,
+    PositionInTheWorldReplicatedState, ReplicatedStateBundle, WorldPosition, Writer,
 };
-use nw_reflect::{Envelope, TypeId, encode_client_message, encode_server_messages};
+use nw_reflect::{Envelope, TypeId, encode_client_message, encode_server_messages, encode_type_id};
 
 use crate::LedgerWriter;
 
@@ -23,6 +23,12 @@ pub const RELIABLE_START: u16 = 10;
 pub const ZERO_SESSION: [u8; 16] = [0; 16];
 /// Entity key of [`position_bundle`].
 pub const TEST_ENTITY: u64 = 2;
+/// Type 11 slot byte with slot 0.
+const ALC_SLOT_0: u8 = 1;
+/// Type 11 slot 0 child that is a `blob33`.
+const ALC_BLOB33_CHILD: u32 = 29;
+/// A `blob33` count over its limit of 32.
+const ALC_BLOB33_OVER_LIMIT: u64 = 40;
 
 /// One ledger record at [`TEST_TIME_MS`] in [`TEST_CONTEXT`].
 pub fn record(direction: u32, datagram: &[u8]) -> Vec<u8> {
@@ -94,6 +100,29 @@ pub fn position_bundle_at(x: f32, y: f32, z: f32) -> Vec<u8> {
 /// [`position_bundle_at`] at (1, 2, 3).
 pub fn position_bundle() -> Vec<u8> {
     position_bundle_at(1.0, 2.0, 3.0)
+}
+
+/// A bundle with a position member of [`TEST_ENTITY`], then a type 11 member whose `blob33`
+/// count is over its limit: the walk keeps the first and fails at the second.
+pub fn bundle_with_a_failing_member() -> Vec<u8> {
+    let mut payload = Writer::new();
+    payload.prefixed(1).expect("group").u8(2);
+    payload.bytes(
+        &BundleMember {
+            u64_at_0: TEST_ENTITY,
+            state: MemberState::Position(PositionInTheWorldReplicatedState::default()),
+        }
+        .encode()
+        .expect("member"),
+    );
+    payload.prefixed(TEST_ENTITY + 1).expect("key");
+    payload.bytes(&encode_type_id(&TypeId::FileSlot(ALC_TYPE_INDEX)).expect("class"));
+    payload
+        .u8(ALC_SLOT_0)
+        .wide_prefixed(1 << ALC_BLOB33_CHILD)
+        .prefixed(ALC_BLOB33_OVER_LIMIT)
+        .expect("count");
+    bundle_of(payload.finish())
 }
 
 /// One server datagram that carries `envelopes`, reliable, at [`RELIABLE_START`].

@@ -3,7 +3,16 @@
 
 import { hexRows } from './hex.js';
 import { WorldMap } from './map.js';
-import { directionText, formatBytes, formatRate, ratioText, sortRows } from './tables.js';
+import { openOutcome } from './slots.js';
+import { boxAround } from './view.js';
+import {
+  directionText,
+  formatBytes,
+  formatRate,
+  largest,
+  ratioText,
+  sortRows,
+} from './tables.js';
 
 const ADMIN_HEADERS = { 'X-NW-Admin': '1', 'Content-Type': 'application/json' };
 const POLL_MS = 500;
@@ -14,6 +23,7 @@ const PLAYER_KEY = 'player';
 const PLAYER_COLOUR = '#ffd84a';
 const TRACK_COLOURS = ['#4fc3f7', '#ef6c6c', '#81c784', '#ba68c8', '#ffb74d', '#4db6ac'];
 const SELECTED_COLOUR = '#ffffff';
+const FIT_MARGIN_M = 50;
 
 const $ = (id) => document.getElementById(id);
 const api = (path) => fetch(path).then((response) => {
@@ -119,8 +129,9 @@ async function openSlot(id, slot) {
   }
   for (;;) {
     const state = await api(`/api/captures/${slot}/state`);
-    if (state.state !== 'indexing') {
-      return state;
+    const outcome = openOutcome(state, id);
+    if (outcome !== 'wait') {
+      return { ...state, replaced: outcome === 'replaced' };
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
   }
@@ -129,6 +140,10 @@ async function openSlot(id, slot) {
 async function openSession(session) {
   $('session-title').textContent = `Reading ${session.id}`;
   const state = await openSlot(session.id, 'main');
+  if (state.replaced) {
+    // A later click opened another session; that open shows it.
+    return;
+  }
   if (state.state !== 'ready') {
     $('session-title').textContent = `${session.id}: ${state.error ?? state.state}`;
     return;
@@ -209,7 +224,7 @@ async function showRate(type) {
   const context = canvas.getContext('2d');
   canvas.width = canvas.clientWidth;
   const height = canvas.height;
-  const top = Math.max(1, ...bars);
+  const top = largest(bars, 1);
   const width = canvas.width / Math.max(bars.length, 1);
   context.clearRect(0, 0, canvas.width, height);
   context.fillStyle = getComputedStyle(document.body).getPropertyValue('--accent');
@@ -303,18 +318,10 @@ function drawPaths() {
 
 function fitToPlayer() {
   const points = page.player.length > 0 ? page.player : [...page.trackPoints.values()].flat();
-  if (points.length === 0) {
-    return;
+  const box = boxAround(points, FIT_MARGIN_M);
+  if (box) {
+    page.map.fit(box);
   }
-  const xs = points.map((point) => point.x);
-  const ys = points.map((point) => point.y);
-  const margin = 50;
-  page.map.fit({
-    minX: Math.min(...xs) - margin,
-    minY: Math.min(...ys) - margin,
-    maxX: Math.max(...xs) + margin,
-    maxY: Math.max(...ys) + margin,
-  });
 }
 
 // Messages and bytes ---------------------------------------------------------------------------
@@ -352,6 +359,12 @@ async function showBytes(message) {
     item.addEventListener('click', () => drawHex(index));
     members.append(item);
   });
+  if (page.bytes.failed_class !== null) {
+    const item = document.createElement('li');
+    item.className = 'muted';
+    item.textContent = `failed at ${page.bytes.failed_name ?? page.bytes.failed_class}: ${page.bytes.failed_reason}`;
+    members.append(item);
+  }
   if (page.bytes.stopped_at !== null) {
     const item = document.createElement('li');
     item.className = 'muted';
@@ -406,6 +419,9 @@ async function compare() {
   const id = $('compare-search').value;
   $('compare-status').textContent = `Reading ${id}`;
   const state = await openSlot(id, 'compare');
+  if (state.replaced) {
+    return;
+  }
   if (state.state !== 'ready') {
     $('compare-status').textContent = `${id}: ${state.error ?? state.state}`;
     return;

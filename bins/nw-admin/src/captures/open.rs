@@ -11,6 +11,9 @@ use nw_capture::SessionIndex;
 
 use crate::captures::catalog::SessionEntry;
 
+/// The error of a slot whose indexer panicked.
+const INDEXER_PANIC: &str = "the index build panicked on this ledger";
+
 /// Reads a ledger file and builds its index.
 pub type Indexer =
     Arc<dyn Fn(&Path) -> Result<(Arc<[u8]>, SessionIndex), String> + Send + Sync + 'static>;
@@ -138,7 +141,11 @@ impl OpenSessions {
         }
         let indexer = Arc::clone(&self.indexer);
         tokio::task::spawn_blocking(move || {
-            let state = match indexer(&entry.path) {
+            // A panic on a broken ledger must end in `Failed`, not leave the slot indexing.
+            let built =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| indexer(&entry.path)))
+                    .unwrap_or_else(|_| Err(INDEXER_PANIC.to_owned()));
+            let state = match built {
                 Ok((ledger, index)) => SlotState::Ready {
                     id: entry.id,
                     index: Arc::new(index),
@@ -256,6 +263,24 @@ pub(crate) mod tests {
             settled(&open, Slot::Main).await,
             SlotState::Failed { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn a_panic_while_indexing_fails_the_slot() {
+        let dir = tempfile::tempdir().expect("dir");
+        let open = OpenSessions::with_indexer(Arc::new(|_: &Path| panic!("broken index")));
+        open.open(Slot::Main, ping_session(dir.path(), "a.bin"));
+        let deadline = tokio::time::Instant::now() + SLOW * 5;
+        loop {
+            match open.state(Slot::Main) {
+                SlotState::Failed { error, .. } => {
+                    assert!(error.contains("panicked"), "{error}");
+                    return;
+                }
+                _ if tokio::time::Instant::now() > deadline => panic!("still not failed"),
+                _ => tokio::time::sleep(WAIT_STEP).await,
+            }
+        }
     }
 
     #[test]

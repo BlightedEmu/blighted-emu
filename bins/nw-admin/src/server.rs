@@ -2,7 +2,7 @@
 //! The HTTP routes of `nw-admin` (admin tools spec sections 3 and 7).
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
@@ -19,6 +19,7 @@ use crate::captures::catalog::search;
 use crate::guard::{AdminOrigin, admin_guard};
 use crate::relief::relief_tile;
 use crate::world::{SpawnKind, SpawnQuery, WorldLayer};
+use nw_world::map_tiles::tile_file;
 
 /// Content type of map tiles.
 pub const PNG: &str = "image/png";
@@ -85,7 +86,7 @@ async fn map_tile(
     State(state): State<AppState>,
     UrlPath((level, row, column)): UrlPath<(u8, u32, u32)>,
 ) -> Response {
-    let path = tile_path(&state.map_dir, level, row, column);
+    let path = tile_file(&state.map_dir, level, row, column);
     match tokio::fs::read(&path).await {
         Ok(bytes) => png_response(bytes),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
@@ -147,18 +148,14 @@ async fn type_label(State(state): State<AppState>, UrlPath(idx): UrlPath<u64>) -
     Json(state.captures.labels.label(idx)).into_response()
 }
 
-fn tile_path(map_dir: &Path, level: u8, row: u32, column: u32) -> PathBuf {
-    map_dir
-        .join(level.to_string())
-        .join(format!("{row}_{column}.png"))
-}
-
 fn png_response(bytes: Vec<u8>) -> Response {
     ([(header::CONTENT_TYPE, PNG)], bytes).into_response()
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use http_body_util::BodyExt;
@@ -190,6 +187,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri(uri)
+                    .header(header::HOST, LISTEN)
                     .body(Body::empty())
                     .expect("request"),
             )

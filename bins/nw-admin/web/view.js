@@ -110,3 +110,22 @@ export function visibleTiles(view, tilesIndex, level) {
   }
   return tiles;
 }
+
+/** The world box around points ({ x, y }) with a margin in metres; null for no point. */
+export function boxAround(points, margin) {
+  if (points.length === 0) {
+    return null;
+  }
+  // A loop, not Math.min(...): a spread of a few 100,000 values overflows the call stack.
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const point of points) {
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  }
+  return { minX: minX - margin, minY: minY - margin, maxX: maxX + margin, maxY: maxY + margin };
+}

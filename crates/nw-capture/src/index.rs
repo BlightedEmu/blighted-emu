@@ -11,6 +11,9 @@ use crate::{CaptureError, ledger_records};
 /// A key back after this long is a new appearance (mob replication rate note, "Distance").
 pub const TRACK_GAP_MS: u64 = 5_000;
 const MS_PER_SECOND: u64 = 1_000;
+/// Seconds of rate buckets per type; later messages count in the last bucket (a broken record
+/// time must not size a bucket list).
+pub const MAX_RATE_SECONDS: usize = 86_400;
 
 /// Totals of a session.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -98,7 +101,7 @@ pub struct SessionIndex {
     pub tracks: Vec<Track>,
     /// The player's own positions (client input).
     pub player: Vec<TrackPoint>,
-    /// Classes where bundle walks stopped, with counts, by class.
+    /// Classes where bundle walks stopped (no reader, or a failing reader), with counts, by class.
     pub coverage: Vec<(u64, u64)>,
     /// Streams that stopped.
     pub failures: Vec<StreamFailure>,
@@ -160,8 +163,10 @@ impl SessionIndex {
                     stats.count += 1;
                     stats.bytes += u64::from(decoded.size);
                     stats.last_ms = decoded.time_ms;
-                    let second = (decoded.time_ms.saturating_sub(index.summary.first_ms)
-                        / MS_PER_SECOND) as usize;
+                    let second = usize::try_from(
+                        decoded.time_ms.saturating_sub(index.summary.first_ms) / MS_PER_SECOND,
+                    )
+                    .map_or(MAX_RATE_SECONDS, |second| second.min(MAX_RATE_SECONDS));
                     if stats.per_second.len() <= second {
                         stats.per_second.resize(second + 1, 0);
                     }
@@ -171,12 +176,14 @@ impl SessionIndex {
                     Detail::Bundle {
                         members,
                         stopped_at,
+                        failed,
                     } => {
                         for member in members {
                             add_to_track(&mut tracks, &mut done, member, decoded.time_ms);
                         }
-                        if let Some(class) = stopped_at {
-                            *coverage.entry(*class).or_default() += 1;
+                        let end = stopped_at.or(failed.as_ref().map(|failure| failure.class));
+                        if let Some(class) = end {
+                            *coverage.entry(class).or_default() += 1;
                         }
                     }
                     Detail::Input {
@@ -397,5 +404,34 @@ mod tests {
             envelope(REPLICATED_STATE_BUNDLE_TYPE_INDEX, bundle.clone())
         }));
         assert_eq!(index.coverage, vec![(12, 2)]);
+    }
+
+    #[test]
+    fn a_far_future_record_does_not_blow_up_the_rates() {
+        let mut ledger = server_ledger(&[0], ping);
+        ledger.extend(record_at(
+            u64::MAX,
+            SERVER_TO_CLIENT,
+            &server_datagram_at(RELIABLE_START + 1, &[ping(1)]),
+        ));
+        let index = SessionIndex::build(&ledger);
+        let stats = &index.types[0];
+        assert_eq!(stats.count, 2);
+        assert!(stats.per_second.len() <= MAX_RATE_SECONDS + 1);
+        assert_eq!(stats.per_second.iter().sum::<u32>(), 2);
+    }
+
+    #[test]
+    fn a_failing_member_class_is_counted_in_the_coverage() {
+        let bundle = crate::test_support::bundle_with_a_failing_member();
+        let index = SessionIndex::build(&server_ledger(&[0], |_| {
+            envelope(REPLICATED_STATE_BUNDLE_TYPE_INDEX, bundle.clone())
+        }));
+        assert_eq!(index.coverage, vec![(nw_messages::ALC_TYPE_INDEX, 1)]);
+        assert_eq!(
+            index.tracks.len(),
+            1,
+            "the member before it still makes a track"
+        );
     }
 }

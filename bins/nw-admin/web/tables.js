@@ -58,3 +58,12 @@ export function formatBytes(bytes) {
 export function directionText(direction) {
   return DIRECTIONS[direction] ?? MISSING;
 }
+
+/** The largest value, at least `floor` (a loop: a spread of a long list overflows the stack). */
+export function largest(values, floor) {
+  let top = floor;
+  for (const value of values) {
+    top = Math.max(top, value);
+  }
+  return top;
+}

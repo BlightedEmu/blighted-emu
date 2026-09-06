@@ -11,7 +11,9 @@ pub mod names;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
 
-pub use decode::{Decoded, Decoder, DeliveredEnvelope, Detail, MemberRef, RecordOutput, describe};
+pub use decode::{
+    Decoded, Decoder, DeliveredEnvelope, Detail, MemberFailure, MemberRef, RecordOutput, describe,
+};
 pub use index::{
     SessionIndex, StreamFailure, Summary, TRACK_GAP_MS, Track, TrackPoint, TypeStats, message_bytes,
 };

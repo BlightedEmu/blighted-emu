@@ -7,14 +7,13 @@
 //! Map tiles are game data: they stay in the git-ignored `local-data/`.
 
 use std::collections::BTreeMap;
-use std::fs::File;
-use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::mpsc::sync_channel;
 
 use nw_formats::dds::{DdsError, DdsFormat, dds_header, decode_dds};
-use nw_world::map_tiles::{LEVEL_1_TILE_M, TILES_FILE, TilesIndex};
+use nw_formats::png_image::encode_rgba_png;
+use nw_world::map_tiles::{LEVEL_1_TILE_M, TILES_FILE, TilesIndex, tile_file};
 
 use crate::error::ToolError;
 use crate::source::GameSource;
@@ -128,27 +127,19 @@ pub fn write_tile(
         path: label,
         source,
     })?;
-    let folder = level_dir.join(name.level.to_string());
-    std::fs::create_dir_all(&folder).map_err(|source| MapTilesError::Io {
-        path: folder.clone(),
-        source,
-    })?;
-    let path = folder.join(format!("{y}_{x}.png"));
-    let file = File::create(&path).map_err(|source| MapTilesError::Io {
-        path: path.clone(),
-        source,
-    })?;
-    let png_error = |source| MapTilesError::Png {
-        path: path.clone(),
-        source,
-    };
-    let mut encoder = png::Encoder::new(BufWriter::new(file), image.width, image.height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Fast);
-    let mut writer = encoder.write_header().map_err(png_error)?;
-    writer.write_image_data(&rgba).map_err(png_error)?;
-    writer.finish().map_err(png_error)?;
+    let path = tile_file(level_dir, name.level, u32::from(y), u32::from(x));
+    let bytes =
+        encode_rgba_png(image.width, image.height, &rgba).map_err(|source| MapTilesError::Png {
+            path: path.clone(),
+            source,
+        })?;
+    if let Some(folder) = path.parent() {
+        std::fs::create_dir_all(folder).map_err(|source| MapTilesError::Io {
+            path: folder.to_path_buf(),
+            source,
+        })?;
+    }
+    std::fs::write(&path, bytes).map_err(|source| MapTilesError::Io { path, source })?;
     Ok(image.format)
 }
 

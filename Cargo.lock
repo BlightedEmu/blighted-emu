@@ -3021,6 +3021,7 @@ dependencies = [
  "bcdec_rs",
  "crc32fast",
  "flate2",
+ "png",
  "quick-xml 0.42.0",
  "serde",
  "tempfile",

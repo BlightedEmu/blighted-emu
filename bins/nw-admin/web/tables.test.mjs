@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { directionText, formatBytes, formatRate, ratioText, sortRows } from './tables.js';
+import { directionText, largest, formatBytes, formatRate, ratioText, sortRows } from './tables.js';
 
 test('sortRows sorts numbers and puts missing last', () => {
   const rows = [{ n: 10 }, { n: null }, { n: 2 }, { n: 33 }];
@@ -37,4 +37,10 @@ test('formatBytes picks its unit', () => {
 test('directionText names the two directions', () => {
   assert.equal(directionText(0), 'server → client');
   assert.equal(directionText(1), 'client → server');
+});
+
+test('largest takes a very long list and has a floor', () => {
+  const values = Array.from({ length: 400000 }, (_, index) => index % 1000);
+  assert.equal(largest(values, 1), 999);
+  assert.equal(largest([], 1), 1);
 });

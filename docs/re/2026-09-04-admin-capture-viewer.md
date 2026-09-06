@@ -62,6 +62,8 @@ The move of the ledger code into `nw-capture` and the shared decoder gave the sa
 
 **Observed.** In the browser, a training dummy session shows 79 message types, 9 entities with their paths, 26 walk stop classes, the bytes of a bundle with its members marked, and a compare table with a catacombs session (125 rows, 64 with a ratio). The console shows no error.
 
+**Observed.** After the review fixes, the page also shows the largest session (133 message types, 1,160 entities, the message list); before them, a list of 312,322 player points overflowed the browser's call stack. A request with another `Host` (a page whose name was rebound to 127.0.0.1) gets 403.
+
 **Observed.** Our own session: one `sim`, `world-director`, `rep-gateway` and `edge-http` (port 8443), then `nw-testclient --ledger <file> pair`. Every pair check passed. The ledger (653 KB) opens with 3,639 records, 3,553 messages, 18 tracks, 1,602 player points and no stream failure. Compared with the training dummy session: ours has 14 message types, the recorded one 79; 13 are in both, 66 only in the recorded one, and 1 (type 3601) only in ours. Server to client: ours 11, recorded 41. Client to server: ours 3, recorded 38.
 
 ## What this proves
