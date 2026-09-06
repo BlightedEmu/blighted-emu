@@ -41,6 +41,14 @@ pub const STEP_DELAY: Duration = Duration::from_secs(1);
 pub const RESPAWN_STEP_M: f32 = 1.0;
 /// The own position must move this far from the death to show that the bot lives again.
 const STEP_PROOF_M: f32 = 0.5;
+/// Bot homes lie on a ring this far around their start, so that the bots of one start do not
+/// stand on one point.
+pub const START_SPREAD_M: f32 = 8.0;
+/// The golden angle, in radians: homes in turn on the ring stay far apart for any count.
+const GOLDEN_ANGLE: f32 = 2.399_963;
+/// Most bots per start: each player sees its 47 nearest entities, bots and mobs together, and a
+/// hunt start has up to 17 mobs (M6-B spec section 14, amendment 5).
+pub const MAX_BOTS_PER_START: usize = 30;
 /// A request older than this at the end of the run must have been answered.
 pub const RESPAWN_PROOF_WAIT: Duration = Duration::from_secs(3);
 
@@ -49,8 +57,8 @@ pub const RESPAWN_PROOF_WAIT: Duration = Duration::from_secs(3);
 pub struct HuntSettings {
     /// The bots and how they log in.
     pub fleet: FleetSettings,
-    /// The hunt starts, east and north, in metres; bot `n` goes to start `n` modulo their
-    /// number while it sees no mob.
+    /// The hunt starts, east and north, in metres; bot `n` goes to its home around start `n`
+    /// modulo their number while it sees no mob.
     pub starts: Vec<[f32; 2]>,
     /// Walking speed, in metres per second.
     pub speed_mps: f32,
@@ -95,7 +103,8 @@ enum Phase {
 #[derive(Debug, Clone)]
 pub struct Hunter {
     settings: Arc<HuntSettings>,
-    start: [f32; 2],
+    /// Where the bot waits while it sees no mob: a point on the ring around its start.
+    home: [f32; 2],
     phase: Phase,
     deaths_seen: u64,
     last_sent: Option<Duration>,
@@ -108,14 +117,16 @@ pub struct Hunter {
 impl Hunter {
     /// Bot `n` of the hunt.
     pub fn new(settings: Arc<HuntSettings>, n: usize) -> Self {
-        let start = settings
-            .starts
-            .get(n % settings.starts.len().max(1))
-            .copied()
-            .unwrap_or_default();
+        let starts = settings.starts.len().max(1);
+        let start = settings.starts.get(n % starts).copied().unwrap_or_default();
+        let angle = (n / starts) as f32 * GOLDEN_ANGLE;
+        let home = [
+            start[0] + START_SPREAD_M * angle.cos(),
+            start[1] + START_SPREAD_M * angle.sin(),
+        ];
         Self {
             settings,
-            start,
+            home,
             phase: Phase::Hunting,
             deaths_seen: 0,
             last_sent: None,
@@ -202,8 +213,8 @@ impl Hunter {
             Some((mob, _)) => {
                 self.move_toward(own, [mob.x, mob.y], reach_m * STOP_SHARE, since, ground)
             }
-            None if horizontal(own, self.start) > reach_m => {
-                self.move_toward(own, self.start, 0.0, since, ground)
+            None if horizontal(own, self.home) > reach_m => {
+                self.move_toward(own, self.home, 0.0, since, ground)
             }
             None => None,
         }
@@ -243,6 +254,11 @@ impl Hunter {
         self.sent = Some([x, y, z]);
         self.last_sent = Some(since);
         Some(HuntAction::Move(next))
+    }
+
+    /// Where the bot waits while it sees no mob.
+    pub const fn home(&self) -> [f32; 2] {
+        self.home
     }
 
     /// Respawns seen to work: a step after the request, or a later death.
@@ -543,15 +559,34 @@ mod tests {
     }
 
     #[test]
-    fn a_bot_without_a_mob_walks_to_its_start() {
+    fn a_bot_without_a_mob_walks_to_its_home() {
         let mut hunter = Hunter::new(settings(), 0);
         let away = at(ORIGIN + 30.0);
         assert!(x_of(hunter.step(away, &[], 0, SEND_INTERVAL, &NoGround)) < ORIGIN + 30.0);
-        let mut home = Hunter::new(settings(), 0);
-        assert_eq!(
-            home.step(at(ORIGIN), &[], 0, SEND_INTERVAL, &NoGround),
-            None
-        );
+        let mut waiting = Hunter::new(settings(), 0);
+        let [x, y] = waiting.home();
+        let home = WorldPosition::from_metres(x, y, HEIGHT).expect("finite");
+        assert_eq!(waiting.step(home, &[], 0, SEND_INTERVAL, &NoGround), None);
+    }
+
+    #[test]
+    fn bots_of_one_start_stand_apart_around_it() {
+        let three = Arc::new(HuntSettings {
+            starts: vec![[ORIGIN, ORIGIN], [0.0, 0.0], [0.0, 0.0]],
+            ..(*settings()).clone()
+        });
+        let homes: Vec<[f32; 2]> = [0, 3, 6]
+            .iter()
+            .map(|n| Hunter::new(Arc::clone(&three), *n).home())
+            .collect();
+        for home in &homes {
+            let from_start = (home[0] - ORIGIN).hypot(home[1] - ORIGIN);
+            assert!(from_start <= START_SPREAD_M + 0.01, "{home:?}");
+        }
+        for (a, b) in [(0, 1), (0, 2), (1, 2)] {
+            let apart = (homes[a][0] - homes[b][0]).hypot(homes[a][1] - homes[b][1]);
+            assert!(apart >= 1.0, "{homes:?}");
+        }
     }
 
     #[test]

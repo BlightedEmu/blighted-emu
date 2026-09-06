@@ -63,9 +63,10 @@ level = "newworld_vitaeeterna"
 # bot that dies asks to respawn. The accounts, sockets, walking speed and ground are those of
 # [swarm]. Put the hunt starts on flat land near low-level spawns (the M6-B record lists them).
 [hunt]
-bots = 1000
-bots_per_second = 50
-# Bot n walks to start n modulo their number while it sees no mob.
+# At most 30 bots per start: each player sees its 47 nearest entities, bots and mobs together.
+bots = 30
+bots_per_second = 10
+# Bot n waits on a ring of 8 m around start n modulo their number while it sees no mob.
 starts_m = [[11132.5, 7305.9]]
 # Below the sim's attack reach (combat.attack_reach_m = 3.0).
 reach_m = 2.5

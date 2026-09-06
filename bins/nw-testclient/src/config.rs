@@ -10,7 +10,7 @@ use nw_login::names::CHARACTER_NAME_MAX_LEN;
 use serde::Deserialize;
 
 use crate::fleet::{FleetSettings, MAX_BOTS, NAME_SUFFIX_LETTERS};
-use crate::hunt::HuntSettings;
+use crate::hunt::{HuntSettings, MAX_BOTS_PER_START};
 use crate::route::{Route, RouteError};
 use crate::swarm::SwarmSettings;
 
@@ -203,6 +203,9 @@ impl TestClientConfig {
             password,
         )?;
         valid_starts(&hunt.starts_m)?;
+        if hunt.bots > hunt.starts_m.len() * MAX_BOTS_PER_START {
+            return invalid("bots", "at most 30 bots per start: more see only bots");
+        }
         if !(positive(hunt.reach_m) && positive(self.swarm.speed_mps)) {
             return invalid("reach_m", "reach and speed must be finite numbers above 0");
         }
@@ -316,8 +319,8 @@ mod tests {
     /// M5 spec section 1.2 criterion 2.2.
     const M5_BOTS: usize = 1000;
     const M5_BUNDLE_GAP_MS: u64 = 250;
-    /// M6-B spec section 1.2 criterion 4.
-    const M6B_BOTS: usize = 1000;
+    /// One start (M6-B spec section 14, amendment 5).
+    const M6B_BOTS: usize = 30;
     /// M6-B spec section 9.2 (F7).
     const M6B_RESPAWN_WAIT_MS: u64 = 2500;
 
@@ -387,5 +390,9 @@ mod tests {
         assert!(refused(|hunt| hunt.reach_m = 0.0));
         assert!(refused(|hunt| hunt.attack_interval_ms = 0));
         assert!(refused(|hunt| hunt.respawn_wait_ms = 0));
+        assert!(
+            refused(|hunt| hunt.bots = MAX_BOTS_PER_START + 1),
+            "a crowd at one start sees only bots"
+        );
     }
 }
