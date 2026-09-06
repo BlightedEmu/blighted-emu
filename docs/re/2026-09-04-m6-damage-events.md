@@ -67,9 +67,19 @@ Total 1,203 bodies. The fixed head is 50 bytes, the prefix is 1 byte, and the it
 
 **Observed.** `MB::DamageReceiverComponentReplicatedState`. Unmarshal `FUN_14659bbf0` (`0x14659bbf0`) builds the object in `FUN_1466f8310` (`0x1466f8310`). The instance vtable is `0x148551480`. Virtual `+0x90` is `FUN_1417b4110`, the same bundle reader as type 15.
 
-**Observed.** The constructor registers three children: `isBlockActive`, `blockWeaponSlotAlias`, and `debugCritChance`.
+**Observed.** The constructor registers three children, all on slot 0:
 
-**Unknown.** Each child's wire size, and an exact-end count. The fight walks stopped on this class (30 times in the cave, 15 times in the dummy) and did not decode it. It is not the per-hit damage. That is type 2071.
+| Child | Name | Field vtable | Reader `+0x30` | Bytes when present |
+|---|---|---|---|---|
+| 0 | `isBlockActive` | `0x14803f098` | `FUN_1417b3cb0` (`0x1417b3cb0`) | 1 raw byte, must be below 2 |
+| 1 | `blockWeaponSlotAlias` | `0x148551410` | `FUN_1432d9510` (`0x1432d9510`) | one `u32` (`FUN_14087a220`) |
+| 2 | `debugCritChance` | `0x1480ff160` | `FUN_142a42f30` (`0x142a42f30`) | one `u32` swap (`FUN_14087a270`) |
+
+The `+0x30` targets were read from the three field vtables in the existing Ghidra project (read-only, analysis off, heap `16G`, `-max-cpu 10`, `cpu.core.override=10`). The decompiles are `<re-scratch>/scratch-m6/out7`. `FUN_1417b3cb0` reads 1 raw byte (`FUN_140878610` length 1) and keeps it only below 2. `FUN_1432d9510` calls `FUN_14087a220`. `FUN_142a42f30` calls `FUN_14087a270`; the same reader carries the big-endian `f32` stamina children in the replication-rate note. REA `open_binary` was not called. No REA Evidence ID.
+
+**Observed.** The slot-0 reader with widths (1, 4, 4) was applied to every type 1528 member the extended walk reached in all 695 ledgers. Reached members: 92,087. Members that end on a valid next header: 92,086. Boundary failures: 1. Short reads: 6. Member lengths: 2 bytes on 2 bodies (no child), 3 bytes on 15,986 bodies (child 0 only), 7 bytes on 76,099 bodies (children 0 and 1). Child 2 (`debugCritChance`) is present on 0 of 92,087 bodies. 1 + 1 + 1 = 3 and 1 + 1 + 1 + 4 = 7 match the reader sizes above.
+
+**Inferred.** Child 0 is a flag byte. Child 1 is a 4-byte alias word. Child 2 is a 4-byte word that the captures never send. Type 1528 is not the per-hit damage. That is type 2071.
 
 ## Files read
 

@@ -39,9 +39,13 @@ Captures checked for an exact read of type 10 and type 11, with the reliable-fra
 
 **Inferred.** A type 10 body on the bundle path is one slot byte, then the child bytes for slot 0 when bit 0 is set. Bit 0 of the child byte selects `AssetId` (20 bytes). Bit 1 selects `GdeRef` (16 bytes). A clear bit reads nothing. The 16 raw bytes are the asset id and the entity id. This note does not copy them.
 
+**Observed.** The `u32` inside `AssetId` is 2 on 79,123 of 79,534 reached bodies. On the 34,912 bodies reached with no passed class before them in the bundle, the value is 2 on all 34,912. The other 411 values sit only after a passed class, spread over 155 distinct values with at most 83 bodies each. The opened alias asset in the spawners note carries the same sub-id as a big-endian `u32` of 2.
+
+**Inferred.** The `AssetId` sub-id is 2. The few other values are walk-boundary artifacts of the extended walk, because they vanish under clean alignment. This matches the Azoth field note.
+
 **Observed.** The same reader was run on all 695 ledgers. It accepts a type 10 member when that member is reached before any class the walk cannot read. Reached bodies: 66,223. Failures: 0. A failure means the reader ran off the end of the payload. The three fight sessions inside that total: training dummy 16, cave 52, catacombs 55.
 
-**Unknown.** Type 10 members that sit after a class this walk cannot read. Those bodies were not reached, because the member header has no length. The sub-id inside `AssetId`. The Azoth field note says the `u32` is always 2. This pass did not print values.
+**Observed.** An extended walk also passes the classes the replication-rate note already reads: type 13, slot-0 type 15, slot-0 types 4297, 3139, and 2913, and slot-0 type 1528 (widths 1, 4, 4, from the damage note). Reached type 10 bodies: 116,953. Bodies reached only after passing one of those classes in the same bundle: 50,730, which equals 116,953 minus 66,223. Type 10 members that fail the (20, 16) reader: 4,031. The walk still stops at types 5620, 4236, 3451, and 3935, whose slots are not constants, and at multi-slot members.
 
 ## 2. Remove
 
@@ -57,18 +61,20 @@ Captures checked for an exact read of type 10 and type 11, with the reliable-fra
 
 **Observed.** Type 1791 reads 16 raw bytes, one `u64` big-endian (`FUN_14087ad90`, byte swap `FUN_1461679c0`), and 16 raw bytes. Type 566 reads one byte, one `u32` big-endian, then `FUN_1415acc30` (one `u32` big-endian and two 16-byte copies), then `FUN_1417aef20`. Type 1517 uses the same head and ends in `FUN_1417aced0` (16 raw bytes, one `u64` big-endian, `FUN_1415acfc0`, then two flag bytes that must be 0 or 1).
 
-**Inferred.** Type 1791 is the short remove: an id, a `u64`, and a second id. Types 566 and 1517 are the area-of-interest removes. The client needs one of these, plus the absence of further type 10 updates, to drop a non-player entity. Which of the three a mob despawn uses was not separated in the captures.
+**Observed.** The tails separate the three removes. Type 1791 (`GlobalEntityListenerTrait`) is the short remove: 16 raw bytes, one `u64` big-endian, 16 raw bytes, with no tail. Type 566 (`GhostBaseTrait`) reads one byte, one `u32` big-endian, `FUN_1415acc30`, then `FUN_1417aef20`, which reads 16 raw bytes, two `u64` values, and an optional second block (`FUN_1415acfc0`, `FUN_1417b1410`, `FUN_1415bc660`). Type 1517 (`GhostExTrait`) shares the 566 head and ends in `FUN_1417aced0`: 16 raw bytes, one `u64`, `FUN_1415acfc0`, then two flag bytes that must be 0 or 1 (`FUN_1407da140`).
 
-**Observed.** A count of these type indexes across all 695 ledgers, with the reliable-frame join: type 566 count 0, type 1517 count 0, type 1791 count 0. There is no body to fail an exact-end check. The readers are decompiled above and were not applied to a captured body because none exist in this set. A mob leaving the interest set in these captures is not one of these three messages.
+**Inferred.** Type 1791 is the global-listener remove, not the grid path. Types 566 and 1517 are the grid (area-of-interest) removes: 566 is the base form with an optional second block, and 1517 is the extended form with the two interest flags. A mob is a grid entity, so its despawn uses the 566/1517 pair, never 1791.
+
+**Observed.** A count of these type indexes across all 695 ledgers, with the reliable-frame join: type 566 count 0, type 1517 count 0, type 1791 count 0, type 1414 count 0, type 161 count 0. There is no body to fail an exact-end check. The readers are decompiled above and were not applied to a captured body because none exist in this set. A mob leaving the interest set in these captures sends no remove message; the client sees the absence of further type 10 updates.
 
 ## Status
 
 | Item | Status | Still missing |
 |---|---|---|
-| Type 10 child order and sizes | Reached bodies 66,223, failures 0 | Bodies after an unread class |
-| `AssetId` sub-id value | Unknown | A value census that prints only the `u32` |
-| Remove message readers | Decompiled. Count in 695 ledgers is 0 | No captured body to check |
-| Which remove a mob uses | Unknown | A count of these types around a mob leaving the interest set |
+| Type 10 child order and sizes | Reached bodies 116,953, of which 50,730 sit after a passed class | Bodies after types 5620, 4236, 3451, 3935, or a multi-slot member |
+| `AssetId` sub-id value | 2 on 79,123 of 79,534 bodies, and 2 on all 34,912 clean-alignment bodies | None |
+| Remove message readers | Decompiled. Count in 695 ledgers is 0 for all five types | No captured body to check |
+| Which remove a mob uses | Grid pair 566/1517 by reader; 1791 is the global path. Count 0, so despawn here is update-silence | A capture that contains a grid remove |
 
 ## Files read
 
