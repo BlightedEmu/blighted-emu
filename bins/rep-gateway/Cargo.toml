@@ -34,7 +34,7 @@ nw-messages.workspace = true
 nw-sim-core = { workspace = true, features = ["test-util"] }
 nw-testclient.workspace = true
 reqwest.workspace = true
-sim.workspace = true
+sim = { workspace = true, features = ["test-util"] }
 world-director.workspace = true
 tempfile.workspace = true
 

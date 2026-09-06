@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use nw_bus::{BusId, Hit};
 use nw_content::combat::CombatData;
 use nw_sim_core::BrainSettings;
 
@@ -53,8 +54,17 @@ impl AttackRefusal {
     }
 }
 
+/// A hit for the sim that owns the target (M6-A spec section 7.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteHit {
+    /// The sim that owns the target.
+    pub owner: BusId,
+    /// The hit.
+    pub hit: Hit,
+}
+
 /// What a hit did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttackOutcome {
     /// The target lost `amount` of health.
     Hit {
@@ -68,6 +78,8 @@ pub enum AttackOutcome {
         /// The target.
         target: u64,
     },
+    /// The target belongs to another sim; the hit goes there.
+    Remote(RemoteHit),
 }
 
 impl AttackOutcome {
@@ -76,6 +88,7 @@ impl AttackOutcome {
         match self {
             Self::Hit { .. } => "hit",
             Self::Killed { .. } => "killed",
+            Self::Remote(_) => "remote",
         }
     }
 }
@@ -105,27 +118,29 @@ pub struct CombatSettings {
     pub seed: u64,
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
-    use nw_content::combat::{AttackRow, CombatRows, CombatSource, LevelRow, MobType, WeaponRow};
-
-    use super::*;
-    use crate::config::tests::committed;
+/// Hand-made combat rows for tests (feature `test-util`).
+#[cfg(any(test, feature = "test-util"))]
+pub mod test_support {
+    use nw_content::combat::{
+        AttackRow, CombatData, CombatRows, CombatSource, LevelRow, MobType, WeaponRow,
+    };
 
     /// The vitals id of the test mob type.
-    pub(crate) const TEST_MOB: &str = "Test_Boar";
+    pub const TEST_MOB: &str = "Test_Boar";
     /// The level of the test spawns.
-    pub(crate) const TEST_LEVEL: u32 = 20;
+    pub const TEST_LEVEL: u32 = 20;
     /// The test player's max health.
-    pub(crate) const TEST_PLAYER_HEALTH: u32 = 856;
-    /// Base health and damage of the test level.
-    pub(crate) const TEST_LEVEL_HEALTH: f64 = 1000.0;
-    pub(crate) const TEST_LEVEL_DAMAGE: f64 = 100.0;
+    pub const TEST_PLAYER_HEALTH: u32 = 856;
+    /// Base health of the test level.
+    pub const TEST_LEVEL_HEALTH: f64 = 1000.0;
+    /// Base damage of the test level.
+    pub const TEST_LEVEL_DAMAGE: f64 = 100.0;
     /// Base damage of the test sword.
-    pub(crate) const TEST_SWORD_DAMAGE: f64 = 64.0;
+    pub const TEST_SWORD_DAMAGE: f64 = 64.0;
 
-    /// Hand-made combat rows with the committed config's ids.
-    pub(crate) fn test_data() -> CombatData {
+    /// Rows with the default config ids: one plain mob type, one level, the sword and its
+    /// attacks, the player.
+    pub fn test_data() -> CombatData {
         let rows = CombatRows::default();
         let source = CombatSource {
             base_types: vec![(TEST_MOB.to_owned(), MobType::PLAIN)],
@@ -159,6 +174,13 @@ pub(crate) mod tests {
         };
         CombatData::build(source, &rows).expect("test combat data")
     }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::test_support::test_data;
+    use super::*;
+    use crate::config::tests::committed;
 
     /// The committed config's combat settings on the test rows.
     pub(crate) fn test_combat() -> CombatSettings {

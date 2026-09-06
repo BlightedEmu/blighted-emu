@@ -37,6 +37,7 @@ use nw_testclient::pair::{
 use nw_testclient::route::Route;
 use nw_testclient::udp::run_rep;
 use nw_testclient::walk::{WalkSettings, login_token, walk};
+use sim::combat::test_support::test_data;
 use sim::config::{SimConfig, load_sim_config};
 use sim::server::{LoopSettings, serve as serve_sim};
 use tokio::net::TcpListener;
@@ -355,6 +356,7 @@ async fn start_sim(world_id: Uuid, sim_id: BusId, world_pool: &PgPool) -> JoinHa
         save_interval: SAVE_INTERVAL,
         heartbeat_interval: HEARTBEAT,
         heartbeat_misses: HEARTBEAT_MISSES,
+        combat: config.combat_settings(Arc::new(test_data()), Arc::from([])),
     };
     let db = world_pool.clone();
     let sim = tokio::spawn(async move {

@@ -55,6 +55,11 @@ pub fn sim_ghosts(world: Uuid, sim: &BusId) -> String {
     format!("nw.{world}.sim.{sim}.ghosts")
 }
 
+/// Sim to sim: hits on the receiver's entities.
+pub fn sim_hit(world: Uuid, sim: &BusId) -> String {
+    format!("nw.{world}.sim.{sim}.hit")
+}
+
 /// Every sim heartbeat of a world (a NATS wildcard), for the director.
 pub fn all_sim_heartbeats(world: Uuid) -> String {
     format!("nw.{world}.sim.*.heartbeat")
@@ -98,6 +103,7 @@ mod tests {
             sim_ghosts(world, &sim),
             format!("{prefix}.sim.sim-1.ghosts")
         );
+        assert_eq!(sim_hit(world, &sim), format!("{prefix}.sim.sim-1.hit"));
         assert_eq!(
             all_sim_heartbeats(world),
             format!("{prefix}.sim.*.heartbeat")

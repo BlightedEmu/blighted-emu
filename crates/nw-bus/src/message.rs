@@ -272,8 +272,20 @@ pub const MAX_BUS_MESSAGE_BYTES: usize = 1024 * 1024;
 /// of a bundle member holds.
 pub const MOB_ENTITY_BASE: u64 = 1 << 34;
 
-/// Most bytes of one [`Ghost`] in `postcard`: a 10-byte entity number and three 4-byte floats.
-pub const MAX_GHOST_BYTES: usize = 22;
+/// Most bytes of one [`Ghost`] in `postcard`: a 10-byte entity number, three 4-byte floats, and
+/// a mob's state (a 1-byte option tag, two 5-byte numbers and a 1-byte flag).
+pub const MAX_GHOST_BYTES: usize = 34;
+
+/// The state of a mob ghost (M6-A spec section 6.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MobGhost {
+    /// Health now.
+    pub health: u32,
+    /// Max health.
+    pub max_health: u32,
+    /// The mob walks back to its spawn and takes no damage.
+    pub returning: bool,
+}
 
 /// A read-only copy of an entity near a border.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -282,6 +294,23 @@ pub struct Ghost {
     pub entity: u64,
     /// Its position.
     pub position: Point,
+    /// A mob's state; `None` for a player.
+    pub mob: Option<MobGhost>,
+}
+
+/// A hit on an entity of another sim (M6-A spec section 7.3), sent to the sim that owns it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hit {
+    /// The target's entity number.
+    pub target: u64,
+    /// The attacker's entity number.
+    pub attacker: u64,
+    /// The attacker's sim.
+    pub attacker_sim: BusId,
+    /// Health it takes.
+    pub amount: u32,
+    /// Threat it adds.
+    pub threat: u64,
 }
 
 /// The ghosts of one sim for another, every tick (M5 spec section 3.4).
@@ -538,6 +567,7 @@ mod tests {
             entities: vec![Ghost {
                 entity: CONNECTION,
                 position: POINT,
+                mob: None,
             }],
         });
         round_trip(SimHeartbeat {
@@ -605,8 +635,28 @@ mod tests {
                 y: f32::MIN,
                 z: f32::NAN,
             },
+            mob: Some(MobGhost {
+                health: u32::MAX,
+                max_health: u32::MAX,
+                returning: true,
+            }),
         };
         assert!(encode(&ghost).expect("encode").len() <= MAX_GHOST_BYTES);
+        round_trip(Ghost {
+            position: POINT,
+            ..ghost
+        });
+    }
+
+    #[test]
+    fn hits_round_trip() {
+        round_trip(Hit {
+            target: MOB_ENTITY_BASE + 7,
+            attacker: CONNECTION,
+            attacker_sim: sim(),
+            amount: 42,
+            threat: 43,
+        });
     }
 
     #[test]

@@ -11,7 +11,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use nw_bus::MOB_ENTITY_BASE;
+use nw_bus::{MOB_ENTITY_BASE, MobGhost};
 use nw_content::combat::CombatData;
 use nw_sim_core::{
     Brain, BrainAction, BrainSettings, Dice, Ground, Health, MobAttack, MobState, Position, Seen,
@@ -237,6 +237,22 @@ impl Mobs {
         }
     }
 
+    /// Every awake mob as a ghost: entity number, position and state (M6-A spec section 6.3).
+    pub fn awake_ghosts(&self) -> impl Iterator<Item = (u64, Position, MobGhost)> + '_ {
+        self.awake.iter().filter_map(|index| {
+            let mob = self.live.get(index)?;
+            Some((
+                mob_entity(*index),
+                mob.brain.position(),
+                MobGhost {
+                    health: mob.health.current(),
+                    max_health: mob.health.max(),
+                    returning: mob.brain.state() == MobState::Return,
+                },
+            ))
+        })
+    }
+
     /// The mob with entity number `entity`.
     pub fn get_mut(&mut self, entity: u64) -> Option<&mut Mob> {
         self.live.get_mut(&spawn_index(entity)?)
@@ -292,7 +308,8 @@ mod tests {
     use nw_sim_core::{Ground, MobState, hurt};
 
     use super::*;
-    use crate::combat::tests::{TEST_LEVEL, TEST_MOB, test_combat};
+    use crate::combat::test_support::{TEST_LEVEL, TEST_MOB};
+    use crate::combat::tests::test_combat;
 
     const HEIGHT: f32 = 37.5;
     const PLAYER: u64 = 3;

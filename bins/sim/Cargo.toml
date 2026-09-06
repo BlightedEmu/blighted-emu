@@ -37,6 +37,8 @@ nw-db = { workspace = true, features = ["test-util"] }
 serde_json.workspace = true
 
 [features]
+# `combat::test_support`: combat rows for other crates' tests.
+test-util = []
 # Tests that need the Docker Compose NATS and PostgreSQL (`just test-infra`).
 infra = []
 

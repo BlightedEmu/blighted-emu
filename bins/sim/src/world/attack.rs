@@ -9,11 +9,11 @@
 
 use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
-use nw_bus::ConnectionRef;
+use nw_bus::{BusId, ConnectionRef, Hit};
 use nw_sim_core::{Damage, Health, MobState, PlayerAttack, died, hurt, mob_hit, player_hit};
 
-use super::{Body, Player, SimWorld};
-use crate::combat::{AttackOutcome, AttackRefusal};
+use super::{Body, Player, Position, SimWorld};
+use crate::combat::{AttackOutcome, AttackRefusal, RemoteHit};
 use crate::mobs::{MobAttackIntent, spawn_index};
 
 /// A player's health and attack times.
@@ -32,6 +32,15 @@ impl Vitals {
             last_attack_ms: None,
         }
     }
+}
+
+/// What an attack sees of its target.
+struct TargetView {
+    position: Position,
+    dead: bool,
+    returning: bool,
+    /// The sim of a ghost target; `None` when the target is here.
+    owner: Option<BusId>,
 }
 
 impl SimWorld {
@@ -72,15 +81,13 @@ impl SimWorld {
         if spawn_index(target).is_none() {
             return Err(AttackRefusal::UnknownTarget);
         }
-        let reach_m = self.combat.brain.attack_reach_m + self.combat.reach_margin_m;
-        let mob = self
-            .mobs
-            .get_mut(target)
+        let view = self
+            .target_view(target)
             .ok_or(AttackRefusal::UnknownTarget)?;
-        if mob.health.is_dead() {
+        if view.dead {
             return Err(AttackRefusal::TargetDead);
         }
-        if mob.brain.state() == MobState::Return {
+        if view.returning {
             return Err(AttackRefusal::Returning);
         }
         let row = self
@@ -88,7 +95,8 @@ impl SimWorld {
             .data
             .attack(damage_id)
             .ok_or(AttackRefusal::NotWeaponAttack)?;
-        if mob.brain.position().horizontal_distance(position) > reach_m {
+        let reach_m = self.combat.brain.attack_reach_m + self.combat.reach_margin_m;
+        if view.position.horizontal_distance(position) > reach_m {
             return Err(AttackRefusal::OutOfReach);
         }
         let too_fast = vitals
@@ -105,13 +113,61 @@ impl SimWorld {
             crit_chance: weapon.crit_chance,
             crit_multiplier: weapon.crit_multiplier,
         };
+        let threat_base = row.threat;
         let hit = player_hit(&attack, self.combat.armor_share, &mut self.dice);
-        let threat = row.threat.saturating_add(u64::from(hit.amount));
+        let threat = threat_base.saturating_add(u64::from(hit.amount));
         if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
             vitals.last_attack_ms = Some(now_ms);
         }
-        self.apply_hit(target, number, hit.amount, threat, now_ms)
-            .ok_or(AttackRefusal::TargetDead)
+        match view.owner {
+            None => self
+                .apply_hit(target, number, hit.amount, threat, now_ms)
+                .ok_or(AttackRefusal::TargetDead),
+            Some(owner) => Ok(AttackOutcome::Remote(
+                self.remote_hit(owner, target, number, hit.amount, threat),
+            )),
+        }
+    }
+
+    /// What an attack sees of the mob `target`: here, or a ghost of its owner.
+    fn target_view(&mut self, target: u64) -> Option<TargetView> {
+        if let Some(mob) = self.mobs.get_mut(target) {
+            return Some(TargetView {
+                position: mob.brain.position(),
+                dead: mob.health.is_dead(),
+                returning: mob.brain.state() == MobState::Return,
+                owner: None,
+            });
+        }
+        let (owner, ghost) = self.ghost(target)?;
+        let state = ghost.mob?;
+        Some(TargetView {
+            position: ghost.position,
+            dead: state.health == 0,
+            returning: state.returning,
+            owner: Some(owner.clone()),
+        })
+    }
+
+    /// A hit for `owner`, the sim of `target`.
+    fn remote_hit(
+        &self,
+        owner: BusId,
+        target: u64,
+        attacker: u64,
+        amount: u32,
+        threat: u64,
+    ) -> RemoteHit {
+        RemoteHit {
+            owner,
+            hit: Hit {
+                target,
+                attacker,
+                attacker_sim: self.me.id.clone(),
+                amount,
+                threat,
+            },
+        }
     }
 
     /// Applies a hit of `amount` with `threat` from `attacker` on `target`, a mob or a player of
@@ -179,7 +235,8 @@ impl SimWorld {
         }
     }
 
-    /// Applies the mobs' hits on the players of this sim.
+    /// Applies the mobs' hits on the players of this sim; a hit on a player ghost goes to its
+    /// sim.
     pub(super) fn mob_hits(
         &mut self,
         intents: Vec<MobAttackIntent>,
@@ -190,7 +247,20 @@ impl SimWorld {
             .into_iter()
             .filter_map(|intent| {
                 let hit = mob_hit(&self.mobs.get_mut(intent.mob)?.attack, armor_share);
-                self.apply_hit(intent.target, intent.mob, hit.amount, 0, now_ms)
+                if self.player_by_number(intent.target).is_some() {
+                    return self.apply_hit(intent.target, intent.mob, hit.amount, 0, now_ms);
+                }
+                let (owner, ghost) = self.ghost(intent.target)?;
+                let owner = owner.clone();
+                ghost.mob.is_none().then(|| {
+                    AttackOutcome::Remote(self.remote_hit(
+                        owner,
+                        intent.target,
+                        intent.mob,
+                        hit.amount,
+                        0,
+                    ))
+                })
             })
             .collect()
     }
@@ -201,12 +271,14 @@ mod tests {
     use nw_sim_core::{Dice, MobState, brain_step, hurt};
 
     use super::*;
-    use crate::combat::tests::{TEST_PLAYER_HEALTH, test_combat};
+    use crate::combat::test_support::TEST_PLAYER_HEALTH;
+    use crate::combat::tests::test_combat;
     use crate::mobs::mob_entity;
+    use crate::world::MoveError;
     use crate::world::tests::{
-        BORDER_X, CELL_M, NOW, connection, join, table, test_spawn, tick, world_with_spawns,
+        BORDER_X, CELL_M, NOW, connection, join, slot, table, test_spawn, tick, world_with_spawns,
     };
-    use crate::world::{MoveError, Position};
+    use nw_bus::{Ghost, MobGhost, Point};
 
     const LIGHT: &str = "1H_Sword_Attack1";
     const MOB_X: f32 = CELL_M / 2.0;
@@ -347,6 +419,7 @@ mod tests {
                     return (now, hits);
                 }
                 AttackOutcome::Hit { amount, .. } => assert_eq!(amount, SWORD_HIT),
+                AttackOutcome::Remote(remote) => panic!("a local mob, not {remote:?}"),
             }
             now += INTERVAL_MS;
         }
@@ -457,6 +530,131 @@ mod tests {
             tick(&mut world, NOW + 2 * TICK_MS).deaths.is_empty(),
             "once"
         );
+    }
+
+    fn sim_b() -> BusId {
+        slot("sim-b").id
+    }
+
+    /// A mob ghost of sim-b at `x`.
+    fn mob_ghost(x: f32, health: u32, returning: bool) -> Ghost {
+        Ghost {
+            entity: mob(),
+            position: Point {
+                x,
+                y: 10.0,
+                z: 50.0,
+            },
+            mob: Some(MobGhost {
+                health,
+                max_health: MOB_HEALTH,
+                returning,
+            }),
+        }
+    }
+
+    /// A world of sim-a with player 1 just west of the border.
+    fn border() -> SimWorld {
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, BORDER_X - 1.5);
+        world
+    }
+
+    #[test]
+    fn an_attack_on_a_ghost_goes_to_its_owner() {
+        let mut world = border();
+        world.set_ghosts(
+            &sim_b(),
+            vec![mob_ghost(BORDER_X + 1.0, MOB_HEALTH, false)],
+            NOW,
+        );
+        let outcome = world
+            .attack(&connection(1), mob(), LIGHT, NOW)
+            .expect("remote hit");
+        let AttackOutcome::Remote(remote) = outcome else {
+            panic!("not remote: {outcome:?}");
+        };
+        assert_eq!(remote.owner, sim_b());
+        assert_eq!((remote.hit.target, remote.hit.attacker), (mob(), 1));
+        assert_eq!(remote.hit.amount, SWORD_HIT);
+        assert_eq!(remote.hit.attacker_sim, slot("sim-a").id);
+    }
+
+    #[test]
+    fn a_ghost_mob_is_checked_like_a_local_one() {
+        let mut world = border();
+        world.set_ghosts(
+            &sim_b(),
+            vec![mob_ghost(BORDER_X + 1.0, MOB_HEALTH, true)],
+            NOW,
+        );
+        assert_eq!(
+            world.attack(&connection(1), mob(), LIGHT, NOW),
+            Err(AttackRefusal::Returning)
+        );
+        world.set_ghosts(&sim_b(), vec![mob_ghost(BORDER_X + 1.0, 0, false)], NOW);
+        assert_eq!(
+            world.attack(&connection(1), mob(), LIGHT, NOW),
+            Err(AttackRefusal::TargetDead)
+        );
+        world.set_ghosts(
+            &sim_b(),
+            vec![mob_ghost(BORDER_X + 9.0, MOB_HEALTH, false)],
+            NOW,
+        );
+        assert_eq!(
+            world.attack(&connection(1), mob(), LIGHT, NOW),
+            Err(AttackRefusal::OutOfReach)
+        );
+    }
+
+    #[test]
+    fn a_mob_hits_a_ghost_player_through_its_sim() {
+        let mut world = world_with_spawns(vec![test_spawn(BORDER_X - 1.0)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        let player = Ghost {
+            entity: 9,
+            position: Point {
+                x: BORDER_X + 1.0,
+                y: 10.0,
+                z: 50.0,
+            },
+            mob: None,
+        };
+        let mut remote = None;
+        for tick_number in 0..10 {
+            let now = NOW + tick_number * TICK_MS;
+            world.set_ghosts(&sim_b(), vec![player], now);
+            remote = tick(&mut world, now)
+                .mob_hits
+                .into_iter()
+                .find_map(|outcome| match outcome {
+                    AttackOutcome::Remote(remote) => Some(remote),
+                    _ => None,
+                });
+            if remote.is_some() {
+                break;
+            }
+        }
+        let remote = remote.expect("the mob hit the ghost player");
+        assert_eq!(remote.owner, sim_b());
+        assert_eq!((remote.hit.target, remote.hit.attacker), (9, mob()));
+    }
+
+    #[test]
+    fn a_hit_for_a_mob_of_a_lost_cell_is_dropped() {
+        let mut world = world_with_spawns(vec![test_spawn(MOB_X)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        world.set_table(&table(&["sim-b", "sim-a"])).expect("table");
+        assert_eq!(world.apply_hit(mob(), 1, SWORD_HIT, 0, NOW), None);
+    }
+
+    #[test]
+    fn a_hit_on_a_dead_mob_is_dropped() {
+        let mut world = fight();
+        world.apply_hit(mob(), 1, LETHAL, 0, NOW);
+        assert_eq!(world.apply_hit(mob(), 1, SWORD_HIT, 0, NOW), None);
     }
 
     #[test]

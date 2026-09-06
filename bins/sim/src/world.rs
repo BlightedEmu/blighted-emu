@@ -21,7 +21,9 @@ use bevy_ecs::change_detection::Mut;
 use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use nw_bus::{Admit, BusId, CellTable, ConnectionRef, Ghost, HandoffOffer, Point, SimSlot};
+use nw_bus::{
+    Admit, BusId, CellTable, ConnectionRef, Ghost, HandoffOffer, MobGhost, Point, SimSlot,
+};
 use nw_messages::{
     MessageError, ReplicatedStateBundle, ServerMessage, TimeSynchMsg, WorldPosition,
 };
@@ -38,7 +40,7 @@ use attack::Vitals;
 
 use crate::combat::{AttackOutcome, CombatSettings};
 use crate::login::{SessionIds, WorldIds, login_messages};
-use crate::mobs::{MobAttackIntent, MobChanges, Mobs, spawn_index};
+use crate::mobs::{MobAttackIntent, MobChanges, Mobs};
 
 /// Carrier channel of the login messages and the time messages.
 pub const MESSAGE_CHANNEL: u8 = 0;
@@ -216,7 +218,16 @@ struct Cells {
 
 struct ReceivedGhosts {
     received_ms: u64,
-    entities: Vec<(u64, Position)>,
+    entities: Vec<ReceivedGhost>,
+}
+
+/// One entity of another sim.
+#[derive(Clone, Copy)]
+struct ReceivedGhost {
+    entity: u64,
+    position: Position,
+    /// A mob's state; `None` for a player.
+    mob: Option<MobGhost>,
 }
 
 /// The players of one sim.
@@ -523,7 +534,11 @@ impl SimWorld {
         let entities = entities
             .into_iter()
             .filter(|ghost| ghost.position.is_finite())
-            .map(|ghost| (ghost.entity, Position::from(ghost.position)))
+            .map(|ghost| ReceivedGhost {
+                entity: ghost.entity,
+                position: Position::from(ghost.position),
+                mob: ghost.mob,
+            })
             .collect();
         self.ghosts.insert(
             from.clone(),
@@ -532,6 +547,17 @@ impl SimWorld {
                 entities,
             },
         );
+    }
+
+    /// The ghost `entity` and the sim it belongs to.
+    fn ghost(&self, entity: u64) -> Option<(&BusId, ReceivedGhost)> {
+        self.ghosts.iter().find_map(|(owner, ghosts)| {
+            ghosts
+                .entities
+                .iter()
+                .find(|ghost| ghost.entity == entity)
+                .map(|ghost| (owner, *ghost))
+        })
     }
 
     /// What the cell tables did to the mobs since the last call.
@@ -603,13 +629,11 @@ impl SimWorld {
             });
         }
         let ghosts = self.ghosts.values().flat_map(|ghosts| &ghosts.entities);
-        for (entity, position) in ghosts {
-            if spawn_index(*entity).is_none() {
-                seen.push(Seen {
-                    entity: *entity,
-                    position: *position,
-                });
-            }
+        for ghost in ghosts.filter(|ghost| ghost.mob.is_none()) {
+            seen.push(Seen {
+                entity: ghost.entity,
+                position: ghost.position,
+            });
         }
         self.mobs.tick(&seen, now_ms, &*self.ground)
     }
@@ -666,6 +690,18 @@ impl SimWorld {
                         lists.entry(sim.id.clone()).or_default().push(Ghost {
                             entity: player.number,
                             position: Point::from(position),
+                            mob: None,
+                        });
+                    }
+                }
+            }
+            for (entity, position, state) in self.mobs.awake_ghosts() {
+                for owner in cells.owners.others_within(cells.me, position, radius) {
+                    if let Some(sim) = cells.sims.get(usize::from(owner)) {
+                        lists.entry(sim.id.clone()).or_default().push(Ghost {
+                            entity,
+                            position: Point::from(position),
+                            mob: Some(state),
                         });
                     }
                 }
@@ -693,8 +729,10 @@ impl SimWorld {
         everyone.extend(
             self.ghosts
                 .values()
-                .flat_map(|ghosts| ghosts.entities.iter().copied())
-                .filter(|(number, _)| !own.contains(number)),
+                .flat_map(|ghosts| &ghosts.entities)
+                // Mobs are not in bundles before M6-B (M6-A spec section 1.1).
+                .filter(|ghost| ghost.mob.is_none() && !own.contains(&ghost.entity))
+                .map(|ghost| (ghost.entity, ghost.position)),
         );
         // The radius is checked at start to be a finite number above 0.
         let Some(mut grid) = SpatialGrid::new(self.settings.interest_radius_m) else {
@@ -913,7 +951,8 @@ mod tests {
     use nw_sim_core::{CellGrid, CellOwners, GroundCheck, MoveLimits, MoveRefusal};
 
     use super::*;
-    use crate::combat::tests::{TEST_LEVEL, TEST_MOB, test_combat};
+    use crate::combat::test_support::{TEST_LEVEL, TEST_MOB};
+    use crate::combat::tests::test_combat;
     use crate::mobs::VitalsSpawn;
 
     /// The largest entity number that fits the 5-byte prefix code (35 bits).
@@ -945,7 +984,7 @@ mod tests {
     const GHOST_NUMBER: u64 = 99;
     const RESUME_BASE: u64 = 1 << 32;
 
-    fn slot(name: &str) -> SimSlot {
+    pub(super) fn slot(name: &str) -> SimSlot {
         SimSlot {
             id: BusId::try_from(name.to_owned()).expect("id"),
             generation: GENERATION,
@@ -1120,6 +1159,23 @@ mod tests {
         world.set_table(&table(&["sim-b", "sim-a"])).expect("table");
         let changes = world.take_mob_changes();
         assert_eq!((changes.spawned, changes.removed), (1, 2));
+    }
+
+    #[test]
+    fn a_border_mob_is_a_ghost_next_door() {
+        let mut world = world_with_spawns(vec![test_spawn(BORDER_X - 20.0)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, BORDER_X - 60.0);
+        tick(&mut world, NOW);
+        let ghosts = tick(&mut world, NOW + 33).ghosts;
+        let (target, entities) = &ghosts[0];
+        assert_eq!(target, &slot("sim-b").id);
+        let mob = entities
+            .iter()
+            .find(|ghost| ghost.mob.is_some())
+            .expect("the mob is a ghost");
+        assert_eq!(mob.entity, crate::mobs::mob_entity(0));
+        assert_eq!(mob.mob.map(|state| state.returning), Some(false));
     }
 
     #[test]
@@ -1560,6 +1616,7 @@ mod tests {
                 y: 10.0,
                 z: 50.0,
             },
+            mob: None,
         };
         world.set_ghosts(
             &slot("sim-b").id,

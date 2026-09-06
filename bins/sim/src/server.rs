@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 
 use nw_bus::{
     Admit, AdmitReply, Bus, BusError, BusId, CellTable, ConnectionRef, GatewayOutput, Ghosts,
-    HandoffMessage, HandoffReply, Heartbeat, Incoming, InputBatch, OutputBatch, Point, Publisher,
-    SimHeartbeat, SimInput, SimSlot, split_batches, subject,
+    HandoffMessage, HandoffReply, Heartbeat, Hit, Incoming, InputBatch, OutputBatch, Point,
+    Publisher, SimHeartbeat, SimInput, SimSlot, split_batches, subject,
 };
 use nw_common::time::unix_ms;
 use nw_db::{PgPool, SaveOutcome, SavedPosition, save_character_position};
@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
-use crate::combat::CombatSettings;
+use crate::combat::{AttackOutcome, CombatSettings, RemoteHit};
 use crate::forward::{Forward, ForwardTable};
 use crate::gateways::GatewayTracker;
 use crate::login::WorldIds;
@@ -102,6 +102,12 @@ pub const METRIC_DROPPED_OUTPUTS: &str = "sim_dropped_outputs_total";
 pub const METRIC_MOBS: &str = "sim_mobs";
 /// Metric: attacks by `result`.
 pub const METRIC_ATTACKS: &str = "sim_attacks_total";
+/// Metric: hits from other sims by `result`.
+pub const METRIC_REMOTE_HITS: &str = "sim_remote_hits_total";
+/// A remote hit that landed.
+const APPLIED: &str = "applied";
+/// A remote hit whose target is gone, dead or returning.
+const DROPPED: &str = "dropped";
 /// Metric: deaths by `kind`.
 pub const METRIC_DEATHS: &str = "sim_deaths_total";
 /// Label of a death's kind.
@@ -184,6 +190,7 @@ struct Inbox {
     inputs: nw_bus::Subscription<InputBatch>,
     handoffs: nw_bus::Subscription<HandoffMessage>,
     ghosts: nw_bus::Subscription<Ghosts>,
+    hits: nw_bus::Subscription<Hit>,
     tables: nw_bus::Subscription<CellTable>,
     beats: nw_bus::Subscription<Heartbeat>,
 }
@@ -195,6 +202,7 @@ impl Inbox {
             inputs: bus.subscribe(subject::sim_input(world_id, sim)).await?,
             handoffs: bus.subscribe(subject::sim_handoff(world_id, sim)).await?,
             ghosts: bus.subscribe(subject::sim_ghosts(world_id, sim)).await?,
+            hits: bus.subscribe(subject::sim_hit(world_id, sim)).await?,
             tables: bus.subscribe(subject::director_table(world_id)).await?,
             beats: bus
                 .subscribe(subject::all_gateway_heartbeats(world_id))
@@ -217,6 +225,7 @@ struct Loop {
     /// Connections with a direct input since they came here.
     direct: HashSet<ConnectionRef>,
     ghosts: Publisher<Ghosts>,
+    hits: Publisher<Hit>,
     cancels: Publisher<HandoffMessage>,
     beats: Publisher<SimHeartbeat>,
     db: PgPool,
@@ -267,6 +276,7 @@ pub async fn serve(
         pending_forwards: BTreeMap::new(),
         direct: HashSet::new(),
         ghosts: Publisher::start(bus.clone(), SIM_QUEUE),
+        hits: Publisher::start(bus.clone(), SIM_QUEUE),
         cancels: Publisher::start(bus.clone(), SIM_QUEUE),
         beats: Publisher::start(bus.clone(), HEARTBEAT_QUEUE),
         settings,
@@ -301,6 +311,10 @@ pub async fn serve(
             Some(ghosts) = inbox.ghosts.next() => match ghosts {
                 Ok(ghosts) => state.ghosts_in(ghosts.message),
                 Err(error) => tracing::warn!(%error, "bad ghost message"),
+            },
+            Some(hit) = inbox.hits.next() => match hit {
+                Ok(hit) => state.hit_in(&hit.message),
+                Err(error) => tracing::warn!(%error, "bad hit message"),
             },
             Some(table) = inbox.tables.next() => match table {
                 Ok(table) => state.table(&table.message),
@@ -500,6 +514,28 @@ impl Loop {
             .set_ghosts(&ghosts.from, ghosts.entities, self.now_ms());
     }
 
+    /// A hit from another sim on an entity of this one; a target that is gone, dead or returning
+    /// drops it (M6-A spec section 7.3).
+    fn hit_in(&mut self, hit: &Hit) {
+        let applied = self.world.apply_hit(
+            hit.target,
+            hit.attacker,
+            hit.amount,
+            hit.threat,
+            self.now_ms(),
+        );
+        let result = if applied.is_some() { APPLIED } else { DROPPED };
+        metrics::counter!(METRIC_REMOTE_HITS, RESULT_LABEL => result).increment(1);
+    }
+
+    /// Sends a hit to the sim that owns its target.
+    fn send_hit(&self, remote: RemoteHit) {
+        let subject = subject::sim_hit(self.settings.world_id, &remote.owner);
+        if !self.hits.send(subject, remote.hit) {
+            metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
+        }
+    }
+
     /// A new cell table. A table without this sim makes its players leave without `Close`: the
     /// gateways resume them on other sims (M5 spec section 3.6).
     fn table(&mut self, table: &CellTable) {
@@ -579,8 +615,11 @@ impl Loop {
         for (state, count) in self.world.mob_counts() {
             metrics::gauge!(METRIC_MOBS, STATE_LABEL => state.label()).set(count as f64);
         }
-        for hit in &output.mob_hits {
+        for hit in output.mob_hits {
             metrics::counter!(METRIC_ATTACKS, RESULT_LABEL => hit.label()).increment(1);
+            if let AttackOutcome::Remote(remote) = hit {
+                self.send_hit(remote);
+            }
         }
         for death in &output.deaths {
             metrics::counter!(METRIC_DEATHS, KIND_LABEL => PLAYER_KIND).increment(1);
@@ -859,8 +898,12 @@ mod tests {
     use tokio::task::JoinHandle;
 
     use super::*;
-    use crate::combat::tests::{TEST_PLAYER_HEALTH, test_combat};
+    use nw_formats::objectstream::lowercase_crc32;
+
+    use crate::combat::test_support::{TEST_LEVEL, TEST_MOB, TEST_PLAYER_HEALTH};
+    use crate::combat::tests::test_combat;
     use crate::config::tests::committed;
+    use crate::mobs::VitalsSpawn;
     use crate::world::{MESSAGE_CHANNEL, REPLICATION_CHANNEL};
 
     const WAIT: Duration = Duration::from_secs(5);
@@ -1377,12 +1420,21 @@ mod tests {
 
     impl Pair {
         async fn start(db: &PgPool) -> Self {
+            Self::start_with(db, test_combat()).await
+        }
+
+        /// A pair whose east sim has the combat settings `east_combat`.
+        async fn start_with(db: &PgPool, east_combat: CombatSettings) -> Self {
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
             let gateway = TestGateway::start(&bus, world_id, true).await;
             // Sorted ids give the stripes: "sim-a" is west, "sim-b" east.
             let west = Running::start(&bus, settings(world_id, "sim-a"), db).await;
-            let east = Running::start(&bus, settings(world_id, "sim-b"), db).await;
+            let east_settings = LoopSettings {
+                combat: east_combat,
+                ..settings(world_id, "sim-b")
+            };
+            let east = Running::start(&bus, east_settings, db).await;
             let slots = slots(&bus, world_id, &[west.id(), east.id()]).await;
             let tables = publish_tables(&bus, world_id, slots);
             Self {
@@ -1458,6 +1510,35 @@ mod tests {
             input(&bus, world_id, pair.west.id(), &left).await;
             let saved = saved_position(db, ada.1).await;
             assert!((saved.x - f64::from(further)).abs() < SAVE_TOLERANCE_M);
+            pair.stop().await;
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mob_of_the_other_sim_kills_a_player_through_the_bus() {
+        /// A mob hit of 100 x 100: more than a player's health.
+        const LETHAL_FACTOR: f64 = 100.0;
+        with_test_schema(async |db| {
+            WORLD_MIGRATOR.run(db).await.expect("migrate");
+            let mut combat = test_combat();
+            combat.mob_attack_factor = LETHAL_FACTOR;
+            combat.spawns = vec![VitalsSpawn {
+                vitals_id: lowercase_crc32(TEST_MOB),
+                level: TEST_LEVEL,
+                position: [BORDER_X + 2.0, Y, Z],
+                ..VitalsSpawn::default()
+            }]
+            .into();
+            let pair = Pair::start_with(db, combat).await;
+            let ada = character(db).await;
+            let west_player = admit_at(pair.gateway.connection(CONNECTION), ada, BORDER_X - 1.0);
+            admit(&pair.bus, pair.world_id, pair.west.id(), &west_player).await;
+            let saved = saved_position(db, ada.1).await;
+            assert!(
+                (saved.x - f64::from(BORDER_X - 1.0)).abs() < SAVE_TOLERANCE_M,
+                "saved at once where it died"
+            );
             pair.stop().await;
         })
         .await;
