@@ -171,7 +171,8 @@ impl SimWorld {
     }
 
     /// Applies a hit of `amount` with `threat` from `attacker` on `target`, a mob or a player of
-    /// this sim. Returns `None` when the target is not here, is dead, or (a mob) is returning.
+    /// this sim. Returns `None` when the target is not here, is dead, (a mob) is returning, or
+    /// (a player) is frozen for a handoff, whose offer already carries its health.
     pub fn apply_hit(
         &mut self,
         target: u64,
@@ -196,6 +197,9 @@ impl SimWorld {
             return Some(outcome);
         }
         let entity = self.player_by_number(target)?;
+        if self.world.get::<Player>(entity)?.frozen {
+            return None;
+        }
         let mut vitals = self.world.get_mut::<Vitals>(entity)?;
         match vitals.health.take(amount) {
             Damage::AlreadyDead => None,
@@ -731,6 +735,47 @@ mod tests {
         );
         assert!(kills > 0, "mobs died and respawned");
         assert!(p99 < ONE_TICK_MS, "tick p99 {p99:.2} ms");
+    }
+
+    #[test]
+    fn a_dead_player_is_not_handed_off() {
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, BORDER_X + 50.0);
+        world.apply_hit(1, mob(), LETHAL, 0, NOW);
+        assert!(
+            tick(&mut world, NOW).handoffs.is_empty(),
+            "it stays until its respawn"
+        );
+        assert_eq!(tick(&mut world, NOW + PLAYER_RESPAWN_MS).handoffs.len(), 1);
+    }
+
+    #[test]
+    fn a_hit_on_a_frozen_player_is_dropped() {
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, BORDER_X + 50.0);
+        let offer = tick(&mut world, NOW).handoffs[0].offer.clone();
+        assert_eq!(
+            world.apply_hit(1, mob(), LETHAL, 0, NOW),
+            None,
+            "the offer has its health"
+        );
+        assert_eq!(health_of(&mut world, 1).current(), offer.health);
+    }
+
+    #[test]
+    fn a_dead_player_is_no_ghost() {
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, BORDER_X - 50.0);
+        assert_eq!(tick(&mut world, NOW).ghosts[0].1.len(), 1);
+        world.apply_hit(1, mob(), LETHAL, 0, NOW);
+        let ghosts = tick(&mut world, NOW + TICK_MS).ghosts;
+        assert!(
+            ghosts.iter().all(|(_, entities)| entities.is_empty()),
+            "{ghosts:?}"
+        );
     }
 
     #[test]

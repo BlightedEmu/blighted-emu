@@ -118,6 +118,10 @@ const PLAYER_KIND: &str = "player";
 const DEAD_REASON: &str = "dead";
 /// Metric: owned spawns without a mob type or level row.
 pub const METRIC_MOBS_UNSPAWNED: &str = "sim_mobs_unspawned_total";
+/// Metric: mob brain steps.
+pub const METRIC_MOB_BRAIN_RUNS: &str = "sim_mob_brain_runs_total";
+/// Metric: player scans for mobs to wake.
+pub const METRIC_MOB_WAKE_SCANS: &str = "sim_mob_wake_scans_total";
 /// Metric: time of the mob part of a tick.
 pub const METRIC_MOB_TICK_SECONDS: &str = "sim_mob_tick_seconds";
 /// Label of a mob's state.
@@ -615,6 +619,9 @@ impl Loop {
         for (state, count) in self.world.mob_counts() {
             metrics::gauge!(METRIC_MOBS, STATE_LABEL => state.label()).set(count as f64);
         }
+        let (brain_runs, wake_scans) = self.world.mob_work();
+        metrics::counter!(METRIC_MOB_BRAIN_RUNS).absolute(brain_runs);
+        metrics::counter!(METRIC_MOB_WAKE_SCANS).absolute(wake_scans);
         for hit in output.mob_hits {
             metrics::counter!(METRIC_ATTACKS, RESULT_LABEL => hit.label()).increment(1);
             if let AttackOutcome::Remote(remote) = hit {

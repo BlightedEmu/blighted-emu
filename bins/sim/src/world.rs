@@ -565,6 +565,11 @@ impl SimWorld {
         std::mem::take(&mut self.mob_changes)
     }
 
+    /// Brain steps and player wake scans of the mobs since the start.
+    pub const fn mob_work(&self) -> (u64, u64) {
+        (self.mobs.brain_runs(), self.mobs.wake_scans())
+    }
+
     /// Mobs by state.
     pub fn mob_counts(&self) -> [(MobState, usize); MobState::ALL.len()] {
         self.mobs.counts()
@@ -646,7 +651,8 @@ impl SimWorld {
         let mut query = self.world.query::<(&mut Player, &Body, &Vitals)>();
         let mut starts = Vec::new();
         for (mut player, body, vitals) in query.iter_mut(&mut self.world) {
-            if player.frozen || now_ms < player.no_handoff_before_ms {
+            // A dead player stays until its respawn: the next sim could not revive it.
+            if player.frozen || now_ms < player.no_handoff_before_ms || vitals.health.is_dead() {
                 continue;
             }
             let position = body.motion.position();
@@ -682,8 +688,12 @@ impl SimWorld {
         let mut lists: BTreeMap<BusId, Vec<Ghost>> = BTreeMap::new();
         if let Some(cells) = &self.cells {
             let radius = self.settings.interest_radius_m;
-            let mut query = self.world.query::<(&Player, &Body)>();
-            for (player, body) in query.iter(&self.world) {
+            let mut query = self.world.query::<(&Player, &Body, &Vitals)>();
+            // A dead player is no ghost: the mobs of other sims forget it too.
+            for (player, body, _) in query
+                .iter(&self.world)
+                .filter(|(_, _, vitals)| !vitals.health.is_dead())
+            {
                 let position = body.motion.position();
                 for owner in cells.owners.others_within(cells.me, position, radius) {
                     if let Some(sim) = cells.sims.get(usize::from(owner)) {

@@ -6,7 +6,9 @@
 //! Only awake mobs run their brain. Each tick, the mobs within the wake radius of a player wake;
 //! an idle mob without a player near falls asleep again (its brain decides when). A grid of the
 //! spawn points, in buckets of the wake radius plus the leash radius, finds the mobs near a
-//! player, because a mob is never farther than the leash from its spawn.
+//! player, because a mob is never farther than the leash from its spawn. A player scans again
+//! only after it moved [`WAKE_RESCAN_M`] since its last scan, or when the cells change: a player
+//! who stands still keeps its awake mobs awake without a scan.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -20,6 +22,10 @@ use nw_sim_core::{
 pub use nw_world::records::VitalsSpawn;
 
 use crate::combat::CombatSettings;
+
+/// A player scans for mobs to wake again after moving this far (about 2 s of running); far less
+/// than the wake radius, so a mob wakes before the player can reach it.
+pub const WAKE_RESCAN_M: f32 = 10.0;
 
 /// The entity number of the mob of spawn `index`.
 pub const fn mob_entity(index: u32) -> u64 {
@@ -76,6 +82,9 @@ pub struct Mobs {
     spawn_grid: Option<SpatialGrid<u32>>,
     dice: Dice,
     brain_runs: u64,
+    /// Where each player last scanned for mobs to wake.
+    scanned: HashMap<u64, Position>,
+    wake_scans: u64,
 }
 
 fn position_of(spawn: &VitalsSpawn) -> Position {
@@ -106,6 +115,8 @@ impl Mobs {
             spawn_grid: None,
             dice: Dice::new(combat.seed),
             brain_runs: 0,
+            scanned: HashMap::new(),
+            wake_scans: 0,
         }
     }
 
@@ -129,6 +140,7 @@ impl Mobs {
     /// Spawns the mobs of the spawns that `owns`, and removes the others.
     pub fn set_cells(&mut self, owns: impl Fn(Position) -> bool) -> MobChanges {
         let mut changes = MobChanges::default();
+        self.scanned.clear();
         let spawns = Arc::clone(&self.spawns);
         for (index, spawn) in (0_u32..).zip(spawns.iter()) {
             if owns(position_of(spawn)) {
@@ -177,8 +189,19 @@ impl Mobs {
             player_grid.insert(player.entity, player.position);
         }
         let mut run: BTreeSet<u32> = self.awake.clone();
+        let mut scanned = HashMap::with_capacity(players.len());
         if let Some(spawn_grid) = &self.spawn_grid {
             for player in players {
+                if let Some(last) = self
+                    .scanned
+                    .get(&player.entity)
+                    .filter(|last| last.horizontal_distance(player.position) < WAKE_RESCAN_M)
+                {
+                    scanned.insert(player.entity, *last);
+                    continue;
+                }
+                scanned.insert(player.entity, player.position);
+                self.wake_scans += 1;
                 for (index, _) in spawn_grid.near(player.position) {
                     let near = self.live.get(&index).is_some_and(|mob| {
                         mob.brain.position().horizontal_distance(player.position) <= wake_m
@@ -189,6 +212,7 @@ impl Mobs {
                 }
             }
         }
+        self.scanned = scanned;
         let mut intents = Vec::new();
         for index in run {
             let Some(mob) = self.live.get_mut(&index) else {
@@ -297,6 +321,11 @@ impl Mobs {
     /// Brain steps run since the start.
     pub const fn brain_runs(&self) -> u64 {
         self.brain_runs
+    }
+
+    /// Wake scans of players since the start.
+    pub const fn wake_scans(&self) -> u64 {
+        self.wake_scans
     }
 }
 
@@ -448,6 +477,30 @@ mod tests {
                 target: PLAYER
             }]
         );
+    }
+
+    #[test]
+    fn a_player_that_stands_still_does_not_rescan() {
+        let mut mobs = mobs(vec![spawn_at(100.0, TEST_MOB, TEST_LEVEL)]);
+        mobs.set_cells(every);
+        mobs.tick(&[player_at(150.0)], 0, &Flat);
+        assert_eq!(mobs.wake_scans(), 1);
+        mobs.tick(&[player_at(150.0 + WAKE_RESCAN_M - 1.0)], TICK_MS, &Flat);
+        assert_eq!(mobs.wake_scans(), 1, "still near its last scan");
+        mobs.tick(
+            &[player_at(150.0 + WAKE_RESCAN_M + 1.0)],
+            2 * TICK_MS,
+            &Flat,
+        );
+        assert_eq!(mobs.wake_scans(), 2, "moved far enough");
+        mobs.set_cells(|_| false);
+        mobs.set_cells(every);
+        mobs.tick(
+            &[player_at(150.0 + WAKE_RESCAN_M + 1.0)],
+            3 * TICK_MS,
+            &Flat,
+        );
+        assert_eq!(mobs.wake_scans(), 3, "new mobs: everyone scans again");
     }
 
     #[test]
