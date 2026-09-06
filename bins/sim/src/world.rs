@@ -35,7 +35,7 @@ use uuid::Uuid;
 mod attack;
 mod members;
 
-use members::{MobCard, bundles, card_of, mob_members, position_member};
+use members::{CARD_REFRESH_BUNDLES, MobCard, bundles, card_of, mob_members, position_member};
 
 use attack::Vitals;
 
@@ -927,7 +927,11 @@ impl Neighbourhood<'_> {
                 position_member(own, own_position).into_iter().collect();
             for number in numbers {
                 if let Some(card) = self.cards.get(&number) {
-                    let first = entered.contains(&number);
+                    // Staggered by the entity number, so the cards of a crowd do not all come
+                    // in one bundle.
+                    let refresh =
+                        player.bundles_sent.wrapping_add(number) % CARD_REFRESH_BUNDLES == 0;
+                    let first = entered.contains(&number) || refresh;
                     members.extend(mob_members(card, first, self.asset_sub_id));
                 } else if let Some(position) = self.positions.get(&number) {
                     members.extend(position_member(number, *position));
@@ -1252,6 +1256,23 @@ mod tests {
             classes_of(&tick(&mut world, NOW + 33).messages, &connection(1), mob),
             [POSITION_IN_THE_WORLD_TYPE_INDEX]
         );
+    }
+
+    #[test]
+    fn a_lost_card_comes_again_within_a_second() {
+        let x = CELL_M / 2.0;
+        let mut world = world_with_spawns(vec![test_spawn(x)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, x + 5.0);
+        let mob = crate::mobs::mob_entity(0);
+        tick(&mut world, NOW);
+        let cards = (1..=CARD_REFRESH_BUNDLES)
+            .map(|step| tick(&mut world, NOW + 33 * step).messages)
+            .filter(|messages| {
+                classes_of(messages, &connection(1), mob).contains(&GDE_METADATA_TYPE_INDEX)
+            })
+            .count();
+        assert_eq!(cards, 1, "once more in the next second of bundles");
     }
 
     #[test]

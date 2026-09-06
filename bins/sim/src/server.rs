@@ -1457,15 +1457,12 @@ mod tests {
             .await;
             assert!(first.contains(&(mob, VITALS_TYPE_INDEX)), "{first:?}");
             assert!(first.contains(&(mob, POSITION_IN_THE_WORLD_TYPE_INDEX)));
-            let later = bundle_classes(&mut gateway, |_| true).await;
-            assert!(
-                later.contains(&(mob, POSITION_IN_THE_WORLD_TYPE_INDEX)),
-                "{later:?}"
-            );
-            assert!(
-                !later.contains(&(mob, GDE_METADATA_TYPE_INDEX)),
-                "the card once"
-            );
+            // The card comes again once per second of bundles; between, the mob is its position.
+            bundle_classes(&mut gateway, |classes| {
+                classes.contains(&(mob, POSITION_IN_THE_WORLD_TYPE_INDEX))
+                    && !classes.contains(&(mob, GDE_METADATA_TYPE_INDEX))
+            })
+            .await;
             tables.abort();
             sim.stop().await;
         })

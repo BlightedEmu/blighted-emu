@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The bundle members of players and mobs (M6-B spec section 5). A player is its position. A
 //! mob is its position too, and when it comes into a player's view, its spawn card (type 10) and
-//! its vitals block (type 15, slot 0) come first, once. The spawn card's ids are our own values:
+//! its vitals block (type 15, slot 0) come first; they come again once per
+//! [`CARD_REFRESH_BUNDLES`] bundles while it stays in view. The spawn card's ids are our own values:
 //! what the client needs there is Unknown.
 //!
 //! Bundles split by bytes: an unreliable carrier message must fit one datagram (it is never
@@ -22,6 +23,10 @@ use super::MAX_BUNDLE_MEMBERS;
 const MAX_POSITION_MEMBER_BYTES: usize = 18;
 /// The member bytes of one bundle.
 pub(super) const MAX_BUNDLE_PAYLOAD_BYTES: usize = MAX_BUNDLE_MEMBERS * MAX_POSITION_MEMBER_BYTES;
+/// A mob in view sends its card and vitals again once per this many bundles of the player (about
+/// one second at one bundle per tick): a bundle is unreliable, and a lost card would hide the mob
+/// for as long as it stays in view.
+pub(super) const CARD_REFRESH_BUNDLES: u64 = 30;
 /// The entity number fills the last 8 bytes of the 16-byte `GdeRef`.
 const ENTITY_IN_REF: usize = GDE_ID_LEN - std::mem::size_of::<u64>();
 
