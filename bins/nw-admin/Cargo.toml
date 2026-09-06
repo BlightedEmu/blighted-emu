@@ -23,6 +23,9 @@ tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread"
 tracing.workspace = true
 
 [dev-dependencies]
+nw-capture = { workspace = true, features = ["test-util"] }
+nw-messages.workspace = true
+nw-reflect.workspace = true
 http-body-util.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The capture viewer (admin tools spec section 4): the session list and the type names.
 
+pub mod api;
 pub mod azoth;
 pub mod catalog;
+pub mod open;
 
 use std::path::Path;
 
@@ -19,6 +21,8 @@ pub struct Captures {
     pub sessions: Vec<SessionEntry>,
     /// Type labels.
     pub labels: TypeLabels,
+    /// The open sessions.
+    pub open: open::OpenSessions,
 }
 
 impl Captures {
@@ -36,6 +40,7 @@ impl Captures {
         Self {
             sessions,
             labels: TypeLabels::new(ours, AzothTypes::load(&config.azoth_dir)),
+            open: open::OpenSessions::default(),
         }
     }
 }

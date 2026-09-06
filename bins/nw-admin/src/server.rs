@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use crate::assets::asset;
 use crate::captures::Captures;
+use crate::captures::api::capture_routes;
 use crate::captures::catalog::search;
 use crate::guard::{AdminOrigin, admin_guard};
 use crate::relief::relief_tile;
@@ -29,7 +30,7 @@ pub struct AppState {
     world: Arc<WorldLayer>,
     map_dir: Arc<PathBuf>,
     origin: AdminOrigin,
-    captures: Arc<Captures>,
+    pub(crate) captures: Arc<Captures>,
 }
 
 impl AppState {
@@ -61,6 +62,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/world/spawns", get(spawns))
         .route("/api/captures/sessions", get(sessions))
         .route("/api/captures/types/{idx}", get(type_label))
+        .merge(capture_routes())
         .layer(axum::middleware::from_fn_with_state(
             state.origin.clone(),
             admin_guard,
