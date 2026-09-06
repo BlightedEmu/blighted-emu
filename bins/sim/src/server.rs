@@ -34,7 +34,7 @@ use crate::combat::{AttackOutcome, AttackRefusal, CombatSettings, RemoteHit};
 use crate::forward::{Forward, ForwardTable};
 use crate::gateways::GatewayTracker;
 use crate::login::WorldIds;
-use crate::mobs::MobChanges;
+use crate::mobs::{MobChanges, spawn_index};
 use crate::saves::SaveQueue;
 use crate::world::{
     Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
@@ -118,9 +118,11 @@ const DROPPED: &str = "dropped";
 /// Metric: deaths by `kind`.
 pub const METRIC_DEATHS: &str = "sim_deaths_total";
 /// Label of a death's kind.
-const KIND_LABEL: &str = "kind";
+pub const KIND_LABEL: &str = "kind";
 /// A player's death.
 const PLAYER_KIND: &str = "player";
+/// A mob's death.
+pub const MOB_KIND: &str = "mob";
 /// Reason of a move of a dead player.
 const DEAD_REASON: &str = "dead";
 /// Metric: owned spawns without a mob type or level row.
@@ -572,6 +574,9 @@ impl Loop {
             hit.threat,
             self.now_ms(),
         );
+        if let Some(outcome) = &applied {
+            count_mob_death(outcome);
+        }
         let result = if applied.is_some() { APPLIED } else { DROPPED };
         metrics::counter!(METRIC_REMOTE_HITS, RESULT_LABEL => result).increment(1);
         self.send_combat_messages();
@@ -580,7 +585,10 @@ impl Loop {
     /// Counts an attack of a player or a mob; a hit on a target of another sim goes there.
     fn attack_result(&self, result: Result<AttackOutcome, AttackRefusal>) {
         let label = match &result {
-            Ok(outcome) => outcome.label(),
+            Ok(outcome) => {
+                count_mob_death(outcome);
+                outcome.label()
+            }
             Err(refusal) => refusal.reason(),
         };
         metrics::counter!(METRIC_ATTACKS, RESULT_LABEL => label).increment(1);
@@ -937,8 +945,46 @@ impl Loop {
 }
 
 /// Milliseconds since 2000-01-01. The unit of the retail `TimeSynchMsg` is Unknown.
+/// Counts a mob that `outcome` killed; a killed player is counted with its departure.
+fn count_mob_death(outcome: &AttackOutcome) {
+    if let AttackOutcome::Killed { target } = outcome
+        && spawn_index(*target).is_some()
+    {
+        metrics::counter!(METRIC_DEATHS, KIND_LABEL => MOB_KIND).increment(1);
+    }
+}
+
 fn server_time() -> u64 {
     unix_ms().saturating_sub(SERVER_EPOCH_UNIX_MS)
+}
+
+#[cfg(test)]
+mod metric_tests {
+    use super::*;
+    use crate::mobs::mob_entity;
+
+    #[test]
+    fn a_killed_mob_counts_a_mob_death() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            count_mob_death(&AttackOutcome::Killed {
+                target: mob_entity(0),
+            });
+            count_mob_death(&AttackOutcome::Killed { target: 7 });
+            count_mob_death(&AttackOutcome::Hit {
+                target: mob_entity(1),
+                amount: 1,
+            });
+        });
+        let text = handle.render();
+        let mob = format!("{METRIC_DEATHS}{{{KIND_LABEL}=\"{MOB_KIND}\"}} 1");
+        assert!(text.contains(&mob), "{text}");
+        assert!(
+            !text.contains(PLAYER_KIND),
+            "a player death counts with its departure"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "infra"))]
