@@ -3109,6 +3109,7 @@ name = "nw-testclient"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "nw-capture",
  "nw-carrier",
  "nw-common",
  "nw-content",

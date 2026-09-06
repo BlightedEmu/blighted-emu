@@ -20,7 +20,7 @@ use nw_testclient::config::{
 use nw_testclient::fleet::{NewClient, udp_receive_errors};
 use nw_testclient::hunt::run_hunt;
 use nw_testclient::pair::{Check, PairSettings, run_pair};
-use nw_testclient::rep::RepClient;
+use nw_testclient::rep::{LedgerSlot, RepClient};
 use nw_testclient::swarm::run_swarm;
 use nw_testclient::udp::run_rep;
 use nw_testclient::walk::{WalkSettings, login_token, walk};
@@ -41,6 +41,10 @@ struct Cli {
     /// Configuration file. The password comes from `NW_SECRET_TESTCLIENT_PASSWORD`.
     #[arg(long, default_value = DEFAULT_CONFIG)]
     config: PathBuf,
+    /// Writes the plain carrier datagrams of the first client to this capture ledger, which
+    /// `nw-admin` opens like a recorded session.
+    #[arg(long, global = true)]
+    ledger: Option<PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -98,22 +102,31 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
     nw_login::install_crypto_provider();
     let http = reqwest::Client::builder().build()?;
     let trusted = DtlsClientConfig::new(&std::fs::read(&config.certificate_file)?)?;
+    let ledger = Arc::new(LedgerSlot::new(match &cli.ledger {
+        Some(path) => Some(nw_capture::LedgerWriter::new(
+            Box::new(std::io::BufWriter::new(std::fs::File::create(path)?))
+                as Box<dyn std::io::Write + Send>,
+        )),
+        None => None,
+    }));
     match cli.command.unwrap_or(Command::Registration) {
-        Command::Registration => registration(&config, &http, &trusted, &own(&config)?).await,
-        Command::Pair => pair(&config, &http, &trusted, own(&config)?).await,
+        Command::Registration => {
+            registration(&config, &http, &trusted, &own(&config)?, &ledger).await
+        }
+        Command::Pair => pair(&config, &http, &trusted, own(&config)?, &ledger).await,
         Command::Swarm { bots } => {
             let mut config = config;
             if let Some(bots) = bots {
                 config.swarm.bots = bots;
             }
-            swarm(&config, &http, trusted).await
+            swarm(&config, &http, trusted, ledger).await
         }
         Command::Hunt { bots } => {
             let mut config = config;
             if let Some(bots) = bots {
                 config.hunt.bots = bots;
             }
-            hunt(&config, &http, trusted).await
+            hunt(&config, &http, trusted, ledger).await
         }
     }
 }
@@ -133,9 +146,10 @@ async fn swarm(
     config: &TestClientConfig,
     http: &reqwest::Client,
     trusted: DtlsClientConfig,
+    ledger: Arc<LedgerSlot>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let settings = Arc::new(config.swarm_settings(secret(SWARM_PASSWORD_ENV)?)?);
-    let (ground, new_client) = fleet_parts(config, trusted)?;
+    let (ground, new_client) = fleet_parts(config, trusted, ledger)?;
     let errors_before = receive_errors();
     let report = run_swarm(http, Arc::clone(&settings), ground, new_client, |line| {
         println!("{line}");
@@ -153,9 +167,10 @@ async fn hunt(
     config: &TestClientConfig,
     http: &reqwest::Client,
     trusted: DtlsClientConfig,
+    ledger: Arc<LedgerSlot>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let settings = Arc::new(config.hunt_settings(secret(SWARM_PASSWORD_ENV)?)?);
-    let (ground, new_client) = fleet_parts(config, trusted)?;
+    let (ground, new_client) = fleet_parts(config, trusted, ledger)?;
     let errors_before = receive_errors();
     let report = run_hunt(http, Arc::clone(&settings), ground, new_client, |line| {
         println!("{line}");
@@ -173,6 +188,7 @@ async fn hunt(
 fn fleet_parts(
     config: &TestClientConfig,
     trusted: DtlsClientConfig,
+    ledger: Arc<LedgerSlot>,
 ) -> Result<(Arc<WorldFile>, NewClient), Box<dyn std::error::Error>> {
     let swarm = &config.swarm;
     let build = load_client_build(&swarm.client_build_config)?;
@@ -180,7 +196,9 @@ fn fleet_parts(
     let ground = Arc::new(WorldFile::load(&path, &build)?);
     let mtu = config.mtu;
     let trusted = Arc::new(trusted);
-    let new_client: NewClient = Arc::new(move |token| RepClient::new(&trusted, mtu, token, 0));
+    let new_client: NewClient = Arc::new(move |token| {
+        RepClient::new(&trusted, mtu, token, 0).map(|client| ledger.give(client))
+    });
     Ok((ground, new_client))
 }
 
@@ -243,6 +261,7 @@ async fn pair(
     http: &reqwest::Client,
     trusted: &DtlsClientConfig,
     first: WalkSettings,
+    ledger: &LedgerSlot,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let second = walk_settings(
         config,
@@ -261,7 +280,7 @@ async fn pair(
     let report = run_pair(
         http,
         &settings,
-        |token| RepClient::new(trusted, config.mtu, token, 0),
+        |token| RepClient::new(trusted, config.mtu, token, 0).map(|client| ledger.give(client)),
         |line| println!("{line}"),
     )
     .await?;
@@ -274,11 +293,13 @@ async fn registration(
     http: &reqwest::Client,
     trusted: &DtlsClientConfig,
     settings: &WalkSettings,
+    ledger: &LedgerSlot,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let admission = walk(http, settings, |line| println!("{line}")).await?;
     let token = login_token(&admission.token);
     let registration_timeout = Duration::from_secs(config.registration_timeout_seconds);
-    let new_client = || RepClient::new(trusted, config.mtu, token.clone(), 0);
+    let new_client =
+        || RepClient::new(trusted, config.mtu, token.clone(), 0).map(|client| ledger.give(client));
     let outcome = run_rep(
         admission.rep_address,
         new_client()?,

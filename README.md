@@ -300,6 +300,8 @@ For the capture viewer it lists every `ledger.bin` under `local-data/captures/` 
 
 The capture viewer page (`/web/captures.html`) opens a session and shows its totals, the message types (with names, Azoth catalog status, counts and rates; a click draws the count per second), the entities with their paths on the map, the player's own path, a time slider, the messages near the slider time, the bytes of a message with its bundle members marked, the member classes where the bundle walks stop (the readers still missing), and a type rate comparison with a second session. Capture data stays on this PC: the pages run on a loopback address and keep nothing.
 
+`nw-testclient --ledger <file> <command>` writes the plain carrier datagrams of its first client (received after DTLS decryption, sent before DTLS encryption) as a capture ledger. Put it under `local-data/captures/` and the capture viewer opens it like a recorded session, so a session with our servers can be compared with one of the real game.
+
 The world map page (`/web/map.html`) shows the map tiles, the relief, or the relief over the tiles at half strength (the check that both line up), and, closer than 4 m per pixel, the mob spawns, gatherables and landmarks of the world file. The page code is plain JavaScript modules built into the program; `just test-web` runs their tests with Node's built-in test runner.
 
 ## Rules for contributors

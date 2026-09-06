@@ -5,7 +5,11 @@
 //! The caller passes in received datagrams and the time and sends what [`RepClient::poll`]
 //! returns. The registration request goes out as soon as the carrier is connected.
 
+use std::io::Write;
+
+use nw_capture::{CLIENT_TO_SERVER, LedgerWriter, SERVER_TO_CLIENT};
 use nw_carrier::{CarrierError, Connection, Event, MESSAGE_CHANNEL};
+use nw_common::time::unix_ms;
 use nw_dtls::{DtlsClientConfig, DtlsError, DtlsSession};
 use nw_reflect::{
     CLIENT_SESSION_LEN, Envelope, EnvelopeError, FramingError, LoginToken, PING_MSG_TYPE_INDEX,
@@ -72,11 +76,41 @@ pub struct Received {
     pub envelope: Envelope,
 }
 
+/// Context of every record of our own ledgers.
+pub const OWN_LEDGER_CONTEXT: u64 = 1;
+
+/// Where a client writes its plain carrier datagrams, as a capture ledger.
+pub type OwnLedger = LedgerWriter<Box<dyn Write + Send>>;
+
+/// A ledger for the first client made (`--ledger`); later clients get none.
+pub struct LedgerSlot(std::sync::Mutex<Option<OwnLedger>>);
+
+impl LedgerSlot {
+    /// A slot that holds `ledger`, or nothing.
+    pub fn new(ledger: Option<OwnLedger>) -> Self {
+        Self(std::sync::Mutex::new(ledger))
+    }
+
+    /// `client` with the ledger when the slot still holds it.
+    pub fn give(&self, client: RepClient) -> RepClient {
+        let ledger = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        match ledger {
+            Some(ledger) => client.with_ledger(ledger),
+            None => client,
+        }
+    }
+}
+
 /// The client side of one REP connection.
 pub struct RepClient {
     dtls: DtlsSession,
     carrier: Connection,
     token: Option<LoginToken>,
+    ledger: Option<OwnLedger>,
 }
 
 impl RepClient {
@@ -95,7 +129,31 @@ impl RepClient {
             dtls: DtlsSession::connect(config, mtu)?,
             carrier: Connection::client(now_ms),
             token: Some(token),
+            ledger: None,
         })
+    }
+
+    /// This client with every plain carrier datagram written to `ledger` (admin tools spec
+    /// section 4.6): received ones after DTLS decryption, sent ones before DTLS encryption.
+    #[must_use]
+    pub fn with_ledger(mut self, ledger: OwnLedger) -> Self {
+        self.ledger = Some(ledger);
+        self
+    }
+
+    /// Whether the client still writes its ledger (a write error stops it; the run goes on).
+    pub fn records_ledger(&self) -> bool {
+        self.ledger.is_some()
+    }
+
+    fn record(&mut self, direction: u32, datagram: &[u8]) {
+        let Some(ledger) = &mut self.ledger else {
+            return;
+        };
+        if let Err(error) = ledger.record(unix_ms(), direction, OWN_LEDGER_CONTEXT, datagram) {
+            eprintln!("the ledger stops: {error}");
+            self.ledger = None;
+        }
     }
 
     /// Handles one received datagram.
@@ -106,6 +164,7 @@ impl RepClient {
     pub fn receive(&mut self, now_ms: u64, datagram: &[u8]) -> Result<Vec<RepEvent>, RepError> {
         let mut events = Vec::new();
         for plaintext in self.dtls.receive(datagram)? {
+            self.record(SERVER_TO_CLIENT, &plaintext);
             for event in self.carrier.receive(now_ms, &plaintext)? {
                 match event {
                     Event::Connected => {
@@ -188,6 +247,7 @@ impl RepClient {
         self.dtls.poll_timer()?;
         if self.dtls.is_established() {
             for datagram in self.carrier.poll(now_ms)? {
+                self.record(CLIENT_TO_SERVER, &datagram);
                 self.dtls.send(&datagram)?;
             }
         }
@@ -425,5 +485,139 @@ pub(crate) mod tests {
             .find(|envelope| envelope.type_index() == Some(PING_MSG_TYPE_INDEX))
             .expect("echo");
         assert_eq!(echo.body, PING_BODY);
+    }
+
+    /// A writer into a buffer the test keeps.
+    #[derive(Clone, Default)]
+    struct Shared(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Shared {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("buffer").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A writer that always fails.
+    struct Broken;
+
+    impl std::io::Write for Broken {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("disk full"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn registered_with(client: &mut RepClient) {
+        let mut server = Server::new();
+        let response = RegistrationResponseMsg {
+            uint32_at_0x8: REGISTRATION_STATUS_AUTHORIZED,
+            uint64: 1,
+            bytes_at_0x18: b"TOKEN".to_vec(),
+            bytes_at_0x38: b"version".to_vec(),
+            bytes_at_0x58: REGISTRATION_RESPONSE_OBSERVED_FLAGS,
+        };
+        let reply = response.encode().expect("response");
+        let (events, _) = run(
+            client,
+            &mut server,
+            |server, envelope| {
+                if envelope.type_index() == Some(REGISTRATION_REQUEST_V3_MSG_TYPE_INDEX) {
+                    server.send(REGISTRATION_RESPONSE_MSG_TYPE_INDEX, reply.clone());
+                }
+            },
+            |events| {
+                events
+                    .iter()
+                    .any(|event| matches!(event, RepEvent::Registered(_)))
+            },
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, RepEvent::Registered(_)))
+        );
+    }
+
+    fn ledger_client(out: impl std::io::Write + Send + 'static) -> RepClient {
+        let config = DtlsClientConfig::new(&IDENTITY.certificate_pem).expect("client config");
+        RepClient::new(&config, MTU, token(), START_MS)
+            .expect("client")
+            .with_ledger(nw_capture::LedgerWriter::new(Box::new(out)))
+    }
+
+    #[test]
+    fn a_ledger_client_records_both_directions() {
+        let buffer = Shared::default();
+        let mut client = ledger_client(buffer.clone());
+        registered_with(&mut client);
+        drop(client);
+        let bytes = buffer.0.lock().expect("buffer").clone();
+        let records = nw_capture::parse_ledger(&bytes).expect("ledger");
+        for direction in [nw_capture::SERVER_TO_CLIENT, nw_capture::CLIENT_TO_SERVER] {
+            assert!(records.iter().any(|record| record.direction == direction));
+        }
+        assert!(
+            records
+                .iter()
+                .all(|record| record.context == OWN_LEDGER_CONTEXT)
+        );
+    }
+
+    #[test]
+    fn the_recorded_ledger_indexes_with_the_login_messages() {
+        let buffer = Shared::default();
+        let mut client = ledger_client(buffer.clone());
+        registered_with(&mut client);
+        drop(client);
+        let bytes = buffer.0.lock().expect("buffer").clone();
+        let index = nw_capture::SessionIndex::build(&bytes);
+        assert!(index.failures.is_empty(), "{:?}", index.failures);
+        let has = |type_index, direction| {
+            index
+                .types
+                .iter()
+                .any(|stats| stats.type_index == type_index && stats.direction == direction)
+        };
+        assert!(has(
+            REGISTRATION_REQUEST_V3_MSG_TYPE_INDEX,
+            nw_capture::CLIENT_TO_SERVER
+        ));
+        assert!(has(
+            REGISTRATION_RESPONSE_MSG_TYPE_INDEX,
+            nw_capture::SERVER_TO_CLIENT
+        ));
+    }
+
+    #[test]
+    fn a_failed_write_stops_recording_not_the_run() {
+        let mut client = ledger_client(Broken);
+        registered_with(&mut client);
+        assert!(!client.records_ledger());
+    }
+
+    #[test]
+    fn a_ledger_slot_goes_to_the_first_client_only() {
+        let slot = LedgerSlot::new(Some(nw_capture::LedgerWriter::new(Box::new(
+            Shared::default(),
+        ))));
+        let config = DtlsClientConfig::new(&IDENTITY.certificate_pem).expect("client config");
+        let first = slot.give(RepClient::new(&config, MTU, token(), START_MS).expect("client"));
+        let second = slot.give(RepClient::new(&config, MTU, token(), START_MS).expect("client"));
+        assert!(first.records_ledger());
+        assert!(!second.records_ledger());
+        let empty = LedgerSlot::new(None);
+        assert!(
+            !empty
+                .give(RepClient::new(&config, MTU, token(), START_MS).expect("client"))
+                .records_ledger()
+        );
     }
 }
