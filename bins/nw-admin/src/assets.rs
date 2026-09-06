@@ -49,7 +49,10 @@ mod tests {
             assert_eq!(asset(script).map(|file| file.content_type), Some(JS));
         }
         assert_eq!(asset("map.html").map(|file| file.content_type), Some(HTML));
-        assert_eq!(asset("captures.html").map(|file| file.content_type), Some(HTML));
+        assert_eq!(
+            asset("captures.html").map(|file| file.content_type),
+            Some(HTML)
+        );
         assert!(asset("view.test.mjs").is_none());
         assert!(asset("../Cargo.toml").is_none());
         assert!(asset("missing.js").is_none());
