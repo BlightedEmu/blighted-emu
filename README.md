@@ -206,7 +206,7 @@ Secrets:
 |---|---|
 | `NW_SECRET_WORLD_1_DATABASE_PASSWORD` | Password of the world database (the director and `sim` use the variable named by `world_database_password_env`) |
 | `NW_SECRET_TESTCLIENT_PASSWORD_B` | Password of the second test account (`nw-testclient pair` only) |
-| `NW_SECRET_TESTCLIENT_SWARM_PASSWORD` | Password of every bot account (`nw-testclient swarm` only) |
+| `NW_SECRET_TESTCLIENT_SWARM_PASSWORD` | Password of every bot account (`nw-testclient swarm` and `hunt` only) |
 
 Start the director, then the `sim` processes, then the gateway. Each `sim` needs its own `sim_id` and `metrics_listen`; override them with environment variables:
 
@@ -274,6 +274,7 @@ Checks:
 
 - `content-tool combat-check` (local data, see Capture check): every spawn finds its rows, and our mob health is compared with nwdb.info.
 - The fight stress test: `cargo test --release -p sim fight_stress -- --ignored --nocapture` (1,000 players each fighting one mob in one `sim`; tick p99 under 33 ms).
+- `nw-testclient hunt` runs `[hunt] bots` bots (`--bots <n>` sets another count) with the accounts, walking speed and ground of `[swarm]`. Each bot walks to the nearest mob it sees (with none in view, to entry `n` modulo the count of `starts_m`), stops within `reach_m`, and attacks every `attack_interval_ms`. After a 4299 it waits `respawn_wait_ms`, sends a 1938, and steps 1 m to show that it lives again. It checks that every bot registered, was not closed, hit a mob (a 2071), lived again after each request, and got its bundles with no gap above `max_bundle_gap_ms`; from the metrics of every `sim` in `metrics_urls`, that at least one mob died per 10 bots, that no move was refused, that 99 % of the ticks took at most one tick, and that every metrics page was read.
 
 ## Rules for contributors
 

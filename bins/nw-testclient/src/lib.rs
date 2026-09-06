@@ -3,6 +3,8 @@
 //! client program and by the `rep-gateway` tests.
 
 pub mod config;
+pub mod fleet;
+pub mod hunt;
 pub mod metrics;
 pub mod pair;
 pub mod rep;

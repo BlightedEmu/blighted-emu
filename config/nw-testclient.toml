@@ -58,3 +58,20 @@ metrics_urls = ["http://127.0.0.1:9102/metrics"]
 client_build_config = "config/client-build.toml"
 content_dir = "local-data/content"
 level = "newworld_vitaeeterna"
+
+# hunt (M6-B exit test): bots walk to the nearest mob they see, stop in reach and attack it; a
+# bot that dies asks to respawn. The accounts, sockets, walking speed and ground are those of
+# [swarm]. Put the hunt starts on flat land near low-level spawns (the M6-B record lists them).
+[hunt]
+bots = 1000
+bots_per_second = 50
+# Bot n walks to start n modulo their number while it sees no mob.
+starts_m = [[11132.5, 7305.9]]
+# Below the sim's attack reach (combat.attack_reach_m = 3.0).
+reach_m = 2.5
+attack_interval_ms = 600
+# The captured gap from a 4299 to the client's 1938 is 2.42 to 2.65 s.
+respawn_wait_ms = 2500
+duration_seconds = 120
+max_bundle_gap_ms = 250
+metrics_urls = ["http://127.0.0.1:9102/metrics"]

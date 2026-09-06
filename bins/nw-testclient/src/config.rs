@@ -9,8 +9,10 @@ use nw_common::config::{ConfigError, load_config};
 use nw_login::names::CHARACTER_NAME_MAX_LEN;
 use serde::Deserialize;
 
+use crate::fleet::{FleetSettings, MAX_BOTS, NAME_SUFFIX_LETTERS};
+use crate::hunt::HuntSettings;
 use crate::route::{Route, RouteError};
-use crate::swarm::{MAX_BOTS, NAME_SUFFIX_LETTERS, SwarmSettings};
+use crate::swarm::SwarmSettings;
 
 /// Environment prefix of overrides.
 pub const TESTCLIENT_ENV_PREFIX: &str = "NW_TESTCLIENT_";
@@ -57,6 +59,33 @@ pub struct TestClientConfig {
     pub path_tolerance_m: f32,
     /// `[swarm]`: the bots of the M5 exit test.
     pub swarm: SwarmConfig,
+    /// `[hunt]`: the bots of the M6-B exit test.
+    pub hunt: HuntConfig,
+}
+
+/// `[hunt]` (M6-B spec section 11). The accounts, sockets, speed and ground are those of
+/// `[swarm]`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HuntConfig {
+    /// Bots to run.
+    pub bots: usize,
+    /// New bots per second.
+    pub bots_per_second: u32,
+    /// The hunt starts, east and north, in metres.
+    pub starts_m: Vec<[f32; 2]>,
+    /// A bot attacks a mob within this distance, in metres.
+    pub reach_m: f32,
+    /// Time between two attacks of a bot, in milliseconds.
+    pub attack_interval_ms: u64,
+    /// Time from a 4299 to the bot's 1938, in milliseconds.
+    pub respawn_wait_ms: u64,
+    /// Seconds in the world per bot.
+    pub duration_seconds: u64,
+    /// Longest gap between two own bundles, in milliseconds.
+    pub max_bundle_gap_ms: u64,
+    /// The metrics URL of every sim.
+    pub metrics_urls: Vec<String>,
 }
 
 /// `[swarm]` (M5 spec section 11).
@@ -98,10 +127,10 @@ pub struct SwarmConfig {
     pub level: String,
 }
 
-/// A `[swarm]` value that is not allowed.
+/// A `[swarm]` or `[hunt]` value that is not allowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("swarm config value `{key}` is not valid: {reason}")]
-pub struct SwarmConfigError {
+#[error("config value `{key}` is not valid: {reason}")]
+pub struct ScenarioConfigError {
     /// Key.
     pub key: &'static str,
     /// Why.
@@ -122,11 +151,86 @@ impl TestClientConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`SwarmConfigError`] for a `[swarm]` value that is not allowed.
-    pub fn swarm_settings(&self, password: String) -> Result<SwarmSettings, SwarmConfigError> {
+    /// Returns [`ScenarioConfigError`] for a `[swarm]` value that is not allowed.
+    pub fn swarm_settings(&self, password: String) -> Result<SwarmSettings, ScenarioConfigError> {
         let swarm = &self.swarm;
-        let invalid = |key, reason| Err(SwarmConfigError { key, reason });
-        if !(1..=MAX_BOTS).contains(&swarm.bots) {
+        let fleet = self.fleet_settings(
+            Fleet {
+                bots: swarm.bots,
+                bots_per_second: swarm.bots_per_second,
+                duration_seconds: swarm.duration_seconds,
+                metrics_urls: &swarm.metrics_urls,
+            },
+            password,
+        )?;
+        if swarm.min_crossings == 0 {
+            return invalid("min_crossings", "must be at least 1");
+        }
+        valid_starts(&swarm.starts_m)?;
+        if !(positive(swarm.swing_m) && positive(swarm.speed_mps)) {
+            return invalid("swing_m", "swing and speed must be finite numbers above 0");
+        }
+        if !(swarm.lane_spread_m.is_finite() && swarm.lane_spread_m >= 0.0) {
+            return invalid("lane_spread_m", "must be a finite number of at least 0");
+        }
+        Ok(SwarmSettings {
+            fleet,
+            lane_spread_m: swarm.lane_spread_m,
+            swing_m: swarm.swing_m,
+            speed_mps: swarm.speed_mps,
+            min_crossings: swarm.min_crossings,
+            max_bundle_gap: Duration::from_millis(swarm.max_bundle_gap_ms),
+            path_tolerance_m: self.path_tolerance_m,
+            starts: swarm.starts_m.clone(),
+        })
+    }
+
+    /// The hunt settings with the bot password `password`. The bot accounts, the walking speed
+    /// and the ground come from `[swarm]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScenarioConfigError`] for a `[hunt]` or `[swarm]` value that is not allowed.
+    pub fn hunt_settings(&self, password: String) -> Result<HuntSettings, ScenarioConfigError> {
+        let hunt = &self.hunt;
+        let fleet = self.fleet_settings(
+            Fleet {
+                bots: hunt.bots,
+                bots_per_second: hunt.bots_per_second,
+                duration_seconds: hunt.duration_seconds,
+                metrics_urls: &hunt.metrics_urls,
+            },
+            password,
+        )?;
+        valid_starts(&hunt.starts_m)?;
+        if !(positive(hunt.reach_m) && positive(self.swarm.speed_mps)) {
+            return invalid("reach_m", "reach and speed must be finite numbers above 0");
+        }
+        if hunt.attack_interval_ms == 0 || hunt.respawn_wait_ms == 0 {
+            return invalid(
+                "attack_interval_ms",
+                "the attack and respawn waits must be above 0",
+            );
+        }
+        Ok(HuntSettings {
+            fleet,
+            starts: hunt.starts_m.clone(),
+            speed_mps: self.swarm.speed_mps,
+            reach_m: hunt.reach_m,
+            attack_interval: Duration::from_millis(hunt.attack_interval_ms),
+            respawn_wait: Duration::from_millis(hunt.respawn_wait_ms),
+            max_bundle_gap: Duration::from_millis(hunt.max_bundle_gap_ms),
+        })
+    }
+
+    /// The bots of a scenario, with the accounts and sockets of `[swarm]`.
+    fn fleet_settings(
+        &self,
+        fleet: Fleet<'_>,
+        password: String,
+    ) -> Result<FleetSettings, ScenarioConfigError> {
+        let swarm = &self.swarm;
+        if !(1..=MAX_BOTS).contains(&fleet.bots) {
             return invalid("bots", "must be 1 to 17576");
         }
         let name_length = swarm.character_prefix.len() + NAME_SUFFIX_LETTERS as usize;
@@ -140,50 +244,54 @@ impl TestClientConfig {
                 "must be letters only, at most 13 of them",
             );
         }
-        if swarm.min_crossings == 0 {
-            return invalid("min_crossings", "must be at least 1");
-        }
-        let finite = |start: &[f32; 2]| start.iter().all(|value| value.is_finite());
-        if swarm.starts_m.is_empty() || !swarm.starts_m.iter().all(finite) {
-            return invalid("starts_m", "must hold at least one finite position");
-        }
         if swarm.udp_buffer_bytes == 0 {
             return invalid("udp_buffer_bytes", "must be above 0");
         }
-        let positive = |value: f32| value.is_finite() && value > 0.0;
-        if !(positive(swarm.swing_m) && positive(swarm.speed_mps)) {
-            return invalid("swing_m", "swing and speed must be finite numbers above 0");
-        }
-        if !(swarm.lane_spread_m.is_finite() && swarm.lane_spread_m >= 0.0) {
-            return invalid("lane_spread_m", "must be a finite number of at least 0");
-        }
-        if swarm.bots_per_second == 0 || swarm.duration_seconds == 0 {
+        if fleet.bots_per_second == 0 || fleet.duration_seconds == 0 {
             return invalid(
                 "bots_per_second",
                 "the rate and the duration must be above 0",
             );
         }
-        Ok(SwarmSettings {
-            bots: swarm.bots,
+        Ok(FleetSettings {
+            bots: fleet.bots,
             account_prefix: swarm.account_prefix.clone(),
             character_prefix: swarm.character_prefix.clone(),
             password,
             login_url: self.login_url.clone(),
             game_url: self.game_url.clone(),
-            bots_per_second: swarm.bots_per_second,
-            lane_spread_m: swarm.lane_spread_m,
-            swing_m: swarm.swing_m,
-            speed_mps: swarm.speed_mps,
-            duration: Duration::from_secs(swarm.duration_seconds),
+            bots_per_second: fleet.bots_per_second,
+            duration: Duration::from_secs(fleet.duration_seconds),
             registration_timeout: Duration::from_secs(self.registration_timeout_seconds),
-            min_crossings: swarm.min_crossings,
-            max_bundle_gap: Duration::from_millis(swarm.max_bundle_gap_ms),
-            path_tolerance_m: self.path_tolerance_m,
-            metrics_urls: swarm.metrics_urls.clone(),
-            starts: swarm.starts_m.clone(),
+            metrics_urls: fleet.metrics_urls.to_vec(),
             udp_buffer_bytes: swarm.udp_buffer_bytes,
         })
     }
+}
+
+/// The values of a scenario section that make its fleet.
+struct Fleet<'a> {
+    bots: usize,
+    bots_per_second: u32,
+    duration_seconds: u64,
+    metrics_urls: &'a [String],
+}
+
+fn invalid<T>(key: &'static str, reason: &'static str) -> Result<T, ScenarioConfigError> {
+    Err(ScenarioConfigError { key, reason })
+}
+
+fn positive(value: f32) -> bool {
+    value.is_finite() && value > 0.0
+}
+
+/// At least one start, every one finite.
+fn valid_starts(starts: &[[f32; 2]]) -> Result<(), ScenarioConfigError> {
+    let finite = |start: &[f32; 2]| start.iter().all(|value| value.is_finite());
+    if starts.is_empty() || !starts.iter().all(finite) {
+        return invalid("starts_m", "must hold at least one finite position");
+    }
+    Ok(())
 }
 
 /// Reads the configuration.
@@ -208,6 +316,10 @@ mod tests {
     /// M5 spec section 1.2 criterion 2.2.
     const M5_BOTS: usize = 1000;
     const M5_BUNDLE_GAP_MS: u64 = 250;
+    /// M6-B spec section 1.2 criterion 4.
+    const M6B_BOTS: usize = 1000;
+    /// M6-B spec section 9.2 (F7).
+    const M6B_RESPAWN_WAIT_MS: u64 = 2500;
 
     #[test]
     fn committed_example_config_loads() {
@@ -221,7 +333,13 @@ mod tests {
         assert!(route.length() > 0.0);
         assert!(config.jump_m > 0.0);
         let swarm = config.swarm_settings(String::new()).expect("swarm");
-        assert_eq!(swarm.bots, M5_BOTS);
+        assert_eq!(swarm.fleet.bots, M5_BOTS);
+        let hunt = config.hunt_settings(String::new()).expect("hunt");
+        assert_eq!(hunt.fleet.bots, M6B_BOTS);
+        assert_eq!(
+            hunt.respawn_wait,
+            Duration::from_millis(M6B_RESPAWN_WAIT_MS)
+        );
         assert_eq!(
             swarm.max_bundle_gap,
             Duration::from_millis(M5_BUNDLE_GAP_MS)
@@ -251,5 +369,23 @@ mod tests {
         assert!(refused(|swarm| swarm.starts_m = vec![[f32::NAN, 0.0]]));
         assert!(refused(|swarm| swarm.starts_m.clear()));
         assert!(refused(|swarm| swarm.udp_buffer_bytes = 0));
+    }
+
+    #[test]
+    fn bad_hunt_values_are_refused() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(COMMITTED_CONFIG);
+        let config = load_testclient_config(&path).expect("config");
+        let refused = |change: fn(&mut HuntConfig)| {
+            let mut bad = config.clone();
+            change(&mut bad.hunt);
+            bad.hunt_settings(String::new()).is_err()
+        };
+        assert!(refused(|hunt| hunt.bots = 0));
+        assert!(refused(|hunt| hunt.bots_per_second = 0));
+        assert!(refused(|hunt| hunt.duration_seconds = 0));
+        assert!(refused(|hunt| hunt.starts_m.clear()));
+        assert!(refused(|hunt| hunt.reach_m = 0.0));
+        assert!(refused(|hunt| hunt.attack_interval_ms = 0));
+        assert!(refused(|hunt| hunt.respawn_wait_ms = 0));
     }
 }

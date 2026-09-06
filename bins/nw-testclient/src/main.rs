@@ -2,8 +2,8 @@
 //! `nw-testclient`: logs in over HTTPS like the game, then registers with `rep-gateway`.
 //! `registration` (the default) stays connected, then checks that the same ticket is refused a
 //! second time. `pair` runs two clients in the world (M4 spec section 9). `swarm` runs many bots
-//! across a sim border (M5 spec section 11). Prints one line per step; exits with 0 only when
-//! every step passed.
+//! across a sim border (M5 spec section 11). `hunt` runs many bots that fight mobs (M6-B spec
+//! section 9). Prints one line per step; exits with 0 only when every step passed.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -17,9 +17,11 @@ use nw_reflect::REGISTRATION_STATUS_AUTHORIZED;
 use nw_testclient::config::{
     PASSWORD_ENV, SECOND_PASSWORD_ENV, SWARM_PASSWORD_ENV, TestClientConfig, load_testclient_config,
 };
-use nw_testclient::pair::{PairSettings, run_pair};
+use nw_testclient::fleet::{NewClient, udp_receive_errors};
+use nw_testclient::hunt::run_hunt;
+use nw_testclient::pair::{Check, PairSettings, run_pair};
 use nw_testclient::rep::RepClient;
-use nw_testclient::swarm::{NewClient, run_swarm, udp_receive_errors};
+use nw_testclient::swarm::run_swarm;
 use nw_testclient::udp::run_rep;
 use nw_testclient::walk::{WalkSettings, login_token, walk};
 use nw_world::WorldFile;
@@ -55,6 +57,13 @@ enum Command {
     /// `NW_SECRET_TESTCLIENT_SWARM_PASSWORD`.
     Swarm {
         /// Bots of this step instead of `[swarm] bots`.
+        #[arg(long)]
+        bots: Option<usize>,
+    },
+    /// Many bots that fight mobs (`[hunt]`, with the accounts of `[swarm]`). The bot password
+    /// comes from `NW_SECRET_TESTCLIENT_SWARM_PASSWORD`.
+    Hunt {
+        /// Bots of this step instead of `[hunt] bots`.
         #[arg(long)]
         bots: Option<usize>,
     },
@@ -99,6 +108,13 @@ async fn steps(cli: Cli) -> Result<bool, Box<dyn std::error::Error>> {
             }
             swarm(&config, &http, trusted).await
         }
+        Command::Hunt { bots } => {
+            let mut config = config;
+            if let Some(bots) = bots {
+                config.hunt.bots = bots;
+            }
+            hunt(&config, &http, trusted).await
+        }
     }
 }
 
@@ -119,6 +135,45 @@ async fn swarm(
     trusted: DtlsClientConfig,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let settings = Arc::new(config.swarm_settings(secret(SWARM_PASSWORD_ENV)?)?);
+    let (ground, new_client) = fleet_parts(config, trusted)?;
+    let errors_before = receive_errors();
+    let report = run_swarm(http, Arc::clone(&settings), ground, new_client, |line| {
+        println!("{line}");
+    })
+    .await;
+    println!("{}", report.summary());
+    Ok(print_end(
+        report.error_kinds(),
+        errors_before,
+        &report.checks(&settings),
+    ))
+}
+
+async fn hunt(
+    config: &TestClientConfig,
+    http: &reqwest::Client,
+    trusted: DtlsClientConfig,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let settings = Arc::new(config.hunt_settings(secret(SWARM_PASSWORD_ENV)?)?);
+    let (ground, new_client) = fleet_parts(config, trusted)?;
+    let errors_before = receive_errors();
+    let report = run_hunt(http, Arc::clone(&settings), ground, new_client, |line| {
+        println!("{line}");
+    })
+    .await;
+    println!("{}", report.summary());
+    Ok(print_end(
+        report.error_kinds(),
+        errors_before,
+        &report.checks(&settings),
+    ))
+}
+
+/// The ground of the `[swarm]` level and the maker of bot clients.
+fn fleet_parts(
+    config: &TestClientConfig,
+    trusted: DtlsClientConfig,
+) -> Result<(Arc<WorldFile>, NewClient), Box<dyn std::error::Error>> {
     let swarm = &config.swarm;
     let build = load_client_build(&swarm.client_build_config)?;
     let path = world_file_path(&swarm.content_dir, &build, &swarm.level);
@@ -126,13 +181,17 @@ async fn swarm(
     let mtu = config.mtu;
     let trusted = Arc::new(trusted);
     let new_client: NewClient = Arc::new(move |token| RepClient::new(&trusted, mtu, token, 0));
-    let errors_before = receive_errors();
-    let report = run_swarm(http, Arc::clone(&settings), ground, new_client, |line| {
-        println!("{line}");
-    })
-    .await;
-    println!("{}", report.summary());
-    for (error, bots) in report.error_kinds() {
+    Ok((ground, new_client))
+}
+
+/// Prints the bot errors, the PC's UDP drops since `errors_before` and the checks; returns
+/// whether every check passed.
+fn print_end(
+    error_kinds: std::collections::BTreeMap<&str, usize>,
+    errors_before: Option<u64>,
+    checks: &[Check],
+) -> bool {
+    for (error, bots) in error_kinds {
         println!("{bots} bots failed to start: {error}");
     }
     match (errors_before, receive_errors()) {
@@ -142,11 +201,16 @@ async fn swarm(
         ),
         _ => println!("UDP receive buffer errors of the PC: Unknown"),
     }
-    for check in report.checks(&settings) {
+    print_checks(checks)
+}
+
+/// Prints each check; returns whether every check passed.
+fn print_checks(checks: &[Check]) -> bool {
+    for check in checks {
         let result = if check.passed { "pass" } else { "FAIL" };
         println!("{}: {result}", check.name);
     }
-    Ok(report.passed(&settings))
+    checks.iter().all(|check| check.passed)
 }
 
 /// The PC's count of UDP datagrams dropped for a full receive buffer (Linux).
@@ -202,11 +266,7 @@ async fn pair(
     )
     .await?;
     let tolerances = (config.path_tolerance_m, config.position_tolerance_m);
-    for check in report.checks(tolerances.0, tolerances.1) {
-        let result = if check.passed { "pass" } else { "FAIL" };
-        println!("{}: {result}", check.name);
-    }
-    Ok(report.passed(tolerances.0, tolerances.1))
+    Ok(print_checks(&report.checks(tolerances.0, tolerances.1)))
 }
 
 async fn registration(
