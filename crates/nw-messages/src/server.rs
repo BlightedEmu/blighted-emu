@@ -25,13 +25,6 @@ pub const SERVER_MESSAGE_TYPES: [u64; 8] = [
     ReplicatedStateBundle::TYPE_INDEX,
 ];
 
-/// Type indexes of the combat messages of M6-B.
-pub const COMBAT_MESSAGE_TYPES: [u64; 3] = [
-    DamageDealtMsg::TYPE_INDEX,
-    OnDamageMsg::TYPE_INDEX,
-    DeathRecapMsg::TYPE_INDEX,
-];
-
 /// Type indexes of the login messages, in the captured order: every type of
 /// [`SERVER_MESSAGE_TYPES`] but the bundle, which comes after them.
 pub const LOGIN_MESSAGE_TYPES: &[u64] = SERVER_MESSAGE_TYPES
@@ -66,8 +59,8 @@ pub enum ServerMessage {
 }
 
 impl ServerMessage {
-    /// Decodes `body` when `type_index` is one of [`SERVER_MESSAGE_TYPES`] or
-    /// [`COMBAT_MESSAGE_TYPES`]; `None` otherwise.
+    /// Decodes `body` when `type_index` is one of [`SERVER_MESSAGE_TYPES`] or a combat message
+    /// of M6-B (2071, 3601, 4299); `None` otherwise.
     pub fn decode(type_index: u64, body: &[u8]) -> Option<Result<Self, MessageError>> {
         let message = match type_index {
             TimingConfigurationConnectedMsg::TYPE_INDEX => {
@@ -197,8 +190,6 @@ mod tests {
             ServerMessage::OnDamage(OnDamageMsg::hit(ENTITY, ENTITY + 1, 5.0)),
             ServerMessage::DeathRecap(DeathRecapMsg::of(ENTITY, ENTITY + 1)),
         ];
-        let order: Vec<u64> = samples.iter().map(ServerMessage::type_index).collect();
-        assert_eq!(order, COMBAT_MESSAGE_TYPES);
         for message in samples {
             let body = message.encode().expect("encode");
             assert_eq!(

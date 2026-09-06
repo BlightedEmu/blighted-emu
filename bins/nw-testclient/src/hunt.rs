@@ -290,6 +290,8 @@ pub struct HuntBotReport {
     pub max_gap: Duration,
     /// 2071 messages for the bot's hits.
     pub hits_dealt: u64,
+    /// 3601 messages for hits the bot took.
+    pub hits_taken: u64,
     /// 4299 messages for the bot.
     pub deaths: u64,
     /// Respawns seen to work.
@@ -359,10 +361,12 @@ impl HuntReport {
         let worst_gap = self.bots.iter().map(|bot| bot.max_gap).max();
         let errors = self.bots.iter().filter(|bot| bot.error.is_some()).count();
         format!(
-            "bots {}, failed to start {errors}, hits {}, deaths {}, lived again {}, mob deaths \
-             {}, moves after a death {}, worst bundle gap {} ms, ticks within one tick {:.4}",
+            "bots {}, failed to start {errors}, hits {}, hits taken {}, deaths {}, lived again {}, \
+             mob deaths {}, moves after a death {}, worst bundle gap {} ms, ticks within one tick \
+             {:.4}",
             self.bots.len(),
             sum(|bot| bot.hits_dealt),
+            sum(|bot| bot.hits_taken),
             sum(|bot| bot.deaths),
             sum(|bot| bot.lived_again),
             self.sims.mob_deaths,
@@ -434,6 +438,7 @@ impl FleetBot for HuntBot {
             closed: outcome.closed_by_server,
             max_gap: self.clock.max_gap(outcome.held),
             hits_dealt: self.view.hits_dealt(),
+            hits_taken: self.view.hits_taken(),
             deaths: self.view.deaths(),
             lived_again: self.hunter.lived_again(),
             unanswered_request,
@@ -643,6 +648,7 @@ mod tests {
             closed: false,
             max_gap: Duration::from_millis(100),
             hits_dealt: 5,
+            hits_taken: 2,
             deaths: 1,
             lived_again: 1,
             unanswered_request: false,
@@ -661,6 +667,18 @@ mod tests {
             },
             unread_metrics: 0,
         }
+    }
+
+    #[test]
+    fn the_summary_counts_the_hits_the_mobs_made() {
+        let mut report = good_report();
+        report.bots[0].hits_taken = 3;
+        report.bots[1].hits_taken = 4;
+        assert!(
+            report.summary().contains("hits taken 7"),
+            "{}",
+            report.summary()
+        );
     }
 
     #[test]
