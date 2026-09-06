@@ -52,9 +52,9 @@ fn decode(received: &Received) -> Result<Read, ViewError> {
                 .groups
                 .iter()
                 .flat_map(|group| &group.members)
-                .filter_map(|member| {
-                    let MemberState::Position(state) = &member.state;
-                    Some((member.u64_at_0, state.position?))
+                .filter_map(|member| match &member.state {
+                    MemberState::Position(state) => Some((member.u64_at_0, state.position?)),
+                    _ => None,
                 })
                 .collect();
             Read::Bundle(members)

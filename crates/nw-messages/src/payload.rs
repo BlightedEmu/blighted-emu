@@ -10,7 +10,9 @@ use std::ops::Range;
 
 use nw_reflect::{TypeId, decode_type_id, encode_type_id};
 
+use crate::gde::{GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
 use crate::position::{POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState};
+use crate::vitals::{VITALS_TYPE_INDEX, VitalsSlot0};
 use crate::wire::{MessageError, Reader, Writer};
 
 /// The state of one member, by class.
@@ -18,6 +20,10 @@ use crate::wire::{MessageError, Reader, Writer};
 pub enum MemberState {
     /// `MB::PositionInTheWorldReplicatedState`.
     Position(PositionInTheWorldReplicatedState),
+    /// `MB::GdeMetadataReplicatedState`: the spawn card.
+    GdeMetadata(GdeMetadataReplicatedState),
+    /// `MB::VitalsComponentReplicatedState`, slot 0.
+    Vitals(VitalsSlot0),
 }
 
 impl MemberState {
@@ -25,6 +31,8 @@ impl MemberState {
     pub const fn type_index(&self) -> u64 {
         match self {
             Self::Position(_) => POSITION_IN_THE_WORLD_TYPE_INDEX,
+            Self::GdeMetadata(_) => GDE_METADATA_TYPE_INDEX,
+            Self::Vitals(_) => VITALS_TYPE_INDEX,
         }
     }
 
@@ -38,6 +46,10 @@ impl MemberState {
             TypeId::FileSlot(POSITION_IN_THE_WORLD_TYPE_INDEX) => {
                 PositionInTheWorldReplicatedState::read(reader).map(Self::Position)
             }
+            TypeId::FileSlot(GDE_METADATA_TYPE_INDEX) => {
+                GdeMetadataReplicatedState::read(reader).map(Self::GdeMetadata)
+            }
+            TypeId::FileSlot(VITALS_TYPE_INDEX) => VitalsSlot0::read(reader).map(Self::Vitals),
             _ => Err(MessageError::UnknownMemberClass { class }),
         }
     }
@@ -45,6 +57,14 @@ impl MemberState {
     fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
         match self {
             Self::Position(state) => state.write(writer),
+            Self::GdeMetadata(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::Vitals(state) => {
+                state.write(writer);
+                Ok(())
+            }
         }
     }
 }
@@ -191,7 +211,9 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::gde::{AssetId, GDE_ID_LEN, GdeMetadataReplicatedState};
     use crate::position::WorldPosition;
+    use crate::vitals::VitalsSlot0;
     use crate::wire::RAW_ID_LEN;
 
     const ENTITY: u64 = 300;
@@ -223,6 +245,36 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn members_of_the_new_classes_walk_in_a_payload() {
+        let card = BundleMember {
+            u64_at_0: ENTITY,
+            state: MemberState::GdeMetadata(GdeMetadataReplicatedState {
+                asset: Some(AssetId {
+                    id: [1; GDE_ID_LEN],
+                    sub_id: 2,
+                }),
+                gde_ref: Some([9; GDE_ID_LEN]),
+            }),
+        };
+        let vitals = BundleMember {
+            u64_at_0: ENTITY,
+            state: MemberState::Vitals(VitalsSlot0 {
+                vitals_level: Some(5),
+                max_health: Some(1000),
+                ..VitalsSlot0::default()
+            }),
+        };
+        let mixed = BundlePayload {
+            groups: vec![BundleGroup {
+                leading: LEADING,
+                members: vec![position_member(1.0), card, vitals],
+            }],
+        };
+        let bytes = mixed.encode().expect("encode");
+        assert_eq!(BundlePayload::decode(&bytes), Ok(mixed));
     }
 
     #[test]

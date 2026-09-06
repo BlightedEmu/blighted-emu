@@ -11,14 +11,17 @@ pub mod client_add_entry;
 pub mod client_input;
 pub mod connected;
 pub mod day_phase;
+pub mod gde;
 pub mod payload;
 pub mod position;
 pub mod server;
+mod slots;
 pub mod spawn_point;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
 pub mod time_change;
 pub mod time_synch;
+pub mod vitals;
 pub mod wire;
 
 pub use bundle::{
@@ -35,6 +38,7 @@ pub use connected::{
     TIMING_CONFIGURATION_CONNECTED_MSG_TYPE_INDEX, TimingConfigurationConnectedMsg,
 };
 pub use day_phase::{OBSERVED_DAY_PHASE, SYNC_DAY_PHASE_MSG_TYPE_INDEX, SyncDayPhaseMsg};
+pub use gde::{AssetId, GDE_ID_LEN, GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
 pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, MemberState};
 pub use position::{
     POSITION_IN_THE_WORLD_TYPE_INDEX, POSITION_Z_MAX, POSITION_Z_MIN,
@@ -47,4 +51,5 @@ pub use time_change::{
     OBSERVED_TIME_CHANGE_U32S_AT_28, SYNC_TIME_CHANGE_MSG_TYPE_INDEX, SyncTimeChangeMsg,
 };
 pub use time_synch::TimeSynchMsg;
+pub use vitals::{VITALS_TYPE_INDEX, VitalsData, VitalsSlot0};
 pub use wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};

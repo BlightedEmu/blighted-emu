@@ -1159,10 +1159,15 @@ mod tests {
             .groups
             .iter()
             .flat_map(|group| {
-                group.members.iter().map(|member| {
-                    let MemberState::Position(state) = &member.state;
-                    (member.u64_at_0, state.position.expect("position").x)
-                })
+                group
+                    .members
+                    .iter()
+                    .filter_map(|member| match &member.state {
+                        MemberState::Position(state) => {
+                            Some((member.u64_at_0, state.position.expect("position").x))
+                        }
+                        _ => None,
+                    })
             })
             .collect()
     }

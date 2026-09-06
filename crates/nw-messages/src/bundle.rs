@@ -201,6 +201,7 @@ mod tests {
             .iter()
             .map(|member| match &member.state {
                 MemberState::Position(state) => (member.u64_at_0, state.position),
+                other => panic!("only positions here, not {other:?}"),
             })
             .collect();
         assert_eq!(members, vec![(FIRST, Some(here)), (SECOND, Some(there))]);
