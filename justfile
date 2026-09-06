@@ -11,11 +11,16 @@ check:
     cargo test --workspace
     cargo deny check
     just test-scripts
+    just test-web
 
 # Run the shell script tests.
 test-scripts:
     scripts/target-size.test.sh
     scripts/no-game-data.test.sh
+
+# Run the tests of the admin page code (Node built-in test runner, no package).
+test-web:
+    node --test 'bins/nw-admin/web/*.test.mjs'
 
 # Print the build folder size; fails above 10 GiB (spec 10.6).
 size:

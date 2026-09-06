@@ -296,6 +296,8 @@ just map-tiles
 cargo run --release -p nw-admin -- serve
 ```
 
+The world map page (`/web/map.html`) shows the map tiles, the relief, or the relief over the tiles at half strength (the check that both line up), and, closer than 4 m per pixel, the mob spawns, gatherables and landmarks of the world file. The page code is plain JavaScript modules built into the program; `just test-web` runs their tests with Node's built-in test runner.
+
 ## Rules for contributors
 
 - Never commit game files, captures, or `deploy/.env`. Put local game data in `local-data/` (ignored by git).

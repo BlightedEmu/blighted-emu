@@ -5,6 +5,8 @@
 pub const HTML: &str = "text/html; charset=utf-8";
 /// Content type of style sheets.
 pub const CSS: &str = "text/css; charset=utf-8";
+/// Content type of script modules.
+pub const JS: &str = "text/javascript; charset=utf-8";
 
 /// One web file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +22,10 @@ pub fn asset(name: &str) -> Option<Asset> {
     let (content_type, body) = match name {
         "index.html" => (HTML, include_str!("../web/index.html")),
         "style.css" => (CSS, include_str!("../web/style.css")),
+        "map.html" => (HTML, include_str!("../web/map.html")),
+        "map.js" => (JS, include_str!("../web/map.js")),
+        "view.js" => (JS, include_str!("../web/view.js")),
+        "hex.js" => (JS, include_str!("../web/hex.js")),
         _ => return None,
     };
     Some(Asset { content_type, body })
@@ -36,6 +42,11 @@ mod tests {
             Some(HTML)
         );
         assert_eq!(asset("style.css").map(|file| file.content_type), Some(CSS));
+        for script in ["map.js", "view.js", "hex.js"] {
+            assert_eq!(asset(script).map(|file| file.content_type), Some(JS));
+        }
+        assert_eq!(asset("map.html").map(|file| file.content_type), Some(HTML));
+        assert!(asset("view.test.mjs").is_none());
         assert!(asset("../Cargo.toml").is_none());
         assert!(asset("missing.js").is_none());
     }

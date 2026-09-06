@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>World map</title>
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body class="map-page">
+  <header>
+    <h1><a href="/">nw-admin</a> · World map</h1>
+  </header>
+  <div class="toolbar">
+    <label>Layer
+      <select id="layer">
+        <option value="tiles">Map tiles</option>
+        <option value="relief">Relief</option>
+        <option value="both">Relief over tiles</option>
+      </select>
+    </label>
+    <label><input type="checkbox" value="vitals" class="kind"> Mob spawns</label>
+    <label><input type="checkbox" value="gatherables" class="kind"> Gatherables</label>
+    <label><input type="checkbox" value="landmarks" class="kind"> Landmarks</label>
+    <button id="zoom-in" type="button" title="Zoom in">+</button>
+    <button id="zoom-out" type="button" title="Zoom out">−</button>
+    <button id="fit" type="button">Whole world</button>
+    <span class="status" id="status"></span>
+  </div>
+  <canvas id="map" class="map"></canvas>
+  <script type="module">
+    import { LAYERS, SPAWN_ZOOM_M_PER_PX, WorldMap } from '/web/map.js';
+
+    const status = document.getElementById('status');
+    const info = await (await fetch('/api/world/info')).json();
+    let cursor = null;
+    const map = new WorldMap(document.getElementById('map'), info, (point) => {
+      cursor = point;
+      showStatus();
+    });
+    function showStatus() {
+      const view = map.currentView();
+      const at = cursor ? `${cursor.x.toFixed(1)}, ${cursor.y.toFixed(1)}` : '—';
+      const spawns = view.metresPerPixel > SPAWN_ZOOM_M_PER_PX ? ' · zoom in for spawns' : '';
+      status.textContent = `cursor ${at} · ${view.metresPerPixel.toFixed(2)} m/px${spawns}`;
+    }
+    const layer = document.getElementById('layer');
+    layer.value = info.map_tiles ? LAYERS.TILES : LAYERS.RELIEF;
+    layer.addEventListener('change', () => map.setLayer(layer.value));
+    const kinds = [...document.querySelectorAll('.kind')];
+    for (const box of kinds) {
+      box.addEventListener('change', () =>
+        map.setSpawnKinds(kinds.filter((item) => item.checked).map((item) => item.value)));
+    }
+    document.getElementById('zoom-in').addEventListener('click', () => { map.zoom(1); showStatus(); });
+    document.getElementById('zoom-out').addEventListener('click', () => { map.zoom(-1); showStatus(); });
+    document.getElementById('fit').addEventListener('click', () => { map.fit(); showStatus(); });
+    map.onSelect((item) => {
+      if (item && item.id) {
+        status.textContent = `${item.kind} ${item.id}${item.level === null ? '' : ` level ${item.level}`} at ${item.x.toFixed(1)}, ${item.y.toFixed(1)}`;
+      }
+    });
+    showStatus();
+  </script>
+</body>
+</html>
