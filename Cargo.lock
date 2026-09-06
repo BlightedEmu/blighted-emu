@@ -866,6 +866,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "crc32fast",
+ "nw-capture",
  "nw-carrier",
  "nw-common",
  "nw-content",
@@ -2912,6 +2913,17 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "nw-capture"
+version = "0.1.0"
+dependencies = [
+ "nw-carrier",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

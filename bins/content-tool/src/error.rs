@@ -6,11 +6,11 @@ use nw_content::ContainerError;
 use nw_content::combat::CombatDataError;
 use nw_content::fill::FillError;
 
-use crate::capture::CaptureError;
 use crate::codegen::CodegenError;
 use crate::combat::NwdbError;
 use crate::source::SourceError;
 use crate::world::WorldBuildError;
+use nw_capture::CaptureError;
 
 /// Any error of a `content-tool` command.
 #[derive(Debug, thiserror::Error)]

@@ -26,6 +26,7 @@ allow = [
 exceptions = [
     { crate = "edge-http", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-bus", allow = ["AGPL-3.0-or-later"] },
+    { crate = "nw-capture", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-carrier", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-common", allow = ["AGPL-3.0-or-later"] },
     { crate = "nw-content", allow = ["AGPL-3.0-or-later"] },

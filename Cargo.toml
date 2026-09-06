@@ -59,6 +59,7 @@ weezl = { version = "0.2.1", default-features = false, features = ["alloc"] }
 zip = { version = "9.0.2", default-features = false }
 
 nw-bus = { path = "crates/nw-bus", version = "0.1.0" }
+nw-capture = { path = "crates/nw-capture", version = "0.1.0" }
 nw-carrier = { path = "crates/nw-carrier", version = "0.1.0" }
 nw-common = { path = "crates/nw-common", version = "0.1.0" }
 nw-content = { path = "crates/nw-content", version = "0.1.0" }

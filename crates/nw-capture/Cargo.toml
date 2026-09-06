@@ -1,0 +1,20 @@
+[package]
+name = "nw-capture"
+version = "0.1.0"
+description = "Reads and writes capture ledgers (decrypted carrier datagrams) and names message types."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nw-carrier.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

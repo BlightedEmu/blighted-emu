@@ -7,14 +7,13 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use content_tool::build::{DEFAULT_CONTENT_DIR, default_bundle_path, run_build};
-use content_tool::capture::{
-    CLIENT_TO_SERVER, CaptureError, CaptureReport, SERVER_TO_CLIENT, TypeNames,
-};
+use content_tool::capture::CaptureReport;
 use content_tool::codegen::run_codegen;
 use content_tool::combat::{CombatCheck, DEFAULT_LEVEL, DEFAULT_NWDB_DIR, check, read_nwdb};
 use content_tool::error::ToolError;
 use content_tool::source::GameSource;
 use content_tool::world::{LevelReport, UnmatchedIds, run_world, world_totals};
+use nw_capture::{CLIENT_TO_SERVER, CaptureError, SERVER_TO_CLIENT, TypeNames};
 use nw_content::ContentBundle;
 use nw_content::client_build::load_client_build;
 use nw_content::combat::{CombatData, CombatRows};
