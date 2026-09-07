@@ -88,7 +88,7 @@ impl Scrape {
             .samples
             .iter()
             .filter(|sample| sample.name == name)
-            .filter_map(|sample| bound_of(sample))
+            .filter_map(bound_of)
             .collect();
         bounds.sort_by(f64::total_cmp);
         bounds.dedup_by(|a, b| (*a - *b).abs() < BOUND_TOLERANCE || a == b);
