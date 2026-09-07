@@ -1,14 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Starts a local test world for the live panel: edge-http (HTTPS on port 8443), world-director,
-# one sim, rep-gateway, and then blighted-admin in the foreground. Ctrl-C stops all of them.
-# Usage: live-stack.sh   (run `cargo build --release` first; NW_GAME_DIR names the game install)
+# 1 to 8 sims, rep-gateway, and then blighted-admin in the foreground. Ctrl-C stops all of them.
+# Usage: live-stack.sh [sims]   (default 5 sims of 2,000 players each, so 10,000 players fit;
+# run `cargo build --release` first; NW_GAME_DIR names the game install)
 # It needs the git-ignored local files below. The servers get the secrets of the env file;
 # blighted-admin does not (its bot batches read the env file themselves). Logs go to LOG_DIR.
 # LIVE_STACK_ROOT overrides the repository folder (used by the tests).
 set -euo pipefail
 
+readonly EXIT_USAGE=2
 readonly EXIT_MISSING=3
+readonly DEFAULT_SIMS=5
 readonly ROOT="${LIVE_STACK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 readonly BIN="target/release"
 readonly ENV_FILE="local-data/m3-test.env"
@@ -19,15 +22,29 @@ readonly EDGE_LISTEN="0.0.0.0:8443"
 readonly LOGIN_URL="https://login.faqfirebase.com:8443"
 readonly GAME_URL="https://game.faqfirebase.com:8443"
 readonly PANEL_URL="http://127.0.0.1:9180/live"
-readonly SIM_ID="sim-1"
-readonly SIM_METRICS_LISTEN="127.0.0.1:9102"
+# The sim metrics ports that local-data/nw-testclient.toml reads (port 9103 is the director's).
+readonly SIM_METRICS_PORTS=(9102 9104 9105 9106 9107 9108 9109 9110)
+readonly GATEWAY_METRICS_URL="http://127.0.0.1:9101/metrics"
+readonly DIRECTOR_METRICS_URL="http://127.0.0.1:9103/metrics"
 readonly SNAPSHOT_INTERVAL_MS=250
-readonly LOGIN_FAIL_LIMIT=5000
-readonly HANDSHAKES_PER_IP_PER_SECOND=200
+readonly SIM_TICK_THREADS=4
+# Bots do not spread evenly over the sims' cells: each sim takes twice its usual 2,000.
+readonly SIM_MAX_PLAYERS=4000
+# Bots log in fast and all from this PC: room for 10,000 of them (the M5 load test settings).
+readonly LOGIN_FAIL_LIMIT=50000
+readonly GATEWAY_WORKERS=12
+readonly GATEWAY_MAX_CONNECTIONS=12000
+readonly HANDSHAKES_PER_IP_PER_SECOND=1000
 # The sim joins after the director runs; the gateway starts after the sim has its cells.
 readonly DIRECTOR_START_S=2
 readonly SIM_START_S=8
 readonly PROGRAMS=(edge-http world-director sim rep-gateway blighted-admin nw-testclient)
+
+sims="${1:-$DEFAULT_SIMS}"
+if [[ ! "$sims" =~ ^[1-9][0-9]*$ ]] || ((sims > ${#SIM_METRICS_PORTS[@]})); then
+  echo "live stack: sims must be 1 to ${#SIM_METRICS_PORTS[@]}, not '$sims'" >&2
+  exit "$EXIT_USAGE"
+fi
 
 cd "$ROOT"
 
@@ -72,13 +89,22 @@ start_server edge env NW_EDGE_HTTPS_LISTEN="$EDGE_LISTEN" \
   "$BIN/edge-http" --config "$EDGE_CONFIG" serve
 start_server director "$BIN/world-director" --config "$DIRECTOR_CONFIG"
 sleep "$DIRECTOR_START_S"
-start_server "$SIM_ID" env NW_SIM_SIM_ID="$SIM_ID" NW_SIM_METRICS_LISTEN="$SIM_METRICS_LISTEN" \
-  NW_SIM_ADMIN__SNAPSHOT_INTERVAL_MS="$SNAPSHOT_INTERVAL_MS" "$BIN/sim"
+metrics_urls="\"$GATEWAY_METRICS_URL\", \"$DIRECTOR_METRICS_URL\""
+for ((index = 0; index < sims; index++)); do
+  sim_id="sim-$((index + 1))"
+  port="${SIM_METRICS_PORTS[index]}"
+  start_server "$sim_id" env NW_SIM_SIM_ID="$sim_id" NW_SIM_METRICS_LISTEN="127.0.0.1:$port" \
+    NW_SIM_TICK_THREADS="$SIM_TICK_THREADS" NW_SIM_MAX_PLAYERS="$SIM_MAX_PLAYERS" \
+    NW_SIM_ADMIN__SNAPSHOT_INTERVAL_MS="$SNAPSHOT_INTERVAL_MS" "$BIN/sim"
+  metrics_urls+=", \"http://127.0.0.1:$port/metrics\""
+done
 sleep "$SIM_START_S"
-start_server gateway env \
+start_server gateway env NW_GATEWAY_WORKERS="$GATEWAY_WORKERS" \
+  NW_GATEWAY_LIMITS__MAX_CONNECTIONS="$GATEWAY_MAX_CONNECTIONS" \
   NW_GATEWAY_LIMITS__HANDSHAKES_PER_IP_PER_SECOND="$HANDSHAKES_PER_IP_PER_SECOND" \
   "$BIN/rep-gateway" serve
 
-echo "Servers run; logs in $LOG_DIR. Open $PANEL_URL. Ctrl-C stops everything."
+echo "$sims sims run; logs in $LOG_DIR. Open $PANEL_URL. Ctrl-C stops everything."
 NW_TESTCLIENT_LOGIN_URL="$LOGIN_URL" NW_TESTCLIENT_GAME_URL="$GAME_URL" \
+  BLIGHTED_ADMIN_LIVE__METRICS_URLS="[$metrics_urls]" \
   "$BIN/blighted-admin" serve

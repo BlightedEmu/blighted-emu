@@ -19,10 +19,11 @@ test-scripts:
     scripts/no-game-data.test.sh
     scripts/live-stack.test.sh
 
-# Start a local test world (edge-http on 8443, director, one sim, gateway) and the live panel;
-# Ctrl-C stops all. Run `cargo build --release` and set NW_GAME_DIR first.
-live:
-    scripts/live-stack.sh
+# Start a local test world (edge-http on 8443, director, 1 to 8 sims, gateway) and the live
+# panel; 5 sims hold 10,000 players. Ctrl-C stops all. Build with `cargo build --release` and
+# set NW_GAME_DIR first.
+live sims="5":
+    scripts/live-stack.sh {{sims}}
 
 # Run the tests of the admin page code (Node built-in test runner, no package).
 test-web:

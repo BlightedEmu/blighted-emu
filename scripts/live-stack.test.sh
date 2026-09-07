@@ -5,6 +5,7 @@ set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly STACK_SCRIPT="$SCRIPT_DIR/live-stack.sh"
+readonly EXIT_USAGE=2
 readonly EXIT_MISSING=3
 
 work_dir="$(mktemp -d)"
@@ -33,6 +34,12 @@ expect "an empty folder names a missing program" "$EXIT_MISSING" "target/release
 
 expect "no game folder is named" "$EXIT_MISSING" "NW_GAME_DIR" \
   env -u NW_GAME_DIR LIVE_STACK_ROOT="$work_dir" "$STACK_SCRIPT"
+
+expect "nine sims are refused" "$EXIT_USAGE" "sims must be 1 to 8" \
+  env LIVE_STACK_ROOT="$work_dir" NW_GAME_DIR="$work_dir" "$STACK_SCRIPT" 9
+
+expect "a sim count that is not a number is refused" "$EXIT_USAGE" "not 'five'" \
+  env LIVE_STACK_ROOT="$work_dir" NW_GAME_DIR="$work_dir" "$STACK_SCRIPT" five
 
 if [[ -d "$work_dir/local-data/logs" ]]; then
   echo "FAIL: a refused start wrote logs"
