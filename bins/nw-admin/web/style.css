@@ -125,3 +125,10 @@ input[type="search"], .pane-head button, .tabs button {
   .viewer { grid-template-columns: 1fr; grid-auto-rows: minmax(200px, auto); overflow: auto; }
   .pane { border-right: 0; border-bottom: 1px solid var(--line); max-height: 40vh; }
 }
+.live-page { display: flex; flex-direction: column; height: 100vh; }
+.live-page .facts { padding: 8px 16px; gap: 8px; }
+.live-page .fact { min-width: 110px; padding: 4px 10px; }
+.live-page .viewer { grid-template-columns: minmax(220px, 300px) 1fr minmax(220px, 320px); }
+.socket-live { color: #4cae4c; }
+.socket-closed { color: #d9534f; }
+.batch { flex-direction: row !important; justify-content: space-between; align-items: center; gap: 8px; }

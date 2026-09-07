@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live panel</title>
+  <link rel="stylesheet" href="/web/style.css">
+</head>
+<body class="live-page">
+  <header>
+    <h1><a href="/">nw-admin</a> · Live panel</h1>
+    <span class="status" id="status"></span>
+  </header>
+  <div class="toolbar">
+    <span>Bots</span>
+    <span id="bot-buttons"></span>
+    <button type="button" id="stop-all">Stop all</button>
+    <button type="button" id="reconnect">Reconnect</button>
+    <label><input type="checkbox" id="trails" checked> Trails</label>
+    <label><input type="checkbox" id="sleeping"> Sleeping mob spawns (zoom in)</label>
+    <button type="button" id="fit">Whole world</button>
+  </div>
+  <div class="facts" id="tiles"></div>
+  <div class="viewer">
+    <aside class="pane">
+      <div class="pane-head"><strong>Batches</strong></div>
+      <ul class="list inline" id="batches"></ul>
+      <div class="pane-head"><strong>Events</strong></div>
+      <ul class="list" id="events"></ul>
+    </aside>
+    <section class="centre">
+      <canvas id="map" class="map"></canvas>
+    </section>
+    <aside class="pane" id="right">
+      <div class="pane-head"><strong>Selection</strong></div>
+      <pre class="detail" id="selection">Click a player or a mob.</pre>
+    </aside>
+  </div>
+  <div class="tab-body">
+    <table class="grid">
+      <thead>
+        <tr>
+          <th class="sortable" data-column="entity">Entity</th>
+          <th class="sortable" data-column="sim">Sim</th>
+          <th class="sortable num" data-column="x">x</th>
+          <th class="sortable num" data-column="y">y</th>
+          <th class="sortable num" data-column="z">z</th>
+          <th class="sortable" data-column="state">State</th>
+        </tr>
+      </thead>
+      <tbody id="players"></tbody>
+    </table>
+  </div>
+  <script type="module" src="/web/live.js"></script>
+</body>
+</html>

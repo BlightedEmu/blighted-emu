@@ -27,6 +27,9 @@ use nw_world::map_tiles::tile_file;
 /// Content type of map tiles.
 pub const PNG: &str = "image/png";
 const INDEX: &str = "index.html";
+const LIVE_PAGE: &str = "live.html";
+/// The live page.
+pub const LIVE_PAGE_ROUTE: &str = "/live";
 
 /// What every route shares.
 #[derive(Debug, Clone)]
@@ -62,6 +65,10 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(|| web_file(UrlPath(INDEX.to_owned()))))
+        .route(
+            LIVE_PAGE_ROUTE,
+            get(|| web_file(UrlPath(LIVE_PAGE.to_owned()))),
+        )
         .route("/web/{file}", get(web_file))
         .route("/api/world/info", get(world_info))
         .route("/api/world/tiles/{level}/{row}/{column}", get(map_tile))
@@ -229,6 +236,17 @@ mod tests {
             (status, content_type.as_deref()),
             (StatusCode::OK, Some(crate::assets::CSS))
         );
+    }
+
+    #[tokio::test]
+    async fn the_live_page_is_served_at_live() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (status, content_type, body) = get(app(dir.path()), LIVE_PAGE_ROUTE).await;
+        assert_eq!(
+            (status, content_type.as_deref()),
+            (StatusCode::OK, Some(crate::assets::HTML))
+        );
+        assert!(String::from_utf8_lossy(&body).contains("/web/live.js"));
     }
 
     #[tokio::test]

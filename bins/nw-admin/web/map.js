@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The world map on a 2D canvas: map tiles or relief tiles, spawn points, paths and points, with
-// pan, zoom, follow and pick. Shared by every admin page.
+// The world map on a 2D canvas: map tiles or relief tiles, sim cells, spawn points, paths and
+// points, with pan, zoom, follow and pick. Shared by every admin page.
 
 import {
   boxOf,
@@ -29,6 +29,8 @@ const POINT_RADIUS_PX = 4;
 const SPAWN_RADIUS_PX = 3;
 const PATH_WIDTH_PX = 2;
 const OVERLAY_ALPHA = 0.5;
+const CELL_FILL_ALPHA = 0.15;
+const CELL_LINE_WIDTH_PX = 1;
 const SPAWN_FETCH_DELAY_MS = 150;
 const LABEL_FONT = '11px system-ui, sans-serif';
 const BACKGROUND = '#0d1013';
@@ -49,6 +51,7 @@ export class WorldMap {
     this.spawns = [];
     this.paths = [];
     this.points = [];
+    this.cells = null;
     this.followKey = null;
     this.selectHandler = () => {};
     this.images = new Map();
@@ -83,6 +86,15 @@ export class WorldMap {
   /** Points: [{ key, x, y, color, label }]. */
   setPoints(points) {
     this.points = points;
+    this.redraw();
+  }
+
+  /**
+   * Sim cells: { size, columns, rows, owners, colors } (owners row by row from the south-west
+   * corner, each an index into `colors` or null), or null for none.
+   */
+  setCells(cells) {
+    this.cells = cells;
     this.redraw();
   }
 
@@ -268,6 +280,7 @@ export class WorldMap {
       const alpha = this.layer === LAYERS.BOTH && this.info.map_tiles ? OVERLAY_ALPHA : 1;
       this.drawTiles('relief', RELIEF_TILE_PX, alpha);
     }
+    this.drawCells();
     this.drawSpawns();
     this.drawPaths();
     this.drawPoints();
@@ -321,6 +334,30 @@ export class WorldMap {
       this.images.set(url, image);
     }
     return image;
+  }
+
+  drawCells() {
+    if (!this.cells) {
+      return;
+    }
+    const { size, columns, owners, colors } = this.cells;
+    const context = this.context;
+    const side = size / this.view.metresPerPixel;
+    context.lineWidth = CELL_LINE_WIDTH_PX;
+    owners.forEach((owner, index) => {
+      if (owner === null || owner === undefined) {
+        return;
+      }
+      const column = index % columns;
+      const row = Math.floor(index / columns);
+      const topLeft = worldToScreen(this.view, column * size, (row + 1) * size);
+      context.globalAlpha = CELL_FILL_ALPHA;
+      context.fillStyle = colors[owner % colors.length];
+      context.fillRect(topLeft.px, topLeft.py, side, side);
+      context.globalAlpha = 1;
+      context.strokeStyle = colors[owner % colors.length];
+      context.strokeRect(topLeft.px, topLeft.py, side, side);
+    });
   }
 
   drawSpawns() {

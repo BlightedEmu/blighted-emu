@@ -24,6 +24,9 @@ pub fn asset(name: &str) -> Option<Asset> {
         "style.css" => (CSS, include_str!("../web/style.css")),
         "map.html" => (HTML, include_str!("../web/map.html")),
         "map.js" => (JS, include_str!("../web/map.js")),
+        "live.html" => (HTML, include_str!("../web/live.html")),
+        "live.js" => (JS, include_str!("../web/live.js")),
+        "tiles.js" => (JS, include_str!("../web/tiles.js")),
         "view.js" => (JS, include_str!("../web/view.js")),
         "hex.js" => (JS, include_str!("../web/hex.js")),
         "tables.js" => (JS, include_str!("../web/tables.js")),
@@ -47,6 +50,8 @@ mod tests {
         );
         assert_eq!(asset("style.css").map(|file| file.content_type), Some(CSS));
         for script in [
+            "live.js",
+            "tiles.js",
             "map.js",
             "view.js",
             "hex.js",
@@ -57,6 +62,7 @@ mod tests {
             assert_eq!(asset(script).map(|file| file.content_type), Some(JS));
         }
         assert_eq!(asset("map.html").map(|file| file.content_type), Some(HTML));
+        assert_eq!(asset("live.html").map(|file| file.content_type), Some(HTML));
         assert_eq!(
             asset("captures.html").map(|file| file.content_type),
             Some(HTML)
