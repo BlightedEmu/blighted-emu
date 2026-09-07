@@ -201,3 +201,78 @@ Child index is the append order on slot 0. One size per child. The 4-byte floats
 - `<re-scratch>/scratch-m6/round3/M6Round3.java`, output `ghidra-out/`
 - Ghidra project `<re-scratch>/ghidra`, read-only, analysis off, 12 decompiler threads. REA `open_binary` was not called. No REA Evidence ID.
 - `NewWorld.exe` disassembly of `FUN_14671e040`
+
+## Round 4
+
+The 14-child slot-0 table is unchanged. This round sizes slot 1, and it separates the capture-check failures that follow a vitals member from a change of those widths.
+
+### Slot 1 table
+
+**Observed.** Slot 1 is the slot appended by `FUN_141677dd0` inside `FUN_14671e040`. Registration order on that slot:
+
+| Child | Name | Reader | Bytes | Type |
+|---|---|---|---:|---|
+| 0 | `ManaAmount` | `FUN_142a42f30` | 4 | big-endian `f32` |
+| 1 | `replicatedAfflictionsHotData` | `FUN_14694edf0` | list | grammar below |
+| 2 | `replicatedAfflictionsColdData` | `FUN_14694eb20` | list | grammar below |
+| 3 | `ManaMax` | `FUN_142a42f30` | 4 | big-endian `f32` |
+| 4 | `ManaTickRate` | `FUN_142a42f80` | 2 | big-endian `u16` (`FUN_14087ae90`) |
+
+`FUN_1417b4110` tests only the low bits for the slots that exist. Vitals has two slots, so the slot byte uses bit 0 and bit 1. Bit 0 is slot 0. Bit 1 is slot 1. A body with both bits set reads slot 0, then slot 1.
+
+### Affliction list
+
+**Observed.** Both list readers start with a short prefix integer (`FUN_14087b5c0`). The hot reader is vtable `0x14855eab0` at virtual `+0x30`. The cold reader is vtable `0x14855eb50` at virtual `+0x30`.
+
+**Observed.** When that count is not 0, the reader takes the items in groups of at most 8. Each group is one byte, then that many items. Bit `i` of the group byte selects the long form of item `i`. A clear bit is the short form. Each item, short or long, is one byte, then an id. The id is one byte: 0 reads nothing more; 1 reads a wide prefix integer (`FUN_14087b770`); any other value makes the reader fail. The long form is then appended.
+
+**Observed.** The hot long form is `FUN_145ce61b0`: two big-endian binary16 values (`FUN_14087ae90`, 2 bytes each) and two big-endian `u64` values (`FUN_14087ad90`, byte swap `FUN_1461679c0`, 8 bytes each). 20 bytes.
+
+**Observed.** The cold long form is `FUN_145ce6130`: one binary16, then `FUN_1407d7c20` (one byte, then one byte that must be 0 or 1). 4 bytes. A last byte of 2 or more fails the reader.
+
+**Observed.** When the first count is 0, the reader does not stop. It calls virtual `+0x78`. Hot: `FUN_1469518e0`. Cold: `FUN_1469517e0`. That call reads one id, then a short prefix count. The count must be at most `0x2000000`. Each item is one byte plus the long form of that list. There is no short form on this path.
+
+### Slot 1 fit
+
+**Observed.** On the 696 ledgers, a body whose slot byte is 2 (slot 1 only) ends on a following known class, or on the payload end, for 460,589 of 460,589 bodies. Misses: 0. By child mask:
+
+| Mask | Children | Bodies |
+|---|---|---:|
+| 1 | 0 | 426,606 |
+| 2 | 1 | 26,066 |
+| 3 | 0, 1 | 2,325 |
+| 6 | 1, 2 | 4,710 |
+| 7 | 0, 1, 2 | 882 |
+
+**Observed.** A body whose slot byte is 3 (slot 0 then slot 1) ends the same way for 47,276 of 47,276. Misses: 0. Masks on slot 1: 1 on 44,573, 2 on 1,141, 6 on 689, 7 on 529, 3 on 291, and 31 (children 0 through 4) on 53. Children 3 and 4 occur on those 53 bodies and use the 4-byte and 2-byte sizes above.
+
+**Observed.** The same walk still ends the slot-0-only table for 2,399,847 bodies and misses 61. The miss count is the round-3 remainder. The slot-1 grammar does not move those 61.
+
+**Observed.** Item count on the hot list, using the inner count when the first prefix is 0: 0 on 2,774 lists, 1 on 33,884, 2 on 28. No hot list in this walk had an item count above 2.
+
+**Observed.** A hot-list item count that rose on the same replication key did so 571 times. 390 of those 571 rises were within 1.5 s of a type 2071 or type 3601 on that connection. Hits of those two types: 131,258. The join is the connection clock. It is not a join to one ability, and it does not label a damage-over-time ability.
+
+### Failures after a vitals member
+
+**Observed.** Of the 176 capture-check failures, 67 have a vitals member as the member before the failure. The slot byte of that vitals member is 1. The 14-child read of that member succeeds. The failure is the next member.
+
+**Observed.** 26 of the 67 are "encoded member differs" on a member of class 10, 11, or 13. The body of that member, read and written by its reader, is the same bytes. The difference is the prefix in front of the body. 22 of the 26 use a longer prefix than the shortest form: a type id in 2, 3, or 4 bytes where the shortest form is 1 byte (18 members), or a key in 5 bytes written as 3 (3 members) or in 4 bytes written as 3 (1 member). The other 4 are class 11, the key prefix stays 5 bytes, the type prefix stays 1 byte, and the header bytes still differ. Those 4 were not split further.
+
+**Inferred.** Those 26 are not a second size of a vitals child. The vitals body already ends on a member whose own body round-trips. Changing a vitals width would move that member.
+
+**Observed.** 32 of the 67 fail in class 13, "position slot: unknown bits". 8 fail in class 11 with a count above 32 (6) or above 176 (2). 1 fails in class 11 with a flag byte other than 0 or 1. Masking the position slot byte down to bit 0 lets the position reader finish on 17 of the 32 and still fail on 15. That is not a rule for all 32. The position note already says other slot bits were clear on the members it reached. `FUN_1417b4110` tests only as many low bits as the object has slots. These 32 are not settled by that fact alone: 15 still fail after the mask.
+
+**Open after round 4.** A single width change, or a pad after the children, that makes all 41 reader failures (32 position, 8 count, 1 flag) end, and that leaves the 2,399,847 slot-0 fits in place. The width search on an earlier walker accepted many widths at once, because a later type 11 body can absorb the shifted bytes (`probe-summary-widths.txt`). It did not name one child. The 26 prefix differences are not part of this open item.
+
+### Bodies that follow type 11 and then fail inside vitals
+
+**Observed.** 57 capture-check failures are class 15, "body ends early", and the member before them is class 11. The failure file's split of those 57 is 37 that need 4 bytes and have 2, 15 that need 4 and have 0, and 5 that need 2 and have 1. The framed payload ends inside the field.
+
+**Observed.** On the body located after that class 11 member, `VitalsSlot0::read` returns the same truncation, 57 of 57. A second walker with the same 14 widths reports a finished body of 5 to 16 bytes on those 57 and does not name the short child. The two walks do not agree, so this round does not assign the missing bytes to one child. Slot byte on that located body is 1, not 3. Slot 1 is not the missing tail.
+
+### Round 4 files
+
+- `<re-scratch>/scratch-m6/round4/scan_round4.py`, log `scan-round4.log`
+- `<re-scratch>/scratch-m6/round4/probe.rs`, summaries `probe-summary.txt` and `probe-summary-widths.txt`
+- `<re-scratch>/scratch-m6/round4/M6Round4.java`, `M6Round4b.java`, `M6Round4c.java`, `M6Round4d.java`, output `ghidra-out/`
+- Ghidra project `<re-scratch>/ghidra`, read-only, analysis off, 14 decompiler threads. REA `open_binary` was not called. No REA Evidence ID.
