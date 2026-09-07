@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `serve`: reads the configuration, the world file and the content bundle names, and serves
-//! the admin pages until Ctrl-C.
+//! `serve`: reads the configuration, the world file and the content bundle names, starts the
+//! live readers when `[live]` is set, and serves the admin pages until Ctrl-C.
 
 use std::path::Path;
 
@@ -8,6 +8,7 @@ use nw_common::logging::{LoggingError, init_logging};
 
 use crate::captures::Captures;
 use crate::config::{AdminConfigError, load_admin_config};
+use crate::live;
 use crate::server::{AppState, router};
 use crate::world::{WorldLayer, WorldLayerError, map_dir};
 
@@ -42,12 +43,14 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let world = WorldLayer::load(&config)?;
     let game_dir = std::env::var_os(GAME_DIR_ENV).map(std::path::PathBuf::from);
     let captures = Captures::load(&config.captures, game_dir.as_deref());
-    let state = AppState::new(world, map_dir(&config), config.listen, captures);
+    let map = map_dir(&config);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(RunError::Io)?
         .block_on(async {
+            let live = config.live.as_ref().map(live::start);
+            let state = AppState::new(world, map, config.listen, captures, live);
             let listener = tokio::net::TcpListener::bind(config.listen)
                 .await
                 .map_err(RunError::Io)?;

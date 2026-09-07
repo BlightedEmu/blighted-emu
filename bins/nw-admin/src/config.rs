@@ -6,9 +6,13 @@ use std::path::{Path, PathBuf};
 
 use nw_common::config::{ConfigError, load_config};
 use serde::Deserialize;
+use uuid::Uuid;
 
 /// Prefix of the environment overrides.
 pub const ADMIN_ENV_PREFIX: &str = "NW_ADMIN_";
+/// Shortest scrape and state interval.
+pub const MIN_LIVE_INTERVAL_MS: u64 = 100;
+const INTERVAL_TOO_SHORT: &str = "is shorter than MIN_LIVE_INTERVAL_MS";
 
 /// The admin tools configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -28,6 +32,26 @@ pub struct AdminConfig {
     pub max_spawns_per_request: usize,
     /// The capture viewer.
     pub captures: CapturesConfig,
+    /// The live panel; without it the live routes are 404.
+    pub live: Option<LiveConfig>,
+}
+
+/// The live panel part of the configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiveConfig {
+    /// The bus.
+    pub nats_url: String,
+    /// The world, as in the world-director configuration.
+    pub world_id: Uuid,
+    /// The metrics pages of the servers.
+    pub metrics_urls: Vec<String>,
+    /// Time between scrapes (also the CPU sample time).
+    pub scrape_interval_ms: u64,
+    /// Time between two states sent to the page.
+    pub state_interval_ms: u64,
+    /// Program names shown in the CPU tile.
+    pub processes: Vec<String>,
 }
 
 /// The capture viewer part of the configuration.
@@ -81,6 +105,19 @@ pub fn load_admin_config(path: &Path) -> Result<AdminConfig, AdminConfigError> {
             reason: "must be at least 1",
         });
     }
+    if let Some(live) = &config.live {
+        for (key, interval) in [
+            ("live.scrape_interval_ms", live.scrape_interval_ms),
+            ("live.state_interval_ms", live.state_interval_ms),
+        ] {
+            if interval < MIN_LIVE_INTERVAL_MS {
+                return Err(AdminConfigError::Invalid {
+                    key,
+                    reason: INTERVAL_TOO_SHORT,
+                });
+            }
+        }
+    }
     Ok(config)
 }
 
@@ -99,17 +136,51 @@ mod tests {
         assert!(config.max_spawns_per_request > 0);
     }
 
-    #[test]
-    fn a_listen_address_off_loopback_is_refused() {
+    fn load_changed(from: &str, to: &str) -> Result<AdminConfig, AdminConfigError> {
         let committed =
             std::fs::read_to_string(repo_root().join("config/nw-admin.toml")).expect("read");
-        let changed = committed.replace("listen = \"127.0.0.1:", "listen = \"0.0.0.0:");
+        let changed = committed.replace(from, to);
         assert_ne!(changed, committed);
         let dir = tempfile::tempdir().expect("dir");
         let path = dir.path().join("nw-admin.toml");
         std::fs::write(&path, changed).expect("write");
+        load_admin_config(&path)
+    }
+
+    #[test]
+    fn the_committed_config_has_a_live_section() {
+        let config = load_admin_config(&repo_root().join("config/nw-admin.toml")).expect("load");
+        let live = config.live.expect("live section");
+        assert!(!live.metrics_urls.is_empty());
+        assert!(live.scrape_interval_ms >= MIN_LIVE_INTERVAL_MS);
+        assert!(live.state_interval_ms >= MIN_LIVE_INTERVAL_MS);
+    }
+
+    #[test]
+    fn a_live_interval_below_the_minimum_is_refused() {
+        for (from, to, key) in [
+            (
+                "scrape_interval_ms = 1000",
+                "scrape_interval_ms = 10",
+                "live.scrape_interval_ms",
+            ),
+            (
+                "state_interval_ms = 250",
+                "state_interval_ms = 0",
+                "live.state_interval_ms",
+            ),
+        ] {
+            assert!(
+                matches!(load_changed(from, to), Err(AdminConfigError::Invalid { key: found, .. }) if found == key),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_listen_address_off_loopback_is_refused() {
         assert!(matches!(
-            load_admin_config(&path),
+            load_changed("listen = \"127.0.0.1:", "listen = \"0.0.0.0:"),
             Err(AdminConfigError::NotLoopback(_))
         ));
     }

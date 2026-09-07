@@ -17,6 +17,8 @@ use crate::captures::Captures;
 use crate::captures::api::capture_routes;
 use crate::captures::catalog::search;
 use crate::guard::{AdminOrigin, admin_guard};
+use crate::live::Live;
+use crate::live::stream::live_routes;
 use crate::relief::relief_tile;
 use crate::world::{SpawnKind, SpawnQuery, WorldLayer};
 use nw_world::map_tiles::tile_file;
@@ -32,22 +34,25 @@ pub struct AppState {
     map_dir: Arc<PathBuf>,
     origin: AdminOrigin,
     pub(crate) captures: Arc<Captures>,
+    pub(crate) live: Option<Live>,
 }
 
 impl AppState {
-    /// The state of a server on `listen` with `world`, the map tiles in `map_dir`, and the
-    /// capture sessions.
+    /// The state of a server on `listen` with `world`, the map tiles in `map_dir`, the capture
+    /// sessions, and the live panel when configured.
     pub fn new(
         world: WorldLayer,
         map_dir: PathBuf,
         listen: SocketAddr,
         captures: Captures,
+        live: Option<Live>,
     ) -> Self {
         Self {
             world: Arc::new(world),
             map_dir: Arc::new(map_dir),
             origin: AdminOrigin::of(listen),
             captures: Arc::new(captures),
+            live,
         }
     }
 }
@@ -64,6 +69,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/captures/sessions", get(sessions))
         .route("/api/captures/types/{idx}", get(type_label))
         .merge(capture_routes())
+        .merge(live_routes())
         .layer(axum::middleware::from_fn_with_state(
             state.origin.clone(),
             admin_guard,
@@ -179,6 +185,7 @@ mod tests {
             map_dir.to_path_buf(),
             LISTEN.parse().expect("address"),
             captures,
+            None,
         ))
     }
 

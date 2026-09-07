@@ -6,6 +6,7 @@ pub mod assets;
 pub mod captures;
 pub mod config;
 pub mod guard;
+pub mod live;
 pub mod relief;
 pub mod run;
 pub mod server;

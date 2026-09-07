@@ -23,3 +23,15 @@ azoth_dir = "local-data/azoth-catalog"
 type_index = "typeindex.json"
 # Aeternum-World class names (AGPL-3.0).
 type_names = "local-data/Aeternum-World-main/Catalog/uuid_to_class.json"
+
+[live]
+# The bus and the world of config/world-director.toml.
+nats_url = "nats://127.0.0.1:4222"
+world_id = "8d0f4c2e-0000-4000-8000-000000000001"
+# The metrics listeners of config/rep-gateway.toml, config/sim.toml and config/world-director.toml.
+metrics_urls = ["http://127.0.0.1:9101/metrics", "http://127.0.0.1:9102/metrics", "http://127.0.0.1:9103/metrics"]
+# Time between scrapes and CPU samples, and between two states sent to the page (at least 100).
+scrape_interval_ms = 1000
+state_interval_ms = 250
+# Program names of the CPU tile.
+processes = ["sim", "rep-gateway", "world-director", "edge-http", "nw-testclient"]

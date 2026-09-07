@@ -15,11 +15,18 @@ nw-common.workspace = true
 nw-content.workspace = true
 nw-formats.workspace = true
 nw-world.workspace = true
+nw-bus.workspace = true
+nw-login.workspace = true
+futures-util.workspace = true
+rep-gateway.workspace = true
+reqwest.workspace = true
+sim.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 png.workspace = true
@@ -30,6 +37,10 @@ http-body-util.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower.workspace = true
+
+[features]
+# Tests that need the Docker Compose NATS (`just test-infra`).
+infra = ["nw-bus/infra"]
 
 [lints]
 workspace = true

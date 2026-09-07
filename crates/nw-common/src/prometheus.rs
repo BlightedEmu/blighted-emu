@@ -34,6 +34,11 @@ impl Scrape {
         }
     }
 
+    /// No sample was read: the text was not Prometheus text.
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
     /// Adds the samples of `other`.
     pub fn add(&mut self, other: &Self) {
         self.samples.extend(other.samples.iter().cloned());
@@ -181,6 +186,12 @@ sim_handoff_seconds_sum 0.2
 sim_handoff_seconds_count 13
 sim_players 4
 ";
+
+    #[test]
+    fn a_text_without_samples_is_empty() {
+        assert!(Scrape::parse("<html>not metrics</html>\n# HELP x y\n").is_empty());
+        assert!(!Scrape::parse(TEXT).is_empty());
+    }
 
     #[test]
     fn histogram_buckets_parse() {

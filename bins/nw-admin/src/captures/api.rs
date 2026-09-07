@@ -674,6 +674,7 @@ mod tests {
             dir.path().to_path_buf(),
             LISTEN.parse().expect("address"),
             captures,
+            None,
         ));
         Fixture { _dir: dir, app }
     }
