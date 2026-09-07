@@ -38,9 +38,9 @@
   --selection: rgba(242, 183, 5, 0.35);
   color-scheme: dark;
 
-  --font-sign: "Barlow Condensed", "Fira Sans Condensed", "Roboto Condensed", "Nimbus Sans Narrow",
+  --font-sign: "Fira Sans Condensed", "Roboto Condensed", "Nimbus Sans Narrow",
     "Arial Narrow", "DejaVu Sans Condensed", sans-serif;
-  --font-body: "Barlow", "Fira Sans", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Fira Sans", "Segoe UI", system-ui, sans-serif;
   --font-data: ui-monospace, "DejaVu Sans Mono", "Cascadia Mono", Consolas, monospace;
   --rail-width: 76px;
   --gutter: 24px;
@@ -114,7 +114,7 @@ h1, h2 { font-family: var(--font-sign); font-stretch: condensed; margin: 0; }
 }
 .rail a:hover, .rail button:hover { color: var(--rail-on); }
 .rail a[aria-current="page"] { color: var(--rail-on); }
-.rail a:not(.mark)[aria-current="page"]::before {
+.rail a:not(.flag-mark)[aria-current="page"]::before {
   content: "";
   display: block;
   width: 28px;
@@ -122,15 +122,15 @@ h1, h2 { font-family: var(--font-sign); font-stretch: condensed; margin: 0; }
   margin: 0 auto 6px;
   background: var(--signal-yellow);
 }
-.mark {
+.flag-mark {
   width: 36px;
   height: 36px;
   display: grid;
   grid-template: 1fr 1fr / 1fr 1fr;
   border: 1px solid var(--flag-edge);
 }
-.mark i:nth-child(1), .mark i:nth-child(4) { background: var(--signal-red); }
-.mark i:nth-child(2), .mark i:nth-child(3) { background: var(--signal-white); }
+.flag-mark i:nth-child(1), .flag-mark i:nth-child(4) { background: var(--signal-red); }
+.flag-mark i:nth-child(2), .flag-mark i:nth-child(3) { background: var(--signal-white); }
 .rail .theme {
   margin-top: auto;
   background: none;
@@ -396,7 +396,7 @@ label { display: inline-flex; align-items: center; gap: 6px; }
   :root { --gutter: 16px; }
   body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
   .rail { position: static; height: auto; flex-direction: row; justify-content: flex-start; gap: 18px; padding: 10px var(--gutter); }
-  .rail a:not(.mark)[aria-current="page"]::before { margin: 0 0 4px; }
+  .rail a:not(.flag-mark)[aria-current="page"]::before { margin: 0 0 4px; }
   .rail .theme { margin: 0 0 0 auto; }
   .deck { grid-template-columns: minmax(0, 1fr); flex: none; }
   .deck .chart { height: 420px; }
