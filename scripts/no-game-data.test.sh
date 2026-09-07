@@ -42,6 +42,8 @@ check_case "metadata file is refused" "$EXIT_FOUND" "data/region.metadata" "x"
 check_case "capitals file is refused" "$EXIT_FOUND" "data/a.capitals.json" "{}"
 check_case "texture file is refused" "$EXIT_FOUND" "map/tile.dds" "DDS "
 check_case "upper-case texture file is refused" "$EXIT_FOUND" "map/TILE.DDS" "DDS "
+check_case "capture ledger by name is refused" "$EXIT_FOUND" "runs/ledger.bin" "x"
+check_case "capture ledger by content is refused" "$EXIT_FOUND" "runs/session.dat" "NWDL....record"
 
 # A folder that git does not track must fail the guard, not pass it.
 not_repo="$(mktemp -d)"

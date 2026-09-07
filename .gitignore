@@ -11,7 +11,13 @@
 *.pak
 *.datasheet
 *.loc.xml
+*.dds
+*.DDS
 typeindex.json
+
+# Capture ledgers (`nw-testclient --ledger`, recorded sessions): other players' data, or the
+# login token of our own test session. scripts/no-game-data.sh refuses these too.
+ledger.bin
 
 # Ghidra projects and exported decompiler listings.
 *.gpr
