@@ -438,7 +438,8 @@ async function refreshBatches() {
         const stop = document.createElement('button');
         stop.type = 'button';
         stop.textContent = 'Stop';
-        stop.disabled = batch.state !== 'running';
+        // A waiting batch can be taken back; a stopping one is on its way out.
+        stop.disabled = batch.state === 'stopping';
         stop.addEventListener('click', () => post(`${BOTS_URL}/${batch.batch}/stop`));
         item.append(text, stop);
         return item;

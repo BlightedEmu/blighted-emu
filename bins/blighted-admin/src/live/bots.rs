@@ -2,6 +2,10 @@
 //! Bot batches (admin tools spec section 5.3): each batch is one `nw-testclient swarm` process
 //! that runs until its standard input closes. The page sends only a size from [`BATCH_SIZES`]
 //! and a batch number; the program, its config and its secrets come from `[live]`.
+//!
+//! Batches log in one after another: a new batch waits while another one still starts its bots,
+//! because thousands of logins at once overflow the PC's UDP buffers and the bots already in
+//! the world lose their link.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -47,6 +51,8 @@ const UNTIL_STOPPED: &str = "0";
 const LETTERS: u32 = 26;
 const FIRST_LETTER: u8 = b'a';
 const LINE_END: u8 = b'\n';
+/// The line part of `nw-testclient` (`run_fleet`) once every bot of a batch is started.
+const STARTED_MARK: &str = " bots started in ";
 
 /// Where the batches come from.
 #[derive(Debug, Clone)]
@@ -86,6 +92,8 @@ impl BotSettings {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchState {
+    /// It waits for the batch before it to start its bots.
+    Waiting,
     /// Its bots run.
     Running,
     /// Its input is closed; it has not exited yet.
@@ -99,7 +107,7 @@ pub struct BatchView {
     pub batch: u32,
     /// Its bots.
     pub size: u32,
-    /// Unix milliseconds of its start.
+    /// Unix milliseconds of its start, or of its request while it waits.
     pub started_ms: u64,
     /// What it does.
     pub state: BatchState,
@@ -187,6 +195,8 @@ fn ended_text(batch: u32, status: std::io::Result<ExitStatus>) -> String {
 struct Batch {
     view: BatchView,
     stop: Option<oneshot::Sender<()>>,
+    /// Its process runs and has not started all its bots yet.
+    logging_in: bool,
 }
 
 #[derive(Debug, Default)]
@@ -196,8 +206,34 @@ struct Batches {
 }
 
 impl Batches {
+    /// Bots of the started batches.
     fn bots(&self) -> u32 {
+        self.running
+            .values()
+            .filter(|batch| batch.view.state != BatchState::Waiting)
+            .map(|batch| batch.view.size)
+            .sum()
+    }
+
+    /// Bots of every batch, the waiting ones too.
+    fn asked(&self) -> u32 {
         self.running.values().map(|batch| batch.view.size).sum()
+    }
+
+    /// The batch that starts its bots now, if any.
+    fn logging_in(&self) -> Option<u32> {
+        self.running
+            .values()
+            .find(|batch| batch.logging_in)
+            .map(|batch| batch.view.batch)
+    }
+
+    /// The oldest waiting batch.
+    fn first_waiting(&self) -> Option<u32> {
+        self.running
+            .values()
+            .find(|batch| batch.view.state == BatchState::Waiting)
+            .map(|batch| batch.view.batch)
     }
 }
 
@@ -233,28 +269,100 @@ impl Bots {
         state.event(text, unix_ms());
     }
 
-    /// Starts a batch of `size` bots.
+    /// Asks for a batch of `size` bots: it starts now, or after the batches before it have
+    /// started their bots.
     ///
     /// # Errors
     ///
-    /// [`BotsError::Size`], [`BotsError::Limit`], [`BotsError::EnvFile`] or
-    /// [`BotsError::Spawn`]; then nothing is started.
+    /// [`BotsError::Size`], [`BotsError::Limit`] or [`BotsError::EnvFile`]; then nothing is
+    /// asked. [`BotsError::Spawn`] when it should start now and does not. A waiting batch that
+    /// later fails to start is an event.
     pub fn start(&self, size: u32) -> Result<BatchView, BotsError> {
         if !BATCH_SIZES.contains(&size) {
             return Err(BotsError::Size(size));
         }
-        let secrets = read_secret_env(&self.settings.testclient_env_file)?;
+        // Read now, so that a missing file is an answer to this request.
+        read_secret_env(&self.settings.testclient_env_file)?;
         let mut batches = self.batches();
-        let running = batches.bots();
-        if running.saturating_add(size) > self.settings.max_bots {
+        let asked = batches.asked();
+        if asked.saturating_add(size) > self.settings.max_bots {
             return Err(BotsError::Limit {
-                running,
+                running: asked,
                 max: self.settings.max_bots,
             });
         }
         let batch = batches.next;
+        batches.next = batches.next.saturating_add(1);
+        let view = BatchView {
+            batch,
+            size,
+            started_ms: unix_ms(),
+            state: BatchState::Waiting,
+        };
+        batches.running.insert(
+            batch,
+            Batch {
+                view,
+                stop: None,
+                logging_in: false,
+            },
+        );
+        let ahead = batches.logging_in();
+        drop(batches);
+        if let Some(ahead) = ahead {
+            self.event(format!(
+                "batch {batch} waits for batch {ahead} to start its bots: {size} bots"
+            ));
+        }
+        self.start_next();
+        self.batches()
+            .running
+            .get(&batch)
+            .map(|found| found.view.clone())
+            .ok_or_else(|| BotsError::Spawn(format!("batch {batch} did not start; see the events")))
+    }
+
+    /// Starts the oldest waiting batch when no batch is starting its bots.
+    fn start_next(&self) {
+        loop {
+            let mut batches = self.batches();
+            if batches.logging_in().is_some() {
+                return;
+            }
+            let Some(batch) = batches.first_waiting() else {
+                return;
+            };
+            match self.spawn(&mut batches, batch) {
+                Ok((child, stopped, size, total)) => {
+                    drop(batches);
+                    self.run(batch, child, stopped);
+                    self.total_changed(total, format!("batch {batch} started: {size} bots"));
+                    return;
+                }
+                Err(error) => {
+                    batches.running.remove(&batch);
+                    drop(batches);
+                    self.event(format!("batch {batch} {error}"));
+                }
+            }
+        }
+    }
+
+    /// Starts the process of waiting batch `batch`; returns it, its stop, its size and the new
+    /// bot total.
+    fn spawn(
+        &self,
+        batches: &mut Batches,
+        batch: u32,
+    ) -> Result<(Child, oneshot::Receiver<()>, u32, u32), BotsError> {
+        let secrets = read_secret_env(&self.settings.testclient_env_file)?;
+        let size = batches
+            .running
+            .get(&batch)
+            .map(|found| found.view.size)
+            .ok_or(BotsError::UnknownBatch)?;
         let letters = batch_letters(batch);
-        let mut child = Command::new(&self.settings.testclient_bin)
+        let child = Command::new(&self.settings.testclient_bin)
             .arg(CONFIG_ARG)
             .arg(&self.settings.testclient_config)
             .arg(SWARM_COMMAND)
@@ -276,24 +384,18 @@ impl Bots {
             .kill_on_drop(true)
             .spawn()
             .map_err(|error| BotsError::Spawn(error.to_string()))?;
-        batches.next = batches.next.saturating_add(1);
         let (stop, stopped) = oneshot::channel();
-        let view = BatchView {
-            batch,
-            size,
-            started_ms: unix_ms(),
-            state: BatchState::Running,
-        };
-        batches.running.insert(
-            batch,
-            Batch {
-                view: view.clone(),
-                stop: Some(stop),
-            },
-        );
-        let total = batches.bots();
-        drop(batches);
-        self.total_changed(total, format!("batch {batch} started: {size} bots"));
+        if let Some(found) = batches.running.get_mut(&batch) {
+            found.view.state = BatchState::Running;
+            found.view.started_ms = unix_ms();
+            found.stop = Some(stop);
+            found.logging_in = true;
+        }
+        Ok((child, stopped, size, batches.bots()))
+    }
+
+    /// Reads the output of a started batch and waits for its end.
+    fn run(&self, batch: u32, mut child: Child, stopped: oneshot::Receiver<()>) {
         if let Some(stdout) = child.stdout.take() {
             tokio::spawn(self.clone().report_lines(batch, stdout));
         }
@@ -302,7 +404,14 @@ impl Bots {
         }
         let stdin = child.stdin.take();
         tokio::spawn(self.clone().supervise(batch, child, stdin, stopped));
-        Ok(view)
+    }
+
+    /// Batch `batch` started all its bots: the next waiting batch may start.
+    fn bots_started(&self, batch: u32) {
+        if let Some(found) = self.batches().running.get_mut(&batch) {
+            found.logging_in = false;
+        }
+        self.start_next();
     }
 
     /// Closes the input of batch `batch`; it is killed when it does not exit in time.
@@ -316,6 +425,12 @@ impl Bots {
             .running
             .get_mut(&batch)
             .ok_or(BotsError::UnknownBatch)?;
+        if found.view.state == BatchState::Waiting {
+            batches.running.remove(&batch);
+            drop(batches);
+            self.event(format!("batch {batch} no longer waits"));
+            return Ok(());
+        }
         if let Some(stop) = found.stop.take() {
             found.view.state = BatchState::Stopping;
             // A failed send means the batch task ended already.
@@ -354,6 +469,9 @@ impl Bots {
                 Ok(_) => {
                     let text = String::from_utf8_lossy(&line);
                     self.event(format!("batch {batch}: {}", text.trim_end()));
+                    if text.contains(STARTED_MARK) {
+                        self.bots_started(batch);
+                    }
                 }
             }
         }
@@ -387,6 +505,7 @@ impl Bots {
             batches.bots()
         };
         self.total_changed(total, ended_text(batch, status));
+        self.start_next();
     }
 }
 
@@ -500,6 +619,8 @@ cat > /dev/null
 echo "input closed"
 "#;
     const IGNORING: &str = "#!/bin/sh\necho started\nexec sleep 30\n";
+    /// Starts its bots at once (the line of `nw-testclient`), then runs until its input closes.
+    const QUICK: &str = "#!/bin/sh\necho \"$5 bots started in 0.0 s\"\ncat > /dev/null\n";
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -673,6 +794,90 @@ echo "input closed"
         )
         .await;
         assert!(fixture.bots.list().is_empty());
+    }
+
+    fn states(fixture: &Fixture) -> Vec<(u32, BatchState)> {
+        fixture
+            .bots
+            .list()
+            .iter()
+            .map(|batch| (batch.batch, batch.state))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_batch_waits_while_another_starts_its_bots() {
+        let fixture = fixture(PRINTING);
+        start(&fixture, 1).expect("first");
+        let second = start(&fixture, 1).expect("second");
+        assert_eq!(second.state, BatchState::Waiting);
+        wait_for(
+            &fixture.state,
+            &["batch 1 waits for batch 0 to start its bots: 1 bots"],
+        )
+        .await;
+        assert_eq!(
+            states(&fixture),
+            vec![(0, BatchState::Running), (1, BatchState::Waiting)]
+        );
+        assert_eq!(
+            lock(&fixture.state).view().tiles.bots,
+            1,
+            "a waiting batch is not started"
+        );
+        fixture.bots.stop(0).expect("stop");
+        wait_for(
+            &fixture.state,
+            &["batch 0 ended with code 0", "batch 1 started: 1 bots"],
+        )
+        .await;
+        fixture.bots.stop_all();
+        wait_for(&fixture.state, &["batch 1 ended with code 0"]).await;
+    }
+
+    #[tokio::test]
+    async fn the_next_batch_starts_when_the_bots_are_started() {
+        let fixture = fixture(QUICK);
+        start(&fixture, 1).expect("first");
+        start(&fixture, 1).expect("second");
+        wait_for(
+            &fixture.state,
+            &[
+                "batch 0: 1 bots started in 0.0 s",
+                "batch 1: 1 bots started in 0.0 s",
+            ],
+        )
+        .await;
+        assert_eq!(
+            states(&fixture),
+            vec![(0, BatchState::Running), (1, BatchState::Running)]
+        );
+        assert_eq!(lock(&fixture.state).view().tiles.bots, 2);
+        fixture.bots.stop_all();
+        wait_for(
+            &fixture.state,
+            &["batch 0 ended with code 0", "batch 1 ended with code 0"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_waiting_batch_can_be_taken_back_and_counts_to_the_limit() {
+        let fixture = fixture(PRINTING);
+        start(&fixture, MAX_BOTS).expect("first");
+        assert!(
+            matches!(start(&fixture, 1), Err(BotsError::Limit { .. })),
+            "the limit counts every asked bot"
+        );
+        fixture.bots.stop(0).expect("stop");
+        wait_for(&fixture.state, &["batch 0 ended with code 0"]).await;
+        start(&fixture, 1).expect("running");
+        start(&fixture, 1).expect("waiting");
+        fixture.bots.stop(2).expect("take back");
+        wait_for(&fixture.state, &["batch 2 no longer waits"]).await;
+        assert_eq!(states(&fixture), vec![(1, BatchState::Running)]);
+        fixture.bots.stop_all();
+        wait_for(&fixture.state, &["batch 1 ended with code 0"]).await;
     }
 
     fn app(fixture: &Fixture) -> axum::Router {
