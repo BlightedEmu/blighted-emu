@@ -34,6 +34,14 @@ const TRAIL_ALPHA_HEX = '99';
 const TRAIL_COLOUR = `${PLAYER_COLOUR}${TRAIL_ALPHA_HEX}`;
 const SIM_COLOURS = SERIES;
 const BAD_FACT = 'bad';
+/** What each program does, for the CPU line. */
+const PROGRAM_ROLES = {
+  sim: 'Game world',
+  'rep-gateway': 'Network',
+  'world-director': 'Map assignment',
+  'edge-http': 'Login',
+  'nw-testclient': 'Bots',
+};
 const MARKED_STATUS = 'marked';
 const CHANGED_STATUS = 'changed';
 /** Browser storage keys of the page layout choices; the values are '1' or '0'. */
@@ -48,6 +56,7 @@ const socketBox = document.getElementById('socket');
 const serversBox = document.getElementById('servers');
 const tilesBox = document.getElementById('tiles');
 const moreTilesBox = document.getElementById('tiles-more');
+const cpuBox = document.getElementById('cpu');
 const playersCount = document.getElementById('players-count');
 const playersPanel = document.getElementById('players-panel');
 const bigMapButton = document.getElementById('big-map');
@@ -101,9 +110,13 @@ function mainFigures() {
   const tiles = view?.tiles;
   const p99 = tiles?.tick_p99_ms;
   const slow = p99 !== null && p99 !== undefined && p99 > view.tick_budget_ms;
+  // Started bots that are not in a shown snapshot yet: still logging in, or turned away.
+  const botsInWorld = (view?.players ?? []).filter((player) => player.bot).length;
+  const loggingIn = tiles ? Math.max(tiles.bots - botsInWorld, 0) : null;
   return [
-    ['Players', formatTile(TILE_KINDS.COUNT, tiles?.players), false],
-    ['Bots', formatTile(TILE_KINDS.COUNT, tiles?.bots), false],
+    ['In the world', formatTile(TILE_KINDS.COUNT, tiles?.players), false],
+    ['Bots started', formatTile(TILE_KINDS.COUNT, tiles?.bots), false],
+    ['Bots not in the world yet', formatTile(TILE_KINDS.COUNT, loggingIn), false],
     ['Worst tick p99', formatTile(TILE_KINDS.MS, p99), slow],
     ['Members sent', formatTile(TILE_KINDS.RATE, tiles?.members_s), false],
     ['Bandwidth out', formatTile(TILE_KINDS.BYTES, tiles?.bytes_out_s), false],
@@ -122,10 +135,15 @@ function moreFigures() {
     ['Bandwidth in', formatTile(TILE_KINDS.BYTES, tiles?.bytes_in_s)],
     ['Mobs asleep', formatTile(TILE_KINDS.COUNT, tiles?.mobs_asleep)],
   ];
-  for (const [name, percent] of tiles?.cpu ?? []) {
-    rows.push([`CPU ${name}`, formatTile(TILE_KINDS.CPU, percent)]);
-  }
   return rows;
+}
+
+/** CPU per program, with a plain name for each program (100 % is one full core). */
+function cpuFigures() {
+  return (view?.tiles?.cpu ?? []).map(([program, percent]) => [
+    PROGRAM_ROLES[program] ? `${PROGRAM_ROLES[program]} (${program})` : program,
+    formatTile(TILE_KINDS.CPU, percent),
+  ]);
 }
 
 function showFigures() {
@@ -134,6 +152,7 @@ function showFigures() {
   facts.forEach((fact, index) => fact.classList.toggle(BAD_FACT, main[index][2]));
   tilesBox.replaceChildren(...facts);
   moreTilesBox.replaceChildren(...factElements(moreFigures()));
+  cpuBox.replaceChildren(...factElements(cpuFigures()));
 }
 
 function showSocket() {

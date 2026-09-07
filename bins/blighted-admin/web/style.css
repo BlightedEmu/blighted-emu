@@ -274,6 +274,9 @@ label { display: inline-flex; align-items: center; gap: 6px; }
 .figures { border-top: 2px solid var(--rule); border-bottom: 1px solid var(--line); }
 .figures .fact { font-size: 30px; }
 .figures .minor { padding-top: 0; gap: 4px 24px; }
+.cpu-line { padding: 0 var(--gutter) 12px; }
+.cpu-help { margin: 0 0 4px; font-size: 12px; color: var(--mute); max-width: 90ch; }
+.cpu-line .facts { padding: 0; }
 .figures .minor .fact { font-size: 15px; flex-direction: row-reverse; justify-content: flex-end; align-items: baseline; gap: 6px; }
 .figures .minor .fact.unknown { font-size: 13px; }
 
