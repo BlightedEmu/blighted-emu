@@ -131,6 +131,8 @@ pub const METRIC_MOBS_UNSPAWNED: &str = "sim_mobs_unspawned_total";
 pub const METRIC_MOB_BRAIN_RUNS: &str = "sim_mob_brain_runs_total";
 /// Metric: player scans for mobs to wake.
 pub const METRIC_MOB_WAKE_SCANS: &str = "sim_mob_wake_scans_total";
+/// Metric: members put in bundles: each player's own member and every other entity.
+pub const METRIC_BUNDLE_MEMBERS: &str = "sim_bundle_members_total";
 /// Metric: time of the mob part of a tick.
 pub const METRIC_MOB_TICK_SECONDS: &str = "sim_mob_tick_seconds";
 /// Label of a mob's state.
@@ -673,6 +675,7 @@ impl Loop {
         };
         metrics::histogram!(METRIC_TICK_SECONDS).record(started.elapsed().as_secs_f64());
         metrics::histogram!(METRIC_MOB_TICK_SECONDS).record(output.mob_seconds);
+        metrics::counter!(METRIC_BUNDLE_MEMBERS).increment(output.bundle_members);
         for (state, count) in self.world.mob_counts() {
             metrics::gauge!(METRIC_MOBS, STATE_LABEL => state.label()).set(count as f64);
         }

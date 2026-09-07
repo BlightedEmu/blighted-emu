@@ -50,6 +50,10 @@ pub const METRIC_DROPPED: &str = "rep_gateway_dropped_total";
 pub const METRIC_DATAGRAMS_IN: &str = "rep_gateway_datagrams_in_total";
 /// Metric: sent datagrams.
 pub const METRIC_DATAGRAMS_OUT: &str = "rep_gateway_datagrams_out_total";
+/// Metric: UDP payload bytes received.
+pub const METRIC_BYTES_IN: &str = "rep_gateway_bytes_in_total";
+/// Metric: UDP payload bytes sent.
+pub const METRIC_BYTES_OUT: &str = "rep_gateway_bytes_out_total";
 const RESULT_LABEL: &str = "result";
 const REASON_LABEL: &str = "reason";
 /// Label of the per-worker gauges.
@@ -159,7 +163,7 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
     }
 
     async fn datagram(&mut self, address: SocketAddr, bytes: &[u8]) {
-        metrics::counter!(METRIC_DATAGRAMS_IN).increment(1);
+        count_in(bytes);
         let now = self.now_ms();
         let Some(peer) = self.peers.get_mut(&address) else {
             self.first_datagram(address, bytes, now).await;
@@ -425,8 +429,20 @@ fn report_peers(worker: u16, peers: &HashMap<SocketAddr, Peer>) {
     metrics::gauge!(METRIC_HANDSHAKES, WORKER_LABEL => worker).set(handshakes as f64);
 }
 
-async fn send(socket: &UdpSocket, address: SocketAddr, datagram: &[u8]) {
+/// Counts one received datagram and its bytes.
+fn count_in(datagram: &[u8]) {
+    metrics::counter!(METRIC_DATAGRAMS_IN).increment(1);
+    metrics::counter!(METRIC_BYTES_IN).increment(datagram.len() as u64);
+}
+
+/// Counts one sent datagram and its bytes.
+fn count_out(datagram: &[u8]) {
     metrics::counter!(METRIC_DATAGRAMS_OUT).increment(1);
+    metrics::counter!(METRIC_BYTES_OUT).increment(datagram.len() as u64);
+}
+
+async fn send(socket: &UdpSocket, address: SocketAddr, datagram: &[u8]) {
+    count_out(datagram);
     if let Err(error) = socket.send_to(datagram, address).await {
         tracing::debug!(%error, %address, "send failed");
     }
@@ -772,6 +788,28 @@ pub(crate) mod tests {
             envelopes: vec![login_envelope()],
         });
         wait_for(|| sent(&world).contains(&Sent::Left(UNKNOWN_CONNECTION))).await;
+    }
+
+    #[test]
+    fn bytes_are_counted_both_ways() {
+        const IN_BYTES: [u8; 5] = [0; 5];
+        const OUT_BYTES: [u8; 3] = [0; 3];
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            count_in(&IN_BYTES);
+            count_in(&IN_BYTES);
+            count_out(&OUT_BYTES);
+        });
+        let text = handle.render();
+        for series in [
+            format!("{METRIC_DATAGRAMS_IN} 2"),
+            format!("{METRIC_BYTES_IN} 10"),
+            format!("{METRIC_DATAGRAMS_OUT} 1"),
+            format!("{METRIC_BYTES_OUT} 3"),
+        ] {
+            assert!(text.contains(&series), "{series} in {text}");
+        }
     }
 
     #[test]

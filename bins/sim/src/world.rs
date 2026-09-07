@@ -159,6 +159,15 @@ pub struct TickOutput {
     pub deaths: Vec<Departure>,
     /// Time of the mob part of the tick, in seconds.
     pub mob_seconds: f64,
+    /// Members put in this tick's bundles: each player's own member and every other entity.
+    pub bundle_members: u64,
+}
+
+/// The bundle messages of some players and the members they hold.
+#[derive(Debug, Default)]
+struct Bundled {
+    outgoing: Vec<Outgoing>,
+    members: u64,
 }
 
 /// A refused world change.
@@ -623,7 +632,8 @@ impl SimWorld {
         let mob_hits = self.mob_hits(intents, now_ms);
         let mob_seconds = mobs_started.elapsed().as_secs_f64();
         let mut messages = self.take_messages();
-        messages.extend(self.bundles(now_ms, server_time)?);
+        let bundled = self.bundles(now_ms, server_time)?;
+        messages.extend(bundled.outgoing);
         Ok(TickOutput {
             messages,
             handoffs,
@@ -631,6 +641,7 @@ impl SimWorld {
             mob_hits,
             deaths: std::mem::take(&mut self.deaths),
             mob_seconds,
+            bundle_members: bundled.members,
         })
     }
 
@@ -743,7 +754,7 @@ impl SimWorld {
     }
 
     /// A bundle for every player that is not frozen, on `tick_threads` threads for a large world.
-    fn bundles(&mut self, now_ms: u64, server_time: u64) -> Result<Vec<Outgoing>, MessageError> {
+    fn bundles(&mut self, now_ms: u64, server_time: u64) -> Result<Bundled, MessageError> {
         let mut bodies = self.world.query::<(&Player, &Body)>();
         let mut everyone: Vec<(u64, Position)> = bodies
             .iter(&self.world)
@@ -764,7 +775,7 @@ impl SimWorld {
         }
         // The radius is checked at start to be a finite number above 0.
         let Some(mut grid) = SpatialGrid::new(self.settings.interest_radius_m) else {
-            return Ok(Vec::new());
+            return Ok(Bundled::default());
         };
         for (number, position) in &everyone {
             grid.insert(*number, *position);
@@ -788,7 +799,7 @@ impl SimWorld {
             return near.bundles_of(&mut players);
         }
         let chunk = players.len().div_ceil(threads);
-        let parts: Vec<Result<Vec<Outgoing>, MessageError>> = std::thread::scope(|scope| {
+        let parts: Vec<Result<Bundled, MessageError>> = std::thread::scope(|scope| {
             let handles: Vec<_> = players
                 .chunks_mut(chunk)
                 .map(|part| scope.spawn(|| near.bundles_of(part)))
@@ -802,11 +813,13 @@ impl SimWorld {
                 })
                 .collect()
         });
-        let mut outgoing = Vec::new();
+        let mut bundled = Bundled::default();
         for part in parts {
-            outgoing.extend(part?);
+            let part = part?;
+            bundled.outgoing.extend(part.outgoing);
+            bundled.members += part.members;
         }
-        Ok(outgoing)
+        Ok(bundled)
     }
 
     /// Refuses a new player that would break a world rule.
@@ -904,11 +917,9 @@ struct Neighbourhood<'a> {
 
 impl Neighbourhood<'_> {
     /// The bundles and time messages of `players`, in their order.
-    fn bundles_of(
-        &self,
-        players: &mut [(Mut<Player>, &Body)],
-    ) -> Result<Vec<Outgoing>, MessageError> {
+    fn bundles_of(&self, players: &mut [(Mut<Player>, &Body)]) -> Result<Bundled, MessageError> {
         let mut outgoing = Vec::new();
+        let mut counted = 0_u64;
         for (player, body) in players.iter_mut() {
             if player.frozen {
                 continue;
@@ -937,6 +948,7 @@ impl Neighbourhood<'_> {
                     members.extend(position_member(number, *position));
                 }
             }
+            counted += members.len() as u64;
             for bundle in bundles(player.bundles_sent, members)? {
                 player.bundles_sent = player.bundles_sent.saturating_add(1);
                 outgoing.push(Outgoing {
@@ -961,7 +973,10 @@ impl Neighbourhood<'_> {
                 });
             }
         }
-        Ok(outgoing)
+        Ok(Bundled {
+            outgoing,
+            members: counted,
+        })
     }
 }
 
@@ -1255,6 +1270,20 @@ mod tests {
         assert_eq!(
             classes_of(&tick(&mut world, NOW + 33).messages, &connection(1), mob),
             [POSITION_IN_THE_WORLD_TYPE_INDEX]
+        );
+    }
+
+    #[test]
+    fn bundle_members_count_self_and_others() {
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        for number in 1..=3 {
+            join(&mut world, number, CELL_M / 2.0 + number as f32);
+        }
+        assert_eq!(
+            tick(&mut world, NOW).bundle_members,
+            9,
+            "3 bundles of 3 members"
         );
     }
 

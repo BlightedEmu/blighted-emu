@@ -170,7 +170,7 @@ cargo run -p nw-testclient
 
 `nw-testclient` reads `config/nw-testclient.toml`. Set `login_url` and `game_url` to your domain. The account is made on the first run.
 
-The gateway serves Prometheus metrics on `metrics_listen` (`rep_gateway_*`). Keep that address internal.
+The gateway serves Prometheus metrics on `metrics_listen` (`rep_gateway_*`, among them datagrams and UDP payload bytes in and out). Keep that address internal.
 
 ### M3 exit test
 
@@ -229,7 +229,7 @@ For many players on one PC (M5 load spec): give the gateway one `workers` per co
 
 The bots register their accounts on the first run. `edge-http` counts every registration per IP address against `auth.login_fail_limit`, so raise it for that run, for example `NW_EDGE_AUTH__LOGIN_FAIL_LIMIT=5000`. The gateway counts new connections per IP address too: raise `limits.handshakes_per_ip_per_second` (for example `NW_GATEWAY_LIMITS__HANDSHAKES_PER_IP_PER_SECOND=200`).
 
-The director serves Prometheus metrics on `metrics_listen` (`director_*`), each `sim` on its own (`sim_*`). Keep those addresses internal.
+The director serves Prometheus metrics on `metrics_listen` (`director_*`), each `sim` on its own (`sim_*`, among them `sim_bundle_members_total`: the members put in bundles). Keep those addresses internal.
 
 Known gaps:
 
