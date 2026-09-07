@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `GET /api/live/stream` (server-sent events: one `state` event with the [`LiveView`] as JSON
-//! every `state_interval_ms`) and `GET /api/live/view` (one view). Without a `[live]` section
-//! both are 404.
+//! `GET /api/live/stream` (server-sent events: one `state` event with the
+//! [`LiveView`](crate::live::state::LiveView) as JSON every `state_interval_ms`, until the server
+//! closes) and `GET /api/live/view` (one view). Without a `[live]` section both are 404.
 
 use axum::Router;
 use axum::extract::State;
@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use tokio::time::MissedTickBehavior;
 
 use crate::live::{Live, lock};
@@ -42,6 +42,7 @@ async fn stream_views(State(state): State<AppState>) -> Response {
     let Some(Live {
         state,
         state_interval,
+        mut closing,
         ..
     }) = state.live
     else {
@@ -55,7 +56,13 @@ async fn stream_views(State(state): State<AppState>) -> Response {
         let event = Event::default().event(STATE_EVENT).json_data(view);
         Some((event, (timer, state)))
     });
-    Sse::new(events)
+    let closed = async move {
+        if closing.wait_for(|closing| *closing).await.is_err() {
+            // Nobody can close the server any more: the stream runs until the page leaves.
+            std::future::pending::<()>().await;
+        }
+    };
+    Sse::new(events.take_until(closed))
         .keep_alive(KeepAlive::default())
         .into_response()
 }
@@ -67,6 +74,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request, StatusCode, header};
     use http_body_util::BodyExt;
+    use tokio::sync::watch;
     use tower::ServiceExt;
 
     use super::*;
@@ -80,6 +88,7 @@ mod tests {
     const LISTEN: &str = "127.0.0.1:9180";
     const INTERVAL: Duration = Duration::from_millis(10);
     const EVENT_TEXT: &str = "sim sim-a joined";
+    const WAIT: Duration = Duration::from_secs(5);
 
     fn app(live: Option<Live>) -> axum::Router {
         let dir = std::env::temp_dir();
@@ -92,10 +101,15 @@ mod tests {
         ))
     }
 
-    fn live() -> Live {
+    fn live_closing(closing: watch::Receiver<bool>) -> Live {
         let state = shared();
         lock(&state).event(EVENT_TEXT.to_owned(), 1);
-        Live::new(state.clone(), INTERVAL, idle_bots(state))
+        Live::new(state.clone(), INTERVAL, idle_bots(state), closing)
+    }
+
+    /// A live part whose server never closes (the sender is gone).
+    fn live() -> Live {
+        live_closing(watch::channel(false).1)
     }
 
     fn request(uri: &str) -> Request<Body> {
@@ -136,6 +150,21 @@ mod tests {
         assert!(text.contains(&format!("event: {STATE_EVENT}")));
         let view: serde_json::Value = serde_json::from_str(data).expect("json");
         assert_eq!(view["events"][0]["text"], EVENT_TEXT);
+    }
+
+    #[tokio::test]
+    async fn the_stream_ends_when_the_server_closes() {
+        let (close, closing) = watch::channel(false);
+        let response = app(Some(live_closing(closing)))
+            .oneshot(request(STREAM_ROUTE))
+            .await
+            .expect("response");
+        let mut body = response.into_body();
+        assert!(body.frame().await.is_some(), "a first state");
+        close.send_replace(true);
+        let ended =
+            tokio::time::timeout(WAIT, async { while body.frame().await.is_some() {} }).await;
+        assert!(ended.is_ok(), "the stream ended");
     }
 
     #[tokio::test]

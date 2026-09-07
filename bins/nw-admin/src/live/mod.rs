@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use tokio::sync::watch;
+
 use crate::config::LiveConfig;
 use crate::live::bots::{BotSettings, Bots};
 use crate::live::cpu::{CpuSampler, PROC_DIR};
@@ -37,22 +39,30 @@ pub struct Live {
     state: SharedState,
     state_interval: Duration,
     bots: Bots,
+    closing: watch::Receiver<bool>,
 }
 
 impl Live {
-    /// Routes that send `state` every `state_interval` and run `bots`.
-    pub fn new(state: SharedState, state_interval: Duration, bots: Bots) -> Self {
+    /// Routes that send `state` every `state_interval` and run `bots`; the streams end when
+    /// `closing` turns `true` (a dropped sender never closes them).
+    pub fn new(
+        state: SharedState,
+        state_interval: Duration,
+        bots: Bots,
+        closing: watch::Receiver<bool>,
+    ) -> Self {
         Self {
             state,
             state_interval,
             bots,
+            closing,
         }
     }
 }
 
 /// Starts the bus reader and the scraper of `config` on the current runtime; batches start
-/// from the routes.
-pub fn start(config: &LiveConfig) -> Live {
+/// from the routes. The streams end when `closing` turns `true`.
+pub fn start(config: &LiveConfig, closing: watch::Receiver<bool>) -> Live {
     let state = shared();
     tokio::spawn(bus::run(
         config.nats_url.clone(),
@@ -66,5 +76,10 @@ pub fn start(config: &LiveConfig) -> Live {
         state.clone(),
     ));
     let bots = Bots::new(BotSettings::of(config), state.clone());
-    Live::new(state, Duration::from_millis(config.state_interval_ms), bots)
+    Live::new(
+        state,
+        Duration::from_millis(config.state_interval_ms),
+        bots,
+        closing,
+    )
 }

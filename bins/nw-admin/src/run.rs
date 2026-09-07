@@ -5,6 +5,7 @@
 use std::path::Path;
 
 use nw_common::logging::{LoggingError, init_logging};
+use tokio::sync::watch;
 
 use crate::captures::Captures;
 use crate::config::{AdminConfigError, load_admin_config};
@@ -49,16 +50,19 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         .build()
         .map_err(RunError::Io)?
         .block_on(async {
-            let live = config.live.as_ref().map(live::start);
+            let (close, closing) = watch::channel(false);
+            let live = config.live.as_ref().map(|live| live::start(live, closing));
             let state = AppState::new(world, map, config.listen, captures, live);
             let listener = tokio::net::TcpListener::bind(config.listen)
                 .await
                 .map_err(RunError::Io)?;
             tracing::info!(listen = %config.listen, "serving");
             axum::serve(listener, router(state))
-                .with_graceful_shutdown(async {
+                .with_graceful_shutdown(async move {
                     // A failed signal handler means the server runs until killed.
                     let _ = tokio::signal::ctrl_c().await;
+                    // The live streams never end by themselves; the server waits for them.
+                    let _ = close.send(true);
                 })
                 .await
                 .map_err(RunError::Io)

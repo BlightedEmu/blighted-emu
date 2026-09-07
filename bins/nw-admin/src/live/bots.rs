@@ -685,6 +685,7 @@ echo "input closed"
                 fixture.state.clone(),
                 GRACE,
                 fixture.bots.clone(),
+                tokio::sync::watch::channel(false).1,
             )),
         ))
     }
