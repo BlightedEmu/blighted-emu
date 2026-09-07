@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: AGPL-3.0-or-later */
 /*
- * Blighted Emu: signal flags on a harbour at night. Night watch (dark) is the default theme; the
- * day theme is chosen with the rail button (theme.js). Colour carries state and data only.
+ * Blighted Emu. Night (dark, neutral grey) is the default theme; the day theme is chosen with the
+ * rail button (theme.js). Colour carries state and data only.
  */
 :root {
-  /* Data and flag colours: the same in both themes (palette.js reads them for the map). */
+  /* Data colours: the same in both themes (palette.js reads them for the map). */
   --signal-navy: #13294b;
   --signal-red: #c8102e;
   --signal-yellow: #f2b705;
@@ -31,8 +31,8 @@
   --rail: #0a0a0a;
   --rail-ink: #b3b0aa;
   --rail-on: #ffffff;
-  --flag-blue: #2456a6;
-  --flag-edge: rgba(255, 255, 255, 0.22);
+  --state-ready: #4caf6e;
+  --swatch-edge: rgba(255, 255, 255, 0.22);
   --overlay: rgba(18, 18, 18, 0.92);
   --map-sea: #1b1b1b;
   --selection: rgba(242, 183, 5, 0.35);
@@ -62,8 +62,8 @@
   --rail: #13294b;
   --rail-ink: #c9d3e4;
   --rail-on: #ffffff;
-  --flag-blue: #13294b;
-  --flag-edge: rgba(0, 0, 0, 0.15);
+  --state-ready: #2e7d4f;
+  --swatch-edge: rgba(0, 0, 0, 0.15);
   --overlay: rgba(244, 241, 234, 0.94);
   --map-sea: #c9d6db;
   --selection: rgba(242, 183, 5, 0.45);
@@ -102,7 +102,7 @@ h1, h2 { font-family: var(--font-sign); font-stretch: condensed; margin: 0; }
   flex-direction: column;
   align-items: center;
   gap: 22px;
-  padding: 18px 0;
+  padding: 26px 0 18px;
 }
 .rail a, .rail button {
   font: 600 12px var(--font-sign);
@@ -114,7 +114,7 @@ h1, h2 { font-family: var(--font-sign); font-stretch: condensed; margin: 0; }
 }
 .rail a:hover, .rail button:hover { color: var(--rail-on); }
 .rail a[aria-current="page"] { color: var(--rail-on); }
-.rail a:not(.flag-mark)[aria-current="page"]::before {
+.rail a[aria-current="page"]::before {
   content: "";
   display: block;
   width: 28px;
@@ -122,15 +122,6 @@ h1, h2 { font-family: var(--font-sign); font-stretch: condensed; margin: 0; }
   margin: 0 auto 6px;
   background: var(--signal-yellow);
 }
-.flag-mark {
-  width: 36px;
-  height: 36px;
-  display: grid;
-  grid-template: 1fr 1fr / 1fr 1fr;
-  border: 1px solid var(--flag-edge);
-}
-.flag-mark i:nth-child(1), .flag-mark i:nth-child(4) { background: var(--signal-red); }
-.flag-mark i:nth-child(2), .flag-mark i:nth-child(3) { background: var(--signal-white); }
 .rail .theme {
   margin-top: auto;
   background: none;
@@ -171,7 +162,7 @@ h1, h2 { font-family: var(--font-sign); font-stretch: condensed; margin: 0; }
 }
 .stream[data-state="connecting"] { color: var(--warn); }
 .stream[data-state="closed"] { color: var(--alert); }
-.side h2, .section-head h2, .hoist h2 {
+.side h2, .section-head h2, .servers h2 {
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.1em;
@@ -206,44 +197,39 @@ label { display: inline-flex; align-items: center; gap: 6px; }
   border-top: 2px solid var(--rule);
   border-bottom: 1px solid var(--line);
 }
-.swatch { display: inline-block; width: 14px; height: 9px; border: 1px solid var(--flag-edge); }
+.swatch { display: inline-block; width: 14px; height: 9px; border: 1px solid var(--swatch-edge); }
 .swatch[data-kind="vitals"] { background: var(--signal-red); }
 .swatch[data-kind="gatherables"] { background: var(--signal-green); }
 .swatch[data-kind="landmarks"] { background: var(--signal-yellow); }
 
-/* Hoist: one signal flag per sim and per metrics page ----------------------------------------- */
-.hoist { display: flex; gap: 36px; padding: 6px var(--gutter) 16px; overflow-x: auto; }
-.hoist h2 { color: var(--mute); margin-bottom: 8px; }
-.hoist-group .flags { display: flex; align-items: flex-end; }
-.mast { width: 4px; align-self: stretch; background: var(--rule); margin-right: 14px; }
-.flag-item { width: 138px; display: flex; flex-direction: column; gap: 2px; flex: none; }
-.flag {
-  width: 112px;
-  height: 66px;
-  margin-bottom: 6px;
-  position: relative;
-  border: 1px solid var(--flag-edge);
+/* Server status: a state bar, the name, the state word and a detail line per server ---------- */
+.servers { display: flex; flex-wrap: wrap; gap: 12px 40px; padding: 6px var(--gutter) 16px; }
+.servers h2 { color: var(--mute); margin-bottom: 8px; }
+.server-row { display: flex; flex-wrap: wrap; gap: 12px 20px; }
+.server { width: 168px; display: flex; flex-direction: column; gap: 2px; padding-top: 10px; position: relative; }
+.server::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 3px;
+  background: var(--state-ready);
+  transform-origin: left;
 }
-.flag[data-state="ready"] { background: var(--flag-blue); }
-.flag[data-state="ready"]::after { content: ""; position: absolute; inset: 20px 34px; background: var(--signal-white); }
-.flag[data-state="strained"] { background: linear-gradient(90deg, var(--signal-yellow) 50%, var(--signal-ink) 50%); }
-.flag[data-state="silent"] {
-  background: conic-gradient(var(--signal-red) 0 90deg, var(--signal-white) 0 180deg,
-    var(--signal-red) 0 270deg, var(--signal-white) 0);
-}
-.flag-item b { font: 700 15px var(--font-sign); text-decoration: underline 2px transparent; text-underline-offset: 4px; }
-.flag-item.marked b { text-decoration-color: var(--signal-yellow); }
-.flag-item .reason { font: 600 12px var(--font-sign); letter-spacing: 0.08em; text-transform: uppercase; color: var(--mute); }
-.flag-item[data-state="strained"] .reason { color: var(--warn); }
-.flag-item[data-state="silent"] .reason { color: var(--alert); }
-.flag-item small { color: var(--mute); font-variant-numeric: tabular-nums; }
-.flag-item.raise .flag { animation: raise 480ms var(--ease-out); }
-@keyframes raise {
-  from { transform: translateY(10px); clip-path: inset(100% 0 0 0); }
-  to { transform: none; clip-path: inset(0); }
+.server[data-state="strained"]::before { background: var(--warn); }
+.server[data-state="silent"]::before { background: var(--alert); }
+.server b { font: 700 15px var(--font-sign); text-decoration: underline 2px transparent; text-underline-offset: 4px; overflow-wrap: anywhere; }
+.server.marked b { text-decoration-color: var(--signal-yellow); }
+.server .state { font: 600 12px var(--font-sign); letter-spacing: 0.08em; text-transform: uppercase; color: var(--state-ready); }
+.server[data-state="strained"] .state { color: var(--warn); }
+.server[data-state="silent"] .state { color: var(--alert); }
+.server small { color: var(--mute); font-variant-numeric: tabular-nums; }
+.server.changed::before { animation: grow 480ms var(--ease-out); }
+@keyframes grow {
+  from { transform: scaleX(0); }
+  to { transform: none; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .flag-item.raise .flag { animation: none; }
+  .server.changed::before { animation: none; }
 }
 
 /* Facts: a label under a figure ---------------------------------------------------------------- */
@@ -396,7 +382,7 @@ label { display: inline-flex; align-items: center; gap: 6px; }
   :root { --gutter: 16px; }
   body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 1fr; }
   .rail { position: static; height: auto; flex-direction: row; justify-content: flex-start; gap: 18px; padding: 10px var(--gutter); }
-  .rail a:not(.flag-mark)[aria-current="page"]::before { margin: 0 0 4px; }
+  .rail a[aria-current="page"]::before { margin: 0 0 4px; }
   .rail .theme { margin: 0 0 0 auto; }
   .deck { grid-template-columns: minmax(0, 1fr); flex: none; }
   .deck .chart { height: 420px; }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The data colours of the map (the colours of the signal flags and a few more), shared by every
-// page. style.css holds the values (--signal-*); they are the same in both themes.
+// The data colours of the map: strong signal colours, each easy to tell from the others, shared
+// by every page. style.css holds the values (--signal-*); they are the same in both themes.
 
 const style = getComputedStyle(document.documentElement);
 const signal = (name) => style.getPropertyValue(`--signal-${name}`).trim();

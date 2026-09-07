@@ -27,7 +27,7 @@ pub fn asset(name: &str) -> Option<Asset> {
         "live.html" => (HTML, include_str!("../web/live.html")),
         "live.js" => (JS, include_str!("../web/live.js")),
         "tiles.js" => (JS, include_str!("../web/tiles.js")),
-        "hoist.js" => (JS, include_str!("../web/hoist.js")),
+        "status.js" => (JS, include_str!("../web/status.js")),
         "palette.js" => (JS, include_str!("../web/palette.js")),
         "theme.js" => (JS, include_str!("../web/theme.js")),
         "view.js" => (JS, include_str!("../web/view.js")),
@@ -55,7 +55,7 @@ mod tests {
         for script in [
             "live.js",
             "tiles.js",
-            "hoist.js",
+            "status.js",
             "palette.js",
             "theme.js",
             "map.js",

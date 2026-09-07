@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The live panel: the state stream of blighted-admin (flags, figures, map, players, events) and
-// the bot batch buttons.
+// The live panel: the state stream of blighted-admin (server status, figures, map, players,
+// events) and the bot batch buttons.
 
-import { FLAG_GROUPS, flagText, isMarked, nextHoist } from './hoist.js';
 import { WorldMap } from './map.js';
 import { SERIES, SIGNAL } from './palette.js';
+import { STATUS_GROUPS, isMarked, nextStatuses, statusText } from './status.js';
 import { sortRows } from './tables.js';
 import { TILE_KINDS, TRAIL_POINTS, factElements, formatTile, trailPush } from './tiles.js';
 
@@ -33,14 +33,14 @@ const TRAIL_ALPHA_HEX = '99';
 const TRAIL_COLOUR = `${PLAYER_COLOUR}${TRAIL_ALPHA_HEX}`;
 const SIM_COLOURS = SERIES;
 const BAD_FACT = 'bad';
-const MARKED_FLAG = 'marked';
-const RAISED_FLAG = 'raise';
+const MARKED_STATUS = 'marked';
+const CHANGED_STATUS = 'changed';
 const PLAYER_KEY = 'player-';
 const MOB_KEY = 'mob-';
 
 const status = document.getElementById('status');
 const socketBox = document.getElementById('socket');
-const hoistBox = document.getElementById('hoist');
+const serversBox = document.getElementById('servers');
 const tilesBox = document.getElementById('tiles');
 const moreTilesBox = document.getElementById('tiles-more');
 const playersCount = document.getElementById('players-count');
@@ -56,10 +56,10 @@ const map = new WorldMap(document.getElementById('map'), info);
 let source = null;
 let socket = SOCKET_CONNECTING;
 let view = null;
-/** The flags by key (hoist.js), or null before the first state. */
-let hoist = null;
-/** The drawn flag elements by key: kept, so a flag only rises when its state changes. */
-const flagElements = new Map();
+/** The server statuses by key (status.js), or null before the first state. */
+let statuses = null;
+/** The drawn status elements by key: kept, so the bar only moves when its state changes. */
+const statusElements = new Map();
 let trails = new Map();
 let selectedKey = null;
 /** The batch list as last drawn: it is drawn again only when it changes, so a click lands. */
@@ -138,71 +138,65 @@ function showSocket() {
   socketBox.textContent = socket === SOCKET_LIVE ? 'stream live' : `stream ${socket}`;
 }
 
-function flagElement(key) {
-  let item = flagElements.get(key);
+function statusElement(key) {
+  let item = statusElements.get(key);
   if (!item) {
     item = document.createElement('div');
-    item.className = 'flag-item';
-    const flag = document.createElement('div');
-    flag.className = 'flag';
-    flag.setAttribute('aria-hidden', 'true');
-    const reason = document.createElement('span');
-    reason.className = 'reason';
-    item.append(flag, document.createElement('b'), reason, document.createElement('small'));
-    item.addEventListener('animationend', () => item.classList.remove(RAISED_FLAG));
-    flagElements.set(key, item);
+    item.className = 'server';
+    const state = document.createElement('span');
+    state.className = 'state';
+    item.append(document.createElement('b'), state, document.createElement('small'));
+    item.addEventListener('animationend', () => item.classList.remove(CHANGED_STATUS));
+    statusElements.set(key, item);
   }
   return item;
 }
 
 function groupElement(title, items) {
   const group = document.createElement('div');
-  group.className = 'hoist-group';
+  group.className = 'server-group';
   const head = document.createElement('h2');
   head.textContent = title;
-  const flags = document.createElement('div');
-  flags.className = 'flags';
-  const mast = document.createElement('div');
-  mast.className = 'mast';
-  flags.append(mast, ...items);
-  group.append(head, flags);
+  const row = document.createElement('div');
+  row.className = 'server-row';
+  row.append(...items);
+  group.append(head, row);
   return group;
 }
 
-function showHoist(nowMs) {
-  if (hoist === null || hoist.size === 0) {
+function showServers(nowMs) {
+  if (statuses === null || statuses.size === 0) {
     const empty = document.createElement('p');
     empty.className = 'muted';
-    empty.textContent = hoist === null ? 'Waiting for the first state.' : 'No sim heartbeat and no metrics page yet.';
-    hoistBox.replaceChildren(empty);
+    empty.textContent = statuses === null ? 'Waiting for the first state.' : 'No sim heartbeat and no metrics page yet.';
+    serversBox.replaceChildren(empty);
     return;
   }
-  const groups = { [FLAG_GROUPS.SIMS]: [], [FLAG_GROUPS.PAGES]: [] };
-  for (const [key, flag] of hoist) {
-    const item = flagElement(key);
-    const { reason, detail } = flagText(flag, nowMs);
-    const [banner, name, reasonBox, detailBox] = item.children;
-    if (item.dataset.state !== flag.state && item.dataset.state !== undefined) {
-      item.classList.remove(RAISED_FLAG);
-      // Reading the layout restarts the rise.
+  const groups = { [STATUS_GROUPS.SIMS]: [], [STATUS_GROUPS.PAGES]: [] };
+  for (const [key, server] of statuses) {
+    const item = statusElement(key);
+    const { reason, detail } = statusText(server, nowMs);
+    const [name, stateBox, detailBox] = item.children;
+    if (item.dataset.state !== server.state && item.dataset.state !== undefined) {
+      item.classList.remove(CHANGED_STATUS);
+      // Reading the layout restarts the bar animation.
       void item.offsetWidth;
-      item.classList.add(RAISED_FLAG);
+      item.classList.add(CHANGED_STATUS);
     }
-    item.dataset.state = flag.state;
-    banner.dataset.state = flag.state;
-    name.textContent = flag.name;
-    reasonBox.textContent = reason;
+    item.dataset.state = server.state;
+    name.textContent = server.name;
+    stateBox.textContent = reason;
     detailBox.textContent = detail;
-    item.classList.toggle(MARKED_FLAG, isMarked(flag, nowMs));
-    groups[flag.group].push(item);
+    item.classList.toggle(MARKED_STATUS, isMarked(server, nowMs));
+    groups[server.group].push(item);
   }
-  for (const key of flagElements.keys()) {
-    if (!hoist.has(key)) {
-      flagElements.delete(key);
+  for (const key of statusElements.keys()) {
+    if (!statuses.has(key)) {
+      statusElements.delete(key);
     }
   }
-  hoistBox.replaceChildren(
-    ...[['Sims', groups[FLAG_GROUPS.SIMS]], ['Metrics pages', groups[FLAG_GROUPS.PAGES]]]
+  serversBox.replaceChildren(
+    ...[['Sims', groups[STATUS_GROUPS.SIMS]], ['Metrics pages', groups[STATUS_GROUPS.PAGES]]]
       .filter(([, items]) => items.length > 0)
       .map(([title, items]) => groupElement(title, items)),
   );
@@ -311,8 +305,8 @@ function showEvents() {
 
 function showAll() {
   const nowMs = Date.now();
-  hoist = nextHoist(hoist, view, nowMs);
-  showHoist(nowMs);
+  statuses = nextStatuses(statuses, view, nowMs);
+  showServers(nowMs);
   showFigures();
   showMap();
   showSelection();
@@ -422,7 +416,7 @@ for (const header of document.querySelectorAll('th.sortable')) {
   });
 }
 
-showHoist(Date.now());
+showServers(Date.now());
 showFigures();
 showEvents();
 showPlayers();
