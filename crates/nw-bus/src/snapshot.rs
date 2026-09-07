@@ -136,7 +136,11 @@ mod tests {
         let mobs = (0..20_000).map(mob).collect();
         let parts = snapshot_parts(sim(), TIME_MS, players, mobs, COUNTS);
         assert_eq!(parts.len(), 3);
-        assert!(parts.iter().all(|part| part.parts == 3 && part.time_ms == TIME_MS));
+        assert!(
+            parts
+                .iter()
+                .all(|part| part.parts == 3 && part.time_ms == TIME_MS)
+        );
         assert_eq!(
             parts.iter().map(|part| part.part).collect::<Vec<_>>(),
             vec![0, 1, 2]

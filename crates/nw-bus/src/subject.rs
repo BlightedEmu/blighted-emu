@@ -122,9 +122,6 @@ mod tests {
             sim_snapshot(world, &sim),
             format!("{prefix}.sim.sim-1.snapshot")
         );
-        assert_eq!(
-            all_sim_snapshots(world),
-            format!("{prefix}.sim.*.snapshot")
-        );
+        assert_eq!(all_sim_snapshots(world), format!("{prefix}.sim.*.snapshot"));
     }
 }
