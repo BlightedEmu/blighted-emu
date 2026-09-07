@@ -17,6 +17,12 @@ check:
 test-scripts:
     scripts/target-size.test.sh
     scripts/no-game-data.test.sh
+    scripts/live-stack.test.sh
+
+# Start a local test world (edge-http on 8443, director, one sim, gateway) and the live panel;
+# Ctrl-C stops all. Run `cargo build --release` and set NW_GAME_DIR first.
+live:
+    scripts/live-stack.sh
 
 # Run the tests of the admin page code (Node built-in test runner, no package).
 test-web:
