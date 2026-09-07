@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Starts a local test world for the live panel: edge-http (HTTPS on port 8443), world-director,
 # 1 to 8 sims, rep-gateway, and then blighted-admin in the foreground. Ctrl-C stops all of them.
-# Usage: live-stack.sh [sims]   (default 5 sims of 2,000 players each, so 10,000 players fit;
+# Usage: live-stack.sh [sims]   (default 4 sims of up to 4,000 players each, so 16,000 fit;
 # run `cargo build --release` first; NW_GAME_DIR names the game install)
 # It needs the git-ignored local files below. The servers get the secrets of the env file;
 # blighted-admin does not (its bot batches read the env file themselves). Logs go to LOG_DIR.
@@ -11,7 +11,9 @@ set -euo pipefail
 
 readonly EXIT_USAGE=2
 readonly EXIT_MISSING=3
-readonly DEFAULT_SIMS=5
+# The director splits the map into strips of equal width, west to east. With 5 or more sims the
+# westmost strip (x below 2,048 m) is sea with no start point, so that sim stays empty.
+readonly DEFAULT_SIMS=4
 readonly ROOT="${LIVE_STACK_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 readonly BIN="target/release"
 readonly ENV_FILE="local-data/m3-test.env"
