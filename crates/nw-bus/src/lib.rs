@@ -8,6 +8,7 @@ pub mod client;
 pub mod id;
 pub mod message;
 pub mod publisher;
+pub mod snapshot;
 pub mod subject;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
@@ -21,3 +22,6 @@ pub use message::{
     ResumeOf, SimHeartbeat, SimInput, SimSlot, decode, encode, heartbeat_silence, split_batches,
 };
 pub use publisher::Publisher;
+pub use snapshot::{
+    MOB_STATES, SNAPSHOT_PART_ENTITIES, SimSnapshot, SnapMob, SnapPlayer, snapshot_parts,
+};

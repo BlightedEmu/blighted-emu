@@ -271,7 +271,22 @@ pub struct SimConfig {
     /// Mobs and combat.
     #[serde(default)]
     pub combat: CombatConfig,
+    /// The admin tool.
+    #[serde(default)]
+    pub admin: AdminSection,
 }
+
+/// `[admin]` (admin tools spec section 5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdminSection {
+    /// Time between two admin snapshots on the bus; 0 is off, and then the sim does no snapshot
+    /// work.
+    pub snapshot_interval_ms: u64,
+}
+
+/// Shortest snapshot interval that is not off.
+pub const MIN_SNAPSHOT_INTERVAL_MS: u64 = 100;
 
 /// A value of the configuration that is not allowed.
 #[derive(Debug, thiserror::Error)]
@@ -338,6 +353,13 @@ impl SimConfig {
             return invalid(
                 "max_visible_players",
                 "must leave room for the player itself in one bundle (at most 47)",
+            );
+        }
+        let snapshot = self.admin.snapshot_interval_ms;
+        if snapshot != 0 && snapshot < MIN_SNAPSHOT_INTERVAL_MS {
+            return invalid(
+                "admin.snapshot_interval_ms",
+                "must be 0 (off) or at least 100",
             );
         }
         if self.ghost_ttl_ms < TICK_MS {
@@ -486,6 +508,20 @@ pub(crate) mod tests {
         assert_eq!(config.level, "newworld_vitaeeterna");
         assert_eq!(config.max_visible_players, ONE_BUNDLE_OF_OTHERS);
         assert!(config.max_height_above_ground_m > LARGEST_CAPTURED_FALL_M);
+    }
+
+    #[test]
+    fn the_committed_config_has_no_snapshot() {
+        assert_eq!(committed().admin.snapshot_interval_ms, 0);
+    }
+
+    #[test]
+    fn a_snapshot_interval_below_100_ms_is_refused() {
+        for (interval, ok) in [(0, true), (1, false), (99, false), (100, true)] {
+            let mut config = committed();
+            config.admin.snapshot_interval_ms = interval;
+            assert_eq!(config.validate().is_ok(), ok, "{interval} ms");
+        }
     }
 
     #[test]

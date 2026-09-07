@@ -22,7 +22,7 @@ use nw_world::world_file::world_file_path;
 use crate::config::{SimConfig, SimConfigError, load_sim_config};
 use crate::server::{
     LATENCY_BUCKETS_SECONDS, LoopSettings, METRIC_HANDOFF_SECONDS, METRIC_MOB_TICK_SECONDS,
-    METRIC_TICK_SECONDS, ServeError, serve as serve_loop,
+    METRIC_SNAPSHOT_SECONDS, METRIC_TICK_SECONDS, ServeError, serve as serve_loop,
 };
 
 /// Failure while starting or running `sim`.
@@ -129,6 +129,12 @@ async fn serve_async(
                 &LATENCY_BUCKETS_SECONDS,
             )
         })
+        .and_then(|builder| {
+            builder.set_buckets_for_metric(
+                Matcher::Full(METRIC_SNAPSHOT_SECONDS.to_owned()),
+                &LATENCY_BUCKETS_SECONDS,
+            )
+        })
         .and_then(PrometheusBuilder::install)
         .map_err(|error| RunError::Metrics(error.to_string()))?;
     tracing::info!(sim = %config.sim_id, world = %config.world_id, level = %config.level, "serving");
@@ -143,6 +149,8 @@ async fn serve_async(
         heartbeat_interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
         heartbeat_misses: config.heartbeat_misses,
         combat: config.combat_settings(combat, ground.vitals.clone().into()),
+        snapshot_interval: (config.admin.snapshot_interval_ms != 0)
+            .then(|| std::time::Duration::from_millis(config.admin.snapshot_interval_ms)),
     };
     let shutdown = async {
         // A failed signal handler means sim runs until killed.

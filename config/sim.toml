@@ -87,3 +87,8 @@ min_respawn_ms = 2000
 seed = 1
 # The u32 of a mob spawn card AssetId (Azoth catalog field note: always 2).
 asset_sub_id = 2
+
+# The admin tool's live panel (admin tools spec, section 5). The
+# snapshot of players and awake mobs on the bus is off at 0; at least 100 ms when on.
+[admin]
+snapshot_interval_ms = 0

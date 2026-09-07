@@ -65,6 +65,16 @@ pub fn all_sim_heartbeats(world: Uuid) -> String {
     format!("nw.{world}.sim.*.heartbeat")
 }
 
+/// Sim to the admin tool: the admin snapshot, at the sim's set interval.
+pub fn sim_snapshot(world: Uuid, sim: &BusId) -> String {
+    format!("nw.{world}.sim.{sim}.snapshot")
+}
+
+/// Every sim snapshot of a world (a NATS wildcard), for the admin tool.
+pub fn all_sim_snapshots(world: Uuid) -> String {
+    format!("nw.{world}.sim.*.snapshot")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,6 +117,14 @@ mod tests {
         assert_eq!(
             all_sim_heartbeats(world),
             format!("{prefix}.sim.*.heartbeat")
+        );
+        assert_eq!(
+            sim_snapshot(world, &sim),
+            format!("{prefix}.sim.sim-1.snapshot")
+        );
+        assert_eq!(
+            all_sim_snapshots(world),
+            format!("{prefix}.sim.*.snapshot")
         );
     }
 }

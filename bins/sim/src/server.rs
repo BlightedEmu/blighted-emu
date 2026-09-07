@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use nw_bus::{
     Admit, AdmitReply, Bus, BusError, BusId, CellTable, ConnectionRef, GatewayOutput, Ghosts,
     HandoffMessage, HandoffReply, Heartbeat, Hit, Incoming, InputBatch, OutputBatch, Point,
-    Publisher, SimHeartbeat, SimInput, SimSlot, split_batches, subject,
+    Publisher, SimHeartbeat, SimInput, SimSlot, SimSnapshot, snapshot_parts, split_batches,
+    subject,
 };
 use nw_common::time::unix_ms;
 use nw_db::{PgPool, SaveOutcome, SavedPosition, save_character_position};
@@ -131,6 +132,8 @@ pub const METRIC_MOBS_UNSPAWNED: &str = "sim_mobs_unspawned_total";
 pub const METRIC_MOB_BRAIN_RUNS: &str = "sim_mob_brain_runs_total";
 /// Metric: player scans for mobs to wake.
 pub const METRIC_MOB_WAKE_SCANS: &str = "sim_mob_wake_scans_total";
+/// Metric: time to build and queue one admin snapshot.
+pub const METRIC_SNAPSHOT_SECONDS: &str = "sim_snapshot_seconds";
 /// Metric: members put in bundles: each player's own member and every other entity.
 pub const METRIC_BUNDLE_MEMBERS: &str = "sim_bundle_members_total";
 /// Metric: time of the mob part of a tick.
@@ -176,6 +179,8 @@ pub struct LoopSettings {
     pub heartbeat_misses: u32,
     /// Mobs and combat.
     pub combat: CombatSettings,
+    /// Time between two admin snapshots on the bus; `None` is off.
+    pub snapshot_interval: Option<Duration>,
 }
 
 /// The loop's failure.
@@ -244,6 +249,7 @@ struct Loop {
     hits: Publisher<Hit>,
     cancels: Publisher<HandoffMessage>,
     beats: Publisher<SimHeartbeat>,
+    snapshots: Publisher<SimSnapshot>,
     db: PgPool,
     world: SimWorld,
     gateways: GatewayTracker,
@@ -295,6 +301,7 @@ pub async fn serve(
         hits: Publisher::start(bus.clone(), SIM_QUEUE),
         cancels: Publisher::start(bus.clone(), SIM_QUEUE),
         beats: Publisher::start(bus.clone(), HEARTBEAT_QUEUE),
+        snapshots: Publisher::start(bus.clone(), SIM_QUEUE),
         settings,
         bus,
         db,
@@ -308,6 +315,7 @@ pub async fn serve(
     let mut poll = tokio::time::interval(POLL);
     let mut save_timer = tokio::time::interval(state.settings.save_interval);
     let mut beat_timer = tokio::time::interval(state.settings.heartbeat_interval);
+    let mut snapshot_timer = state.settings.snapshot_interval.map(tokio::time::interval);
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
@@ -345,6 +353,7 @@ pub async fn serve(
             _ = poll.tick() => state.tick(&mut clock),
             _ = save_timer.tick() => state.save_all(),
             _ = beat_timer.tick() => state.heartbeat(),
+            () = next_snapshot(snapshot_timer.as_mut()) => state.snapshot(),
         }
     }
     state.finish().await;
@@ -789,6 +798,26 @@ impl Loop {
         );
     }
 
+    /// Publishes the admin snapshot of this sim, in parts (admin tools spec section 5).
+    fn snapshot(&mut self) {
+        let started = Instant::now();
+        let (players, mobs, counts) = self.world.snapshot();
+        let subject = subject::sim_snapshot(self.settings.world_id, &self.settings.sim_id);
+        let parts = snapshot_parts(
+            self.settings.sim_id.clone(),
+            unix_ms(),
+            players,
+            mobs,
+            counts,
+        );
+        for part in parts {
+            if !self.snapshots.send(subject.clone(), part) {
+                metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
+            }
+        }
+        metrics::histogram!(METRIC_SNAPSHOT_SECONDS).record(started.elapsed().as_secs_f64());
+    }
+
     fn heartbeat(&mut self) {
         let beat = SimHeartbeat {
             id: self.settings.sim_id.clone(),
@@ -940,6 +969,16 @@ impl Loop {
 }
 
 /// Milliseconds since 2000-01-01. The unit of the retail `TimeSynchMsg` is Unknown.
+/// The next tick of the snapshot timer; never, when snapshots are off.
+async fn next_snapshot(timer: Option<&mut tokio::time::Interval>) {
+    match timer {
+        Some(timer) => {
+            timer.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
 /// Counts a mob that `outcome` killed; a killed player is counted with its departure.
 fn count_mob_death(outcome: &AttackOutcome) {
     if let AttackOutcome::Killed { target } = outcome
@@ -1067,6 +1106,7 @@ mod tests {
             heartbeat_interval: HEARTBEAT,
             heartbeat_misses: MISSES,
             combat: test_combat(),
+            snapshot_interval: None,
         }
     }
 
@@ -1429,6 +1469,41 @@ mod tests {
                 _ => None,
             })
             .await
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sim_with_snapshots_publishes_them() {
+        const SNAPSHOT: Duration = Duration::from_millis(100);
+        with_test_schema(async |db| {
+            WORLD_MIGRATOR.run(db).await.expect("migrate");
+            let bus = test_bus().await;
+            let world_id = Uuid::new_v4();
+            let mut snapshots = bus
+                .subscribe::<SimSnapshot>(subject::all_sim_snapshots(world_id))
+                .await
+                .expect("subscribe");
+            bus.flush().await.expect("flush");
+            let sim = Running::start(
+                &bus,
+                LoopSettings {
+                    snapshot_interval: Some(SNAPSHOT),
+                    ..settings(world_id, "sim")
+                },
+                db,
+            )
+            .await;
+            let first = tokio::time::timeout(WAIT, snapshots.next())
+                .await
+                .expect("a snapshot in time")
+                .expect("open")
+                .expect("decode")
+                .message;
+            assert_eq!(&first.sim, sim.id());
+            assert_eq!((first.part, first.parts), (0, 1));
+            assert!(first.mob_counts.is_some());
+            sim.stop().await;
+        })
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -22,7 +22,8 @@ use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use nw_bus::{
-    Admit, BusId, CellTable, ConnectionRef, Ghost, HandoffOffer, MobGhost, Point, SimSlot,
+    Admit, BusId, CellTable, ConnectionRef, Ghost, HandoffOffer, MOB_STATES, MobGhost, Point,
+    SimSlot, SnapMob, SnapPlayer,
 };
 use nw_messages::{BundleMember, MessageError, ServerMessage, TimeSynchMsg, WorldPosition};
 use nw_sim_core::{
@@ -571,6 +572,28 @@ impl SimWorld {
                 .find(|ghost| ghost.entity == entity)
                 .map(|ghost| (owner, *ghost))
         })
+    }
+
+    /// The admin snapshot: every player of this sim, every awake mob, and mobs by state (admin
+    /// tools spec section 5).
+    pub fn snapshot(&mut self) -> (Vec<SnapPlayer>, Vec<SnapMob>, [u32; MOB_STATES]) {
+        let mut query = self.world.query::<(&Player, &Body, &Vitals)>();
+        let players = query
+            .iter(&self.world)
+            .map(|(player, body, vitals)| {
+                let at = body.motion.position();
+                SnapPlayer {
+                    entity: player.number,
+                    x: at.x,
+                    y: at.y,
+                    z: at.z,
+                    dead: vitals.health.is_dead(),
+                    frozen: player.frozen,
+                }
+            })
+            .collect();
+        let (mobs, counts) = self.mobs.snapshot();
+        (players, mobs, counts)
     }
 
     /// Every awake mob of this sim and every mob ghost: entity number, position and state. An
@@ -1271,6 +1294,36 @@ mod tests {
             classes_of(&tick(&mut world, NOW + 33).messages, &connection(1), mob),
             [POSITION_IN_THE_WORLD_TYPE_INDEX]
         );
+    }
+
+    #[test]
+    fn the_world_snapshot_has_players_and_awake_mobs() {
+        const FAR_M: f32 = 500.0;
+        let x = CELL_M / 2.0;
+        let mut world = world_with_spawns(vec![test_spawn(x), test_spawn(x + FAR_M)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, x + 5.0);
+        tick(&mut world, NOW);
+        let (players, mobs, counts) = world.snapshot();
+        assert_eq!(players.len(), 1);
+        assert_eq!((players[0].entity, players[0].dead), (1, false));
+        assert_eq!(
+            mobs.iter().map(|mob| mob.entity).collect::<Vec<_>>(),
+            vec![crate::mobs::mob_entity(0)],
+            "only the awake mob"
+        );
+        assert_eq!(counts[0], 1, "the far mob sleeps and is only counted");
+        assert_eq!(counts.iter().sum::<u32>(), 2);
+    }
+
+    #[test]
+    fn a_dead_player_is_marked() {
+        const LETHAL: u32 = 100_000;
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, CELL_M / 2.0);
+        world.apply_hit(1, crate::mobs::mob_entity(0), LETHAL, 0, NOW);
+        assert!(world.snapshot().0[0].dead);
     }
 
     #[test]

@@ -13,7 +13,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use nw_bus::{MOB_ENTITY_BASE, MobGhost};
+use nw_bus::{MOB_ENTITY_BASE, MOB_STATES, MobGhost, SnapMob};
 use nw_content::combat::CombatData;
 use nw_sim_core::{
     Brain, BrainAction, BrainSettings, Dice, Ground, Health, MobAttack, MobState, Position, Seen,
@@ -304,6 +304,30 @@ impl Mobs {
         self.live.is_empty()
     }
 
+    /// The admin snapshot: every awake mob, and mobs by state (admin tools spec section 5).
+    pub fn snapshot(&self) -> (Vec<SnapMob>, [u32; MOB_STATES]) {
+        let mobs = self
+            .awake
+            .iter()
+            .filter_map(|index| {
+                let mob = self.live.get(index)?;
+                let at = mob.brain.position();
+                Some(SnapMob {
+                    entity: mob_entity(*index),
+                    x: at.x,
+                    y: at.y,
+                    state: state_index(mob.brain.state()),
+                    health: mob.health.current(),
+                    max_health: mob.health.max(),
+                })
+            })
+            .collect();
+        let counts = self
+            .counts()
+            .map(|(_, count)| u32::try_from(count).unwrap_or(u32::MAX));
+        (mobs, counts)
+    }
+
     /// Mobs by state.
     pub fn counts(&self) -> [(MobState, usize); MobState::ALL.len()] {
         MobState::ALL.map(|state| {
@@ -332,6 +356,15 @@ impl Mobs {
     pub const fn wake_scans(&self) -> u64 {
         self.wake_scans
     }
+}
+
+/// The position of `state` in [`MobState::ALL`].
+fn state_index(state: MobState) -> u8 {
+    MobState::ALL
+        .iter()
+        .position(|each| *each == state)
+        .and_then(|index| u8::try_from(index).ok())
+        .unwrap_or(u8::MAX)
 }
 
 #[cfg(test)]

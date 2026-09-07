@@ -229,7 +229,7 @@ For many players on one PC (M5 load spec): give the gateway one `workers` per co
 
 The bots register their accounts on the first run. `edge-http` counts every registration per IP address against `auth.login_fail_limit`, so raise it for that run, for example `NW_EDGE_AUTH__LOGIN_FAIL_LIMIT=5000`. The gateway counts new connections per IP address too: raise `limits.handshakes_per_ip_per_second` (for example `NW_GATEWAY_LIMITS__HANDSHAKES_PER_IP_PER_SECOND=200`).
 
-The director serves Prometheus metrics on `metrics_listen` (`director_*`), each `sim` on its own (`sim_*`, among them `sim_bundle_members_total`: the members put in bundles). Keep those addresses internal.
+The director serves Prometheus metrics on `metrics_listen` (`director_*`), each `sim` on its own (`sim_*`, among them `sim_bundle_members_total`: the members put in bundles). Keep those addresses internal. With `[admin] snapshot_interval_ms` above 0 (at least 100; 0 is off and the committed value), each `sim` publishes a snapshot of its players and awake mobs on `sim.<id>.snapshot` for the admin live panel, and times it in `sim_snapshot_seconds`.
 
 Known gaps:
 
