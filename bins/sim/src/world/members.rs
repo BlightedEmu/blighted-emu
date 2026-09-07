@@ -13,7 +13,7 @@ use nw_bus::MobGhost;
 use nw_messages::{
     AssetId, BundleMember, GDE_ID_LEN, GdeMetadataReplicatedState, MemberState, MessageError,
     PositionInTheWorldReplicatedState, ReplicatedStateBundle, ServerMessage, VitalsSlot0,
-    WorldPosition,
+    VitalsState, WorldPosition,
 };
 use nw_sim_core::Position;
 
@@ -95,14 +95,17 @@ pub(super) fn mob_members(card: &MobCard, first: bool, asset_sub_id: u32) -> Vec
         });
         members.push(BundleMember {
             u64_at_0: card.entity,
-            state: MemberState::Vitals(VitalsSlot0 {
-                health_amount: Some(amount_of(card.health)),
-                health_max: Some(amount_of(card.max_health)),
-                vitals_id: Some(card.vitals_id),
-                vitals_category_id: Some(card.category_id),
-                vitals_level: Some(card.level),
-                max_health: Some(u16::try_from(card.max_health).unwrap_or(u16::MAX)),
-                ..VitalsSlot0::default()
+            state: MemberState::Vitals(VitalsState {
+                slot_0: Some(VitalsSlot0 {
+                    health_amount: Some(amount_of(card.health)),
+                    health_max: Some(amount_of(card.max_health)),
+                    vitals_id: Some(card.vitals_id),
+                    vitals_category_id: Some(card.category_id),
+                    vitals_level: Some(card.level),
+                    max_health: Some(u16::try_from(card.max_health).unwrap_or(u16::MAX)),
+                    ..VitalsSlot0::default()
+                }),
+                slot_1: None,
             }),
         });
     }
@@ -172,7 +175,7 @@ mod tests {
     fn max_health_is_capped_at_u16() {
         let members = mob_members(&card(100_000), true, SUB_ID);
         let vitals = members.iter().find_map(|member| match &member.state {
-            MemberState::Vitals(vitals) => Some(*vitals),
+            MemberState::Vitals(vitals) => vitals.slot_0,
             _ => None,
         });
         assert_eq!(vitals.and_then(|vitals| vitals.max_health), Some(u16::MAX));
@@ -193,7 +196,11 @@ mod tests {
             ENTITY
         );
         assert!(members.iter().all(|member| member.u64_at_0 == ENTITY));
-        let MemberState::Vitals(vitals) = &members[1].state else {
+        let MemberState::Vitals(VitalsState {
+            slot_0: Some(vitals),
+            ..
+        }) = &members[1].state
+        else {
             panic!("then the vitals: {members:?}");
         };
         assert_eq!(
@@ -219,7 +226,11 @@ mod tests {
             ..card(500)
         };
         let members = mob_members(&wounded, true, SUB_ID);
-        let MemberState::Vitals(vitals) = &members[1].state else {
+        let MemberState::Vitals(VitalsState {
+            slot_0: Some(vitals),
+            ..
+        }) = &members[1].state
+        else {
             panic!("the vitals: {members:?}");
         };
         assert_eq!(

@@ -11,9 +11,13 @@ use std::ops::Range;
 use nw_reflect::{TypeId, decode_type_id, encode_type_id};
 
 use crate::alc::{ALC_TYPE_INDEX, AlcState};
+use crate::components::{
+    COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DELAYED_EVENT_TYPE_INDEX, DelayedEventState,
+    STAMINA_TYPE_INDEX, StaminaState,
+};
 use crate::gde::{GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
 use crate::position::{POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState};
-use crate::vitals::{VITALS_TYPE_INDEX, VitalsSlot0};
+use crate::vitals::{VITALS_TYPE_INDEX, VitalsState};
 use crate::wire::{MessageError, Reader, Writer};
 
 /// The state of one member, by class.
@@ -23,10 +27,16 @@ pub enum MemberState {
     Position(PositionInTheWorldReplicatedState),
     /// `MB::GdeMetadataReplicatedState`: the spawn card.
     GdeMetadata(GdeMetadataReplicatedState),
-    /// `MB::VitalsComponentReplicatedState`, slot 0.
-    Vitals(VitalsSlot0),
+    /// `MB::VitalsComponentReplicatedState`.
+    Vitals(VitalsState),
     /// `MB::ALCReplicatedState`: kept as bytes, with its position.
     Alc(AlcState),
+    /// `MB::StaminaComponentReplicatedState`.
+    Stamina(StaminaState),
+    /// `MB::CombatStatusComponentReplicatedState`.
+    CombatStatus(CombatStatusState),
+    /// `MB::DelayedEventComponentReplicatedState`.
+    DelayedEvent(DelayedEventState),
 }
 
 impl MemberState {
@@ -37,6 +47,9 @@ impl MemberState {
             Self::GdeMetadata(_) => GDE_METADATA_TYPE_INDEX,
             Self::Vitals(_) => VITALS_TYPE_INDEX,
             Self::Alc(_) => ALC_TYPE_INDEX,
+            Self::Stamina(_) => STAMINA_TYPE_INDEX,
+            Self::CombatStatus(_) => COMBAT_STATUS_TYPE_INDEX,
+            Self::DelayedEvent(_) => DELAYED_EVENT_TYPE_INDEX,
         }
     }
 
@@ -53,8 +66,15 @@ impl MemberState {
             TypeId::FileSlot(GDE_METADATA_TYPE_INDEX) => {
                 GdeMetadataReplicatedState::read(reader).map(Self::GdeMetadata)
             }
-            TypeId::FileSlot(VITALS_TYPE_INDEX) => VitalsSlot0::read(reader).map(Self::Vitals),
+            TypeId::FileSlot(VITALS_TYPE_INDEX) => VitalsState::read(reader).map(Self::Vitals),
             TypeId::FileSlot(ALC_TYPE_INDEX) => AlcState::read(reader).map(Self::Alc),
+            TypeId::FileSlot(STAMINA_TYPE_INDEX) => StaminaState::read(reader).map(Self::Stamina),
+            TypeId::FileSlot(COMBAT_STATUS_TYPE_INDEX) => {
+                CombatStatusState::read(reader).map(Self::CombatStatus)
+            }
+            TypeId::FileSlot(DELAYED_EVENT_TYPE_INDEX) => {
+                DelayedEventState::read(reader).map(Self::DelayedEvent)
+            }
             _ => Err(MessageError::UnknownMemberClass { class }),
         }
     }
@@ -66,11 +86,20 @@ impl MemberState {
                 state.write(writer);
                 Ok(())
             }
-            Self::Vitals(state) => {
+            Self::Vitals(state) => state.write(writer),
+            Self::Alc(state) => {
                 state.write(writer);
                 Ok(())
             }
-            Self::Alc(state) => {
+            Self::Stamina(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::CombatStatus(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::DelayedEvent(state) => {
                 state.write(writer);
                 Ok(())
             }
@@ -239,7 +268,7 @@ mod tests {
     use super::*;
     use crate::gde::{AssetId, GDE_ID_LEN, GdeMetadataReplicatedState};
     use crate::position::WorldPosition;
-    use crate::vitals::{VITALS_TYPE_INDEX, VitalsSlot0};
+    use crate::vitals::{VITALS_TYPE_INDEX, VitalsSlot0, VitalsState};
     use crate::wire::RAW_ID_LEN;
 
     const ENTITY: u64 = 300;
@@ -288,10 +317,13 @@ mod tests {
         };
         let vitals = BundleMember {
             u64_at_0: ENTITY,
-            state: MemberState::Vitals(VitalsSlot0 {
-                vitals_level: Some(5),
-                max_health: Some(1000),
-                ..VitalsSlot0::default()
+            state: MemberState::Vitals(VitalsState {
+                slot_0: Some(VitalsSlot0 {
+                    vitals_level: Some(5),
+                    max_health: Some(1000),
+                    ..VitalsSlot0::default()
+                }),
+                slot_1: None,
             }),
         };
         let mixed = BundlePayload {
@@ -305,7 +337,7 @@ mod tests {
     }
 
     #[test]
-    fn a_vitals_member_on_another_slot_stops_the_walk() {
+    fn a_vitals_member_on_a_slot_above_1_stops_the_walk() {
         let mut bytes = Writer::new();
         bytes.prefixed(LEADING).expect("leading").u8(2);
         let first = position_member(1.0).encode().expect("member");
@@ -314,7 +346,7 @@ mod tests {
         bytes.bytes(
             &nw_reflect::encode_type_id(&TypeId::FileSlot(VITALS_TYPE_INDEX)).expect("class"),
         );
-        bytes.u8(0b10).u8(0);
+        bytes.u8(0b100).u8(0);
         let payload = bytes.finish();
         let known = BundlePayload::decode_known(&payload).expect("known");
         assert_eq!(known.members.len(), 1);

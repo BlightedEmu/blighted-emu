@@ -475,7 +475,8 @@ mod tests {
         payload.bytes(
             &nw_reflect::encode_type_id(&TypeId::FileSlot(VITALS_TYPE_INDEX)).expect("class"),
         );
-        payload.u8(0b10).u8(0);
+        // Vitals has slots 0 and 1; slot 2 is not sized.
+        payload.u8(0b100).u8(0);
         let bundle = ReplicatedStateBundle {
             leading: None,
             byte_3: 0,

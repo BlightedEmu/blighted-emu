@@ -1,34 +1,28 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `MB::VitalsComponentReplicatedState` (type 15), slot 0, on the bundle path (vitals note,
-//! Round 3). The vitals constructor `FUN_14671e040` appends 14 children to slot 0, in this
-//! order: `HealthAmount`, `StaminaAmount` (big-endian `f32`), `vitalsData` (`FUN_1469515b0`: a
-//! byte, two big-endian `u64`, a byte), `healthChangeFlags` (a byte), `HealthMax` (`f32`),
-//! `HealthTickRate` (`u16`), `StaminaMax` (`f32`), `StaminaTickRate` (`u16`), `vitalsId`,
-//! `vitalsCategoryId`, `vitalsLevel` (`u32`), `invulnerability`, `displayImmuneWhenInvulnerable`
-//! (a byte each) and `maxHealth` (`u16`). That table ends 99.997 % of 2,396,697 captured bodies.
-//! A body that uses another slot is refused: slot 1 (mana and the afflictions) is not sized.
+//! `MB::VitalsComponentReplicatedState` (type 15) on the bundle path (vitals note, Rounds 3 and
+//! 4). The class has two slots; a body with both reads slot 0, then slot 1.
+//!
+//! The constructor `FUN_14671e040` appends 14 children to slot 0: `HealthAmount`,
+//! `StaminaAmount` (big-endian `f32`), `vitalsData` (`FUN_1469515b0`: a byte, two big-endian
+//! `u64`, a byte), `healthChangeFlags` (a byte), `HealthMax` (`f32`), `HealthTickRate` (`u16`),
+//! `StaminaMax` (`f32`), `StaminaTickRate` (`u16`), `vitalsId`, `vitalsCategoryId`, `vitalsLevel`
+//! (`u32`), `invulnerability`, `displayImmuneWhenInvulnerable` (a byte each) and `maxHealth`
+//! (`u16`). That table ends 99.997 % of 2,396,697 captured bodies. Slot 1 has `ManaAmount`
+//! (`f32`), the hot and cold affliction lists ([`crate::afflictions`]), `ManaMax` (`f32`) and
+//! `ManaTickRate` (`u16`); it ends every captured slot-1 body.
 
-use crate::slots::{read_slot_0, write_slot_0};
+use crate::afflictions::{AfflictionList, ColdLong, HotLong};
+use crate::slots::{children_mask, read_children, read_slot_byte, write_children};
 use crate::wire::{MessageError, Reader, Writer};
 
 /// Type index of the class.
 pub const VITALS_TYPE_INDEX: u64 = 15;
-const CHILDREN: u8 = 14;
+const SLOTS: u8 = 2;
+const SLOT_0_BIT: u8 = 0b01;
+const SLOT_1_BIT: u8 = 0b10;
+const SLOT_0_CHILDREN: u8 = 14;
+const SLOT_1_CHILDREN: u8 = 5;
 const FIELD: &str = "vitals";
-const CHILD_HEALTH: u16 = 1 << 0;
-const CHILD_STAMINA: u16 = 1 << 1;
-const CHILD_DATA: u16 = 1 << 2;
-const CHILD_FLAGS: u16 = 1 << 3;
-const CHILD_HEALTH_MAX: u16 = 1 << 4;
-const CHILD_HEALTH_TICK: u16 = 1 << 5;
-const CHILD_STAMINA_MAX: u16 = 1 << 6;
-const CHILD_STAMINA_TICK: u16 = 1 << 7;
-const CHILD_ID: u16 = 1 << 8;
-const CHILD_CATEGORY: u16 = 1 << 9;
-const CHILD_LEVEL: u16 = 1 << 10;
-const CHILD_INVULNERABILITY: u16 = 1 << 11;
-const CHILD_DISPLAY_IMMUNE: u16 = 1 << 12;
-const CHILD_MAX_HEALTH: u16 = 1 << 13;
 
 /// The `vitalsData` child (reader `FUN_1469515b0`): a byte, two big-endian `u64`, a byte. The
 /// meaning is Unknown.
@@ -42,6 +36,67 @@ pub struct VitalsData {
     pub b: u64,
     /// The last byte.
     pub tail: u8,
+}
+
+/// The vitals state: slot 0 and slot 1, each when sent.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VitalsState {
+    /// Slot 0: health, stamina and the ids.
+    pub slot_0: Option<VitalsSlot0>,
+    /// Slot 1: mana and the afflictions.
+    pub slot_1: Option<VitalsSlot1>,
+}
+
+impl VitalsState {
+    /// Reads the state from the bundle path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the body ends early, uses a slot above 1, or has a form
+    /// `write` cannot make.
+    pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let slots = read_slot_byte(reader, FIELD, SLOTS)?;
+        let slot_0 = (slots & SLOT_0_BIT != 0)
+            .then(|| {
+                let children = read_children(reader, FIELD, SLOT_0_CHILDREN)?;
+                VitalsSlot0::read(reader, children)
+            })
+            .transpose()?;
+        let slot_1 = (slots & SLOT_1_BIT != 0)
+            .then(|| {
+                let children = read_children(reader, FIELD, SLOT_1_CHILDREN)?;
+                VitalsSlot1::read(reader, children)
+            })
+            .transpose()?;
+        Ok(Self { slot_0, slot_1 })
+    }
+
+    /// Writes the state for the bundle path. A slot without a child is not sent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError::Prefix`] when an affliction count does not fit the prefix code.
+    pub fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
+        let slot_0 = self.slot_0.filter(|slot| slot.children() != 0);
+        let slot_1 = self.slot_1.as_ref().filter(|slot| slot.children() != 0);
+        let mut slots = 0;
+        if slot_0.is_some() {
+            slots |= SLOT_0_BIT;
+        }
+        if slot_1.is_some() {
+            slots |= SLOT_1_BIT;
+        }
+        writer.u8(slots);
+        if let Some(slot) = slot_0 {
+            write_children(writer, slot.children(), SLOT_0_CHILDREN);
+            slot.write(writer);
+        }
+        if let Some(slot) = slot_1 {
+            write_children(writer, slot.children(), SLOT_1_CHILDREN);
+            slot.write(writer)?;
+        }
+        Ok(())
+    }
 }
 
 /// Slot 0 of the vitals state; every child is optional.
@@ -78,60 +133,48 @@ pub struct VitalsSlot0 {
 }
 
 impl VitalsSlot0 {
-    /// Reads the state from the bundle path.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MessageError`] when the body ends early, uses a slot other than 0, or has a form
-    /// `write` cannot make.
-    pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
-        let Some(children) = read_slot_0(reader, FIELD, CHILDREN)? else {
-            return Ok(Self::default());
-        };
-        let has = |child| children & child != 0;
+    fn read(reader: &mut Reader<'_>, children: u16) -> Result<Self, MessageError> {
+        let has = |child: u16| children & 1 << child != 0;
         Ok(Self {
-            health_amount: has(CHILD_HEALTH).then(|| reader.f32()).transpose()?,
-            stamina_amount: has(CHILD_STAMINA).then(|| reader.f32()).transpose()?,
-            vitals_data: has(CHILD_DATA).then(|| read_data(reader)).transpose()?,
-            health_change_flags: has(CHILD_FLAGS).then(|| reader.u8()).transpose()?,
-            health_max: has(CHILD_HEALTH_MAX).then(|| reader.f32()).transpose()?,
-            health_tick_rate: has(CHILD_HEALTH_TICK).then(|| reader.u16()).transpose()?,
-            stamina_max: has(CHILD_STAMINA_MAX).then(|| reader.f32()).transpose()?,
-            stamina_tick_rate: has(CHILD_STAMINA_TICK).then(|| reader.u16()).transpose()?,
-            vitals_id: has(CHILD_ID).then(|| reader.u32()).transpose()?,
-            vitals_category_id: has(CHILD_CATEGORY).then(|| reader.u32()).transpose()?,
-            vitals_level: has(CHILD_LEVEL).then(|| reader.u32()).transpose()?,
-            invulnerability: has(CHILD_INVULNERABILITY)
-                .then(|| reader.u8())
-                .transpose()?,
-            display_immune: has(CHILD_DISPLAY_IMMUNE).then(|| reader.u8()).transpose()?,
-            max_health: has(CHILD_MAX_HEALTH).then(|| reader.u16()).transpose()?,
+            health_amount: has(0).then(|| reader.f32()).transpose()?,
+            stamina_amount: has(1).then(|| reader.f32()).transpose()?,
+            vitals_data: has(2).then(|| read_data(reader)).transpose()?,
+            health_change_flags: has(3).then(|| reader.u8()).transpose()?,
+            health_max: has(4).then(|| reader.f32()).transpose()?,
+            health_tick_rate: has(5).then(|| reader.u16()).transpose()?,
+            stamina_max: has(6).then(|| reader.f32()).transpose()?,
+            stamina_tick_rate: has(7).then(|| reader.u16()).transpose()?,
+            vitals_id: has(8).then(|| reader.u32()).transpose()?,
+            vitals_category_id: has(9).then(|| reader.u32()).transpose()?,
+            vitals_level: has(10).then(|| reader.u32()).transpose()?,
+            invulnerability: has(11).then(|| reader.u8()).transpose()?,
+            display_immune: has(12).then(|| reader.u8()).transpose()?,
+            max_health: has(13).then(|| reader.u16()).transpose()?,
         })
     }
 
-    /// Writes the state for the bundle path, children in their order.
-    pub fn write(&self, writer: &mut Writer) {
-        let flags = [
-            (self.health_amount.is_some(), CHILD_HEALTH),
-            (self.stamina_amount.is_some(), CHILD_STAMINA),
-            (self.vitals_data.is_some(), CHILD_DATA),
-            (self.health_change_flags.is_some(), CHILD_FLAGS),
-            (self.health_max.is_some(), CHILD_HEALTH_MAX),
-            (self.health_tick_rate.is_some(), CHILD_HEALTH_TICK),
-            (self.stamina_max.is_some(), CHILD_STAMINA_MAX),
-            (self.stamina_tick_rate.is_some(), CHILD_STAMINA_TICK),
-            (self.vitals_id.is_some(), CHILD_ID),
-            (self.vitals_category_id.is_some(), CHILD_CATEGORY),
-            (self.vitals_level.is_some(), CHILD_LEVEL),
-            (self.invulnerability.is_some(), CHILD_INVULNERABILITY),
-            (self.display_immune.is_some(), CHILD_DISPLAY_IMMUNE),
-            (self.max_health.is_some(), CHILD_MAX_HEALTH),
-        ];
-        let children = flags
-            .iter()
-            .filter(|(present, _)| *present)
-            .fold(0, |bits, (_, child)| bits | child);
-        write_slot_0(writer, Some(children), CHILDREN);
+    /// The child bitmap of the children that are sent.
+    pub fn children(&self) -> u16 {
+        children_mask(&[
+            self.health_amount.is_some(),
+            self.stamina_amount.is_some(),
+            self.vitals_data.is_some(),
+            self.health_change_flags.is_some(),
+            self.health_max.is_some(),
+            self.health_tick_rate.is_some(),
+            self.stamina_max.is_some(),
+            self.stamina_tick_rate.is_some(),
+            self.vitals_id.is_some(),
+            self.vitals_category_id.is_some(),
+            self.vitals_level.is_some(),
+            self.invulnerability.is_some(),
+            self.display_immune.is_some(),
+            self.max_health.is_some(),
+        ])
+    }
+
+    /// Writes the children that are sent, in their order.
+    fn write(&self, writer: &mut Writer) {
         for value in [self.health_amount, self.stamina_amount]
             .into_iter()
             .flatten()
@@ -173,6 +216,65 @@ impl VitalsSlot0 {
     }
 }
 
+/// Slot 1 of the vitals state; every child is optional.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct VitalsSlot1 {
+    /// `ManaAmount`.
+    pub mana_amount: Option<f32>,
+    /// `replicatedAfflictionsHotData`.
+    pub afflictions_hot: Option<AfflictionList<HotLong>>,
+    /// `replicatedAfflictionsColdData`.
+    pub afflictions_cold: Option<AfflictionList<ColdLong>>,
+    /// `ManaMax`.
+    pub mana_max: Option<f32>,
+    /// `ManaTickRate`.
+    pub mana_tick_rate: Option<u16>,
+}
+
+impl VitalsSlot1 {
+    fn read(reader: &mut Reader<'_>, children: u16) -> Result<Self, MessageError> {
+        let has = |child: u16| children & 1 << child != 0;
+        Ok(Self {
+            mana_amount: has(0).then(|| reader.f32()).transpose()?,
+            afflictions_hot: has(1).then(|| AfflictionList::read(reader)).transpose()?,
+            afflictions_cold: has(2).then(|| AfflictionList::read(reader)).transpose()?,
+            mana_max: has(3).then(|| reader.f32()).transpose()?,
+            mana_tick_rate: has(4).then(|| reader.u16()).transpose()?,
+        })
+    }
+
+    /// The child bitmap of the children that are sent.
+    pub fn children(&self) -> u16 {
+        children_mask(&[
+            self.mana_amount.is_some(),
+            self.afflictions_hot.is_some(),
+            self.afflictions_cold.is_some(),
+            self.mana_max.is_some(),
+            self.mana_tick_rate.is_some(),
+        ])
+    }
+
+    /// Writes the children that are sent, in their order.
+    fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
+        if let Some(mana) = self.mana_amount {
+            writer.f32(mana);
+        }
+        if let Some(list) = &self.afflictions_hot {
+            list.write(writer)?;
+        }
+        if let Some(list) = &self.afflictions_cold {
+            list.write(writer)?;
+        }
+        if let Some(mana_max) = self.mana_max {
+            writer.f32(mana_max);
+        }
+        if let Some(tick_rate) = self.mana_tick_rate {
+            writer.u16(tick_rate);
+        }
+        Ok(())
+    }
+}
+
 fn read_data(reader: &mut Reader<'_>) -> Result<VitalsData, MessageError> {
     Ok(VitalsData {
         head: reader.u8()?,
@@ -187,26 +289,28 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::afflictions::{Affliction, AfflictionId};
 
     const HEALTH: f32 = 700.5;
     const STAMINA: f32 = 100.0;
+    const MANA: f32 = 55.5;
     const TICK_RATE: u16 = 5;
 
-    fn round(state: &VitalsSlot0) -> VitalsSlot0 {
+    fn round(state: &VitalsState) -> VitalsState {
         let mut writer = Writer::new();
-        state.write(&mut writer);
-        let bytes = writer.finish();
-        let mut reader = Reader::new(&bytes);
-        let read = VitalsSlot0::read(&mut reader).expect("read");
-        reader.finish().expect("to the end");
-        read
+        state.write(&mut writer).expect("write");
+        read_all(&writer.finish())
     }
 
-    fn read_all(bytes: &[u8]) -> VitalsSlot0 {
+    fn read_all(bytes: &[u8]) -> VitalsState {
         let mut reader = Reader::new(bytes);
-        let state = VitalsSlot0::read(&mut reader).expect("read");
+        let state = VitalsState::read(&mut reader).expect("read");
         reader.finish().expect("to the end");
         state
+    }
+
+    fn slot_0(bytes: &[u8]) -> VitalsSlot0 {
+        read_all(bytes).slot_0.expect("slot 0")
     }
 
     /// A finite float: a NaN is not equal to itself.
@@ -221,30 +325,82 @@ mod tests {
         )
     }
 
+    fn slot_0_state() -> impl Strategy<Value = VitalsSlot0> {
+        (
+            (float(), float(), float(), float()),
+            data(),
+            proptest::option::of(any::<u8>()),
+            (
+                proptest::option::of(any::<u16>()),
+                proptest::option::of(any::<u16>()),
+            ),
+            (
+                proptest::option::of(any::<u32>()),
+                proptest::option::of(any::<u32>()),
+                proptest::option::of(any::<u32>()),
+            ),
+            (
+                proptest::option::of(any::<u8>()),
+                proptest::option::of(any::<u8>()),
+            ),
+            proptest::option::of(any::<u16>()),
+        )
+            .prop_map(
+                |(
+                    (health_amount, stamina_amount, health_max, stamina_max),
+                    vitals_data,
+                    health_change_flags,
+                    (health_tick_rate, stamina_tick_rate),
+                    (vitals_id, vitals_category_id, vitals_level),
+                    (invulnerability, display_immune),
+                    max_health,
+                )| VitalsSlot0 {
+                    health_amount,
+                    stamina_amount,
+                    vitals_data,
+                    health_change_flags,
+                    health_max,
+                    health_tick_rate,
+                    stamina_max,
+                    stamina_tick_rate,
+                    vitals_id,
+                    vitals_category_id,
+                    vitals_level,
+                    invulnerability,
+                    display_immune,
+                    max_health,
+                },
+            )
+    }
+
+    fn slot_1_state() -> impl Strategy<Value = VitalsSlot1> {
+        (float(), float(), proptest::option::of(any::<u16>())).prop_map(
+            |(mana_amount, mana_max, mana_tick_rate)| VitalsSlot1 {
+                mana_amount,
+                mana_max,
+                mana_tick_rate,
+                ..VitalsSlot1::default()
+            },
+        )
+    }
+
     proptest! {
         #[test]
-        fn vitals_slot_0_round_trips(
-            (health_amount, stamina_amount, health_max, stamina_max) in (float(), float(), float(), float()),
-            vitals_data in data(),
-            health_change_flags in proptest::option::of(any::<u8>()),
-            (health_tick_rate, stamina_tick_rate) in (proptest::option::of(any::<u16>()), proptest::option::of(any::<u16>())),
-            (vitals_id, vitals_category_id, vitals_level) in (proptest::option::of(any::<u32>()), proptest::option::of(any::<u32>()), proptest::option::of(any::<u32>())),
-            (invulnerability, display_immune) in (proptest::option::of(any::<u8>()), proptest::option::of(any::<u8>())),
-            max_health in proptest::option::of(any::<u16>()),
+        fn vitals_round_trip(
+            slot_0 in proptest::option::of(slot_0_state()),
+            slot_1 in proptest::option::of(slot_1_state()),
         ) {
-            let state = VitalsSlot0 {
-                health_amount, stamina_amount, vitals_data, health_change_flags, health_max,
-                health_tick_rate, stamina_max, stamina_tick_rate, vitals_id, vitals_category_id,
-                vitals_level, invulnerability, display_immune, max_health,
-            };
+            let nonempty_0 = slot_0.filter(|slot| slot.children() != 0);
+            let nonempty_1 = slot_1.filter(|slot| slot.children() != 0);
+            let state = VitalsState { slot_0: nonempty_0, slot_1: nonempty_1 };
             prop_assert_eq!(round(&state), state);
         }
     }
 
     #[test]
-    fn a_vitals_body_on_another_slot_is_refused() {
-        let mut reader = Reader::new(&[0b10, 0x01, 0]);
-        assert!(VitalsSlot0::read(&mut reader).is_err());
+    fn a_slot_above_1_is_refused() {
+        let mut reader = Reader::new(&[0b100, 0x01, 0]);
+        assert!(VitalsState::read(&mut reader).is_err());
     }
 
     #[test]
@@ -252,7 +408,7 @@ mod tests {
         let mut bytes = vec![0x01, 0b11];
         bytes.extend(HEALTH.to_be_bytes());
         bytes.extend(STAMINA.to_be_bytes());
-        let state = read_all(&bytes);
+        let state = slot_0(&bytes);
         assert_eq!(
             (state.health_amount, state.stamina_amount),
             (Some(HEALTH), Some(STAMINA))
@@ -265,7 +421,7 @@ mod tests {
         bytes.extend(1_u64.to_be_bytes());
         bytes.extend(2_u64.to_be_bytes());
         bytes.push(3);
-        let data = read_all(&bytes).vitals_data.expect("vitals data");
+        let data = slot_0(&bytes).vitals_data.expect("vitals data");
         assert_eq!((data.head, data.a, data.b, data.tail), (9, 1, 2, 3));
     }
 
@@ -273,17 +429,74 @@ mod tests {
     fn a_tick_rate_is_2_bytes() {
         let mut bytes = vec![0x01, 1 << 5];
         bytes.extend(TICK_RATE.to_be_bytes());
-        assert_eq!(read_all(&bytes).health_tick_rate, Some(TICK_RATE));
+        assert_eq!(slot_0(&bytes).health_tick_rate, Some(TICK_RATE));
     }
 
     #[test]
     fn only_max_health_is_child_13() {
-        let state = VitalsSlot0 {
-            max_health: Some(500),
-            ..VitalsSlot0::default()
+        let state = VitalsState {
+            slot_0: Some(VitalsSlot0 {
+                max_health: Some(500),
+                ..VitalsSlot0::default()
+            }),
+            slot_1: None,
         };
         let mut writer = Writer::new();
-        state.write(&mut writer);
+        state.write(&mut writer).expect("write");
         assert_eq!(writer.finish(), vec![0x01, 0x80, 0x40, 0x01, 0xf4]);
+    }
+
+    #[test]
+    fn slot_1_alone_holds_the_mana() {
+        let mut bytes = vec![0b10, 0x01];
+        bytes.extend(MANA.to_be_bytes());
+        let state = read_all(&bytes);
+        assert_eq!(state.slot_0, None);
+        assert_eq!(state.slot_1.expect("slot 1").mana_amount, Some(MANA));
+    }
+
+    #[test]
+    fn both_slots_read_slot_0_then_slot_1() {
+        let mut bytes = vec![0b11, 0x01];
+        bytes.extend(HEALTH.to_be_bytes());
+        bytes.push(0x01);
+        bytes.extend(MANA.to_be_bytes());
+        let state = read_all(&bytes);
+        assert_eq!(state.slot_0.expect("slot 0").health_amount, Some(HEALTH));
+        assert_eq!(state.slot_1.expect("slot 1").mana_amount, Some(MANA));
+    }
+
+    #[test]
+    fn slot_1_holds_both_affliction_lists_then_the_mana_max_and_tick() {
+        let state = VitalsState {
+            slot_0: None,
+            slot_1: Some(VitalsSlot1 {
+                afflictions_hot: Some(AfflictionList::Full {
+                    id: AfflictionId::None,
+                    items: vec![(
+                        1,
+                        HotLong {
+                            a: 2,
+                            b: 3,
+                            c: 4,
+                            d: 5,
+                        },
+                    )],
+                }),
+                afflictions_cold: Some(AfflictionList::Items(vec![Affliction {
+                    head: 6,
+                    id: AfflictionId::Wide(7),
+                    long: Some(ColdLong {
+                        value: 8,
+                        byte: 9,
+                        flag: true,
+                    }),
+                }])),
+                mana_max: Some(MANA),
+                mana_tick_rate: Some(TICK_RATE),
+                ..VitalsSlot1::default()
+            }),
+        };
+        assert_eq!(round(&state), state);
     }
 }

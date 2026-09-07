@@ -6,11 +6,13 @@
 //! `docs/re/2026-09-02-replication-and-movement.md` for the replicated states. A field without a
 //! name in the notes keeps a neutral name. `decode` fails on missing bytes and on bytes left over.
 
+pub mod afflictions;
 pub mod alc;
 pub mod bundle;
 pub mod client_add_entry;
 pub mod client_input;
 pub mod combat;
+pub mod components;
 pub mod connected;
 pub mod day_phase;
 pub mod gde;
@@ -26,6 +28,7 @@ pub mod time_synch;
 pub mod vitals;
 pub mod wire;
 
+pub use afflictions::{Affliction, AfflictionId, AfflictionList, ColdLong, HotLong, LongForm};
 pub use alc::{ALC_TYPE_INDEX, AlcChild, AlcState, POS10_CHILD, SLOT0_CHILDREN, SLOT1_CHILDREN};
 pub use bundle::{
     IndexBlock, MAX_BUNDLE_INDEXES, OBSERVED_BUNDLE_BYTE_3, OBSERVED_BUNDLE_BYTE_4,
@@ -40,6 +43,10 @@ pub use combat::{
     DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, DamageDealtMsg, DamageItem, DeathRecapMsg,
     HIT_TAG, MAX_RESPAWN_PAYLOAD, NEUTRAL_SCALE, ON_DAMAGE_TYPE_INDEX, OnDamageMsg,
     REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
+};
+pub use components::{
+    COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DELAYED_EVENT_TYPE_INDEX, DelayedEventState,
+    STAMINA_TYPE_INDEX, StaminaState,
 };
 pub use connected::{
     Block1415acc30, CALENDAR_CONNECTED_MSG_TYPE_INDEX, CalendarConnectedMsg, ConnectedBody,
@@ -59,5 +66,5 @@ pub use time_change::{
     OBSERVED_TIME_CHANGE_U32S_AT_28, SYNC_TIME_CHANGE_MSG_TYPE_INDEX, SyncTimeChangeMsg,
 };
 pub use time_synch::TimeSynchMsg;
-pub use vitals::{VITALS_TYPE_INDEX, VitalsData, VitalsSlot0};
+pub use vitals::{VITALS_TYPE_INDEX, VitalsData, VitalsSlot0, VitalsSlot1, VitalsState};
 pub use wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};

@@ -21,20 +21,27 @@ const CHILDREN_PER_BYTE: u8 = 7;
 /// The child bits of one child byte.
 const CHILD_BITS: u8 = 0x7f;
 
-/// Reads the slot byte and, when slot 0 is set, the child bitmap of `count` children (bit `n`
-/// is child `n`). `None` when slot 0 is not set.
-pub(crate) fn read_slot_0(
+/// Reads the slot byte of a class with `slots` slots: bit `n` is slot `n`, and the slots that are
+/// set follow in order (`FUN_1417b4110` tests only the bits of the slots that exist).
+pub(crate) fn read_slot_byte(
+    reader: &mut Reader<'_>,
+    field: &'static str,
+    slots: u8,
+) -> Result<u8, MessageError> {
+    let byte = reader.u8()?;
+    if u32::from(byte) >> slots != 0 {
+        return Err(MessageError::Unsized { field, byte });
+    }
+    Ok(byte)
+}
+
+/// Reads the child bitmap of one slot of `count` children (bit `n` is child `n`); at least one
+/// child is set.
+pub(crate) fn read_children(
     reader: &mut Reader<'_>,
     field: &'static str,
     count: u8,
-) -> Result<Option<u16>, MessageError> {
-    let slot = reader.u8()?;
-    if slot & !SLOT_0 != 0 {
-        return Err(MessageError::Unsized { field, byte: slot });
-    }
-    if slot == 0 {
-        return Ok(None);
-    }
+) -> Result<u16, MessageError> {
     let mut children: u16 = 0;
     let mut first: u8 = 0;
     loop {
@@ -56,19 +63,14 @@ pub(crate) fn read_slot_0(
         }
         children |= u16::from(bits) << first;
         if last {
-            return Ok(Some(children));
+            return Ok(children);
         }
         first += CHILDREN_PER_BYTE;
     }
 }
 
-/// Writes the slot byte and, for `Some`, the child bitmap of `count` children.
-pub(crate) fn write_slot_0(writer: &mut Writer, children: Option<u16>, count: u8) {
-    let Some(children) = children.filter(|children| *children != 0) else {
-        writer.u8(0);
-        return;
-    };
-    writer.u8(SLOT_0);
+/// Writes the child bitmap `children` (not 0) of one slot of `count` children.
+pub(crate) fn write_children(writer: &mut Writer, children: u16, count: u8) {
     let mut first: u8 = 0;
     while first < count {
         // A child byte holds 7 children: the shift leaves at most 7 bits.
@@ -80,6 +82,38 @@ pub(crate) fn write_slot_0(writer: &mut Writer, children: Option<u16>, count: u8
         }
         first += CHILDREN_PER_BYTE;
     }
+}
+
+/// The child bitmap of the present children; `present[n]` is child `n`.
+pub(crate) fn children_mask(present: &[bool]) -> u16 {
+    present
+        .iter()
+        .enumerate()
+        .filter(|(_, present)| **present)
+        .fold(0, |bits, (child, _)| bits | 1 << child)
+}
+
+/// Reads the slot byte of a class with slot 0 only and, when slot 0 is set, the child bitmap of
+/// `count` children. `None` when slot 0 is not set.
+pub(crate) fn read_slot_0(
+    reader: &mut Reader<'_>,
+    field: &'static str,
+    count: u8,
+) -> Result<Option<u16>, MessageError> {
+    if read_slot_byte(reader, field, 1)? == 0 {
+        return Ok(None);
+    }
+    read_children(reader, field, count).map(Some)
+}
+
+/// Writes the slot byte and, for `Some` with a child, the child bitmap of `count` children.
+pub(crate) fn write_slot_0(writer: &mut Writer, children: Option<u16>, count: u8) {
+    let Some(children) = children.filter(|children| *children != 0) else {
+        writer.u8(0);
+        return;
+    };
+    writer.u8(SLOT_0);
+    write_children(writer, children, count);
 }
 
 #[cfg(test)]

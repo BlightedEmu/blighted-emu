@@ -276,7 +276,11 @@ fn member_position(state: &MemberState) -> Option<[f32; 3]> {
             .position
             .and_then(|at| finite([at.x, at.y, at.z()])),
         MemberState::Alc(alc) => alc.pos10.and_then(|at| finite([at.x, at.y, at.z()])),
-        MemberState::GdeMetadata(_) | MemberState::Vitals(_) => None,
+        MemberState::GdeMetadata(_)
+        | MemberState::Vitals(_)
+        | MemberState::Stamina(_)
+        | MemberState::CombatStatus(_)
+        | MemberState::DelayedEvent(_) => None,
     }
 }
 
