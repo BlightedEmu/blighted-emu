@@ -2,6 +2,7 @@
 // The live panel: the state stream of blighted-admin (server status, figures, map, players,
 // events) and the bot batch buttons.
 
+import { KINDS, mobEntity, playerEntity, selectionRows } from './entity.js';
 import { WorldMap } from './map.js';
 import { SERIES, SIGNAL } from './palette.js';
 import { STATUS_GROUPS, isMarked, nextStatuses, statusText } from './status.js';
@@ -17,15 +18,15 @@ const BATCH_SIZES = [1, 10, 100, 1000];
 const BATCH_REFRESH_MS = 1000;
 /** Most rows of the player table. */
 const PLAYER_ROWS = 500;
-const PLAYER_COLUMNS = 6;
+const PLAYER_COLUMNS = 8;
 const EVENTS_SHOWN = 200;
 const SOCKET_LIVE = 'live';
 const SOCKET_CLOSED = 'closed';
 const SOCKET_CONNECTING = 'connecting';
-const MOB_STATES = ['asleep', 'idle', 'chase', 'attack', 'return', 'dead'];
-/** Mob colours in the order of MOB_STATES. */
+/** Mob colours in the order of MOB_STATES (entity.js). */
 const MOB_COLOURS = [SIGNAL.STONE, SIGNAL.YELLOW, SIGNAL.ORANGE, SIGNAL.RED, SIGNAL.BLUE, SIGNAL.INK];
 const PLAYER_COLOUR = SIGNAL.WHITE;
+const BOT_COLOUR = SIGNAL.GREEN;
 const DEAD_COLOUR = SIGNAL.PURPLE;
 const FROZEN_COLOUR = SIGNAL.ICE;
 /** The player colour at 60 % (an 8-digit hex colour). */
@@ -67,28 +68,24 @@ let shownBatches = '';
 let sortColumn = 'entity';
 let sortDescending = false;
 
-function playerState(player) {
-  if (player.dead) {
-    return 'dead';
-  }
-  return player.frozen ? 'frozen' : 'alive';
-}
-
 function playerColour(player) {
   if (player.dead) {
     return DEAD_COLOUR;
   }
-  return player.frozen ? FROZEN_COLOUR : PLAYER_COLOUR;
+  if (player.frozen) {
+    return FROZEN_COLOUR;
+  }
+  return player.bot ? BOT_COLOUR : PLAYER_COLOUR;
 }
 
 /** Every entity of the view by map key. */
 function entities() {
   const all = new Map();
   for (const player of view?.players ?? []) {
-    all.set(`${PLAYER_KEY}${player.entity}`, { kind: 'player', ...player, state: playerState(player) });
+    all.set(`${PLAYER_KEY}${player.entity}`, playerEntity(player));
   }
   for (const mob of view?.mobs ?? []) {
-    all.set(`${MOB_KEY}${mob.entity}`, { kind: 'mob', ...mob, state: MOB_STATES[mob.state] ?? mob.state });
+    all.set(`${MOB_KEY}${mob.entity}`, mobEntity(mob));
   }
   return all;
 }
@@ -214,7 +211,10 @@ function showMap() {
     points.push({ key: `${MOB_KEY}${mob.entity}`, x: mob.x, y: mob.y, color: MOB_COLOURS[mob.state] ?? MOB_COLOURS[0] });
   }
   for (const player of view?.players ?? []) {
-    points.push({ key: `${PLAYER_KEY}${player.entity}`, x: player.x, y: player.y, color: playerColour(player) });
+    const key = `${PLAYER_KEY}${player.entity}`;
+    // Only the selected player carries its name: names on every dot would hide the map.
+    const label = key === selectedKey ? player.name : undefined;
+    points.push({ key, x: player.x, y: player.y, color: playerColour(player), label });
   }
   map.setPoints(points);
   map.setPaths(
@@ -229,12 +229,31 @@ function showSelection() {
     return;
   }
   const entity = entities().get(selectedKey);
-  selectionBox.textContent = entity ? JSON.stringify(entity, null, 2) : `${selectedKey} is not in view.`;
+  if (!entity) {
+    const gone = document.createElement('p');
+    gone.className = 'hint';
+    gone.textContent = 'It is not in view any more.';
+    selectionBox.replaceChildren(gone);
+    return;
+  }
+  const list = document.createElement('dl');
+  list.className = 'props';
+  list.append(
+    ...selectionRows(entity).flatMap(([label, value]) => {
+      const term = document.createElement('dt');
+      term.textContent = label;
+      const detail = document.createElement('dd');
+      detail.textContent = value;
+      return [term, detail];
+    }),
+  );
+  selectionBox.replaceChildren(list);
 }
 
 function select(key) {
   selectedKey = key;
   map.follow(key);
+  showMap();
   showSelection();
 }
 
@@ -247,7 +266,7 @@ function emptyItem(text) {
 }
 
 function showPlayers() {
-  const rows = (view?.players ?? []).map((player) => ({ ...player, state: playerState(player) }));
+  const rows = (view?.players ?? []).map(playerEntity);
   const sorted = sortRows(rows, sortColumn, sortDescending).slice(0, PLAYER_ROWS);
   playersCount.textContent = rows.length > PLAYER_ROWS ? `first ${PLAYER_ROWS} of ${rows.length}` : `${rows.length}`;
   if (sorted.length === 0) {
@@ -266,6 +285,8 @@ function showPlayers() {
       row.className = 'clickable';
       row.dataset.key = `${PLAYER_KEY}${player.entity}`;
       for (const [value, numeric] of [
+        [player.name, false],
+        [player.kind === KINDS.BOT ? 'bot' : 'player', false],
         [player.entity, false],
         [player.sim, false],
         [player.x.toFixed(1), true],

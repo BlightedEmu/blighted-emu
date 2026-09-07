@@ -32,6 +32,16 @@
     <div class="deck">
       <section class="chart" aria-label="World map">
         <canvas id="map" class="map"></canvas>
+        <ul class="legend" aria-label="Map key">
+          <li><i class="swatch" data-kind="player"></i>Player</li>
+          <li><i class="swatch" data-kind="bot"></i>Bot</li>
+          <li><i class="swatch" data-kind="dead"></i>Dead</li>
+          <li><i class="swatch" data-kind="frozen"></i>Moving between sims</li>
+          <li><i class="swatch" data-kind="idle"></i>Mob idle</li>
+          <li><i class="swatch" data-kind="chase"></i>Mob chasing</li>
+          <li><i class="swatch" data-kind="attack"></i>Mob attacking</li>
+          <li><i class="swatch" data-kind="return"></i>Mob returning</li>
+        </ul>
         <div class="map-tools">
           <label><input type="checkbox" id="trails" checked> Trails</label>
           <label><input type="checkbox" id="sleeping"> Sleeping mob spawns (zoom in)</label>
@@ -49,7 +59,7 @@
         <h2>Events</h2>
         <ul class="list log" id="events"></ul>
         <h2>Selection</h2>
-        <pre class="detail" id="selection"><span class="hint">Click a player or a mob.</span></pre>
+        <div class="selection" id="selection"><p class="hint">Click a player, a bot or a mob on the map, or a row of the players table.</p></div>
       </aside>
     </div>
     <section class="players" aria-labelledby="players-head">
@@ -58,6 +68,8 @@
         <table class="grid">
           <thead>
             <tr>
+              <th class="sortable" data-column="name">Name</th>
+              <th class="sortable" data-column="kind">Kind</th>
               <th class="sortable" data-column="entity">Entity</th>
               <th class="sortable" data-column="sim">Sim</th>
               <th class="sortable num" data-column="x">x</th>

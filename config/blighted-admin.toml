@@ -43,4 +43,7 @@ testclient_env_file = "local-data/m3-test.env"
 # Each batch adds its letters (a, b, ... z, ba, ...); character names hold letters only.
 bot_account_prefix = "adminbot"
 bot_character_prefix = "Adminbot"
+# Character prefixes of bots started outside this panel (config/nw-testclient.toml and the
+# local test runs); the live page marks players with these names, and the one above, as bots.
+other_bot_prefixes = ["Swarm", "Mobsb"]
 max_bots = 10000

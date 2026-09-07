@@ -108,6 +108,7 @@ mod tests {
             parts: 1,
             players: vec![SnapPlayer {
                 entity: ENTITY,
+                name: "Ada".to_owned(),
                 x: 1.0,
                 y: 2.0,
                 z: 3.0,

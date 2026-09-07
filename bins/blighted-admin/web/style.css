@@ -201,6 +201,28 @@ label { display: inline-flex; align-items: center; gap: 6px; }
 .swatch[data-kind="vitals"] { background: var(--signal-red); }
 .swatch[data-kind="gatherables"] { background: var(--signal-green); }
 .swatch[data-kind="landmarks"] { background: var(--signal-yellow); }
+/* The live map key: the colours of live.js (players, bots, dead, frozen, mob states). */
+.swatch[data-kind="player"] { background: var(--signal-white); }
+.swatch[data-kind="bot"] { background: var(--signal-green); }
+.swatch[data-kind="dead"] { background: var(--signal-purple); }
+.swatch[data-kind="frozen"] { background: var(--signal-ice); }
+.swatch[data-kind="idle"] { background: var(--signal-yellow); }
+.swatch[data-kind="chase"] { background: var(--signal-orange); }
+.swatch[data-kind="attack"] { background: var(--signal-red); }
+.swatch[data-kind="return"] { background: var(--signal-blue); }
+.legend {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  margin: 0;
+  padding: 8px 10px;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  background: var(--overlay);
+}
+.legend li { display: flex; align-items: center; gap: 8px; }
 
 /* Server status: a state bar, the name, the state word and a detail line per server ---------- */
 .servers { display: flex; flex-wrap: wrap; gap: 12px 40px; padding: 6px var(--gutter) 16px; }
@@ -295,7 +317,13 @@ label { display: inline-flex; align-items: center; gap: 6px; }
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.detail .hint { font: 14px/1.45 var(--font-body); color: var(--mute); }
+.detail .hint, .selection .hint { font: 14px/1.45 var(--font-body); color: var(--mute); }
+.selection { padding: 4px 20px 16px; overflow: auto; }
+.selection .hint { margin: 0; }
+.props { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; }
+.props dt { font: 600 11px/1.9 var(--font-sign); letter-spacing: 0.08em; text-transform: uppercase; color: var(--mute); }
+.props dd { margin: 0; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.props dd:first-of-type { font: 700 16px var(--font-sign); }
 .grid { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
 .grid th, .grid td { padding: 6px 12px; text-align: left; white-space: nowrap; }
 .grid td { border-top: 1px solid var(--line); }
@@ -387,7 +415,8 @@ label { display: inline-flex; align-items: center; gap: 6px; }
   .deck { grid-template-columns: minmax(0, 1fr); flex: none; }
   .deck .chart { height: 420px; }
   .side { border-left: 0; border-top: 1px solid var(--line); grid-template-rows: none; }
-  .side .list, .side .detail { max-height: 240px; }
+  .side .list, .side .selection { max-height: 240px; }
+  .legend { grid-template-columns: 1fr 1fr; gap: 2px 10px; }
   .figures .fact { font-size: 24px; }
   .map-page .work, .viewer-page .work { height: auto; min-height: 100vh; }
   .map-page .chart { flex: none; height: 70vh; }

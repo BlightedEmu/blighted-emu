@@ -163,6 +163,8 @@ pub struct Admit {
     pub account: Uuid,
     /// The character.
     pub character: Uuid,
+    /// The character's name, for the admin snapshot.
+    pub name: String,
     /// The entity number the director chose.
     pub entity: u64,
     /// Where the player appears.
@@ -220,6 +222,8 @@ pub struct HandoffOffer {
     pub connection: ConnectionRef,
     /// The character.
     pub character: Uuid,
+    /// The character's name, for the admin snapshot.
+    pub name: String,
     /// The entity number; it stays the same.
     pub entity: u64,
     /// The last good position.
@@ -526,6 +530,7 @@ mod tests {
             connection: connection(),
             account: Uuid::new_v4(),
             character: Uuid::new_v4(),
+            name: "Ada".to_owned(),
             entity: CONNECTION,
             position: POINT,
             login: true,
@@ -550,6 +555,7 @@ mod tests {
         let offer = HandoffOffer {
             connection: connection(),
             character: Uuid::new_v4(),
+            name: "Ada".to_owned(),
             entity: CONNECTION,
             position: POINT,
             move_age_ms: 40,

@@ -143,6 +143,7 @@ pub async fn route_join(
         connection: join.connection.clone(),
         account: join.account,
         character: join.character,
+        name: character.name,
         entity,
         position: Point::from(position),
         login: join.resume.is_none(),

@@ -86,6 +86,10 @@ pub struct MetricsView {
 pub struct PlayerView {
     /// The entity number.
     pub entity: u64,
+    /// The character's name.
+    pub name: String,
+    /// The name starts with a bot prefix.
+    pub bot: bool,
     /// Its sim.
     pub sim: String,
     /// East.
@@ -187,9 +191,24 @@ pub struct LiveState {
     cpu: Vec<(String, Option<f64>)>,
     bots: u32,
     events: VecDeque<EventView>,
+    bot_prefixes: Vec<String>,
 }
 
 impl LiveState {
+    /// An empty state that marks players whose names start with one of `bot_prefixes` as bots.
+    pub fn new(bot_prefixes: Vec<String>) -> Self {
+        Self {
+            bot_prefixes,
+            ..Self::default()
+        }
+    }
+
+    fn is_bot(&self, name: &str) -> bool {
+        self.bot_prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix.as_str()))
+    }
+
     /// A sim heartbeat at `now_ms`; a new sim or a new start time is an event.
     pub fn heartbeat(&mut self, beat: SimHeartbeat, now_ms: u64) {
         let entry = SimEntry {
@@ -384,6 +403,8 @@ impl LiveState {
                 .flat_map(|(sim, snapshots)| {
                     snapshots.players.iter().map(move |player| PlayerView {
                         entity: player.entity,
+                        name: player.name.clone(),
+                        bot: self.is_bot(&player.name),
                         sim: sim.to_string(),
                         x: player.x,
                         y: player.y,
@@ -454,6 +475,7 @@ mod tests {
     fn player(entity: u64) -> SnapPlayer {
         SnapPlayer {
             entity,
+            name: format!("Player{entity}"),
             x: 1.0,
             y: 2.0,
             z: 3.0,
@@ -531,6 +553,26 @@ mod tests {
         const BUDGET_MS: f64 = 33.0;
         const TOLERANCE_MS: f64 = 1e-9;
         assert!((LiveState::default().view().tick_budget_ms - BUDGET_MS).abs() < TOLERANCE_MS);
+    }
+
+    #[test]
+    fn players_with_a_bot_prefix_are_bots() {
+        let mut state = LiveState::new(vec!["Adminbot".to_owned(), "Swarm".to_owned()]);
+        let mut snapshot = part(NOW, 0, 1, &[1, 2, 3]);
+        snapshot.players[0].name = "Adminbotab".to_owned();
+        snapshot.players[1].name = "Swarmxyz".to_owned();
+        snapshot.players[2].name = "Ada".to_owned();
+        state.snapshot_part(snapshot);
+        let view = state.view();
+        let marks: Vec<(&str, bool)> = view
+            .players
+            .iter()
+            .map(|player| (player.name.as_str(), player.bot))
+            .collect();
+        assert_eq!(
+            marks,
+            vec![("Adminbotab", true), ("Swarmxyz", true), ("Ada", false)]
+        );
     }
 
     #[test]

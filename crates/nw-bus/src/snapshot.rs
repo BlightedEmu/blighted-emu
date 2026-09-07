@@ -12,10 +12,12 @@ pub const SNAPSHOT_PART_ENTITIES: usize = 20_000;
 pub const MOB_STATES: usize = 6;
 
 /// One player of a snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapPlayer {
     /// The entity number.
     pub entity: u64,
+    /// The character's name.
+    pub name: String,
     /// East, in metres.
     pub x: f32,
     /// North, in metres.
@@ -108,9 +110,13 @@ mod tests {
         BusId::try_from("sim-a".to_owned()).expect("id")
     }
 
+    /// The longest character name (`nw_login::names::CHARACTER_NAME_MAX_LEN` letters).
+    const LONGEST_NAME: &str = "Abcdefghijklmnop";
+
     fn player(entity: u64) -> SnapPlayer {
         SnapPlayer {
             entity,
+            name: LONGEST_NAME.to_owned(),
             x: f32::MAX,
             y: f32::MAX,
             z: f32::MAX,
@@ -165,6 +171,12 @@ mod tests {
 
     #[test]
     fn a_part_fits_one_bus_message() {
+        let all_players = (0..SNAPSHOT_PART_ENTITIES as u64).map(player).collect();
+        let player_part = snapshot_parts(sim(), u64::MAX, all_players, Vec::new(), COUNTS);
+        assert!(
+            encode(&player_part[0]).expect("encode").len() < MAX_BUS_MESSAGE_BYTES,
+            "a part of players with the longest names"
+        );
         let players = (0..SNAPSHOT_PART_ENTITIES as u64 / 2).map(player).collect();
         let mobs = (0..SNAPSHOT_PART_ENTITIES as u64 / 2).map(mob).collect();
         let parts = snapshot_parts(sim(), u64::MAX, players, mobs, COUNTS);

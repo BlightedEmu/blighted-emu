@@ -206,6 +206,7 @@ pub enum TableError {
 struct Player {
     connection: ConnectionRef,
     character: Uuid,
+    name: String,
     number: u64,
     bundles_sent: u64,
     last_time_synch_ms: u64,
@@ -265,6 +266,7 @@ pub struct SimWorld {
 struct Arrival {
     connection: ConnectionRef,
     character: Uuid,
+    name: String,
     number: u64,
     position: Position,
     health: Health,
@@ -334,6 +336,7 @@ impl SimWorld {
         let arrival = Arrival {
             connection: admit.connection.clone(),
             character: admit.character,
+            name: admit.name.clone(),
             number: admit.entity,
             position: Position::from(admit.position),
             health: Health::full(self.combat.data.player_max_health()),
@@ -373,6 +376,7 @@ impl SimWorld {
         let arrival = Arrival {
             connection: offer.connection.clone(),
             character: offer.character,
+            name: offer.name.clone(),
             number: offer.entity,
             position: Position::from(offer.position),
             health: Health::at(offer.health, self.combat.data.player_max_health()),
@@ -584,6 +588,7 @@ impl SimWorld {
                 let at = body.motion.position();
                 SnapPlayer {
                     entity: player.number,
+                    name: player.name.clone(),
                     x: at.x,
                     y: at.y,
                     z: at.z,
@@ -718,6 +723,7 @@ impl SimWorld {
                 offer: HandoffOffer {
                     connection: player.connection.clone(),
                     character: player.character,
+                    name: player.name.clone(),
                     entity: player.number,
                     position: Point::from(state.position),
                     move_age_ms: state.move_age_ms,
@@ -878,6 +884,7 @@ impl SimWorld {
                 Player {
                     connection: arrival.connection.clone(),
                     character: arrival.character,
+                    name: arrival.name,
                     number: arrival.number,
                     bundles_sent,
                     last_time_synch_ms,
@@ -1149,11 +1156,17 @@ mod tests {
         }
     }
 
+    /// The character name of test player `number`.
+    fn player_name(number: u64) -> String {
+        format!("Player{number}")
+    }
+
     fn admit_at(number: u64, x: f32, login: bool) -> Admit {
         Admit {
             connection: connection(number),
             account: Uuid::new_v4(),
             character: Uuid::new_v4(),
+            name: player_name(number),
             entity: number,
             position: Point {
                 x,
@@ -1307,6 +1320,7 @@ mod tests {
         let (players, mobs, counts) = world.snapshot();
         assert_eq!(players.len(), 1);
         assert_eq!((players[0].entity, players[0].dead), (1, false));
+        assert_eq!(players[0].name, player_name(1));
         assert_eq!(
             mobs.iter().map(|mob| mob.entity).collect::<Vec<_>>(),
             vec![crate::mobs::mob_entity(0)],
@@ -1827,6 +1841,7 @@ mod tests {
         let (mut old, mover, _) = border_world();
         tick(&mut old, NOW);
         let mut offer = tick_offer(&mut old);
+        assert_eq!(offer.name, player_name(1), "the name crosses");
         offer.bundles_sent = BUNDLES_BEFORE;
         let mut new = world_of("sim-b", settings(MANY, MAX_PLAYERS));
         new.set_table(&table(&["sim-a", "sim-b"])).expect("table");
@@ -1836,6 +1851,7 @@ mod tests {
             NOW - offer.move_age_ms,
             "the move time crosses as an age"
         );
+        assert_eq!(new.snapshot().0[0].name, offer.name);
         let output = tick(&mut new, NOW);
         let bundle = bundle_of(&output.messages, &mover).expect("bundle");
         assert_eq!(bundle.leading, Some(BUNDLES_BEFORE));

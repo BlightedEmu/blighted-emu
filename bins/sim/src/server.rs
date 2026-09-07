@@ -1384,6 +1384,7 @@ mod tests {
             connection,
             account: character.0,
             character: character.1,
+            name: CHARACTER_NAME.to_owned(),
             entity: CONNECTION,
             position: at(x),
             login: true,
@@ -2213,6 +2214,7 @@ mod tests {
             let offer = HandoffOffer {
                 connection: gateway.connection(CONNECTION),
                 character: character(db).await.1,
+                name: CHARACTER_NAME.to_owned(),
                 entity: CONNECTION,
                 position: at(BORDER_X),
                 move_age_ms: 0,

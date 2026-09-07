@@ -63,8 +63,20 @@ pub struct LiveConfig {
     pub bot_account_prefix: String,
     /// Character prefix of the batches (letters only); the batch letters follow it.
     pub bot_character_prefix: String,
+    /// Character prefixes (letters only) of bots started outside this program, such as
+    /// `nw-testclient` runs; a player whose name starts with one is shown as a bot.
+    pub other_bot_prefixes: Vec<String>,
     /// Most bots of all batches together.
     pub max_bots: u32,
+}
+
+impl LiveConfig {
+    /// Every character prefix of bots: the batches' and the others.
+    pub fn bot_prefixes(&self) -> Vec<String> {
+        std::iter::once(self.bot_character_prefix.clone())
+            .chain(self.other_bot_prefixes.iter().cloned())
+            .collect()
+    }
 }
 
 /// The capture viewer part of the configuration.
@@ -130,10 +142,18 @@ pub fn load_admin_config(path: &Path) -> Result<AdminConfig, AdminConfigError> {
                 });
             }
         }
-        let prefix = &live.bot_character_prefix;
-        if prefix.is_empty() || !prefix.chars().all(|letter| letter.is_ascii_alphabetic()) {
+        let letters = |prefix: &String| {
+            !prefix.is_empty() && prefix.chars().all(|letter| letter.is_ascii_alphabetic())
+        };
+        if !letters(&live.bot_character_prefix) {
             return Err(AdminConfigError::Invalid {
                 key: "live.bot_character_prefix",
+                reason: NOT_LETTERS,
+            });
+        }
+        if !live.other_bot_prefixes.iter().all(letters) {
+            return Err(AdminConfigError::Invalid {
+                key: "live.other_bot_prefixes",
                 reason: NOT_LETTERS,
             });
         }
@@ -198,6 +218,20 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn another_bot_prefix_with_digits_is_refused() {
+        assert!(matches!(
+            load_changed(
+                "other_bot_prefixes = [\"Swarm\"",
+                "other_bot_prefixes = [\"Swarm1\""
+            ),
+            Err(AdminConfigError::Invalid {
+                key: "live.other_bot_prefixes",
+                ..
+            })
+        ));
     }
 
     #[test]
