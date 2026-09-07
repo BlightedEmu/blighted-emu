@@ -83,12 +83,21 @@ fn main() -> ExitCode {
         .enable_all()
         .build()
     {
-        Ok(runtime) => runtime.block_on(run(Cli::parse())),
+        Ok(runtime) => finish(runtime, run(Cli::parse())),
         Err(error) => {
             eprintln!("error: runtime failed: {error}");
             ExitCode::FAILURE
         }
     }
+}
+
+/// Runs `future` to its end on `runtime`, then drops the runtime without waiting for its
+/// blocking tasks: the read of standard input of an until-stopped run ends only with the input,
+/// and the program must end after its report.
+fn finish<F: Future>(runtime: tokio::runtime::Runtime, future: F) -> F::Output {
+    let output = runtime.block_on(future);
+    runtime.shutdown_background();
+    output
 }
 
 async fn run(cli: Cli) -> ExitCode {
@@ -384,4 +393,30 @@ async fn registration(
         && outcome.pings_kept_up()
         && !outcome.closed_by_server
         && second_status != REGISTRATION_STATUS_AUTHORIZED)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use super::*;
+
+    /// Longer than any end of a run may wait.
+    const BLOCKED: Duration = Duration::from_secs(10);
+    const QUICK: Duration = Duration::from_secs(2);
+
+    #[test]
+    fn a_waiting_input_read_does_not_hold_the_end() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .build()
+            .expect("runtime");
+        let started = Instant::now();
+        let code = finish(runtime, async {
+            // Stands for the read of standard input, which waits until the input ends.
+            tokio::task::spawn_blocking(|| std::thread::sleep(BLOCKED));
+            ExitCode::SUCCESS
+        });
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(started.elapsed() < QUICK, "{:?}", started.elapsed());
+    }
 }
