@@ -46,6 +46,7 @@
           <label><input type="checkbox" id="trails" checked> Trails</label>
           <label><input type="checkbox" id="sleeping"> Sleeping mob spawns (zoom in)</label>
           <button type="button" id="fit">Whole world</button>
+          <button type="button" id="big-map" aria-pressed="false">Big map</button>
         </div>
         <div class="bots" role="group" aria-label="Bot batches">
           <strong>Bots</strong>
@@ -62,8 +63,8 @@
         <div class="selection" id="selection"><p class="hint">Click a player, a bot or a mob on the map, or a row of the players table.</p></div>
       </aside>
     </div>
-    <section class="players" aria-labelledby="players-head">
-      <div class="section-head"><h2 id="players-head">Players</h2><span class="status" id="players-count"></span></div>
+    <details class="players" id="players-panel" open>
+      <summary class="section-head"><h2>Players</h2><span class="status" id="players-count"></span></summary>
       <div class="table-scroll">
         <table class="grid">
           <thead>
@@ -81,7 +82,7 @@
           <tbody id="players"></tbody>
         </table>
       </div>
-    </section>
+    </details>
   </main>
   <script type="module" src="/web/live.js"></script>
 </body>

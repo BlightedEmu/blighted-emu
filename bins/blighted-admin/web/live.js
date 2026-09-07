@@ -36,6 +36,10 @@ const SIM_COLOURS = SERIES;
 const BAD_FACT = 'bad';
 const MARKED_STATUS = 'marked';
 const CHANGED_STATUS = 'changed';
+/** Browser storage keys of the page layout choices; the values are '1' or '0'. */
+const PLAYERS_OPEN_KEY = 'blighted-admin-players-open';
+const BIG_MAP_KEY = 'blighted-admin-big-map';
+const BIG_MAP_CLASS = 'big-map';
 const PLAYER_KEY = 'player-';
 const MOB_KEY = 'mob-';
 
@@ -45,6 +49,8 @@ const serversBox = document.getElementById('servers');
 const tilesBox = document.getElementById('tiles');
 const moreTilesBox = document.getElementById('tiles-more');
 const playersCount = document.getElementById('players-count');
+const playersPanel = document.getElementById('players-panel');
+const bigMapButton = document.getElementById('big-map');
 const batchesList = document.getElementById('batches');
 const eventsList = document.getElementById('events');
 const selectionBox = document.getElementById('selection');
@@ -265,10 +271,38 @@ function emptyItem(text) {
   return item;
 }
 
+/** A layout choice kept in this browser, or `fallback` without one (or without storage). */
+function savedChoice(key, fallback) {
+  try {
+    const value = localStorage.getItem(key);
+    return value === null ? fallback : value === '1';
+  } catch {
+    return fallback;
+  }
+}
+
+function saveChoice(key, value) {
+  try {
+    localStorage.setItem(key, value ? '1' : '0');
+  } catch {
+    // Without storage the choice lasts until the page is left.
+  }
+}
+
+function showBigMap(on) {
+  document.body.classList.toggle(BIG_MAP_CLASS, on);
+  bigMapButton.setAttribute('aria-pressed', String(on));
+  bigMapButton.textContent = on ? 'Show panels' : 'Big map';
+}
+
 function showPlayers() {
   const rows = (view?.players ?? []).map(playerEntity);
-  const sorted = sortRows(rows, sortColumn, sortDescending).slice(0, PLAYER_ROWS);
   playersCount.textContent = rows.length > PLAYER_ROWS ? `first ${PLAYER_ROWS} of ${rows.length}` : `${rows.length}`;
+  // A folded table is not drawn: thousands of rows each state would cost for nothing.
+  if (!playersPanel.open) {
+    return;
+  }
+  const sorted = sortRows(rows, sortColumn, sortDescending).slice(0, PLAYER_ROWS);
   if (sorted.length === 0) {
     const row = document.createElement('tr');
     row.className = 'empty';
@@ -410,6 +444,17 @@ for (const size of BATCH_SIZES) {
 document.getElementById('stop-all').addEventListener('click', () => post(STOP_ALL_URL));
 document.getElementById('reconnect').addEventListener('click', connect);
 document.getElementById('fit').addEventListener('click', () => map.fit());
+playersPanel.open = savedChoice(PLAYERS_OPEN_KEY, true);
+playersPanel.addEventListener('toggle', () => {
+  saveChoice(PLAYERS_OPEN_KEY, playersPanel.open);
+  showPlayers();
+});
+showBigMap(savedChoice(BIG_MAP_KEY, false));
+bigMapButton.addEventListener('click', () => {
+  const on = !document.body.classList.contains(BIG_MAP_CLASS);
+  saveChoice(BIG_MAP_KEY, on);
+  showBigMap(on);
+});
 trailsBox.addEventListener('change', showMap);
 sleepingBox.addEventListener('change', () => map.setSpawnKinds(sleepingBox.checked ? ['vitals'] : []));
 // The table is drawn again with every state: a press selects, a click could miss its row.

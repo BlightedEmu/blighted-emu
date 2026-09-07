@@ -350,6 +350,18 @@ label { display: inline-flex; align-items: center; gap: 6px; }
 .grid th[data-sorted="up"]::after { border-bottom-color: currentColor; border-top-width: 0; }
 .grid tr.empty td { color: var(--mute); }
 .section-head { display: flex; align-items: baseline; gap: 12px; padding: 16px var(--gutter) 8px; }
+summary.section-head { cursor: pointer; list-style: none; }
+summary.section-head::-webkit-details-marker { display: none; }
+summary.section-head::before {
+  content: "";
+  align-self: center;
+  border: 5px solid transparent;
+  border-left-color: currentColor;
+  border-right-width: 0;
+  transition: transform 150ms var(--ease-out);
+}
+details[open] > summary.section-head::before { transform: rotate(90deg); }
+summary.section-head:hover h2 { color: var(--accent); }
 
 /* Home ----------------------------------------------------------------------------------- */
 .pages { list-style: none; margin: 0; padding: 0 var(--gutter); max-width: 72ch; }
@@ -369,6 +381,10 @@ label { display: inline-flex; align-items: center; gap: 6px; }
 #batches { max-height: 140px; }
 #events { max-height: 260px; }
 .players { padding-bottom: var(--gutter); }
+/* Big map: only the masthead and the map; the map takes the rest of the screen. */
+.big-map .servers, .big-map .figures, .big-map .side, .big-map .players { display: none; }
+.big-map .deck { grid-template-columns: minmax(0, 1fr); }
+.big-map .deck .chart { margin-bottom: var(--gutter); }
 .players .table-scroll { max-height: 50vh; overflow: auto; margin: 0 var(--gutter); }
 
 /* Map ---------------------------------------------------------------------------------------- */
@@ -414,6 +430,7 @@ label { display: inline-flex; align-items: center; gap: 6px; }
   .rail .theme { margin: 0 0 0 auto; }
   .deck { grid-template-columns: minmax(0, 1fr); flex: none; }
   .deck .chart { height: 420px; }
+  .big-map .deck .chart { height: 80vh; }
   .side { border-left: 0; border-top: 1px solid var(--line); grid-template-rows: none; }
   .side .list, .side .selection { max-height: 240px; }
   .legend { grid-template-columns: 1fr 1fr; gap: 2px 10px; }
