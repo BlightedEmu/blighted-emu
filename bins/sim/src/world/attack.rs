@@ -45,9 +45,9 @@ impl Vitals {
     }
 }
 
-/// A health amount as the `f32` of a hit message.
+/// A health amount as the `f32` of the wire (hit messages, the vitals block).
 #[allow(clippy::cast_precision_loss, reason = "health stays far below 2^24")]
-const fn amount_of(amount: u32) -> f32 {
+pub(super) const fn amount_of(amount: u32) -> f32 {
     amount as f32
 }
 

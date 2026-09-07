@@ -59,5 +59,5 @@ pub use time_change::{
     OBSERVED_TIME_CHANGE_U32S_AT_28, SYNC_TIME_CHANGE_MSG_TYPE_INDEX, SyncTimeChangeMsg,
 };
 pub use time_synch::TimeSynchMsg;
-pub use vitals::{VITALS_TYPE_INDEX, VitalsSlot0};
+pub use vitals::{VITALS_TYPE_INDEX, VitalsData, VitalsSlot0};
 pub use wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};

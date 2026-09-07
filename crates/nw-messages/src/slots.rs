@@ -5,8 +5,8 @@
 //!
 //! These members use slot 0 only, with the children the notes size. A slot other than 0, a
 //! child beyond those, or a last child byte that sets no child is [`MessageError::Unsized`]: the
-//! captures have such bodies (the vitals of live play have 6 more children on slot 0), and a
-//! bundle walk stops there. A slot without children is refused. So every body that reads encodes
+//! captures have such bodies (slot 1 of the vitals: mana and the afflictions), and a bundle
+//! walk stops there. A slot without children is refused. So every body that reads encodes
 //! back to the same bytes. A child byte before the last may set none: that is how only a later
 //! child is sent.
 
@@ -19,7 +19,7 @@ pub(crate) const CONTINUE: u8 = 0x80;
 /// Children in one child byte.
 const CHILDREN_PER_BYTE: u8 = 7;
 /// The child bits of one child byte.
-pub(crate) const CHILD_BITS: u8 = 0x7f;
+const CHILD_BITS: u8 = 0x7f;
 
 /// Reads the slot byte and, when slot 0 is set, the child bitmap of `count` children (bit `n`
 /// is child `n`). `None` when slot 0 is not set.

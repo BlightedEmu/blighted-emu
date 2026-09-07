@@ -322,21 +322,21 @@ mod tests {
     }
 
     #[test]
-    fn a_vitals_member_with_unsized_children_stops_the_walk() {
-        for second in [0x46_u8, 0x00] {
-            let mut bytes = Writer::new();
-            bytes.prefixed(LEADING).expect("leading").u8(2);
-            bytes.bytes(&position_member(1.0).encode().expect("member"));
-            bytes.prefixed(ENTITY).expect("entity");
-            bytes.bytes(
-                &nw_reflect::encode_type_id(&TypeId::FileSlot(VITALS_TYPE_INDEX)).expect("class"),
-            );
-            bytes.u8(0x01).u8(0x80).u8(second).bytes(&[0; 8]);
-            let payload = bytes.finish();
-            let known = BundlePayload::decode_known(&payload).expect("known");
-            assert_eq!(known.members.len(), 1, "second child byte {second:#04x}");
-            assert_eq!(known.stopped_at, Some(TypeId::FileSlot(VITALS_TYPE_INDEX)));
-        }
+    fn a_vitals_member_with_an_empty_last_child_byte_stops_the_walk() {
+        // The client reads an empty last child byte as "no more children"; the writer never
+        // makes that form, so the walk stops there.
+        let mut bytes = Writer::new();
+        bytes.prefixed(LEADING).expect("leading").u8(2);
+        bytes.bytes(&position_member(1.0).encode().expect("member"));
+        bytes.prefixed(ENTITY).expect("entity");
+        bytes.bytes(
+            &nw_reflect::encode_type_id(&TypeId::FileSlot(VITALS_TYPE_INDEX)).expect("class"),
+        );
+        bytes.u8(0x01).u8(0x80).u8(0x00);
+        let payload = bytes.finish();
+        let known = BundlePayload::decode_known(&payload).expect("known");
+        assert_eq!(known.members.len(), 1);
+        assert_eq!(known.stopped_at, Some(TypeId::FileSlot(VITALS_TYPE_INDEX)));
     }
 
     #[test]

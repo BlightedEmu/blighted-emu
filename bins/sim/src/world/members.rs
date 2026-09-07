@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The bundle members of players and mobs (M6-B spec section 5). A player is its position. A
 //! mob is its position too, and when it comes into a player's view, its spawn card (type 10) and
-//! its vitals block (type 15, slot 0) come first; they come again once per
-//! [`CARD_REFRESH_BUNDLES`] bundles while it stays in view. The spawn card's ids are our own values:
+//! its vitals block (type 15, slot 0: current and max health, ids, level) come first; they come
+//! again once per [`CARD_REFRESH_BUNDLES`] bundles while it stays in view. The spawn card's ids are our own values:
 //! what the client needs there is Unknown.
 //!
 //! Bundles split by bytes: an unreliable carrier message must fit one datagram (it is never
@@ -18,6 +18,7 @@ use nw_messages::{
 use nw_sim_core::Position;
 
 use super::MAX_BUNDLE_MEMBERS;
+use super::attack::amount_of;
 
 /// Most bytes of a position member: a 5-byte entity number, a 1-byte class, a 12-byte body.
 const MAX_POSITION_MEMBER_BYTES: usize = 18;
@@ -43,6 +44,8 @@ pub(super) struct MobCard {
     pub(super) category_id: u32,
     /// The spawn level.
     pub(super) level: u32,
+    /// The current health.
+    pub(super) health: u32,
     /// The max health.
     pub(super) max_health: u32,
 }
@@ -55,6 +58,7 @@ pub(super) const fn card_of(entity: u64, position: Position, state: MobGhost) ->
         vitals_id: state.vitals_id,
         category_id: state.category_id,
         level: state.level,
+        health: state.health,
         max_health: state.max_health,
     }
 }
@@ -92,6 +96,8 @@ pub(super) fn mob_members(card: &MobCard, first: bool, asset_sub_id: u32) -> Vec
         members.push(BundleMember {
             u64_at_0: card.entity,
             state: MemberState::Vitals(VitalsSlot0 {
+                health_amount: Some(amount_of(card.health)),
+                health_max: Some(amount_of(card.max_health)),
                 vitals_id: Some(card.vitals_id),
                 vitals_category_id: Some(card.category_id),
                 vitals_level: Some(card.level),
@@ -157,6 +163,7 @@ mod tests {
             vitals_id: 11,
             category_id: 12,
             level: 13,
+            health: max_health,
             max_health,
         }
     }
@@ -202,6 +209,22 @@ mod tests {
             mob_members(&card(500), false, SUB_ID).len(),
             1,
             "later only the position"
+        );
+    }
+
+    #[test]
+    fn the_vitals_block_carries_current_and_max_health() {
+        let wounded = MobCard {
+            health: 400,
+            ..card(500)
+        };
+        let members = mob_members(&wounded, true, SUB_ID);
+        let MemberState::Vitals(vitals) = &members[1].state else {
+            panic!("the vitals: {members:?}");
+        };
+        assert_eq!(
+            (vitals.health_amount, vitals.health_max, vitals.max_health),
+            (Some(400.0), Some(500.0), Some(500))
         );
     }
 
