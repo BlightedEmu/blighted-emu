@@ -18,11 +18,11 @@ use sim::server::{
 };
 use tokio::task::JoinSet;
 
-use crate::metrics::Scrape;
 use crate::pair::Check;
 use crate::rep::{RepClient, RepError};
 use crate::udp::{ANY_LOCAL, RepOutcome, RunError, run_rep_on};
 use crate::walk::{WalkSettings, login_token, walk};
+use nw_common::prometheus::Scrape;
 
 /// Check: every bot got registration status 0.
 pub const BOTS_REGISTERED: &str = "every bot registered";

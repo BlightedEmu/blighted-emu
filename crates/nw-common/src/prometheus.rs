@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The Prometheus text of the `sim` processes (M5 spec section 11.3): counters and histogram
-//! buckets, summed over every sim. Only plain sample lines are read: `name value` or
-//! `name{label="value",...} value`; comments and other lines are skipped.
+//! Prometheus text from the metrics listeners (M5 spec section 11.3, admin tools spec section
+//! 5): counters, gauges and histogram buckets, summed over several scrapes. Only plain sample
+//! lines are read: `name value` or `name{label="value",...} value`; comments and other lines are
+//! skipped.
 
 /// Two bucket bounds closer than this are the same bound.
 const BOUND_TOLERANCE: f64 = 1e-9;
@@ -9,6 +10,8 @@ const BOUND_TOLERANCE: f64 = 1e-9;
 const BUCKET_SUFFIX: &str = "_bucket";
 /// The bound label of a bucket.
 const BOUND_LABEL: &str = "le";
+/// Suffix of the sample count of a histogram.
+const COUNT_SUFFIX: &str = "_count";
 
 #[derive(Debug, Clone, PartialEq)]
 struct Sample {
@@ -61,14 +64,75 @@ impl Scrape {
             .filter(|sample| {
                 sample.labels.iter().any(|(key, value)| {
                     key == BOUND_LABEL
-                        && value
-                            .parse::<f64>()
-                            .is_ok_and(|parsed| (parsed - bound).abs() < BOUND_TOLERANCE)
+                        && value.parse::<f64>().is_ok_and(|parsed| {
+                            parsed == bound || (parsed - bound).abs() < BOUND_TOLERANCE
+                        })
                 })
             })
             .map(|sample| sample.value)
             .sum()
     }
+}
+
+impl Scrape {
+    /// The upper bound of the first bucket of `histogram` whose count reaches the share `q` of
+    /// its `_count`, over every scrape added; `None` when the count is 0. The last bucket's bound
+    /// is infinite.
+    pub fn quantile(&self, histogram: &str, q: f64) -> Option<f64> {
+        let count = self.total(&format!("{histogram}{COUNT_SUFFIX}"), None);
+        if count <= 0.0 {
+            return None;
+        }
+        let name = format!("{histogram}{BUCKET_SUFFIX}");
+        let mut bounds: Vec<f64> = self
+            .samples
+            .iter()
+            .filter(|sample| sample.name == name)
+            .filter_map(|sample| bound_of(sample))
+            .collect();
+        bounds.sort_by(f64::total_cmp);
+        bounds.dedup_by(|a, b| (*a - *b).abs() < BOUND_TOLERANCE || a == b);
+        let wanted = q * count;
+        bounds
+            .into_iter()
+            .find(|bound| self.bucket(histogram, *bound) >= wanted)
+    }
+
+    /// The change from `earlier` to `self`, series by series (for rates between two scrapes). A
+    /// value that went down is a restarted process: its new value is the change. A series
+    /// missing from `earlier` counts from 0.
+    pub fn delta(&self, earlier: &Self) -> Self {
+        let samples = self
+            .samples
+            .iter()
+            .map(|sample| {
+                let before = earlier
+                    .samples
+                    .iter()
+                    .find(|old| old.name == sample.name && old.labels == sample.labels)
+                    .map_or(0.0, |old| old.value);
+                let value = if sample.value >= before {
+                    sample.value - before
+                } else {
+                    sample.value
+                };
+                Sample {
+                    value,
+                    ..sample.clone()
+                }
+            })
+            .collect();
+        Self { samples }
+    }
+}
+
+/// The bound of a bucket sample (`+Inf` is infinite).
+fn bound_of(sample: &Sample) -> Option<f64> {
+    sample
+        .labels
+        .iter()
+        .find(|(key, _)| key == BOUND_LABEL)
+        .and_then(|(_, value)| value.parse().ok())
 }
 
 /// One sample line, or `None` for any other line.
@@ -130,6 +194,39 @@ sim_players 4
         assert_eq!(scrape.total("missing", None), 0.0);
         assert_eq!(scrape.bucket("sim_handoff_seconds", 0.033), 12.0);
         assert_eq!(scrape.total("sim_handoff_seconds_count", None), 13.0);
+    }
+
+    #[test]
+    fn quantile_gives_the_bucket_bound() {
+        let scrape = Scrape::parse(TEXT);
+        assert_eq!(scrape.quantile("sim_handoff_seconds", 0.5), Some(0.02));
+        assert_eq!(scrape.quantile("sim_handoff_seconds", 0.9), Some(0.033));
+        assert_eq!(
+            scrape.quantile("sim_handoff_seconds", 0.99),
+            Some(f64::INFINITY)
+        );
+    }
+
+    #[test]
+    fn quantile_of_an_empty_histogram_is_none() {
+        let empty = Scrape::parse("h_bucket{le=\"0.1\"} 0\nh_count 0\n");
+        assert_eq!(empty.quantile("h", 0.5), None);
+        assert_eq!(Scrape::default().quantile("h", 0.5), None);
+    }
+
+    #[test]
+    fn delta_of_a_restarted_counter_is_the_new_value() {
+        let earlier = Scrape::parse("c{a=\"1\"} 10\nd 5\nh_bucket{le=\"0.1\"} 4\n");
+        let later = Scrape::parse("c{a=\"1\"} 3\nd 9\nh_bucket{le=\"0.1\"} 7\nnew 2\n");
+        let delta = later.delta(&earlier);
+        assert_eq!(
+            delta.total("c", None),
+            3.0,
+            "a counter that went down restarted"
+        );
+        assert_eq!(delta.total("d", None), 4.0);
+        assert_eq!(delta.bucket("h", 0.1), 3.0);
+        assert_eq!(delta.total("new", None), 2.0);
     }
 
     #[test]

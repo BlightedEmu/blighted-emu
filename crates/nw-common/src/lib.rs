@@ -5,4 +5,5 @@
 pub mod config;
 pub mod logging;
 pub mod net;
+pub mod prometheus;
 pub mod time;

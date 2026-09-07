@@ -5,7 +5,6 @@
 pub mod config;
 pub mod fleet;
 pub mod hunt;
-pub mod metrics;
 pub mod pair;
 pub mod rep;
 pub mod route;
