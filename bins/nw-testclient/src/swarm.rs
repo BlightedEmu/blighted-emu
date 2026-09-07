@@ -19,7 +19,7 @@ use crate::fleet::{
 };
 use crate::pair::{Check, INPUT_CHANNEL, SEND_INTERVAL};
 use crate::rep::{RepClient, RepError};
-use crate::route::{Route, RouteError};
+use crate::route::{MAX_ROUTE_DURATION, Route, RouteError};
 use crate::udp::RepOutcome;
 use crate::view::OwnView;
 use tokio::sync::watch;
@@ -284,6 +284,39 @@ struct Walk {
     height: f32,
 }
 
+impl Walk {
+    /// Time walked on the route at `since`. A bot without a run duration walks on: when its
+    /// route is done, a new one starts where it stands.
+    fn walked(
+        &mut self,
+        settings: &SwarmSettings,
+        n: usize,
+        since: Duration,
+    ) -> Result<Duration, RouteError> {
+        let walked = since.saturating_sub(self.started);
+        if settings.fleet.duration.is_some() || walked < self.route.duration() {
+            return Ok(walked);
+        }
+        self.route = route_from(settings, n, self.route.offset_at(walked))?;
+        self.started = since;
+        Ok(Duration::ZERO)
+    }
+}
+
+/// The route of bot `n` from `from` (east and north of its start) for the run duration, or for
+/// [`UNTIL_STOPPED_ROUTE`] in a run until stopped.
+fn route_from(settings: &SwarmSettings, n: usize, from: [f32; 2]) -> Result<Route, RouteError> {
+    bot_route(
+        from,
+        n,
+        settings.fleet.bots,
+        settings.lane_spread_m,
+        settings.swing_m,
+        settings.speed_mps,
+        settings.fleet.duration.unwrap_or(UNTIL_STOPPED_ROUTE),
+    )
+}
+
 impl FleetBot for Bot {
     type Report = BotReport;
 
@@ -308,15 +341,7 @@ impl FleetBot for Bot {
             let Some(start) = nearest_start(&settings.starts, *first) else {
                 return Ok(());
             };
-            let route = bot_route(
-                [first.x - start[0], first.y - start[1]],
-                self.n,
-                settings.fleet.bots,
-                settings.lane_spread_m,
-                settings.swing_m,
-                settings.speed_mps,
-                settings.fleet.duration.unwrap_or(UNTIL_STOPPED_ROUTE),
-            )?;
+            let route = route_from(settings, self.n, [first.x - start[0], first.y - start[1]])?;
             self.walk = Some(Walk {
                 route,
                 start,
@@ -336,7 +361,7 @@ impl FleetBot for Bot {
             return Ok(());
         }
         self.last_sent = Some(since);
-        let walked = since.saturating_sub(walk.started);
+        let walked = walk.walked(&self.settings, self.n, since)?;
         let Some(position) = target(&walk.route, walk.start, walk.height, walked, &*self.ground)
         else {
             return Ok(());
@@ -396,8 +421,9 @@ pub async fn run_swarm(
     run_fleet(http, fleet, new_client, new_bot, stop, report).await
 }
 
-/// The route length of a bot that walks until stopped: it walks back and forth that long.
-const UNTIL_STOPPED_ROUTE: Duration = Duration::from_secs(24 * 60 * 60);
+/// The route time of a bot that walks until stopped, then it starts the next one: half the
+/// longest walk, so that the way to its lane fits as well.
+const UNTIL_STOPPED_ROUTE: Duration = Duration::from_secs(MAX_ROUTE_DURATION.as_secs() / 2);
 
 /// The start of a bot that never saw itself: its report has no bundle and fails.
 const NO_START: [f32; 2] = [0.0, 0.0];
@@ -448,6 +474,50 @@ mod tests {
 
     fn lanes(n: usize) -> Route {
         bot_route([0.0, 0.0], n, BOTS, SPREAD_M, SWING_M, SPEED_MPS, DURATION).expect("route")
+    }
+
+    fn until_stopped() -> SwarmSettings {
+        let mut settings = settings();
+        settings.fleet.duration = None;
+        settings
+    }
+
+    #[test]
+    fn an_until_stopped_route_can_be_built() {
+        assert!(route_from(&until_stopped(), 0, [SPREAD_M, SPREAD_M]).is_ok());
+    }
+
+    #[test]
+    fn an_until_stopped_bot_walks_on_after_its_route() {
+        let settings = until_stopped();
+        let mut walk = Walk {
+            route: lanes(0),
+            start: [ORIGIN, ORIGIN],
+            track: BotTrack::new([ORIGIN, ORIGIN]),
+            started: Duration::ZERO,
+            height: GROUND_HEIGHT,
+        };
+        let done = walk.route.duration();
+        assert_eq!(walk.walked(&settings, 0, done - TICK), Ok(done - TICK));
+        let end = walk.route.offset_at(done + TICK);
+        assert_eq!(walk.walked(&settings, 0, done + TICK), Ok(Duration::ZERO));
+        assert_eq!(walk.started, done + TICK);
+        assert_eq!(walk.route.offset_at(Duration::ZERO), end);
+        assert!(walk.route.duration() > DURATION);
+    }
+
+    #[test]
+    fn a_timed_bot_stops_at_its_route_end() {
+        let mut walk = Walk {
+            route: lanes(0),
+            start: [ORIGIN, ORIGIN],
+            track: BotTrack::new([ORIGIN, ORIGIN]),
+            started: Duration::ZERO,
+            height: GROUND_HEIGHT,
+        };
+        let late = walk.route.duration() * 2;
+        assert_eq!(walk.walked(&settings(), 0, late), Ok(late));
+        assert_eq!(walk.started, Duration::ZERO);
     }
 
     #[test]
