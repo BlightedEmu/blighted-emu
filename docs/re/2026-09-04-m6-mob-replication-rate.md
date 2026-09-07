@@ -83,3 +83,25 @@ Type 15 with slot mask 1 was already read (2,122 bodies accepted, 0 of those ran
 - `docs/re/2026-09-04-m6-mob-spawn-messages.md`
 - `docs/re/2026-09-04-m6-alc-state.md`
 - `docs/re/2026-08-31-world-and-object-stream-formats.md`
+
+## Round 3
+
+### Interest count
+
+**Observed.** Distinct replication keys were counted per connection. One window is every bundle whose ledger timestamp is the same millisecond. A second window is 100 ms. Keys are counted only while the walk is still aligned. A key after an unsized member in the same payload is not in the count, so a window total is a lower bound on that window.
+
+**Observed.** Same-millisecond window, 695 ledgers: the largest count is 43. By capture kind the largest is 43 outside war, OPR, invasion, and arena; 23 in a war capture; 23 in an invasion; 21 in an OPR; 14 in an arena. One bundle, keys seen before the walk stopped: largest 35. One bundle the walk finished: largest 26.
+
+**Observed.** 100 ms window, 696 ledgers: the largest count is 45. By kind: 45 outside those four kinds, 28 in a war, 25 in an OPR, 23 in an invasion, 14 in an arena.
+
+**Observed.** In the same-millisecond windows the largest number of keys that carried class 3935 is 1, and the largest number that carried class 10 or class 15 and not 3935 is 6. Those labels do not partition the 43 keys. Most keys in a full window are neither of those two labels. The measurement does not show a separate player cap and a separate mob cap. It shows one shared count of entity keys.
+
+**Observed.** Distance from the connection's type 1589 position to a parsed entity position, in windows of at least 30 keys, has 8 kept samples and 1 dropped sample. The dropped sample was farther than every entity still present. That is one sample. It does not establish a keep rule.
+
+### Client constant
+
+**Observed.** A read-only scan of `.text` for a register compared with immediate 47, then a decompile of the 17 functions that contain those sites (`M6Cmp47.java`), finds no entity limit. The uses are the character `/` (byte value 47) and the length 47 of an AWS header string. `RelevanceRadius` is a reflected property name in `FUN_14416b800`. The function copies a default; it does not compare a count with 47. `VisibleCount` in the image is a UI-cursor string, not a replication cap.
+
+**Inferred.** These captures never reach 47 entity keys in one connection window. The largest aligned count is 45 in 100 ms, which is below 47. The client image, on the searches above, does not contain a 47-entity interest constant. The emulator's 47 is not confirmed or contradicted by a reached cap. It is above every count this walk could align.
+
+**Open after round 3.** Which entities are kept when a cap is reached. The distance sample is 8 kept and 1 dropped. A rule needs the entities the server did not send. This walk cannot see those. Methods and counts are in `docs/re/2026-09-04-m6-round-3.md`.

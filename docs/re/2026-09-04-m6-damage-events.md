@@ -86,3 +86,19 @@ The `+0x30` targets were read from the three field vtables in the existing Ghidr
 - `docs/re/2026-09-02-replication-and-movement.md`
 - `docs/re/2026-09-04-m6-vitals-state.md`
 - Ghidra program `NewWorld.exe` in `<re-scratch>/ghidra`, read-only
+
+## Round 3
+
+Round 2 task 1, the head integers of types 2071, 3601, 4299, and 1938.
+
+**Observed.** On 695 ledgers, each big-endian `u64` at the start of those bodies was compared with the replication keys seen on the same connection in the previous 5 s. Match count is 0 for every tested word: 2071 offsets 0 and 8 (101,317 bodies), 3601 offsets 0, 8, and 16 (29,937 bodies), 4299 offsets 0 and 8 (280 bodies), 1938 offsets 0 and 8 (305 bodies). The low 32 bits of those words also match 0 keys.
+
+**Observed.** Where the connection had already received a type 164 body (16 bytes), one of three slices of the type 2071 body matched that 16-byte value on 3,336 of 57,631 bodies. The three slices are the first 8 bytes, the next 8 bytes, and bytes 16 through 31. The test does not say which slice. Each slice's own share is at most that 5.8%.
+
+**Observed.** The 16 bytes at offset 16 of type 2071 equal a type 10 `GdeRef` from the same ledger on 10,628 of 101,317 bodies (10.5%). They equal the first 16 bytes of an `AssetId` on 0 bodies. Type 1791 occurs 0 times, so there is no remove-id comparison.
+
+**Inferred.** None of these head words is the replication key, and none is cleanly the type 164 id. The target and the attacker are not recovered by equality with those two id spaces.
+
+## Round 3 files
+
+- `<re-scratch>/scratch-m6/round3/scan_round3.py`, log `scan-round3.log`

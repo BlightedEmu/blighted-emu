@@ -84,3 +84,9 @@ Captures checked for an exact read of type 10 and type 11, with the reliable-fra
 - `docs/re/2026-09-02-carrier-captures.md`
 - `local-data/Aeternum-World-main/Catalog/uuid_to_class.json` (AGPL-3.0, addresses only)
 - Ghidra program `NewWorld.exe` in `<re-scratch>/ghidra`, read-only
+
+## Round 3
+
+Round 2 task 2. Tasks 3 and 4 are already in the status table. They are not repeated.
+
+**Observed.** Sum of per-ledger distinct `GdeRef` values, 695 ledgers: 81,308. That is a sum of per-ledger counts, not one global set. The 16 bytes at offset 16 of type 2071 equal a `GdeRef` from the same ledger on 10,628 of 101,317 bodies. They equal the first 16 bytes of an `AssetId` on 0 bodies. Type 1791 occurs 0 times.

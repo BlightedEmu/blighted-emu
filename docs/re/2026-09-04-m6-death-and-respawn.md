@@ -62,16 +62,40 @@ Body length is 40 when the count is 22, and 41 when the count is 23. 16 + 1 + 1 
 
 **Observed.** A mob is a non-player entity. Its health is type 15 (`HealthAmount` in the vitals note). Its removal is one of the messages in the spawn note (types 566, 1517, or 1791). Type 3950 is a player class. Type 4299 is a vitals client message, so a mob can send it, and this pass did not show that a mob body is different from a player body.
 
-**Inferred.** A player death on these captures is type 4299, then type 1938 about 2.5 s later. Type 3950 is not part of that pair here. A mob does not use `HealthAmount` on the wire. The vitals note shows that field is not registered. A mob death is therefore not visible as a health integer in type 15.
+**Inferred.** A player death on these captures is type 4299, then type 1938 about 2.5 s later. Type 3950 is not part of that pair here. Round 3 withdraws the claim that a mob does not send `HealthAmount`. Slot 0 child 0 is that field.
 
 **Observed.** Gaps between two type 10 members that share a replication key, in the four fight sessions, when the gap is from 30 s to 2 hours: 13 gaps. Lowest 30.3 s, median 56.9 s, highest 159.6 s. None is near the 360 s slice cooldown.
 
 **Observed.** A player-style pair is the next message on the same connection context. Type 4299 then type 1938 is that pair for a player. A mob respawn would be the next type 10 for the same replication key. Types 566, 1517, and 1791 occur 0 times, so there is no remove message to start that clock. The next type 10 on the same connection, with no shared replication key, was measured anyway: 157 gaps, lowest 0 s, median 2.154 s, highest 171.974 s. A gap of 0 s is another entity's spawn card in the same ledger time. It is not the dead mob.
 
-**Unknown.** A mob's own death-to-respawn time. The search is finished offline. Current health is not a wire field. No numeric field in type 15 or type 4299 joins a creature datasheet id to the replication key (the combat note lists the match counts). The same-key type 10 gaps in the four fight sessions stay the 13 gaps already recorded, and they are not the 360 s slice cooldown. The missing fact is a death event that uses the same replication key as the next type 10. The ledgers and the readers do not contain that event. Getting it would require running the client.
+**Withdrawn in Round 3.** This paragraph used to call the death-to-respawn time Unknown, and it said the measurement needs the running client. That is not the standing result. Current health is slot 0 child 0. The clocks and the reason they are not the 360 s asset are in Round 3.
 
 ## Files read
 
 - `docs/re/2026-09-04-m6-mob-spawn-messages.md`
 - `docs/re/2026-09-04-m6-vitals-state.md`
 - Ghidra program `NewWorld.exe` in `<re-scratch>/ghidra`, read-only
+
+## Round 3
+
+**Corrected.** Section 4 said current health is not a wire field, and that a death-to-respawn time needs the running client. The vitals note, round 3, puts current health on slot 0 child 0. The clocks below were measured offline. They do not match the 360 s asset, for the reason in the inference at the end of this section.
+
+### Asset side
+
+**Observed.** The spawners note already records one point spawner: `m_minRespawnCooldown` and `m_maxRespawnCooldown` are both 360.0 seconds. A directory pass over the install paks found 20,342 paths whose names contain `pointspawner` and end in `.dynamicslice`. Every one of those entries uses a compression method other than store, so the zip reader cannot inflate them. This pass did not extract those slices. The only cooldown read from a slice remains 360.0 and 360.0 on that one asset.
+
+**Observed.** The generated datasheet rows name `RespawnCooldownMod` on experience, `MinRespawnRate` and `MaxRespawnRate` on gatherables, and `DungeonRespawnsPermitted` on game modes. `VitalsData` has no respawn-time column. Those datasheet columns are not a mob's death-to-spawn delay.
+
+### Capture side
+
+**Observed.** World files under `local-data/content/` hold 118,706 vitals spawn points (115,937 of them in the open world). Catacomb `nw_catacomb_00` contributes 0 vitals spawns. Dungeon points in these files are mostly absent from the vitals section.
+
+**Observed.** Child 0 of slot 0 (`HealthAmount`) went from above 5 to at most 0.5 on 100 samples that also had a recent position. 73 of those positions were within 20 m of a vitals spawn. 27 were not.
+
+**Observed.** Type 10 cards seen while the walk was aligned: 39,475. A position on the same replication key, in the same bundle or within 5 s, was missing for 39,475 of them. On one catacombs ledger the same check is 365 card events, 1 distinct card key, 7 distinct position keys, overlap 0. The card key and the position key are not the same key in the members this walk reaches.
+
+**Observed.** A second join treats the first parsed position of a key as a birth. Births: 5,262. Within 20 m of a spawn: 3,066. Paired with an earlier death at that spawn, on a different key: 1. The gap is 14.869 s.
+
+**Observed.** The same key's `HealthAmount` later rose above 5 after that drop on 5,686 of 5,931 drops. 245 drops had no later sample above 5 before the ledger ended. The gaps run from 0 s to 1,861.265 s. The median is below 1 s (the 1-second histogram's middle sample is in the 0 bucket). 5,177 of 5,686 gaps are under 30 s. 19 of 5,686 are from 300 s through 420 s.
+
+**Inferred.** That clock is not the spawner cooldown. A return in the same second is a dip through 0.5, or a heal, on a key that never left. It is not a new life at 360 s. The spawn-point join does not supply the missing 360 s cluster: it produced one gap, 14.869 s. These captures do not contain a death-to-next-life sample set that matches the 360 s asset. The asset value stands for the one opened spawner. The capture clocks measure a different event.
