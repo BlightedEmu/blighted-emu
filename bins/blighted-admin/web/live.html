@@ -1,56 +1,77 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Live panel</title>
+  <title>Live · Blighted Emu</title>
   <link rel="stylesheet" href="/web/style.css">
+  <script src="/web/theme.js"></script>
 </head>
 <body class="live-page">
-  <header>
-    <h1><a href="/">Blighted Emu</a> · Live panel</h1>
-    <span class="status" id="status"></span>
-  </header>
-  <div class="toolbar">
-    <span>Bots</span>
-    <span id="bot-buttons"></span>
-    <button type="button" id="stop-all">Stop all</button>
-    <button type="button" id="reconnect">Reconnect</button>
-    <label><input type="checkbox" id="trails" checked> Trails</label>
-    <label><input type="checkbox" id="sleeping"> Sleeping mob spawns (zoom in)</label>
-    <button type="button" id="fit">Whole world</button>
-  </div>
-  <div class="facts" id="tiles"></div>
-  <div class="viewer">
-    <aside class="pane">
-      <div class="pane-head"><strong>Batches</strong></div>
-      <ul class="list inline" id="batches"></ul>
-      <div class="pane-head"><strong>Events</strong></div>
-      <ul class="list" id="events"></ul>
-    </aside>
-    <section class="centre">
-      <canvas id="map" class="map"></canvas>
+  <nav class="rail" aria-label="Pages">
+    <a class="mark" href="/" aria-hidden="true" tabindex="-1"><i></i><i></i><i></i><i></i></a>
+    <a href="/">Home</a>
+    <a href="/live" aria-current="page">Live</a>
+    <a href="/web/map.html">Map</a>
+    <a href="/web/captures.html">Captures</a>
+    <button type="button" class="theme" id="theme"></button>
+  </nav>
+  <main class="work">
+    <header class="masthead">
+      <h1>Blighted Emu <span>· Live</span></h1>
+      <div class="end">
+        <span class="status error" id="status" role="status"></span>
+        <span class="stream" id="socket" data-state="connecting">connecting</span>
+        <button type="button" id="reconnect">Reconnect</button>
+      </div>
+    </header>
+    <section class="hoist" id="hoist" aria-label="Server flags"></section>
+    <div class="figures">
+      <div class="facts" id="tiles"></div>
+      <div class="facts minor" id="tiles-more"></div>
+    </div>
+    <div class="deck">
+      <section class="chart" aria-label="World map">
+        <canvas id="map" class="map"></canvas>
+        <div class="map-tools">
+          <label><input type="checkbox" id="trails" checked> Trails</label>
+          <label><input type="checkbox" id="sleeping"> Sleeping mob spawns (zoom in)</label>
+          <button type="button" id="fit">Whole world</button>
+        </div>
+        <div class="bots" role="group" aria-label="Bot batches">
+          <strong>Bots</strong>
+          <span id="bot-buttons"></span>
+          <button type="button" class="danger" id="stop-all">Stop all</button>
+        </div>
+      </section>
+      <aside class="side">
+        <h2>Batches</h2>
+        <ul class="list" id="batches"></ul>
+        <h2>Events</h2>
+        <ul class="list log" id="events"></ul>
+        <h2>Selection</h2>
+        <pre class="detail" id="selection"><span class="hint">Click a player or a mob.</span></pre>
+      </aside>
+    </div>
+    <section class="players" aria-labelledby="players-head">
+      <div class="section-head"><h2 id="players-head">Players</h2><span class="status" id="players-count"></span></div>
+      <div class="table-scroll">
+        <table class="grid">
+          <thead>
+            <tr>
+              <th class="sortable" data-column="entity">Entity</th>
+              <th class="sortable" data-column="sim">Sim</th>
+              <th class="sortable num" data-column="x">x</th>
+              <th class="sortable num" data-column="y">y</th>
+              <th class="sortable num" data-column="z">z</th>
+              <th class="sortable" data-column="state">State</th>
+            </tr>
+          </thead>
+          <tbody id="players"></tbody>
+        </table>
+      </div>
     </section>
-    <aside class="pane" id="right">
-      <div class="pane-head"><strong>Selection</strong></div>
-      <pre class="detail" id="selection">Click a player or a mob.</pre>
-    </aside>
-  </div>
-  <div class="tab-body">
-    <table class="grid">
-      <thead>
-        <tr>
-          <th class="sortable" data-column="entity">Entity</th>
-          <th class="sortable" data-column="sim">Sim</th>
-          <th class="sortable num" data-column="x">x</th>
-          <th class="sortable num" data-column="y">y</th>
-          <th class="sortable num" data-column="z">z</th>
-          <th class="sortable" data-column="state">State</th>
-        </tr>
-      </thead>
-      <tbody id="players"></tbody>
-    </table>
-  </div>
+  </main>
   <script type="module" src="/web/live.js"></script>
 </body>
 </html>

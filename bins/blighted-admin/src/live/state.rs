@@ -12,7 +12,7 @@ use rep_gateway::server::{
     METRIC_BYTES_IN, METRIC_BYTES_OUT, METRIC_DATAGRAMS_IN, METRIC_DATAGRAMS_OUT,
 };
 use serde::Serialize;
-use sim::server::{METRIC_BUNDLE_MEMBERS, METRIC_TICK_SECONDS};
+use sim::server::{METRIC_BUNDLE_MEMBERS, METRIC_TICK_SECONDS, ONE_TICK_SECONDS};
 
 /// A sim without a heartbeat for longer than this has left.
 pub const SIM_SILENT_MS: u64 = 3_000;
@@ -145,6 +145,8 @@ pub struct LiveView {
     pub mobs: Vec<MobView>,
     /// The newest events, oldest first.
     pub events: Vec<EventView>,
+    /// One sim tick at 30 Hz: a tick p99 above it is a slow tick.
+    pub tick_budget_ms: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -407,6 +409,7 @@ impl LiveState {
                 })
                 .collect(),
             events: self.events.iter().cloned().collect(),
+            tick_budget_ms: ONE_TICK_SECONDS * MS_PER_SECOND,
         }
     }
 }
@@ -521,6 +524,13 @@ mod tests {
             vec![1],
             "an older snapshot never replaces a newer one"
         );
+    }
+
+    #[test]
+    fn the_view_gives_the_tick_budget() {
+        const BUDGET_MS: f64 = 33.0;
+        const TOLERANCE_MS: f64 = 1e-9;
+        assert!((LiveState::default().view().tick_budget_ms - BUDGET_MS).abs() < TOLERANCE_MS);
     }
 
     #[test]

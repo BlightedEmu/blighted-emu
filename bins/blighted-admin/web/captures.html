@@ -1,15 +1,25 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Capture viewer</title>
+  <title>Captures · Blighted Emu</title>
   <link rel="stylesheet" href="/web/style.css">
+  <script src="/web/theme.js"></script>
 </head>
 <body class="viewer-page">
-  <header>
-    <h1><a href="/">Blighted Emu</a> · Capture viewer</h1>
-    <span class="status" id="session-title">No session open</span>
+  <nav class="rail" aria-label="Pages">
+    <a class="mark" href="/" aria-hidden="true" tabindex="-1"><i></i><i></i><i></i><i></i></a>
+    <a href="/">Home</a>
+    <a href="/live">Live</a>
+    <a href="/web/map.html">Map</a>
+    <a href="/web/captures.html" aria-current="page">Captures</a>
+    <button type="button" class="theme" id="theme"></button>
+  </nav>
+  <main class="work">
+  <header class="masthead">
+    <h1>Blighted Emu <span>· Captures</span></h1>
+    <div class="end"><span class="status" id="session-title">No session open</span></div>
   </header>
   <div class="viewer">
     <aside class="pane" id="left">
@@ -25,7 +35,7 @@
     </aside>
     <section class="centre">
       <div class="facts" id="summary"></div>
-      <canvas id="map" class="map"></canvas>
+      <div class="chart" aria-label="Session map"><canvas id="map" class="map"></canvas></div>
       <div class="timeline">
         <input type="range" id="time" min="0" max="0" value="0" aria-label="Time">
         <span class="status" id="time-label">—</span>
@@ -33,7 +43,7 @@
     </section>
     <aside class="pane" id="right">
       <div class="pane-head"><strong>Selection</strong></div>
-      <pre class="detail" id="selection">Click a path, an entity or a message.</pre>
+      <pre class="detail" id="selection"><span class="hint">Click a path, an entity or a message.</span></pre>
     </aside>
   </div>
   <nav class="tabs" id="tabs">
@@ -58,6 +68,7 @@
       <table class="grid" id="compare-table"></table>
     </div>
   </section>
+  </main>
   <script type="module" src="/web/captures.js"></script>
 </body>
 </html>

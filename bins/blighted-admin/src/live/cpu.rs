@@ -65,7 +65,8 @@ pub fn read_sample(proc_dir: &Path, at_ms: u64) -> std::io::Result<CpuSample> {
 }
 
 /// CPU per name between two samples, in % of one core: the ticks of the processes in both
-/// samples. `None` when no time passed.
+/// samples. `None` when no time passed or no process of that name is in both samples (a
+/// program that is not running has no CPU figure, not 0 %).
 pub fn cpu_percent(
     earlier: &CpuSample,
     later: &CpuSample,
@@ -75,20 +76,20 @@ pub fn cpu_percent(
     names
         .iter()
         .map(|name| {
-            let percent = (seconds > 0.0).then(|| {
-                let ticks: u64 = later
-                    .ticks
-                    .iter()
-                    .filter(|(_, (later_name, _))| later_name == name)
-                    .filter_map(|(pid, (_, now))| {
-                        earlier
-                            .ticks
-                            .get(pid)
-                            .filter(|(earlier_name, _)| earlier_name == name)
-                            .map(|(_, before)| now.saturating_sub(*before))
-                    })
-                    .sum();
-                ticks as f64 / CLOCK_TICKS_PER_SECOND / seconds * PERCENT
+            let deltas: Vec<u64> = later
+                .ticks
+                .iter()
+                .filter(|(_, (later_name, _))| later_name == name)
+                .filter_map(|(pid, (_, now))| {
+                    earlier
+                        .ticks
+                        .get(pid)
+                        .filter(|(earlier_name, _)| earlier_name == name)
+                        .map(|(_, before)| now.saturating_sub(*before))
+                })
+                .collect();
+            let percent = (seconds > 0.0 && !deltas.is_empty()).then(|| {
+                deltas.iter().sum::<u64>() as f64 / CLOCK_TICKS_PER_SECOND / seconds * PERCENT
             });
             (name.clone(), percent)
         })
@@ -168,7 +169,7 @@ mod tests {
             cpu_percent(&earlier, &later, &names(&["sim", "rep-gateway"])),
             vec![
                 ("sim".to_owned(), Some(100.0)),
-                ("rep-gateway".to_owned(), Some(0.0)),
+                ("rep-gateway".to_owned(), None),
             ]
         );
         assert_eq!(
@@ -197,7 +198,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("dir");
         let mut sampler = CpuSampler::new(dir.path().to_path_buf(), names(&["sim"]));
         assert_eq!(sampler.sample(0), vec![("sim".to_owned(), None)]);
-        assert_eq!(sampler.sample(1_000), vec![("sim".to_owned(), Some(0.0))]);
+        assert_eq!(
+            sampler.sample(1_000),
+            vec![("sim".to_owned(), None)],
+            "no sim process: no figure"
+        );
         let mut missing = CpuSampler::new(dir.path().join("missing"), names(&["sim"]));
         missing.sample(0);
         assert_eq!(missing.sample(1_000), vec![("sim".to_owned(), None)]);

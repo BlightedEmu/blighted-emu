@@ -1,40 +1,48 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Blighted Emu</title>
   <link rel="stylesheet" href="/web/style.css">
+  <script src="/web/theme.js"></script>
 </head>
 <body>
-  <header>
-    <h1>Blighted Emu</h1>
-    <nav><a href="/web/map.html">World map</a><a href="/web/captures.html">Capture viewer</a><a href="/live">Live panel</a></nav>
-  </header>
-  <main>
-    <div class="facts" id="facts">Loading the world facts.</div>
+  <nav class="rail" aria-label="Pages">
+    <a class="mark" href="/" aria-hidden="true" tabindex="-1"><i></i><i></i><i></i><i></i></a>
+    <a href="/" aria-current="page">Home</a>
+    <a href="/live">Live</a>
+    <a href="/web/map.html">Map</a>
+    <a href="/web/captures.html">Captures</a>
+    <button type="button" class="theme" id="theme"></button>
+  </nav>
+  <main class="work">
+    <header class="masthead">
+      <h1>Blighted Emu</h1>
+    </header>
+    <div class="facts figures" id="facts"><div class="fact"><span>World</span>Reading the world facts.</div></div>
+    <ul class="pages">
+      <li><a href="/live">Live</a><p>Server flags, figures, players and mobs on the map, and the bot batch buttons.</p></li>
+      <li><a href="/web/map.html">Map</a><p>The world map with its relief, mob spawns, gatherables and landmarks.</p></li>
+      <li><a href="/web/captures.html">Captures</a><p>Recorded retail sessions: paths, message types, bytes, walk stops, and a compare.</p></li>
+    </ul>
   </main>
   <script type="module">
+    import { factElements } from '/web/tiles.js';
+
     const facts = document.getElementById('facts');
     try {
       const info = await (await fetch('/api/world/info')).json();
       const levels = info.tiles.levels.length;
-      facts.innerHTML = '';
-      for (const [label, value] of [
+      facts.replaceChildren(...factElements([
         ['Level', info.tiles.level],
         ['World size', `${info.world_m} m`],
         ['Ocean level', `${info.ocean_level} m`],
         ['Map tiles', info.map_tiles ? `${levels} levels` : 'not written (run just map-tiles)'],
-      ]) {
-        const fact = document.createElement('div');
-        fact.className = 'fact';
-        const name = document.createElement('span');
-        name.textContent = label;
-        fact.append(name, String(value));
-        facts.append(fact);
-      }
+      ]));
     } catch (error) {
-      facts.textContent = `The world facts cannot be read: ${error}`;
+      facts.replaceChildren(...factElements([['World', `The world facts cannot be read: ${error}`]]));
+      facts.firstChild.classList.add('bad');
     }
   </script>
 </body>

@@ -2,6 +2,7 @@
 // The world map on a 2D canvas: map tiles or relief tiles, sim cells, spawn points, paths and
 // points, with pan, zoom, follow and pick. Shared by every admin page.
 
+import { POINT_RING, SIGNAL } from './palette.js';
 import {
   boxOf,
   parentTile,
@@ -20,10 +21,12 @@ export const SPAWN_ZOOM_M_PER_PX = 4;
 /** Base layers. */
 export const LAYERS = Object.freeze({ TILES: 'tiles', RELIEF: 'relief', BOTH: 'both' });
 
-const SPAWN_COLOURS = { vitals: '#d9534f', gatherables: '#4cae4c', landmarks: '#e8a33d' };
+const SPAWN_COLOURS = { vitals: SIGNAL.RED, gatherables: SIGNAL.GREEN, landmarks: SIGNAL.YELLOW };
 const LABEL_M_PER_PX = 0.6;
 const WHEEL_STEP = 1.2;
 const BUTTON_STEP = 2;
+/** A fitted box fills this share of the canvas less, so the corner tools cover no land. */
+const FIT_MARGIN = 1.25;
 const PICK_PX = 8;
 const POINT_RADIUS_PX = 4;
 const SPAWN_RADIUS_PX = 3;
@@ -32,8 +35,18 @@ const OVERLAY_ALPHA = 0.5;
 const CELL_FILL_ALPHA = 0.15;
 const CELL_LINE_WIDTH_PX = 1;
 const SPAWN_FETCH_DELAY_MS = 150;
-const LABEL_FONT = '11px system-ui, sans-serif';
-const BACKGROUND = '#0d1013';
+const POINT_RING_PX = 1.5;
+/** Weight and size of the labels; the family is the page's sign face. */
+const LABEL_WEIGHT_SIZE = '600 12px';
+const LABEL_INK = SIGNAL.INK;
+const LABEL_HALO = SIGNAL.WHITE;
+const LABEL_HALO_PX = 3;
+const LABEL_GAP_PX = 2;
+const LABEL_DROP_PX = 4;
+/** CSS properties of style.css: the ground outside the tiles (per theme) and the sign face. */
+const SEA_PROPERTY = '--map-sea';
+const SIGN_FONT_PROPERTY = '--font-sign';
+const THEME_ATTRIBUTE = 'data-theme';
 
 export class WorldMap {
   /**
@@ -58,11 +71,18 @@ export class WorldMap {
     this.spawnTimer = null;
     this.spawnRequest = 0;
     this.view = { centerX: 0, centerY: 0, metresPerPixel: 1, width: 1, height: 1 };
+    this.labelFont = '';
     this.drawQueued = false;
-    // The first fit waits for the canvas to have its laid-out size.
-    this.fitPending = true;
+    // The fitted box, kept while the viewer has not moved the view: a resize fits it again (the
+    // first fit waits for the canvas to have its laid-out size).
+    this.fitBox = this.worldBox();
     this.resize();
     this.listen();
+    // The sea colour belongs to the theme (theme.js sets it on the root): draw again on a change.
+    new MutationObserver(() => this.redraw()).observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: [THEME_ATTRIBUTE],
+    });
   }
 
   /** Sets the base layer (one of LAYERS). */
@@ -101,6 +121,9 @@ export class WorldMap {
   /** Keeps the point or the path end of `key` in the centre; null stops. */
   follow(key) {
     this.followKey = key;
+    if (key !== null) {
+      this.fitBox = null;
+    }
     this.redraw();
   }
 
@@ -109,21 +132,28 @@ export class WorldMap {
     this.selectHandler = handler;
   }
 
-  /** Shows a world box, or the whole world. */
-  fit(box = { minX: 0, minY: 0, maxX: this.info.world_m, maxY: this.info.world_m }) {
+  /** The box of the whole world. */
+  worldBox() {
+    return { minX: 0, minY: 0, maxX: this.info.world_m, maxY: this.info.world_m };
+  }
+
+  /** Shows a world box, or the whole world, with room for the tools on the map's corners. */
+  fit(box = this.worldBox()) {
+    this.fitBox = box;
     const width = Math.max(box.maxX - box.minX, 1);
     const height = Math.max(box.maxY - box.minY, 1);
     this.view = {
       ...this.view,
       centerX: (box.minX + box.maxX) / 2,
       centerY: (box.minY + box.maxY) / 2,
-      metresPerPixel: Math.max(width / this.view.width, height / this.view.height) * 1.05,
+      metresPerPixel: Math.max(width / this.view.width, height / this.view.height) * FIT_MARGIN,
     };
     this.changed();
   }
 
   /** Zooms in (`steps` > 0) or out around the centre. */
   zoom(steps) {
+    this.fitBox = null;
     this.view = zoomAt(
       this.view,
       this.view.width / 2,
@@ -143,9 +173,8 @@ export class WorldMap {
     this.canvas.height = Math.round(height * ratio);
     this.context.setTransform(ratio, 0, 0, ratio, 0, 0);
     this.view = { ...this.view, width, height };
-    if (this.fitPending && this.canvas.clientWidth > 0 && this.canvas.clientHeight > 0) {
-      this.fitPending = false;
-      this.fit();
+    if (this.fitBox && this.canvas.clientWidth > 0 && this.canvas.clientHeight > 0) {
+      this.fit(this.fitBox);
       return;
     }
     this.changed();
@@ -182,6 +211,7 @@ export class WorldMap {
       drag.y = event.offsetY;
       if (drag.moved) {
         this.followKey = null;
+        this.fitBox = null;
       }
       this.changed();
     });
@@ -196,6 +226,7 @@ export class WorldMap {
       'wheel',
       (event) => {
         event.preventDefault();
+        this.fitBox = null;
         const factor = event.deltaY > 0 ? WHEEL_STEP : 1 / WHEEL_STEP;
         this.view = zoomAt(this.view, event.offsetX, event.offsetY, factor, this.info.world_m);
         this.changed();
@@ -271,7 +302,9 @@ export class WorldMap {
       this.view = { ...this.view, centerX: target.x, centerY: target.y };
     }
     const context = this.context;
-    context.fillStyle = BACKGROUND;
+    const style = getComputedStyle(this.canvas);
+    this.labelFont = `${LABEL_WEIGHT_SIZE} ${style.getPropertyValue(SIGN_FONT_PROPERTY)}`;
+    context.fillStyle = style.getPropertyValue(SEA_PROPERTY);
     context.fillRect(0, 0, this.view.width, this.view.height);
     if (this.layer !== LAYERS.RELIEF && this.info.map_tiles) {
       this.drawTiles('tiles', MAP_TILE_PX, 1);
@@ -363,16 +396,13 @@ export class WorldMap {
   drawSpawns() {
     const context = this.context;
     const labels = this.view.metresPerPixel <= LABEL_M_PER_PX;
-    context.font = LABEL_FONT;
+    context.font = this.labelFont;
     for (const spawn of this.spawns) {
       const { px, py } = worldToScreen(this.view, spawn.x, spawn.y);
-      context.fillStyle = SPAWN_COLOURS[spawn.kind];
-      context.beginPath();
-      context.arc(px, py, SPAWN_RADIUS_PX, 0, Math.PI * 2);
-      context.fill();
+      this.drawDot(px, py, SPAWN_RADIUS_PX, SPAWN_COLOURS[spawn.kind]);
       if (labels) {
         const level = spawn.level === null ? '' : ` ${spawn.level}`;
-        context.fillText(`${spawn.id}${level}`, px + SPAWN_RADIUS_PX + 2, py + 4);
+        this.drawLabel(`${spawn.id}${level}`, px + SPAWN_RADIUS_PX, py);
       }
     }
   }
@@ -400,17 +430,38 @@ export class WorldMap {
 
   drawPoints() {
     const context = this.context;
-    context.font = LABEL_FONT;
+    context.font = this.labelFont;
     for (const point of this.points) {
       const { px, py } = worldToScreen(this.view, point.x, point.y);
-      context.fillStyle = point.color;
-      context.beginPath();
-      context.arc(px, py, POINT_RADIUS_PX, 0, Math.PI * 2);
-      context.fill();
+      this.drawDot(px, py, POINT_RADIUS_PX, point.color);
       if (point.label) {
-        context.fillText(point.label, px + POINT_RADIUS_PX + 2, py + 4);
+        this.drawLabel(point.label, px + POINT_RADIUS_PX, py);
       }
     }
+  }
+
+  /** A filled dot with a thin ring, so it shows on light and dark ground. */
+  drawDot(px, py, radius, color) {
+    const context = this.context;
+    context.fillStyle = color;
+    context.strokeStyle = POINT_RING;
+    context.lineWidth = POINT_RING_PX;
+    context.beginPath();
+    context.arc(px, py, radius, 0, Math.PI * 2);
+    context.fill();
+    context.stroke();
+  }
+
+  /** Ink text on a white halo to the right of a dot. */
+  drawLabel(text, px, py) {
+    const context = this.context;
+    const x = px + LABEL_GAP_PX;
+    const y = py + LABEL_DROP_PX;
+    context.lineWidth = LABEL_HALO_PX;
+    context.strokeStyle = LABEL_HALO;
+    context.strokeText(text, x, y);
+    context.fillStyle = LABEL_INK;
+    context.fillText(text, x, y);
   }
 
   /** The point, path or spawn nearest to a screen pixel within PICK_PX, or null. */

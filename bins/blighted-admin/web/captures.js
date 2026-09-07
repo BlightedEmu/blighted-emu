@@ -3,7 +3,9 @@
 
 import { hexRows } from './hex.js';
 import { WorldMap } from './map.js';
+import { SERIES, SIGNAL } from './palette.js';
 import { openOutcome } from './slots.js';
+import { factElements } from './tiles.js';
 import { boxAround } from './view.js';
 import {
   directionText,
@@ -20,9 +22,10 @@ const SEARCH_DELAY_MS = 200;
 const MESSAGES_PAGE = 300;
 const DRAW_ALL_BATCH = 16;
 const PLAYER_KEY = 'player';
-const PLAYER_COLOUR = '#ffd84a';
-const TRACK_COLOURS = ['#4fc3f7', '#ef6c6c', '#81c784', '#ba68c8', '#ffb74d', '#4db6ac'];
-const SELECTED_COLOUR = '#ffffff';
+const PLAYER_COLOUR = SIGNAL.YELLOW;
+/** Track colours: the series without yellow, which is the player's. */
+const TRACK_COLOURS = SERIES.filter((colour) => colour !== PLAYER_COLOUR);
+const SELECTED_COLOUR = SIGNAL.WHITE;
 const FIT_MARGIN_M = 50;
 
 const $ = (id) => document.getElementById(id);
@@ -184,14 +187,7 @@ function showSummary() {
   if (summary.error) {
     facts.push(['Ledger error', summary.error]);
   }
-  $('summary').replaceChildren(...facts.map(([label, value]) => {
-    const fact = document.createElement('div');
-    fact.className = 'fact';
-    const name = document.createElement('span');
-    name.textContent = label;
-    fact.append(name, value);
-    return fact;
-  }));
+  $('summary').replaceChildren(...factElements(facts));
 }
 
 // Types ----------------------------------------------------------------------------------------

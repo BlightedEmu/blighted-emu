@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The live panel: the state stream of blighted-admin (tiles, map, players, events) and the bot
-// batch buttons.
+// The live panel: the state stream of blighted-admin (flags, figures, map, players, events) and
+// the bot batch buttons.
 
+import { FLAG_GROUPS, flagText, isMarked, nextHoist } from './hoist.js';
 import { WorldMap } from './map.js';
+import { SERIES, SIGNAL } from './palette.js';
 import { sortRows } from './tables.js';
-import { TILE_KINDS, TRAIL_POINTS, formatTile, trailPush } from './tiles.js';
+import { TILE_KINDS, TRAIL_POINTS, factElements, formatTile, trailPush } from './tiles.js';
 
 const STREAM_URL = '/api/live/stream';
 const BOTS_URL = '/api/live/bots';
@@ -15,22 +17,33 @@ const BATCH_SIZES = [1, 10, 100, 1000];
 const BATCH_REFRESH_MS = 1000;
 /** Most rows of the player table. */
 const PLAYER_ROWS = 500;
+const PLAYER_COLUMNS = 6;
 const EVENTS_SHOWN = 200;
 const SOCKET_LIVE = 'live';
 const SOCKET_CLOSED = 'closed';
 const SOCKET_CONNECTING = 'connecting';
 const MOB_STATES = ['asleep', 'idle', 'chase', 'attack', 'return', 'dead'];
-const MOB_COLOURS = ['#8a8f96', '#e8a33d', '#f07f3c', '#d9534f', '#5bc0de', '#4a4d52'];
-const PLAYER_COLOUR = '#4aa3df';
-const DEAD_COLOUR = '#9b59b6';
-const FROZEN_COLOUR = '#f5f5f5';
-const TRAIL_COLOUR = 'rgba(74, 163, 223, 0.5)';
-const SIM_COLOURS = ['#2f6f8f', '#8f2f6f', '#6f8f2f', '#8f6f2f', '#2f8f6f', '#6f2f8f', '#8f2f2f', '#2f2f8f'];
+/** Mob colours in the order of MOB_STATES. */
+const MOB_COLOURS = [SIGNAL.STONE, SIGNAL.YELLOW, SIGNAL.ORANGE, SIGNAL.RED, SIGNAL.BLUE, SIGNAL.INK];
+const PLAYER_COLOUR = SIGNAL.WHITE;
+const DEAD_COLOUR = SIGNAL.PURPLE;
+const FROZEN_COLOUR = SIGNAL.ICE;
+/** The player colour at 60 % (an 8-digit hex colour). */
+const TRAIL_ALPHA_HEX = '99';
+const TRAIL_COLOUR = `${PLAYER_COLOUR}${TRAIL_ALPHA_HEX}`;
+const SIM_COLOURS = SERIES;
+const BAD_FACT = 'bad';
+const MARKED_FLAG = 'marked';
+const RAISED_FLAG = 'raise';
 const PLAYER_KEY = 'player-';
 const MOB_KEY = 'mob-';
 
 const status = document.getElementById('status');
+const socketBox = document.getElementById('socket');
+const hoistBox = document.getElementById('hoist');
 const tilesBox = document.getElementById('tiles');
+const moreTilesBox = document.getElementById('tiles-more');
+const playersCount = document.getElementById('players-count');
 const batchesList = document.getElementById('batches');
 const eventsList = document.getElementById('events');
 const selectionBox = document.getElementById('selection');
@@ -43,6 +56,10 @@ const map = new WorldMap(document.getElementById('map'), info);
 let source = null;
 let socket = SOCKET_CONNECTING;
 let view = null;
+/** The flags by key (hoist.js), or null before the first state. */
+let hoist = null;
+/** The drawn flag elements by key: kept, so a flag only rises when its state changes. */
+const flagElements = new Map();
 let trails = new Map();
 let selectedKey = null;
 /** The batch list as last drawn: it is drawn again only when it changes, so a click lands. */
@@ -76,46 +93,118 @@ function entities() {
   return all;
 }
 
-function tileRow() {
+/** The six main figures: [label, value, bad] each. */
+function mainFigures() {
+  const tiles = view?.tiles;
+  const p99 = tiles?.tick_p99_ms;
+  const slow = p99 !== null && p99 !== undefined && p99 > view.tick_budget_ms;
+  return [
+    ['Players', formatTile(TILE_KINDS.COUNT, tiles?.players), false],
+    ['Bots', formatTile(TILE_KINDS.COUNT, tiles?.bots), false],
+    ['Worst tick p99', formatTile(TILE_KINDS.MS, p99), slow],
+    ['Members sent', formatTile(TILE_KINDS.RATE, tiles?.members_s), false],
+    ['Bandwidth out', formatTile(TILE_KINDS.BYTES, tiles?.bytes_out_s), false],
+    ['Mobs awake', formatTile(TILE_KINDS.COUNT, tiles?.mobs_awake), false],
+  ];
+}
+
+/** The other figures, in the small line under the main ones: [label, value] each. */
+function moreFigures() {
   const tiles = view?.tiles;
   const rows = [
-    ['Socket', socket],
     ['Sims', formatTile(TILE_KINDS.COUNT, tiles?.sims)],
-    ['Players', formatTile(TILE_KINDS.COUNT, tiles?.players)],
-    ['Bots', formatTile(TILE_KINDS.COUNT, tiles?.bots)],
     ['Tick avg', formatTile(TILE_KINDS.MS, tiles?.tick_avg_ms)],
-    ['Tick p99', formatTile(TILE_KINDS.MS, tiles?.tick_p99_ms)],
     ['Packets in', formatTile(TILE_KINDS.RATE, tiles?.datagrams_in_s)],
     ['Packets out', formatTile(TILE_KINDS.RATE, tiles?.datagrams_out_s)],
     ['Bandwidth in', formatTile(TILE_KINDS.BYTES, tiles?.bytes_in_s)],
-    ['Bandwidth out', formatTile(TILE_KINDS.BYTES, tiles?.bytes_out_s)],
-    ['Members', formatTile(TILE_KINDS.RATE, tiles?.members_s)],
-    ['Mobs awake', formatTile(TILE_KINDS.COUNT, tiles?.mobs_awake)],
     ['Mobs asleep', formatTile(TILE_KINDS.COUNT, tiles?.mobs_asleep)],
   ];
   for (const [name, percent] of tiles?.cpu ?? []) {
     rows.push([`CPU ${name}`, formatTile(TILE_KINDS.CPU, percent)]);
   }
-  for (const page of view?.metrics ?? []) {
-    const where = new URL(page.url).host;
-    rows.push([`Tick ${where}`, `${formatTile(TILE_KINDS.MS, page.tick_avg_ms)} · p99 ${formatTile(TILE_KINDS.MS, page.tick_p99_ms)}`]);
-  }
   return rows;
 }
 
-function showTiles() {
-  tilesBox.replaceChildren(
-    ...tileRow().map(([name, value]) => {
-      const tile = document.createElement('div');
-      tile.className = 'fact';
-      const label = document.createElement('span');
-      label.textContent = name;
-      tile.append(label, value);
-      if (name === 'Socket') {
-        tile.classList.add(value === SOCKET_LIVE ? 'socket-live' : 'socket-closed');
-      }
-      return tile;
-    }),
+function showFigures() {
+  const main = mainFigures();
+  const facts = factElements(main.map(([name, value]) => [name, value]));
+  facts.forEach((fact, index) => fact.classList.toggle(BAD_FACT, main[index][2]));
+  tilesBox.replaceChildren(...facts);
+  moreTilesBox.replaceChildren(...factElements(moreFigures()));
+}
+
+function showSocket() {
+  socketBox.dataset.state = socket;
+  socketBox.textContent = socket === SOCKET_LIVE ? 'stream live' : `stream ${socket}`;
+}
+
+function flagElement(key) {
+  let item = flagElements.get(key);
+  if (!item) {
+    item = document.createElement('div');
+    item.className = 'flag-item';
+    const flag = document.createElement('div');
+    flag.className = 'flag';
+    flag.setAttribute('aria-hidden', 'true');
+    const reason = document.createElement('span');
+    reason.className = 'reason';
+    item.append(flag, document.createElement('b'), reason, document.createElement('small'));
+    item.addEventListener('animationend', () => item.classList.remove(RAISED_FLAG));
+    flagElements.set(key, item);
+  }
+  return item;
+}
+
+function groupElement(title, items) {
+  const group = document.createElement('div');
+  group.className = 'hoist-group';
+  const head = document.createElement('h2');
+  head.textContent = title;
+  const flags = document.createElement('div');
+  flags.className = 'flags';
+  const mast = document.createElement('div');
+  mast.className = 'mast';
+  flags.append(mast, ...items);
+  group.append(head, flags);
+  return group;
+}
+
+function showHoist(nowMs) {
+  if (hoist === null || hoist.size === 0) {
+    const empty = document.createElement('p');
+    empty.className = 'muted';
+    empty.textContent = hoist === null ? 'Waiting for the first state.' : 'No sim heartbeat and no metrics page yet.';
+    hoistBox.replaceChildren(empty);
+    return;
+  }
+  const groups = { [FLAG_GROUPS.SIMS]: [], [FLAG_GROUPS.PAGES]: [] };
+  for (const [key, flag] of hoist) {
+    const item = flagElement(key);
+    const { reason, detail } = flagText(flag, nowMs);
+    const [banner, name, reasonBox, detailBox] = item.children;
+    if (item.dataset.state !== flag.state && item.dataset.state !== undefined) {
+      item.classList.remove(RAISED_FLAG);
+      // Reading the layout restarts the rise.
+      void item.offsetWidth;
+      item.classList.add(RAISED_FLAG);
+    }
+    item.dataset.state = flag.state;
+    banner.dataset.state = flag.state;
+    name.textContent = flag.name;
+    reasonBox.textContent = reason;
+    detailBox.textContent = detail;
+    item.classList.toggle(MARKED_FLAG, isMarked(flag, nowMs));
+    groups[flag.group].push(item);
+  }
+  for (const key of flagElements.keys()) {
+    if (!hoist.has(key)) {
+      flagElements.delete(key);
+    }
+  }
+  hoistBox.replaceChildren(
+    ...[['Sims', groups[FLAG_GROUPS.SIMS]], ['Metrics pages', groups[FLAG_GROUPS.PAGES]]]
+      .filter(([, items]) => items.length > 0)
+      .map(([title, items]) => groupElement(title, items)),
   );
 }
 
@@ -155,9 +244,28 @@ function select(key) {
   showSelection();
 }
 
+/** A list item that says the list is empty. */
+function emptyItem(text) {
+  const item = document.createElement('li');
+  item.className = 'empty';
+  item.textContent = text;
+  return item;
+}
+
 function showPlayers() {
   const rows = (view?.players ?? []).map((player) => ({ ...player, state: playerState(player) }));
   const sorted = sortRows(rows, sortColumn, sortDescending).slice(0, PLAYER_ROWS);
+  playersCount.textContent = rows.length > PLAYER_ROWS ? `first ${PLAYER_ROWS} of ${rows.length}` : `${rows.length}`;
+  if (sorted.length === 0) {
+    const row = document.createElement('tr');
+    row.className = 'empty';
+    const cell = document.createElement('td');
+    cell.colSpan = PLAYER_COLUMNS;
+    cell.textContent = 'No player in the shown snapshots.';
+    row.append(cell);
+    playersBody.replaceChildren(row);
+    return;
+  }
   playersBody.replaceChildren(
     ...sorted.map((player) => {
       const row = document.createElement('tr');
@@ -185,11 +293,15 @@ function showPlayers() {
 
 function showEvents() {
   const events = [...(view?.events ?? [])].reverse().slice(0, EVENTS_SHOWN);
+  if (events.length === 0) {
+    eventsList.replaceChildren(emptyItem('No event yet.'));
+    return;
+  }
   eventsList.replaceChildren(
     ...events.map((event) => {
       const item = document.createElement('li');
-      const time = document.createElement('span');
-      time.className = 'muted';
+      const time = document.createElement('time');
+      time.dateTime = new Date(event.time_ms).toISOString();
       time.textContent = new Date(event.time_ms).toLocaleTimeString();
       item.append(time, event.text);
       return item;
@@ -198,7 +310,10 @@ function showEvents() {
 }
 
 function showAll() {
-  showTiles();
+  const nowMs = Date.now();
+  hoist = nextHoist(hoist, view, nowMs);
+  showHoist(nowMs);
+  showFigures();
   showMap();
   showSelection();
   showPlayers();
@@ -208,15 +323,15 @@ function showAll() {
 function connect() {
   source?.close();
   socket = SOCKET_CONNECTING;
-  showTiles();
+  showSocket();
   source = new EventSource(STREAM_URL);
   source.addEventListener('open', () => {
     socket = SOCKET_LIVE;
-    showTiles();
+    showSocket();
   });
   source.addEventListener('error', () => {
     socket = source.readyState === EventSource.CLOSED ? SOCKET_CLOSED : SOCKET_CONNECTING;
-    showTiles();
+    showSocket();
   });
   source.addEventListener(STATE_EVENT, (event) => {
     view = JSON.parse(event.data);
@@ -242,6 +357,10 @@ async function refreshBatches() {
       return;
     }
     shownBatches = drawn;
+    if (batches.length === 0) {
+      batchesList.replaceChildren(emptyItem('No batch. A Bots button starts one.'));
+      return;
+    }
     batchesList.replaceChildren(
       ...batches.map((batch) => {
         const item = document.createElement('li');
@@ -303,6 +422,10 @@ for (const header of document.querySelectorAll('th.sortable')) {
   });
 }
 
+showHoist(Date.now());
+showFigures();
+showEvents();
+showPlayers();
 connect();
 refreshBatches();
 setInterval(refreshBatches, BATCH_REFRESH_MS);

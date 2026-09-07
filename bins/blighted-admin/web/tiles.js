@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Tile texts and player trails of the live page.
+// Fact elements (a label under a figure), tile texts and the player trails of the live page.
 
 import { formatBytes, formatRate } from './tables.js';
 
@@ -36,6 +36,21 @@ export function formatTile(kind, value) {
     default:
       return String(value);
   }
+}
+
+/**
+ * One `.fact` element per [label, value] pair (style.css shows the label under the value). An
+ * unknown value is marked, so it shows small and muted.
+ */
+export function factElements(pairs) {
+  return pairs.map(([label, value]) => {
+    const fact = document.createElement('div');
+    fact.className = value === UNKNOWN ? 'fact unknown' : 'fact';
+    const name = document.createElement('span');
+    name.textContent = label;
+    fact.append(name, String(value));
+    return fact;
+  });
 }
 
 /**
