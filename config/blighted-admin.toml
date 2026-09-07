@@ -1,5 +1,5 @@
-# nw-admin configuration (admin tools spec section 6). This file holds no secret.
-# Any key below can be overridden with NW_ADMIN_<KEY>, nested keys joined by "__".
+# blighted-admin configuration (Blighted Emu admin tools, spec section 6). This file holds no secret.
+# Any key below can be overridden with BLIGHTED_ADMIN_<KEY>, nested keys joined by "__".
 
 # The admin pages. Only a loopback address is allowed: the tools have no login.
 listen = "127.0.0.1:9180"

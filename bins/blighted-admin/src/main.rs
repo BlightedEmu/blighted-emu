@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `nw-admin`: local admin web tools.
+//! `blighted-admin`: local admin web tools.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -7,11 +7,11 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 /// The committed example configuration.
-const DEFAULT_CONFIG: &str = "config/nw-admin.toml";
+const DEFAULT_CONFIG: &str = "config/blighted-admin.toml";
 
 #[derive(Parser)]
 #[command(
-    name = "nw-admin",
+    name = "blighted-admin",
     about = "Local admin web tools of the Blighted New World emulator."
 )]
 struct Cli {
@@ -31,7 +31,7 @@ enum Command {
 
 fn main() -> ExitCode {
     let Command::Serve { config } = Cli::parse().command;
-    match nw_admin::run::serve(&config) {
+    match blighted_admin::run::serve(&config) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");

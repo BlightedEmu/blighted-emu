@@ -288,12 +288,12 @@ export NW_GAME_DIR="/path/to/steamapps/common/New World"
 just map-tiles
 ```
 
-### nw-admin
+### blighted-admin
 
-`nw-admin serve` serves the admin pages on `http://127.0.0.1:9180/` (`config/nw-admin.toml`, overrides `NW_ADMIN_<KEY>`). It reads the world file and the content bundle from `just world` and `just bundle`, and the map tiles from `just map-tiles` when they exist; without them the map shows only the height relief. It listens on a loopback address only, because the tools have no login. A request other than `GET` needs the header `X-NW-Admin: 1` and, when the browser sends an `Origin`, the origin of the admin pages; so another web site in your browser cannot use it.
+`blighted-admin serve` serves the admin pages on `http://127.0.0.1:9180/` (`config/blighted-admin.toml`, overrides `BLIGHTED_ADMIN_<KEY>`). It reads the world file and the content bundle from `just world` and `just bundle`, and the map tiles from `just map-tiles` when they exist; without them the map shows only the height relief. It listens on a loopback address only, because the tools have no login. A request other than `GET` needs the header `X-Blighted-Admin: 1` and, when the browser sends an `Origin`, the origin of the admin pages; so another web site in your browser cannot use it.
 
 ```bash
-cargo run --release -p nw-admin -- serve
+cargo run --release -p blighted-admin -- serve
 ```
 
 For the capture viewer it lists every `ledger.bin` under `local-data/captures/` with the name of its `metadata.json` and, for an open-world session, the title of the saved Discord post that holds its archive. Message type names come from the install's `typeindex.json` joined with the Aeternum-World names (set `NW_GAME_DIR`), then from the local Azoth catalog archive (`local-data/azoth-catalog/types.json`, saved by its `archive.py` from their public API).

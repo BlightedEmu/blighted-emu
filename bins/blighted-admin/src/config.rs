@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `config/nw-admin.toml` with `NW_ADMIN_` overrides (admin tools spec section 6).
+//! `config/blighted-admin.toml` with `BLIGHTED_ADMIN_` overrides (admin tools spec section 6).
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 /// Prefix of the environment overrides.
-pub const ADMIN_ENV_PREFIX: &str = "NW_ADMIN_";
+pub const ADMIN_ENV_PREFIX: &str = "BLIGHTED_ADMIN_";
 /// Shortest scrape and state interval.
 pub const MIN_LIVE_INTERVAL_MS: u64 = 100;
 const INTERVAL_TOO_SHORT: &str = "is shorter than MIN_LIVE_INTERVAL_MS";
@@ -102,7 +102,7 @@ pub enum AdminConfigError {
     },
 }
 
-/// Reads and checks `path` with `NW_ADMIN_` overrides.
+/// Reads and checks `path` with `BLIGHTED_ADMIN_` overrides.
 ///
 /// # Errors
 ///
@@ -151,25 +151,27 @@ mod tests {
 
     #[test]
     fn the_committed_config_loads() {
-        let config = load_admin_config(&repo_root().join("config/nw-admin.toml")).expect("load");
+        let config =
+            load_admin_config(&repo_root().join("config/blighted-admin.toml")).expect("load");
         assert!(config.listen.ip().is_loopback());
         assert!(config.max_spawns_per_request > 0);
     }
 
     fn load_changed(from: &str, to: &str) -> Result<AdminConfig, AdminConfigError> {
         let committed =
-            std::fs::read_to_string(repo_root().join("config/nw-admin.toml")).expect("read");
+            std::fs::read_to_string(repo_root().join("config/blighted-admin.toml")).expect("read");
         let changed = committed.replace(from, to);
         assert_ne!(changed, committed);
         let dir = tempfile::tempdir().expect("dir");
-        let path = dir.path().join("nw-admin.toml");
+        let path = dir.path().join("blighted-admin.toml");
         std::fs::write(&path, changed).expect("write");
         load_admin_config(&path)
     }
 
     #[test]
     fn the_committed_config_has_a_live_section() {
-        let config = load_admin_config(&repo_root().join("config/nw-admin.toml")).expect("load");
+        let config =
+            load_admin_config(&repo_root().join("config/blighted-admin.toml")).expect("load");
         let live = config.live.expect("live section");
         assert!(!live.metrics_urls.is_empty());
         assert!(live.scrape_interval_ms >= MIN_LIVE_INTERVAL_MS);

@@ -158,6 +158,9 @@ mcp.json
 
 # Agent design notes, plans and specs
 /docs/superpowers/
+# Design-tool context (Impeccable): product brief and design record
+/PRODUCT.md
+/DESIGN.md
 /docs/plans/
 /.plans/
 /plans/

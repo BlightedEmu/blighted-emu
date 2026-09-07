@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The HTTP routes of `nw-admin` (admin tools spec sections 3 and 7).
+//! The HTTP routes of `blighted-admin` (admin tools spec sections 3 and 7).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

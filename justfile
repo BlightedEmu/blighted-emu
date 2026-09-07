@@ -20,7 +20,7 @@ test-scripts:
 
 # Run the tests of the admin page code (Node built-in test runner, no package).
 test-web:
-    node --test 'bins/nw-admin/web/*.test.mjs'
+    node --test 'bins/blighted-admin/web/*.test.mjs'
 
 # Print the build folder size; fails above 10 GiB (spec 10.6).
 size:
@@ -46,7 +46,7 @@ infra-test:
 
 # Tests that need the Docker Compose PostgreSQL, Valkey and NATS. Run `just infra-up` first.
 test-infra:
-    cargo test -p nw-db -p nw-login -p nw-bus -p sim -p rep-gateway -p world-director -p nw-admin --features nw-db/infra,nw-login/infra,nw-bus/infra,sim/infra,rep-gateway/infra,world-director/infra,nw-admin/infra
+    cargo test -p nw-db -p nw-login -p nw-bus -p sim -p rep-gateway -p world-director -p blighted-admin --features nw-db/infra,nw-login/infra,nw-bus/infra,sim/infra,rep-gateway/infra,world-director/infra,blighted-admin/infra
 
 # Tests that read your own New World install. Set NW_GAME_DIR first.
 test-local:

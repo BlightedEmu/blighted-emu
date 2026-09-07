@@ -1,5 +1,5 @@
 [package]
-name = "nw-admin"
+name = "blighted-admin"
 version = "0.1.0"
 description = "Local admin web tools: the world map and the capture viewer."
 edition.workspace = true

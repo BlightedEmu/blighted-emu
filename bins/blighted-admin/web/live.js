@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The live panel: the state stream of nw-admin (tiles, map, players, events) and the bot
+// The live panel: the state stream of blighted-admin (tiles, map, players, events) and the bot
 // batch buttons.
 
 import { WorldMap } from './map.js';
@@ -10,7 +10,7 @@ const STREAM_URL = '/api/live/stream';
 const BOTS_URL = '/api/live/bots';
 const STOP_ALL_URL = '/api/live/bots/stop-all';
 const STATE_EVENT = 'state';
-const ADMIN_HEADERS = { 'X-NW-Admin': '1', 'Content-Type': 'application/json' };
+const ADMIN_HEADERS = { 'X-Blighted-Admin': '1', 'Content-Type': 'application/json' };
 const BATCH_SIZES = [1, 10, 100, 1000];
 const BATCH_REFRESH_MS = 1000;
 /** Most rows of the player table. */

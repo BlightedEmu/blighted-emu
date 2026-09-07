@@ -47,7 +47,7 @@ struct Cli {
     #[arg(long, default_value = DEFAULT_CONFIG)]
     config: PathBuf,
     /// Writes the plain carrier datagrams of the first client to this capture ledger, which
-    /// `nw-admin` opens like a recorded session.
+    /// `blighted-admin` opens like a recorded session.
     #[arg(long, global = true)]
     ledger: Option<PathBuf>,
     #[command(subcommand)]

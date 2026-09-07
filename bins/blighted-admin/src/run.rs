@@ -16,7 +16,7 @@ use crate::world::{WorldLayer, WorldLayerError, map_dir};
 /// Environment variable that names the New World install folder (for `typeindex.json`).
 pub const GAME_DIR_ENV: &str = "NW_GAME_DIR";
 
-/// `nw-admin serve` failed.
+/// `blighted-admin serve` failed.
 #[derive(Debug, thiserror::Error)]
 pub enum RunError {
     /// The configuration cannot be used.

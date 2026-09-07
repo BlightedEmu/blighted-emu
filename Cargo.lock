@@ -580,6 +580,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "blighted-admin"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "clap",
+ "futures-util",
+ "http-body-util",
+ "nw-bus",
+ "nw-capture",
+ "nw-common",
+ "nw-content",
+ "nw-formats",
+ "nw-login",
+ "nw-messages",
+ "nw-reflect",
+ "nw-world",
+ "png",
+ "rep-gateway",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sim",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "block-buffer"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2904,37 +2935,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "nw-admin"
-version = "0.1.0"
-dependencies = [
- "axum",
- "clap",
- "futures-util",
- "http-body-util",
- "nw-bus",
- "nw-capture",
- "nw-common",
- "nw-content",
- "nw-formats",
- "nw-login",
- "nw-messages",
- "nw-reflect",
- "nw-world",
- "png",
- "rep-gateway",
- "reqwest",
- "serde",
- "serde_json",
- "sim",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tower",
- "tracing",
- "uuid",
 ]
 
 [[package]]

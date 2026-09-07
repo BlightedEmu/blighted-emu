@@ -2,7 +2,7 @@
 //! Refuses requests that another web site could send (admin tools spec section 7). Every request
 //! needs a `Host` of this server: a page whose name was rebound to 127.0.0.1 (DNS rebinding)
 //! sends its own name and cannot read the capture data. A request other than `GET` or `HEAD`
-//! also needs the header `X-NW-Admin: 1`, which a cross-site request cannot set without a CORS
+//! also needs the header `X-Blighted-Admin: 1`, which a cross-site request cannot set without a CORS
 //! pre-flight that this server does not answer, and an `Origin`, when sent, of this server.
 
 use std::net::SocketAddr;
@@ -14,7 +14,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 
 /// Header every changing request needs.
-pub const ADMIN_HEADER: &str = "x-nw-admin";
+pub const ADMIN_HEADER: &str = "x-blighted-admin";
 /// Its value.
 pub const ADMIN_HEADER_VALUE: &str = "1";
 const LOCALHOST: &str = "localhost";

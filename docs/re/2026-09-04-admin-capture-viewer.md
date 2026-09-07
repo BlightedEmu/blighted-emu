@@ -56,7 +56,7 @@ The move of the ledger code into `nw-capture` and the shared decoder gave the sa
 
 ## 4. Capture viewer
 
-**Observed.** `nw-admin` lists 695 sessions (as `capture-check`), 385 with a `metadata.json` name and all 410 open-world sessions with the title of their Discord post.
+**Observed.** `blighted-admin` (then named `nw-admin`) lists 695 sessions (as `capture-check`), 385 with a `metadata.json` name and all 410 open-world sessions with the title of their Discord post.
 
 **Observed.** The largest ledger (307 MB, 1,083,337 records, 1,086,769 messages, 1,160 tracks, 312,322 player points) opens in 1.25 s; the bytes of a message near its end come in 0.32 s. The program uses 1.2 GB of memory with the world layer and that session.
 

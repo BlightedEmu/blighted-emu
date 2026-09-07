@@ -14,7 +14,7 @@ import {
   sortRows,
 } from './tables.js';
 
-const ADMIN_HEADERS = { 'X-NW-Admin': '1', 'Content-Type': 'application/json' };
+const ADMIN_HEADERS = { 'X-Blighted-Admin': '1', 'Content-Type': 'application/json' };
 const POLL_MS = 500;
 const SEARCH_DELAY_MS = 200;
 const MESSAGES_PAGE = 300;
