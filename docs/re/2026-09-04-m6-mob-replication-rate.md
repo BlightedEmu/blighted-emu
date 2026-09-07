@@ -105,3 +105,21 @@ Type 15 with slot mask 1 was already read (2,122 bodies accepted, 0 of those ran
 **Inferred.** These captures never reach 47 entity keys in one connection window. The largest aligned count is 45 in 100 ms, which is below 47. The client image, on the searches above, does not contain a 47-entity interest constant. The emulator's 47 is not confirmed or contradicted by a reached cap. It is above every count this walk could align.
 
 **Open after round 3.** Which entities are kept when a cap is reached. The distance sample is 8 kept and 1 dropped. A rule needs the entities the server did not send. This walk cannot see those. Methods and counts are in `docs/re/2026-09-04-m6-round-3.md`.
+
+## Round 5
+
+This round tests the capture-check failures that stop before the failure line names a member. The file has 59 such lines. The walk shows they are not the first bytes of the payload.
+
+**Observed.** The product walk reads at least two members before the error on every one of the 59. The failure line has no previous member because a prefix error is raised before the member reader returns, so the capture check does not name the member. The error split is 20 that need 17 bytes, 27 other truncated prefixes, 5 group-count failures, and 5 other prefix failures. 56 of the 59 have a class 15 member as the last member that did read.
+
+**Observed.** A type id of 0 needs 1 prefix byte and 16 raw bytes, 17 in total. `FUN_146af2340` reads the key with `FUN_14087b5c0` and the type id with `FUN_1461ad130`. There is no second header form in `FUN_14175ccc0`, `FUN_146af20d0`, or `FUN_146af2340`. A group is one short prefix integer, one byte count, and that many members.
+
+**Observed.** Moving the failing start by 1 to 24 bytes does not find a key of 3 to 5 bytes and a known class that writes the same bytes, on 54 of the 57 failures that have a previous member in this set. The same negative result is in the vitals note for the bodies that follow a vitals member.
+
+**Inferred.** These 59 are the same end-of-payload cut as the 70 class 11 failures, one member later or inside the next header. The bytes the prefix needs are not in this payload. The client group reader fails when the buffer ends inside the prefix. It does not switch to a second header.
+
+### Round 5 files
+
+- `<re-scratch>/scratch-m6/round5/src/main.rs`, summary `probe-summary.txt`
+- `<re-scratch>/scratch-m6/round5/ghidra-out/fn_14175ccc0.c`, `fn_146af20d0.c`, `fn_146af2340.c`
+- Ghidra read-only, analysis off. REA `open_binary` was not called. No REA Evidence ID.

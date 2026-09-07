@@ -276,3 +276,52 @@ The 14-child slot-0 table is unchanged. This round sizes slot 1, and it separate
 - `<re-scratch>/scratch-m6/round4/probe.rs`, summaries `probe-summary.txt` and `probe-summary-widths.txt`
 - `<re-scratch>/scratch-m6/round4/M6Round4.java`, `M6Round4b.java`, `M6Round4c.java`, `M6Round4d.java`, output `ghidra-out/`
 - Ghidra project `<re-scratch>/ghidra`, read-only, analysis off, 14 decompiler threads. REA `open_binary` was not called. No REA Evidence ID.
+
+## Round 5
+
+The 14-child slot 0 table is unchanged. This round tests the 89 capture-check failures that follow a slot-0 vitals member. A layout change is accepted only when it clears those 89 and still ends the 2,399,847 bodies that already fit.
+
+### Static readers
+
+**Observed.** `FUN_1417b4110` reads one byte and tests only as many low bits as the object has slots. Vitals has two slots, so only bit 0 and bit 1 are tested. `FUN_1417b43c0` reads one byte per group of at most 7 children. Bit 7 reads another child byte. A success path does not skip a child whose bit is set.
+
+**Observed.** Each slot-0 child reader, and the helper it calls, has one success length:
+
+| Child | Reader | Helper | Bytes on success |
+|---|---|---|---:|
+| 0, 1, 4, 6 | `FUN_142a42f30` | `FUN_14087a270` | 4 |
+| 5, 7 | `FUN_142a42f80` | `FUN_14087ae90` | 2 |
+| 2 | `FUN_1469515b0` | `FUN_140878610`, `FUN_14087ad90`, `FUN_14087a190` | 18 |
+| 3 | `FUN_146951470` | `FUN_140878610` | 1 |
+| 8, 9 | `FUN_1432d9460` | `FUN_14087a220` | 4 |
+| 10 | `FUN_1417b3620` | `FUN_14087a220` | 4 |
+| 11, 12 | `FUN_14279e210` | `FUN_14087a190` | 1 |
+| 13 | `FUN_142a42e10` | `FUN_14087a1c0` | 2 |
+
+A failed helper returns failure for the child. It does not return success after fewer bytes. There is no value check, version, or second meaning of the child byte in these functions.
+
+### The 36 encoded differences
+
+**Observed.** All 36 are in the 89. The member after the vitals member reads, and its body bytes match the bytes the reader writes back. By class: 16 of class 10, 11 of class 11, 7 of class 13, 2 of class 15. The tail after that member walks on 35 of the 36. Key length 1 on 25, 3 on 2, 4 on 1, 5 on 8. Type-prefix length 1 on 9, 2 on 9, 3 on 15, 4 on 3. The type prefix is longer than the shortest form on 27. The key length 1 is the shortest form of the key value that was read.
+
+**Inferred.** Those 36 are not a vitals body that was read too long. The vitals member already ends on a member whose body matches, and the bytes after that member still walk on 35 of 36. A shift of the boundary would move that member.
+
+### The 40 position failures and the 12 count failures
+
+**Observed.** 40 fail in class 13, "position slot: unknown bits". 11 of the slot bytes have bit 0 clear. 29 have bit 0 set. Clearing every slot bit except bit 0 lets the position reader finish on 21 of the 40. The tail then walks on 20 of those 21. The other 19 still fail on the child byte. Clearing child bits above the three position children, and skipping one extra child byte when bit 7 is set, lets 9 of those 19 finish. The tail walks on 8 of the 9. 10 of the 40 still fail.
+
+**Observed.** 12 fail on a count. 7 name limit 32. 4 name limit 176. 1 names another limit. The limits 32 and 176 are the client blob limits from round 4 (`FUN_142a43140` below 33, `FUN_142a43230` below 177).
+
+### Searches that did not name a shorter child
+
+**Observed.** For each of the 53 reader failures in the 89, the start of the failing member was moved by 1 to 8 bytes in both directions. A candidate counted only when the key length was 3, 4, or 5, the type id was the shortest form, and a known class read and wrote the same bytes. 49 of the 53 had no such start. The same search out to 24 bytes left 48 of those 49 with no such start.
+
+**Observed.** For the vitals body before those failures, each set child was given every width below its table width, and each pair of set children was shortened the same way. 79 of the 81 vitals bodies in this set had no width that produced a key of 3 to 5 bytes and a known class that wrote the same bytes. The child masks are not one mask. The most common is `0x22ff` on 35 of the 89. Of all 219 failures, the scene counts are 160 other, 29 war, 25 OPR, 4 arena, and 1 invasion.
+
+**Open after round 5.** One vitals rule that clears all 89 and still ends the 2,399,847 slot-0 bodies. The static readers have one success length each. The 36 encoded differences are a prefix form, not a child width. The position-bit ignore rule clears 30 of the 40 position failures and leaves 10. The count failures are the client limits on 11 of the 12. No shorter child is shared by the rest.
+
+### Round 5 files
+
+- `<re-scratch>/scratch-m6/round5/src/main.rs`, summary `probe-summary.txt`
+- `<re-scratch>/scratch-m6/round5/M6Round5.java`, output `ghidra-out/`
+- Ghidra project `<re-scratch>/ghidra`, read-only, analysis off, 14 decompiler threads. REA `open_binary` was not called. No REA Evidence ID.
