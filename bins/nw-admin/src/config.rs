@@ -13,6 +13,7 @@ pub const ADMIN_ENV_PREFIX: &str = "NW_ADMIN_";
 /// Shortest scrape and state interval.
 pub const MIN_LIVE_INTERVAL_MS: u64 = 100;
 const INTERVAL_TOO_SHORT: &str = "is shorter than MIN_LIVE_INTERVAL_MS";
+const NOT_LETTERS: &str = "must be one or more letters a to z or A to Z";
 
 /// The admin tools configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -52,6 +53,18 @@ pub struct LiveConfig {
     pub state_interval_ms: u64,
     /// Program names shown in the CPU tile.
     pub processes: Vec<String>,
+    /// The `nw-testclient` program of the bot batches.
+    pub testclient_bin: PathBuf,
+    /// Its configuration.
+    pub testclient_config: PathBuf,
+    /// `KEY=VALUE` file; only its `NW_SECRET_*` lines go to the batches.
+    pub testclient_env_file: PathBuf,
+    /// Account prefix of the batches; the batch letters follow it.
+    pub bot_account_prefix: String,
+    /// Character prefix of the batches (letters only); the batch letters follow it.
+    pub bot_character_prefix: String,
+    /// Most bots of all batches together.
+    pub max_bots: u32,
 }
 
 /// The capture viewer part of the configuration.
@@ -117,6 +130,13 @@ pub fn load_admin_config(path: &Path) -> Result<AdminConfig, AdminConfigError> {
                 });
             }
         }
+        let prefix = &live.bot_character_prefix;
+        if prefix.is_empty() || !prefix.chars().all(|letter| letter.is_ascii_alphabetic()) {
+            return Err(AdminConfigError::Invalid {
+                key: "live.bot_character_prefix",
+                reason: NOT_LETTERS,
+            });
+        }
     }
     Ok(config)
 }
@@ -154,6 +174,7 @@ mod tests {
         assert!(!live.metrics_urls.is_empty());
         assert!(live.scrape_interval_ms >= MIN_LIVE_INTERVAL_MS);
         assert!(live.state_interval_ms >= MIN_LIVE_INTERVAL_MS);
+        assert!(live.max_bots > 0);
     }
 
     #[test]
@@ -175,6 +196,20 @@ mod tests {
                 "{key}"
             );
         }
+    }
+
+    #[test]
+    fn a_character_prefix_with_digits_is_refused() {
+        assert!(matches!(
+            load_changed(
+                "bot_character_prefix = \"Adminbot\"",
+                "bot_character_prefix = \"Admin1\""
+            ),
+            Err(AdminConfigError::Invalid {
+                key: "live.bot_character_prefix",
+                ..
+            })
+        ));
     }
 
     #[test]

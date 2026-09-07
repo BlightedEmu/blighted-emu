@@ -42,6 +42,7 @@ async fn stream_views(State(state): State<AppState>) -> Response {
     let Some(Live {
         state,
         state_interval,
+        ..
     }) = state.live
     else {
         return StatusCode::NOT_FOUND.into_response();
@@ -70,6 +71,7 @@ mod tests {
 
     use super::*;
     use crate::captures::Captures;
+    use crate::live::bots::idle_bots;
     use crate::live::{lock, shared};
     use crate::server::{AppState, router};
     use crate::world::tests::test_layer;
@@ -93,7 +95,7 @@ mod tests {
     fn live() -> Live {
         let state = shared();
         lock(&state).event(EVENT_TEXT.to_owned(), 1);
-        Live::new(state, INTERVAL)
+        Live::new(state.clone(), INTERVAL, idle_bots(state))
     }
 
     fn request(uri: &str) -> Request<Body> {

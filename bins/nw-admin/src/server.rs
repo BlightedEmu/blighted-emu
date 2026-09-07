@@ -18,6 +18,7 @@ use crate::captures::api::capture_routes;
 use crate::captures::catalog::search;
 use crate::guard::{AdminOrigin, admin_guard};
 use crate::live::Live;
+use crate::live::bots::bot_routes;
 use crate::live::stream::live_routes;
 use crate::relief::relief_tile;
 use crate::world::{SpawnKind, SpawnQuery, WorldLayer};
@@ -70,6 +71,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/captures/types/{idx}", get(type_label))
         .merge(capture_routes())
         .merge(live_routes())
+        .merge(bot_routes())
         .layer(axum::middleware::from_fn_with_state(
             state.origin.clone(),
             admin_guard,

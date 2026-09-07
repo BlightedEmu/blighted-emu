@@ -35,3 +35,12 @@ scrape_interval_ms = 1000
 state_interval_ms = 250
 # Program names of the CPU tile.
 processes = ["sim", "rep-gateway", "world-director", "edge-http", "nw-testclient"]
+# Bot batches (`nw-testclient swarm` until stopped). The program and its config come from here,
+# never from the page. Only the NW_SECRET_* lines of the environment file reach a batch.
+testclient_bin = "target/release/nw-testclient"
+testclient_config = "local-data/nw-testclient.toml"
+testclient_env_file = "local-data/m3-test.env"
+# Each batch adds its letters (a, b, ... z, ba, ...); character names hold letters only.
+bot_account_prefix = "adminbot"
+bot_character_prefix = "Adminbot"
+max_bots = 10000

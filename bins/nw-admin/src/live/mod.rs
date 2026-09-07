@@ -2,6 +2,7 @@
 //! The live panel (admin tools spec section 5): the state of the running servers, read from the
 //! bus, the metrics pages and `/proc`, and sent to the page.
 
+pub mod bots;
 pub mod bus;
 pub mod cpu;
 pub mod scrape;
@@ -13,6 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use crate::config::LiveConfig;
+use crate::live::bots::{BotSettings, Bots};
 use crate::live::cpu::{CpuSampler, PROC_DIR};
 use crate::live::state::LiveState;
 
@@ -34,19 +36,22 @@ pub fn lock(state: &SharedState) -> MutexGuard<'_, LiveState> {
 pub struct Live {
     state: SharedState,
     state_interval: Duration,
+    bots: Bots,
 }
 
 impl Live {
-    /// Routes that send `state` every `state_interval`.
-    pub fn new(state: SharedState, state_interval: Duration) -> Self {
+    /// Routes that send `state` every `state_interval` and run `bots`.
+    pub fn new(state: SharedState, state_interval: Duration, bots: Bots) -> Self {
         Self {
             state,
             state_interval,
+            bots,
         }
     }
 }
 
-/// Starts the bus reader and the scraper of `config` on the current runtime.
+/// Starts the bus reader and the scraper of `config` on the current runtime; batches start
+/// from the routes.
 pub fn start(config: &LiveConfig) -> Live {
     let state = shared();
     tokio::spawn(bus::run(
@@ -60,5 +65,6 @@ pub fn start(config: &LiveConfig) -> Live {
         CpuSampler::new(PathBuf::from(PROC_DIR), config.processes.clone()),
         state.clone(),
     ));
-    Live::new(state, Duration::from_millis(config.state_interval_ms))
+    let bots = Bots::new(BotSettings::of(config), state.clone());
+    Live::new(state, Duration::from_millis(config.state_interval_ms), bots)
 }
