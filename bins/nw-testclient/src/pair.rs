@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::rep::{RepClient, RepError};
 use crate::route::Route;
-use crate::udp::{RepOutcome, RunError, run_rep_with};
+use crate::udp::{Hold, RepOutcome, RunError, run_rep_with};
 use crate::view::{ViewError, WorldView};
 use crate::walk::{WalkError, WalkSettings, login_token, walk};
 
@@ -233,7 +233,14 @@ pub async fn session_with(
     registration_timeout: Duration,
     on_tick: impl FnMut(&mut RepClient, &mut RepOutcome, Duration) -> Result<(), RepError>,
 ) -> Result<Session, PairError> {
-    let outcome = run_rep_with(gateway, client, hold, registration_timeout, on_tick).await?;
+    let outcome = run_rep_with(
+        gateway,
+        client,
+        Hold::For(hold),
+        registration_timeout,
+        on_tick,
+    )
+    .await?;
     let view = WorldView::from_messages(&outcome.messages)?;
     Ok(Session { outcome, view })
 }

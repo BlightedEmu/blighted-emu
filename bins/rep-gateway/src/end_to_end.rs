@@ -35,7 +35,7 @@ use nw_testclient::pair::{
     INPUT_CHANNEL, PairSettings, SEND_INTERVAL, distance, run_pair, session, session_with,
 };
 use nw_testclient::route::Route;
-use nw_testclient::udp::run_rep;
+use nw_testclient::udp::{Hold, run_rep};
 use nw_testclient::walk::{WalkSettings, login_token, walk};
 use sim::combat::test_support::test_data;
 use sim::config::{SimConfig, load_sim_config};
@@ -204,13 +204,13 @@ async fn a_client_logs_in_and_registers_with_the_gateway_once() {
         assert_eq!(admission.rep_address, gateway);
 
         let token = login_token(&admission.token);
-        let outcome = run_rep(gateway, client(token.clone()), HOLD, WAIT)
+        let outcome = run_rep(gateway, client(token.clone()), Hold::For(HOLD), WAIT)
             .await
             .expect("register");
         assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
         assert_eq!(outcome.server_version.as_deref(), Some(VERSION));
         assert!(outcome.pings > 0);
-        let again = run_rep(gateway, client(token), HOLD, WAIT)
+        let again = run_rep(gateway, client(token), Hold::For(HOLD), WAIT)
             .await
             .expect("register again");
         assert_eq!(again.status, Some(REGISTRATION_STATUS_REFUSED));

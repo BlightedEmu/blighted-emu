@@ -22,6 +22,7 @@ use crate::rep::{RepClient, RepError};
 use crate::route::{Route, RouteError};
 use crate::udp::RepOutcome;
 use crate::view::OwnView;
+use tokio::sync::watch;
 
 /// Check: every bot crossed the start line at least `min_crossings` times.
 pub const BOTS_CROSSED: &str = "every bot crossed the sim border often enough";
@@ -314,7 +315,7 @@ impl FleetBot for Bot {
                 settings.lane_spread_m,
                 settings.swing_m,
                 settings.speed_mps,
-                settings.fleet.duration,
+                settings.fleet.duration.unwrap_or(UNTIL_STOPPED_ROUTE),
             )?;
             self.walk = Some(Walk {
                 route,
@@ -380,6 +381,7 @@ pub async fn run_swarm(
     settings: Arc<SwarmSettings>,
     ground: Arc<dyn Ground + Send + Sync>,
     new_client: NewClient,
+    stop: watch::Receiver<bool>,
     report: impl FnMut(String),
 ) -> SwarmReport {
     let fleet = Arc::new(settings.fleet.clone());
@@ -391,8 +393,11 @@ pub async fn run_swarm(
         walk: None,
         last_sent: None,
     });
-    run_fleet(http, fleet, new_client, new_bot, report).await
+    run_fleet(http, fleet, new_client, new_bot, stop, report).await
 }
+
+/// The route length of a bot that walks until stopped: it walks back and forth that long.
+const UNTIL_STOPPED_ROUTE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// The start of a bot that never saw itself: its report has no bundle and fails.
 const NO_START: [f32; 2] = [0.0, 0.0];

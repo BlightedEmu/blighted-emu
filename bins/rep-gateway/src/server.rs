@@ -483,7 +483,7 @@ pub(crate) mod tests {
     use nw_login::test_support::test_signing_key;
     use nw_reflect::LoginToken;
     use nw_testclient::rep::RepClient;
-    use nw_testclient::udp::{RepOutcome, run_rep};
+    use nw_testclient::udp::{Hold, RepOutcome, run_rep};
 
     use nw_carrier::MESSAGE_CHANNEL;
     use nw_reflect::{Envelope, TypeId};
@@ -663,13 +663,13 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_client_registers_once_over_udp_and_gets_pings() {
         let (gateway, token) = start(LIMITS).await;
-        let outcome = run_rep(gateway, client(token.clone()), HOLD, WAIT)
+        let outcome = run_rep(gateway, client(token.clone()), Hold::For(HOLD), WAIT)
             .await
             .expect("run");
         assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
         assert_eq!(outcome.server_version.as_deref(), Some(VERSION));
         assert!(outcome.pings > 0);
-        let again = run_rep(gateway, client(token), HOLD, WAIT)
+        let again = run_rep(gateway, client(token), Hold::For(HOLD), WAIT)
             .await
             .expect("again");
         assert_eq!(again.status, Some(REGISTRATION_STATUS_REFUSED));
@@ -683,9 +683,14 @@ pub(crate) mod tests {
             ..LIMITS
         };
         let (gateway, token) = start(one).await;
-        let first = tokio::spawn(run_rep(gateway, client(token.clone()), HOLD_FIRST, WAIT));
+        let first = tokio::spawn(run_rep(
+            gateway,
+            client(token.clone()),
+            Hold::For(HOLD_FIRST),
+            WAIT,
+        ));
         tokio::time::sleep(SETTLE).await;
-        let second = run_rep(gateway, client(token), HOLD, REFUSED_WAIT)
+        let second = run_rep(gateway, client(token), Hold::For(HOLD), REFUSED_WAIT)
             .await
             .expect("second");
         assert_eq!(second, RepOutcome::default());
@@ -700,11 +705,11 @@ pub(crate) mod tests {
             ..LIMITS
         };
         let (gateway, token) = start(one).await;
-        let first = run_rep(gateway, client(token.clone()), HOLD, WAIT)
+        let first = run_rep(gateway, client(token.clone()), Hold::For(HOLD), WAIT)
             .await
             .expect("first");
         assert_eq!(first.status, Some(REGISTRATION_STATUS_AUTHORIZED));
-        let second = run_rep(gateway, client(token), HOLD, ONE_HELLO_WAIT)
+        let second = run_rep(gateway, client(token), Hold::For(HOLD), ONE_HELLO_WAIT)
             .await
             .expect("second");
         assert_eq!(second, RepOutcome::default());
@@ -729,7 +734,7 @@ pub(crate) mod tests {
                 spoofer.send_to(datagram, gateway).await.expect("send");
             }
         }
-        let outcome = run_rep(gateway, client(token), HOLD, WAIT)
+        let outcome = run_rep(gateway, client(token), Hold::For(HOLD), WAIT)
             .await
             .expect("run");
         assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
@@ -739,7 +744,7 @@ pub(crate) mod tests {
     async fn world_messages_follow_the_response_and_the_world_hears_the_departure() {
         let (world, events) = TestWorld::new(false, vec![login_envelope()]);
         let (gateway, token) = start_with(LIMITS, (world.clone(), events)).await;
-        let outcome = run_rep(gateway, client(token), HOLD, WAIT)
+        let outcome = run_rep(gateway, client(token), Hold::For(HOLD), WAIT)
             .await
             .expect("run");
         assert_eq!(outcome.status, Some(REGISTRATION_STATUS_AUTHORIZED));
@@ -759,7 +764,7 @@ pub(crate) mod tests {
     async fn a_refused_join_gets_status_1() {
         let (world, events) = TestWorld::new(true, Vec::new());
         let (gateway, token) = start_with(LIMITS, (world.clone(), events)).await;
-        let outcome = run_rep(gateway, client(token), HOLD, WAIT)
+        let outcome = run_rep(gateway, client(token), Hold::For(HOLD), WAIT)
             .await
             .expect("run");
         assert_eq!(outcome.status, Some(REGISTRATION_STATUS_REFUSED));
@@ -772,7 +777,7 @@ pub(crate) mod tests {
     async fn a_world_close_ends_the_connection_and_unknown_connections_are_left() {
         let (world, events) = TestWorld::new(false, Vec::new());
         let (gateway, token) = start_with(LIMITS, (world.clone(), events)).await;
-        let run = tokio::spawn(run_rep(gateway, client(token), HOLD_FIRST, WAIT));
+        let run = tokio::spawn(run_rep(gateway, client(token), Hold::For(HOLD_FIRST), WAIT));
         let connection = first_join(&world).await;
         tokio::time::sleep(SETTLE).await;
         world.emit(WorldEvent::Close { connection });

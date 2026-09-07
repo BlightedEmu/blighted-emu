@@ -16,11 +16,12 @@ use sim::server::{
     METRIC_HANDOFF_SECONDS, METRIC_HANDOFFS, METRIC_REFUSED_MOVES, METRIC_TICK_SECONDS, MOB_KIND,
     ONE_TICK_SECONDS, REASON_LABEL, RESULT_LABEL,
 };
+use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use crate::pair::Check;
 use crate::rep::{RepClient, RepError};
-use crate::udp::{ANY_LOCAL, RepOutcome, RunError, run_rep_on};
+use crate::udp::{ANY_LOCAL, Hold, RepOutcome, RunError, run_rep_on};
 use crate::walk::{WalkSettings, login_token, walk};
 use nw_common::prometheus::Scrape;
 
@@ -69,8 +70,8 @@ pub struct FleetSettings {
     pub game_url: String,
     /// New bots per second.
     pub bots_per_second: u32,
-    /// Time in the world per bot.
-    pub duration: Duration,
+    /// Time in the world per bot; `None` until the run is told to stop.
+    pub duration: Option<Duration>,
     /// Longest wait for a registration response.
     pub registration_timeout: Duration,
     /// The metrics URL of every sim.
@@ -306,6 +307,7 @@ pub async fn run_fleet<B: FleetBot>(
     fleet: Arc<FleetSettings>,
     new_client: NewClient,
     new_bot: NewBot<B>,
+    stop: watch::Receiver<bool>,
     mut report: impl FnMut(String),
 ) -> FleetRun<B::Report> {
     let before = scrape(http, &fleet.metrics_urls, &mut report).await;
@@ -315,7 +317,10 @@ pub async fn run_fleet<B: FleetBot>(
     for n in 0..fleet.bots {
         let (http, fleet, new_client) = (http.clone(), Arc::clone(&fleet), Arc::clone(&new_client));
         let bot = new_bot(n);
-        bots.spawn(async move { run_bot(&http, &fleet, n, &*new_client, bot).await });
+        let hold = fleet
+            .duration
+            .map_or_else(|| Hold::UntilStopped(stop.clone()), Hold::For);
+        bots.spawn(async move { run_bot(&http, &fleet, n, &*new_client, bot, hold).await });
         tokio::time::sleep(pause).await;
     }
     report(format!(
@@ -341,6 +346,7 @@ async fn run_bot<B: FleetBot>(
     n: usize,
     new_client: &(dyn Fn(LoginToken) -> Result<RepClient, RepError> + Send + Sync),
     mut bot: B,
+    hold: Hold,
 ) -> B::Report {
     let (account, character_name) = bot_names(&fleet.account_prefix, &fleet.character_prefix, n);
     let walk_settings = WalkSettings {
@@ -366,7 +372,7 @@ async fn run_bot<B: FleetBot>(
         socket,
         admission.rep_address,
         client,
-        fleet.duration,
+        hold,
         fleet.registration_timeout,
         |client, outcome, since| bot.tick(client, outcome, since),
     )
@@ -432,7 +438,7 @@ pub(crate) mod test_support {
             login_url: String::new(),
             game_url: String::new(),
             bots_per_second: 50,
-            duration,
+            duration: Some(duration),
             registration_timeout: duration,
             metrics_urls: vec!["http://127.0.0.1:9102/metrics".to_owned()],
             udp_buffer_bytes: 1 << 20,

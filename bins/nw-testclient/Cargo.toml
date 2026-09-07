@@ -24,7 +24,7 @@ reqwest.workspace = true
 serde.workspace = true
 sim.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 
 [dev-dependencies]
 nw-messages = { workspace = true, features = ["test-util"] }

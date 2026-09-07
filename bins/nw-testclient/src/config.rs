@@ -250,11 +250,8 @@ impl TestClientConfig {
         if swarm.udp_buffer_bytes == 0 {
             return invalid("udp_buffer_bytes", "must be above 0");
         }
-        if fleet.bots_per_second == 0 || fleet.duration_seconds == 0 {
-            return invalid(
-                "bots_per_second",
-                "the rate and the duration must be above 0",
-            );
+        if fleet.bots_per_second == 0 {
+            return invalid("bots_per_second", "must be above 0");
         }
         Ok(FleetSettings {
             bots: fleet.bots,
@@ -264,7 +261,9 @@ impl TestClientConfig {
             login_url: self.login_url.clone(),
             game_url: self.game_url.clone(),
             bots_per_second: fleet.bots_per_second,
-            duration: Duration::from_secs(fleet.duration_seconds),
+            // 0 is "until stopped".
+            duration: (fleet.duration_seconds != 0)
+                .then(|| Duration::from_secs(fleet.duration_seconds)),
             registration_timeout: Duration::from_secs(self.registration_timeout_seconds),
             metrics_urls: fleet.metrics_urls.to_vec(),
             udp_buffer_bytes: swarm.udp_buffer_bytes,
@@ -375,6 +374,27 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_duration_means_until_stopped() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(COMMITTED_CONFIG);
+        let mut config = load_testclient_config(&path).expect("config");
+        config.swarm.duration_seconds = 0;
+        config.hunt.duration_seconds = 0;
+        let swarm = config.swarm_settings(String::new()).expect("swarm");
+        assert_eq!(swarm.fleet.duration, None);
+        let hunt = config.hunt_settings(String::new()).expect("hunt");
+        assert_eq!(hunt.fleet.duration, None);
+    }
+
+    #[test]
+    fn swarm_settings_keep_the_other_checks() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(COMMITTED_CONFIG);
+        let mut config = load_testclient_config(&path).expect("config");
+        config.swarm.duration_seconds = 0;
+        config.swarm.bots_per_second = 0;
+        assert!(config.swarm_settings(String::new()).is_err());
+    }
+
+    #[test]
     fn bad_hunt_values_are_refused() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(COMMITTED_CONFIG);
         let config = load_testclient_config(&path).expect("config");
@@ -385,7 +405,6 @@ mod tests {
         };
         assert!(refused(|hunt| hunt.bots = 0));
         assert!(refused(|hunt| hunt.bots_per_second = 0));
-        assert!(refused(|hunt| hunt.duration_seconds = 0));
         assert!(refused(|hunt| hunt.starts_m.clear()));
         assert!(refused(|hunt| hunt.reach_m = 0.0));
         assert!(refused(|hunt| hunt.attack_interval_ms = 0));

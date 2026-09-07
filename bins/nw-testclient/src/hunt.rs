@@ -24,6 +24,7 @@ use crate::pair::{Check, INPUT_CHANNEL, SEND_INTERVAL};
 use crate::rep::{RepClient, RepError};
 use crate::udp::RepOutcome;
 use crate::view::CombatView;
+use tokio::sync::watch;
 
 /// Check: every bot got at least one 2071.
 pub const BOTS_HIT: &str = "every bot hit a mob";
@@ -470,6 +471,7 @@ pub async fn run_hunt(
     settings: Arc<HuntSettings>,
     ground: Arc<dyn Ground + Send + Sync>,
     new_client: NewClient,
+    stop: watch::Receiver<bool>,
     report: impl FnMut(String),
 ) -> HuntReport {
     let fleet = Arc::new(settings.fleet.clone());
@@ -480,7 +482,7 @@ pub async fn run_hunt(
         own: None,
         clock: BundleClock::new(),
     });
-    run_fleet(http, fleet, new_client, new_bot, report).await
+    run_fleet(http, fleet, new_client, new_bot, stop, report).await
 }
 
 #[cfg(test)]

@@ -20,6 +20,25 @@ pub const MIN_PING_SHARE: f64 = 0.5;
 /// Any local address and port.
 pub const ANY_LOCAL: &str = "0.0.0.0:0";
 
+/// How long a client stays after its registration response.
+#[derive(Debug, Clone)]
+pub enum Hold {
+    /// This long after the response.
+    For(Duration),
+    /// Until the value turns `true` (also before the response).
+    UntilStopped(tokio::sync::watch::Receiver<bool>),
+}
+
+impl Hold {
+    /// Whether the hold is over, `held` after the response (`None` before it).
+    pub fn is_over(&self, held: Option<Duration>) -> bool {
+        match self {
+            Self::For(hold) => held.is_some_and(|held| held >= *hold),
+            Self::UntilStopped(stop) => *stop.borrow(),
+        }
+    }
+}
+
 /// What happened on the connection.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepOutcome {
@@ -58,8 +77,7 @@ pub enum RunError {
 }
 
 /// Runs `client` against `gateway` until the server closes, `timeout` passes without a
-/// registration response, or `hold` has passed after the response. Then it closes the
-/// connection.
+/// registration response, or the `hold` is over. Then it closes the connection.
 ///
 /// # Errors
 ///
@@ -67,7 +85,7 @@ pub enum RunError {
 pub async fn run_rep(
     gateway: SocketAddr,
     client: RepClient,
-    hold: Duration,
+    hold: Hold,
     timeout: Duration,
 ) -> Result<RepOutcome, RunError> {
     run_rep_with(gateway, client, hold, timeout, |_, _, _| Ok(())).await
@@ -83,7 +101,7 @@ pub async fn run_rep(
 pub async fn run_rep_with(
     gateway: SocketAddr,
     client: RepClient,
-    hold: Duration,
+    hold: Hold,
     timeout: Duration,
     on_tick: impl FnMut(&mut RepClient, &mut RepOutcome, Duration) -> Result<(), RepError>,
 ) -> Result<RepOutcome, RunError> {
@@ -100,7 +118,7 @@ pub async fn run_rep_on(
     socket: UdpSocket,
     gateway: SocketAddr,
     mut client: RepClient,
-    hold: Duration,
+    hold: Hold,
     timeout: Duration,
     mut on_tick: impl FnMut(&mut RepClient, &mut RepOutcome, Duration) -> Result<(), RepError>,
 ) -> Result<RepOutcome, RunError> {
@@ -110,7 +128,7 @@ pub async fn run_rep_on(
     let mut registered_at: Option<Instant> = None;
     let mut buffer = vec![0_u8; MAX_UDP_DATAGRAM];
     loop {
-        let held = registered_at.is_some_and(|at| at.elapsed() >= hold);
+        let held = hold.is_over(registered_at.map(|at| at.elapsed()));
         let waited = registered_at.is_none() && started.elapsed() >= timeout;
         if outcome.closed_by_server || held || waited {
             break;
@@ -157,6 +175,25 @@ mod tests {
     const HOLD: Duration = Duration::from_secs(60);
     const FULL_PINGS: u32 = 60;
     const EARLY_STOP_PINGS: u32 = 3;
+
+    #[test]
+    fn a_held_client_stops_when_told() {
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let hold = Hold::UntilStopped(stopped);
+        assert!(!hold.is_over(Some(HOLD * 10)), "no time limit");
+        assert!(!hold.is_over(None));
+        stop.send(true).expect("send");
+        assert!(hold.is_over(Some(Duration::ZERO)));
+        assert!(hold.is_over(None), "also before the registration");
+    }
+
+    #[test]
+    fn a_timed_hold_is_unchanged() {
+        let hold = Hold::For(HOLD);
+        assert!(!hold.is_over(None), "the registration timeout decides then");
+        assert!(!hold.is_over(Some(HOLD - Duration::from_millis(1))));
+        assert!(hold.is_over(Some(HOLD)));
+    }
 
     #[test]
     fn pings_must_last_the_whole_hold() {

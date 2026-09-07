@@ -10,6 +10,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
+use tokio::sync::watch;
+
 use clap::{Parser, Subcommand};
 use nw_content::client_build::load_client_build;
 use nw_dtls::DtlsClientConfig;
@@ -22,13 +25,15 @@ use nw_testclient::hunt::run_hunt;
 use nw_testclient::pair::{Check, PairSettings, run_pair};
 use nw_testclient::rep::{LedgerSlot, RepClient};
 use nw_testclient::swarm::run_swarm;
-use nw_testclient::udp::run_rep;
+use nw_testclient::udp::{Hold, run_rep};
 use nw_testclient::walk::{WalkSettings, login_token, walk};
 use nw_world::WorldFile;
 use nw_world::world_file::world_file_path;
 
 /// The committed example configuration.
 const DEFAULT_CONFIG: &str = "config/nw-testclient.toml";
+/// Bytes read from standard input at a time while waiting for its end.
+const INPUT_BUFFER_BYTES: usize = 256;
 /// The kernel's network counters (Linux).
 const SNMP_PATH: &str = "/proc/net/snmp";
 
@@ -151,9 +156,17 @@ async fn swarm(
     let settings = Arc::new(config.swarm_settings(secret(SWARM_PASSWORD_ENV)?)?);
     let (ground, new_client) = fleet_parts(config, trusted, ledger)?;
     let errors_before = receive_errors();
-    let report = run_swarm(http, Arc::clone(&settings), ground, new_client, |line| {
-        println!("{line}");
-    })
+    let stop = stop_signal(settings.fleet.duration.is_none());
+    let report = run_swarm(
+        http,
+        Arc::clone(&settings),
+        ground,
+        new_client,
+        stop,
+        |line| {
+            println!("{line}");
+        },
+    )
     .await;
     println!("{}", report.summary());
     Ok(print_end(
@@ -172,9 +185,17 @@ async fn hunt(
     let settings = Arc::new(config.hunt_settings(secret(SWARM_PASSWORD_ENV)?)?);
     let (ground, new_client) = fleet_parts(config, trusted, ledger)?;
     let errors_before = receive_errors();
-    let report = run_hunt(http, Arc::clone(&settings), ground, new_client, |line| {
-        println!("{line}");
-    })
+    let stop = stop_signal(settings.fleet.duration.is_none());
+    let report = run_hunt(
+        http,
+        Arc::clone(&settings),
+        ground,
+        new_client,
+        stop,
+        |line| {
+            println!("{line}");
+        },
+    )
     .await;
     println!("{}", report.summary());
     Ok(print_end(
@@ -182,6 +203,31 @@ async fn hunt(
         errors_before,
         &report.checks(&settings),
     ))
+}
+
+/// The stop of a run without a duration: it turns `true` on Ctrl-C or when standard input
+/// reaches its end (the admin panel closes it to stop a batch). A timed run never stops early.
+fn stop_signal(until_stopped: bool) -> watch::Receiver<bool> {
+    let (stop, stopped) = watch::channel(false);
+    if until_stopped {
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                () = input_end() => {}
+            }
+            println!("stopping: every bot closes");
+            // The receivers live as long as the run.
+            let _ = stop.send(true);
+        });
+    }
+    stopped
+}
+
+/// Waits until standard input reaches its end or fails.
+async fn input_end() {
+    let mut input = tokio::io::stdin();
+    let mut buffer = [0_u8; INPUT_BUFFER_BYTES];
+    while matches!(input.read(&mut buffer).await, Ok(read) if read > 0) {}
 }
 
 /// The ground of the `[swarm]` level and the maker of bot clients.
@@ -303,7 +349,7 @@ async fn registration(
     let outcome = run_rep(
         admission.rep_address,
         new_client()?,
-        Duration::from_secs(config.hold_seconds),
+        Hold::For(Duration::from_secs(config.hold_seconds)),
         registration_timeout,
     )
     .await?;
@@ -325,7 +371,7 @@ async fn registration(
     let again = run_rep(
         admission.rep_address,
         new_client()?,
-        Duration::ZERO,
+        Hold::For(Duration::ZERO),
         registration_timeout,
     )
     .await?;
