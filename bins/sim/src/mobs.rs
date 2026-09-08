@@ -381,6 +381,7 @@ fn state_index(state: MobState) -> u8 {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use nw_formats::objectstream::lowercase_crc32;
     use nw_sim_core::{Ground, MobState, hurt};
@@ -516,6 +517,36 @@ mod tests {
         assert_eq!(counts, expected);
         assert_eq!(counts.iter().sum::<u32>(), 3);
         assert_eq!(counts[usize::from(state_index(MobState::Asleep))], 2);
+    }
+
+    /// Admin tools spec 1.3 B3: run with
+    /// `cargo test --release -p sim snapshot_speed -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "release-mode timing of the admin snapshot"]
+    fn snapshot_speed_of_many_awake_mobs() {
+        /// Awake mobs of the busiest sim in the live panel exit test (one sim, 1,000 bots).
+        const AWAKE: u32 = 23_000;
+        const SPACING_M: f32 = 0.004;
+        const ROUNDS: u32 = 100;
+        const LIMIT: Duration = Duration::from_micros(500);
+        let spawns = (0..AWAKE)
+            .map(|index| spawn_at(100.0 + index as f32 * SPACING_M, TEST_MOB, TEST_LEVEL))
+            .collect();
+        let mut mobs = mobs(spawns);
+        mobs.set_cells(every);
+        mobs.tick(&[player_at(150.0)], TICK_MS, &Flat);
+        assert_eq!(
+            mobs.snapshot().0.len(),
+            AWAKE as usize,
+            "every mob is awake"
+        );
+        let started = Instant::now();
+        for _ in 0..ROUNDS {
+            std::hint::black_box(mobs.snapshot());
+        }
+        let average = started.elapsed() / ROUNDS;
+        println!("snapshot of {AWAKE} awake mobs: {average:?}");
+        assert!(average < LIMIT, "{average:?}");
     }
 
     #[test]
