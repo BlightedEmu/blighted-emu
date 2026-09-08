@@ -4,6 +4,8 @@
 # 1 to 8 sims, rep-gateway, and then blighted-admin in the foreground. Ctrl-C stops all of them.
 # Usage: live-stack.sh [sims]   (default 4 sims of up to 4,000 players each, so 16,000 fit;
 # run `cargo build --release` first; NW_GAME_DIR names the game install)
+# LIVE_STACK_SNAPSHOT_MS sets the sim snapshot interval (default 250; 0 turns snapshots off, to
+# measure what they cost).
 # It needs the git-ignored local files below. The servers get the secrets of the env file;
 # blighted-admin does not (its bot batches read the env file themselves). Logs go to LOG_DIR.
 # LIVE_STACK_ROOT overrides the repository folder (used by the tests).
@@ -28,7 +30,7 @@ readonly PANEL_URL="http://127.0.0.1:9180/live"
 readonly SIM_METRICS_PORTS=(9102 9104 9105 9106 9107 9108 9109 9110)
 readonly GATEWAY_METRICS_URL="http://127.0.0.1:9101/metrics"
 readonly DIRECTOR_METRICS_URL="http://127.0.0.1:9103/metrics"
-readonly SNAPSHOT_INTERVAL_MS=250
+readonly DEFAULT_SNAPSHOT_INTERVAL_MS=250
 readonly SIM_TICK_THREADS=4
 # Bots do not spread evenly over the sims' cells: each sim takes twice its usual 2,000.
 readonly SIM_MAX_PLAYERS=4000
@@ -45,6 +47,12 @@ readonly PROGRAMS=(edge-http world-director sim rep-gateway blighted-admin nw-te
 sims="${1:-$DEFAULT_SIMS}"
 if [[ ! "$sims" =~ ^[1-9][0-9]*$ ]] || ((sims > ${#SIM_METRICS_PORTS[@]})); then
   echo "live stack: sims must be 1 to ${#SIM_METRICS_PORTS[@]}, not '$sims'" >&2
+  exit "$EXIT_USAGE"
+fi
+
+snapshot_interval_ms="${LIVE_STACK_SNAPSHOT_MS:-$DEFAULT_SNAPSHOT_INTERVAL_MS}"
+if [[ ! "$snapshot_interval_ms" =~ ^[0-9]+$ ]]; then
+  echo "live stack: LIVE_STACK_SNAPSHOT_MS must be a whole number of ms, not '$snapshot_interval_ms'" >&2
   exit "$EXIT_USAGE"
 fi
 
@@ -97,7 +105,7 @@ for ((index = 0; index < sims; index++)); do
   port="${SIM_METRICS_PORTS[index]}"
   start_server "$sim_id" env NW_SIM_SIM_ID="$sim_id" NW_SIM_METRICS_LISTEN="127.0.0.1:$port" \
     NW_SIM_TICK_THREADS="$SIM_TICK_THREADS" NW_SIM_MAX_PLAYERS="$SIM_MAX_PLAYERS" \
-    NW_SIM_ADMIN__SNAPSHOT_INTERVAL_MS="$SNAPSHOT_INTERVAL_MS" "$BIN/sim"
+    NW_SIM_ADMIN__SNAPSHOT_INTERVAL_MS="$snapshot_interval_ms" "$BIN/sim"
   metrics_urls+=", \"http://127.0.0.1:$port/metrics\""
 done
 sleep "$SIM_START_S"

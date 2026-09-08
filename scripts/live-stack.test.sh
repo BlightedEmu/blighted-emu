@@ -41,6 +41,10 @@ expect "nine sims are refused" "$EXIT_USAGE" "sims must be 1 to 8" \
 expect "a sim count that is not a number is refused" "$EXIT_USAGE" "not 'five'" \
   env LIVE_STACK_ROOT="$work_dir" NW_GAME_DIR="$work_dir" "$STACK_SCRIPT" five
 
+expect "a snapshot interval that is not a number is refused" "$EXIT_USAGE" "not 'often'" \
+  env LIVE_STACK_ROOT="$work_dir" NW_GAME_DIR="$work_dir" LIVE_STACK_SNAPSHOT_MS=often \
+  "$STACK_SCRIPT"
+
 if [[ -d "$work_dir/local-data/logs" ]]; then
   echo "FAIL: a refused start wrote logs"
   failures=$((failures + 1))
