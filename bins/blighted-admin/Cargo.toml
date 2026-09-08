@@ -15,6 +15,7 @@ nw-common.workspace = true
 nw-content.workspace = true
 nw-formats.workspace = true
 nw-world.workspace = true
+nw-testclient.workspace = true
 nw-bus.workspace = true
 nw-login.workspace = true
 futures-util.workspace = true

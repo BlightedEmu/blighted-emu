@@ -19,6 +19,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use nw_common::time::unix_ms;
+use nw_testclient::fleet::BOTS_STARTED_MARK;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
@@ -51,8 +52,6 @@ const UNTIL_STOPPED: &str = "0";
 const LETTERS: u32 = 26;
 const FIRST_LETTER: u8 = b'a';
 const LINE_END: u8 = b'\n';
-/// The line part of `nw-testclient` (`run_fleet`) once every bot of a batch is started.
-const STARTED_MARK: &str = " bots started in ";
 
 /// Where the batches come from.
 #[derive(Debug, Clone)]
@@ -469,7 +468,7 @@ impl Bots {
                 Ok(_) => {
                     let text = String::from_utf8_lossy(&line);
                     self.event(format!("batch {batch}: {}", text.trim_end()));
-                    if text.contains(STARTED_MARK) {
+                    if text.contains(BOTS_STARTED_MARK) {
                         self.bots_started(batch);
                     }
                 }
@@ -588,6 +587,7 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode, header};
+    use nw_testclient::fleet::started_line;
     use tower::ServiceExt;
 
     use super::*;
@@ -620,7 +620,10 @@ echo "input closed"
 "#;
     const IGNORING: &str = "#!/bin/sh\necho started\nexec sleep 30\n";
     /// Starts its bots at once (the line of `nw-testclient`), then runs until its input closes.
-    const QUICK: &str = "#!/bin/sh\necho \"$5 bots started in 0.0 s\"\ncat > /dev/null\n";
+    /// A batch that starts its bots at once (its fifth argument is the bot count).
+    fn quick_script() -> String {
+        format!("#!/bin/sh\necho \"$5{BOTS_STARTED_MARK}0.0 s\"\ncat > /dev/null\n")
+    }
 
     struct Fixture {
         _dir: tempfile::TempDir,
@@ -837,15 +840,13 @@ echo "input closed"
 
     #[tokio::test]
     async fn the_next_batch_starts_when_the_bots_are_started() {
-        let fixture = fixture(QUICK);
+        let fixture = fixture(&quick_script());
         start(&fixture, 1).expect("first");
         start(&fixture, 1).expect("second");
+        let line = started_line(1, Duration::ZERO);
         wait_for(
             &fixture.state,
-            &[
-                "batch 0: 1 bots started in 0.0 s",
-                "batch 1: 1 bots started in 0.0 s",
-            ],
+            &[&format!("batch 0: {line}"), &format!("batch 1: {line}")],
         )
         .await;
         assert_eq!(

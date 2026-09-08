@@ -595,6 +595,7 @@ dependencies = [
  "nw-login",
  "nw-messages",
  "nw-reflect",
+ "nw-testclient",
  "nw-world",
  "png",
  "rep-gateway",

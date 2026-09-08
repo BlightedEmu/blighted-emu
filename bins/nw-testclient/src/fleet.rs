@@ -300,8 +300,17 @@ pub fn udp_receive_errors(snmp: &str) -> Option<u64> {
     values.split_whitespace().nth(column)?.parse().ok()
 }
 
+/// The part of the line that says every bot of a run is started; the admin panel reads it to
+/// start the next batch.
+pub const BOTS_STARTED_MARK: &str = " bots started in ";
+
+/// The line that says `bots` bots started in `took`.
+pub fn started_line(bots: usize, took: Duration) -> String {
+    format!("{bots}{BOTS_STARTED_MARK}{:.1} s", took.as_secs_f64())
+}
+
 /// Runs every bot, `bots_per_second` new ones each second, and reads the sim metrics before and
-/// after.
+/// after. A stop ends the starts: bots not yet started do not start.
 pub async fn run_fleet<B: FleetBot>(
     http: &Client,
     fleet: Arc<FleetSettings>,
@@ -314,20 +323,24 @@ pub async fn run_fleet<B: FleetBot>(
     let mut bots = JoinSet::new();
     let pause = Duration::from_secs(1) / fleet.bots_per_second.max(1);
     let started = Instant::now();
+    let mut stopped = stop.clone();
     for n in 0..fleet.bots {
+        if *stopped.borrow() {
+            break;
+        }
         let (http, fleet, new_client) = (http.clone(), Arc::clone(&fleet), Arc::clone(&new_client));
         let bot = new_bot(n);
         let hold = fleet
             .duration
             .map_or_else(|| Hold::UntilStopped(stop.clone()), Hold::For);
         bots.spawn(async move { run_bot(&http, &fleet, n, &*new_client, bot, hold).await });
-        tokio::time::sleep(pause).await;
+        tokio::select! {
+            () = tokio::time::sleep(pause) => {}
+            // An error means the sender is gone: nobody can stop the run, so only the pause ends.
+            Ok(()) = stopped.changed() => {}
+        }
     }
-    report(format!(
-        "{} bots started in {:.1} s",
-        fleet.bots,
-        started.elapsed().as_secs_f64()
-    ));
+    report(started_line(bots.len(), started.elapsed()));
     let mut reports = Vec::with_capacity(fleet.bots);
     while let Some(done) = bots.join_next().await {
         reports.push(done.unwrap_or_else(|error| B::failed(error.to_string())));
@@ -450,7 +463,95 @@ pub(crate) mod test_support {
 mod tests {
     use std::collections::BTreeSet;
 
+    use super::test_support::test_fleet;
     use super::*;
+
+    struct Idle;
+
+    impl FleetBot for Idle {
+        type Report = String;
+
+        fn tick(
+            &mut self,
+            _: &mut RepClient,
+            _: &mut RepOutcome,
+            _: Duration,
+        ) -> Result<(), RepError> {
+            Ok(())
+        }
+
+        fn report(self, _: &RepOutcome) -> String {
+            String::new()
+        }
+
+        fn failed(error: String) -> String {
+            error
+        }
+    }
+
+    #[test]
+    fn the_started_line_holds_the_mark_the_panel_reads() {
+        assert!(started_line(10, Duration::from_millis(200)).contains(BOTS_STARTED_MARK));
+    }
+
+    #[tokio::test]
+    async fn a_fleet_nobody_can_stop_keeps_its_pace() {
+        const BOTS: usize = 3;
+        const PER_SECOND: u32 = 10;
+        /// Two pauses of 100 ms between three starts.
+        const SHORTEST: Duration = Duration::from_millis(200);
+        nw_login::install_crypto_provider();
+        let mut fleet = test_fleet(SHORTEST);
+        fleet.bots = BOTS;
+        fleet.bots_per_second = PER_SECOND;
+        fleet.metrics_urls = Vec::new();
+        let (stop, stopped) = watch::channel(false);
+        drop(stop);
+        let new_client: NewClient =
+            Arc::new(|_| Err(RepError::Route(crate::route::RouteError::TooShort)));
+        let started = Instant::now();
+        let run = run_fleet(
+            &Client::new(),
+            Arc::new(fleet),
+            new_client,
+            Arc::new(|_| Idle),
+            stopped,
+            |_| {},
+        )
+        .await;
+        assert_eq!(run.bots.len(), BOTS);
+        assert!(started.elapsed() >= SHORTEST, "{:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn a_stopped_fleet_starts_no_more_bots() {
+        /// Far more bots than the wait below lets start at one per second.
+        const BOTS: usize = 1000;
+        const WAIT: Duration = Duration::from_secs(5);
+        nw_login::install_crypto_provider();
+        let mut fleet = test_fleet(WAIT);
+        fleet.bots = BOTS;
+        fleet.bots_per_second = 1;
+        fleet.duration = None;
+        fleet.metrics_urls = Vec::new();
+        let (_stop, stopped) = watch::channel(true);
+        let new_client: NewClient =
+            Arc::new(|_| Err(RepError::Route(crate::route::RouteError::TooShort)));
+        let run = tokio::time::timeout(
+            WAIT,
+            run_fleet(
+                &Client::new(),
+                Arc::new(fleet),
+                new_client,
+                Arc::new(|_| Idle),
+                stopped,
+                |_| {},
+            ),
+        )
+        .await
+        .expect("a stopped fleet ends");
+        assert!(run.bots.is_empty(), "{} bots started", run.bots.len());
+    }
 
     #[test]
     fn bot_names_are_letters_and_unique() {
