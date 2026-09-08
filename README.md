@@ -304,6 +304,12 @@ The capture viewer page (`/web/captures.html`) opens a session and shows its tot
 
 The world map page (`/web/map.html`) shows the map tiles, the relief, or the relief over the tiles at half strength (the check that both line up), and, closer than 4 m per pixel, the mob spawns, gatherables and landmarks of the world file. The page code is plain JavaScript modules built into the program; `just test-web` runs their tests with Node's built-in test runner.
 
+### Live panel
+
+The live page (`/live`) shows the running servers: tiles (sims, players, bots, CPU per program, tick time per sim, packets and bandwidth of the gateway, bundle members, awake and asleep mobs), the map with the sim cells, the players and the awake mobs, the player list, the selected entity, the event log, and buttons that start bot batches of 1, 10, 100 or 1,000 (`nw-testclient swarm` until stopped, one batch after another) and stop them. It reads the bus (`[live] nats_url`, the heartbeats, the cell table and the sim snapshots), the metrics pages in `[live] metrics_urls`, and `/proc` for CPU (Linux only). Bot batches take the `NW_SECRET_*` lines of `[live] testclient_env_file`; the page sends only a size and a batch number. A sim publishes snapshots only with `[admin] snapshot_interval_ms` above 0.
+
+`just live <sims>` starts a whole local test world for it (edge-http on port 8443, the director, 1 to 8 sims with snapshots every 250 ms, the gateway) and then the panel; Ctrl-C stops all of them. Build with `cargo build --release` and set `NW_GAME_DIR` first. `LIVE_STACK_SNAPSHOT_MS=0 just live 8` runs it with snapshots off, to compare tick times. The exit test is in `docs/re/2026-09-06-admin-live-panel.md`.
+
 ## Rules for contributors
 
 - Never commit game files, captures, or `deploy/.env`. Put local game data in `local-data/` (ignored by git).
