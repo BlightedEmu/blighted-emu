@@ -3,6 +3,7 @@
 //! for a Steam ticket.
 
 use std::collections::HashSet;
+use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -23,6 +24,13 @@ pub const ALLOWED_ARGUMENTS: [&str; 7] = [
     "-AuthEndpoint",
     "-AuthBackend",
 ];
+/// Launch argument that points the client at an absolute override-config file, bypassing the
+/// packed `@assets@` lookup.
+pub const OVERRIDE_CONFIG_ARG: &str = "-OverrideConfigPath";
+/// Environment variable that, when set to a non-empty value, makes the launcher pass
+/// [`OVERRIDE_CONFIG_ARG`] with that value, so the client reads an absolute override-config file
+/// instead of the packed `@assets@/ClientOverride.json` that a retail client does not read.
+pub const OVERRIDE_CONFIG_ENV: &str = "NW_LAUNCHER_OVERRIDE_CONFIG";
 /// Default Steam program.
 #[cfg(windows)]
 pub const DEFAULT_STEAM: &str = r"C:\Program Files (x86)\Steam\steam.exe";
@@ -58,15 +66,71 @@ pub enum GameError {
     /// An argument value points to an Amazon or CloudFront host.
     #[error("the server asked for the Amazon or CloudFront address {0}")]
     Forbidden(String),
-    /// Steam could not be started.
-    #[error("Steam could not be started from {}: {source}", .steam.display())]
+    /// The game program (Steam or Proton) could not be started.
+    #[error("could not start the game: {} failed: {source}", .program.display())]
     Start {
-        /// The Steam program.
-        steam: PathBuf,
+        /// The program that failed to start.
+        program: PathBuf,
         /// The start error.
         #[source]
         source: std::io::Error,
     },
+}
+
+/// A direct Proton launch of a game executable, bypassing Steam's own game launcher (and so
+/// Easy Anti-Cheat). Set by the four [`DIRECT_EXE_ENV`] family variables.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectLaunch {
+    /// The Proton program.
+    pub proton: PathBuf,
+    /// The game executable to run (for example the patched `BlightedNewWorld.exe`).
+    pub exe: PathBuf,
+    /// `STEAM_COMPAT_DATA_PATH`: the game's Proton prefix (`compatdata/<app-id>`).
+    pub compat_data: PathBuf,
+    /// `STEAM_COMPAT_CLIENT_INSTALL_PATH`: the Steam install directory.
+    pub client_install: PathBuf,
+}
+
+/// The game executable to run directly under Proton.
+pub const DIRECT_EXE_ENV: &str = "NW_LAUNCHER_GAME_EXE";
+/// The Proton program used for a direct launch.
+pub const DIRECT_PROTON_ENV: &str = "NW_LAUNCHER_PROTON";
+/// The game's Proton prefix for a direct launch.
+pub const DIRECT_COMPAT_DATA_ENV: &str = "NW_LAUNCHER_STEAM_COMPAT_DATA";
+/// The Steam install directory for a direct launch.
+pub const DIRECT_CLIENT_INSTALL_ENV: &str = "NW_LAUNCHER_STEAM_CLIENT_INSTALL";
+
+/// The Proton verb that runs a program in the prefix.
+const PROTON_VERB: &str = "run";
+/// Steam app-id environment variables the game reads to find its Steam context.
+const STEAM_APP_ID_ENV: &str = "SteamAppId";
+const STEAM_GAME_ID_ENV: &str = "SteamGameId";
+const STEAM_COMPAT_DATA_PATH_ENV: &str = "STEAM_COMPAT_DATA_PATH";
+const STEAM_COMPAT_CLIENT_INSTALL_PATH_ENV: &str = "STEAM_COMPAT_CLIENT_INSTALL_PATH";
+
+/// A [`DirectLaunch`] from the environment, or none when any of the four variables is missing.
+pub fn direct_launch_from_env() -> Option<DirectLaunch> {
+    Some(DirectLaunch {
+        proton: std::env::var_os(DIRECT_PROTON_ENV)?.into(),
+        exe: std::env::var_os(DIRECT_EXE_ENV)?.into(),
+        compat_data: std::env::var_os(DIRECT_COMPAT_DATA_ENV)?.into(),
+        client_install: std::env::var_os(DIRECT_CLIENT_INSTALL_ENV)?.into(),
+    })
+}
+
+/// `<proton> run <exe> <arguments>` with the Steam compatibility environment, so a patched game
+/// executable runs under Proton without Steam's own launcher and without Easy Anti-Cheat.
+pub fn direct_command(launch: &DirectLaunch, arguments: &[String]) -> Command {
+    let mut command = Command::new(&launch.proton);
+    command
+        .arg(PROTON_VERB)
+        .arg(&launch.exe)
+        .args(arguments)
+        .env(STEAM_COMPAT_DATA_PATH_ENV, &launch.compat_data)
+        .env(STEAM_COMPAT_CLIENT_INSTALL_PATH_ENV, &launch.client_install)
+        .env(STEAM_APP_ID_ENV, STEAM_APP_ID)
+        .env(STEAM_GAME_ID_ENV, STEAM_APP_ID);
+    command
 }
 
 fn is_plain_value(value: &str) -> bool {
@@ -128,6 +192,28 @@ pub fn game_arguments(template: &[String], session_key: &str) -> Result<Vec<Stri
     }
 }
 
+/// The `-OverrideConfigPath <path>` pair for a path value, or none when it is absent or empty.
+fn override_config_pair(path: Option<&str>) -> Option<(String, String)> {
+    match path {
+        Some(value) if !value.is_empty() => {
+            Some((OVERRIDE_CONFIG_ARG.to_owned(), value.to_owned()))
+        }
+        _ => None,
+    }
+}
+
+/// Appends `-OverrideConfigPath <path>` when [`OVERRIDE_CONFIG_ENV`] holds a non-empty value, so
+/// the client reads that absolute override-config file. Returns `arguments` unchanged otherwise.
+pub fn append_override_config(mut arguments: Vec<String>) -> Vec<String> {
+    if let Some((name, value)) =
+        override_config_pair(env::var(OVERRIDE_CONFIG_ENV).ok().as_deref())
+    {
+        arguments.push(name);
+        arguments.push(value);
+    }
+    arguments
+}
+
 /// `steam -applaunch 1063730 <arguments>`.
 pub fn steam_command(steam: &Path, arguments: &[String]) -> Command {
     let mut command = Command::new(steam);
@@ -138,19 +224,24 @@ pub fn steam_command(steam: &Path, arguments: &[String]) -> Command {
     command
 }
 
-/// Starts the game and returns at once.
+/// Starts the game and returns at once. Uses a direct Proton launch when
+/// [`direct_launch_from_env`] is configured, otherwise Steam.
 pub fn start_game(steam: &Path, arguments: &[String]) -> Result<(), GameError> {
-    steam_command(steam, arguments)
+    let mut command = match direct_launch_from_env() {
+        Some(launch) => direct_command(&launch, arguments),
+        None => steam_command(steam, arguments),
+    };
+    let program = PathBuf::from(command.get_program());
+    command
         .spawn()
         .map(drop)
-        .map_err(|source| GameError::Start {
-            steam: steam.to_path_buf(),
-            source,
-        })
+        .map_err(|source| GameError::Start { program, source })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
     use super::*;
 
     const KEY: &str = "abcdefghijklmnopqrstuvwxyz234567abcdefghijklmnopqrst";
@@ -278,6 +369,71 @@ mod tests {
                 "-LoginChannelOverride",
                 KEY
             ]
+        );
+    }
+
+    #[test]
+    fn override_config_pair_is_added_only_for_a_non_empty_path() {
+        assert_eq!(
+            override_config_pair(Some("Z:/x/ClientOverride.json")),
+            Some((
+                "-OverrideConfigPath".to_owned(),
+                "Z:/x/ClientOverride.json".to_owned()
+            ))
+        );
+        assert_eq!(override_config_pair(Some("")), None);
+        assert_eq!(override_config_pair(None), None);
+    }
+
+    #[test]
+    fn append_override_config_keeps_the_original_arguments_first() {
+        let base = template(&["-LoginChannelOverride", KEY]);
+        let result = append_override_config(base.clone());
+        assert_eq!(result[..base.len()], base[..]);
+    }
+
+    #[test]
+    fn direct_command_runs_the_exe_under_proton_with_steam_env() {
+        let launch = DirectLaunch {
+            proton: PathBuf::from("/opt/GE-Proton/proton"),
+            exe: PathBuf::from("/games/New World/Bin64/BlightedNewWorld.exe"),
+            compat_data: PathBuf::from("/steam/steamapps/compatdata/1063730"),
+            client_install: PathBuf::from("/home/p/.local/share/Steam"),
+        };
+        let command = direct_command(&launch, &template(&["-LoginChannelOverride", KEY]));
+        assert_eq!(command.get_program(), OsStr::new("/opt/GE-Proton/proton"));
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "run",
+                "/games/New World/Bin64/BlightedNewWorld.exe",
+                "-LoginChannelOverride",
+                KEY
+            ]
+        );
+        let envs: std::collections::HashMap<String, String> = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(envs.get("SteamAppId").map(String::as_str), Some(STEAM_APP_ID));
+        assert_eq!(
+            envs.get("STEAM_COMPAT_DATA_PATH").map(String::as_str),
+            Some("/steam/steamapps/compatdata/1063730")
+        );
+        assert_eq!(
+            envs.get("STEAM_COMPAT_CLIENT_INSTALL_PATH").map(String::as_str),
+            Some("/home/p/.local/share/Steam")
         );
     }
 

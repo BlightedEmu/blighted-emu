@@ -10,7 +10,7 @@ use eframe::egui;
 use nw_protocol::launcher_api::{AuthMode, DiscordPollReply, LauncherInfo, PasswordCredentials};
 
 use crate::api::{ApiError, LauncherApi, discord_login_page};
-use crate::game::{DEFAULT_STEAM, game_arguments, start_game};
+use crate::game::{DEFAULT_STEAM, append_override_config, game_arguments, start_game};
 use crate::server::api_base_url;
 use crate::settings::Settings;
 
@@ -167,7 +167,7 @@ impl LauncherApp {
                 Err(error) => return failure(&error),
             };
             match game_arguments(&info.launch_arguments, &key)
-                .and_then(|arguments| start_game(&steam, &arguments))
+                .and_then(|arguments| start_game(&steam, &append_override_config(arguments)))
             {
                 Ok(()) => Event::GameStarted,
                 Err(error) => Event::Failed(error.to_string()),
