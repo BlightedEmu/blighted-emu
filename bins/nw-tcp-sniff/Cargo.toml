@@ -1,0 +1,22 @@
+[package]
+name = "nw-tcp-sniff"
+version = "0.1.0"
+description = "Diagnostic TCP listener that records the raw bytes a client sends, to learn the TCP transport framing."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+hex.workspace = true
+nw-common.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

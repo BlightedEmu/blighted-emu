@@ -3114,6 +3114,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nw-tcp-sniff"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "hex",
+ "nw-common",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "nw-testclient"
 version = "0.1.0"
 dependencies = [
