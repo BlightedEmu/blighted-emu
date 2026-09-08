@@ -14,10 +14,17 @@
 use nw_messages::{
     Block1415acc30, CalendarConnectedMsg, ClientAddEntryMsg, ConnectedBody, MessageError,
     OBSERVED_DAY_PHASE, OBSERVED_TIME_CHANGE_F32S_AT_16, OBSERVED_TIME_CHANGE_F32S_AT_60,
-    OBSERVED_TIME_CHANGE_U32S_AT_28, PlayerManagerSelfIdentificationMsg, RAW_ID_LEN,
-    ReceivePlayerSpawnPointMsg, ServerMessage, SyncDayPhaseMsg, SyncTimeChangeMsg, TimeSynchMsg,
-    TimingConfigurationConnectedMsg,
+    LevelInfoChangedMsg, OBSERVED_TIME_CHANGE_U32S_AT_28, PlayerManagerSelfIdentificationMsg,
+    RAW_ID_LEN, ReceivePlayerSpawnPointMsg, ServerMessage, SyncDayPhaseMsg, SyncTimeChangeMsg,
+    TimeSynchMsg, TimingConfigurationConnectedMsg,
 };
+
+/// The `clientCtx` id of `LevelInfoChangedMsg`. The client stores it and expects every state
+/// bundle that follows to carry the same number (bootstrap bodies note, type 1635).
+const SESSION_CLIENT_CONTEXT: u8 = 1;
+/// The phase id of the single open-world phasing entry. It must not be 0 (the client drops a
+/// 0-phase entry); one phase is used for every player of this server.
+const SESSION_PHASE_ID: u64 = 1;
 
 /// Ids that stay the same for every player of one `sim` run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,6 +134,11 @@ pub fn login_messages(
             u64_at_8: world.day_phase_ids[1],
             u32_at_16: OBSERVED_DAY_PHASE,
         }),
+        ServerMessage::LevelInfoChanged(LevelInfoChangedMsg::open_world(
+            SESSION_CLIENT_CONTEXT,
+            server_time,
+            SESSION_PHASE_ID,
+        )),
     ];
     messages.iter().map(ServerMessage::envelope).collect()
 }

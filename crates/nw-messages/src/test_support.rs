@@ -6,6 +6,7 @@ use crate::connected::{
     Block1415acc30, CalendarConnectedMsg, ConnectedBody, TimingConfigurationConnectedMsg,
 };
 use crate::day_phase::SyncDayPhaseMsg;
+use crate::level_info::LevelInfoChangedMsg;
 use crate::self_ident::PlayerManagerSelfIdentificationMsg;
 use crate::server::ServerMessage;
 use crate::spawn_point::ReceivePlayerSpawnPointMsg;
@@ -43,5 +44,6 @@ pub fn login_samples(own: u64) -> Vec<ServerMessage> {
             u64_at_8: 11,
             u32_at_16: 2,
         }),
+        ServerMessage::LevelInfoChanged(LevelInfoChangedMsg::open_world(1, 12, 1)),
     ]
 }

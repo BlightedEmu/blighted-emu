@@ -6,6 +6,7 @@ use crate::client_add_entry::ClientAddEntryMsg;
 use crate::combat::{DamageDealtMsg, DeathRecapMsg, OnDamageMsg};
 use crate::connected::{CalendarConnectedMsg, TimingConfigurationConnectedMsg};
 use crate::day_phase::SyncDayPhaseMsg;
+use crate::level_info::LevelInfoChangedMsg;
 use crate::self_ident::PlayerManagerSelfIdentificationMsg;
 use crate::spawn_point::ReceivePlayerSpawnPointMsg;
 use crate::time_change::SyncTimeChangeMsg;
@@ -15,7 +16,7 @@ use nw_reflect::{Envelope, TypeId};
 use crate::wire::{BodyCodec, MessageError};
 
 /// Type indexes of [`ServerMessage`], in the order of the captured login.
-pub const SERVER_MESSAGE_TYPES: [u64; 9] = [
+pub const SERVER_MESSAGE_TYPES: [u64; 10] = [
     TimingConfigurationConnectedMsg::TYPE_INDEX,
     CalendarConnectedMsg::TYPE_INDEX,
     PlayerManagerSelfIdentificationMsg::TYPE_INDEX,
@@ -24,6 +25,7 @@ pub const SERVER_MESSAGE_TYPES: [u64; 9] = [
     TimeSynchMsg::TYPE_INDEX,
     SyncTimeChangeMsg::TYPE_INDEX,
     SyncDayPhaseMsg::TYPE_INDEX,
+    LevelInfoChangedMsg::TYPE_INDEX,
     ReplicatedStateBundle::TYPE_INDEX,
 ];
 
@@ -52,6 +54,8 @@ pub enum ServerMessage {
     TimeChange(SyncTimeChangeMsg),
     /// 4247.
     DayPhase(SyncDayPhaseMsg),
+    /// 1635.
+    LevelInfoChanged(LevelInfoChangedMsg),
     /// 8.
     Bundle(ReplicatedStateBundle),
     /// 2071.
@@ -86,6 +90,9 @@ impl ServerMessage {
             TimeSynchMsg::TYPE_INDEX => TimeSynchMsg::decode(body).map(Self::TimeSynch),
             SyncTimeChangeMsg::TYPE_INDEX => SyncTimeChangeMsg::decode(body).map(Self::TimeChange),
             SyncDayPhaseMsg::TYPE_INDEX => SyncDayPhaseMsg::decode(body).map(Self::DayPhase),
+            LevelInfoChangedMsg::TYPE_INDEX => {
+                LevelInfoChangedMsg::decode(body).map(Self::LevelInfoChanged)
+            }
             ReplicatedStateBundle::TYPE_INDEX => {
                 ReplicatedStateBundle::decode(body).map(Self::Bundle)
             }
@@ -108,6 +115,7 @@ impl ServerMessage {
             Self::TimeSynch(_) => TimeSynchMsg::TYPE_INDEX,
             Self::TimeChange(_) => SyncTimeChangeMsg::TYPE_INDEX,
             Self::DayPhase(_) => SyncDayPhaseMsg::TYPE_INDEX,
+            Self::LevelInfoChanged(_) => LevelInfoChangedMsg::TYPE_INDEX,
             Self::Bundle(_) => ReplicatedStateBundle::TYPE_INDEX,
             Self::DamageDealt(_) => DamageDealtMsg::TYPE_INDEX,
             Self::OnDamage(_) => OnDamageMsg::TYPE_INDEX,
@@ -144,6 +152,7 @@ impl ServerMessage {
             Self::TimeSynch(message) => message.encode(),
             Self::TimeChange(message) => message.encode(),
             Self::DayPhase(message) => message.encode(),
+            Self::LevelInfoChanged(message) => message.encode(),
             Self::Bundle(message) => message.encode(),
             Self::DamageDealt(message) => message.encode(),
             Self::OnDamage(message) => message.encode(),
@@ -181,7 +190,7 @@ mod tests {
         assert_eq!(order, SERVER_MESSAGE_TYPES);
         assert_eq!(
             LOGIN_MESSAGE_TYPES.last(),
-            Some(&SyncDayPhaseMsg::TYPE_INDEX)
+            Some(&LevelInfoChangedMsg::TYPE_INDEX)
         );
         for message in samples {
             let body = message.encode().expect("encode");

@@ -16,6 +16,7 @@ pub mod components;
 pub mod connected;
 pub mod day_phase;
 pub mod gde;
+pub mod level_info;
 pub mod payload;
 pub mod position;
 pub mod self_ident;
@@ -55,6 +56,7 @@ pub use connected::{
 };
 pub use day_phase::{OBSERVED_DAY_PHASE, SYNC_DAY_PHASE_MSG_TYPE_INDEX, SyncDayPhaseMsg};
 pub use gde::{AssetId, GDE_ID_LEN, GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
+pub use level_info::{LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, LevelInfoChangedMsg, PhasingEntry};
 pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, MemberState};
 pub use position::{
     POSITION_IN_THE_WORLD_TYPE_INDEX, POSITION_Z_MAX, POSITION_Z_MIN,
