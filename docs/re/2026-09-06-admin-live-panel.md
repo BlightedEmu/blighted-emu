@@ -10,7 +10,7 @@ This note records the exit test of spec `2026-09-04-admin-tools-design.md` secti
 |---|---|
 | B1. `cargo test --workspace`, `just test-web`, `just check`, `just test-infra` pass | Pass. |
 | B2. 8 sims with mobs: 1,000 bots from the buttons, on the map, one followed, all stopped; every tile has a value; tick p99 of every sim within one tick | Pass (see 2). |
-| B3. Snapshot on, sim with 1,000 players: extra tick time under 0.5 ms average | Per tick: pass (0.32 ms). Per snapshot: not met (2.35 ms). See 3. |
+| B3. Snapshot on, sim with 1,000 players: extra tick time under 0.5 ms average (`sim_snapshot_seconds`) | Not met: 2.35 ms per snapshot (0.32 ms when spread over the ticks). See 3. |
 | B4. This record | Yes. |
 
 ## 1. Program checks
@@ -60,7 +60,7 @@ The snapshot time grows with the awake mobs, not with the players: this sim send
 
 `cargo test --release -p sim snapshot_speed -- --ignored --nocapture` builds the snapshot of 23,000 awake mobs in 0.30 ms on its own. In the running sim the mobs lie apart in memory and the PC also runs the bots and the gateway, so the same work takes about 8 times as long.
 
-**Ruling.** B3 is read as the extra time per tick (the spec says "extra tick time ... average"): pass. The time of one snapshot is recorded here as not met. Cost if wrong: every 250 ms one tick of a full sim starts up to about 2.4 ms late.
+**Result.** The spec measures B3 with `sim_snapshot_seconds`, which is the time of one snapshot: 2.35 ms against 0.5 ms, so B3 is not met. Spread over the ticks it is 0.32 ms per tick, and the tick p99 bucket went from 33 ms to 50 ms with snapshots on. The cause is the number of awake mobs (23,085), and the time of one snapshot grows with them. With 8 sims the busiest sim takes 0.79 ms per snapshot (section 2). Ways to meet B3 are a longer snapshot interval, a snapshot of a part of the mobs per interval, or a mob table laid out in one block of memory; none is done in part B.
 
 ## 4. Changes made by the live checks
 
