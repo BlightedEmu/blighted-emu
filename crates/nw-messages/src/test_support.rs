@@ -6,6 +6,7 @@ use crate::connected::{
     Block1415acc30, CalendarConnectedMsg, ConnectedBody, TimingConfigurationConnectedMsg,
 };
 use crate::day_phase::SyncDayPhaseMsg;
+use crate::self_ident::PlayerManagerSelfIdentificationMsg;
 use crate::server::ServerMessage;
 use crate::spawn_point::ReceivePlayerSpawnPointMsg;
 use crate::time_change::SyncTimeChangeMsg;
@@ -26,6 +27,7 @@ pub fn login_samples(own: u64) -> Vec<ServerMessage> {
     vec![
         ServerMessage::TimingConfigurationConnected(TimingConfigurationConnectedMsg(connected)),
         ServerMessage::CalendarConnected(CalendarConnectedMsg(connected)),
+        ServerMessage::SelfIdentification(PlayerManagerSelfIdentificationMsg),
         ServerMessage::ClientAddEntry(ClientAddEntryMsg::for_entity(own)),
         ServerMessage::PlayerSpawnPoint(ReceivePlayerSpawnPointMsg),
         ServerMessage::TimeSynch(TimeSynchMsg { time: 5 }),

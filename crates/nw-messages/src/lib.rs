@@ -18,6 +18,7 @@ pub mod day_phase;
 pub mod gde;
 pub mod payload;
 pub mod position;
+pub mod self_ident;
 pub mod server;
 mod slots;
 pub mod spawn_point;
@@ -58,6 +59,9 @@ pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, Member
 pub use position::{
     POSITION_IN_THE_WORLD_TYPE_INDEX, POSITION_Z_MAX, POSITION_Z_MIN,
     PositionInTheWorldReplicatedState, Rotation, RotationComponent, Scale, WorldPosition,
+};
+pub use self_ident::{
+    PLAYER_MANAGER_SELF_IDENTIFICATION_MSG_TYPE_INDEX, PlayerManagerSelfIdentificationMsg,
 };
 pub use server::{LOGIN_MESSAGE_TYPES, SERVER_MESSAGE_TYPES, ServerMessage};
 pub use spawn_point::{RECEIVE_PLAYER_SPAWN_POINT_MSG_TYPE_INDEX, ReceivePlayerSpawnPointMsg};

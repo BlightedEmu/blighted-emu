@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The login messages that `sim` sends after a join, in the captured order (M4 spec section
-//! 5.2): 446, 1034, 164, 1617, 335, 4246, 4247. Messages with an open layout (1628, 3236, 1635,
-//! 6310) are not sent.
+//! 5.2): 446, 1034, 1628, 164, 1617, 335, 4246, 4247. Message 1628
+//! (`PlayerManagerSelfIdentificationMsg`) is the one that moves the real client out of
+//! `WaitingForActorGameConnection`; this server sends its smallest accepted body (see
+//! [`PlayerManagerSelfIdentificationMsg`]). Messages 3236, 1635 and 6310 (still open layout) are
+//! not sent.
 //!
 //! Every id field holds a value this server chooses; no byte comes from a capture. The meaning of
 //! most of these ids in the retail service is Unknown. One choice is ours alone: the entry id of
@@ -11,8 +14,9 @@
 use nw_messages::{
     Block1415acc30, CalendarConnectedMsg, ClientAddEntryMsg, ConnectedBody, MessageError,
     OBSERVED_DAY_PHASE, OBSERVED_TIME_CHANGE_F32S_AT_16, OBSERVED_TIME_CHANGE_F32S_AT_60,
-    OBSERVED_TIME_CHANGE_U32S_AT_28, RAW_ID_LEN, ReceivePlayerSpawnPointMsg, ServerMessage,
-    SyncDayPhaseMsg, SyncTimeChangeMsg, TimeSynchMsg, TimingConfigurationConnectedMsg,
+    OBSERVED_TIME_CHANGE_U32S_AT_28, PlayerManagerSelfIdentificationMsg, RAW_ID_LEN,
+    ReceivePlayerSpawnPointMsg, ServerMessage, SyncDayPhaseMsg, SyncTimeChangeMsg, TimeSynchMsg,
+    TimingConfigurationConnectedMsg,
 };
 
 /// Ids that stay the same for every player of one `sim` run.
@@ -107,6 +111,7 @@ pub fn login_messages(
             block_at_0: world.calendar_block,
             block_at_36: session_block,
         })),
+        ServerMessage::SelfIdentification(PlayerManagerSelfIdentificationMsg),
         ServerMessage::ClientAddEntry(ClientAddEntryMsg::for_entity(entity)),
         ServerMessage::PlayerSpawnPoint(ReceivePlayerSpawnPointMsg),
         ServerMessage::TimeSynch(TimeSynchMsg { time: server_time }),
@@ -142,7 +147,7 @@ fn random_u64() -> Result<u64, getrandom::Error> {
 
 #[cfg(test)]
 mod tests {
-    use nw_messages::LOGIN_MESSAGE_TYPES;
+    use nw_messages::{BodyCodec, LOGIN_MESSAGE_TYPES};
     use nw_reflect::Envelope;
 
     use super::*;
@@ -166,7 +171,11 @@ mod tests {
             })
             .collect();
         assert_eq!(types, LOGIN_MESSAGE_TYPES);
-        let entry = Envelope::decode(&envelopes[2]).expect("entry");
+        let entry_slot = LOGIN_MESSAGE_TYPES
+            .iter()
+            .position(|&type_index| type_index == ClientAddEntryMsg::TYPE_INDEX)
+            .expect("the entry message is in the login order");
+        let entry = Envelope::decode(&envelopes[entry_slot]).expect("entry");
         let Some(Ok(ServerMessage::ClientAddEntry(message))) = ServerMessage::from_envelope(&entry)
         else {
             panic!("expected the entry message");

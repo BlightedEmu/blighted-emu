@@ -6,6 +6,7 @@ use crate::client_add_entry::ClientAddEntryMsg;
 use crate::combat::{DamageDealtMsg, DeathRecapMsg, OnDamageMsg};
 use crate::connected::{CalendarConnectedMsg, TimingConfigurationConnectedMsg};
 use crate::day_phase::SyncDayPhaseMsg;
+use crate::self_ident::PlayerManagerSelfIdentificationMsg;
 use crate::spawn_point::ReceivePlayerSpawnPointMsg;
 use crate::time_change::SyncTimeChangeMsg;
 use crate::time_synch::TimeSynchMsg;
@@ -14,9 +15,10 @@ use nw_reflect::{Envelope, TypeId};
 use crate::wire::{BodyCodec, MessageError};
 
 /// Type indexes of [`ServerMessage`], in the order of the captured login.
-pub const SERVER_MESSAGE_TYPES: [u64; 8] = [
+pub const SERVER_MESSAGE_TYPES: [u64; 9] = [
     TimingConfigurationConnectedMsg::TYPE_INDEX,
     CalendarConnectedMsg::TYPE_INDEX,
+    PlayerManagerSelfIdentificationMsg::TYPE_INDEX,
     ClientAddEntryMsg::TYPE_INDEX,
     ReceivePlayerSpawnPointMsg::TYPE_INDEX,
     TimeSynchMsg::TYPE_INDEX,
@@ -38,6 +40,8 @@ pub enum ServerMessage {
     TimingConfigurationConnected(TimingConfigurationConnectedMsg),
     /// 1034.
     CalendarConnected(CalendarConnectedMsg),
+    /// 1628.
+    SelfIdentification(PlayerManagerSelfIdentificationMsg),
     /// 164.
     ClientAddEntry(ClientAddEntryMsg),
     /// 1617.
@@ -70,6 +74,9 @@ impl ServerMessage {
             CalendarConnectedMsg::TYPE_INDEX => {
                 CalendarConnectedMsg::decode(body).map(Self::CalendarConnected)
             }
+            PlayerManagerSelfIdentificationMsg::TYPE_INDEX => {
+                PlayerManagerSelfIdentificationMsg::decode(body).map(Self::SelfIdentification)
+            }
             ClientAddEntryMsg::TYPE_INDEX => {
                 ClientAddEntryMsg::decode(body).map(Self::ClientAddEntry)
             }
@@ -95,6 +102,7 @@ impl ServerMessage {
         match self {
             Self::TimingConfigurationConnected(_) => TimingConfigurationConnectedMsg::TYPE_INDEX,
             Self::CalendarConnected(_) => CalendarConnectedMsg::TYPE_INDEX,
+            Self::SelfIdentification(_) => PlayerManagerSelfIdentificationMsg::TYPE_INDEX,
             Self::ClientAddEntry(_) => ClientAddEntryMsg::TYPE_INDEX,
             Self::PlayerSpawnPoint(_) => ReceivePlayerSpawnPointMsg::TYPE_INDEX,
             Self::TimeSynch(_) => TimeSynchMsg::TYPE_INDEX,
@@ -130,6 +138,7 @@ impl ServerMessage {
         match self {
             Self::TimingConfigurationConnected(message) => message.encode(),
             Self::CalendarConnected(message) => message.encode(),
+            Self::SelfIdentification(message) => message.encode(),
             Self::ClientAddEntry(message) => message.encode(),
             Self::PlayerSpawnPoint(message) => message.encode(),
             Self::TimeSynch(message) => message.encode(),
