@@ -101,6 +101,74 @@ Next steps:
 3. Confirm the player's own entity (matching `ClientAddEntryMsg`'s entity
    number) is in the stream and recognised as the local player.
 
+## Deep dive 2026-09-08 (overnight): why the player does not spawn
+
+Ran more decompiles (read-only, reusing the Ghidra project at
+`<re-scratch>/ghidra-25810808`; helper scripts `scripts/StringFuncs.java`
+and `scripts/Callers.java`). Build-25810808 addresses.
+
+### The InGame trigger is a state bundle, not a message
+
+`FUN_14644b330` (state machine, old `FUN_14644a070`) case `0xd`: InGame needs
+all of `FUN_145a934f0(actor_game)` (`+0x252`, map loaded) != 0, `FUN_141026220()`
+(client context) != 0, and its vtable `+0x30` != 0 (local player entity
+spawned).
+
+`FUN_146449f90` (LoadContextAndLevel, old `FUN_146448cd0`) is the only thing
+that issues `map %s` and sets `+0x252`. It is NOT called by the 1628 or 1635
+handlers. Its one caller is `FUN_14643fa70` — the GameMessagePort handler for
+incoming replication. When a type-8 `ReplicatedStateBundle` arrives whose
+clientContextInstanceId equals the port's expected context and the context
+object is still null, `FUN_14643fa70` calls LoadContextAndLevel and logs
+"HandleUnexpectedMessage skipping ReceiveStateBundle for bundle message due to
+clientContext == nullptr". So the client bootstraps its context/level from the
+FIRST matching state bundle. No message on channel 0 does this.
+
+### The bundle's clientContext is the step-3 header byte, and ours matches
+
+`FUN_1406c1240` returns the in-memory bundle byte `+0x30`. The type-8 header
+reader `FUN_146b08e40` (old `FUN_146b07870`) writes the wire step-3 byte to
+`+0x30` (step 1/2 -> `+0x28`, step 3 -> `+0x30`, step 4 -> `+0x31`, step-5/6
+flags -> `+0x8`/`+0x9`, index block -> `+0x38`, payload -> `+0x110`). So
+clientContextInstanceId = bundle `byte_3`. The sim sets `byte_3 = 1`
+(`OBSERVED_BUNDLE_BYTE_3`) and 1635 sends clientCtx = 1, so they already match.
+
+### The actual blocker: no channel-1 bundle reaches the client
+
+Game.log shows NONE of `FUN_14643fa70`'s log lines (no "skipping
+ReceiveStateBundle…", no "MayHandleReplicationUnreliable returning false", no
+"received bundle for a previous ClientContext"). So the client's game port is
+not receiving any type-8 bundle. With the context byte already matching, the
+only explanation is delivery: the real client is not getting the sim's
+channel-1 (unreliable) state bundles on the game connection.
+
+Live metrics at the time: `sim_players 0`, `sim_deaths_total{player} 1`,
+`rep_gateway_datagrams_out_total 2314`. The player joined with full health
+(`world.rs` admit: `Health::full(player_max_health())`) but then was killed by
+mobs while idling ~60 s at WaitingForPlayerSpawn (115,522 mobs in the world);
+that death is a consequence of not spawning, not the cause.
+
+### Leading hypothesis for the morning
+
+The real client's "actor game connection" (the second channel it starts right
+after registration) may be where it expects the state-bundle stream, separate
+from how `nw-testclient` (one connection) receives it. The emulator sends
+bundles on carrier channel 1 of the one REP connection; confirm whether the
+real client reads bundles there or on a distinct actor-game channel/connection.
+
+Morning plan:
+1. Capture the UDP the gateway sends to the real client (or add a per-connection
+   channel-1 send counter) to see whether channel-1 bundles are actually sent to
+   this connection and in what form.
+2. If sent but ignored, RE how the client sets up the actor game connection and
+   where it binds the bundle receive (around `FUN_145a905d0` /
+   `CJavelinActorGame` and the gridmate channel setup).
+3. If not sent, fix the gateway so joined real-client connections get channel-1
+   bundles.
+4. Separately, stop the idle player being killed by mobs before InGame (spawn
+   protection or no mob aggro until spawned) so the death does not confuse the
+   next test.
+
 ## How the live test runs
 
 `scripts/live-stack.sh` forces edge to 8443 for `nw-testclient`. The real
