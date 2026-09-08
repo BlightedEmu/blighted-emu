@@ -18,6 +18,7 @@ test-scripts:
     scripts/target-size.test.sh
     scripts/no-game-data.test.sh
     scripts/live-stack.test.sh
+    scripts/patch-client.test.sh
 
 # Start a local test world (edge-http on 8443, director, 1 to 8 sims, gateway) and the live
 # panel; 4 sims hold 16,000 players. Ctrl-C stops all. Build with `cargo build --release` and
