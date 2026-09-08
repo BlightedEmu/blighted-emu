@@ -304,47 +304,48 @@ impl Mobs {
         self.live.is_empty()
     }
 
-    /// The admin snapshot: every awake mob, and mobs by state (admin tools spec section 5).
+    /// The admin snapshot: every awake mob, and mobs by state (admin tools spec section 5), in
+    /// one walk over the awake mobs.
     pub fn snapshot(&self) -> (Vec<SnapMob>, [u32; MOB_STATES]) {
+        let mut counts = self.asleep_counts();
         let mobs = self
-            .awake
-            .iter()
-            .filter_map(|index| {
-                let mob = self.live.get(index)?;
+            .awake_mobs()
+            .map(|(index, mob)| {
+                tally(&mut counts, mob.brain.state());
                 let at = mob.brain.position();
-                Some(SnapMob {
-                    entity: mob_entity(*index),
+                SnapMob {
+                    entity: mob_entity(index),
                     x: at.x,
                     y: at.y,
                     state: state_index(mob.brain.state()),
                     health: mob.health.current(),
                     max_health: mob.health.max(),
-                })
+                }
             })
             .collect();
-        let counts = self
-            .counts()
-            .map(|(_, count)| u32::try_from(count).unwrap_or(u32::MAX));
+        let counts = counts.map(|(_, count)| u32::try_from(count).unwrap_or(u32::MAX));
         (mobs, counts)
     }
 
-    /// Mobs by state.
+    /// Mobs by state, in one walk over the awake mobs.
     pub fn counts(&self) -> [(MobState, usize); MobState::ALL.len()] {
-        MobState::ALL.map(|state| {
-            let count = if state == MobState::Asleep {
-                self.live.len() - self.awake.len()
-            } else {
-                self.awake
-                    .iter()
-                    .filter(|index| {
-                        self.live
-                            .get(index)
-                            .is_some_and(|mob| mob.brain.state() == state)
-                    })
-                    .count()
-            };
-            (state, count)
-        })
+        let mut counts = self.asleep_counts();
+        for (_, mob) in self.awake_mobs() {
+            tally(&mut counts, mob.brain.state());
+        }
+        counts
+    }
+
+    /// Every state at 0 but the asleep mobs: every live mob that is not awake.
+    fn asleep_counts(&self) -> [(MobState, usize); MobState::ALL.len()] {
+        let asleep = self.live.len() - self.awake.len();
+        MobState::ALL.map(|state| (state, if state == MobState::Asleep { asleep } else { 0 }))
+    }
+
+    fn awake_mobs(&self) -> impl Iterator<Item = (u32, &Mob)> + '_ {
+        self.awake
+            .iter()
+            .filter_map(|index| self.live.get(index).map(|mob| (*index, mob)))
     }
 
     /// Brain steps run since the start.
@@ -359,6 +360,16 @@ impl Mobs {
 }
 
 /// The position of `state` in [`MobState::ALL`].
+/// Counts one awake mob in `state`; asleep mobs are counted as the mobs that are not awake.
+fn tally(counts: &mut [(MobState, usize); MobState::ALL.len()], state: MobState) {
+    if state == MobState::Asleep {
+        return;
+    }
+    if let Some((_, count)) = counts.iter_mut().find(|(each, _)| *each == state) {
+        *count += 1;
+    }
+}
+
 fn state_index(state: MobState) -> u8 {
     MobState::ALL
         .iter()
@@ -483,6 +494,28 @@ mod tests {
             .into_iter()
             .find(|(state, _)| *state == MobState::Idle);
         assert_eq!(awake, Some((MobState::Idle, 1)));
+    }
+
+    #[test]
+    fn the_snapshot_lists_awake_mobs_and_counts_every_state() {
+        let mut mobs = mobs(vec![
+            spawn_at(100.0, TEST_MOB, TEST_LEVEL),
+            spawn_at(100.0 + FAR_M, TEST_MOB, TEST_LEVEL),
+            spawn_at(100.0 + 2.0 * FAR_M, TEST_MOB, TEST_LEVEL),
+        ]);
+        mobs.set_cells(every);
+        mobs.tick(&[player_at(150.0)], TICK_MS, &Flat);
+        let (awake, counts) = mobs.snapshot();
+        assert_eq!(
+            awake.iter().map(|mob| mob.entity).collect::<Vec<_>>(),
+            vec![mob_entity(0)]
+        );
+        let expected = mobs
+            .counts()
+            .map(|(_, count)| u32::try_from(count).expect("count"));
+        assert_eq!(counts, expected);
+        assert_eq!(counts.iter().sum::<u32>(), 3);
+        assert_eq!(counts[usize::from(state_index(MobState::Asleep))], 2);
     }
 
     #[test]
