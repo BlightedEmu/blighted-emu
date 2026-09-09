@@ -29,16 +29,23 @@ use crate::mobs::{MobAttackIntent, spawn_index};
 pub(super) struct Vitals {
     pub(super) health: Health,
     pub(super) dead_since_ms: Option<u64>,
+    /// Spawn protection: `false` until the player's client is in the world. A fresh login starts
+    /// `false`; the first movement the client sends ([`SimWorld::move_to`]) sets it `true`. While
+    /// it is `false`, mobs cannot hit the player ([`SimWorld::mob_hits`]), so an idle character
+    /// waiting at the loading screen is not killed before it spawns. A handed-off player keeps
+    /// `true`.
+    pub(super) spawned: bool,
     last_attack_ms: Option<u64>,
     /// The attack bits of the last input record.
     attack_bits: u8,
 }
 
 impl Vitals {
-    pub(super) const fn new(health: Health) -> Self {
+    pub(super) const fn new(health: Health, spawned: bool) -> Self {
         Self {
             health,
             dead_since_ms: None,
+            spawned,
             last_attack_ms: None,
             attack_bits: 0,
         }
@@ -399,7 +406,12 @@ impl SimWorld {
             .into_iter()
             .filter_map(|intent| {
                 let hit = mob_hit(&self.mobs.get_mut(intent.mob)?.attack, armor_share);
-                if self.player_by_number(intent.target).is_some() {
+                if let Some(entity) = self.player_by_number(intent.target) {
+                    // Spawn protection: a mob cannot hit a player whose client has not spawned
+                    // into the world yet (it would die at the loading screen otherwise).
+                    if !self.world.get::<Vitals>(entity).is_some_and(|v| v.spawned) {
+                        return None;
+                    }
                     return self.apply_hit(intent.target, intent.mob, hit.amount, 0, now_ms);
                 }
                 let (owner, ghost) = self.ghost(intent.target)?;
@@ -428,7 +440,8 @@ mod tests {
     use crate::combat::tests::test_combat;
     use crate::mobs::mob_entity;
     use crate::world::tests::{
-        BORDER_X, CELL_M, NOW, connection, join, slot, table, test_spawn, tick, world_with_spawns,
+        BORDER_X, CELL_M, NOW, SERVER_TIME, admit_at, connection, join, slot, table, test_spawn,
+        tick, world_with_spawns,
     };
     use crate::world::{MESSAGE_CHANNEL, MoveError, Outgoing, WorldSettings};
     use nw_bus::{Ghost, MobGhost, Point};
@@ -692,6 +705,49 @@ mod tests {
             }
             now += TICK_MS;
             assert!(now < NOW + LONG_AFTER_MS, "the mob never hit");
+        }
+    }
+
+    #[test]
+    fn spawn_protection_stops_mobs_until_the_player_moves() {
+        let hit_on_one = |outcome: &AttackOutcome| {
+            matches!(outcome,
+                AttackOutcome::Hit { target, .. } | AttackOutcome::Killed { target } if *target == 1)
+        };
+        let mut world = world_with_spawns(vec![test_spawn(MOB_X)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        // A fresh login (not a handoff): spawn-protected until its client moves.
+        world
+            .admit(&admit_at(1, MOB_X + 2.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let mut now = NOW;
+        while now < NOW + LONG_AFTER_MS {
+            let output = tick(&mut world, now);
+            assert!(
+                !output.mob_hits.iter().any(hit_on_one),
+                "a mob hit the player before it spawned",
+            );
+            now += TICK_MS;
+        }
+        assert_eq!(
+            health_of(&mut world, 1).current(),
+            TEST_PLAYER_HEALTH,
+            "the protected player kept full health",
+        );
+        // The first movement ends the protection, so the same mob can now hit it.
+        let next = Position {
+            x: MOB_X + 2.0,
+            y: 10.0,
+            z: 50.0,
+        };
+        let _ = world.move_to(&connection(1), next, now);
+        loop {
+            let output = tick(&mut world, now);
+            if output.mob_hits.iter().any(hit_on_one) {
+                return;
+            }
+            now += TICK_MS;
+            assert!(now < NOW + 2 * LONG_AFTER_MS, "the mob never hit after the spawn");
         }
     }
 

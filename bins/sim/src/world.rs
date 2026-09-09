@@ -270,6 +270,9 @@ struct Arrival {
     number: u64,
     position: Position,
     health: Health,
+    /// Whether the player is already in the world (spawn protection off). A fresh login is
+    /// `false`; a handed-off player is `true`. See [`attack::Vitals`].
+    spawned: bool,
 }
 
 impl SimWorld {
@@ -340,6 +343,9 @@ impl SimWorld {
             number: admit.entity,
             position: Position::from(admit.position),
             health: Health::full(self.combat.data.player_max_health()),
+            // A fresh login gets spawn protection until its client spawns; a resume was already
+            // in the world.
+            spawned: !admit.login,
         };
         self.check(&arrival)?;
         let login = if admit.login {
@@ -380,6 +386,8 @@ impl SimWorld {
             number: offer.entity,
             position: Position::from(offer.position),
             health: Health::at(offer.health, self.combat.data.player_max_health()),
+            // A handed-off player was already in the world.
+            spawned: true,
         };
         self.check(&arrival)?;
         let state = MotionState {
@@ -423,6 +431,11 @@ impl SimWorld {
             .is_some_and(|player| player.frozen)
         {
             return Err(MoveError::Frozen);
+        }
+        // The client sends movement only once it has spawned into the world, so the first move
+        // ends the player's spawn protection (see [`attack::Vitals`]).
+        if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
+            vitals.spawned = true;
         }
         if self
             .world
@@ -897,7 +910,7 @@ impl SimWorld {
                     no_handoff_before_ms,
                 },
                 Body { motion },
-                Vitals::new(arrival.health),
+                Vitals::new(arrival.health, arrival.spawned),
             ))
             .id();
         self.by_connection.insert(arrival.connection, entity);
@@ -1161,7 +1174,7 @@ mod tests {
         format!("Player{number}")
     }
 
-    fn admit_at(number: u64, x: f32, login: bool) -> Admit {
+    pub(super) fn admit_at(number: u64, x: f32, login: bool) -> Admit {
         Admit {
             connection: connection(number),
             account: Uuid::new_v4(),
@@ -1183,6 +1196,14 @@ mod tests {
         world
             .admit(&admit_at(number, x, true), NOW, SERVER_TIME)
             .expect("admit");
+        // The combat tests treat a joined player as already in the world, so end its spawn
+        // protection (a real client does this by sending its first movement).
+        let entity = world.player_by_number(number).expect("player");
+        world
+            .world
+            .get_mut::<Vitals>(entity)
+            .expect("vitals")
+            .spawned = true;
     }
 
     /// The entity numbers in the bundle of one connection.
