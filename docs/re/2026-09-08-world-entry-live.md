@@ -191,6 +191,39 @@ Morning plan:
    protection or no mob aggro until spawned) so the death does not confuse the
    next test.
 
+## Morning retest 2026-09-08 (spawn protection build 81a5b09)
+
+Spawn protection works: `sim_players 1` and no death during the wait (the idle
+player is no longer killed by mobs). The client still stops at
+WaitingForPlayerSpawn and loops `OnLocalNetworkConnectionWarning`, and Game.log
+still shows NONE of `FUN_14643fa70`'s bundle-handler lines. Metrics during the
+run: `datagrams_out ~2580`, `datagrams_in ~819` (the client is sending us acks/
+pings), `sim_players 1`.
+
+So, firmly isolated: the real client ingests channel-0 reliable messages fully
+(it processed every login message including 1635) but does NOT ingest our
+channel-1 UNRELIABLE state bundles. The gateway sends them (verified in
+`send_envelopes`), so this is the carrier framing/handling of unreliable
+channel-1 frames — which `nw-carrier` has only ever exchanged with our own
+`nw-testclient`, never with the real gridmate client.
+
+A raw UDP capture does not help: the REP traffic is DTLS-encrypted, so tcpdump
+would only show ciphertext (and no capture tool is installed anyway). Plaintext
+frames are only visible server-side (log them in `nw-carrier`/gateway before
+DTLS) or client-side (Frida on the receive path).
+
+### Candidate next steps (pick one)
+1. Bisection: send the bundles RELIABLY on channel 1 for one test (reliable
+   frames share the framing that channel 0 already works with). If the client
+   then ingests them, the bug is specifically our unreliable framing; if not,
+   it is channel 1 itself. (sim world.rs ~line 1000 `reliable: false`.)
+2. Log the plaintext channel-1 frames the gateway sends (flags/channel/seq) in
+   `nw-carrier` and compare to the carrier note's documented frame format
+   (docs/re/2026-09-02-carrier-captures.md), looking for an unreliable-frame
+   flag/sequence mismatch.
+3. Frida-instrument the client's receive path (`FUN_140f89a80` and the frame
+   dispatch) to see why it drops channel-1 unreliable frames.
+
 ## How the live test runs
 
 `scripts/live-stack.sh` forces edge to 8443 for `nw-testclient`. The real
