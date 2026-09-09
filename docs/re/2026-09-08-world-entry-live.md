@@ -224,6 +224,62 @@ DTLS) or client-side (Frida on the receive path).
 3. Frida-instrument the client's receive path (`FUN_140f89a80` and the frame
    dispatch) to see why it drops channel-1 unreliable frames.
 
+## BREAKTHROUGH 2026-09-08: reliable bundles load the map; member decode is the wall
+
+Bisection result (sim sends bundles reliably on channel 1 via `NW_RELIABLE_BUNDLES`):
+the real client DOES ingest reliable channel-1 bundles. Game.log then showed, in
+order: "received bundle for a previous ClientContext: expected=0, incoming=1",
+LevelInfoChanged to clientContext 1, then **`Loading of map "NewWorld_VitaeEterna"
+... allowing map change`** and "skipping ReceiveStateBundle ... clientContext ==
+nullptr" (LoadContextAndLevel fired). So:
+- CONFIRMED: our `nw-carrier` UNRELIABLE channel-1 framing is wrong for the real
+  client (unreliable frames are dropped; reliable ones are accepted). Separate bug
+  to fix in nw-carrier.
+- The client loaded the open-world map and reached a black screen (map loaded,
+  waiting for entities). Two walls past where we were this morning.
+
+Then the real wall, logged every bundle:
+```
+[ERROR] TypeRegistry: Invalid index requested in GetTypeIdForIndex {"index":13690,"size":7052}
+[ERROR] StateReplication: Failure during read of ReplicatedStateBundle. {"stateSequence":...}
+```
+Our type table has 7052 slots; index 13690 (and 9290) is out of range — a DESYNC:
+one bundle member's state body is a different length than the real client's reader
+expects, so the next member's type-id is read from the wrong offset. The whole
+bundle read aborts, so no entity (incl. the player) spawns -> black screen.
+
+ROOT INSIGHT: the replication-and-movement note (2026-09-02) only ever validated
+bundles made ENTIRELY of position members (type 13); the capture walk "stops at the
+first member that is not type 13". So our MOB-card members — GDE metadata (type 10)
+and vitals (type 15), from `bins/sim/src/world/members.rs` `mob_members` — were
+reverse-engineered but NEVER validated end-to-end against the real client, and they
+are what desync its reader. The player's own member is position-only (validated).
+
+Also seen: "MayHandleReplicationUnreliable() returning false ... seq 0
+m_lastUnreliableReplicationSeq 1" — the client tracks a per-context replication
+sequence and rejects a bundle whose seq is not newer; our bundle sequence numbering
+(the group leading / bundles_sent) may also need to match this.
+
+### Debug knobs added (env, off by default, tests green)
+- `NW_RELIABLE_BUNDLES` (sim): send bundles reliably on channel 1 (bisection).
+- `NW_POSITIONS_ONLY` (sim): omit mob-card members; a bundle then holds only the
+  validated position member(s), to test whether the player spawns from those alone.
+Both in bins/sim/src/world.rs. The scratch real-client-stack.sh sets both for the
+next test.
+
+### Next steps
+1. Retest with NW_RELIABLE_BUNDLES + NW_POSITIONS_ONLY: does the player spawn
+   (leave WaitingForPlayerSpawn -> InGame) from position-only bundles? If yes, the
+   player-entry path works and only the mob-member encoding remains.
+2. Fix the mob-card member encodings (GDE metadata, vitals) against a real captured
+   type-8 bundle that contains them (byte-for-byte), so the client's reader stays in
+   sync. The captures are the ground truth; decode a real non-position member and
+   match its body length/layout.
+3. Fix the `nw-carrier` UNRELIABLE channel-1 framing so bundles need not be reliable
+   (reliable is wrong for the per-tick state flood).
+4. Match the bundle replication sequence the client expects
+   (m_lastUnreliableReplicationSeq).
+
 ## How the live test runs
 
 `scripts/live-stack.sh` forces edge to 8443 for `nw-testclient`. The real

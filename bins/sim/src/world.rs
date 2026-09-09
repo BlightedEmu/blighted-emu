@@ -48,6 +48,28 @@ use crate::mobs::{MobAttackIntent, MobChanges, Mobs};
 pub const MESSAGE_CHANNEL: u8 = 0;
 /// Carrier channel of the replication bundles.
 pub const REPLICATION_CHANNEL: u8 = 1;
+
+/// Debug bisection knob (env `NW_RELIABLE_BUNDLES`): send the replication bundles reliably on
+/// channel 1 instead of unreliably. Off by default; used to test a client that ignores our
+/// unreliable channel-1 frames. The name is outside the `NW_SIM_` prefix on purpose, because the
+/// sim config parser rejects unknown `NW_SIM_*` env vars. Read once.
+fn reliable_bundles() -> bool {
+    use std::sync::OnceLock;
+    static RELIABLE: OnceLock<bool> = OnceLock::new();
+    *RELIABLE.get_or_init(|| std::env::var_os("NW_RELIABLE_BUNDLES").is_some())
+}
+
+/// Debug bisection knob (env `NW_POSITIONS_ONLY`): put only position members in the bundles and
+/// omit mob cards. The position member is the one bundle member validated against the retail
+/// captures; the mob-card members (GDE metadata, vitals) were only reverse-engineered, and the
+/// real client fails to decode a bundle that contains them. With this on, a bundle holds only
+/// the player's own validated position member, to test whether that alone spawns the player.
+/// Off by default. Read once.
+fn positions_only() -> bool {
+    use std::sync::OnceLock;
+    static POSITIONS_ONLY: OnceLock<bool> = OnceLock::new();
+    *POSITIONS_ONLY.get_or_init(|| std::env::var_os("NW_POSITIONS_ONLY").is_some())
+}
 /// Time between two `TimeSynchMsg` of one player (about 3 s in the captures).
 pub const TIME_SYNCH_INTERVAL_MS: u64 = 3000;
 /// Most members in one bundle. An unreliable carrier message must fit one datagram (it is never
@@ -981,6 +1003,11 @@ impl Neighbourhood<'_> {
                 position_member(own, own_position).into_iter().collect();
             for number in numbers {
                 if let Some(card) = self.cards.get(&number) {
+                    if positions_only() {
+                        // Skip the unvalidated mob-card members; the real client cannot decode a
+                        // bundle that holds them (see [`positions_only`]).
+                        continue;
+                    }
                     // Staggered by the entity number, so the cards of a crowd do not all come
                     // in one bundle.
                     let refresh =
@@ -997,7 +1024,7 @@ impl Neighbourhood<'_> {
                 outgoing.push(Outgoing {
                     connection: player.connection.clone(),
                     channel: REPLICATION_CHANNEL,
-                    reliable: false,
+                    reliable: reliable_bundles(),
                     envelopes: vec![bundle],
                 });
             }
