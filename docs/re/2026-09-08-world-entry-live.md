@@ -156,8 +156,30 @@ from how `nw-testclient` (one connection) receives it. The emulator sends
 bundles on carrier channel 1 of the one REP connection; confirm whether the
 real client reads bundles there or on a distinct actor-game channel/connection.
 
+### Server send path verified (so the blocker is client-side or was masked)
+
+`rep-gateway` peer `send_envelopes` (peer.rs): once `Phase::Registered`, it
+sends every channel via `send_now` -> `carrier.send(channel, reliable, ...)`,
+including channel-1 unreliable bundles. During ticket checking it holds
+reliable messages and drops unreliable ones, but the player had registered, so
+channel-1 bundles were being sent. So the gateway delivery path is correct
+(the same path `nw-testclient` uses to see positions).
+
+Two things therefore remain for the morning: (a) in the 04:19 run the player
+died almost immediately (no spawn protection yet, commit 81a5b09 adds it), so
+few/no bundles may have gone out before it left replication; with protection
+the player survives and bundles flow every tick, so the first matching-context
+bundle should reach the client -> retest first. (b) if the client still gets no
+bundle, it is the real client's channel-1 ingestion on its actor game
+connection (client-side), which the UDP capture will show.
+
 Morning plan:
-1. Capture the UDP the gateway sends to the real client (or add a per-connection
+1. Retest with spawn protection (81a5b09): the player no longer dies, so
+   channel-1 bundles flow the whole time; check Game.log for "skipping
+   ReceiveStateBundle" / "map NewWorld_VitaeEterna" / InGame.
+2. If still stuck, capture the UDP the gateway sends to the real client
+   (`sudo tcpdump -i lo -w /tmp/nw.pcap udp port 33435` during the test) and
+   compare channel-1 frames to a retail capture. (or add a per-connection
    channel-1 send counter) to see whether channel-1 bundles are actually sent to
    this connection and in what form.
 2. If sent but ignored, RE how the client sets up the actor game connection and
