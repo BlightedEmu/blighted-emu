@@ -1,24 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The bundle members of players and mobs (M6-B spec section 5). A player is its position. A
-//! mob is its position too, and when it comes into a player's view, its spawn card (type 10) and
-//! its vitals block (type 15, slot 0: current and max health, ids, level) come first; they come
-//! again once per [`CARD_REFRESH_BUNDLES`] bundles while it stays in view. The spawn card's ids are our own values:
-//! what the client needs there is Unknown.
+//! The bundle members of players and mobs (M6-B spec section 5). A player is its own position
+//! member (type 13). A mob replicates the way the retail bundles do: its spawn card (type 10)
+//! when it comes into a player's view (and again once per [`CARD_REFRESH_BUNDLES`] bundles while
+//! it stays in view), then its position every bundle through an `ALCReplicatedState` (type 11,
+//! the member that dominates the real bundles) carrying the `pos10` child. The real client cannot
+//! decode a `VitalsComponentReplicatedState` (type 15) member — that class is not in the captured
+//! bundle members and its wire layout was never pinned — so the mob no longer sends one. The
+//! spawn card's ids are our own values: what the client needs there is Unknown.
 //!
 //! Bundles split by bytes: an unreliable carrier message must fit one datagram (it is never
 //! chunked), so a bundle's members take at most the bytes of [`MAX_BUNDLE_MEMBERS`] position
 //! members, as before M6-B.
 
-use nw_bus::MobGhost;
 use nw_messages::{
-    AssetId, BundleMember, GDE_ID_LEN, GdeMetadataReplicatedState, MemberState, MessageError,
-    PositionInTheWorldReplicatedState, ReplicatedStateBundle, ServerMessage, VitalsSlot0,
-    VitalsState, WorldPosition,
+    AlcState, AssetId, BundleMember, GDE_ID_LEN, GdeMetadataReplicatedState, InputPosition,
+    MemberState, MessageError, PositionInTheWorldReplicatedState, ReplicatedStateBundle,
+    ServerMessage, WorldPosition,
 };
 use nw_sim_core::Position;
 
 use super::MAX_BUNDLE_MEMBERS;
-use super::attack::amount_of;
 
 /// Most bytes of a position member: a 5-byte entity number, a 1-byte class, a 12-byte body.
 const MAX_POSITION_MEMBER_BYTES: usize = 18;
@@ -31,36 +32,20 @@ pub(super) const CARD_REFRESH_BUNDLES: u64 = 30;
 /// The entity number fills the last 8 bytes of the 16-byte `GdeRef`.
 const ENTITY_IN_REF: usize = GDE_ID_LEN - std::mem::size_of::<u64>();
 
-/// What a client needs to show one mob.
+/// What a client needs to show one mob: its entity number and where it is. Health and ids used
+/// to go out in a type-15 vitals member, which the real client cannot decode, so they are no
+/// longer part of the card.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct MobCard {
     /// The entity number.
     pub(super) entity: u64,
     /// Where it is.
     pub(super) position: Position,
-    /// crc32 of the lower-case vitals id.
-    pub(super) vitals_id: u32,
-    /// crc32 of the lower-case category id.
-    pub(super) category_id: u32,
-    /// The spawn level.
-    pub(super) level: u32,
-    /// The current health.
-    pub(super) health: u32,
-    /// The max health.
-    pub(super) max_health: u32,
 }
 
-/// The card of a mob from its state.
-pub(super) const fn card_of(entity: u64, position: Position, state: MobGhost) -> MobCard {
-    MobCard {
-        entity,
-        position,
-        vitals_id: state.vitals_id,
-        category_id: state.category_id,
-        level: state.level,
-        health: state.health,
-        max_health: state.max_health,
-    }
+/// The card of a mob.
+pub(super) const fn card_of(entity: u64, position: Position) -> MobCard {
+    MobCard { entity, position }
 }
 
 /// The position member of `entity`; `None` for a position that is not finite.
@@ -93,23 +78,14 @@ pub(super) fn mob_members(card: &MobCard, first: bool, asset_sub_id: u32) -> Vec
                 gde_ref: Some(gde_ref),
             }),
         });
+    }
+    if let Some(pos) = InputPosition::from_metres(card.position.x, card.position.y, card.position.z)
+    {
         members.push(BundleMember {
             u64_at_0: card.entity,
-            state: MemberState::Vitals(VitalsState {
-                slot_0: Some(VitalsSlot0 {
-                    health_amount: Some(amount_of(card.health)),
-                    health_max: Some(amount_of(card.max_health)),
-                    vitals_id: Some(card.vitals_id),
-                    vitals_category_id: Some(card.category_id),
-                    vitals_level: Some(card.level),
-                    max_health: Some(u16::try_from(card.max_health).unwrap_or(u16::MAX)),
-                    ..VitalsSlot0::default()
-                }),
-                slot_1: None,
-            }),
+            state: MemberState::Alc(AlcState::at_position(pos)),
         });
     }
-    members.extend(position_member(card.entity, card.position));
     members
 }
 
@@ -155,7 +131,7 @@ mod tests {
     const PAYLOAD_HEADER_BYTES: usize = 2;
     const SUB_ID: u32 = 2;
 
-    fn card(max_health: u32) -> MobCard {
+    fn card() -> MobCard {
         MobCard {
             entity: ENTITY,
             position: Position {
@@ -163,27 +139,12 @@ mod tests {
                 y: 20.0,
                 z: 30.0,
             },
-            vitals_id: 11,
-            category_id: 12,
-            level: 13,
-            health: max_health,
-            max_health,
         }
     }
 
     #[test]
-    fn max_health_is_capped_at_u16() {
-        let members = mob_members(&card(100_000), true, SUB_ID);
-        let vitals = members.iter().find_map(|member| match &member.state {
-            MemberState::Vitals(vitals) => vitals.slot_0,
-            _ => None,
-        });
-        assert_eq!(vitals.and_then(|vitals| vitals.max_health), Some(u16::MAX));
-    }
-
-    #[test]
-    fn the_spawn_card_carries_the_sub_id_and_the_entity_number() {
-        let members = mob_members(&card(500), true, SUB_ID);
+    fn a_mob_sends_its_spawn_card_then_an_alc_position() {
+        let members = mob_members(&card(), true, SUB_ID);
         let MemberState::GdeMetadata(spawn) = &members[0].state else {
             panic!("the card comes first: {members:?}");
         };
@@ -195,47 +156,35 @@ mod tests {
             u64::from_be_bytes(gde_ref[8..].try_into().expect("8")),
             ENTITY
         );
-        assert!(members.iter().all(|member| member.u64_at_0 == ENTITY));
-        let MemberState::Vitals(VitalsState {
-            slot_0: Some(vitals),
-            ..
-        }) = &members[1].state
-        else {
-            panic!("then the vitals: {members:?}");
+        let MemberState::Alc(alc) = &members[1].state else {
+            panic!("then the ALC position: {members:?}");
         };
+        assert_eq!(alc.pos10, InputPosition::from_metres(10.0, 20.0, 30.0));
+        assert!(members.iter().all(|member| member.u64_at_0 == ENTITY));
         assert_eq!(
-            (
-                vitals.vitals_id,
-                vitals.vitals_category_id,
-                vitals.vitals_level
-            ),
-            (Some(11), Some(12), Some(13))
-        );
-        assert!(matches!(members[2].state, MemberState::Position(_)));
-        assert_eq!(
-            mob_members(&card(500), false, SUB_ID).len(),
+            mob_members(&card(), false, SUB_ID).len(),
             1,
-            "later only the position"
+            "later only the ALC position, not the spawn card"
         );
     }
 
     #[test]
-    fn the_vitals_block_carries_current_and_max_health() {
-        let wounded = MobCard {
-            health: 400,
-            ..card(500)
-        };
-        let members = mob_members(&wounded, true, SUB_ID);
-        let MemberState::Vitals(VitalsState {
-            slot_0: Some(vitals),
-            ..
-        }) = &members[1].state
+    fn the_alc_position_member_round_trips_in_a_bundle() {
+        let members = mob_members(&card(), true, SUB_ID);
+        let envelope = bundle(0, members).expect("bundle");
+        let envelope = Envelope::decode(&envelope).expect("envelope");
+        let Some(Ok(ServerMessage::Bundle(decoded))) = ServerMessage::from_envelope(&envelope)
         else {
-            panic!("the vitals: {members:?}");
+            panic!("a bundle");
         };
+        let payload = BundlePayload::decode(&decoded.payload).expect("payload");
+        let alc = payload.groups[0].members.iter().find_map(|member| match &member.state {
+            MemberState::Alc(alc) => Some(alc.clone()),
+            _ => None,
+        });
         assert_eq!(
-            (vitals.health_amount, vitals.health_max, vitals.max_health),
-            (Some(400.0), Some(500.0), Some(500))
+            alc.and_then(|alc| alc.pos10),
+            InputPosition::from_metres(10.0, 20.0, 30.0)
         );
     }
 
@@ -246,7 +195,7 @@ mod tests {
                 mob_members(
                     &MobCard {
                         entity: ENTITY + index,
-                        ..card(500)
+                        ..card()
                     },
                     true,
                     SUB_ID,

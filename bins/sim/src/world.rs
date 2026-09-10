@@ -832,10 +832,9 @@ impl SimWorld {
             }
         }
         // A dead mob is not sent (M6-B spec section 5.6).
-        for (entity, position, state) in self.mob_states().filter(|(_, _, state)| state.health > 0)
-        {
+        for (entity, position, _) in self.mob_states().filter(|(_, _, state)| state.health > 0) {
             everyone.push((entity, position));
-            cards.insert(entity, card_of(entity, position, state));
+            cards.insert(entity, card_of(entity, position));
         }
         // The radius is checked at start to be a finite number above 0.
         let Some(mut grid) = SpatialGrid::new(self.settings.interest_radius_m) else {
@@ -1057,8 +1056,8 @@ mod tests {
     use nw_bus::CellTable;
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
     use nw_messages::{
-        BundlePayload, GDE_METADATA_TYPE_INDEX, LOGIN_MESSAGE_TYPES, MemberState,
-        POSITION_IN_THE_WORLD_TYPE_INDEX, ReplicatedStateBundle, VITALS_TYPE_INDEX,
+        ALC_TYPE_INDEX, BundlePayload, GDE_METADATA_TYPE_INDEX, LOGIN_MESSAGE_TYPES, MemberState,
+        ReplicatedStateBundle,
     };
     use nw_reflect::{Envelope, encode_server_messages};
     use nw_sim_core::test_support::NoGround;
@@ -1334,14 +1333,10 @@ mod tests {
             .collect()
     }
 
-    const CARD_CLASSES: [u64; 3] = [
-        GDE_METADATA_TYPE_INDEX,
-        VITALS_TYPE_INDEX,
-        POSITION_IN_THE_WORLD_TYPE_INDEX,
-    ];
+    const CARD_CLASSES: [u64; 2] = [GDE_METADATA_TYPE_INDEX, ALC_TYPE_INDEX];
 
     #[test]
-    fn a_mob_entering_view_sends_its_card_and_vitals_once() {
+    fn a_mob_entering_view_sends_its_card_and_alc_once() {
         let x = CELL_M / 2.0;
         let mut world = world_with_spawns(vec![test_spawn(x)]);
         world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
@@ -1353,7 +1348,7 @@ mod tests {
         );
         assert_eq!(
             classes_of(&tick(&mut world, NOW + 33).messages, &connection(1), mob),
-            [POSITION_IN_THE_WORLD_TYPE_INDEX]
+            [ALC_TYPE_INDEX]
         );
     }
 

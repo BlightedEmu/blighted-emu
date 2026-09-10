@@ -149,6 +149,21 @@ impl AlcState {
     pub fn write(&self, writer: &mut Writer) {
         writer.bytes(&self.bytes);
     }
+
+    /// A minimal body that replicates only `pos` through the slot-0 `pos10` child (child 27):
+    /// the slot-0 mask bit, a presence integer with only child 27 set, then the 10-byte position.
+    /// This is how entities carry their position in the retail bundles (the dominant member is
+    /// type 11); [`read`](Self::read) of the result returns the same bytes and `pos10`.
+    pub fn at_position(pos: InputPosition) -> Self {
+        let mut writer = Writer::new();
+        writer.u8(SLOT_BITS[0]);
+        writer.wide_prefixed(1 << POS10_CHILD);
+        writer.f32(pos.x).f32(pos.y).u16(pos.z_raw);
+        Self {
+            bytes: writer.finish(),
+            pos10: Some(pos),
+        }
+    }
 }
 
 fn skip_child(kind: AlcChild, reader: &mut Reader<'_>) -> Result<(), MessageError> {
