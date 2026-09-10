@@ -49,6 +49,13 @@ pub const MESSAGE_CHANNEL: u8 = 0;
 /// Carrier channel of the replication bundles.
 pub const REPLICATION_CHANNEL: u8 = 1;
 
+/// First replication-bundle sequence of a fresh login. The real client drops a bundle whose
+/// sequence is not greater than its `m_lastUnreliableReplicationSeq`, which is already 1 right
+/// after `LevelInfoChanged`, so a login that started its sequence at 0 had its first bundles
+/// rejected and never spawned. A fresh login starts above that mark; a handed-off player keeps
+/// its own running sequence (see [`SimWorld::take`]).
+const FIRST_LOGIN_BUNDLE_SEQUENCE: u64 = 2;
+
 /// Debug bisection knob (env `NW_RELIABLE_BUNDLES`): send the replication bundles reliably on
 /// channel 1 instead of unreliably. Off by default; used to test a client that ignores our
 /// unreliable channel-1 frames. The name is outside the `NW_SIM_` prefix on purpose, because the
@@ -383,10 +390,17 @@ impl SimWorld {
             None
         };
         let motion = Motion::new(arrival.position, now_ms, &self.settings.limits);
+        // A fresh login must start its bundle sequence above the client's mark; a resume keeps the
+        // sequence it already carried.
+        let first_sequence = if admit.login {
+            admit.bundles_sent.max(FIRST_LOGIN_BUNDLE_SEQUENCE)
+        } else {
+            admit.bundles_sent
+        };
         self.spawn(
             arrival,
             motion,
-            admit.bundles_sent,
+            first_sequence,
             now_ms,
             admit.handoffs,
             now_ms,
