@@ -747,7 +747,10 @@ mod tests {
                 return;
             }
             now += TICK_MS;
-            assert!(now < NOW + 2 * LONG_AFTER_MS, "the mob never hit after the spawn");
+            assert!(
+                now < NOW + 2 * LONG_AFTER_MS,
+                "the mob never hit after the spawn"
+            );
         }
     }
 

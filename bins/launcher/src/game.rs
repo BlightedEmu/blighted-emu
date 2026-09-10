@@ -205,8 +205,7 @@ fn override_config_pair(path: Option<&str>) -> Option<(String, String)> {
 /// Appends `-OverrideConfigPath <path>` when [`OVERRIDE_CONFIG_ENV`] holds a non-empty value, so
 /// the client reads that absolute override-config file. Returns `arguments` unchanged otherwise.
 pub fn append_override_config(mut arguments: Vec<String>) -> Vec<String> {
-    if let Some((name, value)) =
-        override_config_pair(env::var(OVERRIDE_CONFIG_ENV).ok().as_deref())
+    if let Some((name, value)) = override_config_pair(env::var(OVERRIDE_CONFIG_ENV).ok().as_deref())
     {
         arguments.push(name);
         arguments.push(value);
@@ -426,13 +425,17 @@ mod tests {
                 })
             })
             .collect();
-        assert_eq!(envs.get("SteamAppId").map(String::as_str), Some(STEAM_APP_ID));
+        assert_eq!(
+            envs.get("SteamAppId").map(String::as_str),
+            Some(STEAM_APP_ID)
+        );
         assert_eq!(
             envs.get("STEAM_COMPAT_DATA_PATH").map(String::as_str),
             Some("/steam/steamapps/compatdata/1063730")
         );
         assert_eq!(
-            envs.get("STEAM_COMPAT_CLIENT_INSTALL_PATH").map(String::as_str),
+            envs.get("STEAM_COMPAT_CLIENT_INSTALL_PATH")
+                .map(String::as_str),
             Some("/home/p/.local/share/Steam")
         );
     }
