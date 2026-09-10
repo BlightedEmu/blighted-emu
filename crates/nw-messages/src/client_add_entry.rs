@@ -6,13 +6,12 @@
 //! bytes, then the number as a big-endian `u64`), so a test client knows which bundle member it
 //! is: [`ClientAddEntryMsg::for_entity`] and [`ClientAddEntryMsg::entity_number`].
 
-use crate::wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};
+use crate::wire::{
+    BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer, entity_of_raw_id, raw_id_of_entity,
+};
 
 /// File slot of `ClientAddEntryMsg`.
 pub const CLIENT_ADD_ENTRY_MSG_TYPE_INDEX: u64 = 164;
-
-/// Bytes of the entity number at the end of an entry id.
-const ENTITY_NUMBER_LEN: usize = 8;
 
 /// Adds a routing entry for one id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,20 +23,15 @@ pub struct ClientAddEntryMsg {
 impl ClientAddEntryMsg {
     /// The entry of entity `number` (see the module note).
     pub fn for_entity(number: u64) -> Self {
-        let mut entry_id = [0; RAW_ID_LEN];
-        entry_id[RAW_ID_LEN - ENTITY_NUMBER_LEN..].copy_from_slice(&number.to_be_bytes());
-        Self { entry_id }
+        Self {
+            entry_id: raw_id_of_entity(number),
+        }
     }
 
     /// The entity number of an entry that [`ClientAddEntryMsg::for_entity`] made; `None` for
     /// another id.
     pub fn entity_number(&self) -> Option<u64> {
-        let (zeros, number) = self.entry_id.split_at(RAW_ID_LEN - ENTITY_NUMBER_LEN);
-        let number: [u8; ENTITY_NUMBER_LEN] = number.try_into().ok()?;
-        zeros
-            .iter()
-            .all(|byte| *byte == 0)
-            .then_some(u64::from_be_bytes(number))
+        entity_of_raw_id(&self.entry_id)
     }
 }
 

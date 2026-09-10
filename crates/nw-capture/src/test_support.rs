@@ -84,9 +84,9 @@ pub fn bundle_of(payload: Vec<u8>) -> Vec<u8> {
 pub fn position_bundle_at(x: f32, y: f32, z: f32) -> Vec<u8> {
     let payload = BundlePayload {
         groups: vec![BundleGroup {
-            leading: 1,
+            interest: 1,
             members: vec![BundleMember {
-                u64_at_0: TEST_ENTITY,
+                component: TEST_ENTITY,
                 state: MemberState::Position(PositionInTheWorldReplicatedState {
                     position: WorldPosition::from_metres(x, y, z),
                     ..PositionInTheWorldReplicatedState::default()
@@ -109,7 +109,7 @@ pub fn bundle_with_a_failing_member() -> Vec<u8> {
     payload.prefixed(1).expect("group").u8(2);
     payload.bytes(
         &BundleMember {
-            u64_at_0: TEST_ENTITY,
+            component: TEST_ENTITY,
             state: MemberState::Position(PositionInTheWorldReplicatedState::default()),
         }
         .encode()

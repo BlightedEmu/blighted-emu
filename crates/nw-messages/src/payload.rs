@@ -16,6 +16,7 @@ use crate::components::{
     STAMINA_TYPE_INDEX, StaminaState,
 };
 use crate::gde::{GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
+use crate::player_components::EmptyState;
 use crate::position::{POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState};
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsState};
 use crate::wire::{MessageError, Reader, Writer};
@@ -37,6 +38,8 @@ pub enum MemberState {
     CombatStatus(CombatStatusState),
     /// `MB::DelayedEventComponentReplicatedState`.
     DelayedEvent(DelayedEventState),
+    /// An empty state of a player component class without a reader of its own.
+    Empty(EmptyState),
 }
 
 impl MemberState {
@@ -50,6 +53,7 @@ impl MemberState {
             Self::Stamina(_) => STAMINA_TYPE_INDEX,
             Self::CombatStatus(_) => COMBAT_STATUS_TYPE_INDEX,
             Self::DelayedEvent(_) => DELAYED_EVENT_TYPE_INDEX,
+            Self::Empty(state) => state.class,
         }
     }
 
@@ -74,6 +78,9 @@ impl MemberState {
             }
             TypeId::FileSlot(DELAYED_EVENT_TYPE_INDEX) => {
                 DelayedEventState::read(reader).map(Self::DelayedEvent)
+            }
+            TypeId::FileSlot(index) if EmptyState::covers(index) => {
+                EmptyState::read(index, reader).map(Self::Empty)
             }
             _ => Err(MessageError::UnknownMemberClass { class }),
         }
@@ -103,6 +110,10 @@ impl MemberState {
                 state.write(writer);
                 Ok(())
             }
+            Self::Empty(_) => {
+                EmptyState::write(writer);
+                Ok(())
+            }
         }
     }
 }
@@ -110,8 +121,10 @@ impl MemberState {
 /// One member: one replicated state of one entity.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BundleMember {
-    /// The first prefix-coded integer. The code does not name it.
-    pub u64_at_0: u64,
+    /// The first prefix-coded integer: which replicated component of the entity this state is.
+    /// In the captures the spawn card is always 0, the own player's `ALCReplicatedState` is 16,
+    /// and a mob's is 4 or 5.
+    pub component: u64,
     /// The state.
     pub state: MemberState,
 }
@@ -125,7 +138,7 @@ impl BundleMember {
     pub fn encode(&self) -> Result<Vec<u8>, MessageError> {
         let mut writer = Writer::new();
         writer
-            .prefixed(self.u64_at_0)?
+            .prefixed(self.component)?
             .bytes(&encode_type_id(&self.state.class())?);
         self.state.write(&mut writer)?;
         Ok(writer.finish())
@@ -135,8 +148,9 @@ impl BundleMember {
 /// One group of members.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BundleGroup {
-    /// The group's prefix-coded integer. The client keeps its low 16 bits.
-    pub leading: u64,
+    /// The group's prefix-coded integer: the entity slot (`interestId`) of the members. The client
+    /// keeps its low 16 bits.
+    pub interest: u64,
     /// The members; at most `u8::MAX`.
     pub members: Vec<BundleMember>,
 }
@@ -174,7 +188,7 @@ impl BundlePayload {
                     count: u64::try_from(group.members.len()).unwrap_or(u64::MAX),
                     limit: u64::from(u8::MAX),
                 })?;
-            writer.prefixed(group.leading)?.u8(count);
+            writer.prefixed(group.interest)?.u8(count);
             for member in &group.members {
                 writer.bytes(&member.encode()?);
             }
@@ -192,13 +206,13 @@ impl BundlePayload {
         let mut reader = Reader::new(payload);
         let mut groups = Vec::new();
         while !reader.is_empty() {
-            let leading = reader.prefixed()?;
+            let interest = reader.prefixed()?;
             let count = reader.u8()?;
             let mut members = Vec::new();
             for _ in 0..count {
                 members.push(read_member(&mut reader)?);
             }
-            groups.push(BundleGroup { leading, members });
+            groups.push(BundleGroup { interest, members });
         }
         Ok(Self { groups })
     }
@@ -240,7 +254,7 @@ impl BundlePayload {
 
 /// One member: the integer, the class type id, and the state of that class.
 fn read_member(reader: &mut Reader<'_>) -> Result<BundleMember, MessageError> {
-    let u64_at_0 = reader.prefixed()?;
+    let component = reader.prefixed()?;
     let class = read_class(reader)?;
     // A slot whose children are not sized cannot be passed: the walk stops there, as at a class
     // without a reader. Any other failure names the member's class.
@@ -252,7 +266,7 @@ fn read_member(reader: &mut Reader<'_>) -> Result<BundleMember, MessageError> {
             source: Box::new(other),
         },
     })?;
-    Ok(BundleMember { u64_at_0, state })
+    Ok(BundleMember { component, state })
 }
 
 fn read_class(reader: &mut Reader<'_>) -> Result<TypeId, MessageError> {
@@ -280,7 +294,7 @@ mod tests {
 
     fn position_member(x: f32) -> BundleMember {
         BundleMember {
-            u64_at_0: ENTITY,
+            component: ENTITY,
             state: MemberState::Position(PositionInTheWorldReplicatedState {
                 position: Some(WorldPosition::from_metres(x, 2.0, 3.0).expect("finite")),
                 ..PositionInTheWorldReplicatedState::default()
@@ -292,11 +306,11 @@ mod tests {
         BundlePayload {
             groups: vec![
                 BundleGroup {
-                    leading: LEADING,
+                    interest: LEADING,
                     members: vec![position_member(1.0), position_member(4.0)],
                 },
                 BundleGroup {
-                    leading: LEADING + 1,
+                    interest: LEADING + 1,
                     members: vec![position_member(5.0)],
                 },
             ],
@@ -306,7 +320,7 @@ mod tests {
     #[test]
     fn members_of_the_new_classes_walk_in_a_payload() {
         let card = BundleMember {
-            u64_at_0: ENTITY,
+            component: ENTITY,
             state: MemberState::GdeMetadata(GdeMetadataReplicatedState {
                 asset: Some(AssetId {
                     id: [1; GDE_ID_LEN],
@@ -316,7 +330,7 @@ mod tests {
             }),
         };
         let vitals = BundleMember {
-            u64_at_0: ENTITY,
+            component: ENTITY,
             state: MemberState::Vitals(VitalsState {
                 slot_0: Some(VitalsSlot0 {
                     vitals_level: Some(5),
@@ -328,7 +342,7 @@ mod tests {
         };
         let mixed = BundlePayload {
             groups: vec![BundleGroup {
-                leading: LEADING,
+                interest: LEADING,
                 members: vec![position_member(1.0), card, vitals],
             }],
         };
@@ -473,7 +487,7 @@ mod tests {
     #[test]
     fn too_many_members_or_a_short_payload_are_errors() {
         let group = BundleGroup {
-            leading: LEADING,
+            interest: LEADING,
             members: vec![position_member(1.0); usize::from(u8::MAX) + 1],
         };
         assert!(matches!(

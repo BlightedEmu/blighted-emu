@@ -234,6 +234,11 @@ pub struct HandoffOffer {
     pub budget_m: f32,
     /// Bundles sent to the player so far; the sequence goes on.
     pub bundles_sent: u64,
+    /// The client's entity slots: each entity in view and its slot (`interestId`). The taker
+    /// keeps them, so the client's slots stay tied to the same entities.
+    pub slots: Vec<(u64, u16)>,
+    /// Slots that left the view and are not stopped on the client yet.
+    pub pending_stops: Vec<u16>,
     /// Milliseconds since the last `TimeSynchMsg`.
     pub time_synch_age_ms: u64,
     /// Handoffs of this player so far, this one included; the gateway's route sequence.
@@ -561,6 +566,8 @@ mod tests {
             move_age_ms: 40,
             budget_m: 3.5,
             bundles_sent: 900,
+            slots: vec![(CONNECTION + 1, 3)],
+            pending_stops: vec![4],
             time_synch_age_ms: 1200,
             handoffs: 2,
             health: 500,

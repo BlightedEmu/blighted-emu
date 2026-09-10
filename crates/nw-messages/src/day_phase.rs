@@ -13,7 +13,7 @@ pub const OBSERVED_DAY_PHASE: u32 = 2;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncDayPhaseMsg {
     /// Offset 0; varies per session.
-    pub u64_at_0: u64,
+    pub component: u64,
     /// Offset 8; varies per session.
     pub u64_at_8: u64,
     /// Offset 16.
@@ -25,7 +25,7 @@ impl BodyCodec for SyncDayPhaseMsg {
 
     fn encode(&self) -> Result<Vec<u8>, MessageError> {
         Ok(Writer::new()
-            .u64(self.u64_at_0)
+            .u64(self.component)
             .u64(self.u64_at_8)
             .u32(self.u32_at_16)
             .finish())
@@ -34,7 +34,7 @@ impl BodyCodec for SyncDayPhaseMsg {
     fn decode(body: &[u8]) -> Result<Self, MessageError> {
         let mut reader = Reader::new(body);
         let message = Self {
-            u64_at_0: reader.u64()?,
+            component: reader.u64()?,
             u64_at_8: reader.u64()?,
             u32_at_16: reader.u32()?,
         };
@@ -52,7 +52,7 @@ mod tests {
     #[test]
     fn the_body_is_two_u64_and_one_u32() {
         let message = SyncDayPhaseMsg {
-            u64_at_0: 1,
+            component: 1,
             u64_at_8: 2,
             u32_at_16: OBSERVED_DAY_PHASE,
         };

@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn a_whole_payload_must_encode_to_the_same_bytes() {
         let member = BundleMember {
-            u64_at_0: 2,
+            component: 2,
             state: MemberState::Position(PositionInTheWorldReplicatedState::default()),
         };
         // The group integer 1 in the two-byte form; the encoder writes the one-byte form.
@@ -548,7 +548,7 @@ mod tests {
             .u8(2)
             .bytes(
                 &BundleMember {
-                    u64_at_0: 2,
+                    component: 2,
                     state: MemberState::Position(PositionInTheWorldReplicatedState::default()),
                 }
                 .encode()

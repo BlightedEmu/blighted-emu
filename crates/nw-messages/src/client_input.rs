@@ -245,7 +245,7 @@ pub struct InputRecord {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ClientInputMsg {
     /// The first big-endian `u64`.
-    pub u64_at_0: u64,
+    pub component: u64,
     /// The second big-endian `u64`.
     pub u64_at_8: u64,
     /// The fixed head.
@@ -393,7 +393,7 @@ impl BodyCodec for ClientInputMsg {
 
     fn encode(&self) -> Result<Vec<u8>, MessageError> {
         let mut writer = Writer::new();
-        writer.u64(self.u64_at_0).u64(self.u64_at_8);
+        writer.u64(self.component).u64(self.u64_at_8);
         self.head.write(&mut writer)?;
         let count = u8::try_from(self.records.len()).map_err(|_| MessageError::CountTooLarge {
             count: u64::try_from(self.records.len()).unwrap_or(u64::MAX),
@@ -409,7 +409,7 @@ impl BodyCodec for ClientInputMsg {
 
     fn decode(body: &[u8]) -> Result<Self, MessageError> {
         let mut reader = Reader::new(body);
-        let u64_at_0 = reader.u64()?;
+        let component = reader.u64()?;
         let u64_at_8 = reader.u64()?;
         let head = InputHead::read(&mut reader)?;
         let count = reader.u8()?;
@@ -419,7 +419,7 @@ impl BodyCodec for ClientInputMsg {
             .collect::<Result<Vec<_>, _>>()?;
         reader.finish()?;
         Ok(Self {
-            u64_at_0,
+            component,
             u64_at_8,
             head,
             records,
@@ -939,7 +939,7 @@ mod tests {
 
     fn message(records: Vec<InputRecord>) -> ClientInputMsg {
         ClientInputMsg {
-            u64_at_0: 1,
+            component: 1,
             u64_at_8: 2,
             head: InputHead {
                 bytes_1_to_4: [1, 2, 3, 4],

@@ -2,28 +2,37 @@
 //! `Amazon::Hub::ReplicatedStateBundle` (bodies note, section 8): the outer header only. Reader
 //! `FUN_14646c2b0`, header `FUN_146b07870`. The payload bytes after the header are kept as they
 //! are; [`crate::payload`] reads their members.
+//!
+//! The walk (`FUN_14175ccc0`) first applies the index block as `ReplicationControl` commands, then
+//! hands each payload group to the entity state handler (`FUN_141717fc0`) with the low 16 bits of
+//! the group integer as its `interestId`. One interest id is one entity slot of the client;
+//! interest [`LOCAL_PLAYER_INTEREST`] is the client's own player (world-entry note, "Spawn
+//! condition traced").
 
-use crate::payload::{BundleGroup, BundleMember, BundlePayload, MemberState};
-use crate::position::{PositionInTheWorldReplicatedState, WorldPosition};
+use crate::payload::{BundleGroup, BundlePayload};
 use crate::wire::{BodyCodec, MessageError, Reader, Writer};
 
 /// File slot of `ReplicatedStateBundle`.
 pub const REPLICATED_STATE_BUNDLE_TYPE_INDEX: u64 = 8;
 /// Most `u16` values in the index block (`FUN_146a6ddb0`).
 pub const MAX_BUNDLE_INDEXES: u64 = 100;
-/// The group integer of the captured bundles: one value per connection; its meaning is Unknown.
-pub const OBSERVED_BUNDLE_GROUP: u64 = 1;
+/// The interest id of the client's own player: `FUN_141717fc0` takes its "new local player
+/// metadata" branch only for interest 1, and the own entity of every capture is in group 1.
+pub const LOCAL_PLAYER_INTEREST: u16 = 1;
 /// Header byte 3 of every captured bundle.
 pub const OBSERVED_BUNDLE_BYTE_3: u8 = 1;
 /// The most common header byte 4 in the captures; its meaning is Unknown.
 pub const OBSERVED_BUNDLE_BYTE_4: u8 = 1;
 
-/// The optional block of step 7: a prefix-coded count, then a list of big-endian `u16`.
+/// The optional block of step 7: the `ReplicationControl` commands. A prefix-coded stop count,
+/// then a list of big-endian `u16` interest ids: the first `stop_count` are stopped (the client
+/// drops that entity slot), the rest are paused. In the captures the stop count always equals the
+/// list length.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexBlock {
-    /// The first prefix-coded count. Its meaning is Unknown.
-    pub count: u64,
-    /// The `u16` values; at most [`MAX_BUNDLE_INDEXES`].
+    /// How many of [`IndexBlock::indexes`], from the front, are stops.
+    pub stop_count: u64,
+    /// The interest ids; at most [`MAX_BUNDLE_INDEXES`].
     pub indexes: Vec<u16>,
 }
 
@@ -45,51 +54,27 @@ pub struct ReplicatedStateBundle {
 }
 
 impl ReplicatedStateBundle {
-    /// A bundle with the captured header values (`sequence` as the leading integer, an empty
-    /// index block) and one group: a position member for each `(entity number, position)`.
+    /// A bundle with the captured header values, `sequence` as the leading integer, the interest
+    /// ids in `stops` stopped, and `groups` (one group per entity slot), in order.
     ///
     /// # Errors
     ///
     /// Returns [`MessageError`] when a member cannot be encoded.
-    pub fn of_positions(
+    pub fn of_groups(
         sequence: u64,
-        positions: &[(u64, WorldPosition)],
+        stops: Vec<u16>,
+        groups: Vec<BundleGroup>,
     ) -> Result<Self, MessageError> {
-        let members = positions
-            .iter()
-            .map(|(number, position)| BundleMember {
-                u64_at_0: *number,
-                state: MemberState::Position(PositionInTheWorldReplicatedState {
-                    position: Some(*position),
-                    ..PositionInTheWorldReplicatedState::default()
-                }),
-            })
-            .collect();
-        Self::of_members(sequence, members)
-    }
-
-    /// A bundle with the captured header values and one group of `members`, in order.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MessageError`] when a member cannot be encoded.
-    pub fn of_members(sequence: u64, members: Vec<BundleMember>) -> Result<Self, MessageError> {
-        let payload = BundlePayload {
-            groups: vec![BundleGroup {
-                leading: OBSERVED_BUNDLE_GROUP,
-                members,
-            }],
-        };
         Ok(Self {
             leading: Some(sequence),
             byte_3: OBSERVED_BUNDLE_BYTE_3,
             byte_4: OBSERVED_BUNDLE_BYTE_4,
             flag_5: true,
             index_block: Some(IndexBlock {
-                count: 0,
-                indexes: Vec::new(),
+                stop_count: u64::try_from(stops.len()).unwrap_or(u64::MAX),
+                indexes: stops,
             }),
-            payload: payload.encode()?,
+            payload: BundlePayload { groups }.encode()?,
         })
     }
 }
@@ -116,7 +101,7 @@ impl BodyCodec for ReplicatedStateBundle {
                     limit: MAX_BUNDLE_INDEXES,
                 });
             }
-            writer.prefixed(block.count)?.prefixed(count)?;
+            writer.prefixed(block.stop_count)?.prefixed(count)?;
             for index in &block.indexes {
                 writer.u16(*index);
             }
@@ -137,7 +122,7 @@ impl BodyCodec for ReplicatedStateBundle {
         let byte_4 = reader.u8()?;
         let flag_5 = reader.boolean()?;
         let index_block = if reader.boolean()? {
-            let count = reader.prefixed()?;
+            let stop_count = reader.prefixed()?;
             let len = reader.prefixed()?;
             if len > MAX_BUNDLE_INDEXES {
                 return Err(MessageError::CountTooLarge {
@@ -149,7 +134,10 @@ impl BodyCodec for ReplicatedStateBundle {
             for _ in 0..len {
                 indexes.push(reader.u16()?);
             }
-            Some(IndexBlock { count, indexes })
+            Some(IndexBlock {
+                stop_count,
+                indexes,
+            })
         } else {
             None
         };
@@ -173,6 +161,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::payload::{BundleMember, MemberState};
+    use crate::position::{PositionInTheWorldReplicatedState, WorldPosition};
 
     const PAYLOAD_LEN: usize = 300;
     const LEADING: u64 = 1000;
@@ -180,16 +170,31 @@ mod tests {
     const TOO_MANY_INDEXES: u8 = 101;
 
     const SEQUENCE: u64 = 7;
-    const FIRST: u64 = 1;
-    const SECOND: u64 = 2;
+    const COMPONENT: u64 = 16;
+    const OTHER_INTEREST: u16 = 3;
+    const STOPPED: [u16; 2] = [4, 9];
+
+    fn group(interest: u16, x: f32) -> BundleGroup {
+        BundleGroup {
+            interest: u64::from(interest),
+            members: vec![BundleMember {
+                component: COMPONENT,
+                state: MemberState::Position(PositionInTheWorldReplicatedState {
+                    position: WorldPosition::from_metres(x, 0.0, 0.0),
+                    ..PositionInTheWorldReplicatedState::default()
+                }),
+            }],
+        }
+    }
 
     #[test]
-    fn a_position_bundle_has_the_captured_header_and_one_member_per_entity() {
-        let here = WorldPosition::from_metres(1.0, 2.0, 3.0).expect("finite");
-        let there = WorldPosition::from_metres(4.0, 5.0, 6.0).expect("finite");
-        let bundle =
-            ReplicatedStateBundle::of_positions(SEQUENCE, &[(FIRST, here), (SECOND, there)])
-                .expect("bundle");
+    fn a_bundle_of_groups_has_the_captured_header_the_stops_and_one_group_per_slot() {
+        let groups = vec![
+            group(LOCAL_PLAYER_INTEREST, 1.0),
+            group(OTHER_INTEREST, 2.0),
+        ];
+        let bundle = ReplicatedStateBundle::of_groups(SEQUENCE, STOPPED.to_vec(), groups.clone())
+            .expect("bundle");
         assert_eq!(bundle.leading, Some(SEQUENCE));
         assert_eq!(
             (bundle.byte_3, bundle.byte_4, bundle.flag_5),
@@ -198,22 +203,12 @@ mod tests {
         assert_eq!(
             bundle.index_block,
             Some(IndexBlock {
-                count: 0,
-                indexes: Vec::new()
+                stop_count: STOPPED.len() as u64,
+                indexes: STOPPED.to_vec()
             })
         );
         let payload = BundlePayload::decode(&bundle.payload).expect("payload");
-        assert_eq!(payload.groups.len(), 1);
-        assert_eq!(payload.groups[0].leading, OBSERVED_BUNDLE_GROUP);
-        let members: Vec<(u64, Option<WorldPosition>)> = payload.groups[0]
-            .members
-            .iter()
-            .map(|member| match &member.state {
-                MemberState::Position(state) => (member.u64_at_0, state.position),
-                other => panic!("only positions here, not {other:?}"),
-            })
-            .collect();
-        assert_eq!(members, vec![(FIRST, Some(here)), (SECOND, Some(there))]);
+        assert_eq!(payload.groups, groups);
     }
 
     fn full() -> ReplicatedStateBundle {
@@ -223,7 +218,7 @@ mod tests {
             byte_4: 4,
             flag_5: true,
             index_block: Some(IndexBlock {
-                count: 2,
+                stop_count: 2,
                 indexes: vec![7, 0x0102],
             }),
             payload: vec![5; PAYLOAD_LEN],
@@ -250,7 +245,7 @@ mod tests {
     fn too_many_indexes_and_short_payloads_are_errors() {
         let mut bundle = full();
         bundle.index_block = Some(IndexBlock {
-            count: 0,
+            stop_count: 0,
             indexes: vec![0; MAX_BUNDLE_INDEXES as usize + 1],
         });
         assert!(matches!(

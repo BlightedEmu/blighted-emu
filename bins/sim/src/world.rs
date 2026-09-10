@@ -25,7 +25,7 @@ use nw_bus::{
     Admit, BusId, CellTable, ConnectionRef, Ghost, HandoffOffer, MOB_STATES, MobGhost, Point,
     SimSlot, SnapMob, SnapPlayer,
 };
-use nw_messages::{BundleMember, MessageError, ServerMessage, TimeSynchMsg, WorldPosition};
+use nw_messages::{BundleGroup, MessageError, ServerMessage, TimeSynchMsg, WorldPosition};
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
     Motion, MotionState, MoveLimits, MoveRefusal, Position, Seen, SpatialGrid,
@@ -35,8 +35,12 @@ use uuid::Uuid;
 
 mod attack;
 mod members;
+mod slots;
 
-use members::{CARD_REFRESH_BUNDLES, MobCard, bundles, card_of, mob_members, position_member};
+use members::{
+    CARD_REFRESH_BUNDLES, EntityKind, MobCard, bundles, card_of, entity_group, own_group,
+};
+use slots::Slots;
 
 use attack::Vitals;
 
@@ -66,12 +70,20 @@ fn reliable_bundles() -> bool {
     *RELIABLE.get_or_init(|| std::env::var_os("NW_RELIABLE_BUNDLES").is_some())
 }
 
-/// Debug bisection knob (env `NW_POSITIONS_ONLY`): put only position members in the bundles and
-/// omit mob cards. The position member is the one bundle member validated against the retail
-/// captures; the mob-card members (GDE metadata, vitals) were only reverse-engineered, and the
-/// real client fails to decode a bundle that contains them. With this on, a bundle holds only
-/// the player's own validated position member, to test whether that alone spawns the player.
-/// Off by default. Read once.
+/// Work-in-progress knob (env `NW_LOCAL_PLAYER_CARD`): send the client its own player as a spawn
+/// card (player prefab, slot 1) with the empty states of the other player components. The real
+/// client then portrays its player but crashes while it merges the record (player-component
+/// note), so this is off by default: without the card the client loads the level and waits at
+/// `WaitingForPlayerSpawn`. Read once.
+pub(crate) fn local_player_card() -> bool {
+    use std::sync::OnceLock;
+    static CARD: OnceLock<bool> = OnceLock::new();
+    *CARD.get_or_init(|| std::env::var_os("NW_LOCAL_PLAYER_CARD").is_some())
+}
+
+/// Debug bisection knob (env `NW_POSITIONS_ONLY`): put only the own player's group in the
+/// bundles and omit every other entity, to test the local-player spawn with nothing else in the
+/// bundles. Off by default. Read once.
 fn positions_only() -> bool {
     use std::sync::OnceLock;
     static POSITIONS_ONLY: OnceLock<bool> = OnceLock::new();
@@ -105,6 +117,8 @@ pub struct WorldSettings {
     pub ghost_ttl_ms: u64,
     /// Threads of the bundle step.
     pub tick_threads: usize,
+    /// Whether a client gets its own player as a spawn card ([`local_player_card`]).
+    pub local_player_card: bool,
 }
 
 /// Fewest players for which the bundle step uses more than one thread; below that, starting
@@ -240,9 +254,19 @@ struct Player {
     bundles_sent: u64,
     last_time_synch_ms: u64,
     interest: Interest<u64>,
+    /// The client's entity slots.
+    slots: Slots,
+    /// Whether the own spawn card went out from this sim.
+    own_card_sent: bool,
     frozen: bool,
     handoffs: u64,
     no_handoff_before_ms: u64,
+}
+
+/// What a client already has of the replication stream: it goes on across a handoff.
+struct Replication {
+    bundles_sent: u64,
+    slots: Slots,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -397,14 +421,11 @@ impl SimWorld {
         } else {
             admit.bundles_sent
         };
-        self.spawn(
-            arrival,
-            motion,
-            first_sequence,
-            now_ms,
-            admit.handoffs,
-            now_ms,
-        );
+        let replication = Replication {
+            bundles_sent: first_sequence,
+            slots: Slots::new(),
+        };
+        self.spawn(arrival, motion, replication, now_ms, admit.handoffs, now_ms);
         Ok(login)
     }
 
@@ -433,10 +454,17 @@ impl SimWorld {
         };
         let motion = Motion::import(state, now_ms, &self.settings.limits);
         let retry_at = now_ms.saturating_add(self.settings.handoff_retry_ms);
+        let replication = Replication {
+            bundles_sent: offer.bundles_sent,
+            slots: Slots::restored(
+                offer.slots.iter().copied().collect(),
+                offer.pending_stops.clone(),
+            ),
+        };
         self.spawn(
             arrival,
             motion,
-            offer.bundles_sent,
+            replication,
             now_ms.saturating_sub(offer.time_synch_age_ms),
             offer.handoffs,
             retry_at,
@@ -778,6 +806,13 @@ impl SimWorld {
                     move_age_ms: state.move_age_ms,
                     budget_m: state.budget_m,
                     bundles_sent: player.bundles_sent,
+                    slots: player
+                        .slots
+                        .assigned()
+                        .iter()
+                        .map(|(entity, interest)| (*entity, *interest))
+                        .collect(),
+                    pending_stops: player.slots.pending_stops().to_vec(),
                     time_synch_age_ms: now_ms.saturating_sub(player.last_time_synch_ms),
                     handoffs: player.handoffs.saturating_add(1),
                     health: vitals.health.current(),
@@ -862,11 +897,13 @@ impl SimWorld {
             positions: everyone.iter().copied().collect(),
             cards,
             asset_sub_id: self.combat.asset_sub_id,
+            local_player_card: self.settings.local_player_card,
             now_ms,
             server_time,
         };
-        let mut query = self.world.query::<(&mut Player, &Body)>();
-        let mut players: Vec<(Mut<Player>, &Body)> = query.iter_mut(&mut self.world).collect();
+        let mut query = self.world.query::<(&mut Player, &Body, &Vitals)>();
+        let mut players: Vec<(Mut<Player>, &Body, &Vitals)> =
+            query.iter_mut(&mut self.world).collect();
         let threads = self
             .settings
             .tick_threads
@@ -921,7 +958,7 @@ impl SimWorld {
         &mut self,
         arrival: Arrival,
         motion: Motion,
-        bundles_sent: u64,
+        replication: Replication,
         last_time_synch_ms: u64,
         handoffs: u64,
         no_handoff_before_ms: u64,
@@ -934,12 +971,14 @@ impl SimWorld {
                     character: arrival.character,
                     name: arrival.name,
                     number: arrival.number,
-                    bundles_sent,
+                    bundles_sent: replication.bundles_sent,
                     last_time_synch_ms,
                     interest: Interest::new(
                         self.settings.interest_radius_m,
                         self.settings.max_visible_players,
                     ),
+                    slots: replication.slots,
+                    own_card_sent: false,
                     frozen: false,
                     handoffs,
                     no_handoff_before_ms,
@@ -989,16 +1028,20 @@ struct Neighbourhood<'a> {
     positions: HashMap<u64, Position>,
     cards: HashMap<u64, MobCard>,
     asset_sub_id: u32,
+    local_player_card: bool,
     now_ms: u64,
     server_time: u64,
 }
 
 impl Neighbourhood<'_> {
     /// The bundles and time messages of `players`, in their order.
-    fn bundles_of(&self, players: &mut [(Mut<Player>, &Body)]) -> Result<Bundled, MessageError> {
+    fn bundles_of(
+        &self,
+        players: &mut [(Mut<Player>, &Body, &Vitals)],
+    ) -> Result<Bundled, MessageError> {
         let mut outgoing = Vec::new();
         let mut counted = 0_u64;
-        for (player, body) in players.iter_mut() {
+        for (player, body, vitals) in players.iter_mut() {
             if player.frozen {
                 continue;
             }
@@ -1009,30 +1052,59 @@ impl Neighbourhood<'_> {
                 .near(own_position)
                 .filter(|(number, _)| *number != own);
             let seen = player.interest.update(own_position, others);
-            let entered: HashSet<u64> = seen.entered.iter().copied().collect();
-            let mut numbers: Vec<u64> = seen.entered.into_iter().chain(seen.stayed).collect();
+            let mut numbers: Vec<u64> = if positions_only() {
+                // Only the own group (see [`positions_only`]).
+                Vec::new()
+            } else {
+                seen.entered.into_iter().chain(seen.stayed).collect()
+            };
             numbers.sort_unstable();
-            let mut members: Vec<BundleMember> =
-                position_member(own, own_position).into_iter().collect();
+            player.slots.keep_only(&numbers);
+            // Until its client spawned the player, the client keeps the own states in its
+            // offline portrayal cache and merges every later record of the slot into the cached
+            // one; such a merge crashes it (player-component note, crashes 2 and 3). So until
+            // then the own group goes out once, whole, with the card; after the spawn the card
+            // comes again once per refresh and the position every tick.
+            let first_card = !player.own_card_sent && self.local_player_card;
+            player.own_card_sent = true;
+            let own_carded = first_card
+                || (self.local_player_card
+                    && vitals.spawned
+                    && player.bundles_sent % CARD_REFRESH_BUNDLES == 0);
+            let own_sent = first_card || vitals.spawned || !self.local_player_card;
+            let mut groups: Vec<BundleGroup> = own_sent
+                .then(|| own_group(own, own_position, own_carded))
+                .flatten()
+                .into_iter()
+                .collect();
             for number in numbers {
-                if let Some(card) = self.cards.get(&number) {
-                    if positions_only() {
-                        // Skip the unvalidated mob-card members; the real client cannot decode a
-                        // bundle that holds them (see [`positions_only`]).
-                        continue;
-                    }
-                    // Staggered by the entity number, so the cards of a crowd do not all come
-                    // in one bundle.
-                    let refresh =
-                        player.bundles_sent.wrapping_add(number) % CARD_REFRESH_BUNDLES == 0;
-                    let first = entered.contains(&number) || refresh;
-                    members.extend(mob_members(card, first, self.asset_sub_id));
-                } else if let Some(position) = self.positions.get(&number) {
-                    members.extend(position_member(number, *position));
-                }
+                let (kind, position) = match self.cards.get(&number) {
+                    Some(card) => (EntityKind::mob(self.asset_sub_id), card.position),
+                    None => match self.positions.get(&number) {
+                        Some(position) => (EntityKind::PLAYER, *position),
+                        None => continue,
+                    },
+                };
+                // Every slot in use: the entity is not sent until one is free.
+                let Some(slot) = player.slots.slot(number) else {
+                    continue;
+                };
+                // Staggered by the entity number, so the cards of a crowd do not all come in one
+                // bundle.
+                let refresh = player.bundles_sent.wrapping_add(number) % CARD_REFRESH_BUNDLES == 0;
+                groups.extend(entity_group(
+                    slot.interest,
+                    number,
+                    kind,
+                    position,
+                    slot.new || refresh,
+                ));
             }
-            counted += members.len() as u64;
-            for bundle in bundles(player.bundles_sent, members)? {
+            counted += groups
+                .iter()
+                .map(|group| group.members.len() as u64)
+                .sum::<u64>();
+            for bundle in bundles(player.bundles_sent, &mut player.slots, groups)? {
                 player.bundles_sent = player.bundles_sent.saturating_add(1);
                 outgoing.push(Outgoing {
                     connection: player.connection.clone(),
@@ -1070,8 +1142,8 @@ mod tests {
     use nw_bus::CellTable;
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
     use nw_messages::{
-        ALC_TYPE_INDEX, BundlePayload, GDE_METADATA_TYPE_INDEX, LOGIN_MESSAGE_TYPES, MemberState,
-        ReplicatedStateBundle,
+        ALC_TYPE_INDEX, GDE_METADATA_TYPE_INDEX, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
+        PLAYER_EMPTY_COMPONENTS, ReplicatedStateBundle, SlotRead, SlotUpdate,
     };
     use nw_reflect::{Envelope, encode_server_messages};
     use nw_sim_core::test_support::NoGround;
@@ -1136,6 +1208,7 @@ mod tests {
             handoff_retry_ms: RETRY_MS,
             ghost_ttl_ms: GHOST_TTL_MS,
             tick_threads: 1,
+            local_player_card: true,
         }
     }
 
@@ -1246,9 +1319,9 @@ mod tests {
             .spawned = true;
     }
 
-    /// The entity numbers in the bundle of one connection.
-    fn seen_by(outgoing: &[Outgoing], who: &ConnectionRef) -> Vec<u64> {
-        positions_seen_by(outgoing, who)
+    /// The entity numbers in the first bundle of one connection.
+    fn seen_by(world: &SimWorld, outgoing: &[Outgoing], who: &ConnectionRef) -> Vec<u64> {
+        positions_seen_by(world, outgoing, who)
             .into_iter()
             .map(|(number, _)| number)
             .collect()
@@ -1258,32 +1331,62 @@ mod tests {
         let message = outgoing
             .iter()
             .find(|out| out.connection == *who && out.channel == REPLICATION_CHANNEL)?;
-        let envelope = Envelope::decode(&message.envelopes[0]).expect("envelope");
+        Some(bundle_in(&message.envelopes[0]))
+    }
+
+    fn bundle_in(bytes: &[u8]) -> ReplicatedStateBundle {
+        let envelope = Envelope::decode(bytes).expect("envelope");
         let Some(Ok(ServerMessage::Bundle(bundle))) = ServerMessage::from_envelope(&envelope)
         else {
             panic!("expected a bundle");
         };
-        Some(bundle)
+        bundle
     }
 
-    /// The entity numbers and x positions in the bundle of one connection.
-    fn positions_seen_by(outgoing: &[Outgoing], who: &ConnectionRef) -> Vec<(u64, f32)> {
-        let bundle = bundle_of(outgoing, who).expect("bundle");
-        BundlePayload::decode(&bundle.payload)
-            .expect("payload")
-            .groups
+    /// The entity in slot `interest` of `who`, as this sim gave the slots.
+    fn entity_in_slot(world: &SimWorld, who: &ConnectionRef, interest: u16) -> Option<u64> {
+        let player = world.world.get::<Player>(*world.by_connection.get(who)?)?;
+        if interest == LOCAL_PLAYER_INTEREST {
+            return Some(player.number);
+        }
+        player
+            .slots
+            .assigned()
             .iter()
-            .flat_map(|group| {
-                group
-                    .members
-                    .iter()
-                    .filter_map(|member| match &member.state {
-                        MemberState::Position(state) => {
-                            Some((member.u64_at_0, state.position.expect("position").x))
-                        }
-                        _ => None,
-                    })
+            .find(|(_, slot)| **slot == interest)
+            .map(|(entity, _)| *entity)
+    }
+
+    /// The groups of `bundle` of `who`, each with the entity of its slot.
+    fn groups_in(
+        world: &SimWorld,
+        who: &ConnectionRef,
+        bundle: &ReplicatedStateBundle,
+    ) -> Vec<(u64, SlotUpdate)> {
+        SlotRead::of(bundle)
+            .expect("read")
+            .updates
+            .into_iter()
+            .map(|update| {
+                let entity = update
+                    .entity
+                    .or_else(|| entity_in_slot(world, who, update.interest))
+                    .expect("every slot is tied");
+                (entity, update)
             })
+            .collect()
+    }
+
+    /// The entity numbers and x positions in the first bundle of one connection.
+    fn positions_seen_by(
+        world: &SimWorld,
+        outgoing: &[Outgoing],
+        who: &ConnectionRef,
+    ) -> Vec<(u64, f32)> {
+        let bundle = bundle_of(outgoing, who).expect("bundle");
+        groups_in(world, who, &bundle)
+            .into_iter()
+            .filter_map(|(entity, update)| Some((entity, update.position?.x)))
             .collect()
     }
 
@@ -1325,26 +1428,32 @@ mod tests {
     }
 
     /// The member classes of `entity` in every bundle of `who`, in order.
-    fn classes_of(outgoing: &[Outgoing], who: &ConnectionRef, entity: u64) -> Vec<u64> {
+    fn classes_of(
+        world: &SimWorld,
+        outgoing: &[Outgoing],
+        who: &ConnectionRef,
+        entity: u64,
+    ) -> Vec<u64> {
         outgoing
             .iter()
             .filter(|out| out.connection == *who && out.channel == REPLICATION_CHANNEL)
             .flat_map(|out| &out.envelopes)
-            .flat_map(|bytes| {
-                let envelope = Envelope::decode(bytes).expect("envelope");
-                let Some(Ok(ServerMessage::Bundle(bundle))) =
-                    ServerMessage::from_envelope(&envelope)
-                else {
-                    panic!("expected a bundle");
-                };
-                BundlePayload::decode(&bundle.payload)
-                    .expect("payload")
-                    .groups
-            })
-            .flat_map(|group| group.members)
-            .filter(|member| member.u64_at_0 == entity)
+            .flat_map(|bytes| groups_in(world, who, &bundle_in(bytes)))
+            .filter(|(number, _)| *number == entity)
+            .flat_map(|(_, update)| update.members)
             .map(|member| member.state.type_index())
             .collect()
+    }
+
+    /// [`classes_of`] the bundles of the next tick.
+    fn next_classes_of(
+        world: &mut SimWorld,
+        now: u64,
+        who: &ConnectionRef,
+        entity: u64,
+    ) -> Vec<u64> {
+        let messages = tick(world, now).messages;
+        classes_of(world, &messages, who, entity)
     }
 
     const CARD_CLASSES: [u64; 2] = [GDE_METADATA_TYPE_INDEX, ALC_TYPE_INDEX];
@@ -1357,11 +1466,11 @@ mod tests {
         join(&mut world, 1, x + 5.0);
         let mob = crate::mobs::mob_entity(0);
         assert_eq!(
-            classes_of(&tick(&mut world, NOW).messages, &connection(1), mob),
+            next_classes_of(&mut world, NOW, &connection(1), mob),
             CARD_CLASSES
         );
         assert_eq!(
-            classes_of(&tick(&mut world, NOW + 33).messages, &connection(1), mob),
+            next_classes_of(&mut world, NOW + 33, &connection(1), mob),
             [ALC_TYPE_INDEX]
         );
     }
@@ -1406,9 +1515,76 @@ mod tests {
         }
         assert_eq!(
             tick(&mut world, NOW).bundle_members,
-            9,
-            "3 bundles of 3 members"
+            9 * (2 + PLAYER_EMPTY_COMPONENTS.len() as u64),
+            "3 bundles of 3 groups, each a card, the empty player components and a position"
         );
+    }
+
+    #[test]
+    fn before_its_client_spawned_the_own_player_goes_out_only_whole() {
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        world
+            .admit(&admit_at(1, CELL_M / 2.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let own_groups = |world: &mut SimWorld, now: u64| {
+            let messages = tick(world, now).messages;
+            bundle_of(&messages, &connection(1))
+                .map(|bundle| SlotRead::of(&bundle).expect("read").updates)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(SlotUpdate::is_local_player)
+                .map(|update| update.card.is_some())
+                .collect::<Vec<bool>>()
+        };
+        assert_eq!(
+            own_groups(&mut world, NOW),
+            vec![true],
+            "the whole card first"
+        );
+        for step in 1..=CARD_REFRESH_BUNDLES {
+            assert!(
+                own_groups(&mut world, NOW + 33 * step).is_empty(),
+                "nothing more for the own slot before the spawn, not even a card refresh"
+            );
+        }
+        let entity = world.player_by_number(1).expect("player");
+        world
+            .world
+            .get_mut::<Vitals>(entity)
+            .expect("vitals")
+            .spawned = true;
+        assert_eq!(
+            own_groups(&mut world, NOW + 33 * (CARD_REFRESH_BUNDLES + 1)),
+            vec![false],
+            "the position every tick after the spawn"
+        );
+    }
+
+    #[test]
+    fn without_the_card_knob_the_own_player_is_its_position_every_tick() {
+        let mut world = world_of(
+            "sim-a",
+            WorldSettings {
+                local_player_card: false,
+                ..settings(MANY, MAX_PLAYERS)
+            },
+        );
+        world
+            .admit(&admit_at(1, 0.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        for step in 0..2 {
+            let messages = tick(&mut world, NOW + 33 * step).messages;
+            let bundle = bundle_of(&messages, &connection(1)).expect("bundle");
+            let own: Vec<bool> = SlotRead::of(&bundle)
+                .expect("read")
+                .updates
+                .into_iter()
+                .filter(SlotUpdate::is_local_player)
+                .map(|update| update.card.is_some())
+                .collect();
+            assert_eq!(own, vec![false], "no own card, the position every tick");
+        }
     }
 
     #[test]
@@ -1420,9 +1596,9 @@ mod tests {
         let mob = crate::mobs::mob_entity(0);
         tick(&mut world, NOW);
         let cards = (1..=CARD_REFRESH_BUNDLES)
-            .map(|step| tick(&mut world, NOW + 33 * step).messages)
-            .filter(|messages| {
-                classes_of(messages, &connection(1), mob).contains(&GDE_METADATA_TYPE_INDEX)
+            .filter(|step| {
+                next_classes_of(&mut world, NOW + 33 * step, &connection(1), mob)
+                    .contains(&GDE_METADATA_TYPE_INDEX)
             })
             .count();
         assert_eq!(cards, 1, "once more in the next second of bundles");
@@ -1439,9 +1615,9 @@ mod tests {
         let mob = crate::mobs::mob_entity(0);
         tick(&mut world, NOW);
         world.apply_hit(mob, 1, LETHAL, 0, NOW);
-        assert!(classes_of(&tick(&mut world, NOW + 33).messages, &connection(1), mob).is_empty());
+        assert!(next_classes_of(&mut world, NOW + 33, &connection(1), mob).is_empty());
         let back = tick(&mut world, NOW + MOB_RESPAWN_MS).messages;
-        assert_eq!(classes_of(&back, &connection(1), mob), CARD_CLASSES);
+        assert_eq!(classes_of(&world, &back, &connection(1), mob), CARD_CLASSES);
     }
 
     #[test]
@@ -1461,19 +1637,19 @@ mod tests {
         join(&mut world, 2, x + 4.0);
         let mob = crate::mobs::mob_entity(0);
         assert!(
-            classes_of(&tick(&mut world, NOW).messages, &connection(1), mob).is_empty(),
+            next_classes_of(&mut world, NOW, &connection(1), mob).is_empty(),
             "the nearer player takes the one place"
         );
         world.leave(&connection(2));
         assert_eq!(
-            classes_of(&tick(&mut world, NOW + 33).messages, &connection(1), mob),
+            next_classes_of(&mut world, NOW + 33, &connection(1), mob),
             CARD_CLASSES
         );
         join(&mut world, 2, x + 4.0);
-        assert!(classes_of(&tick(&mut world, NOW + 66).messages, &connection(1), mob).is_empty());
+        assert!(next_classes_of(&mut world, NOW + 66, &connection(1), mob).is_empty());
         world.leave(&connection(2));
         assert_eq!(
-            classes_of(&tick(&mut world, NOW + 99).messages, &connection(1), mob),
+            next_classes_of(&mut world, NOW + 99, &connection(1), mob),
             CARD_CLASSES,
             "a new card after it was out of view"
         );
@@ -1503,7 +1679,7 @@ mod tests {
         };
         world.set_ghosts(&slot("sim-b").id, vec![ghost], NOW);
         assert_eq!(
-            classes_of(&tick(&mut world, NOW).messages, &connection(1), mob),
+            next_classes_of(&mut world, NOW, &connection(1), mob),
             CARD_CLASSES
         );
     }
@@ -1531,7 +1707,7 @@ mod tests {
             Ok(GroundCheck::NoGround)
         );
         let outgoing = tick(&mut world, NOW + ONE_SECOND_MS).messages;
-        let (_, seen_x) = positions_seen_by(&outgoing, &b)[1];
+        let (_, seen_x) = positions_seen_by(&world, &outgoing, &b)[1];
         assert!((seen_x - SPEED_MPS).abs() < CLOSE_M);
         let far = at(SPEED_MPS * 10.0);
         let later = NOW + ONE_SECOND_MS + A_BIT_LATER_MS;
@@ -1540,7 +1716,7 @@ mod tests {
             Err(MoveError::Refused(MoveRefusal::TooFast))
         );
         let outgoing = tick(&mut world, later).messages;
-        let (_, own_x) = positions_seen_by(&outgoing, &a)[0];
+        let (_, own_x) = positions_seen_by(&world, &outgoing, &a)[0];
         assert!((own_x - SPEED_MPS).abs() < CLOSE_M);
         assert_eq!(
             world.move_to(&connection(9), at(1.0), later),
@@ -1576,7 +1752,7 @@ mod tests {
         assert!(login.reliable);
         assert_eq!(login.envelopes.len(), LOGIN_MESSAGE_TYPES.len());
         let outgoing = tick(&mut world, NOW).messages;
-        assert_eq!(seen_by(&outgoing, &connection(77)), vec![77]);
+        assert_eq!(seen_by(&world, &outgoing, &connection(77)), vec![77]);
     }
 
     #[test]
@@ -1665,9 +1841,9 @@ mod tests {
         join(&mut world, 2, 50.0);
         join(&mut world, 3, 500.0);
         let outgoing = tick(&mut world, NOW).messages;
-        assert_eq!(seen_by(&outgoing, &a), vec![1, 2]);
-        assert_eq!(seen_by(&outgoing, &b), vec![2, 1]);
-        assert_eq!(seen_by(&outgoing, &c), vec![3]);
+        assert_eq!(seen_by(&world, &outgoing, &a), vec![1, 2]);
+        assert_eq!(seen_by(&world, &outgoing, &b), vec![2, 1]);
+        assert_eq!(seen_by(&world, &outgoing, &c), vec![3]);
         assert!(
             outgoing
                 .iter()
@@ -1676,14 +1852,14 @@ mod tests {
     }
 
     /// What every connection saw in one tick: its bundle members by entity number and x.
-    fn seen_by_all(outgoing: &[Outgoing]) -> BTreeMap<u64, Vec<(u64, f32)>> {
+    fn seen_by_all(world: &SimWorld, outgoing: &[Outgoing]) -> BTreeMap<u64, Vec<(u64, f32)>> {
         outgoing
             .iter()
             .filter(|out| out.channel == REPLICATION_CHANNEL)
             .map(|out| {
                 (
                     out.connection.connection,
-                    positions_seen_by(outgoing, &out.connection),
+                    positions_seen_by(world, outgoing, &out.connection),
                 )
             })
             .collect()
@@ -1704,7 +1880,8 @@ mod tests {
             for number in 1..=PLAYERS {
                 join(&mut world, number, number as f32 * SPACING_M);
             }
-            seen_by_all(&tick(&mut world, NOW).messages)
+            let messages = tick(&mut world, NOW).messages;
+            seen_by_all(&world, &messages)
         };
         let one = crowd(1);
         assert_eq!(one.len(), PLAYERS as usize);
@@ -1719,7 +1896,7 @@ mod tests {
         join(&mut world, 3, 10.0);
         join(&mut world, 4, 20.0);
         let outgoing = tick(&mut world, NOW).messages;
-        assert_eq!(seen_by(&outgoing, &connection(1)), vec![1, 3, 4]);
+        assert_eq!(seen_by(&world, &outgoing, &connection(1)), vec![1, 3, 4]);
     }
 
     #[test]
@@ -1735,7 +1912,7 @@ mod tests {
         assert_eq!(departure.position, at(10.0));
         assert_eq!(departure.moved_at_ms, NOW);
         let outgoing = tick(&mut world, NOW).messages;
-        assert_eq!(seen_by(&outgoing, &a), vec![1]);
+        assert_eq!(seen_by(&world, &outgoing, &a), vec![1]);
         assert_eq!(world.leave(&b), None);
     }
 
@@ -1813,19 +1990,42 @@ mod tests {
             .iter()
             .filter(|out| out.connection == viewer && out.channel == REPLICATION_CHANNEL)
             .count();
-        assert!(bundles > 1 && bundles <= (PLAYERS as usize).div_ceil(MAX_BUNDLE_MEMBERS));
+        assert!(bundles > 1);
+        for out in outgoing
+            .iter()
+            .filter(|out| out.channel == REPLICATION_CHANNEL)
+        {
+            let payload = encode_server_messages(&[&out.envelopes[0]]).expect("payload");
+            assert!(payload.len() <= MAX_CHUNK_PAYLOAD, "{}", payload.len());
+        }
+        // The largest bundle: the largest sequence, entity numbers and slots, every group with
+        // its card, and as many stops as one bundle takes.
         let largest_number = u64::MAX >> LARGEST_NUMBER_SHIFT;
-        let full: Vec<BundleMember> = (0..MAX_BUNDLE_MEMBERS as u64)
-            .filter_map(|offset| members::position_member(largest_number - offset, at(0.0)))
-            .collect();
-        let envelopes = members::bundles(u64::MAX >> LARGEST_NUMBER_SHIFT, full).expect("bundle");
-        assert_eq!(
-            envelopes.len(),
-            1,
-            "48 of the largest members fill one bundle"
+        let mut slots = Slots::restored(
+            (0..MAX_BUNDLE_MEMBERS as u64)
+                .map(|offset| (offset, u16::MAX - MAX_BUNDLE_MEMBERS as u16 + offset as u16))
+                .collect(),
+            Vec::new(),
         );
-        let payload = encode_server_messages(&[&envelopes[0]]).expect("payload");
-        assert!(payload.len() <= MAX_CHUNK_PAYLOAD, "{}", payload.len());
+        slots.keep_only(&[]);
+        let full: Vec<BundleGroup> = (0..MAX_BUNDLE_MEMBERS as u64)
+            .filter_map(|offset| {
+                entity_group(
+                    u16::MAX - offset as u16,
+                    largest_number - offset,
+                    EntityKind::PLAYER,
+                    at(0.0),
+                    true,
+                )
+            })
+            .collect();
+        // The largest sequence that leaves room for the next bundles of this tick.
+        let sequence = largest_number - MAX_BUNDLE_MEMBERS as u64;
+        let envelopes = members::bundles(sequence, &mut slots, full).expect("bundles");
+        for envelope in &envelopes {
+            let payload = encode_server_messages(&[envelope]).expect("payload");
+            assert!(payload.len() <= MAX_CHUNK_PAYLOAD, "{}", payload.len());
+        }
     }
 
     /// A world of the first of two sims, with a player 50 m inside the second sim's cells and
@@ -1855,7 +2055,7 @@ mod tests {
         assert_eq!(start.offer.handoffs, 1);
         assert_eq!(start.offer.position.x, BORDER_X + 50.0);
         assert!(bundle_of(&first.messages, &mover).is_none(), "frozen");
-        assert_eq!(seen_by(&first.messages, &viewer), vec![2, 1]);
+        assert_eq!(seen_by(&world, &first.messages, &viewer), vec![2, 1]);
         assert_eq!(
             world.move_to(&mover, at(BORDER_X + 51.0), NOW + ONE_SECOND_MS),
             Err(MoveError::Frozen)
@@ -1899,6 +2099,8 @@ mod tests {
         tick(&mut old, NOW);
         let mut offer = tick_offer(&mut old);
         assert_eq!(offer.name, player_name(1), "the name crosses");
+        // The client tied a slot to the viewer before the handoff.
+        offer.slots = vec![(2, slots::FIRST_REMOTE_INTEREST)];
         offer.bundles_sent = BUNDLES_BEFORE;
         let mut new = world_of("sim-b", settings(MANY, MAX_PLAYERS));
         new.set_table(&table(&["sim-a", "sim-b"])).expect("table");
@@ -1912,7 +2114,12 @@ mod tests {
         let output = tick(&mut new, NOW);
         let bundle = bundle_of(&output.messages, &mover).expect("bundle");
         assert_eq!(bundle.leading, Some(BUNDLES_BEFORE));
-        assert_eq!(seen_by(&output.messages, &mover), vec![1]);
+        assert_eq!(
+            bundle.index_block.map(|block| block.indexes),
+            Some(vec![slots::FIRST_REMOTE_INTEREST]),
+            "the taker does not see the viewer, so it stops the viewer's slot"
+        );
+        assert_eq!(seen_by(&new, &output.messages, &mover), vec![1]);
         let reach = BORDER_X + 50.0 + offer.budget_m;
         assert_eq!(
             new.move_to(&mover, at(reach + 1.0), NOW),
@@ -1966,11 +2173,11 @@ mod tests {
         );
         let outgoing = tick(&mut world, NOW).messages;
         assert_eq!(
-            positions_seen_by(&outgoing, &connection(1)),
+            positions_seen_by(&world, &outgoing, &connection(1)),
             vec![(1, 0.0), (GHOST_NUMBER, 10.0)]
         );
         let later = tick(&mut world, NOW + GHOST_TTL_MS + 1).messages;
-        assert_eq!(seen_by(&later, &connection(1)), vec![1]);
+        assert_eq!(seen_by(&world, &later, &connection(1)), vec![1]);
     }
 
     #[test]

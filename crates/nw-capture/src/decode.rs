@@ -246,7 +246,7 @@ fn bundle_detail(body: &[u8]) -> Detail {
         .members
         .iter()
         .map(|(member, range)| MemberRef {
-            key: member.u64_at_0,
+            key: member.component,
             class: member.state.type_index(),
             range: to_u32(offset + range.start)..to_u32(offset + range.end),
             position: member_position(&member.state),
@@ -280,7 +280,8 @@ fn member_position(state: &MemberState) -> Option<[f32; 3]> {
         | MemberState::Vitals(_)
         | MemberState::Stamina(_)
         | MemberState::CombatStatus(_)
-        | MemberState::DelayedEvent(_) => None,
+        | MemberState::DelayedEvent(_)
+        | MemberState::Empty(_) => None,
     }
 }
 

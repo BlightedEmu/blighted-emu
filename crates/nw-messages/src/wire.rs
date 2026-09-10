@@ -8,6 +8,27 @@ use thiserror::Error;
 
 /// Bytes of a raw id field.
 pub const RAW_ID_LEN: usize = 16;
+/// Bytes of an entity number at the end of a raw id that [`raw_id_of_entity`] made.
+const ENTITY_NUMBER_LEN: usize = 8;
+
+/// The raw id this server gives entity `number`: 8 zero bytes, then the number as a big-endian
+/// `u64`. The retail meaning of these ids is Unknown; the same id goes in `ClientAddEntryMsg` and
+/// in the entity's spawn card, so a client can tie the two.
+pub fn raw_id_of_entity(number: u64) -> [u8; RAW_ID_LEN] {
+    let mut id = [0; RAW_ID_LEN];
+    id[RAW_ID_LEN - ENTITY_NUMBER_LEN..].copy_from_slice(&number.to_be_bytes());
+    id
+}
+
+/// The entity number of a raw id that [`raw_id_of_entity`] made; `None` for another id.
+pub fn entity_of_raw_id(id: &[u8; RAW_ID_LEN]) -> Option<u64> {
+    let (zeros, number) = id.split_at(RAW_ID_LEN - ENTITY_NUMBER_LEN);
+    let number: [u8; ENTITY_NUMBER_LEN] = number.try_into().ok()?;
+    zeros
+        .iter()
+        .all(|byte| *byte == 0)
+        .then_some(u64::from_be_bytes(number))
+}
 /// Bits in one byte.
 const BYTE_BITS: u32 = 8;
 /// Value bits of a wide prefix-coded integer with `n` extra bytes, for `n` from 0 to 8.

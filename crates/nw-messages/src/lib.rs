@@ -15,9 +15,11 @@ pub mod combat;
 pub mod components;
 pub mod connected;
 pub mod day_phase;
+pub mod entity_slots;
 pub mod gde;
 pub mod level_info;
 pub mod payload;
+pub mod player_components;
 pub mod position;
 pub mod self_ident;
 pub mod server;
@@ -33,8 +35,8 @@ pub mod wire;
 pub use afflictions::{Affliction, AfflictionId, AfflictionList, ColdLong, HotLong, LongForm};
 pub use alc::{ALC_TYPE_INDEX, AlcChild, AlcState, POS10_CHILD, SLOT0_CHILDREN, SLOT1_CHILDREN};
 pub use bundle::{
-    IndexBlock, MAX_BUNDLE_INDEXES, OBSERVED_BUNDLE_BYTE_3, OBSERVED_BUNDLE_BYTE_4,
-    OBSERVED_BUNDLE_GROUP, REPLICATED_STATE_BUNDLE_TYPE_INDEX, ReplicatedStateBundle,
+    IndexBlock, LOCAL_PLAYER_INTEREST, MAX_BUNDLE_INDEXES, OBSERVED_BUNDLE_BYTE_3,
+    OBSERVED_BUNDLE_BYTE_4, REPLICATED_STATE_BUNDLE_TYPE_INDEX, ReplicatedStateBundle,
 };
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use client_input::{
@@ -55,9 +57,16 @@ pub use connected::{
     TIMING_CONFIGURATION_CONNECTED_MSG_TYPE_INDEX, TimingConfigurationConnectedMsg,
 };
 pub use day_phase::{OBSERVED_DAY_PHASE, SYNC_DAY_PHASE_MSG_TYPE_INDEX, SyncDayPhaseMsg};
-pub use gde::{AssetId, GDE_ID_LEN, GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
+pub use entity_slots::{EntitySlots, SlotRead, SlotUpdate};
+pub use gde::{
+    AssetId, DYNAMIC_SLICE_SUB_ID, GDE_ID_LEN, GDE_METADATA_COMPONENT, GDE_METADATA_TYPE_INDEX,
+    GdeMetadataReplicatedState, PLAYER_SLICE_ASSET,
+};
 pub use level_info::{LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, LevelInfoChangedMsg, PhasingEntry};
 pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, MemberState};
+pub use player_components::{
+    EmptyState, PLAYER_EMPTY_COMPONENTS, empty_state, player_empty_members,
+};
 pub use position::{
     POSITION_IN_THE_WORLD_TYPE_INDEX, POSITION_Z_MAX, POSITION_Z_MIN,
     PositionInTheWorldReplicatedState, Rotation, RotationComponent, Scale, WorldPosition,
@@ -73,4 +82,6 @@ pub use time_change::{
 };
 pub use time_synch::TimeSynchMsg;
 pub use vitals::{VITALS_TYPE_INDEX, VitalsData, VitalsSlot0, VitalsSlot1, VitalsState};
-pub use wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};
+pub use wire::{
+    BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer, entity_of_raw_id, raw_id_of_entity,
+};

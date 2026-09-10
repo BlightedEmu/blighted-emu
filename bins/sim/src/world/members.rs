@@ -1,40 +1,50 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The bundle members of players and mobs (M6-B spec section 5). A player is its own position
-//! member (type 13). A mob replicates the way the retail bundles do: its spawn card (type 10)
-//! when it comes into a player's view (and again once per [`CARD_REFRESH_BUNDLES`] bundles while
-//! it stays in view), then its position every bundle through an `ALCReplicatedState` (type 11,
-//! the member that dominates the real bundles) carrying the `pos10` child. The real client cannot
-//! decode a `VitalsComponentReplicatedState` (type 15) member — that class is not in the captured
-//! bundle members and its wire layout was never pinned — so the mob no longer sends one. The
-//! spawn card's ids are our own values: what the client needs there is Unknown.
+//! The bundle groups of the entities a client sees (world-entry note, "Spawn condition traced").
+//! Each entity is one group in its own slot ([`super::slots`]); the own player is slot
+//! [`LOCAL_PLAYER_INTEREST`]. A group holds the entity's spawn card (type 10, component
+//! [`GDE_METADATA_COMPONENT`]) when the entity comes into view (and again once per
+//! [`CARD_REFRESH_BUNDLES`] bundles while it stays in view), then its position in an
+//! `ALCReplicatedState` (type 11) carrying the `pos10` child, as the retail bundles do. A player's
+//! card names the player prefab ([`PLAYER_SLICE_ASSET`]): the client registers its local player
+//! only when that prefab is portrayed in slot 1. A mob's card ids are our own values: the mob
+//! prefab is Unknown.
 //!
 //! Bundles split by bytes: an unreliable carrier message must fit one datagram (it is never
-//! chunked), so a bundle's members take at most the bytes of [`MAX_BUNDLE_MEMBERS`] position
-//! members, as before M6-B.
+//! chunked), so a bundle's groups and stops take at most the bytes of [`MAX_BUNDLE_MEMBERS`]
+//! position members, as before M6-B.
 
 use nw_messages::{
-    AlcState, AssetId, BundleMember, GDE_ID_LEN, GdeMetadataReplicatedState, InputPosition,
-    MemberState, MessageError, PositionInTheWorldReplicatedState, ReplicatedStateBundle,
-    ServerMessage, WorldPosition,
+    AlcState, AssetId, BundleGroup, BundleMember, BundlePayload, GDE_ID_LEN,
+    GDE_METADATA_COMPONENT, GdeMetadataReplicatedState, InputPosition, LOCAL_PLAYER_INTEREST,
+    MAX_BUNDLE_INDEXES, MemberState, MessageError, PLAYER_SLICE_ASSET, ReplicatedStateBundle,
+    ServerMessage, player_empty_members,
 };
 use nw_sim_core::Position;
 
 use super::MAX_BUNDLE_MEMBERS;
+use super::slots::Slots;
 
 /// Most bytes of a position member: a 5-byte entity number, a 1-byte class, a 12-byte body.
 const MAX_POSITION_MEMBER_BYTES: usize = 18;
-/// The member bytes of one bundle.
+/// The group and stop bytes of one bundle.
 pub(super) const MAX_BUNDLE_PAYLOAD_BYTES: usize = MAX_BUNDLE_MEMBERS * MAX_POSITION_MEMBER_BYTES;
-/// A mob in view sends its card and vitals again once per this many bundles of the player (about
-/// one second at one bundle per tick): a bundle is unreliable, and a lost card would hide the mob
+/// Bytes of one stopped slot in the index block (a big-endian `u16`).
+const STOP_BYTES: usize = 2;
+/// Most stops in one bundle: an eighth of the bundle bytes.
+const MAX_STOPS_PER_BUNDLE: usize = MAX_BUNDLE_PAYLOAD_BYTES / STOP_BYTES / 8;
+const _: () = assert!(MAX_STOPS_PER_BUNDLE as u64 <= MAX_BUNDLE_INDEXES);
+/// An entity in view sends its card again once per this many bundles of the player (about one
+/// second at one bundle per tick): a bundle is unreliable, and a lost card would hide the entity
 /// for as long as it stays in view.
 pub(super) const CARD_REFRESH_BUNDLES: u64 = 30;
-/// The entity number fills the last 8 bytes of the 16-byte `GdeRef`.
-const ENTITY_IN_REF: usize = GDE_ID_LEN - std::mem::size_of::<u64>();
+/// The component of a player's `ALCReplicatedState`: 16 on every own-player member of the
+/// captures.
+pub(super) const PLAYER_ALC_COMPONENT: u64 = 16;
+/// The component of a mob's `ALCReplicatedState`: the most common mob value in the captures
+/// (4 and 5 both occur; which mob prefab uses which is Unknown).
+pub(super) const MOB_ALC_COMPONENT: u64 = 5;
 
-/// What a client needs to show one mob: its entity number and where it is. Health and ids used
-/// to go out in a type-15 vitals member, which the real client cannot decode, so they are no
-/// longer part of the card.
+/// What a client needs to show one mob: its entity number and where it is.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct MobCard {
     /// The entity number.
@@ -48,176 +58,249 @@ pub(super) const fn card_of(entity: u64, position: Position) -> MobCard {
     MobCard { entity, position }
 }
 
-/// The position member of `entity`; `None` for a position that is not finite.
-pub(super) fn position_member(entity: u64, position: Position) -> Option<BundleMember> {
-    Some(BundleMember {
-        u64_at_0: entity,
-        state: MemberState::Position(PositionInTheWorldReplicatedState {
-            position: Some(WorldPosition::from_metres(
-                position.x, position.y, position.z,
-            )?),
-            ..PositionInTheWorldReplicatedState::default()
-        }),
+/// The prefab and the `ALCReplicatedState` component of one kind of entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct EntityKind {
+    asset: AssetId,
+    alc_component: u64,
+    /// Whether the card comes with an empty state for every other replicated component of the
+    /// prefab ([`player_empty_members`]).
+    empty_components: bool,
+}
+
+impl EntityKind {
+    /// A player.
+    pub(super) const PLAYER: Self = Self {
+        asset: PLAYER_SLICE_ASSET,
+        alc_component: PLAYER_ALC_COMPONENT,
+        empty_components: true,
+    };
+
+    /// A mob whose card carries `asset_sub_id`.
+    pub(super) const fn mob(asset_sub_id: u32) -> Self {
+        Self {
+            asset: AssetId {
+                id: [0; GDE_ID_LEN],
+                sub_id: asset_sub_id,
+            },
+            alc_component: MOB_ALC_COMPONENT,
+            empty_components: false,
+        }
+    }
+}
+
+/// The group of `entity` of `kind` in slot `interest`: its card (with the empty states of a
+/// player) when `carded`, then its position. `None` for a position that is not finite.
+pub(super) fn entity_group(
+    interest: u16,
+    entity: u64,
+    kind: EntityKind,
+    position: Position,
+    carded: bool,
+) -> Option<BundleGroup> {
+    let pos = InputPosition::from_metres(position.x, position.y, position.z)?;
+    let mut members = Vec::new();
+    if carded {
+        members.push(BundleMember {
+            component: GDE_METADATA_COMPONENT,
+            state: MemberState::GdeMetadata(GdeMetadataReplicatedState::for_entity(
+                kind.asset, entity,
+            )),
+        });
+        if kind.empty_components {
+            members.extend(player_empty_members());
+        }
+    }
+    members.push(BundleMember {
+        component: kind.alc_component,
+        state: MemberState::Alc(AlcState::at_position(pos)),
+    });
+    Some(BundleGroup {
+        interest: u64::from(interest),
+        members,
     })
 }
 
-/// The members of a mob: its spawn card and vitals block when it is `first` in view, then its
-/// position.
-pub(super) fn mob_members(card: &MobCard, first: bool, asset_sub_id: u32) -> Vec<BundleMember> {
-    let mut members = Vec::new();
-    if first {
-        let mut gde_ref = [0; GDE_ID_LEN];
-        gde_ref[ENTITY_IN_REF..].copy_from_slice(&card.entity.to_be_bytes());
-        members.push(BundleMember {
-            u64_at_0: card.entity,
-            state: MemberState::GdeMetadata(GdeMetadataReplicatedState {
-                asset: Some(AssetId {
-                    id: [0; GDE_ID_LEN],
-                    sub_id: asset_sub_id,
-                }),
-                gde_ref: Some(gde_ref),
-            }),
-        });
-    }
-    if let Some(pos) = InputPosition::from_metres(card.position.x, card.position.y, card.position.z)
-    {
-        members.push(BundleMember {
-            u64_at_0: card.entity,
-            state: MemberState::Alc(AlcState::at_position(pos)),
-        });
-    }
-    members
+/// The group of the client's own player.
+pub(super) fn own_group(entity: u64, position: Position, carded: bool) -> Option<BundleGroup> {
+    entity_group(
+        LOCAL_PLAYER_INTEREST,
+        entity,
+        EntityKind::PLAYER,
+        position,
+        carded,
+    )
 }
 
-/// The bundle envelopes of `members`, in order, split by bytes; the first has sequence
+/// The bundle envelopes of `groups`, in order, split by bytes, with the pending stops of `slots`
+/// in their index blocks (in extra bundles when the groups end first); the first has sequence
 /// `sequence` and each next one the next.
 pub(super) fn bundles(
     sequence: u64,
-    members: Vec<BundleMember>,
+    slots: &mut Slots,
+    groups: Vec<BundleGroup>,
 ) -> Result<Vec<Vec<u8>>, MessageError> {
     let mut envelopes = Vec::new();
-    let mut part = Vec::new();
-    let mut part_bytes = 0;
-    for member in members {
-        let bytes = member.encode()?.len();
-        if !part.is_empty() && part_bytes + bytes > MAX_BUNDLE_PAYLOAD_BYTES {
-            let next = sequence + envelopes.len() as u64;
-            envelopes.push(bundle(next, std::mem::take(&mut part))?);
-            part_bytes = 0;
+    let mut groups = groups.into_iter().peekable();
+    while groups.peek().is_some() || !slots.pending_stops().is_empty() {
+        let stops = slots.take_stops(MAX_STOPS_PER_BUNDLE);
+        let mut used = stops.len() * STOP_BYTES;
+        let mut part = Vec::new();
+        while let Some(group) = groups.peek() {
+            let bytes = group_bytes(group)?;
+            if !part.is_empty() && used + bytes > MAX_BUNDLE_PAYLOAD_BYTES {
+                break;
+            }
+            used += bytes;
+            part.extend(groups.next());
         }
-        part_bytes += bytes;
-        part.push(member);
-    }
-    if !part.is_empty() {
         let next = sequence + envelopes.len() as u64;
-        envelopes.push(bundle(next, part)?);
+        envelopes.push(
+            ServerMessage::Bundle(ReplicatedStateBundle::of_groups(next, stops, part)?)
+                .envelope()?,
+        );
     }
     Ok(envelopes)
 }
 
-fn bundle(sequence: u64, members: Vec<BundleMember>) -> Result<Vec<u8>, MessageError> {
-    ServerMessage::Bundle(ReplicatedStateBundle::of_members(sequence, members)?).envelope()
+fn group_bytes(group: &BundleGroup) -> Result<usize, MessageError> {
+    Ok(BundlePayload {
+        groups: vec![group.clone()],
+    }
+    .encode()?
+    .len())
 }
 
 #[cfg(test)]
 mod tests {
-    use nw_messages::{BundlePayload, MemberState, ServerMessage};
+    use nw_messages::{EntitySlots, SlotRead};
     use nw_reflect::Envelope;
 
+    use super::super::slots::FIRST_REMOTE_INTEREST;
     use super::*;
 
     const ENTITY: u64 = (1 << 34) + 7;
-    /// The group head before the members: the group integer and the member count.
-    const PAYLOAD_HEADER_BYTES: usize = 2;
+    const OWN: u64 = 9;
     const SUB_ID: u32 = 2;
+    const SEQUENCE: u64 = 4;
+    const MANY: u64 = 60;
+    const ALL_STOPS: usize = 1000;
 
-    fn card() -> MobCard {
-        MobCard {
-            entity: ENTITY,
-            position: Position {
-                x: 10.0,
-                y: 20.0,
-                z: 30.0,
-            },
+    fn at() -> Position {
+        Position {
+            x: 10.0,
+            y: 20.0,
+            z: 30.0,
         }
     }
 
+    fn reads(envelopes: &[Vec<u8>]) -> Vec<SlotRead> {
+        envelopes
+            .iter()
+            .map(|bytes| {
+                let envelope = Envelope::decode(bytes).expect("envelope");
+                let Some(Ok(ServerMessage::Bundle(bundle))) =
+                    ServerMessage::from_envelope(&envelope)
+                else {
+                    panic!("a bundle");
+                };
+                SlotRead::of(&bundle).expect("read")
+            })
+            .collect()
+    }
+
     #[test]
-    fn a_mob_sends_its_spawn_card_then_an_alc_position() {
-        let members = mob_members(&card(), true, SUB_ID);
-        let MemberState::GdeMetadata(spawn) = &members[0].state else {
-            panic!("the card comes first: {members:?}");
+    fn the_own_player_is_the_player_prefab_in_slot_1() {
+        let group = own_group(OWN, at(), true).expect("finite");
+        assert_eq!(group.interest, u64::from(LOCAL_PLAYER_INTEREST));
+        let MemberState::GdeMetadata(card) = &group.members[0].state else {
+            panic!("the card comes first: {group:?}");
         };
-        let asset = spawn.asset.expect("asset");
-        assert_eq!((asset.id, asset.sub_id), ([0; 16], SUB_ID));
-        let gde_ref = spawn.gde_ref.expect("ref");
-        assert_eq!(&gde_ref[..8], &[0; 8]);
+        assert_eq!(group.members[0].component, GDE_METADATA_COMPONENT);
+        assert_eq!(card.asset, Some(PLAYER_SLICE_ASSET));
+        assert_eq!(card.entity_number(), Some(OWN));
+        let empties: Vec<BundleMember> = player_empty_members().collect();
         assert_eq!(
-            u64::from_be_bytes(gde_ref[8..].try_into().expect("8")),
-            ENTITY
+            group.members[1..=empties.len()],
+            empties[..],
+            "every other player component gets an empty state with the card"
         );
-        let MemberState::Alc(alc) = &members[1].state else {
-            panic!("then the ALC position: {members:?}");
+        let last = group.members.last().expect("position");
+        assert_eq!(last.component, PLAYER_ALC_COMPONENT);
+        let MemberState::Alc(alc) = &last.state else {
+            panic!("then the ALC position: {group:?}");
         };
         assert_eq!(alc.pos10, InputPosition::from_metres(10.0, 20.0, 30.0));
-        assert!(members.iter().all(|member| member.u64_at_0 == ENTITY));
-        assert_eq!(
-            mob_members(&card(), false, SUB_ID).len(),
-            1,
-            "later only the ALC position, not the spawn card"
-        );
+        let later = own_group(OWN, at(), false).expect("finite");
+        assert_eq!(later.members.len(), 1, "later only the ALC position");
     }
 
     #[test]
-    fn the_alc_position_member_round_trips_in_a_bundle() {
-        let members = mob_members(&card(), true, SUB_ID);
-        let envelope = bundle(0, members).expect("bundle");
-        let envelope = Envelope::decode(&envelope).expect("envelope");
-        let Some(Ok(ServerMessage::Bundle(decoded))) = ServerMessage::from_envelope(&envelope)
-        else {
-            panic!("a bundle");
+    fn a_mob_group_carries_its_own_card() {
+        let group = entity_group(
+            FIRST_REMOTE_INTEREST,
+            ENTITY,
+            EntityKind::mob(SUB_ID),
+            at(),
+            true,
+        )
+        .expect("finite");
+        let MemberState::GdeMetadata(card) = &group.members[0].state else {
+            panic!("the card comes first: {group:?}");
         };
-        let payload = BundlePayload::decode(&decoded.payload).expect("payload");
-        let alc = payload.groups[0].members.iter().find_map(|member| match &member.state {
-            MemberState::Alc(alc) => Some(alc.clone()),
-            _ => None,
-        });
-        assert_eq!(
-            alc.and_then(|alc| alc.pos10),
-            InputPosition::from_metres(10.0, 20.0, 30.0)
-        );
+        let asset = card.asset.expect("asset");
+        assert_eq!((asset.id, asset.sub_id), ([0; GDE_ID_LEN], SUB_ID));
+        assert_eq!(card.entity_number(), Some(ENTITY));
+        assert_eq!(group.members[1].component, MOB_ALC_COMPONENT);
     }
 
     #[test]
-    fn bundles_split_by_bytes() {
-        let members: Vec<BundleMember> = (0..60)
-            .flat_map(|index| {
-                mob_members(
-                    &MobCard {
-                        entity: ENTITY + index,
-                        ..card()
-                    },
+    fn bundles_split_by_bytes_and_carry_the_stops() {
+        let mut slots = Slots::new();
+        let groups: Vec<BundleGroup> = (0..MANY)
+            .map(|index| {
+                let interest = slots.slot(ENTITY + index).expect("slot").interest;
+                entity_group(
+                    interest,
+                    ENTITY + index,
+                    EntityKind::mob(SUB_ID),
+                    at(),
                     true,
-                    SUB_ID,
                 )
+                .expect("finite")
             })
             .collect();
-        let envelopes = bundles(0, members.clone()).expect("bundles");
+        slots.keep_only(&[]);
+        let envelopes = bundles(SEQUENCE, &mut slots, groups).expect("bundles");
         assert!(envelopes.len() > 1);
-        let mut seen = 0;
-        for envelope in &envelopes {
-            let envelope = Envelope::decode(envelope).expect("envelope");
-            let Some(Ok(ServerMessage::Bundle(bundle))) = ServerMessage::from_envelope(&envelope)
-            else {
-                panic!("a bundle");
-            };
-            assert!(bundle.payload.len() <= MAX_BUNDLE_PAYLOAD_BYTES + PAYLOAD_HEADER_BYTES);
-            seen += BundlePayload::decode(&bundle.payload)
-                .expect("payload")
-                .groups[0]
-                .members
-                .len();
+        let reads = reads(&envelopes);
+        let mut entities = EntitySlots::default();
+        let mut seen = Vec::new();
+        let mut stopped = 0;
+        for mut read in reads {
+            stopped += read.stops.len();
+            entities.resolve(&mut read);
+            seen.extend(read.updates.iter().filter_map(|update| update.entity));
         }
-        assert_eq!(seen, members.len(), "every member once, in order");
+        let expected: Vec<u64> = (0..MANY).map(|index| ENTITY + index).collect();
+        assert_eq!(seen, expected, "every group once, in order");
+        assert_eq!(stopped, MANY as usize, "every stop goes out");
+        assert!(slots.take_stops(ALL_STOPS).is_empty());
+    }
+
+    #[test]
+    fn stops_without_groups_still_go_out() {
+        let mut slots = Slots::new();
+        slots.slot(ENTITY);
+        slots.keep_only(&[]);
+        let envelopes = bundles(SEQUENCE, &mut slots, Vec::new()).expect("bundles");
+        let reads = reads(&envelopes);
+        assert_eq!(reads.len(), 1);
+        assert_eq!(reads[0].stops, vec![FIRST_REMOTE_INTEREST]);
+        assert!(
+            bundles(SEQUENCE, &mut slots, Vec::new())
+                .expect("bundles")
+                .is_empty()
+        );
     }
 }

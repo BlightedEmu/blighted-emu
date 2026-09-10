@@ -468,7 +468,7 @@ mod tests {
             )
             .bytes(&body(&[POS10_CHILD], &[], 0));
         let position = crate::payload::BundleMember {
-            u64_at_0: ENTITY,
+            component: ENTITY,
             state: MemberState::Position(PositionInTheWorldReplicatedState {
                 position: WorldPosition::from_metres(1.0, 2.0, 3.0),
                 ..PositionInTheWorldReplicatedState::default()

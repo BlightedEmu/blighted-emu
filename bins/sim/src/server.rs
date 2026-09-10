@@ -1030,9 +1030,8 @@ mod tests {
     use nw_db::test_db::with_test_schema;
     use nw_db::{NewCharacter, WORLD_MIGRATOR, character_position, insert_character};
     use nw_messages::{
-        BundlePayload, DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, GDE_METADATA_TYPE_INDEX,
-        InputPosition, LOGIN_MESSAGE_TYPES, MemberState, POSITION_IN_THE_WORLD_TYPE_INDEX,
-        ServerMessage, VITALS_TYPE_INDEX,
+        ALC_TYPE_INDEX, DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, EntitySlots,
+        GDE_METADATA_TYPE_INDEX, InputPosition, LOGIN_MESSAGE_TYPES, ServerMessage, SlotRead,
     };
     use nw_reflect::TypeId;
     use nw_sim_core::test_support::NoGround;
@@ -1173,6 +1172,8 @@ mod tests {
         id: BusId,
         outputs: Subscription<OutputBatch>,
         waiting: VecDeque<(BusId, GatewayOutput)>,
+        /// The entity slots each connection saw so far.
+        entities: BTreeMap<u64, EntitySlots>,
         beats: JoinHandle<()>,
     }
 
@@ -1203,6 +1204,7 @@ mod tests {
                 id,
                 outputs,
                 waiting: VecDeque::new(),
+                entities: BTreeMap::new(),
                 beats,
             }
         }
@@ -1214,8 +1216,9 @@ mod tests {
             }
         }
 
-        /// The next output and the sim that sent it.
-        async fn next_from(&mut self) -> (BusId, GatewayOutput) {
+        /// The next output, the sim that sent it, and its bundles read with the slots its
+        /// connection saw so far.
+        async fn next_from(&mut self) -> (BusId, GatewayOutput, Vec<SlotRead>) {
             while self.waiting.is_empty() {
                 let batch = tokio::time::timeout(WAIT, self.outputs.next())
                     .await
@@ -1231,7 +1234,49 @@ mod tests {
                         .map(|output| (sim.clone(), output)),
                 );
             }
-            self.waiting.pop_front().expect("an output waits")
+            let (sim, output) = self.waiting.pop_front().expect("an output waits");
+            let reads = match &output {
+                GatewayOutput::ServerMessages {
+                    connection,
+                    channel: REPLICATION_CHANNEL,
+                    envelopes,
+                    ..
+                } => {
+                    let slots = self.entities.entry(*connection).or_default();
+                    envelopes
+                        .iter()
+                        .map(|envelope| {
+                            let mut read = read_bundle(envelope);
+                            slots.resolve(&mut read);
+                            read
+                        })
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
+            (sim, output, reads)
+        }
+
+        /// The next bundles (with their sender and connection) that `wanted` picks, within
+        /// [`WAIT`].
+        async fn until_bundles<T>(
+            &mut self,
+            mut wanted: impl FnMut(&BusId, u64, &[SlotRead]) -> Option<T>,
+        ) -> T {
+            let deadline = Instant::now() + WAIT;
+            loop {
+                assert!(Instant::now() < deadline, "no wanted bundles in time");
+                let (sim, output, reads) = self.next_from().await;
+                if let GatewayOutput::ServerMessages {
+                    connection,
+                    channel: REPLICATION_CHANNEL,
+                    ..
+                } = output
+                    && let Some(found) = wanted(&sim, connection, &reads)
+                {
+                    return found;
+                }
+            }
         }
 
         /// The next output (with its sender) that `wanted` picks, within [`WAIT`].
@@ -1242,7 +1287,7 @@ mod tests {
             let deadline = Instant::now() + WAIT;
             loop {
                 assert!(Instant::now() < deadline, "no wanted output in time");
-                let (sim, output) = self.next_from().await;
+                let (sim, output, _) = self.next_from().await;
                 if let Some(found) = wanted(sim, output) {
                     return found;
                 }
@@ -1266,14 +1311,8 @@ mod tests {
 
         /// The entity numbers of the next bundle that `sim` sends to `connection`.
         async fn bundle_from(&mut self, sim: &BusId, connection: u64) -> Vec<u64> {
-            self.until_from(|from, output| match output {
-                GatewayOutput::ServerMessages {
-                    connection: to,
-                    channel: REPLICATION_CHANNEL,
-                    envelopes,
-                    ..
-                } if from == *sim && to == connection => Some(members(&envelopes[0])),
-                _ => None,
+            self.until_bundles(|from, to, reads| {
+                (from == sim && to == connection).then(|| entities_in(&reads[0]))
             })
             .await
         }
@@ -1285,36 +1324,26 @@ mod tests {
         }
     }
 
-    /// The entity numbers and x positions of a bundle envelope.
-    fn member_positions(envelope: &[u8]) -> Vec<(u64, f32)> {
+    fn read_bundle(envelope: &[u8]) -> SlotRead {
         let envelope = Envelope::decode(envelope).expect("envelope");
         let Some(Ok(ServerMessage::Bundle(bundle))) = ServerMessage::from_envelope(&envelope)
         else {
             panic!("expected a bundle");
         };
-        BundlePayload::decode(&bundle.payload)
-            .expect("payload")
-            .groups
+        SlotRead::of(&bundle).expect("read")
+    }
+
+    /// The entity numbers of a bundle, in order.
+    fn entities_in(read: &SlotRead) -> Vec<u64> {
+        read.updates
             .iter()
-            .flat_map(|group| {
-                group
-                    .members
-                    .iter()
-                    .filter_map(|member| match &member.state {
-                        MemberState::Position(state) => {
-                            Some((member.u64_at_0, state.position.expect("position").x))
-                        }
-                        _ => None,
-                    })
-            })
+            .map(|update| update.entity.expect("every slot is tied"))
             .collect()
     }
 
-    fn members(envelope: &[u8]) -> Vec<u64> {
-        member_positions(envelope)
-            .into_iter()
-            .map(|(number, _)| number)
-            .collect()
+    /// The own x of a bundle.
+    fn own_x(read: &SlotRead) -> f32 {
+        read.local_player_position().expect("own position").x
     }
 
     /// The slots of `sims` from their heartbeats.
@@ -1429,24 +1458,17 @@ mod tests {
         .into()
     }
 
-    /// The entity numbers and class type indexes of the members of every bundle in `envelopes`.
-    fn member_classes(envelopes: &[Vec<u8>]) -> Vec<(u64, u64)> {
-        envelopes
+    /// The entity numbers and class type indexes of the members of every bundle in `reads`.
+    fn member_classes(reads: &[SlotRead]) -> Vec<(u64, u64)> {
+        reads
             .iter()
-            .flat_map(|bytes| {
-                let envelope = Envelope::decode(bytes).expect("envelope");
-                let Some(Ok(ServerMessage::Bundle(bundle))) =
-                    ServerMessage::from_envelope(&envelope)
-                else {
-                    panic!("expected a bundle");
-                };
-                BundlePayload::decode(&bundle.payload)
-                    .expect("payload")
-                    .groups
-                    .into_iter()
-                    .flat_map(|group| group.members)
-                    .map(|member| (member.u64_at_0, member.state.type_index()))
-                    .collect::<Vec<_>>()
+            .flat_map(|read| &read.updates)
+            .flat_map(|update| {
+                let entity = update.entity.expect("every slot is tied");
+                update
+                    .members
+                    .iter()
+                    .map(move |member| (entity, member.state.type_index()))
             })
             .collect()
     }
@@ -1457,17 +1479,12 @@ mod tests {
         mut wanted: impl FnMut(&[(u64, u64)]) -> bool,
     ) -> Vec<(u64, u64)> {
         gateway
-            .until(|output| match output {
-                GatewayOutput::ServerMessages {
-                    connection: CONNECTION,
-                    channel: REPLICATION_CHANNEL,
-                    envelopes,
-                    ..
-                } => {
-                    let classes = member_classes(&envelopes);
-                    wanted(&classes).then_some(classes)
+            .until_bundles(|_, connection, reads| {
+                if connection != CONNECTION {
+                    return None;
                 }
-                _ => None,
+                let classes = member_classes(reads);
+                wanted(&classes).then_some(classes)
             })
             .await
     }
@@ -1535,11 +1552,10 @@ mod tests {
                 classes.contains(&(mob, GDE_METADATA_TYPE_INDEX))
             })
             .await;
-            assert!(first.contains(&(mob, VITALS_TYPE_INDEX)), "{first:?}");
-            assert!(first.contains(&(mob, POSITION_IN_THE_WORLD_TYPE_INDEX)));
+            assert!(first.contains(&(mob, ALC_TYPE_INDEX)), "{first:?}");
             // The card comes again once per second of bundles; between, the mob is its position.
             bundle_classes(&mut gateway, |classes| {
-                classes.contains(&(mob, POSITION_IN_THE_WORLD_TYPE_INDEX))
+                classes.contains(&(mob, ALC_TYPE_INDEX))
                     && !classes.contains(&(mob, GDE_METADATA_TYPE_INDEX))
             })
             .await;
@@ -1690,16 +1706,8 @@ mod tests {
             let target = BORDER_X + STEP_M;
             input(&bus, world_id, sim.id(), &move_to(connection, target)).await;
             gateway
-                .until(|output| match output {
-                    GatewayOutput::ServerMessages {
-                        channel: REPLICATION_CHANNEL,
-                        envelopes,
-                        ..
-                    } => {
-                        let own_x = member_positions(&envelopes[0])[0].1;
-                        ((own_x - target).abs() < MOVE_TOLERANCE_M).then_some(())
-                    }
-                    _ => None,
+                .until_bundles(|_, _, reads| {
+                    ((own_x(&reads[0]) - target).abs() < MOVE_TOLERANCE_M).then_some(())
                 })
                 .await;
             sim.stop().await;
@@ -1835,16 +1843,9 @@ mod tests {
                 .await;
             assert_eq!(again, (east.clone(), FIRST_HANDOFF));
             pair.gateway
-                .until_from(|sim, output| match output {
-                    GatewayOutput::ServerMessages {
-                        channel: REPLICATION_CHANNEL,
-                        envelopes,
-                        ..
-                    } if sim == east => {
-                        let own_x = member_positions(&envelopes[0])[0].1;
-                        ((own_x - further).abs() < MOVE_TOLERANCE_M).then_some(())
-                    }
-                    _ => None,
+                .until_bundles(|sim, _, reads| {
+                    (*sim == east && (own_x(&reads[0]) - further).abs() < MOVE_TOLERANCE_M)
+                        .then_some(())
                 })
                 .await;
             let left = SimInput::Left { connection };
@@ -2157,14 +2158,8 @@ mod tests {
     /// The own x of the next bundle of `sim` for the test's connection.
     async fn own_x_from(gateway: &mut TestGateway, sim: &BusId) -> f32 {
         gateway
-            .until_from(|from, output| match output {
-                GatewayOutput::ServerMessages {
-                    connection: CONNECTION,
-                    channel: REPLICATION_CHANNEL,
-                    envelopes,
-                    ..
-                } if from == *sim => Some(member_positions(&envelopes[0])[0].1),
-                _ => None,
+            .until_bundles(|from, connection, reads| {
+                (from == sim && connection == CONNECTION).then(|| own_x(&reads[0]))
             })
             .await
     }
@@ -2220,6 +2215,8 @@ mod tests {
                 move_age_ms: 0,
                 budget_m: 0.0,
                 bundles_sent: 0,
+                slots: Vec::new(),
+                pending_stops: Vec::new(),
                 time_synch_age_ms: 0,
                 handoffs: FIRST_HANDOFF,
                 health: TEST_PLAYER_HEALTH,

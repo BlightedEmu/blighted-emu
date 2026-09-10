@@ -12,11 +12,11 @@
 //! test client knows which bundle member it is.
 
 use nw_messages::{
-    Block1415acc30, CalendarConnectedMsg, ClientAddEntryMsg, ConnectedBody, MessageError,
-    OBSERVED_DAY_PHASE, OBSERVED_TIME_CHANGE_F32S_AT_16, OBSERVED_TIME_CHANGE_F32S_AT_60,
-    LevelInfoChangedMsg, OBSERVED_TIME_CHANGE_U32S_AT_28, PlayerManagerSelfIdentificationMsg,
-    RAW_ID_LEN, ReceivePlayerSpawnPointMsg, ServerMessage, SyncDayPhaseMsg, SyncTimeChangeMsg,
-    TimeSynchMsg, TimingConfigurationConnectedMsg,
+    Block1415acc30, CalendarConnectedMsg, ClientAddEntryMsg, ConnectedBody, LevelInfoChangedMsg,
+    MessageError, OBSERVED_DAY_PHASE, OBSERVED_TIME_CHANGE_F32S_AT_16,
+    OBSERVED_TIME_CHANGE_F32S_AT_60, OBSERVED_TIME_CHANGE_U32S_AT_28,
+    PlayerManagerSelfIdentificationMsg, RAW_ID_LEN, ReceivePlayerSpawnPointMsg, ServerMessage,
+    SyncDayPhaseMsg, SyncTimeChangeMsg, TimeSynchMsg, TimingConfigurationConnectedMsg,
 };
 
 /// The `clientCtx` id of `LevelInfoChangedMsg`. The client stores it and expects every state
@@ -130,7 +130,7 @@ pub fn login_messages(
             f32s_at_60: OBSERVED_TIME_CHANGE_F32S_AT_60,
         }),
         ServerMessage::DayPhase(SyncDayPhaseMsg {
-            u64_at_0: world.day_phase_ids[0],
+            component: world.day_phase_ids[0],
             u64_at_8: world.day_phase_ids[1],
             u32_at_16: OBSERVED_DAY_PHASE,
         }),

@@ -367,8 +367,8 @@ pub async fn run_pair(
 
 #[cfg(test)]
 mod tests {
-    use nw_messages::test_support::login_samples;
-    use nw_messages::{ReplicatedStateBundle, ServerMessage};
+    use nw_messages::ServerMessage;
+    use nw_messages::test_support::{login_samples, players_bundle};
     use nw_reflect::{Envelope, TypeId};
 
     use super::*;
@@ -432,7 +432,7 @@ mod tests {
                 positions.push((other, *position));
             }
             let sequence = u64::try_from(step).expect("small");
-            let bundle = ReplicatedStateBundle::of_positions(sequence, &positions).expect("bundle");
+            let bundle = players_bundle(sequence, own, &positions);
             messages.push(received(BUNDLE_CHANNEL, &ServerMessage::Bundle(bundle)));
         }
         let view = WorldView::from_messages(&messages).expect("view");
