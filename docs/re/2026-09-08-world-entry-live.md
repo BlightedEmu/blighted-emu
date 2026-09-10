@@ -280,6 +280,33 @@ next test.
 4. Match the bundle replication sequence the client expects
    (m_lastUnreliableReplicationSeq).
 
+## Capture-diff of the mob members (2026-09-08): wrong member composition
+
+Compared our `mob_members` (bins/sim/src/world/members.rs) to the real bundle
+member-class frequencies in docs/re/2026-09-02-replication-and-movement.md
+("Twenty most common classes"):
+- Real mob bundles are dominated by `ALCReplicatedState` (type 11): 4,669,175
+  reached member headers, common single-member body 5 or 9 bytes. We do NOT emit
+  ALC for mobs.
+- We emit `VitalsComponentReplicatedState` (type 15) for every mob, but type 15
+  is NOT in the real top-20 member classes at all (the capture walk never reached
+  a type-15 member), and docs/re/2026-09-04-m6-vitals-state.md states its wire
+  slot layout was never pinned ("the byte offset of current health inside a type
+  15 body is not fixed by the static image"). So our type-15 member is an
+  unvalidated guess the real client cannot decode -> its reader overruns -> the
+  next member's type-id reads as garbage (index 13690) -> whole bundle read
+  aborts. This is the desync.
+- GDE metadata (type 10): real median body ~281 bytes vs our ~37 (fewer children
+  set) — plausibly fine structurally but also never validated against the client.
+
+Conclusion: the mob-member set/layout we send was invented in M6 and never
+validated against the real client. Proper fix = represent mobs with the members
+retail actually sends (GDE spawn card + ALC per-tick state), with layouts matched
+byte-for-byte to captures; drop the type-15 vitals member from the bundle path.
+This is a real RE/impl chunk (finishing the M6 bundle wire format). The player's
+own member is position (type 13), which IS validated — so the NW_POSITIONS_ONLY
+test should still spawn the player without any mob members.
+
 ## How the live test runs
 
 `scripts/live-stack.sh` forces edge to 8443 for `nw-testclient`. The real
