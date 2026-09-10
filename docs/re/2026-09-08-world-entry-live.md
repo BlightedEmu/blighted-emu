@@ -307,6 +307,67 @@ This is a real RE/impl chunk (finishing the M6 bundle wire format). The player's
 own member is position (type 13), which IS validated — so the NW_POSITIONS_ONLY
 test should still spawn the player without any mob members.
 
+## Spawn condition traced 2026-09-08 (evening): no local player entity
+
+Live retest after the sequence fix (`65706af`): the client still reaches
+`WaitingForPlayerSpawn` and loops `OnLocalNetworkConnectionWarning`.
+
+**Observed (Ghidra, read-only).** The `WaitingForPlayerSpawn -> InGame` poll in
+`FUN_14644a070` calls `FUN_141026080`, an `AZ::Interface` getter. Its type
+descriptor (`0x14a13c610`) names `.?AVPlayerRegistry@Javelin@@`. The poll needs
+`PlayerRegistry` virtual `+0x30` to return non-zero.
+
+**Observed.** `FUN_1468760d0` logs
+`PlayerComponentClientFacet::OnEnable(MB::EnableReason /*reason*/)`. When its
+own virtual `+0xe8` returns non-zero, it calls `PlayerRegistry` virtual `+0x10`
+with its entity (`FUN_14100a7a0` is the same registry getter).
+
+**Inferred.** `+0x10` sets the local player and `+0x30` returns it. The client
+sets the local player only when an entity with a `PlayerComponent` client facet
+is enabled and that facet reports local.
+
+**Observed.** `FUN_141717fc0` is the per-entity state handler. It starts an
+entity portrayal only from GDE metadata (`StartPortrayingGDE`). One branch logs
+`Received new local player metadata, updating m_localPlayersServerGDERef.` It
+takes that branch when its `interestId` argument is 1 and a check on the entity
+object (`+0x850`, virtual `+0x20`) is true.
+
+**Observed (captures, scratch walk, no bytes printed).** In
+`NH-MSQ-10.2-Quest` each world change (1635) is followed on channel 1 by a
+RELIABLE bundle of about 38 KB, then reliable bundles of about 8.5 KB. The
+first member class differs per change (1528, 5606, 3752, 3857), so the
+project's member walk stops at once (no reader). The local player's key gets
+only type 11 (ALC) members in the reachable stream (never type 13).
+
+**Observed (captures, scratch walk, counts only).** The bundle group integer is
+the entity slot (`interestId`); the member's first integer is a component index
+(spawn card 0, own-player ALC 16, mob ALC 4 or 5). The own player's ALC is in
+group 1 on every bundle of `NH-MSQ-10.2-Quest`. Over 80 sessions, 430 of 465
+spawn cards with the player prefab (reached in a bundle's first group) are in
+group 1, and 1,322 of about 1,340 bundles above 20 KB start with group 1. The
+header index block lists stopped slots (stop count equals list length in every
+captured bundle). The player prefab is `slices/player.dynamicslice` (catalog
+record size 367,528 bytes, sub id 2); its GUID is on 464 captured cards.
+
+**Corrected.** first-light `info/nw-login-safe-20260502-153840/handoff-notes.md`
+names `interest=91` as the local-player record. The counts above put the own
+player in slot 1. Its fragment list for that record (3935, 4236, 3147, 4878,
+603, 11, 3152, 899, 1528, 10, 3312, 5620, 3183) is still the best list of the
+components a full player entity carries.
+
+**Conclusion.** The sim never makes the player's own entity exist on the
+client. It sends a type-13 position member for a key the client never
+portrayed. Next work:
+1. Send the player's own entity as a GDE metadata member (interest 1) with the
+   player prefab asset, so the client portrays it and the `PlayerComponent`
+   facet enables. The player asset id is Unknown. Candidate source: the game
+   asset catalog, not the captures.
+2. Learn what the facet virtual `+0xe8` (is-local) checks. Candidate:
+   `m_localPlayersServerGDERef` set by the branch above.
+3. Learn which members of the 38 KB entry bundle the facet needs
+   (`PlayerComponentReplicatedState` 3935 is the candidate).
+4. Send the player's own per-tick state as ALC (type 11), as retail does.
+
 ## How the live test runs
 
 `scripts/live-stack.sh` forces edge to 8443 for `nw-testclient`. The real
