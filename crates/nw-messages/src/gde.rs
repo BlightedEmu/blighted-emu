@@ -148,9 +148,11 @@ mod tests {
         assert_eq!(card.asset, Some(PLAYER_SLICE_ASSET));
         assert_eq!(card.entity_number(), Some(NUMBER));
         assert_eq!(round(&card), card);
+        let mut foreign_id = [7; GDE_ID_LEN];
+        foreign_id[0] = 8;
         let foreign = GdeMetadataReplicatedState {
             asset: None,
-            gde_ref: Some([7; GDE_ID_LEN]),
+            gde_ref: Some(foreign_id),
         };
         assert_eq!(foreign.entity_number(), None);
     }

@@ -65,7 +65,8 @@ pub use gde::{
 pub use level_info::{LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, LevelInfoChangedMsg, PhasingEntry};
 pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, MemberState};
 pub use player_components::{
-    EmptyState, PLAYER_EMPTY_COMPONENTS, empty_state, player_empty_members,
+    EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS, PlayerComponentState,
+    empty_state, player_empty_members,
 };
 pub use position::{
     POSITION_IN_THE_WORLD_TYPE_INDEX, POSITION_Z_MAX, POSITION_Z_MIN,

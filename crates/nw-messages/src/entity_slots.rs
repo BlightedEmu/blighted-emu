@@ -115,7 +115,14 @@ impl EntitySlots {
         stopped
     }
 
-    /// The entity of `interest`, when a card tied it.
+    /// Ties `interest` to `entity` without a spawn card: type 164 names the local player's
+    /// entity, and slot [`LOCAL_PLAYER_INTEREST`] holds that player even when the card knob is
+    /// off (local-player-check note).
+    pub fn bind(&mut self, interest: u16, entity: u64) {
+        self.entities.insert(interest, entity);
+    }
+
+    /// The entity of `interest`, when a card or [`Self::bind`] tied it.
     pub fn entity(&self, interest: u16) -> Option<u64> {
         self.entities.get(&interest).copied()
     }
@@ -132,6 +139,7 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::Stamina(_)
         | MemberState::CombatStatus(_)
         | MemberState::DelayedEvent(_)
+        | MemberState::PlayerComponent(_)
         | MemberState::Empty(_) => None,
     }
 }
@@ -215,5 +223,18 @@ mod tests {
         assert_eq!(slots.resolve(&mut stopped), vec![MOB]);
         assert_eq!(slots.entity(MOB_SLOT), None);
         assert_eq!(slots.entity(LOCAL_PLAYER_INTEREST), Some(OWN));
+    }
+
+    #[test]
+    fn a_bind_ties_the_local_slot_without_a_card() {
+        let mut slots = EntitySlots::default();
+        slots.bind(LOCAL_PLAYER_INTEREST, OWN);
+        let mut later = read(
+            Vec::new(),
+            vec![group(LOCAL_PLAYER_INTEREST, vec![alc_at(1.0)])],
+        );
+        slots.resolve(&mut later);
+        assert_eq!(later.updates[0].entity, Some(OWN));
+        assert_eq!(later.updates[0].card, None);
     }
 }

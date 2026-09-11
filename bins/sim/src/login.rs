@@ -8,8 +8,8 @@
 //!
 //! Every id field holds a value this server chooses; no byte comes from a capture. The meaning of
 //! most of these ids in the retail service is Unknown. One choice is ours alone: the entry id of
-//! `ClientAddEntryMsg` holds the player's entity number ([`ClientAddEntryMsg::for_entity`]), so a
-//! test client knows which bundle member it is.
+//! `ClientAddEntryMsg` and the first presence of `PlayerManagerSelfIdentificationMsg` hold the
+//! player's entity number, the same 16 bytes as the spawn-card GdeRef (local-player-check note).
 
 use nw_messages::{
     Block1415acc30, CalendarConnectedMsg, ClientAddEntryMsg, ConnectedBody, LevelInfoChangedMsg,
@@ -118,7 +118,7 @@ pub fn login_messages(
             block_at_0: world.calendar_block,
             block_at_36: session_block,
         })),
-        ServerMessage::SelfIdentification(PlayerManagerSelfIdentificationMsg),
+        ServerMessage::SelfIdentification(PlayerManagerSelfIdentificationMsg::for_entity(entity)),
         ServerMessage::ClientAddEntry(ClientAddEntryMsg::for_entity(entity)),
         ServerMessage::PlayerSpawnPoint(ReceivePlayerSpawnPointMsg),
         ServerMessage::TimeSynch(TimeSynchMsg { time: server_time }),
@@ -193,6 +193,17 @@ mod tests {
             panic!("expected the entry message");
         };
         assert_eq!(message.entity_number(), Some(ENTITY));
+        let ident_slot = LOGIN_MESSAGE_TYPES
+            .iter()
+            .position(|&type_index| type_index == PlayerManagerSelfIdentificationMsg::TYPE_INDEX)
+            .expect("the identification message is in the login order");
+        let ident = Envelope::decode(&envelopes[ident_slot]).expect("ident");
+        let Some(Ok(ServerMessage::SelfIdentification(ident))) =
+            ServerMessage::from_envelope(&ident)
+        else {
+            panic!("expected the identification message");
+        };
+        assert_eq!(ident.character_id, message.entry_id);
     }
 
     #[test]

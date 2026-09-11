@@ -1031,7 +1031,8 @@ mod tests {
     use nw_db::{NewCharacter, WORLD_MIGRATOR, character_position, insert_character};
     use nw_messages::{
         ALC_TYPE_INDEX, DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, EntitySlots,
-        GDE_METADATA_TYPE_INDEX, InputPosition, LOGIN_MESSAGE_TYPES, ServerMessage, SlotRead,
+        GDE_METADATA_TYPE_INDEX, InputPosition, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
+        ServerMessage, SlotRead,
     };
     use nw_reflect::TypeId;
     use nw_sim_core::test_support::NoGround;
@@ -1094,11 +1095,15 @@ mod tests {
 
     fn settings(world_id: Uuid, name: &str) -> LoopSettings {
         let config = committed();
+        let mut world = config.world_settings(bounds()).expect("world settings");
+        // The live path under test: own player card on, other entities held until the client
+        // sends movement (local-player-check note).
+        world.local_player_card = true;
         LoopSettings {
             sim_id: id(name),
             world_id,
             level: LEVEL.to_owned(),
-            world: config.world_settings(bounds()).expect("world settings"),
+            world,
             handoff_timeout: Duration::from_millis(config.handoff_timeout_ms),
             forward_ttl_ms: config.forward_ttl_ms,
             save_interval: SAVE_INTERVAL,
@@ -1251,6 +1256,31 @@ mod tests {
                             read
                         })
                         .collect()
+                }
+                GatewayOutput::ServerMessages {
+                    connection,
+                    channel: MESSAGE_CHANNEL,
+                    envelopes,
+                    ..
+                } => {
+                    for envelope in envelopes {
+                        let Ok(envelope) = Envelope::decode(envelope) else {
+                            continue;
+                        };
+                        let Some(Ok(ServerMessage::ClientAddEntry(entry))) =
+                            ServerMessage::from_envelope(&envelope)
+                        else {
+                            continue;
+                        };
+                        let Some(entity) = entry.entity_number() else {
+                            continue;
+                        };
+                        self.entities
+                            .entry(*connection)
+                            .or_default()
+                            .bind(LOCAL_PLAYER_INTEREST, entity);
+                    }
+                    Vec::new()
                 }
                 _ => Vec::new(),
             };
@@ -1422,6 +1452,17 @@ mod tests {
         }
     }
 
+    /// Ends spawn protection: the first movement is how a real client marks itself in-game.
+    async fn spawn_client(
+        bus: &Bus,
+        world_id: Uuid,
+        sim: &BusId,
+        connection: ConnectionRef,
+        x: f32,
+    ) {
+        input(bus, world_id, sim, &move_to(connection, x)).await;
+    }
+
     /// A position-only input to `x`.
     fn move_to(connection: ConnectionRef, x: f32) -> SimInput {
         let target = InputPosition::from_metres(x, Y, Z).expect("finite");
@@ -1547,6 +1588,14 @@ mod tests {
             let tables = publish_tables(&bus, world_id, slots(&bus, world_id, &[sim.id()]).await);
             let player = admit_at(gateway.connection(CONNECTION), ada, MOB_X + 2.0);
             admit(&bus, world_id, sim.id(), &player).await;
+            spawn_client(
+                &bus,
+                world_id,
+                sim.id(),
+                gateway.connection(CONNECTION),
+                MOB_X + 2.0,
+            )
+            .await;
             let mob = mob_entity(0);
             let first = bundle_classes(&mut gateway, |classes| {
                 classes.contains(&(mob, GDE_METADATA_TYPE_INDEX))
@@ -1589,6 +1638,14 @@ mod tests {
             let tables = publish_tables(&bus, world_id, slots(&bus, world_id, &[sim.id()]).await);
             let player = admit_at(gateway.connection(CONNECTION), ada, PLAYER_X);
             admit(&bus, world_id, sim.id(), &player).await;
+            spawn_client(
+                &bus,
+                world_id,
+                sim.id(),
+                gateway.connection(CONNECTION),
+                PLAYER_X,
+            )
+            .await;
             let mob = mob_entity(0);
             bundle_classes(&mut gateway, |classes| {
                 classes.contains(&(mob, GDE_METADATA_TYPE_INDEX))
@@ -1899,6 +1956,14 @@ mod tests {
             let tables = publish_tables(&bus, world_id, slots(&bus, world_id, &[sim.id()]).await);
             let player = admit_at(gateway.connection(CONNECTION), ada, PLAYER_X);
             admit(&bus, world_id, sim.id(), &player).await;
+            spawn_client(
+                &bus,
+                world_id,
+                sim.id(),
+                gateway.connection(CONNECTION),
+                PLAYER_X,
+            )
+            .await;
             let saved = saved_position(db, ada.1).await;
             assert!(
                 (saved.x - f64::from(PLAYER_X)).abs() < SAVE_TOLERANCE_M,
@@ -1950,6 +2015,14 @@ mod tests {
             let ada = character(db).await;
             let west_player = admit_at(pair.gateway.connection(CONNECTION), ada, BORDER_X - 1.0);
             admit(&pair.bus, pair.world_id, pair.west.id(), &west_player).await;
+            spawn_client(
+                &pair.bus,
+                pair.world_id,
+                pair.west.id(),
+                pair.gateway.connection(CONNECTION),
+                BORDER_X - 1.0,
+            )
+            .await;
             let saved = saved_position(db, ada.1).await;
             assert!(
                 (saved.x - f64::from(BORDER_X - 1.0)).abs() < SAVE_TOLERANCE_M,
@@ -1981,7 +2054,23 @@ mod tests {
                 )
             };
             admit(&bus, world_id, pair.west.id(), &west_player).await;
+            spawn_client(
+                &bus,
+                world_id,
+                pair.west.id(),
+                pair.gateway.connection(CONNECTION),
+                BORDER_X - CROSSING_M,
+            )
+            .await;
             admit(&bus, world_id, pair.east.id(), &east_player).await;
+            spawn_client(
+                &bus,
+                world_id,
+                pair.east.id(),
+                pair.gateway.connection(CONNECTION + 1),
+                BORDER_X + CROSSING_M,
+            )
+            .await;
             let east = pair.east.id().clone();
             let seen = async {
                 loop {

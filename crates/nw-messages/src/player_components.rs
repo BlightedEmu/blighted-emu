@@ -3,8 +3,9 @@
 //! A member's component index picks the component of the portrayed entity that takes the state
 //! (`FUN_14167beb0`). When the player prefab is portrayed with no state for its other components,
 //! the real client crashes while it applies the cached states. So the player's group carries one
-//! state for every replicated component: the spawn card, the position, and an empty state ("no
-//! slot set") for each component below.
+//! state for every replicated component: the spawn card, the position, a connected type-3935
+//! `PlayerComponentReplicatedState`, and an empty state ("no slot set") for each other component
+//! below.
 //!
 //! The table is the client's own fragment log of a captured session (`NH-MSQ-10`, 2026-09-16):
 //! every member of slot 1 it decoded, as (component index, class type index). All of these
@@ -16,11 +17,27 @@ use crate::components::{
     COMBAT_STATUS_TYPE_INDEX, CombatStatusState, STAMINA_TYPE_INDEX, StaminaState,
 };
 use crate::payload::{BundleMember, MemberState};
+use crate::slots::{children_mask, read_children, read_slot_byte, write_children};
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsState};
-use crate::wire::{MessageError, Reader, Writer};
+use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
 
+/// Type index of `MB::PlayerComponentReplicatedState`.
+pub const PLAYER_COMPONENT_TYPE_INDEX: u64 = 3935;
 /// The empty slot byte of a generic-reader body.
 const NO_SLOT: u8 = 0;
+/// Slots of type 3935: base slot 0 plus two add-slot calls (`FUN_146713160`).
+const PLAYER_COMPONENT_SLOTS: u8 = 3;
+/// Slot-byte bit for slot 2 (packet `group1`: `characterId`, `playerConnected`, …).
+const SLOT_2_BIT: u8 = 0b100;
+/// Children registered on slot 2, in constructor order.
+const SLOT_2_CHILDREN: u8 = 9;
+/// Slot 2 child 0: `characterId` (presence `FUN_14087ac50`).
+const CHILD_CHARACTER_ID: u16 = 1 << 0;
+/// Slot 2 child 3: `playerConnected` (one boolean byte, `FUN_1417b4c20`).
+const CHILD_PLAYER_CONNECTED: u16 = 1 << 3;
+/// Presence flag bit 0: take the fixed 16-byte path (`FUN_14087ac50`).
+const PRESENCE_FLAG_FIXED: u8 = 0x01;
+const FIELD: &str = "player component";
 
 /// (component index, class type index) of each replicated component of the player prefab, other
 /// than the spawn card and the position.
@@ -123,6 +140,100 @@ impl EmptyState {
     }
 }
 
+/// `MB::PlayerComponentReplicatedState` (type 3935, component 9). Slot 2 holds
+/// `characterId` and `playerConnected` (local-player-check note). Other slot-2 children and
+/// slots 0 and 1 are not encoded here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlayerComponentState {
+    /// Slot 2 child 0: the 16-byte character id, when sent.
+    pub character_id: Option<[u8; RAW_ID_LEN]>,
+    /// Slot 2 child 3: whether this player is connected, when sent.
+    pub player_connected: Option<bool>,
+}
+
+impl PlayerComponentState {
+    /// The first body of a local player: `characterId` is `id`, `playerConnected` is true.
+    pub const fn connected(id: [u8; RAW_ID_LEN]) -> Self {
+        Self {
+            character_id: Some(id),
+            player_connected: Some(true),
+        }
+    }
+
+    /// Reads the state from the bundle path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the body ends early, sets slot 0 or 1, or sets a slot-2
+    /// child this reader does not size.
+    pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let slots = read_slot_byte(reader, FIELD, PLAYER_COMPONENT_SLOTS)?;
+        if slots & !SLOT_2_BIT != 0 {
+            return Err(MessageError::Unsized {
+                field: FIELD,
+                byte: slots,
+            });
+        }
+        if slots & SLOT_2_BIT == 0 {
+            return Ok(Self::default());
+        }
+        let children = read_children(reader, FIELD, SLOT_2_CHILDREN)?;
+        let known = CHILD_CHARACTER_ID | CHILD_PLAYER_CONNECTED;
+        if children & !known != 0 {
+            return Err(MessageError::Unsized {
+                field: FIELD,
+                byte: children as u8,
+            });
+        }
+        let character_id = (children & CHILD_CHARACTER_ID != 0)
+            .then(|| read_presence_id(reader))
+            .transpose()?;
+        let player_connected = (children & CHILD_PLAYER_CONNECTED != 0)
+            .then(|| reader.boolean())
+            .transpose()?;
+        Ok(Self {
+            character_id,
+            player_connected,
+        })
+    }
+
+    /// Writes the state for the bundle path. A slot without a known child is not sent.
+    pub fn write(&self, writer: &mut Writer) {
+        let character_id = self.character_id;
+        let player_connected = self.player_connected;
+        let children = children_mask(&[
+            character_id.is_some(),
+            false,
+            false,
+            player_connected.is_some(),
+        ]);
+        if children == 0 {
+            writer.u8(NO_SLOT);
+            return;
+        }
+        writer.u8(SLOT_2_BIT);
+        write_children(writer, children, SLOT_2_CHILDREN);
+        if let Some(id) = character_id {
+            writer.u8(PRESENCE_FLAG_FIXED).bytes(&id);
+        }
+        if let Some(connected) = player_connected {
+            writer.boolean(connected);
+        }
+    }
+}
+
+/// Reads one presence id (`FUN_14087ac50`): a flag byte whose bit 0 must be set, then 16 bytes.
+fn read_presence_id(reader: &mut Reader<'_>) -> Result<[u8; RAW_ID_LEN], MessageError> {
+    let flag = reader.u8()?;
+    if flag & PRESENCE_FLAG_FIXED == 0 {
+        return Err(MessageError::BadTag {
+            field: "PlayerComponentReplicatedState characterId flag",
+            tag: flag,
+        });
+    }
+    reader.raw_id()
+}
+
 /// The empty state of player component `class`: the default of a class with its own reader here
 /// (it writes the same single slot byte of 0), else an [`EmptyState`].
 pub fn empty_state(class: u64) -> MemberState {
@@ -130,6 +241,9 @@ pub fn empty_state(class: u64) -> MemberState {
         VITALS_TYPE_INDEX => MemberState::Vitals(VitalsState::default()),
         STAMINA_TYPE_INDEX => MemberState::Stamina(StaminaState::default()),
         COMBAT_STATUS_TYPE_INDEX => MemberState::CombatStatus(CombatStatusState::default()),
+        PLAYER_COMPONENT_TYPE_INDEX => {
+            MemberState::PlayerComponent(PlayerComponentState::default())
+        }
         _ => MemberState::Empty(EmptyState { class }),
     }
 }
@@ -147,7 +261,10 @@ pub fn player_empty_members() -> impl Iterator<Item = BundleMember> {
 fn has_own_reader(class: u64) -> bool {
     matches!(
         class,
-        VITALS_TYPE_INDEX | STAMINA_TYPE_INDEX | COMBAT_STATUS_TYPE_INDEX
+        VITALS_TYPE_INDEX
+            | STAMINA_TYPE_INDEX
+            | COMBAT_STATUS_TYPE_INDEX
+            | PLAYER_COMPONENT_TYPE_INDEX
     )
 }
 
@@ -186,9 +303,38 @@ mod tests {
             !EmptyState::covers(VITALS_TYPE_INDEX),
             "vitals has its own reader"
         );
+        assert!(
+            !EmptyState::covers(PLAYER_COMPONENT_TYPE_INDEX),
+            "player component has its own reader"
+        );
         let mut reader = Reader::new(&[1]);
         assert!(matches!(
             EmptyState::read(class, &mut reader),
+            Err(MessageError::Unsized { .. })
+        ));
+    }
+
+    #[test]
+    fn a_connected_player_component_round_trips() {
+        const ID: [u8; RAW_ID_LEN] = [9; RAW_ID_LEN];
+        let state = PlayerComponentState::connected(ID);
+        let mut writer = Writer::new();
+        state.write(&mut writer);
+        let bytes = writer.finish();
+        assert_eq!(bytes.first(), Some(&SLOT_2_BIT));
+        let mut reader = Reader::new(&bytes);
+        let read = PlayerComponentState::read(&mut reader).expect("read");
+        reader.finish().expect("to the end");
+        assert_eq!(read, state);
+        assert_eq!(read.player_connected, Some(true));
+        assert_eq!(read.character_id, Some(ID));
+    }
+
+    #[test]
+    fn slot_1_of_a_player_component_stops_the_walk() {
+        let mut reader = Reader::new(&[0b010]);
+        assert!(matches!(
+            PlayerComponentState::read(&mut reader),
             Err(MessageError::Unsized { .. })
         ));
     }

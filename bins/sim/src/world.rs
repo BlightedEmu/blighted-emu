@@ -60,6 +60,12 @@ pub const REPLICATION_CHANNEL: u8 = 1;
 /// its own running sequence (see [`SimWorld::take`]).
 const FIRST_LOGIN_BUNDLE_SEQUENCE: u64 = 2;
 
+/// Wait after a fresh login before the one-time own spawn card goes out. The card is sent once
+/// before the client spawns (see [`Neighbourhood`]); a card sent on the login tick reaches the
+/// client before it has applied `LevelInfoChanged` (channel 0), so the client drops it as a
+/// bundle "for a previous ClientContext", never loads the level, and never moves to spawn.
+const OWN_CARD_DELAY_MS: u64 = 1_000;
+
 /// Debug bisection knob (env `NW_RELIABLE_BUNDLES`): send the replication bundles reliably on
 /// channel 1 instead of unreliably. Off by default; used to test a client that ignores our
 /// unreliable channel-1 frames. The name is outside the `NW_SIM_` prefix on purpose, because the
@@ -71,10 +77,10 @@ fn reliable_bundles() -> bool {
 }
 
 /// Work-in-progress knob (env `NW_LOCAL_PLAYER_CARD`): send the client its own player as a spawn
-/// card (player prefab, slot 1) with the empty states of the other player components. The real
-/// client then portrays its player but crashes while it merges the record (player-component
-/// note), so this is off by default: without the card the client loads the level and waits at
-/// `WaitingForPlayerSpawn`. Read once.
+/// card (player prefab, slot 1) with a connected type-3935 state and empty states of the other
+/// player components (local-player-check note). Off by default until a live InGame check passes.
+/// Overnight 2026-09-10: do not make this return true. Without the card the client loads the
+/// level and waits at `WaitingForPlayerSpawn`. Read once.
 pub(crate) fn local_player_card() -> bool {
     use std::sync::OnceLock;
     static CARD: OnceLock<bool> = OnceLock::new();
@@ -258,6 +264,8 @@ struct Player {
     slots: Slots,
     /// Whether the own spawn card went out from this sim.
     own_card_sent: bool,
+    /// Earliest time the own spawn card may go out.
+    own_card_due_ms: u64,
     frozen: bool,
     handoffs: u64,
     no_handoff_before_ms: u64,
@@ -326,6 +334,8 @@ struct Arrival {
     /// Whether the player is already in the world (spawn protection off). A fresh login is
     /// `false`; a handed-off player is `true`. See [`attack::Vitals`].
     spawned: bool,
+    /// Earliest time the own spawn card may go out ([`OWN_CARD_DELAY_MS`]).
+    own_card_due_ms: u64,
 }
 
 impl SimWorld {
@@ -399,6 +409,11 @@ impl SimWorld {
             // A fresh login gets spawn protection until its client spawns; a resume was already
             // in the world.
             spawned: !admit.login,
+            own_card_due_ms: if admit.login {
+                now_ms.saturating_add(OWN_CARD_DELAY_MS)
+            } else {
+                now_ms
+            },
         };
         self.check(&arrival)?;
         let login = if admit.login {
@@ -445,6 +460,7 @@ impl SimWorld {
             health: Health::at(offer.health, self.combat.data.player_max_health()),
             // A handed-off player was already in the world.
             spawned: true,
+            own_card_due_ms: now_ms,
         };
         self.check(&arrival)?;
         let state = MotionState {
@@ -896,7 +912,6 @@ impl SimWorld {
             grid: &grid,
             positions: everyone.iter().copied().collect(),
             cards,
-            asset_sub_id: self.combat.asset_sub_id,
             local_player_card: self.settings.local_player_card,
             now_ms,
             server_time,
@@ -979,6 +994,7 @@ impl SimWorld {
                     ),
                     slots: replication.slots,
                     own_card_sent: false,
+                    own_card_due_ms: arrival.own_card_due_ms,
                     frozen: false,
                     handoffs,
                     no_handoff_before_ms,
@@ -1027,7 +1043,6 @@ struct Neighbourhood<'a> {
     grid: &'a SpatialGrid<u64>,
     positions: HashMap<u64, Position>,
     cards: HashMap<u64, MobCard>,
-    asset_sub_id: u32,
     local_player_card: bool,
     now_ms: u64,
     server_time: u64,
@@ -1052,8 +1067,10 @@ impl Neighbourhood<'_> {
                 .near(own_position)
                 .filter(|(number, _)| *number != own);
             let seen = player.interest.update(own_position, others);
-            let mut numbers: Vec<u64> = if positions_only() {
-                // Only the own group (see [`positions_only`]).
+            // Until the client has spawned, other entities share the offline cache with the
+            // own player (local-player-check note). Hold them until the first movement.
+            let hold_others = self.local_player_card && !vitals.spawned;
+            let mut numbers: Vec<u64> = if positions_only() || hold_others {
                 Vec::new()
             } else {
                 seen.entered.into_iter().chain(seen.stayed).collect()
@@ -1065,8 +1082,12 @@ impl Neighbourhood<'_> {
             // one; such a merge crashes it (player-component note, crashes 2 and 3). So until
             // then the own group goes out once, whole, with the card; after the spawn the card
             // comes again once per refresh and the position every tick.
-            let first_card = !player.own_card_sent && self.local_player_card;
-            player.own_card_sent = true;
+            let first_card = !player.own_card_sent
+                && self.local_player_card
+                && self.now_ms >= player.own_card_due_ms;
+            if first_card {
+                player.own_card_sent = true;
+            }
             let own_carded = first_card
                 || (self.local_player_card
                     && vitals.spawned
@@ -1079,7 +1100,7 @@ impl Neighbourhood<'_> {
                 .collect();
             for number in numbers {
                 let (kind, position) = match self.cards.get(&number) {
-                    Some(card) => (EntityKind::mob(self.asset_sub_id), card.position),
+                    Some(card) => (EntityKind::mob(number), card.position),
                     None => match self.positions.get(&number) {
                         Some(position) => (EntityKind::PLAYER, *position),
                         None => continue,
@@ -1319,7 +1340,7 @@ mod tests {
             .spawned = true;
     }
 
-    /// The entity numbers in the first bundle of one connection.
+    /// The entity numbers in the replication bundles of one connection this tick.
     fn seen_by(world: &SimWorld, outgoing: &[Outgoing], who: &ConnectionRef) -> Vec<u64> {
         positions_seen_by(world, outgoing, who)
             .into_iter()
@@ -1377,16 +1398,22 @@ mod tests {
             .collect()
     }
 
-    /// The entity numbers and x positions in the first bundle of one connection.
+    /// The entity numbers and x positions in every replication bundle of one connection this tick.
     fn positions_seen_by(
         world: &SimWorld,
         outgoing: &[Outgoing],
         who: &ConnectionRef,
     ) -> Vec<(u64, f32)> {
-        let bundle = bundle_of(outgoing, who).expect("bundle");
-        groups_in(world, who, &bundle)
-            .into_iter()
-            .filter_map(|(entity, update)| Some((entity, update.position?.x)))
+        outgoing
+            .iter()
+            .filter(|out| out.connection == *who && out.channel == REPLICATION_CHANNEL)
+            .flat_map(|out| {
+                out.envelopes.iter().flat_map(|bytes| {
+                    groups_in(world, who, &bundle_in(bytes))
+                        .into_iter()
+                        .filter_map(|(entity, update)| Some((entity, update.position?.x)))
+                })
+            })
             .collect()
     }
 
@@ -1514,7 +1541,7 @@ mod tests {
             join(&mut world, number, CELL_M / 2.0 + number as f32);
         }
         assert_eq!(
-            tick(&mut world, NOW).bundle_members,
+            tick(&mut world, NOW + OWN_CARD_DELAY_MS).bundle_members,
             9 * (2 + PLAYER_EMPTY_COMPONENTS.len() as u64),
             "3 bundles of 3 groups, each a card, the empty player components and a position"
         );
@@ -1537,14 +1564,19 @@ mod tests {
                 .map(|update| update.card.is_some())
                 .collect::<Vec<bool>>()
         };
+        assert!(
+            own_groups(&mut world, NOW).is_empty(),
+            "no card on the login tick: the client has not applied LevelInfoChanged yet"
+        );
+        let card_at = NOW + OWN_CARD_DELAY_MS;
         assert_eq!(
-            own_groups(&mut world, NOW),
+            own_groups(&mut world, card_at),
             vec![true],
-            "the whole card first"
+            "the whole card once the login has settled"
         );
         for step in 1..=CARD_REFRESH_BUNDLES {
             assert!(
-                own_groups(&mut world, NOW + 33 * step).is_empty(),
+                own_groups(&mut world, card_at + 33 * step).is_empty(),
                 "nothing more for the own slot before the spawn, not even a card refresh"
             );
         }
@@ -1555,9 +1587,29 @@ mod tests {
             .expect("vitals")
             .spawned = true;
         assert_eq!(
-            own_groups(&mut world, NOW + 33 * (CARD_REFRESH_BUNDLES + 1)),
+            own_groups(&mut world, card_at + 33 * (CARD_REFRESH_BUNDLES + 1)),
             vec![false],
             "the position every tick after the spawn"
+        );
+    }
+
+    #[test]
+    fn other_entities_wait_until_the_client_spawned() {
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        world
+            .admit(&admit_at(1, CELL_M / 2.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        world
+            .admit(&admit_at(2, CELL_M / 2.0 + 1.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let messages = tick(&mut world, NOW + OWN_CARD_DELAY_MS).messages;
+        let bundle = bundle_of(&messages, &connection(1)).expect("bundle");
+        let updates = SlotRead::of(&bundle).expect("read").updates;
+        assert_eq!(updates.len(), 1, "only the own player before spawn");
+        assert!(
+            updates.iter().all(SlotUpdate::is_local_player),
+            "other entities share the offline cache until spawn"
         );
     }
 
@@ -1751,7 +1803,7 @@ mod tests {
         assert_eq!(login.channel, MESSAGE_CHANNEL);
         assert!(login.reliable);
         assert_eq!(login.envelopes.len(), LOGIN_MESSAGE_TYPES.len());
-        let outgoing = tick(&mut world, NOW).messages;
+        let outgoing = tick(&mut world, NOW + OWN_CARD_DELAY_MS).messages;
         assert_eq!(seen_by(&world, &outgoing, &connection(77)), vec![77]);
     }
 

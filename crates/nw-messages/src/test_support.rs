@@ -32,7 +32,7 @@ pub fn login_samples(own: u64) -> Vec<ServerMessage> {
     vec![
         ServerMessage::TimingConfigurationConnected(TimingConfigurationConnectedMsg(connected)),
         ServerMessage::CalendarConnected(CalendarConnectedMsg(connected)),
-        ServerMessage::SelfIdentification(PlayerManagerSelfIdentificationMsg),
+        ServerMessage::SelfIdentification(PlayerManagerSelfIdentificationMsg::for_entity(own)),
         ServerMessage::ClientAddEntry(ClientAddEntryMsg::for_entity(own)),
         ServerMessage::PlayerSpawnPoint(ReceivePlayerSpawnPointMsg),
         ServerMessage::TimeSynch(TimeSynchMsg { time: 5 }),

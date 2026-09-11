@@ -7,11 +7,12 @@
 //!
 //! The unmarshal (`FUN_1414fd530`, build 25810808 `FUN_141516e40`) reads a fixed field set; each
 //! field reader fails only when the stream runs out (the two flag bytes must also be 0 or 1).
-//! See `docs/re/2026-09-02-post-registration-sequence.md` and the world-entry note. This server
-//! sends the smallest body that the unmarshal accepts: every id and number is zero, and the two
-//! presence flags are set so the reader takes its fixed-size path. No capture byte is copied.
+//! See `docs/re/2026-09-02-post-registration-sequence.md` and the local-player-check note. This
+//! server sends the smallest body that the unmarshal accepts: the first presence id is the
+//! character id, every other id and number is zero, and the two presence flags are set so the
+//! reader takes its fixed-size path. No capture byte is copied.
 
-use crate::wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};
+use crate::wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer, raw_id_of_entity};
 
 /// File slot of `PlayerManagerSelfIdentificationMsg`.
 pub const PLAYER_MANAGER_SELF_IDENTIFICATION_MSG_TYPE_INDEX: u64 = 1628;
@@ -27,19 +28,31 @@ const MIDDLE_BLOCK_COUNT: usize = 3;
 /// Tells the real client who its character is in this session. Receiving it ends the client's
 /// `WaitingForActorGameConnection` wait.
 ///
-/// The emulator sends the smallest body the client accepts, so this type holds no field: every
-/// value in the body is zero. [`decode`](Self::decode) still checks the whole wire grammar, so a
-/// body that does not match its layout is rejected.
+/// The first presence id is the character id (local-player-check note). This server writes the
+/// same 16 bytes it puts on the player's spawn card. Other fields stay zero. [`decode`](Self::decode)
+/// still checks the whole wire grammar, so a body that does not match its layout is rejected.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct PlayerManagerSelfIdentificationMsg;
+pub struct PlayerManagerSelfIdentificationMsg {
+    /// First presence block (`FUN_14087ac50`): the character id.
+    pub character_id: [u8; RAW_ID_LEN],
+}
+
+impl PlayerManagerSelfIdentificationMsg {
+    /// The identification of entity `number`: the same raw id as its spawn card.
+    pub fn for_entity(number: u64) -> Self {
+        Self {
+            character_id: raw_id_of_entity(number),
+        }
+    }
+}
 
 impl BodyCodec for PlayerManagerSelfIdentificationMsg {
     const TYPE_INDEX: u64 = PLAYER_MANAGER_SELF_IDENTIFICATION_MSG_TYPE_INDEX;
 
     fn encode(&self) -> Result<Vec<u8>, MessageError> {
         let mut writer = Writer::new();
-        // Presence block one (`FUN_14087ac50`): flag, then a 16-byte id.
-        writer.u8(PRESENCE_FLAG_FIXED).bytes(&[0; RAW_ID_LEN]);
+        // Presence block one (`FUN_14087ac50`): flag, then the character id.
+        writer.u8(PRESENCE_FLAG_FIXED).bytes(&self.character_id);
         // Three `FUN_1415acc30` blocks: a big-endian u32 and two 16-byte ids each.
         for _ in 0..MIDDLE_BLOCK_COUNT {
             writer
@@ -59,7 +72,7 @@ impl BodyCodec for PlayerManagerSelfIdentificationMsg {
 
     fn decode(body: &[u8]) -> Result<Self, MessageError> {
         let mut reader = Reader::new(body);
-        read_presence_block(&mut reader)?;
+        let character_id = read_presence_block(&mut reader)?;
         for _ in 0..MIDDLE_BLOCK_COUNT {
             reader.u32()?;
             reader.raw_id()?;
@@ -76,13 +89,13 @@ impl BodyCodec for PlayerManagerSelfIdentificationMsg {
         reader.u32()?;
         read_presence_block(&mut reader)?;
         reader.finish()?;
-        Ok(Self)
+        Ok(Self { character_id })
     }
 }
 
 /// Reads one presence block (`FUN_14087ac50`): a flag byte whose bit 0 must be set, then a
 /// 16-byte id. The variable sub-reader path (bit 0 clear) is not a form this server sends.
-fn read_presence_block(reader: &mut Reader) -> Result<(), MessageError> {
+fn read_presence_block(reader: &mut Reader<'_>) -> Result<[u8; RAW_ID_LEN], MessageError> {
     let flag = reader.u8()?;
     if flag & PRESENCE_FLAG_FIXED == 0 {
         return Err(MessageError::BadTag {
@@ -90,8 +103,7 @@ fn read_presence_block(reader: &mut Reader) -> Result<(), MessageError> {
             tag: flag,
         });
     }
-    reader.raw_id()?;
-    Ok(())
+    reader.raw_id()
 }
 
 #[cfg(test)]
@@ -106,17 +118,21 @@ mod tests {
 
     #[test]
     fn the_minimal_body_round_trips() {
-        let body = PlayerManagerSelfIdentificationMsg.encode().expect("encode");
+        let message = PlayerManagerSelfIdentificationMsg::for_entity(7);
+        let body = message.encode().expect("encode");
         assert_eq!(body.len(), MINIMAL_BODY_LEN);
         assert_eq!(
             PlayerManagerSelfIdentificationMsg::decode(&body),
-            Ok(PlayerManagerSelfIdentificationMsg)
+            Ok(message)
         );
+        assert_ne!(message.character_id, [0; RAW_ID_LEN]);
     }
 
     #[test]
     fn a_presence_flag_without_bit_zero_is_rejected() {
-        let mut body = PlayerManagerSelfIdentificationMsg.encode().expect("encode");
+        let mut body = PlayerManagerSelfIdentificationMsg::default()
+            .encode()
+            .expect("encode");
         body[0] = 0;
         assert!(matches!(
             PlayerManagerSelfIdentificationMsg::decode(&body),
@@ -126,7 +142,9 @@ mod tests {
 
     #[test]
     fn a_short_body_is_rejected() {
-        let body = PlayerManagerSelfIdentificationMsg.encode().expect("encode");
+        let body = PlayerManagerSelfIdentificationMsg::default()
+            .encode()
+            .expect("encode");
         assert!(matches!(
             PlayerManagerSelfIdentificationMsg::decode(&body[..body.len() - 1]),
             Err(MessageError::Truncated { .. })
@@ -135,7 +153,9 @@ mod tests {
 
     #[test]
     fn trailing_bytes_are_rejected() {
-        let mut body = PlayerManagerSelfIdentificationMsg.encode().expect("encode");
+        let mut body = PlayerManagerSelfIdentificationMsg::default()
+            .encode()
+            .expect("encode");
         body.push(0);
         assert_eq!(
             PlayerManagerSelfIdentificationMsg::decode(&body),

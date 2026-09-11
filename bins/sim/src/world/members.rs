@@ -14,10 +14,11 @@
 //! position members, as before M6-B.
 
 use nw_messages::{
-    AlcState, AssetId, BundleGroup, BundleMember, BundlePayload, GDE_ID_LEN,
+    AlcState, AssetId, BundleGroup, BundleMember, BundlePayload, DYNAMIC_SLICE_SUB_ID,
     GDE_METADATA_COMPONENT, GdeMetadataReplicatedState, InputPosition, LOCAL_PLAYER_INTEREST,
-    MAX_BUNDLE_INDEXES, MemberState, MessageError, PLAYER_SLICE_ASSET, ReplicatedStateBundle,
-    ServerMessage, player_empty_members,
+    MAX_BUNDLE_INDEXES, MemberState, MessageError, PLAYER_COMPONENT_TYPE_INDEX, PLAYER_SLICE_ASSET,
+    PlayerComponentState, ReplicatedStateBundle, ServerMessage, player_empty_members,
+    raw_id_of_entity,
 };
 use nw_sim_core::Position;
 
@@ -76,12 +77,14 @@ impl EntityKind {
         empty_components: true,
     };
 
-    /// A mob whose card carries `asset_sub_id`.
-    pub(super) const fn mob(asset_sub_id: u32) -> Self {
+    /// A mob whose card carries a unique asset id derived from `entity` (local-player-check
+    /// note). The real mob prefab GUID is Unknown; an all-zero id is not used, so the client's
+    /// offline cache does not share one key across mobs.
+    pub(super) fn mob(entity: u64) -> Self {
         Self {
             asset: AssetId {
-                id: [0; GDE_ID_LEN],
-                sub_id: asset_sub_id,
+                id: raw_id_of_entity(entity),
+                sub_id: DYNAMIC_SLICE_SUB_ID,
             },
             alc_component: MOB_ALC_COMPONENT,
             empty_components: false,
@@ -108,7 +111,19 @@ pub(super) fn entity_group(
             )),
         });
         if kind.empty_components {
-            members.extend(player_empty_members());
+            let character_id = raw_id_of_entity(entity);
+            members.extend(player_empty_members().map(|member| {
+                if member.state.type_index() == PLAYER_COMPONENT_TYPE_INDEX {
+                    BundleMember {
+                        component: member.component,
+                        state: MemberState::PlayerComponent(PlayerComponentState::connected(
+                            character_id,
+                        )),
+                    }
+                } else {
+                    member
+                }
+            }));
         }
     }
     members.push(BundleMember {
@@ -173,7 +188,7 @@ fn group_bytes(group: &BundleGroup) -> Result<usize, MessageError> {
 
 #[cfg(test)]
 mod tests {
-    use nw_messages::{EntitySlots, SlotRead};
+    use nw_messages::{EntitySlots, GDE_ID_LEN, SlotRead};
     use nw_reflect::Envelope;
 
     use super::super::slots::FIRST_REMOTE_INTEREST;
@@ -181,7 +196,6 @@ mod tests {
 
     const ENTITY: u64 = (1 << 34) + 7;
     const OWN: u64 = 9;
-    const SUB_ID: u32 = 2;
     const SEQUENCE: u64 = 4;
     const MANY: u64 = 60;
     const ALL_STOPS: usize = 1000;
@@ -219,12 +233,34 @@ mod tests {
         assert_eq!(group.members[0].component, GDE_METADATA_COMPONENT);
         assert_eq!(card.asset, Some(PLAYER_SLICE_ASSET));
         assert_eq!(card.entity_number(), Some(OWN));
-        let empties: Vec<BundleMember> = player_empty_members().collect();
+        let empties: Vec<BundleMember> = player_empty_members()
+            .map(|member| {
+                if member.state.type_index() == PLAYER_COMPONENT_TYPE_INDEX {
+                    BundleMember {
+                        component: member.component,
+                        state: MemberState::PlayerComponent(PlayerComponentState::connected(
+                            raw_id_of_entity(OWN),
+                        )),
+                    }
+                } else {
+                    member
+                }
+            })
+            .collect();
         assert_eq!(
             group.members[1..=empties.len()],
             empties[..],
-            "every other player component gets an empty state with the card"
+            "every other player component gets a state with the card, and 3935 is connected"
         );
+        let player = empties
+            .iter()
+            .find(|member| member.state.type_index() == PLAYER_COMPONENT_TYPE_INDEX)
+            .expect("player component");
+        let MemberState::PlayerComponent(state) = &player.state else {
+            panic!("3935 is the player component: {player:?}");
+        };
+        assert_eq!(state.character_id, Some(raw_id_of_entity(OWN)));
+        assert_eq!(state.player_connected, Some(true));
         let last = group.members.last().expect("position");
         assert_eq!(last.component, PLAYER_ALC_COMPONENT);
         let MemberState::Alc(alc) = &last.state else {
@@ -233,6 +269,11 @@ mod tests {
         assert_eq!(alc.pos10, InputPosition::from_metres(10.0, 20.0, 30.0));
         let later = own_group(OWN, at(), false).expect("finite");
         assert_eq!(later.members.len(), 1, "later only the ALC position");
+        let payload = BundlePayload {
+            groups: vec![group.clone()],
+        };
+        let read = BundlePayload::decode(&payload.encode().expect("payload")).expect("read");
+        assert_eq!(read.groups[0].members, group.members);
     }
 
     #[test]
@@ -240,7 +281,7 @@ mod tests {
         let group = entity_group(
             FIRST_REMOTE_INTEREST,
             ENTITY,
-            EntityKind::mob(SUB_ID),
+            EntityKind::mob(ENTITY),
             at(),
             true,
         )
@@ -249,7 +290,9 @@ mod tests {
             panic!("the card comes first: {group:?}");
         };
         let asset = card.asset.expect("asset");
-        assert_eq!((asset.id, asset.sub_id), ([0; GDE_ID_LEN], SUB_ID));
+        assert_eq!(asset.id, raw_id_of_entity(ENTITY));
+        assert_eq!(asset.sub_id, DYNAMIC_SLICE_SUB_ID);
+        assert_ne!(asset.id, [0; GDE_ID_LEN]);
         assert_eq!(card.entity_number(), Some(ENTITY));
         assert_eq!(group.members[1].component, MOB_ALC_COMPONENT);
     }
@@ -263,7 +306,7 @@ mod tests {
                 entity_group(
                     interest,
                     ENTITY + index,
-                    EntityKind::mob(SUB_ID),
+                    EntityKind::mob(ENTITY + index),
                     at(),
                     true,
                 )

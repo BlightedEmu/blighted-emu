@@ -16,7 +16,7 @@ use crate::components::{
     STAMINA_TYPE_INDEX, StaminaState,
 };
 use crate::gde::{GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
-use crate::player_components::EmptyState;
+use crate::player_components::{EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PlayerComponentState};
 use crate::position::{POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState};
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsState};
 use crate::wire::{MessageError, Reader, Writer};
@@ -38,6 +38,8 @@ pub enum MemberState {
     CombatStatus(CombatStatusState),
     /// `MB::DelayedEventComponentReplicatedState`.
     DelayedEvent(DelayedEventState),
+    /// `MB::PlayerComponentReplicatedState`.
+    PlayerComponent(PlayerComponentState),
     /// An empty state of a player component class without a reader of its own.
     Empty(EmptyState),
 }
@@ -53,6 +55,7 @@ impl MemberState {
             Self::Stamina(_) => STAMINA_TYPE_INDEX,
             Self::CombatStatus(_) => COMBAT_STATUS_TYPE_INDEX,
             Self::DelayedEvent(_) => DELAYED_EVENT_TYPE_INDEX,
+            Self::PlayerComponent(_) => PLAYER_COMPONENT_TYPE_INDEX,
             Self::Empty(state) => state.class,
         }
     }
@@ -78,6 +81,9 @@ impl MemberState {
             }
             TypeId::FileSlot(DELAYED_EVENT_TYPE_INDEX) => {
                 DelayedEventState::read(reader).map(Self::DelayedEvent)
+            }
+            TypeId::FileSlot(PLAYER_COMPONENT_TYPE_INDEX) => {
+                PlayerComponentState::read(reader).map(Self::PlayerComponent)
             }
             TypeId::FileSlot(index) if EmptyState::covers(index) => {
                 EmptyState::read(index, reader).map(Self::Empty)
@@ -107,6 +113,10 @@ impl MemberState {
                 Ok(())
             }
             Self::DelayedEvent(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::PlayerComponent(state) => {
                 state.write(writer);
                 Ok(())
             }
