@@ -404,7 +404,12 @@ impl SimWorld {
             character: admit.character,
             name: admit.name.clone(),
             number: admit.entity,
-            position: Position::from(admit.position),
+            // A saved spot can be in the air or under the ground (a save during a jump, or a
+            // height from another world file); the player arrives on the ground.
+            position: self
+                .settings
+                .limits
+                .onto_ground(&*self.ground, Position::from(admit.position)),
             health: Health::full(self.combat.data.player_max_health()),
             // A fresh login gets spawn protection until its client spawns; a resume was already
             // in the world.
@@ -1189,7 +1194,7 @@ mod tests {
         MemberState, PLAYER_EMPTY_COMPONENTS, ReplicatedStateBundle, SlotRead, SlotUpdate,
     };
     use nw_reflect::{Envelope, encode_server_messages};
-    use nw_sim_core::test_support::NoGround;
+    use nw_sim_core::test_support::{FlatGround, NoGround};
     use nw_sim_core::{CellGrid, CellOwners, GroundCheck, MoveLimits, MoveRefusal};
 
     use super::*;
@@ -2365,5 +2370,22 @@ mod tests {
         assert_eq!(world.set_table(&wrong), Err(TableError::WrongSize));
         join(&mut world, 1, BORDER_X + 50.0);
         assert!(tick(&mut world, NOW).handoffs.is_empty());
+    }
+
+    #[test]
+    fn a_login_saved_in_the_air_arrives_on_the_ground() {
+        const GROUND_M: f32 = 20.0;
+        let mut world = SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(FlatGround(GROUND_M)),
+            slot("sim-a"),
+            test_combat(),
+        );
+        let mut in_the_air = admit_at(1, 0.0, true);
+        in_the_air.position.z = GROUND_M + MAX_ABOVE_GROUND_M + 1.0;
+        world.admit(&in_the_air, NOW, SERVER_TIME).expect("admit");
+        let departure = world.leave(&connection(1)).expect("left");
+        assert_eq!(departure.position.z, GROUND_M);
     }
 }

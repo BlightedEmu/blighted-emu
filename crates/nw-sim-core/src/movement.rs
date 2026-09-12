@@ -156,6 +156,25 @@ impl MoveLimits {
     fn max_budget_m(&self) -> f32 {
         self.max_speed_mps * self.burst_seconds
     }
+
+    /// Whether the height `z` is at most `ground_tolerance_m` below the ground `height` and at
+    /// most `max_height_above_ground_m` above it. A height that is not finite is not.
+    fn near_ground(&self, height: f32, z: f32) -> bool {
+        (height - self.ground_tolerance_m..=height + self.max_height_above_ground_m).contains(&z)
+    }
+
+    /// `position` with its height on the ground of `ground` when it is under the ground or too
+    /// far above it, so an arriving player neither falls nor starts in the terrain. Unchanged
+    /// where the level has no height data.
+    pub fn onto_ground(&self, ground: &(impl Ground + ?Sized), position: Position) -> Position {
+        match ground.height_at(position.x, position.y) {
+            Some(height) if !self.near_ground(height, position.z) => Position {
+                z: height,
+                ..position
+            },
+            _ => position,
+        }
+    }
 }
 
 /// Why a move was refused.
@@ -292,10 +311,7 @@ impl Motion {
             return Err(MoveRefusal::TooFast);
         }
         let check = match ground.height_at(next.x, next.y) {
-            Some(height)
-                if next.z < height - limits.ground_tolerance_m
-                    || next.z > height + limits.max_height_above_ground_m =>
-            {
+            Some(height) if !limits.near_ground(height, next.z) => {
                 return Err(MoveRefusal::OffGround);
             }
             Some(_) => GroundCheck::Checked,
@@ -491,6 +507,31 @@ mod tests {
             high.try_move(&limits(), &Flat, &bounds(), at(11.0, roof), time),
             Ok(GroundCheck::Checked)
         );
+    }
+
+    #[test]
+    fn an_arrival_off_the_ground_is_put_on_it() {
+        let limits = limits();
+        let fallen = at(10.0, GROUND_HEIGHT - BELOW - 0.5);
+        assert_eq!(limits.onto_ground(&Flat, fallen), at(10.0, GROUND_HEIGHT));
+        let in_the_air = at(10.0, GROUND_HEIGHT + ABOVE + 0.5);
+        assert_eq!(
+            limits.onto_ground(&Flat, in_the_air),
+            at(10.0, GROUND_HEIGHT)
+        );
+        let not_finite = at(10.0, f32::NAN);
+        assert_eq!(
+            limits.onto_ground(&Flat, not_finite),
+            at(10.0, GROUND_HEIGHT)
+        );
+        let roof = at(10.0, GROUND_HEIGHT + ABOVE - 1.0);
+        assert_eq!(
+            limits.onto_ground(&Flat, roof),
+            roof,
+            "a roof or bridge stays"
+        );
+        let no_data = at(1000.0, GROUND_HEIGHT + ABOVE * 2.0);
+        assert_eq!(limits.onto_ground(&Flat, no_data), no_data);
     }
 
     #[test]

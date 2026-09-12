@@ -12,3 +12,13 @@ impl Ground for NoGround {
         None
     }
 }
+
+/// A level with flat ground at one height everywhere.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FlatGround(pub f32);
+
+impl Ground for FlatGround {
+    fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+        Some(self.0)
+    }
+}

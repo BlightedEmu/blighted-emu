@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use nw_bus::{Admit, AdmitReply, Bus, Join, MOB_ENTITY_BASE, Point, SimSlot, subject};
-use nw_db::{PgPool, character_by_id, character_position, next_entity_number};
+use nw_db::{PgPool, SavedPosition, character_by_id, character_position, next_entity_number};
 use nw_sim_core::Position;
 use uuid::Uuid;
 
@@ -94,6 +94,26 @@ pub fn start_for(starts: &[Position], entity: u64) -> Option<Position> {
     starts.get((entity % count) as usize).copied()
 }
 
+/// Where a character with entity number `entity` appears: its saved spot when that spot is on
+/// `level` and `on_map` holds for it, else its start ([`start_for`]). A spot that is off the map
+/// would refuse every later join of the character; the sim puts the height on the ground.
+pub fn join_position(
+    saved: Option<&SavedPosition>,
+    level: &str,
+    on_map: impl Fn(Position) -> bool,
+    starts: &[Position],
+    entity: u64,
+) -> Option<Position> {
+    saved
+        .filter(|saved| saved.level == level)
+        .map(|saved| {
+            let [x, y, z] = saved.metres();
+            Position { x, y, z }
+        })
+        .filter(|position| on_map(*position))
+        .or_else(|| start_for(starts, entity))
+}
+
 /// Routes `join` to the owner of the player's cell in `assignment`. Returns the sim and the
 /// entity number: a new one, or the resumed one.
 ///
@@ -128,13 +148,14 @@ pub async fn route_join(
             NEW_PLAYER_COUNT,
         ),
     };
-    let position = match saved {
-        Some(saved) if saved.level == context.level => {
-            let [x, y, z] = saved.metres();
-            Position { x, y, z }
-        }
-        _ => start_for(&context.starts, entity).ok_or(JoinRefusal::NoStart)?,
-    };
+    let position = join_position(
+        saved.as_ref(),
+        &context.level,
+        |position| assignment.covers(position),
+        &context.starts,
+        entity,
+    )
+    .ok_or(JoinRefusal::NoStart)?;
     let sim = assignment
         .owner_at(position)
         .ok_or(JoinRefusal::NoOwner)?
@@ -204,5 +225,54 @@ mod tests {
             .expect("starts");
         assert_eq!(xs, vec![2.0, 3.0, 1.0, 2.0, 3.0, 1.0]);
         assert_eq!(start_for(&[], 1), None);
+    }
+
+    const LEVEL: &str = "newworld_vitaeeterna";
+    const MAP_EDGE_M: f32 = 100.0;
+
+    fn saved_at(level: &str, x: f64) -> SavedPosition {
+        SavedPosition {
+            level: level.to_owned(),
+            x,
+            y: 10.0,
+            z: 50.0,
+            yaw: 0.0,
+            saved_at_ms: 0,
+        }
+    }
+
+    fn on_map(position: Position) -> bool {
+        (0.0..=MAP_EDGE_M).contains(&position.x)
+    }
+
+    #[test]
+    fn a_saved_spot_on_the_map_is_kept_and_one_off_it_gets_a_start() {
+        let entity = 1;
+        let saved = saved_at(LEVEL, 42.0);
+        let kept = join_position(Some(&saved), LEVEL, on_map, &STARTS, entity);
+        assert_eq!(
+            kept,
+            Some(Position {
+                x: 42.0,
+                y: 10.0,
+                z: 50.0
+            })
+        );
+        let start = start_for(&STARTS, entity);
+        let off_map = saved_at(LEVEL, f64::from(MAP_EDGE_M) + 1.0);
+        assert_eq!(
+            join_position(Some(&off_map), LEVEL, on_map, &STARTS, entity),
+            start
+        );
+        let other_level = saved_at("nw_dungeon_edengrove_00", 42.0);
+        assert_eq!(
+            join_position(Some(&other_level), LEVEL, on_map, &STARTS, entity),
+            start
+        );
+        assert_eq!(join_position(None, LEVEL, on_map, &STARTS, entity), start);
+        assert_eq!(
+            join_position(Some(&off_map), LEVEL, on_map, &[], entity),
+            None
+        );
     }
 }

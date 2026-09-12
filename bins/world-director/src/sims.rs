@@ -148,6 +148,11 @@ impl Assignment {
         self.sims.get(usize::from(index))
     }
 
+    /// Whether `position` is on the map: inside the cell grid of the level.
+    pub fn covers(&self, position: Position) -> bool {
+        self.owners.grid().cell_of(position.x, position.y).is_some()
+    }
+
     /// The table that sims and gateways get.
     pub fn table(&self) -> CellTable {
         let grid = self.owners.grid();
@@ -326,6 +331,14 @@ mod tests {
         assert_eq!(assignment.owner_at(west), Some(&slot("sim-1")));
         assert_eq!(assignment.owner_at(east), Some(&slot("sim-2")));
         assert_eq!(assignment.owner_at(Position { x: -1.0, ..west }), None);
+        assert!(assignment.covers(west));
+        assert!(!assignment.covers(Position { x: -1.0, ..west }));
+        assert!(
+            !Assignment::new(VERSION, grid(), Vec::new()).covers(Position {
+                x: LEVEL_M + 1.0,
+                ..west
+            })
+        );
         let table = assignment.table();
         assert_eq!(table.version, VERSION);
         assert_eq!((table.columns, table.rows), (7, 7));
