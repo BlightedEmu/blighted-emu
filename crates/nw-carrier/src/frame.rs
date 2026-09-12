@@ -51,7 +51,9 @@ pub struct Frame {
     pub chunks_remaining: Option<u16>,
     /// Message sequence number.
     pub sequence: u16,
-    /// Reliable sequence number. Unreliable frames carry the channel's current value.
+    /// Reliable sequence number. An unreliable frame carries the number of the last reliable
+    /// frame sent on its channel (65535 before any), as every captured unreliable frame does.
+    /// The real client ignored unreliable frames that named a reliable frame not yet sent.
     pub reliable_sequence: u16,
     /// Payload.
     pub payload: Vec<u8>,

@@ -192,10 +192,16 @@ impl Peer {
         let mut events = Vec::new();
         for plaintext in plaintexts {
             for event in self.carrier.receive(now_ms, &plaintext)? {
-                if let Event::Message(message) = event
-                    && let Some(event) = self.message(&message)?
-                {
-                    events.push(event);
+                match event {
+                    Event::Message(message) => {
+                        if let Some(event) = self.message(&message)? {
+                            events.push(event);
+                        }
+                    }
+                    Event::ConnectionWarning { count } => {
+                        tracing::debug!(count, "client raised a connection warning");
+                    }
+                    Event::Connected | Event::Closed { .. } => {}
                 }
             }
         }

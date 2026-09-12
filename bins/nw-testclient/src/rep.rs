@@ -178,7 +178,7 @@ impl RepClient {
                         }
                     }
                     Event::Closed { reason } => events.push(RepEvent::Closed { reason }),
-                    Event::ConnectionControl(_) => {}
+                    Event::ConnectionWarning { .. } => {}
                 }
             }
         }

@@ -5,8 +5,9 @@
 //! The client sends a connect request (version 5) on the system channel about every 30 ms, with
 //! one more `0x01` byte per retry, until the connect ack arrives. The server answers the first
 //! request with a reliable connect ack. Both sides ack received datagrams within
-//! [`ACK_DELAY_MS`] and send a keepalive ack after [`KEEP_ALIVE_MS`] without traffic. The caller
-//! reads the time, moves the bytes, and drops a silent connection.
+//! [`ACK_DELAY_MS`] and send an ack after [`KEEP_ALIVE_MS`] without traffic: the acks of any
+//! ack-only datagrams still unacked, else a keepalive. The caller reads the time, moves the
+//! bytes, and drops a silent connection.
 
 use crate::datagram::decode_datagram;
 use crate::error::CarrierError;
@@ -74,8 +75,11 @@ pub enum Event {
         /// Reason byte.
         reason: u8,
     },
-    /// Connection control data (meaning Unknown).
-    ConnectionControl(Vec<u8>),
+    /// The peer's connection check found a bad link.
+    ConnectionWarning {
+        /// Warnings the peer has raised on this connection, this one included.
+        count: u32,
+    },
 }
 
 /// One carrier connection.
@@ -193,7 +197,9 @@ impl Connection {
                 self.state = ConnectionState::Closed;
                 events.push(Event::Closed { reason });
             }
-            SystemMessage::ConnectionControl(data) => events.push(Event::ConnectionControl(data)),
+            SystemMessage::ConnectionWarning { count } => {
+                events.push(Event::ConnectionWarning { count });
+            }
             SystemMessage::ConnectRequest { .. }
             | SystemMessage::ConnectAck { .. }
             | SystemMessage::Other { .. } => {}
@@ -276,8 +282,9 @@ impl Connection {
             && self.sender.is_idle()
             && now_ms.saturating_sub(self.last_sent_ms) >= KEEP_ALIVE_MS
         {
-            let keep_alive = SystemMessage::Acks(Acks::KeepAlive);
-            self.sender.send(SYSTEM_UNRELIABLE, &keep_alive.encode())?;
+            let acks = self.receiver.take_acks().unwrap_or(Acks::KeepAlive);
+            self.sender
+                .send(SYSTEM_UNRELIABLE, &SystemMessage::Acks(acks).encode())?;
         }
         let datagrams = self.sender.poll(now_ms)?;
         if !datagrams.is_empty() {
@@ -299,6 +306,7 @@ mod tests {
     const DATA_CHANNEL: u8 = 0;
     const HELLO: &[u8] = b"hello";
     const BIG_LEN: usize = 3 * MAX_CHUNK_PAYLOAD;
+    const WARNING_COUNT: u32 = 3;
     /// Exchanges that let every pending ack go out.
     const SETTLE_ROUNDS: u64 = 3;
     /// First connect request in the captures.
@@ -437,13 +445,47 @@ mod tests {
         let (mut client, mut server) = connected_pair();
         let now = settle(&mut client, &mut server, START);
         let quiet = now + KEEP_ALIVE_MS;
-        let datagrams = client.poll(quiet).expect("poll");
+        let datagrams = server.poll(quiet).expect("poll");
         assert_eq!(datagrams.len(), 1);
         let frames =
             decode_frames(&decode_datagram(&datagrams[0]).expect("decode").body).expect("frames");
         assert_eq!(
             SystemMessage::decode(&frames[0].payload),
             Ok(SystemMessage::Acks(Acks::KeepAlive))
+        );
+    }
+
+    #[test]
+    fn an_idle_connection_acks_ack_only_datagrams_in_place_of_a_keepalive() {
+        let (mut client, mut server) = connected_pair();
+        let now = settle(&mut client, &mut server, START);
+        let quiet = now + KEEP_ALIVE_MS;
+        let datagrams = client.poll(quiet).expect("poll");
+        assert_eq!(datagrams.len(), 1);
+        let frames =
+            decode_frames(&decode_datagram(&datagrams[0]).expect("decode").body).expect("frames");
+        let Ok(SystemMessage::Acks(acks)) = SystemMessage::decode(&frames[0].payload) else {
+            panic!("expected an ack");
+        };
+        assert_ne!(acks, Acks::KeepAlive);
+    }
+
+    #[test]
+    fn a_connection_warning_reaches_the_caller() {
+        let (mut client, mut server) = connected_pair();
+        let warning = SystemMessage::ConnectionWarning {
+            count: WARNING_COUNT,
+        };
+        client
+            .sender
+            .send(SYSTEM_UNRELIABLE, &warning.encode())
+            .expect("send");
+        let (_, server_events) = exchange(&mut client, &mut server, START + STEP);
+        assert_eq!(
+            server_events,
+            vec![Event::ConnectionWarning {
+                count: WARNING_COUNT
+            }]
         );
     }
 

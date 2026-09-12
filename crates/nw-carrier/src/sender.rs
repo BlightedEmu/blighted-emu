@@ -104,10 +104,13 @@ impl Sender {
         let reliable = delivery.reliable || total > 1;
         for (chunk, left) in chunks.into_iter().zip((1..=total).rev()) {
             let state = &mut self.channels[channel];
-            let reliable_sequence = state.next_reliable;
-            if reliable {
-                state.next_reliable = state.next_reliable.wrapping_add(1);
-            }
+            let reliable_sequence = if reliable {
+                let sequence = state.next_reliable;
+                state.next_reliable = sequence.wrapping_add(1);
+                sequence
+            } else {
+                state.next_reliable.wrapping_sub(1)
+            };
             let sequence = state.next_sequence;
             state.next_sequence = state.next_sequence.wrapping_add(1);
             let frame = Frame {
@@ -228,6 +231,15 @@ mod tests {
     };
     const BAD_CHANNEL: u8 = 4;
     const SMALL: &[u8] = b"hello";
+    /// Reliable sequence of a captured client unreliable frame sent before any reliable frame on
+    /// its channel.
+    const NO_RELIABLE_SENT: u16 = u16::MAX;
+    const FIRST_RELIABLE: u16 = 0;
+    /// Flags of a captured unreliable frame after a frame on the same channel in one datagram:
+    /// sequence implicit, reliable sequence written.
+    const CAPTURED_UNRELIABLE_FOLLOWER_FLAGS: u8 = 0x08;
+    /// Header of such a frame: flags, length, reliable sequence.
+    const LAST_FRAME_HEADER_LEN: usize = 5;
     /// Three chunks: two full ones and one byte.
     const CHUNKED_LEN: usize = 2 * MAX_CHUNK_PAYLOAD + 1;
     const CHUNKED_COUNT: u16 = 3;
@@ -312,6 +324,32 @@ mod tests {
                 .expect("nothing")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn unreliable_frames_carry_the_last_sent_reliable_sequence() {
+        let mut sender = Sender::new();
+        sender.send(LOOSE, SMALL).expect("before any reliable");
+        sender
+            .send(
+                Delivery {
+                    reliable: true,
+                    ..LOOSE
+                },
+                SMALL,
+            )
+            .expect("reliable");
+        sender.send(LOOSE, SMALL).expect("after the reliable");
+        let datagrams = sender.poll(NOW).expect("poll");
+        let body = decode_datagram(&datagrams[0]).expect("decode").body;
+        let frames = decode_frames(&body).expect("frames");
+        let carried: Vec<u16> = frames.iter().map(|frame| frame.reliable_sequence).collect();
+        assert_eq!(
+            carried,
+            vec![NO_RELIABLE_SENT, FIRST_RELIABLE, FIRST_RELIABLE]
+        );
+        let last_frame_flags = body[body.len() - SMALL.len() - LAST_FRAME_HEADER_LEN];
+        assert_eq!(last_frame_flags, CAPTURED_UNRELIABLE_FOLLOWER_FLAGS);
     }
 
     #[test]

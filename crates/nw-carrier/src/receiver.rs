@@ -5,10 +5,10 @@
 //! next expected one is a duplicate and is dropped. Chunks are joined from in-order frames only.
 //! A repeated datagram is acked again and its frames are dropped. A new connection expects
 //! reliable sequence 0 on every channel, as all captured connections start; a capture that starts
-//! in the middle of a session learns the start from its first reliable frame. Only datagrams with
-//! a reliable
-//! frame are acked: only reliable frames are sent again, and acking ack-only datagrams would make
-//! two idle peers ack each other without end.
+//! in the middle of a session learns the start from its first reliable frame. Every datagram is
+//! acked, as retail does: the client's connection check counts an unacked datagram as lost and
+//! raises connection warnings. A datagram that holds only acks asks for no ack of its own, so two
+//! idle peers do not ack each other without end; it is acked with the next ack that goes out.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -97,6 +97,7 @@ pub struct Receiver {
     recent: VecDeque<u16>,
     recent_set: HashSet<u16>,
     unacked: Vec<u16>,
+    ack_requested: bool,
     held_total: usize,
     accept_data: bool,
 }
@@ -123,6 +124,7 @@ impl Receiver {
             recent: VecDeque::with_capacity(RECENT_DATAGRAMS),
             recent_set: HashSet::with_capacity(RECENT_DATAGRAMS),
             unacked: Vec::new(),
+            ack_requested: false,
             held_total: 0,
             accept_data: true,
         }
@@ -147,22 +149,27 @@ impl Receiver {
     /// breaks the count rule, an unreliable chunk, a message over the limit, or too many held
     /// frames. The caller closes the connection.
     pub fn receive(&mut self, datagram: &Datagram) -> Result<Vec<Inbound>, CarrierError> {
+        self.unacked.push(datagram.sequence);
         if !self.remember(datagram.sequence) {
-            self.unacked.push(datagram.sequence);
+            self.ack_requested = true;
             return Ok(Vec::new());
         }
         let frames = decode_frames(&datagram.body)?;
-        if frames.iter().any(|frame| frame.reliable) {
-            self.unacked.push(datagram.sequence);
-        }
         let mut delivered = Vec::new();
         for frame in frames {
             if frame.channel != SYSTEM_CHANNEL && !self.accept_data {
                 return Err(CarrierError::NotConnected);
             }
             if frame.channel == SYSTEM_CHANNEL {
-                delivered.push(Inbound::System(SystemMessage::decode(&frame.payload)?));
-            } else if frame.reliable {
+                let system = SystemMessage::decode(&frame.payload)?;
+                if !matches!(system, SystemMessage::Acks(_)) {
+                    self.ack_requested = true;
+                }
+                delivered.push(Inbound::System(system));
+                continue;
+            }
+            self.ack_requested = true;
+            if frame.reliable {
                 self.order(frame, &mut delivered)?;
             } else if frame.chunks_remaining.is_some() {
                 return Err(CarrierError::UnreliableChunk);
@@ -177,14 +184,14 @@ impl Receiver {
         Ok(delivered)
     }
 
-    /// Whether a received datagram waits for an ack.
+    /// Whether a received datagram that is not ack-only waits for an ack.
     pub fn wants_ack(&self) -> bool {
-        !self.unacked.is_empty()
+        self.ack_requested
     }
 
-    /// An ack of every datagram with a reliable frame received since the last call, or `None`
-    /// when there is none.
+    /// An ack of every datagram received since the last call, or `None` when there is none.
     pub fn take_acks(&mut self) -> Option<Acks> {
+        self.ack_requested = false;
         let first = *self.unacked.first()?;
         let last = self
             .unacked
@@ -579,17 +586,55 @@ mod tests {
         );
     }
 
+    /// An unreliable frame on the system channel with an ack payload.
+    fn ack_frame(payload: &[u8]) -> Frame {
+        Frame {
+            channel: SYSTEM_CHANNEL,
+            reliable: false,
+            ..frame(0, None, payload)
+        }
+    }
+
     #[test]
-    fn ack_only_datagrams_are_not_acked() {
+    fn ack_only_datagrams_ask_for_no_ack_but_ride_with_the_next_one() {
         let mut receiver = Receiver::mid_stream(ReceiveLimits::SESSION);
-        let mut ack = frame(0, None, &[0x20, 0x06]);
-        ack.reliable = false;
-        ack.channel = SYSTEM_CHANNEL;
         receiver
-            .receive(&datagram(DATAGRAM, &[ack]))
+            .receive(&datagram(DATAGRAM, &[ack_frame(&[0x20, 0x06])]))
             .expect("keepalive");
         assert!(!receiver.wants_ack());
-        assert_eq!(receiver.take_acks(), None);
+        let mut loose = frame(START, None, b"u");
+        loose.reliable = false;
+        receiver
+            .receive(&datagram(DATAGRAM + 1, &[loose]))
+            .expect("unreliable");
+        assert!(receiver.wants_ack());
+        assert_eq!(
+            receiver.take_acks(),
+            Some(Acks::Range {
+                last: DATAGRAM + 1,
+                first: DATAGRAM
+            })
+        );
+        assert!(!receiver.wants_ack());
+    }
+
+    #[test]
+    fn unreliable_and_system_datagrams_are_acked_like_retail() {
+        let mut receiver = Receiver::mid_stream(ReceiveLimits::SESSION);
+        let mut loose = frame(START, None, b"u");
+        loose.reliable = false;
+        loose.channel = OTHER_CHANNEL;
+        receiver
+            .receive(&datagram(DATAGRAM, &[loose]))
+            .expect("unreliable");
+        assert!(receiver.wants_ack());
+        assert_eq!(receiver.take_acks(), Some(Acks::Last(DATAGRAM)));
+        let control = SystemMessage::ConnectionWarning { count: 1 }.encode();
+        receiver
+            .receive(&datagram(DATAGRAM + 1, &[ack_frame(&control)]))
+            .expect("warning");
+        assert!(receiver.wants_ack());
+        assert_eq!(receiver.take_acks(), Some(Acks::Last(DATAGRAM + 1)));
     }
 
     #[test]

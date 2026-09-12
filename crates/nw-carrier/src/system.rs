@@ -14,8 +14,9 @@ pub const OP_CONNECT_ACK: u8 = 2;
 pub const OP_DISCONNECT: u8 = 3;
 /// Datagram acks; also the keepalive (both).
 pub const OP_ACKS: u8 = 6;
-/// Connection control (both); meaning of the 4 data bytes Unknown.
-pub const OP_CONNECTION_CONTROL: u8 = 7;
+/// Connection warning (both): the sender's connection check found a bad link. The 4 data bytes
+/// are the sender's warning count, big-endian (client `0x145de0020`, build 25810808).
+pub const OP_CONNECTION_WARNING: u8 = 7;
 /// Version value in every captured connect request and connect ack.
 pub const CARRIER_VERSION: u32 = 5;
 /// Reason byte of every captured disconnect.
@@ -37,6 +38,7 @@ pub const MAX_ACK_RANGE: u16 = 512;
 
 const OPCODE_LEN: usize = 1;
 const VERSION_LEN: usize = 4;
+const WARNING_COUNT_LEN: usize = 4;
 const SEQUENCE_LEN: usize = 2;
 const BITS_PER_BYTE: usize = 8;
 
@@ -109,8 +111,11 @@ pub enum SystemMessage {
     },
     /// Datagram acks.
     Acks(Acks),
-    /// Connection control; the data bytes are kept as they are.
-    ConnectionControl(Vec<u8>),
+    /// Connection warning.
+    ConnectionWarning {
+        /// Warnings the sender has raised on this connection, this one included.
+        count: u32,
+    },
     /// Any other opcode.
     Other {
         /// Opcode.
@@ -130,7 +135,9 @@ impl SystemMessage {
             Self::ConnectAck { version, extra } => (versioned(*version, extra), OP_CONNECT_ACK),
             Self::Disconnect { reason } => (vec![*reason], OP_DISCONNECT),
             Self::Acks(acks) => (encode_acks(acks), OP_ACKS),
-            Self::ConnectionControl(data) => (data.clone(), OP_CONNECTION_CONTROL),
+            Self::ConnectionWarning { count } => {
+                (count.to_be_bytes().to_vec(), OP_CONNECTION_WARNING)
+            }
             Self::Other { opcode, data } => (data.clone(), *opcode),
         };
         out.push(opcode);
@@ -167,7 +174,12 @@ impl SystemMessage {
                 _ => Err(bad),
             },
             OP_ACKS => decode_acks(data).map(Self::Acks).ok_or(bad),
-            OP_CONNECTION_CONTROL => Ok(Self::ConnectionControl(data.to_vec())),
+            OP_CONNECTION_WARNING => {
+                let count: [u8; WARNING_COUNT_LEN] = data.try_into().map_err(|_| bad)?;
+                Ok(Self::ConnectionWarning {
+                    count: u32::from_be_bytes(count),
+                })
+            }
             _ => Ok(Self::Other {
                 opcode,
                 data: data.to_vec(),
@@ -254,8 +266,11 @@ mod tests {
     const RANGE_ACK: [u8; 6] = [0x40, 0x00, 0x12, 0x00, 0x10, 0x06];
     /// Bitmap ack: last 0x0010; bits 0 and 2 set, so 0x000F and 0x000D are acked too.
     const BITMAP_ACK: [u8; 5] = [0x81, 0x00, 0x10, 0b0000_0101, 0x06];
-    /// Connection control in the captured layout: 4 data bytes, then opcode 7.
-    const CONNECTION_CONTROL: [u8; 5] = [0x00, 0x00, 0x12, 0x34, 0x07];
+    /// Connection warning in the captured layout: big-endian count, then opcode 7.
+    const CONNECTION_WARNING: [u8; 5] = [0x00, 0x00, 0x12, 0x34, 0x07];
+    const WARNING_COUNT: u32 = 0x1234;
+    /// A connection warning with a cut-short count.
+    const SHORT_WARNING: [u8; 3] = [0x12, 0x34, 0x07];
     const RETRY_MARK: u8 = 0x01;
     const LAST: u16 = 0x0012;
     const FIRST: u16 = 0x0010;
@@ -293,11 +308,19 @@ mod tests {
                 reason: DISCONNECT_REASON_NONE
             })
         );
+        let warning = SystemMessage::ConnectionWarning {
+            count: WARNING_COUNT,
+        };
         assert_eq!(
-            SystemMessage::decode(&CONNECTION_CONTROL),
-            Ok(SystemMessage::ConnectionControl(
-                CONNECTION_CONTROL[..CONNECTION_CONTROL.len() - 1].to_vec()
-            ))
+            SystemMessage::decode(&CONNECTION_WARNING),
+            Ok(warning.clone())
+        );
+        assert_eq!(warning.encode(), CONNECTION_WARNING);
+        assert_eq!(
+            SystemMessage::decode(&SHORT_WARNING),
+            Err(CarrierError::BadSystemMessage {
+                opcode: OP_CONNECTION_WARNING
+            })
         );
     }
 
