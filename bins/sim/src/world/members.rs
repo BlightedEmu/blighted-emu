@@ -131,21 +131,47 @@ pub(super) fn entity_group(
     })
 }
 
-/// The group of the client's own player with its `states`.
+/// Which card goes with the client's own player in one bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum OwnCard {
+    /// No card: only the position.
+    Without,
+    /// The card again, with the position.
+    Refresh,
+    /// The first card, with the full first state that sets the client's start position
+    /// ([`AlcState::spawn`]).
+    Spawn,
+}
+
+/// The group of the client's own player with its `states`; `None` for a position that is not
+/// finite.
+///
+/// # Errors
+///
+/// Returns [`MessageError`] when the spawn state cannot be encoded.
 pub(super) fn own_group(
     entity: u64,
     states: PlayerStates,
     position: Position,
-    carded: bool,
-) -> Option<BundleGroup> {
-    entity_group(
+    card: OwnCard,
+) -> Result<Option<BundleGroup>, MessageError> {
+    let Some(mut group) = entity_group(
         LOCAL_PLAYER_INTEREST,
         entity,
         EntityKind::PLAYER,
         position,
-        carded,
+        card != OwnCard::Without,
         Some(states),
-    )
+    ) else {
+        return Ok(None);
+    };
+    if card == OwnCard::Spawn
+        && let Some(pos) = InputPosition::from_metres(position.x, position.y, position.z)
+        && let Some(alc) = group.members.last_mut()
+    {
+        alc.state = MemberState::Alc(AlcState::spawn(pos)?);
+    }
+    Ok(Some(group))
 }
 
 /// The bundle envelopes of `groups`, in order, split by bytes, with the pending stops of `slots`
@@ -237,7 +263,9 @@ mod tests {
 
     #[test]
     fn the_own_player_is_the_player_prefab_in_slot_1() {
-        let group = own_group(OWN, own_states(), at(), true).expect("finite");
+        let group = own_group(OWN, own_states(), at(), OwnCard::Spawn)
+            .expect("encode")
+            .expect("finite");
         assert_eq!(group.interest, u64::from(LOCAL_PLAYER_INTEREST));
         let MemberState::GdeMetadata(card) = &group.members[0].state else {
             panic!("the card comes first: {group:?}");
@@ -270,13 +298,40 @@ mod tests {
             panic!("then the ALC position: {group:?}");
         };
         assert_eq!(alc.pos10, InputPosition::from_metres(10.0, 20.0, 30.0));
-        let later = own_group(OWN, own_states(), at(), false).expect("finite");
+        let later = own_group(OWN, own_states(), at(), OwnCard::Without)
+            .expect("encode")
+            .expect("finite");
         assert_eq!(later.members.len(), 1, "later only the ALC position");
         let payload = BundlePayload {
             groups: vec![group.clone()],
         };
         let read = BundlePayload::decode(&payload.encode().expect("payload")).expect("read");
         assert_eq!(read.groups[0].members, group.members);
+    }
+
+    #[test]
+    fn only_the_spawn_card_carries_the_full_first_state() {
+        let pos = InputPosition::from_metres(10.0, 20.0, 30.0).expect("finite");
+        let alc_of = |card: OwnCard| {
+            let group = own_group(OWN, own_states(), at(), card)
+                .expect("encode")
+                .expect("finite");
+            group.members.last().expect("alc").state.clone()
+        };
+        assert_eq!(
+            alc_of(OwnCard::Spawn),
+            MemberState::Alc(AlcState::spawn(pos).expect("spawn")),
+            "the first card sets the start position with the full state"
+        );
+        assert_eq!(
+            alc_of(OwnCard::Refresh),
+            MemberState::Alc(AlcState::at_position(pos)),
+            "a refresh moves nothing: the plain position"
+        );
+        assert_eq!(
+            alc_of(OwnCard::Without),
+            MemberState::Alc(AlcState::at_position(pos))
+        );
     }
 
     #[test]

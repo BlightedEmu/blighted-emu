@@ -108,7 +108,7 @@ impl InputPosition {
         })
     }
 
-    fn write(&self, writer: &mut Writer) {
+    pub(crate) fn write(&self, writer: &mut Writer) {
         writer.f32(self.x).f32(self.y).u16(self.z_raw);
     }
 }

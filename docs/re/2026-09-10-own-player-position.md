@@ -52,16 +52,26 @@ position.
 counter. Children 1 and 2 do not echo the client input frame number (the `u16` after each
 input record mask, a simple counter).
 
-**Observed.** At world entry (the first own ALC after type 1628, 18 sessions), the own ALC has
-no position at all: children 0, 1, 2, 12, and often 25 (`idAbs` = 0) and 26
-(`timeOffsetAbs`). Neither `worldPosAbs` nor `worldPosRel`.
+**Correction (later the same day).** The earlier reading "the first own ALC at entry has no
+position" was wrong: our member walk stops at the first unknown class (3147) before it reaches
+the real first own ALC, so it saw only later small updates.
 
-**Inferred.** Retail does not send the start position in the ALC. The client knows its start
-position from another source before or at spawn.
+**Observed.** A byte search of the first bundle after 1628 in the beach capture (Soul
+Survivor) found the client's start spot (478.5, 849.7; client's first input 480.6, 850.2) inside
+an own ALC member (`10 0b`: component 16, class 11) of the 13,324-byte entry bundle. It is a
+FULL state: slot mask `0x03`, slot-0 presence `0x21ff3fafffffff`, slot-1 presence `0x7f`.
+Over 315 retail logins the first own ALC always has both slots, `idAbs` (25), `timeOffsetAbs`
+(26), `worldPosAbs` (27), `teleportAndMigrationId` (31) and fixed children 29-53;
+`segmentedStamina` (46) is 4021696251 in all 315.
+
+**Fix (live-verified 2026-09-10 23:28Z).** `AlcState::spawn` writes the most common retail first
+state with our position; the sim sends it with the own spawn card only. The client then starts at
+the sim position (client inputs x 11146-11154, y 7302-7312 vs sim 11132.5, 7305.9), the world
+renders, and the player walks. The network-warning icon is gone (carrier fix).
 
 ## Unknown (next)
 
-- The source of the start position. Not the character list (no coordinates; it has
+- (Solved above.) The source of the start position. Not the character list (no coordinates; it has
   `LocationId`, `LocationGroupId`, `FtueCompleted`). Not 1617 (empty). Candidates: a member of
   the first own group that our walk cannot read yet (type 13 `PositionInTheWorldReplicatedState`
   or another), or a GDE / streaming path.

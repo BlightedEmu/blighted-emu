@@ -150,6 +150,26 @@ impl AlcState {
         writer.bytes(&self.bytes);
     }
 
+    /// The first state of the client's own player, at `pos`: both slots with the children and
+    /// values of the most common retail first own ALC (own-player-position note: 315 logins).
+    /// The client takes its start position only from such a full state (with the absolute
+    /// `idAbs`, `timeOffsetAbs` and `worldPosAbs` parts); a lone `pos10` leaves it at the grid
+    /// origin.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when a prefix value cannot be encoded.
+    pub fn spawn(pos: InputPosition) -> Result<Self, MessageError> {
+        let mut writer = Writer::new();
+        writer.u8(SLOT_BITS[0] | SLOT_BITS[1]);
+        write_children(&mut writer, &SPAWN_SLOT0, pos)?;
+        write_children(&mut writer, &SPAWN_SLOT1, pos)?;
+        Ok(Self {
+            bytes: writer.finish(),
+            pos10: Some(pos),
+        })
+    }
+
     /// A minimal body that replicates only `pos` through the slot-0 `pos10` child (child 27):
     /// the slot-0 mask bit, a presence integer with only child 27 set, then the 10-byte position.
     /// This is how entities carry their position in the retail bundles (the dominant member is
@@ -164,6 +184,137 @@ impl AlcState {
             pos10: Some(pos),
         }
     }
+}
+
+/// One child value of a written state.
+#[derive(Debug, Clone, Copy)]
+enum SpawnValue {
+    /// A `u8`.
+    Byte(u8),
+    /// A `u16` or `half`.
+    Word(u16),
+    /// A short prefix integer.
+    Prefixed(u64),
+    /// An `f32`.
+    Float(f32),
+    /// A `u64`.
+    Long(u64),
+    /// Fixed bytes: a `pos3`, a `quat` (tag and extra bytes), a `frag`, or a blob (count and
+    /// bytes).
+    Raw(&'static [u8]),
+    /// The `pos10` position.
+    Position,
+}
+
+use SpawnValue::{Byte, Float, Long, Position as SpawnPosition, Prefixed, Raw, Word};
+
+/// `worldPosRel` 0 on each axis (the relative part of the position; `0x7f` is the zero step).
+const ZERO_POS3: [u8; POS3_LEN] = [0x7f; POS3_LEN];
+/// An empty blob: count 0.
+const EMPTY_BLOB: [u8; 1] = [0];
+/// A `frag` of zeros.
+const ZERO_FRAG: [u8; FRAG_LEN] = [0; FRAG_LEN];
+/// The retail `segmentedStamina` (child 46) of every first own ALC (315 of 315 logins).
+const FULL_SEGMENTED_STAMINA: u64 = 4_021_696_251;
+
+/// Slot-0 children of the first own state (child index and value), from the most common retail
+/// first own ALC: id and time parts, the four slayer slots, zero relative position, a facing,
+/// the absolute parts 0 with `worldPosAbs`, `teleportAndMigrationId` 1, and the fixed scope,
+/// water, anchor and stamina children. Child 40 (`scopeTimeBlob0Data1`) is 0, as in 16 logins.
+const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
+    (0, Byte(2)),
+    (1, Byte(9)),
+    (2, Byte(129)),
+    (3, Word(0x2844)),
+    (4, Byte(127)),
+    (5, Word(0)),
+    (6, Byte(127)),
+    (7, Word(0)),
+    (8, Byte(127)),
+    (9, Word(0)),
+    (10, Raw(&ZERO_POS3)),
+    (11, Raw(&[0x66, 0xfe])),
+    (12, Raw(&[0x19, 0x7f])),
+    (13, Prefixed(31)),
+    (14, Word(1)),
+    (15, Prefixed(1081)),
+    (16, Prefixed(45)),
+    (17, Word(1)),
+    (18, Prefixed(0)),
+    (19, Prefixed(0)),
+    (20, Word(0)),
+    (21, Prefixed(0)),
+    (22, Prefixed(0)),
+    (23, Word(0)),
+    (24, Prefixed(0)),
+    (25, Byte(0)),
+    (26, Byte(0)),
+    (POS10_CHILD, SpawnPosition),
+    (29, Raw(&EMPTY_BLOB)),
+    (31, Byte(1)),
+    (32, Prefixed(0)),
+    (33, Raw(&EMPTY_BLOB)),
+    (34, Raw(&ZERO_FRAG)),
+    (35, Float(0.0)),
+    (36, Word(0x4a20)),
+    (37, Word(0)),
+    (40, Long(0)),
+    (41, Byte(243)),
+    (42, Byte(83)),
+    (43, Byte(0)),
+    (44, Byte(20)),
+    (45, Byte(0)),
+    (46, Prefixed(FULL_SEGMENTED_STAMINA)),
+    (47, Byte(4)),
+    (48, Prefixed(0)),
+    (53, Float(2.0)),
+];
+
+/// Slot-1 children of the first own state: all 0 or empty.
+const SPAWN_SLOT1: [(usize, SpawnValue); 7] = [
+    (0, Byte(0)),
+    (1, Byte(0)),
+    (2, Raw(&EMPTY_BLOB)),
+    (3, Raw(&EMPTY_BLOB)),
+    (4, Byte(0)),
+    (5, Byte(0)),
+    (6, Byte(0)),
+];
+
+/// Writes one slot: the presence integer of `children`, then each value in order.
+fn write_children(
+    writer: &mut Writer,
+    children: &[(usize, SpawnValue)],
+    pos: InputPosition,
+) -> Result<(), MessageError> {
+    let present = children
+        .iter()
+        .fold(0_u64, |mask, (index, _)| mask | 1 << index);
+    writer.wide_prefixed(present);
+    for (_, value) in children {
+        match *value {
+            Byte(value) => {
+                writer.u8(value);
+            }
+            Word(value) => {
+                writer.u16(value);
+            }
+            Prefixed(value) => {
+                writer.prefixed(value)?;
+            }
+            Float(value) => {
+                writer.f32(value);
+            }
+            Long(value) => {
+                writer.u64(value);
+            }
+            Raw(bytes) => {
+                writer.bytes(bytes);
+            }
+            SpawnPosition => pos.write(writer),
+        }
+    }
+    Ok(())
 }
 
 fn skip_child(kind: AlcChild, reader: &mut Reader<'_>) -> Result<(), MessageError> {
@@ -490,4 +641,32 @@ mod tests {
         let whole = BundlePayload::decode(&payload).expect("whole");
         assert_eq!(whole.encode().expect("encode"), payload);
     }
+
+    /// The child sets of the most common retail first own ALC (own-player-position note).
+    const RETAIL_FIRST_SLOT0: u64 = 0x0021_ff3f_afff_ffff;
+    const RETAIL_FIRST_SLOT1: u64 = 0x7f;
+
+    #[test]
+    fn the_spawn_state_has_the_retail_shape_and_our_position() {
+        let pos = InputPosition {
+            x: POS10_X,
+            y: POS10_Y,
+            z_raw: POS10_Z_RAW,
+        };
+        let state = AlcState::spawn(pos).expect("spawn");
+        let mut reader = Reader::new(&state.bytes);
+        assert_eq!(reader.u8().expect("mask"), SLOT_BITS[0] | SLOT_BITS[1]);
+        assert_eq!(reader.wide_prefixed().expect("slot 0"), RETAIL_FIRST_SLOT0);
+        let mut whole = Reader::new(&state.bytes);
+        let read = AlcState::read(&mut whole).expect("read");
+        whole.finish().expect("the whole body is one state");
+        assert_eq!(read, state);
+        assert_eq!(read.pos10, Some(pos));
+        let slot1_at = state.bytes.len() - SLOT1_BODY_LEN;
+        let mut slot1 = Reader::new(&state.bytes[slot1_at..]);
+        assert_eq!(slot1.wide_prefixed().expect("slot 1"), RETAIL_FIRST_SLOT1);
+    }
+
+    /// Slot 1 of the spawn state: a 1-byte presence integer and seven 1-byte children.
+    const SLOT1_BODY_LEN: usize = 8;
 }

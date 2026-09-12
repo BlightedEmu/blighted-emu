@@ -40,7 +40,7 @@ mod members;
 mod slots;
 
 use members::{
-    CARD_REFRESH_BUNDLES, EntityKind, MobCard, bundles, card_of, entity_group, own_group,
+    CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, bundles, card_of, entity_group, own_group,
 };
 use slots::Slots;
 
@@ -1128,18 +1128,22 @@ impl Neighbourhood<'_> {
                     && vitals.spawned
                     && player.bundles_sent % CARD_REFRESH_BUNDLES == 0);
             let own_sent = first_card || vitals.spawned || !self.local_player_card;
-            let mut groups: Vec<BundleGroup> = own_sent
-                .then(|| {
-                    let states = PlayerStates {
-                        character_id: *player.character.as_bytes(),
-                        look: player.look,
-                        health: Some((vitals.health.current(), vitals.health.max())),
-                    };
-                    own_group(own, states, own_position, own_carded)
-                })
-                .flatten()
-                .into_iter()
-                .collect();
+            let own_card = if first_card {
+                OwnCard::Spawn
+            } else if own_carded {
+                OwnCard::Refresh
+            } else {
+                OwnCard::Without
+            };
+            let mut groups: Vec<BundleGroup> = Vec::new();
+            if own_sent {
+                let states = PlayerStates {
+                    character_id: *player.character.as_bytes(),
+                    look: player.look,
+                    health: Some((vitals.health.current(), vitals.health.max())),
+                };
+                groups.extend(own_group(own, states, own_position, own_card)?);
+            }
             for number in numbers {
                 let (kind, position) = match self.cards.get(&number) {
                     Some(card) => (EntityKind::mob(number), card.position),
