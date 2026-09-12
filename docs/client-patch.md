@@ -59,6 +59,28 @@ Build where this was derived: Steam build `25810808`, patch at file offset
 `0x78F0B90`. Reasoning and the reverse-engineering trail:
 [docs/re/2026-09-06-cert-bypass-patch-plan.md](re/2026-09-06-cert-bypass-patch-plan.md).
 
+## Second change: Exit to desktop
+
+Without it, "Exit to desktop" hangs the client. The exit path calls the Steam
+auth manager's `EndSession`, which only stores the quit callback and asks the
+Omni persona client to finish later. Our setup has no persona client, so the
+callback never runs and the game never quits.
+
+The Sonic auth manager's `EndSession` runs the callback at once (the callback
+logs `In callback function for IAuthManager::GetInstance()->EndSession()` and
+runs the console command `quit`). The patch points the Steam `EndSession`
+vtable slot at the Sonic function: one 8-byte pointer in `.rdata`, in build
+25810808 at file offset `0x844AB78`, `0x145A8D380` -> `0x145A8D310`. The Sonic
+function also writes 1 to the byte at `this+0x58`; no Steam or base
+constructor sets that byte, and the write comes after the quit has started.
+
+The tool finds both functions by byte signatures (the Steam one with a
+wildcard for its call offset) and then the single pointer to the Steam
+function. Reasoning and addresses:
+[docs/re/2026-09-10-exit-to-desktop-patch.md](re/2026-09-10-exit-to-desktop-patch.md).
+
+"Exit to main menu" is a different path and is not changed by this patch.
+
 ## How to make the patched copy
 
 The tool finds the function by its byte signature, not by a fixed address,
@@ -112,6 +134,12 @@ changed the function. Re-find it with Ghidra (use `MAXMEM=24G` and
 
 If the struct offsets `0x158` / `0x188` ever change, update them in the
 signature too.
+
+For the exit patch, re-find the two `EndSession` functions: the Steam auth
+manager vtable is the one its constructor stores (build 25810808:
+`FUN_145a80510` stores `0x14844BA48`), slot `+0x130`; the Sonic vtable's slot
+`+0x130` is the function that calls the callback first. Update
+`SONIC_END_SESSION` and `STEAM_END_SESSION` in `scripts/patch-client.py`.
 
 ## Launching the patched client (no EAC)
 
