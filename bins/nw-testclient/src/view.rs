@@ -341,7 +341,8 @@ mod tests {
     };
     use nw_messages::{
         AssetId, BodyCodec, BundleGroup, ClientAddEntryMsg, DYNAMIC_SLICE_SUB_ID, DamageDealtMsg,
-        DeathRecapMsg, GDE_ID_LEN, LOCAL_PLAYER_INTEREST, OnDamageMsg, ReplicatedStateBundle,
+        DeathRecapMsg, GDE_ID_LEN, LOCAL_PLAYER_INTEREST, LOGIN_CLIENT_CONTEXT, OnDamageMsg,
+        ReplicatedStateBundle,
     };
     use nw_reflect::{Envelope, TypeId};
 
@@ -465,7 +466,9 @@ mod tests {
     fn mob_bundle(sequence: u64, stops: Vec<u16>, groups: Vec<BundleGroup>) -> Received {
         let own = entity_group(LOCAL_PLAYER_INTEREST, OWN, None, Some(at(1.0)));
         let groups = std::iter::once(own).chain(groups).collect();
-        let bundle = ReplicatedStateBundle::of_groups(sequence, stops, groups).expect("bundle");
+        let bundle =
+            ReplicatedStateBundle::of_groups(sequence, LOGIN_CLIENT_CONTEXT, stops, groups)
+                .expect("bundle");
         received(BUNDLE_CHANNEL, &ServerMessage::Bundle(bundle))
     }
 

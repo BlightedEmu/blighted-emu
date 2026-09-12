@@ -1,0 +1,61 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! The new-player start (new-player-start note, from the retail "Soul Survivor" capture): a new
+//! character starts in the private tutorial level, walks to its exit, and enters the open world
+//! at the beach start.
+
+use crate::movement::Position;
+
+/// The world-file folder name of the tutorial level (`FTUE_V2` on the client).
+pub const TUTORIAL_FOLDER: &str = "ftue_v2";
+
+/// Where a new character appears in the tutorial: the client's first position after the
+/// tutorial `LevelInfoChangedMsg`.
+pub const TUTORIAL_START: Position = Position {
+    x: 480.57,
+    y: 850.16,
+    z: 91.26,
+};
+
+/// The tutorial's end: the client's last position before the server changed the level to the
+/// open world. Until quests run, reaching it ends the tutorial.
+pub const TUTORIAL_EXIT: Position = Position {
+    x: 491.63,
+    y: 210.79,
+    z: 25.45,
+};
+
+/// How close (horizontally, in metres) a player must come to [`TUTORIAL_EXIT`] to leave.
+pub const TUTORIAL_EXIT_RADIUS_M: f32 = 20.0;
+
+/// Where a player appears in the open world after the tutorial (the beach start): the client's
+/// first position after the open-world `LevelInfoChangedMsg`.
+pub const OPEN_WORLD_START: Position = Position {
+    x: 7278.91,
+    y: 3143.20,
+    z: 41.45,
+};
+
+/// Whether `position` is at the tutorial's exit.
+pub fn at_tutorial_exit(position: Position) -> bool {
+    let (dx, dy) = (position.x - TUTORIAL_EXIT.x, position.y - TUTORIAL_EXIT.y);
+    dx.hypot(dy) <= TUTORIAL_EXIT_RADIUS_M
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_exit_is_near_its_point_and_not_at_the_start() {
+        assert!(at_tutorial_exit(TUTORIAL_EXIT));
+        assert!(at_tutorial_exit(Position {
+            x: TUTORIAL_EXIT.x + TUTORIAL_EXIT_RADIUS_M - 1.0,
+            ..TUTORIAL_EXIT
+        }));
+        assert!(!at_tutorial_exit(Position {
+            x: TUTORIAL_EXIT.x + TUTORIAL_EXIT_RADIUS_M + 1.0,
+            ..TUTORIAL_EXIT
+        }));
+        assert!(!at_tutorial_exit(TUTORIAL_START));
+    }
+}

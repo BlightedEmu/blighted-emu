@@ -8,6 +8,7 @@ pub mod combat;
 pub mod grid;
 pub mod interest;
 pub mod movement;
+pub mod new_player;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
 pub mod tick;
@@ -27,5 +28,9 @@ pub use interest::{Interest, InterestChanges};
 pub use movement::{
     CellBounds, Ground, GroundCheck, Motion, MotionState, MoveLimits, MoveLimitsError, MoveRefusal,
     Position,
+};
+pub use new_player::{
+    OPEN_WORLD_START, TUTORIAL_EXIT, TUTORIAL_EXIT_RADIUS_M, TUTORIAL_FOLDER, TUTORIAL_START,
+    at_tutorial_exit,
 };
 pub use tick::{DueTicks, TICKS_PER_SECOND, TickClock};

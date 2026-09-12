@@ -176,9 +176,10 @@ pub(super) fn own_group(
 
 /// The bundle envelopes of `groups`, in order, split by bytes, with the pending stops of `slots`
 /// in their index blocks (in extra bundles when the groups end first); the first has sequence
-/// `sequence` and each next one the next.
+/// `sequence` and each next one the next; each carries `client_context`.
 pub(super) fn bundles(
     sequence: u64,
+    client_context: u8,
     slots: &mut Slots,
     groups: Vec<BundleGroup>,
 ) -> Result<Vec<Vec<u8>>, MessageError> {
@@ -198,8 +199,13 @@ pub(super) fn bundles(
         }
         let next = sequence + envelopes.len() as u64;
         envelopes.push(
-            ServerMessage::Bundle(ReplicatedStateBundle::of_groups(next, stops, part)?)
-                .envelope()?,
+            ServerMessage::Bundle(ReplicatedStateBundle::of_groups(
+                next,
+                client_context,
+                stops,
+                part,
+            )?)
+            .envelope()?,
         );
     }
     Ok(envelopes)
@@ -215,7 +221,10 @@ fn group_bytes(group: &BundleGroup) -> Result<usize, MessageError> {
 
 #[cfg(test)]
 mod tests {
-    use nw_messages::{EntitySlots, GDE_ID_LEN, PLAYER_COMPONENT_TYPE_INDEX, PlayerLook, SlotRead};
+    use nw_messages::{
+        EntitySlots, GDE_ID_LEN, LOGIN_CLIENT_CONTEXT, PLAYER_COMPONENT_TYPE_INDEX, PlayerLook,
+        SlotRead,
+    };
     use nw_reflect::Envelope;
     use uuid::Uuid;
 
@@ -374,7 +383,8 @@ mod tests {
             })
             .collect();
         slots.keep_only(&[]);
-        let envelopes = bundles(SEQUENCE, &mut slots, groups).expect("bundles");
+        let envelopes =
+            bundles(SEQUENCE, LOGIN_CLIENT_CONTEXT, &mut slots, groups).expect("bundles");
         assert!(envelopes.len() > 1);
         let reads = reads(&envelopes);
         let mut entities = EntitySlots::default();
@@ -396,12 +406,13 @@ mod tests {
         let mut slots = Slots::new();
         slots.slot(ENTITY);
         slots.keep_only(&[]);
-        let envelopes = bundles(SEQUENCE, &mut slots, Vec::new()).expect("bundles");
+        let envelopes =
+            bundles(SEQUENCE, LOGIN_CLIENT_CONTEXT, &mut slots, Vec::new()).expect("bundles");
         let reads = reads(&envelopes);
         assert_eq!(reads.len(), 1);
         assert_eq!(reads[0].stops, vec![FIRST_REMOTE_INTEREST]);
         assert!(
-            bundles(SEQUENCE, &mut slots, Vec::new())
+            bundles(SEQUENCE, LOGIN_CLIENT_CONTEXT, &mut slots, Vec::new())
                 .expect("bundles")
                 .is_empty()
         );

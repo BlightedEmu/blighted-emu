@@ -192,7 +192,9 @@ mod tests {
     }
 
     fn read(stops: Vec<u16>, groups: Vec<BundleGroup>) -> SlotRead {
-        let bundle = ReplicatedStateBundle::of_groups(SEQUENCE, stops, groups).expect("bundle");
+        let bundle =
+            ReplicatedStateBundle::of_groups(SEQUENCE, crate::LOGIN_CLIENT_CONTEXT, stops, groups)
+                .expect("bundle");
         SlotRead::of(&bundle).expect("read")
     }
 

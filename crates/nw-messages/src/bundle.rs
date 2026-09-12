@@ -19,8 +19,6 @@ pub const MAX_BUNDLE_INDEXES: u64 = 100;
 /// The interest id of the client's own player: `FUN_141717fc0` takes its "new local player
 /// metadata" branch only for interest 1, and the own entity of every capture is in group 1.
 pub const LOCAL_PLAYER_INTEREST: u16 = 1;
-/// Header byte 3 of every captured bundle.
-pub const OBSERVED_BUNDLE_BYTE_3: u8 = 1;
 /// The most common header byte 4 in the captures; its meaning is Unknown.
 pub const OBSERVED_BUNDLE_BYTE_4: u8 = 1;
 
@@ -54,20 +52,22 @@ pub struct ReplicatedStateBundle {
 }
 
 impl ReplicatedStateBundle {
-    /// A bundle with the captured header values, `sequence` as the leading integer, the interest
-    /// ids in `stops` stopped, and `groups` (one group per entity slot), in order.
+    /// A bundle with the captured header values, `sequence` as the leading integer,
+    /// `client_context` as header byte 3 (the client-context id of the player's current level), the
+    /// interest ids in `stops` stopped, and `groups` (one group per entity slot), in order.
     ///
     /// # Errors
     ///
     /// Returns [`MessageError`] when a member cannot be encoded.
     pub fn of_groups(
         sequence: u64,
+        client_context: u8,
         stops: Vec<u16>,
         groups: Vec<BundleGroup>,
     ) -> Result<Self, MessageError> {
         Ok(Self {
             leading: Some(sequence),
-            byte_3: OBSERVED_BUNDLE_BYTE_3,
+            byte_3: client_context,
             byte_4: OBSERVED_BUNDLE_BYTE_4,
             flag_5: true,
             index_block: Some(IndexBlock {
@@ -161,6 +161,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::level_info::LOGIN_CLIENT_CONTEXT;
     use crate::payload::{BundleMember, MemberState};
     use crate::position::{PositionInTheWorldReplicatedState, WorldPosition};
 
@@ -193,12 +194,17 @@ mod tests {
             group(LOCAL_PLAYER_INTEREST, 1.0),
             group(OTHER_INTEREST, 2.0),
         ];
-        let bundle = ReplicatedStateBundle::of_groups(SEQUENCE, STOPPED.to_vec(), groups.clone())
-            .expect("bundle");
+        let bundle = ReplicatedStateBundle::of_groups(
+            SEQUENCE,
+            LOGIN_CLIENT_CONTEXT,
+            STOPPED.to_vec(),
+            groups.clone(),
+        )
+        .expect("bundle");
         assert_eq!(bundle.leading, Some(SEQUENCE));
         assert_eq!(
             (bundle.byte_3, bundle.byte_4, bundle.flag_5),
-            (OBSERVED_BUNDLE_BYTE_3, OBSERVED_BUNDLE_BYTE_4, true)
+            (LOGIN_CLIENT_CONTEXT, OBSERVED_BUNDLE_BYTE_4, true)
         );
         assert_eq!(
             bundle.index_block,

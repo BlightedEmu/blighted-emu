@@ -13,6 +13,8 @@ use nw_sim_core::{CellGrid, CellOwners, Position};
 
 struct Live {
     generation: u64,
+    /// The level it runs.
+    level: String,
     players: u32,
     max_players: u32,
     /// Admits since the last heartbeat, which its player count does not hold yet.
@@ -55,6 +57,7 @@ impl SimRegistry {
     pub fn beat(&mut self, beat: &SimHeartbeat, now: Instant) -> bool {
         let live = Live {
             generation: beat.started_at_ms,
+            level: beat.level.clone(),
             players: beat.players,
             max_players: beat.max_players,
             pending: 0,
@@ -86,15 +89,28 @@ impl SimRegistry {
         silent
     }
 
-    /// The live sims, by id.
-    pub fn slots(&self) -> Vec<SimSlot> {
+    /// The live sims of `level`, by id.
+    pub fn slots(&self, level: &str) -> Vec<SimSlot> {
         self.sims
             .iter()
-            .map(|(id, live)| SimSlot {
-                id: id.clone(),
-                generation: live.generation,
-            })
+            .filter(|(_, live)| live.level == level)
+            .map(|(id, live)| slot_of(id, live))
             .collect()
+    }
+
+    /// The live sim of `level` with the most free player slots (admits in flight counted), the
+    /// first by id on a tie; `None` when no sim of `level` has a free slot.
+    pub fn least_loaded(&self, level: &str) -> Option<SimSlot> {
+        self.sims
+            .iter()
+            .filter(|(_, live)| live.level == level && free_of(live) > 0)
+            .min_by_key(|(_, live)| std::cmp::Reverse(free_of(live)))
+            .map(|(id, live)| slot_of(id, live))
+    }
+
+    /// Live sims of every level.
+    pub fn count(&self) -> usize {
+        self.sims.len()
     }
 
     /// Players in the world.
@@ -114,11 +130,23 @@ impl SimRegistry {
     /// Players the live sims can still take, admits in flight counted; a sim above its own limit
     /// counts as full.
     pub fn free_slots(&self) -> u32 {
-        self.sims.values().fold(0, |sum, live| {
-            let taken = live.players.saturating_add(live.pending);
-            sum.saturating_add(live.max_players.saturating_sub(taken))
-        })
+        self.sims
+            .values()
+            .fold(0, |sum, live| sum.saturating_add(free_of(live)))
     }
+}
+
+fn slot_of(id: &BusId, live: &Live) -> SimSlot {
+    SimSlot {
+        id: id.clone(),
+        generation: live.generation,
+    }
+}
+
+/// Players `live` can still take, admits in flight counted; above its own limit it is full.
+fn free_of(live: &Live) -> u32 {
+    let taken = live.players.saturating_add(live.pending);
+    live.max_players.saturating_sub(taken)
 }
 
 /// The cells of the open map shared over the live sims.
@@ -199,6 +227,7 @@ mod tests {
     const STARTED_AT_MS: u64 = 100;
     const MAX_PLAYERS: u32 = 2000;
     const LEVEL_M: f32 = 14_336.0;
+    const LEVEL: &str = "newworld_vitaeeterna";
     const CELL_M: f32 = 2048.0;
     const VERSION: u64 = 4;
 
@@ -212,6 +241,7 @@ mod tests {
             started_at_ms,
             players,
             max_players: MAX_PLAYERS,
+            level: LEVEL.to_owned(),
         }
     }
 
@@ -233,9 +263,9 @@ mod tests {
         assert!(sims.beat(&beat("sim-2", STARTED_AT_MS, 0), now));
         assert!(!sims.beat(&beat("sim-2", STARTED_AT_MS, 5), now));
         assert!(sims.beat(&beat("sim-1", STARTED_AT_MS, 0), now));
-        assert_eq!(sims.slots(), vec![slot("sim-1"), slot("sim-2")]);
+        assert_eq!(sims.slots(LEVEL), vec![slot("sim-1"), slot("sim-2")]);
         assert!(sims.beat(&beat("sim-1", STARTED_AT_MS + 1, 0), now));
-        assert_eq!(sims.slots()[0].generation, STARTED_AT_MS + 1);
+        assert_eq!(sims.slots(LEVEL)[0].generation, STARTED_AT_MS + 1);
     }
 
     #[test]
@@ -251,7 +281,7 @@ mod tests {
             sims.drop_silent(start + limit + INTERVAL),
             vec![id("sim-1")]
         );
-        assert_eq!(sims.slots(), vec![slot("sim-2")]);
+        assert_eq!(sims.slots(LEVEL), vec![slot("sim-2")]);
     }
 
     #[test]
@@ -267,7 +297,7 @@ mod tests {
             sims.drop_silent(quiet).is_empty(),
             "the director lost its link"
         );
-        assert_eq!(sims.slots().len(), 2);
+        assert_eq!(sims.slots(LEVEL).len(), 2);
         // Beats come back from one sim only; the other is dropped one window later.
         let back = quiet + INTERVAL;
         sims.beat(&beat("sim-1", STARTED_AT_MS, 0), back);
@@ -357,5 +387,26 @@ mod tests {
         let empty = Assignment::new(VERSION, grid(), Vec::new());
         assert_eq!(empty.owner_at(west), None);
         assert!(empty.x_ranges().is_empty());
+    }
+
+    #[test]
+    fn the_map_goes_to_open_sims_and_new_players_to_the_freest_tutorial_sim() {
+        let mut sims = SimRegistry::new(INTERVAL, MISSES);
+        let now = Instant::now();
+        sims.beat(&beat("sim-1", STARTED_AT_MS, 0), now);
+        let tutorial = |name: &str, players: u32| SimHeartbeat {
+            level: nw_sim_core::TUTORIAL_FOLDER.to_owned(),
+            ..beat(name, STARTED_AT_MS, players)
+        };
+        sims.beat(&tutorial("tut-1", 5), now);
+        sims.beat(&tutorial("tut-2", 2), now);
+        assert_eq!(sims.slots(LEVEL), vec![slot("sim-1")]);
+        assert_eq!(sims.count(), 3);
+        assert_eq!(
+            sims.least_loaded(nw_sim_core::TUTORIAL_FOLDER),
+            Some(slot("tut-2")),
+            "the tutorial sim with the most free slots"
+        );
+        assert_eq!(sims.least_loaded("no_such_level"), None);
     }
 }

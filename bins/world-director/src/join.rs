@@ -7,7 +7,7 @@ use std::time::Duration;
 use nw_bus::{Admit, AdmitReply, Bus, Join, MOB_ENTITY_BASE, Point, SimSlot, subject};
 use nw_db::{PgPool, SavedPosition, character_by_id, character_position, next_entity_number};
 use nw_login::look::saved_look;
-use nw_sim_core::Position;
+use nw_sim_core::{Position, TUTORIAL_FOLDER, TUTORIAL_START};
 use uuid::Uuid;
 
 use crate::sims::Assignment;
@@ -115,7 +115,14 @@ pub fn join_position(
         .or_else(|| start_for(starts, entity))
 }
 
-/// Routes `join` to the owner of the player's cell in `assignment`. Returns the sim and the
+/// Whether a character with the saved spot `saved` starts in the tutorial: it was never in the
+/// world, or it left during the tutorial (which then starts again).
+pub fn starts_in_tutorial(saved: Option<&SavedPosition>) -> bool {
+    saved.is_none_or(|saved| saved.level == TUTORIAL_FOLDER)
+}
+
+/// Routes `join`: a new player to the tutorial sim `tutorial` (when one is live) at the tutorial
+/// start, every other player to the owner of its cell in `assignment`. Returns the sim and the
 /// entity number: a new one, or the resumed one.
 ///
 /// # Errors
@@ -124,6 +131,7 @@ pub fn join_position(
 pub async fn route_join(
     context: &JoinContext,
     assignment: &Assignment,
+    tutorial: Option<&SimSlot>,
     join: &Join,
 ) -> Result<(SimSlot, u64), JoinRefusal> {
     let database = |error: nw_db::DbError| JoinRefusal::Database(error.to_string());
@@ -149,18 +157,24 @@ pub async fn route_join(
             NEW_PLAYER_COUNT,
         ),
     };
-    let position = join_position(
-        saved.as_ref(),
-        &context.level,
-        |position| assignment.covers(position),
-        &context.starts,
-        entity,
-    )
-    .ok_or(JoinRefusal::NoStart)?;
-    let sim = assignment
-        .owner_at(position)
-        .ok_or(JoinRefusal::NoOwner)?
-        .clone();
+    let (sim, position) = match tutorial.filter(|_| starts_in_tutorial(saved.as_ref())) {
+        Some(tutorial) => (tutorial.clone(), TUTORIAL_START),
+        None => {
+            let position = join_position(
+                saved.as_ref(),
+                &context.level,
+                |position| assignment.covers(position),
+                &context.starts,
+                entity,
+            )
+            .ok_or(JoinRefusal::NoStart)?;
+            let sim = assignment
+                .owner_at(position)
+                .ok_or(JoinRefusal::NoOwner)?
+                .clone();
+            (sim, position)
+        }
+    };
     let admit = Admit {
         connection: join.connection.clone(),
         account: join.account,
@@ -218,6 +232,13 @@ mod tests {
             z: 0.0,
         },
     ];
+
+    #[test]
+    fn new_characters_and_tutorial_leavers_start_in_the_tutorial() {
+        assert!(starts_in_tutorial(None));
+        assert!(starts_in_tutorial(Some(&saved_at(TUTORIAL_FOLDER, 1.0))));
+        assert!(!starts_in_tutorial(Some(&saved_at(LEVEL, 1.0))));
+    }
 
     #[test]
     fn new_characters_take_the_start_points_in_turn() {

@@ -26,11 +26,13 @@ use nw_bus::{
     SimSlot, SnapMob, SnapPlayer,
 };
 use nw_messages::{
-    BundleGroup, MessageError, PlayerLook, PlayerStates, ServerMessage, TimeSynchMsg, WorldPosition,
+    BundleGroup, LOGIN_CLIENT_CONTEXT, LevelSpec, MessageError, PlayerLook, PlayerStates,
+    ServerMessage, TUTORIAL_LEVEL, TimeSynchMsg, WorldPosition,
 };
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
-    Motion, MotionState, MoveLimits, MoveRefusal, Position, Seen, SpatialGrid,
+    Motion, MotionState, MoveLimits, MoveRefusal, OPEN_WORLD_START, Position, Seen, SpatialGrid,
+    at_tutorial_exit,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -47,7 +49,7 @@ use slots::Slots;
 use attack::Vitals;
 
 use crate::combat::{AttackOutcome, CombatSettings};
-use crate::login::{SessionIds, WorldIds, login_messages};
+use crate::login::{SessionIds, WorldIds, level_change_messages, login_messages, phase_id};
 use crate::mobs::{MobAttackIntent, MobChanges, Mobs};
 
 /// Carrier channel of the login messages and the time messages.
@@ -127,6 +129,9 @@ pub struct WorldSettings {
     pub tick_threads: usize,
     /// Whether a client gets its own player as a spawn card ([`local_player_card`]).
     pub local_player_card: bool,
+    /// The level this sim runs. The tutorial is a set of private instances: it hands players
+    /// on only at its exit, into the open world (new-player-start note).
+    pub level: LevelSpec,
 }
 
 /// Fewest players for which the bundle step uses more than one thread; below that, starting
@@ -270,6 +275,8 @@ struct Player {
     own_card_sent: bool,
     /// Earliest time the own spawn card may go out.
     own_card_due_ms: u64,
+    /// The client-context id of the player's current level; every bundle carries it.
+    client_context: u8,
     frozen: bool,
     handoffs: u64,
     no_handoff_before_ms: u64,
@@ -316,6 +323,9 @@ pub struct SimWorld {
     ground: Arc<dyn Ground + Send + Sync>,
     me: SimSlot,
     cells: Option<Cells>,
+    /// Tutorial sims only: the open-world sim that owns [`OPEN_WORLD_START`], where the exit
+    /// hands players.
+    exit_target: Option<SimSlot>,
     ghosts: HashMap<BusId, ReceivedGhosts>,
     ghost_targets: BTreeSet<BusId>,
     mobs: Mobs,
@@ -341,6 +351,8 @@ struct Arrival {
     spawned: bool,
     /// Earliest time the own spawn card may go out ([`OWN_CARD_DELAY_MS`]).
     own_card_due_ms: u64,
+    /// The client-context id of the player's current level.
+    client_context: u8,
 }
 
 impl SimWorld {
@@ -366,6 +378,7 @@ impl SimWorld {
             ground,
             me,
             cells: None,
+            exit_target: None,
             ghosts: HashMap::new(),
             ghost_targets: BTreeSet::new(),
         }
@@ -425,11 +438,19 @@ impl SimWorld {
             } else {
                 now_ms
             },
+            client_context: LOGIN_CLIENT_CONTEXT,
         };
         self.check(&arrival)?;
         let login = if admit.login {
-            let envelopes =
-                login_messages(&self.ids, SessionIds::random()?, admit.entity, server_time)?;
+            let level = self.settings.level;
+            let envelopes = login_messages(
+                &self.ids,
+                SessionIds::random()?,
+                admit.entity,
+                server_time,
+                level,
+                phase_id(level)?,
+            )?;
             Some(Outgoing {
                 connection: admit.connection.clone(),
                 channel: MESSAGE_CHANNEL,
@@ -456,25 +477,66 @@ impl SimWorld {
     }
 
     /// Takes the player of `offer` from another sim, with the same entity number, bundle
-    /// sequence and movement budget.
+    /// sequence and movement budget. A player that enters this level from another one (the end
+    /// of the tutorial) gets the level change messages, which this returns, the next
+    /// client-context id, and a new spawn as at a login; it lands on the ground.
     ///
     /// # Errors
     ///
     /// Returns [`WorldError`] as [`SimWorld::admit`] does.
-    pub fn take(&mut self, offer: &HandoffOffer, now_ms: u64) -> Result<(), WorldError> {
+    pub fn take(
+        &mut self,
+        offer: &HandoffOffer,
+        now_ms: u64,
+        server_time: u64,
+    ) -> Result<Option<Outgoing>, WorldError> {
+        let enters = offer.enter_level;
+        let position = Position::from(offer.position);
         let arrival = Arrival {
             connection: offer.connection.clone(),
             character: offer.character,
             name: offer.name.clone(),
             look: offer.look.map(PlayerLook::of_choices),
             number: offer.entity,
-            position: Position::from(offer.position),
+            position: if enters {
+                self.settings.limits.onto_ground(&*self.ground, position)
+            } else {
+                position
+            },
             health: Health::at(offer.health, self.combat.data.player_max_health()),
-            // A handed-off player was already in the world.
-            spawned: true,
-            own_card_due_ms: now_ms,
+            // A handed-off player was already in the world; one that enters a new level spawns
+            // again once its client has loaded it.
+            spawned: !enters,
+            own_card_due_ms: if enters {
+                now_ms.saturating_add(OWN_CARD_DELAY_MS)
+            } else {
+                now_ms
+            },
+            client_context: if enters {
+                offer.client_context.saturating_add(1)
+            } else {
+                offer.client_context
+            },
         };
         self.check(&arrival)?;
+        let level_change = if enters {
+            let level = self.settings.level;
+            let envelopes = level_change_messages(
+                offer.entity,
+                level,
+                arrival.client_context,
+                server_time,
+                phase_id(level)?,
+            )?;
+            Some(Outgoing {
+                connection: offer.connection.clone(),
+                channel: MESSAGE_CHANNEL,
+                reliable: true,
+                envelopes,
+            })
+        } else {
+            None
+        };
         let state = MotionState {
             position: arrival.position,
             move_age_ms: offer.move_age_ms,
@@ -482,12 +544,18 @@ impl SimWorld {
         };
         let motion = Motion::import(state, now_ms, &self.settings.limits);
         let retry_at = now_ms.saturating_add(self.settings.handoff_retry_ms);
-        let replication = Replication {
-            bundles_sent: offer.bundles_sent,
-            slots: Slots::restored(
+        // A new level starts with no entity slots on the client.
+        let slots = if enters {
+            Slots::new()
+        } else {
+            Slots::restored(
                 offer.slots.iter().copied().collect(),
                 offer.pending_stops.clone(),
-            ),
+            )
+        };
+        let replication = Replication {
+            bundles_sent: offer.bundles_sent,
+            slots,
         };
         self.spawn(
             arrival,
@@ -497,7 +565,7 @@ impl SimWorld {
             offer.handoffs,
             retry_at,
         );
-        Ok(())
+        Ok(level_change)
     }
 
     /// Notes that the client of `connection` sent a message. A client sends nothing between the
@@ -639,6 +707,13 @@ impl SimWorld {
     /// Returns [`TableError::WrongSize`] for a table that does not fit the level; the last table
     /// stays.
     pub fn set_table(&mut self, table: &CellTable) -> Result<Vec<Departure>, TableError> {
+        if self.is_tutorial() {
+            // A tutorial sim owns its whole private level and is in no open-world table; from the
+            // table it needs only the sim its exit hands players to.
+            self.mob_changes.add(self.mobs.set_cells(|_| true));
+            self.exit_target = owner_in(table, OPEN_WORLD_START);
+            return Ok(Vec::new());
+        }
         let bounds = self.settings.bounds;
         let grid = CellGrid::new(bounds.max_x, bounds.max_y, table.cell_size_m)
             .ok()
@@ -822,7 +897,15 @@ impl SimWorld {
         self.mobs.tick(&seen, now_ms, &*self.ground)
     }
 
+    /// Whether this sim runs the tutorial.
+    fn is_tutorial(&self) -> bool {
+        self.settings.level == TUTORIAL_LEVEL
+    }
+
     fn start_handoffs(&mut self, now_ms: u64) -> Vec<HandoffStart> {
+        if self.is_tutorial() {
+            return self.tutorial_exits(now_ms);
+        }
         let Some(cells) = &self.cells else {
             return Vec::new();
         };
@@ -843,30 +926,36 @@ impl SimWorld {
                 continue;
             };
             player.frozen = true;
-            let state = body.motion.export(now_ms);
             starts.push(HandoffStart {
                 target: target.clone(),
-                offer: HandoffOffer {
-                    connection: player.connection.clone(),
-                    character: player.character,
-                    name: player.name.clone(),
-                    entity: player.number,
-                    position: Point::from(state.position),
-                    move_age_ms: state.move_age_ms,
-                    budget_m: state.budget_m,
-                    bundles_sent: player.bundles_sent,
-                    slots: player
-                        .slots
-                        .assigned()
-                        .iter()
-                        .map(|(entity, interest)| (*entity, *interest))
-                        .collect(),
-                    pending_stops: player.slots.pending_stops().to_vec(),
-                    time_synch_age_ms: now_ms.saturating_sub(player.last_time_synch_ms),
-                    handoffs: player.handoffs.saturating_add(1),
-                    health: vitals.health.current(),
-                    look: player.look.map(|look| look.choices()),
-                },
+                offer: handoff_offer(&player, body, vitals, now_ms, None),
+            });
+        }
+        starts
+    }
+
+    /// The tutorial players at the exit, handed to the open-world sim that owns the beach start
+    /// with the level change (new-player-start note). Only a player whose client has spawned
+    /// leaves; without a known open-world sim everyone stays.
+    fn tutorial_exits(&mut self, now_ms: u64) -> Vec<HandoffStart> {
+        let Some(target) = self.exit_target.clone() else {
+            return Vec::new();
+        };
+        let mut query = self.world.query::<(&mut Player, &Body, &Vitals)>();
+        let mut starts = Vec::new();
+        for (mut player, body, vitals) in query.iter_mut(&mut self.world) {
+            if player.frozen
+                || now_ms < player.no_handoff_before_ms
+                || !vitals.spawned
+                || vitals.health.is_dead()
+                || !at_tutorial_exit(body.motion.position())
+            {
+                continue;
+            }
+            player.frozen = true;
+            starts.push(HandoffStart {
+                target: target.clone(),
+                offer: handoff_offer(&player, body, vitals, now_ms, Some(OPEN_WORLD_START)),
             });
         }
         starts
@@ -1030,6 +1119,7 @@ impl SimWorld {
                     slots: replication.slots,
                     own_card_sent: false,
                     own_card_due_ms: arrival.own_card_due_ms,
+                    client_context: arrival.client_context,
                     frozen: false,
                     handoffs,
                     no_handoff_before_ms,
@@ -1172,7 +1262,12 @@ impl Neighbourhood<'_> {
                 .iter()
                 .map(|group| group.members.len() as u64)
                 .sum::<u64>();
-            for bundle in bundles(player.bundles_sent, &mut player.slots, groups)? {
+            for bundle in bundles(
+                player.bundles_sent,
+                player.client_context,
+                &mut player.slots,
+                groups,
+            )? {
                 player.bundles_sent = player.bundles_sent.saturating_add(1);
                 outgoing.push(Outgoing {
                     connection: player.connection.clone(),
@@ -1203,6 +1298,61 @@ impl Neighbourhood<'_> {
     }
 }
 
+/// The offer that hands `player` to another sim. `enter_at` is `Some` for a player that leaves
+/// this level for another one (the end of the tutorial): it appears there at that position, the
+/// taker sends the level change, and the client's entity slots start empty.
+fn handoff_offer(
+    player: &Player,
+    body: &Body,
+    vitals: &Vitals,
+    now_ms: u64,
+    enter_at: Option<Position>,
+) -> HandoffOffer {
+    let state = body.motion.export(now_ms);
+    let enters = enter_at.is_some();
+    HandoffOffer {
+        connection: player.connection.clone(),
+        character: player.character,
+        name: player.name.clone(),
+        entity: player.number,
+        position: Point::from(enter_at.unwrap_or(state.position)),
+        move_age_ms: state.move_age_ms,
+        budget_m: state.budget_m,
+        bundles_sent: player.bundles_sent,
+        slots: if enters {
+            Vec::new()
+        } else {
+            player
+                .slots
+                .assigned()
+                .iter()
+                .map(|(entity, interest)| (*entity, *interest))
+                .collect()
+        },
+        pending_stops: if enters {
+            Vec::new()
+        } else {
+            player.slots.pending_stops().to_vec()
+        },
+        time_synch_age_ms: now_ms.saturating_sub(player.last_time_synch_ms),
+        handoffs: player.handoffs.saturating_add(1),
+        health: vitals.health.current(),
+        look: player.look.map(|look| look.choices()),
+        client_context: player.client_context,
+        enter_level: enters,
+    }
+}
+
+/// The sim of `table` that owns the cell at `position`; `None` when the table does not fit its
+/// own size or no live sim owns that cell.
+fn owner_in(table: &CellTable, position: Position) -> Option<SimSlot> {
+    let cell = table.cell_size_m;
+    let grid = CellGrid::new(table.columns as f32 * cell, table.rows as f32 * cell, cell).ok()?;
+    let owners = CellOwners::from_cells(grid, table.owners.clone())?;
+    let index = owners.owner_at(position)?;
+    table.sims.get(usize::from(index)).cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1211,13 +1361,15 @@ mod tests {
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
     use nw_messages::{
         ALC_TYPE_INDEX, GDE_METADATA_TYPE_INDEX, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
-        LOOK_CHOICES, MemberState, PLAYER_APPEARANCE_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS,
-        PlayerAppearanceState, ReplicatedStateBundle, SlotRead, SlotUpdate, VITALS_TYPE_INDEX,
-        VitalsState,
+        LOOK_CHOICES, MemberState, OPEN_WORLD_LEVEL, PLAYER_APPEARANCE_TYPE_INDEX,
+        PLAYER_EMPTY_COMPONENTS, PlayerAppearanceState, ReplicatedStateBundle, SlotRead,
+        SlotUpdate, VITALS_TYPE_INDEX, VitalsState,
     };
     use nw_reflect::{Envelope, encode_server_messages};
     use nw_sim_core::test_support::{FlatGround, NoGround};
-    use nw_sim_core::{CellGrid, CellOwners, GroundCheck, MoveLimits, MoveRefusal};
+    use nw_sim_core::{
+        CellGrid, CellOwners, GroundCheck, MoveLimits, MoveRefusal, TUTORIAL_EXIT, TUTORIAL_START,
+    };
 
     use super::*;
     use crate::combat::test_support::{TEST_LEVEL, TEST_MOB};
@@ -1281,6 +1433,7 @@ mod tests {
             ghost_ttl_ms: GHOST_TTL_MS,
             tick_threads: 1,
             local_player_card: true,
+            level: OPEN_WORLD_LEVEL,
         }
     }
 
@@ -1665,6 +1818,92 @@ mod tests {
         );
     }
 
+    fn tutorial_world() -> SimWorld {
+        let mut tutorial = settings(MANY, MAX_PLAYERS);
+        tutorial.level = TUTORIAL_LEVEL;
+        world_of("tut-1", tutorial)
+    }
+
+    fn level_info_in(outgoing: &Outgoing) -> nw_messages::LevelInfoChangedMsg {
+        outgoing
+            .envelopes
+            .iter()
+            .find_map(|bytes| {
+                match ServerMessage::from_envelope(&Envelope::decode(bytes).expect("envelope")) {
+                    Some(Ok(ServerMessage::LevelInfoChanged(level))) => Some(level),
+                    _ => None,
+                }
+            })
+            .expect("a level message")
+    }
+
+    #[test]
+    fn a_tutorial_sim_logs_players_into_the_tutorial_level() {
+        let mut world = tutorial_world();
+        let login = world
+            .admit(&admit_at(1, TUTORIAL_START.x, true), NOW, SERVER_TIME)
+            .expect("admit")
+            .expect("login messages");
+        let level = level_info_in(&login);
+        assert_eq!(level.level, TUTORIAL_LEVEL);
+        assert_eq!(level.client_context, LOGIN_CLIENT_CONTEXT);
+    }
+
+    #[test]
+    fn the_tutorial_exit_moves_a_spawned_player_into_the_open_world() {
+        let mut tutorial = tutorial_world();
+        assert!(
+            tutorial
+                .set_table(&table(&["sim-a", "sim-b"]))
+                .expect("table")
+                .is_empty(),
+            "a tutorial sim keeps its players whatever the open-world table says"
+        );
+        let mut at_exit = admit_at(1, TUTORIAL_EXIT.x, true);
+        at_exit.position = Point::from(TUTORIAL_EXIT);
+        tutorial.admit(&at_exit, NOW, SERVER_TIME).expect("admit");
+        let card_at = NOW + OWN_CARD_DELAY_MS;
+        assert!(
+            tick(&mut tutorial, card_at).handoffs.is_empty(),
+            "a player whose client has not spawned stays"
+        );
+        tutorial.heard_from(&connection(1));
+        let handoffs = tick(&mut tutorial, card_at + 33).handoffs;
+        assert_eq!(handoffs.len(), 1);
+        let start = &handoffs[0];
+        assert_eq!(start.target, slot("sim-b"), "the owner of the beach start");
+        let offer = &start.offer;
+        assert!(offer.enter_level);
+        assert_eq!(offer.position, Point::from(OPEN_WORLD_START));
+        assert_eq!(offer.client_context, LOGIN_CLIENT_CONTEXT);
+        assert!(offer.slots.is_empty());
+
+        let mut open = world_of("sim-b", settings(MANY, MAX_PLAYERS));
+        open.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        let change = open
+            .take(offer, card_at, SERVER_TIME)
+            .expect("take")
+            .expect("level change messages");
+        let level = level_info_in(&change);
+        assert_eq!(level.level, OPEN_WORLD_LEVEL);
+        assert_eq!(level.client_context, LOGIN_CLIENT_CONTEXT + 1);
+        let messages = tick(&mut open, card_at + OWN_CARD_DELAY_MS).messages;
+        let bundle = bundle_of(&messages, &connection(1)).expect("the new spawn card");
+        assert_eq!(
+            bundle.byte_3,
+            LOGIN_CLIENT_CONTEXT + 1,
+            "bundles carry the new context"
+        );
+        assert!(
+            SlotRead::of(&bundle)
+                .expect("read")
+                .updates
+                .iter()
+                .any(|update| update.is_local_player() && update.card.is_some()),
+            "the player spawns again in the new level"
+        );
+    }
+
     #[test]
     fn a_client_message_after_the_card_ends_the_hold() {
         let mut world = world_with_spawns(Vec::new());
@@ -1768,7 +2007,7 @@ mod tests {
         offer.look = Some(SAVED_LOOK);
         let mut new = world_of("sim-b", settings(MANY, MAX_PLAYERS));
         new.set_table(&table(&["sim-a", "sim-b"])).expect("table");
-        new.take(&offer, NOW).expect("take");
+        new.take(&offer, NOW, SERVER_TIME).expect("take");
         let looks: Vec<Option<PlayerLook>> = new
             .world
             .query::<&Player>()
@@ -2256,7 +2495,8 @@ mod tests {
             .collect();
         // The largest sequence that leaves room for the next bundles of this tick.
         let sequence = largest_number - MAX_BUNDLE_MEMBERS as u64;
-        let envelopes = members::bundles(sequence, &mut slots, full).expect("bundles");
+        let envelopes =
+            members::bundles(sequence, LOGIN_CLIENT_CONTEXT, &mut slots, full).expect("bundles");
         for envelope in &envelopes {
             let payload = encode_server_messages(&[envelope]).expect("payload");
             assert!(payload.len() <= MAX_CHUNK_PAYLOAD, "{}", payload.len());
@@ -2339,7 +2579,7 @@ mod tests {
         offer.bundles_sent = BUNDLES_BEFORE;
         let mut new = world_of("sim-b", settings(MANY, MAX_PLAYERS));
         new.set_table(&table(&["sim-a", "sim-b"])).expect("table");
-        new.take(&offer, NOW).expect("take");
+        new.take(&offer, NOW, SERVER_TIME).expect("take");
         assert_eq!(
             new.positions()[0].moved_at_ms,
             NOW - offer.move_age_ms,
@@ -2365,7 +2605,7 @@ mod tests {
             Ok(GroundCheck::NoGround)
         );
         assert!(matches!(
-            new.take(&offer, NOW),
+            new.take(&offer, NOW, SERVER_TIME),
             Err(WorldError::AlreadyJoined(_))
         ));
         assert!(

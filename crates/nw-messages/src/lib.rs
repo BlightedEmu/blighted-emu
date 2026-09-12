@@ -39,8 +39,8 @@ pub use appearance::{
     LOOK_CHOICES, PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState, PlayerIconData, PlayerLook,
 };
 pub use bundle::{
-    IndexBlock, LOCAL_PLAYER_INTEREST, MAX_BUNDLE_INDEXES, OBSERVED_BUNDLE_BYTE_3,
-    OBSERVED_BUNDLE_BYTE_4, REPLICATED_STATE_BUNDLE_TYPE_INDEX, ReplicatedStateBundle,
+    IndexBlock, LOCAL_PLAYER_INTEREST, MAX_BUNDLE_INDEXES, OBSERVED_BUNDLE_BYTE_4,
+    REPLICATED_STATE_BUNDLE_TYPE_INDEX, ReplicatedStateBundle,
 };
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use client_input::{
@@ -66,7 +66,10 @@ pub use gde::{
     AssetId, DYNAMIC_SLICE_SUB_ID, GDE_ID_LEN, GDE_METADATA_COMPONENT, GDE_METADATA_TYPE_INDEX,
     GdeMetadataReplicatedState, PLAYER_SLICE_ASSET,
 };
-pub use level_info::{LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, LevelInfoChangedMsg, PhasingEntry};
+pub use level_info::{
+    LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, LEVELS, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg,
+    LevelSpec, OPEN_WORLD_LEVEL, PhasingEntry, TUTORIAL_LEVEL,
+};
 pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, MemberState};
 pub use player_components::{
     EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS, PlayerComponentState,

@@ -15,7 +15,7 @@ use nw_bus::{
 };
 use nw_db::PgPool;
 use nw_login::queue::QueueStore;
-use nw_sim_core::{CellGrid, Position};
+use nw_sim_core::{CellGrid, Position, TUTORIAL_FOLDER};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
@@ -150,30 +150,34 @@ impl<Q: QueueStore> Loop<Q> {
     fn join(&self, join: Incoming<Join>) {
         let context = Arc::clone(&self.context);
         let assignment = self.assignment.clone();
+        let tutorial = self.sims.least_loaded(TUTORIAL_FOLDER);
         let admits = self.admits.clone();
         tokio::spawn(async move {
             let reply = match assignment {
-                Some(assignment) => match route_join(&context, &assignment, &join.message).await {
-                    Ok((sim, entity)) => {
-                        metrics::counter!(METRIC_JOINS, RESULT_LABEL => JOINED).increment(1);
-                        tracing::info!(character = %join.message.character, sim = %sim.id, "joined");
-                        // The loop may have stopped; then the count no longer matters.
-                        let _ = admits.send(sim.id.clone()).await;
-                        JoinReply::Joined {
-                            sim: sim.id,
-                            generation: sim.generation,
-                            entity,
+                Some(assignment) => {
+                    match route_join(&context, &assignment, tutorial.as_ref(), &join.message).await
+                    {
+                        Ok((sim, entity)) => {
+                            metrics::counter!(METRIC_JOINS, RESULT_LABEL => JOINED).increment(1);
+                            tracing::info!(character = %join.message.character, sim = %sim.id, "joined");
+                            // The loop may have stopped; then the count no longer matters.
+                            let _ = admits.send(sim.id.clone()).await;
+                            JoinReply::Joined {
+                                sim: sim.id,
+                                generation: sim.generation,
+                                entity,
+                            }
+                        }
+                        Err(refusal) => {
+                            metrics::counter!(METRIC_JOINS, RESULT_LABEL => refusal.label())
+                                .increment(1);
+                            tracing::warn!(character = %join.message.character, %refusal, "join refused");
+                            JoinReply::Refused {
+                                reason: refusal.to_string(),
+                            }
                         }
                     }
-                    Err(refusal) => {
-                        metrics::counter!(METRIC_JOINS, RESULT_LABEL => refusal.label())
-                            .increment(1);
-                        tracing::warn!(character = %join.message.character, %refusal, "join refused");
-                        JoinReply::Refused {
-                            reason: refusal.to_string(),
-                        }
-                    }
-                },
+                }
                 None => JoinReply::Refused {
                     reason: STARTING.to_owned(),
                 },
@@ -213,7 +217,7 @@ impl<Q: QueueStore> Loop<Q> {
             return;
         };
         self.publish(assignment.table());
-        metrics::gauge!(METRIC_SIMS).set(self.sims.slots().len() as f64);
+        metrics::gauge!(METRIC_SIMS).set(self.sims.count() as f64);
         metrics::gauge!(METRIC_PLAYERS).set(f64::from(self.sims.players()));
         let store = self.store.clone();
         let (world_id, free, ttl) = (
@@ -238,7 +242,11 @@ impl<Q: QueueStore> Loop<Q> {
 
     fn reassign_now(&mut self) {
         self.version += 1;
-        let assignment = Assignment::new(self.version, self.settings.grid, self.sims.slots());
+        let assignment = Assignment::new(
+            self.version,
+            self.settings.grid,
+            self.sims.slots(&self.context.level),
+        );
         for (sim, from_x, to_x) in assignment.x_ranges() {
             tracing::info!(sim = %sim.id, from_x, to_x, version = self.version, "cells assigned");
         }
@@ -357,6 +365,7 @@ mod tests {
                 started_at_ms,
                 players: 0,
                 max_players: MAX_PLAYERS,
+                level: LEVEL.to_owned(),
             };
             let beats = tokio::spawn(async move {
                 loop {

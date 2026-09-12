@@ -549,20 +549,26 @@ impl Loop {
     /// A handoff offer from another sim, or the cancel of one that this sim took too late.
     fn handoff(&mut self, handoff: Incoming<HandoffMessage>) {
         let reply = match &handoff.message {
-            HandoffMessage::Offer(offer) => Some(match self.world.take(offer, self.now_ms()) {
-                Ok(()) => {
-                    self.forwards.remove(&offer.connection);
-                    self.gateways
-                        .joined(&offer.connection.gateway, Instant::now());
-                    HandoffReply::Accepted
-                }
-                Err(error) => {
-                    tracing::warn!(character = %offer.character, %error, "handoff refused");
-                    HandoffReply::Refused {
-                        reason: error.to_string(),
+            HandoffMessage::Offer(offer) => {
+                Some(match self.world.take(offer, self.now_ms(), server_time()) {
+                    Ok(level_change) => {
+                        if let Some(level_change) = level_change {
+                            tracing::info!(character = %offer.character, "entered the level");
+                            self.send(level_change);
+                        }
+                        self.forwards.remove(&offer.connection);
+                        self.gateways
+                            .joined(&offer.connection.gateway, Instant::now());
+                        HandoffReply::Accepted
                     }
-                }
-            }),
+                    Err(error) => {
+                        tracing::warn!(character = %offer.character, %error, "handoff refused");
+                        HandoffReply::Refused {
+                            reason: error.to_string(),
+                        }
+                    }
+                })
+            }
             HandoffMessage::Cancel {
                 connection,
                 handoffs,
@@ -840,6 +846,7 @@ impl Loop {
             started_at_ms: self.started_at_ms,
             players: u32::try_from(self.world.players()).unwrap_or(u32::MAX),
             max_players: self.settings.world.max_players,
+            level: self.settings.level.clone(),
         };
         let subject = subject::sim_heartbeat(self.settings.world_id, &self.settings.sim_id);
         if !self.beats.send(subject, beat) {
@@ -2327,6 +2334,8 @@ mod tests {
                 handoffs: FIRST_HANDOFF,
                 health: TEST_PLAYER_HEALTH,
                 look: None,
+                client_context: 1,
+                enter_level: false,
             };
             let subject = subject::sim_handoff(world_id, &id);
             let mut reply: Result<HandoffReply, BusError> = Err(BusError::NoReplySubject);

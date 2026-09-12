@@ -251,6 +251,12 @@ pub struct HandoffOffer {
     pub health: u32,
     /// The character's look, as in [`Admit::look`].
     pub look: Option<[u8; LOOK_CHOICES]>,
+    /// The client-context id of the player's current level; every bundle carries it.
+    pub client_context: u8,
+    /// Whether the player enters the taker's level from another level (the end of the
+    /// tutorial): the taker sends the level change and a new spawn state, with the next
+    /// client-context id.
+    pub enter_level: bool,
 }
 
 /// Sim to sim, on the taker's handoff subject. Both go on one subject, so NATS keeps their order.
@@ -354,6 +360,10 @@ pub struct SimHeartbeat {
     pub players: u32,
     /// Players it takes at most.
     pub max_players: u32,
+    /// The level it runs (its world-file folder name, for example `newworld_vitaeeterna`). The
+    /// director splits the open map over the sims of its own level and sends new characters to
+    /// the sims of the tutorial level.
+    pub level: String,
 }
 
 /// Largest batch, in envelope bytes: well below [`MAX_BUS_MESSAGE_BYTES`] (M5 load spec
@@ -581,6 +591,8 @@ mod tests {
             handoffs: 2,
             health: 500,
             look: None,
+            client_context: 1,
+            enter_level: false,
         };
         round_trip(HandoffMessage::Offer(offer));
         round_trip(HandoffMessage::Cancel {
@@ -604,6 +616,7 @@ mod tests {
             started_at_ms: STARTED_AT_MS,
             players: 10,
             max_players: 2000,
+            level: "newworld_vitaeeterna".to_owned(),
         });
     }
 

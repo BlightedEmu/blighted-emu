@@ -469,6 +469,7 @@ mod tests {
             started_at_ms,
             players,
             max_players: 1000,
+            level: "newworld_vitaeeterna".to_owned(),
         }
     }
 

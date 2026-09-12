@@ -1345,7 +1345,7 @@ mod tests {
         let offer = tick(&mut world, NOW).handoffs[0].offer.clone();
         assert_eq!(offer.health, TEST_PLAYER_HEALTH - SWORD_HIT);
         let mut next = world_with_spawns(Vec::new());
-        next.take(&offer, NOW).expect("take");
+        next.take(&offer, NOW, SERVER_TIME).expect("take");
         assert_eq!(
             health_of(&mut next, 1).current(),
             TEST_PLAYER_HEALTH - SWORD_HIT

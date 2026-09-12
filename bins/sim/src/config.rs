@@ -12,6 +12,7 @@ use nw_db::DatabaseConfig;
 use std::sync::Arc;
 
 use nw_content::combat::{CombatData, CombatRows};
+use nw_messages::LevelSpec;
 use nw_sim_core::{BrainSettings, CellBounds, MoveLimits, MoveLimitsError, TICKS_PER_SECOND};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -416,6 +417,10 @@ impl SimConfig {
             ghost_ttl_ms: self.ghost_ttl_ms,
             tick_threads: self.tick_threads(),
             local_player_card: crate::world::local_player_card(),
+            level: LevelSpec::of_folder(&self.level).ok_or(SimConfigError::Invalid {
+                key: "level",
+                reason: "not a level this server can name to the client",
+            })?,
         })
     }
 

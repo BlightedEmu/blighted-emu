@@ -102,5 +102,6 @@ pub fn players_bundle(
             entity_group(interest, *number, Some(PLAYER_SLICE_ASSET), Some(*position))
         })
         .collect();
-    ReplicatedStateBundle::of_groups(sequence, Vec::new(), groups).expect("bundle")
+    ReplicatedStateBundle::of_groups(sequence, crate::LOGIN_CLIENT_CONTEXT, Vec::new(), groups)
+        .expect("bundle")
 }
