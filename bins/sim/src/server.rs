@@ -529,6 +529,14 @@ impl Loop {
             }
             Err(MoveError::Frozen) => metrics::counter!(METRIC_FROZEN_MOVES).increment(1),
             Err(MoveError::Refused(refusal)) => {
+                tracing::debug!(
+                    reason = refusal.reason(),
+                    x = next.x,
+                    y = next.y,
+                    z = next.z,
+                    z_raw = position.z_raw,
+                    "refused client move"
+                );
                 metrics::counter!(METRIC_REFUSED_MOVES, REASON_LABEL => refusal.reason())
                     .increment(1);
             }
