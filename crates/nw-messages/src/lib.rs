@@ -8,6 +8,7 @@
 
 pub mod afflictions;
 pub mod alc;
+pub mod appearance;
 pub mod bundle;
 pub mod client_add_entry;
 pub mod client_input;
@@ -34,6 +35,9 @@ pub mod wire;
 
 pub use afflictions::{Affliction, AfflictionId, AfflictionList, ColdLong, HotLong, LongForm};
 pub use alc::{ALC_TYPE_INDEX, AlcChild, AlcState, POS10_CHILD, SLOT0_CHILDREN, SLOT1_CHILDREN};
+pub use appearance::{
+    LOOK_CHOICES, PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState, PlayerIconData, PlayerLook,
+};
 pub use bundle::{
     IndexBlock, LOCAL_PLAYER_INTEREST, MAX_BUNDLE_INDEXES, OBSERVED_BUNDLE_BYTE_3,
     OBSERVED_BUNDLE_BYTE_4, REPLICATED_STATE_BUNDLE_TYPE_INDEX, ReplicatedStateBundle,
@@ -50,7 +54,7 @@ pub use combat::{
 };
 pub use components::{
     COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DELAYED_EVENT_TYPE_INDEX, DelayedEventState,
-    STAMINA_TYPE_INDEX, StaminaState,
+    MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState,
 };
 pub use connected::{
     Block1415acc30, CALENDAR_CONNECTED_MSG_TYPE_INDEX, CalendarConnectedMsg, ConnectedBody,
@@ -66,7 +70,7 @@ pub use level_info::{LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, LevelInfoChangedMsg, Pha
 pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, MemberState};
 pub use player_components::{
     EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS, PlayerComponentState,
-    empty_state, player_empty_members,
+    PlayerStates, empty_state, player_members,
 };
 pub use position::{
     POSITION_IN_THE_WORLD_TYPE_INDEX, POSITION_Z_MAX, POSITION_Z_MIN,
@@ -82,7 +86,9 @@ pub use time_change::{
     OBSERVED_TIME_CHANGE_U32S_AT_28, SYNC_TIME_CHANGE_MSG_TYPE_INDEX, SyncTimeChangeMsg,
 };
 pub use time_synch::TimeSynchMsg;
-pub use vitals::{VITALS_TYPE_INDEX, VitalsData, VitalsSlot0, VitalsSlot1, VitalsState};
+pub use vitals::{
+    PLAYER_VITALS_ID, VITALS_TYPE_INDEX, VitalsData, VitalsSlot0, VitalsSlot1, VitalsState,
+};
 pub use wire::{
     BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer, entity_of_raw_id, raw_id_of_entity,
 };

@@ -5,7 +5,7 @@
 //! is an `AZ::Data::AssetId` of the asset catalog: a 16-byte GUID and a sub id. The client starts
 //! portraying an entity only from this card (`FUN_141717fc0`, "StartPortrayingGDE").
 
-use crate::slots::{read_slot_0, write_slot_0};
+use crate::slots::{read_slot_0, write_known};
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer, entity_of_raw_id, raw_id_of_entity};
 
 /// Type index of the class.
@@ -73,23 +73,19 @@ impl GdeMetadataReplicatedState {
     ///
     /// Returns [`MessageError`] when the body ends early or a form `write` cannot make is set.
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
-        let Some(children) = read_slot_0(reader, FIELD, CHILDREN)? else {
-            return Ok(Self::default());
-        };
-        let asset = if children & CHILD_ASSET != 0 {
-            Some(AssetId {
-                id: reader.array()?,
-                sub_id: reader.u32()?,
-            })
-        } else {
-            None
-        };
-        let gde_ref = if children & CHILD_GDE_REF != 0 {
-            Some(reader.array()?)
-        } else {
-            None
-        };
-        Ok(Self { asset, gde_ref })
+        let mut state = Self::default();
+        read_slot_0(reader, FIELD, CHILDREN, |reader, child| {
+            if 1 << child == CHILD_ASSET {
+                state.asset = Some(AssetId {
+                    id: reader.array()?,
+                    sub_id: reader.u32()?,
+                });
+            } else {
+                state.gde_ref = Some(reader.array()?);
+            }
+            Ok(())
+        })?;
+        Ok(state)
     }
 
     /// Writes the state for the bundle path.
@@ -101,13 +97,14 @@ impl GdeMetadataReplicatedState {
         if self.gde_ref.is_some() {
             children |= CHILD_GDE_REF;
         }
-        write_slot_0(writer, Some(children), CHILDREN);
-        if let Some(asset) = &self.asset {
-            writer.bytes(&asset.id).u32(asset.sub_id);
-        }
-        if let Some(gde_ref) = &self.gde_ref {
-            writer.bytes(gde_ref);
-        }
+        write_known(writer, children, CHILDREN, |writer, child| {
+            if 1 << child == CHILD_ASSET {
+                self.asset
+                    .map(|asset| writer.bytes(&asset.id).u32(asset.sub_id));
+            } else {
+                self.gde_ref.map(|gde_ref| writer.bytes(&gde_ref));
+            }
+        });
     }
 }
 

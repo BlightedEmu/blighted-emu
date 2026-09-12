@@ -4,8 +4,9 @@
 //! (`FUN_14167beb0`). When the player prefab is portrayed with no state for its other components,
 //! the real client crashes while it applies the cached states. So the player's group carries one
 //! state for every replicated component: the spawn card, the position, a connected type-3935
-//! `PlayerComponentReplicatedState`, and an empty state ("no slot set") for each other component
-//! below.
+//! `PlayerComponentReplicatedState`, the look (type 1195) and the vitals, stamina and mana (types
+//! 15, 4297 and 1652) when known ([`player_members`]), and an empty state ("no slot set") for each
+//! other component below.
 //!
 //! The table is the client's own fragment log of a captured session (`NH-MSQ-10`, 2026-09-16):
 //! every member of slot 1 it decoded, as (component index, class type index). All of these
@@ -13,11 +14,14 @@
 //! every captured body only bits 0 to 2 are set, so one slot byte of 0 is a whole empty body.
 //! Component 0 (the spawn card) and 16 (`ALCReplicatedState`) are not in the table.
 
+use crate::appearance::PlayerLook;
+use crate::appearance::{PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState};
 use crate::components::{
-    COMBAT_STATUS_TYPE_INDEX, CombatStatusState, STAMINA_TYPE_INDEX, StaminaState,
+    COMBAT_STATUS_TYPE_INDEX, CombatStatusState, MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX,
+    StaminaState,
 };
 use crate::payload::{BundleMember, MemberState};
-use crate::slots::{children_mask, read_children, read_slot_byte, write_children};
+use crate::slots::{children_mask, read_children, read_slot_byte, write_known_children};
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsState};
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
 
@@ -53,7 +57,7 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 56] = [
     (6, 2768),
     (9, 3935),
     (10, 3829),
-    (12, 1195),
+    (12, PLAYER_APPEARANCE_TYPE_INDEX),
     (13, 603),
     (14, 1528),
     (17, 3563),
@@ -80,7 +84,7 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 56] = [
     (44, 4236),
     (45, 2932),
     (46, 185),
-    (47, 1652),
+    (47, MANA_TYPE_INDEX),
     (48, 5257),
     (49, 3152),
     (50, 4321),
@@ -181,24 +185,21 @@ impl PlayerComponentState {
         if slots & SLOT_2_BIT == 0 {
             return Ok(Self::default());
         }
-        let children = read_children(reader, FIELD, SLOT_2_CHILDREN)?;
-        let known = CHILD_CHARACTER_ID | CHILD_PLAYER_CONNECTED;
-        if children & !known != 0 {
-            return Err(MessageError::Unsized {
-                field: FIELD,
-                byte: children as u8,
-            });
-        }
-        let character_id = (children & CHILD_CHARACTER_ID != 0)
-            .then(|| read_presence_id(reader))
-            .transpose()?;
-        let player_connected = (children & CHILD_PLAYER_CONNECTED != 0)
-            .then(|| reader.boolean())
-            .transpose()?;
-        Ok(Self {
-            character_id,
-            player_connected,
-        })
+        let mut state = Self::default();
+        read_children(reader, FIELD, SLOT_2_CHILDREN, |reader, child| {
+            match 1 << child {
+                CHILD_CHARACTER_ID => state.character_id = Some(read_presence_id(reader)?),
+                CHILD_PLAYER_CONNECTED => state.player_connected = Some(reader.boolean()?),
+                _ => {
+                    return Err(MessageError::Unsized {
+                        field: FIELD,
+                        byte: child,
+                    });
+                }
+            }
+            Ok(())
+        })?;
+        Ok(state)
     }
 
     /// Writes the state for the bundle path. A slot without a known child is not sent.
@@ -216,15 +217,17 @@ impl PlayerComponentState {
             return;
         }
         writer.u8(SLOT_2_BIT);
-        write_children(writer, children, SLOT_2_CHILDREN);
-        if let Some(id) = character_id {
-            writer
-                .u8(PRESENCE_FLAG_FIXED | PRESENCE_FLAG_UUID_TEXT)
-                .bytes(&id);
-        }
-        if let Some(connected) = player_connected {
-            writer.boolean(connected);
-        }
+        write_known_children(writer, children, SLOT_2_CHILDREN, |writer, child| {
+            if 1 << child == CHILD_CHARACTER_ID {
+                character_id.map(|id| {
+                    writer
+                        .u8(PRESENCE_FLAG_FIXED | PRESENCE_FLAG_UUID_TEXT)
+                        .bytes(&id)
+                });
+            } else {
+                player_connected.map(|connected| writer.boolean(connected));
+            }
+        });
     }
 }
 
@@ -250,18 +253,50 @@ pub fn empty_state(class: u64) -> MemberState {
         PLAYER_COMPONENT_TYPE_INDEX => {
             MemberState::PlayerComponent(PlayerComponentState::default())
         }
+        PLAYER_APPEARANCE_TYPE_INDEX => MemberState::Appearance(PlayerAppearanceState::default()),
+        MANA_TYPE_INDEX => MemberState::Mana(ManaState::default()),
         _ => MemberState::Empty(EmptyState { class }),
     }
 }
 
-/// The members of the empty states of every player component in [`PLAYER_EMPTY_COMPONENTS`].
-pub fn player_empty_members() -> impl Iterator<Item = BundleMember> {
+/// What a player's card says of the player besides its prefab and position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlayerStates {
+    /// The 3935 `characterId`: the login character of the client's own player.
+    pub character_id: [u8; RAW_ID_LEN],
+    /// The saved look, when known.
+    pub look: Option<PlayerLook>,
+    /// Current and max health, when known; with them go full stamina and mana.
+    pub health: Option<(u32, u32)>,
+}
+
+/// The members of every player component in [`PLAYER_EMPTY_COMPONENTS`] for `states`: a connected
+/// 3935 state, the look and vitals that `states` knows, and an empty state for the rest.
+pub fn player_members(states: PlayerStates) -> impl Iterator<Item = BundleMember> {
     PLAYER_EMPTY_COMPONENTS
         .iter()
-        .map(|(component, class)| BundleMember {
+        .map(move |(component, class)| BundleMember {
             component: *component,
-            state: empty_state(*class),
+            state: player_state(states, *class),
         })
+}
+
+/// The state of player component `class` for `states`.
+fn player_state(states: PlayerStates, class: u64) -> MemberState {
+    match (class, states.look, states.health) {
+        (PLAYER_COMPONENT_TYPE_INDEX, _, _) => {
+            MemberState::PlayerComponent(PlayerComponentState::connected(states.character_id))
+        }
+        (PLAYER_APPEARANCE_TYPE_INDEX, Some(look), _) => {
+            MemberState::Appearance(PlayerAppearanceState::of(look))
+        }
+        (VITALS_TYPE_INDEX, _, Some((health, health_max))) => {
+            MemberState::Vitals(VitalsState::player(health, health_max))
+        }
+        (STAMINA_TYPE_INDEX, _, Some(_)) => MemberState::Stamina(StaminaState::player()),
+        (MANA_TYPE_INDEX, _, Some(_)) => MemberState::Mana(ManaState::player()),
+        _ => empty_state(class),
+    }
 }
 
 fn has_own_reader(class: u64) -> bool {
@@ -271,6 +306,8 @@ fn has_own_reader(class: u64) -> bool {
             | STAMINA_TYPE_INDEX
             | COMBAT_STATUS_TYPE_INDEX
             | PLAYER_COMPONENT_TYPE_INDEX
+            | PLAYER_APPEARANCE_TYPE_INDEX
+            | MANA_TYPE_INDEX
     )
 }
 
@@ -283,22 +320,88 @@ mod tests {
     /// A member: a 1-byte component index, a class id of at most 2 bytes, a 1-byte body.
     const MAX_EMPTY_MEMBER_BYTES: usize = 4;
 
-    #[test]
-    fn every_empty_player_component_is_one_zero_byte_and_reads_back() {
-        let members: Vec<BundleMember> = player_empty_members().collect();
-        for member in &members {
-            let bytes = member.encode().expect("member");
-            assert_eq!(bytes.last(), Some(&NO_SLOT), "{member:?}");
-            assert!(bytes.len() <= MAX_EMPTY_MEMBER_BYTES, "{member:?}");
-        }
+    const CHARACTER_ID: [u8; RAW_ID_LEN] = [5; RAW_ID_LEN];
+    const HEALTH: (u32, u32) = (800, 856);
+    /// The classes that carry a body when the look and the health are known.
+    const KNOWN_CLASSES: [u64; 5] = [
+        PLAYER_COMPONENT_TYPE_INDEX,
+        PLAYER_APPEARANCE_TYPE_INDEX,
+        VITALS_TYPE_INDEX,
+        STAMINA_TYPE_INDEX,
+        MANA_TYPE_INDEX,
+    ];
+
+    fn reads_back(members: &[BundleMember]) {
         let payload = BundlePayload {
             groups: vec![BundleGroup {
                 interest: LOCAL_SLOT,
-                members: members.clone(),
+                members: members.to_vec(),
             }],
         };
         let read = BundlePayload::decode(&payload.encode().expect("payload")).expect("read");
         assert_eq!(read.groups[0].members, members);
+    }
+
+    #[test]
+    fn without_look_and_health_every_other_component_is_one_zero_byte() {
+        let states = PlayerStates {
+            character_id: CHARACTER_ID,
+            look: None,
+            health: None,
+        };
+        let members: Vec<BundleMember> = player_members(states).collect();
+        assert_eq!(members.len(), PLAYER_EMPTY_COMPONENTS.len());
+        for member in &members {
+            if member.state.type_index() == PLAYER_COMPONENT_TYPE_INDEX {
+                assert_eq!(
+                    member.state,
+                    MemberState::PlayerComponent(PlayerComponentState::connected(CHARACTER_ID))
+                );
+                continue;
+            }
+            let bytes = member.encode().expect("member");
+            assert_eq!(bytes.last(), Some(&NO_SLOT), "{member:?}");
+            assert!(bytes.len() <= MAX_EMPTY_MEMBER_BYTES, "{member:?}");
+        }
+        reads_back(&members);
+    }
+
+    #[test]
+    fn a_known_look_and_health_fill_the_appearance_and_vitals() {
+        let look = PlayerLook::default();
+        let states = PlayerStates {
+            character_id: CHARACTER_ID,
+            look: Some(look),
+            health: Some(HEALTH),
+        };
+        let members: Vec<BundleMember> = player_members(states).collect();
+        for member in &members {
+            let class = member.state.type_index();
+            let expected = match class {
+                PLAYER_COMPONENT_TYPE_INDEX => {
+                    MemberState::PlayerComponent(PlayerComponentState::connected(CHARACTER_ID))
+                }
+                PLAYER_APPEARANCE_TYPE_INDEX => {
+                    MemberState::Appearance(PlayerAppearanceState::of(look))
+                }
+                VITALS_TYPE_INDEX => MemberState::Vitals(VitalsState::player(HEALTH.0, HEALTH.1)),
+                STAMINA_TYPE_INDEX => MemberState::Stamina(StaminaState::player()),
+                MANA_TYPE_INDEX => MemberState::Mana(ManaState::player()),
+                _ => empty_state(class),
+            };
+            assert_eq!(member.state, expected);
+        }
+        for class in KNOWN_CLASSES {
+            assert_eq!(
+                members
+                    .iter()
+                    .filter(|member| member.state.type_index() == class)
+                    .count(),
+                1,
+                "class {class} is one player component"
+            );
+        }
+        reads_back(&members);
     }
 
     #[test]

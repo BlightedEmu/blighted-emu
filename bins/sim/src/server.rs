@@ -1457,6 +1457,7 @@ mod tests {
             login: true,
             handoffs: 0,
             bundles_sent: 0,
+            look: None,
         }
     }
 
@@ -2317,6 +2318,7 @@ mod tests {
                 time_synch_age_ms: 0,
                 handoffs: FIRST_HANDOFF,
                 health: TEST_PLAYER_HEALTH,
+                look: None,
             };
             let subject = subject::sim_handoff(world_id, &id);
             let mut reply: Result<HandoffReply, BusError> = Err(BusError::NoReplySubject);

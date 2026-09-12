@@ -3,12 +3,17 @@
 //! `FUN_1417b4110` reads one byte per group of up to 8 slots, and `FUN_1417b43c0` one byte per
 //! group of up to 7 children of a slot, where bit 7 means that another child byte follows.
 //!
+//! A slot's child bytes are not all up front: each child byte is followed by the data of the
+//! children it sets, then the next child byte (player-appearance note, section 1).
+//!
 //! These members use slot 0 only, with the children the notes size. A slot other than 0, a
 //! child beyond those, or a last child byte that sets no child is [`MessageError::Unsized`]: the
 //! captures have such bodies (slot 1 of the vitals: mana and the afflictions), and a bundle
 //! walk stops there. A slot without children is refused. So every body that reads encodes
 //! back to the same bytes. A child byte before the last may set none: that is how only a later
 //! child is sent.
+
+use std::convert::Infallible;
 
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -35,12 +40,14 @@ pub(crate) fn read_slot_byte(
     Ok(byte)
 }
 
-/// Reads the child bitmap of one slot of `count` children (bit `n` is child `n`); at least one
-/// child is set.
+/// Reads one slot of `count` children: each child byte, then the data of the children it sets,
+/// which `read_child` reads in child order (player-appearance note, section 1). Returns the child
+/// bitmap (bit `n` is child `n`); at least one child is set.
 pub(crate) fn read_children(
     reader: &mut Reader<'_>,
     field: &'static str,
     count: u8,
+    mut read_child: impl FnMut(&mut Reader<'_>, u8) -> Result<(), MessageError>,
 ) -> Result<u16, MessageError> {
     let mut children: u16 = 0;
     let mut first: u8 = 0;
@@ -61,6 +68,9 @@ pub(crate) fn read_children(
         if bits & !known != 0 || (bits == 0 && last) || (!last && !more_allowed) {
             return Err(MessageError::Unsized { field, byte });
         }
+        for child in (0..CHILDREN_PER_BYTE).filter(|bit| bits & 1 << bit != 0) {
+            read_child(reader, first + child)?;
+        }
         children |= u16::from(bits) << first;
         if last {
             return Ok(children);
@@ -69,19 +79,29 @@ pub(crate) fn read_children(
     }
 }
 
-/// Writes the child bitmap `children` (not 0) of one slot of `count` children.
-pub(crate) fn write_children(writer: &mut Writer, children: u16, count: u8) {
+/// Writes one slot of `count` children with the bitmap `children` (not 0): each child byte, then
+/// the data of the children it sets, which `write_child` writes in child order.
+pub(crate) fn write_children<E>(
+    writer: &mut Writer,
+    children: u16,
+    count: u8,
+    mut write_child: impl FnMut(&mut Writer, u8) -> Result<(), E>,
+) -> Result<(), E> {
     let mut first: u8 = 0;
     while first < count {
         // A child byte holds 7 children: the shift leaves at most 7 bits.
         let bits = (children >> first) as u8 & CHILD_BITS;
         let rest = children >> (first + CHILDREN_PER_BYTE);
         writer.u8(if rest == 0 { bits } else { bits | CONTINUE });
+        for child in (0..CHILDREN_PER_BYTE).filter(|bit| bits & 1 << bit != 0) {
+            write_child(writer, first + child)?;
+        }
         if rest == 0 {
-            return;
+            break;
         }
         first += CHILDREN_PER_BYTE;
     }
+    Ok(())
 }
 
 /// The child bitmap of the present children; `present[n]` is child `n`.
@@ -93,77 +113,108 @@ pub(crate) fn children_mask(present: &[bool]) -> u16 {
         .fold(0, |bits, (child, _)| bits | 1 << child)
 }
 
-/// Reads the slot byte of a class with slot 0 only and, when slot 0 is set, the child bitmap of
-/// `count` children. `None` when slot 0 is not set.
+/// Reads the slot byte of a class with slot 0 only and, when slot 0 is set, its children (see
+/// [`read_children`]). `None` when slot 0 is not set.
 pub(crate) fn read_slot_0(
     reader: &mut Reader<'_>,
     field: &'static str,
     count: u8,
+    read_child: impl FnMut(&mut Reader<'_>, u8) -> Result<(), MessageError>,
 ) -> Result<Option<u16>, MessageError> {
     if read_slot_byte(reader, field, 1)? == 0 {
         return Ok(None);
     }
-    read_children(reader, field, count).map(Some)
+    read_children(reader, field, count, read_child).map(Some)
 }
 
-/// Writes the slot byte and, for `Some` with a child, the child bitmap of `count` children.
-pub(crate) fn write_slot_0(writer: &mut Writer, children: Option<u16>, count: u8) {
-    let Some(children) = children.filter(|children| *children != 0) else {
+/// [`write_children`] with a child writer that cannot fail.
+pub(crate) fn write_known_children(
+    writer: &mut Writer,
+    children: u16,
+    count: u8,
+    mut write_child: impl FnMut(&mut Writer, u8),
+) {
+    write_children::<Infallible>(writer, children, count, |writer, child| {
+        write_child(writer, child);
+        Ok(())
+    })
+    .unwrap_or_else(|never| match never {});
+}
+
+/// Writes the slot byte and, when `children` sets a child, slot 0 (see [`write_children`]), with
+/// a child writer that cannot fail.
+pub(crate) fn write_known(
+    writer: &mut Writer,
+    children: u16,
+    count: u8,
+    write_child: impl FnMut(&mut Writer, u8),
+) {
+    if children == 0 {
         writer.u8(0);
         return;
-    };
+    }
     writer.u8(SLOT_0);
-    write_children(writer, children, count);
+    write_known_children(writer, children, count, write_child);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn round(present: bool, children: u16, count: u8) -> Vec<u8> {
+    /// Writes a slot whose children carry one byte each: the child index.
+    fn round(children: u16, count: u8) -> Vec<u8> {
         let mut writer = Writer::new();
-        write_slot_0(&mut writer, present.then_some(children), count);
+        write_known(&mut writer, children, count, |writer, child| {
+            writer.u8(child);
+        });
         writer.finish()
+    }
+
+    /// Reads a body written by [`round`]: the bitmap and the children in read order.
+    fn read(bytes: &[u8], count: u8) -> Result<(Option<u16>, Vec<u8>), MessageError> {
+        let mut reader = Reader::new(bytes);
+        let mut seen = Vec::new();
+        let children = read_slot_0(&mut reader, "test", count, |reader, child| {
+            assert_eq!(
+                reader.u8()?,
+                child,
+                "each child's data follows its own child byte"
+            );
+            seen.push(child);
+            Ok(())
+        })?;
+        reader.finish()?;
+        Ok((children, seen))
     }
 
     #[test]
     fn no_slot_is_one_zero_byte() {
-        assert_eq!(round(false, 0, 2), vec![0]);
-        let mut reader = Reader::new(&[0]);
-        assert_eq!(read_slot_0(&mut reader, "test", 2).expect("read"), None);
+        assert_eq!(round(0, 2), vec![0]);
+        assert_eq!(read(&[0], 2).expect("read"), (None, Vec::new()));
     }
 
     #[test]
     fn children_up_to_seven_take_one_byte() {
-        let bytes = round(true, 0b11, 2);
-        assert_eq!(bytes, vec![SLOT_0, 0b11]);
-        let mut reader = Reader::new(&bytes);
-        assert_eq!(
-            read_slot_0(&mut reader, "test", 2).expect("read"),
-            Some(0b11)
-        );
+        let bytes = round(0b11, 2);
+        assert_eq!(bytes, vec![SLOT_0, 0b11, 0, 1]);
+        assert_eq!(read(&bytes, 2).expect("read"), (Some(0b11), vec![0, 1]));
     }
 
     #[test]
-    fn the_eighth_child_takes_a_second_byte() {
-        let bytes = round(true, 1 << 7 | 1, 8);
-        assert_eq!(bytes, vec![SLOT_0, 1 | CONTINUE, 1]);
-        let mut reader = Reader::new(&bytes);
+    fn the_eighth_child_byte_comes_after_the_first_seven_children() {
+        let bytes = round(1 << 7 | 1, 8);
+        assert_eq!(bytes, vec![SLOT_0, 1 | CONTINUE, 0, 1, 7]);
         assert_eq!(
-            read_slot_0(&mut reader, "test", 8).expect("read"),
-            Some(1 << 7 | 1)
+            read(&bytes, 8).expect("read"),
+            (Some(1 << 7 | 1), vec![0, 7])
         );
     }
 
     #[test]
     fn only_the_eighth_child_is_an_empty_first_byte_then_one() {
-        let bytes = round(true, 1 << 7, 8);
-        assert_eq!(bytes, vec![SLOT_0, CONTINUE, 1]);
-        let mut reader = Reader::new(&bytes);
-        assert_eq!(
-            read_slot_0(&mut reader, "test", 8).expect("read"),
-            Some(1 << 7)
-        );
+        let bytes = round(1 << 7, 8);
+        assert_eq!(bytes, vec![SLOT_0, CONTINUE, 1, 7]);
+        assert_eq!(read(&bytes, 8).expect("read"), (Some(1 << 7), vec![7]));
     }
 
     #[test]
@@ -171,17 +222,13 @@ mod tests {
         let cases: [(&[u8], u8); 6] = [
             (&[0b10], 2),
             (&[SLOT_0, 0], 2),
-            (&[SLOT_0, 0b100], 2),
-            (&[SLOT_0, 1 | CONTINUE, 1], 2),
+            (&[SLOT_0, 0b100, 2], 2),
+            (&[SLOT_0, 1 | CONTINUE, 0, 1], 2),
             (&[SLOT_0, CONTINUE, 0], 8),
-            (&[SLOT_0, CONTINUE, 0b10], 8),
+            (&[SLOT_0, CONTINUE, 0b10, 8], 8),
         ];
         for (bytes, count) in cases {
-            let mut reader = Reader::new(bytes);
-            assert!(
-                read_slot_0(&mut reader, "test", count).is_err(),
-                "{bytes:?} with {count}"
-            );
+            assert!(read(bytes, count).is_err(), "{bytes:?} with {count}");
         }
     }
 }

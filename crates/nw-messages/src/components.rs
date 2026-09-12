@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Three small replicated states with slot 0 only (component tables note, sections 1 to 3):
-//! `MB::StaminaComponentReplicatedState` (type 4297), `MB::CombatStatusComponentReplicatedState`
-//! (type 2913) and `MB::DelayedEventComponentReplicatedState` (type 3139). Each table ends every
-//! reached captured body of its class.
+//! Four small replicated states with slot 0 only (component tables note, sections 1 to 3, and
+//! player-appearance note, section 3): `MB::StaminaComponentReplicatedState` (type 4297),
+//! `MB::CombatStatusComponentReplicatedState` (type 2913),
+//! `MB::DelayedEventComponentReplicatedState` (type 3139) and `MB::ManaComponentReplicatedState`
+//! (type 1652). Each table ends every reached captured body of its class.
 
-use crate::slots::{children_mask, read_slot_0, write_slot_0};
+use crate::slots::{children_mask, read_slot_0, write_known};
 use crate::wire::{MessageError, Reader, Writer};
 
 /// Type index of `MB::StaminaComponentReplicatedState`.
@@ -13,7 +14,14 @@ pub const STAMINA_TYPE_INDEX: u64 = 4297;
 pub const COMBAT_STATUS_TYPE_INDEX: u64 = 2913;
 /// Type index of `MB::DelayedEventComponentReplicatedState`.
 pub const DELAYED_EVENT_TYPE_INDEX: u64 = 3139;
-const STAMINA_CHILDREN: u8 = 6;
+/// Type index of `MB::ManaComponentReplicatedState`.
+pub const MANA_TYPE_INDEX: u64 = 1652;
+/// Full stamina and mana of a player: 100 on the captured first bodies (vitals row `Player`).
+const PLAYER_POOL: f32 = 100.0;
+/// A stamina or mana value of 0 on the captured first bodies (`winded`, `regen`, `regenDelay`).
+const NONE_YET: f32 = 0.0;
+/// A multiplier or rate of 1 on the captured first bodies (`multMax`, `multRegen`, `regenRate`).
+const UNIT_RATE: f32 = 1.0;
 const COMBAT_STATUS_CHILDREN: u8 = 4;
 const DELAYED_EVENT_CHILDREN: u8 = 2;
 
@@ -35,6 +43,19 @@ pub struct StaminaState {
 }
 
 impl StaminaState {
+    /// The first stamina of a player, as the usual 26-byte captured first body: 100 of 100, not
+    /// winded, rates 1.
+    pub const fn player() -> Self {
+        Self {
+            cur: Some(PLAYER_POOL),
+            max: Some(PLAYER_POOL),
+            winded: Some(NONE_YET),
+            regen: Some(NONE_YET),
+            mult_max: Some(UNIT_RATE),
+            mult_regen: Some(UNIT_RATE),
+        }
+    }
+
     /// Reads the state from the bundle path.
     ///
     /// # Errors
@@ -42,19 +63,14 @@ impl StaminaState {
     /// Returns [`MessageError`] when the body ends early or has a slot or child the table has
     /// not.
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
-        let children = read_slot_0(reader, "stamina", STAMINA_CHILDREN)?.unwrap_or_default();
-        let mut value = |child: u16| {
-            (children & 1 << child != 0)
-                .then(|| reader.f32())
-                .transpose()
-        };
+        let [cur, max, winded, regen, mult_max, mult_regen] = read_floats(reader, "stamina")?;
         Ok(Self {
-            cur: value(0)?,
-            max: value(1)?,
-            winded: value(2)?,
-            regen: value(3)?,
-            mult_max: value(4)?,
-            mult_regen: value(5)?,
+            cur,
+            max,
+            winded,
+            regen,
+            mult_max,
+            mult_regen,
         })
     }
 
@@ -68,11 +84,7 @@ impl StaminaState {
             self.mult_max,
             self.mult_regen,
         ];
-        let present = values.map(|value| value.is_some());
-        write_slot_0(writer, Some(children_mask(&present)), STAMINA_CHILDREN);
-        for value in values.into_iter().flatten() {
-            writer.f32(value);
-        }
+        write_floats(writer, &values);
     }
 }
 
@@ -98,15 +110,22 @@ impl CombatStatusState {
     /// Returns [`MessageError`] when the body ends early, a flag is not 0 or 1, or a slot or
     /// child is not in the table.
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
-        let children =
-            read_slot_0(reader, "combat status", COMBAT_STATUS_CHILDREN)?.unwrap_or_default();
-        let has = |child: u16| children & 1 << child != 0;
-        Ok(Self {
-            in_combat: has(0).then(|| reader.boolean()).transpose()?,
-            in_pvp_combat: has(1).then(|| reader.boolean()).transpose()?,
-            logged_out_time: has(2).then(|| reader.u64()).transpose()?,
-            concluded_time: has(3).then(|| reader.u64()).transpose()?,
-        })
+        let mut state = Self::default();
+        read_slot_0(
+            reader,
+            "combat status",
+            COMBAT_STATUS_CHILDREN,
+            |reader, child| {
+                match child {
+                    0 => state.in_combat = Some(reader.boolean()?),
+                    1 => state.in_pvp_combat = Some(reader.boolean()?),
+                    2 => state.logged_out_time = Some(reader.u64()?),
+                    _ => state.concluded_time = Some(reader.u64()?),
+                }
+                Ok(())
+            },
+        )?;
+        Ok(state)
     }
 
     /// Writes the state for the bundle path.
@@ -117,20 +136,19 @@ impl CombatStatusState {
             self.logged_out_time.is_some(),
             self.concluded_time.is_some(),
         ];
-        write_slot_0(
+        write_known(
             writer,
-            Some(children_mask(&present)),
+            children_mask(&present),
             COMBAT_STATUS_CHILDREN,
+            |writer, child| {
+                match child {
+                    0 => self.in_combat.map(|flag| writer.boolean(flag)),
+                    1 => self.in_pvp_combat.map(|flag| writer.boolean(flag)),
+                    2 => self.logged_out_time.map(|time| writer.u64(time)),
+                    _ => self.concluded_time.map(|time| writer.u64(time)),
+                };
+            },
         );
-        for flag in [self.in_combat, self.in_pvp_combat].into_iter().flatten() {
-            writer.boolean(flag);
-        }
-        for time in [self.logged_out_time, self.concluded_time]
-            .into_iter()
-            .flatten()
-        {
-            writer.u64(time);
-        }
     }
 }
 
@@ -151,30 +169,120 @@ impl DelayedEventState {
     /// Returns [`MessageError`] when the body ends early, the flag is not 0 or 1, or a slot or
     /// child is not in the table.
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
-        let children =
-            read_slot_0(reader, "delayed event", DELAYED_EVENT_CHILDREN)?.unwrap_or_default();
-        let has = |child: u16| children & 1 << child != 0;
-        Ok(Self {
-            total_delay: has(0).then(|| reader.u16()).transpose()?,
-            completed: has(1).then(|| reader.boolean()).transpose()?,
-        })
+        let mut state = Self::default();
+        read_slot_0(
+            reader,
+            "delayed event",
+            DELAYED_EVENT_CHILDREN,
+            |reader, child| {
+                if child == 0 {
+                    state.total_delay = Some(reader.u16()?);
+                } else {
+                    state.completed = Some(reader.boolean()?);
+                }
+                Ok(())
+            },
+        )?;
+        Ok(state)
     }
 
     /// Writes the state for the bundle path.
     pub fn write(&self, writer: &mut Writer) {
         let present = [self.total_delay.is_some(), self.completed.is_some()];
-        write_slot_0(
+        write_known(
             writer,
-            Some(children_mask(&present)),
+            children_mask(&present),
             DELAYED_EVENT_CHILDREN,
+            |writer, child| {
+                match child {
+                    0 => self.total_delay.map(|delay| writer.u16(delay)),
+                    _ => self.completed.map(|completed| writer.boolean(completed)),
+                };
+            },
         );
-        if let Some(total_delay) = self.total_delay {
-            writer.u16(total_delay);
-        }
-        if let Some(completed) = self.completed {
-            writer.boolean(completed);
+    }
+}
+
+/// `MB::ManaComponentReplicatedState` (`FUN_1467088c0`): four big-endian `f32` children. The
+/// names of the first two are Unknown (short strings the decompiler does not show); both are 100
+/// on the captured first bodies.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ManaState {
+    /// Child 0 (name Unknown).
+    pub first: Option<f32>,
+    /// Child 1 (name Unknown).
+    pub second: Option<f32>,
+    /// `regenDelay`.
+    pub regen_delay: Option<f32>,
+    /// `regenRate`.
+    pub regen_rate: Option<f32>,
+}
+
+impl ManaState {
+    /// The first mana state of a player, as the usual 18-byte captured first body: 100, 100,
+    /// delay 0, rate 1.
+    pub const fn player() -> Self {
+        Self {
+            first: Some(PLAYER_POOL),
+            second: Some(PLAYER_POOL),
+            regen_delay: Some(NONE_YET),
+            regen_rate: Some(UNIT_RATE),
         }
     }
+
+    /// Reads the state from the bundle path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the body ends early or has a slot or child the table has
+    /// not.
+    pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let [first, second, regen_delay, regen_rate] = read_floats(reader, "mana")?;
+        Ok(Self {
+            first,
+            second,
+            regen_delay,
+            regen_rate,
+        })
+    }
+
+    /// Writes the state for the bundle path.
+    pub fn write(&self, writer: &mut Writer) {
+        write_floats(
+            writer,
+            &[self.first, self.second, self.regen_delay, self.regen_rate],
+        );
+    }
+}
+
+/// Reads slot 0 of a class whose `N` children are all big-endian `f32`.
+fn read_floats<const N: usize>(
+    reader: &mut Reader<'_>,
+    field: &'static str,
+) -> Result<[Option<f32>; N], MessageError> {
+    let mut values = [None; N];
+    // The tables have at most 7 children.
+    read_slot_0(reader, field, N as u8, |reader, child| {
+        values[usize::from(child)] = Some(reader.f32()?);
+        Ok(())
+    })?;
+    Ok(values)
+}
+
+/// Writes slot 0 of a class whose children are all big-endian `f32`.
+fn write_floats(writer: &mut Writer, values: &[Option<f32>]) {
+    let present: Vec<bool> = values.iter().map(Option::is_some).collect();
+    // The tables have at most 7 children.
+    write_known(
+        writer,
+        children_mask(&present),
+        values.len() as u8,
+        |writer, child| {
+            if let Some(value) = values[usize::from(child)] {
+                writer.f32(value);
+            }
+        },
+    );
 }
 
 #[cfg(test)]
@@ -276,6 +384,32 @@ mod tests {
             (state.total_delay, state.completed),
             (Some(DELAY_MS), Some(false))
         );
+    }
+
+    #[test]
+    fn a_player_start_stamina_is_all_six_floats() {
+        let bytes = encoded(|writer| StaminaState::player().write(writer));
+        let mut expected = vec![0x01, 0b11_1111];
+        for value in [100.0_f32, 100.0, 0.0, 0.0, 1.0, 1.0] {
+            expected.extend(value.to_be_bytes());
+        }
+        assert_eq!(bytes, expected, "the 26-byte retail first body");
+    }
+
+    #[test]
+    fn a_player_start_mana_is_four_floats() {
+        let bytes = encoded(|writer| ManaState::player().write(writer));
+        let mut expected = vec![0x01, 0b1111];
+        for value in [100.0_f32, 100.0, 0.0, 1.0] {
+            expected.extend(value.to_be_bytes());
+        }
+        assert_eq!(bytes, expected, "the 18-byte retail first body");
+        let mut reader = Reader::new(&bytes);
+        assert_eq!(
+            ManaState::read(&mut reader).expect("read"),
+            ManaState::player()
+        );
+        assert!(reader.is_empty());
     }
 
     #[test]

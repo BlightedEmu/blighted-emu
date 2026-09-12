@@ -10,6 +10,7 @@ pub mod game;
 pub mod host;
 pub mod keys;
 pub mod launcher;
+pub mod look;
 #[cfg(test)]
 mod memory;
 pub mod names;

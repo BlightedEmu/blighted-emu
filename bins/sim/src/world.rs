@@ -25,7 +25,9 @@ use nw_bus::{
     Admit, BusId, CellTable, ConnectionRef, Ghost, HandoffOffer, MOB_STATES, MobGhost, Point,
     SimSlot, SnapMob, SnapPlayer,
 };
-use nw_messages::{BundleGroup, MessageError, ServerMessage, TimeSynchMsg, WorldPosition};
+use nw_messages::{
+    BundleGroup, MessageError, PlayerLook, PlayerStates, ServerMessage, TimeSynchMsg, WorldPosition,
+};
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
     Motion, MotionState, MoveLimits, MoveRefusal, Position, Seen, SpatialGrid,
@@ -256,6 +258,8 @@ struct Player {
     connection: ConnectionRef,
     character: Uuid,
     name: String,
+    /// The saved look, sent with the own spawn card.
+    look: Option<PlayerLook>,
     number: u64,
     bundles_sent: u64,
     last_time_synch_ms: u64,
@@ -328,6 +332,7 @@ struct Arrival {
     connection: ConnectionRef,
     character: Uuid,
     name: String,
+    look: Option<PlayerLook>,
     number: u64,
     position: Position,
     health: Health,
@@ -403,6 +408,7 @@ impl SimWorld {
             connection: admit.connection.clone(),
             character: admit.character,
             name: admit.name.clone(),
+            look: admit.look.map(PlayerLook::of_choices),
             number: admit.entity,
             // A saved spot can be in the air or under the ground (a save during a jump, or a
             // height from another world file); the player arrives on the ground.
@@ -460,6 +466,7 @@ impl SimWorld {
             connection: offer.connection.clone(),
             character: offer.character,
             name: offer.name.clone(),
+            look: offer.look.map(PlayerLook::of_choices),
             number: offer.entity,
             position: Position::from(offer.position),
             health: Health::at(offer.health, self.combat.data.player_max_health()),
@@ -858,6 +865,7 @@ impl SimWorld {
                     time_synch_age_ms: now_ms.saturating_sub(player.last_time_synch_ms),
                     handoffs: player.handoffs.saturating_add(1),
                     health: vitals.health.current(),
+                    look: player.look.map(|look| look.choices()),
                 },
             });
         }
@@ -1011,6 +1019,7 @@ impl SimWorld {
                     connection: arrival.connection.clone(),
                     character: arrival.character,
                     name: arrival.name,
+                    look: arrival.look,
                     number: arrival.number,
                     bundles_sent: replication.bundles_sent,
                     last_time_synch_ms,
@@ -1120,7 +1129,14 @@ impl Neighbourhood<'_> {
                     && player.bundles_sent % CARD_REFRESH_BUNDLES == 0);
             let own_sent = first_card || vitals.spawned || !self.local_player_card;
             let mut groups: Vec<BundleGroup> = own_sent
-                .then(|| own_group(own, player.character, own_position, own_carded))
+                .then(|| {
+                    let states = PlayerStates {
+                        character_id: *player.character.as_bytes(),
+                        look: player.look,
+                        health: Some((vitals.health.current(), vitals.health.max())),
+                    };
+                    own_group(own, states, own_position, own_carded)
+                })
                 .flatten()
                 .into_iter()
                 .collect();
@@ -1191,7 +1207,9 @@ mod tests {
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
     use nw_messages::{
         ALC_TYPE_INDEX, GDE_METADATA_TYPE_INDEX, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
-        MemberState, PLAYER_EMPTY_COMPONENTS, ReplicatedStateBundle, SlotRead, SlotUpdate,
+        LOOK_CHOICES, MemberState, PLAYER_APPEARANCE_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS,
+        PlayerAppearanceState, ReplicatedStateBundle, SlotRead, SlotUpdate, VITALS_TYPE_INDEX,
+        VitalsState,
     };
     use nw_reflect::{Envelope, encode_server_messages};
     use nw_sim_core::test_support::{FlatGround, NoGround};
@@ -1208,6 +1226,8 @@ mod tests {
     const RADIUS: f32 = 100.0;
     pub(super) const NOW: u64 = 10_000;
     pub(super) const SERVER_TIME: u64 = 7;
+    /// A saved look: male, face05, skin01, hairstyle65m (player-appearance note).
+    const SAVED_LOOK: [u8; LOOK_CHOICES] = [0, 5, 0, 65, 44, 4, 4, 11, 0, 6, 26, 14];
     /// 5 m/s with no margin and a burst of 1 s: at most 5 m in one move.
     const SPEED_MPS: f32 = 5.0;
     const BURST_SECONDS: f32 = 1.0;
@@ -1350,6 +1370,7 @@ mod tests {
             login,
             handoffs: 0,
             bundles_sent: 0,
+            look: None,
         }
     }
 
@@ -1700,6 +1721,60 @@ mod tests {
     }
 
     #[test]
+    fn the_own_card_carries_the_saved_look_and_the_health() {
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        let mut admit = admit_at(1, CELL_M / 2.0, true);
+        admit.look = Some(SAVED_LOOK);
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let max = world.combat.data.player_max_health();
+        let messages = tick(&mut world, NOW + OWN_CARD_DELAY_MS).messages;
+        let bundle = bundle_of(&messages, &connection(1)).expect("bundle");
+        let own = SlotRead::of(&bundle)
+            .expect("read")
+            .updates
+            .into_iter()
+            .find(SlotUpdate::is_local_player)
+            .expect("own group");
+        let state_of = |class: u64| {
+            own.members
+                .iter()
+                .find(|member| member.state.type_index() == class)
+                .map(|member| member.state.clone())
+        };
+        assert_eq!(
+            state_of(PLAYER_APPEARANCE_TYPE_INDEX),
+            Some(MemberState::Appearance(PlayerAppearanceState::of(
+                PlayerLook::of_choices(SAVED_LOOK)
+            ))),
+            "the saved look, not the default mesh"
+        );
+        assert_eq!(
+            state_of(VITALS_TYPE_INDEX),
+            Some(MemberState::Vitals(VitalsState::player(max, max))),
+            "full health of the player vitals row, so the bar is not 00/00"
+        );
+    }
+
+    #[test]
+    fn a_taken_player_keeps_its_look() {
+        let (mut old, _, _) = border_world();
+        tick(&mut old, NOW);
+        let mut offer = tick_offer(&mut old);
+        offer.look = Some(SAVED_LOOK);
+        let mut new = world_of("sim-b", settings(MANY, MAX_PLAYERS));
+        new.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        new.take(&offer, NOW).expect("take");
+        let looks: Vec<Option<PlayerLook>> = new
+            .world
+            .query::<&Player>()
+            .iter(&new.world)
+            .map(|player| player.look)
+            .collect();
+        assert_eq!(looks, vec![Some(PlayerLook::of_choices(SAVED_LOOK))]);
+    }
+
+    #[test]
     fn without_the_card_knob_the_own_player_is_its_position_every_tick() {
         let mut world = world_of(
             "sim-a",
@@ -1891,6 +1966,23 @@ mod tests {
         assert_eq!(login.envelopes.len(), LOGIN_MESSAGE_TYPES.len());
         let outgoing = tick(&mut world, NOW + OWN_CARD_DELAY_MS).messages;
         assert_eq!(seen_by(&world, &outgoing, &connection(77)), vec![77]);
+    }
+
+    #[test]
+    fn a_login_saved_in_the_air_arrives_on_the_ground() {
+        const GROUND_M: f32 = 20.0;
+        let mut world = SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(FlatGround(GROUND_M)),
+            slot("sim-a"),
+            test_combat(),
+        );
+        let mut in_the_air = admit_at(1, 0.0, true);
+        in_the_air.position.z = GROUND_M + MAX_ABOVE_GROUND_M + 1.0;
+        world.admit(&in_the_air, NOW, SERVER_TIME).expect("admit");
+        let departure = world.leave(&connection(1)).expect("left");
+        assert_eq!(departure.position.z, GROUND_M);
     }
 
     #[test]
@@ -2370,22 +2462,5 @@ mod tests {
         assert_eq!(world.set_table(&wrong), Err(TableError::WrongSize));
         join(&mut world, 1, BORDER_X + 50.0);
         assert!(tick(&mut world, NOW).handoffs.is_empty());
-    }
-
-    #[test]
-    fn a_login_saved_in_the_air_arrives_on_the_ground() {
-        const GROUND_M: f32 = 20.0;
-        let mut world = SimWorld::new(
-            settings(MANY, MAX_PLAYERS),
-            WorldIds::random(0).expect("ids"),
-            Arc::new(FlatGround(GROUND_M)),
-            slot("sim-a"),
-            test_combat(),
-        );
-        let mut in_the_air = admit_at(1, 0.0, true);
-        in_the_air.position.z = GROUND_M + MAX_ABOVE_GROUND_M + 1.0;
-        world.admit(&in_the_air, NOW, SERVER_TIME).expect("admit");
-        let departure = world.leave(&connection(1)).expect("left");
-        assert_eq!(departure.position.z, GROUND_M);
     }
 }

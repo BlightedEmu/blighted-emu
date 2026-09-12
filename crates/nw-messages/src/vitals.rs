@@ -12,7 +12,9 @@
 //! `ManaTickRate` (`u16`); it ends every captured slot-1 body.
 
 use crate::afflictions::{AfflictionList, ColdLong, HotLong};
-use crate::slots::{children_mask, read_children, read_slot_byte, write_children};
+use crate::slots::{
+    children_mask, read_children, read_slot_byte, write_children, write_known_children,
+};
 use crate::wire::{MessageError, Reader, Writer};
 
 /// Type index of the class.
@@ -23,6 +25,17 @@ const SLOT_1_BIT: u8 = 0b10;
 const SLOT_0_CHILDREN: u8 = 14;
 const SLOT_1_CHILDREN: u8 = 5;
 const FIELD: &str = "vitals";
+/// `vitalsId` of a player: the lowercase CRC-32 of the vitals row `Player`, on every local-player
+/// body of the captures (player-appearance note, section 3). The client finds the mana regen rate through it.
+pub const PLAYER_VITALS_ID: u32 = 0x9819_7a65;
+/// Max stamina of the vitals row `Player` (`StaminaBaseMax`); 100 on every captured local player.
+pub const PLAYER_STAMINA_MAX: f32 = 100.0;
+/// Max mana of the vitals row `Player` (`ManaBaseMax`); 100 on the captured local players.
+pub const PLAYER_MANA_MAX: f32 = 100.0;
+/// `StaminaTickRate` on all 1,333 captured local-player bodies that carry it; its unit is Unknown.
+pub const PLAYER_STAMINA_TICK_RATE: u16 = 0x5100;
+/// `HealthTickRate` and `ManaTickRate` on every captured local-player body.
+pub const PLAYER_TICK_RATE: u16 = 0;
 
 /// The `vitalsData` child (reader `FUN_1469515b0`): a byte, two big-endian `u64`, a byte. The
 /// meaning is Unknown.
@@ -48,6 +61,32 @@ pub struct VitalsState {
 }
 
 impl VitalsState {
+    /// The first vitals of a player with `health` of `health_max`, full stamina and mana: the
+    /// children of a retail first local-player body (slot 0 children 0, 1, 4 to 8 and 13; slot 1
+    /// children 0, 3 and 4), without `vitalsData`, `healthChangeFlags` and the affliction lists,
+    /// whose meaning or form is Unknown.
+    pub fn player(health: u32, health_max: u32) -> Self {
+        Self {
+            slot_0: Some(VitalsSlot0 {
+                health_amount: Some(health as f32),
+                stamina_amount: Some(PLAYER_STAMINA_MAX),
+                health_max: Some(health_max as f32),
+                health_tick_rate: Some(PLAYER_TICK_RATE),
+                stamina_max: Some(PLAYER_STAMINA_MAX),
+                stamina_tick_rate: Some(PLAYER_STAMINA_TICK_RATE),
+                vitals_id: Some(PLAYER_VITALS_ID),
+                max_health: Some(u16::try_from(health_max).unwrap_or(u16::MAX)),
+                ..VitalsSlot0::default()
+            }),
+            slot_1: Some(VitalsSlot1 {
+                mana_amount: Some(PLAYER_MANA_MAX),
+                mana_max: Some(PLAYER_MANA_MAX),
+                mana_tick_rate: Some(PLAYER_TICK_RATE),
+                ..VitalsSlot1::default()
+            }),
+        }
+    }
+
     /// Reads the state from the bundle path.
     ///
     /// # Errors
@@ -57,16 +96,10 @@ impl VitalsState {
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         let slots = read_slot_byte(reader, FIELD, SLOTS)?;
         let slot_0 = (slots & SLOT_0_BIT != 0)
-            .then(|| {
-                let children = read_children(reader, FIELD, SLOT_0_CHILDREN)?;
-                VitalsSlot0::read(reader, children)
-            })
+            .then(|| VitalsSlot0::read(reader))
             .transpose()?;
         let slot_1 = (slots & SLOT_1_BIT != 0)
-            .then(|| {
-                let children = read_children(reader, FIELD, SLOT_1_CHILDREN)?;
-                VitalsSlot1::read(reader, children)
-            })
+            .then(|| VitalsSlot1::read(reader))
             .transpose()?;
         Ok(Self { slot_0, slot_1 })
     }
@@ -88,11 +121,9 @@ impl VitalsState {
         }
         writer.u8(slots);
         if let Some(slot) = slot_0 {
-            write_children(writer, slot.children(), SLOT_0_CHILDREN);
             slot.write(writer);
         }
         if let Some(slot) = slot_1 {
-            write_children(writer, slot.children(), SLOT_1_CHILDREN);
             slot.write(writer)?;
         }
         Ok(())
@@ -133,24 +164,28 @@ pub struct VitalsSlot0 {
 }
 
 impl VitalsSlot0 {
-    fn read(reader: &mut Reader<'_>, children: u16) -> Result<Self, MessageError> {
-        let has = |child: u16| children & 1 << child != 0;
-        Ok(Self {
-            health_amount: has(0).then(|| reader.f32()).transpose()?,
-            stamina_amount: has(1).then(|| reader.f32()).transpose()?,
-            vitals_data: has(2).then(|| read_data(reader)).transpose()?,
-            health_change_flags: has(3).then(|| reader.u8()).transpose()?,
-            health_max: has(4).then(|| reader.f32()).transpose()?,
-            health_tick_rate: has(5).then(|| reader.u16()).transpose()?,
-            stamina_max: has(6).then(|| reader.f32()).transpose()?,
-            stamina_tick_rate: has(7).then(|| reader.u16()).transpose()?,
-            vitals_id: has(8).then(|| reader.u32()).transpose()?,
-            vitals_category_id: has(9).then(|| reader.u32()).transpose()?,
-            vitals_level: has(10).then(|| reader.u32()).transpose()?,
-            invulnerability: has(11).then(|| reader.u8()).transpose()?,
-            display_immune: has(12).then(|| reader.u8()).transpose()?,
-            max_health: has(13).then(|| reader.u16()).transpose()?,
-        })
+    fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let mut slot = Self::default();
+        read_children(reader, FIELD, SLOT_0_CHILDREN, |reader, child| {
+            match child {
+                0 => slot.health_amount = Some(reader.f32()?),
+                1 => slot.stamina_amount = Some(reader.f32()?),
+                2 => slot.vitals_data = Some(read_data(reader)?),
+                3 => slot.health_change_flags = Some(reader.u8()?),
+                4 => slot.health_max = Some(reader.f32()?),
+                5 => slot.health_tick_rate = Some(reader.u16()?),
+                6 => slot.stamina_max = Some(reader.f32()?),
+                7 => slot.stamina_tick_rate = Some(reader.u16()?),
+                8 => slot.vitals_id = Some(reader.u32()?),
+                9 => slot.vitals_category_id = Some(reader.u32()?),
+                10 => slot.vitals_level = Some(reader.u32()?),
+                11 => slot.invulnerability = Some(reader.u8()?),
+                12 => slot.display_immune = Some(reader.u8()?),
+                _ => slot.max_health = Some(reader.u16()?),
+            }
+            Ok(())
+        })?;
+        Ok(slot)
     }
 
     /// The child bitmap of the children that are sent.
@@ -173,46 +208,28 @@ impl VitalsSlot0 {
         ])
     }
 
-    /// Writes the children that are sent, in their order.
+    /// Writes the child bytes and the children that are sent.
     fn write(&self, writer: &mut Writer) {
-        for value in [self.health_amount, self.stamina_amount]
-            .into_iter()
-            .flatten()
-        {
-            writer.f32(value);
-        }
-        if let Some(data) = &self.vitals_data {
-            writer.u8(data.head).u64(data.a).u64(data.b).u8(data.tail);
-        }
-        if let Some(flags) = self.health_change_flags {
-            writer.u8(flags);
-        }
-        for (max, tick_rate) in [
-            (self.health_max, self.health_tick_rate),
-            (self.stamina_max, self.stamina_tick_rate),
-        ] {
-            if let Some(max) = max {
-                writer.f32(max);
-            }
-            if let Some(tick_rate) = tick_rate {
-                writer.u16(tick_rate);
-            }
-        }
-        for value in [self.vitals_id, self.vitals_category_id, self.vitals_level]
-            .into_iter()
-            .flatten()
-        {
-            writer.u32(value);
-        }
-        for byte in [self.invulnerability, self.display_immune]
-            .into_iter()
-            .flatten()
-        {
-            writer.u8(byte);
-        }
-        if let Some(max_health) = self.max_health {
-            writer.u16(max_health);
-        }
+        write_known_children(writer, self.children(), SLOT_0_CHILDREN, |writer, child| {
+            match child {
+                0 => self.health_amount.map(|value| writer.f32(value)),
+                1 => self.stamina_amount.map(|value| writer.f32(value)),
+                2 => self
+                    .vitals_data
+                    .map(|data| writer.u8(data.head).u64(data.a).u64(data.b).u8(data.tail)),
+                3 => self.health_change_flags.map(|flags| writer.u8(flags)),
+                4 => self.health_max.map(|value| writer.f32(value)),
+                5 => self.health_tick_rate.map(|rate| writer.u16(rate)),
+                6 => self.stamina_max.map(|value| writer.f32(value)),
+                7 => self.stamina_tick_rate.map(|rate| writer.u16(rate)),
+                8 => self.vitals_id.map(|id| writer.u32(id)),
+                9 => self.vitals_category_id.map(|id| writer.u32(id)),
+                10 => self.vitals_level.map(|level| writer.u32(level)),
+                11 => self.invulnerability.map(|byte| writer.u8(byte)),
+                12 => self.display_immune.map(|byte| writer.u8(byte)),
+                _ => self.max_health.map(|max| writer.u16(max)),
+            };
+        });
     }
 }
 
@@ -232,15 +249,19 @@ pub struct VitalsSlot1 {
 }
 
 impl VitalsSlot1 {
-    fn read(reader: &mut Reader<'_>, children: u16) -> Result<Self, MessageError> {
-        let has = |child: u16| children & 1 << child != 0;
-        Ok(Self {
-            mana_amount: has(0).then(|| reader.f32()).transpose()?,
-            afflictions_hot: has(1).then(|| AfflictionList::read(reader)).transpose()?,
-            afflictions_cold: has(2).then(|| AfflictionList::read(reader)).transpose()?,
-            mana_max: has(3).then(|| reader.f32()).transpose()?,
-            mana_tick_rate: has(4).then(|| reader.u16()).transpose()?,
-        })
+    fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let mut slot = Self::default();
+        read_children(reader, FIELD, SLOT_1_CHILDREN, |reader, child| {
+            match child {
+                0 => slot.mana_amount = Some(reader.f32()?),
+                1 => slot.afflictions_hot = Some(AfflictionList::read(reader)?),
+                2 => slot.afflictions_cold = Some(AfflictionList::read(reader)?),
+                3 => slot.mana_max = Some(reader.f32()?),
+                _ => slot.mana_tick_rate = Some(reader.u16()?),
+            }
+            Ok(())
+        })?;
+        Ok(slot)
     }
 
     /// The child bitmap of the children that are sent.
@@ -254,24 +275,32 @@ impl VitalsSlot1 {
         ])
     }
 
-    /// Writes the children that are sent, in their order.
+    /// Writes the child bytes and the children that are sent.
     fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
-        if let Some(mana) = self.mana_amount {
-            writer.f32(mana);
-        }
-        if let Some(list) = &self.afflictions_hot {
-            list.write(writer)?;
-        }
-        if let Some(list) = &self.afflictions_cold {
-            list.write(writer)?;
-        }
-        if let Some(mana_max) = self.mana_max {
-            writer.f32(mana_max);
-        }
-        if let Some(tick_rate) = self.mana_tick_rate {
-            writer.u16(tick_rate);
-        }
-        Ok(())
+        write_children(writer, self.children(), SLOT_1_CHILDREN, |writer, child| {
+            match child {
+                0 => {
+                    self.mana_amount.map(|mana| writer.f32(mana));
+                }
+                1 => {
+                    if let Some(list) = &self.afflictions_hot {
+                        list.write(writer)?;
+                    }
+                }
+                2 => {
+                    if let Some(list) = &self.afflictions_cold {
+                        list.write(writer)?;
+                    }
+                }
+                3 => {
+                    self.mana_max.map(|mana_max| writer.f32(mana_max));
+                }
+                _ => {
+                    self.mana_tick_rate.map(|rate| writer.u16(rate));
+                }
+            }
+            Ok(())
+        })
     }
 }
 
@@ -395,6 +424,39 @@ mod tests {
             let state = VitalsState { slot_0: nonempty_0, slot_1: nonempty_1 };
             prop_assert_eq!(round(&state), state);
         }
+    }
+
+    #[test]
+    fn a_player_start_is_the_retail_first_body_without_unknown_children() {
+        const HEALTH_NOW: u32 = 800;
+        const HEALTH_MAX: u32 = 856;
+        let mut writer = Writer::new();
+        VitalsState::player(HEALTH_NOW, HEALTH_MAX)
+            .write(&mut writer)
+            .expect("write");
+        let mut expected = vec![0b11, 0xf3];
+        expected.extend((HEALTH_NOW as f32).to_be_bytes());
+        expected.extend(PLAYER_STAMINA_MAX.to_be_bytes());
+        expected.extend((HEALTH_MAX as f32).to_be_bytes());
+        expected.extend(PLAYER_TICK_RATE.to_be_bytes());
+        expected.extend(PLAYER_STAMINA_MAX.to_be_bytes());
+        // Children 7, 8 and 13: the second child byte comes after the first seven children.
+        expected.push(0x43);
+        expected.extend(PLAYER_STAMINA_TICK_RATE.to_be_bytes());
+        expected.extend(PLAYER_VITALS_ID.to_be_bytes());
+        expected.extend((HEALTH_MAX as u16).to_be_bytes());
+        // Slot 1: children 0, 3 and 4.
+        expected.push(0b1_1001);
+        expected.extend(PLAYER_MANA_MAX.to_be_bytes());
+        expected.extend(PLAYER_MANA_MAX.to_be_bytes());
+        expected.extend(PLAYER_TICK_RATE.to_be_bytes());
+        let bytes = writer.finish();
+        assert_eq!(bytes, expected);
+        let state = read_all(&bytes);
+        let slot = state.slot_0.expect("slot 0");
+        assert_eq!(slot.vitals_id, Some(PLAYER_VITALS_ID));
+        assert_eq!(slot.max_health, Some(HEALTH_MAX as u16));
+        assert_eq!(slot.children(), 0x21f3);
     }
 
     #[test]

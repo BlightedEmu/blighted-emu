@@ -11,9 +11,10 @@ use std::ops::Range;
 use nw_reflect::{TypeId, decode_type_id, encode_type_id};
 
 use crate::alc::{ALC_TYPE_INDEX, AlcState};
+use crate::appearance::{PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState};
 use crate::components::{
     COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DELAYED_EVENT_TYPE_INDEX, DelayedEventState,
-    STAMINA_TYPE_INDEX, StaminaState,
+    MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState,
 };
 use crate::gde::{GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
 use crate::player_components::{EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PlayerComponentState};
@@ -40,6 +41,10 @@ pub enum MemberState {
     DelayedEvent(DelayedEventState),
     /// `MB::PlayerComponentReplicatedState`.
     PlayerComponent(PlayerComponentState),
+    /// `MB::PlayerAppearanceComponentReplicatedState`.
+    Appearance(PlayerAppearanceState),
+    /// `MB::ManaComponentReplicatedState`.
+    Mana(ManaState),
     /// An empty state of a player component class without a reader of its own.
     Empty(EmptyState),
 }
@@ -56,6 +61,8 @@ impl MemberState {
             Self::CombatStatus(_) => COMBAT_STATUS_TYPE_INDEX,
             Self::DelayedEvent(_) => DELAYED_EVENT_TYPE_INDEX,
             Self::PlayerComponent(_) => PLAYER_COMPONENT_TYPE_INDEX,
+            Self::Appearance(_) => PLAYER_APPEARANCE_TYPE_INDEX,
+            Self::Mana(_) => MANA_TYPE_INDEX,
             Self::Empty(state) => state.class,
         }
     }
@@ -85,6 +92,10 @@ impl MemberState {
             TypeId::FileSlot(PLAYER_COMPONENT_TYPE_INDEX) => {
                 PlayerComponentState::read(reader).map(Self::PlayerComponent)
             }
+            TypeId::FileSlot(PLAYER_APPEARANCE_TYPE_INDEX) => {
+                PlayerAppearanceState::read(reader).map(Self::Appearance)
+            }
+            TypeId::FileSlot(MANA_TYPE_INDEX) => ManaState::read(reader).map(Self::Mana),
             TypeId::FileSlot(index) if EmptyState::covers(index) => {
                 EmptyState::read(index, reader).map(Self::Empty)
             }
@@ -117,6 +128,14 @@ impl MemberState {
                 Ok(())
             }
             Self::PlayerComponent(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::Appearance(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::Mana(state) => {
                 state.write(writer);
                 Ok(())
             }

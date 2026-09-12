@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use nw_messages::LOOK_CHOICES;
 use nw_sim_core::Position;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -175,6 +176,9 @@ pub struct Admit {
     pub handoffs: u64,
     /// The bundle sequence the player starts with: 0, or the count of a resume.
     pub bundles_sent: u64,
+    /// The character's saved look (`nw_messages::PlayerLook` choices); `None` when the saved
+    /// creation settings do not give one.
+    pub look: Option<[u8; LOOK_CHOICES]>,
 }
 
 /// The answer to [`Admit`].
@@ -245,6 +249,8 @@ pub struct HandoffOffer {
     pub handoffs: u64,
     /// The player's health; a handoff never heals (M6-A).
     pub health: u32,
+    /// The character's look, as in [`Admit::look`].
+    pub look: Option<[u8; LOOK_CHOICES]>,
 }
 
 /// Sim to sim, on the taker's handoff subject. Both go on one subject, so NATS keeps their order.
@@ -523,6 +529,8 @@ mod tests {
         BusId::try_from("sim-1".to_owned()).expect("id")
     }
 
+    const LOOK: [u8; LOOK_CHOICES] = [0, 4, 0, 64, 43, 4, 4, 11, 0, 5, 25, 14];
+
     const POINT: Point = Point {
         x: 1.5,
         y: -2.0,
@@ -541,6 +549,7 @@ mod tests {
             login: true,
             handoffs: 0,
             bundles_sent: 0,
+            look: Some(LOOK),
         });
         round_trip(AdmitReply::Admitted);
         round_trip(AdmitReply::Refused {
@@ -571,6 +580,7 @@ mod tests {
             time_synch_age_ms: 1200,
             handoffs: 2,
             health: 500,
+            look: None,
         };
         round_trip(HandoffMessage::Offer(offer));
         round_trip(HandoffMessage::Cancel {

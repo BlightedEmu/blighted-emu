@@ -16,12 +16,10 @@
 use nw_messages::{
     AlcState, AssetId, BundleGroup, BundleMember, BundlePayload, DYNAMIC_SLICE_SUB_ID,
     GDE_METADATA_COMPONENT, GdeMetadataReplicatedState, InputPosition, LOCAL_PLAYER_INTEREST,
-    MAX_BUNDLE_INDEXES, MemberState, MessageError, PLAYER_COMPONENT_TYPE_INDEX, PLAYER_SLICE_ASSET,
-    PlayerComponentState, ReplicatedStateBundle, ServerMessage, player_empty_members,
-    raw_id_of_entity,
+    MAX_BUNDLE_INDEXES, MemberState, MessageError, PLAYER_SLICE_ASSET, PlayerStates,
+    ReplicatedStateBundle, ServerMessage, player_members, raw_id_of_entity,
 };
 use nw_sim_core::Position;
-use uuid::Uuid;
 
 use super::MAX_BUNDLE_MEMBERS;
 use super::slots::Slots;
@@ -65,8 +63,8 @@ pub(super) const fn card_of(entity: u64, position: Position) -> MobCard {
 pub(super) struct EntityKind {
     asset: AssetId,
     alc_component: u64,
-    /// Whether the card comes with an empty state for every other replicated component of the
-    /// prefab ([`player_empty_members`]).
+    /// Whether the card comes with a state for every other replicated component of the prefab
+    /// ([`player_members`]).
     empty_components: bool,
 }
 
@@ -93,9 +91,10 @@ impl EntityKind {
     }
 }
 
-/// The group of `entity` of `kind` in slot `interest`: its card (with the empty states of a
-/// player) when `carded`, then its position. A player's type-3935 `characterId` is `character`
-/// when known (the client's own player must match its login token), else the entity raw id.
+/// The group of `entity` of `kind` in slot `interest`: its card (with the other component states
+/// of a player) when `carded`, then its position. A player's states are `states` when known (the
+/// client's own player: its login character, look and vitals), else a connected 3935 state with
+/// the entity raw id as `characterId` and empty states.
 /// `None` for a position that is not finite.
 pub(super) fn entity_group(
     interest: u16,
@@ -103,7 +102,7 @@ pub(super) fn entity_group(
     kind: EntityKind,
     position: Position,
     carded: bool,
-    character: Option<Uuid>,
+    states: Option<PlayerStates>,
 ) -> Option<BundleGroup> {
     let pos = InputPosition::from_metres(position.x, position.y, position.z)?;
     let mut members = Vec::new();
@@ -115,20 +114,11 @@ pub(super) fn entity_group(
             )),
         });
         if kind.empty_components {
-            let character_id =
-                character.map_or_else(|| raw_id_of_entity(entity), |id| *id.as_bytes());
-            members.extend(player_empty_members().map(|member| {
-                if member.state.type_index() == PLAYER_COMPONENT_TYPE_INDEX {
-                    BundleMember {
-                        component: member.component,
-                        state: MemberState::PlayerComponent(PlayerComponentState::connected(
-                            character_id,
-                        )),
-                    }
-                } else {
-                    member
-                }
-            }));
+            members.extend(player_members(states.unwrap_or(PlayerStates {
+                character_id: raw_id_of_entity(entity),
+                look: None,
+                health: None,
+            })));
         }
     }
     members.push(BundleMember {
@@ -141,10 +131,10 @@ pub(super) fn entity_group(
     })
 }
 
-/// The group of the client's own player, whose 3935 `characterId` is its `character`.
+/// The group of the client's own player with its `states`.
 pub(super) fn own_group(
     entity: u64,
-    character: Uuid,
+    states: PlayerStates,
     position: Position,
     carded: bool,
 ) -> Option<BundleGroup> {
@@ -154,7 +144,7 @@ pub(super) fn own_group(
         EntityKind::PLAYER,
         position,
         carded,
-        Some(character),
+        Some(states),
     )
 }
 
@@ -199,8 +189,9 @@ fn group_bytes(group: &BundleGroup) -> Result<usize, MessageError> {
 
 #[cfg(test)]
 mod tests {
-    use nw_messages::{EntitySlots, GDE_ID_LEN, SlotRead};
+    use nw_messages::{EntitySlots, GDE_ID_LEN, PLAYER_COMPONENT_TYPE_INDEX, PlayerLook, SlotRead};
     use nw_reflect::Envelope;
+    use uuid::Uuid;
 
     use super::super::slots::FIRST_REMOTE_INTEREST;
     use super::*;
@@ -208,6 +199,15 @@ mod tests {
     const ENTITY: u64 = (1 << 34) + 7;
     const OWN: u64 = 9;
     const CHARACTER: Uuid = Uuid::from_u128(0x2b87_684d_c82c_46a4_90e4_c764_0247_7507);
+    const HEALTH: (u32, u32) = (700, 856);
+
+    fn own_states() -> PlayerStates {
+        PlayerStates {
+            character_id: *CHARACTER.as_bytes(),
+            look: Some(PlayerLook::default()),
+            health: Some(HEALTH),
+        }
+    }
     const SEQUENCE: u64 = 4;
     const MANY: u64 = 60;
     const ALL_STOPS: usize = 1000;
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn the_own_player_is_the_player_prefab_in_slot_1() {
-        let group = own_group(OWN, CHARACTER, at(), true).expect("finite");
+        let group = own_group(OWN, own_states(), at(), true).expect("finite");
         assert_eq!(group.interest, u64::from(LOCAL_PLAYER_INTEREST));
         let MemberState::GdeMetadata(card) = &group.members[0].state else {
             panic!("the card comes first: {group:?}");
@@ -245,26 +245,13 @@ mod tests {
         assert_eq!(group.members[0].component, GDE_METADATA_COMPONENT);
         assert_eq!(card.asset, Some(PLAYER_SLICE_ASSET));
         assert_eq!(card.entity_number(), Some(OWN));
-        let empties: Vec<BundleMember> = player_empty_members()
-            .map(|member| {
-                if member.state.type_index() == PLAYER_COMPONENT_TYPE_INDEX {
-                    BundleMember {
-                        component: member.component,
-                        state: MemberState::PlayerComponent(PlayerComponentState::connected(
-                            *CHARACTER.as_bytes(),
-                        )),
-                    }
-                } else {
-                    member
-                }
-            })
-            .collect();
+        let states: Vec<BundleMember> = player_members(own_states()).collect();
         assert_eq!(
-            group.members[1..=empties.len()],
-            empties[..],
-            "every other player component gets a state with the card, and 3935 is connected"
+            group.members[1..=states.len()],
+            states[..],
+            "every other player component gets a state with the card: the own states"
         );
-        let player = empties
+        let player = states
             .iter()
             .find(|member| member.state.type_index() == PLAYER_COMPONENT_TYPE_INDEX)
             .expect("player component");
@@ -283,7 +270,7 @@ mod tests {
             panic!("then the ALC position: {group:?}");
         };
         assert_eq!(alc.pos10, InputPosition::from_metres(10.0, 20.0, 30.0));
-        let later = own_group(OWN, CHARACTER, at(), false).expect("finite");
+        let later = own_group(OWN, own_states(), at(), false).expect("finite");
         assert_eq!(later.members.len(), 1, "later only the ALC position");
         let payload = BundlePayload {
             groups: vec![group.clone()],
