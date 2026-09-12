@@ -488,6 +488,27 @@ impl SimWorld {
         Ok(())
     }
 
+    /// Notes that the client of `connection` sent a message. A client sends nothing between the
+    /// login and its spawn: its first message after the own spawn card comes in the same moment it
+    /// logs `player spawn succeeds, in game` (live 2026-09-10). So that message ends the hold on
+    /// the replication stream and the spawn protection. Before the card it means nothing, and a
+    /// player who already spawned is not changed.
+    pub fn heard_from(&mut self, connection: &ConnectionRef) {
+        let Some(&entity) = self.by_connection.get(connection) else {
+            return;
+        };
+        if !self
+            .world
+            .get::<Player>(entity)
+            .is_some_and(|player| player.own_card_sent)
+        {
+            return;
+        }
+        if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
+            vitals.spawned = true;
+        }
+    }
+
     /// Moves the player of `connection` to `next`, received at `now_ms`, when the movement checks
     /// (M4 spec section 7.2 with sections 15 and 16) allow it.
     ///
@@ -1094,7 +1115,7 @@ impl Neighbourhood<'_> {
                     && player.bundles_sent % CARD_REFRESH_BUNDLES == 0);
             let own_sent = first_card || vitals.spawned || !self.local_player_card;
             let mut groups: Vec<BundleGroup> = own_sent
-                .then(|| own_group(own, own_position, own_carded))
+                .then(|| own_group(own, player.character, own_position, own_carded))
                 .flatten()
                 .into_iter()
                 .collect();
@@ -1119,6 +1140,7 @@ impl Neighbourhood<'_> {
                     kind,
                     position,
                     slot.new || refresh,
+                    None,
                 ));
             }
             counted += groups
@@ -1164,7 +1186,7 @@ mod tests {
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
     use nw_messages::{
         ALC_TYPE_INDEX, GDE_METADATA_TYPE_INDEX, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
-        PLAYER_EMPTY_COMPONENTS, ReplicatedStateBundle, SlotRead, SlotUpdate,
+        MemberState, PLAYER_EMPTY_COMPONENTS, ReplicatedStateBundle, SlotRead, SlotUpdate,
     };
     use nw_reflect::{Envelope, encode_server_messages};
     use nw_sim_core::test_support::NoGround;
@@ -1610,6 +1632,65 @@ mod tests {
         assert!(
             updates.iter().all(SlotUpdate::is_local_player),
             "other entities share the offline cache until spawn"
+        );
+    }
+
+    #[test]
+    fn a_client_message_after_the_card_ends_the_hold() {
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        world
+            .admit(&admit_at(1, CELL_M / 2.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let own_updates = |world: &mut SimWorld, now: u64| {
+            let messages = tick(world, now).messages;
+            bundle_of(&messages, &connection(1))
+                .map(|bundle| SlotRead::of(&bundle).expect("read").updates)
+                .unwrap_or_default()
+                .iter()
+                .filter(|update| update.is_local_player())
+                .count()
+        };
+        world.heard_from(&connection(1));
+        let card_at = NOW + OWN_CARD_DELAY_MS;
+        assert_eq!(own_updates(&mut world, card_at), 1, "the card");
+        assert_eq!(
+            own_updates(&mut world, card_at + 33),
+            0,
+            "a message before the card does not end the hold"
+        );
+        world.heard_from(&connection(1));
+        for step in 2..=4 {
+            assert_eq!(
+                own_updates(&mut world, card_at + 33 * step),
+                1,
+                "the position every tick once the client spawned"
+            );
+        }
+    }
+
+    #[test]
+    fn the_own_card_names_the_login_character() {
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        let admit = admit_at(1, CELL_M / 2.0, true);
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let messages = tick(&mut world, NOW + OWN_CARD_DELAY_MS).messages;
+        let bundle = bundle_of(&messages, &connection(1)).expect("bundle");
+        let own = SlotRead::of(&bundle)
+            .expect("read")
+            .updates
+            .into_iter()
+            .find(SlotUpdate::is_local_player)
+            .expect("own group");
+        let character_id = own.members.iter().find_map(|member| match &member.state {
+            MemberState::PlayerComponent(state) => state.character_id,
+            _ => None,
+        });
+        assert_eq!(
+            character_id,
+            Some(*admit.character.as_bytes()),
+            "the client sees its local player only when characterId is its login character"
         );
     }
 
@@ -2068,6 +2149,7 @@ mod tests {
                     EntityKind::PLAYER,
                     at(0.0),
                     true,
+                    None,
                 )
             })
             .collect();

@@ -21,6 +21,7 @@ use nw_messages::{
     raw_id_of_entity,
 };
 use nw_sim_core::Position;
+use uuid::Uuid;
 
 use super::MAX_BUNDLE_MEMBERS;
 use super::slots::Slots;
@@ -93,13 +94,16 @@ impl EntityKind {
 }
 
 /// The group of `entity` of `kind` in slot `interest`: its card (with the empty states of a
-/// player) when `carded`, then its position. `None` for a position that is not finite.
+/// player) when `carded`, then its position. A player's type-3935 `characterId` is `character`
+/// when known (the client's own player must match its login token), else the entity raw id.
+/// `None` for a position that is not finite.
 pub(super) fn entity_group(
     interest: u16,
     entity: u64,
     kind: EntityKind,
     position: Position,
     carded: bool,
+    character: Option<Uuid>,
 ) -> Option<BundleGroup> {
     let pos = InputPosition::from_metres(position.x, position.y, position.z)?;
     let mut members = Vec::new();
@@ -111,7 +115,8 @@ pub(super) fn entity_group(
             )),
         });
         if kind.empty_components {
-            let character_id = raw_id_of_entity(entity);
+            let character_id =
+                character.map_or_else(|| raw_id_of_entity(entity), |id| *id.as_bytes());
             members.extend(player_empty_members().map(|member| {
                 if member.state.type_index() == PLAYER_COMPONENT_TYPE_INDEX {
                     BundleMember {
@@ -136,14 +141,20 @@ pub(super) fn entity_group(
     })
 }
 
-/// The group of the client's own player.
-pub(super) fn own_group(entity: u64, position: Position, carded: bool) -> Option<BundleGroup> {
+/// The group of the client's own player, whose 3935 `characterId` is its `character`.
+pub(super) fn own_group(
+    entity: u64,
+    character: Uuid,
+    position: Position,
+    carded: bool,
+) -> Option<BundleGroup> {
     entity_group(
         LOCAL_PLAYER_INTEREST,
         entity,
         EntityKind::PLAYER,
         position,
         carded,
+        Some(character),
     )
 }
 
@@ -196,6 +207,7 @@ mod tests {
 
     const ENTITY: u64 = (1 << 34) + 7;
     const OWN: u64 = 9;
+    const CHARACTER: Uuid = Uuid::from_u128(0x2b87_684d_c82c_46a4_90e4_c764_0247_7507);
     const SEQUENCE: u64 = 4;
     const MANY: u64 = 60;
     const ALL_STOPS: usize = 1000;
@@ -225,7 +237,7 @@ mod tests {
 
     #[test]
     fn the_own_player_is_the_player_prefab_in_slot_1() {
-        let group = own_group(OWN, at(), true).expect("finite");
+        let group = own_group(OWN, CHARACTER, at(), true).expect("finite");
         assert_eq!(group.interest, u64::from(LOCAL_PLAYER_INTEREST));
         let MemberState::GdeMetadata(card) = &group.members[0].state else {
             panic!("the card comes first: {group:?}");
@@ -239,7 +251,7 @@ mod tests {
                     BundleMember {
                         component: member.component,
                         state: MemberState::PlayerComponent(PlayerComponentState::connected(
-                            raw_id_of_entity(OWN),
+                            *CHARACTER.as_bytes(),
                         )),
                     }
                 } else {
@@ -259,7 +271,11 @@ mod tests {
         let MemberState::PlayerComponent(state) = &player.state else {
             panic!("3935 is the player component: {player:?}");
         };
-        assert_eq!(state.character_id, Some(raw_id_of_entity(OWN)));
+        assert_eq!(
+            state.character_id,
+            Some(*CHARACTER.as_bytes()),
+            "the own characterId is the login character, so the client sees the local player"
+        );
         assert_eq!(state.player_connected, Some(true));
         let last = group.members.last().expect("position");
         assert_eq!(last.component, PLAYER_ALC_COMPONENT);
@@ -267,7 +283,7 @@ mod tests {
             panic!("then the ALC position: {group:?}");
         };
         assert_eq!(alc.pos10, InputPosition::from_metres(10.0, 20.0, 30.0));
-        let later = own_group(OWN, at(), false).expect("finite");
+        let later = own_group(OWN, CHARACTER, at(), false).expect("finite");
         assert_eq!(later.members.len(), 1, "later only the ALC position");
         let payload = BundlePayload {
             groups: vec![group.clone()],
@@ -284,6 +300,7 @@ mod tests {
             EntityKind::mob(ENTITY),
             at(),
             true,
+            None,
         )
         .expect("finite");
         let MemberState::GdeMetadata(card) = &group.members[0].state else {
@@ -309,6 +326,7 @@ mod tests {
                     EntityKind::mob(ENTITY + index),
                     at(),
                     true,
+                    None,
                 )
                 .expect("finite")
             })

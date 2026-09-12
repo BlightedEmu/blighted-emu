@@ -469,12 +469,20 @@ impl Loop {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
             return;
         };
+        self.world.heard_from(connection);
         match envelope.type_index() {
             Some(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX) => {
                 self.client_input(connection, &envelope.body);
             }
             Some(REQUEST_RESPAWN_TYPE_INDEX) => self.respawn_request(connection, &envelope.body),
-            _ => metrics::counter!(METRIC_IGNORED_MESSAGES).increment(1),
+            _ => {
+                tracing::debug!(
+                    type_id = ?envelope.type_id,
+                    body_len = envelope.body.len(),
+                    "ignored client message"
+                );
+                metrics::counter!(METRIC_IGNORED_MESSAGES).increment(1);
+            }
         }
     }
 

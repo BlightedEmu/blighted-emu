@@ -37,6 +37,10 @@ const CHILD_CHARACTER_ID: u16 = 1 << 0;
 const CHILD_PLAYER_CONNECTED: u16 = 1 << 3;
 /// Presence flag bit 0: take the fixed 16-byte path (`FUN_14087ac50`).
 const PRESENCE_FLAG_FIXED: u8 = 0x01;
+/// Presence flag bit 2: the client turns the 16 bytes into lowercase dashed UUID text. The
+/// local-player check compares that text with the login token `CharacterId` (facet `+0xe8`
+/// note), so `characterId` must use it; without it the text is 32 bare hex digits.
+const PRESENCE_FLAG_UUID_TEXT: u8 = 0x04;
 const FIELD: &str = "player component";
 
 /// (component index, class type index) of each replicated component of the player prefab, other
@@ -214,7 +218,9 @@ impl PlayerComponentState {
         writer.u8(SLOT_2_BIT);
         write_children(writer, children, SLOT_2_CHILDREN);
         if let Some(id) = character_id {
-            writer.u8(PRESENCE_FLAG_FIXED).bytes(&id);
+            writer
+                .u8(PRESENCE_FLAG_FIXED | PRESENCE_FLAG_UUID_TEXT)
+                .bytes(&id);
         }
         if let Some(connected) = player_connected {
             writer.boolean(connected);
@@ -328,6 +334,21 @@ mod tests {
         assert_eq!(read, state);
         assert_eq!(read.player_connected, Some(true));
         assert_eq!(read.character_id, Some(ID));
+    }
+
+    #[test]
+    fn a_connected_body_carries_the_character_id_as_uuid_text() {
+        const ID: [u8; RAW_ID_LEN] = [7; RAW_ID_LEN];
+        let mut writer = Writer::new();
+        PlayerComponentState::connected(ID).write(&mut writer);
+        let mut expected = vec![
+            SLOT_2_BIT,
+            0x09,
+            PRESENCE_FLAG_FIXED | PRESENCE_FLAG_UUID_TEXT,
+        ];
+        expected.extend_from_slice(&ID);
+        expected.push(1);
+        assert_eq!(writer.finish(), expected, "facet +0xe8 note, section 6");
     }
 
     #[test]
