@@ -83,6 +83,8 @@ const CHOICE_LISTS: [ChoiceList; LOOK_CHOICES - 2] = [
 /// The ObjectStream child names of gender and race.
 const GENDER_NAME: &str = "gender";
 const RACE_NAME: &str = "race";
+/// The ObjectStream child name of the archetype pick: a backstory id.
+const BACKSTORY_NAME: &str = "backstory";
 /// The race row name prefix.
 const RACE_PREFIX: &str = "face";
 /// The head and facial hair names end with this letter in both genders' lists.
@@ -91,8 +93,7 @@ const HAIR_SUFFIX: char = 'm';
 /// The look saved with a character, from its stored appearance JSON. `None` when the settings are
 /// missing (bots and tests store `{}`) or a choice is not in its list.
 pub fn saved_look(appearance: &serde_json::Value) -> Option<PlayerLook> {
-    let params = appearance.get(CREATION_PARAMS_KEY)?.as_str()?;
-    let root = visuals(params)?;
+    let root = saved_visuals(appearance)?;
     let text = |name: &str| root.child(lowercase_crc32(name))?.as_string().ok();
     let gender_name = text(GENDER_NAME)?;
     let gender = GENDERS.iter().position(|known| *known == gender_name)?;
@@ -103,6 +104,23 @@ pub fn saved_look(appearance: &serde_json::Value) -> Option<PlayerLook> {
         *choice = list_position(list, text(list.name)?)?;
     }
     Some(PlayerLook::of_choices(choices))
+}
+
+/// The backstory id that the character's archetype pick saved (for example `Archetype_Mystic`),
+/// from its stored appearance JSON (starter-kit note, section 6). `None` when the settings are
+/// missing or have no backstory.
+pub fn saved_backstory(appearance: &serde_json::Value) -> Option<String> {
+    let root = saved_visuals(appearance)?;
+    let backstory = root
+        .child(lowercase_crc32(BACKSTORY_NAME))?
+        .as_string()
+        .ok()?;
+    (!backstory.is_empty()).then(|| backstory.to_owned())
+}
+
+/// The root element of the `visualsBlob` in a stored appearance.
+fn saved_visuals(appearance: &serde_json::Value) -> Option<Element> {
+    visuals(appearance.get(CREATION_PARAMS_KEY)?.as_str()?)
 }
 
 /// The race row of `name` (`faceNN`) in the male or female race list.
@@ -268,6 +286,22 @@ mod tests {
             Some(0),
             "the first hair row is None"
         );
+    }
+
+    #[test]
+    fn the_archetype_pick_is_the_saved_backstory() {
+        const PICK: &str = "Archetype_Mystic";
+        let mut children = names(&MALE_NAMES);
+        children.push((BACKSTORY_NAME, PICK.as_bytes().to_vec()));
+        let saved = appearance(params(&children));
+        assert_eq!(saved_backstory(&saved).as_deref(), Some(PICK));
+        assert_eq!(
+            saved_backstory(&appearance(params(&names(&MALE_NAMES)))),
+            None
+        );
+        let empty = vec![(BACKSTORY_NAME, Vec::new())];
+        assert_eq!(saved_backstory(&appearance(params(&empty))), None);
+        assert_eq!(saved_backstory(&serde_json::json!({})), None);
     }
 
     #[test]
