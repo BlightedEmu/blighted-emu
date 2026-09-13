@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Typed New World game rule tables and the content bundle file.
 
+pub mod achievements;
 pub mod bundle;
 pub mod client_build;
 pub mod combat;
@@ -11,6 +12,7 @@ pub mod fill;
 #[rustfmt::skip]
 pub mod generated;
 pub mod ids;
+pub mod starter;
 pub mod table;
 
 pub use bundle::ContentBundle;
