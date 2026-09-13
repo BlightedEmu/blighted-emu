@@ -246,6 +246,7 @@ impl<Q: QueueStore> Loop<Q> {
             self.version,
             self.settings.grid,
             self.sims.slots(&self.context.level),
+            self.sims.other_slots(&self.context.level),
         );
         for (sim, from_x, to_x) in assignment.x_ranges() {
             tracing::info!(sim = %sim.id, from_x, to_x, version = self.version, "cells assigned");

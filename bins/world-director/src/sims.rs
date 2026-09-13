@@ -91,9 +91,18 @@ impl SimRegistry {
 
     /// The live sims of `level`, by id.
     pub fn slots(&self, level: &str) -> Vec<SimSlot> {
+        self.slots_where(|live| live.level == level)
+    }
+
+    /// The live sims of every other level than `level` (the tutorial sims), by id.
+    pub fn other_slots(&self, level: &str) -> Vec<SimSlot> {
+        self.slots_where(|live| live.level != level)
+    }
+
+    fn slots_where(&self, keep: impl Fn(&Live) -> bool) -> Vec<SimSlot> {
         self.sims
             .iter()
-            .filter(|(_, live)| live.level == level)
+            .filter(|(_, live)| keep(live))
             .map(|(id, live)| slot_of(id, live))
             .collect()
     }
@@ -159,10 +168,17 @@ pub struct Assignment {
 
 impl Assignment {
     /// The column stripes of `grid` over `sims`, in their order. More sims than a cell table
-    /// can name (65,536) are left out.
-    pub fn new(version: u64, grid: CellGrid, mut sims: Vec<SimSlot>) -> Self {
+    /// can name (65,536) are left out. The sims of other levels (`other_levels`) own no cells;
+    /// they follow in the table, so that gateways count their players as routed.
+    pub fn new(
+        version: u64,
+        grid: CellGrid,
+        mut sims: Vec<SimSlot>,
+        other_levels: Vec<SimSlot>,
+    ) -> Self {
         sims.truncate(usize::from(u16::MAX) + 1);
         let indexes: Vec<u16> = (0..=u16::MAX).take(sims.len()).collect();
+        sims.extend(other_levels);
         Self {
             version,
             owners: CellOwners::columns(grid, &indexes),
@@ -348,7 +364,12 @@ mod tests {
 
     #[test]
     fn the_assignment_routes_by_column_and_becomes_a_table() {
-        let assignment = Assignment::new(VERSION, grid(), vec![slot("sim-1"), slot("sim-2")]);
+        let assignment = Assignment::new(
+            VERSION,
+            grid(),
+            vec![slot("sim-1"), slot("sim-2")],
+            Vec::new(),
+        );
         let west = Position {
             x: 10.0,
             y: 9000.0,
@@ -364,7 +385,7 @@ mod tests {
         assert!(assignment.covers(west));
         assert!(!assignment.covers(Position { x: -1.0, ..west }));
         assert!(
-            !Assignment::new(VERSION, grid(), Vec::new()).covers(Position {
+            !Assignment::new(VERSION, grid(), Vec::new(), Vec::new()).covers(Position {
                 x: LEVEL_M + 1.0,
                 ..west
             })
@@ -384,7 +405,7 @@ mod tests {
                 (slot("sim-2"), 3.0 * CELL_M, LEVEL_M)
             ]
         );
-        let empty = Assignment::new(VERSION, grid(), Vec::new());
+        let empty = Assignment::new(VERSION, grid(), Vec::new(), Vec::new());
         assert_eq!(empty.owner_at(west), None);
         assert!(empty.x_ranges().is_empty());
     }
@@ -408,5 +429,19 @@ mod tests {
             "the tutorial sim with the most free slots"
         );
         assert_eq!(sims.least_loaded("no_such_level"), None);
+        assert_eq!(sims.other_slots(LEVEL), vec![slot("tut-1"), slot("tut-2")]);
+    }
+
+    #[test]
+    fn sims_of_other_levels_are_in_the_table_without_cells() {
+        let assignment = Assignment::new(VERSION, grid(), vec![slot("sim-1")], vec![slot("tut-1")]);
+        let table = assignment.table();
+        assert_eq!(table.sims, vec![slot("sim-1"), slot("tut-1")]);
+        assert!(table.owners.iter().all(|owner| *owner == Some(0)));
+        assert_eq!(
+            assignment.x_ranges(),
+            vec![(slot("sim-1"), 0.0, LEVEL_M)],
+            "the tutorial sim has no columns"
+        );
     }
 }
