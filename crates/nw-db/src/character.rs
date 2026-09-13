@@ -86,6 +86,22 @@ pub async fn insert_character(world: &PgPool, new: &NewCharacter) -> Result<Char
     Ok(character_from_row(row))
 }
 
+/// Deletes the character `character_id` of `account_id` from a world database, with its saved
+/// position. Returns whether the account had that character.
+pub async fn delete_character(
+    world: &PgPool,
+    account_id: Uuid,
+    character_id: Uuid,
+) -> Result<bool, DbError> {
+    let deleted =
+        sqlx::query("DELETE FROM player_character WHERE character_id = $1 AND account_id = $2")
+            .bind(character_id)
+            .bind(account_id)
+            .execute(world)
+            .await?;
+    Ok(deleted.rows_affected() > 0)
+}
+
 /// The characters of one account in one world, oldest first.
 pub async fn characters_for_account(
     world: &PgPool,

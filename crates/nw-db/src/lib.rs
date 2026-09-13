@@ -21,8 +21,8 @@ pub use account::{
     account_by_id, create_password_account, discord_account, password_login, set_banned,
 };
 pub use character::{
-    character_by_id, character_name_taken, characters_for_account, insert_character,
-    release_character_name, reserve_character_name,
+    character_by_id, character_name_taken, characters_for_account, delete_character,
+    insert_character, release_character_name, reserve_character_name,
 };
 pub use connect::{DatabaseConfig, connect, connect_options};
 pub use entity::{MAX_ENTITY_NUMBER, next_entity_number};

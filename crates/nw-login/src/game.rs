@@ -15,17 +15,17 @@ use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, FromRequestParts, Path, State};
 use axum::http::request::Parts;
 use axum::http::{Method, Uri};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use nw_db::{Character, NewCharacter};
 use nw_protocol::game_api::{
-    AUTH_STACK_STAGE, AUTH_STACK_TAG, CHARACTERS_SEGMENT, ChannelDocument, CharacterSummary,
-    Cluster, CreateCharacterReply, CreateCharacterRequestBody, GATEWAY_STAGE, GET_LOGIN_INFO_PATH,
-    HTTP_GATEWAY_TAG, LIST_WORLDS_PATH, LOGIN_GATEWAY_TAG, ListWorldsBody, ListWorldsReply,
-    LoginInfoList, LoginInfoReply, NO_TRANSFER_REGION, NameRecord, PUBLIC_STATUS_OPEN, PublicApi,
-    QUEUE_LOGIN_PATH, STEAM_AUTH_PATH, SteamAuthReply, VALIDATOR_SEGMENT, ValidateCharacterRequest,
-    WORLD_SET_LIVE, WORLD_STATUS_ACTIVE, WORLD_TYPE_OPEN_WORLD, WORLD_VERSION, WORLDS_PATH,
-    WorldModel,
+    AUTH_STACK_STAGE, AUTH_STACK_TAG, CHARACTER_PATH, CHARACTERS_SEGMENT, ChannelDocument,
+    CharacterSummary, Cluster, CreateCharacterReply, CreateCharacterRequestBody, GATEWAY_STAGE,
+    GET_LOGIN_INFO_PATH, HTTP_GATEWAY_TAG, LIST_WORLDS_PATH, LOGIN_GATEWAY_TAG, ListWorldsBody,
+    ListWorldsReply, LoginInfoList, LoginInfoReply, NO_TRANSFER_REGION, NameRecord,
+    PUBLIC_STATUS_OPEN, PublicApi, QUEUE_LOGIN_PATH, STEAM_AUTH_PATH, SteamAuthReply,
+    VALIDATOR_SEGMENT, ValidateCharacterRequest, WORLD_SET_LIVE, WORLD_STATUS_ACTIVE,
+    WORLD_TYPE_OPEN_WORLD, WORLD_VERSION, WORLDS_PATH, WorldModel,
 };
 use nw_protocol::{LoginQueueReply, parse_login_queue_request};
 use serde::Deserialize;
@@ -97,6 +97,12 @@ struct TicketPath {
     ticket_id: String,
 }
 
+/// The character parameter of the delete route.
+#[derive(Debug, Deserialize)]
+struct CharacterPath {
+    character_id: Uuid,
+}
+
 /// The world parameter of a character route.
 #[derive(Debug, Deserialize)]
 struct WorldPath {
@@ -166,6 +172,10 @@ where
         .route(
             &gateway_route(&format!("{WORLDS_PATH}/{{world_id}}{VALIDATOR_SEGMENT}")),
             post(validate_character::<G, C, R, Q>),
+        )
+        .route(
+            &gateway_route(&format!("{CHARACTER_PATH}/{{character_id}}")),
+            delete(delete_character::<G, C, R, Q>),
         )
         .route(
             &gateway_route(QUEUE_LOGIN_PATH),
@@ -421,6 +431,28 @@ where
     Ok(Json(CreateCharacterReply {
         character: character_summary(world.id, &character),
     }))
+}
+
+/// Deletes a character of the session's account. The client shows error 16 for any status but
+/// 200 (JSON note section 3); the reply body model is Unknown, so a deleted character gets an
+/// empty JSON object.
+async fn delete_character<G, C, R, Q>(
+    State(state): State<GameState<G, C, R, Q>>,
+    SessionAccount(account): SessionAccount,
+    Path(path): Path<CharacterPath>,
+) -> Result<Json<serde_json::Map<String, serde_json::Value>>, ApiError>
+where
+    C: CharacterStore,
+{
+    let world = world_of_character(&state, account, path.character_id).await?;
+    if !state
+        .characters
+        .delete(world.id, account, path.character_id)
+        .await?
+    {
+        return Err(ApiError::UnknownCharacter);
+    }
+    Ok(Json(serde_json::Map::new()))
 }
 
 /// Checks a name. The reply body model is Unknown (JSON note section 5.4), so a free name gets an
@@ -1081,6 +1113,56 @@ pub(crate) mod tests {
             (status, error_code(&body).as_str()),
             (StatusCode::BAD_REQUEST, "bad_request")
         );
+    }
+
+    #[tokio::test]
+    async fn a_character_is_deleted_by_its_own_account_only() {
+        let fixture = fixture().await;
+        let world = fixture.state.config.worlds[0].id;
+        let app = game_router(fixture.state.clone());
+        let own = character_of(&fixture.state, fixture.account, NAME).await;
+        let (_, other_account) = new_session(&fixture.state).await;
+        let foreign = character_of(&fixture.state, other_account, "Other").await;
+        let delete_path = |character: Uuid| {
+            game_path(
+                &fixture.session,
+                &format!("{GATEWAY_STAGE}{CHARACTER_PATH}/{character}"),
+            )
+        };
+        let (status, body) = call(&app, "DELETE", &delete_path(foreign)).await;
+        assert_eq!(
+            (status, error_code(&body).as_str()),
+            (StatusCode::NOT_FOUND, "unknown_character")
+        );
+        let (status, body) = call(&app, "DELETE", &delete_path(own)).await;
+        assert_eq!((status, &body[..]), (StatusCode::OK, &b"{}"[..]));
+        let left = fixture
+            .state
+            .characters
+            .characters(world, fixture.account)
+            .await
+            .expect("list");
+        assert!(left.is_empty());
+        assert!(
+            !fixture
+                .state
+                .characters
+                .name_taken(NAME)
+                .await
+                .expect("free")
+        );
+        let (status, _) = call(&app, "DELETE", &delete_path(own)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "deleted once");
+        let (status, _) = call(
+            &app,
+            "DELETE",
+            &game_path(
+                OTHER_KEY,
+                &format!("{GATEWAY_STAGE}{CHARACTER_PATH}/{foreign}"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

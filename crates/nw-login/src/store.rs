@@ -119,6 +119,15 @@ pub trait CharacterStore: Clone + Send + Sync + 'static {
         world_id: Uuid,
         new: &NewCharacter,
     ) -> impl Future<Output = Result<Character, StoreError>> + Send;
+
+    /// Deletes the character `character_id` of `account_id` from its world and frees its name.
+    /// Returns whether the account had that character there.
+    fn delete(
+        &self,
+        world_id: Uuid,
+        account_id: Uuid,
+        character_id: Uuid,
+    ) -> impl Future<Output = Result<bool, StoreError>> + Send;
 }
 
 /// Counters for rate limits (Valkey).

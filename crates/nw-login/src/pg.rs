@@ -51,6 +51,24 @@ async fn create_character(
     }
 }
 
+/// Deletes a character from its world, then frees its name.
+async fn delete_character(
+    global: &PgPool,
+    world: &PgPool,
+    account_id: Uuid,
+    character_id: Uuid,
+) -> Result<bool, StoreError> {
+    let deleted = nw_db::delete_character(world, account_id, character_id)
+        .await
+        .map_err(store_error)?;
+    if deleted {
+        nw_db::release_character_name(global, character_id)
+            .await
+            .map_err(store_error)?;
+    }
+    Ok(deleted)
+}
+
 /// Characters in the world databases and their names in the global database.
 #[derive(Debug, Clone)]
 pub struct PgCharacters {
@@ -108,6 +126,23 @@ impl CharacterStore for PgCharacters {
         tokio::spawn(async move { create_character(&global, &world, world_id, &new).await })
             .await
             .map_err(StoreError::unavailable)?
+    }
+
+    /// Runs in its own task, so a dropped request cannot stop between the delete and the name
+    /// release.
+    async fn delete(
+        &self,
+        world_id: Uuid,
+        account_id: Uuid,
+        character_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let world = self.world(world_id)?.clone();
+        let global = self.global.clone();
+        tokio::spawn(
+            async move { delete_character(&global, &world, account_id, character_id).await },
+        )
+        .await
+        .map_err(StoreError::unavailable)?
     }
 }
 

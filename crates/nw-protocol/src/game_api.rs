@@ -26,6 +26,8 @@ pub const WORLDS_PATH: &str = "/game/worlds";
 pub const CHARACTERS_SEGMENT: &str = "/characters";
 /// `ValidateCharacter` path after the world id.
 pub const VALIDATOR_SEGMENT: &str = "/characters/validator";
+/// `DeleteCharacter` operation path; the character id follows (`DELETE`).
+pub const CHARACTER_PATH: &str = "/game/characters";
 /// `QueueLogin` operation path; `RefreshQueuedLogin` appends `/<ticket id>`.
 pub const QUEUE_LOGIN_PATH: &str = "/game/login/queue/v2";
 

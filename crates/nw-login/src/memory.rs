@@ -268,6 +268,27 @@ impl CharacterStore for MemoryCharacters {
             .push(character.clone());
         Ok(character)
     }
+
+    async fn delete(
+        &self,
+        world_id: Uuid,
+        account_id: Uuid,
+        character_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let mut characters = lock(&self.0);
+        let world = characters
+            .worlds
+            .get_mut(&world_id)
+            .ok_or(StoreError::UnknownWorld)?;
+        let Some(at) = world.iter().position(|character| {
+            character.id == character_id && character.account_id == account_id
+        }) else {
+            return Ok(false);
+        };
+        let character = world.remove(at);
+        characters.names.remove(&character.name.to_lowercase());
+        Ok(true)
+    }
 }
 
 /// Rate-limit counters in memory.
@@ -662,6 +683,30 @@ pub(crate) mod contract {
             store.characters(Uuid::new_v4(), account).await,
             Err(StoreError::UnknownWorld)
         ));
+        assert!(
+            !store
+                .delete(first, Uuid::new_v4(), created.id)
+                .await
+                .expect("other account"),
+            "another account cannot delete it"
+        );
+        assert!(
+            store
+                .delete(first, account, created.id)
+                .await
+                .expect("delete")
+        );
+        assert_eq!(
+            store.character(first, created.id).await.expect("gone"),
+            None
+        );
+        assert!(!store.name_taken(&name).await.expect("freed"));
+        assert!(
+            !store
+                .delete(first, account, created.id)
+                .await
+                .expect("again")
+        );
     }
 
     /// Checks a [`GameSessionStore`].
