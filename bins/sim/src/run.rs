@@ -20,6 +20,8 @@ use nw_world::WorldFile;
 use nw_world::world_file::world_file_path;
 
 use crate::config::{SimConfig, SimConfigError, load_sim_config};
+use crate::mobs::spawns_of_level;
+use crate::player_content::PlayerContent;
 use crate::server::{
     LATENCY_BUCKETS_SECONDS, LoopSettings, METRIC_HANDOFF_SECONDS, METRIC_MOB_TICK_SECONDS,
     METRIC_SNAPSHOT_SECONDS, METRIC_TICK_SECONDS, ServeError, serve as serve_loop,
@@ -87,17 +89,18 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let world_file = Arc::new(WorldFile::load(&path, &build)?);
     let bundle = ContentBundle::load(&bundle_path(&config.content_dir, &build), &build)
         .map_err(RunError::Bundle)?;
-    // Only the combat rows stay; the rest of the bundle is dropped here.
+    // Only the combat rows and the player content stay; the rest of the bundle is dropped here.
     let combat = Arc::new(CombatData::from_tables(
         &bundle.tables,
         &config.combat.rows(),
     )?);
+    let content = Arc::new(PlayerContent::from_tables(&bundle.tables));
     drop(bundle);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(RunError::Runtime)?
-        .block_on(serve_async(config, password, world_file, combat))
+        .block_on(serve_async(config, password, world_file, combat, content))
 }
 
 async fn serve_async(
@@ -105,6 +108,7 @@ async fn serve_async(
     password: String,
     ground: Arc<WorldFile>,
     combat: Arc<CombatData>,
+    content: Arc<PlayerContent>,
 ) -> Result<(), RunError> {
     let db = nw_db::connect(&config.world_database, &password)
         .await
@@ -148,7 +152,8 @@ async fn serve_async(
         save_interval: std::time::Duration::from_millis(config.save_interval_ms),
         heartbeat_interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
         heartbeat_misses: config.heartbeat_misses,
-        combat: config.combat_settings(combat, ground.vitals.clone().into()),
+        combat: config.combat_settings(combat, spawns_of_level(&config.level, &ground.vitals)),
+        content,
         snapshot_interval: (config.admin.snapshot_interval_ms != 0)
             .then(|| std::time::Duration::from_millis(config.admin.snapshot_interval_ms)),
     };

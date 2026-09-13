@@ -100,6 +100,27 @@ pub struct PhasingEntry {
     pub extra: u32,
 }
 
+impl PhasingEntry {
+    /// Reads one entry: key type, key id, phase id, extra.
+    pub(crate) fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        Ok(Self {
+            key_type: reader.u8()?,
+            key_id: reader.u32()?,
+            phase_id: reader.u64()?,
+            extra: reader.u32()?,
+        })
+    }
+
+    /// Writes the entry.
+    pub(crate) fn write(&self, writer: &mut Writer) {
+        writer
+            .u8(self.key_type)
+            .u32(self.key_id)
+            .u64(self.phase_id)
+            .u32(self.extra);
+    }
+}
+
 /// Tells the client which level to load and the session context to use.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LevelInfoChangedMsg {
@@ -179,11 +200,7 @@ impl BodyCodec for LevelInfoChangedMsg {
             .u64(self.reserved);
         writer.prefixed(self.phasing.len() as u64)?;
         for entry in &self.phasing {
-            writer
-                .u8(entry.key_type)
-                .u32(entry.key_id)
-                .u64(entry.phase_id)
-                .u32(entry.extra);
+            entry.write(&mut writer);
         }
         writer
             .u8(FLAG_A0)
@@ -216,12 +233,7 @@ impl BodyCodec for LevelInfoChangedMsg {
         let count = reader.prefixed()?;
         let mut phasing = Vec::new();
         for _ in 0..count {
-            phasing.push(PhasingEntry {
-                key_type: reader.u8()?,
-                key_id: reader.u32()?,
-                phase_id: reader.u64()?,
-                extra: reader.u32()?,
-            });
+            phasing.push(PhasingEntry::read(&mut reader)?);
         }
         reader.u8()?;
         let client_context = reader.u8()?;

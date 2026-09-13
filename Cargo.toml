@@ -56,7 +56,7 @@ tokio = { version = "1.53.2", default-features = false }
 tower = { version = "0.5.3", default-features = false, features = ["util"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "ansi", "env-filter", "std"] }
-uuid = { version = "1.28.0", default-features = false, features = ["std", "v4", "serde"] }
+uuid = { version = "1.28.0", default-features = false, features = ["std", "v4", "v5", "serde"] }
 weezl = { version = "0.2.1", default-features = false, features = ["alloc"] }
 zip = { version = "9.0.2", default-features = false }
 

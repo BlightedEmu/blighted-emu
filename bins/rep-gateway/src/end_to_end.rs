@@ -357,6 +357,7 @@ async fn start_sim(world_id: Uuid, sim_id: BusId, world_pool: &PgPool) -> JoinHa
         heartbeat_interval: HEARTBEAT,
         heartbeat_misses: HEARTBEAT_MISSES,
         combat: config.combat_settings(Arc::new(test_data()), Arc::from([])),
+        content: Arc::default(),
         snapshot_interval: None,
     };
     let db = world_pool.clone();

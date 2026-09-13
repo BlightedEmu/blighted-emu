@@ -179,6 +179,9 @@ pub struct Admit {
     /// The character's saved look (`nw_messages::PlayerLook` choices); `None` when the saved
     /// creation settings do not give one.
     pub look: Option<[u8; LOOK_CHOICES]>,
+    /// The backstory id of the character's archetype pick (`Archetype_Mystic`, ...), which
+    /// names its starter kit; `None` when the saved creation settings do not give one.
+    pub backstory: Option<String>,
 }
 
 /// The answer to [`Admit`].
@@ -251,6 +254,10 @@ pub struct HandoffOffer {
     pub health: u32,
     /// The character's look, as in [`Admit::look`].
     pub look: Option<[u8; LOOK_CHOICES]>,
+    /// The character's backstory, as in [`Admit::backstory`].
+    pub backstory: Option<String>,
+    /// The sequence of the player's last phasing update; the next one goes on from it.
+    pub phasing_sequence: u8,
     /// The client-context id of the player's current level; every bundle carries it.
     pub client_context: u8,
     /// Whether the player enters the taker's level from another level (the end of the
@@ -560,6 +567,7 @@ mod tests {
             handoffs: 0,
             bundles_sent: 0,
             look: Some(LOOK),
+            backstory: Some("Archetype_Mystic".to_owned()),
         });
         round_trip(AdmitReply::Admitted);
         round_trip(AdmitReply::Refused {
@@ -591,6 +599,8 @@ mod tests {
             handoffs: 2,
             health: 500,
             look: None,
+            backstory: None,
+            phasing_sequence: 2,
             client_context: 1,
             enter_level: false,
         };

@@ -26,8 +26,9 @@ use nw_bus::{
     SimSlot, SnapMob, SnapPlayer,
 };
 use nw_messages::{
-    BundleGroup, LOGIN_CLIENT_CONTEXT, LevelSpec, MessageError, PlayerLook, PlayerStates,
-    ServerMessage, TUTORIAL_LEVEL, TimeSynchMsg, WorldPosition,
+    BundleGroup, ClientFacetMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec,
+    MessageError, PlayerGear, PlayerLook, PlayerStates, ServerMessage, TUTORIAL_LEVEL,
+    TimeSynchMsg, WorldPosition,
 };
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
@@ -38,9 +39,12 @@ use thiserror::Error;
 use uuid::Uuid;
 
 mod attack;
+mod gear;
+mod level_flow;
 mod members;
 mod slots;
 
+use level_flow::{LevelFlow, TutorialAchievements};
 use members::{
     CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, bundles, card_of, entity_group, own_group,
 };
@@ -49,8 +53,11 @@ use slots::Slots;
 use attack::Vitals;
 
 use crate::combat::{AttackOutcome, CombatSettings};
-use crate::login::{SessionIds, WorldIds, level_change_messages, login_messages, phase_id};
+use crate::login::{
+    SessionIds, WorldIds, level_change_messages, login_level_info, login_messages, phase_id,
+};
 use crate::mobs::{MobAttackIntent, MobChanges, Mobs};
+use crate::player_content::PlayerContent;
 
 /// Carrier channel of the login messages and the time messages.
 pub const MESSAGE_CHANNEL: u8 = 0;
@@ -265,6 +272,10 @@ struct Player {
     name: String,
     /// The saved look, sent with the own spawn card.
     look: Option<PlayerLook>,
+    /// The backstory of the archetype pick; it goes on with a handoff.
+    backstory: Option<String>,
+    /// The worn gear, sent with the own spawn card.
+    gear: Option<PlayerGear>,
     number: u64,
     bundles_sent: u64,
     last_time_synch_ms: u64,
@@ -277,6 +288,10 @@ struct Player {
     own_card_due_ms: u64,
     /// The client-context id of the player's current level; every bundle carries it.
     client_context: u8,
+    /// What the client and this server still say to each other in this level.
+    flow: LevelFlow,
+    /// Whether the client asked to leave the tutorial (502).
+    leaving: bool,
     frozen: bool,
     handoffs: u64,
     no_handoff_before_ms: u64,
@@ -331,9 +346,13 @@ pub struct SimWorld {
     mobs: Mobs,
     mob_changes: MobChanges,
     combat: CombatSettings,
+    /// The starter kits and achievement bits.
+    content: Arc<PlayerContent>,
+    /// The achievement bits of the tutorial flow.
+    tutorial_achievements: TutorialAchievements,
     dice: Dice,
     deaths: Vec<Departure>,
-    /// Hit and death messages since the last [`SimWorld::take_messages`].
+    /// Hit, death and facet messages since the last [`SimWorld::take_messages`].
     combat_messages: Vec<Outgoing>,
 }
 
@@ -343,6 +362,7 @@ struct Arrival {
     character: Uuid,
     name: String,
     look: Option<PlayerLook>,
+    backstory: Option<String>,
     number: u64,
     position: Position,
     health: Health,
@@ -353,6 +373,8 @@ struct Arrival {
     own_card_due_ms: u64,
     /// The client-context id of the player's current level.
     client_context: u8,
+    /// The flow of the level it arrives in.
+    flow: LevelFlow,
 }
 
 impl SimWorld {
@@ -363,8 +385,11 @@ impl SimWorld {
         ground: Arc<dyn Ground + Send + Sync>,
         me: SimSlot,
         combat: CombatSettings,
+        content: Arc<PlayerContent>,
     ) -> Self {
         Self {
+            tutorial_achievements: TutorialAchievements::of(&content.achievements),
+            content,
             mobs: Mobs::new(Arc::clone(&combat.spawns), &combat),
             mob_changes: MobChanges::default(),
             dice: Dice::new(combat.seed),
@@ -417,11 +442,28 @@ impl SimWorld {
         if here && !admit.login {
             return Ok(None);
         }
+        let level = self.settings.level;
+        let level_info = if admit.login {
+            Some(login_level_info(level, server_time, phase_id(level)?))
+        } else {
+            None
+        };
+        let flow = match &level_info {
+            Some(level_info) => LevelFlow::after_level_info(
+                admit.entity,
+                level_info.clone(),
+                now_ms,
+                0,
+                self.tutorial_flow(),
+            ),
+            None => LevelFlow::resumed(admit.entity, 0),
+        };
         let arrival = Arrival {
             connection: admit.connection.clone(),
             character: admit.character,
             name: admit.name.clone(),
             look: admit.look.map(PlayerLook::of_choices),
+            backstory: admit.backstory.clone(),
             number: admit.entity,
             // A saved spot can be in the air or under the ground (a save during a jump, or a
             // height from another world file); the player arrives on the ground.
@@ -439,17 +481,16 @@ impl SimWorld {
                 now_ms
             },
             client_context: LOGIN_CLIENT_CONTEXT,
+            flow,
         };
         self.check(&arrival)?;
-        let login = if admit.login {
-            let level = self.settings.level;
+        let login = if let Some(level_info) = &level_info {
             let envelopes = login_messages(
                 &self.ids,
                 SessionIds::random()?,
                 admit.entity,
                 server_time,
-                level,
-                phase_id(level)?,
+                level_info,
             )?;
             Some(Outgoing {
                 connection: admit.connection.clone(),
@@ -492,11 +533,38 @@ impl SimWorld {
     ) -> Result<Option<Outgoing>, WorldError> {
         let enters = offer.enter_level;
         let position = Position::from(offer.position);
+        let client_context = if enters {
+            offer.client_context.saturating_add(1)
+        } else {
+            offer.client_context
+        };
+        let level = self.settings.level;
+        let level_info = if enters {
+            Some(LevelInfoChangedMsg::of_level(
+                level,
+                client_context,
+                server_time,
+                phase_id(level)?,
+            ))
+        } else {
+            None
+        };
+        let flow = match &level_info {
+            Some(level_info) => LevelFlow::after_level_info(
+                offer.entity,
+                level_info.clone(),
+                now_ms,
+                offer.phasing_sequence,
+                self.tutorial_flow(),
+            ),
+            None => LevelFlow::resumed(offer.entity, offer.phasing_sequence),
+        };
         let arrival = Arrival {
             connection: offer.connection.clone(),
             character: offer.character,
             name: offer.name.clone(),
             look: offer.look.map(PlayerLook::of_choices),
+            backstory: offer.backstory.clone(),
             number: offer.entity,
             position: if enters {
                 self.settings.limits.onto_ground(&*self.ground, position)
@@ -512,22 +580,12 @@ impl SimWorld {
             } else {
                 now_ms
             },
-            client_context: if enters {
-                offer.client_context.saturating_add(1)
-            } else {
-                offer.client_context
-            },
+            client_context,
+            flow,
         };
         self.check(&arrival)?;
-        let level_change = if enters {
-            let level = self.settings.level;
-            let envelopes = level_change_messages(
-                offer.entity,
-                level,
-                arrival.client_context,
-                server_time,
-                phase_id(level)?,
-            )?;
+        let level_change = if let Some(level_info) = &level_info {
+            let envelopes = level_change_messages(offer.entity, level_info)?;
             Some(Outgoing {
                 connection: offer.connection.clone(),
                 channel: MESSAGE_CHANNEL,
@@ -902,6 +960,58 @@ impl SimWorld {
         self.settings.level == TUTORIAL_LEVEL
     }
 
+    /// The tutorial achievement bits when this sim runs the tutorial.
+    fn tutorial_flow(&self) -> Option<&TutorialAchievements> {
+        self.is_tutorial().then_some(&self.tutorial_achievements)
+    }
+
+    /// Answers a facet call of the client of `connection` (tutorial-intro note, section 4). In
+    /// the tutorial, a request to leave (502) shows the loading screen and hands the player to the
+    /// open world at the next tick, as the exit does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when an answer cannot be encoded.
+    pub fn facet_message(
+        &mut self,
+        connection: &ConnectionRef,
+        message: ClientFacetMsg,
+    ) -> Result<(), MessageError> {
+        let Some(&entity) = self.by_connection.get(connection) else {
+            return Ok(());
+        };
+        let tutorial = self.is_tutorial();
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return Ok(());
+        };
+        let answers = match message {
+            ClientFacetMsg::ReturnToMainWorld { .. } if tutorial && !player.leaving => {
+                player.leaving = true;
+                player.flow.leave()
+            }
+            _ => {
+                let client_context = player.client_context;
+                player
+                    .flow
+                    .answer(message, client_context, &self.tutorial_achievements)
+            }
+        };
+        if answers.is_empty() {
+            return Ok(());
+        }
+        let envelopes = answers
+            .iter()
+            .map(ServerMessage::envelope)
+            .collect::<Result<_, _>>()?;
+        self.combat_messages.push(Outgoing {
+            connection: connection.clone(),
+            channel: MESSAGE_CHANNEL,
+            reliable: true,
+            envelopes,
+        });
+        Ok(())
+    }
+
     fn start_handoffs(&mut self, now_ms: u64) -> Vec<HandoffStart> {
         if self.is_tutorial() {
             return self.tutorial_exits(now_ms);
@@ -934,9 +1044,9 @@ impl SimWorld {
         starts
     }
 
-    /// The tutorial players at the exit, handed to the open-world sim that owns the beach start
-    /// with the level change (new-player-start note). Only a player whose client has spawned
-    /// leaves; without a known open-world sim everyone stays.
+    /// The tutorial players at the exit or whose client asked to leave, handed to the open-world
+    /// sim that owns the beach start with the level change (new-player-start note). Only a player
+    /// whose client has spawned leaves; without a known open-world sim everyone stays.
     fn tutorial_exits(&mut self, now_ms: u64) -> Vec<HandoffStart> {
         let Some(target) = self.exit_target.clone() else {
             return Vec::new();
@@ -948,7 +1058,7 @@ impl SimWorld {
                 || now_ms < player.no_handoff_before_ms
                 || !vitals.spawned
                 || vitals.health.is_dead()
-                || !at_tutorial_exit(body.motion.position())
+                || !(player.leaving || at_tutorial_exit(body.motion.position()))
             {
                 continue;
             }
@@ -1109,6 +1219,12 @@ impl SimWorld {
                     character: arrival.character,
                     name: arrival.name,
                     look: arrival.look,
+                    gear: gear::starter_gear(
+                        &self.content.kits,
+                        arrival.character,
+                        arrival.backstory.as_deref(),
+                    ),
+                    backstory: arrival.backstory,
                     number: arrival.number,
                     bundles_sent: replication.bundles_sent,
                     last_time_synch_ms,
@@ -1120,6 +1236,8 @@ impl SimWorld {
                     own_card_sent: false,
                     own_card_due_ms: arrival.own_card_due_ms,
                     client_context: arrival.client_context,
+                    flow: arrival.flow,
+                    leaving: false,
                     frozen: false,
                     handoffs,
                     no_handoff_before_ms,
@@ -1227,12 +1345,30 @@ impl Neighbourhood<'_> {
             };
             let mut groups: Vec<BundleGroup> = Vec::new();
             if own_sent {
+                // The whole gear and achievements go with the first card only; later the
+                // achievements send their changes.
+                let first = own_card == OwnCard::Spawn;
+                let achievements = if first {
+                    player.flow.first_achievements()
+                } else {
+                    player.flow.take_achievement_changes()
+                };
                 let states = PlayerStates {
                     character_id: *player.character.as_bytes(),
                     look: player.look,
                     health: Some((vitals.health.current(), vitals.health.max())),
+                    gear: player.gear.as_ref().filter(|_| first),
+                    achievements: achievements.as_ref(),
                 };
                 groups.extend(own_group(own, states, own_position, own_card)?);
+            }
+            if let Some(level_info) = player.flow.level_info_due(self.now_ms) {
+                outgoing.push(Outgoing {
+                    connection: player.connection.clone(),
+                    channel: MESSAGE_CHANNEL,
+                    reliable: true,
+                    envelopes: vec![level_info.envelope()?],
+                });
             }
             for number in numbers {
                 let (kind, position) = match self.cards.get(&number) {
@@ -1338,6 +1474,8 @@ fn handoff_offer(
         handoffs: player.handoffs.saturating_add(1),
         health: vitals.health.current(),
         look: player.look.map(|look| look.choices()),
+        backstory: player.backstory.clone(),
+        phasing_sequence: player.flow.phasing_sequence(),
         client_context: player.client_context,
         enter_level: enters,
     }
@@ -1361,9 +1499,9 @@ mod tests {
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
     use nw_messages::{
         ALC_TYPE_INDEX, GDE_METADATA_TYPE_INDEX, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
-        LOOK_CHOICES, MemberState, OPEN_WORLD_LEVEL, PLAYER_APPEARANCE_TYPE_INDEX,
-        PLAYER_EMPTY_COMPONENTS, PlayerAppearanceState, ReplicatedStateBundle, SlotRead,
-        SlotUpdate, VITALS_TYPE_INDEX, VitalsState,
+        LOOK_CHOICES, MemberState, OPEN_WORLD_LEVEL, PAPERDOLL_TYPE_INDEX,
+        PLAYER_APPEARANCE_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS, PlayerAppearanceState,
+        ReplicatedStateBundle, SlotRead, SlotUpdate, VITALS_TYPE_INDEX, VitalsState,
     };
     use nw_reflect::{Envelope, encode_server_messages};
     use nw_sim_core::test_support::{FlatGround, NoGround};
@@ -1444,6 +1582,7 @@ mod tests {
             Arc::new(NoGround),
             slot(name),
             test_combat(),
+            Arc::default(),
         )
     }
 
@@ -1471,6 +1610,7 @@ mod tests {
             Arc::new(NoGround),
             slot("sim-a"),
             combat,
+            Arc::default(),
         )
     }
 
@@ -1528,6 +1668,7 @@ mod tests {
             handoffs: 0,
             bundles_sent: 0,
             look: None,
+            backstory: None,
         }
     }
 
@@ -1849,6 +1990,105 @@ mod tests {
         assert_eq!(level.client_context, LOGIN_CLIENT_CONTEXT);
     }
 
+    /// The messages of `outgoing` for `who` on the message channel.
+    fn messages_for(outgoing: &[Outgoing], who: &ConnectionRef) -> Vec<ServerMessage> {
+        outgoing
+            .iter()
+            .filter(|out| out.connection == *who && out.channel == MESSAGE_CHANNEL)
+            .flat_map(|out| &out.envelopes)
+            .filter_map(|bytes| {
+                ServerMessage::from_envelope(&Envelope::decode(bytes).expect("envelope"))
+            })
+            .map(|message| message.expect("message"))
+            .collect()
+    }
+
+    #[test]
+    fn the_tutorial_flow_unlocks_the_intro_answers_the_level_and_leaves_on_request() {
+        const INTRO_UNLOCK_BIT: u32 = 14_804;
+        let mut tutorial_settings = settings(MANY, MAX_PLAYERS);
+        tutorial_settings.level = TUTORIAL_LEVEL;
+        let mut world = SimWorld::new(
+            tutorial_settings,
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("tut-1"),
+            test_combat(),
+            Arc::new(PlayerContent {
+                achievements: nw_content::achievements::AchievementIndexes::build([(
+                    "FTUE_Intro2_Cinematic_Unlock".to_owned(),
+                    INTRO_UNLOCK_BIT,
+                )]),
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a"])).expect("table");
+        let who = connection(1);
+        world
+            .admit(&admit_at(1, TUTORIAL_START.x, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let card_at = NOW + OWN_CARD_DELAY_MS;
+        let bundle = bundle_of(&tick(&mut world, card_at).messages, &who).expect("card");
+        let own = SlotRead::of(&bundle)
+            .expect("read")
+            .updates
+            .into_iter()
+            .find(SlotUpdate::is_local_player)
+            .expect("own group");
+        let achievements = own.members.iter().find_map(|member| match &member.state {
+            MemberState::Achievement(state) => state.bits.clone(),
+            _ => None,
+        });
+        let Some(nw_messages::AchievementBits::Full(bits)) = achievements else {
+            panic!("the whole bitset with the card: {achievements:?}");
+        };
+        assert_ne!(
+            bits.elements[(INTRO_UNLOCK_BIT / 8) as usize] & 1 << (INTRO_UNLOCK_BIT % 8),
+            0,
+            "the intro is unlocked"
+        );
+        world.heard_from(&who);
+
+        let again = tick(&mut world, NOW + level_flow::LEVEL_INFO_AGAIN_MS).messages;
+        assert!(
+            messages_for(&again, &who)
+                .iter()
+                .any(|message| matches!(message, ServerMessage::LevelInfoChanged(_))),
+            "the level message again"
+        );
+        let header = nw_messages::FacetHeader::of(nw_messages::facet::component::PLAYER, 1);
+        world
+            .facet_message(
+                &who,
+                ClientFacetMsg::AckLevelInfo {
+                    header,
+                    client_context: LOGIN_CLIENT_CONTEXT,
+                },
+            )
+            .expect("ack");
+        world
+            .facet_message(&who, ClientFacetMsg::ReturnToMainWorld { header, flag: 0 })
+            .expect("leave");
+        let output = tick(&mut world, NOW + level_flow::LEVEL_INFO_AGAIN_MS + 33);
+        let messages = messages_for(&output.messages, &who);
+        let types: Vec<u64> = messages.iter().map(ServerMessage::type_index).collect();
+        assert_eq!(
+            types,
+            vec![
+                nw_messages::facet::UPDATE_PHASING_TYPE_INDEX,
+                nw_messages::facet::TELEPORT_WITH_LOADING_SCREEN_TYPE_INDEX,
+                nw_messages::facet::UPDATE_PHASING_TYPE_INDEX,
+            ]
+        );
+        assert_eq!(output.handoffs.len(), 1, "a request leaves from anywhere");
+        let offer = &output.handoffs[0].offer;
+        assert!(offer.enter_level);
+        assert_eq!(
+            offer.phasing_sequence, 2,
+            "the level change goes on from it"
+        );
+    }
+
     #[test]
     fn the_tutorial_exit_moves_a_spawned_player_into_the_open_world() {
         let mut tutorial = tutorial_world();
@@ -2000,6 +2240,61 @@ mod tests {
     }
 
     #[test]
+    fn the_own_card_wears_the_starter_kit_and_a_handoff_keeps_it() {
+        let mut combat = test_combat();
+        combat.spawns = Vec::new().into();
+        let mut world = SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            combat,
+            Arc::new(PlayerContent {
+                kits: gear::tests::kits(),
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        let mut admit = admit_at(1, CELL_M / 2.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let messages = tick(&mut world, NOW + OWN_CARD_DELAY_MS).messages;
+        let bundle = bundle_of(&messages, &connection(1)).expect("bundle");
+        let own = SlotRead::of(&bundle)
+            .expect("read")
+            .updates
+            .into_iter()
+            .find(SlotUpdate::is_local_player)
+            .expect("own group");
+        let expected = gear::starter_gear(
+            &gear::tests::kits(),
+            admit.character,
+            Some(gear::tests::BACKSTORY),
+        )
+        .expect("gear");
+        let paperdoll = own
+            .members
+            .iter()
+            .find(|member| member.state.type_index() == PAPERDOLL_TYPE_INDEX)
+            .map(|member| member.state.clone());
+        assert_eq!(
+            paperdoll,
+            Some(MemberState::Paperdoll(Box::new(expected.paperdoll)))
+        );
+        let player = world
+            .world
+            .query::<&Player>()
+            .iter(&world.world)
+            .next()
+            .expect("player");
+        assert_eq!(
+            player.backstory.as_deref(),
+            Some(gear::tests::BACKSTORY),
+            "a handoff offer carries it on"
+        );
+    }
+
+    #[test]
     fn a_taken_player_keeps_its_look() {
         let (mut old, _, _) = border_world();
         tick(&mut old, NOW);
@@ -2087,6 +2382,7 @@ mod tests {
             Arc::new(NoGround),
             slot("sim-a"),
             combat,
+            Arc::default(),
         );
         world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
         join(&mut world, 1, x + 5.0);
@@ -2220,6 +2516,7 @@ mod tests {
             Arc::new(FlatGround(GROUND_M)),
             slot("sim-a"),
             test_combat(),
+            Arc::default(),
         );
         let mut in_the_air = admit_at(1, 0.0, true);
         in_the_air.position.z = GROUND_M + MAX_ABOVE_GROUND_M + 1.0;

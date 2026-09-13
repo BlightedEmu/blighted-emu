@@ -14,10 +14,10 @@
 //! position members, as before M6-B.
 
 use nw_messages::{
-    AlcState, AssetId, BundleGroup, BundleMember, BundlePayload, DYNAMIC_SLICE_SUB_ID,
-    GDE_METADATA_COMPONENT, GdeMetadataReplicatedState, InputPosition, LOCAL_PLAYER_INTEREST,
-    MAX_BUNDLE_INDEXES, MemberState, MessageError, PLAYER_SLICE_ASSET, PlayerStates,
-    ReplicatedStateBundle, ServerMessage, player_members, raw_id_of_entity,
+    ACHIEVEMENT_COMPONENT, AlcState, AssetId, BundleGroup, BundleMember, BundlePayload,
+    DYNAMIC_SLICE_SUB_ID, GDE_METADATA_COMPONENT, GdeMetadataReplicatedState, InputPosition,
+    LOCAL_PLAYER_INTEREST, MAX_BUNDLE_INDEXES, MemberState, MessageError, PLAYER_SLICE_ASSET,
+    PlayerStates, ReplicatedStateBundle, ServerMessage, player_members, raw_id_of_entity,
 };
 use nw_sim_core::Position;
 
@@ -102,7 +102,7 @@ pub(super) fn entity_group(
     kind: EntityKind,
     position: Position,
     carded: bool,
-    states: Option<PlayerStates>,
+    states: Option<PlayerStates<'_>>,
 ) -> Option<BundleGroup> {
     let pos = InputPosition::from_metres(position.x, position.y, position.z)?;
     let mut members = Vec::new();
@@ -118,6 +118,8 @@ pub(super) fn entity_group(
                 character_id: raw_id_of_entity(entity),
                 look: None,
                 health: None,
+                gear: None,
+                achievements: None,
             })));
         }
     }
@@ -151,7 +153,7 @@ pub(super) enum OwnCard {
 /// Returns [`MessageError`] when the spawn state cannot be encoded.
 pub(super) fn own_group(
     entity: u64,
-    states: PlayerStates,
+    states: PlayerStates<'_>,
     position: Position,
     card: OwnCard,
 ) -> Result<Option<BundleGroup>, MessageError> {
@@ -170,6 +172,19 @@ pub(super) fn own_group(
         && let Some(alc) = group.members.last_mut()
     {
         alc.state = MemberState::Alc(AlcState::spawn(pos)?);
+    }
+    // Without the card, achievement changes still go out, before the position.
+    if card == OwnCard::Without
+        && let Some(achievements) = states.achievements
+    {
+        let before_position = group.members.len().saturating_sub(1);
+        group.members.insert(
+            before_position,
+            BundleMember {
+                component: ACHIEVEMENT_COMPONENT,
+                state: MemberState::Achievement(achievements.clone()),
+            },
+        );
     }
     Ok(Some(group))
 }
@@ -236,11 +251,13 @@ mod tests {
     const CHARACTER: Uuid = Uuid::from_u128(0x2b87_684d_c82c_46a4_90e4_c764_0247_7507);
     const HEALTH: (u32, u32) = (700, 856);
 
-    fn own_states() -> PlayerStates {
+    fn own_states() -> PlayerStates<'static> {
         PlayerStates {
             character_id: *CHARACTER.as_bytes(),
             look: Some(PlayerLook::default()),
             health: Some(HEALTH),
+            gear: None,
+            achievements: None,
         }
     }
     const SEQUENCE: u64 = 4;

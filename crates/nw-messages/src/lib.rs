@@ -6,6 +6,7 @@
 //! `docs/re/2026-09-02-replication-and-movement.md` for the replicated states. A field without a
 //! name in the notes keeps a neutral name. `decode` fails on missing bytes and on bytes left over.
 
+pub mod achievements;
 pub mod afflictions;
 pub mod alc;
 pub mod appearance;
@@ -15,10 +16,15 @@ pub mod client_input;
 pub mod combat;
 pub mod components;
 pub mod connected;
+pub mod containers;
 pub mod day_phase;
 pub mod entity_slots;
+pub mod facet;
 pub mod gde;
+pub mod gear;
+pub mod items;
 pub mod level_info;
+pub mod paperdoll;
 pub mod payload;
 pub mod player_components;
 pub mod position;
@@ -33,6 +39,9 @@ pub mod time_synch;
 pub mod vitals;
 pub mod wire;
 
+pub use achievements::{
+    ACHIEVEMENT_COMPONENT, ACHIEVEMENT_TYPE_INDEX, AchievementBits, AchievementState, ByteChange,
+};
 pub use afflictions::{Affliction, AfflictionId, AfflictionList, ColdLong, HotLong, LongForm};
 pub use alc::{ALC_TYPE_INDEX, AlcChild, AlcState, POS10_CHILD, SLOT0_CHILDREN, SLOT1_CHILDREN};
 pub use appearance::{
@@ -60,15 +69,29 @@ pub use connected::{
     Block1415acc30, CALENDAR_CONNECTED_MSG_TYPE_INDEX, CalendarConnectedMsg, ConnectedBody,
     TIMING_CONFIGURATION_CONNECTED_MSG_TYPE_INDEX, TimingConfigurationConnectedMsg,
 };
+pub use containers::{
+    BAG_COMPONENT, CONTAINER_TYPE_INDEX, ContainerState, ITEM_MANAGEMENT_TYPE_INDEX,
+    ItemManagementState, OwnedItem,
+};
 pub use day_phase::{OBSERVED_DAY_PHASE, SYNC_DAY_PHASE_MSG_TYPE_INDEX, SyncDayPhaseMsg};
 pub use entity_slots::{EntitySlots, SlotRead, SlotUpdate};
+pub use facet::{
+    ClientFacetMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg, FacetHeader,
+    TeleportWithLoadingScreenMsg, UpdatePhasingMsg,
+};
 pub use gde::{
     AssetId, DYNAMIC_SLICE_SUB_ID, GDE_ID_LEN, GDE_METADATA_COMPONENT, GDE_METADATA_TYPE_INDEX,
     GdeMetadataReplicatedState, PLAYER_SLICE_ASSET,
 };
+pub use gear::{EquippedItem, PlayerGear, STARTER_BAG_SLOTS};
+pub use items::{FullList, ItemRecord};
 pub use level_info::{
     LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, LEVELS, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg,
     LevelSpec, OPEN_WORLD_LEVEL, PhasingEntry, TUTORIAL_LEVEL,
+};
+pub use paperdoll::{
+    ItemVisual, LoadedAmmo, Loadout, PAPERDOLL_TYPE_INDEX, PaperdollOwner, PaperdollPublic,
+    PaperdollState, SlotBits,
 };
 pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, MemberState};
 pub use player_components::{

@@ -142,6 +142,10 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::PlayerComponent(_)
         | MemberState::Appearance(_)
         | MemberState::Mana(_)
+        | MemberState::Paperdoll(_)
+        | MemberState::Container(_)
+        | MemberState::Achievement(_)
+        | MemberState::ItemManagement(_)
         | MemberState::Empty(_) => None,
     }
 }

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use nw_bus::{Admit, AdmitReply, Bus, Join, MOB_ENTITY_BASE, Point, SimSlot, subject};
 use nw_db::{PgPool, SavedPosition, character_by_id, character_position, next_entity_number};
-use nw_login::look::saved_look;
+use nw_login::look::{saved_backstory, saved_look};
 use nw_sim_core::{Position, TUTORIAL_FOLDER, TUTORIAL_START};
 use uuid::Uuid;
 
@@ -186,6 +186,7 @@ pub async fn route_join(
         handoffs,
         bundles_sent,
         look: saved_look(&character.appearance).map(|look| look.choices()),
+        backstory: saved_backstory(&character.appearance),
     };
     let reply = context
         .bus

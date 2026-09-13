@@ -10,13 +10,18 @@ use std::ops::Range;
 
 use nw_reflect::{TypeId, decode_type_id, encode_type_id};
 
+use crate::achievements::{ACHIEVEMENT_TYPE_INDEX, AchievementState};
 use crate::alc::{ALC_TYPE_INDEX, AlcState};
 use crate::appearance::{PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState};
 use crate::components::{
     COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DELAYED_EVENT_TYPE_INDEX, DelayedEventState,
     MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState,
 };
+use crate::containers::{
+    CONTAINER_TYPE_INDEX, ContainerState, ITEM_MANAGEMENT_TYPE_INDEX, ItemManagementState,
+};
 use crate::gde::{GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
+use crate::paperdoll::{PAPERDOLL_TYPE_INDEX, PaperdollState};
 use crate::player_components::{EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PlayerComponentState};
 use crate::position::{POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState};
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsState};
@@ -45,6 +50,14 @@ pub enum MemberState {
     Appearance(PlayerAppearanceState),
     /// `MB::ManaComponentReplicatedState`.
     Mana(ManaState),
+    /// `MB::PaperdollComponentReplicatedState`, boxed: it is far larger than the other states.
+    Paperdoll(Box<PaperdollState>),
+    /// `MB::ContainerComponentReplicatedState`.
+    Container(ContainerState),
+    /// `MB::AchievementComponentReplicatedState`.
+    Achievement(AchievementState),
+    /// `MB::ItemManagementComponentReplicatedState`.
+    ItemManagement(ItemManagementState),
     /// An empty state of a player component class without a reader of its own.
     Empty(EmptyState),
 }
@@ -63,6 +76,10 @@ impl MemberState {
             Self::PlayerComponent(_) => PLAYER_COMPONENT_TYPE_INDEX,
             Self::Appearance(_) => PLAYER_APPEARANCE_TYPE_INDEX,
             Self::Mana(_) => MANA_TYPE_INDEX,
+            Self::Paperdoll(_) => PAPERDOLL_TYPE_INDEX,
+            Self::Container(_) => CONTAINER_TYPE_INDEX,
+            Self::Achievement(_) => ACHIEVEMENT_TYPE_INDEX,
+            Self::ItemManagement(_) => ITEM_MANAGEMENT_TYPE_INDEX,
             Self::Empty(state) => state.class,
         }
     }
@@ -96,6 +113,18 @@ impl MemberState {
                 PlayerAppearanceState::read(reader).map(Self::Appearance)
             }
             TypeId::FileSlot(MANA_TYPE_INDEX) => ManaState::read(reader).map(Self::Mana),
+            TypeId::FileSlot(PAPERDOLL_TYPE_INDEX) => {
+                PaperdollState::read(reader).map(|state| Self::Paperdoll(Box::new(state)))
+            }
+            TypeId::FileSlot(CONTAINER_TYPE_INDEX) => {
+                ContainerState::read(reader).map(Self::Container)
+            }
+            TypeId::FileSlot(ACHIEVEMENT_TYPE_INDEX) => {
+                AchievementState::read(reader).map(Self::Achievement)
+            }
+            TypeId::FileSlot(ITEM_MANAGEMENT_TYPE_INDEX) => {
+                ItemManagementState::read(reader).map(Self::ItemManagement)
+            }
             TypeId::FileSlot(index) if EmptyState::covers(index) => {
                 EmptyState::read(index, reader).map(Self::Empty)
             }
@@ -139,6 +168,10 @@ impl MemberState {
                 state.write(writer);
                 Ok(())
             }
+            Self::Paperdoll(state) => state.write(writer),
+            Self::Container(state) => state.write(writer),
+            Self::Achievement(state) => state.write(writer),
+            Self::ItemManagement(state) => state.write(writer),
             Self::Empty(_) => {
                 EmptyState::write(writer);
                 Ok(())

@@ -6,6 +6,9 @@ use crate::client_add_entry::ClientAddEntryMsg;
 use crate::combat::{DamageDealtMsg, DeathRecapMsg, OnDamageMsg};
 use crate::connected::{CalendarConnectedMsg, TimingConfigurationConnectedMsg};
 use crate::day_phase::SyncDayPhaseMsg;
+use crate::facet::{
+    CutsceneEndFinalizedMsg, CutsceneGrantedMsg, TeleportWithLoadingScreenMsg, UpdatePhasingMsg,
+};
 use crate::level_info::LevelInfoChangedMsg;
 use crate::self_ident::PlayerManagerSelfIdentificationMsg;
 use crate::spawn_point::ReceivePlayerSpawnPointMsg;
@@ -64,11 +67,20 @@ pub enum ServerMessage {
     OnDamage(OnDamageMsg),
     /// 4299.
     DeathRecap(DeathRecapMsg),
+    /// 6310.
+    UpdatePhasing(UpdatePhasingMsg),
+    /// 6707.
+    CutsceneGranted(CutsceneGrantedMsg),
+    /// 6709.
+    CutsceneEndFinalized(CutsceneEndFinalizedMsg),
+    /// 3951.
+    TeleportWithLoadingScreen(TeleportWithLoadingScreenMsg),
 }
 
 impl ServerMessage {
-    /// Decodes `body` when `type_index` is one of [`SERVER_MESSAGE_TYPES`] or a combat message
-    /// of M6-B (2071, 3601, 4299); `None` otherwise.
+    /// Decodes `body` when `type_index` is one of [`SERVER_MESSAGE_TYPES`], a combat message of
+    /// M6-B (2071, 3601, 4299) or a tutorial facet call (6310, 6707, 6709, 3951); `None`
+    /// otherwise.
     pub fn decode(type_index: u64, body: &[u8]) -> Option<Result<Self, MessageError>> {
         let message = match type_index {
             TimingConfigurationConnectedMsg::TYPE_INDEX => {
@@ -99,6 +111,16 @@ impl ServerMessage {
             DamageDealtMsg::TYPE_INDEX => DamageDealtMsg::decode(body).map(Self::DamageDealt),
             OnDamageMsg::TYPE_INDEX => OnDamageMsg::decode(body).map(Self::OnDamage),
             DeathRecapMsg::TYPE_INDEX => DeathRecapMsg::decode(body).map(Self::DeathRecap),
+            UpdatePhasingMsg::TYPE_INDEX => UpdatePhasingMsg::decode(body).map(Self::UpdatePhasing),
+            CutsceneGrantedMsg::TYPE_INDEX => {
+                CutsceneGrantedMsg::decode(body).map(Self::CutsceneGranted)
+            }
+            CutsceneEndFinalizedMsg::TYPE_INDEX => {
+                CutsceneEndFinalizedMsg::decode(body).map(Self::CutsceneEndFinalized)
+            }
+            TeleportWithLoadingScreenMsg::TYPE_INDEX => {
+                TeleportWithLoadingScreenMsg::decode(body).map(Self::TeleportWithLoadingScreen)
+            }
             _ => return None,
         };
         Some(message)
@@ -120,6 +142,10 @@ impl ServerMessage {
             Self::DamageDealt(_) => DamageDealtMsg::TYPE_INDEX,
             Self::OnDamage(_) => OnDamageMsg::TYPE_INDEX,
             Self::DeathRecap(_) => DeathRecapMsg::TYPE_INDEX,
+            Self::UpdatePhasing(_) => UpdatePhasingMsg::TYPE_INDEX,
+            Self::CutsceneGranted(_) => CutsceneGrantedMsg::TYPE_INDEX,
+            Self::CutsceneEndFinalized(_) => CutsceneEndFinalizedMsg::TYPE_INDEX,
+            Self::TeleportWithLoadingScreen(_) => TeleportWithLoadingScreenMsg::TYPE_INDEX,
         }
     }
 
@@ -157,6 +183,10 @@ impl ServerMessage {
             Self::DamageDealt(message) => message.encode(),
             Self::OnDamage(message) => message.encode(),
             Self::DeathRecap(message) => message.encode(),
+            Self::UpdatePhasing(message) => message.encode(),
+            Self::CutsceneGranted(message) => message.encode(),
+            Self::CutsceneEndFinalized(message) => message.encode(),
+            Self::TeleportWithLoadingScreen(message) => message.encode(),
         }
     }
 }

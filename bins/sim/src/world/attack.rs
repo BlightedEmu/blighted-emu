@@ -1252,6 +1252,7 @@ mod tests {
             std::sync::Arc::new(Flat),
             slot("sim-a"),
             combat,
+            std::sync::Arc::default(),
         );
         world.set_table(&table(&["sim-a"])).expect("table");
         for fight in 0..STRESS_FIGHTS {

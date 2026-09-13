@@ -17,7 +17,7 @@ use nw_bus::{MOB_ENTITY_BASE, MOB_STATES, MobGhost, SnapMob};
 use nw_content::combat::CombatData;
 use nw_sim_core::{
     Brain, BrainAction, BrainSettings, Dice, Ground, Health, MobAttack, MobState, Position, Seen,
-    SpatialGrid, brain_step, forget, mob_max_health,
+    SpatialGrid, TUTORIAL_FOLDER, brain_step, forget, mob_max_health,
 };
 pub use nw_world::records::VitalsSpawn;
 
@@ -85,6 +85,18 @@ pub struct Mobs {
     /// Where each player last scanned for mobs to wake.
     scanned: HashMap<u64, Position>,
     wake_scans: u64,
+}
+
+/// The spawns that a sim of `level` spawns. The tutorial's encounter spawns are the fights of
+/// its quest chain, which quest scripts start; spawned at once, they stand on the new player at
+/// the tutorial start. Every other level keeps all its spawns.
+pub fn spawns_of_level(level: &str, spawns: &[VitalsSpawn]) -> Arc<[VitalsSpawn]> {
+    let tutorial = level == TUTORIAL_FOLDER;
+    spawns
+        .iter()
+        .filter(|spawn| !(tutorial && spawn.is_encounter))
+        .cloned()
+        .collect()
 }
 
 fn position_of(spawn: &VitalsSpawn) -> Position {
@@ -410,6 +422,21 @@ mod tests {
             position: [x, 1000.0, HEIGHT],
             ..VitalsSpawn::default()
         }
+    }
+
+    #[test]
+    fn the_tutorial_leaves_out_its_quest_encounters_and_other_levels_keep_them() {
+        let encounter = VitalsSpawn {
+            is_encounter: true,
+            ..spawn_at(0.0, TEST_MOB, TEST_LEVEL)
+        };
+        let standing = spawn_at(1.0, TEST_MOB, TEST_LEVEL);
+        let spawns = [encounter.clone(), standing.clone()];
+        assert_eq!(&*spawns_of_level(TUTORIAL_FOLDER, &spawns), &[standing][..]);
+        assert_eq!(
+            &*spawns_of_level("newworld_vitaeeterna", &spawns),
+            &spawns[..]
+        );
     }
 
     fn mobs(spawns: Vec<VitalsSpawn>) -> Mobs {

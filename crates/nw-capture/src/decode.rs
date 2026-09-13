@@ -284,6 +284,10 @@ fn member_position(state: &MemberState) -> Option<[f32; 3]> {
         | MemberState::PlayerComponent(_)
         | MemberState::Appearance(_)
         | MemberState::Mana(_)
+        | MemberState::Paperdoll(_)
+        | MemberState::Container(_)
+        | MemberState::Achievement(_)
+        | MemberState::ItemManagement(_)
         | MemberState::Empty(_) => None,
     }
 }

@@ -22,7 +22,7 @@ use nw_bus::{
 use nw_common::time::unix_ms;
 use nw_db::{PgPool, SaveOutcome, SavedPosition, save_character_position};
 use nw_messages::{
-    BodyCodec, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+    BodyCodec, ClientFacetMsg, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
     REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
 };
 use nw_reflect::Envelope;
@@ -36,6 +36,7 @@ use crate::forward::{Forward, ForwardTable};
 use crate::gateways::GatewayTracker;
 use crate::login::WorldIds;
 use crate::mobs::{MobChanges, spawn_index};
+use crate::player_content::PlayerContent;
 use crate::saves::SaveQueue;
 use crate::world::{
     Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
@@ -179,6 +180,8 @@ pub struct LoopSettings {
     pub heartbeat_misses: u32,
     /// Mobs and combat.
     pub combat: CombatSettings,
+    /// The starter kits and achievement bits.
+    pub content: Arc<PlayerContent>,
     /// Time between two admin snapshots on the bus; `None` is off.
     pub snapshot_interval: Option<Duration>,
 }
@@ -289,6 +292,7 @@ pub async fn serve(
             ground,
             me,
             settings.combat.clone(),
+            Arc::clone(&settings.content),
         ),
         gateways: GatewayTracker::new(settings.heartbeat_interval, settings.heartbeat_misses),
         forwards: ForwardTable::new(settings.forward_ttl_ms),
@@ -461,9 +465,10 @@ impl Loop {
         }
     }
 
-    /// Reads one client message: an input (1589) or a respawn request (1938); every other type
-    /// is counted and ignored. The hit and death messages it makes wait in the world for the
-    /// next tick. Bad bytes are counted and never close the connection.
+    /// Reads one client message: an input (1589), a respawn request (1938) or a facet call of
+    /// the level flow ([`ClientFacetMsg`]); every other type is counted and ignored. The
+    /// messages it makes wait in the world for the next tick. Bad bytes are counted and never
+    /// close the connection.
     fn client_message(&mut self, connection: &ConnectionRef, bytes: &[u8]) {
         let Ok(envelope) = Envelope::decode(bytes) else {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
@@ -475,10 +480,20 @@ impl Loop {
                 self.client_input(connection, &envelope.body);
             }
             Some(REQUEST_RESPAWN_TYPE_INDEX) => self.respawn_request(connection, &envelope.body),
+            Some(index) if let Some(facet) = ClientFacetMsg::decode(index, &envelope.body) => {
+                let Ok(facet) = facet else {
+                    metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
+                    return;
+                };
+                tracing::debug!(?facet, "client facet call");
+                if let Err(error) = self.world.facet_message(connection, facet) {
+                    tracing::warn!(%error, "facet answer not sent");
+                }
+            }
             _ => {
                 tracing::debug!(
                     type_id = ?envelope.type_id,
-                    body_len = envelope.body.len(),
+                    body = %hex_of(&envelope.body),
                     "ignored client message"
                 );
                 metrics::counter!(METRIC_IGNORED_MESSAGES).increment(1);
@@ -1011,6 +1026,11 @@ fn count_mob_death(outcome: &AttackOutcome) {
     }
 }
 
+/// `bytes` as lowercase hex, for the debug log.
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn server_time() -> u64 {
     unix_ms().saturating_sub(SERVER_EPOCH_UNIX_MS)
 }
@@ -1133,6 +1153,7 @@ mod tests {
             heartbeat_interval: HEARTBEAT,
             heartbeat_misses: MISSES,
             combat: test_combat(),
+            content: Arc::default(),
             snapshot_interval: None,
         }
     }
@@ -1473,6 +1494,7 @@ mod tests {
             handoffs: 0,
             bundles_sent: 0,
             look: None,
+            backstory: None,
         }
     }
 
@@ -2334,6 +2356,8 @@ mod tests {
                 handoffs: FIRST_HANDOFF,
                 health: TEST_PLAYER_HEALTH,
                 look: None,
+                backstory: None,
+                phasing_sequence: 0,
                 client_context: 1,
                 enter_level: false,
             };

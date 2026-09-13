@@ -4,9 +4,9 @@
 //! (`FUN_14167beb0`). When the player prefab is portrayed with no state for its other components,
 //! the real client crashes while it applies the cached states. So the player's group carries one
 //! state for every replicated component: the spawn card, the position, a connected type-3935
-//! `PlayerComponentReplicatedState`, the look (type 1195) and the vitals, stamina and mana (types
-//! 15, 4297 and 1652) when known ([`player_members`]), and an empty state ("no slot set") for each
-//! other component below.
+//! `PlayerComponentReplicatedState`, the look (type 1195), the vitals, stamina and mana (types
+//! 15, 4297 and 1652), the gear (types 3183, 1755 and 5437) and the achievements (type 3210)
+//! when known ([`player_members`]), and an empty state ("no slot set") for each other component below.
 //!
 //! The table is the client's own fragment log of a captured session (`NH-MSQ-10`, 2026-09-16):
 //! every member of slot 1 it decoded, as (component index, class type index). All of these
@@ -14,12 +14,19 @@
 //! every captured body only bits 0 to 2 are set, so one slot byte of 0 is a whole empty body.
 //! Component 0 (the spawn card) and 16 (`ALCReplicatedState`) are not in the table.
 
+use crate::achievements::{ACHIEVEMENT_TYPE_INDEX, AchievementState};
 use crate::appearance::PlayerLook;
 use crate::appearance::{PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState};
 use crate::components::{
     COMBAT_STATUS_TYPE_INDEX, CombatStatusState, MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX,
     StaminaState,
 };
+use crate::containers::{
+    BAG_COMPONENT, CONTAINER_TYPE_INDEX, ContainerState, ITEM_MANAGEMENT_TYPE_INDEX,
+    ItemManagementState,
+};
+use crate::gear::PlayerGear;
+use crate::paperdoll::PAPERDOLL_TYPE_INDEX;
 use crate::payload::{BundleMember, MemberState};
 use crate::slots::{children_mask, read_children, read_slot_byte, write_known_children};
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsState};
@@ -255,34 +262,64 @@ pub fn empty_state(class: u64) -> MemberState {
         }
         PLAYER_APPEARANCE_TYPE_INDEX => MemberState::Appearance(PlayerAppearanceState::default()),
         MANA_TYPE_INDEX => MemberState::Mana(ManaState::default()),
+        PAPERDOLL_TYPE_INDEX => MemberState::Paperdoll(Box::default()),
+        CONTAINER_TYPE_INDEX => MemberState::Container(ContainerState::default()),
+        ITEM_MANAGEMENT_TYPE_INDEX => MemberState::ItemManagement(ItemManagementState::default()),
+        ACHIEVEMENT_TYPE_INDEX => MemberState::Achievement(AchievementState::default()),
         _ => MemberState::Empty(EmptyState { class }),
     }
 }
 
 /// What a player's card says of the player besides its prefab and position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlayerStates {
+pub struct PlayerStates<'a> {
     /// The 3935 `characterId`: the login character of the client's own player.
     pub character_id: [u8; RAW_ID_LEN],
     /// The saved look, when known.
     pub look: Option<PlayerLook>,
     /// Current and max health, when known; with them go full stamina and mana.
     pub health: Option<(u32, u32)>,
+    /// The gear states, when known.
+    pub gear: Option<&'a PlayerGear>,
+    /// The achievements, when known.
+    pub achievements: Option<&'a AchievementState>,
 }
 
 /// The members of every player component in [`PLAYER_EMPTY_COMPONENTS`] for `states`: a connected
-/// 3935 state, the look and vitals that `states` knows, and an empty state for the rest.
-pub fn player_members(states: PlayerStates) -> impl Iterator<Item = BundleMember> {
+/// 3935 state, the look, vitals and gear that `states` knows, and an empty state for the rest.
+pub fn player_members(states: PlayerStates<'_>) -> impl Iterator<Item = BundleMember> {
     PLAYER_EMPTY_COMPONENTS
         .iter()
         .map(move |(component, class)| BundleMember {
             component: *component,
-            state: player_state(states, *class),
+            state: player_state(states, *component, *class),
         })
 }
 
-/// The state of player component `class` for `states`.
-fn player_state(states: PlayerStates, class: u64) -> MemberState {
+/// The state of player component `component` of class `class` for `states`.
+fn player_state(states: PlayerStates<'_>, component: u64, class: u64) -> MemberState {
+    if class == ACHIEVEMENT_TYPE_INDEX
+        && let Some(achievements) = states.achievements
+    {
+        return MemberState::Achievement(achievements.clone());
+    }
+    if let Some(gear) = states.gear {
+        match class {
+            PAPERDOLL_TYPE_INDEX => {
+                return MemberState::Paperdoll(Box::new(gear.paperdoll.clone()));
+            }
+            CONTAINER_TYPE_INDEX if component == BAG_COMPONENT => {
+                return MemberState::Container(gear.bag.clone());
+            }
+            CONTAINER_TYPE_INDEX => {
+                return MemberState::Container(gear.second_container.clone());
+            }
+            ITEM_MANAGEMENT_TYPE_INDEX => {
+                return MemberState::ItemManagement(gear.owned.clone());
+            }
+            _ => {}
+        }
+    }
     match (class, states.look, states.health) {
         (PLAYER_COMPONENT_TYPE_INDEX, _, _) => {
             MemberState::PlayerComponent(PlayerComponentState::connected(states.character_id))
@@ -308,6 +345,10 @@ fn has_own_reader(class: u64) -> bool {
             | PLAYER_COMPONENT_TYPE_INDEX
             | PLAYER_APPEARANCE_TYPE_INDEX
             | MANA_TYPE_INDEX
+            | PAPERDOLL_TYPE_INDEX
+            | CONTAINER_TYPE_INDEX
+            | ITEM_MANAGEMENT_TYPE_INDEX
+            | ACHIEVEMENT_TYPE_INDEX
     )
 }
 
@@ -348,6 +389,8 @@ mod tests {
             character_id: CHARACTER_ID,
             look: None,
             health: None,
+            gear: None,
+            achievements: None,
         };
         let members: Vec<BundleMember> = player_members(states).collect();
         assert_eq!(members.len(), PLAYER_EMPTY_COMPONENTS.len());
@@ -373,6 +416,8 @@ mod tests {
             character_id: CHARACTER_ID,
             look: Some(look),
             health: Some(HEALTH),
+            gear: None,
+            achievements: None,
         };
         let members: Vec<BundleMember> = player_members(states).collect();
         for member in &members {
@@ -401,6 +446,55 @@ mod tests {
                 "class {class} is one player component"
             );
         }
+        reads_back(&members);
+    }
+
+    #[test]
+    fn known_gear_fills_the_paperdoll_the_two_containers_and_the_owned_items() {
+        const SWORD_INDEX: u32 = 1228;
+        const SWORD_DURABILITY: u32 = 1000;
+        const SWORD_GEAR_SCORE: u32 = 60;
+        let gear = PlayerGear::first(&[crate::gear::EquippedItem {
+            slot: crate::paperdoll::slot::MAIN_HAND_OPTION_1,
+            item_index: SWORD_INDEX,
+            gear_score: SWORD_GEAR_SCORE,
+            durability: SWORD_DURABILITY,
+            bound: true,
+            instance: CHARACTER_ID,
+        }]);
+        let states = PlayerStates {
+            character_id: CHARACTER_ID,
+            look: None,
+            health: None,
+            gear: Some(&gear),
+            achievements: None,
+        };
+        let members: Vec<BundleMember> = player_members(states).collect();
+        let state_of = |component: u64| {
+            members
+                .iter()
+                .find(|member| member.component == component)
+                .map(|member| member.state.clone())
+        };
+        const PAPERDOLL_COMPONENT: u64 = 62;
+        const SECOND_CONTAINER_COMPONENT: u64 = 76;
+        const ITEM_MANAGEMENT_COMPONENT: u64 = 2;
+        assert_eq!(
+            state_of(PAPERDOLL_COMPONENT),
+            Some(MemberState::Paperdoll(Box::new(gear.paperdoll.clone())))
+        );
+        assert_eq!(
+            state_of(BAG_COMPONENT),
+            Some(MemberState::Container(gear.bag.clone()))
+        );
+        assert_eq!(
+            state_of(SECOND_CONTAINER_COMPONENT),
+            Some(MemberState::Container(gear.second_container.clone()))
+        );
+        assert_eq!(
+            state_of(ITEM_MANAGEMENT_COMPONENT),
+            Some(MemberState::ItemManagement(gear.owned.clone()))
+        );
         reads_back(&members);
     }
 

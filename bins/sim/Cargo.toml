@@ -17,6 +17,7 @@ nw-bus.workspace = true
 nw-common.workspace = true
 nw-content.workspace = true
 nw-db.workspace = true
+nw-formats.workspace = true
 nw-messages.workspace = true
 nw-reflect.workspace = true
 nw-sim-core.workspace = true
@@ -30,7 +31,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 nw-sim-core = { workspace = true, features = ["test-util"] }
-nw-formats.workspace = true
 nw-bus = { workspace = true, features = ["test-util"] }
 nw-carrier.workspace = true
 nw-db = { workspace = true, features = ["test-util"] }

@@ -3,18 +3,22 @@
 //! 5.2): 446, 1034, 1628, 164, 1617, 335, 4246, 4247. Message 1628
 //! (`PlayerManagerSelfIdentificationMsg`) is the one that moves the real client out of
 //! `WaitingForActorGameConnection`; this server sends its smallest accepted body (see
-//! [`PlayerManagerSelfIdentificationMsg`]). Messages 3236, 1635 and 6310 (still open layout) are
-//! not sent. The `LevelInfoChangedMsg` (1635) names the sim's level: the tutorial or the open
-//! world (new-player-start note); [`level_change_messages`] moves a player into another level.
+//! [`PlayerManagerSelfIdentificationMsg`]). Message 3236 (still open layout) is not sent. The
+//! `LevelInfoChangedMsg` (1635) names the sim's level: the tutorial or the open world
+//! (new-player-start note); [`level_change_messages`] moves a player into another level. The
+//! phasing update (6310) follows the client's acknowledgement of the level (`world::level_flow`).
 //!
-//! Every id field holds a value this server chooses; no byte comes from a capture. The meaning of
-//! most of these ids in the retail service is Unknown. One choice is ours alone: the entry id of
-//! `ClientAddEntryMsg` and the first presence of `PlayerManagerSelfIdentificationMsg` hold the
-//! player's entity number, the same 16 bytes as the spawn-card GdeRef (local-player-check note).
+//! Most id fields hold a value this server chooses; the meaning of most of these ids in the
+//! retail service is Unknown. One choice is ours alone: the entry id of `ClientAddEntryMsg` and
+//! the first presence of `PlayerManagerSelfIdentificationMsg` hold the player's entity number, the
+//! same 16 bytes as the spawn-card GdeRef (local-player-check note). The time messages are facet
+//! calls of the player's time component: their ids are its [`FacetHeader`] (tutorial-intro note,
+//! section 0), else the client drops them.
 
+use nw_messages::facet::component;
 use nw_messages::{
-    Block1415acc30, CalendarConnectedMsg, ClientAddEntryMsg, ConnectedBody, LOGIN_CLIENT_CONTEXT,
-    LevelInfoChangedMsg, LevelSpec, MessageError, OBSERVED_DAY_PHASE,
+    Block1415acc30, CalendarConnectedMsg, ClientAddEntryMsg, ConnectedBody, FacetHeader,
+    LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec, MessageError, OBSERVED_DAY_PHASE,
     OBSERVED_TIME_CHANGE_F32S_AT_16, OBSERVED_TIME_CHANGE_F32S_AT_60,
     OBSERVED_TIME_CHANGE_U32S_AT_28, PlayerManagerSelfIdentificationMsg, RAW_ID_LEN,
     ReceivePlayerSpawnPointMsg, ServerMessage, SyncDayPhaseMsg, SyncTimeChangeMsg, TUTORIAL_LEVEL,
@@ -49,12 +53,8 @@ pub struct WorldIds {
     pub calendar_block: Block1415acc30,
     /// The 16 bytes that both classes share in their second block.
     pub shared_session_bytes: [u8; RAW_ID_LEN],
-    /// The two ids of `SyncTimeChange`.
-    pub time_change_ids: [u64; 2],
     /// The time of `SyncTimeChange`: the same at every login in the captures.
     pub time_change_time: u64,
-    /// The two values of `SyncDayPhase`.
-    pub day_phase_ids: [u64; 2],
 }
 
 impl WorldIds {
@@ -75,9 +75,7 @@ impl WorldIds {
             timing_block: block()?,
             calendar_block: block()?,
             shared_session_bytes: random_id()?,
-            time_change_ids: [random_u64()?, random_u64()?],
             time_change_time: start_time,
-            day_phase_ids: [random_u64()?, random_u64()?],
         })
     }
 }
@@ -105,7 +103,13 @@ impl SessionIds {
     }
 }
 
-/// The login messages for one player, as envelopes, in the captured order.
+/// The `LevelInfoChangedMsg` of a login into `level`, in phase `phase_id`.
+pub fn login_level_info(level: LevelSpec, server_time: u64, phase_id: u64) -> LevelInfoChangedMsg {
+    LevelInfoChangedMsg::of_level(level, LOGIN_CLIENT_CONTEXT, server_time, phase_id)
+}
+
+/// The login messages for one player, as envelopes, in the captured order, ending with
+/// `level_info`.
 ///
 /// # Errors
 ///
@@ -115,9 +119,9 @@ pub fn login_messages(
     session: SessionIds,
     entity: u64,
     server_time: u64,
-    level: LevelSpec,
-    phase_id: u64,
+    level_info: &LevelInfoChangedMsg,
 ) -> Result<Vec<Vec<u8>>, MessageError> {
+    let time = FacetHeader::of(component::TIME, entity);
     let session_block = Block1415acc30 {
         value: session.value,
         first: session.first,
@@ -139,50 +143,37 @@ pub fn login_messages(
         ServerMessage::PlayerSpawnPoint(ReceivePlayerSpawnPointMsg),
         ServerMessage::TimeSynch(TimeSynchMsg { time: server_time }),
         ServerMessage::TimeChange(SyncTimeChangeMsg {
-            ids: world.time_change_ids,
+            ids: [time.target, time.entity],
             f32s_at_16: OBSERVED_TIME_CHANGE_F32S_AT_16,
             u32s_at_28: OBSERVED_TIME_CHANGE_U32S_AT_28,
             time: world.time_change_time,
             f32s_at_60: OBSERVED_TIME_CHANGE_F32S_AT_60,
         }),
         ServerMessage::DayPhase(SyncDayPhaseMsg {
-            component: world.day_phase_ids[0],
-            u64_at_8: world.day_phase_ids[1],
+            component: time.target,
+            u64_at_8: time.entity,
             u32_at_16: OBSERVED_DAY_PHASE,
         }),
-        ServerMessage::LevelInfoChanged(LevelInfoChangedMsg::of_level(
-            level,
-            LOGIN_CLIENT_CONTEXT,
-            server_time,
-            phase_id,
-        )),
+        ServerMessage::LevelInfoChanged(level_info.clone()),
     ];
     messages.iter().map(ServerMessage::envelope).collect()
 }
 
-/// The messages that move a player's client into `level` (retail end of the tutorial, in the
-/// captured order without the facet calls): the entry and spawn-point messages again, then the
-/// `LevelInfoChangedMsg` with `client_context`, the id every later bundle must carry.
+/// The messages that move a player's client into another level (retail end of the tutorial, in
+/// the captured order without the facet calls): the entry and spawn-point messages again, then
+/// `level_info`, whose client context every later bundle must carry.
 ///
 /// # Errors
 ///
 /// Returns [`MessageError`] when a message cannot be encoded.
 pub fn level_change_messages(
     entity: u64,
-    level: LevelSpec,
-    client_context: u8,
-    server_time: u64,
-    phase_id: u64,
+    level_info: &LevelInfoChangedMsg,
 ) -> Result<Vec<Vec<u8>>, MessageError> {
     let messages = [
         ServerMessage::ClientAddEntry(ClientAddEntryMsg::for_entity(entity)),
         ServerMessage::PlayerSpawnPoint(ReceivePlayerSpawnPointMsg),
-        ServerMessage::LevelInfoChanged(LevelInfoChangedMsg::of_level(
-            level,
-            client_context,
-            server_time,
-            phase_id,
-        )),
+        ServerMessage::LevelInfoChanged(level_info.clone()),
     ];
     messages.iter().map(ServerMessage::envelope).collect()
 }
@@ -216,8 +207,9 @@ mod tests {
     fn the_login_messages_come_in_the_captured_order() {
         let world = WorldIds::random(START_TIME).expect("world");
         let session = SessionIds::random().expect("session");
-        let envelopes = login_messages(&world, session, ENTITY, SERVER_TIME, OPEN_WORLD_LEVEL, 1)
-            .expect("messages");
+        let level_info = login_level_info(OPEN_WORLD_LEVEL, SERVER_TIME, 1);
+        let envelopes =
+            login_messages(&world, session, ENTITY, SERVER_TIME, &level_info).expect("messages");
         let types: Vec<u64> = envelopes
             .iter()
             .map(|bytes| {
@@ -252,11 +244,40 @@ mod tests {
     }
 
     #[test]
+    fn the_time_messages_call_the_player_time_component() {
+        let world = WorldIds::random(START_TIME).expect("world");
+        let session = SessionIds::random().expect("session");
+        let level_info = login_level_info(OPEN_WORLD_LEVEL, SERVER_TIME, 1);
+        let envelopes =
+            login_messages(&world, session, ENTITY, SERVER_TIME, &level_info).expect("messages");
+        let time = FacetHeader::of(component::TIME, ENTITY);
+        let mut checked = 0;
+        for bytes in &envelopes {
+            match ServerMessage::from_envelope(&Envelope::decode(bytes).expect("envelope")) {
+                Some(Ok(ServerMessage::TimeChange(message))) => {
+                    assert_eq!(message.ids, [time.target, time.entity]);
+                    checked += 1;
+                }
+                Some(Ok(ServerMessage::DayPhase(message))) => {
+                    assert_eq!(
+                        (message.component, message.u64_at_8),
+                        (time.target, time.entity)
+                    );
+                    checked += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(checked, 2);
+    }
+
+    #[test]
     fn both_connected_messages_share_the_session_block() {
         let world = WorldIds::random(START_TIME).expect("world");
         let session = SessionIds::random().expect("session");
-        let envelopes = login_messages(&world, session, ENTITY, SERVER_TIME, OPEN_WORLD_LEVEL, 1)
-            .expect("messages");
+        let level_info = login_level_info(OPEN_WORLD_LEVEL, SERVER_TIME, 1);
+        let envelopes =
+            login_messages(&world, session, ENTITY, SERVER_TIME, &level_info).expect("messages");
         let second_block = |bytes: &[u8]| match ServerMessage::from_envelope(
             &Envelope::decode(bytes).expect("envelope"),
         ) {
@@ -289,8 +310,9 @@ mod tests {
             phase_id(OPEN_WORLD_LEVEL).expect("phase"),
             OPEN_WORLD_PHASE_ID
         );
-        let envelopes = login_messages(&world, session, ENTITY, SERVER_TIME, TUTORIAL_LEVEL, phase)
-            .expect("messages");
+        let level_info = login_level_info(TUTORIAL_LEVEL, SERVER_TIME, phase);
+        let envelopes =
+            login_messages(&world, session, ENTITY, SERVER_TIME, &level_info).expect("messages");
         let level = level_info_of(&envelopes);
         assert_eq!(level.level, TUTORIAL_LEVEL);
         assert_eq!(level.client_context, LOGIN_CLIENT_CONTEXT);
@@ -300,9 +322,9 @@ mod tests {
     #[test]
     fn a_level_change_names_the_new_level_with_the_next_context() {
         const NEXT_CONTEXT: u8 = LOGIN_CLIENT_CONTEXT + 1;
-        let envelopes =
-            level_change_messages(ENTITY, OPEN_WORLD_LEVEL, NEXT_CONTEXT, SERVER_TIME, 1)
-                .expect("messages");
+        let level_info =
+            LevelInfoChangedMsg::of_level(OPEN_WORLD_LEVEL, NEXT_CONTEXT, SERVER_TIME, 1);
+        let envelopes = level_change_messages(ENTITY, &level_info).expect("messages");
         let types: Vec<u64> = envelopes
             .iter()
             .map(|bytes| {
