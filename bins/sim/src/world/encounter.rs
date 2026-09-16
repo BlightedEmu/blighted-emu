@@ -24,7 +24,7 @@
 //!   after the gather time ends it and gives two health potions.
 //!
 //! Every mob of the tutorial is personal: only its player sees it. A dead mob's body stays for
-//! [`CORPSE_MS`], then it goes.
+//! its kind's retail time, then it goes.
 
 use std::sync::Arc;
 
@@ -46,8 +46,15 @@ use crate::objectives::{Effect, Event, KillTypes, ObjectiveRun, ObjectiveTree, T
 pub(super) const FIRST_SAILOR_DELAY_MS: u64 = 15_882;
 /// The level of every tutorial mob (retail cards).
 const TUTORIAL_MOB_LEVEL: u32 = 1;
-/// How long a dead mob's body stays (our choice: long enough for its death to play).
-pub(super) const CORPSE_MS: u64 = 10_000;
+/// How long Thorpe's body stays (our choice: the capture's tutorial ends before retail removed
+/// it).
+const THORPE_CORPSE_MS: u64 = 10_000;
+/// How long a dead mob's body stays, by kind (retail: from its 3916 to its slot's stop; sailors
+/// 5105, 5105 and 5136 ms; legionnaire 6055, signifier 6087; risen 7041; swarmers 7101-7123).
+const SAILOR_CORPSE_MS: u64 = 5_105;
+const LEGION_CORPSE_MS: u64 = 6_055;
+const RISEN_CORPSE_MS: u64 = 7_041;
+const SWARMER_CORPSE_MS: u64 = 7_101;
 /// The video during which the player moves into the water.
 const SHIP_SINKING_VIDEO: &str = "ftue_intro3";
 /// Time from the start of that video to the move (retail 13.5 s).
@@ -146,6 +153,8 @@ struct SpawnPoint {
     pace: Pace,
     /// When it comes after its fight starts.
     delay_ms: u64,
+    /// How long its body stays after its death.
+    corpse_ms: u64,
 }
 
 /// How the tutorial mobs fight (tutorial-ai and creature-animation session notes, live capture
@@ -289,6 +298,7 @@ const FIRST_SAILOR: SpawnPoint = SpawnPoint {
     collision: SAILOR_COLLISION,
     pace: SAILOR_PACE,
     delay_ms: 0,
+    corpse_ms: SAILOR_CORPSE_MS,
 };
 /// When the last sailor comes after the first one died (the wave's slice delays are 0 s and 1 s,
 /// Observed: cards 55 ms and 1058 ms after the first sailor's 3916).
@@ -317,6 +327,7 @@ const SWARMER: SpawnPoint = SpawnPoint {
     collision: SWARMER_COLLISION,
     pace: SWARMER_PACE,
     delay_ms: 1_315,
+    corpse_ms: SWARMER_CORPSE_MS,
 };
 /// The fights that start when a task is done, with the retail cards' positions.
 const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
@@ -331,6 +342,7 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
             pace: LEGION_PACE,
             // Retail card 179393, 4200 ms after the door (175193).
             delay_ms: 4_200,
+            corpse_ms: LEGION_CORPSE_MS,
         }],
     ),
     (
@@ -344,6 +356,7 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
             pace: LEGION_PACE,
             // Retail card 202592, 5782 ms after the trigger (196810).
             delay_ms: 5_782,
+            corpse_ms: LEGION_CORPSE_MS,
         }],
     ),
     (
@@ -359,6 +372,7 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
                 // Retail cards after the trigger (282975): risen +417 ms, swarmers +1315,
                 // +2316 and +3313 ms, each about 50 ms after a spawner timer ends.
                 delay_ms: 417,
+                corpse_ms: RISEN_CORPSE_MS,
             },
             SWARMER,
             SpawnPoint {
@@ -383,6 +397,7 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
             collision: LEGION_COLLISION,
             pace: THORPE_PACE,
             delay_ms: 0,
+            corpse_ms: THORPE_CORPSE_MS,
         }],
     ),
 ];
@@ -485,6 +500,8 @@ struct Fighter {
     batch: usize,
     /// Its pick of the player (2415) went out.
     announced: bool,
+    /// How long its body stays after its death.
+    corpse_ms: u64,
 }
 
 /// The tutorial of one player.
@@ -667,6 +684,7 @@ impl Tutorial {
             collision: point.collision,
             batch,
             announced,
+            corpse_ms: point.corpse_ms,
         });
         // Thorpe fights the player from his spawn (retail 2415 at 451137 with the player 26.5 m
         // away, beyond the brain's sight).
@@ -889,7 +907,7 @@ impl Tutorial {
                 "tutorial: a mob died"
             );
             self.corpses
-                .push((fighter.entity, now_ms.saturating_add(CORPSE_MS)));
+                .push((fighter.entity, now_ms.saturating_add(fighter.corpse_ms)));
             orders.push(Order::Died {
                 mob: fighter.entity,
                 collision: fighter.collision,
@@ -1332,11 +1350,24 @@ pub(crate) mod tests {
                 .contains(&picked),
             "once"
         );
-        assert!(mobs.health(first).is_some(), "the body stays a while");
-        tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + CORPSE_MS);
-        assert_eq!(mobs.health(first), None, "then it goes");
+        assert_eq!(mobs.health(first), None, "the first sailor's body went");
+        assert!(mobs.health(second).is_some(), "the body stays a while");
+        tutorial.tick(
+            &mut mobs,
+            &kill_types(),
+            SHIP,
+            door_at + SAILOR_CORPSE_MS - 1,
+        );
+        assert!(mobs.health(second).is_some(), "until the retail time");
+        tutorial.tick(&mut mobs, &kill_types(), SHIP, door_at + SAILOR_CORPSE_MS);
+        assert_eq!(mobs.health(second), None, "then it goes");
         kill_all(&mut mobs, &tutorial);
-        let orders = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + CORPSE_MS + 1);
+        let orders = tutorial.tick(
+            &mut mobs,
+            &kill_types(),
+            SHIP,
+            door_at + SAILOR_CORPSE_MS + 1,
+        );
         assert!(
             orders.contains(&Order::Experience(FOE_EXPERIENCE)),
             "an island foe gives experience: {orders:?}"
