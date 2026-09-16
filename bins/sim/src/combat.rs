@@ -172,14 +172,20 @@ pub mod test_support {
     /// Rows with the default config ids: one plain mob type, one level, the sword and its
     /// attacks, the player.
     pub fn test_data() -> CombatData {
+        CombatData::build(test_source(), &CombatRows::default()).expect("test combat data")
+    }
+
+    /// The source of [`test_data`], for tests that add rows.
+    pub fn test_source() -> CombatSource {
         let rows = CombatRows::default();
-        let source = CombatSource {
+        CombatSource {
             base_types: vec![(TEST_MOB.to_owned(), MobType::PLAIN)],
             levels: vec![(
                 TEST_LEVEL,
                 LevelRow {
                     base_max_health: TEST_LEVEL_HEALTH,
                     base_damage: TEST_LEVEL_DAMAGE,
+                    physical_armor_rating: 0.0,
                 },
             )],
             weapons: vec![(
@@ -202,8 +208,7 @@ pub mod test_support {
                 .collect(),
             player_health: vec![(rows.player_vitals_id.clone(), TEST_PLAYER_HEALTH)],
             ..CombatSource::default()
-        };
-        CombatData::build(source, &rows).expect("test combat data")
+        }
     }
 }
 

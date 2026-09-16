@@ -9,6 +9,10 @@
 //! player, because a mob is never farther than the leash from its spawn. A player scans again
 //! only after it moved [`WAKE_RESCAN_M`] since its last scan, or when the cells change: a player
 //! who stands still keeps its awake mobs awake without a scan.
+//!
+//! A personal mob (a tutorial encounter's) belongs to one player: only that player sees it and is
+//! its target, it may be held idle until its fight starts, it stays awake, and it does not
+//! respawn: its encounter removes it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
@@ -26,6 +30,20 @@ use crate::combat::CombatSettings;
 /// A player scans for mobs to wake again after moving this far (about 2 s of running); far less
 /// than the wake radius, so a mob wakes before the player can reach it.
 pub const WAKE_RESCAN_M: f32 = 10.0;
+
+/// A moving mob keeps its own height when the level's ground lies more than this far below it
+/// (our choice): it stands on a floor the height map does not hold, such as the tutorial ship's
+/// deck high above the sea bed (live 2026-09-12: the sailor dropped under the ship and vanished).
+pub const MAX_STEP_DOWN_M: f32 = 3.0;
+
+/// The height of a mob that moves to `to` on `ground`: the ground's, unless the ground lies more
+/// than [`MAX_STEP_DOWN_M`] below the mob.
+fn height_after_move(ground: &dyn Ground, to: Position) -> f32 {
+    match ground.height_at(to.x, to.y) {
+        Some(height) if to.z - height <= MAX_STEP_DOWN_M => height,
+        _ => to.z,
+    }
+}
 
 /// The entity number of the mob of spawn `index`.
 pub const fn mob_entity(index: u32) -> u64 {
@@ -70,9 +88,46 @@ pub struct MobChanges {
     pub unspawned: usize,
 }
 
+/// The stamina a blocked swing of a mob without a pace takes (Inferred: the retail signifier's
+/// light stab, a level 1 mob, took 14.6; the swings of other mobs are Unknown).
+pub const DEFAULT_BLOCK_STAMINA: f32 = 14.6;
+
+/// How a personal mob fights when not as its rows and the config say.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pace {
+    /// Its attack factor, in place of the config's `mob_attack_factor`.
+    pub attack_factor: f64,
+    /// Time between two swings: a random time in this range, rolled after each swing. Its first
+    /// swing also waits the shortest gap after its fight starts.
+    pub swing_gap_ms: (u64, u64),
+    /// Its chase speed, in place of the config's `mob_speed_mps`.
+    pub speed_mps: f32,
+    /// When a swing hits, after it starts.
+    pub hit_delay_ms: u64,
+    /// The stamina a swing takes from a player who blocks it.
+    pub block_stamina: f32,
+}
+
+/// A mob spawned for one player.
+#[derive(Debug, Clone)]
+struct Personal {
+    spawn: VitalsSpawn,
+    owner: u64,
+    /// The mob sees no player until its fight starts.
+    held: bool,
+    pace: Option<Pace>,
+    /// The gap before its next swing, when paced.
+    swing_gap_ms: u64,
+    /// Until this time the mob does nothing (a scripted pause).
+    frozen_until_ms: u64,
+}
+
 /// The mobs of one sim.
 pub struct Mobs {
     spawns: Arc<[VitalsSpawn]>,
+    /// Personal mobs by index; their indexes follow the spawn list.
+    personal: HashMap<u32, Personal>,
+    next_personal: u32,
     data: Arc<CombatData>,
     settings: BrainSettings,
     mob_attack_factor: f64,
@@ -87,16 +142,14 @@ pub struct Mobs {
     wake_scans: u64,
 }
 
-/// The spawns that a sim of `level` spawns. The tutorial's encounter spawns are the fights of
-/// its quest chain, which quest scripts start; spawned at once, they stand on the new player at
-/// the tutorial start. Every other level keeps all its spawns.
+/// The spawns that a sim of `level` spawns. Every mob of the tutorial is a fight of its quest,
+/// which the tutorial script spawns for each player (its level file also lists the island's
+/// fights as plain spawns); every other level keeps all its spawns.
 pub fn spawns_of_level(level: &str, spawns: &[VitalsSpawn]) -> Arc<[VitalsSpawn]> {
-    let tutorial = level == TUTORIAL_FOLDER;
-    spawns
-        .iter()
-        .filter(|spawn| !(tutorial && spawn.is_encounter))
-        .cloned()
-        .collect()
+    if level == TUTORIAL_FOLDER {
+        return Arc::from([]);
+    }
+    spawns.iter().cloned().collect()
 }
 
 fn position_of(spawn: &VitalsSpawn) -> Position {
@@ -116,8 +169,11 @@ impl MobChanges {
 impl Mobs {
     /// No mob yet; the spawns of the cells come with [`Mobs::set_cells`].
     pub fn new(spawns: Arc<[VitalsSpawn]>, combat: &CombatSettings) -> Self {
+        let next_personal = u32::try_from(spawns.len()).unwrap_or(u32::MAX);
         Self {
             spawns,
+            personal: HashMap::new(),
+            next_personal,
             data: Arc::clone(&combat.data),
             settings: combat.brain,
             mob_attack_factor: combat.mob_attack_factor,
@@ -147,6 +203,131 @@ impl Mobs {
                 factor: self.mob_attack_factor,
             },
         })
+    }
+
+    /// Spawns a personal mob of `spawn` for player `owner` at `now_ms`, held idle when `held`,
+    /// hitting at `pace` when given; its entity number, or `None` without its rows. A paced mob
+    /// that fights at once waits one interval before its first hit.
+    pub fn spawn_personal(
+        &mut self,
+        spawn: VitalsSpawn,
+        owner: u64,
+        held: bool,
+        pace: Option<Pace>,
+        now_ms: u64,
+    ) -> Option<u64> {
+        let mut mob = self.make(&spawn)?;
+        if let Some(pace) = pace {
+            mob.attack.factor = pace.attack_factor;
+            if !held {
+                mob.brain.wait_to_attack(now_ms);
+            }
+        }
+        let swing_gap_ms = pace.map_or(0, |pace| pace.swing_gap_ms.0);
+        let index = self.next_personal;
+        self.next_personal = index.checked_add(1)?;
+        self.live.insert(index, mob);
+        self.awake.insert(index);
+        self.personal.insert(
+            index,
+            Personal {
+                spawn,
+                owner,
+                held,
+                pace,
+                swing_gap_ms,
+                frozen_until_ms: 0,
+            },
+        );
+        Some(mob_entity(index))
+    }
+
+    /// Lets the held personal mobs of `owner` see it at `now_ms`; a paced one waits one interval
+    /// before its first hit.
+    pub fn release(&mut self, owner: u64, now_ms: u64) {
+        for (index, personal) in self
+            .personal
+            .iter_mut()
+            .filter(|(_, mob)| mob.owner == owner && mob.held)
+        {
+            personal.held = false;
+            if personal.pace.is_some()
+                && let Some(mob) = self.live.get_mut(index)
+            {
+                mob.brain.wait_to_attack(now_ms);
+            }
+        }
+    }
+
+    /// Removes the personal mob `entity`.
+    pub fn remove_personal(&mut self, entity: u64) {
+        if let Some(index) = spawn_index(entity)
+            && self.personal.remove(&index).is_some()
+        {
+            self.live.remove(&index);
+            self.awake.remove(&index);
+        }
+    }
+
+    /// The owner of mob `entity` when it is personal.
+    pub fn owner(&self, entity: u64) -> Option<u64> {
+        self.personal
+            .get(&spawn_index(entity)?)
+            .map(|personal| personal.owner)
+    }
+
+    /// The brain state of mob `entity`, when it lives here.
+    pub fn brain_state(&self, entity: u64) -> Option<MobState> {
+        self.live
+            .get(&spawn_index(entity)?)
+            .map(|mob| mob.brain.state())
+    }
+
+    /// Personal mob `entity` stands still and does nothing until `until_ms`.
+    pub fn freeze(&mut self, entity: u64, until_ms: u64) {
+        if let Some(personal) = spawn_index(entity).and_then(|index| self.personal.get_mut(&index))
+        {
+            personal.frozen_until_ms = until_ms;
+        }
+    }
+
+    /// When a swing of mob `entity` hits, after the swing starts: its pace's delay, else 0.
+    pub fn hit_delay_ms(&self, entity: u64) -> u64 {
+        spawn_index(entity)
+            .and_then(|index| self.personal.get(&index)?.pace)
+            .map_or(0, |pace| pace.hit_delay_ms)
+    }
+
+    /// The stamina a swing of mob `entity` takes from a player who blocks it: its pace's, or
+    /// [`DEFAULT_BLOCK_STAMINA`].
+    pub fn block_stamina(&self, entity: u64) -> f32 {
+        spawn_index(entity)
+            .and_then(|index| self.personal.get(&index)?.pace)
+            .map_or(DEFAULT_BLOCK_STAMINA, |pace| pace.block_stamina)
+    }
+
+    /// The level of mob `entity`, when it lives here.
+    pub fn level(&self, entity: u64) -> Option<u32> {
+        self.spawn_of(spawn_index(entity)?).map(|spawn| spawn.level)
+    }
+
+    /// The entity mob `entity` chases or hits, when it lives here.
+    pub fn target(&self, entity: u64) -> Option<u64> {
+        self.live.get(&spawn_index(entity)?)?.brain.target()
+    }
+
+    /// The health of mob `entity`, when it lives here.
+    pub fn health(&self, entity: u64) -> Option<u32> {
+        self.live
+            .get(&spawn_index(entity)?)
+            .map(|mob| mob.health.current())
+    }
+
+    /// The spawn of mob `index`: a world spawn or a personal one.
+    fn spawn_of(&self, index: u32) -> Option<&VitalsSpawn> {
+        self.spawns
+            .get(index as usize)
+            .or_else(|| self.personal.get(&index).map(|personal| &personal.spawn))
     }
 
     /// Spawns the mobs of the spawns that `owns`, and removes the others.
@@ -230,32 +411,57 @@ impl Mobs {
             let Some(mob) = self.live.get_mut(&index) else {
                 continue;
             };
+            if self
+                .personal
+                .get(&index)
+                .is_some_and(|personal| now_ms < personal.frozen_until_ms)
+            {
+                continue;
+            }
             let at = mob.brain.position();
+            let personal = self.personal.get(&index);
             let seen: Vec<Seen> = player_grid
                 .near(at)
                 .filter(|(_, position)| position.horizontal_distance(at) <= wake_m)
+                .filter(|(entity, _)| personal.is_none_or(|mob| !mob.held && mob.owner == *entity))
                 .map(|(entity, position)| Seen { entity, position })
                 .collect();
             self.brain_runs += 1;
-            match brain_step(
-                &mut mob.brain,
-                &seen,
-                now_ms,
-                &self.settings,
-                &mut self.dice,
-            ) {
+            let settings = personal.filter(|personal| personal.pace.is_some()).map_or(
+                self.settings,
+                |personal| BrainSettings {
+                    mob_attack_interval_ms: personal.swing_gap_ms,
+                    mob_speed_mps: personal
+                        .pace
+                        .map_or(self.settings.mob_speed_mps, |pace| pace.speed_mps),
+                    ..self.settings
+                },
+            );
+            let is_personal = personal.is_some();
+            let action = brain_step(&mut mob.brain, &seen, now_ms, &settings, &mut self.dice);
+            match action {
                 BrainAction::MoveTo(to) => {
-                    mob.brain
-                        .set_height(ground.height_at(to.x, to.y).unwrap_or(to.z));
+                    mob.brain.set_height(height_after_move(ground, to));
                 }
-                BrainAction::Attack(target) => intents.push(MobAttackIntent {
-                    mob: mob_entity(index),
-                    target,
-                }),
+                BrainAction::Attack(target) => {
+                    intents.push(MobAttackIntent {
+                        mob: mob_entity(index),
+                        target,
+                    });
+                    if let Some(personal) = self.personal.get_mut(&index)
+                        && let Some(pace) = personal.pace
+                    {
+                        let (shortest, longest) = pace.swing_gap_ms;
+                        let spread =
+                            u32::try_from(longest.saturating_sub(shortest)).unwrap_or(u32::MAX);
+                        personal.swing_gap_ms =
+                            shortest + u64::from(self.dice.below(spread.saturating_add(1)));
+                    }
+                }
                 BrainAction::Respawned | BrainAction::Home => mob.health.refill(),
                 BrainAction::None => {}
             }
-            if mob.brain.state() == MobState::Asleep {
+            if mob.brain.state() == MobState::Asleep && !is_personal {
                 self.awake.remove(&index);
             } else {
                 self.awake.insert(index);
@@ -278,7 +484,7 @@ impl Mobs {
     pub fn awake_states(&self) -> impl Iterator<Item = (u64, Position, MobGhost)> + '_ {
         self.awake.iter().filter_map(|index| {
             let mob = self.live.get(index)?;
-            let spawn = self.spawns.get(*index as usize)?;
+            let spawn = self.spawn_of(*index)?;
             Some((
                 mob_entity(*index),
                 mob.brain.position(),
@@ -425,14 +631,14 @@ mod tests {
     }
 
     #[test]
-    fn the_tutorial_leaves_out_its_quest_encounters_and_other_levels_keep_them() {
+    fn the_tutorial_spawns_only_its_script_and_other_levels_keep_their_spawns() {
         let encounter = VitalsSpawn {
             is_encounter: true,
             ..spawn_at(0.0, TEST_MOB, TEST_LEVEL)
         };
         let standing = spawn_at(1.0, TEST_MOB, TEST_LEVEL);
         let spawns = [encounter.clone(), standing.clone()];
-        assert_eq!(&*spawns_of_level(TUTORIAL_FOLDER, &spawns), &[standing][..]);
+        assert!(spawns_of_level(TUTORIAL_FOLDER, &spawns).is_empty());
         assert_eq!(
             &*spawns_of_level("newworld_vitaeeterna", &spawns),
             &spawns[..]
@@ -588,6 +794,91 @@ mod tests {
         let mob = mobs.get_mut(mob_entity(0)).expect("mob");
         assert_eq!(mob.brain.state(), MobState::Chase);
         assert_eq!(mob.brain.position().z, HEIGHT);
+    }
+
+    #[test]
+    fn a_mob_on_a_deck_keeps_its_height() {
+        const DECK: f32 = 90.0;
+        let mut spawn = spawn_at(100.0, TEST_MOB, TEST_LEVEL);
+        spawn.position[2] = DECK;
+        let mut mobs = mobs(vec![spawn]);
+        mobs.set_cells(every);
+        for tick in 0..10 {
+            mobs.tick(&[player_at(110.0)], tick * TICK_MS, &Flat);
+        }
+        let mob = mobs.get_mut(mob_entity(0)).expect("mob");
+        assert_eq!(mob.brain.state(), MobState::Chase);
+        assert_eq!(
+            mob.brain.position().z,
+            DECK,
+            "the ground is far below the deck"
+        );
+        let near = Position {
+            x: 0.0,
+            y: 0.0,
+            z: HEIGHT + MAX_STEP_DOWN_M,
+        };
+        assert_eq!(
+            height_after_move(&Flat, near),
+            HEIGHT,
+            "a step down onto the ground"
+        );
+    }
+
+    #[test]
+    fn a_paced_mob_waits_one_interval_after_its_fight_starts_and_between_hits() {
+        const GAP_MS: u64 = 6_000;
+        const SPREAD_MS: u64 = 1_000;
+        const PACE: Pace = Pace {
+            attack_factor: 0.25,
+            swing_gap_ms: (GAP_MS, GAP_MS + SPREAD_MS),
+            speed_mps: 5.5,
+            hit_delay_ms: 456,
+            block_stamina: DEFAULT_BLOCK_STAMINA,
+        };
+        const START: u64 = 1_000;
+        let mut mobs = mobs(Vec::new());
+        let held = mobs
+            .spawn_personal(
+                spawn_at(100.0, TEST_MOB, TEST_LEVEL),
+                PLAYER,
+                true,
+                Some(PACE),
+                0,
+            )
+            .expect("rows");
+        assert_eq!(mobs.get_mut(held).map(|mob| mob.attack.factor), Some(0.25));
+        mobs.release(PLAYER, START);
+        let mut hits = Vec::new();
+        let mut now = START;
+        while now < START + 3 * PACE.swing_gap_ms.0 {
+            if !mobs.tick(&[player_at(101.0)], now, &Flat).is_empty() {
+                hits.push(now);
+            }
+            now += TICK_MS;
+        }
+        assert!(hits.len() >= 2, "{hits:?}");
+        assert!(hits[0] >= START + PACE.swing_gap_ms.0, "{hits:?}");
+        assert!(hits[1] - hits[0] >= PACE.swing_gap_ms.0, "{hits:?}");
+        let at_once = mobs
+            .spawn_personal(
+                spawn_at(100.0, TEST_MOB, TEST_LEVEL),
+                PLAYER,
+                false,
+                Some(PACE),
+                now,
+            )
+            .expect("rows");
+        let ticks_to_try = 3 * PACE.swing_gap_ms.0 / TICK_MS;
+        let first = (0..ticks_to_try)
+            .map(|tick| now + tick * TICK_MS)
+            .find(|at| {
+                mobs.tick(&[player_at(101.0)], *at, &Flat)
+                    .iter()
+                    .any(|intent| intent.mob == at_once)
+            })
+            .expect("it hits");
+        assert!(first >= now + PACE.swing_gap_ms.0);
     }
 
     #[test]

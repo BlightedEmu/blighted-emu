@@ -25,14 +25,19 @@ ground_tolerance_m = 2.0
 # Above the largest captured fall (128.6 m, movement numbers note, Check section).
 max_height_above_ground_m = 150.0
 # Movement (M4 spec section 7.2 with sections 15 and 16). run_speed_mps is the datasheet
-# ServerValidatedCanRun speed. The limit is 3.25 x (1 + 1.2) = 7.15 m/s: above sprint (5.5 m/s)
-# with the 15 % road boost (6.3 m/s). Faster captured speeds have an Unknown cause (mounts,
-# speed effects); sim has none of them yet. Watch sim_moves_refused_total in live tests.
+# ServerValidatedCanRun speed. The limit is 3.25 x (1 + 3.0) = 13 m/s: faster than the fastest
+# honest pace of the retail tutorial capture (10.3 m/s while dodging: 17.1 m in 1 s, 37.2 m in
+# 3 s, 61.8 m in 6 s, and 6.3 m/s over 40 s), so the distance budget fills again while the
+# player dodges. With 7.15 m/s, and again with 10.4 m/s and a 3 s burst (31.2 m < 37.2 m), a
+# live fight and the swim to shore emptied the budget and every later move was refused
+# (2026-09-14). Watch sim_moves_refused_total in live tests.
 run_speed_mps = 3.25
-speed_margin = 1.2
-# Longer than the longest gap between captured movement messages (1.5 to 2.5 s), so a player
-# who moved on during a stall is not refused when its next message comes.
-burst_seconds = 3.0
+speed_margin = 3.0
+# 8 s at the limit hold 104 m: above the largest burst of the retail capture (61.8 m in 6 s)
+# and above a move that covers the longest gap between captured movement messages (1.5 to
+# 2.5 s), so a player who moved on during a stall is not refused when its next message comes.
+# What stays refused is a real teleport (400 m or more in the captures).
+burst_seconds = 8.0
 # Handoff (M5 spec section 3.3): a player this far into another sim's cells moves to that sim.
 handoff_margin_m = 5.0
 handoff_timeout_ms = 250
@@ -60,7 +65,8 @@ player_vitals_id = "Player"
 weapon_id = "SwordT1"
 attack_damage_ids = ["1H_Sword_Attack1", "1H_Sword_Attack2"]
 armor_share = 0.35
-player_armor_share = 0.0
+# Retail 3601 hits on a new character in starter armor keep 0.6006 of the damage.
+player_armor_share = 0.3994
 mob_attack_factor = 1.0
 # wake_radius_m: absent means interest_radius_m.
 sleep_after_ms = 30000

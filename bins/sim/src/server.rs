@@ -486,7 +486,7 @@ impl Loop {
                     return;
                 };
                 tracing::debug!(?facet, "client facet call");
-                if let Err(error) = self.world.facet_message(connection, facet) {
+                if let Err(error) = self.world.facet_message(connection, facet, self.now_ms()) {
                     tracing::warn!(%error, "facet answer not sent");
                 }
             }
@@ -508,10 +508,13 @@ impl Loop {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
             return;
         };
-        if let Some(position) = input.last_position() {
+        if let Some(position) = input.newest_position() {
             self.move_player(connection, position);
         }
         let now_ms = self.now_ms();
+        if let Some(request) = input.interaction() {
+            self.world.interact(connection, request, now_ms);
+        }
         for result in self.world.attack_input(connection, &input.records, now_ms) {
             self.attack_result(result);
         }
@@ -537,7 +540,11 @@ impl Loop {
             y: position.y,
             z: position.z(),
         };
-        match self.world.move_to(connection, next, self.now_ms()) {
+        let result = self.world.move_to(connection, next, self.now_ms());
+        if result.is_ok() {
+            tracing::trace!(x = next.x, y = next.y, z = next.z, "client move");
+        }
+        match result {
             Ok(GroundCheck::Checked) | Err(MoveError::NotInWorld) => {}
             Ok(GroundCheck::NoGround) => {
                 metrics::counter!(METRIC_MOVES_WITHOUT_GROUND).increment(1);
@@ -767,7 +774,7 @@ impl Loop {
             let reply = bus
                 .request::<HandoffMessage, HandoffReply>(
                     subject,
-                    &HandoffMessage::Offer(start.offer),
+                    &HandoffMessage::Offer(Box::new(start.offer)),
                     timeout,
                 )
                 .await;
@@ -1136,9 +1143,14 @@ mod tests {
         BusId::try_from(format!("{prefix}-{}", Uuid::new_v4().simple())).expect("id")
     }
 
+    /// The sea height of the test level (`terrain.json` `oceanLevel` of the open world).
+    const TEST_OCEAN_LEVEL_M: f32 = 40.0;
+
     fn settings(world_id: Uuid, name: &str) -> LoopSettings {
         let config = committed();
-        let mut world = config.world_settings(bounds()).expect("world settings");
+        let mut world = config
+            .world_settings(bounds(), TEST_OCEAN_LEVEL_M)
+            .expect("world settings");
         // The live path under test: own player card on, other entities held until the client
         // sends movement (local-player-check note).
         world.local_player_card = true;
@@ -2360,12 +2372,18 @@ mod tests {
                 phasing_sequence: 0,
                 client_context: 1,
                 enter_level: false,
+                items: None,
+                experience: 0,
             };
             let subject = subject::sim_handoff(world_id, &id);
             let mut reply: Result<HandoffReply, BusError> = Err(BusError::NoReplySubject);
             for _ in 0..TRIES {
                 reply = bus
-                    .request(subject.clone(), &HandoffMessage::Offer(offer.clone()), WAIT)
+                    .request(
+                        subject.clone(),
+                        &HandoffMessage::Offer(Box::new(offer.clone())),
+                        WAIT,
+                    )
                     .await;
                 if reply.is_ok() {
                     break;

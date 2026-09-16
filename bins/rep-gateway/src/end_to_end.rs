@@ -60,6 +60,8 @@ const SECOND_CHARACTER_NAME: &str = "Pairtwo";
 const ACCOUNT_PREFIX: &str = "e2e";
 const ACCOUNT_RANDOM_DIGITS: usize = 12;
 const LEVEL: &str = "newworld_vitaeeterna";
+/// The sea height of that level (`terrain.json` `oceanLevel`).
+const OCEAN_LEVEL_M: f32 = 40.0;
 const SIM_CONFIG: &str = "../../config/sim.toml";
 const LEVEL_M: f32 = 14_336.0;
 const CELL_M: f32 = 2048.0;
@@ -350,7 +352,9 @@ async fn start_sim(world_id: Uuid, sim_id: BusId, world_pool: &PgPool) -> JoinHa
         sim_id,
         world_id,
         level: LEVEL.to_owned(),
-        world: config.world_settings(bounds).expect("world settings"),
+        world: config
+            .world_settings(bounds, OCEAN_LEVEL_M)
+            .expect("world settings"),
         handoff_timeout: Duration::from_millis(config.handoff_timeout_ms),
         forward_ttl_ms: config.forward_ttl_ms,
         save_interval: SAVE_INTERVAL,

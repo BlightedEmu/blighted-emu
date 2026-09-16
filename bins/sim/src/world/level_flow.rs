@@ -4,17 +4,16 @@
 //!
 //! - About [`LEVEL_INFO_AGAIN_MS`] after a `LevelInfoChangedMsg`, the server sends it again; the
 //!   client acknowledges the level (5181), and the server sends the phases of its sectors (6310).
-//! - In the tutorial, the player's achievements unlock the intro video, which the client plays on
-//!   its own. When a video or a cutscene ends, its "watched" achievement is set, which unlocks the
-//!   next step of the client's tutorial triggers. The server allows each cutscene the client asks
-//!   for (6703 → 6707) and closes it when it ends (6705 → 6709).
+//! - Every player starts with the expansion and the achievement of its archetype pick. In the
+//!   tutorial, the quest's task tree sets the achievements that unlock the client's videos and
+//!   cutscenes ([`crate::objectives`]). The server allows each cutscene the client asks for
+//!   (6703 → 6707) and closes it when it ends (6705 → 6709).
 //! - When the client asks to leave the tutorial (502), the server shows the loading screen (3951)
 //!   and clears the phases (an empty 6310) before the level change.
 
 use std::collections::HashMap;
 
 use nw_content::achievements::AchievementIndexes;
-use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::facet::component;
 use nw_messages::{
     AchievementBits, AchievementState, ByteChange, ClientFacetMsg, CutsceneEndFinalizedMsg,
@@ -29,49 +28,47 @@ pub(super) const LEVEL_INFO_AGAIN_MS: u64 = 5000;
 const TUTORIAL_PHASING_MODE: u8 = 3;
 const OPEN_WORLD_PHASING_MODE: u8 = 2;
 const EMPTY_PHASING_MODE: u8 = 0;
-/// The tutorial achievement set at login: the intro video plays only with it.
-const INTRO_UNLOCK: &str = "FTUE_Intro2_Cinematic_Unlock";
-/// The tutorial achievement set when the client has loaded the tutorial level (retail sets it
-/// about 2 s later): the first in-game cutscene (crew member) starts only with it.
-const CREW_CUTSCENE_UNLOCK: &str = "FTUE_PCCM_Cinematic_Unlock";
-/// The "watched" achievement of each tutorial video and cutscene, by its lowercase name. The
-/// client names a video or cutscene by the CRC-32 of that name.
-const WATCHED: [(&str, &str); 5] = [
-    ("ftue_intro1", "FTUE_Intro1_Cinematic_Watched"),
-    ("ftue_intro2", "FTUE_Intro2_Cinematic_Watched"),
-    ("ftue_intro3", "FTUE_Intro3_Cinematic_Watched"),
-    ("ftue_rez", "FTUE_Rez_Cinematic_Watched"),
-    (
-        "ftue_01_solesurvivor_confrontingcrewmember_igc",
-        "FTUE_PCCM_Cinematic_Watched",
-    ),
-];
+/// Bytes of the achievement bitset that build 25810808 retail servers send (live capture of
+/// 2026-09-12); a bit beyond it is not kept.
+const BITSET_BYTES: usize = 1910;
+/// The achievement of the Rise of the Angry Earth expansion; every account of this server has it
+/// (retail sets it 5 s after login).
+const EXPANSION_UNLOCK: &str = "Expansion_2023_Unlock";
 /// The version of the first full achievement state (retail value).
 const FIRST_ACHIEVEMENT_VERSION: u64 = 3;
 
-/// The achievement bits of the tutorial flow, from the content.
+/// The achievement bits a player starts with, and the bit of every achievement id.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TutorialAchievements {
-    bitset_bytes: usize,
-    intro_unlock: Option<u32>,
-    crew_cutscene_unlock: Option<u32>,
-    /// The "watched" bit of each video or cutscene id.
-    watched: HashMap<u32, u32>,
+pub struct AchievementRules {
+    indexes: AchievementIndexes,
+    expansion: Option<u32>,
+    /// The bit of each archetype pick, by backstory id.
+    archetypes: HashMap<String, u32>,
 }
 
-impl TutorialAchievements {
-    /// The bits of `indexes`; an achievement the content does not have is left out.
-    pub fn of(indexes: &AchievementIndexes) -> Self {
+impl AchievementRules {
+    /// The bit of achievement `id`.
+    pub(super) fn bit(&self, id: &str) -> Option<u32> {
+        self.indexes.index(id)
+    }
+
+    /// The bit of the expansion every player has from the start.
+    pub(super) const fn expansion(&self) -> Option<u32> {
+        self.expansion
+    }
+
+    /// The bits of `indexes`, with the achievement of each archetype pick in `archetype_unlocks`
+    /// (backstory id, achievement id); an achievement the content does not have is left out.
+    pub fn of(indexes: &AchievementIndexes, archetype_unlocks: &[(String, String)]) -> Self {
         Self {
-            bitset_bytes: indexes.bitset_bytes(),
-            intro_unlock: indexes.index(INTRO_UNLOCK),
-            crew_cutscene_unlock: indexes.index(CREW_CUTSCENE_UNLOCK),
-            watched: WATCHED
+            expansion: indexes.index(EXPANSION_UNLOCK),
+            archetypes: archetype_unlocks
                 .iter()
-                .filter_map(|(event, achievement)| {
-                    Some((lowercase_crc32(event), indexes.index(achievement)?))
+                .filter_map(|(backstory, achievement)| {
+                    Some((backstory.clone(), indexes.index(achievement)?))
                 })
                 .collect(),
+            indexes: indexes.clone(),
         }
     }
 }
@@ -88,7 +85,20 @@ impl Achievements {
     /// Sets `bit` and records the changed byte; a set bit or one beyond the bitset changes
     /// nothing.
     fn set(&mut self, bit: u32) {
-        if let Some(value) = set_bit(&mut self.bits, bit) {
+        let changed = set_bit(&mut self.bits, bit);
+        self.record(bit, changed);
+    }
+
+    /// Clears `bit` and records the changed byte; a clear bit or one beyond the bitset changes
+    /// nothing.
+    fn clear(&mut self, bit: u32) {
+        let changed = clear_bit(&mut self.bits, bit);
+        self.record(bit, changed);
+    }
+
+    /// Records the new byte `changed` of `bit`, when there is one.
+    fn record(&mut self, bit: u32, changed: Option<u8>) {
+        if let Some(value) = changed {
             self.version += 1;
             self.changes.push(ByteChange {
                 byte: bit / u8::BITS,
@@ -97,6 +107,16 @@ impl Achievements {
             });
         }
     }
+}
+
+/// Clears `bit` of `bits`; the new byte, or `None` when nothing changed.
+fn clear_bit(bits: &mut [u8], bit: u32) -> Option<u8> {
+    let value = bits.get_mut((bit / u8::BITS) as usize)?;
+    let new = *value & !(1 << (bit % u8::BITS));
+    (new != *value).then(|| {
+        *value = new;
+        new
+    })
 }
 
 /// Sets `bit` of `bits`; the new byte, or `None` when nothing changed.
@@ -123,39 +143,40 @@ pub(super) struct LevelFlow {
     phasing_sequence: u8,
     /// The cutscene the client was allowed to play.
     cutscene: Option<u32>,
-    /// Tutorial players only.
+    /// `None` for a player taken without a level change (its client has them).
     achievements: Option<Achievements>,
 }
 
 impl LevelFlow {
     /// The flow after `level_info` went to the client of entity `entity` at `now_ms`, after
-    /// `phasing_sequence` updates. A tutorial player starts with the intro unlocked.
+    /// `phasing_sequence` updates. Every player starts with the expansion and the achievement of
+    /// its archetype pick (`backstory`).
     pub(super) fn after_level_info(
         entity: u64,
         level_info: LevelInfoChangedMsg,
         now_ms: u64,
         phasing_sequence: u8,
-        tutorial: Option<&TutorialAchievements>,
+        rules: &AchievementRules,
+        tutorial: bool,
+        backstory: Option<&str>,
     ) -> Self {
-        let achievements = tutorial.map(|tutorial| {
-            let mut bits = vec![0; tutorial.bitset_bytes];
-            if let Some(bit) = tutorial.intro_unlock {
-                set_bit(&mut bits, bit);
-            }
-            Achievements {
-                bits,
-                version: FIRST_ACHIEVEMENT_VERSION,
-                changes: Vec::new(),
-            }
-        });
+        let mut bits = vec![0; BITSET_BYTES];
+        let archetype = backstory.and_then(|backstory| rules.archetypes.get(backstory).copied());
+        for bit in [rules.expansion, archetype].into_iter().flatten() {
+            set_bit(&mut bits, bit);
+        }
         Self {
             entity,
             level_info: Some(level_info),
             level_info_again_at_ms: Some(now_ms.saturating_add(LEVEL_INFO_AGAIN_MS)),
-            tutorial: tutorial.is_some(),
+            tutorial,
             phasing_sequence,
             cutscene: None,
-            achievements,
+            achievements: Some(Achievements {
+                bits,
+                version: FIRST_ACHIEVEMENT_VERSION,
+                changes: Vec::new(),
+            }),
         }
     }
 
@@ -170,6 +191,13 @@ impl LevelFlow {
             cutscene: None,
             achievements: None,
         }
+    }
+
+    /// The phase id of the level's private instance (the tutorial); `None` without a level change
+    /// or a phase.
+    pub(super) fn phase_id(&self) -> Option<u64> {
+        let level_info = self.level_info.as_ref()?;
+        level_info.phasing.first().map(|entry| entry.phase_id)
     }
 
     /// The sequence of the last phasing update; a level change goes on from it.
@@ -187,21 +215,22 @@ impl LevelFlow {
         self.level_info.clone().map(ServerMessage::LevelInfoChanged)
     }
 
-    /// The answers to `message` from a client in `client_context`, with `tutorial`'s bits.
+    /// The cutscene the client plays, when one was allowed.
+    pub(super) const fn cutscene(&self) -> Option<u32> {
+        self.cutscene
+    }
+
+    /// The answers to `message` from a client in `client_context`.
     pub(super) fn answer(
         &mut self,
         message: ClientFacetMsg,
         client_context: u8,
-        tutorial: &TutorialAchievements,
     ) -> Vec<ServerMessage> {
         match message {
             ClientFacetMsg::AckLevelInfo {
                 client_context: acked,
                 ..
             } if acked == client_context => {
-                if self.tutorial {
-                    self.set(tutorial.crew_cutscene_unlock);
-                }
                 let mode = if self.tutorial {
                     TUTORIAL_PHASING_MODE
                 } else {
@@ -214,10 +243,6 @@ impl LevelFlow {
                     .unwrap_or_default();
                 vec![self.phasing(entries, mode)]
             }
-            ClientFacetMsg::CinematicEnded { cinematic, .. } => {
-                self.set(tutorial.watched.get(&cinematic).copied());
-                Vec::new()
-            }
             ClientFacetMsg::RequestCutscene { cutscene, .. } => {
                 self.cutscene = Some(cutscene);
                 vec![ServerMessage::CutsceneGranted(CutsceneGrantedMsg {
@@ -226,18 +251,22 @@ impl LevelFlow {
                 })]
             }
             ClientFacetMsg::CutsceneEnded { .. } => {
-                if let Some(cutscene) = self.cutscene.take() {
-                    self.set(tutorial.watched.get(&cutscene).copied());
-                }
+                self.cutscene = None;
                 vec![ServerMessage::CutsceneEndFinalized(
                     CutsceneEndFinalizedMsg {
                         header: self.header(component::PLAYER_CUTSCENE),
                     },
                 )]
             }
-            ClientFacetMsg::AckLevelInfo { .. } | ClientFacetMsg::ReturnToMainWorld { .. } => {
-                Vec::new()
-            }
+            ClientFacetMsg::AckLevelInfo { .. }
+            | ClientFacetMsg::CinematicStarted { .. }
+            | ClientFacetMsg::CinematicEnded { .. }
+            | ClientFacetMsg::QteCompleted { .. }
+            | ClientFacetMsg::UiScreenOpened { .. }
+            | ClientFacetMsg::TriggerAreaPassthrough { .. }
+            | ClientFacetMsg::TakeAllItems { .. }
+            | ClientFacetMsg::EquipItem { .. }
+            | ClientFacetMsg::ReturnToMainWorld { .. } => Vec::new(),
         }
     }
 
@@ -252,8 +281,8 @@ impl LevelFlow {
         ]
     }
 
-    /// The whole achievement state for the spawn card; `None` outside the tutorial. Changes
-    /// made so far are in it.
+    /// The whole achievement state for the spawn card; `None` for a player taken without a level
+    /// change. Changes made so far are in it.
     pub(super) fn first_achievements(&mut self) -> Option<AchievementState> {
         let achievements = self.achievements.as_mut()?;
         achievements.changes.clear();
@@ -278,9 +307,21 @@ impl LevelFlow {
         })
     }
 
-    fn set(&mut self, bit: Option<u32>) {
-        if let (Some(achievements), Some(bit)) = (self.achievements.as_mut(), bit) {
+    /// Sets achievement `id` of `rules`; an id the content does not have changes nothing.
+    pub(super) fn set_achievement(&mut self, rules: &AchievementRules, id: &str) {
+        if let (Some(achievements), Some(bit)) =
+            (self.achievements.as_mut(), rules.indexes.index(id))
+        {
             achievements.set(bit);
+        }
+    }
+
+    /// Clears achievement `id` (a quest's `TaskLockAchievement`).
+    pub(super) fn clear_achievement(&mut self, rules: &AchievementRules, id: &str) {
+        if let (Some(achievements), Some(bit)) =
+            (self.achievements.as_mut(), rules.indexes.index(id))
+        {
+            achievements.clear(bit);
         }
     }
 
@@ -301,6 +342,7 @@ impl LevelFlow {
 
 #[cfg(test)]
 mod tests {
+    use nw_formats::objectstream::lowercase_crc32;
     use nw_messages::{LOGIN_CLIENT_CONTEXT, TUTORIAL_LEVEL};
 
     use super::*;
@@ -308,21 +350,23 @@ mod tests {
     const ENTITY: u64 = 7;
     const NOW: u64 = 1000;
     const PHASE: u64 = 0x8b2c_bbb8_6aa9_9537;
+    const INTRO_UNLOCK: &str = "FTUE_Intro2_Cinematic_Unlock";
     const INTRO_UNLOCK_BIT: u32 = 14_804;
-    const INTRO_WATCHED_BIT: u32 = 14_805;
-    const CREW_UNLOCK_BIT: u32 = 15_198;
-    const CREW_WATCHED_BIT: u32 = 15_199;
 
-    fn tutorial() -> TutorialAchievements {
-        TutorialAchievements::of(&AchievementIndexes::build([
+    const EXPANSION_BIT: u32 = 11_979;
+    const WARMONGER_BIT: u32 = 14_878;
+    const WARMONGER: &str = "Archetype_Destroyer";
+
+    fn tutorial() -> AchievementRules {
+        let indexes = AchievementIndexes::build([
+            (EXPANSION_UNLOCK.to_owned(), EXPANSION_BIT),
+            ("Archetype_Warmonger".to_owned(), WARMONGER_BIT),
             (INTRO_UNLOCK.to_owned(), INTRO_UNLOCK_BIT),
-            (
-                "FTUE_Intro2_Cinematic_Watched".to_owned(),
-                INTRO_WATCHED_BIT,
-            ),
-            (CREW_CUTSCENE_UNLOCK.to_owned(), CREW_UNLOCK_BIT),
-            ("FTUE_PCCM_Cinematic_Watched".to_owned(), CREW_WATCHED_BIT),
-        ]))
+        ]);
+        AchievementRules::of(
+            &indexes,
+            &[(WARMONGER.to_owned(), "Archetype_Warmonger".to_owned())],
+        )
     }
 
     fn flow() -> LevelFlow {
@@ -331,7 +375,9 @@ mod tests {
             LevelInfoChangedMsg::of_level(TUTORIAL_LEVEL, LOGIN_CLIENT_CONTEXT, NOW, PHASE),
             NOW,
             0,
-            Some(&tutorial()),
+            &tutorial(),
+            true,
+            Some(WARMONGER),
         )
     }
 
@@ -349,13 +395,35 @@ mod tests {
     }
 
     #[test]
-    fn a_tutorial_player_starts_with_only_the_intro_unlocked() {
+    fn a_player_starts_with_the_expansion_and_its_archetype() {
         let mut flow = flow();
         let first = flow.first_achievements().expect("achievements");
-        assert!(bit(&first, INTRO_UNLOCK_BIT));
-        assert!(!bit(&first, INTRO_WATCHED_BIT));
-        assert!(!bit(&first, CREW_UNLOCK_BIT));
+        let Some(AchievementBits::Full(list)) = &first.bits else {
+            panic!("a full bitset");
+        };
+        assert_eq!(list.elements.len(), BITSET_BYTES);
+        assert!(bit(&first, EXPANSION_BIT));
+        assert!(bit(&first, WARMONGER_BIT));
+        assert!(!bit(&first, INTRO_UNLOCK_BIT));
         assert_eq!(flow.take_achievement_changes(), None);
+    }
+
+    #[test]
+    fn a_set_achievement_is_one_change() {
+        let mut flow = flow();
+        flow.first_achievements();
+        flow.set_achievement(&tutorial(), INTRO_UNLOCK);
+        flow.set_achievement(&tutorial(), INTRO_UNLOCK);
+        flow.set_achievement(&tutorial(), "Nothing");
+        let changes = flow.take_achievement_changes().expect("intro unlock");
+        assert_eq!(
+            changes.bits,
+            Some(AchievementBits::Changes(vec![ByteChange {
+                byte: INTRO_UNLOCK_BIT / 8,
+                version: FIRST_ACHIEVEMENT_VERSION + 1,
+                value: 1 << (INTRO_UNLOCK_BIT % 8),
+            }]))
+        );
     }
 
     #[test]
@@ -371,37 +439,20 @@ mod tests {
             header: header(component::PLAYER),
             client_context: LOGIN_CLIENT_CONTEXT,
         };
-        let answers = flow.answer(ack, LOGIN_CLIENT_CONTEXT, &tutorial());
+        let answers = flow.answer(ack, LOGIN_CLIENT_CONTEXT);
         let [ServerMessage::UpdatePhasing(phasing)] = answers.as_slice() else {
             panic!("one phasing update: {answers:?}");
         };
         assert_eq!(phasing.header, header(component::GRID_TRACKING));
         assert_eq!((phasing.mode, phasing.sequence), (3, 1));
         assert_eq!(phasing.entries[0].phase_id, PHASE);
-        let changes = flow.take_achievement_changes().expect("crew unlock");
-        assert_eq!(
-            changes.bits,
-            Some(AchievementBits::Changes(vec![ByteChange {
-                byte: CREW_UNLOCK_BIT / 8,
-                version: FIRST_ACHIEVEMENT_VERSION + 1,
-                value: 1 << (CREW_UNLOCK_BIT % 8),
-            }]))
-        );
-        let other_context = flow.answer(ack, LOGIN_CLIENT_CONTEXT + 1, &tutorial());
+        let other_context = flow.answer(ack, LOGIN_CLIENT_CONTEXT + 1);
         assert!(other_context.is_empty(), "an ack of another level");
     }
 
     #[test]
-    fn videos_and_cutscenes_set_their_watched_bits() {
+    fn a_cutscene_is_granted_then_closed() {
         let mut flow = flow();
-        flow.answer(
-            ClientFacetMsg::CinematicEnded {
-                header: header(component::PLAYER_CUTSCENE),
-                cinematic: lowercase_crc32("ftue_intro2"),
-            },
-            LOGIN_CLIENT_CONTEXT,
-            &tutorial(),
-        );
         let crew = lowercase_crc32("ftue_01_solesurvivor_confrontingcrewmember_igc");
         let granted = flow.answer(
             ClientFacetMsg::RequestCutscene {
@@ -409,8 +460,8 @@ mod tests {
                 cutscene: crew,
             },
             LOGIN_CLIENT_CONTEXT,
-            &tutorial(),
         );
+        assert_eq!(flow.cutscene(), Some(crew));
         assert_eq!(
             granted,
             vec![ServerMessage::CutsceneGranted(CutsceneGrantedMsg {
@@ -423,15 +474,12 @@ mod tests {
                 header: header(component::PLAYER_CUTSCENE),
             },
             LOGIN_CLIENT_CONTEXT,
-            &tutorial(),
         );
         assert!(matches!(
             ended.as_slice(),
             [ServerMessage::CutsceneEndFinalized(_)]
         ));
-        let state = flow.first_achievements().expect("achievements");
-        assert!(bit(&state, INTRO_WATCHED_BIT));
-        assert!(bit(&state, CREW_WATCHED_BIT));
+        assert_eq!(flow.cutscene(), None);
     }
 
     #[test]

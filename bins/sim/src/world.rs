@@ -22,13 +22,18 @@ use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use nw_bus::{
-    Admit, BusId, CellTable, ConnectionRef, Ghost, HandoffOffer, MOB_STATES, MobGhost, Point,
-    SimSlot, SnapMob, SnapPlayer,
+    Admit, BusId, CarriedItem, CellTable, ConnectionRef, Ghost, HandoffOffer, MOB_STATES, MobGhost,
+    Point, QuestRun, SimSlot, SnapMob, SnapPlayer,
 };
+use nw_messages::items::{FIRST_VERSION, FullList};
+use nw_messages::paperdoll::slot::QUICK_SLOT_1;
 use nw_messages::{
-    BundleGroup, ClientFacetMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec,
-    MessageError, PlayerGear, PlayerLook, PlayerStates, ServerMessage, TUTORIAL_LEVEL,
-    TimeSynchMsg, WorldPosition,
+    BundleGroup, BundleMember, ClientFacetMsg, ConsumableCooldown, CooldownsState,
+    DisableCollisionMsg, GatheringInterruptedMsg, InteractionEndedMsg, InteractionRequest,
+    InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec, MessageError,
+    PlayerLook, PlayerSeenByAiMsg, PlayerStates, ProgressionState, SelectedAsTargetMsg,
+    ServerMessage, StorageSearchItemsMsg, TUTORIAL_LEVEL, TargetMsg, TimeSynchMsg,
+    UnselectedAsTargetMsg, WorldPosition,
 };
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
@@ -38,17 +43,33 @@ use nw_sim_core::{
 use thiserror::Error;
 use uuid::Uuid;
 
+mod asset_script;
 mod attack;
+mod encounter;
 mod gear;
+mod level_assets;
 mod level_flow;
 mod members;
+mod mob_timeline;
+mod quest_tracker;
 mod slots;
+mod stamina;
+mod statics;
 
-use level_flow::{LevelFlow, TutorialAchievements};
+use asset_script::Step;
+use encounter::{BAG_PREFIX, Order, Tutorial};
+use gear::Gear;
+use level_assets::{ASSET_ENTITY_BASE, AssetViews, asset_gde_ref};
+use level_flow::{AchievementRules, LevelFlow};
 use members::{
-    CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, bundles, card_of, entity_group, own_group,
+    CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, OwnTeleport, bundles, card_of,
+    log_mob_group, mob_group, own_group, remote_group,
 };
+use mob_timeline::{ALERT_MS, MobPose, MobTimelines, animations_of};
+use quest_tracker::QuestTracker;
 use slots::Slots;
+use stamina::Stamina;
+use statics::{STATIC_ENTITY_BASE, StaticViews, bag_emptied, bag_loot, interactor_cleared};
 
 use attack::Vitals;
 
@@ -57,7 +78,10 @@ use crate::login::{
     SessionIds, WorldIds, level_change_messages, login_level_info, login_messages, phase_id,
 };
 use crate::mobs::{MobAttackIntent, MobChanges, Mobs};
-use crate::player_content::PlayerContent;
+use crate::objectives::{Effect, Event, ObjectiveRun};
+use crate::player_content::{MobLooks, OPEN_WORLD_OBJECTIVE, PlayerContent, TUTORIAL_OBJECTIVE};
+use nw_content::ftue_entities::{self, FACET_LEN, FtueLevel};
+use nw_messages::raw_id_of_entity;
 
 /// Carrier channel of the login messages and the time messages.
 pub const MESSAGE_CHANNEL: u8 = 0;
@@ -76,6 +100,14 @@ const FIRST_LOGIN_BUNDLE_SEQUENCE: u64 = 2;
 /// client before it has applied `LevelInfoChanged` (channel 0), so the client drops it as a
 /// bundle "for a previous ClientContext", never loads the level, and never moves to spawn.
 const OWN_CARD_DELAY_MS: u64 = 1_000;
+
+/// How long a row of refused moves may run before the server moves the player back to the last
+/// good position. A refused move leaves the client where it was — but it never sees that, because
+/// it only applies the teleport-numbered own state (own-player-position note). Without this
+/// move-back the client keeps walking on its own while the server keeps the stale position:
+/// later moves miss the distance check too, and area tasks never see the player (live run of
+/// 2026-09-14). The honest case — one unlucky refused move — resynchronises on the next input.
+const REFUSED_RESYNC_MS: u64 = 1_000;
 
 /// Debug bisection knob (env `NW_RELIABLE_BUNDLES`): send the replication bundles reliably on
 /// channel 1 instead of unreliably. Off by default; used to test a client that ignores our
@@ -139,6 +171,9 @@ pub struct WorldSettings {
     /// The level this sim runs. The tutorial is a set of private instances: it hands players
     /// on only at its exit, into the open world (new-player-start note).
     pub level: LevelSpec,
+    /// The height of the level's sea (`terrain.json` `oceanLevel`), in metres: a player near it
+    /// swims.
+    pub ocean_level_m: f32,
 }
 
 /// Fewest players for which the bundle step uses more than one thread; below that, starting
@@ -274,8 +309,8 @@ struct Player {
     look: Option<PlayerLook>,
     /// The backstory of the archetype pick; it goes on with a handoff.
     backstory: Option<String>,
-    /// The worn gear, sent with the own spawn card.
-    gear: Option<PlayerGear>,
+    /// The worn and carried items, sent with the own spawn card and after each change.
+    gear: Option<Gear>,
     number: u64,
     bundles_sent: u64,
     last_time_synch_ms: u64,
@@ -292,6 +327,36 @@ struct Player {
     flow: LevelFlow,
     /// Whether the client asked to leave the tutorial (502).
     leaving: bool,
+    /// Whether the server moved the player: its next own state moves it ([`OwnTeleport`]).
+    moved: bool,
+    /// Server time of the first refused move in the current row; `None` after a good move.
+    /// A row of [`REFUSED_RESYNC_MS`] sets `moved`, so the client returns to the last good
+    /// position it could not otherwise see.
+    refused_since_ms: Option<u64>,
+    /// Server time of the first own state, the start of the own clock.
+    own_spawned_ms: Option<u64>,
+    /// Moves of the player by the server so far.
+    teleports: u8,
+    /// The quest tracker of its tutorial quest.
+    quest: Option<QuestTracker>,
+    /// Its experience points, and whether they changed since the last bundle.
+    experience: u32,
+    experience_changed: bool,
+    /// Its running consumable cooldowns, and whether they changed since the last bundle.
+    cooldowns: Vec<ConsumableCooldown>,
+    cooldowns_changed: bool,
+    /// Its new health after a heal, for the next bundle.
+    healed_to: Option<u32>,
+    /// Its stamina.
+    stamina: Stamina,
+    /// The version of its replicated lists that this server sends besides the gear.
+    list_version: u64,
+    /// Own-group members to append to the next bundle (the take's cleared interactor target).
+    extra_members: Vec<BundleMember>,
+    /// The tutorial's static level entities it sees.
+    statics: StaticViews,
+    /// The tutorial's asset entities it sees.
+    assets: AssetViews,
     frozen: bool,
     handoffs: u64,
     no_handoff_before_ms: u64,
@@ -348,12 +413,28 @@ pub struct SimWorld {
     combat: CombatSettings,
     /// The starter kits and achievement bits.
     content: Arc<PlayerContent>,
-    /// The achievement bits of the tutorial flow.
-    tutorial_achievements: TutorialAchievements,
+    /// The achievement bits players start with and the tutorial flow sets.
+    achievement_rules: AchievementRules,
+    /// Tutorial sims only: the tutorial of each player, by entity number.
+    tutorials: HashMap<u64, Tutorial>,
+    /// Open-world sims: the quest of each player who came from the tutorial, by entity number.
+    quests: HashMap<u64, ObjectiveRun>,
+    /// The state numbers, clock and animation of each shown mob.
+    mob_timelines: MobTimelines,
+    /// The health each shown mob had in the last bundle step.
+    mob_health_shown: HashMap<u64, u32>,
+    /// The boss phase of each boss mob that left phase 0.
+    boss_phases: HashMap<u64, u32>,
+    /// The boss phase each shown boss mob last sent.
+    boss_phases_shown: HashMap<u64, u32>,
     dice: Dice,
     deaths: Vec<Departure>,
     /// Hit, death and facet messages since the last [`SimWorld::take_messages`].
     combat_messages: Vec<Outgoing>,
+    /// Potions pressed: the player number and when the drink works.
+    drinks: Vec<(u64, u64)>,
+    /// Mob swings that have not hit yet, with the time they hit.
+    swings: Vec<(u64, MobAttackIntent)>,
 }
 
 /// A new player before it is in the world.
@@ -375,6 +456,10 @@ struct Arrival {
     client_context: u8,
     /// The flow of the level it arrives in.
     flow: LevelFlow,
+    /// The items another sim sent; `None` gives the login kit.
+    items: Option<Vec<CarriedItem>>,
+    /// Its experience points.
+    experience: u32,
 }
 
 impl SimWorld {
@@ -388,13 +473,24 @@ impl SimWorld {
         content: Arc<PlayerContent>,
     ) -> Self {
         Self {
-            tutorial_achievements: TutorialAchievements::of(&content.achievements),
+            achievement_rules: AchievementRules::of(
+                &content.achievements,
+                &content.archetype_unlocks,
+            ),
+            tutorials: HashMap::new(),
+            quests: HashMap::new(),
+            mob_timelines: MobTimelines::default(),
+            mob_health_shown: HashMap::new(),
+            boss_phases: HashMap::new(),
+            boss_phases_shown: HashMap::new(),
             content,
             mobs: Mobs::new(Arc::clone(&combat.spawns), &combat),
             mob_changes: MobChanges::default(),
             dice: Dice::new(combat.seed),
             deaths: Vec::new(),
             combat_messages: Vec::new(),
+            drinks: Vec::new(),
+            swings: Vec::new(),
             combat,
             world: World::new(),
             by_connection: HashMap::new(),
@@ -454,7 +550,9 @@ impl SimWorld {
                 level_info.clone(),
                 now_ms,
                 0,
-                self.tutorial_flow(),
+                &self.achievement_rules,
+                self.is_tutorial(),
+                admit.backstory.as_deref(),
             ),
             None => LevelFlow::resumed(admit.entity, 0),
         };
@@ -482,6 +580,8 @@ impl SimWorld {
             },
             client_context: LOGIN_CLIENT_CONTEXT,
             flow,
+            items: None,
+            experience: 0,
         };
         self.check(&arrival)?;
         let login = if let Some(level_info) = &level_info {
@@ -514,6 +614,9 @@ impl SimWorld {
             slots: Slots::new(),
         };
         self.spawn(arrival, motion, replication, now_ms, admit.handoffs, now_ms);
+        if admit.login && self.is_tutorial() {
+            self.start_tutorial(admit.entity, now_ms);
+        }
         Ok(login)
     }
 
@@ -555,7 +658,9 @@ impl SimWorld {
                 level_info.clone(),
                 now_ms,
                 offer.phasing_sequence,
-                self.tutorial_flow(),
+                &self.achievement_rules,
+                self.is_tutorial(),
+                offer.backstory.as_deref(),
             ),
             None => LevelFlow::resumed(offer.entity, offer.phasing_sequence),
         };
@@ -582,6 +687,8 @@ impl SimWorld {
             },
             client_context,
             flow,
+            items: offer.items.clone(),
+            experience: offer.experience,
         };
         self.check(&arrival)?;
         let level_change = if let Some(level_info) = &level_info {
@@ -623,6 +730,11 @@ impl SimWorld {
             offer.handoffs,
             retry_at,
         );
+        if enters && !self.is_tutorial() {
+            self.start_open_quest(offer.entity, now_ms);
+        } else if let Some(quest) = &offer.quest {
+            self.resume_open_quest(offer.entity, quest, now_ms);
+        }
         Ok(level_change)
     }
 
@@ -653,7 +765,8 @@ impl SimWorld {
     /// # Errors
     ///
     /// Returns [`MoveError`] when there is no such player, it is frozen, or a check refuses the
-    /// move; then the player keeps its last good position, which its next bundle shows.
+    /// move; then the player keeps its last good position. When moves stay refused for
+    /// [`REFUSED_RESYNC_MS`] the player is moved back there.
     pub fn move_to(
         &mut self,
         connection: &ConnectionRef,
@@ -683,27 +796,66 @@ impl SimWorld {
         {
             return Err(MoveError::Dead);
         }
-        let mut body = self
-            .world
-            .get_mut::<Body>(entity)
-            .ok_or(MoveError::NotInWorld)?;
-        body.motion
-            .try_move(
-                &self.settings.limits,
-                &*self.ground,
-                &self.settings.bounds,
-                next,
-                now_ms,
+        let (result, last_good) = {
+            let mut body = self
+                .world
+                .get_mut::<Body>(entity)
+                .ok_or(MoveError::NotInWorld)?;
+            (
+                body.motion.try_move(
+                    &self.settings.limits,
+                    &*self.ground,
+                    &self.settings.bounds,
+                    next,
+                    now_ms,
+                ),
+                body.motion.position(),
             )
-            .map_err(MoveError::Refused)
+        };
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return result.map_err(MoveError::Refused);
+        };
+        match result {
+            Err(refusal) => {
+                let since = player.refused_since_ms.get_or_insert(now_ms);
+                if now_ms.saturating_sub(*since) >= REFUSED_RESYNC_MS {
+                    player.moved = true;
+                    player.refused_since_ms = None;
+                    tracing::debug!(
+                        player = player.number,
+                        x = last_good.x,
+                        y = last_good.y,
+                        z = last_good.z,
+                        "moves refused too long: player moved back"
+                    );
+                }
+                Err(MoveError::Refused(refusal))
+            }
+            Ok(check) => {
+                player.refused_since_ms = None;
+                Ok(check)
+            }
+        }
     }
 
     /// Removes a player.
     pub fn leave(&mut self, connection: &ConnectionRef) -> Option<Departure> {
-        let entity = self.by_connection.remove(connection)?;
+        let entity = *self.by_connection.get(connection)?;
         let departure = self.departure(entity);
-        self.world.despawn(entity);
+        self.remove_player(connection, entity);
         departure
+    }
+
+    /// Takes the player `entity` of `connection` out of this world, with its tutorial.
+    fn remove_player(&mut self, connection: &ConnectionRef, entity: Entity) {
+        self.by_connection.remove(connection);
+        if let Some(number) = self.world.get::<Player>(entity).map(|player| player.number) {
+            self.quests.remove(&number);
+            if let Some(tutorial) = self.tutorials.remove(&number) {
+                tutorial.end(&mut self.mobs);
+            }
+        }
+        self.world.despawn(entity);
     }
 
     /// Removes every player of a gateway.
@@ -729,8 +881,7 @@ impl SimWorld {
             .get::<Player>(entity)
             .is_some_and(|player| player.handoffs == handoffs);
         if same_attempt {
-            self.by_connection.remove(connection);
-            self.world.despawn(entity);
+            self.remove_player(connection, entity);
         }
         same_attempt
     }
@@ -746,8 +897,7 @@ impl SimWorld {
             return HandoffEnd::Gone;
         };
         if accepted {
-            self.by_connection.remove(connection);
-            self.world.despawn(entity);
+            self.remove_player(connection, entity);
             return HandoffEnd::Moved;
         }
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
@@ -915,9 +1065,14 @@ impl SimWorld {
         let handoffs = self.start_handoffs(now_ms);
         let ghosts = self.ghosts_out();
         let mobs_started = Instant::now();
-        let intents = self.tick_mobs(now_ms);
+        let swings = self.tick_mobs(now_ms);
+        let intents = self.swings_landing(swings, now_ms);
         let mob_hits = self.mob_hits(intents, now_ms);
         let mob_seconds = mobs_started.elapsed().as_secs_f64();
+        self.tick_tutorials(now_ms);
+        self.tick_quests(now_ms);
+        self.drink_due(now_ms, server_time);
+        self.tick_stamina(now_ms);
         let mut messages = self.take_messages();
         let bundled = self.bundles(now_ms, server_time)?;
         messages.extend(bundled.outgoing);
@@ -955,19 +1110,344 @@ impl SimWorld {
         self.mobs.tick(&seen, now_ms, &*self.ground)
     }
 
+    /// Starts the tutorial of player `number` at `now_ms`; without the quest in the content
+    /// there is none, and the tutorial ends at its exit.
+    fn start_tutorial(&mut self, number: u64, now_ms: u64) {
+        let Some(quest) = self.content.tutorial_quest.clone() else {
+            return;
+        };
+        let (mut tutorial, orders) = Tutorial::start(
+            number,
+            quest,
+            &self.content.tutorial_level,
+            &mut self.mobs,
+            now_ms,
+        );
+        // The expansion is in the player's first achievement state.
+        if let Some(bit) = self.achievement_rules.expansion() {
+            tutorial.achievement(bit, now_ms);
+        }
+        if let Some(old) = self.tutorials.insert(number, tutorial) {
+            old.end(&mut self.mobs);
+        }
+        self.carry_out(number, orders, now_ms);
+    }
+
+    /// Runs the tutorials with their players' positions.
+    fn tick_tutorials(&mut self, now_ms: u64) {
+        let numbers: Vec<u64> = self.tutorials.keys().copied().collect();
+        for number in numbers {
+            let position = self
+                .player_by_number(number)
+                .and_then(|entity| self.world.get::<Body>(entity))
+                .map(|body| body.motion.position());
+            let (Some(position), Some(tutorial)) = (position, self.tutorials.get_mut(&number))
+            else {
+                continue;
+            };
+            let orders = tutorial.tick(&mut self.mobs, &self.content.kill_types, position, now_ms);
+            self.carry_out(number, orders, now_ms);
+            self.update_quest_tracker(number);
+        }
+    }
+
+    /// Gives the quest tracker of player `number` its tutorial's or its quest's task list.
+    fn update_quest_tracker(&mut self, number: u64) {
+        let Some(entity) = self.player_by_number(number) else {
+            return;
+        };
+        let (tasks, finished) = if let Some(tutorial) = self.tutorials.get(&number) {
+            (tutorial.progress(), tutorial.finished())
+        } else if let Some(quest) = self.quests.get(&number) {
+            (quest.progress(), quest.finished())
+        } else {
+            return;
+        };
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            player
+                .quest
+                .get_or_insert_with(|| QuestTracker::new(TUTORIAL_OBJECTIVE, number))
+                .update(tasks, finished);
+        }
+    }
+
+    /// Starts the first open-world quest of player `number`, who just left the tutorial
+    /// (retail: `12_GetOffBeach` is in its first open-world state, with the tutorial completed).
+    fn start_open_quest(&mut self, number: u64, now_ms: u64) {
+        let Some(tree) = self.content.open_world_quest.clone() else {
+            return;
+        };
+        let Some(entity) = self.player_by_number(number) else {
+            return;
+        };
+        let (run, effects) = ObjectiveRun::start(tree, now_ms);
+        self.quests.insert(number, run);
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            player.quest = Some(
+                QuestTracker::new(OPEN_WORLD_OBJECTIVE, number)
+                    .after(&[TUTORIAL_OBJECTIVE], number),
+            );
+        }
+        self.quest_effects(number, effects, now_ms);
+        self.update_quest_tracker(number);
+    }
+
+    /// Goes on with the open-world quest run `run` of player `number`, who came from another sim
+    /// of this level: its tracker's lists go on above the versions the client has.
+    fn resume_open_quest(&mut self, number: u64, run: &QuestRun, now_ms: u64) {
+        let Some(tree) = self.content.open_world_quest.clone() else {
+            return;
+        };
+        let Some(quest) = ObjectiveRun::resume(tree, run, now_ms) else {
+            tracing::warn!(
+                player = number,
+                "handed-off quest does not fit the quest tree"
+            );
+            return;
+        };
+        let Some(entity) = self.player_by_number(number) else {
+            return;
+        };
+        let tasks = quest.progress();
+        // A finished quest's end states went out from the other sim; its tracker stays empty.
+        let finished = quest.finished();
+        self.quests.insert(number, quest);
+        if finished {
+            return;
+        }
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            let mut tracker = QuestTracker::new(OPEN_WORLD_OBJECTIVE, number)
+                .after(&[TUTORIAL_OBJECTIVE], number)
+                .above(run.tracker_version);
+            tracker.update(tasks, false);
+            // The first own card on this sim sends the whole quest; nothing more is due.
+            while tracker.take_change().is_some() {}
+            player.quest = Some(tracker);
+        }
+    }
+
+    /// Feeds game event `event` to the open-world quest of player `number`.
+    fn quest_event(&mut self, number: u64, event: Event<'_>, now_ms: u64) {
+        let Some(quest) = self.quests.get_mut(&number) else {
+            return;
+        };
+        let effects = quest.event(event, now_ms);
+        self.quest_effects(number, effects, now_ms);
+    }
+
+    /// Carries out the `effects` of player `number`'s open-world quest: achievements are set or
+    /// cleared (a set one is an event of the quest again), items removed.
+    fn quest_effects(&mut self, number: u64, effects: Vec<Effect>, now_ms: u64) {
+        let Some(entity) = self.player_by_number(number) else {
+            return;
+        };
+        let mut pending = effects;
+        while !pending.is_empty() {
+            let mut set = Vec::new();
+            if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                for effect in pending.drain(..) {
+                    match effect {
+                        Effect::Achievement(id) => {
+                            player.flow.set_achievement(&self.achievement_rules, &id);
+                            set.push(id);
+                        }
+                        Effect::LockAchievement(id) => {
+                            player.flow.clear_achievement(&self.achievement_rules, &id);
+                        }
+                        Effect::RemoveItem(id) => {
+                            if let Some(gear) = player.gear.as_mut() {
+                                gear.remove(&id);
+                            }
+                        }
+                        Effect::Done(_) => {}
+                    }
+                }
+            }
+            let Some(quest) = self.quests.get_mut(&number) else {
+                return;
+            };
+            for id in set {
+                pending.extend(quest.event(Event::AchievementSet(&id), now_ms));
+            }
+        }
+    }
+
+    /// Runs the open-world quests: their timers and the players' places.
+    fn tick_quests(&mut self, now_ms: u64) {
+        let numbers: Vec<u64> = self.quests.keys().copied().collect();
+        for number in numbers {
+            let position = self
+                .player_by_number(number)
+                .and_then(|entity| self.world.get::<Body>(entity))
+                .map(|body| body.motion.position());
+            let (Some(position), Some(quest)) = (position, self.quests.get_mut(&number)) else {
+                continue;
+            };
+            let mut effects = quest.tick(now_ms);
+            effects.extend(quest.event(Event::Moved(position), now_ms));
+            self.quest_effects(number, effects, now_ms);
+            self.update_quest_tracker(number);
+        }
+    }
+
+    /// Carries out the tutorial `orders` for player `number` at `now_ms`; an item it gets goes
+    /// back to its tutorial as an event, whose orders are carried out too.
+    fn carry_out(&mut self, number: u64, orders: Vec<Order>, now_ms: u64) {
+        let Some(entity) = self.player_by_number(number) else {
+            return;
+        };
+        let mut pending = orders;
+        while !pending.is_empty() {
+            let mut gained = Vec::new();
+            let mut set_bits = Vec::new();
+            for order in pending.drain(..) {
+                if let Order::MoveTo(position) = order {
+                    if let Some(mut body) = self.world.get_mut::<Body>(entity) {
+                        body.motion = Motion::new(position, now_ms, &self.settings.limits);
+                    }
+                    if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                        player.moved = true;
+                    }
+                    continue;
+                }
+                let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+                    return;
+                };
+                match order {
+                    Order::Achievement(id) => {
+                        player.flow.set_achievement(&self.achievement_rules, &id);
+                        set_bits.extend(self.achievement_rules.bit(&id));
+                    }
+                    Order::Asset(asset, step) => match step {
+                        Step::Show => player.assets.show(asset, asset_gde_ref(number, asset)),
+                        Step::Change(change) => player.assets.change(asset, change),
+                        Step::Hide => player.assets.hide(asset),
+                    },
+                    Order::RemoveItem(id) => {
+                        if let Some(gear) = player.gear.as_mut() {
+                            gear.remove(&id);
+                        }
+                    }
+                    Order::RefillPotions(id, quantity) => {
+                        let player = &mut *player;
+                        if let (Some(item), Some(gear)) =
+                            (self.content.kits.item(&id), player.gear.as_mut())
+                        {
+                            gear.renew(item, quantity, QUICK_SLOT_1);
+                        }
+                        player.cooldowns.clear();
+                        player.cooldowns_changed = true;
+                    }
+                    Order::GiveItem(id, quantity) => {
+                        let item = self.content.kits.item(&id);
+                        let given = item
+                            .zip(player.gear.as_mut())
+                            .is_some_and(|(item, gear)| gear.add(item, quantity));
+                        if given {
+                            gained.push(id);
+                        } else {
+                            tracing::warn!(player = number, item = %id, "tutorial item not given");
+                        }
+                    }
+                    Order::ShowIsland => {
+                        let statics = &self.content.tutorial_level.statics;
+                        player.statics.show_island(statics);
+                        // Retail sends the bag's container contents ~300 ms after its card;
+                        // the client refuses a take-all on an empty container.
+                        let items = player
+                            .backstory
+                            .as_deref()
+                            .map(|backstory| self.content.kits.bag(backstory))
+                            .unwrap_or_default();
+                        let loot = bag_loot(player.character, items);
+                        player.statics.queue(statics, &BAG_PREFIX, loot);
+                    }
+                    Order::StaticChange(prefix, change) => {
+                        player.statics.change(
+                            &self.content.tutorial_level.statics,
+                            &prefix,
+                            change,
+                        );
+                    }
+                    Order::HideStatic(prefix) => {
+                        player
+                            .statics
+                            .hide(&self.content.tutorial_level.statics, &prefix);
+                    }
+                    Order::AcceptGather(request) => {
+                        let accept = gather_accept(number, request);
+                        send_now(&mut self.combat_messages, &player.connection, &[accept]);
+                    }
+                    Order::EndGather(request) => {
+                        let end = gather_end(number, request);
+                        send_now(&mut self.combat_messages, &player.connection, &end);
+                    }
+                    Order::Targeted { mob, tutorial_ai } => {
+                        let messages = targeted(number, mob, tutorial_ai);
+                        send_now(&mut self.combat_messages, &player.connection, &messages);
+                    }
+                    Order::BossPhase { mob, phase } => {
+                        self.boss_phases.insert(mob, phase);
+                    }
+                    Order::Died { mob, collision } => {
+                        let messages = died(number, mob, collision);
+                        send_now(&mut self.combat_messages, &player.connection, &messages);
+                    }
+                    Order::LockAchievement(id) => {
+                        player.flow.clear_achievement(&self.achievement_rules, &id);
+                    }
+                    Order::Experience(points) => {
+                        player.experience = player.experience.saturating_add(points);
+                        player.experience_changed = true;
+                    }
+                    Order::MoveTo(_) => {}
+                }
+            }
+            let Some(tutorial) = self.tutorials.get_mut(&number) else {
+                break;
+            };
+            for bit in set_bits {
+                tutorial.achievement(bit, now_ms);
+            }
+            for id in &gained {
+                pending.extend(tutorial.event(Event::ItemGained(id), &mut self.mobs, now_ms));
+            }
+        }
+    }
+
     /// Whether this sim runs the tutorial.
     fn is_tutorial(&self) -> bool {
         self.settings.level == TUTORIAL_LEVEL
     }
 
-    /// The tutorial achievement bits when this sim runs the tutorial.
-    fn tutorial_flow(&self) -> Option<&TutorialAchievements> {
-        self.is_tutorial().then_some(&self.tutorial_achievements)
+    /// The client of `connection` starts interaction `request` at `now_ms` (the use of a static
+    /// entity, from its input): its tutorial answers a use of the chest.
+    pub fn interact(
+        &mut self,
+        connection: &ConnectionRef,
+        request: InteractionRequest,
+        now_ms: u64,
+    ) {
+        let Some(number) = self
+            .by_connection
+            .get(connection)
+            .and_then(|entity| self.world.get::<Player>(*entity))
+            .map(|player| player.number)
+        else {
+            return;
+        };
+        let Some(tutorial) = self.tutorials.get_mut(&number) else {
+            return;
+        };
+        let orders = tutorial.interact(request, now_ms);
+        self.carry_out(number, orders, now_ms);
     }
 
-    /// Answers a facet call of the client of `connection` (tutorial-intro note, section 4). In
-    /// the tutorial, a request to leave (502) shows the loading screen and hands the player to the
-    /// open world at the next tick, as the exit does.
+    /// Answers a facet call of the client of `connection` at `now_ms` (tutorial-intro note,
+    /// section 4), and gives it to the player's tutorial: videos, cutscenes, the quick-time
+    /// lesson, UI screens, the beach bag and equips (live-tutorial note). In the tutorial, a
+    /// request to leave (502) shows the loading screen and hands the player to the open world at
+    /// the next tick, as the exit does.
     ///
     /// # Errors
     ///
@@ -976,6 +1456,7 @@ impl SimWorld {
         &mut self,
         connection: &ConnectionRef,
         message: ClientFacetMsg,
+        now_ms: u64,
     ) -> Result<(), MessageError> {
         let Some(&entity) = self.by_connection.get(connection) else {
             return Ok(());
@@ -984,6 +1465,25 @@ impl SimWorld {
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return Ok(());
         };
+        let number = player.number;
+        let ended_cutscene = player.flow.cutscene();
+        let equipped = match message {
+            ClientFacetMsg::EquipItem {
+                bag_slot,
+                equip_slot,
+                quantity,
+                instance,
+                ..
+            } => player.gear.as_mut().and_then(|gear| {
+                gear.equip(bag_slot, equip_slot, quantity, instance)
+                    .inspect_err(|refusal| {
+                        tracing::debug!(?refusal, bag_slot, equip_slot, "equip refused");
+                    })
+                    .ok()
+            }),
+            _ => None,
+        };
+        let backstory = player.backstory.clone();
         let answers = match message {
             ClientFacetMsg::ReturnToMainWorld { .. } if tutorial && !player.leaving => {
                 player.leaving = true;
@@ -991,24 +1491,72 @@ impl SimWorld {
             }
             _ => {
                 let client_context = player.client_context;
-                player
-                    .flow
-                    .answer(message, client_context, &self.tutorial_achievements)
+                player.flow.answer(message, client_context)
             }
         };
-        if answers.is_empty() {
+        send_now(&mut self.combat_messages, connection, &answers);
+        if !self.tutorials.contains_key(&number) {
+            let event = match message {
+                ClientFacetMsg::CinematicStarted { cinematic, .. } => {
+                    Some(Event::CinematicStarted(cinematic))
+                }
+                ClientFacetMsg::CinematicEnded { cinematic, .. } => {
+                    Some(Event::CinematicEnded(cinematic))
+                }
+                ClientFacetMsg::CutsceneEnded { .. } => ended_cutscene.map(Event::CutsceneEnded),
+                ClientFacetMsg::UiScreenOpened { screen, .. } => {
+                    Some(Event::UiScreenOpened(screen))
+                }
+                _ => None,
+            };
+            if let Some(event) = event {
+                self.quest_event(number, event, now_ms);
+            }
             return Ok(());
         }
-        let envelopes = answers
-            .iter()
-            .map(ServerMessage::envelope)
-            .collect::<Result<_, _>>()?;
-        self.combat_messages.push(Outgoing {
-            connection: connection.clone(),
-            channel: MESSAGE_CHANNEL,
-            reliable: true,
-            envelopes,
-        });
+        let Some(run) = self.tutorials.get_mut(&number) else {
+            return Ok(());
+        };
+        run.client_message(&message, now_ms);
+        let mobs = &mut self.mobs;
+        let orders = match message {
+            ClientFacetMsg::QteCompleted { .. } => run.lesson_done(mobs, now_ms),
+            ClientFacetMsg::CinematicStarted { cinematic, .. } => {
+                run.event(Event::CinematicStarted(cinematic), mobs, now_ms)
+            }
+            ClientFacetMsg::CinematicEnded { cinematic, .. } => {
+                run.event(Event::CinematicEnded(cinematic), mobs, now_ms)
+            }
+            ClientFacetMsg::CutsceneEnded { .. } => ended_cutscene
+                .map(|cutscene| run.event(Event::CutsceneEnded(cutscene), mobs, now_ms))
+                .unwrap_or_default(),
+            ClientFacetMsg::UiScreenOpened { screen, .. } => {
+                run.event(Event::UiScreenOpened(screen), mobs, now_ms)
+            }
+            ClientFacetMsg::EquipItem { .. } => equipped
+                .map(|item| run.event(Event::Equipped(&item), mobs, now_ms))
+                .unwrap_or_default(),
+            ClientFacetMsg::TakeAllItems { container, .. } if run.take_bag(&container, now_ms) => {
+                let items = backstory
+                    .as_deref()
+                    .map(|backstory| self.content.kits.bag(backstory))
+                    .unwrap_or_default();
+                player.statics.queue(
+                    &self.content.tutorial_level.statics,
+                    &BAG_PREFIX,
+                    bag_emptied(items.len()),
+                );
+                player.extra_members.push(interactor_cleared(&BAG_PREFIX));
+                let mut orders: Vec<Order> = items
+                    .iter()
+                    .map(|item| Order::GiveItem(item.item_id.clone(), 1))
+                    .collect();
+                orders.extend(run.event(Event::ContainerLooted, mobs, now_ms));
+                orders
+            }
+            _ => Vec::new(),
+        };
+        self.carry_out(number, orders, now_ms);
         Ok(())
     }
 
@@ -1020,6 +1568,7 @@ impl SimWorld {
             return Vec::new();
         };
         let margin = self.settings.handoff_margin_m;
+        let quests = &self.quests;
         let mut query = self.world.query::<(&mut Player, &Body, &Vitals)>();
         let mut starts = Vec::new();
         for (mut player, body, vitals) in query.iter_mut(&mut self.world) {
@@ -1036,9 +1585,13 @@ impl SimWorld {
                 continue;
             };
             player.frozen = true;
+            let tracker_version = player.quest.as_ref().map_or(0, QuestTracker::version);
+            let quest = quests
+                .get(&player.number)
+                .map(|run| run.export(now_ms, tracker_version));
             starts.push(HandoffStart {
                 target: target.clone(),
-                offer: handoff_offer(&player, body, vitals, now_ms, None),
+                offer: handoff_offer(&player, body, vitals, now_ms, None, quest),
             });
         }
         starts
@@ -1051,21 +1604,26 @@ impl SimWorld {
         let Some(target) = self.exit_target.clone() else {
             return Vec::new();
         };
+        let tutorials = &self.tutorials;
         let mut query = self.world.query::<(&mut Player, &Body, &Vitals)>();
         let mut starts = Vec::new();
         for (mut player, body, vitals) in query.iter_mut(&mut self.world) {
+            // With the quest running, the client asks to leave after the last video; without
+            // it, the exit area ends the tutorial.
+            let at_exit =
+                !tutorials.contains_key(&player.number) && at_tutorial_exit(body.motion.position());
             if player.frozen
                 || now_ms < player.no_handoff_before_ms
                 || !vitals.spawned
                 || vitals.health.is_dead()
-                || !(player.leaving || at_tutorial_exit(body.motion.position()))
+                || !(player.leaving || at_exit)
             {
                 continue;
             }
             player.frozen = true;
             starts.push(HandoffStart {
                 target: target.clone(),
-                offer: handoff_offer(&player, body, vitals, now_ms, Some(OPEN_WORLD_START)),
+                offer: handoff_offer(&player, body, vitals, now_ms, Some(OPEN_WORLD_START), None),
             });
         }
         starts
@@ -1129,11 +1687,80 @@ impl SimWorld {
                 everyone.push((ghost.entity, ghost.position));
             }
         }
-        // A dead mob is not sent (M6-B spec section 5.6).
-        for (entity, position, _) in self.mob_states().filter(|(_, _, state)| state.health > 0) {
+        // A dead mob is sent only with a prefab, whose death states play its death; without one
+        // it is not sent (M6-B spec section 5.6).
+        let content = Arc::clone(&self.content);
+        let shown = |state: &MobGhost| {
+            state.health > 0 || content.mob_looks.look(state.vitals_id).is_some()
+        };
+        let mobs: Vec<(u64, Position, MobGhost)> = self
+            .mob_states()
+            .filter(|(_, _, state)| shown(state))
+            .collect();
+        // A personal mob's timeline starts when its owner's client can see it: the first state
+        // then carries the spawn fragment, as on retail (live 2026-09-12: a sailor whose first
+        // state came after the spawn fragment ended stayed invisible).
+        let spawned: HashSet<u64> = self
+            .world
+            .query::<(&Player, &Vitals)>()
+            .iter(&self.world)
+            .filter(|(_, vitals)| vitals.spawned)
+            .map(|(player, _)| player.number)
+            .collect();
+        // Where each player is, for the facing of the mobs that fight it.
+        let positions: HashMap<u64, Position> = everyone.iter().copied().collect();
+        for (entity, position, state) in mobs {
             everyone.push((entity, position));
-            cards.insert(entity, card_of(entity, position));
+            let owner = self.mobs.owner(entity);
+            let mut card = card_of(entity, position, state, owner);
+            let previous = self.mob_health_shown.insert(entity, state.health);
+            card.health_changed = previous != Some(state.health);
+            card.first_damage = card.health_changed
+                && previous == Some(state.max_health)
+                && state.health < state.max_health;
+            if let Some(&phase) = self.boss_phases.get(&entity) {
+                let shown = self.boss_phases_shown.insert(entity, phase);
+                card.boss_phase = Some(phase);
+                card.boss_phase_changed = shown != Some(phase);
+            }
+            let unseen = owner.is_some_and(|owner| !spawned.contains(&owner));
+            if let Some(look) = content
+                .mob_looks
+                .look(state.vitals_id)
+                .filter(|look| look.alc.is_some() && !unseen)
+            {
+                let target = self
+                    .mobs
+                    .target(entity)
+                    .and_then(|target| positions.get(&target).copied());
+                let pose = MobPose {
+                    position,
+                    brain: self.mobs.brain_state(entity),
+                    dead: state.health == 0,
+                    target,
+                };
+                let frame = self.mob_timelines.advance(
+                    entity,
+                    server_time,
+                    &pose,
+                    animations_of(&look.asset),
+                );
+                if frame.alert_started {
+                    self.mobs.freeze(entity, now_ms + ALERT_MS);
+                }
+                card.alc = Some(frame);
+            }
+            cards.insert(entity, card);
         }
+        let shown: HashSet<u64> = cards.keys().copied().collect();
+        self.mob_timelines.keep_only(&shown);
+        self.mob_health_shown
+            .retain(|entity, _| shown.contains(entity));
+        self.boss_phases_shown
+            .retain(|entity, _| shown.contains(entity));
+        let mobs = &self.mobs;
+        self.boss_phases
+            .retain(|entity, _| mobs.health(*entity).is_some());
         // The radius is checked at start to be a finite number above 0.
         let Some(mut grid) = SpatialGrid::new(self.settings.interest_radius_m) else {
             return Ok(Bundled::default());
@@ -1145,6 +1772,8 @@ impl SimWorld {
             grid: &grid,
             positions: everyone.iter().copied().collect(),
             cards,
+            mob_looks: &content.mob_looks,
+            level: &content.tutorial_level,
             local_player_card: self.settings.local_player_card,
             now_ms,
             server_time,
@@ -1219,11 +1848,18 @@ impl SimWorld {
                     character: arrival.character,
                     name: arrival.name,
                     look: arrival.look,
-                    gear: gear::starter_gear(
-                        &self.content.kits,
-                        arrival.character,
-                        arrival.backstory.as_deref(),
-                    ),
+                    gear: match &arrival.items {
+                        Some(items) => Some(Gear::carried_in(
+                            &self.content.kits,
+                            arrival.character,
+                            items,
+                        )),
+                        None => Gear::starter(
+                            &self.content.kits,
+                            arrival.character,
+                            arrival.backstory.as_deref(),
+                        ),
+                    },
                     backstory: arrival.backstory,
                     number: arrival.number,
                     bundles_sent: replication.bundles_sent,
@@ -1238,6 +1874,21 @@ impl SimWorld {
                     client_context: arrival.client_context,
                     flow: arrival.flow,
                     leaving: false,
+                    moved: false,
+                    refused_since_ms: None,
+                    own_spawned_ms: None,
+                    teleports: 0,
+                    quest: None,
+                    experience: arrival.experience,
+                    experience_changed: false,
+                    cooldowns: Vec::new(),
+                    cooldowns_changed: false,
+                    healed_to: None,
+                    stamina: Stamina::default(),
+                    list_version: FIRST_VERSION,
+                    extra_members: Vec::new(),
+                    statics: StaticViews::default(),
+                    assets: AssetViews::default(),
                     frozen: false,
                     handoffs,
                     no_handoff_before_ms,
@@ -1271,6 +1922,114 @@ impl SimWorld {
     }
 }
 
+/// Queues `messages` for the client of `connection` on the reliable message channel; a message
+/// that cannot be encoded is logged and left out.
+fn send_now(outgoing: &mut Vec<Outgoing>, connection: &ConnectionRef, messages: &[ServerMessage]) {
+    let envelopes: Vec<Vec<u8>> = messages
+        .iter()
+        .filter_map(|message| {
+            message
+                .envelope()
+                .inspect_err(|error| tracing::warn!(%error, "message not sent"))
+                .ok()
+        })
+        .collect();
+    if !envelopes.is_empty() {
+        outgoing.push(Outgoing {
+            connection: connection.clone(),
+            channel: MESSAGE_CHANNEL,
+            reliable: true,
+            envelopes,
+        });
+    }
+}
+
+/// The messages when mob `mob` picks player `number` as its target (2415); a sailor's tutorial
+/// AI also saw the player (955; live-tutorial note, section 7).
+fn targeted(number: u64, mob: u64, tutorial_ai: bool) -> Vec<ServerMessage> {
+    use nw_messages::facet::component;
+    let mut messages = vec![ServerMessage::SelectedAsTarget(SelectedAsTargetMsg(
+        TargetMsg {
+            header: nw_messages::FacetHeader::of(component::AI_TARGETABLE, number),
+            creature: mob.swap_bytes(),
+        },
+    ))];
+    if tutorial_ai {
+        messages.push(ServerMessage::PlayerSeenByAi(PlayerSeenByAiMsg {
+            header: nw_messages::FacetHeader::of_child(
+                component::TUTORIAL_AI,
+                component::TUTORIAL_AI_CHILD,
+                mob,
+            ),
+        }));
+    }
+    messages
+}
+
+/// The messages when mob `mob`, whose `CharacterComponent` is `collision`, dies near player
+/// `number`: it drops the player as its target (3916) and stops colliding (1793).
+fn died(number: u64, mob: u64, collision: u64) -> [ServerMessage; 2] {
+    use nw_messages::facet::component;
+    [
+        ServerMessage::UnselectedAsTarget(UnselectedAsTargetMsg(TargetMsg {
+            header: nw_messages::FacetHeader::of(component::AI_TARGETABLE, number),
+            creature: mob.swap_bytes(),
+        })),
+        ServerMessage::DisableCollision(DisableCollisionMsg {
+            header: nw_messages::FacetHeader::of(collision, mob),
+        }),
+    ]
+}
+
+/// The display name string id of the ruin chest (the retail answer).
+const CHEST_DISPLAY_NAME: &[u8] = b"@LootContainer_AncientSmall_DisplayName";
+/// The validation result of an accepted interaction.
+const INTERACTION_ACCEPTED: u8 = 1;
+
+/// The entity number whose facet entity is that of the static entity `target` (its first eight
+/// bytes reversed, as for a player).
+fn facet_number(target: &[u8; nw_messages::wire::RAW_ID_LEN]) -> u64 {
+    let mut first = [0; 8];
+    first.copy_from_slice(&target[..8]);
+    u64::from_be_bytes(first)
+}
+
+/// The accept of player `number`'s gather `request` (3743; ftue-static-entities note, section 5).
+fn gather_accept(number: u64, request: InteractionRequest) -> ServerMessage {
+    ServerMessage::InteractionValidated(InteractionValidatedMsg {
+        header: nw_messages::FacetHeader::of(nw_messages::facet::component::INTERACTOR, number),
+        target: request.target,
+        target_entity: request.target_entity,
+        interaction: request.interaction,
+        kind: request.kind,
+        status: INTERACTION_ACCEPTED,
+        name: CHEST_DISPLAY_NAME.to_vec(),
+        extra: 0,
+        // An id of unknown meaning: one per player and interaction.
+        id: *Uuid::new_v5(
+            &Uuid::from_u64_pair(number, request.interaction),
+            &request.target,
+        )
+        .as_bytes(),
+    })
+}
+
+/// The end of player `number`'s gather `request`: the interaction ends (3746) and the chest's
+/// gathering stops (2724).
+fn gather_end(number: u64, request: InteractionRequest) -> [ServerMessage; 2] {
+    [
+        ServerMessage::InteractionEnded(InteractionEndedMsg {
+            header: nw_messages::FacetHeader::of(nw_messages::facet::component::INTERACTOR, number),
+        }),
+        ServerMessage::GatheringInterrupted(GatheringInterruptedMsg {
+            header: nw_messages::FacetHeader::of(
+                nw_messages::facet::component::CHEST_GATHERABLE_CONTROLLER,
+                facet_number(&request.target),
+            ),
+        }),
+    ]
+}
+
 fn departure_of(player: &Player, body: &Body) -> Departure {
     Departure {
         connection: player.connection.clone(),
@@ -1286,6 +2045,9 @@ struct Neighbourhood<'a> {
     grid: &'a SpatialGrid<u64>,
     positions: HashMap<u64, Position>,
     cards: HashMap<u64, MobCard>,
+    mob_looks: &'a MobLooks,
+    /// The tutorial level's static and asset entities.
+    level: &'a FtueLevel,
     local_player_card: bool,
     now_ms: u64,
     server_time: u64,
@@ -1316,8 +2078,17 @@ impl Neighbourhood<'_> {
             let mut numbers: Vec<u64> = if positions_only() || hold_others {
                 Vec::new()
             } else {
-                seen.entered.into_iter().chain(seen.stayed).collect()
+                seen.entered
+                    .into_iter()
+                    .chain(seen.stayed)
+                    .filter(|number| self.cards.get(number).is_none_or(|card| card.seen_by(own)))
+                    .collect()
             };
+            // The static entities come with the other entities, once the client has spawned.
+            if !(positions_only() || hold_others) {
+                numbers.extend(player.statics.numbers());
+                numbers.extend(player.assets.numbers());
+            }
             numbers.sort_unstable();
             player.slots.keep_only(&numbers);
             // Until its client spawned the player, the client keeps the own states in its
@@ -1330,6 +2101,7 @@ impl Neighbourhood<'_> {
                 && self.now_ms >= player.own_card_due_ms;
             if first_card {
                 player.own_card_sent = true;
+                player.own_spawned_ms = Some(self.server_time);
             }
             let own_carded = first_card
                 || (self.local_player_card
@@ -1343,24 +2115,97 @@ impl Neighbourhood<'_> {
             } else {
                 OwnCard::Without
             };
+            // A move by the server goes once the client has spawned.
+            let moved = own_card != OwnCard::Spawn && vitals.spawned && player.moved;
+            let teleport = if moved {
+                player.moved = false;
+                player.teleports = player.teleports.wrapping_add(1);
+                let since_spawn_ms = player
+                    .own_spawned_ms
+                    .map_or(0, |spawned| self.server_time.saturating_sub(spawned));
+                tracing::debug!(
+                    player = own,
+                    teleports = player.teleports,
+                    since_spawn_ms,
+                    "own teleport"
+                );
+                Some(OwnTeleport::of(player.teleports, since_spawn_ms))
+            } else {
+                None
+            };
             let mut groups: Vec<BundleGroup> = Vec::new();
             if own_sent {
-                // The whole gear and achievements go with the first card only; later the
-                // achievements send their changes.
+                // The whole gear and achievements go with the first card; later the
+                // achievements send their changes, and the gear its whole states again after a
+                // change.
                 let first = own_card == OwnCard::Spawn;
                 let achievements = if first {
                     player.flow.first_achievements()
                 } else {
                     player.flow.take_achievement_changes()
                 };
+                let gear = player.gear.as_mut().and_then(|gear| {
+                    if first {
+                        Some(gear.states())
+                    } else {
+                        gear.take_change()
+                    }
+                });
+                // Retail sends an empty storage search before the bundle of each item change.
+                if !first && gear.is_some() {
+                    outgoing.push(Outgoing {
+                        connection: player.connection.clone(),
+                        channel: MESSAGE_CHANNEL,
+                        reliable: true,
+                        envelopes: vec![
+                            ServerMessage::StorageSearchItems(StorageSearchItemsMsg::empty(own))
+                                .envelope()?,
+                        ],
+                    });
+                }
+                // The quest tracker: the whole quest with the first card, then its changes.
+                let objectives = player.quest.as_mut().and_then(|quest| {
+                    if first {
+                        Some(quest.first_state())
+                    } else {
+                        quest.take_change()
+                    }
+                });
+                // The experience: whole with the first card, then after each change.
+                let progression = if first {
+                    Some(ProgressionState::login(player.experience))
+                } else {
+                    std::mem::take(&mut player.experience_changed)
+                        .then(|| ProgressionState::experience(player.experience))
+                };
+                // The cooldowns and a heal after a potion.
+                let cooldowns = std::mem::take(&mut player.cooldowns_changed).then(|| {
+                    player.list_version += 1;
+                    CooldownsState {
+                        consumables: Some(FullList {
+                            version: Some(player.list_version),
+                            elements: player.cooldowns.clone(),
+                        }),
+                    }
+                });
+                let health_change = player.healed_to.take();
+                let stamina = player.stamina.take_change();
                 let states = PlayerStates {
                     character_id: *player.character.as_bytes(),
                     look: player.look,
                     health: Some((vitals.health.current(), vitals.health.max())),
-                    gear: player.gear.as_ref().filter(|_| first),
+                    gear: gear.as_ref(),
                     achievements: achievements.as_ref(),
+                    objectives: objectives.as_ref(),
+                    progression,
+                    health_change,
+                    cooldowns: cooldowns.as_ref(),
+                    stamina,
                 };
-                groups.extend(own_group(own, states, own_position, own_card)?);
+                if let Some(mut group) = own_group(own, states, own_position, own_card, teleport)? {
+                    group.members.append(&mut player.extra_members);
+                    groups.push(group);
+                }
             }
             if let Some(level_info) = player.flow.level_info_due(self.now_ms) {
                 outgoing.push(Outgoing {
@@ -1370,13 +2215,35 @@ impl Neighbourhood<'_> {
                     envelopes: vec![level_info.envelope()?],
                 });
             }
+            let statics_ids = player.flow.phase_id().map(|phase_id| {
+                let player_gde_ref = raw_id_of_entity(own);
+                let mut player_facet = [0; FACET_LEN];
+                player_facet.copy_from_slice(&player_gde_ref[..FACET_LEN]);
+                player_facet.reverse();
+                ftue_entities::SessionIds {
+                    player_gde_ref,
+                    player_facet,
+                    phase_id,
+                }
+            });
             for number in numbers {
-                let (kind, position) = match self.cards.get(&number) {
-                    Some(card) => (EntityKind::mob(number), card.position),
-                    None => match self.positions.get(&number) {
-                        Some(position) => (EntityKind::PLAYER, *position),
-                        None => continue,
-                    },
+                if number >= STATIC_ENTITY_BASE {
+                    let (Some(ids), Some(slot)) = (statics_ids, player.slots.slot(number)) else {
+                        continue;
+                    };
+                    groups.extend(if number >= ASSET_ENTITY_BASE {
+                        player.assets.group(number, slot, self.level, &ids)
+                    } else {
+                        player
+                            .statics
+                            .group(number, slot, &self.level.statics, &ids)
+                    });
+                    continue;
+                }
+                let seen = match (self.cards.get(&number), self.positions.get(&number)) {
+                    (Some(card), _) => Ok(card),
+                    (None, Some(position)) => Err(*position),
+                    (None, None) => continue,
                 };
                 // Every slot in use: the entity is not sent until one is free.
                 let Some(slot) = player.slots.slot(number) else {
@@ -1385,14 +2252,25 @@ impl Neighbourhood<'_> {
                 // Staggered by the entity number, so the cards of a crowd do not all come in one
                 // bundle.
                 let refresh = player.bundles_sent.wrapping_add(number) % CARD_REFRESH_BUNDLES == 0;
-                groups.extend(entity_group(
-                    slot.interest,
-                    number,
-                    kind,
-                    position,
-                    slot.new || refresh,
-                    None,
-                ));
+                let carded = slot.new || refresh;
+                // A mob card, else a player's position.
+                groups.extend(match seen {
+                    Ok(card) => {
+                        let look = self.mob_looks.look(card.state.vitals_id);
+                        // A mob with a prefab gets its card once, as on retail: the card makes
+                        // the client load the creature slice, and a card again starts that
+                        // load over, so the mob never shows (live 2026-09-12).
+                        let carded = if look.is_some() { slot.new } else { carded };
+                        let group = mob_group(slot.interest, card, look, carded)?;
+                        if let Some(group) = &group {
+                            log_mob_group(number, carded, group);
+                        }
+                        group
+                    }
+                    Err(position) => {
+                        remote_group(slot.interest, number, EntityKind::PLAYER, position, carded)?
+                    }
+                });
             }
             counted += groups
                 .iter()
@@ -1419,10 +2297,8 @@ impl Neighbourhood<'_> {
                     channel: MESSAGE_CHANNEL,
                     reliable: true,
                     envelopes: vec![
-                        ServerMessage::TimeSynch(TimeSynchMsg {
-                            time: self.server_time,
-                        })
-                        .envelope()?,
+                        ServerMessage::TimeSynch(TimeSynchMsg::at_server_ms(self.server_time))
+                            .envelope()?,
                     ],
                 });
             }
@@ -1434,15 +2310,17 @@ impl Neighbourhood<'_> {
     }
 }
 
-/// The offer that hands `player` to another sim. `enter_at` is `Some` for a player that leaves
-/// this level for another one (the end of the tutorial): it appears there at that position, the
-/// taker sends the level change, and the client's entity slots start empty.
+/// The offer that hands `player` to another sim, with its run of its open-world `quest`.
+/// `enter_at` is `Some` for a player that leaves this level for another one (the end of the
+/// tutorial): it appears there at that position, the taker sends the level change, and the
+/// client's entity slots start empty.
 fn handoff_offer(
     player: &Player,
     body: &Body,
     vitals: &Vitals,
     now_ms: u64,
     enter_at: Option<Position>,
+    quest: Option<QuestRun>,
 ) -> HandoffOffer {
     let state = body.motion.export(now_ms);
     let enters = enter_at.is_some();
@@ -1478,6 +2356,9 @@ fn handoff_offer(
         phasing_sequence: player.flow.phasing_sequence(),
         client_context: player.client_context,
         enter_level: enters,
+        items: player.gear.as_ref().map(Gear::carried),
+        experience: player.experience,
+        quest,
     }
 }
 
@@ -1552,6 +2433,9 @@ mod tests {
         }
     }
 
+    /// The sea height of the test level: below the test players.
+    pub(super) const OCEAN_LEVEL_M: f32 = 20.0;
+
     pub(super) fn settings(max_visible_players: usize, max_players: u32) -> WorldSettings {
         WorldSettings {
             interest_radius_m: RADIUS,
@@ -1572,6 +2456,7 @@ mod tests {
             tick_threads: 1,
             local_player_card: true,
             level: OPEN_WORLD_LEVEL,
+            ocean_level_m: OCEAN_LEVEL_M,
         }
     }
 
@@ -1982,7 +2867,11 @@ mod tests {
     fn a_tutorial_sim_logs_players_into_the_tutorial_level() {
         let mut world = tutorial_world();
         let login = world
-            .admit(&admit_at(1, TUTORIAL_START.x, true), NOW, SERVER_TIME)
+            .admit(
+                &admit_at(1, nw_sim_core::TUTORIAL_START.x, true),
+                NOW,
+                SERVER_TIME,
+            )
             .expect("admit")
             .expect("login messages");
         let level = level_info_in(&login);
@@ -2004,7 +2893,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tutorial_flow_unlocks_the_intro_answers_the_level_and_leaves_on_request() {
+    fn the_tutorial_quest_unlocks_the_intro_the_level_is_answered_and_leaving_works() {
         const INTRO_UNLOCK_BIT: u32 = 14_804;
         let mut tutorial_settings = settings(MANY, MAX_PLAYERS);
         tutorial_settings.level = TUTORIAL_LEVEL;
@@ -2019,13 +2908,18 @@ mod tests {
                     "FTUE_Intro2_Cinematic_Unlock".to_owned(),
                     INTRO_UNLOCK_BIT,
                 )]),
+                tutorial_quest: Some(encounter::tests::tree()),
                 ..PlayerContent::default()
             }),
         );
         world.set_table(&table(&["sim-a"])).expect("table");
         let who = connection(1);
         world
-            .admit(&admit_at(1, TUTORIAL_START.x, true), NOW, SERVER_TIME)
+            .admit(
+                &admit_at(1, nw_sim_core::TUTORIAL_START.x, true),
+                NOW,
+                SERVER_TIME,
+            )
             .expect("admit");
         let card_at = NOW + OWN_CARD_DELAY_MS;
         let bundle = bundle_of(&tick(&mut world, card_at).messages, &who).expect("card");
@@ -2064,10 +2958,15 @@ mod tests {
                     header,
                     client_context: LOGIN_CLIENT_CONTEXT,
                 },
+                NOW,
             )
             .expect("ack");
         world
-            .facet_message(&who, ClientFacetMsg::ReturnToMainWorld { header, flag: 0 })
+            .facet_message(
+                &who,
+                ClientFacetMsg::ReturnToMainWorld { header, flag: 0 },
+                NOW,
+            )
             .expect("leave");
         let output = tick(&mut world, NOW + level_flow::LEVEL_INFO_AGAIN_MS + 33);
         let messages = messages_for(&output.messages, &who);
@@ -2087,6 +2986,122 @@ mod tests {
             offer.phasing_sequence, 2,
             "the level change goes on from it"
         );
+    }
+
+    /// The sailor asset of the prefab table (mob-cards note, section 1.3).
+    const SAILOR_ASSET_HEX: &str = "b7e33b294bcf57b8a476abdc3a31fae7";
+
+    /// The mobs whose cards name `asset` in the bundles of `outgoing` for `who`.
+    fn cards_of(
+        outgoing: &[Outgoing],
+        who: &ConnectionRef,
+        asset: nw_messages::AssetId,
+    ) -> Vec<u64> {
+        outgoing
+            .iter()
+            .filter(|out| out.connection == *who && out.channel == REPLICATION_CHANNEL)
+            .flat_map(|out| &out.envelopes)
+            .flat_map(|bytes| SlotRead::of(&bundle_in(bytes)).expect("read").updates)
+            .flat_map(|update| update.members)
+            .filter_map(|member| match member.state {
+                MemberState::GdeMetadata(card) if card.asset == Some(asset) => card.entity_number(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_ship_fight_shows_its_sailors_to_their_player_and_brings_two_more() {
+        let prefab = format!(
+            r#"[{{"vitals_id":{},"vitals_name":null,"asset":"{SAILOR_ASSET_HEX}","sub_id":2,
+                "alc_component":5,"vitals_component":9,"first_members":[],"death_members":[],
+                "seen":1}}]"#,
+            encounter::tests::sailor_vitals()
+        );
+        let prefabs = nw_content::mob_prefabs::MobPrefabs::parse(&prefab).expect("table");
+        let (mob_looks, _) = crate::player_content::MobLooks::of(&prefabs);
+        let mut tutorial_settings = settings(MANY, MAX_PLAYERS);
+        tutorial_settings.level = TUTORIAL_LEVEL;
+        let mut world = SimWorld::new(
+            tutorial_settings,
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("tut-1"),
+            encounter::tests::sailor_combat(),
+            Arc::new(PlayerContent {
+                mob_looks,
+                kill_types: encounter::tests::kill_types(),
+                tutorial_quest: Some(encounter::tests::tree()),
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a"])).expect("table");
+        let asset = world
+            .content
+            .mob_looks
+            .look(encounter::tests::sailor_vitals())
+            .expect("sailor look")
+            .asset;
+        let sailor_cards =
+            |outgoing: &[Outgoing], who: &ConnectionRef| cards_of(outgoing, who, asset);
+        let (owner, other) = (connection(1), connection(2));
+        for number in [1, 2] {
+            let mut admit = admit_at(number, TUTORIAL_START.x, true);
+            admit.position = Point::from(nw_sim_core::TUTORIAL_START);
+            world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        }
+        let spawn_at = NOW + OWN_CARD_DELAY_MS;
+        tick(&mut world, spawn_at);
+        world.heard_from(&owner);
+        world.heard_from(&other);
+        let output = tick(&mut world, spawn_at + 33);
+        assert!(
+            sailor_cards(&output.messages, &owner).is_empty(),
+            "the first sailor comes later, as on retail"
+        );
+        let card_at = NOW + encounter::FIRST_SAILOR_DELAY_MS;
+        let output = tick(&mut world, card_at + 33);
+        let first = sailor_cards(&output.messages, &owner);
+        assert_eq!(first.len(), 1, "the owner sees its waiting sailor");
+        assert!(
+            sailor_cards(&output.messages, &other)
+                .iter()
+                .all(|sailor| !first.contains(sailor)),
+            "another player does not see it"
+        );
+        let mut again = 0;
+        for step in 2..=CARD_REFRESH_BUNDLES + 1 {
+            let output = tick(&mut world, card_at + 33 * step);
+            again += sailor_cards(&output.messages, &owner)
+                .iter()
+                .filter(|sailor| **sailor == first[0])
+                .count();
+        }
+        assert_eq!(again, 0, "a mob with a prefab gets its card once");
+        let card_at = card_at + 33 * CARD_REFRESH_BUNDLES;
+        let header = nw_messages::FacetHeader::of(nw_messages::facet::component::PLAYER, 1);
+        world
+            .facet_message(
+                &owner,
+                ClientFacetMsg::QteCompleted {
+                    header,
+                    sequence: 0,
+                },
+                card_at,
+            )
+            .expect("lesson done");
+        let sailor = world.mobs.get_mut(first[0]).expect("sailor");
+        let max = sailor.health.max();
+        sailor.health.take(max);
+        let mut seen = Vec::new();
+        for step in 2..5 {
+            let output = tick(&mut world, card_at + 33 * step);
+            seen.extend(sailor_cards(&output.messages, &owner));
+        }
+        seen.retain(|sailor| *sailor != first[0]);
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), 2, "two more sailors come to their owner");
     }
 
     #[test]
@@ -2266,12 +3281,13 @@ mod tests {
             .into_iter()
             .find(SlotUpdate::is_local_player)
             .expect("own group");
-        let expected = gear::starter_gear(
+        let expected = Gear::starter(
             &gear::tests::kits(),
             admit.character,
             Some(gear::tests::BACKSTORY),
         )
-        .expect("gear");
+        .expect("gear")
+        .states();
         let paperdoll = own
             .members
             .iter()
@@ -2491,6 +3507,62 @@ mod tests {
         assert!(refused.is_err());
         let departure = world.leave(&a).expect("left");
         assert_eq!(departure.moved_at_ms, NOW + ONE_SECOND_MS);
+    }
+
+    #[test]
+    fn refused_moves_for_a_while_move_the_player_back() {
+        let mut world = world();
+        let a = connection(1);
+        join(&mut world, 1, 0.0);
+        let entity = world.player_by_number(1).expect("player");
+        let refused_since_ms = |world: &SimWorld| {
+            world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .refused_since_ms
+        };
+        let moved = |world: &SimWorld| world.world.get::<Player>(entity).expect("player").moved;
+        let far = at(SPEED_MPS * 10.0);
+        let first = NOW + 1;
+        assert_eq!(
+            world.move_to(&a, far, first),
+            Err(MoveError::Refused(MoveRefusal::TooFast))
+        );
+        assert_eq!(refused_since_ms(&world), Some(first));
+        assert!(
+            !moved(&world),
+            "one refused move only keeps the last good position"
+        );
+        let before = first + REFUSED_RESYNC_MS - 1;
+        assert_eq!(
+            world.move_to(&a, far, before),
+            Err(MoveError::Refused(MoveRefusal::TooFast))
+        );
+        assert!(
+            !moved(&world),
+            "a short row of refused moves does not move the player"
+        );
+        let over = first + REFUSED_RESYNC_MS;
+        assert_eq!(
+            world.move_to(&a, far, over),
+            Err(MoveError::Refused(MoveRefusal::TooFast))
+        );
+        assert!(
+            moved(&world),
+            "then the next own state moves the player back"
+        );
+        assert_eq!(refused_since_ms(&world), None, "the move-back ends the row");
+        assert_eq!(
+            world.move_to(&a, far, over + 1),
+            Err(MoveError::Refused(MoveRefusal::TooFast))
+        );
+        assert_eq!(refused_since_ms(&world), Some(over + 1), "a new row starts");
+        assert_eq!(
+            world.move_to(&a, at(SPEED_MPS), over + REFUSED_RESYNC_MS),
+            Ok(GroundCheck::NoGround)
+        );
+        assert_eq!(refused_since_ms(&world), None, "a good move ends the row");
     }
 
     #[test]
@@ -2780,14 +3852,14 @@ mod tests {
         slots.keep_only(&[]);
         let full: Vec<BundleGroup> = (0..MAX_BUNDLE_MEMBERS as u64)
             .filter_map(|offset| {
-                entity_group(
+                remote_group(
                     u16::MAX - offset as u16,
                     largest_number - offset,
                     EntityKind::PLAYER,
                     at(0.0),
                     true,
-                    None,
                 )
+                .expect("encode")
             })
             .collect();
         // The largest sequence that leaves room for the next bundles of this tick.

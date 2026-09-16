@@ -1,0 +1,559 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! The tutorial's static level entities that one player sees (ftue-static-entities note).
+//!
+//! The client has the tutorial's static entities (the beach bag, the ruin chest, trigger volumes,
+//! timelines) in its level slices. The server still sends each one a spawn card that names only
+//! its `GdeRef`, with the states of some of its components; the client uses the bag and the
+//! chest through them. The cards and states are the retail ones of the static entity table
+//! ([`FtueEntities`]), with this player's ids written in. Retail shows the ship's entities until
+//! the move into the water, and the island's after it. This server sends only the island's: with
+//! the ship's, the live client showed a black world on the ship (2026-09-12), and the ship needs
+//! none of them.
+
+use std::collections::{BTreeMap, VecDeque};
+
+use nw_content::ftue_entities::{EntityMember, FtueEntities, GDE_REF_PREFIX_LEN, SessionIds};
+use nw_content::starter::KitItem;
+use nw_messages::items::{FullList, ITEM_BOUND, ItemRecord, SYNC_CONTAINER, SYNC_MOVED};
+use nw_messages::{BundleGroup, BundleMember, ContainerState, MemberState};
+use uuid::Uuid;
+
+use super::gear::instance_id;
+use super::slots::Slot;
+
+/// First slot key of a static entity: its index in the table is added. Keys are never sent; they
+/// stay above every player and mob number.
+pub(super) const STATIC_ENTITY_BASE: u64 = 1 << 40;
+/// When the table's capture moved the player into the water: entities carded before it belong to
+/// the ship.
+const RETAIL_WATER_MOVE_MS: u64 = 118_546;
+
+/// The bag entity's container component (retail take-all target).
+const BAG_CONTAINER_COMPONENT: u64 = 2;
+/// The bag entity's components: interact state, loot-drop glow, delayed events.
+const BAG_INTERACT_COMPONENT: u64 = 3;
+const BAG_LOOT_COMPONENT: u64 = 6;
+const BAG_EVENT_COMPONENTS: [u64; 2] = [7, 8];
+/// The player's component whose state names the interaction target (retail take group).
+const INTERACTOR_COMPONENT: u64 = 26;
+/// `MB::LootDropReplicatedState` (class 2027): the loot glow, on and off (retail bodies).
+const LOOT_DROP_TYPE_INDEX: u64 = 2027;
+const LOOT_DROP_ON: &[u8] = &[0x01, 0x01, 0x00, 0x00, 0x00, 0x01];
+const LOOT_DROP_OFF: &[u8] = &[0x01, 0x01, 0x00, 0x00, 0x00, 0x00];
+/// `MB::InteractReplicatedState` (class 2930) of a taken container (retail take group).
+const INTERACT_TYPE_INDEX: u64 = 2930;
+const INTERACT_TAKEN: &[u8] = &[0x01, 0x01, 0x00];
+/// `MB::DelayedEventComponentReplicatedState` (class 3139) bodies the bag's event components
+/// send at the take (retail values, recorded).
+const DELAYED_EVENT_TYPE_INDEX: u64 = 3139;
+const BAG_EVENT_BODIES: [&[u8]; 2] = [&[0x01, 0x01, 0x3d, 0x00], &[0x01, 0x01, 0x2e, 0x66]];
+/// `MB::InteractorComponentReplicatedState` (class 3752): the take clears the target.
+const INTERACTOR_TYPE_INDEX: u64 = 3752;
+/// List version of the bag's filled and emptied containers (retail values).
+const BAG_FILLED_VERSION: u64 = 5;
+const BAG_EMPTIED_VERSION: u64 = 6;
+
+/// One of the groups [`StaticViews::group`] sends after the card: `Recorded` replays a change of
+/// the static entity table; `Built` is a group this server made itself (the bag's loot contents
+/// and the states of its take).
+#[derive(Debug, Clone, PartialEq)]
+enum Pending {
+    Recorded(Vec<EntityMember>),
+    Built(Vec<BundleMember>),
+}
+
+/// The static entities one player sees, with the state changes not sent yet.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(super) struct StaticViews {
+    /// Table index of each shown entity, with its change groups to send in order.
+    shown: BTreeMap<usize, VecDeque<Pending>>,
+}
+
+impl StaticViews {
+    /// Shows the island's entities of `entities` (those carded after the move into the water).
+    pub(super) fn show_island(&mut self, entities: &FtueEntities) {
+        self.shown.clear();
+        for (index, entity) in entities.entities.iter().enumerate() {
+            let carded_at = entity.spawns.first().map(|spawn| spawn.time_ms);
+            if carded_at.is_some_and(|at| at >= RETAIL_WATER_MOVE_MS) {
+                self.shown.insert(index, VecDeque::new());
+            }
+        }
+    }
+
+    /// Queues change group `change` of the shown entity whose `GdeRef` starts with `prefix`.
+    pub(super) fn change(
+        &mut self,
+        entities: &FtueEntities,
+        prefix: &[u8; GDE_REF_PREFIX_LEN],
+        change: usize,
+    ) {
+        let Some((index, group)) = find(entities, prefix)
+            .and_then(|index| Some((index, entities.entities[index].changes.get(change)?)))
+        else {
+            return;
+        };
+        if let Some(pending) = self.shown.get_mut(&index) {
+            pending.push_back(Pending::Recorded(group.members.clone()));
+        }
+    }
+
+    /// Queues `members` as the next change of the shown entity whose `GdeRef` starts with
+    /// `prefix`: a state this server makes, not a replay of the table (the bag's loot contents
+    /// and its take).
+    pub(super) fn queue(
+        &mut self,
+        entities: &FtueEntities,
+        prefix: &[u8; GDE_REF_PREFIX_LEN],
+        members: Vec<BundleMember>,
+    ) {
+        if let Some(pending) = find(entities, prefix).and_then(|index| self.shown.get_mut(&index)) {
+            pending.push_back(Pending::Built(members));
+        }
+    }
+
+    /// Hides the entity whose `GdeRef` starts with `prefix`.
+    pub(super) fn hide(&mut self, entities: &FtueEntities, prefix: &[u8; GDE_REF_PREFIX_LEN]) {
+        if let Some(index) = find(entities, prefix) {
+            self.shown.remove(&index);
+        }
+    }
+
+    /// The slot keys of the shown entities.
+    pub(super) fn numbers(&self) -> impl Iterator<Item = u64> + '_ {
+        self.shown
+            .keys()
+            .map(|index| STATIC_ENTITY_BASE + *index as u64)
+    }
+
+    /// The group of the entity of slot key `number` in `slot`: its spawn states when the slot is
+    /// new, else its next change; `None` for no shown entity or nothing to send.
+    pub(super) fn group(
+        &mut self,
+        number: u64,
+        slot: Slot,
+        entities: &FtueEntities,
+        ids: &SessionIds,
+    ) -> Option<BundleGroup> {
+        let index = usize::try_from(number.checked_sub(STATIC_ENTITY_BASE)?).ok()?;
+        let pending = self.shown.get_mut(&index)?;
+        let members = if slot.new {
+            Pending::Recorded(
+                entities
+                    .entities
+                    .get(index)?
+                    .spawns
+                    .first()?
+                    .members
+                    .clone(),
+            )
+        } else {
+            pending.pop_front()?
+        };
+        Some(BundleGroup {
+            interest: u64::from(slot.interest),
+            members: match members {
+                Pending::Recorded(members) => members
+                    .iter()
+                    .map(|member| BundleMember {
+                        component: member.component,
+                        state: MemberState::Recorded {
+                            class: member.class,
+                            body: member.patched_body(ids),
+                        },
+                    })
+                    .collect(),
+                Pending::Built(members) => members,
+            },
+        })
+    }
+}
+
+/// The bag's loot group, sent after its card (retail: ~300 ms): the container's contents and
+/// the loot glow. The client's `CanTakeItems` refuses a take-all on a container whose item list
+/// is empty (`PlayerTradeComponent - CanTakeItems - Invalid parameters`, live run of
+/// 2026-09-14), so the bag cannot be looted until this state is out.
+pub(super) fn bag_loot(character: Uuid, items: &[KitItem]) -> Vec<BundleMember> {
+    vec![
+        BundleMember {
+            component: BAG_CONTAINER_COMPONENT,
+            state: MemberState::Container(ContainerState {
+                items: Some(FullList {
+                    version: Some(BAG_FILLED_VERSION),
+                    elements: items
+                        .iter()
+                        .enumerate()
+                        .map(|(slot, item)| container_item(character, slot as u16, item))
+                        .collect(),
+                }),
+                bonus_max_encumbrance: Some(0),
+                was_emptied: Some(false),
+                ..ContainerState::default()
+            }),
+        },
+        BundleMember {
+            component: BAG_LOOT_COMPONENT,
+            state: MemberState::Recorded {
+                class: LOOT_DROP_TYPE_INDEX,
+                body: LOOT_DROP_ON.to_vec(),
+            },
+        },
+    ]
+}
+
+/// The bag group of a take (retail): the emptied container, the interact flag off, the glow
+/// off, and the two delayed events' bodies.
+pub(super) fn bag_emptied(item_count: usize) -> Vec<BundleMember> {
+    let emptied = ItemRecord {
+        sync_reason: SYNC_MOVED,
+        ..ItemRecord::EMPTY_SLOT
+    };
+    vec![
+        BundleMember {
+            component: BAG_CONTAINER_COMPONENT,
+            state: MemberState::Container(ContainerState {
+                items: Some(FullList {
+                    version: Some(BAG_EMPTIED_VERSION),
+                    elements: vec![emptied; item_count],
+                }),
+                was_emptied: Some(true),
+                ..ContainerState::default()
+            }),
+        },
+        BundleMember {
+            component: BAG_INTERACT_COMPONENT,
+            state: MemberState::Recorded {
+                class: INTERACT_TYPE_INDEX,
+                body: INTERACT_TAKEN.to_vec(),
+            },
+        },
+        BundleMember {
+            component: BAG_LOOT_COMPONENT,
+            state: MemberState::Recorded {
+                class: LOOT_DROP_TYPE_INDEX,
+                body: LOOT_DROP_OFF.to_vec(),
+            },
+        },
+    ]
+    .into_iter()
+    .chain(
+        BAG_EVENT_COMPONENTS
+            .into_iter()
+            .zip(BAG_EVENT_BODIES)
+            .map(|(component, body)| BundleMember {
+                component,
+                state: MemberState::Recorded {
+                    class: DELAYED_EVENT_TYPE_INDEX,
+                    body: body.to_vec(),
+                },
+            }),
+    )
+    .collect()
+}
+
+/// The own-group member of a take (retail): the player's interactor state with the bag's entity
+/// id — the target the client is to drop.
+pub(super) fn interactor_cleared(prefix: &[u8; GDE_REF_PREFIX_LEN]) -> BundleMember {
+    let mut body = vec![0x01, 0x01];
+    body.extend(u64::from_be_bytes(*prefix).to_le_bytes());
+    BundleMember {
+        component: INTERACTOR_COMPONENT,
+        state: MemberState::Recorded {
+            class: INTERACTOR_TYPE_INDEX,
+            body,
+        },
+    }
+}
+
+/// The record of `item` in a loot container's slot `slot` (retail: quantity 1, sync reason
+/// [`SYNC_CONTAINER`], the slot as the counter). The wire perk index rule is not known, so the
+/// records go without perks.
+fn container_item(character: Uuid, slot: u16, item: &KitItem) -> ItemRecord {
+    ItemRecord {
+        quantity: 1,
+        sync_reason: SYNC_CONTAINER,
+        container_slot: Some(slot),
+        item_index: item.item_index,
+        durability: item.durability,
+        max_durability: item.durability,
+        counter: u32::from(slot),
+        gear_score: item.gear_score,
+        instance: instance_id(character, &item.item_id),
+        flags: if item.bound { ITEM_BOUND } else { 0 },
+        ..ItemRecord::EMPTY_SLOT
+    }
+}
+
+/// The table index of the entity whose `GdeRef` starts with `prefix`.
+fn find(entities: &FtueEntities, prefix: &[u8; GDE_REF_PREFIX_LEN]) -> Option<usize> {
+    entities
+        .entities
+        .iter()
+        .position(|entity| &entity.gde_ref_prefix == prefix)
+}
+
+#[cfg(test)]
+mod tests {
+    use nw_content::ftue_entities::{EntityGroup, FtueEntity};
+    use nw_content::starter::{EquipSlot, KitItem};
+    use nw_messages::CONTAINER_TYPE_INDEX;
+    use nw_messages::wire::{Reader, Writer};
+
+    use super::*;
+
+    const SHIP_PREFIX: [u8; GDE_REF_PREFIX_LEN] = [1; GDE_REF_PREFIX_LEN];
+    const BAG_PREFIX: [u8; GDE_REF_PREFIX_LEN] = [2; GDE_REF_PREFIX_LEN];
+    const CARD_CLASS: u64 = 10;
+    const DELAYED_EVENT_CLASS: u64 = 3139;
+    const PHASE: u64 = 0x79bb_231b_6ad2_7648;
+
+    fn group(time_ms: u64, class: u64, body: Vec<u8>, phase_at: Vec<usize>) -> EntityGroup {
+        EntityGroup {
+            time_ms,
+            interest: 9,
+            members: vec![EntityMember {
+                component: 0,
+                class,
+                body,
+                player_gde_ref_at: Vec::new(),
+                player_facet_at: Vec::new(),
+                phase_suffix_at: phase_at,
+            }],
+        }
+    }
+
+    /// A ship entity and a bag with one change.
+    fn entities() -> FtueEntities {
+        let card = |prefix: [u8; GDE_REF_PREFIX_LEN]| {
+            let mut body = vec![0x01, 0x02];
+            body.extend(prefix);
+            body.extend([0; GDE_REF_PREFIX_LEN]);
+            body
+        };
+        FtueEntities {
+            level: "ftue_v2".to_owned(),
+            entities: vec![
+                FtueEntity {
+                    gde_ref_prefix: SHIP_PREFIX,
+                    spawns: vec![group(5100, CARD_CLASS, card(SHIP_PREFIX), vec![10])],
+                    changes: Vec::new(),
+                    despawns: vec![RETAIL_WATER_MOVE_MS],
+                },
+                FtueEntity {
+                    gde_ref_prefix: BAG_PREFIX,
+                    spawns: vec![group(164_262, CARD_CLASS, card(BAG_PREFIX), vec![10])],
+                    changes: vec![group(
+                        169_211,
+                        DELAYED_EVENT_CLASS,
+                        vec![1, 3, 0, 0, 1],
+                        vec![],
+                    )],
+                    despawns: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    fn ids() -> SessionIds {
+        SessionIds {
+            player_gde_ref: [7; 16],
+            player_facet: [8; 8],
+            phase_id: PHASE,
+        }
+    }
+
+    const fn slot(interest: u16, new: bool) -> Slot {
+        Slot { interest, new }
+    }
+
+    #[test]
+    fn the_island_shows_its_entities_with_the_session_phase() {
+        let entities = entities();
+        let mut views = StaticViews::default();
+        views.show_island(&entities);
+        let bag = STATIC_ENTITY_BASE + 1;
+        assert_eq!(views.numbers().collect::<Vec<_>>(), [bag], "not the ship's");
+        let group = views
+            .group(bag, slot(6, true), &entities, &ids())
+            .expect("card");
+        assert_eq!(group.interest, 6);
+        let MemberState::Recorded { body, .. } = &group.members[0].state else {
+            panic!("recorded");
+        };
+        assert_eq!(body[10..], PHASE.to_le_bytes());
+        assert_eq!(
+            views.group(bag, slot(6, false), &entities, &ids()),
+            None,
+            "nothing more to send"
+        );
+    }
+
+    #[test]
+    fn a_change_goes_after_the_card_and_a_hidden_entity_leaves() {
+        let entities = entities();
+        let mut views = StaticViews::default();
+        views.show_island(&entities);
+        views.change(&entities, &BAG_PREFIX, 0);
+        views.change(&entities, &BAG_PREFIX, 1);
+        let bag = STATIC_ENTITY_BASE + 1;
+        let card = views.group(bag, slot(9, true), &entities, &ids());
+        assert_eq!(
+            card.expect("card").members[0].state.type_index(),
+            CARD_CLASS
+        );
+        let change = views.group(bag, slot(9, false), &entities, &ids());
+        assert_eq!(
+            change.expect("change").members[0].state.type_index(),
+            DELAYED_EVENT_CLASS
+        );
+        views.hide(&entities, &BAG_PREFIX);
+        assert_eq!(views.numbers().count(), 0);
+    }
+
+    const CHARACTER: Uuid = Uuid::from_u128(0x42);
+
+    /// The retail Destroyer bag: greataxe, head, warhammer (fill group of 164578).
+    fn bag_items() -> [KitItem; 3] {
+        let kit = |item_id: &str, item_index, gear_score, durability, slot| KitItem {
+            item_id: item_id.to_owned(),
+            item_index,
+            slot,
+            gear_score,
+            durability,
+            bound: true,
+        };
+        [
+            kit("greataxe", 40_265, 75, 700, Some(EquipSlot::MainHand)),
+            kit("head", 40_235, 75, 375, Some(EquipSlot::Head)),
+            kit("warhammer", 40_266, 75, 700, Some(EquipSlot::MainHand)),
+        ]
+    }
+
+    #[test]
+    fn the_bag_loot_is_the_retail_fill_group() {
+        let members = bag_loot(CHARACTER, &bag_items());
+        assert_eq!(members.len(), 2);
+        let MemberState::Container(state) = &members[0].state else {
+            panic!("container");
+        };
+        assert_eq!(members[0].component, 2);
+        assert_eq!(state.bonus_max_encumbrance, Some(0));
+        assert_eq!(state.was_emptied, Some(false));
+        let items = state.items.as_ref().expect("items");
+        assert_eq!(items.version, Some(BAG_FILLED_VERSION));
+        assert_eq!(items.elements.len(), 3);
+        // The retail greataxe record's packed number, slot 0 (quantity 1, sync reason 3).
+        assert_eq!(items.elements[0].quantity, 1);
+        assert_eq!(items.elements[0].sync_reason, SYNC_CONTAINER);
+        assert_eq!(items.elements[0].container_slot, Some(0));
+        assert_eq!(items.elements[0].item_index, 40_265);
+        assert_eq!(items.elements[0].durability, 700);
+        assert_eq!(items.elements[0].max_durability, 700);
+        assert_eq!(items.elements[0].gear_score, 75);
+        assert_eq!(items.elements[0].flags, ITEM_BOUND);
+        assert_eq!(
+            items.elements[0].instance,
+            instance_id(CHARACTER, "greataxe")
+        );
+        let mut writer = Writer::new();
+        items.elements[0].write(&mut writer).expect("record");
+        // Retail packed bytes of the greataxe.
+        assert_eq!(
+            writer.finish()[..8],
+            [0x00, 0x01, 0x00, 0xa3, 0xb1, 0x53, 0xc9, 0x45]
+        );
+        // The retail body of the whole member.
+        let body = members[0].encode().expect("member");
+        assert_eq!(
+            body[..9],
+            [0x02, 0x9b, 0x1b, 0x01, 0x15, 0x00, 0x01, 0x05, 0x03]
+        );
+        assert_eq!(members[1].component, 6);
+        assert_eq!(
+            members[1].state,
+            MemberState::Recorded {
+                class: LOOT_DROP_TYPE_INDEX,
+                body: LOOT_DROP_ON.to_vec()
+            }
+        );
+    }
+
+    #[test]
+    fn the_emptied_bag_is_the_retail_take_group() {
+        let members = bag_emptied(3);
+        assert_eq!(
+            members
+                .iter()
+                .map(|member| (member.component, member.state.type_index()))
+                .collect::<Vec<_>>(),
+            [
+                (2, CONTAINER_TYPE_INDEX),
+                (3, INTERACT_TYPE_INDEX),
+                (6, LOOT_DROP_TYPE_INDEX),
+                (7, DELAYED_EVENT_TYPE_INDEX),
+                (8, DELAYED_EVENT_TYPE_INDEX),
+            ]
+        );
+        let MemberState::Container(state) = &members[0].state else {
+            panic!("container");
+        };
+        assert_eq!(state.was_emptied, Some(true));
+        let items = state.items.as_ref().expect("items");
+        assert_eq!(items.version, Some(BAG_EMPTIED_VERSION));
+        assert_eq!(items.elements.len(), 3);
+        for record in &items.elements {
+            assert_eq!(record.quantity, 0);
+            assert_eq!(record.sync_reason, SYNC_MOVED);
+            assert_eq!(record.container_slot, None);
+            assert_eq!(record.item_index, 0);
+        }
+        // Retail take body: slot 0, children {items, was_emptied}, version 6, 3 records, true.
+        let body = members[0].encode().expect("member");
+        assert_eq!(
+            body[..9],
+            [0x02, 0x9b, 0x1b, 0x01, 0x11, 0x00, 0x01, 0x06, 0x03]
+        );
+        assert_eq!(body[body.len() - 1], 0x01);
+        // The empty records read back.
+        let mut reader = Reader::new(&body[3..]);
+        let read = ContainerState::read(&mut reader).expect("read");
+        assert_eq!(read, *state);
+    }
+
+    #[test]
+    fn the_take_clears_the_players_interactor_target() {
+        let member = interactor_cleared(&BAG_PREFIX);
+        assert_eq!(member.component, 26);
+        let MemberState::Recorded { class, body } = &member.state else {
+            panic!("recorded");
+        };
+        assert_eq!(*class, INTERACTOR_TYPE_INDEX);
+        // Retail: `01 01` and the bag's entity id, the prefix as a big-endian number.
+        assert_eq!(
+            body[..],
+            [0x01, 0x01]
+                .into_iter()
+                .chain(u64::from_be_bytes(BAG_PREFIX).to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_queued_group_goes_out_after_the_card() {
+        let entities = entities();
+        let mut views = StaticViews::default();
+        views.show_island(&entities);
+        let bag = STATIC_ENTITY_BASE + 1;
+        views.queue(&entities, &BAG_PREFIX, bag_loot(CHARACTER, &bag_items()));
+        let card = views.group(bag, slot(9, true), &entities, &ids());
+        assert_eq!(
+            card.expect("card").members[0].state.type_index(),
+            CARD_CLASS
+        );
+        let loot = views
+            .group(bag, slot(9, false), &entities, &ids())
+            .expect("loot");
+        assert!(matches!(loot.members[0].state, MemberState::Container(_)));
+        assert_eq!(views.group(bag, slot(9, false), &entities, &ids()), None);
+    }
+}

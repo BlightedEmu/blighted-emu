@@ -141,7 +141,7 @@ pub fn login_messages(
         ServerMessage::SelfIdentification(PlayerManagerSelfIdentificationMsg::for_entity(entity)),
         ServerMessage::ClientAddEntry(ClientAddEntryMsg::for_entity(entity)),
         ServerMessage::PlayerSpawnPoint(ReceivePlayerSpawnPointMsg),
-        ServerMessage::TimeSynch(TimeSynchMsg { time: server_time }),
+        ServerMessage::TimeSynch(TimeSynchMsg::at_server_ms(server_time)),
         ServerMessage::TimeChange(SyncTimeChangeMsg {
             ids: [time.target, time.entity],
             f32s_at_16: OBSERVED_TIME_CHANGE_F32S_AT_16,

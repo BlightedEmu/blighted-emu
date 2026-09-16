@@ -8,7 +8,9 @@
 //! health where it died when its client asks (M6-B spec section 8).
 //!
 //! Hits and deaths send messages (M6-B spec section 7): a hit made sends the attacker a 2071, a
-//! hit applied on a player sends it a 3601, and a death a 4299. They wait in the world until
+//! hit applied on a player sends it a 3601, and a death a 4299. A mob's melee hit on a player
+//! sends it a 2218; while the player holds block, the hit does no damage and the 2218 says so
+//! (live-tutorial note, section 7). They wait in the world until
 //! [`SimWorld::take_messages`] or the tick takes them.
 //!
 //! [`SimWorld::attack_input`] turns the attack bits of a client's input records into attacks on
@@ -17,12 +19,49 @@
 use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use nw_bus::{BusId, ConnectionRef, Hit};
-use nw_messages::{DamageDealtMsg, DeathRecapMsg, InputRecord, OnDamageMsg, ServerMessage};
+use std::sync::Arc;
+
+use nw_formats::objectstream::lowercase_crc32;
+use nw_messages::paperdoll::slot;
+use nw_messages::{
+    AdjustFxScriptsMsg, ConsumableCooldown, DamageDealtMsg, DeathRecapMsg, InputRecord,
+    MeleeHitMsg, OnDamageMsg, ServerMessage,
+};
 use nw_sim_core::{Damage, Health, MobState, PlayerAttack, died, hurt, mob_hit, player_hit};
 
+use super::stamina::Dodge;
 use super::{Body, MESSAGE_CHANNEL, Outgoing, Player, Position, SimWorld};
 use crate::combat::{AttackOutcome, AttackRefusal, RemoteHit, RespawnRefusal};
 use crate::mobs::{MobAttackIntent, spawn_index};
+
+/// How high above the sea a player still swims (Inferred: retail swam at 0.0 to 1.55 m above the
+/// tutorial's sea and walked onto the beach at 3.5 m).
+const SWIM_HEIGHT_M: f32 = 1.6;
+/// How long a dodge roll keeps mob hits off (Inferred: no retail hit message fell inside a roll;
+/// the roll length is Unknown; xp-potion-exit note, section 5.4).
+const DODGE_MS: u64 = 500;
+
+/// The fit of the damage share that a mob's armor takes off a player's hit (xp-potion-exit note,
+/// section 4.2, Inferred from two points: retail tutorial hits kept 0.7011 with a gear score 60
+/// weapon and 0.7541 with gear score 75, on level 1 mobs of armor rating 109.336):
+/// `armor / (armor + SCALE × gear score ^ POWER)`.
+const ARMOR_FIT_SCALE: f64 = 1.8748;
+const ARMOR_FIT_POWER: f64 = 1.2013;
+
+/// The share of a hit that a mob of armor rating `armor` takes off a weapon of `gear_score`.
+fn armor_share(armor: f64, gear_score: u32) -> f64 {
+    armor / (armor + ARMOR_FIT_SCALE * f64::from(gear_score).powf(ARMOR_FIT_POWER))
+}
+
+/// How long after the press a potion works (retail: the answer came 326 ms after the press;
+/// Inferred: the drink animation).
+const DRINK_MS: u64 = 326;
+/// The visual script of a heal: crc32 of `potionheal` (retail 608 after the potion).
+const HEAL_SCRIPT: u32 = 0xf7e1_e0d6;
+/// Microseconds per millisecond.
+const US_PER_MS: u64 = 1000;
+/// Milliseconds per second.
+const MS_PER_SECOND: u64 = 1000;
 
 /// A player's health and attack times.
 #[derive(Component, Debug, Clone, Copy)]
@@ -38,6 +77,16 @@ pub(super) struct Vitals {
     last_attack_ms: Option<u64>,
     /// The attack bits of the last input record.
     attack_bits: u8,
+    /// The player holds block (the newest input record, [`ClientInputMsg::blocking`]).
+    ///
+    /// [`ClientInputMsg::blocking`]: nw_messages::ClientInputMsg::blocking
+    blocking: bool,
+    /// The player held the dodge key in the newest input record.
+    dodge_held: bool,
+    /// The player pressed quick slot 1 in the newest input record.
+    quick_slot_held: bool,
+    /// A dodge roll runs until this time: mob hits miss.
+    dodging_until_ms: u64,
 }
 
 impl Vitals {
@@ -48,6 +97,10 @@ impl Vitals {
             spawned,
             last_attack_ms: None,
             attack_bits: 0,
+            blocking: false,
+            dodge_held: false,
+            quick_slot_held: false,
+            dodging_until_ms: 0,
         }
     }
 }
@@ -63,6 +116,8 @@ struct TargetView {
     position: Position,
     dead: bool,
     returning: bool,
+    /// Its level, for its armor.
+    level: u32,
     /// The sim of a ghost target; `None` when the target is here.
     owner: Option<BusId>,
 }
@@ -129,7 +184,20 @@ impl SimWorld {
         if too_fast {
             return Err(AttackRefusal::TooFast);
         }
-        let weapon = self.combat.data.weapon();
+        // The weapon in the hand, else the config's; its gear score sets the armor share.
+        let held = self
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref()?.main_weapon())
+            .and_then(|(item, gear_score)| {
+                Some((*self.combat.data.weapon_of_item(item)?, gear_score))
+            });
+        let weapon = held.map_or_else(|| *self.combat.data.weapon(), |(weapon, _)| weapon);
+        let armor_share = held
+            .zip(self.combat.data.level(view.level))
+            .map_or(self.combat.armor_share, |((_, gear_score), level)| {
+                armor_share(level.physical_armor_rating, gear_score)
+            });
         let attack = PlayerAttack {
             base_damage: weapon.base_damage,
             coefficient: row.coefficient,
@@ -138,7 +206,7 @@ impl SimWorld {
             crit_multiplier: weapon.crit_multiplier,
         };
         let threat_base = row.threat;
-        let hit = player_hit(&attack, self.combat.armor_share, &mut self.dice);
+        let hit = player_hit(&attack, armor_share, &mut self.dice);
         let threat = threat_base.saturating_add(u64::from(hit.amount));
         if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
             vitals.last_attack_ms = Some(now_ms);
@@ -151,9 +219,18 @@ impl SimWorld {
                 AttackOutcome::Remote(self.remote_hit(owner, target, number, hit.amount, threat))
             }
         };
+        let killed = matches!(outcome, AttackOutcome::Killed { .. });
+        if matches!(outcome, AttackOutcome::Hit { .. }) {
+            self.mob_timelines.hurt(target);
+        }
         self.send_reliable(
             attacker.clone(),
-            &ServerMessage::DamageDealt(DamageDealtMsg::hit(target, number, amount_of(hit.amount))),
+            &ServerMessage::DamageDealt(DamageDealtMsg::hit(
+                number,
+                target,
+                amount_of(hit.amount),
+                killed,
+            )),
         );
         Ok(outcome)
     }
@@ -174,6 +251,75 @@ impl SimWorld {
             }),
             Err(error) => tracing::error!(%error, "combat message not encoded"),
         }
+    }
+
+    /// Drinks the potions whose press is due at `now_ms`, at server time `server_ms` (ms since
+    /// 2000-01-01).
+    pub(super) fn drink_due(&mut self, now_ms: u64, server_ms: u64) {
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.drinks)
+            .into_iter()
+            .partition(|(_, at)| now_ms >= *at);
+        self.drinks = later;
+        for (number, _) in due {
+            self.drink(number, server_ms);
+        }
+    }
+
+    /// The player `number` drinks the potion of its quick slot 1, unless the slot is empty, holds
+    /// no healing item, or the item's cooldown runs (xp-potion-exit note, section 2.5): one less
+    /// in the slot, the cooldown, the heal (`health` + `health share` x max, at most to the max)
+    /// and the heal's visual script.
+    fn drink(&mut self, number: u64, server_ms: u64) {
+        let Some(entity) = self.player_by_number(number) else {
+            return;
+        };
+        let data = Arc::clone(&self.combat.data);
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        let player = &mut *player;
+        let Some(gear) = player.gear.as_mut() else {
+            return;
+        };
+        let Some(item) = gear.worn_item(slot::QUICK_SLOT_1).map(str::to_owned) else {
+            return;
+        };
+        let Some(heal) = data.heal_of_item(&item) else {
+            return;
+        };
+        let group = lowercase_crc32(&heal.cooldown_id);
+        let now_us = server_ms.saturating_mul(US_PER_MS);
+        player.cooldowns.retain(|cooldown| cooldown.end_us > now_us);
+        if player
+            .cooldowns
+            .iter()
+            .any(|cooldown| cooldown.group == group)
+        {
+            return;
+        }
+        gear.use_one(slot::QUICK_SLOT_1);
+        let cooldown_ms = u64::from(heal.cooldown_s) * MS_PER_SECOND;
+        player.cooldowns.push(ConsumableCooldown {
+            consumable: lowercase_crc32(&item),
+            end_us: now_us.saturating_add(cooldown_ms * US_PER_MS),
+            group,
+        });
+        player.cooldowns_changed = true;
+        let connection = player.connection.clone();
+        let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) else {
+            return;
+        };
+        let max = f64::from(vitals.health.max());
+        // The heal fits a `u32`: it is below the max health and a flat amount.
+        let amount = (heal.health + heal.health_share * max).round() as u32;
+        let healed = vitals.health.heal(amount);
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            player.healed_to = Some(healed);
+        }
+        self.send_reliable(
+            connection,
+            &ServerMessage::AdjustFxScripts(AdjustFxScriptsMsg::on(number, HEAL_SCRIPT)),
+        );
     }
 
     /// The dead player of `connection` lives again with full health where it died, when
@@ -203,7 +349,10 @@ impl SimWorld {
         Ok(())
     }
 
-    /// One result per rising edge of the attack bits in `records`, in record order: a record that
+    /// Keeps whether the player holds block, starts a dodge roll on a new press of the dodge key
+    /// and a drink on a new press of quick slot 1 (the first, newest record), then gives one
+    /// result
+    /// per rising edge of the attack bits in `records`, in record order: a record that
     /// sets any attack bit the record before it did not set (M6-B spec section 6.1). The first
     /// edge attacks; the others of the same message are [`AttackRefusal::TooFast`]. The bits of
     /// the last record carry over to the next message. Nothing for a connection without a player.
@@ -213,12 +362,19 @@ impl SimWorld {
         records: &[InputRecord],
         now_ms: u64,
     ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
-        let Some(mut vitals) = self
-            .by_connection
-            .get(connection)
-            .copied()
-            .and_then(|entity| self.world.get_mut::<Vitals>(entity))
-        else {
+        let Some(entity) = self.by_connection.get(connection).copied() else {
+            return Vec::new();
+        };
+        let Some(number) = self.world.get::<Player>(entity).map(|player| player.number) else {
+            return Vec::new();
+        };
+        let swimming = self.world.get::<Body>(entity).is_some_and(|body| {
+            body.motion.position().z <= self.settings.ocean_level_m + SWIM_HEIGHT_M
+        });
+        if let Some(newest) = records.first() {
+            self.stamina_input(entity, number, newest, swimming, now_ms);
+        }
+        let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) else {
             return Vec::new();
         };
         let mut edges = 0;
@@ -236,6 +392,59 @@ impl SimWorld {
         std::iter::once(self.attack_nearest(connection, now_ms))
             .chain((1..edges).map(|_| Err(AttackRefusal::TooFast)))
             .collect()
+    }
+
+    /// The block, dodge and quick slot keys of the newest input record `newest` of player
+    /// `number`: a release of block starts its stamina's regen delay again; a new press of dodge
+    /// starts a roll, or a dash when `swimming`, if its stamina pays for it; a new press of quick
+    /// slot 1 drinks.
+    fn stamina_input(
+        &mut self,
+        entity: Entity,
+        number: u64,
+        newest: &InputRecord,
+        swimming: bool,
+        now_ms: u64,
+    ) {
+        let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) else {
+            return;
+        };
+        let blocking = newest.blocking();
+        let block_released = vitals.blocking && !blocking;
+        vitals.blocking = blocking;
+        let dodge = newest.dodging();
+        let dodge_pressed = dodge && !vitals.dodge_held;
+        vitals.dodge_held = dodge;
+        let quick = newest.using_quick_slot_1();
+        if quick && !vitals.quick_slot_held {
+            self.drinks.push((number, now_ms.saturating_add(DRINK_MS)));
+        }
+        vitals.quick_slot_held = quick;
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        if block_released {
+            player.stamina.block_released();
+        }
+        let kind = if swimming {
+            Dodge::SwimDash
+        } else {
+            Dodge::Roll
+        };
+        if dodge_pressed
+            && player.stamina.dodge(kind, now_ms)
+            && let Some(mut vitals) = self.world.get_mut::<Vitals>(entity)
+        {
+            vitals.dodging_until_ms = now_ms.saturating_add(DODGE_MS);
+        }
+    }
+
+    /// Runs the stamina of every player one tick at `now_ms`.
+    pub(super) fn tick_stamina(&mut self, now_ms: u64) {
+        let mut query = self.world.query::<&mut Player>();
+        for mut player in query.iter_mut(&mut self.world) {
+            player.stamina.tick(now_ms);
+        }
     }
 
     /// The player of `attacker` attacks the nearest living, not returning mob in reach, here or
@@ -268,12 +477,21 @@ impl SimWorld {
             .motion
             .position();
         let reach_m = self.combat.brain.attack_reach_m + self.combat.reach_margin_m;
-        let target = self
+        let nearest = self
             .mob_states()
             .filter(|(_, _, state)| state.health > 0 && !state.returning)
             .map(|(mob, at, _)| (mob, at.horizontal_distance(position)))
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        tracing::debug!(
+            attacker = ?attacker,
+            x = position.x,
+            y = position.y,
+            nearest = ?nearest,
+            reach_m,
+            "player attack"
+        );
+        let target = nearest
             .filter(|(_, distance)| *distance <= reach_m)
-            .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(mob, _)| mob)
             .ok_or(AttackRefusal::NoTarget)?;
         let damage_id = self
@@ -289,11 +507,16 @@ impl SimWorld {
     /// What an attack sees of the mob `target`: here, or a ghost of its owner.
     fn target_view(&mut self, target: u64) -> Option<TargetView> {
         if let Some(mob) = self.mobs.get_mut(target) {
-            return Some(TargetView {
+            let view = TargetView {
                 position: mob.brain.position(),
                 dead: mob.health.is_dead(),
                 returning: mob.brain.state() == MobState::Return,
+                level: 0,
                 owner: None,
+            };
+            return Some(TargetView {
+                level: self.mobs.level(target).unwrap_or_default(),
+                ..view
             });
         }
         let (owner, ghost) = self.ghost(target)?;
@@ -302,6 +525,7 @@ impl SimWorld {
             position: ghost.position,
             dead: state.health == 0,
             returning: state.returning,
+            level: state.level,
             owner: Some(owner.clone()),
         })
     }
@@ -369,7 +593,7 @@ impl SimWorld {
         }
         self.send_reliable(
             connection.clone(),
-            &ServerMessage::OnDamage(OnDamageMsg::hit(target, attacker, amount_of(amount))),
+            &ServerMessage::OnDamage(OnDamageMsg::hit(target, amount_of(amount))),
         );
         if damage == Damage::Hurt {
             return Some(AttackOutcome::Hit { target, amount });
@@ -380,7 +604,7 @@ impl SimWorld {
         }
         self.send_reliable(
             connection,
-            &ServerMessage::DeathRecap(DeathRecapMsg::of(target, attacker)),
+            &ServerMessage::DeathRecap(DeathRecapMsg::of(target)),
         );
         Some(AttackOutcome::Killed { target })
     }
@@ -394,6 +618,31 @@ impl SimWorld {
             .map(|(entity, _)| entity)
     }
 
+    /// Starts the swings `started` at `now_ms` (their animation) and gives the swings that hit
+    /// now: each lands its mob's hit delay after its start (retail: the hit came a fixed time
+    /// after the attack started, per creature; creature-animation note, section 5.1).
+    pub(super) fn swings_landing(
+        &mut self,
+        started: Vec<MobAttackIntent>,
+        now_ms: u64,
+    ) -> Vec<MobAttackIntent> {
+        for swing in started {
+            self.mob_timelines.attacked(swing.mob);
+            let lands_ms = now_ms.saturating_add(self.mobs.hit_delay_ms(swing.mob));
+            self.swings.push((lands_ms, swing));
+        }
+        let (landing, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.swings)
+            .into_iter()
+            .partition(|(lands_ms, _)| now_ms >= *lands_ms);
+        self.swings = later;
+        landing
+            .into_iter()
+            .map(|(_, swing)| swing)
+            // A mob that died before its swing landed does not hit.
+            .filter(|swing| self.mobs.health(swing.mob).is_some_and(|health| health > 0))
+            .collect()
+    }
+
     /// Applies the mobs' hits on the players of this sim; a hit on a player ghost goes to its
     /// sim.
     pub(super) fn mob_hits(
@@ -405,11 +654,43 @@ impl SimWorld {
         intents
             .into_iter()
             .filter_map(|intent| {
-                let hit = mob_hit(&self.mobs.get_mut(intent.mob)?.attack, armor_share);
+                let mob = self.mobs.get_mut(intent.mob)?;
+                let at = mob.brain.position();
+                let hit = mob_hit(&mob.attack, armor_share);
+                tracing::debug!(
+                    mob = intent.mob,
+                    target = intent.target,
+                    x = at.x,
+                    y = at.y,
+                    z = at.z,
+                    amount = hit.amount,
+                    "mob attack"
+                );
                 if let Some(entity) = self.player_by_number(intent.target) {
+                    let vitals = *self.world.get::<Vitals>(entity)?;
                     // Spawn protection: a mob cannot hit a player whose client has not spawned
                     // into the world yet (it would die at the loading screen otherwise).
-                    if !self.world.get::<Vitals>(entity).is_some_and(|v| v.spawned) {
+                    if !vitals.spawned {
+                        return None;
+                    }
+                    // A swing into a dodge roll misses: retail sends no hit message then.
+                    if now_ms < vitals.dodging_until_ms {
+                        return None;
+                    }
+                    let block_stamina = self.mobs.block_stamina(intent.mob);
+                    let mut player = self.world.get_mut::<Player>(entity)?;
+                    // A block holds while the player has stamina; the hit takes some of it (Inferred:
+                    // retail never let a blocked hit find the stamina at 0).
+                    let blocked = vitals.blocking && player.stamina.current() > 0.0;
+                    if blocked {
+                        player.stamina.blocked_hit(block_stamina);
+                    }
+                    let connection = player.connection.clone();
+                    self.send_reliable(
+                        connection,
+                        &ServerMessage::MeleeHit(MeleeHitMsg::on(intent.target, blocked)),
+                    );
+                    if blocked {
                         return None;
                     }
                     return self.apply_hit(intent.target, intent.mob, hit.amount, 0, now_ms);
@@ -445,7 +726,9 @@ mod tests {
     };
     use crate::world::{MESSAGE_CHANNEL, MoveError, Outgoing, WorldSettings};
     use nw_bus::{Ghost, MobGhost, Point};
-    use nw_messages::{DamageDealtMsg, DeathRecapMsg, OnDamageMsg, ServerMessage};
+    use nw_messages::{
+        DamageDealtMsg, DeathRecapMsg, OnDamageMsg, ServerMessage, StorageSearchItemsMsg,
+    };
     use nw_reflect::Envelope;
 
     const LIGHT: &str = "1H_Sword_Attack1";
@@ -651,9 +934,10 @@ mod tests {
         assert_eq!(
             messages_to(&world.take_messages(), 1),
             vec![ServerMessage::DamageDealt(DamageDealtMsg::hit(
-                mob(),
                 1,
-                amount(SWORD_HIT)
+                mob(),
+                amount(SWORD_HIT),
+                false
             ))]
         );
         assert!(world.take_messages().is_empty(), "taken once");
@@ -673,11 +957,196 @@ mod tests {
         assert_eq!(
             messages_to(&world.take_messages(), 1),
             vec![ServerMessage::DamageDealt(DamageDealtMsg::hit(
-                mob(),
                 1,
-                amount(SWORD_HIT)
+                mob(),
+                amount(SWORD_HIT),
+                false
             ))]
         );
+    }
+
+    #[test]
+    fn a_blocked_mob_hit_does_no_damage() {
+        let mut world = fight();
+        let blocking = InputRecord {
+            slots: nw_messages::InputSlots {
+                count: 19,
+                values: vec![0, 1 << 62],
+                bytes: [0; 4],
+            },
+            ..InputRecord::default()
+        };
+        assert!(
+            world
+                .attack_input(&connection(1), &[blocking], NOW)
+                .is_empty()
+        );
+        let mut now = NOW;
+        while now < NOW + LONG_AFTER_MS {
+            let output = tick(&mut world, now);
+            assert!(output.mob_hits.is_empty(), "a blocked hit did damage");
+            let messages = messages_to(&output.messages, 1);
+            if messages.contains(&ServerMessage::MeleeHit(MeleeHitMsg::on(1, true))) {
+                assert_eq!(health_of(&mut world, 1).current(), TEST_PLAYER_HEALTH);
+                let stamina = player_stamina(&mut world, 1);
+                assert!(stamina < 100.0, "the block took stamina: {stamina}");
+                return;
+            }
+            now += TICK_MS;
+        }
+        panic!("the mob never swung");
+    }
+
+    fn player_stamina(world: &mut SimWorld, number: u64) -> f32 {
+        let entity = world.player_by_number(number).expect("player");
+        world
+            .world
+            .get::<Player>(entity)
+            .expect("player")
+            .stamina
+            .current()
+    }
+
+    #[test]
+    fn an_item_change_sends_an_empty_storage_search() {
+        use crate::world::gear::Gear;
+        use crate::world::gear::tests::{BACKSTORY, kits};
+        let mut world = fight();
+        let entity = world.player_by_number(1).expect("player");
+        let character = world.world.get::<Player>(entity).expect("player").character;
+        world.world.get_mut::<Player>(entity).expect("player").gear =
+            Gear::starter(&kits(), character, Some(BACKSTORY));
+        let search = ServerMessage::StorageSearchItems(StorageSearchItemsMsg::empty(1));
+        let output = tick(&mut world, NOW);
+        assert!(
+            !messages_to(&output.messages, 1).contains(&search),
+            "no change yet"
+        );
+        let removed = world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .gear
+            .as_mut()
+            .expect("gear")
+            .remove("1hSwordT2_FTUE");
+        assert!(removed);
+        let output = tick(&mut world, NOW + TICK_MS);
+        assert!(messages_to(&output.messages, 1).contains(&search));
+    }
+
+    #[test]
+    fn a_block_without_stamina_lets_the_hit_through() {
+        let mut world = fight();
+        let entity = world.player_by_number(1).expect("player");
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .stamina
+            .blocked_hit(LETHAL as f32);
+        let blocking = InputRecord {
+            slots: nw_messages::InputSlots {
+                count: 19,
+                values: vec![0, 1 << 62],
+                bytes: [0; 4],
+            },
+            ..InputRecord::default()
+        };
+        world.attack_input(&connection(1), &[blocking], NOW);
+        let mut now = NOW;
+        while now < NOW + LONG_AFTER_MS {
+            let output = tick(&mut world, now);
+            let messages = messages_to(&output.messages, 1);
+            assert!(
+                !messages.contains(&ServerMessage::MeleeHit(MeleeHitMsg::on(1, true))),
+                "no block at 0 stamina"
+            );
+            if !output.mob_hits.is_empty() {
+                assert!(health_of(&mut world, 1).current() < TEST_PLAYER_HEALTH);
+                return;
+            }
+            now += TICK_MS;
+        }
+        panic!("the mob never hit");
+    }
+
+    #[test]
+    fn the_armor_fit_gives_the_retail_tutorial_shares() {
+        const LEVEL_1_ARMOR: f64 = 109.336;
+        const KEPT_GS_60: f64 = 0.7011;
+        const KEPT_GS_75: f64 = 0.7541;
+        assert!((1.0 - armor_share(LEVEL_1_ARMOR, 60) - KEPT_GS_60).abs() < 1e-3);
+        assert!((1.0 - armor_share(LEVEL_1_ARMOR, 75) - KEPT_GS_75).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_paced_swing_lands_after_its_hit_delay() {
+        const DELAY_MS: u64 = 456;
+        let mut world = fight();
+        let pace = crate::mobs::Pace {
+            attack_factor: 1.0,
+            swing_gap_ms: (2_500, 4_000),
+            speed_mps: 5.5,
+            hit_delay_ms: DELAY_MS,
+            block_stamina: crate::mobs::DEFAULT_BLOCK_STAMINA,
+        };
+        let mob = world
+            .mobs
+            .spawn_personal(test_spawn(MOB_X), 1, false, Some(pace), NOW)
+            .expect("rows");
+        let swing = MobAttackIntent { mob, target: 1 };
+        assert!(world.swings_landing(vec![swing], NOW).is_empty());
+        assert!(
+            world
+                .swings_landing(Vec::new(), NOW + DELAY_MS - 1)
+                .is_empty()
+        );
+        assert_eq!(world.swings_landing(Vec::new(), NOW + DELAY_MS), [swing]);
+        assert!(
+            world
+                .swings_landing(Vec::new(), NOW + DELAY_MS + 1)
+                .is_empty(),
+            "once"
+        );
+    }
+
+    #[test]
+    fn a_swing_into_a_dodge_roll_misses() {
+        let mut world = fight();
+        let dodge = InputRecord {
+            slots: nw_messages::InputSlots {
+                count: 19,
+                values: vec![0, 1 << 3],
+                bytes: [0; 4],
+            },
+            ..InputRecord::default()
+        };
+        let mut now = NOW;
+        assert!(
+            world
+                .attack_input(&connection(1), std::slice::from_ref(&dodge), now)
+                .is_empty()
+        );
+        while now < NOW + DODGE_MS {
+            let output = tick(&mut world, now);
+            assert!(output.mob_hits.is_empty(), "a hit landed in the roll");
+            assert!(
+                messages_to(&output.messages, 1)
+                    .iter()
+                    .all(|message| !matches!(message, ServerMessage::MeleeHit(_)))
+            );
+            now += TICK_MS;
+        }
+        // Holding the key does not roll again; only a new press does.
+        assert!(world.attack_input(&connection(1), &[dodge], now).is_empty());
+        while now < NOW + LONG_AFTER_MS {
+            if !tick(&mut world, now).mob_hits.is_empty() {
+                return;
+            }
+            now += TICK_MS;
+        }
+        panic!("the mob never hit after the roll");
     }
 
     #[test]
@@ -694,11 +1163,11 @@ mod tests {
                 assert_eq!(*target, 1);
                 let messages = messages_to(&output.messages, 1);
                 assert!(
-                    messages.contains(&ServerMessage::OnDamage(OnDamageMsg::hit(
-                        1,
-                        mob(),
-                        amount(*hit)
-                    ))),
+                    messages.contains(&ServerMessage::OnDamage(OnDamageMsg::hit(1, amount(*hit)))),
+                    "{messages:?}"
+                );
+                assert!(
+                    messages.contains(&ServerMessage::MeleeHit(MeleeHitMsg::on(1, false))),
                     "{messages:?}"
                 );
                 return;
@@ -762,7 +1231,6 @@ mod tests {
             messages_to(&world.take_messages(), 1),
             vec![ServerMessage::OnDamage(OnDamageMsg::hit(
                 1,
-                mob(),
                 amount(SWORD_HIT)
             ))]
         );
@@ -775,7 +1243,7 @@ mod tests {
         let messages = messages_to(&world.take_messages(), 1);
         assert_eq!(
             messages.last(),
-            Some(&ServerMessage::DeathRecap(DeathRecapMsg::of(1, mob())))
+            Some(&ServerMessage::DeathRecap(DeathRecapMsg::of(1)))
         );
         assert!(matches!(messages[0], ServerMessage::OnDamage(_)));
     }

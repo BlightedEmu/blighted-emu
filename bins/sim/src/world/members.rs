@@ -13,16 +13,21 @@
 //! chunked), so a bundle's groups and stops take at most the bytes of [`MAX_BUNDLE_MEMBERS`]
 //! position members, as before M6-B.
 
+use nw_bus::MobGhost;
 use nw_messages::{
-    ACHIEVEMENT_COMPONENT, AlcState, AssetId, BundleGroup, BundleMember, BundlePayload,
+    AlcStamp, AlcState, AssetId, BOSS_PHASE_TYPE_INDEX, BundleGroup, BundleMember, BundlePayload,
     DYNAMIC_SLICE_SUB_ID, GDE_METADATA_COMPONENT, GdeMetadataReplicatedState, InputPosition,
     LOCAL_PLAYER_INTEREST, MAX_BUNDLE_INDEXES, MemberState, MessageError, PLAYER_SLICE_ASSET,
-    PlayerStates, ReplicatedStateBundle, ServerMessage, player_members, raw_id_of_entity,
+    PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT,
+    ServerMessage, VitalsState, boss_phase_change, change_members, player_members,
+    raw_id_of_entity,
 };
 use nw_sim_core::Position;
 
 use super::MAX_BUNDLE_MEMBERS;
+use super::mob_timeline::MobFrame;
 use super::slots::Slots;
+use crate::player_content::MobLook;
 
 /// Most bytes of a position member: a 5-byte entity number, a 1-byte class, a 12-byte body.
 const MAX_POSITION_MEMBER_BYTES: usize = 18;
@@ -44,18 +49,54 @@ pub(super) const PLAYER_ALC_COMPONENT: u64 = 16;
 /// (4 and 5 both occur; which mob prefab uses which is Unknown).
 pub(super) const MOB_ALC_COMPONENT: u64 = 5;
 
-/// What a client needs to show one mob: its entity number and where it is.
+/// What a client needs to show one mob: its entity number, where it is and its vitals.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct MobCard {
     /// The entity number.
     pub(super) entity: u64,
     /// Where it is.
     pub(super) position: Position,
+    /// Its vitals and ids.
+    pub(super) state: MobGhost,
+    /// The only player who sees it, for a personal mob.
+    pub(super) owner: Option<u64>,
+    /// Its states of this tick, for a mob whose prefab has a first `ALCReplicatedState`.
+    pub(super) alc: Option<MobFrame>,
+    /// Its health changed since the last bundle step (or it is new).
+    pub(super) health_changed: bool,
+    /// That change is its first damage: the health it showed before was its maximum.
+    pub(super) first_damage: bool,
+    /// Its boss phase, for a boss mob that left phase 0.
+    pub(super) boss_phase: Option<u32>,
+    /// Its boss phase changed since the last bundle step.
+    pub(super) boss_phase_changed: bool,
+}
+
+impl MobCard {
+    /// Whether player `player` sees this mob.
+    pub(super) fn seen_by(&self, player: u64) -> bool {
+        self.owner.is_none_or(|owner| owner == player)
+    }
 }
 
 /// The card of a mob.
-pub(super) const fn card_of(entity: u64, position: Position) -> MobCard {
-    MobCard { entity, position }
+pub(super) const fn card_of(
+    entity: u64,
+    position: Position,
+    state: MobGhost,
+    owner: Option<u64>,
+) -> MobCard {
+    MobCard {
+        entity,
+        position,
+        state,
+        owner,
+        alc: None,
+        health_changed: true,
+        first_damage: false,
+        boss_phase: None,
+        boss_phase_changed: false,
+    }
 }
 
 /// The prefab and the `ALCReplicatedState` component of one kind of entity.
@@ -76,9 +117,18 @@ impl EntityKind {
         empty_components: true,
     };
 
-    /// A mob whose card carries a unique asset id derived from `entity` (local-player-check
-    /// note). The real mob prefab GUID is Unknown; an all-zero id is not used, so the client's
-    /// offline cache does not share one key across mobs.
+    /// A mob of a prefab of the prefab table: its creature slice and ALC component.
+    pub(super) const fn of_look(look: &MobLook) -> Self {
+        Self {
+            asset: look.asset,
+            alc_component: look.alc_component,
+            empty_components: false,
+        }
+    }
+
+    /// A mob without a prefab in the table: its card carries a unique asset id derived from
+    /// `entity` (local-player-check note), which the client cannot find, so it shows nothing; an
+    /// all-zero id is not used, so the client's offline cache does not share one key across mobs.
     pub(super) fn mob(entity: u64) -> Self {
         Self {
             asset: AssetId {
@@ -120,6 +170,11 @@ pub(super) fn entity_group(
                 health: None,
                 gear: None,
                 achievements: None,
+                objectives: None,
+                progression: None,
+                health_change: None,
+                cooldowns: None,
+                stamina: None,
             })));
         }
     }
@@ -131,6 +186,232 @@ pub(super) fn entity_group(
         interest: u64::from(interest),
         members,
     })
+}
+
+/// Makes the position of `group` (its last member) the full first state at `position`
+/// ([`AlcState::spawn`]): a client places a new entity only from such a state; from a lone
+/// `pos10` it stays at the grid origin (own-player-position note).
+///
+/// # Errors
+///
+/// Returns [`MessageError`] when the state cannot be encoded.
+fn full_first_position(group: &mut BundleGroup, position: Position) -> Result<(), MessageError> {
+    if let Some(pos) = InputPosition::from_metres(position.x, position.y, position.z)
+        && let Some(alc) = group.members.last_mut()
+    {
+        alc.state = MemberState::Alc(AlcState::spawn(pos)?);
+    }
+    Ok(())
+}
+
+/// The group of another entity of `kind` in slot `interest`: as [`entity_group`], with the full
+/// first position when `carded`.
+///
+/// # Errors
+///
+/// Returns [`MessageError`] when the first position cannot be encoded.
+pub(super) fn remote_group(
+    interest: u16,
+    entity: u64,
+    kind: EntityKind,
+    position: Position,
+    carded: bool,
+) -> Result<Option<BundleGroup>, MessageError> {
+    let Some(mut group) = entity_group(interest, entity, kind, position, carded, None) else {
+        return Ok(None);
+    };
+    if carded {
+        full_first_position(&mut group, position)?;
+    }
+    Ok(Some(group))
+}
+
+/// The group of the mob of `card` in slot `interest`. With its prefab `look`, a carded group
+/// carries the prefab's first states and the whole vitals, a later group the health when it
+/// changed, and the group of a mob that just died the death states (mob-cards note, sections 2
+/// and 5).
+/// A mob with a timeline ([`MobCard::alc`]) sends its first state with the card and its later
+/// states when they are due; without one, the group carries the plain position. Without a
+/// look, the group is the card and the position only. `None` for a position that is not finite
+/// or a group with nothing to send.
+///
+/// # Errors
+///
+/// Returns [`MessageError`] when a state cannot be encoded.
+pub(super) fn mob_group(
+    interest: u16,
+    card: &MobCard,
+    look: Option<&MobLook>,
+    carded: bool,
+) -> Result<Option<BundleGroup>, MessageError> {
+    let Some(look) = look else {
+        return remote_group(
+            interest,
+            card.entity,
+            EntityKind::mob(card.entity),
+            card.position,
+            carded,
+        );
+    };
+    let Some(mut group) = remote_group(
+        interest,
+        card.entity,
+        EntityKind::of_look(look),
+        card.position,
+        carded,
+    )?
+    else {
+        return Ok(None);
+    };
+    // The plain position is the last member.
+    let Some(plain) = group.members.pop() else {
+        return Ok(None);
+    };
+    let position = match &card.alc {
+        None => Some(plain),
+        Some(frame) => {
+            let alc = if carded {
+                let pos =
+                    InputPosition::from_metres(card.position.x, card.position.y, card.position.z);
+                match (&look.alc, pos) {
+                    (Some(first), Some(pos)) => {
+                        first.mob_first(frame.stamp, pos, frame.facing, frame.animation.as_ref())?
+                    }
+                    _ => None,
+                }
+            } else {
+                frame.step.as_ref().map(AlcState::mob_step).transpose()?
+            };
+            match alc {
+                Some(alc) => Some(BundleMember {
+                    component: plain.component,
+                    state: MemberState::Alc(alc),
+                }),
+                None => carded.then_some(plain),
+            }
+        }
+    };
+    let mob = card.state;
+    let dead = mob.health == 0;
+    let vitals = if carded {
+        group.members.extend(look.first.iter().cloned());
+        let mut vitals = match &look.vitals {
+            Some(recorded) => recorded.creature_as_recorded(
+                mob.health,
+                mob.max_health,
+                mob.vitals_id,
+                mob.category_id,
+                mob.level,
+            ),
+            None => VitalsState::creature(
+                mob.health,
+                mob.max_health,
+                mob.vitals_id,
+                mob.category_id,
+                mob.level,
+            ),
+        };
+        if let (Some(slot), Some(health)) = (
+            vitals.slot_0.as_mut(),
+            VitalsState::creature_health(mob.health).slot_0,
+        ) {
+            slot.vitals_data = health.vitals_data;
+        }
+        Some(vitals)
+    } else {
+        // Retail sends the health once after each change (a vitals delta after each hit), with
+        // its change flags at the first damage.
+        card.health_changed.then(|| {
+            if card.first_damage {
+                VitalsState::creature_first_damage(mob.health)
+            } else {
+                VitalsState::creature_health(mob.health)
+            }
+        })
+    };
+    if let Some(vitals) = vitals {
+        group.members.push(BundleMember {
+            component: look.vitals_component,
+            state: MemberState::Vitals(vitals),
+        });
+    }
+    // A boss phase goes with the card (after the prefab's phase 0) and after each change, on
+    // the component of the prefab's boss phase state.
+    let boss_component = look
+        .first
+        .iter()
+        .find(|member| member.state.type_index() == BOSS_PHASE_TYPE_INDEX)
+        .map(|member| member.component);
+    if let (Some(phase), Some(component)) = (card.boss_phase, boss_component)
+        && (carded || card.boss_phase_changed)
+    {
+        group.members.push(BundleMember {
+            component,
+            state: MemberState::Recorded {
+                class: BOSS_PHASE_TYPE_INDEX,
+                body: boss_phase_change(phase),
+            },
+        });
+    }
+    if dead && (carded || card.health_changed) {
+        group.members.extend(look.death.iter().cloned());
+    }
+    // The position stays the last member.
+    group.members.extend(position);
+    Ok((!group.members.is_empty()).then_some(group))
+}
+
+/// Logs the members of mob `mob`'s group at debug level, as hex, so a live run can be compared
+/// byte for byte with the retail captures.
+pub(super) fn log_mob_group(mob: u64, carded: bool, group: &BundleGroup) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    let members: Vec<String> = group
+        .members
+        .iter()
+        .map(|member| {
+            member.encode().map_or_else(
+                |error| format!("<{error}>"),
+                |bytes| bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+            )
+        })
+        .collect();
+    tracing::debug!(
+        mob,
+        interest = group.interest,
+        carded,
+        members = members.join(" "),
+        "mob group"
+    );
+}
+
+/// Milliseconds per own state number (retail: the own state number goes up by one per 33 ms,
+/// live capture 117010 to 117112 ms).
+const OWN_STATE_MS: u64 = 33;
+
+/// A move of the client's own player by the server (retail moves the player into the water so):
+/// the number and time of the state and the new teleport number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OwnTeleport {
+    stamp: AlcStamp,
+    number: u8,
+}
+
+impl OwnTeleport {
+    /// The `count`-th server move, `since_spawn_ms` after the first own state: the own clock
+    /// goes on from that state's number and time (anchor 0, 16-bit wrapping offset), and the
+    /// teleport number from its 1.
+    pub(super) fn of(count: u8, since_spawn_ms: u64) -> Self {
+        Self {
+            stamp: AlcStamp {
+                id: SPAWN_STATE_ID.wrapping_add((since_spawn_ms / OWN_STATE_MS) as u16),
+                anchor_us: 0,
+                offset_ms: SPAWN_STATE_MS.wrapping_add(since_spawn_ms as u16),
+            },
+            number: SPAWN_TELEPORT.wrapping_add(count),
+        }
+    }
 }
 
 /// Which card goes with the client's own player in one bundle.
@@ -146,7 +427,8 @@ pub(super) enum OwnCard {
 }
 
 /// The group of the client's own player with its `states`; `None` for a position that is not
-/// finite.
+/// finite. When the server `moved` the player, the position is the full first state, which the
+/// client takes as its new place (retail: the move into the water, live-tutorial note section 4).
 ///
 /// # Errors
 ///
@@ -156,6 +438,7 @@ pub(super) fn own_group(
     states: PlayerStates<'_>,
     position: Position,
     card: OwnCard,
+    teleport: Option<OwnTeleport>,
 ) -> Result<Option<BundleGroup>, MessageError> {
     let Some(mut group) = entity_group(
         LOCAL_PLAYER_INTEREST,
@@ -167,24 +450,23 @@ pub(super) fn own_group(
     ) else {
         return Ok(None);
     };
-    if card == OwnCard::Spawn
-        && let Some(pos) = InputPosition::from_metres(position.x, position.y, position.z)
-        && let Some(alc) = group.members.last_mut()
-    {
-        alc.state = MemberState::Alc(AlcState::spawn(pos)?);
+    if card == OwnCard::Spawn {
+        full_first_position(&mut group, position)?;
+    } else if let (Some(teleport), Some(pos), Some(alc)) = (
+        teleport,
+        InputPosition::from_metres(position.x, position.y, position.z),
+        group.members.last_mut(),
+    ) {
+        alc.state = MemberState::Alc(AlcState::teleport(teleport.stamp, pos, teleport.number));
     }
-    // Without the card, achievement changes still go out, before the position.
-    if card == OwnCard::Without
-        && let Some(achievements) = states.achievements
-    {
+    // Without the card, the changes (achievements, objectives, experience, gear, health) still
+    // go out, before the position.
+    if card == OwnCard::Without {
+        let changes = change_members(states);
         let before_position = group.members.len().saturating_sub(1);
-        group.members.insert(
-            before_position,
-            BundleMember {
-                component: ACHIEVEMENT_COMPONENT,
-                state: MemberState::Achievement(achievements.clone()),
-            },
-        );
+        group
+            .members
+            .splice(before_position..before_position, changes);
     }
     Ok(Some(group))
 }
@@ -246,6 +528,8 @@ mod tests {
     use super::super::slots::FIRST_REMOTE_INTEREST;
     use super::*;
 
+    const NOW: u64 = 66_000;
+
     const ENTITY: u64 = (1 << 34) + 7;
     const OWN: u64 = 9;
     const CHARACTER: Uuid = Uuid::from_u128(0x2b87_684d_c82c_46a4_90e4_c764_0247_7507);
@@ -258,6 +542,11 @@ mod tests {
             health: Some(HEALTH),
             gear: None,
             achievements: None,
+            objectives: None,
+            progression: None,
+            health_change: None,
+            cooldowns: None,
+            stamina: None,
         }
     }
     const SEQUENCE: u64 = 4;
@@ -289,7 +578,7 @@ mod tests {
 
     #[test]
     fn the_own_player_is_the_player_prefab_in_slot_1() {
-        let group = own_group(OWN, own_states(), at(), OwnCard::Spawn)
+        let group = own_group(OWN, own_states(), at(), OwnCard::Spawn, None)
             .expect("encode")
             .expect("finite");
         assert_eq!(group.interest, u64::from(LOCAL_PLAYER_INTEREST));
@@ -324,7 +613,7 @@ mod tests {
             panic!("then the ALC position: {group:?}");
         };
         assert_eq!(alc.pos10, InputPosition::from_metres(10.0, 20.0, 30.0));
-        let later = own_group(OWN, own_states(), at(), OwnCard::Without)
+        let later = own_group(OWN, own_states(), at(), OwnCard::Without, None)
             .expect("encode")
             .expect("finite");
         assert_eq!(later.members.len(), 1, "later only the ALC position");
@@ -336,10 +625,38 @@ mod tests {
     }
 
     #[test]
+    fn a_server_move_sends_the_next_teleport_number_on_the_own_clock() {
+        const SINCE_SPAWN_MS: u64 = 117_000;
+        let pos = InputPosition::from_metres(10.0, 20.0, 30.0).expect("finite");
+        let teleport = OwnTeleport::of(1, SINCE_SPAWN_MS);
+        assert_eq!(teleport.number, SPAWN_TELEPORT + 1, "retail: 1, then 2");
+        assert_eq!(
+            teleport.stamp.id,
+            SPAWN_STATE_ID + (SINCE_SPAWN_MS / OWN_STATE_MS) as u16
+        );
+        assert_eq!(
+            teleport.stamp.offset_ms,
+            SPAWN_STATE_MS.wrapping_add(SINCE_SPAWN_MS as u16),
+            "the own time wraps at 16 bits"
+        );
+        let group = own_group(OWN, own_states(), at(), OwnCard::Without, Some(teleport))
+            .expect("encode")
+            .expect("finite");
+        assert_eq!(
+            group.members.last().map(|member| &member.state),
+            Some(&MemberState::Alc(AlcState::teleport(
+                teleport.stamp,
+                pos,
+                teleport.number
+            )))
+        );
+    }
+
+    #[test]
     fn only_the_spawn_card_carries_the_full_first_state() {
         let pos = InputPosition::from_metres(10.0, 20.0, 30.0).expect("finite");
         let alc_of = |card: OwnCard| {
-            let group = own_group(OWN, own_states(), at(), card)
+            let group = own_group(OWN, own_states(), at(), card, None)
                 .expect("encode")
                 .expect("finite");
             group.members.last().expect("alc").state.clone()
@@ -380,6 +697,257 @@ mod tests {
         assert_ne!(asset.id, [0; GDE_ID_LEN]);
         assert_eq!(card.entity_number(), Some(ENTITY));
         assert_eq!(group.members[1].component, MOB_ALC_COMPONENT);
+    }
+
+    #[test]
+    fn a_first_damage_sends_the_change_flags_and_later_ones_do_not() {
+        const VITALS_COMPONENT: u64 = 9;
+        let look = MobLook {
+            asset: AssetId {
+                id: [0x3c; GDE_ID_LEN],
+                sub_id: DYNAMIC_SLICE_SUB_ID,
+            },
+            alc_component: MOB_ALC_COMPONENT,
+            vitals_component: VITALS_COMPONENT,
+            alc: None,
+            vitals: None,
+            first: Vec::new(),
+            death: Vec::new(),
+        };
+        let state = MobGhost {
+            health: 245,
+            max_health: 353,
+            returning: false,
+            vitals_id: 1,
+            category_id: 2,
+            level: 1,
+        };
+        let flags_of = |first_damage| {
+            let card = MobCard {
+                first_damage,
+                ..card_of(ENTITY, at(), state, None)
+            };
+            let group = mob_group(FIRST_REMOTE_INTEREST, &card, Some(&look), false)
+                .expect("encode")
+                .expect("group");
+            group.members.iter().find_map(|member| match &member.state {
+                MemberState::Vitals(vitals) => {
+                    vitals.slot_0.as_ref().map(|slot| slot.health_change_flags)
+                }
+                _ => None,
+            })
+        };
+        assert_eq!(flags_of(true), Some(Some(nw_messages::FIRST_DAMAGE_FLAGS)));
+        assert_eq!(flags_of(false), Some(None));
+    }
+
+    #[test]
+    fn a_boss_sends_its_phase_after_each_change_on_its_prefab_component() {
+        const BOSS_COMPONENT: u64 = 14;
+        const PHASE: u32 = 1;
+        let card_phase = BundleMember {
+            component: BOSS_COMPONENT,
+            state: MemberState::Recorded {
+                class: BOSS_PHASE_TYPE_INDEX,
+                body: vec![0x01, 0x03, 0, 0, 0, 0, 0x01],
+            },
+        };
+        let look = MobLook {
+            asset: AssetId {
+                id: [0x3c; GDE_ID_LEN],
+                sub_id: DYNAMIC_SLICE_SUB_ID,
+            },
+            alc_component: MOB_ALC_COMPONENT,
+            vitals_component: 9,
+            alc: None,
+            vitals: None,
+            first: vec![card_phase.clone()],
+            death: Vec::new(),
+        };
+        let state = MobGhost {
+            health: 100,
+            max_health: 100,
+            returning: false,
+            vitals_id: 1,
+            category_id: 2,
+            level: 1,
+        };
+        let changed = MobCard {
+            health_changed: false,
+            boss_phase: Some(PHASE),
+            boss_phase_changed: true,
+            ..card_of(ENTITY, at(), state, None)
+        };
+        let phase = BundleMember {
+            component: BOSS_COMPONENT,
+            state: MemberState::Recorded {
+                class: BOSS_PHASE_TYPE_INDEX,
+                body: boss_phase_change(PHASE),
+            },
+        };
+        let group = mob_group(FIRST_REMOTE_INTEREST, &changed, Some(&look), false)
+            .expect("encode")
+            .expect("group");
+        assert!(group.members.contains(&phase), "the change goes out");
+        let carded = mob_group(FIRST_REMOTE_INTEREST, &changed, Some(&look), true)
+            .expect("encode")
+            .expect("group");
+        let at_card = carded
+            .members
+            .iter()
+            .position(|member| *member == card_phase);
+        let at_phase = carded.members.iter().position(|member| *member == phase);
+        assert!(
+            at_card < at_phase,
+            "a card carries the phase after the prefab's"
+        );
+        let unchanged = MobCard {
+            boss_phase_changed: false,
+            ..changed
+        };
+        let later = mob_group(FIRST_REMOTE_INTEREST, &unchanged, Some(&look), false)
+            .expect("encode")
+            .expect("the position");
+        assert!(!later.members.contains(&phase), "sent once");
+    }
+
+    #[test]
+    fn a_mob_with_a_prefab_shows_its_slice_states_health_and_death() {
+        const SAILOR_ASSET: [u8; GDE_ID_LEN] = [0xb7; GDE_ID_LEN];
+        const VITALS_COMPONENT: u64 = 9;
+        const HEALTH: u32 = 353;
+        let gatherable = BundleMember {
+            component: 6,
+            state: MemberState::GatherableController(nw_messages::GatherableControllerState {
+                gatherable_state: Some(4),
+            }),
+        };
+        let death = BundleMember {
+            component: 20,
+            state: MemberState::DelayedEvent(nw_messages::DelayedEventState {
+                total_delay: None,
+                completed: Some(true),
+            }),
+        };
+        let look = MobLook {
+            asset: AssetId {
+                id: SAILOR_ASSET,
+                sub_id: DYNAMIC_SLICE_SUB_ID,
+            },
+            alc_component: MOB_ALC_COMPONENT,
+            vitals_component: VITALS_COMPONENT,
+            // A recorded first position somewhere else: the group moves it to the mob.
+            alc: InputPosition::from_metres(1.0, 2.0, 3.0).map(AlcState::at_position),
+            vitals: None,
+            first: vec![gatherable.clone()],
+            death: vec![death.clone()],
+        };
+        let state = |health| MobGhost {
+            health,
+            max_health: HEALTH,
+            returning: false,
+            vitals_id: 1,
+            category_id: 2,
+            level: 1,
+        };
+        let stamp = nw_messages::AlcStamp {
+            id: 7,
+            anchor_us: NOW * 1000,
+            offset_ms: 33,
+        };
+        let frame = |step| MobFrame {
+            stamp,
+            animation: None,
+            facing: None,
+            step,
+            alert_started: false,
+        };
+        let card = MobCard {
+            alc: Some(frame(None)),
+            health_changed: false,
+            ..card_of(ENTITY, at(), state(HEALTH), None)
+        };
+        let first = mob_group(FIRST_REMOTE_INTEREST, &card, Some(&look), true)
+            .expect("encode")
+            .expect("group");
+        let MemberState::GdeMetadata(gde) = &first.members[0].state else {
+            panic!("the card first: {first:?}");
+        };
+        assert_eq!(gde.asset.map(|asset| asset.id), Some(SAILOR_ASSET));
+        assert_eq!(first.members[1], gatherable);
+        assert_eq!(first.members[2].component, VITALS_COMPONENT);
+        assert_eq!(
+            first.members.last().map(|member| member.component),
+            Some(MOB_ALC_COMPONENT)
+        );
+        let Some(MemberState::Alc(alc)) = first.members.last().map(|member| &member.state) else {
+            panic!("the position last");
+        };
+        assert_eq!(
+            alc.pos10,
+            InputPosition::from_metres(at().x, at().y, at().z),
+            "the recorded state at the mob's place"
+        );
+        assert_eq!(
+            mob_group(FIRST_REMOTE_INTEREST, &card, Some(&look), false).expect("encode"),
+            None,
+            "no health change and no state due: nothing to send"
+        );
+        let step = nw_messages::MobStep {
+            stamp,
+            anchored: false,
+            position: InputPosition::from_metres(at().x, at().y, at().z),
+            facing: None,
+            scope: None,
+        };
+        let moving = MobCard {
+            alc: Some(frame(Some(step))),
+            ..card
+        };
+        let full = mob_group(FIRST_REMOTE_INTEREST, &moving, Some(&look), false)
+            .expect("encode")
+            .expect("group");
+        assert_eq!(full.members.len(), 1, "full health: the state only");
+        assert_eq!(
+            full.members[0].state,
+            MemberState::Alc(AlcState::mob_step(&step).expect("step")),
+            "a later state carries the state number and clock"
+        );
+        let unchanged = MobCard {
+            health_changed: false,
+            ..card_of(ENTITY, at(), state(HEALTH / 2), None)
+        };
+        assert_eq!(
+            mob_group(FIRST_REMOTE_INTEREST, &unchanged, Some(&look), false)
+                .expect("encode")
+                .map(|group| group.members.len()),
+            Some(1),
+            "a hurt mob sends its health once per change: the plain position only"
+        );
+        let hurt = card_of(ENTITY, at(), state(HEALTH / 2), None);
+        let hurt = mob_group(FIRST_REMOTE_INTEREST, &hurt, Some(&look), false)
+            .expect("encode")
+            .expect("group");
+        assert_eq!(
+            hurt.members[0].state,
+            MemberState::Vitals(VitalsState::creature_health(HEALTH / 2))
+        );
+        let dead = card_of(ENTITY, at(), state(0), Some(OWN));
+        assert!(dead.seen_by(OWN) && !dead.seen_by(OWN + 1));
+        let dead = mob_group(FIRST_REMOTE_INTEREST, &dead, Some(&look), false)
+            .expect("encode")
+            .expect("group");
+        assert_eq!(dead.members[1], death);
+        let MemberState::Vitals(vitals) = &dead.members[0].state else {
+            panic!("vitals first: {dead:?}");
+        };
+        assert_eq!(
+            vitals
+                .slot_0
+                .and_then(|slot| slot.vitals_data)
+                .map(|data| data.head),
+            Some(1)
+        );
     }
 
     #[test]

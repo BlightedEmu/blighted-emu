@@ -32,6 +32,10 @@ pub const TICK_MS: u64 = 1000_u64.div_ceil(TICKS_PER_SECOND);
 
 /// Default share of a player's damage that mob armor takes off (nwdb, M6-A spec F7).
 pub const DEFAULT_ARMOR_SHARE: f64 = 0.35;
+/// Default share of a mob's damage that a player's armor takes off: retail 3601 hits on a new
+/// character in the tutorial's starter armor keep 0.6006 of the damage (live capture
+/// 2026-09-12, all 2 ship hits and the first island hits).
+pub const DEFAULT_PLAYER_ARMOR_SHARE: f64 = 0.3994;
 /// Default factor of a mob's attack row.
 pub const DEFAULT_MOB_ATTACK_FACTOR: f64 = 1.0;
 /// Default quiet time before an idle mob sleeps.
@@ -120,7 +124,7 @@ impl Default for CombatConfig {
             weapon_id: rows.weapon_id,
             attack_damage_ids: rows.attack_damage_ids,
             armor_share: DEFAULT_ARMOR_SHARE,
-            player_armor_share: 0.0,
+            player_armor_share: DEFAULT_PLAYER_ARMOR_SHARE,
             mob_attack_factor: DEFAULT_MOB_ATTACK_FACTOR,
             wake_radius_m: None,
             sleep_after_ms: DEFAULT_SLEEP_AFTER_MS,
@@ -394,12 +398,17 @@ impl SimConfig {
         Ok(())
     }
 
-    /// The settings of the world state on a level with the edges `bounds`.
+    /// The settings of the world state on a level with the edges `bounds` and its sea at
+    /// `ocean_level_m`.
     ///
     /// # Errors
     ///
     /// Returns [`SimConfigError::Invalid`] for a movement limit that is not usable.
-    pub fn world_settings(&self, bounds: CellBounds) -> Result<WorldSettings, SimConfigError> {
+    pub fn world_settings(
+        &self,
+        bounds: CellBounds,
+        ocean_level_m: f32,
+    ) -> Result<WorldSettings, SimConfigError> {
         let limits = self
             .move_limits()
             .map_err(|error| SimConfigError::Invalid {
@@ -421,6 +430,7 @@ impl SimConfig {
                 key: "level",
                 reason: "not a level this server can name to the client",
             })?,
+            ocean_level_m,
         })
     }
 

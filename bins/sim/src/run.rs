@@ -14,6 +14,8 @@ use nw_content::bundle::bundle_path;
 use nw_content::client_build::load_client_build;
 use nw_content::combat::{CombatData, CombatDataError};
 use nw_content::container::ContainerError;
+use nw_content::ftue_entities::FtueLevel;
+use nw_content::mob_prefabs::MobPrefabs;
 use nw_db::{DbError, WORLD_MIGRATOR, check_schema};
 use nw_sim_core::level_bounds;
 use nw_world::WorldFile;
@@ -21,7 +23,7 @@ use nw_world::world_file::world_file_path;
 
 use crate::config::{SimConfig, SimConfigError, load_sim_config};
 use crate::mobs::spawns_of_level;
-use crate::player_content::PlayerContent;
+use crate::player_content::{MobLooks, PlayerContent};
 use crate::server::{
     LATENCY_BUCKETS_SECONDS, LoopSettings, METRIC_HANDOFF_SECONDS, METRIC_MOB_TICK_SECONDS,
     METRIC_SNAPSHOT_SECONDS, METRIC_TICK_SECONDS, ServeError, serve as serve_loop,
@@ -94,7 +96,40 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         &bundle.tables,
         &config.combat.rows(),
     )?);
-    let content = Arc::new(PlayerContent::from_tables(&bundle.tables));
+    let mob_looks = match MobPrefabs::load(&config.content_dir, &build) {
+        Ok(prefabs) => {
+            let (looks, skipped) = MobLooks::of(&prefabs);
+            tracing::info!(prefabs = looks.len(), skipped, "mob prefab table");
+            looks
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no mob prefab table: mobs are not shown to clients");
+            MobLooks::default()
+        }
+    };
+    let tutorial_level = match FtueLevel::load(&config.content_dir, &build) {
+        Ok(level) => {
+            tracing::info!(
+                statics = level.statics.entities.len(),
+                assets = level.assets.len(),
+                "tutorial level entities"
+            );
+            level
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no tutorial level entity table: the tutorial's level entities are not sent");
+            FtueLevel::default()
+        }
+    };
+    let content = Arc::new(PlayerContent::new(
+        &bundle.tables,
+        mob_looks,
+        tutorial_level,
+    ));
+    match &content.tutorial_quest {
+        Some(quest) => tracing::info!(tasks = quest.len(), "tutorial quest"),
+        None => tracing::warn!("no tutorial quest: the tutorial ends at its exit"),
+    }
     drop(bundle);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -146,7 +181,7 @@ async fn serve_async(
         sim_id: config.sim_id.clone(),
         world_id: config.world_id,
         level: config.level.clone(),
-        world: config.world_settings(level_bounds(&ground.level))?,
+        world: config.world_settings(level_bounds(&ground.level), ground.level.ocean_level)?,
         handoff_timeout: std::time::Duration::from_millis(config.handoff_timeout_ms),
         forward_ttl_ms: config.forward_ttl_ms,
         save_interval: std::time::Duration::from_millis(config.save_interval_ms),
