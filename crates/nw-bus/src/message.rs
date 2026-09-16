@@ -293,6 +293,11 @@ pub struct HandoffOffer {
     /// The player's run of its open-world quest, when one runs.
     #[serde(default)]
     pub quest: Option<QuestRun>,
+    /// The set achievement bits of the level the player leaves; a taker that changes the level
+    /// keeps them (retail: the open world's first full achievement state held the tutorial's 54
+    /// bits).
+    #[serde(default)]
+    pub achievements: Vec<u32>,
 }
 
 /// A player's run of a quest, as a handoff carries it to the next sim.
@@ -660,6 +665,7 @@ mod tests {
             client_context: 1,
             enter_level: false,
             experience: 0,
+            achievements: vec![14809, 15317],
             items: Some(vec![CarriedItem {
                 item_id: "PotionHealthT1".to_owned(),
                 quantity: 2,

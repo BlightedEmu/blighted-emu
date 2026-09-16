@@ -193,6 +193,7 @@ impl LevelFlow {
     /// The flow after `level_info` went to the client of entity `entity` at `now_ms`, after
     /// `phasing_sequence` updates. Every player starts with the expansion and the achievement of
     /// its archetype pick (`backstory`).
+    #[allow(clippy::too_many_arguments, reason = "the flow's start values")]
     pub(super) fn after_level_info(
         entity: u64,
         level_info: LevelInfoChangedMsg,
@@ -201,12 +202,23 @@ impl LevelFlow {
         rules: &AchievementRules,
         tutorial: bool,
         backstory: Option<&str>,
+        carried: &[u32],
     ) -> Self {
-        let mut bits = vec![0; BITSET_BYTES];
+        let mut achievements = Achievements {
+            bits: vec![0; BITSET_BYTES],
+            version: FIRST_ACHIEVEMENT_VERSION,
+            changes: Vec::new(),
+        };
         let archetype = backstory.and_then(|backstory| rules.archetypes.get(backstory).copied());
-        for bit in [rules.expansion, archetype].into_iter().flatten() {
-            set_bit(&mut bits, bit);
+        for bit in [rules.expansion, archetype]
+            .into_iter()
+            .flatten()
+            .chain(carried.iter().copied())
+        {
+            achievements.set(bit);
         }
+        // The first state sends the whole bitset.
+        achievements.changes.clear();
         Self {
             entity,
             level_info: Some(level_info),
@@ -214,12 +226,23 @@ impl LevelFlow {
             tutorial,
             phasing_sequence,
             cutscene: None,
-            achievements: Some(Achievements {
-                bits,
-                version: FIRST_ACHIEVEMENT_VERSION,
-                changes: Vec::new(),
-            }),
+            achievements: Some(achievements),
         }
+    }
+
+    /// The set achievement bits, for a handoff; none for a player taken without a level change.
+    pub(super) fn achievement_bits(&self) -> Vec<u32> {
+        let Some(achievements) = &self.achievements else {
+            return Vec::new();
+        };
+        (0..)
+            .zip(&achievements.bits)
+            .flat_map(|(byte, value): (u32, &u8)| {
+                (0..u8::BITS)
+                    .filter(move |bit| value & (1 << bit) != 0)
+                    .map(move |bit| byte * u8::BITS + bit)
+            })
+            .collect()
     }
 
     /// The flow of a player that a sim took without a level change: nothing is pending.
@@ -313,14 +336,19 @@ impl LevelFlow {
     }
 
     /// The messages when the player leaves this level: the loading screen and no phases.
-    pub(super) fn leave(&mut self) -> Vec<ServerMessage> {
-        vec![
-            ServerMessage::TeleportWithLoadingScreen(TeleportWithLoadingScreenMsg {
+    pub(super) fn leave(&self) -> Vec<ServerMessage> {
+        vec![ServerMessage::TeleportWithLoadingScreen(
+            TeleportWithLoadingScreenMsg {
                 header: self.header(component::PLAYER),
                 flag: true,
-            }),
-            self.phasing(Vec::new(), EMPTY_PHASING_MODE),
-        ]
+            },
+        )]
+    }
+
+    /// The empty phasing update that goes when the player leaves the level, after its last
+    /// states (retail: 361 ms after the 502).
+    pub(super) fn left(&mut self) -> ServerMessage {
+        self.phasing(Vec::new(), EMPTY_PHASING_MODE)
     }
 
     /// The whole achievement state for the spawn card; `None` for a player taken without a level
@@ -415,6 +443,7 @@ mod tests {
             &tutorial(),
             true,
             Some(WARMONGER),
+            &[],
         )
     }
 
@@ -443,6 +472,33 @@ mod tests {
         assert!(bit(&first, WARMONGER_BIT));
         assert!(!bit(&first, INTRO_UNLOCK_BIT));
         assert_eq!(flow.take_achievement_changes(), None);
+    }
+
+    #[test]
+    fn the_bits_of_the_last_level_come_with_the_first_state() {
+        // Retail: the open world's first full state (654375) held the tutorial's bits, the door
+        // bit 15317 among them.
+        const CARRIED: [u32; 2] = [14_809, 15_317];
+        let mut flow = LevelFlow::after_level_info(
+            ENTITY,
+            LevelInfoChangedMsg::of_level(TUTORIAL_LEVEL, LOGIN_CLIENT_CONTEXT, NOW, PHASE),
+            NOW,
+            0,
+            &tutorial(),
+            false,
+            Some(WARMONGER),
+            &CARRIED,
+        );
+        let mut expected = vec![EXPANSION_BIT, WARMONGER_BIT, CARRIED[0], CARRIED[1]];
+        expected.sort_unstable();
+        assert_eq!(flow.achievement_bits(), expected);
+        assert!(flow.first_achievements().is_some());
+        assert_eq!(
+            flow.take_achievement_changes(),
+            None,
+            "the full state holds them"
+        );
+        assert!(LevelFlow::resumed(ENTITY, 0).achievement_bits().is_empty());
     }
 
     #[test]
@@ -560,14 +616,13 @@ mod tests {
     fn leaving_shows_the_loading_screen_and_clears_the_phases() {
         let mut flow = flow();
         let messages = flow.leave();
-        let [
-            ServerMessage::TeleportWithLoadingScreen(teleport),
-            ServerMessage::UpdatePhasing(empty),
-        ] = messages.as_slice()
-        else {
-            panic!("teleport and empty phasing: {messages:?}");
+        let [ServerMessage::TeleportWithLoadingScreen(teleport)] = messages.as_slice() else {
+            panic!("teleport: {messages:?}");
         };
         assert_eq!(teleport.header, header(component::PLAYER));
+        let ServerMessage::UpdatePhasing(empty) = flow.left() else {
+            panic!("empty phasing");
+        };
         assert!(empty.entries.is_empty());
         assert_eq!((empty.mode, empty.sequence), (EMPTY_PHASING_MODE, 1));
         assert_eq!(flow.phasing_sequence(), 1);

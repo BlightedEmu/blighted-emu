@@ -2382,6 +2382,8 @@ mod tests {
                 enter_level: false,
                 items: None,
                 experience: 0,
+                quest: None,
+                achievements: Vec::new(),
             };
             let subject = subject::sim_handoff(world_id, &id);
             let mut reply: Result<HandoffReply, BusError> = Err(BusError::NoReplySubject);

@@ -107,6 +107,10 @@ const MS_PER_SECOND_F32: f32 = 1_000.0;
 /// How long a mob stands from the start of its alert before it moves (retail sailors: 2.0 s from
 /// sailor 1's `Alert_Turn` at 73978 to its run at 76014; 2.8-3.1 s for sailors 2 and 3).
 const ALERT_STAND_MS: u64 = 2_000;
+/// How long a player who asked to leave the tutorial (502) stays: its last states (the quest's
+/// end, the lore, the potions) go out before the handoff (retail: 3951 at 653944, the bundles to
+/// 654011, the empty 6310 at 654271, 361 ms after the 502).
+const LEAVE_DELAY_MS: u64 = 361;
 
 /// How long a row of refused moves may run before the server moves the player back to the last
 /// good position. A refused move leaves the client where it was — but it never sees that, because
@@ -332,8 +336,8 @@ struct Player {
     client_context: u8,
     /// What the client and this server still say to each other in this level.
     flow: LevelFlow,
-    /// Whether the client asked to leave the tutorial (502).
-    leaving: bool,
+    /// When the player leaves the tutorial, once its client asked to (502).
+    leave_at_ms: Option<u64>,
     /// Whether the server moved the player: its next own state moves it ([`OwnTeleport`]).
     moved: bool,
     /// The client's last camera point and when it came, for the player's speed.
@@ -571,6 +575,7 @@ impl SimWorld {
                 &self.achievement_rules,
                 self.is_tutorial(),
                 admit.backstory.as_deref(),
+                &[],
             ),
             None => LevelFlow::resumed(admit.entity, 0),
         };
@@ -679,6 +684,7 @@ impl SimWorld {
                 &self.achievement_rules,
                 self.is_tutorial(),
                 offer.backstory.as_deref(),
+                &offer.achievements,
             ),
             None => LevelFlow::resumed(offer.entity, offer.phasing_sequence),
         };
@@ -1557,8 +1563,10 @@ impl SimWorld {
         };
         let backstory = player.backstory.clone();
         let answers = match message {
-            ClientFacetMsg::ReturnToMainWorld { .. } if tutorial && !player.leaving => {
-                player.leaving = true;
+            ClientFacetMsg::ReturnToMainWorld { .. }
+                if tutorial && player.leave_at_ms.is_none() =>
+            {
+                player.leave_at_ms = Some(now_ms.saturating_add(LEAVE_DELAY_MS));
                 player.flow.leave()
             }
             _ => {
@@ -1684,15 +1692,20 @@ impl SimWorld {
             // it, the exit area ends the tutorial.
             let at_exit =
                 !tutorials.contains_key(&player.number) && at_tutorial_exit(body.motion.position());
+            let leaves = player.leave_at_ms.is_some_and(|at| now_ms >= at);
             if player.frozen
                 || now_ms < player.no_handoff_before_ms
                 || !vitals.spawned
                 || vitals.health.is_dead()
-                || !(player.leaving || at_exit)
+                || !(leaves || at_exit)
             {
                 continue;
             }
             player.frozen = true;
+            if leaves {
+                let left = player.flow.left();
+                send_now(&mut self.combat_messages, &player.connection, &[left]);
+            }
             starts.push(HandoffStart {
                 target: target.clone(),
                 offer: handoff_offer(&player, body, vitals, now_ms, Some(OPEN_WORLD_START), None),
@@ -1952,7 +1965,7 @@ impl SimWorld {
                     own_card_due_ms: arrival.own_card_due_ms,
                     client_context: arrival.client_context,
                     flow: arrival.flow,
-                    leaving: false,
+                    leave_at_ms: None,
                     moved: false,
                     move_facing: None,
                     last_camera: None,
@@ -2440,6 +2453,7 @@ fn handoff_offer(
         items: player.gear.as_ref().map(Gear::carried),
         experience: player.experience,
         quest,
+        achievements: player.flow.achievement_bits(),
     }
 }
 
@@ -3049,17 +3063,28 @@ mod tests {
                 NOW,
             )
             .expect("leave");
-        let output = tick(&mut world, NOW + level_flow::LEVEL_INFO_AGAIN_MS + 33);
-        let messages = messages_for(&output.messages, &who);
-        let types: Vec<u64> = messages.iter().map(ServerMessage::type_index).collect();
+        let staying = tick(&mut world, NOW + LEAVE_DELAY_MS - 1);
+        assert!(staying.handoffs.is_empty(), "the last states go out first");
+        let types = |output: &TickOutput| -> Vec<u64> {
+            messages_for(&output.messages, &who)
+                .iter()
+                .map(ServerMessage::type_index)
+                .collect()
+        };
         assert_eq!(
-            types,
-            vec![
+            types(&staying),
+            [
                 nw_messages::facet::UPDATE_PHASING_TYPE_INDEX,
                 nw_messages::facet::TELEPORT_WITH_LOADING_SCREEN_TYPE_INDEX,
-                nw_messages::facet::UPDATE_PHASING_TYPE_INDEX,
-            ]
+            ],
+            "the answer to the level, then the loading screen at once"
         );
+        let output = tick(&mut world, NOW + level_flow::LEVEL_INFO_AGAIN_MS + 33);
+        let left = messages_for(&output.messages, &who);
+        let [ServerMessage::UpdatePhasing(empty)] = left.as_slice() else {
+            panic!("the empty phasing at the handoff: {left:?}");
+        };
+        assert!(empty.entries.is_empty());
         assert_eq!(output.handoffs.len(), 1, "a request leaves from anywhere");
         let offer = &output.handoffs[0].offer;
         assert!(offer.enter_level);
