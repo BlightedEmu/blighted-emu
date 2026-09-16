@@ -19,7 +19,7 @@ use nw_messages::{
     DYNAMIC_SLICE_SUB_ID, GDE_METADATA_COMPONENT, GdeMetadataReplicatedState, InputPosition,
     LOCAL_PLAYER_INTEREST, MAX_BUNDLE_INDEXES, MemberState, MessageError, PLAYER_SLICE_ASSET,
     PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT,
-    ServerMessage, VitalsState, boss_phase_change, change_members, player_members,
+    ServerMessage, TeleportStep, VitalsState, boss_phase_change, change_members, player_members,
     raw_id_of_entity,
 };
 use nw_sim_core::Position;
@@ -392,17 +392,24 @@ const OWN_STATE_MS: u64 = 33;
 
 /// A move of the client's own player by the server (retail moves the player into the water so):
 /// the number and time of the state and the new teleport number.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct OwnTeleport {
     stamp: AlcStamp,
     number: u8,
+    facing: Option<f32>,
+    step: TeleportStep,
 }
 
 impl OwnTeleport {
     /// The `count`-th server move, `since_spawn_ms` after the first own state: the own clock
     /// goes on from that state's number and time (anchor 0, 16-bit wrapping offset), and the
     /// teleport number from its 1.
-    pub(super) fn of(count: u8, since_spawn_ms: u64) -> Self {
+    pub(super) fn of(
+        count: u8,
+        since_spawn_ms: u64,
+        facing: Option<f32>,
+        step: TeleportStep,
+    ) -> Self {
         Self {
             stamp: AlcStamp {
                 id: SPAWN_STATE_ID.wrapping_add((since_spawn_ms / OWN_STATE_MS) as u16),
@@ -410,6 +417,8 @@ impl OwnTeleport {
                 offset_ms: SPAWN_STATE_MS.wrapping_add(since_spawn_ms as u16),
             },
             number: SPAWN_TELEPORT.wrapping_add(count),
+            facing,
+            step,
         }
     }
 }
@@ -457,7 +466,13 @@ pub(super) fn own_group(
         InputPosition::from_metres(position.x, position.y, position.z),
         group.members.last_mut(),
     ) {
-        alc.state = MemberState::Alc(AlcState::teleport(teleport.stamp, pos, teleport.number));
+        alc.state = MemberState::Alc(AlcState::teleport(
+            teleport.stamp,
+            pos,
+            teleport.facing,
+            teleport.number,
+            teleport.step,
+        ));
     }
     // Without the card, the changes (achievements, objectives, experience, gear, health) still
     // go out, before the position.
@@ -628,7 +643,8 @@ mod tests {
     fn a_server_move_sends_the_next_teleport_number_on_the_own_clock() {
         const SINCE_SPAWN_MS: u64 = 117_000;
         let pos = InputPosition::from_metres(10.0, 20.0, 30.0).expect("finite");
-        let teleport = OwnTeleport::of(1, SINCE_SPAWN_MS);
+        const FACING: f32 = 1.434;
+        let teleport = OwnTeleport::of(1, SINCE_SPAWN_MS, Some(FACING), TeleportStep::Confirm);
         assert_eq!(teleport.number, SPAWN_TELEPORT + 1, "retail: 1, then 2");
         assert_eq!(
             teleport.stamp.id,
@@ -647,7 +663,9 @@ mod tests {
             Some(&MemberState::Alc(AlcState::teleport(
                 teleport.stamp,
                 pos,
-                teleport.number
+                Some(FACING),
+                teleport.number,
+                TeleportStep::Confirm,
             )))
         );
     }

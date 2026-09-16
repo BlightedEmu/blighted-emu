@@ -70,6 +70,32 @@ const DEFAULT_SPEED: u16 = 0;
 /// Bytes of the Mannequin tag state (child 34).
 pub const FRAG_TAGS_LEN: usize = FRAG_LEN;
 
+/// One state of a server move of the client's own player. Retail sent three states in a row
+/// (118546, 118580, 118614 ms): the new place with the anchor offset and the facing, the place
+/// again at zero offset with the new teleport number, then zero offset with the number alone. A
+/// single state with the number and the anchor offset left the live client moving on with its
+/// old speed (2026-09-14: thrown 18 m east and 3 m up after the water move).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TeleportStep {
+    /// The new place: `worldPosRel` at the anchor, the facing and `pos10`.
+    Place,
+    /// The place again at zero offset, the facing and the teleport number.
+    Confirm,
+    /// Zero offset and the teleport number.
+    Hold,
+}
+
+impl TeleportStep {
+    /// The step after this one; `None` after the last.
+    pub const fn next(self) -> Option<Self> {
+        match self {
+            Self::Place => Some(Self::Confirm),
+            Self::Confirm => Some(Self::Hold),
+            Self::Hold => None,
+        }
+    }
+}
+
 /// The number and time of one state of an entity: the client places the states of an entity on
 /// its timeline by them, at `anchor_us + offset_ms × 1000`, and blends between the two states
 /// around its render time (mob-animation note, section 1; retail never sends a state without
@@ -537,14 +563,30 @@ impl AlcState {
         Ok(Self::of_slot0(children, step.position))
     }
 
-    /// A state that moves the client's own player to `pos`: the number and time of `stamp`, the
-    /// retail re-anchor form of the position, and the new teleport number `teleport` (retail
-    /// moves the player into the water with children 0, 1, 2, 10, 11, 27 and 31).
-    pub fn teleport(stamp: AlcStamp, pos: InputPosition, teleport: u8) -> Self {
+    /// One of the three states that move the client's own player to `pos`, facing `facing`
+    /// (yaw, radians) when it is known, with teleport number `teleport` (retail moved the player
+    /// into the water so, 118546 to 118614 ms): see [`TeleportStep`]. Each carries the number and
+    /// time of `stamp`.
+    pub fn teleport(
+        stamp: AlcStamp,
+        pos: InputPosition,
+        facing: Option<f32>,
+        teleport: u8,
+        step: TeleportStep,
+    ) -> Self {
         let mut children: Vec<(usize, Vec<u8>)> = stamp_children(stamp).into();
-        children.extend(position_children(pos));
-        children.push((TELEPORT_CHILD, vec![teleport]));
-        Self::of_slot0(children, Some(pos))
+        let [at_anchor, pos10] = position_children(pos);
+        let rotation = facing.map(|yaw| (ROTATION_CHILD, rotation_bytes(yaw)));
+        let zero_offset = (POS_REL_CHILD, ZERO_POS3.to_vec());
+        let number = (TELEPORT_CHILD, vec![teleport]);
+        match step {
+            TeleportStep::Place => children.extend([at_anchor, pos10].into_iter().chain(rotation)),
+            TeleportStep::Confirm => {
+                children.extend([zero_offset, pos10, number].into_iter().chain(rotation));
+            }
+            TeleportStep::Hold => children.extend([zero_offset, number]),
+        }
+        Self::of_slot0(children, (step != TeleportStep::Hold).then_some(pos))
     }
 
     /// A body of slot 0 alone with `children` (child index and bytes, in any order).
@@ -1357,17 +1399,41 @@ mod tests {
     }
 
     #[test]
-    fn a_teleport_sends_the_retail_children_and_its_number() {
-        let to = InputPosition::from_metres(793.842_47, 337.422_12, 26.16).expect("position");
-        let moved = AlcState::teleport(STAMP, to, SPAWN_TELEPORT + 1);
+    fn a_teleport_sends_the_three_retail_states() {
+        // Retail water move (118546, 118580, 118614 ms): pos10 `444675eb43a8b6081d5c`, facing
+        // `66f6`, then zero offset with teleport number 2.
+        const RETAIL_POS10: &str = "444675eb43a8b6081d5c";
+        const RETAIL_FACING: [u8; 2] = [0x66, 0xf6];
+        const WATER_YAW: f32 = 1.434;
+        let pos = InputPosition::read(&mut Reader::new(&hex(RETAIL_POS10))).expect("pos10");
+        let state = |step| {
+            let state = AlcState::teleport(STAMP, pos, Some(WATER_YAW), SPAWN_TELEPORT + 1, step);
+            assert_eq!(
+                AlcState::read(&mut Reader::new(&state.bytes)).expect("read"),
+                state
+            );
+            state
+        };
+        let present = |state: &AlcState| -> Vec<usize> {
+            children_of(state).into_iter().map(|(c, _)| c).collect()
+        };
+        let place = state(TeleportStep::Place);
+        assert_eq!(present(&place), [0, 1, 10, 11, 25, 26, 27]);
+        assert_eq!(child(&place, POS_REL_CHILD), Some(AT_ANCHOR.to_vec()));
+        assert_eq!(child(&place, ROTATION_CHILD), Some(RETAIL_FACING.to_vec()));
+        assert_eq!(child(&place, POS10_CHILD), Some(hex(RETAIL_POS10)));
+        let confirm = state(TeleportStep::Confirm);
         assert_eq!(
-            AlcState::read(&mut Reader::new(&moved.bytes)).expect("read"),
-            moved
+            present(&confirm),
+            [0, 1, 10, 11, 25, 26, 27, TELEPORT_CHILD]
         );
-        let present: Vec<usize> = children_of(&moved).into_iter().map(|(c, _)| c).collect();
-        assert_eq!(present, [0, 1, 10, 25, 26, 27, TELEPORT_CHILD]);
-        assert_eq!(child(&moved, TELEPORT_CHILD), Some(vec![2]));
-        assert_eq!(child(&moved, POS_REL_CHILD), Some(AT_ANCHOR.to_vec()));
+        assert_eq!(child(&confirm, POS_REL_CHILD), Some(ZERO_POS3.to_vec()));
+        assert_eq!(child(&confirm, TELEPORT_CHILD), Some(vec![2]));
+        let hold = state(TeleportStep::Hold);
+        assert_eq!(present(&hold), [0, 1, 10, 25, 26, TELEPORT_CHILD]);
+        assert_eq!(child(&hold, POS_REL_CHILD), Some(ZERO_POS3.to_vec()));
+        assert_eq!(TeleportStep::Place.next(), Some(TeleportStep::Confirm));
+        assert_eq!(TeleportStep::Hold.next(), None);
     }
 
     #[test]

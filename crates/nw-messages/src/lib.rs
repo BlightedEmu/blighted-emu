@@ -49,7 +49,7 @@ pub use afflictions::{Affliction, AfflictionId, AfflictionList, ColdLong, HotLon
 pub use alc::{
     ALC_TYPE_INDEX, AlcChild, AlcStamp, AlcState, FRAG_TAGS_LEN, LayerEntry, MobAnimation, MobStep,
     POS10_CHILD, SLOT0_CHILDREN, SLOT1_CHILDREN, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT,
-    ScopeEntry, StepScope,
+    ScopeEntry, StepScope, TeleportStep,
 };
 pub use appearance::{
     LOOK_CHOICES, PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState, PlayerIconData, PlayerLook,
@@ -91,8 +91,8 @@ pub use entity_slots::{EntitySlots, SlotRead, SlotUpdate};
 pub use facet::{
     AdjustFxScriptsMsg, ClientFacetMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg,
     DisableCollisionMsg, FacetHeader, GatheringInterruptedMsg, InteractionEndedMsg,
-    InteractionValidatedMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg,
-    TargetMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg,
+    InteractionValidatedMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg, TargetMsg,
+    TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg,
 };
 pub use gde::{
     AssetId, DYNAMIC_SLICE_SUB_ID, GDE_ID_LEN, GDE_METADATA_COMPONENT, GDE_METADATA_TYPE_INDEX,

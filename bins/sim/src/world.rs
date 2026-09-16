@@ -32,8 +32,8 @@ use nw_messages::{
     DisableCollisionMsg, GatheringInterruptedMsg, InteractionEndedMsg, InteractionRequest,
     InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec, MessageError,
     PlayerLook, PlayerSeenByAiMsg, PlayerStates, ProgressionState, SelectedAsTargetMsg,
-    ServerMessage, TUTORIAL_LEVEL, TargetMsg, TimeSynchMsg,
-    UnselectedAsTargetMsg, WorldPosition,
+    ServerMessage, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg, UnselectedAsTargetMsg,
+    WorldPosition,
 };
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
@@ -329,6 +329,10 @@ struct Player {
     leaving: bool,
     /// Whether the server moved the player: its next own state moves it ([`OwnTeleport`]).
     moved: bool,
+    /// Where the player faces after the server's move, when the move says so.
+    move_facing: Option<f32>,
+    /// The next state of a server move still to send.
+    teleport_step: Option<TeleportStep>,
     /// Server time of the first refused move in the current row; `None` after a good move.
     /// A row of [`REFUSED_RESYNC_MS`] sets `moved`, so the client returns to the last good
     /// position it could not otherwise see.
@@ -820,6 +824,7 @@ impl SimWorld {
                 let since = player.refused_since_ms.get_or_insert(now_ms);
                 if now_ms.saturating_sub(*since) >= REFUSED_RESYNC_MS {
                     player.moved = true;
+                    player.move_facing = None;
                     player.refused_since_ms = None;
                     tracing::debug!(
                         player = player.number,
@@ -1301,12 +1306,13 @@ impl SimWorld {
             let mut gained = Vec::new();
             let mut set_bits = Vec::new();
             for order in pending.drain(..) {
-                if let Order::MoveTo(position) = order {
+                if let Order::MoveTo(position, facing) = order {
                     if let Some(mut body) = self.world.get_mut::<Body>(entity) {
                         body.motion = Motion::new(position, now_ms, &self.settings.limits);
                     }
                     if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                         player.moved = true;
+                        player.move_facing = Some(facing);
                     }
                     continue;
                 }
@@ -1400,7 +1406,7 @@ impl SimWorld {
                         player.experience = player.experience.saturating_add(points);
                         player.experience_changed = true;
                     }
-                    Order::MoveTo(_) => {}
+                    Order::MoveTo(..) => {}
                 }
             }
             let Some(tutorial) = self.tutorials.get_mut(&number) else {
@@ -1875,6 +1881,8 @@ impl SimWorld {
                     flow: arrival.flow,
                     leaving: false,
                     moved: false,
+                    move_facing: None,
+                    teleport_step: None,
                     refused_since_ms: None,
                     own_spawned_ms: None,
                     teleports: 0,
@@ -2115,11 +2123,19 @@ impl Neighbourhood<'_> {
             } else {
                 OwnCard::Without
             };
-            // A move by the server goes once the client has spawned.
-            let moved = own_card != OwnCard::Spawn && vitals.spawned && player.moved;
-            let teleport = if moved {
-                player.moved = false;
+            // A move by the server goes once the client has spawned, in three states, one per
+            // bundle (retail; [`TeleportStep`]).
+            let can_move = own_card != OwnCard::Spawn && vitals.spawned;
+            let step = if can_move && std::mem::take(&mut player.moved) {
                 player.teleports = player.teleports.wrapping_add(1);
+                Some(TeleportStep::Place)
+            } else if can_move {
+                player.teleport_step.take()
+            } else {
+                None
+            };
+            let teleport = step.map(|step| {
+                player.teleport_step = step.next();
                 let since_spawn_ms = player
                     .own_spawned_ms
                     .map_or(0, |spawned| self.server_time.saturating_sub(spawned));
@@ -2127,12 +2143,11 @@ impl Neighbourhood<'_> {
                     player = own,
                     teleports = player.teleports,
                     since_spawn_ms,
+                    ?step,
                     "own teleport"
                 );
-                Some(OwnTeleport::of(player.teleports, since_spawn_ms))
-            } else {
-                None
-            };
+                OwnTeleport::of(player.teleports, since_spawn_ms, player.move_facing, step)
+            });
             let mut groups: Vec<BundleGroup> = Vec::new();
             if own_sent {
                 // The whole gear and achievements go with the first card; later the
@@ -3495,6 +3510,40 @@ mod tests {
         assert!(refused.is_err());
         let departure = world.leave(&a).expect("left");
         assert_eq!(departure.moved_at_ms, NOW + ONE_SECOND_MS);
+    }
+
+    #[test]
+    fn a_server_move_goes_out_in_three_states_in_a_row() {
+        let mut world = world();
+        let a = connection(1);
+        join(&mut world, 1, 0.0);
+        let card_at = NOW + OWN_CARD_DELAY_MS;
+        tick(&mut world, card_at);
+        world.heard_from(&a);
+        let entity = world.player_by_number(1).expect("player");
+        let step = |world: &SimWorld| {
+            world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .teleport_step
+        };
+        world.world.get_mut::<Player>(entity).expect("player").moved = true;
+        let mut steps = Vec::new();
+        for n in 1..=4 {
+            tick(&mut world, card_at + 33 * n);
+            steps.push(step(&world));
+        }
+        assert_eq!(
+            steps,
+            [
+                Some(TeleportStep::Confirm),
+                Some(TeleportStep::Hold),
+                None,
+                None
+            ],
+            "Place, then Confirm, then Hold, one per bundle"
+        );
     }
 
     #[test]

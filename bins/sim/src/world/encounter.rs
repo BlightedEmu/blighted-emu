@@ -57,6 +57,8 @@ const WATER_AT: Position = Position {
     y: 337.42,
     z: 26.16,
 };
+/// Where the player faces in the water (retail own state 118546: rotation `66f6`, yaw 1.434 rad).
+const WATER_FACING: f32 = 1.434;
 /// Thorpe's intermission starts when his health falls to this part of his maximum (retail
 /// `Boss_Phase` entry: health 60 %; he stopped at 59.5 %).
 const CAPTAIN_INTERMISSION_FRACTION: f64 = 0.6;
@@ -352,8 +354,8 @@ pub(super) enum Order {
     /// The player's potions of this item become a new stack of this many in quick slot 1, and
     /// its cooldowns end (retail when the quest ends).
     RefillPotions(String, u32),
-    /// Move the player here.
-    MoveTo(Position),
+    /// Move the player here, facing `facing` (yaw, radians).
+    MoveTo(Position, f32),
     /// The player gets these experience points.
     Experience(u32),
     /// Clear this achievement.
@@ -683,7 +685,7 @@ impl Tutorial {
     fn move_to_water(&mut self, orders: &mut Vec<Order>) {
         if !std::mem::replace(&mut self.moved_to_water, true) {
             self.water_at_ms = None;
-            orders.push(Order::MoveTo(WATER_AT));
+            orders.push(Order::MoveTo(WATER_AT, WATER_FACING));
             orders.push(Order::ShowIsland);
             self.assets.on(Trigger::WaterMove, self.now_ms);
             tracing::info!(player = self.owner, "tutorial: into the water");
@@ -1150,11 +1152,14 @@ pub(crate) mod tests {
             SHIP,
             NOW + WATER_MOVE_DELAY_MS - 1,
         );
-        assert!(!early.contains(&Order::MoveTo(WATER_AT)));
+        assert!(!early.contains(&Order::MoveTo(WATER_AT, WATER_FACING)));
         let due = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + WATER_MOVE_DELAY_MS);
-        assert!(due.contains(&Order::MoveTo(WATER_AT)));
+        assert!(due.contains(&Order::MoveTo(WATER_AT, WATER_FACING)));
         let ended = tutorial.event(Event::CinematicEnded(sinking), &mut mobs, NOW);
-        assert!(!ended.contains(&Order::MoveTo(WATER_AT)), "once only");
+        assert!(
+            !ended.contains(&Order::MoveTo(WATER_AT, WATER_FACING)),
+            "once only"
+        );
     }
 
     #[test]
