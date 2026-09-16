@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use nw_bus::{MOB_ENTITY_BASE, MOB_STATES, MobGhost, SnapMob};
 use nw_content::combat::CombatData;
+use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_sim_core::{
     Brain, BrainAction, BrainSettings, Dice, Ground, Health, MobAttack, MobState, Position, Seen,
     SpatialGrid, TUTORIAL_FOLDER, brain_step, forget, mob_max_health,
@@ -128,6 +129,8 @@ struct Personal {
     frozen_until_ms: u64,
     /// Hits do no damage until this time.
     absorb_until_ms: u64,
+    /// The slice asset of its retail card, when its vitals id has more than one look.
+    asset: Option<[u8; ASSET_ID_LEN]>,
 }
 
 /// The mobs of one sim.
@@ -214,14 +217,16 @@ impl Mobs {
     }
 
     /// Spawns a personal mob of `spawn` for player `owner` at `now_ms`, held idle when `held`,
-    /// hitting at `pace` when given; its entity number, or `None` without its rows. A paced mob
-    /// that fights at once waits one interval before its first hit.
+    /// hitting at `pace` when given, shown with slice asset `asset` when given; its entity
+    /// number, or `None` without its rows. A paced mob that fights at once waits one interval
+    /// before its first hit.
     pub fn spawn_personal(
         &mut self,
         spawn: VitalsSpawn,
         owner: u64,
         held: bool,
         pace: Option<Pace>,
+        asset: Option<[u8; ASSET_ID_LEN]>,
         now_ms: u64,
     ) -> Option<u64> {
         let mut mob = self.make(&spawn)?;
@@ -246,6 +251,7 @@ impl Mobs {
                 swing_gap_ms,
                 frozen_until_ms: 0,
                 absorb_until_ms: 0,
+                asset,
             },
         );
         Some(mob_entity(index))
@@ -283,6 +289,11 @@ impl Mobs {
         self.personal
             .get(&spawn_index(entity)?)
             .map(|personal| personal.owner)
+    }
+
+    /// The slice asset of personal mob `entity`'s retail card, when it has one.
+    pub fn asset(&self, entity: u64) -> Option<[u8; ASSET_ID_LEN]> {
+        self.personal.get(&spawn_index(entity)?)?.asset
     }
 
     /// The brain state of mob `entity`, when it lives here.
@@ -876,6 +887,7 @@ mod tests {
                 PLAYER,
                 true,
                 Some(PACE),
+                None,
                 0,
             )
             .expect("rows");
@@ -898,6 +910,7 @@ mod tests {
                 PLAYER,
                 false,
                 Some(PACE),
+                None,
                 now,
             )
             .expect("rows");

@@ -32,6 +32,7 @@ use nw_formats::objectstream::lowercase_crc32;
 use nw_sim_core::Position;
 
 use nw_content::ftue_entities::{FtueLevel, GDE_REF_PREFIX_LEN};
+use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{ClientFacetMsg, InteractionRequest};
 
@@ -439,6 +440,10 @@ pub(super) struct Tutorial {
     assets: AssetScript,
     /// Mobs spawned so far.
     spawned: usize,
+    /// The vitals id and card asset of each retail mob, in spawn order: the tutorial spawns its
+    /// mobs in the retail order, so the mob of each order place gets that retail mob's look (the
+    /// two legionnaires share a vitals id but not a look).
+    retail_looks: Vec<(u32, [u8; ASSET_ID_LEN])>,
     /// The spawn order places of each batch of mobs.
     batches: Vec<Vec<usize>>,
     /// The time of the call being handled.
@@ -476,6 +481,11 @@ impl Tutorial {
             later: Vec::new(),
             assets: AssetScript::of(level),
             spawned: 0,
+            retail_looks: level
+                .mobs
+                .iter()
+                .map(|mob| (mob.vitals_id, mob.asset))
+                .collect(),
             batches: Vec::new(),
             now_ms,
             first_sailor_at_ms: Some(now_ms.saturating_add(FIRST_SAILOR_DELAY_MS)),
@@ -529,9 +539,19 @@ impl Tutorial {
     ) {
         let spawn = spawn_of(point);
         let vitals_id = spawn.vitals_id;
-        let Some(entity) =
-            mobs.spawn_personal(spawn, self.owner, held, Some(point.pace), self.now_ms)
-        else {
+        let asset = self
+            .retail_looks
+            .get(self.spawned)
+            .filter(|(retail_vitals, _)| *retail_vitals == vitals_id)
+            .map(|(_, asset)| *asset);
+        let Some(entity) = mobs.spawn_personal(
+            spawn,
+            self.owner,
+            held,
+            Some(point.pace),
+            asset,
+            self.now_ms,
+        ) else {
             tracing::warn!(vitals = point.vitals, "tutorial mob without combat rows");
             return;
         };

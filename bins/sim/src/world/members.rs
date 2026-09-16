@@ -14,6 +14,7 @@
 //! position members, as before M6-B.
 
 use nw_bus::MobGhost;
+use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::{
     AlcStamp, AlcState, AssetId, BOSS_PHASE_TYPE_INDEX, BundleGroup, BundleMember, BundlePayload,
     DYNAMIC_SLICE_SUB_ID, GDE_METADATA_COMPONENT, GdeMetadataReplicatedState, InputPosition,
@@ -70,6 +71,8 @@ pub(super) struct MobCard {
     pub(super) boss_phase: Option<u32>,
     /// Its boss phase changed since the last bundle step.
     pub(super) boss_phase_changed: bool,
+    /// The slice asset of its look, when it has its own (a personal mob with a retail card).
+    pub(super) asset: Option<[u8; ASSET_ID_LEN]>,
 }
 
 impl MobCard {
@@ -96,6 +99,7 @@ pub(super) const fn card_of(
         first_damage: false,
         boss_phase: None,
         boss_phase_changed: false,
+        asset: None,
     }
 }
 

@@ -1753,7 +1753,7 @@ impl SimWorld {
         // it is not sent (M6-B spec section 5.6).
         let content = Arc::clone(&self.content);
         let shown = |state: &MobGhost| {
-            state.health > 0 || content.mob_looks.look(state.vitals_id).is_some()
+            state.health > 0 || content.mob_looks.look(state.vitals_id, None).is_some()
         };
         let mobs: Vec<(u64, Position, MobGhost)> = self
             .mob_states()
@@ -1775,6 +1775,7 @@ impl SimWorld {
             everyone.push((entity, position));
             let owner = self.mobs.owner(entity);
             let mut card = card_of(entity, position, state, owner);
+            card.asset = self.mobs.asset(entity);
             let previous = self.mob_health_shown.insert(entity, state.health);
             card.health_changed = previous != Some(state.health);
             card.first_damage = card.health_changed
@@ -1788,7 +1789,7 @@ impl SimWorld {
             let unseen = owner.is_some_and(|owner| !spawned.contains(&owner));
             if let Some(look) = content
                 .mob_looks
-                .look(state.vitals_id)
+                .look(state.vitals_id, card.asset)
                 .filter(|look| look.alc.is_some() && !unseen)
             {
                 let target = self
@@ -2316,7 +2317,7 @@ impl Neighbourhood<'_> {
                 // A mob card, else a player's position.
                 groups.extend(match seen {
                     Ok(card) => {
-                        let look = self.mob_looks.look(card.state.vitals_id);
+                        let look = self.mob_looks.look(card.state.vitals_id, card.asset);
                         // A mob with a prefab gets its card once, as on retail: the card makes
                         // the client load the creature slice, and a card again starts that
                         // load over, so the mob never shows (live 2026-09-12).
@@ -3099,7 +3100,7 @@ mod tests {
         let asset = world
             .content
             .mob_looks
-            .look(encounter::tests::sailor_vitals())
+            .look(encounter::tests::sailor_vitals(), None)
             .expect("sailor look")
             .asset;
         let sailor_cards =

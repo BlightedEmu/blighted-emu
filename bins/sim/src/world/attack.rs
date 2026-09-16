@@ -1074,7 +1074,7 @@ mod tests {
         };
         let mob = world
             .mobs
-            .spawn_personal(test_spawn(MOB_X), 1, false, Some(pace), NOW)
+            .spawn_personal(test_spawn(MOB_X), 1, false, Some(pace), None, NOW)
             .expect("rows");
         let swing = MobAttackIntent { mob, target: 1 };
         assert!(world.swings_landing(vec![swing], NOW).is_empty());

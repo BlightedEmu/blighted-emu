@@ -5,7 +5,9 @@
 //! A mob shows on the client only when its spawn card names the asset of its creature slice; the
 //! world file gives only the vitals id. The table maps a vitals id to that asset, the components
 //! of its ALC and vitals states, and the bodies of the other states of its first retail group and
-//! of its death. A vitals id with more than one prefab keeps the one seen most often.
+//! of its death. A vitals id can have more than one prefab (retail: the two tutorial legionnaires
+//! share `Legion_Legionnaire_FTUE` but have their own slice assets); the table keeps each, and the
+//! one seen most often is the vitals id's default.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -94,10 +96,15 @@ struct PrefabRow {
     seen: u32,
 }
 
-/// The prefab of every vitals id in the table.
+/// A vitals id and the slice asset of one of its prefabs.
+pub type PrefabKey = (u32, [u8; ASSET_ID_LEN]);
+
+/// Every prefab in the table, by vitals id and asset.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MobPrefabs {
-    by_vitals: HashMap<u32, MobPrefab>,
+    by_key: HashMap<PrefabKey, MobPrefab>,
+    /// The asset of the prefab seen most often of each vitals id.
+    default_asset: HashMap<u32, [u8; ASSET_ID_LEN]>,
 }
 
 impl MobPrefabs {
@@ -120,43 +127,55 @@ impl MobPrefabs {
     /// Returns [`MobPrefabsError`] when the text is not the table.
     pub fn parse(text: &str) -> Result<Self, MobPrefabsError> {
         let rows: Vec<PrefabRow> = serde_json::from_str(text)?;
-        let mut best: HashMap<u32, (u32, MobPrefab)> = HashMap::new();
+        let mut by_key = HashMap::new();
+        let mut most_seen: HashMap<u32, (u32, [u8; ASSET_ID_LEN])> = HashMap::new();
         for row in rows {
             let seen = row.seen;
             let vitals_id = row.vitals_id;
             let prefab = prefab_of(row)?;
-            if best.get(&vitals_id).is_none_or(|(most, _)| seen > *most) {
-                best.insert(vitals_id, (seen, prefab));
+            if most_seen
+                .get(&vitals_id)
+                .is_none_or(|(most, _)| seen > *most)
+            {
+                most_seen.insert(vitals_id, (seen, prefab.asset));
             }
+            by_key.insert((vitals_id, prefab.asset), prefab);
         }
         Ok(Self {
-            by_vitals: best
+            by_key,
+            default_asset: most_seen
                 .into_iter()
-                .map(|(vitals_id, (_, prefab))| (vitals_id, prefab))
+                .map(|(vitals_id, (_, asset))| (vitals_id, asset))
                 .collect(),
         })
     }
 
-    /// The prefab of vitals id `vitals_id`.
+    /// The prefab of vitals id `vitals_id` seen most often.
     pub fn prefab(&self, vitals_id: u32) -> Option<&MobPrefab> {
-        self.by_vitals.get(&vitals_id)
+        let asset = self.default_asset.get(&vitals_id)?;
+        self.by_key.get(&(vitals_id, *asset))
     }
 
-    /// Every vitals id with its prefab.
-    pub fn iter(&self) -> impl Iterator<Item = (u32, &MobPrefab)> {
-        self.by_vitals
+    /// The default asset of each vitals id.
+    pub fn default_assets(&self) -> impl Iterator<Item = (u32, [u8; ASSET_ID_LEN])> {
+        self.default_asset
             .iter()
-            .map(|(vitals_id, prefab)| (*vitals_id, prefab))
+            .map(|(vitals_id, asset)| (*vitals_id, *asset))
     }
 
-    /// Vitals ids in the table.
+    /// Every prefab with its vitals id and asset.
+    pub fn iter(&self) -> impl Iterator<Item = (PrefabKey, &MobPrefab)> {
+        self.by_key.iter().map(|(key, prefab)| (*key, prefab))
+    }
+
+    /// Prefabs in the table.
     pub fn len(&self) -> usize {
-        self.by_vitals.len()
+        self.by_key.len()
     }
 
     /// Whether the table is empty.
     pub fn is_empty(&self) -> bool {
-        self.by_vitals.is_empty()
+        self.by_key.is_empty()
     }
 }
 
@@ -205,11 +224,11 @@ mod tests {
     }
 
     #[test]
-    fn the_most_seen_prefab_of_a_vitals_id_is_kept() {
+    fn the_most_seen_prefab_of_a_vitals_id_is_its_default() {
         let other = "00112233445566778899aabbccddeeff";
         let text = format!("[{},{}]", row(other, 1), row(SAILOR_ASSET, 3));
         let table = MobPrefabs::parse(&text).expect("table");
-        assert_eq!(table.len(), 1);
+        assert_eq!(table.len(), 2, "each asset's prefab is kept");
         let sailor = table.prefab(SAILOR).expect("sailor");
         assert_eq!(hex::encode(sailor.asset), SAILOR_ASSET);
         assert_eq!((sailor.alc_component, sailor.vitals_component), (5, 9));

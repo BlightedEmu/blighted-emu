@@ -8,7 +8,7 @@ use std::sync::Arc;
 use nw_content::Tables;
 use nw_content::achievements::AchievementIndexes;
 use nw_content::ftue_entities::FtueLevel;
-use nw_content::mob_prefabs::{MobPrefabs, PrefabMember};
+use nw_content::mob_prefabs::{ASSET_ID_LEN, MobPrefabs, PrefabKey, PrefabMember};
 use nw_content::starter::StarterKits;
 use nw_messages::{AlcState, AssetId, BundleMember, MemberState, VitalsState};
 
@@ -45,10 +45,12 @@ pub struct MobLook {
     pub death: Vec<BundleMember>,
 }
 
-/// The look of every mob prefab, by vitals id.
+/// The look of every mob prefab, by vitals id and slice asset.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MobLooks {
-    by_vitals: HashMap<u32, MobLook>,
+    by_key: HashMap<PrefabKey, MobLook>,
+    /// The asset of each vitals id's most seen prefab.
+    default_asset: HashMap<u32, [u8; ASSET_ID_LEN]>,
 }
 
 impl MobLooks {
@@ -70,9 +72,9 @@ impl MobLooks {
                 })
                 .collect()
         };
-        let by_vitals = prefabs
+        let by_key = prefabs
             .iter()
-            .map(|(vitals_id, prefab)| {
+            .map(|(key, prefab)| {
                 // The ALC and vitals states of the first group are taken apart: each mob gets
                 // them with its own place and health.
                 let mut alc = None;
@@ -100,25 +102,35 @@ impl MobLooks {
                     first,
                     death: members(&prefab.death_members),
                 };
-                (vitals_id, look)
+                (key, look)
             })
             .collect();
-        (Self { by_vitals }, skipped)
+        let looks = Self {
+            by_key,
+            default_asset: prefabs.default_assets().collect(),
+        };
+        (looks, skipped)
     }
 
-    /// The look of vitals id `vitals_id`.
-    pub fn look(&self, vitals_id: u32) -> Option<&MobLook> {
-        self.by_vitals.get(&vitals_id)
+    /// The look of vitals id `vitals_id` with slice asset `asset`; without an asset, or when the
+    /// table has no prefab of it, the vitals id's most seen look.
+    pub fn look(&self, vitals_id: u32, asset: Option<[u8; ASSET_ID_LEN]>) -> Option<&MobLook> {
+        asset
+            .and_then(|asset| self.by_key.get(&(vitals_id, asset)))
+            .or_else(|| {
+                let asset = self.default_asset.get(&vitals_id)?;
+                self.by_key.get(&(vitals_id, *asset))
+            })
     }
 
     /// Prefabs with a look.
     pub fn len(&self) -> usize {
-        self.by_vitals.len()
+        self.by_key.len()
     }
 
     /// Whether there is no look.
     pub fn is_empty(&self) -> bool {
-        self.by_vitals.is_empty()
+        self.by_key.is_empty()
     }
 }
 
@@ -192,10 +204,39 @@ mod tests {
         let prefabs = MobPrefabs::parse(&text).expect("table");
         let (looks, skipped) = MobLooks::of(&prefabs);
         assert_eq!(skipped, 1, "a cut damage receiver body");
-        let sailor = looks.look(SAILOR).expect("sailor");
+        let sailor = looks.look(SAILOR, None).expect("sailor");
         assert_eq!(sailor.asset.sub_id, 2);
         assert_eq!(sailor.first.len(), 1);
         assert_eq!(sailor.first[0].component, 6);
         assert_eq!(sailor.death.len(), 1);
+    }
+
+    #[test]
+    fn a_mob_with_its_own_asset_gets_its_own_look() {
+        // Retail: the door legionnaire (179393) and the signifier (202592) share their vitals id.
+        const LEGIONNAIRE: u32 = 3_705_015_359;
+        const DOOR: [u8; ASSET_ID_LEN] =
+            0xc05f_c957_8487_5559_afe8_74a7_8f95_fb64_u128.to_be_bytes();
+        const SIGNIFIER: [u8; ASSET_ID_LEN] =
+            0x87a3_35e7_6b86_50d5_a465_fe08_10bd_a5df_u128.to_be_bytes();
+        let row = |asset: [u8; ASSET_ID_LEN], sub_id: u32, seen: u32| {
+            let asset: String = asset.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!(
+                r#"{{"vitals_id":{LEGIONNAIRE},"vitals_name":null,"asset":"{asset}",
+                    "sub_id":{sub_id},"alc_component":5,"vitals_component":9,
+                    "first_members":[],"death_members":[],"seen":{seen}}}"#
+            )
+        };
+        let text = format!("[{},{}]", row(DOOR, 1, 2), row(SIGNIFIER, 2, 3));
+        let (looks, _) = MobLooks::of(&MobPrefabs::parse(&text).expect("table"));
+        let sub_id = |asset| looks.look(LEGIONNAIRE, asset).map(|look| look.asset.sub_id);
+        assert_eq!(sub_id(Some(DOOR)), Some(1));
+        assert_eq!(sub_id(Some(SIGNIFIER)), Some(2));
+        assert_eq!(sub_id(None), Some(2), "the most seen look without an asset");
+        assert_eq!(
+            sub_id(Some([0; ASSET_ID_LEN])),
+            Some(2),
+            "and for an asset not in the table"
+        );
     }
 }
