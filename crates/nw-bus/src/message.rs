@@ -222,6 +222,26 @@ pub struct CellTable {
     pub owners: Vec<Option<u16>>,
 }
 
+/// Where a carried item is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ItemPlace {
+    /// Worn in this paperdoll slot.
+    Worn(u32),
+    /// In this bag slot.
+    Bag(u16),
+}
+
+/// One item stack a player carries to another sim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CarriedItem {
+    /// The item id (`MasterItemDefinitions` `ItemID`).
+    pub item_id: String,
+    /// Stack size.
+    pub quantity: u32,
+    /// Where it is.
+    pub place: ItemPlace,
+}
+
 /// One player moving to another sim (M5 spec section 3.3).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandoffOffer {
@@ -264,13 +284,49 @@ pub struct HandoffOffer {
     /// tutorial): the taker sends the level change and a new spawn state, with the next
     /// client-context id.
     pub enter_level: bool,
+    /// The items the player carries; `None` when the sender kept none, so the taker gives the
+    /// login kit of the backstory.
+    pub items: Option<Vec<CarriedItem>>,
+    /// The player's experience points (the tutorial's kills give some).
+    #[serde(default)]
+    pub experience: u32,
+    /// The player's run of its open-world quest, when one runs.
+    #[serde(default)]
+    pub quest: Option<QuestRun>,
+}
+
+/// A player's run of a quest, as a handoff carries it to the next sim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuestRun {
+    /// The state of each task of the quest's tree, in tree order.
+    pub tasks: Vec<QuestTask>,
+    /// The tasks with progress (their tree index), in the order they first had it.
+    pub listed: Vec<u32>,
+    /// The version of the newest quest tracker lists the client has.
+    pub tracker_version: u64,
+}
+
+/// The state of one task of a [`QuestRun`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuestTask {
+    /// Not started, or stopped.
+    Idle,
+    /// Waiting: kills or items so far, and the time left on its timer.
+    Active {
+        /// Kills or items so far.
+        progress: u32,
+        /// Milliseconds until its timer ends; `None` without a timer.
+        due_in_ms: Option<u64>,
+    },
+    /// Done.
+    Done,
 }
 
 /// Sim to sim, on the taker's handoff subject. Both go on one subject, so NATS keeps their order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HandoffMessage {
     /// Take this player (request/reply).
-    Offer(HandoffOffer),
+    Offer(Box<HandoffOffer>),
     /// The offer of this connection timed out or its player left; undo a late take.
     Cancel {
         /// The connection.
@@ -603,8 +659,26 @@ mod tests {
             phasing_sequence: 2,
             client_context: 1,
             enter_level: false,
+            experience: 0,
+            items: Some(vec![CarriedItem {
+                item_id: "PotionHealthT1".to_owned(),
+                quantity: 2,
+                place: ItemPlace::Worn(14),
+            }]),
+            quest: Some(QuestRun {
+                tasks: vec![
+                    QuestTask::Done,
+                    QuestTask::Active {
+                        progress: 1,
+                        due_in_ms: Some(500),
+                    },
+                    QuestTask::Idle,
+                ],
+                listed: vec![0, 1],
+                tracker_version: 7,
+            }),
         };
-        round_trip(HandoffMessage::Offer(offer));
+        round_trip(HandoffMessage::Offer(Box::new(offer)));
         round_trip(HandoffMessage::Cancel {
             connection: connection(),
             handoffs: 2,

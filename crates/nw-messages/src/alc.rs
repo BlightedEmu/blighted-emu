@@ -10,6 +10,8 @@
 //! Only `pos10` (slot 0, child 27) is kept as a value. The rest is skipped, and the body keeps
 //! its exact bytes, so a read and write gives the same bytes.
 
+use std::ops::Range;
+
 use crate::client_input::InputPosition;
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -17,6 +19,330 @@ use crate::wire::{MessageError, Reader, Writer};
 pub const ALC_TYPE_INDEX: u64 = 11;
 /// Slot 0 child that holds the position (`pos10`), counted from 0.
 pub const POS10_CHILD: usize = 27;
+/// Slot 0 children of a state's number and clock (sailor-movement note, section 1): `idRel` and
+/// `timeOffsetRel` (the low bytes), `idAbs` and `timeOffsetAbs` (the high bytes).
+const ID_REL_CHILD: usize = 0;
+const TIME_REL_CHILD: usize = 1;
+const ID_ABS_CHILD: usize = 25;
+const TIME_ABS_CHILD: usize = 26;
+/// Slot 0 child of the facing (`rotation`, a quat).
+const ROTATION_CHILD: usize = 11;
+/// One quat byte: `byte * QUAT_STEP - QUAT_OFFSET` (`FUN_14087a8d0`: sqrt(2) / 255 and
+/// 1 / sqrt(2); rotation note, section 1).
+const QUAT_STEP: f32 = 0.005_545_935_6;
+const QUAT_OFFSET: f32 = std::f32::consts::FRAC_1_SQRT_2;
+/// Quat tags of a turn about the up axis (x and y zero): the w part derived from the z byte,
+/// the z part derived from the w byte, and yaw 0 (z zero too, no byte).
+const QUAT_TAG_W_DERIVED: u8 = 0x66;
+const QUAT_TAG_Z_DERIVED: u8 = 0x46;
+const QUAT_TAG_NORTH: u8 = 0x6e;
+/// Set in a quat tag when the derived part is negative.
+const QUAT_TAG_NEGATIVE: u8 = 1;
+/// Slot 0 child of the offset from `pos10` (`worldPosRel`).
+const POS_REL_CHILD: usize = 10;
+/// Slot 0 children of the FullBody scope time in 1/30 s ticks, low byte first
+/// (`scopeTimeBlob0Data0` to `Data3`; mob-animation note, section 3.3).
+const SCOPE_TIME_CHILDREN: [usize; 4] = [28, 38, 49, 50];
+/// Slot 0 child of the times of the scopes above FullBody (`scopeTimeBlobEx`).
+const SCOPE_TIME_EX_CHILD: usize = 29;
+/// Slot 0 child of the mask of the active scopes (`scopeData`).
+const SCOPE_DATA_CHILD: usize = 32;
+/// Slot 0 child of the scope entries (`scopeInfoBlob`).
+const SCOPE_INFO_CHILD: usize = 33;
+/// Slot 0 child of the Mannequin tag state (`globalFragTags`).
+const FRAG_TAGS_CHILD: usize = 34;
+/// Slot 0 child of the angle from a mob's facing to the facing it wants
+/// (`aiAngleToDesiredFacing`, radians; creature-animation note, section 7).
+const FACING_GAP_CHILD: usize = 35;
+/// Slot 0 child of the teleport number (`teleportAndMigrationId`). The client puts its own
+/// player at a server position when it changes: the first own state sends 1, and retail moves the
+/// player into the water with a state that sends 2 (live capture, 118580 ms).
+const TELEPORT_CHILD: usize = 31;
+/// Slot 0 child of the time anchor (`timeAnchor`, µs since 2000-01-01; mob-animation note,
+/// section 1): a state's time is the anchor plus its offset in children 1 and 26.
+const TIME_ANCHOR_CHILD: usize = 40;
+/// A `worldPosRel` that puts the entity at its `pos10`.
+const AT_ANCHOR: [u8; POS3_LEN] = [0xff; POS3_LEN];
+/// `scopeData` with only the FullBody scope (bit 0).
+const FULL_BODY_SCOPE: u64 = 1;
+/// The playback speed of a scope entry that plays at its own speed.
+const DEFAULT_SPEED: u16 = 0;
+/// Bytes of the Mannequin tag state (child 34).
+pub const FRAG_TAGS_LEN: usize = FRAG_LEN;
+
+/// The number and time of one state of an entity: the client places the states of an entity on
+/// its timeline by them, at `anchor_us + offset_ms × 1000`, and blends between the two states
+/// around its render time (mob-animation note, section 1; retail never sends a state without
+/// `idRel`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AlcStamp {
+    /// The state number; +1 per new state.
+    pub id: u16,
+    /// The time anchor: server microseconds since 2000-01-01.
+    pub anchor_us: u64,
+    /// The state's time after the anchor, in milliseconds.
+    pub offset_ms: u16,
+}
+
+impl AlcStamp {
+    fn low(value: u16) -> u8 {
+        value.to_be_bytes()[1]
+    }
+
+    fn high(value: u16) -> u8 {
+        value.to_be_bytes()[0]
+    }
+}
+
+/// One FullBody scope entry: a Mannequin fragment and a CAGE action that started at state
+/// `start_id` (mob-animation note, section 3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScopeEntry {
+    /// The number of the state in which the entry started.
+    pub start_id: u16,
+    /// The fragment's index + 1 in the creature's Mannequin controller definitions.
+    pub fragment: u16,
+    /// The action's index + 1 in the creature's CAGE grid.
+    pub action: u16,
+    /// The last byte of a retail entry of this fragment (**Unknown** meaning).
+    pub tail: u8,
+}
+
+impl ScopeEntry {
+    /// Writes the entry: the start, the fragment, the action, the speed and the tail.
+    fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
+        writer.u16(self.start_id);
+        writer.prefixed(u64::from(self.fragment))?;
+        writer.prefixed(u64::from(self.action))?;
+        writer.u16(DEFAULT_SPEED).u8(self.tail);
+        Ok(())
+    }
+}
+
+/// The `scopeInfoBlob` of `entries`, in scope order: their byte count, then the entries.
+fn info_blob(entries: &[ScopeEntry]) -> Result<Vec<u8>, MessageError> {
+    let mut body = Writer::new();
+    for entry in entries {
+        entry.write(&mut body)?;
+    }
+    let body = body.finish();
+    let mut blob = Writer::new();
+    blob.prefixed(body.len() as u64)?;
+    blob.bytes(&body);
+    Ok(blob.finish())
+}
+
+/// The `scopeTimeBlobEx` of the scopes above FullBody: their byte count, then each scope's time
+/// in seconds as a big-endian `half` (retail look pose: `02 3556`).
+fn times_ex_blob(seconds: Option<f32>) -> Result<Vec<u8>, MessageError> {
+    let Some(seconds) = seconds else {
+        return Ok(EMPTY_BLOB.to_vec());
+    };
+    let mut blob = Writer::new();
+    blob.prefixed(HALF_LEN)?;
+    blob.u16(half_bits(seconds));
+    Ok(blob.finish())
+}
+
+/// Bytes of a `half`.
+const HALF_LEN: u64 = 2;
+/// `half` layout: sign, 5 exponent bits with bias 15, 10 mantissa bits.
+const HALF_SIGN: u32 = 0x8000;
+const HALF_INFINITY: u32 = 0x7c00;
+const HALF_EXPONENT_BIAS: i32 = 15;
+const HALF_MAX_EXPONENT: i32 = 0x1f;
+const HALF_MANTISSA_BITS: u32 = 10;
+/// `f32` layout: 8 exponent bits with bias 127, 23 mantissa bits.
+const F32_EXPONENT_BIAS: i32 = 127;
+const F32_EXPONENT_MASK: u32 = 0xff;
+const F32_MANTISSA_BITS: u32 = 23;
+const F32_MANTISSA_MASK: u32 = (1 << F32_MANTISSA_BITS) - 1;
+/// The mantissa bits that `half` drops from an `f32`.
+const DROPPED_BITS: u32 = F32_MANTISSA_BITS - HALF_MANTISSA_BITS;
+
+/// The `half` bits of `value`, rounded to the nearest (ties to even); a value too large for a
+/// `half` becomes infinity, and a value not a number becomes infinity too (never sent).
+fn half_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = (bits >> u16::BITS) & HALF_SIGN;
+    // The exponent field has 8 bits.
+    let exponent = ((bits >> F32_MANTISSA_BITS) & F32_EXPONENT_MASK) as i32 - F32_EXPONENT_BIAS
+        + HALF_EXPONENT_BIAS;
+    let mantissa = bits & F32_MANTISSA_MASK;
+    let round = |value: u32, dropped: u32| {
+        let kept = value >> dropped;
+        let rest = value & ((1 << dropped) - 1);
+        let half_way = 1 << (dropped - 1);
+        kept + u32::from(rest > half_way || (rest == half_way && kept & 1 == 1))
+    };
+    let magnitude = if exponent >= HALF_MAX_EXPONENT {
+        HALF_INFINITY
+    } else if exponent > 0 {
+        // A carry out of the mantissa steps the exponent, as it should.
+        // `exponent` is below 31 here.
+        round(
+            (exponent as u32) << F32_MANTISSA_BITS | mantissa,
+            DROPPED_BITS,
+        )
+        .min(HALF_INFINITY)
+    } else if exponent > -(HALF_MANTISSA_BITS as i32) {
+        // A subnormal `half`: the hidden bit joins the mantissa. `exponent` is -9 to 0.
+        round(
+            mantissa | 1 << F32_MANTISSA_BITS,
+            DROPPED_BITS + (1 - exponent) as u32,
+        )
+    } else {
+        0
+    };
+    // Sign and magnitude fit 16 bits.
+    (sign | magnitude) as u16
+}
+
+/// A scope above FullBody that plays with it (the look pose): its scope bit, its entry and its
+/// time in seconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LayerEntry {
+    /// Its bit in `scopeData`.
+    pub scope_bit: u8,
+    /// Its entry.
+    pub entry: ScopeEntry,
+    /// Its time, in seconds.
+    pub seconds: f32,
+}
+
+/// What a mob shows: one FullBody scope entry, the time since it started, its tags, a look
+/// pose above it, and the angle it still has to turn.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MobAnimation {
+    /// The entry.
+    pub entry: ScopeEntry,
+    /// The time in the entry, in 1/30 s ticks.
+    pub ticks: u32,
+    /// The Mannequin tag state.
+    pub tags: [u8; FRAG_TAGS_LEN],
+    /// The look pose that plays with the entry, when one does.
+    pub look_pose: Option<LayerEntry>,
+    /// The angle from its facing to the facing it wants (radians), when it goes with the state.
+    pub facing_gap: Option<f32>,
+}
+
+impl MobAnimation {
+    /// The scope children of this animation: times, the times of the look pose, the mask of the
+    /// scopes, the entries, the tags and the angle to turn.
+    fn children(&self) -> Result<Vec<(usize, Vec<u8>)>, MessageError> {
+        let mut children = scope_time_children(self.ticks, true);
+        let mut entries = vec![self.entry];
+        let mut scopes = FULL_BODY_SCOPE;
+        if let Some(layer) = self.look_pose {
+            entries.push(layer.entry);
+            scopes |= 1 << layer.scope_bit;
+        }
+        children.extend([
+            (
+                SCOPE_TIME_EX_CHILD,
+                times_ex_blob(self.look_pose.map(|layer| layer.seconds))?,
+            ),
+            (SCOPE_DATA_CHILD, prefixed_bytes(scopes)?),
+            (SCOPE_INFO_CHILD, info_blob(&entries)?),
+            (FRAG_TAGS_CHILD, self.tags.to_vec()),
+        ]);
+        if let Some(gap) = self.facing_gap {
+            children.push((FACING_GAP_CHILD, gap.to_be_bytes().to_vec()));
+        }
+        Ok(children)
+    }
+}
+
+/// The scope part of a later mob state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StepScope {
+    /// The animation goes on.
+    Ticks {
+        /// Its time in 1/30 s ticks.
+        ticks: u32,
+        /// The bytes above the low byte changed since the last state, and go with it.
+        high_changed: bool,
+        /// The time of its look pose in seconds, when one plays.
+        look_pose_seconds: Option<f32>,
+    },
+    /// A new animation starts.
+    Changed(MobAnimation),
+}
+
+/// One later state of a mob (sailor-movement note, section 5; mob-animation note, section 5).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MobStep {
+    /// Its number and time.
+    pub stamp: AlcStamp,
+    /// The anchor of `stamp` is new and goes with the state.
+    pub anchored: bool,
+    /// Where the mob is now, when it moved.
+    pub position: Option<InputPosition>,
+    /// Its new facing (yaw, radians), when it turned.
+    pub facing: Option<f32>,
+    /// Its animation, for a mob whose animations are known.
+    pub scope: Option<StepScope>,
+}
+
+/// The `scopeTimeBlob0Data*` children of `ticks`: the low byte, and the higher ones when
+/// `with_high`.
+fn scope_time_children(ticks: u32, with_high: bool) -> Vec<(usize, Vec<u8>)> {
+    let bytes = ticks.to_le_bytes();
+    SCOPE_TIME_CHILDREN
+        .iter()
+        .zip(bytes)
+        .take(if with_high {
+            SCOPE_TIME_CHILDREN.len()
+        } else {
+            1
+        })
+        .map(|(child, byte)| (*child, vec![byte]))
+        .collect()
+}
+
+/// The bytes of the prefix-coded `value`.
+fn prefixed_bytes(value: u64) -> Result<Vec<u8>, MessageError> {
+    Ok(Writer::new().prefixed(value)?.finish())
+}
+
+/// The `rotation` bytes of a facing `yaw` (radians; 0 faces north, +y, and a positive yaw turns
+/// to the west): `(0, 0, sin(yaw/2), cos(yaw/2))` in the client's smallest-three form, with the
+/// larger of z and w derived. Re-encodes all 3,648 retail values (rotation note, section 2).
+pub fn rotation_bytes(yaw: f32) -> Vec<u8> {
+    let half = yaw / 2.0;
+    // q and -q are the same turn: keep w at 0 or above.
+    let sign = if half.cos() < 0.0 { -1.0 } else { 1.0 };
+    let (z, w) = (half.sin() * sign, half.cos() * sign);
+    let byte = |part: f32| ((part + QUAT_OFFSET) / QUAT_STEP).round().clamp(0.0, 255.0) as u8;
+    if z == 0.0 {
+        vec![QUAT_TAG_NORTH]
+    } else if w >= z.abs() {
+        vec![QUAT_TAG_W_DERIVED, byte(z)]
+    } else {
+        let tag = QUAT_TAG_Z_DERIVED | if z < 0.0 { QUAT_TAG_NEGATIVE } else { 0 };
+        vec![tag, byte(w)]
+    }
+}
+
+/// The number and clock children of `stamp`.
+fn stamp_children(stamp: AlcStamp) -> [(usize, Vec<u8>); 4] {
+    [
+        (ID_REL_CHILD, vec![AlcStamp::low(stamp.id)]),
+        (TIME_REL_CHILD, vec![AlcStamp::low(stamp.offset_ms)]),
+        (ID_ABS_CHILD, vec![AlcStamp::high(stamp.id)]),
+        (TIME_ABS_CHILD, vec![AlcStamp::high(stamp.offset_ms)]),
+    ]
+}
+
+/// The position children of `pos`: no offset from the new `pos10`.
+fn position_children(pos: InputPosition) -> [(usize, Vec<u8>); 2] {
+    let mut position = Writer::new();
+    pos.write(&mut position);
+    [
+        (POS_REL_CHILD, AT_ANCHOR.to_vec()),
+        (POS10_CHILD, position.finish()),
+    ]
+}
 /// A `blob33` count is below this.
 const BLOB33_LIMIT: u8 = 33;
 /// A `blob177` count is below this.
@@ -120,29 +446,122 @@ impl AlcState {
     /// `bounds` flag is not 0 or 1.
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         let start = reader.rest();
-        let mask = reader.u8()?;
-        let mut pos10 = None;
-        for (slot_bit, children) in SLOT_BITS.iter().zip([&SLOT0_CHILDREN[..], &SLOT1_CHILDREN]) {
-            if mask & slot_bit == 0 {
-                continue;
-            }
-            let present = reader.wide_prefixed()? & PRESENCE_BITS;
-            for (index, kind) in children.iter().enumerate() {
-                if present >> index & 1 == 0 {
-                    continue;
-                }
-                if *kind == Pos10 {
-                    pos10 = Some(InputPosition::read(reader)?);
-                } else {
-                    skip_child(*kind, reader)?;
-                }
+        let walked = walk(reader)?;
+        Ok(Self {
+            bytes: start[..walked.used].to_vec(),
+            pos10: walked.pos10,
+        })
+    }
+
+    /// The same body as the first state of a mob at `pos`, with the number and clock of `stamp`
+    /// and, when known, its facing and animation: a retail first state of a mob, moved to another spawn
+    /// point and to this server's clock. Its offset from `pos10` becomes none. A child that the
+    /// body does not send stays unsent. `None` when the body sends no `pos10`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when a scope child cannot be encoded.
+    pub fn mob_first(
+        &self,
+        stamp: AlcStamp,
+        pos: InputPosition,
+        facing: Option<f32>,
+        animation: Option<&MobAnimation>,
+    ) -> Result<Option<Self>, MessageError> {
+        let Ok(walked) = walk(&mut Reader::new(&self.bytes)) else {
+            return Ok(None);
+        };
+        if walked.pos10.is_none() {
+            return Ok(None);
+        }
+        let mut values: Vec<(usize, Vec<u8>)> = stamp_children(stamp).into();
+        values.extend(position_children(pos));
+        values.push((TIME_ANCHOR_CHILD, stamp.anchor_us.to_be_bytes().to_vec()));
+        if let Some(yaw) = facing {
+            values.push((ROTATION_CHILD, rotation_bytes(yaw)));
+        }
+        if let Some(animation) = animation {
+            values.extend(animation.children()?);
+        }
+        let mut bytes = Vec::with_capacity(self.bytes.len());
+        let mut copied = 0;
+        for (child, range) in walked.slot0_ranges {
+            if let Some((_, value)) = values.iter().find(|(index, _)| *index == child) {
+                bytes.extend_from_slice(&self.bytes[copied..range.start]);
+                bytes.extend_from_slice(value);
+                copied = range.end;
             }
         }
-        let used = start.len() - reader.remaining();
-        Ok(Self {
-            bytes: start[..used].to_vec(),
+        bytes.extend_from_slice(&self.bytes[copied..]);
+        Ok(Some(Self {
+            bytes,
+            pos10: Some(pos),
+        }))
+    }
+
+    /// A later state of a mob: its number and time, the time anchor when it is new, the retail
+    /// re-anchor form of the position when it moved, and its animation children (sailor-movement
+    /// note, section 5; mob-animation note, section 5).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when a scope child cannot be encoded.
+    pub fn mob_step(step: &MobStep) -> Result<Self, MessageError> {
+        let mut children: Vec<(usize, Vec<u8>)> = stamp_children(step.stamp).into();
+        if let Some(pos) = step.position {
+            children.extend(position_children(pos));
+        }
+        if let Some(yaw) = step.facing {
+            children.push((ROTATION_CHILD, rotation_bytes(yaw)));
+        }
+        match step.scope {
+            Some(StepScope::Ticks {
+                ticks,
+                high_changed,
+                look_pose_seconds,
+            }) => {
+                children.extend(scope_time_children(ticks, high_changed));
+                if look_pose_seconds.is_some() {
+                    children.push((SCOPE_TIME_EX_CHILD, times_ex_blob(look_pose_seconds)?));
+                }
+            }
+            Some(StepScope::Changed(animation)) => children.extend(animation.children()?),
+            None => {}
+        }
+        if step.anchored {
+            children.push((
+                TIME_ANCHOR_CHILD,
+                step.stamp.anchor_us.to_be_bytes().to_vec(),
+            ));
+        }
+        Ok(Self::of_slot0(children, step.position))
+    }
+
+    /// A state that moves the client's own player to `pos`: the number and time of `stamp`, the
+    /// retail re-anchor form of the position, and the new teleport number `teleport` (retail
+    /// moves the player into the water with children 0, 1, 2, 10, 11, 27 and 31).
+    pub fn teleport(stamp: AlcStamp, pos: InputPosition, teleport: u8) -> Self {
+        let mut children: Vec<(usize, Vec<u8>)> = stamp_children(stamp).into();
+        children.extend(position_children(pos));
+        children.push((TELEPORT_CHILD, vec![teleport]));
+        Self::of_slot0(children, Some(pos))
+    }
+
+    /// A body of slot 0 alone with `children` (child index and bytes, in any order).
+    fn of_slot0(mut children: Vec<(usize, Vec<u8>)>, pos10: Option<InputPosition>) -> Self {
+        children.sort_unstable_by_key(|(child, _)| *child);
+        let present = children
+            .iter()
+            .fold(0_u64, |mask, (child, _)| mask | 1 << child);
+        let mut writer = Writer::new();
+        writer.u8(SLOT_BITS[0]).wide_prefixed(present);
+        for (_, value) in &children {
+            writer.bytes(value);
+        }
+        Self {
+            bytes: writer.finish(),
             pos10,
-        })
+        }
     }
 
     /// Writes the body as read.
@@ -186,6 +605,53 @@ impl AlcState {
     }
 }
 
+/// What a walk of one body found.
+struct Walked {
+    /// Bytes of the body.
+    used: usize,
+    /// Its `pos10`, when it sends one.
+    pos10: Option<InputPosition>,
+    /// The body bytes of each slot-0 child it sends.
+    slot0_ranges: Vec<(usize, Range<usize>)>,
+}
+
+/// Walks one body.
+fn walk(reader: &mut Reader<'_>) -> Result<Walked, MessageError> {
+    let length = reader.remaining();
+    let mask = reader.u8()?;
+    let mut pos10 = None;
+    let mut slot0_ranges = Vec::new();
+    for (slot, (slot_bit, children)) in SLOT_BITS
+        .iter()
+        .zip([&SLOT0_CHILDREN[..], &SLOT1_CHILDREN])
+        .enumerate()
+    {
+        if mask & slot_bit == 0 {
+            continue;
+        }
+        let present = reader.wide_prefixed()? & PRESENCE_BITS;
+        for (index, kind) in children.iter().enumerate() {
+            if present >> index & 1 == 0 {
+                continue;
+            }
+            let start = length - reader.remaining();
+            if *kind == Pos10 {
+                pos10 = Some(InputPosition::read(reader)?);
+            } else {
+                skip_child(*kind, reader)?;
+            }
+            if slot == 0 {
+                slot0_ranges.push((index, start..length - reader.remaining()));
+            }
+        }
+    }
+    Ok(Walked {
+        used: length - reader.remaining(),
+        pos10,
+        slot0_ranges,
+    })
+}
+
 /// One child value of a written state.
 #[derive(Debug, Clone, Copy)]
 enum SpawnValue {
@@ -217,13 +683,20 @@ const ZERO_FRAG: [u8; FRAG_LEN] = [0; FRAG_LEN];
 /// The retail `segmentedStamina` (child 46) of every first own ALC (315 of 315 logins).
 const FULL_SEGMENTED_STAMINA: u64 = 4_021_696_251;
 
+/// The number of the first own state (the most common retail first own ALC).
+pub const SPAWN_STATE_ID: u16 = 2;
+/// The time of the first own state after its anchor of 0, in ms.
+pub const SPAWN_STATE_MS: u16 = 9;
+/// The teleport number of the first own state.
+pub const SPAWN_TELEPORT: u8 = 1;
+
 /// Slot-0 children of the first own state (child index and value), from the most common retail
 /// first own ALC: id and time parts, the four slayer slots, zero relative position, a facing,
 /// the absolute parts 0 with `worldPosAbs`, `teleportAndMigrationId` 1, and the fixed scope,
-/// water, anchor and stamina children. Child 40 (`scopeTimeBlob0Data1`) is 0, as in 16 logins.
+/// water, anchor and stamina children. Child 40 (`timeAnchor`) is 0, as in 16 logins.
 const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
-    (0, Byte(2)),
-    (1, Byte(9)),
+    (ID_REL_CHILD, Byte(SPAWN_STATE_ID.to_be_bytes()[1])),
+    (TIME_REL_CHILD, Byte(SPAWN_STATE_MS.to_be_bytes()[1])),
     (2, Byte(129)),
     (3, Word(0x2844)),
     (4, Byte(127)),
@@ -251,7 +724,7 @@ const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
     (26, Byte(0)),
     (POS10_CHILD, SpawnPosition),
     (29, Raw(&EMPTY_BLOB)),
-    (31, Byte(1)),
+    (TELEPORT_CHILD, Byte(SPAWN_TELEPORT)),
     (32, Prefixed(0)),
     (33, Raw(&EMPTY_BLOB)),
     (34, Raw(&ZERO_FRAG)),
@@ -669,4 +1142,281 @@ mod tests {
 
     /// Slot 1 of the spawn state: a 1-byte presence integer and seven 1-byte children.
     const SLOT1_BODY_LEN: usize = 8;
+
+    /// Sailor 1's first ALC (mob-cards note, section 2.1): `pos10` (467.617, 846.008, raw 11329).
+    const RETAIL_SAILOR: &str = concat!(
+        "01fe031c00be7fff2601007f7f7f6600187f000043e9cefc445380802c4100000101080001b902240000",
+        "52040328088b800800000000000000000000000000000002ff753e0c5a7dc313000b00f77b26fc0200",
+        "000040000000"
+    );
+    const SAILOR_RAW_Z: u16 = 11329;
+    const STAMP: AlcStamp = AlcStamp {
+        id: 0x0102,
+        anchor_us: 845_730_278_284_365,
+        offset_ms: 0x0304,
+    };
+    /// A retail `Move_Combat` entry of the sailor (mob-animation note, section 4).
+    const MOVE_ENTRY: ScopeEntry = ScopeEntry {
+        start_id: 0x0393,
+        fragment: 182,
+        action: 26,
+        tail: 0xeb,
+    };
+    const MOVE_ENTRY_BLOB: [u8; 9] = [8, 0x03, 0x93, 0xb6, 0x02, 0x1a, 0x00, 0x00, 0xeb];
+    /// The retail tags of an alert sailor.
+    const ALERT_TAGS: [u8; FRAG_TAGS_LEN] = [
+        0x04, 0x03, 0x28, 0x08, 0x8b, 0x82, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    const TICKS: u32 = 0x0102_0304;
+
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// The bytes of each slot-0 child of `state`.
+    fn children_of(state: &AlcState) -> Vec<(usize, Vec<u8>)> {
+        walk(&mut Reader::new(&state.bytes))
+            .expect("walk")
+            .slot0_ranges
+            .into_iter()
+            .map(|(child, range)| (child, state.bytes[range].to_vec()))
+            .collect()
+    }
+
+    fn child(state: &AlcState, index: usize) -> Option<Vec<u8>> {
+        children_of(state)
+            .into_iter()
+            .find(|(child, _)| *child == index)
+            .map(|(_, bytes)| bytes)
+    }
+
+    #[test]
+    fn a_facing_has_the_retail_bytes() {
+        // Retail samples (rotation note, sections 2 and 3), by heading (degrees from east,
+        // counter-clockwise); the yaw is the heading minus 90 degrees.
+        let yaw_of_heading = |heading: f32| (heading - 90.0).to_radians();
+        assert_eq!(rotation_bytes(yaw_of_heading(0.0)), [0x66, 0x00]);
+        assert_eq!(rotation_bytes(yaw_of_heading(18.4)), [0x66, 0x16]);
+        assert_eq!(rotation_bytes(yaw_of_heading(90.0)), [QUAT_TAG_NORTH]);
+        assert_eq!(rotation_bytes(yaw_of_heading(114.7)), [0x66, 0xa6]);
+        assert_eq!(rotation_bytes(yaw_of_heading(-105.6)), [0x46, 0x98]);
+    }
+
+    #[test]
+    fn a_scope_entry_has_the_retail_bytes() {
+        assert_eq!(info_blob(&[MOVE_ENTRY]).expect("blob"), MOVE_ENTRY_BLOB);
+    }
+
+    #[test]
+    fn a_retail_mob_state_moves_to_another_spawn_point() {
+        let bytes = hex(RETAIL_SAILOR);
+        let retail = AlcState::read(&mut Reader::new(&bytes)).expect("read");
+        assert_eq!(retail.bytes, bytes);
+        assert_eq!(retail.pos10.map(|pos| pos.z_raw), Some(SAILOR_RAW_Z));
+        let to = InputPosition::from_metres(468.734, 847.221, 89.99).expect("position");
+        let moved = retail
+            .mob_first(STAMP, to, None, None)
+            .expect("encode")
+            .expect("moved");
+        assert_eq!(moved.bytes.len(), bytes.len());
+        let again = AlcState::read(&mut Reader::new(&moved.bytes)).expect("read");
+        assert_eq!(again, moved);
+        assert_eq!(again.pos10, Some(to));
+        // Children 0, 1, 25 and 26 hold our number and clock; child 10 puts it at its pos10.
+        let ids: Vec<Option<Vec<u8>>> =
+            [ID_REL_CHILD, TIME_REL_CHILD, ID_ABS_CHILD, TIME_ABS_CHILD]
+                .into_iter()
+                .map(|index| child(&moved, index))
+                .collect();
+        assert_eq!(
+            ids,
+            [vec![0x02], vec![0x04], vec![0x01], vec![0x03]].map(Some)
+        );
+        assert_eq!(child(&moved, POS_REL_CHILD), Some(AT_ANCHOR.to_vec()));
+        assert_eq!(
+            child(&moved, TIME_ANCHOR_CHILD),
+            Some(STAMP.anchor_us.to_be_bytes().to_vec())
+        );
+        // Without the recorded scope children, they keep the recorded bytes.
+        assert_eq!(
+            child(&moved, SCOPE_INFO_CHILD),
+            child(&retail, SCOPE_INFO_CHILD)
+        );
+        assert_eq!(
+            AlcState::at_position(to)
+                .mob_first(STAMP, to, None, None)
+                .expect("encode")
+                .map(|alc| alc.pos10),
+            Some(Some(to))
+        );
+    }
+
+    #[test]
+    fn a_first_mob_state_shows_our_animation() {
+        let retail = AlcState::read(&mut Reader::new(&hex(RETAIL_SAILOR))).expect("read");
+        let to = InputPosition::from_metres(468.734, 847.221, 89.99).expect("position");
+        let animation = MobAnimation {
+            entry: MOVE_ENTRY,
+            ticks: TICKS,
+            tags: ALERT_TAGS,
+            look_pose: None,
+            facing_gap: None,
+        };
+        let first = retail
+            .mob_first(STAMP, to, None, Some(&animation))
+            .expect("encode")
+            .expect("first");
+        assert_eq!(
+            AlcState::read(&mut Reader::new(&first.bytes)).expect("read"),
+            first
+        );
+        assert_eq!(
+            child(&first, SCOPE_INFO_CHILD),
+            Some(MOVE_ENTRY_BLOB.to_vec())
+        );
+        assert_eq!(child(&first, FRAG_TAGS_CHILD), Some(ALERT_TAGS.to_vec()));
+        assert_eq!(child(&first, SCOPE_DATA_CHILD), Some(vec![1]));
+        assert_eq!(child(&first, SCOPE_TIME_CHILDREN[0]), Some(vec![0x04]));
+        // The other children keep the recorded bytes.
+        assert_eq!(child(&first, 46), child(&retail, 46));
+    }
+
+    #[test]
+    fn an_alert_with_its_look_pose_has_the_retail_children() {
+        // Retail legionnaire alert (204711 of the tutorial capture; creature-animation note,
+        // section 1): 29 = `02 3556`, 32 = `11`, 33 = alert and look pose, 35 = 1.774 rad.
+        const RETAIL_GAP_BITS: u32 = 0x3fe3_0d9d;
+        const START: u16 = 0x56;
+        let alert = MobAnimation {
+            entry: ScopeEntry {
+                start_id: START,
+                fragment: 7,
+                action: 12,
+                tail: 0x53,
+            },
+            ticks: 0,
+            tags: ALERT_TAGS,
+            look_pose: Some(LayerEntry {
+                scope_bit: 4,
+                entry: ScopeEntry {
+                    start_id: START,
+                    fragment: 45,
+                    action: 25,
+                    tail: 0xe9,
+                },
+                seconds: 0.3335,
+            }),
+            facing_gap: Some(f32::from_bits(RETAIL_GAP_BITS)),
+        };
+        let state = AlcState::mob_step(&MobStep {
+            stamp: STAMP,
+            anchored: false,
+            position: None,
+            facing: None,
+            scope: Some(StepScope::Changed(alert)),
+        })
+        .expect("step");
+        assert_eq!(child(&state, SCOPE_TIME_EX_CHILD), Some(hex("023556")));
+        assert_eq!(child(&state, SCOPE_DATA_CHILD), Some(vec![0x11]));
+        assert_eq!(
+            child(&state, SCOPE_INFO_CHILD),
+            Some(hex("0e0056070c00005300562d190000e9"))
+        );
+        assert_eq!(child(&state, FACING_GAP_CHILD), Some(hex("3fe30d9d")));
+        let later = AlcState::mob_step(&MobStep {
+            stamp: STAMP,
+            anchored: false,
+            position: None,
+            facing: None,
+            scope: Some(StepScope::Ticks {
+                ticks: 1,
+                high_changed: false,
+                look_pose_seconds: Some(0.367),
+            }),
+        })
+        .expect("step");
+        assert_eq!(child(&later, SCOPE_TIME_EX_CHILD), Some(hex("0235df")));
+    }
+
+    #[test]
+    fn halves_round_to_the_nearest() {
+        assert_eq!(half_bits(0.0), 0);
+        assert_eq!(half_bits(1.0), 0x3c00);
+        assert_eq!(half_bits(1.0 / 3.0), 0x3555);
+        assert_eq!(half_bits(-2.0), 0xc000);
+        assert_eq!(half_bits(65_504.0), 0x7bff, "the largest half");
+        assert_eq!(half_bits(1.0e6), 0x7c00, "too large: infinity");
+        assert_eq!(half_bits(2.0_f32.powi(-24)), 1, "the smallest subnormal");
+        assert_eq!(half_bits(2.0_f32.powi(-26)), 0, "below it: zero");
+        // 1 + 2^-11 is half-way between two halves: ties go to the even one.
+        assert_eq!(half_bits(1.0 + 2.0_f32.powi(-11)), 0x3c00);
+        assert_eq!(half_bits(1.0 + 3.0 * 2.0_f32.powi(-11)), 0x3c02);
+    }
+
+    #[test]
+    fn a_teleport_sends_the_retail_children_and_its_number() {
+        let to = InputPosition::from_metres(793.842_47, 337.422_12, 26.16).expect("position");
+        let moved = AlcState::teleport(STAMP, to, SPAWN_TELEPORT + 1);
+        assert_eq!(
+            AlcState::read(&mut Reader::new(&moved.bytes)).expect("read"),
+            moved
+        );
+        let present: Vec<usize> = children_of(&moved).into_iter().map(|(c, _)| c).collect();
+        assert_eq!(present, [0, 1, 10, 25, 26, 27, TELEPORT_CHILD]);
+        assert_eq!(child(&moved, TELEPORT_CHILD), Some(vec![2]));
+        assert_eq!(child(&moved, POS_REL_CHILD), Some(AT_ANCHOR.to_vec()));
+    }
+
+    #[test]
+    fn a_mob_step_sends_only_its_parts() {
+        let to = InputPosition::from_metres(470.0, 848.0, 90.0).expect("position");
+        let walking = AlcState::mob_step(&MobStep {
+            stamp: STAMP,
+            anchored: false,
+            position: Some(to),
+            facing: None,
+            scope: Some(StepScope::Ticks {
+                ticks: TICKS,
+                high_changed: false,
+                look_pose_seconds: None,
+            }),
+        })
+        .expect("step");
+        assert_eq!(
+            AlcState::read(&mut Reader::new(&walking.bytes)).expect("read"),
+            walking
+        );
+        let present: Vec<usize> = children_of(&walking).into_iter().map(|(c, _)| c).collect();
+        assert_eq!(present, [0, 1, 10, 25, 26, 27, 28]);
+        let changed = AlcState::mob_step(&MobStep {
+            stamp: STAMP,
+            anchored: true,
+            position: None,
+            facing: None,
+            scope: Some(StepScope::Changed(MobAnimation {
+                entry: MOVE_ENTRY,
+                ticks: 0,
+                tags: ALERT_TAGS,
+                look_pose: None,
+                facing_gap: None,
+            })),
+        })
+        .expect("step");
+        let present: Vec<usize> = children_of(&changed).into_iter().map(|(c, _)| c).collect();
+        assert_eq!(present, [0, 1, 25, 26, 28, 29, 32, 33, 34, 38, 40, 49, 50]);
+        assert_eq!(changed.pos10, None);
+        let idle = AlcState::mob_step(&MobStep {
+            stamp: STAMP,
+            anchored: false,
+            position: None,
+            facing: None,
+            scope: None,
+        })
+        .expect("step");
+        let present: Vec<usize> = children_of(&idle).into_iter().map(|(c, _)| c).collect();
+        assert_eq!(present, [0, 1, 25, 26]);
+    }
 }

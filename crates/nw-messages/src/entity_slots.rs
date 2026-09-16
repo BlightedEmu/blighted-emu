@@ -145,8 +145,14 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::Paperdoll(_)
         | MemberState::Container(_)
         | MemberState::Achievement(_)
+        | MemberState::DamageReceiver(_)
+        | MemberState::GatherableController(_)
         | MemberState::ItemManagement(_)
-        | MemberState::Empty(_) => None,
+        | MemberState::Objectives(_)
+        | MemberState::Progression(_)
+        | MemberState::Cooldowns(_)
+        | MemberState::Empty(_)
+        | MemberState::Recorded { .. } => None,
     }
 }
 

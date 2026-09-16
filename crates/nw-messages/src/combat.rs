@@ -4,12 +4,15 @@
 //! encodes back to the same bytes. Counts use the wide prefix (`FUN_14087b5c0`); strings use the
 //! prefix-coded length of `FUN_14087a3d0`, as in the client input.
 
-use crate::wire::{BodyCodec, MessageError, Reader, Writer};
+use crate::facet::{FacetHeader, component};
+use crate::wire::{BodyCodec, MessageError, Reader, Writer, raw_id_of_entity};
 
 /// `DamageReceiverComponentClientFacet_OnDamageDealt`.
 pub const DAMAGE_DEALT_TYPE_INDEX: u64 = 2071;
 /// `VitalsComponentClientFacet_OnDamage`.
 pub const ON_DAMAGE_TYPE_INDEX: u64 = 3601;
+/// `DamageReceiverComponentClientFacet_HandleMeleeDamage`.
+pub const MELEE_HIT_TYPE_INDEX: u64 = 2218;
 /// `VitalsComponentClientFacet_ClientSyncDeathRecap`.
 pub const DEATH_RECAP_TYPE_INDEX: u64 = 4299;
 /// `PlayerComponentServerFacet_RequestRespawn` (client to server).
@@ -31,6 +34,14 @@ const BLOCK_LEN: usize = 16;
 const RAW_7_LEN: usize = 7;
 /// Bytes of one damage item.
 const ITEM_LEN: usize = 9;
+/// The hit volume of a hit: the lowercase CRC-32 of `torso` (mob-cards note, section 4.3).
+const HIT_VOLUME_TORSO: u32 = 0x275f_bc85;
+/// The camera shake of a hit: the lowercase CRC-32 of `small`.
+const CAMERA_SHAKE_SMALL: u32 = 0x7545_ea13;
+/// Hit flags (little-endian `u16`): the hit can crit.
+const HIT_FLAG_CAN_CRIT: u16 = 0x0020;
+/// Hit flags: the hit killed the target.
+const HIT_FLAG_KILLED: u16 = 0x0008;
 
 /// One damage item (`FUN_145b56640`, `FUN_145ce6260`): a tag byte and two big-endian `f32`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -79,6 +90,47 @@ fn one_hit(amount: f32) -> Vec<DamageItem> {
     }]
 }
 
+/// Type 2218: a creature's melee hit reached the player (live-tutorial note, section 7). Retail
+/// sends `blocked` 0 with every hit that did damage (in the same ms as its 3601) and 1, with no
+/// 3601, for a hit while the player held block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeleeHitMsg {
+    /// The header: the player's damage receiver.
+    pub header: FacetHeader,
+    /// The player blocked the hit.
+    pub blocked: bool,
+}
+
+impl MeleeHitMsg {
+    /// A melee hit on player `player`.
+    pub fn on(player: u64, blocked: bool) -> Self {
+        Self {
+            header: FacetHeader::of(component::DAMAGE_RECEIVER, player),
+            blocked,
+        }
+    }
+}
+
+impl BodyCodec for MeleeHitMsg {
+    const TYPE_INDEX: u64 = MELEE_HIT_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        Ok(writer.u8(u8::from(self.blocked)).finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let message = Self {
+            header: FacetHeader::read(&mut reader)?,
+            blocked: reader.boolean()?,
+        };
+        reader.finish()?;
+        Ok(message)
+    }
+}
+
 /// Type 2071: a hit dealt.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DamageDealtMsg {
@@ -101,17 +153,25 @@ pub struct DamageDealtMsg {
 }
 
 impl DamageDealtMsg {
-    /// A hit of `amount` on `target` by `attacker`; every other field 0 (our own choice, M6-B
-    /// spec section 7).
-    pub fn hit(target: u64, attacker: u64, amount: f32) -> Self {
+    /// A hit of `amount` by player `attacker` on entity `target`, `killed` when it killed it: a
+    /// call to the attacker's damage receiver that names the target by its spawn-card reference
+    /// and facet entity, with a torso hit and a small camera shake (mob-cards note, section 4.3).
+    pub fn hit(attacker: u64, target: u64, amount: f32, killed: bool) -> Self {
+        let header = FacetHeader::of(component::DAMAGE_RECEIVER, attacker);
+        let flags = if killed {
+            HIT_FLAG_CAN_CRIT | HIT_FLAG_KILLED
+        } else {
+            HIT_FLAG_CAN_CRIT
+        };
         Self {
-            head_a: target,
-            head_b: attacker,
-            raw_16: [0; 16],
-            u64_c: 0,
-            u32_d: 0,
-            u32_e: 0,
-            raw_2: [0; 2],
+            head_a: header.target,
+            head_b: header.entity,
+            raw_16: raw_id_of_entity(target),
+            // The facet entity of the target.
+            u64_c: target.swap_bytes(),
+            u32_d: HIT_VOLUME_TORSO,
+            u32_e: CAMERA_SHAKE_SMALL,
+            raw_2: flags.to_le_bytes(),
             items: one_hit(amount),
         }
     }
@@ -171,11 +231,13 @@ pub struct OnDamageMsg {
 }
 
 impl OnDamageMsg {
-    /// Damage of `amount` to `target` from `attacker`; every other field 0.
-    pub fn hit(target: u64, attacker: u64, amount: f32) -> Self {
+    /// Damage of `amount` to player `target`: a call to its vitals component; every other field
+    /// 0 (their meaning is Unknown).
+    pub fn hit(target: u64, amount: f32) -> Self {
+        let header = FacetHeader::of_child(component::VITALS, component::STATS_CHILD, target);
         Self {
-            head_a: target,
-            head_b: attacker,
+            head_a: header.target,
+            head_b: header.entity,
             u64_c: 0,
             raw_2: [0; 2],
             u32_d: 0,
@@ -347,12 +409,13 @@ pub struct DeathRecapMsg {
 }
 
 impl DeathRecapMsg {
-    /// A recap for `player`, killed by `killer`: empty strings, every other field 0 (M6-B spec
-    /// section 8).
-    pub fn of(player: u64, killer: u64) -> Self {
+    /// A recap for `player`: a call to its vitals component, empty strings, every other field 0
+    /// (M6-B spec section 8).
+    pub fn of(player: u64) -> Self {
+        let header = FacetHeader::of_child(component::VITALS, component::STATS_CHILD, player);
         Self {
-            head_a: player,
-            head_b: killer,
+            head_a: header.target,
+            head_b: header.entity,
             string_a: Vec::new(),
             string_b: Vec::new(),
             flag_a: false,
@@ -527,6 +590,23 @@ mod tests {
     const ATTACKER: u64 = 9;
     const AMOUNT: f32 = 42.0;
 
+    #[test]
+    fn a_blocked_melee_hit_has_the_retail_bytes() {
+        // Retail 2218 of a blocked hit (live-tutorial note, section 7): the player's damage
+        // receiver, then 1. The facet entity is the reversed player number.
+        const RETAIL: [u8; 17] = [
+            0x8c, 0x6d, 0xee, 0xd1, 0x7d, 0xda, 0x2a, 0x1b, 0xbf, 0xa9, 0x6f, 0x3e, 0xa2, 0xe3,
+            0x6a, 0x5a, 0x01,
+        ];
+        const PLAYER: u64 = 0x5a6a_e3a2_3e6f_a9bf;
+        let blocked = MeleeHitMsg::on(PLAYER, true);
+        assert_eq!(blocked.encode().expect("encode"), RETAIL);
+        assert_eq!(MeleeHitMsg::decode(&RETAIL), Ok(blocked));
+        let landed = MeleeHitMsg::on(PLAYER, false).encode().expect("encode");
+        assert_eq!(landed[..16], RETAIL[..16]);
+        assert_eq!(landed[16], 0);
+    }
+
     fn items() -> impl Strategy<Value = Vec<DamageItem>> {
         prop::collection::vec(
             (any::<u8>(), -1.0e6_f32..1.0e6, 0.0_f32..2.0)
@@ -609,7 +689,7 @@ mod tests {
 
     #[test]
     fn a_2071_with_one_item_is_60_bytes() {
-        let body = DamageDealtMsg::hit(TARGET, ATTACKER, AMOUNT)
+        let body = DamageDealtMsg::hit(ATTACKER, TARGET, AMOUNT, false)
             .encode()
             .expect("encode");
         assert_eq!(body.len(), 60);
@@ -618,18 +698,38 @@ mod tests {
     }
 
     #[test]
+    fn a_2071_calls_the_attackers_damage_receiver_with_the_retail_fields() {
+        // The Soul Survivor player and first sailor (mob-cards note, section 4.3).
+        const SOUL_PLAYER: u64 = 0x650f_7a09_cf50_b550;
+        const SOUL_SAILOR: u64 = 0xa0d5_6dec_a068_8d10;
+        const RETAIL_TARGET: u64 = 0x31d3_f99c_aa47_7511;
+        let hit = DamageDealtMsg::hit(
+            SOUL_PLAYER.swap_bytes(),
+            SOUL_SAILOR.swap_bytes(),
+            AMOUNT,
+            false,
+        );
+        assert_eq!((hit.head_a, hit.head_b), (RETAIL_TARGET, SOUL_PLAYER));
+        assert_eq!(hit.u64_c, SOUL_SAILOR);
+        assert_eq!(
+            (hit.u32_d, hit.u32_e, hit.raw_2),
+            (0x275f_bc85, 0x7545_ea13, [0x20, 0x00])
+        );
+        let killing = DamageDealtMsg::hit(ATTACKER, TARGET, AMOUNT, true);
+        assert_eq!(killing.raw_2, [0x28, 0x00]);
+    }
+
+    #[test]
     fn a_3601_head_is_42_bytes() {
-        let body = OnDamageMsg::hit(TARGET, ATTACKER, AMOUNT)
-            .encode()
-            .expect("encode");
+        let body = OnDamageMsg::hit(TARGET, AMOUNT).encode().expect("encode");
         assert_eq!(body.len(), 42 + 1 + 9);
     }
 
     #[test]
     fn a_minimal_death_recap_round_trips() {
-        let recap = DeathRecapMsg::of(TARGET, ATTACKER);
+        let recap = DeathRecapMsg::of(TARGET);
         assert_eq!(round(&recap), recap);
-        assert_eq!((recap.head_a, recap.head_b), (TARGET, ATTACKER));
+        assert_eq!(recap.head_b, TARGET.swap_bytes());
     }
 
     #[test]
@@ -655,10 +755,10 @@ mod tests {
 
     #[test]
     fn a_count_over_the_reader_limit_is_refused() {
-        let mut recap = DeathRecapMsg::of(TARGET, ATTACKER);
+        let mut recap = DeathRecapMsg::of(TARGET);
         recap.list_a = vec![0; 6];
         assert!(recap.encode().is_err());
-        let mut recap = DeathRecapMsg::of(TARGET, ATTACKER);
+        let mut recap = DeathRecapMsg::of(TARGET);
         recap.list_c = vec![0; 4];
         assert!(recap.encode().is_err());
     }

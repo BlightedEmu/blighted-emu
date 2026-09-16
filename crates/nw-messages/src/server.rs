@@ -3,11 +3,14 @@
 
 use crate::bundle::ReplicatedStateBundle;
 use crate::client_add_entry::ClientAddEntryMsg;
-use crate::combat::{DamageDealtMsg, DeathRecapMsg, OnDamageMsg};
+use crate::combat::{DamageDealtMsg, DeathRecapMsg, MeleeHitMsg, OnDamageMsg};
 use crate::connected::{CalendarConnectedMsg, TimingConfigurationConnectedMsg};
 use crate::day_phase::SyncDayPhaseMsg;
 use crate::facet::{
-    CutsceneEndFinalizedMsg, CutsceneGrantedMsg, TeleportWithLoadingScreenMsg, UpdatePhasingMsg,
+    AdjustFxScriptsMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg, DisableCollisionMsg,
+    GatheringInterruptedMsg, InteractionEndedMsg, InteractionValidatedMsg, PlayerSeenByAiMsg,
+    SelectedAsTargetMsg, StorageSearchItemsMsg, TeleportWithLoadingScreenMsg,
+    UnselectedAsTargetMsg, UpdatePhasingMsg,
 };
 use crate::level_info::LevelInfoChangedMsg;
 use crate::self_ident::PlayerManagerSelfIdentificationMsg;
@@ -65,6 +68,12 @@ pub enum ServerMessage {
     DamageDealt(DamageDealtMsg),
     /// 3601.
     OnDamage(OnDamageMsg),
+    /// 2218.
+    MeleeHit(MeleeHitMsg),
+    /// 608.
+    AdjustFxScripts(AdjustFxScriptsMsg),
+    /// 7048.
+    StorageSearchItems(StorageSearchItemsMsg),
     /// 4299.
     DeathRecap(DeathRecapMsg),
     /// 6310.
@@ -75,12 +84,26 @@ pub enum ServerMessage {
     CutsceneEndFinalized(CutsceneEndFinalizedMsg),
     /// 3951.
     TeleportWithLoadingScreen(TeleportWithLoadingScreenMsg),
+    /// 3743.
+    InteractionValidated(InteractionValidatedMsg),
+    /// 3746.
+    InteractionEnded(InteractionEndedMsg),
+    /// 2724.
+    GatheringInterrupted(GatheringInterruptedMsg),
+    /// 955.
+    PlayerSeenByAi(PlayerSeenByAiMsg),
+    /// 2415.
+    SelectedAsTarget(SelectedAsTargetMsg),
+    /// 3916.
+    UnselectedAsTarget(UnselectedAsTargetMsg),
+    /// 1793.
+    DisableCollision(DisableCollisionMsg),
 }
 
 impl ServerMessage {
     /// Decodes `body` when `type_index` is one of [`SERVER_MESSAGE_TYPES`], a combat message of
-    /// M6-B (2071, 3601, 4299) or a tutorial facet call (6310, 6707, 6709, 3951); `None`
-    /// otherwise.
+    /// M6-B (2071, 3601, 4299, 2218) or a tutorial facet call (6310, 6707, 6709, 3951, 3743, 3746,
+    /// 2724, 955, 2415, 3916, 1793); `None` otherwise.
     pub fn decode(type_index: u64, body: &[u8]) -> Option<Result<Self, MessageError>> {
         let message = match type_index {
             TimingConfigurationConnectedMsg::TYPE_INDEX => {
@@ -110,6 +133,13 @@ impl ServerMessage {
             }
             DamageDealtMsg::TYPE_INDEX => DamageDealtMsg::decode(body).map(Self::DamageDealt),
             OnDamageMsg::TYPE_INDEX => OnDamageMsg::decode(body).map(Self::OnDamage),
+            MeleeHitMsg::TYPE_INDEX => MeleeHitMsg::decode(body).map(Self::MeleeHit),
+            AdjustFxScriptsMsg::TYPE_INDEX => {
+                AdjustFxScriptsMsg::decode(body).map(Self::AdjustFxScripts)
+            }
+            StorageSearchItemsMsg::TYPE_INDEX => {
+                StorageSearchItemsMsg::decode(body).map(Self::StorageSearchItems)
+            }
             DeathRecapMsg::TYPE_INDEX => DeathRecapMsg::decode(body).map(Self::DeathRecap),
             UpdatePhasingMsg::TYPE_INDEX => UpdatePhasingMsg::decode(body).map(Self::UpdatePhasing),
             CutsceneGrantedMsg::TYPE_INDEX => {
@@ -120,6 +150,27 @@ impl ServerMessage {
             }
             TeleportWithLoadingScreenMsg::TYPE_INDEX => {
                 TeleportWithLoadingScreenMsg::decode(body).map(Self::TeleportWithLoadingScreen)
+            }
+            InteractionValidatedMsg::TYPE_INDEX => {
+                InteractionValidatedMsg::decode(body).map(Self::InteractionValidated)
+            }
+            InteractionEndedMsg::TYPE_INDEX => {
+                InteractionEndedMsg::decode(body).map(Self::InteractionEnded)
+            }
+            GatheringInterruptedMsg::TYPE_INDEX => {
+                GatheringInterruptedMsg::decode(body).map(Self::GatheringInterrupted)
+            }
+            PlayerSeenByAiMsg::TYPE_INDEX => {
+                PlayerSeenByAiMsg::decode(body).map(Self::PlayerSeenByAi)
+            }
+            SelectedAsTargetMsg::TYPE_INDEX => {
+                SelectedAsTargetMsg::decode(body).map(Self::SelectedAsTarget)
+            }
+            UnselectedAsTargetMsg::TYPE_INDEX => {
+                UnselectedAsTargetMsg::decode(body).map(Self::UnselectedAsTarget)
+            }
+            DisableCollisionMsg::TYPE_INDEX => {
+                DisableCollisionMsg::decode(body).map(Self::DisableCollision)
             }
             _ => return None,
         };
@@ -141,11 +192,21 @@ impl ServerMessage {
             Self::Bundle(_) => ReplicatedStateBundle::TYPE_INDEX,
             Self::DamageDealt(_) => DamageDealtMsg::TYPE_INDEX,
             Self::OnDamage(_) => OnDamageMsg::TYPE_INDEX,
+            Self::MeleeHit(_) => MeleeHitMsg::TYPE_INDEX,
+            Self::AdjustFxScripts(_) => AdjustFxScriptsMsg::TYPE_INDEX,
+            Self::StorageSearchItems(_) => StorageSearchItemsMsg::TYPE_INDEX,
             Self::DeathRecap(_) => DeathRecapMsg::TYPE_INDEX,
             Self::UpdatePhasing(_) => UpdatePhasingMsg::TYPE_INDEX,
             Self::CutsceneGranted(_) => CutsceneGrantedMsg::TYPE_INDEX,
             Self::CutsceneEndFinalized(_) => CutsceneEndFinalizedMsg::TYPE_INDEX,
             Self::TeleportWithLoadingScreen(_) => TeleportWithLoadingScreenMsg::TYPE_INDEX,
+            Self::InteractionValidated(_) => InteractionValidatedMsg::TYPE_INDEX,
+            Self::InteractionEnded(_) => InteractionEndedMsg::TYPE_INDEX,
+            Self::GatheringInterrupted(_) => GatheringInterruptedMsg::TYPE_INDEX,
+            Self::PlayerSeenByAi(_) => PlayerSeenByAiMsg::TYPE_INDEX,
+            Self::SelectedAsTarget(_) => SelectedAsTargetMsg::TYPE_INDEX,
+            Self::UnselectedAsTarget(_) => UnselectedAsTargetMsg::TYPE_INDEX,
+            Self::DisableCollision(_) => DisableCollisionMsg::TYPE_INDEX,
         }
     }
 
@@ -182,11 +243,21 @@ impl ServerMessage {
             Self::Bundle(message) => message.encode(),
             Self::DamageDealt(message) => message.encode(),
             Self::OnDamage(message) => message.encode(),
+            Self::MeleeHit(message) => message.encode(),
+            Self::AdjustFxScripts(message) => message.encode(),
+            Self::StorageSearchItems(message) => message.encode(),
             Self::DeathRecap(message) => message.encode(),
             Self::UpdatePhasing(message) => message.encode(),
             Self::CutsceneGranted(message) => message.encode(),
             Self::CutsceneEndFinalized(message) => message.encode(),
             Self::TeleportWithLoadingScreen(message) => message.encode(),
+            Self::InteractionValidated(message) => message.encode(),
+            Self::InteractionEnded(message) => message.encode(),
+            Self::GatheringInterrupted(message) => message.encode(),
+            Self::PlayerSeenByAi(message) => message.encode(),
+            Self::SelectedAsTarget(message) => message.encode(),
+            Self::UnselectedAsTarget(message) => message.encode(),
+            Self::DisableCollision(message) => message.encode(),
         }
     }
 }
@@ -231,12 +302,54 @@ mod tests {
         }
     }
 
+    /// crc32 of `potionheal`.
+    const POTION_HEAL_SCRIPT: u32 = 0xf7e1_e0d6;
+
+    #[test]
+    fn the_retail_potion_script_message_has_the_retail_bytes() {
+        // Retail 608 (xp-potion-exit note, section 2.2): `d934888ec32a8b14 bfa96f3ea2e36a5a
+        // f7e1e0d6 01`; the facet entity is the reversed player number.
+        const PLAYER: u64 = 0x5a6a_e3a2_3e6f_a9bf;
+        let body = AdjustFxScriptsMsg::on(PLAYER, POTION_HEAL_SCRIPT)
+            .encode()
+            .expect("encode");
+        assert_eq!(
+            body,
+            [
+                0xd9, 0x34, 0x88, 0x8e, 0xc3, 0x2a, 0x8b, 0x14, 0xbf, 0xa9, 0x6f, 0x3e, 0xa2, 0xe3,
+                0x6a, 0x5a, 0xf7, 0xe1, 0xe0, 0xd6, 0x01
+            ]
+        );
+    }
+
+    #[test]
+    fn the_retail_storage_search_message_has_the_retail_bytes() {
+        // Retail 7048 (xp-potion-exit note, section 2.2): `e2403d11f3992f76 bfa96f3ea2e36a5a`
+        // and 22 zero bytes.
+        const PLAYER: u64 = 0x5a6a_e3a2_3e6f_a9bf;
+        let body = StorageSearchItemsMsg::empty(PLAYER)
+            .encode()
+            .expect("encode");
+        let mut retail = vec![
+            0xe2, 0x40, 0x3d, 0x11, 0xf3, 0x99, 0x2f, 0x76, 0xbf, 0xa9, 0x6f, 0x3e, 0xa2, 0xe3,
+            0x6a, 0x5a,
+        ];
+        retail.extend([0; 22]);
+        assert_eq!(body, retail);
+        let mut other = retail.clone();
+        other[20] = 1;
+        assert!(StorageSearchItemsMsg::decode(&other).is_err(), "not empty");
+    }
+
     #[test]
     fn combat_messages_decode_by_their_index() {
         let samples = [
-            ServerMessage::DamageDealt(DamageDealtMsg::hit(ENTITY, ENTITY + 1, 5.0)),
-            ServerMessage::OnDamage(OnDamageMsg::hit(ENTITY, ENTITY + 1, 5.0)),
-            ServerMessage::DeathRecap(DeathRecapMsg::of(ENTITY, ENTITY + 1)),
+            ServerMessage::DamageDealt(DamageDealtMsg::hit(ENTITY, ENTITY + 1, 5.0, false)),
+            ServerMessage::OnDamage(OnDamageMsg::hit(ENTITY, 5.0)),
+            ServerMessage::DeathRecap(DeathRecapMsg::of(ENTITY)),
+            ServerMessage::MeleeHit(MeleeHitMsg::on(ENTITY, true)),
+            ServerMessage::AdjustFxScripts(AdjustFxScriptsMsg::on(ENTITY, POTION_HEAL_SCRIPT)),
+            ServerMessage::StorageSearchItems(StorageSearchItemsMsg::empty(ENTITY)),
         ];
         for message in samples {
             let body = message.encode().expect("encode");

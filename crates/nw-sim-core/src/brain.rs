@@ -162,6 +162,11 @@ impl Brain {
         self.spawn
     }
 
+    /// Its next hit comes one attack interval after `now_ms` at the earliest.
+    pub const fn wait_to_attack(&mut self, now_ms: u64) {
+        self.last_attack_ms = Some(now_ms);
+    }
+
     /// Puts the mob on the ground at height `z`.
     pub const fn set_height(&mut self, z: f32) {
         self.position.z = z;

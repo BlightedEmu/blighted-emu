@@ -10,7 +10,7 @@
 //! same bytes; `encode` refuses a record whose fixed fields do not match its mask.
 
 use crate::position::{height_from_raw, height_to_raw};
-use crate::wire::{BodyCodec, MessageError, Reader, Writer};
+use crate::wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};
 
 /// File slot of `ReceiveInputFromClient`.
 pub const RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX: u64 = 1589;
@@ -167,6 +167,36 @@ pub enum Bit8 {
     Empty,
     /// Flag 1: the long body, as raw bytes.
     Body(Vec<u8>),
+}
+
+/// The start of a bit-8 body: the object the client uses (ftue-static-entities note, section 5).
+/// The client sends it in the first record of every input until the interaction ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InteractionRequest {
+    /// The entity id of the object.
+    pub target: [u8; RAW_ID_LEN],
+    /// Its facet entity.
+    pub target_entity: u64,
+    /// The interaction id (the server's answer and the client's cancel carry it).
+    pub interaction: u64,
+    /// The interaction kind (14 to gather, 28 a loot satchel).
+    pub kind: u8,
+}
+
+impl Bit8 {
+    /// The interaction of a body; `None` for an empty one or a body too short.
+    pub fn interaction(&self) -> Option<InteractionRequest> {
+        let Self::Body(body) = self else {
+            return None;
+        };
+        let mut reader = Reader::new(body);
+        Some(InteractionRequest {
+            target: reader.raw_id().ok()?,
+            target_entity: reader.u64().ok()?,
+            interaction: reader.u64().ok()?,
+            kind: reader.u8().ok()?,
+        })
+    }
 }
 
 /// The mask bits that are 0 in every movement-only record and set in fights (attack input
@@ -339,7 +369,45 @@ impl RowLayout {
     }
 }
 
+/// The slot value and its bit that are set while the player holds block. Live capture of the
+/// tutorial (2026-09-12): set in the inputs of 25 periods; the server sent `isBlockActive` 1 in
+/// them, and all 10 melee hits that retail reported blocked (2218 with 1) fell in them.
+const BLOCK_SLOT_VALUE: usize = 1;
+const BLOCK_SLOT_BIT: u32 = 62;
+/// The slot value and its bit that are set while the player holds the dodge key. Live capture of
+/// the tutorial: each press that started a roll cost the dodge stamina (45 on land, 50 in the
+/// water) 33 ms later (xp-potion-exit note, section 5).
+const DODGE_SLOT_VALUE: usize = 1;
+const DODGE_SLOT_BIT: u32 = 3;
+/// The slot value and its bit of a press of quick slot 1 (the potion): set in one record only,
+/// the one before the retail server used the potion of paperdoll slot 14 (xp-potion-exit note,
+/// section 2.1; Inferred from one use).
+const QUICK_SLOT_1_VALUE: usize = 1;
+const QUICK_SLOT_1_BIT: u32 = 23;
+
 impl InputRecord {
+    fn slot_bit(&self, value: usize, bit: u32) -> bool {
+        self.slots
+            .values
+            .get(value)
+            .is_some_and(|slots| slots >> bit & 1 == 1)
+    }
+
+    /// Whether the player holds block in this record.
+    pub fn blocking(&self) -> bool {
+        self.slot_bit(BLOCK_SLOT_VALUE, BLOCK_SLOT_BIT)
+    }
+
+    /// Whether the player holds the dodge key in this record.
+    pub fn dodging(&self) -> bool {
+        self.slot_bit(DODGE_SLOT_VALUE, DODGE_SLOT_BIT)
+    }
+
+    /// Whether the player presses quick slot 1 in this record.
+    pub fn using_quick_slot_1(&self) -> bool {
+        self.slot_bit(QUICK_SLOT_1_VALUE, QUICK_SLOT_1_BIT)
+    }
+
     /// The attack bits of the mask: bit `n` of the result is [`ATTACK_MASK_BITS`]`[n]`.
     pub fn attack_bits(&self) -> u8 {
         ATTACK_MASK_BITS
@@ -382,9 +450,24 @@ impl ClientInputMsg {
         }
     }
 
-    /// The position of the last record that has one.
-    pub fn last_position(&self) -> Option<InputPosition> {
-        self.records.iter().rev().find_map(|record| record.bit_7)
+    /// The newest position: that of the first record that has one. The client sends the newest
+    /// record first (see [`Self::blocking`]); the later records repeat older inputs.
+    pub fn newest_position(&self) -> Option<InputPosition> {
+        self.records.iter().find_map(|record| record.bit_7)
+    }
+
+    /// Whether the player holds block now: the state of the newest record. The client sends the
+    /// newest record first (the counter after the mask falls by one per record in the live
+    /// capture). `None` for an input without records.
+    pub fn blocking(&self) -> Option<bool> {
+        self.records.first().map(InputRecord::blocking)
+    }
+
+    /// The interaction of the first record that carries one.
+    pub fn interaction(&self) -> Option<InteractionRequest> {
+        self.records
+            .iter()
+            .find_map(|record| record.bit_8.as_ref()?.interaction())
     }
 }
 
@@ -937,6 +1020,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_newest_record_says_whether_the_player_blocks() {
+        // Retail slot values of a record while the player held block (live capture, 93347 ms).
+        const BLOCKING: [u64; 10] = [
+            8_796_093_022_208,
+            4_611_686_018_427_387_904,
+            128,
+            0,
+            2_251_799_813_685_250,
+            0,
+            0,
+            288_797_724_287_172_608,
+            216_172_782_382_219_264,
+            1024,
+        ];
+        let blocking = InputRecord {
+            slots: InputSlots {
+                count: 19,
+                values: BLOCKING.to_vec(),
+                bytes: [128; SLOT_BYTES],
+            },
+            ..InputRecord::default()
+        };
+        let open = full_record();
+        assert!(blocking.blocking());
+        assert!(!open.blocking());
+        assert_eq!(
+            message(vec![blocking.clone(), open.clone()]).blocking(),
+            Some(true)
+        );
+        assert_eq!(message(vec![open, blocking]).blocking(), Some(false));
+        assert_eq!(message(Vec::new()).blocking(), None);
+        // Retail dodge press (slot value 1 bit 3) and quick slot 1 press (bit 23).
+        let press = |value: u64| InputRecord {
+            slots: InputSlots {
+                count: 19,
+                values: vec![0, value],
+                bytes: [128; SLOT_BYTES],
+            },
+            ..InputRecord::default()
+        };
+        assert!(press(8_796_093_022_216).dodging());
+        assert!(!press(8_796_093_022_208).dodging());
+        assert!(press(8_388_608).using_quick_slot_1());
+        assert!(!press(8_388_608).dodging());
+    }
+
     fn message(records: Vec<InputRecord>) -> ClientInputMsg {
         ClientInputMsg {
             component: 1,
@@ -967,8 +1097,23 @@ mod tests {
         let body = input.encode().expect("encode");
         let decoded = ClientInputMsg::decode(&body).expect("decode");
         assert_eq!(decoded, input);
-        assert_eq!(decoded.last_position(), Some(position()));
+        assert_eq!(decoded.newest_position(), Some(position()));
         assert_eq!(decoded.encode().expect("again"), body);
+    }
+
+    #[test]
+    fn the_newest_position_is_that_of_the_first_record() {
+        let older = InputPosition::from_metres(1.0, 2.0, 3.0).expect("finite");
+        let input = ClientInputMsg {
+            records: [
+                vec![InputRecord::default()],
+                ClientInputMsg::position(position()).records,
+                ClientInputMsg::position(older).records,
+            ]
+            .concat(),
+            ..ClientInputMsg::default()
+        };
+        assert_eq!(input.newest_position(), Some(position()));
     }
 
     #[test]
@@ -995,7 +1140,7 @@ mod tests {
         let body = input.encode().expect("encode");
         let decoded = ClientInputMsg::decode(&body).expect("decode");
         assert_eq!(decoded, input);
-        assert_eq!(decoded.last_position(), Some(position()));
+        assert_eq!(decoded.newest_position(), Some(position()));
         assert_eq!(decoded.records[0].attack_bits(), 0b0001);
     }
 
@@ -1088,7 +1233,17 @@ mod tests {
         };
         let input = message(vec![record]);
         let body = input.encode().expect("encode");
-        assert_eq!(ClientInputMsg::decode(&body), Ok(input));
+        assert_eq!(ClientInputMsg::decode(&body), Ok(input.clone()));
+        assert_eq!(
+            input.interaction(),
+            Some(InteractionRequest {
+                target: [1; 16],
+                target_entity: 2,
+                interaction: 3,
+                kind: 4,
+            })
+        );
+        assert_eq!(Bit8::Empty.interaction(), None);
     }
 
     #[test]

@@ -18,16 +18,19 @@ use crate::achievements::{ACHIEVEMENT_TYPE_INDEX, AchievementState};
 use crate::appearance::PlayerLook;
 use crate::appearance::{PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState};
 use crate::components::{
-    COMBAT_STATUS_TYPE_INDEX, CombatStatusState, MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX,
-    StaminaState,
+    COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DAMAGE_RECEIVER_TYPE_INDEX, DamageReceiverState,
+    MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState,
 };
 use crate::containers::{
     BAG_COMPONENT, CONTAINER_TYPE_INDEX, ContainerState, ITEM_MANAGEMENT_TYPE_INDEX,
     ItemManagementState,
 };
+use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
 use crate::gear::PlayerGear;
+use crate::objectives::{OBJECTIVES_TYPE_INDEX, ObjectivesState};
 use crate::paperdoll::PAPERDOLL_TYPE_INDEX;
 use crate::payload::{BundleMember, MemberState};
+use crate::progression::{PROGRESSION_TYPE_INDEX, ProgressionState};
 use crate::slots::{children_mask, read_children, read_slot_byte, write_known_children};
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsState};
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
@@ -85,8 +88,8 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 56] = [
     (35, 3765),
     (36, 81),
     (39, 5620),
-    (41, VITALS_TYPE_INDEX),
-    (42, STAMINA_TYPE_INDEX),
+    (PLAYER_VITALS_COMPONENT, VITALS_TYPE_INDEX),
+    (PLAYER_STAMINA_COMPONENT, STAMINA_TYPE_INDEX),
     (43, 1525),
     (44, 4236),
     (45, 2932),
@@ -266,12 +269,16 @@ pub fn empty_state(class: u64) -> MemberState {
         CONTAINER_TYPE_INDEX => MemberState::Container(ContainerState::default()),
         ITEM_MANAGEMENT_TYPE_INDEX => MemberState::ItemManagement(ItemManagementState::default()),
         ACHIEVEMENT_TYPE_INDEX => MemberState::Achievement(AchievementState::default()),
+        DAMAGE_RECEIVER_TYPE_INDEX => MemberState::DamageReceiver(DamageReceiverState::default()),
+        OBJECTIVES_TYPE_INDEX => MemberState::Objectives(ObjectivesState::default()),
+        PROGRESSION_TYPE_INDEX => MemberState::Progression(ProgressionState::default()),
+        COOLDOWNS_TYPE_INDEX => MemberState::Cooldowns(CooldownsState::default()),
         _ => MemberState::Empty(EmptyState { class }),
     }
 }
 
 /// What a player's card says of the player besides its prefab and position.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlayerStates<'a> {
     /// The 3935 `characterId`: the login character of the client's own player.
     pub character_id: [u8; RAW_ID_LEN],
@@ -283,6 +290,16 @@ pub struct PlayerStates<'a> {
     pub gear: Option<&'a PlayerGear>,
     /// The achievements, when known.
     pub achievements: Option<&'a AchievementState>,
+    /// The objectives (quest tracker), when known.
+    pub objectives: Option<&'a ObjectivesState>,
+    /// The level and experience, when known.
+    pub progression: Option<ProgressionState>,
+    /// The new health after a change (a heal), when there is one.
+    pub health_change: Option<u32>,
+    /// The consumable cooldowns after a change, when there is one.
+    pub cooldowns: Option<&'a CooldownsState>,
+    /// The stamina children that changed, when some did.
+    pub stamina: Option<StaminaState>,
 }
 
 /// The members of every player component in [`PLAYER_EMPTY_COMPONENTS`] for `states`: a connected
@@ -296,12 +313,86 @@ pub fn player_members(states: PlayerStates<'_>) -> impl Iterator<Item = BundleMe
         })
 }
 
+/// The own player component of the vitals.
+pub const PLAYER_VITALS_COMPONENT: u64 = 41;
+/// The own player component of the stamina.
+pub const PLAYER_STAMINA_COMPONENT: u64 = 42;
+
+/// The members of the states that `states` holds besides the card's: the achievements, the
+/// objectives, the progression, the gear, a health change and a stamina change. A bundle without the card sends
+/// these changes.
+pub fn change_members(states: PlayerStates<'_>) -> Vec<BundleMember> {
+    let mut members: Vec<BundleMember> = player_members(states)
+        .filter(|member| match member.state.type_index() {
+            ACHIEVEMENT_TYPE_INDEX => states.achievements.is_some(),
+            OBJECTIVES_TYPE_INDEX => states.objectives.is_some(),
+            PROGRESSION_TYPE_INDEX => states.progression.is_some(),
+            COOLDOWNS_TYPE_INDEX => states.cooldowns.is_some(),
+            PAPERDOLL_TYPE_INDEX | CONTAINER_TYPE_INDEX | ITEM_MANAGEMENT_TYPE_INDEX => {
+                states.gear.is_some()
+            }
+            _ => false,
+        })
+        .collect();
+    if let Some(health) = states.health_change {
+        members.push(BundleMember {
+            component: PLAYER_VITALS_COMPONENT,
+            state: MemberState::Vitals(VitalsState::creature_health(health)),
+        });
+    }
+    if let Some(stamina) = states.stamina {
+        members.push(BundleMember {
+            component: PLAYER_STAMINA_COMPONENT,
+            state: MemberState::Stamina(stamina),
+        });
+    }
+    members
+}
+
+/// The members of the gear components of a player who has `gear`: a gear change sends them
+/// again whole (see [`PlayerGear`]).
+pub fn gear_members(gear: &PlayerGear) -> impl Iterator<Item = BundleMember> + '_ {
+    let states = PlayerStates {
+        character_id: [0; RAW_ID_LEN],
+        look: None,
+        health: None,
+        gear: Some(gear),
+        achievements: None,
+        objectives: None,
+        progression: None,
+        health_change: None,
+        cooldowns: None,
+        stamina: None,
+    };
+    player_members(states).filter(|member| {
+        matches!(
+            member.state.type_index(),
+            PAPERDOLL_TYPE_INDEX | CONTAINER_TYPE_INDEX | ITEM_MANAGEMENT_TYPE_INDEX
+        )
+    })
+}
+
 /// The state of player component `component` of class `class` for `states`.
 fn player_state(states: PlayerStates<'_>, component: u64, class: u64) -> MemberState {
     if class == ACHIEVEMENT_TYPE_INDEX
         && let Some(achievements) = states.achievements
     {
         return MemberState::Achievement(achievements.clone());
+    }
+    if class == OBJECTIVES_TYPE_INDEX
+        && let Some(objectives) = states.objectives
+    {
+        return MemberState::Objectives(objectives.clone());
+    }
+    if class == PROGRESSION_TYPE_INDEX
+        && let Some(progression) = states.progression
+    {
+        return MemberState::Progression(progression);
+    }
+    if class == COOLDOWNS_TYPE_INDEX
+        && let Some(cooldowns) = states.cooldowns
+    {
+        return MemberState::Cooldowns(cooldowns.clone());
     }
     if let Some(gear) = states.gear {
         match class {
@@ -349,6 +440,10 @@ fn has_own_reader(class: u64) -> bool {
             | CONTAINER_TYPE_INDEX
             | ITEM_MANAGEMENT_TYPE_INDEX
             | ACHIEVEMENT_TYPE_INDEX
+            | DAMAGE_RECEIVER_TYPE_INDEX
+            | OBJECTIVES_TYPE_INDEX
+            | PROGRESSION_TYPE_INDEX
+            | COOLDOWNS_TYPE_INDEX
     )
 }
 
@@ -391,6 +486,11 @@ mod tests {
             health: None,
             gear: None,
             achievements: None,
+            objectives: None,
+            progression: None,
+            health_change: None,
+            cooldowns: None,
+            stamina: None,
         };
         let members: Vec<BundleMember> = player_members(states).collect();
         assert_eq!(members.len(), PLAYER_EMPTY_COMPONENTS.len());
@@ -418,6 +518,11 @@ mod tests {
             health: Some(HEALTH),
             gear: None,
             achievements: None,
+            objectives: None,
+            progression: None,
+            health_change: None,
+            cooldowns: None,
+            stamina: None,
         };
         let members: Vec<BundleMember> = player_members(states).collect();
         for member in &members {
@@ -450,17 +555,80 @@ mod tests {
     }
 
     #[test]
+    fn the_changes_are_the_states_given_and_a_health_change() {
+        const HEALED: u32 = 865;
+        let objectives = ObjectivesState::default();
+        // Retail after a land dodge: `01 09 425c0000 3f800000` (stamina-wire note, section 1).
+        const RETAIL_SPEND: [u8; 10] = [0x01, 0x09, 0x42, 0x5c, 0, 0, 0x3f, 0x80, 0, 0];
+        let spend = StaminaState {
+            cur: Some(55.0),
+            regen: Some(1.0),
+            ..StaminaState::default()
+        };
+        let states = PlayerStates {
+            character_id: CHARACTER_ID,
+            look: None,
+            health: Some(HEALTH),
+            gear: None,
+            achievements: None,
+            objectives: Some(&objectives),
+            progression: Some(ProgressionState::experience(20)),
+            health_change: Some(HEALED),
+            cooldowns: None,
+            stamina: Some(spend),
+        };
+        let members = change_members(states);
+        let classes: Vec<u64> = members
+            .iter()
+            .map(|member| member.state.type_index())
+            .collect();
+        assert_eq!(
+            classes,
+            [
+                OBJECTIVES_TYPE_INDEX,
+                PROGRESSION_TYPE_INDEX,
+                VITALS_TYPE_INDEX,
+                STAMINA_TYPE_INDEX
+            ]
+        );
+        assert_eq!(members[3].component, PLAYER_STAMINA_COMPONENT);
+        let mut writer = crate::wire::Writer::new();
+        spend.write(&mut writer);
+        assert_eq!(writer.finish(), RETAIL_SPEND, "retail bytes");
+        assert_eq!(members[3].state, MemberState::Stamina(spend));
+        assert_eq!(members[2].component, PLAYER_VITALS_COMPONENT);
+        assert_eq!(
+            members[2].state,
+            MemberState::Vitals(VitalsState::creature_health(HEALED))
+        );
+    }
+
+    #[test]
+    fn gear_members_are_the_four_gear_components() {
+        let gear = PlayerGear::first(&[]);
+        let classes: Vec<u64> = gear_members(&gear)
+            .map(|member| member.state.type_index())
+            .collect();
+        assert_eq!(classes.len(), 4);
+        assert!(classes.contains(&PAPERDOLL_TYPE_INDEX));
+        assert!(classes.contains(&ITEM_MANAGEMENT_TYPE_INDEX));
+    }
+
+    #[test]
     fn known_gear_fills_the_paperdoll_the_two_containers_and_the_owned_items() {
         const SWORD_INDEX: u32 = 1228;
         const SWORD_DURABILITY: u32 = 1000;
         const SWORD_GEAR_SCORE: u32 = 60;
         let gear = PlayerGear::first(&[crate::gear::EquippedItem {
             slot: crate::paperdoll::slot::MAIN_HAND_OPTION_1,
-            item_index: SWORD_INDEX,
-            gear_score: SWORD_GEAR_SCORE,
-            durability: SWORD_DURABILITY,
-            bound: true,
-            instance: CHARACTER_ID,
+            item: crate::gear::GearItem {
+                item_index: SWORD_INDEX,
+                quantity: 1,
+                gear_score: SWORD_GEAR_SCORE,
+                durability: SWORD_DURABILITY,
+                bound: true,
+                instance: CHARACTER_ID,
+            },
         }]);
         let states = PlayerStates {
             character_id: CHARACTER_ID,
@@ -468,6 +636,11 @@ mod tests {
             health: None,
             gear: Some(&gear),
             achievements: None,
+            objectives: None,
+            progression: None,
+            health_change: None,
+            cooldowns: None,
+            stamina: None,
         };
         let members: Vec<BundleMember> = player_members(states).collect();
         let state_of = |component: u64| {

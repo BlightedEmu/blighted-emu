@@ -4,11 +4,13 @@
 //!
 //! Every facet body starts with two big-endian `u64`s: the target id, then the entity. The entity
 //! is the first 8 bytes of the `ClientAddEntryMsg` entry id in reverse byte order. The target id
-//! is the entity plus a constant of the component (the same in separate retail sessions); the
-//! client looks the target id up and drops a call whose target it does not know.
+//! is the entity plus the `Id` of the component in the player prefab; for a component on a child
+//! entity of the prefab, the entity is first XORed with (main entity `Id` XOR child entity `Id`)
+//! (vitals-facet note). The client looks the target id up and drops a call whose target it does
+//! not know.
 
 use crate::level_info::PhasingEntry;
-use crate::wire::{BodyCodec, MessageError, Reader, Writer};
+use crate::wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};
 
 /// The target-id constant of each component of the player entity (Soul Survivor session).
 pub mod component {
@@ -20,16 +22,50 @@ pub mod component {
     pub const PLAYER_CUTSCENE: u64 = 0xd499_3151_0e1d_d23f;
     /// `GridTrackingComponent`.
     pub const GRID_TRACKING: u64 = 0x3946_bc0c_0a40_83da;
+    /// `DamageReceiverComponent` (mob-cards note, section 4.1).
+    pub const DAMAGE_RECEIVER: u64 = 0xccc4_7f92_daf6_bfc1;
+    /// `StatusEffectsComponent` (live-tutorial note, section 7).
+    pub const STATUS_EFFECTS: u64 = 0x198b_1950_2047_20ba;
+    /// `VitalsComponent`, on the child entity "Stats" ([`STATS_CHILD`]).
+    pub const VITALS: u64 = 0xeeef_fb82_abaf_e4b1;
+    /// The XOR of the player prefab's main entity `RootPlayer` and its child `Stats`.
+    pub const STATS_CHILD: u64 = 0x3caa_c368_06e0_2db3;
+    /// `InteractorComponent` (live-tutorial note, section 7).
+    pub const INTERACTOR: u64 = 0x6c57_18db_fe6d_f612;
+    /// `GatherableControllerComponent` of the tutorial's ruin chest (live-tutorial note,
+    /// section 7).
+    pub const CHEST_GATHERABLE_CONTROLLER: u64 = 0x45d5_7d32_25aa_2566;
+    /// `AITargetableComponent` of the player.
+    pub const AI_TARGETABLE: u64 = 0x5207_d209_ba7d_7dd8;
+    /// `TutorialAIComponent` of a tutorial sailor, on its child [`TUTORIAL_AI_CHILD`].
+    pub const TUTORIAL_AI: u64 = 0xd128_17b1_c795_98a5;
+    /// The XOR of a tutorial sailor's main entity and the child that holds its tutorial AI.
+    pub const TUTORIAL_AI_CHILD: u64 = 0x37 << 32;
+    /// `GlobalStorageComponent` of the player: the retail 7048 target id less the player's
+    /// facet entity (`e2403d11f3992f76` - `bfa96f3ea2e36a5a`).
+    pub const GLOBAL_STORAGE: u64 = 0x2296_cdd3_50b5_c51c;
 }
 
 /// Type index of `PlayerComponentServerFacet_OnAckLevelInfoChanged`.
 pub const ACK_LEVEL_INFO_TYPE_INDEX: u64 = 5181;
+/// Type index of `PlayerCutsceneComponentServerFacet_NotifyCinematicStarted`.
+pub const CINEMATIC_STARTED_TYPE_INDEX: u64 = 6606;
 /// Type index of `PlayerCutsceneComponentServerFacet_NotifyCinematicEnded`.
 pub const CINEMATIC_ENDED_TYPE_INDEX: u64 = 6542;
 /// Type index of `PlayerCutsceneComponentServerFacet_OnClientRequestStartCutscene`.
 pub const REQUEST_CUTSCENE_TYPE_INDEX: u64 = 6703;
 /// Type index of `PlayerCutsceneComponentServerFacet_OnClientCutsceneEnded`.
 pub const CUTSCENE_ENDED_TYPE_INDEX: u64 = 6705;
+/// Type index of `PlayerArenaComponentServerFacet_NotifyPlayerOfFtueQTECompletion`.
+pub const QTE_COMPLETED_TYPE_INDEX: u64 = 6638;
+/// Type index of `PlayerComponentServerFacet_TriggerAreaEntityPassthrough`.
+pub const TRIGGER_AREA_PASSTHROUGH_TYPE_INDEX: u64 = 560;
+/// Type index of `ObjectivesComponentServerFacet_NotifyOpenUiScreen`.
+pub const UI_SCREEN_OPENED_TYPE_INDEX: u64 = 2617;
+/// Type index of `PlayerTradeComponentServerFacet_TakeAllItems`.
+pub const TAKE_ALL_ITEMS_TYPE_INDEX: u64 = 2939;
+/// Type index of `PaperdollComponentServerFacet_ServerEquipItem`.
+pub const EQUIP_ITEM_TYPE_INDEX: u64 = 3895;
 /// Type index of `PlayerComponentServerFacet_ReturnToMainWorld`.
 pub const RETURN_TO_MAIN_WORLD_TYPE_INDEX: u64 = 502;
 /// Type index of `GridTrackingComponentClientFacet_UpdatePhasing`.
@@ -38,6 +74,27 @@ pub const UPDATE_PHASING_TYPE_INDEX: u64 = 6310;
 pub const CUTSCENE_GRANTED_TYPE_INDEX: u64 = 6707;
 /// Type index of `PlayerCutsceneComponentClientFacet_OnServerCutsceneEndRequestFinalized`.
 pub const CUTSCENE_END_FINALIZED_TYPE_INDEX: u64 = 6709;
+/// Type index of `InteractorComponentClientFacet_SyncInteractionValidationResult`.
+pub const INTERACTION_VALIDATED_TYPE_INDEX: u64 = 3743;
+/// Type index of `InteractorComponentClientFacet_CancelCurrentInteraction`.
+pub const INTERACTION_ENDED_TYPE_INDEX: u64 = 3746;
+/// Type index of `GatherableControllerComponentClientFacet_GatheringInterrupted`.
+pub const GATHERING_INTERRUPTED_TYPE_INDEX: u64 = 2724;
+/// Type index of `TutorialAIComponentClientFacet_OnPlayerSeenByAI`.
+pub const PLAYER_SEEN_BY_AI_TYPE_INDEX: u64 = 955;
+/// Type index of `AITargetableComponentClientFacet_OnSelectedAsTarget`.
+pub const SELECTED_AS_TARGET_TYPE_INDEX: u64 = 2415;
+/// Type index of `AITargetableComponentClientFacet_OnUnSelectedAsTarget`.
+pub const UNSELECTED_AS_TARGET_TYPE_INDEX: u64 = 3916;
+/// Type index of `StatusEffectsComponentClientFacet_AdjustFXScripts`.
+pub const ADJUST_FX_SCRIPTS_TYPE_INDEX: u64 = 608;
+/// Type index of `GlobalStorageComponentClientFacet_ReceiveStorageSearchItems`.
+pub const STORAGE_SEARCH_ITEMS_TYPE_INDEX: u64 = 7048;
+/// The bytes after the header of every retail 7048: all zero (an empty search result; the
+/// layout is Unknown, Azoth catalog gives 16 bytes and a `vlq32`).
+const EMPTY_STORAGE_SEARCH: [u8; 22] = [0; 22];
+/// Type index of `CharacterComponentClientFacet_RequestDisableCollision`.
+pub const DISABLE_COLLISION_TYPE_INDEX: u64 = 1793;
 /// Type index of `PlayerComponentClientFacet_OnTeleportWithLoadingScreen`.
 pub const TELEPORT_WITH_LOADING_SCREEN_TYPE_INDEX: u64 = 3951;
 
@@ -61,6 +118,21 @@ impl FacetHeader {
             target: entity.wrapping_add(component),
             entity,
         }
+    }
+
+    /// The header of a call to `component` on the child entity `child` (the XOR of its `Id` with
+    /// the main entity's) of the player of entity number `entity_number`.
+    pub const fn of_child(component: u64, child: u64, entity_number: u64) -> Self {
+        let entity = entity_number.swap_bytes();
+        Self {
+            target: (entity ^ child).wrapping_add(component),
+            entity,
+        }
+    }
+
+    /// The entity number of the header's entity (the inverse of [`FacetHeader::of`]).
+    pub const fn entity_number(&self) -> u64 {
+        self.entity.swap_bytes()
     }
 
     /// Reads the header.
@@ -91,6 +163,13 @@ pub enum ClientFacetMsg {
         /// The acknowledged client context.
         client_context: u8,
     },
+    /// 6606: a cinematic video started; its id is the CRC-32 of its lowercase entry id.
+    CinematicStarted {
+        /// The header.
+        header: FacetHeader,
+        /// The cinematic.
+        cinematic: u32,
+    },
     /// 6542: a cinematic video ended; its id is the CRC-32 of its lowercase entry id.
     CinematicEnded {
         /// The header.
@@ -109,6 +188,62 @@ pub enum ClientFacetMsg {
     CutsceneEnded {
         /// The header.
         header: FacetHeader,
+    },
+    /// 6638: the client finished a tutorial quick-time sequence; its id is the CRC-32 of its
+    /// lowercase name.
+    QteCompleted {
+        /// The header.
+        header: FacetHeader,
+        /// The sequence.
+        sequence: u32,
+    },
+    /// 560: the player passed through the client-side trigger area of a static level entity
+    /// (ftue-static-entities note, section 3).
+    TriggerAreaPassthrough {
+        /// The header.
+        header: FacetHeader,
+        /// The entity id of the trigger area.
+        entity: [u8; RAW_ID_LEN],
+        /// Its facet entity.
+        entity_facet: u64,
+        /// An id of unknown meaning.
+        extra: u64,
+    },
+    /// 2617: the client opened a UI screen; its id is the CRC-32 of its lowercase name (`hud`,
+    /// `inventory`, ...; live-tutorial note, section 2).
+    UiScreenOpened {
+        /// The header.
+        header: FacetHeader,
+        /// The screen.
+        screen: u32,
+    },
+    /// 2939: the Take All button of a loot window: the client asks for every item of the
+    /// container (live-tutorial note, section 5.2).
+    TakeAllItems {
+        /// The header.
+        header: FacetHeader,
+        /// The container's entity id.
+        container: [u8; RAW_ID_LEN],
+        /// The container's facet entity.
+        container_entity: u64,
+        /// An id of unknown meaning.
+        extra: u64,
+    },
+    /// 3895: the client asks to equip the item in bag slot `bag_slot` into paperdoll slot
+    /// `equip_slot` (live-tutorial note, section 5.3).
+    EquipItem {
+        /// The header.
+        header: FacetHeader,
+        /// The bag slot of the item.
+        bag_slot: u32,
+        /// The paperdoll slot.
+        equip_slot: u32,
+        /// How many to equip (a stack).
+        quantity: u32,
+        /// The item instance id.
+        instance: [u8; RAW_ID_LEN],
+        /// A byte of unknown meaning (0 in the capture).
+        flag: u8,
     },
     /// 502: the client asks to leave the tutorial for the open world.
     ReturnToMainWorld {
@@ -135,6 +270,44 @@ impl ClientFacetMsg {
                     client_context: reader.u8()?,
                 })
             }),
+            CINEMATIC_STARTED_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::CinematicStarted {
+                    header,
+                    cinematic: reader.u32()?,
+                })
+            }),
+            TRIGGER_AREA_PASSTHROUGH_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::TriggerAreaPassthrough {
+                    header,
+                    entity: reader.raw_id()?,
+                    entity_facet: reader.u64()?,
+                    extra: reader.u64()?,
+                })
+            }),
+            UI_SCREEN_OPENED_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::UiScreenOpened {
+                    header,
+                    screen: reader.u32()?,
+                })
+            }),
+            TAKE_ALL_ITEMS_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::TakeAllItems {
+                    header,
+                    container: reader.raw_id()?,
+                    container_entity: reader.u64()?,
+                    extra: reader.u64()?,
+                })
+            }),
+            EQUIP_ITEM_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::EquipItem {
+                    header,
+                    bag_slot: reader.u32()?,
+                    equip_slot: reader.u32()?,
+                    quantity: reader.u32()?,
+                    instance: reader.raw_id()?,
+                    flag: reader.u8()?,
+                })
+            }),
             CINEMATIC_ENDED_TYPE_INDEX => read(|header, reader| {
                 Ok(Self::CinematicEnded {
                     header,
@@ -148,6 +321,12 @@ impl ClientFacetMsg {
                 })
             }),
             CUTSCENE_ENDED_TYPE_INDEX => read(|header, _| Ok(Self::CutsceneEnded { header })),
+            QTE_COMPLETED_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::QteCompleted {
+                    header,
+                    sequence: reader.u32()?,
+                })
+            }),
             RETURN_TO_MAIN_WORLD_TYPE_INDEX => read(|header, reader| {
                 Ok(Self::ReturnToMainWorld {
                     header,
@@ -289,6 +468,277 @@ impl BodyCodec for TeleportWithLoadingScreenMsg {
     }
 }
 
+/// 3743: the server's answer to an interaction the client started (ftue-static-entities note,
+/// section 5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InteractionValidatedMsg {
+    /// The header (the player's `InteractorComponent`).
+    pub header: FacetHeader,
+    /// The entity id of the used object.
+    pub target: [u8; RAW_ID_LEN],
+    /// Its facet entity.
+    pub target_entity: u64,
+    /// The interaction id the client sent.
+    pub interaction: u64,
+    /// The interaction kind (14 to gather).
+    pub kind: u8,
+    /// The result (1 accepted).
+    pub status: u8,
+    /// The display name string id of the object.
+    pub name: Vec<u8>,
+    /// A number of unknown meaning (0 in the capture).
+    pub extra: u32,
+    /// An id of unknown meaning.
+    pub id: [u8; RAW_ID_LEN],
+}
+
+impl BodyCodec for InteractionValidatedMsg {
+    const TYPE_INDEX: u64 = INTERACTION_VALIDATED_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        writer
+            .bytes(&self.target)
+            .u64(self.target_entity)
+            .u64(self.interaction)
+            .u8(self.kind)
+            .u8(self.status);
+        // A `usize` length fits 64 bits.
+        writer.wide_prefixed(self.name.len() as u64);
+        Ok(writer
+            .bytes(&self.name)
+            .u32(self.extra)
+            .bytes(&self.id)
+            .finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let header = FacetHeader::read(&mut reader)?;
+        let target = reader.raw_id()?;
+        let target_entity = reader.u64()?;
+        let interaction = reader.u64()?;
+        let kind = reader.u8()?;
+        let status = reader.u8()?;
+        // A length past the body fails the read below.
+        let length = usize::try_from(reader.wide_prefixed()?).unwrap_or(usize::MAX);
+        let name = reader.bytes(length)?.to_vec();
+        let message = Self {
+            header,
+            target,
+            target_entity,
+            interaction,
+            kind,
+            status,
+            name,
+            extra: reader.u32()?,
+            id: reader.raw_id()?,
+        };
+        reader.finish()?;
+        Ok(message)
+    }
+}
+
+/// A facet call that is its header only.
+macro_rules! header_only_message {
+    ($(#[$doc:meta])* $name:ident, $type_index:expr) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub struct $name {
+            /// The header.
+            pub header: FacetHeader,
+        }
+
+        impl BodyCodec for $name {
+            const TYPE_INDEX: u64 = $type_index;
+
+            fn encode(&self) -> Result<Vec<u8>, MessageError> {
+                let mut writer = Writer::new();
+                self.header.write(&mut writer);
+                Ok(writer.finish())
+            }
+
+            fn decode(body: &[u8]) -> Result<Self, MessageError> {
+                let mut reader = Reader::new(body);
+                let message = Self {
+                    header: FacetHeader::read(&mut reader)?,
+                };
+                reader.finish()?;
+                Ok(message)
+            }
+        }
+    };
+}
+
+header_only_message!(
+    /// 955: a tutorial sailor saw the player; its header names the sailor's tutorial AI.
+    PlayerSeenByAiMsg,
+    PLAYER_SEEN_BY_AI_TYPE_INDEX
+);
+header_only_message!(
+    /// 1793: a dead creature stops colliding; its header names the creature's
+    /// `CharacterComponent`.
+    DisableCollisionMsg,
+    DISABLE_COLLISION_TYPE_INDEX
+);
+
+/// 608: a status effect's visual script on the player turns on or off (retail: the potion's
+/// `potionheal` after the drink; xp-potion-exit note, section 2.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdjustFxScriptsMsg {
+    /// The header (the player's `StatusEffectsComponent`).
+    pub header: FacetHeader,
+    /// CRC-32 of the lowercase script name.
+    pub script: u32,
+    /// Whether the script turns on.
+    pub on: bool,
+}
+
+impl AdjustFxScriptsMsg {
+    /// The script of CRC `script` turns on for player `player`.
+    pub const fn on(player: u64, script: u32) -> Self {
+        Self {
+            header: FacetHeader::of(component::STATUS_EFFECTS, player),
+            script,
+            on: true,
+        }
+    }
+}
+
+impl BodyCodec for AdjustFxScriptsMsg {
+    const TYPE_INDEX: u64 = ADJUST_FX_SCRIPTS_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        Ok(writer.u32(self.script).boolean(self.on).finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let message = Self {
+            header: FacetHeader::read(&mut reader)?,
+            script: reader.u32()?,
+            on: reader.boolean()?,
+        };
+        reader.finish()?;
+        Ok(message)
+    }
+}
+
+/// 7048: the items a storage search found, sent empty after each change of the player's items
+/// (retail: after taking the bag, each equip, the chest, the potion and at the tutorial's exit;
+/// xp-potion-exit note, section 2.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageSearchItemsMsg {
+    /// The header (the player's `GlobalStorageComponent`).
+    pub header: FacetHeader,
+}
+
+impl StorageSearchItemsMsg {
+    /// The empty search result of player `player`.
+    pub const fn empty(player: u64) -> Self {
+        Self {
+            header: FacetHeader::of(component::GLOBAL_STORAGE, player),
+        }
+    }
+}
+
+impl BodyCodec for StorageSearchItemsMsg {
+    const TYPE_INDEX: u64 = STORAGE_SEARCH_ITEMS_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        Ok(writer.bytes(&EMPTY_STORAGE_SEARCH).finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let header = FacetHeader::read(&mut reader)?;
+        if reader.bytes(EMPTY_STORAGE_SEARCH.len())? != EMPTY_STORAGE_SEARCH {
+            return Err(MessageError::Unsized {
+                field: "storage search items",
+                byte: 0,
+            });
+        }
+        reader.finish()?;
+        Ok(Self { header })
+    }
+}
+
+/// 2415 and 3916: a creature picks the player as its target, or drops it (live-tutorial note,
+/// section 7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TargetMsg {
+    /// The header (the player's `AITargetableComponent`).
+    pub header: FacetHeader,
+    /// The creature's facet entity.
+    pub creature: u64,
+}
+
+impl TargetMsg {
+    fn encode(&self) -> Vec<u8> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        writer.u64(self.creature).finish()
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let message = Self {
+            header: FacetHeader::read(&mut reader)?,
+            creature: reader.u64()?,
+        };
+        reader.finish()?;
+        Ok(message)
+    }
+}
+
+/// 2415: a creature picked the player as its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectedAsTargetMsg(pub TargetMsg);
+
+/// 3916: a creature no longer targets the player.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnselectedAsTargetMsg(pub TargetMsg);
+
+impl BodyCodec for SelectedAsTargetMsg {
+    const TYPE_INDEX: u64 = SELECTED_AS_TARGET_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        Ok(self.0.encode())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        TargetMsg::decode(body).map(Self)
+    }
+}
+
+impl BodyCodec for UnselectedAsTargetMsg {
+    const TYPE_INDEX: u64 = UNSELECTED_AS_TARGET_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        Ok(self.0.encode())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        TargetMsg::decode(body).map(Self)
+    }
+}
+
+header_only_message!(
+    /// 3746: the interaction is over (the gather time ran out).
+    InteractionEndedMsg,
+    INTERACTION_ENDED_TYPE_INDEX
+);
+header_only_message!(
+    /// 2724: the gatherable's gathering ends; its header names the gatherable.
+    GatheringInterruptedMsg,
+    GATHERING_INTERRUPTED_TYPE_INDEX
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,6 +779,24 @@ mod tests {
     }
 
     #[test]
+    fn a_vitals_call_goes_to_the_stats_child() {
+        // Retail sessions (vitals-facet note): player facet entity and 3601 target.
+        const SESSIONS: [(u64, u64); 3] = [
+            (0xe34e_14f3_44a9_74cc, 0xced4_d31d_edf9_3e30),
+            (0x2896_c8c1_4210_296e, 0x032c_072b_f09f_e98e),
+            (0x67e7_d282_99ff_40aa, 0x4a3d_0d6d_4acf_51ca),
+        ];
+        for (player, target) in SESSIONS {
+            let header = FacetHeader::of_child(
+                component::VITALS,
+                component::STATS_CHILD,
+                player.swap_bytes(),
+            );
+            assert_eq!((header.target, header.entity), (target, player));
+        }
+    }
+
+    #[test]
     fn phasing_and_grant_are_the_retail_bytes() {
         let phasing = UpdatePhasingMsg {
             header: soul(component::GRID_TRACKING),
@@ -349,6 +817,115 @@ mod tests {
             cutscene: 0xa81b_d1af,
         };
         assert_eq!(grant.encode().expect("encode"), hex(SOUL_GRANT));
+    }
+
+    #[test]
+    fn the_ai_messages_are_the_retail_bytes() {
+        // Live tutorial (live-tutorial note, section 7): player facet, sailor 1, and the 2415
+        // and 955 bodies.
+        const PLAYER: u64 = 0xbfa9_6f3e_a2e3_6a5a;
+        const SAILOR: u64 = 0xe5be_db8e_4d15_10aa;
+        const SELECTED: &str = "11b141485d60e832bfa96f3ea2e36a5ae5bedb8e4d1510aa";
+        const SEEN: &str = "b6e6f36b14aaa94fe5bedb8e4d1510aa";
+        let selected = SelectedAsTargetMsg(TargetMsg {
+            header: FacetHeader::of(component::AI_TARGETABLE, PLAYER.swap_bytes()),
+            creature: SAILOR,
+        });
+        assert_eq!(selected.encode().expect("encode"), hex(SELECTED));
+        assert_eq!(SelectedAsTargetMsg::decode(&hex(SELECTED)), Ok(selected));
+        let seen = PlayerSeenByAiMsg {
+            header: FacetHeader::of_child(
+                component::TUTORIAL_AI,
+                component::TUTORIAL_AI_CHILD,
+                SAILOR.swap_bytes(),
+            ),
+        };
+        assert_eq!(seen.encode().expect("encode"), hex(SEEN));
+    }
+
+    #[test]
+    fn the_interaction_answer_round_trips() {
+        const GATHER: u8 = 14;
+        let answer = InteractionValidatedMsg {
+            header: soul(component::INTERACTOR),
+            target: [0xef; RAW_ID_LEN],
+            target_entity: 0x5870_3581_9fa0_a5ef,
+            interaction: 0xd296_06d2_31fe_d9f2,
+            kind: GATHER,
+            status: 1,
+            name: b"@LootContainer_AncientSmall_DisplayName".to_vec(),
+            extra: 0,
+            id: [0x1b; RAW_ID_LEN],
+        };
+        let body = answer.encode().expect("encode");
+        // Header 16, target 16, entity 8, interaction 8, kind and status: the retail name
+        // length 0x27 follows at byte 50.
+        const NAME_LENGTH_AT: usize = 50;
+        assert_eq!(
+            body[NAME_LENGTH_AT],
+            u8::try_from(answer.name.len()).expect("len")
+        );
+        assert_eq!(InteractionValidatedMsg::decode(&body), Ok(answer));
+        let ended = InteractionEndedMsg {
+            header: soul(component::INTERACTOR),
+        };
+        assert_eq!(
+            InteractionEndedMsg::decode(&ended.encode().expect("encode")),
+            Ok(ended)
+        );
+    }
+
+    #[test]
+    fn bag_and_equip_calls_decode() {
+        const BAG_SLOT: u32 = 2;
+        const MAIN_HAND_OPTION_2: u32 = 25;
+        let instance = [0xaf; RAW_ID_LEN];
+        let mut writer = Writer::new();
+        soul(component::PLAYER).write(&mut writer);
+        let equip = writer
+            .u32(BAG_SLOT)
+            .u32(MAIN_HAND_OPTION_2)
+            .u32(1)
+            .bytes(&instance)
+            .u8(0)
+            .finish();
+        assert_eq!(
+            ClientFacetMsg::decode(EQUIP_ITEM_TYPE_INDEX, &equip),
+            Some(Ok(ClientFacetMsg::EquipItem {
+                header: soul(component::PLAYER),
+                bag_slot: BAG_SLOT,
+                equip_slot: MAIN_HAND_OPTION_2,
+                quantity: 1,
+                instance,
+                flag: 0,
+            }))
+        );
+        let mut writer = Writer::new();
+        soul(component::PLAYER).write(&mut writer);
+        let area = [0xff; RAW_ID_LEN];
+        let passthrough = writer.bytes(&area).u64(3).u64(4).finish();
+        assert_eq!(
+            ClientFacetMsg::decode(TRIGGER_AREA_PASSTHROUGH_TYPE_INDEX, &passthrough),
+            Some(Ok(ClientFacetMsg::TriggerAreaPassthrough {
+                header: soul(component::PLAYER),
+                entity: area,
+                entity_facet: 3,
+                extra: 4,
+            }))
+        );
+        let container = [0x2f; RAW_ID_LEN];
+        let mut writer = Writer::new();
+        soul(component::PLAYER).write(&mut writer);
+        let take = writer.bytes(&container).u64(1).u64(2).finish();
+        assert_eq!(
+            ClientFacetMsg::decode(TAKE_ALL_ITEMS_TYPE_INDEX, &take),
+            Some(Ok(ClientFacetMsg::TakeAllItems {
+                header: soul(component::PLAYER),
+                container,
+                container_entity: 1,
+                extra: 2,
+            }))
+        );
     }
 
     #[test]

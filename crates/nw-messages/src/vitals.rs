@@ -25,6 +25,10 @@ const SLOT_1_BIT: u8 = 0b10;
 const SLOT_0_CHILDREN: u8 = 14;
 const SLOT_1_CHILDREN: u8 = 5;
 const FIELD: &str = "vitals";
+/// The `healthChangeFlags` of a creature's first damage: 0 in every retail card, 3 with the
+/// first hit of every tutorial creature (sailors, legionnaire, signifier, risen, Thorpe); the
+/// meaning of the bits is Unknown.
+pub const FIRST_DAMAGE_FLAGS: u8 = 3;
 /// `vitalsId` of a player: the lowercase CRC-32 of the vitals row `Player`, on every local-player
 /// body of the captures (player-appearance note, section 3). The client finds the mana regen rate through it.
 pub const PLAYER_VITALS_ID: u32 = 0x9819_7a65;
@@ -36,6 +40,10 @@ pub const PLAYER_MANA_MAX: f32 = 100.0;
 pub const PLAYER_STAMINA_TICK_RATE: u16 = 0x5100;
 /// `HealthTickRate` and `ManaTickRate` on every captured local-player body.
 pub const PLAYER_TICK_RATE: u16 = 0;
+/// The `vitalsData` head byte of a dead creature (mob-cards note, section 5).
+const DEAD_HEAD: u8 = 1;
+/// The `vitalsData` tail byte on every retail creature body seen (mob-cards note, section 2).
+const CREATURE_DATA_TAIL: u8 = 0xff;
 
 /// The `vitalsData` child (reader `FUN_1469515b0`): a byte, two big-endian `u64`, a byte. The
 /// meaning is Unknown.
@@ -84,6 +92,89 @@ impl VitalsState {
                 mana_tick_rate: Some(PLAYER_TICK_RATE),
                 ..VitalsSlot1::default()
             }),
+        }
+    }
+
+    /// The first vitals of a creature: `health` of `health_max`, its vitals and category ids and
+    /// its level (the children of a retail first creature body that this server knows; the
+    /// meaning of the others is Unknown).
+    pub fn creature(
+        health: u32,
+        health_max: u32,
+        vitals_id: u32,
+        category_id: u32,
+        level: u32,
+    ) -> Self {
+        Self {
+            slot_0: Some(VitalsSlot0 {
+                health_amount: Some(health as f32),
+                health_max: Some(health_max as f32),
+                vitals_id: Some(vitals_id),
+                vitals_category_id: Some(category_id),
+                vitals_level: Some(level),
+                max_health: Some(u16::try_from(health_max).unwrap_or(u16::MAX)),
+                ..VitalsSlot0::default()
+            }),
+            slot_1: None,
+        }
+    }
+
+    /// A recorded retail first state of a creature (with its stamina, data and tick children)
+    /// with this creature's `health`, `health_max`, ids and `level` written in, as
+    /// [`VitalsState::creature`] sets them.
+    pub fn creature_as_recorded(
+        &self,
+        health: u32,
+        health_max: u32,
+        vitals_id: u32,
+        category_id: u32,
+        level: u32,
+    ) -> Self {
+        let ours = Self::creature(health, health_max, vitals_id, category_id, level).slot_0;
+        let (Some(recorded), Some(ours)) = (self.slot_0, ours) else {
+            return Self::creature(health, health_max, vitals_id, category_id, level);
+        };
+        Self {
+            slot_0: Some(VitalsSlot0 {
+                health_amount: ours.health_amount,
+                health_max: ours.health_max,
+                vitals_id: ours.vitals_id,
+                vitals_category_id: ours.vitals_category_id,
+                vitals_level: ours.vitals_level,
+                max_health: ours.max_health,
+                ..recorded
+            }),
+            slot_1: self.slot_1.clone(),
+        }
+    }
+
+    /// A change of a creature's health to `health`. A creature at 0 is dead: its `vitalsData`
+    /// head is 1, which plays the death on the client.
+    pub fn creature_health(health: u32) -> Self {
+        Self::creature_change(health, None)
+    }
+
+    /// The change of a creature's first damage: its health `health` and `healthChangeFlags`
+    /// [`FIRST_DAMAGE_FLAGS`] (retail: every tutorial creature's first hit, `01 09 <health> 03`).
+    pub fn creature_first_damage(health: u32) -> Self {
+        Self::creature_change(health, Some(FIRST_DAMAGE_FLAGS))
+    }
+
+    #[allow(clippy::cast_precision_loss, reason = "health stays far below 2^24")]
+    fn creature_change(health: u32, health_change_flags: Option<u8>) -> Self {
+        Self {
+            slot_0: Some(VitalsSlot0 {
+                health_amount: Some(health as f32),
+                health_change_flags,
+                vitals_data: (health == 0).then_some(VitalsData {
+                    head: DEAD_HEAD,
+                    a: 0,
+                    b: 0,
+                    tail: CREATURE_DATA_TAIL,
+                }),
+                ..VitalsSlot0::default()
+            }),
+            slot_1: None,
         }
     }
 
@@ -318,6 +409,19 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn a_first_damage_is_the_retail_body() {
+        // Retail sailor 1, first hit (78114 of the tutorial capture): `01 09 43754dbc 03`.
+        const RETAIL: [u8; 7] = [0x01, 0x09, 0x43, 0x75, 0x4d, 0xbc, 0x03];
+        let mut state = VitalsState::creature_first_damage(245);
+        if let Some(slot) = state.slot_0.as_mut() {
+            slot.health_amount = Some(f32::from_bits(0x4375_4dbc));
+        }
+        let mut writer = Writer::new();
+        state.write(&mut writer).expect("write");
+        assert_eq!(writer.finish(), RETAIL);
+    }
     use crate::afflictions::{Affliction, AfflictionId};
 
     const HEALTH: f32 = 700.5;
@@ -560,5 +664,29 @@ mod tests {
             }),
         };
         assert_eq!(round(&state), state);
+    }
+
+    #[test]
+    fn a_recorded_creature_state_keeps_its_children_with_our_health() {
+        // Sailor 1's first vitals body (mob-cards note, section 2.1).
+        const RETAIL_SAILOR: &str = concat!(
+            "01ff43b0800000000000000bb5e1fa5b636ba00000000000000000ff0043b0800000003f8000004f00",
+            "00886982c9a452daaa000000010161"
+        );
+        const HEALTH: u32 = 300;
+        const LEVEL: u32 = 2;
+        let bytes: Vec<u8> = (0..RETAIL_SAILOR.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&RETAIL_SAILOR[at..at + 2], 16).expect("hex"))
+            .collect();
+        let recorded = VitalsState::read(&mut Reader::new(&bytes)).expect("read");
+        let ours = recorded.creature_as_recorded(HEALTH, HEALTH, 1, 2, LEVEL);
+        let (Some(was), Some(now)) = (recorded.slot_0, ours.slot_0) else {
+            panic!("slot 0");
+        };
+        assert_eq!(now.health_amount, Some(HEALTH as f32));
+        assert_eq!((now.vitals_id, now.vitals_level), (Some(1), Some(LEVEL)));
+        assert_eq!(now.vitals_data, was.vitals_data, "the recorded data stays");
+        assert_eq!(now.stamina_max, was.stamina_max);
     }
 }

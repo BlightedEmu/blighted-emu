@@ -144,6 +144,11 @@ pub struct CharacterSummary {
     pub persona_id: String,
     /// World id.
     pub world_id: String,
+    /// The character's look for the select screen: base64 of zlib data of the creation settings
+    /// JSON with its `visualsBlob` and `currentLevel` (character-select note). Left out when the
+    /// character has no saved settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_data: Option<String>,
 }
 
 /// One name record (JSON note section 5.1.2).
@@ -304,6 +309,7 @@ mod tests {
             normalized_name: "ada".to_owned(),
             persona_id: ACCOUNT_ID.to_owned(),
             world_id: WORLD_ID.to_owned(),
+            published_data: None,
         }
     }
 

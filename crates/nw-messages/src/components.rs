@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Four small replicated states with slot 0 only (component tables note, sections 1 to 3, and
-//! player-appearance note, section 3): `MB::StaminaComponentReplicatedState` (type 4297),
+//! Small replicated states with slot 0 only (component tables note, sections 1 to 3,
+//! player-appearance note, section 3, and mob-cards note, section 2):
+//! `MB::StaminaComponentReplicatedState` (type 4297),
 //! `MB::CombatStatusComponentReplicatedState` (type 2913),
-//! `MB::DelayedEventComponentReplicatedState` (type 3139) and `MB::ManaComponentReplicatedState`
-//! (type 1652). Each table ends every reached captured body of its class.
+//! `MB::DelayedEventComponentReplicatedState` (type 3139), `MB::ManaComponentReplicatedState`
+//! (type 1652), `MB::DamageReceiverComponentReplicatedState` (type 1528) and
+//! `MB::GatherableControllerReplicatedState` (type 12). Each table ends every reached captured
+//! body of its class.
 
 use crate::slots::{children_mask, read_slot_0, write_known};
 use crate::wire::{MessageError, Reader, Writer};
@@ -16,6 +19,21 @@ pub const COMBAT_STATUS_TYPE_INDEX: u64 = 2913;
 pub const DELAYED_EVENT_TYPE_INDEX: u64 = 3139;
 /// Type index of `MB::ManaComponentReplicatedState`.
 pub const MANA_TYPE_INDEX: u64 = 1652;
+/// Type index of `MB::DamageReceiverComponentReplicatedState`.
+pub const DAMAGE_RECEIVER_TYPE_INDEX: u64 = 1528;
+/// Type index of `MB::GatherableControllerReplicatedState`.
+pub const GATHERABLE_CONTROLLER_TYPE_INDEX: u64 = 12;
+/// Type index of `MB::BossPhaseComponentReplicatedState`.
+pub const BOSS_PHASE_TYPE_INDEX: u64 = 403;
+/// The slot byte and child mask of a boss phase change: slot 0, child 0 (the phase) only.
+const BOSS_PHASE_CHANGE_HEAD: [u8; 2] = [0x01, 0x01];
+
+/// The body of a `MB::BossPhaseComponentReplicatedState` change to boss phase `phase`: child 0
+/// as a big-endian `u32` (retail Thorpe: `01 01 00000001` at his intermission, `01 01 00000003`
+/// at his end; child 1, a byte, only comes with the card).
+pub fn boss_phase_change(phase: u32) -> Vec<u8> {
+    [&BOSS_PHASE_CHANGE_HEAD[..], &phase.to_be_bytes()].concat()
+}
 /// Full stamina and mana of a player: 100 on the captured first bodies (vitals row `Player`).
 const PLAYER_POOL: f32 = 100.0;
 /// A stamina or mana value of 0 on the captured first bodies (`winded`, `regen`, `regenDelay`).
@@ -24,6 +42,13 @@ const NONE_YET: f32 = 0.0;
 const UNIT_RATE: f32 = 1.0;
 const COMBAT_STATUS_CHILDREN: u8 = 4;
 const DELAYED_EVENT_CHILDREN: u8 = 2;
+/// Children of the damage receiver: `isBlockActive` (a flag), `blockWeaponSlotAlias` and
+/// `debugCritChance` (names from the Azoth catalog field note; the last two are four bytes each per
+/// the damage-events note).
+const DAMAGE_RECEIVER_CHILDREN: u8 = 3;
+/// The sized child of the gatherable controller: `gatherableState` (a byte). The width of child 1
+/// (`replenishTime`) is Unknown, so a body that sets it is not read.
+const GATHERABLE_CONTROLLER_CHILDREN: u8 = 1;
 
 /// `MB::StaminaComponentReplicatedState`: six big-endian `f32` children (`FUN_14671a230`).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -203,6 +228,104 @@ impl DelayedEventState {
     }
 }
 
+/// `MB::DamageReceiverComponentReplicatedState`: whether a block is up and with which weapon slot.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DamageReceiverState {
+    /// `isBlockActive`.
+    pub is_block_active: Option<bool>,
+    /// `blockWeaponSlotAlias`.
+    pub block_weapon_slot_alias: Option<u32>,
+    /// `debugCritChance`, kept as its four raw big-endian bytes.
+    pub debug_crit_chance: Option<u32>,
+}
+
+impl DamageReceiverState {
+    /// Reads the state from the bundle path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the body ends early or a slot or child is not in the table.
+    pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let mut state = Self::default();
+        read_slot_0(
+            reader,
+            "damage receiver",
+            DAMAGE_RECEIVER_CHILDREN,
+            |reader, child| {
+                match child {
+                    0 => state.is_block_active = Some(reader.boolean()?),
+                    1 => state.block_weapon_slot_alias = Some(reader.u32()?),
+                    _ => state.debug_crit_chance = Some(reader.u32()?),
+                }
+                Ok(())
+            },
+        )?;
+        Ok(state)
+    }
+
+    /// Writes the state for the bundle path.
+    pub fn write(&self, writer: &mut Writer) {
+        let present = [
+            self.is_block_active.is_some(),
+            self.block_weapon_slot_alias.is_some(),
+            self.debug_crit_chance.is_some(),
+        ];
+        write_known(
+            writer,
+            children_mask(&present),
+            DAMAGE_RECEIVER_CHILDREN,
+            |writer, child| {
+                match child {
+                    0 => self.is_block_active.map(|active| writer.boolean(active)),
+                    1 => self.block_weapon_slot_alias.map(|alias| writer.u32(alias)),
+                    _ => self.debug_crit_chance.map(|chance| writer.u32(chance)),
+                };
+            },
+        );
+    }
+}
+
+/// `MB::GatherableControllerReplicatedState`: the state of a gatherable or of a creature's
+/// gatherable remains (4 on every living mob of the captures).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GatherableControllerState {
+    /// `gatherableState`.
+    pub gatherable_state: Option<u8>,
+}
+
+impl GatherableControllerState {
+    /// Reads the state from the bundle path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the body ends early or sets the unsized child 1.
+    pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let mut state = Self::default();
+        read_slot_0(
+            reader,
+            "gatherable controller",
+            GATHERABLE_CONTROLLER_CHILDREN,
+            |reader, _| {
+                state.gatherable_state = Some(reader.u8()?);
+                Ok(())
+            },
+        )?;
+        Ok(state)
+    }
+
+    /// Writes the state for the bundle path.
+    pub fn write(&self, writer: &mut Writer) {
+        write_known(
+            writer,
+            children_mask(&[self.gatherable_state.is_some()]),
+            GATHERABLE_CONTROLLER_CHILDREN,
+            |writer, _| {
+                self.gatherable_state.map(|state| writer.u8(state));
+            },
+        );
+    }
+}
+
 /// `MB::ManaComponentReplicatedState` (`FUN_1467088c0`): four big-endian `f32` children. The
 /// names of the first two are Unknown (short strings the decompiler does not show); both are 100
 /// on the captured first bodies.
@@ -291,6 +414,13 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn a_boss_phase_change_is_the_retail_body() {
+        // Retail Thorpe (493283 and 546981 of the tutorial capture).
+        assert_eq!(boss_phase_change(1), [0x01, 0x01, 0, 0, 0, 0x01]);
+        assert_eq!(boss_phase_change(3), [0x01, 0x01, 0, 0, 0, 0x03]);
+    }
+
     const STAMINA: f32 = 120.5;
     const DELAY_MS: u16 = 1500;
     const TIME_POINT: u64 = 0x0102_0304_0506_0708;
@@ -372,6 +502,32 @@ mod tests {
     #[test]
     fn a_combat_flag_above_one_is_refused() {
         assert!(CombatStatusState::read(&mut Reader::new(&[0x01, 0b01, 2])).is_err());
+    }
+
+    #[test]
+    fn mob_damage_receiver_and_gatherable_are_the_retail_bodies() {
+        // A retail sailor (mob-cards note, section 2.1).
+        const RETAIL_DAMAGE_RECEIVER: [u8; 7] = [0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x20];
+        const RETAIL_GATHERABLE: [u8; 3] = [0x01, 0x01, 0x04];
+        let receiver =
+            DamageReceiverState::read(&mut Reader::new(&RETAIL_DAMAGE_RECEIVER)).expect("read");
+        assert_eq!(
+            receiver,
+            DamageReceiverState {
+                is_block_active: Some(false),
+                block_weapon_slot_alias: Some(0x20),
+                debug_crit_chance: None,
+            }
+        );
+        let mut writer = Writer::new();
+        receiver.write(&mut writer);
+        assert_eq!(writer.finish(), RETAIL_DAMAGE_RECEIVER);
+        let gatherable =
+            GatherableControllerState::read(&mut Reader::new(&RETAIL_GATHERABLE)).expect("read");
+        assert_eq!(gatherable.gatherable_state, Some(4));
+        let mut writer = Writer::new();
+        gatherable.write(&mut writer);
+        assert_eq!(writer.finish(), RETAIL_GATHERABLE);
     }
 
     #[test]

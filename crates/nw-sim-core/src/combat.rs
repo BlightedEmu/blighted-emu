@@ -108,6 +108,12 @@ impl Health {
         self.current = self.max;
     }
 
+    /// Adds `amount`, at most to the max; the health after it.
+    pub fn heal(&mut self, amount: u32) -> u32 {
+        self.current = self.current.saturating_add(amount).min(self.max);
+        self.current
+    }
+
     /// The health now.
     pub const fn current(&self) -> u32 {
         self.current
@@ -242,6 +248,13 @@ mod tests {
             crit_chance,
             crit_multiplier: CRIT_MULTIPLIER,
         }
+    }
+
+    #[test]
+    fn a_heal_stops_at_the_max() {
+        let mut health = Health::at(500, 856);
+        assert_eq!(health.heal(300), 800);
+        assert_eq!(health.heal(486), 856);
     }
 
     #[test]

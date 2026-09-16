@@ -17,6 +17,7 @@ pub mod combat;
 pub mod components;
 pub mod connected;
 pub mod containers;
+pub mod cooldowns;
 pub mod day_phase;
 pub mod entity_slots;
 pub mod facet;
@@ -24,10 +25,12 @@ pub mod gde;
 pub mod gear;
 pub mod items;
 pub mod level_info;
+pub mod objectives;
 pub mod paperdoll;
 pub mod payload;
 pub mod player_components;
 pub mod position;
+pub mod progression;
 pub mod self_ident;
 pub mod server;
 mod slots;
@@ -43,7 +46,11 @@ pub use achievements::{
     ACHIEVEMENT_COMPONENT, ACHIEVEMENT_TYPE_INDEX, AchievementBits, AchievementState, ByteChange,
 };
 pub use afflictions::{Affliction, AfflictionId, AfflictionList, ColdLong, HotLong, LongForm};
-pub use alc::{ALC_TYPE_INDEX, AlcChild, AlcState, POS10_CHILD, SLOT0_CHILDREN, SLOT1_CHILDREN};
+pub use alc::{
+    ALC_TYPE_INDEX, AlcChild, AlcStamp, AlcState, FRAG_TAGS_LEN, LayerEntry, MobAnimation, MobStep,
+    POS10_CHILD, SLOT0_CHILDREN, SLOT1_CHILDREN, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT,
+    ScopeEntry, StepScope,
+};
 pub use appearance::{
     LOOK_CHOICES, PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState, PlayerIconData, PlayerLook,
 };
@@ -54,16 +61,19 @@ pub use bundle::{
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use client_input::{
     ATTACK_MASK_BITS, Bit8, ClientInputMsg, HeadStep9, INPUT_Z_MAX, INPUT_Z_MIN, InputHead,
-    InputPosition, InputRecord, InputSlots, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+    InputPosition, InputRecord, InputSlots, InteractionRequest,
+    RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
 };
 pub use combat::{
     DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, DamageDealtMsg, DamageItem, DeathRecapMsg,
-    HIT_TAG, MAX_RESPAWN_PAYLOAD, NEUTRAL_SCALE, ON_DAMAGE_TYPE_INDEX, OnDamageMsg,
-    REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
+    HIT_TAG, MAX_RESPAWN_PAYLOAD, MELEE_HIT_TYPE_INDEX, MeleeHitMsg, NEUTRAL_SCALE,
+    ON_DAMAGE_TYPE_INDEX, OnDamageMsg, REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
 };
 pub use components::{
-    COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DELAYED_EVENT_TYPE_INDEX, DelayedEventState,
-    MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState,
+    BOSS_PHASE_TYPE_INDEX, COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DAMAGE_RECEIVER_TYPE_INDEX,
+    DELAYED_EVENT_TYPE_INDEX, DamageReceiverState, DelayedEventState,
+    GATHERABLE_CONTROLLER_TYPE_INDEX, GatherableControllerState, MANA_TYPE_INDEX, ManaState,
+    STAMINA_TYPE_INDEX, StaminaState, boss_phase_change,
 };
 pub use connected::{
     Block1415acc30, CALENDAR_CONNECTED_MSG_TYPE_INDEX, CalendarConnectedMsg, ConnectedBody,
@@ -73,21 +83,30 @@ pub use containers::{
     BAG_COMPONENT, CONTAINER_TYPE_INDEX, ContainerState, ITEM_MANAGEMENT_TYPE_INDEX,
     ItemManagementState, OwnedItem,
 };
+pub use cooldowns::{
+    COOLDOWNS_COMPONENT, COOLDOWNS_TYPE_INDEX, ConsumableCooldown, CooldownsState,
+};
 pub use day_phase::{OBSERVED_DAY_PHASE, SYNC_DAY_PHASE_MSG_TYPE_INDEX, SyncDayPhaseMsg};
 pub use entity_slots::{EntitySlots, SlotRead, SlotUpdate};
 pub use facet::{
-    ClientFacetMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg, FacetHeader,
-    TeleportWithLoadingScreenMsg, UpdatePhasingMsg,
+    AdjustFxScriptsMsg, ClientFacetMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg,
+    DisableCollisionMsg, FacetHeader, GatheringInterruptedMsg, InteractionEndedMsg,
+    InteractionValidatedMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg, StorageSearchItemsMsg,
+    TargetMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg,
 };
 pub use gde::{
     AssetId, DYNAMIC_SLICE_SUB_ID, GDE_ID_LEN, GDE_METADATA_COMPONENT, GDE_METADATA_TYPE_INDEX,
     GdeMetadataReplicatedState, PLAYER_SLICE_ASSET,
 };
-pub use gear::{EquippedItem, PlayerGear, STARTER_BAG_SLOTS};
+pub use gear::{EquippedItem, GearItem, PlayerGear, STARTER_BAG_SLOTS, is_visible_slot};
 pub use items::{FullList, ItemRecord};
 pub use level_info::{
     LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, LEVELS, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg,
     LevelSpec, OPEN_WORLD_LEVEL, PhasingEntry, TUTORIAL_LEVEL,
+};
+pub use objectives::{
+    OBJECTIVES_COMPONENT, OBJECTIVES_TYPE_INDEX, ObjectiveRecord, ObjectivesState, TaskEntry,
+    TaskWireState,
 };
 pub use paperdoll::{
     ItemVisual, LoadedAmmo, Loadout, PAPERDOLL_TYPE_INDEX, PaperdollOwner, PaperdollPublic,
@@ -95,13 +114,14 @@ pub use paperdoll::{
 };
 pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, MemberState};
 pub use player_components::{
-    EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS, PlayerComponentState,
-    PlayerStates, empty_state, player_members,
+    EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS, PLAYER_VITALS_COMPONENT,
+    PlayerComponentState, PlayerStates, change_members, empty_state, gear_members, player_members,
 };
 pub use position::{
     POSITION_IN_THE_WORLD_TYPE_INDEX, POSITION_Z_MAX, POSITION_Z_MIN,
     PositionInTheWorldReplicatedState, Rotation, RotationComponent, Scale, WorldPosition,
 };
+pub use progression::{PROGRESSION_COMPONENT, PROGRESSION_TYPE_INDEX, ProgressionState};
 pub use self_ident::{
     PLAYER_MANAGER_SELF_IDENTIFICATION_MSG_TYPE_INDEX, PlayerManagerSelfIdentificationMsg,
 };
@@ -113,7 +133,8 @@ pub use time_change::{
 };
 pub use time_synch::TimeSynchMsg;
 pub use vitals::{
-    PLAYER_VITALS_ID, VITALS_TYPE_INDEX, VitalsData, VitalsSlot0, VitalsSlot1, VitalsState,
+    FIRST_DAMAGE_FLAGS, PLAYER_VITALS_ID, VITALS_TYPE_INDEX, VitalsData, VitalsSlot0, VitalsSlot1,
+    VitalsState,
 };
 pub use wire::{
     BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer, entity_of_raw_id, raw_id_of_entity,

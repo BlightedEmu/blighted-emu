@@ -29,6 +29,8 @@ pub mod slot {
     pub const FEET: u32 = 4;
     /// `GATHERABLE_HAND`.
     pub const GATHERABLE_HAND: u32 = 9;
+    /// `QUICK_SLOT_1` (paperdoll note, the slot table).
+    pub const QUICK_SLOT_1: u32 = 14;
     /// `MAIN_HAND_OPTION_1`, the main hand.
     pub const MAIN_HAND_OPTION_1: u32 = 24;
     /// `MAIN_HAND_OPTION_3`.

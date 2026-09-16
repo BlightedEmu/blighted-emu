@@ -22,6 +22,11 @@ pub const PERK_SLOTS: usize = 5;
 pub const DYE_BYTES: usize = 4;
 /// Sync reason of an item in a full state at login (paperdoll and containers).
 pub const SYNC_LOGIN: u8 = 4;
+/// Sync reason of an item listed in a lootable container (retail beach bag fill).
+pub const SYNC_CONTAINER: u8 = 3;
+/// Sync reason of an item that moved mid-session: into a bag (retail potions) or out of a
+/// taken container (the beach bag's empty records).
+pub const SYNC_MOVED: u8 = 6;
 /// Sync reason of an owned item at login (type 5437).
 pub const SYNC_OWNED: u8 = 17;
 /// Item flags bit 0: bound to the character.

@@ -14,16 +14,21 @@ use crate::achievements::{ACHIEVEMENT_TYPE_INDEX, AchievementState};
 use crate::alc::{ALC_TYPE_INDEX, AlcState};
 use crate::appearance::{PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState};
 use crate::components::{
-    COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DELAYED_EVENT_TYPE_INDEX, DelayedEventState,
-    MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState,
+    COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DAMAGE_RECEIVER_TYPE_INDEX,
+    DELAYED_EVENT_TYPE_INDEX, DamageReceiverState, DelayedEventState,
+    GATHERABLE_CONTROLLER_TYPE_INDEX, GatherableControllerState, MANA_TYPE_INDEX, ManaState,
+    STAMINA_TYPE_INDEX, StaminaState,
 };
 use crate::containers::{
     CONTAINER_TYPE_INDEX, ContainerState, ITEM_MANAGEMENT_TYPE_INDEX, ItemManagementState,
 };
+use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
 use crate::gde::{GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
+use crate::objectives::{OBJECTIVES_TYPE_INDEX, ObjectivesState};
 use crate::paperdoll::{PAPERDOLL_TYPE_INDEX, PaperdollState};
 use crate::player_components::{EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PlayerComponentState};
 use crate::position::{POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState};
+use crate::progression::{PROGRESSION_TYPE_INDEX, ProgressionState};
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsState};
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -56,10 +61,28 @@ pub enum MemberState {
     Container(ContainerState),
     /// `MB::AchievementComponentReplicatedState`.
     Achievement(AchievementState),
+    /// `MB::DamageReceiverComponentReplicatedState`.
+    DamageReceiver(DamageReceiverState),
+    /// `MB::GatherableControllerReplicatedState`.
+    GatherableController(GatherableControllerState),
     /// `MB::ItemManagementComponentReplicatedState`.
     ItemManagement(ItemManagementState),
+    /// `ObjectivesComponentReplicatedState`.
+    Objectives(ObjectivesState),
+    /// `ProgressionComponentReplicatedState`.
+    Progression(ProgressionState),
+    /// `CooldownTimersComponentReplicatedState`.
+    Cooldowns(CooldownsState),
     /// An empty state of a player component class without a reader of its own.
     Empty(EmptyState),
+    /// A state of `class` sent as recorded body bytes (a retail state replayed as it was, of a
+    /// class without a reader here).
+    Recorded {
+        /// The class type index.
+        class: u64,
+        /// The body bytes.
+        body: Vec<u8>,
+    },
 }
 
 impl MemberState {
@@ -79,14 +102,32 @@ impl MemberState {
             Self::Paperdoll(_) => PAPERDOLL_TYPE_INDEX,
             Self::Container(_) => CONTAINER_TYPE_INDEX,
             Self::Achievement(_) => ACHIEVEMENT_TYPE_INDEX,
+            Self::DamageReceiver(_) => DAMAGE_RECEIVER_TYPE_INDEX,
+            Self::GatherableController(_) => GATHERABLE_CONTROLLER_TYPE_INDEX,
             Self::ItemManagement(_) => ITEM_MANAGEMENT_TYPE_INDEX,
+            Self::Objectives(_) => OBJECTIVES_TYPE_INDEX,
+            Self::Progression(_) => PROGRESSION_TYPE_INDEX,
+            Self::Cooldowns(_) => COOLDOWNS_TYPE_INDEX,
             Self::Empty(state) => state.class,
+            Self::Recorded { class, .. } => *class,
         }
     }
 
     /// The class type id of this state.
     pub const fn class(&self) -> TypeId {
         TypeId::FileSlot(self.type_index())
+    }
+
+    /// The state of class `class` in the body bytes `body`, which it must use up.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the class has no reader here or the body does not match it.
+    pub fn decode(class: u64, body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let state = Self::read(TypeId::FileSlot(class), &mut reader)?;
+        reader.finish()?;
+        Ok(state)
     }
 
     fn read(class: TypeId, reader: &mut Reader<'_>) -> Result<Self, MessageError> {
@@ -119,11 +160,26 @@ impl MemberState {
             TypeId::FileSlot(CONTAINER_TYPE_INDEX) => {
                 ContainerState::read(reader).map(Self::Container)
             }
+            TypeId::FileSlot(DAMAGE_RECEIVER_TYPE_INDEX) => {
+                DamageReceiverState::read(reader).map(Self::DamageReceiver)
+            }
+            TypeId::FileSlot(GATHERABLE_CONTROLLER_TYPE_INDEX) => {
+                GatherableControllerState::read(reader).map(Self::GatherableController)
+            }
             TypeId::FileSlot(ACHIEVEMENT_TYPE_INDEX) => {
                 AchievementState::read(reader).map(Self::Achievement)
             }
             TypeId::FileSlot(ITEM_MANAGEMENT_TYPE_INDEX) => {
                 ItemManagementState::read(reader).map(Self::ItemManagement)
+            }
+            TypeId::FileSlot(OBJECTIVES_TYPE_INDEX) => {
+                ObjectivesState::read(reader).map(Self::Objectives)
+            }
+            TypeId::FileSlot(PROGRESSION_TYPE_INDEX) => {
+                ProgressionState::read(reader).map(Self::Progression)
+            }
+            TypeId::FileSlot(COOLDOWNS_TYPE_INDEX) => {
+                CooldownsState::read(reader).map(Self::Cooldowns)
             }
             TypeId::FileSlot(index) if EmptyState::covers(index) => {
                 EmptyState::read(index, reader).map(Self::Empty)
@@ -171,9 +227,27 @@ impl MemberState {
             Self::Paperdoll(state) => state.write(writer),
             Self::Container(state) => state.write(writer),
             Self::Achievement(state) => state.write(writer),
+            Self::DamageReceiver(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::GatherableController(state) => {
+                state.write(writer);
+                Ok(())
+            }
             Self::ItemManagement(state) => state.write(writer),
+            Self::Objectives(state) => state.write(writer),
+            Self::Progression(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::Cooldowns(state) => state.write(writer),
             Self::Empty(_) => {
                 EmptyState::write(writer);
+                Ok(())
+            }
+            Self::Recorded { body, .. } => {
+                writer.bytes(body);
                 Ok(())
             }
         }
@@ -350,7 +424,7 @@ mod tests {
     const ENTITY: u64 = 300;
     const LEADING: u64 = 7;
     /// A class without a reader here.
-    const OTHER_CLASS: u64 = 12;
+    const OTHER_CLASS: u64 = 14;
     /// An entity integer that fits one prefix byte.
     const SMALL_ENTITY: u8 = 5;
 
@@ -410,6 +484,22 @@ mod tests {
         };
         let bytes = mixed.encode().expect("encode");
         assert_eq!(BundlePayload::decode(&bytes), Ok(mixed));
+    }
+
+    #[test]
+    fn a_recorded_member_writes_its_bytes_as_they_are() {
+        const FTUE_ISLAND_TYPE_INDEX: u64 = 3194;
+        let body = vec![0x01, 0x0f, 0xaa];
+        let member = BundleMember {
+            component: 2,
+            state: MemberState::Recorded {
+                class: FTUE_ISLAND_TYPE_INDEX,
+                body: body.clone(),
+            },
+        };
+        let bytes = member.encode().expect("encode");
+        assert!(bytes.ends_with(&body));
+        assert_eq!(member.state.type_index(), FTUE_ISLAND_TYPE_INDEX);
     }
 
     #[test]

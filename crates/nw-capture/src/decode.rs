@@ -210,7 +210,7 @@ pub fn describe(
             match ClientInputMsg::decode(body) {
                 Ok(input) => Detail::Input {
                     position: input
-                        .last_position()
+                        .newest_position()
                         .and_then(|at| finite([at.x, at.y, at.z()])),
                 },
                 Err(error) => Detail::Failed(error.to_string()),
@@ -287,8 +287,14 @@ fn member_position(state: &MemberState) -> Option<[f32; 3]> {
         | MemberState::Paperdoll(_)
         | MemberState::Container(_)
         | MemberState::Achievement(_)
+        | MemberState::DamageReceiver(_)
+        | MemberState::GatherableController(_)
         | MemberState::ItemManagement(_)
-        | MemberState::Empty(_) => None,
+        | MemberState::Objectives(_)
+        | MemberState::Progression(_)
+        | MemberState::Cooldowns(_)
+        | MemberState::Empty(_)
+        | MemberState::Recorded { .. } => None,
     }
 }
 
@@ -320,7 +326,7 @@ mod tests {
 
     const PING_BODY: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 1];
     /// A class without a reader.
-    const UNREAD_CLASS: u64 = 12;
+    const UNREAD_CLASS: u64 = 14;
 
     fn outputs(ledger: &[u8]) -> Vec<RecordOutput> {
         let mut decoder = Decoder::new();
