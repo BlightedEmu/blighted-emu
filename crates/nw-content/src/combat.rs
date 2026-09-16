@@ -14,6 +14,8 @@ use thiserror::Error;
 
 use crate::Tables;
 
+/// Separates the status effects of an `AddStatusEffects` cell.
+const EFFECT_SEPARATOR: char = '+';
 /// Health and damage mod of a type without them.
 const PLAIN_MOD: f64 = 1.0;
 
@@ -81,6 +83,8 @@ pub struct LevelRow {
     pub base_max_health: f64,
     /// Base damage of one hit.
     pub base_damage: f64,
+    /// Physical armor rating of a mob of this level.
+    pub physical_armor_rating: f64,
 }
 
 /// The player weapon.
@@ -92,6 +96,19 @@ pub struct WeaponRow {
     pub crit_chance: f64,
     /// Crit damage multiplier.
     pub crit_multiplier: f64,
+}
+
+/// A consumable that heals: a potion.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HealingConsumable {
+    /// `ConsumableItemDefinitions.CooldownDuration`, in seconds.
+    pub cooldown_s: u32,
+    /// `CooldownId`: consumables of one id share the cooldown.
+    pub cooldown_id: String,
+    /// The heal of its status effect (`StatusEffectData.Health`).
+    pub health: f64,
+    /// Its share of max health (`HealthModifierPercent`).
+    pub health_share: f64,
 }
 
 /// One attack of `DamageData`.
@@ -120,6 +137,13 @@ pub struct CombatSource {
     pub levels: Vec<(u32, LevelRow)>,
     /// `WeaponItemDefinitions` by id.
     pub weapons: Vec<(String, WeaponRow)>,
+    /// `MasterItemDefinitions`: (item id, `ItemStatsRef`) of the items that have stats.
+    pub item_stats: Vec<(String, String)>,
+    /// `ConsumableItemDefinitions`: (consumable id, cooldown seconds, cooldown id, status
+    /// effects) of the consumables with a cooldown.
+    pub consumables: Vec<(String, u32, String, String)>,
+    /// `StatusEffectData`: (status id, health, health share) of the effects that heal.
+    pub heals: Vec<(String, f64, f64)>,
     /// `DamageData` rows.
     pub attacks: Vec<AttackRow>,
     /// `AITargetingData`: out-of-combat vision offset by creature type.
@@ -170,6 +194,7 @@ impl CombatSource {
                         LevelRow {
                             base_max_health: row.base_max_health,
                             base_damage: row.base_damage,
+                            physical_armor_rating: row.physical_armor_rating,
                         },
                     ))
                 })
@@ -188,6 +213,40 @@ impl CombatSource {
                         },
                     )
                 })
+                .collect(),
+            consumables: tables
+                .consumable_item_definitions
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter_map(|row| {
+                    Some((
+                        row.consumable_id.clone(),
+                        u32::try_from(row.cooldown_duration?).ok()?,
+                        row.cooldown_id.clone()?,
+                        row.add_status_effects.clone()?,
+                    ))
+                })
+                .collect(),
+            heals: tables
+                .status_effect_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter_map(|row| {
+                    let health = row.health?;
+                    (health > 0).then(|| {
+                        (
+                            row.status_id.clone(),
+                            health as f64,
+                            row.health_modifier_percent.unwrap_or(0.0),
+                        )
+                    })
+                })
+                .collect(),
+            item_stats: tables
+                .master_item_definitions
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter_map(|row| Some((row.item_id.clone(), row.item_stats_ref.clone()?)))
                 .collect(),
             attacks: tables
                 .damage_data
@@ -261,6 +320,10 @@ pub struct CombatData {
     mob_types: HashMap<u32, MobType>,
     levels: HashMap<u32, LevelRow>,
     weapon: WeaponRow,
+    /// The weapon row of each item that is a weapon, by lower-case item id.
+    item_weapons: HashMap<String, WeaponRow>,
+    /// The healing consumable of each item that is one, by lower-case item id.
+    item_heals: HashMap<String, HealingConsumable>,
     attacks: Vec<AttackRow>,
     vision_offsets: HashMap<String, f32>,
     player_max_health: u32,
@@ -306,6 +369,51 @@ impl CombatData {
                     .ok_or_else(|| CombatDataError::MissingAttack(wanted.clone()))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let weapons: HashMap<String, WeaponRow> = source
+            .weapons
+            .iter()
+            .map(|(id, weapon)| (id.to_lowercase(), *weapon))
+            .collect();
+        let item_weapons = source
+            .item_stats
+            .iter()
+            .filter_map(|(item, stats)| {
+                Some((item.to_lowercase(), *weapons.get(&stats.to_lowercase())?))
+            })
+            .collect();
+        let heals: HashMap<String, (f64, f64)> = source
+            .heals
+            .iter()
+            .map(|(id, health, share)| (id.to_lowercase(), (*health, *share)))
+            .collect();
+        let consumables: HashMap<String, HealingConsumable> = source
+            .consumables
+            .iter()
+            .filter_map(|(id, cooldown_s, cooldown_id, effects)| {
+                let (health, health_share) = effects
+                    .split(EFFECT_SEPARATOR)
+                    .find_map(|effect| heals.get(&effect.trim().to_lowercase()))?;
+                Some((
+                    id.to_lowercase(),
+                    HealingConsumable {
+                        cooldown_s: *cooldown_s,
+                        cooldown_id: cooldown_id.clone(),
+                        health: *health,
+                        health_share: *health_share,
+                    },
+                ))
+            })
+            .collect();
+        let item_heals = source
+            .item_stats
+            .iter()
+            .filter_map(|(item, stats)| {
+                Some((
+                    item.to_lowercase(),
+                    consumables.get(&stats.to_lowercase())?.clone(),
+                ))
+            })
+            .collect();
         let categories: HashMap<String, CategoryMods> = source.categories.into_iter().collect();
         let base: HashMap<u32, MobType> = source
             .base_types
@@ -339,6 +447,8 @@ impl CombatData {
             mob_types,
             levels: source.levels.into_iter().collect(),
             weapon,
+            item_weapons,
+            item_heals,
             attacks,
             vision_offsets: source.vision_offsets.into_iter().collect(),
             player_max_health,
@@ -348,6 +458,18 @@ impl CombatData {
     /// The mob type of a vitals id crc32.
     pub fn mob_type(&self, vitals_crc: u32) -> Option<&MobType> {
         self.mob_types.get(&vitals_crc)
+    }
+
+    /// The weapon row of item `item_id` (its `ItemStatsRef`); `None` for an item that is no
+    /// weapon. Case does not matter.
+    pub fn weapon_of_item(&self, item_id: &str) -> Option<&WeaponRow> {
+        self.item_weapons.get(&item_id.to_lowercase())
+    }
+
+    /// The healing consumable of item `item_id`; `None` for an item that is none. Case does not
+    /// matter.
+    pub fn heal_of_item(&self, item_id: &str) -> Option<&HealingConsumable> {
+        self.item_heals.get(&item_id.to_lowercase())
     }
 
     /// The row of `level`.
@@ -397,6 +519,11 @@ mod tests {
     const LEVEL: u32 = 20;
     const LEVEL_HEALTH: f64 = 1872.2;
     const LEVEL_DAMAGE: f64 = 686.1;
+    const LEVEL_ARMOR: f64 = 109.336;
+    const SWORD_ITEM: &str = "1hSwordT1";
+    const POTION_COOLDOWN_S: u32 = 25;
+    const POTION_HEAL: f64 = 400.0;
+    const POTION_SHARE: f64 = 0.1;
     const BOAR_HEALTH_MOD: f64 = 0.5;
     const BOAR_DAMAGE_MOD: f64 = 0.8;
     const SWORD_BASE: f64 = 64.0;
@@ -430,6 +557,7 @@ mod tests {
                 LevelRow {
                     base_max_health: LEVEL_HEALTH,
                     base_damage: LEVEL_DAMAGE,
+                    physical_armor_rating: LEVEL_ARMOR,
                 },
             )],
             weapons: vec![(
@@ -440,6 +568,18 @@ mod tests {
                     crit_multiplier: 1.3,
                 },
             )],
+            consumables: vec![(
+                "PotionHealthT1".to_owned(),
+                POTION_COOLDOWN_S,
+                "SurvivalPotion".to_owned(),
+                "PotionHeal".to_owned(),
+            )],
+            heals: vec![("PotionHeal".to_owned(), POTION_HEAL, POTION_SHARE)],
+            item_stats: vec![
+                ("PotionHealthT1".to_owned(), "PotionHealthT1".to_owned()),
+                (SWORD_ITEM.to_owned(), "SwordT1".to_owned()),
+                ("Shield".to_owned(), "NoWeaponRow".to_owned()),
+            ],
             attacks: vec![
                 AttackRow {
                     damage_id: LIGHT.to_owned(),
@@ -462,6 +602,30 @@ mod tests {
 
     fn data() -> CombatData {
         CombatData::build(source(), &rows()).expect("data")
+    }
+
+    #[test]
+    fn a_weapon_item_has_the_row_of_its_stats() {
+        let data = data();
+        assert_eq!(
+            data.weapon_of_item("1HSWORDT1")
+                .map(|weapon| weapon.base_damage),
+            Some(SWORD_BASE)
+        );
+        assert_eq!(data.weapon_of_item("Shield"), None, "no weapon row");
+        assert_eq!(
+            data.heal_of_item("potionhealtht1"),
+            Some(&HealingConsumable {
+                cooldown_s: POTION_COOLDOWN_S,
+                cooldown_id: "SurvivalPotion".to_owned(),
+                health: POTION_HEAL,
+                health_share: POTION_SHARE,
+            })
+        );
+        assert_eq!(
+            data.level(LEVEL).map(|level| level.physical_armor_rating),
+            Some(LEVEL_ARMOR)
+        );
     }
 
     #[test]

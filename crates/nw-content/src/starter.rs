@@ -4,8 +4,9 @@
 //!
 //! The pick saves a backstory id (`Archetype_Mystic`, ...). Its `BackstoryDefinition` row lists
 //! `InventoryItem` as `item:quantity` pairs. A retail new character has the items of quantity 1
-//! equipped at login (four armor pieces and the tutorial sword); the items of quantity 0 come
-//! later from the tutorial's captain's chest.
+//! equipped at login (four armor pieces and the tutorial sword); the items of quantity 0 (the
+//! archetype's weapons and helmet) come later from the bag on the tutorial beach (live-tutorial
+//! note, section 5.2).
 //!
 //! The wire names an item by its client item index: the client walks the `MasterItemDefinitions`
 //! sheets in byte order of their unique id, the rows of each in file order, skips `HousingItem`
@@ -23,7 +24,7 @@ const KIT_PAIR_SEPARATOR: char = ',';
 const KIT_QUANTITY_SEPARATOR: char = ':';
 /// Separates the parts of an `ItemClass` cell.
 const ITEM_CLASS_SEPARATOR: char = '+';
-/// A kit item of at least this quantity is equipped at login.
+/// A kit item of at least this quantity is equipped at login; one of less is in the beach bag.
 const EQUIPPED_AT_LOGIN: u32 = 1;
 
 /// Where an equipped item goes on the paperdoll.
@@ -128,15 +129,15 @@ impl StarterSource {
     }
 }
 
-/// One item of a starter kit that is equipped at login.
+/// One item of the item catalog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KitItem {
     /// `ItemID`.
     pub item_id: String,
     /// The client item index.
     pub item_index: u32,
-    /// Where it is worn.
-    pub slot: EquipSlot,
+    /// Where it is worn; `None` for an item that is not worn (a potion).
+    pub slot: Option<EquipSlot>,
     /// Its gear score.
     pub gear_score: u32,
     /// Its full durability.
@@ -145,10 +146,20 @@ pub struct KitItem {
     pub bound: bool,
 }
 
-/// The login kit of every backstory.
+/// The kits of one backstory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Kit {
+    /// Worn at login.
+    login: Vec<KitItem>,
+    /// In the beach bag.
+    bag: Vec<KitItem>,
+}
+
+/// The kits of every backstory, and every item by id.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StarterKits {
-    kits: HashMap<String, Vec<KitItem>>,
+    kits: HashMap<String, Kit>,
+    items: HashMap<String, KitItem>,
 }
 
 impl StarterKits {
@@ -157,8 +168,7 @@ impl StarterKits {
         Self::build(StarterSource::from_tables(tables))
     }
 
-    /// The kits of `source`. A kit item that has no item row, no worn slot, or a quantity of 0
-    /// is left out.
+    /// The kits of `source`. A kit item that has no item row or no worn slot is left out.
     pub fn build(mut source: StarterSource) -> Self {
         source
             .item_sheets
@@ -168,46 +178,67 @@ impl StarterKits {
             .iter()
             .flat_map(|(_, rows)| rows)
             .filter(|row| row.item_type.as_deref() != Some(HOUSING_ITEM_TYPE));
-        let items: HashMap<&str, (u32, &ItemRow)> = (1_u32..)
+        let items: HashMap<String, KitItem> = (1_u32..)
             .zip(indexed)
-            .map(|(index, row)| (row.item_id.as_str(), (index, row)))
+            .map(|(item_index, row)| {
+                let item = KitItem {
+                    item_id: row.item_id.clone(),
+                    item_index,
+                    slot: row.item_class.as_deref().and_then(EquipSlot::of_item_class),
+                    gear_score: row.gear_score.unwrap_or_default(),
+                    durability: row.durability.unwrap_or_default(),
+                    bound: row.bind_on_pickup,
+                };
+                (row.item_id.clone(), item)
+            })
             .collect();
         let kits = source
             .backstories
             .iter()
             .map(|(backstory, inventory)| {
-                let kit = login_items(inventory)
-                    .filter_map(|item_id| {
-                        let (item_index, row) = items.get(item_id)?;
-                        Some(KitItem {
-                            item_id: row.item_id.clone(),
-                            item_index: *item_index,
-                            slot: EquipSlot::of_item_class(row.item_class.as_deref()?)?,
-                            gear_score: row.gear_score.unwrap_or_default(),
-                            durability: row.durability.unwrap_or_default(),
-                            bound: row.bind_on_pickup,
-                        })
-                    })
-                    .collect();
+                let mut kit = Kit::default();
+                for (item_id, quantity) in kit_pairs(inventory) {
+                    let Some(item) = items.get(item_id).filter(|item| item.slot.is_some()) else {
+                        continue;
+                    };
+                    if quantity >= EQUIPPED_AT_LOGIN {
+                        kit.login.push(item.clone());
+                    } else {
+                        kit.bag.push(item.clone());
+                    }
+                }
                 (backstory.clone(), kit)
             })
             .collect();
-        Self { kits }
+        Self { kits, items }
     }
 
     /// The items that a character of `backstory` has equipped at login, in kit order; `None` for
     /// a backstory without a row.
     pub fn kit(&self, backstory: &str) -> Option<&[KitItem]> {
-        self.kits.get(backstory).map(Vec::as_slice)
+        self.kits.get(backstory).map(|kit| kit.login.as_slice())
+    }
+
+    /// The items in the beach bag of a character of `backstory`, in kit order; empty for a
+    /// backstory without a row.
+    pub fn bag(&self, backstory: &str) -> &[KitItem] {
+        self.kits
+            .get(backstory)
+            .map_or(&[], |kit| kit.bag.as_slice())
+    }
+
+    /// The item `item_id`.
+    pub fn item(&self, item_id: &str) -> Option<&KitItem> {
+        self.items.get(item_id)
     }
 }
 
-/// The item ids of an `InventoryItem` cell whose quantity is at least [`EQUIPPED_AT_LOGIN`].
-fn login_items(inventory: &str) -> impl Iterator<Item = &str> {
+/// The (item id, quantity) pairs of an `InventoryItem` cell; a pair without a number is left
+/// out.
+fn kit_pairs(inventory: &str) -> impl Iterator<Item = (&str, u32)> {
     inventory.split(KIT_PAIR_SEPARATOR).filter_map(|pair| {
         let (item_id, quantity) = pair.trim().split_once(KIT_QUANTITY_SEPARATOR)?;
-        let quantity: u32 = quantity.trim().parse().ok()?;
-        (quantity >= EQUIPPED_AT_LOGIN).then_some(item_id.trim())
+        Some((item_id.trim(), quantity.trim().parse().ok()?))
     })
 }
 
@@ -244,6 +275,10 @@ mod tests {
                     "MasterItemDefinitions_Quest".to_owned(),
                     vec![
                         armor("SwordsmanArchetypeHead", "EquippableHead+Armor+Heavy"),
+                        armor(
+                            "SwordsmanArchetype_2hGreatsword",
+                            "Weapon+EquippableTwoHand+GreatSword+Melee",
+                        ),
                         armor("SwordsmanArchetypeChest", "EquippableChest+Armor+Heavy"),
                         armor("SwordsmanArchetypeHands", "EquippableHands+Armor+Heavy"),
                         armor("SwordsmanArchetypeLegs", "EquippableLegs+Armor+Heavy"),
@@ -256,6 +291,10 @@ mod tests {
                         ItemRow {
                             item_type: Some(HOUSING_ITEM_TYPE.to_owned()),
                             ..armor("House_Chair", "Furniture")
+                        },
+                        ItemRow {
+                            item_type: Some("Consumable".to_owned()),
+                            ..armor("PotionHealthT1", "Consumable+Potion")
                         },
                         row(
                             "1hSwordT2_FTUE",
@@ -277,10 +316,10 @@ mod tests {
     }
 
     #[test]
-    fn the_login_kit_is_the_quantity_one_items_with_client_indexes() {
+    fn the_login_kit_is_the_quantity_one_items_and_the_bag_the_rest() {
         let kits = StarterKits::build(source());
         let kit = kits.kit(BACKSTORY).expect("kit");
-        let summary: Vec<(&str, u32, EquipSlot)> = kit
+        let summary: Vec<(&str, u32, Option<EquipSlot>)> = kit
             .iter()
             .map(|item| (item.item_id.as_str(), item.item_index, item.slot))
             .collect();
@@ -288,13 +327,25 @@ mod tests {
         assert_eq!(
             summary,
             vec![
-                ("SwordsmanArchetypeChest", 3, EquipSlot::Chest),
-                ("SwordsmanArchetypeHands", 4, EquipSlot::Hands),
-                ("SwordsmanArchetypeLegs", 5, EquipSlot::Legs),
-                ("SwordsmanArchetypeFeet", 6, EquipSlot::Feet),
-                ("1hSwordT2_FTUE", 1, EquipSlot::MainHand),
+                ("SwordsmanArchetypeChest", 5, Some(EquipSlot::Chest)),
+                ("SwordsmanArchetypeHands", 6, Some(EquipSlot::Hands)),
+                ("SwordsmanArchetypeLegs", 7, Some(EquipSlot::Legs)),
+                ("SwordsmanArchetypeFeet", 8, Some(EquipSlot::Feet)),
+                ("1hSwordT2_FTUE", 2, Some(EquipSlot::MainHand)),
             ]
         );
+        let bag: Vec<&str> = kits
+            .bag(BACKSTORY)
+            .iter()
+            .map(|item| item.item_id.as_str())
+            .collect();
+        assert_eq!(
+            bag,
+            ["SwordsmanArchetypeHead", "SwordsmanArchetype_2hGreatsword"]
+        );
+        assert!(kits.bag("Archetype_Nobody").is_empty());
+        let potion = kits.item("PotionHealthT1").expect("potion");
+        assert_eq!((potion.item_index, potion.slot), (1, None));
         let sword = &kit[4];
         assert_eq!(
             (sword.gear_score, sword.durability, sword.bound),

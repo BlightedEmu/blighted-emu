@@ -2,6 +2,10 @@
 //! `content-tool`: builds generated table code, the content bundle and the world files from a
 //! New World install, and checks capture ledgers.
 
+use std::collections::HashSet;
+use std::ffi::OsString;
+use std::io::Write;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -11,13 +15,20 @@ use content_tool::capture::CaptureReport;
 use content_tool::codegen::run_codegen;
 use content_tool::combat::{CombatCheck, DEFAULT_LEVEL, DEFAULT_NWDB_DIR, check, read_nwdb};
 use content_tool::error::ToolError;
+use content_tool::ftue_entities::{FtueScan, Timeline, read_ledger, write_table};
 use content_tool::map_tiles::{DEFAULT_MAP_DIR, MapTilesReport, YIndex, run_map_tiles};
+use content_tool::mob_prefabs::{
+    DEFAULT_CAPTURE_ROOTS, LedgerSource, MobPrefabsError, PrefabTable, SourceList,
+    find_ledger_sources, run_workers, scan_ledger, vitals_names, worker_process, write_entries,
+};
 use content_tool::source::GameSource;
 use content_tool::world::{LevelReport, UnmatchedIds, run_world, world_totals};
 use nw_capture::{CLIENT_TO_SERVER, CaptureError, SERVER_TO_CLIENT, TypeNames};
 use nw_content::ContentBundle;
 use nw_content::client_build::load_client_build;
 use nw_content::combat::{CombatData, CombatRows};
+use nw_content::ftue_entities::ftue_entities_path;
+use nw_content::mob_prefabs::mob_prefabs_path;
 use nw_world::WorldFile;
 use nw_world::metadata::SkipCounts;
 use nw_world::records::RecordCounts;
@@ -31,6 +42,12 @@ const TYPE_INDEX_FILE: &str = "typeindex.json";
 const TOP_TYPES: usize = 30;
 /// Decode failures printed by `capture-check`.
 const SHOWN_FAILURES: usize = 20;
+/// Failed ledgers and bad archives printed by `mob-prefabs`.
+const SHOWN_MOB_FAILURES: usize = 20;
+/// Classes printed by `mob-prefabs` that cut spawn card groups short.
+const SHOWN_CUT_CLASSES: usize = 10;
+/// Unread spawn cards of each kind printed by `ftue-entities`.
+const SHOWN_UNREAD_CARDS: usize = 20;
 
 #[derive(Parser)]
 #[command(
@@ -106,6 +123,42 @@ enum Command {
         /// Folder of nwdb.info creature records.
         #[arg(long, default_value = DEFAULT_NWDB_DIR)]
         nwdb_dir: PathBuf,
+    },
+    /// Builds the mob prefab table from the capture ledgers; each ledger is read by its own
+    /// worker process (run it under a memory limit, for example `ulimit -v 4000000`).
+    MobPrefabs {
+        /// Folders searched for `ledger.bin` files and zip archives that hold them.
+        #[arg(default_values = DEFAULT_CAPTURE_ROOTS)]
+        roots: Vec<PathBuf>,
+        /// Output file (default: `local-data/content/mob-prefabs-<build>.json`).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Content bundle for the vitals names (default: `local-data/content/bundle-<build>.bin`).
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+        /// Worker processes at a time (default: the number of CPU threads).
+        #[arg(long)]
+        jobs: Option<NonZeroUsize>,
+    },
+    /// Builds the tutorial entity table (static entities, asset entities and the mobs they name)
+    /// from the capture of a new character's tutorial run (run it under a memory limit, for
+    /// example `ulimit -v 4000000`).
+    FtueEntities {
+        /// The `ledger.bin` file.
+        ledger: PathBuf,
+        /// Output file (default: `local-data/content/ftue-entities-<build>.json`).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Worker of `mob-prefabs`: reads one ledger and prints its tally as JSON.
+    #[command(name = "mob-prefabs-ledger", hide = true)]
+    MobPrefabsLedger {
+        /// The ledger file, or the zip archive that holds it.
+        #[arg(long)]
+        ledger: PathBuf,
+        /// The ledger's entry name in the zip archive.
+        #[arg(long)]
+        entry: Option<String>,
     },
 }
 
@@ -203,8 +256,189 @@ fn run(cli: Cli) -> Result<(), ToolError> {
                 nwdb.unreadable,
             );
         }
+        Command::MobPrefabs {
+            roots,
+            out,
+            bundle,
+            jobs,
+        } => {
+            let out = out
+                .unwrap_or_else(|| mob_prefabs_path(Path::new(DEFAULT_CONTENT_DIR), &client_build));
+            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
+            let global_args = [
+                OsString::from("--game-dir"),
+                cli.game_dir.into_os_string(),
+                OsString::from("--client-build-config"),
+                cli.client_build_config.into_os_string(),
+            ];
+            run_mob_prefabs(&roots, &out, &bundle, &client_build, jobs, &global_args)?;
+        }
+        Command::FtueEntities { ledger, out } => {
+            let out = out.unwrap_or_else(|| {
+                ftue_entities_path(Path::new(DEFAULT_CONTENT_DIR), &client_build)
+            });
+            let scan = content_tool::ftue_entities::scan_ledger(&read_ledger(&ledger)?)?;
+            write_table(&out, &scan.table)?;
+            print_ftue_entities(&scan, &out);
+        }
+        Command::MobPrefabsLedger { ledger, entry } => {
+            let tally = scan_ledger(
+                &LedgerSource {
+                    path: ledger,
+                    entry,
+                }
+                .read()?,
+            );
+            let mut stdout = std::io::stdout().lock();
+            serde_json::to_writer(&mut stdout, &tally).map_err(MobPrefabsError::from)?;
+            stdout.flush().map_err(|source| MobPrefabsError::Io {
+                path: PathBuf::from("stdout"),
+                source,
+            })?;
+        }
     }
     Ok(())
+}
+
+fn run_mob_prefabs(
+    roots: &[PathBuf],
+    out: &Path,
+    bundle: &Path,
+    client_build: &str,
+    jobs: Option<NonZeroUsize>,
+    global_args: &[OsString],
+) -> Result<(), ToolError> {
+    let list = find_ledger_sources(roots)?;
+    let exe = std::env::current_exe().map_err(|source| MobPrefabsError::Io {
+        path: PathBuf::from("content-tool"),
+        source,
+    })?;
+    let jobs = jobs
+        .or_else(|| std::thread::available_parallelism().ok())
+        .unwrap_or(NonZeroUsize::MIN);
+    let results = run_workers(&list.sources, jobs, |source| {
+        worker_process(&exe, global_args, source)
+    });
+    let mut table = PrefabTable::default();
+    let mut failures = Vec::new();
+    for result in results {
+        match result {
+            Ok(tally) => table.add(tally),
+            Err(error) => failures.push(error.to_string()),
+        }
+    }
+    let names = vitals_names(&ContentBundle::load(bundle, client_build)?.tables);
+    let entries = table.entries(&names);
+    write_entries(out, &entries)?;
+    let assets: HashSet<&str> = entries.iter().map(|entry| entry.asset.as_str()).collect();
+    print_mob_prefabs(&list, &table, &failures);
+    println!(
+        "entries: {}, distinct assets: {}, with a vitals name: {}, with a death: {} -> {}",
+        entries.len(),
+        assets.len(),
+        entries
+            .iter()
+            .filter(|entry| entry.vitals_name.is_some())
+            .count(),
+        entries
+            .iter()
+            .filter(|entry| !entry.death_members.is_empty())
+            .count(),
+        out.display()
+    );
+    Ok(())
+}
+
+fn print_mob_prefabs(list: &SourceList, table: &PrefabTable, failures: &[String]) {
+    let stats = &table.stats;
+    println!(
+        "mob-prefabs: {} ledgers found, {} merged, {} duplicates, {} failed; {} rar archives not read, {} bad zip archives",
+        list.sources.len(),
+        table.ledgers,
+        table.duplicates,
+        failures.len(),
+        list.rar_archives,
+        list.bad_archives.len()
+    );
+    println!(
+        "bundles {} ({} bad), mob first groups {}, player cards {}, cards without vitals {}, cut card groups {}, deaths {}, resyncs {}, lost payload tails {}, stream failures {}",
+        stats.bundles,
+        stats.bad_bundles,
+        stats.first_groups,
+        stats.player_cards,
+        stats.cards_without_vitals,
+        stats.cut_cards,
+        stats.deaths,
+        stats.resyncs,
+        stats.lost_tails,
+        stats.stream_failures
+    );
+    let mut cut: Vec<(u64, u64)> = stats.cut_classes.iter().map(|(c, n)| (*c, *n)).collect();
+    cut.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+    println!(
+        "classes without a reader that cut card groups (class, groups): {:?}",
+        &cut[..cut.len().min(SHOWN_CUT_CLASSES)]
+    );
+    for failure in failures.iter().take(SHOWN_MOB_FAILURES) {
+        println!("  failed: {failure}");
+    }
+    for (path, reason) in list.bad_archives.iter().take(SHOWN_MOB_FAILURES) {
+        println!("  bad archive: {}: {reason}", path.display());
+    }
+}
+
+fn print_ftue_entities(scan: &FtueScan, out: &Path) {
+    let stats = &scan.stats;
+    let table = &scan.table;
+    println!(
+        "ftue-entities: {} bundles, {} static and {} asset entities, {} mobs ({} mob cards), {} spawns ({} sent again), {} changes ({} sent again), {} static and {} asset cards in unread groups -> {}",
+        stats.bundles,
+        table.entities.len(),
+        table.asset_entities.len(),
+        table.mobs.len(),
+        stats.mob_cards,
+        stats.spawns,
+        stats.repeated_spawns,
+        stats.changes,
+        stats.repeated_changes,
+        stats.unread_cards.len(),
+        stats.unread_asset_cards.len(),
+        out.display()
+    );
+    for entity in &table.entities {
+        print_timeline(&entity.gde_ref_prefix, &entity.timeline);
+    }
+    for entity in &table.asset_entities {
+        print_timeline(&entity.asset, &entity.timeline);
+    }
+    for mob in &table.mobs {
+        println!(
+            "  mob {} (vitals {:08x}) first card at {} ms",
+            mob.asset, mob.vitals_id, mob.first_card_ms
+        );
+    }
+    for (time_ms, prefix) in stats.unread_cards.iter().take(SHOWN_UNREAD_CARDS) {
+        println!("  unread card at {time_ms} ms: {}", hex::encode(prefix));
+    }
+    for (time_ms, asset) in stats.unread_asset_cards.iter().take(SHOWN_UNREAD_CARDS) {
+        println!(
+            "  unread asset card at {time_ms} ms: {}",
+            hex::encode(asset)
+        );
+    }
+}
+
+fn print_timeline(name: &str, timeline: &Timeline) {
+    println!(
+        "  {name}: spawns at {:?}, {} changes, despawns at {:?}",
+        timeline
+            .spawns
+            .iter()
+            .map(|spawn| (spawn.time_ms, spawn.interest, spawn.members.len()))
+            .collect::<Vec<_>>(),
+        timeline.changes.len(),
+        timeline.despawns
+    );
 }
 
 fn print_map_tiles(report: &MapTilesReport) {

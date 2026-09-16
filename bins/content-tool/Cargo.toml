@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 clap.workspace = true
 crc32fast.workspace = true
+hex.workspace = true
 nw-capture.workspace = true
 nw-carrier.workspace = true
 nw-messages.workspace = true
@@ -28,6 +29,8 @@ serde.workspace = true
 serde_json.workspace = true
 syn.workspace = true
 thiserror.workspace = true
+# Capture archives are deflate zip files.
+zip = { workspace = true, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 nw-capture = { workspace = true, features = ["test-util"] }

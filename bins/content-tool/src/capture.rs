@@ -379,19 +379,17 @@ mod tests {
         let envelopes = [
             envelope(
                 DAMAGE_DEALT_TYPE_INDEX,
-                DamageDealtMsg::hit(TARGET, ATTACKER, 42.0)
+                DamageDealtMsg::hit(ATTACKER, TARGET, 42.0, false)
                     .encode()
                     .expect("2071"),
             ),
             envelope(
                 ON_DAMAGE_TYPE_INDEX,
-                OnDamageMsg::hit(ATTACKER, TARGET, 9.0)
-                    .encode()
-                    .expect("3601"),
+                OnDamageMsg::hit(ATTACKER, 9.0).encode().expect("3601"),
             ),
             envelope(
                 DEATH_RECAP_TYPE_INDEX,
-                DeathRecapMsg::of(ATTACKER, TARGET).encode().expect("4299"),
+                DeathRecapMsg::of(ATTACKER).encode().expect("4299"),
             ),
         ];
         let mut report = CaptureReport::default();
@@ -439,7 +437,7 @@ mod tests {
         const COUNT_AT: usize = 50;
         /// The count 1 in the two-byte wide form: it decodes, but encodes to one byte.
         const LONG_ONE: [u8; 2] = [0x81, 0x00];
-        let mut body = DamageDealtMsg::hit((1 << 34) + 3, 7, 42.0)
+        let mut body = DamageDealtMsg::hit(7, (1 << 34) + 3, 42.0, false)
             .encode()
             .expect("2071");
         assert_eq!(body[COUNT_AT], 1, "one item");

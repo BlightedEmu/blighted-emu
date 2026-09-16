@@ -8,7 +8,9 @@ use nw_content::fill::FillError;
 
 use crate::codegen::CodegenError;
 use crate::combat::NwdbError;
+use crate::ftue_entities::FtueEntitiesError;
 use crate::map_tiles::MapTilesError;
+use crate::mob_prefabs::MobPrefabsError;
 use crate::source::SourceError;
 use crate::world::WorldBuildError;
 use nw_capture::CaptureError;
@@ -56,6 +58,12 @@ pub enum ToolError {
     /// The nwdb.info records cannot be read.
     #[error(transparent)]
     Nwdb(#[from] NwdbError),
+    /// The mob prefab scan failed.
+    #[error(transparent)]
+    MobPrefabs(#[from] MobPrefabsError),
+    /// The tutorial static entity scan failed.
+    #[error(transparent)]
+    FtueEntities(#[from] FtueEntitiesError),
     /// The capture check found decode failures.
     #[error("capture check found {count} decode failures")]
     CaptureFailures {

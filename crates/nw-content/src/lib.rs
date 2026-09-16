@@ -11,7 +11,9 @@ pub mod fill;
 // The generator writes prettyplease output, which rustfmt would format differently.
 #[rustfmt::skip]
 pub mod generated;
+pub mod ftue_entities;
 pub mod ids;
+pub mod mob_prefabs;
 pub mod starter;
 pub mod table;
 
