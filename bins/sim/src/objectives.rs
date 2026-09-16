@@ -571,6 +571,33 @@ impl ObjectiveRun {
             .collect()
     }
 
+    /// Completes the waiting item tasks that the player's items `held` (item id, worn) already
+    /// meet: a have-item task by any stack of its item, an equip task by its item worn. Item
+    /// events count only for tasks that wait when they come; an item the player took before its
+    /// task started would else never count (beach-ruins-chest note: the chest's potions taken
+    /// before `ChestDiscovery`).
+    pub fn sync_held(&mut self, held: &[(&str, bool)], now_ms: u64) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for index in 0..self.states.len() {
+            if !matches!(self.states[index], TaskState::Active { .. }) {
+                continue;
+            }
+            let met = match &self.tree.tasks[index].kind {
+                TaskKind::HaveItem(Some(item)) => {
+                    held.iter().any(|(id, _)| id.eq_ignore_ascii_case(item))
+                }
+                TaskKind::EquipItem(item) => held
+                    .iter()
+                    .any(|(id, worn)| *worn && id.eq_ignore_ascii_case(item)),
+                _ => false,
+            };
+            if met {
+                self.complete(index, now_ms, &mut effects);
+            }
+        }
+        effects
+    }
+
     /// Lists task `index` in the tracker once it has progress.
     fn list(&mut self, index: usize) {
         if !self.listed.contains(&index) {
@@ -970,6 +997,36 @@ mod tests {
             ObjectiveRun::resume(tree, &broken, LATER).is_none(),
             "a task out of the tree"
         );
+    }
+
+    #[test]
+    fn items_held_before_their_task_starts_count() {
+        let rows = vec![
+            container(
+                "Root",
+                "ConsecutiveTaskContainer",
+                &["Wait", "Potions", "Equip"],
+            ),
+            TaskRow {
+                duration: Some(TIMER_S),
+                ..row("Wait", "TaskTimer")
+            },
+            with_item("Potions", "TaskHaveAndReturnItems", "PotionHealthT1"),
+            with_item("Equip", "TaskEquipItem", "PotionHealthT1"),
+        ];
+        let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        // The potions came while the timer ran: the event found no waiting task.
+        run.event(Event::ItemGained("PotionHealthT1"), NOW);
+        run.tick(NOW + TIMER_MS);
+        assert!(run.is_active("Potions"));
+        run.sync_held(&[("PotionHealthT1", false)], NOW + TIMER_MS);
+        assert!(run.is_done("Potions"), "held in the bag");
+        assert!(run.is_active("Equip"), "not worn yet");
+        run.sync_held(&[("PotionHealthT1", false)], NOW + TIMER_MS);
+        assert!(run.is_active("Equip"));
+        run.sync_held(&[("PotionHealthT1", true)], NOW + TIMER_MS);
+        assert!(run.is_done("Equip"), "worn in its quick slot");
     }
 
     #[test]

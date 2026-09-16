@@ -685,6 +685,21 @@ impl Tutorial {
         self.assets.on(Trigger::Achievement(bit), now_ms);
     }
 
+    /// The orders of the quest's waiting item tasks that the player's items `held` (item id,
+    /// worn) already meet, at `now_ms`.
+    pub(super) fn sync_held(
+        &mut self,
+        held: &[(&str, bool)],
+        mobs: &mut Mobs,
+        now_ms: u64,
+    ) -> Vec<Order> {
+        self.now_ms = now_ms;
+        let mut orders = Vec::new();
+        let effects = self.run.sync_held(held, now_ms);
+        self.apply(effects, mobs, &mut orders);
+        orders
+    }
+
     /// The orders of game event `event` at `now_ms`.
     pub(super) fn event(&mut self, event: Event<'_>, mobs: &mut Mobs, now_ms: u64) -> Vec<Order> {
         self.now_ms = now_ms;

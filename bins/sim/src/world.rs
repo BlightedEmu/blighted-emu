@@ -22,8 +22,8 @@ use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use nw_bus::{
-    Admit, BusId, CarriedItem, CellTable, ConnectionRef, Ghost, HandoffOffer, MOB_STATES, MobGhost,
-    Point, QuestRun, SimSlot, SnapMob, SnapPlayer,
+    Admit, BusId, CarriedItem, CellTable, ConnectionRef, Ghost, HandoffOffer, ItemPlace,
+    MOB_STATES, MobGhost, Point, QuestRun, SimSlot, SnapMob, SnapPlayer,
 };
 use nw_messages::items::{FIRST_VERSION, FullList};
 use nw_messages::paperdoll::slot::QUICK_SLOT_1;
@@ -1187,7 +1187,26 @@ impl SimWorld {
             else {
                 continue;
             };
-            let orders = tutorial.tick(&mut self.mobs, &self.content.kill_types, position, now_ms);
+            let mut orders =
+                tutorial.tick(&mut self.mobs, &self.content.kill_types, position, now_ms);
+            // Items the player already holds meet the item tasks that start later.
+            let carried = self
+                .player_by_number(number)
+                .and_then(|entity| self.world.get::<Player>(entity))
+                .and_then(|player| player.gear.as_ref().map(Gear::carried))
+                .unwrap_or_default();
+            let held: Vec<(&str, bool)> = carried
+                .iter()
+                .map(|item| {
+                    (
+                        item.item_id.as_str(),
+                        matches!(item.place, ItemPlace::Worn(_)),
+                    )
+                })
+                .collect();
+            if let Some(tutorial) = self.tutorials.get_mut(&number) {
+                orders.extend(tutorial.sync_held(&held, &mut self.mobs, now_ms));
+            }
             self.carry_out(number, orders, now_ms);
             self.update_quest_tracker(number);
         }
