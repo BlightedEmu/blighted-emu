@@ -45,6 +45,7 @@ use uuid::Uuid;
 
 mod asset_script;
 mod attack;
+mod combat_status;
 mod encounter;
 mod gear;
 mod level_assets;
@@ -57,6 +58,7 @@ mod stamina;
 mod statics;
 
 use asset_script::Step;
+use combat_status::CombatTimer;
 use encounter::{BAG_PREFIX, Order, Tutorial};
 use gear::Gear;
 use level_assets::{ASSET_ENTITY_BASE, AssetViews, asset_gde_ref};
@@ -357,6 +359,8 @@ struct Player {
     healed_to: Option<u32>,
     /// Its stamina.
     stamina: Stamina,
+    /// Its combat status timer.
+    combat: CombatTimer,
     /// The version of its replicated lists that this server sends besides the gear.
     list_version: u64,
     /// Own-group members to append to the next bundle (the take's cleared interactor target).
@@ -1960,6 +1964,7 @@ impl SimWorld {
                     cooldowns_changed: false,
                     healed_to: None,
                     stamina: Stamina::default(),
+                    combat: CombatTimer::default(),
                     list_version: FIRST_VERSION,
                     extra_members: Vec::new(),
                     statics: StaticViews::default(),
@@ -2260,6 +2265,8 @@ impl Neighbourhood<'_> {
                 });
                 let health_change = player.healed_to.take();
                 let stamina = player.stamina.take_change();
+                player.combat.tick(self.now_ms);
+                let combat_status = player.combat.take_change(self.now_ms, self.server_time);
                 let states = PlayerStates {
                     character_id: *player.character.as_bytes(),
                     look: player.look,
@@ -2271,6 +2278,7 @@ impl Neighbourhood<'_> {
                     health_change,
                     cooldowns: cooldowns.as_ref(),
                     stamina,
+                    combat_status,
                 };
                 if let Some(mut group) = own_group(own, states, own_position, own_card, teleport)? {
                     group.members.append(&mut player.extra_members);

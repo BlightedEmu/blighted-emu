@@ -211,6 +211,9 @@ impl SimWorld {
             if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
                 vitals.last_attack_ms = Some(now_ms);
             }
+            if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                player.combat.hit(now_ms, false);
+            }
             self.send_reliable(
                 attacker.clone(),
                 &ServerMessage::DamageDealt(DamageDealtMsg::absorbed(number, target)),
@@ -233,6 +236,9 @@ impl SimWorld {
         let killed = matches!(outcome, AttackOutcome::Killed { .. });
         if matches!(outcome, AttackOutcome::Hit { .. }) {
             self.mob_timelines.hurt(target);
+        }
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            player.combat.hit(now_ms, killed);
         }
         self.send_reliable(
             attacker.clone(),
@@ -950,6 +956,10 @@ mod tests {
             ))]
         );
         assert!(world.take_messages().is_empty(), "taken once");
+        let entity = world.by_connection[&connection(1)];
+        let mut player = world.world.get_mut::<Player>(entity).expect("player");
+        let status = player.combat.take_change(NOW, NOW).expect("in combat");
+        assert_eq!(status.in_combat, Some(true), "the hit starts the combat");
     }
 
     #[test]

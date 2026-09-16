@@ -132,7 +132,7 @@ pub use time_change::{
     OBSERVED_TIME_CHANGE_F32S_AT_16, OBSERVED_TIME_CHANGE_F32S_AT_60,
     OBSERVED_TIME_CHANGE_U32S_AT_28, SYNC_TIME_CHANGE_MSG_TYPE_INDEX, SyncTimeChangeMsg,
 };
-pub use time_synch::TimeSynchMsg;
+pub use time_synch::{NS_PER_MS, TimeSynchMsg};
 pub use vitals::{
     FIRST_DAMAGE_FLAGS, PLAYER_VITALS_ID, VITALS_TYPE_INDEX, VitalsData, VitalsSlot0, VitalsSlot1,
     VitalsState,

@@ -191,6 +191,7 @@ pub(super) fn entity_group(
                 health_change: None,
                 cooldowns: None,
                 stamina: None,
+                combat_status: None,
             })));
         }
     }
@@ -587,6 +588,7 @@ mod tests {
             health_change: None,
             cooldowns: None,
             stamina: None,
+            combat_status: None,
         }
     }
     const SEQUENCE: u64 = 4;

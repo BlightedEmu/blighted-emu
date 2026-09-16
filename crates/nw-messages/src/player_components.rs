@@ -300,6 +300,8 @@ pub struct PlayerStates<'a> {
     pub cooldowns: Option<&'a CooldownsState>,
     /// The stamina children that changed, when some did.
     pub stamina: Option<StaminaState>,
+    /// The combat status children that changed, when some did.
+    pub combat_status: Option<CombatStatusState>,
 }
 
 /// The members of every player component in [`PLAYER_EMPTY_COMPONENTS`] for `states`: a connected
@@ -319,7 +321,8 @@ pub const PLAYER_VITALS_COMPONENT: u64 = 41;
 pub const PLAYER_STAMINA_COMPONENT: u64 = 42;
 
 /// The members of the states that `states` holds besides the card's: the achievements, the
-/// objectives, the progression, the gear, a health change and a stamina change. A bundle without the card sends
+/// objectives, the progression, the gear, the combat status, a health change and a stamina
+/// change. A bundle without the card sends
 /// these changes.
 pub fn change_members(states: PlayerStates<'_>) -> Vec<BundleMember> {
     let mut members: Vec<BundleMember> = player_members(states)
@@ -328,6 +331,7 @@ pub fn change_members(states: PlayerStates<'_>) -> Vec<BundleMember> {
             OBJECTIVES_TYPE_INDEX => states.objectives.is_some(),
             PROGRESSION_TYPE_INDEX => states.progression.is_some(),
             COOLDOWNS_TYPE_INDEX => states.cooldowns.is_some(),
+            COMBAT_STATUS_TYPE_INDEX => states.combat_status.is_some(),
             PAPERDOLL_TYPE_INDEX | CONTAINER_TYPE_INDEX | ITEM_MANAGEMENT_TYPE_INDEX => {
                 states.gear.is_some()
             }
@@ -363,6 +367,7 @@ pub fn gear_members(gear: &PlayerGear) -> impl Iterator<Item = BundleMember> + '
         health_change: None,
         cooldowns: None,
         stamina: None,
+        combat_status: None,
     };
     player_members(states).filter(|member| {
         matches!(
@@ -393,6 +398,11 @@ fn player_state(states: PlayerStates<'_>, component: u64, class: u64) -> MemberS
         && let Some(cooldowns) = states.cooldowns
     {
         return MemberState::Cooldowns(cooldowns.clone());
+    }
+    if class == COMBAT_STATUS_TYPE_INDEX
+        && let Some(status) = states.combat_status
+    {
+        return MemberState::CombatStatus(status);
     }
     if let Some(gear) = states.gear {
         match class {
@@ -491,6 +501,7 @@ mod tests {
             health_change: None,
             cooldowns: None,
             stamina: None,
+            combat_status: None,
         };
         let members: Vec<BundleMember> = player_members(states).collect();
         assert_eq!(members.len(), PLAYER_EMPTY_COMPONENTS.len());
@@ -523,6 +534,7 @@ mod tests {
             health_change: None,
             cooldowns: None,
             stamina: None,
+            combat_status: None,
         };
         let members: Vec<BundleMember> = player_members(states).collect();
         for member in &members {
@@ -576,6 +588,7 @@ mod tests {
             health_change: Some(HEALED),
             cooldowns: None,
             stamina: Some(spend),
+            combat_status: None,
         };
         let members = change_members(states);
         let classes: Vec<u64> = members
@@ -601,6 +614,45 @@ mod tests {
             members[2].state,
             MemberState::Vitals(VitalsState::creature_health(HEALED))
         );
+    }
+
+    #[test]
+    fn a_combat_status_change_goes_out_on_component_28() {
+        // Retail 78148 of the tutorial capture.
+        const RETAIL: [u8; 19] = [
+            0x01, 0x0d, 0x01, 0x0b, 0xbc, 0xa3, 0x48, 0x1f, 0xb3, 0xeb, 0x61, 0x0b, 0xbc, 0xa3,
+            0x45, 0xcb, 0xa8, 0x07, 0x61,
+        ];
+        let status = CombatStatusState {
+            in_combat: Some(true),
+            in_pvp_combat: None,
+            logged_out_time: Some(0x0bbc_a348_1fb3_eb61),
+            concluded_time: Some(0x0bbc_a345_cba8_0761),
+        };
+        let states = PlayerStates {
+            character_id: CHARACTER_ID,
+            look: None,
+            health: Some(HEALTH),
+            gear: None,
+            achievements: None,
+            objectives: None,
+            progression: None,
+            health_change: None,
+            cooldowns: None,
+            stamina: None,
+            combat_status: Some(status),
+        };
+        let members = change_members(states);
+        assert_eq!(
+            members,
+            [BundleMember {
+                component: 28,
+                state: MemberState::CombatStatus(status),
+            }]
+        );
+        let mut writer = crate::wire::Writer::new();
+        status.write(&mut writer);
+        assert_eq!(writer.finish(), RETAIL, "retail bytes");
     }
 
     #[test]
@@ -641,6 +693,7 @@ mod tests {
             health_change: None,
             cooldowns: None,
             stamina: None,
+            combat_status: None,
         };
         let members: Vec<BundleMember> = player_members(states).collect();
         let state_of = |component: u64| {
