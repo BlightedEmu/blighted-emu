@@ -32,7 +32,7 @@ use nw_messages::{
     DisableCollisionMsg, GatheringInterruptedMsg, InteractionEndedMsg, InteractionRequest,
     InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec, MessageError,
     PlayerLook, PlayerSeenByAiMsg, PlayerStates, ProgressionState, SelectedAsTargetMsg,
-    ServerMessage, StorageSearchItemsMsg, TUTORIAL_LEVEL, TargetMsg, TimeSynchMsg,
+    ServerMessage, TUTORIAL_LEVEL, TargetMsg, TimeSynchMsg,
     UnselectedAsTargetMsg, WorldPosition,
 };
 use nw_sim_core::{
@@ -2151,18 +2151,6 @@ impl Neighbourhood<'_> {
                         gear.take_change()
                     }
                 });
-                // Retail sends an empty storage search before the bundle of each item change.
-                if !first && gear.is_some() {
-                    outgoing.push(Outgoing {
-                        connection: player.connection.clone(),
-                        channel: MESSAGE_CHANNEL,
-                        reliable: true,
-                        envelopes: vec![
-                            ServerMessage::StorageSearchItems(StorageSearchItemsMsg::empty(own))
-                                .envelope()?,
-                        ],
-                    });
-                }
                 // The quest tracker: the whole quest with the first card, then its changes.
                 let objectives = player.quest.as_mut().and_then(|quest| {
                     if first {

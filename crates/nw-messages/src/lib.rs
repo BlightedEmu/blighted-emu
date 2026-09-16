@@ -91,7 +91,7 @@ pub use entity_slots::{EntitySlots, SlotRead, SlotUpdate};
 pub use facet::{
     AdjustFxScriptsMsg, ClientFacetMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg,
     DisableCollisionMsg, FacetHeader, GatheringInterruptedMsg, InteractionEndedMsg,
-    InteractionValidatedMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg, StorageSearchItemsMsg,
+    InteractionValidatedMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg,
     TargetMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg,
 };
 pub use gde::{

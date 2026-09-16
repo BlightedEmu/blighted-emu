@@ -41,9 +41,6 @@ pub mod component {
     pub const TUTORIAL_AI: u64 = 0xd128_17b1_c795_98a5;
     /// The XOR of a tutorial sailor's main entity and the child that holds its tutorial AI.
     pub const TUTORIAL_AI_CHILD: u64 = 0x37 << 32;
-    /// `GlobalStorageComponent` of the player: the retail 7048 target id less the player's
-    /// facet entity (`e2403d11f3992f76` - `bfa96f3ea2e36a5a`).
-    pub const GLOBAL_STORAGE: u64 = 0x2296_cdd3_50b5_c51c;
 }
 
 /// Type index of `PlayerComponentServerFacet_OnAckLevelInfoChanged`.
@@ -88,11 +85,6 @@ pub const SELECTED_AS_TARGET_TYPE_INDEX: u64 = 2415;
 pub const UNSELECTED_AS_TARGET_TYPE_INDEX: u64 = 3916;
 /// Type index of `StatusEffectsComponentClientFacet_AdjustFXScripts`.
 pub const ADJUST_FX_SCRIPTS_TYPE_INDEX: u64 = 608;
-/// Type index of `GlobalStorageComponentClientFacet_ReceiveStorageSearchItems`.
-pub const STORAGE_SEARCH_ITEMS_TYPE_INDEX: u64 = 7048;
-/// The bytes after the header of every retail 7048: all zero (an empty search result; the
-/// layout is Unknown, Azoth catalog gives 16 bytes and a `vlq32`).
-const EMPTY_STORAGE_SEARCH: [u8; 22] = [0; 22];
 /// Type index of `CharacterComponentClientFacet_RequestDisableCollision`.
 pub const DISABLE_COLLISION_TYPE_INDEX: u64 = 1793;
 /// Type index of `PlayerComponentClientFacet_OnTeleportWithLoadingScreen`.
@@ -624,47 +616,6 @@ impl BodyCodec for AdjustFxScriptsMsg {
         };
         reader.finish()?;
         Ok(message)
-    }
-}
-
-/// 7048: the items a storage search found, sent empty after each change of the player's items
-/// (retail: after taking the bag, each equip, the chest, the potion and at the tutorial's exit;
-/// xp-potion-exit note, section 2.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StorageSearchItemsMsg {
-    /// The header (the player's `GlobalStorageComponent`).
-    pub header: FacetHeader,
-}
-
-impl StorageSearchItemsMsg {
-    /// The empty search result of player `player`.
-    pub const fn empty(player: u64) -> Self {
-        Self {
-            header: FacetHeader::of(component::GLOBAL_STORAGE, player),
-        }
-    }
-}
-
-impl BodyCodec for StorageSearchItemsMsg {
-    const TYPE_INDEX: u64 = STORAGE_SEARCH_ITEMS_TYPE_INDEX;
-
-    fn encode(&self) -> Result<Vec<u8>, MessageError> {
-        let mut writer = Writer::new();
-        self.header.write(&mut writer);
-        Ok(writer.bytes(&EMPTY_STORAGE_SEARCH).finish())
-    }
-
-    fn decode(body: &[u8]) -> Result<Self, MessageError> {
-        let mut reader = Reader::new(body);
-        let header = FacetHeader::read(&mut reader)?;
-        if reader.bytes(EMPTY_STORAGE_SEARCH.len())? != EMPTY_STORAGE_SEARCH {
-            return Err(MessageError::Unsized {
-                field: "storage search items",
-                byte: 0,
-            });
-        }
-        reader.finish()?;
-        Ok(Self { header })
     }
 }
 

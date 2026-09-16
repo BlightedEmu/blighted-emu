@@ -726,9 +726,7 @@ mod tests {
     };
     use crate::world::{MESSAGE_CHANNEL, MoveError, Outgoing, WorldSettings};
     use nw_bus::{Ghost, MobGhost, Point};
-    use nw_messages::{
-        DamageDealtMsg, DeathRecapMsg, OnDamageMsg, ServerMessage, StorageSearchItemsMsg,
-    };
+    use nw_messages::{DamageDealtMsg, DeathRecapMsg, OnDamageMsg, ServerMessage};
     use nw_reflect::Envelope;
 
     const LIGHT: &str = "1H_Sword_Attack1";
@@ -1005,34 +1003,6 @@ mod tests {
             .expect("player")
             .stamina
             .current()
-    }
-
-    #[test]
-    fn an_item_change_sends_an_empty_storage_search() {
-        use crate::world::gear::Gear;
-        use crate::world::gear::tests::{BACKSTORY, kits};
-        let mut world = fight();
-        let entity = world.player_by_number(1).expect("player");
-        let character = world.world.get::<Player>(entity).expect("player").character;
-        world.world.get_mut::<Player>(entity).expect("player").gear =
-            Gear::starter(&kits(), character, Some(BACKSTORY));
-        let search = ServerMessage::StorageSearchItems(StorageSearchItemsMsg::empty(1));
-        let output = tick(&mut world, NOW);
-        assert!(
-            !messages_to(&output.messages, 1).contains(&search),
-            "no change yet"
-        );
-        let removed = world
-            .world
-            .get_mut::<Player>(entity)
-            .expect("player")
-            .gear
-            .as_mut()
-            .expect("gear")
-            .remove("1hSwordT2_FTUE");
-        assert!(removed);
-        let output = tick(&mut world, NOW + TICK_MS);
-        assert!(messages_to(&output.messages, 1).contains(&search));
     }
 
     #[test]

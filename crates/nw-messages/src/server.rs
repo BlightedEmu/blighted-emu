@@ -9,8 +9,7 @@ use crate::day_phase::SyncDayPhaseMsg;
 use crate::facet::{
     AdjustFxScriptsMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg, DisableCollisionMsg,
     GatheringInterruptedMsg, InteractionEndedMsg, InteractionValidatedMsg, PlayerSeenByAiMsg,
-    SelectedAsTargetMsg, StorageSearchItemsMsg, TeleportWithLoadingScreenMsg,
-    UnselectedAsTargetMsg, UpdatePhasingMsg,
+    SelectedAsTargetMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg,
 };
 use crate::level_info::LevelInfoChangedMsg;
 use crate::self_ident::PlayerManagerSelfIdentificationMsg;
@@ -72,8 +71,6 @@ pub enum ServerMessage {
     MeleeHit(MeleeHitMsg),
     /// 608.
     AdjustFxScripts(AdjustFxScriptsMsg),
-    /// 7048.
-    StorageSearchItems(StorageSearchItemsMsg),
     /// 4299.
     DeathRecap(DeathRecapMsg),
     /// 6310.
@@ -137,9 +134,6 @@ impl ServerMessage {
             AdjustFxScriptsMsg::TYPE_INDEX => {
                 AdjustFxScriptsMsg::decode(body).map(Self::AdjustFxScripts)
             }
-            StorageSearchItemsMsg::TYPE_INDEX => {
-                StorageSearchItemsMsg::decode(body).map(Self::StorageSearchItems)
-            }
             DeathRecapMsg::TYPE_INDEX => DeathRecapMsg::decode(body).map(Self::DeathRecap),
             UpdatePhasingMsg::TYPE_INDEX => UpdatePhasingMsg::decode(body).map(Self::UpdatePhasing),
             CutsceneGrantedMsg::TYPE_INDEX => {
@@ -194,7 +188,6 @@ impl ServerMessage {
             Self::OnDamage(_) => OnDamageMsg::TYPE_INDEX,
             Self::MeleeHit(_) => MeleeHitMsg::TYPE_INDEX,
             Self::AdjustFxScripts(_) => AdjustFxScriptsMsg::TYPE_INDEX,
-            Self::StorageSearchItems(_) => StorageSearchItemsMsg::TYPE_INDEX,
             Self::DeathRecap(_) => DeathRecapMsg::TYPE_INDEX,
             Self::UpdatePhasing(_) => UpdatePhasingMsg::TYPE_INDEX,
             Self::CutsceneGranted(_) => CutsceneGrantedMsg::TYPE_INDEX,
@@ -245,7 +238,6 @@ impl ServerMessage {
             Self::OnDamage(message) => message.encode(),
             Self::MeleeHit(message) => message.encode(),
             Self::AdjustFxScripts(message) => message.encode(),
-            Self::StorageSearchItems(message) => message.encode(),
             Self::DeathRecap(message) => message.encode(),
             Self::UpdatePhasing(message) => message.encode(),
             Self::CutsceneGranted(message) => message.encode(),
@@ -323,25 +315,6 @@ mod tests {
     }
 
     #[test]
-    fn the_retail_storage_search_message_has_the_retail_bytes() {
-        // Retail 7048 (xp-potion-exit note, section 2.2): `e2403d11f3992f76 bfa96f3ea2e36a5a`
-        // and 22 zero bytes.
-        const PLAYER: u64 = 0x5a6a_e3a2_3e6f_a9bf;
-        let body = StorageSearchItemsMsg::empty(PLAYER)
-            .encode()
-            .expect("encode");
-        let mut retail = vec![
-            0xe2, 0x40, 0x3d, 0x11, 0xf3, 0x99, 0x2f, 0x76, 0xbf, 0xa9, 0x6f, 0x3e, 0xa2, 0xe3,
-            0x6a, 0x5a,
-        ];
-        retail.extend([0; 22]);
-        assert_eq!(body, retail);
-        let mut other = retail.clone();
-        other[20] = 1;
-        assert!(StorageSearchItemsMsg::decode(&other).is_err(), "not empty");
-    }
-
-    #[test]
     fn combat_messages_decode_by_their_index() {
         let samples = [
             ServerMessage::DamageDealt(DamageDealtMsg::hit(ENTITY, ENTITY + 1, 5.0, false)),
@@ -349,7 +322,6 @@ mod tests {
             ServerMessage::DeathRecap(DeathRecapMsg::of(ENTITY)),
             ServerMessage::MeleeHit(MeleeHitMsg::on(ENTITY, true)),
             ServerMessage::AdjustFxScripts(AdjustFxScriptsMsg::on(ENTITY, POTION_HEAL_SCRIPT)),
-            ServerMessage::StorageSearchItems(StorageSearchItemsMsg::empty(ENTITY)),
         ];
         for message in samples {
             let body = message.encode().expect("encode");
