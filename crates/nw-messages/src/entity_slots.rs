@@ -139,6 +139,7 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::Stamina(_)
         | MemberState::CombatStatus(_)
         | MemberState::DelayedEvent(_)
+        | MemberState::LookTargeting(_)
         | MemberState::PlayerComponent(_)
         | MemberState::Appearance(_)
         | MemberState::Mana(_)

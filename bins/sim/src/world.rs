@@ -33,7 +33,7 @@ use nw_messages::{
     InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec, MessageError,
     PlayerLook, PlayerSeenByAiMsg, PlayerStates, ProgressionState, SelectedAsTargetMsg,
     ServerMessage, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg, UnselectedAsTargetMsg,
-    WorldPosition,
+    WorldPosition, facet_entity,
 };
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
@@ -435,6 +435,8 @@ pub struct SimWorld {
     boss_phases: HashMap<u64, u32>,
     /// The boss phase each shown boss mob last sent.
     boss_phases_shown: HashMap<u64, u32>,
+    /// The last player each shown mob picked as its target, by entity number.
+    look_targets: HashMap<u64, u64>,
     dice: Dice,
     deaths: Vec<Departure>,
     /// Hit, death and facet messages since the last [`SimWorld::take_messages`].
@@ -491,6 +493,7 @@ impl SimWorld {
             mob_health_shown: HashMap::new(),
             boss_phases: HashMap::new(),
             boss_phases_shown: HashMap::new(),
+            look_targets: HashMap::new(),
             content,
             mobs: Mobs::new(Arc::clone(&combat.spawns), &combat),
             mob_changes: MobChanges::default(),
@@ -1777,6 +1780,10 @@ impl SimWorld {
             let mut card = card_of(entity, position, state, owner);
             card.asset = self.mobs.asset(entity);
             card.server_ms = server_time;
+            if let Some(target) = self.mobs.target(entity) {
+                card.look_target_changed = self.look_targets.insert(entity, target) != Some(target);
+            }
+            card.look_target = self.look_targets.get(&entity).copied().map(facet_entity);
             let previous = self.mob_health_shown.insert(entity, state.health);
             card.health_changed = previous != Some(state.health);
             card.first_damage = card.health_changed
@@ -1822,6 +1829,7 @@ impl SimWorld {
             .retain(|entity, _| shown.contains(entity));
         self.boss_phases_shown
             .retain(|entity, _| shown.contains(entity));
+        self.look_targets.retain(|entity, _| shown.contains(entity));
         let mobs = &self.mobs;
         self.boss_phases
             .retain(|entity, _| mobs.health(*entity).is_some());
@@ -2018,7 +2026,7 @@ fn targeted(number: u64, mob: u64, tutorial_ai: bool) -> Vec<ServerMessage> {
     let mut messages = vec![ServerMessage::SelectedAsTarget(SelectedAsTargetMsg(
         TargetMsg {
             header: nw_messages::FacetHeader::of(component::AI_TARGETABLE, number),
-            creature: mob.swap_bytes(),
+            creature: facet_entity(mob),
         },
     ))];
     if tutorial_ai {
@@ -2040,7 +2048,7 @@ fn died(number: u64, mob: u64, collision: u64) -> [ServerMessage; 2] {
     [
         ServerMessage::UnselectedAsTarget(UnselectedAsTargetMsg(TargetMsg {
             header: nw_messages::FacetHeader::of(component::AI_TARGETABLE, number),
-            creature: mob.swap_bytes(),
+            creature: facet_entity(mob),
         })),
         ServerMessage::DisableCollision(DisableCollisionMsg {
             header: nw_messages::FacetHeader::of(collision, mob),

@@ -18,10 +18,10 @@ use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::{
     AlcStamp, AlcState, AssetId, BOSS_PHASE_TYPE_INDEX, BundleGroup, BundleMember, BundlePayload,
     DYNAMIC_SLICE_SUB_ID, GDE_METADATA_COMPONENT, GdeMetadataReplicatedState, InputPosition,
-    LOCAL_PLAYER_INTEREST, MAX_BUNDLE_INDEXES, MemberState, MessageError, PLAYER_SLICE_ASSET,
-    PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT,
-    ServerMessage, TeleportStep, VitalsData, VitalsState, boss_phase_change, change_members,
-    player_members, raw_id_of_entity,
+    LOCAL_PLAYER_INTEREST, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState, MessageError,
+    PLAYER_SLICE_ASSET, PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID, SPAWN_STATE_MS,
+    SPAWN_TELEPORT, ServerMessage, TeleportStep, VitalsData, VitalsState, boss_phase_change,
+    change_members, player_members, raw_id_of_entity,
 };
 use nw_sim_core::Position;
 
@@ -49,6 +49,9 @@ pub(super) const PLAYER_ALC_COMPONENT: u64 = 16;
 /// The component of a mob's `ALCReplicatedState`: the most common mob value in the captures
 /// (4 and 5 both occur; which mob prefab uses which is Unknown).
 pub(super) const MOB_ALC_COMPONENT: u64 = 5;
+/// The component of a creature's `MB::LookTargetingComponentReplicatedState` (retail: 4 on every
+/// tutorial creature).
+const LOOK_TARGETING_COMPONENT: u64 = 4;
 
 /// What a client needs to show one mob: its entity number, where it is and its vitals.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -75,6 +78,10 @@ pub(super) struct MobCard {
     pub(super) asset: Option<[u8; ASSET_ID_LEN]>,
     /// The server time of this bundle step (ms since 2000-01-01).
     pub(super) server_ms: u64,
+    /// The facet entity it looks at: the last player it picked as its target.
+    pub(super) look_target: Option<u64>,
+    /// It picked a new target since the last bundle step.
+    pub(super) look_target_changed: bool,
 }
 
 impl MobCard {
@@ -103,6 +110,8 @@ pub(super) const fn card_of(
         boss_phase_changed: false,
         asset: None,
         server_ms: 0,
+        look_target: None,
+        look_target_changed: false,
     }
 }
 
@@ -355,6 +364,18 @@ pub(super) fn mob_group(
                 class: BOSS_PHASE_TYPE_INDEX,
                 body: boss_phase_change(phase),
             },
+        });
+    }
+    // The look target goes with the card and after each new target, as on retail (right after
+    // each first 2415; never cleared at a 3916).
+    if let Some(target) = card.look_target
+        && (carded || card.look_target_changed)
+    {
+        group.members.push(BundleMember {
+            component: LOOK_TARGETING_COMPONENT,
+            state: MemberState::LookTargeting(LookTargetingState {
+                target: Some(target),
+            }),
         });
     }
     if dead && (carded || card.health_changed) {
@@ -831,6 +852,67 @@ mod tests {
             .expect("encode")
             .expect("the position");
         assert!(!later.members.contains(&phase), "sent once");
+    }
+
+    #[test]
+    fn a_new_target_goes_out_as_the_look_target() {
+        const PLAYER_FACET: u64 = 0xbfa9_6f3e_a2e3_6a5a;
+        const MOB_HEALTH: u32 = 353;
+        let look = MobLook {
+            asset: AssetId {
+                id: [0xb7; GDE_ID_LEN],
+                sub_id: DYNAMIC_SLICE_SUB_ID,
+            },
+            alc_component: MOB_ALC_COMPONENT,
+            vitals_component: 9,
+            alc: None,
+            vitals: None,
+            first: Vec::new(),
+            death: Vec::new(),
+        };
+        let looking = BundleMember {
+            component: LOOK_TARGETING_COMPONENT,
+            state: MemberState::LookTargeting(LookTargetingState {
+                target: Some(PLAYER_FACET),
+            }),
+        };
+        let picked = MobCard {
+            health_changed: false,
+            look_target: Some(PLAYER_FACET),
+            look_target_changed: true,
+            ..card_of(
+                ENTITY,
+                at(),
+                MobGhost {
+                    health: MOB_HEALTH,
+                    max_health: MOB_HEALTH,
+                    returning: false,
+                    vitals_id: 1,
+                    category_id: 2,
+                    level: 1,
+                },
+                None,
+            )
+        };
+        let members = |card: &MobCard, carded| {
+            mob_group(FIRST_REMOTE_INTEREST, card, Some(&look), carded)
+                .expect("encode")
+                .map(|group| group.members)
+                .unwrap_or_default()
+        };
+        assert!(
+            members(&picked, false).contains(&looking),
+            "the change goes out"
+        );
+        let same = MobCard {
+            look_target_changed: false,
+            ..picked
+        };
+        assert!(!members(&same, false).contains(&looking), "sent once");
+        assert!(
+            members(&same, true).contains(&looking),
+            "and with each card"
+        );
     }
 
     #[test]

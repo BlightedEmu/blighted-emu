@@ -90,6 +90,13 @@ pub const DISABLE_COLLISION_TYPE_INDEX: u64 = 1793;
 /// Type index of `PlayerComponentClientFacet_OnTeleportWithLoadingScreen`.
 pub const TELEPORT_WITH_LOADING_SCREEN_TYPE_INDEX: u64 = 3951;
 
+/// The facet entity of the entity whose entry id names entity number `entity_number`
+/// (`ClientAddEntryMsg::for_entity`): the entry id starts with the big-endian entity number, and
+/// the facet entity is those bytes in reverse order.
+pub const fn facet_entity(entity_number: u64) -> u64 {
+    entity_number.swap_bytes()
+}
+
 /// The two ids that start a facet body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FacetHeader {
@@ -103,9 +110,7 @@ impl FacetHeader {
     /// The header of a call to `component` of the player whose entry id names entity number
     /// `entity_number` (`ClientAddEntryMsg::for_entity`).
     pub const fn of(component: u64, entity_number: u64) -> Self {
-        // The entry id starts with the big-endian entity number; the facet entity is those
-        // bytes in reverse order.
-        let entity = entity_number.swap_bytes();
+        let entity = facet_entity(entity_number);
         Self {
             target: entity.wrapping_add(component),
             entity,

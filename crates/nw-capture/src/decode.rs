@@ -281,6 +281,7 @@ fn member_position(state: &MemberState) -> Option<[f32; 3]> {
         | MemberState::Stamina(_)
         | MemberState::CombatStatus(_)
         | MemberState::DelayedEvent(_)
+        | MemberState::LookTargeting(_)
         | MemberState::PlayerComponent(_)
         | MemberState::Appearance(_)
         | MemberState::Mana(_)

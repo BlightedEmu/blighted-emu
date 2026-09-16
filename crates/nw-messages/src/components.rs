@@ -3,7 +3,8 @@
 //! player-appearance note, section 3, and mob-cards note, section 2):
 //! `MB::StaminaComponentReplicatedState` (type 4297),
 //! `MB::CombatStatusComponentReplicatedState` (type 2913),
-//! `MB::DelayedEventComponentReplicatedState` (type 3139), `MB::ManaComponentReplicatedState`
+//! `MB::DelayedEventComponentReplicatedState` (type 3139),
+//! `MB::LookTargetingComponentReplicatedState` (type 2443), `MB::ManaComponentReplicatedState`
 //! (type 1652), `MB::DamageReceiverComponentReplicatedState` (type 1528) and
 //! `MB::GatherableControllerReplicatedState` (type 12). Each table ends every reached captured
 //! body of its class.
@@ -27,6 +28,11 @@ pub const GATHERABLE_CONTROLLER_TYPE_INDEX: u64 = 12;
 pub const BOSS_PHASE_TYPE_INDEX: u64 = 403;
 /// The slot byte and child mask of a boss phase change: slot 0, child 0 (the phase) only.
 const BOSS_PHASE_CHANGE_HEAD: [u8; 2] = [0x01, 0x01];
+
+/// Type index of `MB::LookTargetingComponentReplicatedState`.
+pub const LOOK_TARGETING_TYPE_INDEX: u64 = 2443;
+/// Children of the look targeting state: `currentLookAtTarget` (Azoth catalog field note).
+const LOOK_TARGETING_CHILDREN: u8 = 1;
 
 /// The body of a `MB::BossPhaseComponentReplicatedState` change to boss phase `phase`: child 0
 /// as a big-endian `u32` (retail Thorpe: `01 01 00000001` at his intermission, `01 01 00000003`
@@ -228,6 +234,48 @@ impl DelayedEventState {
     }
 }
 
+/// `MB::LookTargetingComponentReplicatedState`: what a creature looks at. Retail: each of the 10
+/// creatures of the tutorial, right after it first picked the player (2415), sent
+/// `01 01 bfa96f3ea2e36a5a`, the player's facet entity as a big-endian `u64`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LookTargetingState {
+    /// `currentLookAtTarget`: a facet entity.
+    pub target: Option<u64>,
+}
+
+impl LookTargetingState {
+    /// Reads the state from the bundle path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the body ends early or a slot or child is not in the table.
+    pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let mut state = Self::default();
+        read_slot_0(
+            reader,
+            "look targeting",
+            LOOK_TARGETING_CHILDREN,
+            |reader, _| {
+                state.target = Some(reader.u64()?);
+                Ok(())
+            },
+        )?;
+        Ok(state)
+    }
+
+    /// Writes the state for the bundle path.
+    pub fn write(&self, writer: &mut Writer) {
+        write_known(
+            writer,
+            children_mask(&[self.target.is_some()]),
+            LOOK_TARGETING_CHILDREN,
+            |writer, _| {
+                self.target.map(|target| writer.u64(target));
+            },
+        );
+    }
+}
+
 /// `MB::DamageReceiverComponentReplicatedState`: whether a block is up and with which weapon slot.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DamageReceiverState {
@@ -419,6 +467,19 @@ mod tests {
         // Retail Thorpe (493283 and 546981 of the tutorial capture).
         assert_eq!(boss_phase_change(1), [0x01, 0x01, 0, 0, 0, 0x01]);
         assert_eq!(boss_phase_change(3), [0x01, 0x01, 0, 0, 0, 0x03]);
+    }
+
+    #[test]
+    fn a_look_target_is_the_retail_body() {
+        // Retail sailor 1 at 35050 of the tutorial capture: `0101bfa96f3ea2e36a5a`.
+        const RETAIL: [u8; 10] = [0x01, 0x01, 0xbf, 0xa9, 0x6f, 0x3e, 0xa2, 0xe3, 0x6a, 0x5a];
+        let state = LookTargetingState {
+            target: Some(0xbfa9_6f3e_a2e3_6a5a),
+        };
+        assert_eq!(encoded(|writer| state.write(writer)), RETAIL);
+        let mut reader = Reader::new(&RETAIL);
+        assert_eq!(LookTargetingState::read(&mut reader).expect("read"), state);
+        assert!(reader.is_empty());
     }
 
     const STAMINA: f32 = 120.5;

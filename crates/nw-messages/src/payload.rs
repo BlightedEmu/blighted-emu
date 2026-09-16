@@ -16,8 +16,8 @@ use crate::appearance::{PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState};
 use crate::components::{
     COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DAMAGE_RECEIVER_TYPE_INDEX,
     DELAYED_EVENT_TYPE_INDEX, DamageReceiverState, DelayedEventState,
-    GATHERABLE_CONTROLLER_TYPE_INDEX, GatherableControllerState, MANA_TYPE_INDEX, ManaState,
-    STAMINA_TYPE_INDEX, StaminaState,
+    GATHERABLE_CONTROLLER_TYPE_INDEX, GatherableControllerState, LOOK_TARGETING_TYPE_INDEX,
+    LookTargetingState, MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState,
 };
 use crate::containers::{
     CONTAINER_TYPE_INDEX, ContainerState, ITEM_MANAGEMENT_TYPE_INDEX, ItemManagementState,
@@ -49,6 +49,8 @@ pub enum MemberState {
     CombatStatus(CombatStatusState),
     /// `MB::DelayedEventComponentReplicatedState`.
     DelayedEvent(DelayedEventState),
+    /// `MB::LookTargetingComponentReplicatedState`.
+    LookTargeting(LookTargetingState),
     /// `MB::PlayerComponentReplicatedState`.
     PlayerComponent(PlayerComponentState),
     /// `MB::PlayerAppearanceComponentReplicatedState`.
@@ -96,6 +98,7 @@ impl MemberState {
             Self::Stamina(_) => STAMINA_TYPE_INDEX,
             Self::CombatStatus(_) => COMBAT_STATUS_TYPE_INDEX,
             Self::DelayedEvent(_) => DELAYED_EVENT_TYPE_INDEX,
+            Self::LookTargeting(_) => LOOK_TARGETING_TYPE_INDEX,
             Self::PlayerComponent(_) => PLAYER_COMPONENT_TYPE_INDEX,
             Self::Appearance(_) => PLAYER_APPEARANCE_TYPE_INDEX,
             Self::Mana(_) => MANA_TYPE_INDEX,
@@ -146,6 +149,9 @@ impl MemberState {
             }
             TypeId::FileSlot(DELAYED_EVENT_TYPE_INDEX) => {
                 DelayedEventState::read(reader).map(Self::DelayedEvent)
+            }
+            TypeId::FileSlot(LOOK_TARGETING_TYPE_INDEX) => {
+                LookTargetingState::read(reader).map(Self::LookTargeting)
             }
             TypeId::FileSlot(PLAYER_COMPONENT_TYPE_INDEX) => {
                 PlayerComponentState::read(reader).map(Self::PlayerComponent)
@@ -209,6 +215,10 @@ impl MemberState {
                 Ok(())
             }
             Self::DelayedEvent(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::LookTargeting(state) => {
                 state.write(writer);
                 Ok(())
             }
