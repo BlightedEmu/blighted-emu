@@ -176,6 +176,8 @@ const SAILOR_PACE: Pace = Pace {
         walk_speed_mps: 1.25,
         wander_speed_mps: 0.6,
     },
+    // Its sailor slice ambient vision 30 m (tutorial-ai-behavior note).
+    sight_m: 30.0,
 };
 /// Legionnaire and signifier (damage mod 0.7): 18.70 (262336); cooldown 1-1.5 s + stab about
 /// 0.9-1.2 s; run 5.5 m/s; hit at 627 ms. A blocked light stab took 14.6 stamina (266620).
@@ -194,6 +196,8 @@ const LEGION_PACE: Pace = Pace {
         walk_speed_mps: 1.25,
         wander_speed_mps: 1.1,
     },
+    // Its legion slice ambient vision 12 m (tutorial-ai-behavior note).
+    sight_m: 12.0,
 };
 /// Risen corruption entity (damage mod 0.9): 18.24 (295343); cooldown 0.75-1 s + swipe about
 /// 0.8-0.9 s; run 4.5 m/s; hit at 555 ms. Block stamina: [`BLOCK_STAMINA_PER_MOD`] x the
@@ -213,6 +217,8 @@ const RISEN_PACE: Pace = Pace {
         walk_speed_mps: 2.0,
         wander_speed_mps: 1.1,
     },
+    // Its risen slice ambient vision 12 m (tutorial-ai-behavior note).
+    sight_m: 12.0,
 };
 /// Corruption swarmers (damage mod 0.25): 7.07 (296477); rate limit 0.25 s + slash (length
 /// Unknown; our choice 1 s); run 1.5 m/s; hit at 533 ms. Block stamina: [`BLOCK_STAMINA_PER_MOD`]
@@ -232,6 +238,8 @@ const SWARMER_PACE: Pace = Pace {
         walk_speed_mps: 1.5,
         wander_speed_mps: 0.5,
     },
+    // Its swarmer slice ambient vision 12 m (tutorial-ai-behavior note).
+    sight_m: 12.0,
 };
 /// Thorpe (damage mod 1.125): 25.6 (457997); cooldown 1.15-2.25 s + attack 1.4-2.2 s; run
 /// 4.5 m/s; hit at 611 ms (stab). A blocked stab took 25.55 stamina (481395, 489462).
@@ -250,6 +258,8 @@ const THORPE_PACE: Pace = Pace {
         walk_speed_mps: 1.5,
         wander_speed_mps: 1.5,
     },
+    // Its Thorpe slice ambient vision 20 m (tutorial-ai-behavior note).
+    sight_m: 20.0,
 };
 
 /// Experience points per island foe killed (retail: 20 per legion or corrupted kill, 120 in all;
@@ -455,6 +465,8 @@ struct Fighter {
     collision: u64,
     /// The batch it spawned with.
     batch: usize,
+    /// Its pick of the player (2415) went out.
+    announced: bool,
 }
 
 /// The tutorial of one player.
@@ -605,12 +617,17 @@ impl Tutorial {
         self.spawned += 1;
         self.batches[batch].push(order);
         self.assets.on(Trigger::MobSpawned(order), self.now_ms);
+        // Retail: the sailors and Thorpe pick the player 0.3-0.6 s after their cards; the island's
+        // foes when they first see it (legionnaire 25 s after its card with the player 3.7-8.1 m
+        // away, signifier 56 s and 9.8 m, the risen group 7-9 s): see `announce_targets`.
+        let announced = !held && point.role != Role::Foe;
         self.fighters.push(Fighter {
             entity,
             vitals_id,
             role: point.role,
             collision: point.collision,
             batch,
+            announced,
         });
         // Thorpe fights the player from his spawn (retail 2415 at 451137 with the player 26.5 m
         // away, beyond the brain's sight).
@@ -620,11 +637,24 @@ impl Tutorial {
         {
             nw_sim_core::hurt(&mut mob.brain, self.owner, 0, self.now_ms);
         }
-        if !held {
+        if announced {
             orders.push(Order::Targeted {
                 mob: entity,
                 tutorial_ai: point.role == Role::Sailor,
             });
+        }
+    }
+
+    /// The pick of the player (2415) of each mob whose brain first took the player as its target.
+    fn announce_targets(&mut self, mobs: &Mobs, orders: &mut Vec<Order>) {
+        for fighter in &mut self.fighters {
+            if !fighter.announced && mobs.target(fighter.entity) == Some(self.owner) {
+                fighter.announced = true;
+                orders.push(Order::Targeted {
+                    mob: fighter.entity,
+                    tutorial_ai: fighter.role == Role::Sailor,
+                });
+            }
         }
     }
 
@@ -640,15 +670,15 @@ impl Tutorial {
         mobs.release(self.owner, now_ms);
         self.wave = ShipWave::First;
         tracing::info!(player = self.owner, "tutorial: the first sailor fights");
-        orders.extend(
-            self.fighters
-                .iter()
-                .filter(|fighter| fighter.role == Role::Sailor)
-                .map(|fighter| Order::Targeted {
+        for fighter in &mut self.fighters {
+            if fighter.role == Role::Sailor {
+                fighter.announced = true;
+                orders.push(Order::Targeted {
                     mob: fighter.entity,
                     tutorial_ai: true,
-                }),
-        );
+                });
+            }
+        }
         orders
     }
 
@@ -806,6 +836,7 @@ impl Tutorial {
         let mut orders = Vec::new();
         self.first_sailor_comes(mobs, false, &mut orders);
         self.end_captain(mobs, now_ms, &mut orders);
+        self.announce_targets(mobs, &mut orders);
         let (dead, living): (Vec<Fighter>, Vec<Fighter>) = self
             .fighters
             .iter()
@@ -1206,16 +1237,44 @@ pub(crate) mod tests {
                 Order::Achievement("FTUE_Intro3_Cinematic_Unlock".to_owned()),
                 Order::RemoveItem("1hSwordT2_FTUE".to_owned()),
                 Order::Achievement("FTUE_AncientRuins_Door".to_owned()),
-                Order::Targeted {
-                    mob: legionnaire,
-                    tutorial_ai: false
-                },
             ]
         );
         assert_eq!(
             tutorial.fighters.len(),
             1,
             "the door brings the legionnaire"
+        );
+        // It picks the player only when it sees it, within its 12 m (retail 2415 25 s after its
+        // card).
+        let at = |metres: f32| nw_sim_core::Seen {
+            entity: OWNER,
+            position: Position {
+                x: FIGHTS_AFTER[0].1[0].at.x + metres,
+                ..FIGHTS_AFTER[0].1[0].at
+            },
+        };
+        let ground = nw_sim_core::test_support::NoGround;
+        mobs.tick(&[at(15.0)], NOW + 2, &ground);
+        let unseen = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + 2);
+        assert!(
+            !unseen
+                .iter()
+                .any(|order| matches!(order, Order::Targeted { .. })),
+            "out of sight: {unseen:?}"
+        );
+        mobs.tick(&[at(5.0)], NOW + 3, &ground);
+        let seen = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + 3);
+        let picked = Order::Targeted {
+            mob: legionnaire,
+            tutorial_ai: false,
+        };
+        assert!(seen.contains(&picked), "in sight: {seen:?}");
+        mobs.tick(&[at(5.0)], NOW + 4, &ground);
+        assert!(
+            !tutorial
+                .tick(&mut mobs, &kill_types(), SHIP, NOW + 4)
+                .contains(&picked),
+            "once"
         );
         assert!(mobs.health(first).is_some(), "the body stays a while");
         tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + CORPSE_MS);

@@ -180,6 +180,11 @@ impl Brain {
         }
     }
 
+    /// It sees players `sight_m` far from now on.
+    pub const fn set_sight(&mut self, sight_m: f32) {
+        self.sight_m = sight_m;
+    }
+
     /// The state.
     pub const fn state(&self) -> MobState {
         self.state

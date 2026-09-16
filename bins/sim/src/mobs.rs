@@ -115,6 +115,8 @@ pub struct Pace {
     pub block_stamina: f32,
     /// How it moves and when it swings.
     pub gait: Gait,
+    /// How far it sees, in place of the config's sight.
+    pub sight_m: f32,
 }
 
 /// A mob spawned for one player.
@@ -234,6 +236,7 @@ impl Mobs {
         let mut mob = self.make(&spawn)?;
         if let Some(pace) = pace {
             mob.attack.factor = pace.attack_factor;
+            mob.brain.set_sight(pace.sight_m);
             if !held {
                 mob.brain.wait_to_attack(now_ms);
             }
@@ -879,6 +882,7 @@ mod tests {
             hit_delay_ms: 456,
             block_stamina: DEFAULT_BLOCK_STAMINA,
             gait: Gait::uniform(3.0, 5.5),
+            sight_m: 20.0,
         };
         const START: u64 = 1_000;
         let mut mobs = mobs(Vec::new());
