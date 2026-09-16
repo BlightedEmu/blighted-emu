@@ -125,6 +125,14 @@ pub struct Brain {
 }
 
 impl Brain {
+    /// The mob stood still until `now_ms` (held by a script): its next step moves only the time
+    /// after it, not the time it stood.
+    pub fn stood_until(&mut self, now_ms: u64) {
+        if self.last_step_ms.is_some() {
+            self.last_step_ms = Some(now_ms);
+        }
+    }
+
     /// An asleep mob at `spawn` that sees `sight_m` far.
     pub fn new(spawn: Position, sight_m: f32) -> Self {
         Self {
@@ -398,6 +406,26 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn a_held_mob_steps_only_the_time_after_it_stood() {
+        let mut brain = Brain::new(
+            Position {
+                x: 0.0,
+                y: 0.0,
+                z: 0.0,
+            },
+            20.0,
+        );
+        brain.stood_until(5_000);
+        assert_eq!(
+            brain.last_step_ms, None,
+            "a mob that never stepped has no clock"
+        );
+        brain.last_step_ms = Some(1_000);
+        brain.stood_until(5_000);
+        assert_eq!(brain.last_step_ms, Some(5_000));
+    }
 
     const SPAWN: Position = Position {
         x: 1000.0,

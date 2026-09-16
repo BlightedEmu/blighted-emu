@@ -440,6 +440,9 @@ impl Mobs {
                 .get(&index)
                 .is_some_and(|personal| now_ms < personal.frozen_until_ms)
             {
+                // A frozen mob's step clock waits with it (live 2026-09-14: each sailor jumped
+                // 5.5 m in one state after its alert, a second of run at once).
+                mob.brain.stood_until(now_ms);
                 continue;
             }
             let at = mob.brain.position();
