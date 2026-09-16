@@ -45,15 +45,21 @@ fn height_after_move(ground: &dyn Ground, to: Position) -> f32 {
     }
 }
 
+/// The first mob's number after [`MOB_ENTITY_BASE`]. A number whose low 32 bits are all zero
+/// gives a `GdeRef` that the client takes but never shows: in every live run the first spawned
+/// mob (`MOB_ENTITY_BASE` itself, the tutorial's sailor 1) stayed invisible while it fought,
+/// and the mobs after it, with the same card bytes, showed (2026-09-14).
+const FIRST_MOB_OFFSET: u64 = 1;
+
 /// The entity number of the mob of spawn `index`.
 pub const fn mob_entity(index: u32) -> u64 {
-    MOB_ENTITY_BASE + index as u64
+    MOB_ENTITY_BASE + FIRST_MOB_OFFSET + index as u64
 }
 
 /// The spawn index of a mob's entity number; `None` for a player's number.
 pub fn spawn_index(entity: u64) -> Option<u32> {
     entity
-        .checked_sub(MOB_ENTITY_BASE)
+        .checked_sub(MOB_ENTITY_BASE + FIRST_MOB_OFFSET)
         .and_then(|index| u32::try_from(index).ok())
 }
 
@@ -695,7 +701,12 @@ mod tests {
 
     #[test]
     fn mob_numbers_hold_the_spawn_index() {
-        assert_eq!(mob_entity(5), MOB_ENTITY_BASE + 5);
+        assert_eq!(mob_entity(5), MOB_ENTITY_BASE + FIRST_MOB_OFFSET + 5);
+        // No mob number has its low 32 bits all zero (the client does not show such a mob).
+        for index in [0, 1, 5, u32::MAX - 1] {
+            assert_ne!(mob_entity(index) & u64::from(u32::MAX), 0, "index {index}");
+        }
+        assert_eq!(spawn_index(MOB_ENTITY_BASE), None, "below the first mob");
         assert_eq!(spawn_index(mob_entity(5)), Some(5));
         assert_eq!(spawn_index(42), None);
         /// The most bits of an entity number in a bundle member (the 5-byte prefix code).
