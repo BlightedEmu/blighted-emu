@@ -208,6 +208,35 @@ mod tests {
     }
 
     #[test]
+    fn the_retail_door_change_grows_the_bitset() {
+        // Retail 175193 (tutorial capture): bytes 1911 to 1914, the version on the first entry
+        // only, bit 15317 (the ruins door) in byte 1914.
+        const RETAIL_DOOR: [u8; 25] = [
+            0x01, 0x01, 0x04, 0x0f, 0xb7, 0x1d, 0x01, 0x8b, 0x49, 0x00, 0xb8, 0x1d, 0x01, 0x00,
+            0x00, 0xb9, 0x1d, 0x01, 0x00, 0x00, 0xba, 0x1d, 0x01, 0x00, 0x20,
+        ];
+        const RETAIL_VERSION: u64 = 4683;
+        let change = |byte, version, value| ByteChange {
+            byte,
+            version,
+            value,
+        };
+        let state = AchievementState {
+            bits: Some(AchievementBits::Changes(vec![
+                change(1911, RETAIL_VERSION, 0),
+                change(1912, 0, 0),
+                change(1913, 0, 0),
+                change(1914, 0, 0x20),
+            ])),
+        };
+        assert_eq!(encode(&state), RETAIL_DOOR);
+        assert_eq!(
+            AchievementState::read(&mut Reader::new(&RETAIL_DOOR)),
+            Ok(state)
+        );
+    }
+
+    #[test]
     fn many_changes_take_groups_of_eight() {
         let changes: Vec<ByteChange> = (0..9)
             .map(|byte| ByteChange {

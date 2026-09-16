@@ -28,9 +28,11 @@ pub(super) const LEVEL_INFO_AGAIN_MS: u64 = 5000;
 const TUTORIAL_PHASING_MODE: u8 = 3;
 const OPEN_WORLD_PHASING_MODE: u8 = 2;
 const EMPTY_PHASING_MODE: u8 = 0;
-/// Bytes of the achievement bitset that build 25810808 retail servers send (live capture of
-/// 2026-09-12); a bit beyond it is not kept.
+/// Bytes of the first achievement bitset that build 25810808 retail servers send (live capture of
+/// 2026-09-12). A bit beyond it grows the bitset (see [`Achievements::set`]).
 const BITSET_BYTES: usize = 1910;
+/// The version of every entry of a change after the first (retail: one version per change).
+const LATER_ENTRY_VERSION: u64 = 0;
 /// The achievement of the Rise of the Angry Earth expansion; every account of this server has it
 /// (retail sets it 5 s after login).
 const EXPANSION_UNLOCK: &str = "Expansion_2023_Unlock";
@@ -73,39 +75,79 @@ impl AchievementRules {
     }
 }
 
-/// A player's achievements and the changes not yet sent.
+/// A player's achievements and the bytes changed since the last sent change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Achievements {
     bits: Vec<u8>,
     version: u64,
-    changes: Vec<ByteChange>,
+    /// Changed bytes not sent yet (byte index, new value), in the order they first changed.
+    changes: Vec<(u32, u8)>,
 }
 
 impl Achievements {
-    /// Sets `bit` and records the changed byte; a set bit or one beyond the bitset changes
-    /// nothing.
+    /// Sets `bit` and records the changed bytes. A bit beyond the bitset first grows it with
+    /// zero bytes up to the bit's byte, each a changed byte (retail: the door bit 15317 came as
+    /// bytes 1911 to 1914 of a 1911-byte bitset, the first three 0). A set bit changes nothing.
     fn set(&mut self, bit: u32) {
-        let changed = set_bit(&mut self.bits, bit);
-        self.record(bit, changed);
+        let byte = bit / u8::BITS;
+        let first_new = self.bits.len();
+        // A byte index fits `usize`.
+        let end = byte as usize + 1;
+        if end > first_new {
+            self.bits.resize(end, 0);
+            for new in first_new..end - 1 {
+                // The index fits `u32`: it is below `byte`.
+                self.note(new as u32, 0);
+            }
+        }
+        if let Some(value) = set_bit(&mut self.bits, bit) {
+            self.note(byte, value);
+        }
     }
 
     /// Clears `bit` and records the changed byte; a clear bit or one beyond the bitset changes
     /// nothing.
     fn clear(&mut self, bit: u32) {
-        let changed = clear_bit(&mut self.bits, bit);
-        self.record(bit, changed);
+        if let Some(value) = clear_bit(&mut self.bits, bit) {
+            self.note(bit / u8::BITS, value);
+        }
     }
 
-    /// Records the new byte `changed` of `bit`, when there is one.
-    fn record(&mut self, bit: u32, changed: Option<u8>) {
-        if let Some(value) = changed {
-            self.version += 1;
-            self.changes.push(ByteChange {
-                byte: bit / u8::BITS,
-                version: self.version,
-                value,
-            });
+    /// Notes the new `value` of byte `byte`.
+    fn note(&mut self, byte: u32, value: u8) {
+        match self
+            .changes
+            .iter_mut()
+            .find(|(changed, _)| *changed == byte)
+        {
+            Some(change) => change.1 = value,
+            None => self.changes.push((byte, value)),
         }
+    }
+
+    /// The changed bytes as one change: the next version on its first entry, 0 on the others
+    /// (retail 142262, 175193, 196810); `None` without changes.
+    fn take_changes(&mut self) -> Option<Vec<ByteChange>> {
+        if self.changes.is_empty() {
+            return None;
+        }
+        self.version += 1;
+        let version = self.version;
+        Some(
+            std::mem::take(&mut self.changes)
+                .into_iter()
+                .enumerate()
+                .map(|(index, (byte, value))| ByteChange {
+                    byte,
+                    version: if index == 0 {
+                        version
+                    } else {
+                        LATER_ENTRY_VERSION
+                    },
+                    value,
+                })
+                .collect(),
+        )
     }
 }
 
@@ -296,14 +338,9 @@ impl LevelFlow {
 
     /// The achievement changes not sent yet, as one state; `None` without changes.
     pub(super) fn take_achievement_changes(&mut self) -> Option<AchievementState> {
-        let achievements = self.achievements.as_mut()?;
-        if achievements.changes.is_empty() {
-            return None;
-        }
+        let changes = self.achievements.as_mut()?.take_changes()?;
         Some(AchievementState {
-            bits: Some(AchievementBits::Changes(std::mem::take(
-                &mut achievements.changes,
-            ))),
+            bits: Some(AchievementBits::Changes(changes)),
         })
     }
 
@@ -406,6 +443,43 @@ mod tests {
         assert!(bit(&first, WARMONGER_BIT));
         assert!(!bit(&first, INTRO_UNLOCK_BIT));
         assert_eq!(flow.take_achievement_changes(), None);
+    }
+
+    #[test]
+    fn a_bit_beyond_the_bitset_grows_it_as_retail() {
+        // Retail 175193: the door bit 15317 on a 1911-byte bitset came as bytes 1911 to 1914,
+        // the first with the version, the bits of 1911 to 1913 still 0.
+        const DOOR_BIT: u32 = 15_317;
+        const DOOR_BYTE: u32 = 1914;
+        let mut achievements = Achievements {
+            bits: vec![0; 1911],
+            version: FIRST_ACHIEVEMENT_VERSION,
+            changes: Vec::new(),
+        };
+        achievements.set(DOOR_BIT);
+        let changes = achievements.take_changes().expect("the door");
+        let entries: Vec<(u32, u64, u8)> = changes
+            .iter()
+            .map(|change| (change.byte, change.version, change.value))
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                (1911, FIRST_ACHIEVEMENT_VERSION + 1, 0),
+                (1912, LATER_ENTRY_VERSION, 0),
+                (1913, LATER_ENTRY_VERSION, 0),
+                (DOOR_BYTE, LATER_ENTRY_VERSION, 0x20),
+            ]
+        );
+        assert_eq!(achievements.bits.len(), DOOR_BYTE as usize + 1);
+        achievements.set(DOOR_BIT);
+        assert_eq!(achievements.take_changes(), None, "set once");
+        achievements.clear(DOOR_BIT + 1_000);
+        assert_eq!(
+            achievements.take_changes(),
+            None,
+            "a clear bit past the end"
+        );
     }
 
     #[test]
