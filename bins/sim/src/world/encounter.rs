@@ -66,8 +66,12 @@ const CAPTAIN_INTERMISSION_FRACTION: f64 = 0.6;
 const CAPTAIN_INTERMISSION_PHASE: u32 = 1;
 /// Thorpe's boss phase at his end (retail 403 at 546981, with his death).
 const CAPTAIN_END_PHASE: u32 = 3;
-/// How long the intermission lasts before he heals to full (retail: 493283 to 499917 ms).
+/// When he heals to full after the intermission starts (retail: 493283 to 499917 ms). Until then
+/// hits on him do no damage (retail: five 2071 with amount 0 from 494210 to 499506).
 const CAPTAIN_INTERMISSION_MS: u64 = 6_634;
+/// How long he stands in his phase transition before he fights again (retail fragment
+/// `Phase_Transition_1_to_2` from 493283 to 503682 ms).
+const CAPTAIN_TRANSITION_MS: u64 = 10_399;
 /// After the intermission, Thorpe's scripted death comes at this part of his maximum (retail
 /// `Boss_Phase` entry: health 50 %; he ended at 48.1 %).
 const CAPTAIN_END_FRACTION: f64 = 0.5;
@@ -538,6 +542,14 @@ impl Tutorial {
             collision: point.collision,
             batch,
         });
+        // Thorpe fights the player from his spawn (retail 2415 at 451137 with the player 26.5 m
+        // away, beyond the brain's sight).
+        if point.role == Role::Captain
+            && !held
+            && let Some(mob) = mobs.get_mut(entity)
+        {
+            nw_sim_core::hurt(&mut mob.brain, self.owner, 0, self.now_ms);
+        }
         if !held {
             orders.push(Order::Targeted {
                 mob: entity,
@@ -809,7 +821,8 @@ impl Tutorial {
                 CaptainPhase::First if below(CAPTAIN_INTERMISSION_FRACTION) => {
                     let until_ms = now_ms + CAPTAIN_INTERMISSION_MS;
                     self.captain = CaptainPhase::Intermission { until_ms };
-                    mobs.freeze(captain, until_ms);
+                    mobs.freeze(captain, now_ms + CAPTAIN_TRANSITION_MS);
+                    mobs.absorb(captain, until_ms);
                     orders.push(Order::BossPhase {
                         mob: captain,
                         phase: CAPTAIN_INTERMISSION_PHASE,
@@ -822,6 +835,8 @@ impl Tutorial {
                 }
                 CaptainPhase::Second if below(CAPTAIN_END_FRACTION) => {
                     mob.health.take(current);
+                    // A scripted end: the body neither chases nor swings any more.
+                    nw_sim_core::died(&mut mob.brain, now_ms);
                     orders.push(Order::BossPhase {
                         mob: captain,
                         phase: CAPTAIN_END_PHASE,
@@ -893,6 +908,7 @@ pub(crate) mod tests {
     use crate::config::tests::committed;
     use crate::objectives::TaskRow;
     use crate::player_content::TUTORIAL_QUEST_ROOT;
+    use nw_sim_core::MobState;
 
     const OWNER: u64 = 1;
     const NOW: u64 = 1000;
@@ -1253,6 +1269,8 @@ pub(crate) mod tests {
             tutorial.captain,
             CaptainPhase::Intermission { .. }
         ));
+        assert!(mobs.absorbing(thorpe, NOW), "no damage in his intermission");
+        assert!(!mobs.absorbing(thorpe, NOW + CAPTAIN_INTERMISSION_MS));
         assert!(
             mobs.health(thorpe).is_some_and(|health| health > 0),
             "no death yet"
@@ -1272,6 +1290,11 @@ pub(crate) mod tests {
             NOW + CAPTAIN_INTERMISSION_MS + 1,
         );
         assert_eq!(mobs.health(thorpe), Some(0));
+        assert_eq!(
+            mobs.brain_state(thorpe),
+            Some(MobState::Dead),
+            "his body stops at his scripted end"
+        );
         assert!(orders.contains(&Order::BossPhase {
             mob: thorpe,
             phase: CAPTAIN_END_PHASE

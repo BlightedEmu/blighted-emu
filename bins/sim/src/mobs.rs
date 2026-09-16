@@ -126,6 +126,8 @@ struct Personal {
     swing_gap_ms: u64,
     /// Until this time the mob does nothing (a scripted pause).
     frozen_until_ms: u64,
+    /// Hits do no damage until this time.
+    absorb_until_ms: u64,
 }
 
 /// The mobs of one sim.
@@ -243,6 +245,7 @@ impl Mobs {
                 pace,
                 swing_gap_ms,
                 frozen_until_ms: 0,
+                absorb_until_ms: 0,
             },
         );
         Some(mob_entity(index))
@@ -287,6 +290,21 @@ impl Mobs {
         self.live
             .get(&spawn_index(entity)?)
             .map(|mob| mob.brain.state())
+    }
+
+    /// Hits on personal mob `entity` do no damage until `until_ms`.
+    pub fn absorb(&mut self, entity: u64, until_ms: u64) {
+        if let Some(personal) = spawn_index(entity).and_then(|index| self.personal.get_mut(&index))
+        {
+            personal.absorb_until_ms = until_ms;
+        }
+    }
+
+    /// Whether hits on mob `entity` do no damage at `now_ms`.
+    pub fn absorbing(&self, entity: u64, now_ms: u64) -> bool {
+        spawn_index(entity)
+            .and_then(|index| self.personal.get(&index))
+            .is_some_and(|personal| now_ms < personal.absorb_until_ms)
     }
 
     /// Personal mob `entity` stands still and does nothing until `until_ms`.

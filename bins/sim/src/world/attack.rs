@@ -206,6 +206,17 @@ impl SimWorld {
             crit_multiplier: weapon.crit_multiplier,
         };
         let threat_base = row.threat;
+        // A mob that absorbs hits (Thorpe in his intermission) takes no damage.
+        if view.owner.is_none() && self.mobs.absorbing(target, now_ms) {
+            if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
+                vitals.last_attack_ms = Some(now_ms);
+            }
+            self.send_reliable(
+                attacker.clone(),
+                &ServerMessage::DamageDealt(DamageDealtMsg::absorbed(number, target)),
+            );
+            return Ok(AttackOutcome::Hit { target, amount: 0 });
+        }
         let hit = player_hit(&attack, armor_share, &mut self.dice);
         let threat = threat_base.saturating_add(u64::from(hit.amount));
         if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {

@@ -42,6 +42,12 @@ const CAMERA_SHAKE_SMALL: u32 = 0x7545_ea13;
 const HIT_FLAG_CAN_CRIT: u16 = 0x0020;
 /// Hit flags: the hit killed the target.
 const HIT_FLAG_KILLED: u16 = 0x0008;
+/// Hit flags: the target absorbed the hit (retail Thorpe intermission: `0x0420`).
+const HIT_FLAG_ABSORBED: u16 = 0x0400;
+/// The camera shake of an absorbed hit (retail Thorpe intermission; name Unknown).
+const CAMERA_SHAKE_ABSORBED: u32 = 0x664b_2673;
+/// The item tag of an absorbed hit (retail Thorpe intermission; meaning Unknown).
+const ABSORBED_TAG: u8 = 6;
 
 /// One damage item (`FUN_145b56640`, `FUN_145ce6260`): a tag byte and two big-endian `f32`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -173,6 +179,23 @@ impl DamageDealtMsg {
             u32_e: CAMERA_SHAKE_SMALL,
             raw_2: flags.to_le_bytes(),
             items: one_hit(amount),
+        }
+    }
+}
+
+impl DamageDealtMsg {
+    /// A hit by player `attacker` that target `target` absorbed: no damage (retail Thorpe in his
+    /// intermission, 494210 to 499506 ms).
+    pub fn absorbed(attacker: u64, target: u64) -> Self {
+        Self {
+            u32_e: CAMERA_SHAKE_ABSORBED,
+            raw_2: (HIT_FLAG_CAN_CRIT | HIT_FLAG_ABSORBED).to_le_bytes(),
+            items: vec![DamageItem {
+                tag: ABSORBED_TAG,
+                amount: 0.0,
+                scale: 0.0,
+            }],
+            ..Self::hit(attacker, target, 0.0, false)
         }
     }
 }
@@ -585,6 +608,20 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn an_absorbed_hit_is_the_retail_body() {
+        // Retail Thorpe intermission (494210 of the tutorial capture): torso, camera shake
+        // `664b2673`, flags `2004`, one item `06 00000000 00000000`.
+        const RETAIL_TAIL: [u8; 20] = [
+            0x27, 0x5f, 0xbc, 0x85, 0x66, 0x4b, 0x26, 0x73, 0x20, 0x04, 0x01, 0x06, 0, 0, 0, 0, 0,
+            0, 0, 0,
+        ];
+        let body = DamageDealtMsg::absorbed(7, (1 << 34) + 3)
+            .encode()
+            .expect("encode");
+        assert!(body.ends_with(&RETAIL_TAIL), "{body:02x?}");
+    }
 
     const TARGET: u64 = (1 << 34) + 5;
     const ATTACKER: u64 = 9;
