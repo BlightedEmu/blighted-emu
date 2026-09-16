@@ -1800,7 +1800,9 @@ impl SimWorld {
             let mut card = card_of(entity, position, state, owner);
             card.asset = self.mobs.asset(entity);
             card.server_ms = server_time;
-            if let Some(target) = self.mobs.target(entity) {
+            // Only the tutorial's own mobs: every retail tutorial creature has its look target on
+            // component 4; other prefabs use that component for other states.
+            if let Some(target) = self.mobs.target(entity).filter(|_| owner.is_some()) {
                 card.look_target_changed = self.look_targets.insert(entity, target) != Some(target);
             }
             card.look_target = self.look_targets.get(&entity).copied().map(facet_entity);
@@ -2825,6 +2827,51 @@ mod tests {
         assert_eq!(
             next_classes_of(&mut world, NOW + 33, &connection(1), mob),
             [ALC_TYPE_INDEX]
+        );
+    }
+
+    #[test]
+    fn an_open_world_mob_sends_no_look_target() {
+        const TICKS: u64 = 10;
+        let x = CELL_M / 2.0;
+        // A prefab look, so its groups go the prefab way.
+        let prefab = format!(
+            r#"[{{"vitals_id":{},"vitals_name":null,"asset":"{SAILOR_ASSET_HEX}","sub_id":2,
+                "alc_component":5,"vitals_component":9,"first_members":[],"death_members":[],
+                "seen":1}}]"#,
+            nw_formats::objectstream::lowercase_crc32(TEST_MOB)
+        );
+        let prefabs = nw_content::mob_prefabs::MobPrefabs::parse(&prefab).expect("table");
+        let (mob_looks, _) = crate::player_content::MobLooks::of(&prefabs);
+        let mut combat = test_combat();
+        combat.spawns = vec![test_spawn(x)].into();
+        let mut world = SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            combat,
+            Arc::new(PlayerContent {
+                mob_looks,
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, x + 5.0);
+        let mob = crate::mobs::mob_entity(0);
+        let mut classes = Vec::new();
+        for step in 0..TICKS {
+            classes.extend(next_classes_of(
+                &mut world,
+                NOW + 33 * step,
+                &connection(1),
+                mob,
+            ));
+        }
+        assert_eq!(world.mobs.target(mob), Some(1), "it fights the player");
+        assert!(
+            !classes.contains(&nw_messages::LOOK_TARGETING_TYPE_INDEX),
+            "its prefab's component 4 may hold another state: {classes:?}"
         );
     }
 
