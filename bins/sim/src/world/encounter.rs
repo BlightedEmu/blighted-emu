@@ -131,7 +131,7 @@ enum Role {
 }
 
 /// One mob a fight spawns.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct SpawnPoint {
     /// Its vitals row.
     vitals: &'static str,
@@ -144,6 +144,8 @@ struct SpawnPoint {
     collision: u64,
     /// How it fights.
     pace: Pace,
+    /// When it comes after its fight starts.
+    delay_ms: u64,
 }
 
 /// How the tutorial mobs fight (tutorial-ai and creature-animation session notes, live capture
@@ -286,7 +288,11 @@ const FIRST_SAILOR: SpawnPoint = SpawnPoint {
     role: Role::Sailor,
     collision: SAILOR_COLLISION,
     pace: SAILOR_PACE,
+    delay_ms: 0,
 };
+/// When the last sailor comes after the first one died (the wave's slice delays are 0 s and 1 s,
+/// Observed: cards 55 ms and 1058 ms after the first sailor's 3916).
+pub(super) const LAST_SAILOR_DELAY_MS: u64 = 1_000;
 /// The two later sailors (retail `sp01` and `sp02` of the second wave).
 const LATER_SAILORS: [SpawnPoint; 2] = [
     SpawnPoint {
@@ -295,6 +301,7 @@ const LATER_SAILORS: [SpawnPoint; 2] = [
     },
     SpawnPoint {
         at: point(468.734, 845.17, 89.99),
+        delay_ms: LAST_SAILOR_DELAY_MS,
         ..FIRST_SAILOR
     },
 ];
@@ -309,6 +316,7 @@ const SWARMER: SpawnPoint = SpawnPoint {
     role: Role::Foe,
     collision: SWARMER_COLLISION,
     pace: SWARMER_PACE,
+    delay_ms: 1_315,
 };
 /// The fights that start when a task is done, with the retail cards' positions.
 const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
@@ -321,6 +329,8 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
             role: Role::Foe,
             collision: LEGION_COLLISION,
             pace: LEGION_PACE,
+            // Retail card 179393, 4200 ms after the door (175193).
+            delay_ms: 4_200,
         }],
     ),
     (
@@ -332,6 +342,8 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
             role: Role::Foe,
             collision: LEGION_COLLISION,
             pace: LEGION_PACE,
+            // Retail card 202592, 5782 ms after the trigger (196810).
+            delay_ms: 5_782,
         }],
     ),
     (
@@ -344,14 +356,19 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
                 role: Role::Foe,
                 collision: CORRUPTION_COLLISION,
                 pace: RISEN_PACE,
+                // Retail cards after the trigger (282975): risen +417 ms, swarmers +1315,
+                // +2316 and +3313 ms, each about 50 ms after a spawner timer ends.
+                delay_ms: 417,
             },
             SWARMER,
             SpawnPoint {
                 at: point(580.67, 379.57, 21.74),
+                delay_ms: 2_316,
                 ..SWARMER
             },
             SpawnPoint {
                 at: point(578.21, 380.97, 21.81),
+                delay_ms: 3_313,
                 ..SWARMER
             },
         ],
@@ -365,6 +382,7 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
             role: Role::Captain,
             collision: LEGION_COLLISION,
             pace: THORPE_PACE,
+            delay_ms: 0,
         }],
     ),
 ];
@@ -498,6 +516,8 @@ pub(super) struct Tutorial {
     assets: AssetScript,
     /// Mobs spawned so far.
     spawned: usize,
+    /// Mobs of a started fight that come later: when, their batch, and where.
+    coming: Vec<(u64, usize, SpawnPoint)>,
     /// The vitals id and card asset of each retail mob, in spawn order: the tutorial spawns its
     /// mobs in the retail order, so the mob of each order place gets that retail mob's look (the
     /// two legionnaires share a vitals id but not a look).
@@ -539,6 +559,7 @@ impl Tutorial {
             later: Vec::new(),
             assets: AssetScript::of(level),
             spawned: 0,
+            coming: Vec::new(),
             retail_looks: level
                 .mobs
                 .iter()
@@ -583,7 +604,25 @@ impl Tutorial {
         let batch = self.batches.len();
         self.batches.push(Vec::new());
         for point in points {
-            self.spawn(point, batch, mobs, held, orders);
+            if point.delay_ms == 0 {
+                self.spawn(point, batch, mobs, held, orders);
+            } else {
+                let at_ms = self.now_ms.saturating_add(point.delay_ms);
+                self.coming.push((at_ms, batch, *point));
+            }
+        }
+    }
+
+    /// Spawns the mobs whose time came, in the order they are due.
+    fn spawn_coming(&mut self, mobs: &mut Mobs, orders: &mut Vec<Order>) {
+        let now_ms = self.now_ms;
+        let (mut due, coming): (Vec<_>, Vec<_>) = std::mem::take(&mut self.coming)
+            .into_iter()
+            .partition(|(at_ms, _, _)| now_ms >= *at_ms);
+        self.coming = coming;
+        due.sort_by_key(|(at_ms, _, _)| *at_ms);
+        for (_, batch, point) in due {
+            self.spawn(&point, batch, mobs, false, orders);
         }
     }
 
@@ -835,6 +874,7 @@ impl Tutorial {
         self.now_ms = now_ms;
         let mut orders = Vec::new();
         self.first_sailor_comes(mobs, false, &mut orders);
+        self.spawn_coming(mobs, &mut orders);
         self.end_captain(mobs, now_ms, &mut orders);
         self.announce_targets(mobs, &mut orders);
         let (dead, living): (Vec<Fighter>, Vec<Fighter>) = self
@@ -857,7 +897,11 @@ impl Tutorial {
             let batch_dead = !self
                 .fighters
                 .iter()
-                .any(|living| living.batch == fighter.batch);
+                .any(|living| living.batch == fighter.batch)
+                && !self
+                    .coming
+                    .iter()
+                    .any(|(_, batch, _)| *batch == fighter.batch);
             if batch_dead {
                 for order in self.batches[fighter.batch].clone() {
                     self.assets.on(Trigger::BatchDead(order), now_ms);
@@ -1197,12 +1241,8 @@ pub(crate) mod tests {
         assert!(tutorial.lesson_done(&mut mobs, NOW).is_empty(), "once");
         kill_all(&mut mobs, &tutorial);
         let orders = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW);
-        assert_eq!(tutorial.fighters.len(), 2, "two more sailors come");
-        let later: Vec<u64> = tutorial
-            .fighters
-            .iter()
-            .map(|fighter| fighter.entity)
-            .collect();
+        assert_eq!(tutorial.fighters.len(), 1, "the next sailor comes at once");
+        let second = tutorial.fighters[0].entity;
         assert_eq!(
             orders,
             [
@@ -1211,27 +1251,38 @@ pub(crate) mod tests {
                     collision: SAILOR_COLLISION
                 },
                 Order::Targeted {
-                    mob: later[0],
-                    tutorial_ai: true
-                },
-                Order::Targeted {
-                    mob: later[1],
+                    mob: second,
                     tutorial_ai: true
                 },
             ]
         );
+        let third_at = NOW + LATER_SAILORS[1].delay_ms;
+        let orders = tutorial.tick(&mut mobs, &kill_types(), SHIP, third_at);
+        assert_eq!(
+            tutorial.fighters.len(),
+            2,
+            "and the last one a second later"
+        );
+        let third = tutorial.fighters[1].entity;
+        assert_eq!(
+            orders,
+            [Order::Targeted {
+                mob: third,
+                tutorial_ai: true
+            }]
+        );
         kill_all(&mut mobs, &tutorial);
-        let orders = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + 1);
-        let legionnaire = tutorial.fighters[0].entity;
+        let door_at = third_at + 1;
+        let orders = tutorial.tick(&mut mobs, &kill_types(), SHIP, door_at);
         assert_eq!(
             orders,
             [
                 Order::Died {
-                    mob: later[0],
+                    mob: second,
                     collision: SAILOR_COLLISION
                 },
                 Order::Died {
-                    mob: later[1],
+                    mob: third,
                     collision: SAILOR_COLLISION
                 },
                 Order::Achievement("FTUE_Intro3_Cinematic_Unlock".to_owned()),
@@ -1239,11 +1290,16 @@ pub(crate) mod tests {
                 Order::Achievement("FTUE_AncientRuins_Door".to_owned()),
             ]
         );
+        let legion_at = door_at + FIGHTS_AFTER[0].1[0].delay_ms;
+        tutorial.tick(&mut mobs, &kill_types(), SHIP, legion_at - 1);
+        assert!(tutorial.fighters.is_empty(), "the legionnaire comes later");
+        tutorial.tick(&mut mobs, &kill_types(), SHIP, legion_at);
         assert_eq!(
             tutorial.fighters.len(),
             1,
             "the door brings the legionnaire"
         );
+        let legionnaire = tutorial.fighters[0].entity;
         // It picks the player only when it sees it, within its 12 m (retail 2415 25 s after its
         // card).
         let at = |metres: f32| nw_sim_core::Seen {
@@ -1254,25 +1310,25 @@ pub(crate) mod tests {
             },
         };
         let ground = nw_sim_core::test_support::NoGround;
-        mobs.tick(&[at(15.0)], NOW + 2, &ground);
-        let unseen = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + 2);
+        mobs.tick(&[at(15.0)], legion_at + 1, &ground);
+        let unseen = tutorial.tick(&mut mobs, &kill_types(), SHIP, legion_at + 1);
         assert!(
             !unseen
                 .iter()
                 .any(|order| matches!(order, Order::Targeted { .. })),
             "out of sight: {unseen:?}"
         );
-        mobs.tick(&[at(5.0)], NOW + 3, &ground);
-        let seen = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + 3);
+        mobs.tick(&[at(5.0)], legion_at + 2, &ground);
+        let seen = tutorial.tick(&mut mobs, &kill_types(), SHIP, legion_at + 2);
         let picked = Order::Targeted {
             mob: legionnaire,
             tutorial_ai: false,
         };
         assert!(seen.contains(&picked), "in sight: {seen:?}");
-        mobs.tick(&[at(5.0)], NOW + 4, &ground);
+        mobs.tick(&[at(5.0)], legion_at + 3, &ground);
         assert!(
             !tutorial
-                .tick(&mut mobs, &kill_types(), SHIP, NOW + 4)
+                .tick(&mut mobs, &kill_types(), SHIP, legion_at + 3)
                 .contains(&picked),
             "once"
         );
@@ -1301,6 +1357,37 @@ pub(crate) mod tests {
         );
         tutorial.end(&mut mobs);
         assert_eq!(mobs.health(legionnaire), None);
+    }
+
+    #[test]
+    fn the_risen_group_comes_one_by_one_at_the_retail_times() {
+        let mut mobs = Mobs::new(Vec::new().into(), &sailor_combat());
+        let (mut tutorial, _) =
+            Tutorial::start(OWNER, tree(), &FtueLevel::default(), &mut mobs, NOW);
+        let mut orders = Vec::new();
+        tutorial.spawn_batch(FIGHTS_AFTER[2].1, &mut mobs, false, &mut orders);
+        assert!(tutorial.fighters.is_empty(), "none at the trigger");
+        let vitals: Vec<u32> = FIGHTS_AFTER[2]
+            .1
+            .iter()
+            .map(|point| lowercase_crc32(point.vitals))
+            .collect();
+        for (count, point) in FIGHTS_AFTER[2].1.iter().enumerate() {
+            tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + point.delay_ms - 1);
+            assert_eq!(tutorial.fighters.len(), count, "not before its time");
+            tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + point.delay_ms);
+            assert_eq!(tutorial.fighters.len(), count + 1);
+        }
+        let spawned: Vec<u32> = tutorial
+            .fighters
+            .iter()
+            .map(|fighter| fighter.vitals_id)
+            .collect();
+        assert_eq!(spawned, vitals, "the risen first, then the swarmers");
+        assert!(
+            tutorial.fighters.iter().all(|fighter| fighter.batch == 0),
+            "one batch"
+        );
     }
 
     #[test]

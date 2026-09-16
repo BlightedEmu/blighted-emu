@@ -3200,7 +3200,8 @@ mod tests {
         let max = sailor.health.max();
         sailor.health.take(max);
         let mut seen = Vec::new();
-        for step in 2..5 {
+        let last_step = 5 + encounter::LAST_SAILOR_DELAY_MS / 33;
+        for step in 2..last_step {
             let output = tick(&mut world, card_at + 33 * step);
             seen.extend(sailor_cards(&output.messages, &owner));
         }
