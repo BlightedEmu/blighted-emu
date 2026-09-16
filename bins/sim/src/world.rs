@@ -67,7 +67,7 @@ use members::{
     CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, OwnTeleport, bundles, card_of,
     log_mob_group, mob_group, own_group, remote_group,
 };
-use mob_timeline::{ALERT_MS, MobPose, MobTimelines, animations_of};
+use mob_timeline::{MobPose, MobTimelines, animations_of};
 use quest_tracker::QuestTracker;
 use slots::Slots;
 use stamina::Stamina;
@@ -104,6 +104,9 @@ const FIRST_LOGIN_BUNDLE_SEQUENCE: u64 = 2;
 const OWN_CARD_DELAY_MS: u64 = 1_000;
 /// Milliseconds per second, for speeds.
 const MS_PER_SECOND_F32: f32 = 1_000.0;
+/// How long a mob stands from the start of its alert before it moves (retail sailors: 2.0 s from
+/// sailor 1's `Alert_Turn` at 73978 to its run at 76014; 2.8-3.1 s for sailors 2 and 3).
+const ALERT_STAND_MS: u64 = 2_000;
 
 /// How long a row of refused moves may run before the server moves the player back to the last
 /// good position. A refused move leaves the client where it was — but it never sees that, because
@@ -1821,7 +1824,7 @@ impl SimWorld {
                     animations_of(&look.asset),
                 );
                 if frame.alert_started {
-                    self.mobs.freeze(entity, now_ms + ALERT_MS);
+                    self.mobs.freeze(entity, now_ms + ALERT_STAND_MS);
                 }
                 card.alc = Some(frame);
             }

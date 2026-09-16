@@ -14,7 +14,7 @@ pub mod test_support;
 pub mod tick;
 
 pub use brain::{
-    Brain, BrainAction, BrainSettings, MobState, Seen, died, forget, hurt, step as brain_step,
+    Brain, BrainAction, BrainSettings, Gait, MobState, Seen, died, forget, hurt, step as brain_step,
 };
 pub use cells::{
     CellGrid, CellGridError, CellId, CellOwners, MAX_CELLS, assign_columns, level_bounds,

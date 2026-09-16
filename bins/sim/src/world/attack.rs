@@ -1081,6 +1081,7 @@ mod tests {
             speed_mps: 5.5,
             hit_delay_ms: DELAY_MS,
             block_stamina: crate::mobs::DEFAULT_BLOCK_STAMINA,
+            gait: nw_sim_core::Gait::uniform(3.0, 5.5),
         };
         let mob = world
             .mobs

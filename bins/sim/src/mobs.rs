@@ -21,8 +21,8 @@ use nw_bus::{MOB_ENTITY_BASE, MOB_STATES, MobGhost, SnapMob};
 use nw_content::combat::CombatData;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_sim_core::{
-    Brain, BrainAction, BrainSettings, Dice, Ground, Health, MobAttack, MobState, Position, Seen,
-    SpatialGrid, TUTORIAL_FOLDER, brain_step, forget, mob_max_health,
+    Brain, BrainAction, BrainSettings, Dice, Gait, Ground, Health, MobAttack, MobState, Position,
+    Seen, SpatialGrid, TUTORIAL_FOLDER, brain_step, forget, mob_max_health,
 };
 pub use nw_world::records::VitalsSpawn;
 
@@ -113,6 +113,8 @@ pub struct Pace {
     pub hit_delay_ms: u64,
     /// The stamina a swing takes from a player who blocks it.
     pub block_stamina: f32,
+    /// How it moves and when it swings.
+    pub gait: Gait,
 }
 
 /// A mob spawned for one player.
@@ -465,16 +467,14 @@ impl Mobs {
                 .map(|(entity, position)| Seen { entity, position })
                 .collect();
             self.brain_runs += 1;
-            let settings = personal.filter(|personal| personal.pace.is_some()).map_or(
-                self.settings,
-                |personal| BrainSettings {
-                    mob_attack_interval_ms: personal.swing_gap_ms,
-                    mob_speed_mps: personal
-                        .pace
-                        .map_or(self.settings.mob_speed_mps, |pace| pace.speed_mps),
+            let settings = personal
+                .and_then(|personal| Some((personal.swing_gap_ms, personal.pace?)))
+                .map_or(self.settings, |(swing_gap_ms, pace)| BrainSettings {
+                    mob_attack_interval_ms: swing_gap_ms,
+                    mob_speed_mps: pace.speed_mps,
+                    gait: pace.gait,
                     ..self.settings
-                },
-            );
+                });
             let is_personal = personal.is_some();
             let action = brain_step(&mut mob.brain, &seen, now_ms, &settings, &mut self.dice);
             match action {
@@ -878,6 +878,7 @@ mod tests {
             speed_mps: 5.5,
             hit_delay_ms: 456,
             block_stamina: DEFAULT_BLOCK_STAMINA,
+            gait: Gait::uniform(3.0, 5.5),
         };
         const START: u64 = 1_000;
         let mut mobs = mobs(Vec::new());

@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use nw_content::combat::{CombatData, CombatRows};
 use nw_messages::LevelSpec;
-use nw_sim_core::{BrainSettings, CellBounds, MoveLimits, MoveLimitsError, TICKS_PER_SECOND};
+use nw_sim_core::{BrainSettings, CellBounds, Gait, MoveLimits, MoveLimitsError, TICKS_PER_SECOND};
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -447,6 +447,7 @@ impl SimConfig {
             attack_reach_m: combat.attack_reach_m,
             mob_attack_interval_ms: combat.mob_attack_interval_ms,
             mob_speed_mps: combat.mob_speed_mps,
+            gait: Gait::uniform(combat.attack_reach_m, combat.mob_speed_mps),
             mob_respawn_ms: combat.mob_respawn_ms,
         }
     }

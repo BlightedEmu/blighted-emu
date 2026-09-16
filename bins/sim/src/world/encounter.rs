@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use nw_formats::objectstream::lowercase_crc32;
-use nw_sim_core::Position;
+use nw_sim_core::{Gait, Position};
 
 use nw_content::ftue_entities::{FtueLevel, GDE_REF_PREFIX_LEN};
 use nw_content::mob_prefabs::ASSET_ID_LEN;
@@ -160,50 +160,96 @@ const BLOCK_STAMINA_PER_MOD: f32 = 73.0;
 /// Ship sailors (damage mod 0.5): both landed hits did 12.97; cooldown 1-2 s + attack 1.5-2.0 s;
 /// run 5.5 m/s; hit at 456 ms. Block stamina: no blocked sailor hit took stamina in the capture,
 /// so it is [`BLOCK_STAMINA_PER_MOD`] x the club primary's `BlockStaminaDmgMod` 0.26 (Inferred).
+///
+/// Gait (ship-mobs note, section 2.1): swings started at 0.89-1.81 m; runs only closed gaps of
+/// 4-12 m; nearer it walked (`WalkToTarget` max 1.25 m/s); idle wander at the `Wander` nav max
+/// 0.6 m/s.
 const SAILOR_PACE: Pace = Pace {
     attack_factor: 0.2968,
     swing_gap_ms: (2_500, 4_000),
     speed_mps: 5.5,
     hit_delay_ms: 456,
     block_stamina: BLOCK_STAMINA_PER_MOD * 0.26,
+    gait: Gait {
+        swing_start_m: 1.8,
+        run_beyond_m: 4.0,
+        walk_speed_mps: 1.25,
+        wander_speed_mps: 0.6,
+    },
 };
 /// Legionnaire and signifier (damage mod 0.7): 18.70 (262336); cooldown 1-1.5 s + stab about
 /// 0.9-1.2 s; run 5.5 m/s; hit at 627 ms. A blocked light stab took 14.6 stamina (266620).
+///
+/// Gait (tutorial-ai-behavior note, section 3): its tree attacks at 1.5 m and stabs to 3 m
+/// (Inferred: runs beyond 3 m); strafe max 1.25 m/s; it walked 1.1 m/s before its fight.
 const LEGION_PACE: Pace = Pace {
     attack_factor: 0.3057,
     swing_gap_ms: (1_900, 2_700),
     speed_mps: 5.5,
     hit_delay_ms: 627,
     block_stamina: 14.6,
+    gait: Gait {
+        swing_start_m: 1.5,
+        run_beyond_m: 3.0,
+        walk_speed_mps: 1.25,
+        wander_speed_mps: 1.1,
+    },
 };
 /// Risen corruption entity (damage mod 0.9): 18.24 (295343); cooldown 0.75-1 s + swipe about
 /// 0.8-0.9 s; run 4.5 m/s; hit at 555 ms. Block stamina: [`BLOCK_STAMINA_PER_MOD`] x the
 /// `Attack` row's 0.1 (Inferred).
+///
+/// Gait (tutorial-ai-behavior note, section 4): close attacks at 2.5 m, runs beyond 4.5 m; it
+/// moved 1.1-2 m/s in its fight.
 const RISEN_PACE: Pace = Pace {
     attack_factor: 0.2319,
     swing_gap_ms: (1_550, 1_900),
     speed_mps: 4.5,
     hit_delay_ms: 555,
     block_stamina: BLOCK_STAMINA_PER_MOD * 0.1,
+    gait: Gait {
+        swing_start_m: 2.5,
+        run_beyond_m: 4.5,
+        walk_speed_mps: 2.0,
+        wander_speed_mps: 1.1,
+    },
 };
 /// Corruption swarmers (damage mod 0.25): 7.07 (296477); rate limit 0.25 s + slash (length
 /// Unknown; our choice 1 s); run 1.5 m/s; hit at 533 ms. Block stamina: [`BLOCK_STAMINA_PER_MOD`]
 /// x the swipe's 0.1 (Inferred).
+///
+/// Gait (tutorial-ai-behavior note, section 5): slashes under 1 m, else moves to its target at
+/// 1.5 m/s; it drifted about 0.5 m/s before the fight.
 const SWARMER_PACE: Pace = Pace {
     attack_factor: 0.3236,
     swing_gap_ms: (1_250, 1_500),
     speed_mps: 1.5,
     hit_delay_ms: 533,
     block_stamina: BLOCK_STAMINA_PER_MOD * 0.1,
+    gait: Gait {
+        swing_start_m: 1.0,
+        run_beyond_m: 1.0,
+        walk_speed_mps: 1.5,
+        wander_speed_mps: 0.5,
+    },
 };
 /// Thorpe (damage mod 1.125): 25.6 (457997); cooldown 1.15-2.25 s + attack 1.4-2.2 s; run
 /// 4.5 m/s; hit at 611 ms (stab). A blocked stab took 25.55 stamina (481395, 489462).
+///
+/// Gait (tutorial-ai-behavior note, section 6): attacks at 4 m, runs beyond 9 m, walks at the
+/// `WalkToTarget` max 1.5 m/s.
 const THORPE_PACE: Pace = Pace {
     attack_factor: 0.2604,
     swing_gap_ms: (2_550, 4_450),
     speed_mps: 4.5,
     hit_delay_ms: 611,
     block_stamina: 25.55,
+    gait: Gait {
+        swing_start_m: 4.0,
+        run_beyond_m: 9.0,
+        walk_speed_mps: 1.5,
+        wander_speed_mps: 1.5,
+    },
 };
 
 /// Experience points per island foe killed (retail: 20 per legion or corrupted kill, 120 in all;

@@ -17,6 +17,34 @@ const ARRIVED_M: f32 = 0.05;
 /// Resolution of the random wander points.
 const WANDER_STEPS: u32 = 1_000_000;
 
+/// How a mob moves and when it swings (tutorial-ai-behavior note, section 8; ship-mobs note,
+/// section 2: retail sailors started swings at 0.89-1.81 m, ran only to close a gap of 4-12 m and
+/// walked or stood nearer).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Gait {
+    /// It starts a swing at a target this near.
+    pub swing_start_m: f32,
+    /// A fighting mob farther than this from its target runs at the mob speed; nearer, it walks.
+    pub run_beyond_m: f32,
+    /// Its speed while it walks to its target.
+    pub walk_speed_mps: f32,
+    /// Its speed while it wanders near its spawn.
+    pub wander_speed_mps: f32,
+}
+
+impl Gait {
+    /// A gait with one reach and one speed for every move: it swings at `reach_m` and else runs
+    /// at `speed_mps`.
+    pub const fn uniform(reach_m: f32, speed_mps: f32) -> Self {
+        Self {
+            swing_start_m: reach_m,
+            run_beyond_m: reach_m,
+            walk_speed_mps: speed_mps,
+            wander_speed_mps: speed_mps,
+        }
+    }
+}
+
 /// The numbers of the brain (`sim.toml` section `[combat]`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BrainSettings {
@@ -36,8 +64,10 @@ pub struct BrainSettings {
     pub attack_reach_m: f32,
     /// Time between two hits of a mob.
     pub mob_attack_interval_ms: u64,
-    /// Walking speed.
+    /// Running speed.
     pub mob_speed_mps: f32,
+    /// How it moves and when it swings.
+    pub gait: Gait,
     /// Time from death to respawn.
     pub mob_respawn_ms: u64,
 }
@@ -255,7 +285,7 @@ pub fn step(
         .last_step_ms
         .map_or(0, |last| now_ms.saturating_sub(last).min(MAX_STEP_MS));
     brain.last_step_ms = Some(now_ms);
-    let max_m = settings.mob_speed_mps * elapsed_ms as f32 / MILLIS_PER_SECOND;
+    let reach = |speed_mps: f32| speed_mps * elapsed_ms as f32 / MILLIS_PER_SECOND;
     let player_near = seen.iter().any(|player| {
         player.position.horizontal_distance(brain.position) <= settings.wake_radius_m
     });
@@ -275,7 +305,11 @@ pub fn step(
             BrainAction::Respawned
         }
         MobState::Return => {
-            let at = brain.walk(brain.spawn, max_m, settings.leash_radius_m);
+            let at = brain.walk(
+                brain.spawn,
+                reach(settings.mob_speed_mps),
+                settings.leash_radius_m,
+            );
             if at.horizontal_distance(brain.spawn) > ARRIVED_M {
                 return BrainAction::MoveTo(at);
             }
@@ -291,17 +325,17 @@ pub fn step(
             BrainAction::None
         }
         MobState::Idle | MobState::Chase | MobState::Attack => {
-            fight(brain, seen, now_ms, max_m, settings, dice)
+            fight(brain, seen, now_ms, &reach, settings, dice)
         }
     }
 }
 
-/// The awake states: Idle, Chase and Attack.
+/// The awake states: Idle, Chase and Attack. `reach` gives the metres of this step at a speed.
 fn fight(
     brain: &mut Brain,
     seen: &[Seen],
     now_ms: u64,
-    max_m: f32,
+    reach: &dyn Fn(f32) -> f32,
     settings: &BrainSettings,
     dice: &mut Dice,
 ) -> BrainAction {
@@ -311,6 +345,7 @@ fn fight(
             brain.enter(MobState::Return, now_ms);
             return BrainAction::None;
         }
+        let max_m = reach(settings.gait.wander_speed_mps);
         return idle(brain, now_ms, max_m, settings, dice);
     };
     brain.target = Some(target.entity);
@@ -322,10 +357,20 @@ fn fight(
         brain.enter(MobState::Return, now_ms);
         return BrainAction::None;
     }
-    if target.position.horizontal_distance(brain.position) > settings.attack_reach_m {
+    let gait = settings.gait;
+    let distance = target.position.horizontal_distance(brain.position);
+    if distance > gait.swing_start_m {
         if brain.state != MobState::Chase {
             brain.enter(MobState::Chase, now_ms);
         }
+        let speed_mps = if distance > gait.run_beyond_m {
+            settings.mob_speed_mps
+        } else {
+            gait.walk_speed_mps
+        };
+        // It stops just inside its swing distance, not on the target.
+        let short_m = (distance - gait.swing_start_m + ARRIVED_M).max(0.0);
+        let max_m = reach(speed_mps).min(short_m);
         return BrainAction::MoveTo(brain.walk(target.position, max_m, settings.leash_radius_m));
     }
     if brain.state != MobState::Attack {
@@ -450,7 +495,81 @@ mod tests {
             attack_reach_m: 3.0,
             mob_attack_interval_ms: 2_000,
             mob_speed_mps: 3.25,
+            gait: Gait::uniform(3.0, 3.25),
             mob_respawn_ms: 360_000,
+        }
+    }
+
+    /// A sailor-like gait: swings at 1.8 m, runs beyond 4 m, walks 1.25 m/s, wanders 0.6 m/s.
+    fn paced() -> BrainSettings {
+        BrainSettings {
+            gait: Gait {
+                swing_start_m: 1.8,
+                run_beyond_m: 4.0,
+                walk_speed_mps: 1.25,
+                wander_speed_mps: 0.6,
+            },
+            ..settings()
+        }
+    }
+
+    #[test]
+    fn a_paced_mob_runs_far_walks_near_and_swings_close() {
+        let mut dice = Dice::new(SEED);
+        let mut brain = awake(0);
+        let step_m = |speed_mps: f32| speed_mps * TICK_MS as f32 / 1000.0;
+        let moved = |brain: &mut Brain, player: Position, now: u64, dice: &mut Dice| {
+            let before = brain.position();
+            match step(brain, &[seen(PLAYER, player)], now, &paced(), dice) {
+                BrainAction::MoveTo(to) => to.horizontal_distance(before),
+                other => panic!("moves: {other:?}"),
+            }
+        };
+        let far = moved(&mut brain, east(10.0), TICK_MS, &mut dice);
+        assert!(
+            (far - step_m(settings().mob_speed_mps)).abs() < NEAR_ZERO_M,
+            "runs: {far}"
+        );
+        let near = brain.position().x + 3.0;
+        let player = Position { x: near, ..SPAWN };
+        let walked = moved(&mut brain, player, 2 * TICK_MS, &mut dice);
+        assert!(
+            (walked - step_m(1.25)).abs() < NEAR_ZERO_M,
+            "walks: {walked}"
+        );
+        let mut now = 3 * TICK_MS;
+        let mut swung = false;
+        while now < 10_000 && !swung {
+            swung = step(
+                &mut brain,
+                &[seen(PLAYER, player)],
+                now,
+                &paced(),
+                &mut dice,
+            ) == BrainAction::Attack(PLAYER);
+            now += TICK_MS;
+        }
+        assert!(swung, "swings once in reach");
+        let gap = brain.position().horizontal_distance(player);
+        assert!(
+            gap <= 1.8 && gap > 1.6,
+            "stops inside its swing distance: {gap}"
+        );
+    }
+
+    #[test]
+    fn a_paced_mob_wanders_slowly() {
+        let mut dice = Dice::new(SEED);
+        let mut brain = awake(0);
+        let view = [seen(PLAYER, east(90.0))];
+        let mut now = TICK_MS;
+        while now <= 20_000 {
+            let before = brain.position();
+            if let BrainAction::MoveTo(to) = step(&mut brain, &view, now, &paced(), &mut dice) {
+                let speed_mps = to.horizontal_distance(before) * 1000.0 / TICK_MS as f32;
+                assert!(speed_mps <= 0.6 + NEAR_ZERO_M, "wanders at {speed_mps} m/s");
+            }
+            now += TICK_MS;
         }
     }
 
