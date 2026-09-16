@@ -241,8 +241,22 @@ stamina is above 0.
   `01 03 00000000 01` with the card, `01 01 00000001` at his intermission and `01 01 00000003`
   at his end. Implemented.
 - **Observed.** 7048 `GlobalStorageComponentClientFacet_ReceiveStorageSearchItems` is the
-  header (target = the facet entity + `0x2296cdd350b5c51c`) and 22 zero bytes, sent before the
-  bundle of each item change. Implemented: one per gear change.
+  header and 22 zero bytes, sent before the bundle of each item change. **Observed** (live
+  runs 2026-09-14): our header (the facet entity + `0x2296cdd350b5c51c`, read off the retail
+  bytes as for 608) made the client log `RMIDispatch: The facet target ID couldn't be found` at
+  every send, so the component is not at that id; where it is is **Unknown**. Not sent.
+- **Observed.** Retail moved the player into the water with three own states in a row (118546,
+  118580, 118614): the place with `worldPosRel` `ffffff` and facing `66f6`, the place again at
+  zero offset `7f7f7f` with teleport number 2, then zero offset and the number alone. A single
+  state with the number left the live client moving on with its ship speed: thrown 18 m east
+  and 3 m up (2026-09-14). Implemented: the three states, one per bundle.
+- **Observed.** In every live run the first spawned mob (number `MOB_ENTITY_BASE`, low 32 bits
+  0) stayed invisible while it fought; the next mobs, with the same card bytes, showed. Mob
+  numbers now start one above the base. **Inferred:** the client drops a `GdeRef` whose low
+  32 bits are 0.
+- **Not done.** Area tasks use an 18 m circle around `OverrideLocation`; the ruins trigger
+  fired 10 m away through the closed door (2026-09-14). The real trigger volumes are client
+  level data that the server does not read yet.
 - Implemented: a handoff carries the open-world quest's task states, timers and the tracker
   version; the next sim goes on with them.
 - The sim read the oldest position of each input message; the client sends the newest record
