@@ -2,6 +2,7 @@
 //! `sim` (M4 spec section 7): one cell of one level at 30 Hz. Players join through the bus, get
 //! the login messages, see the players near them in replication bundles, and leave.
 
+pub mod camera;
 pub mod combat;
 pub mod config;
 pub mod forward;

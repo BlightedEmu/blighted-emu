@@ -508,8 +508,8 @@ impl Loop {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
             return;
         };
-        if let Some(position) = input.newest_position() {
-            self.move_player(connection, position);
+        if let Some((position, view)) = input.newest_view() {
+            self.move_player(connection, position, view.map(|[yaw, _]| yaw));
         }
         let now_ms = self.now_ms();
         if let Some(request) = input.interaction() {
@@ -533,14 +533,22 @@ impl Loop {
         metrics::counter!(METRIC_RESPAWNS, RESULT_LABEL => result).increment(1);
     }
 
-    /// Moves the player of `connection` to `position` and counts a refusal.
-    fn move_player(&mut self, connection: &ConnectionRef, position: InputPosition) {
-        let next = Position {
+    /// Moves the player of `connection` to the body under its camera at `position`, looking
+    /// along `yaw` when the record says, and counts a refusal.
+    fn move_player(
+        &mut self,
+        connection: &ConnectionRef,
+        position: InputPosition,
+        yaw: Option<f32>,
+    ) {
+        let camera = Position {
             x: position.x,
             y: position.y,
             z: position.z(),
         };
-        let result = self.world.move_to(connection, next, self.now_ms());
+        let (result, next) = self
+            .world
+            .move_from_camera(connection, camera, yaw, self.now_ms());
         if result.is_ok() {
             tracing::trace!(x = next.x, y = next.y, z = next.z, "client move");
         }

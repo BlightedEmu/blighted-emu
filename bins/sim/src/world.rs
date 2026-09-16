@@ -100,6 +100,8 @@ const FIRST_LOGIN_BUNDLE_SEQUENCE: u64 = 2;
 /// client before it has applied `LevelInfoChanged` (channel 0), so the client drops it as a
 /// bundle "for a previous ClientContext", never loads the level, and never moves to spawn.
 const OWN_CARD_DELAY_MS: u64 = 1_000;
+/// Milliseconds per second, for speeds.
+const MS_PER_SECOND_F32: f32 = 1_000.0;
 
 /// How long a row of refused moves may run before the server moves the player back to the last
 /// good position. A refused move leaves the client where it was — but it never sees that, because
@@ -329,6 +331,8 @@ struct Player {
     leaving: bool,
     /// Whether the server moved the player: its next own state moves it ([`OwnTeleport`]).
     moved: bool,
+    /// The client's last camera point and when it came, for the player's speed.
+    last_camera: Option<(Position, u64)>,
     /// Where the player faces after the server's move, when the move says so.
     move_facing: Option<f32>,
     /// The next state of a server move still to send.
@@ -841,6 +845,39 @@ impl SimWorld {
                 Ok(check)
             }
         }
+    }
+
+    /// Moves the player of `connection` to the body under its client camera at `camera`,
+    /// looking along `yaw` (radians) when the input says ([`crate::camera::body_of`]; without a
+    /// yaw the camera point is taken as the body), received at `now_ms`. Gives the result and the
+    /// body position it checked.
+    pub fn move_from_camera(
+        &mut self,
+        connection: &ConnectionRef,
+        camera: Position,
+        yaw: Option<f32>,
+        now_ms: u64,
+    ) -> (Result<GroundCheck, MoveError>, Position) {
+        let last = self
+            .by_connection
+            .get(connection)
+            .copied()
+            .and_then(|entity| self.world.get_mut::<Player>(entity))
+            .and_then(|mut player| player.last_camera.replace((camera, now_ms)));
+        let next = yaw.map_or(camera, |yaw| {
+            let speed_mps = last.map_or(0.0, |(at, then)| {
+                let elapsed_ms = now_ms.saturating_sub(then);
+                if elapsed_ms == 0 {
+                    0.0
+                } else {
+                    #[allow(clippy::cast_precision_loss, reason = "a gap of a few seconds")]
+                    let seconds = elapsed_ms as f32 / MS_PER_SECOND_F32;
+                    at.horizontal_distance(camera) / seconds
+                }
+            });
+            crate::camera::body_of(camera, yaw, speed_mps)
+        });
+        (self.move_to(connection, next, now_ms), next)
     }
 
     /// Removes a player.
@@ -1882,6 +1919,7 @@ impl SimWorld {
                     leaving: false,
                     moved: false,
                     move_facing: None,
+                    last_camera: None,
                     teleport_step: None,
                     refused_since_ms: None,
                     own_spawned_ms: None,

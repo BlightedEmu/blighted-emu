@@ -456,6 +456,14 @@ impl ClientInputMsg {
         self.records.iter().find_map(|record| record.bit_7)
     }
 
+    /// The newest position and the two view values (bit 6) of the same record, when it has
+    /// them: the client's camera point and its yaw and pitch.
+    pub fn newest_view(&self) -> Option<(InputPosition, Option<[f32; 2]>)> {
+        self.records
+            .iter()
+            .find_map(|record| Some((record.bit_7?, record.bit_6)))
+    }
+
     /// Whether the player holds block now: the state of the newest record. The client sends the
     /// newest record first (the counter after the mask falls by one per record in the live
     /// capture). `None` for an input without records.
