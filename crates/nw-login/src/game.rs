@@ -34,6 +34,7 @@ use uuid::Uuid;
 use crate::config::{EdgeConfig, QUEUE_LIMIT_WINDOW_SECONDS, WorldConfig};
 use crate::error::{ApiError, parse_json};
 use crate::keys::{is_game_session_key, new_random_token};
+use crate::look;
 use crate::names::check_character_name;
 use crate::queue::{QueueAction, QueueSettings, QueueStore, QueueTime, queue_reply};
 use crate::secrets::SigningKey;
@@ -330,9 +331,14 @@ fn world_models(config: &EdgeConfig) -> Vec<WorldModel> {
     config.worlds.iter().map(world_model).collect()
 }
 
+/// The level a character shows on the select screen: every character is a new one until levels
+/// are saved.
+const SELECT_SCREEN_LEVEL: u32 = 1;
+
 /// The character summary the client shows (JSON note section 5.1.1).
 pub(crate) fn character_summary(world_id: Uuid, character: &Character) -> CharacterSummary {
     CharacterSummary {
+        published_data: look::published_data(&character.appearance, SELECT_SCREEN_LEVEL),
         character_id: character.id.to_string(),
         created_date: http_date(character.created_at_unix),
         name: character.name.clone(),

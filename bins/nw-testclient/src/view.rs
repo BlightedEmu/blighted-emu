@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 
 use nw_messages::{
-    EntitySlots, LOGIN_MESSAGE_TYPES, MessageError, PLAYER_SLICE_ASSET, ServerMessage, SlotRead,
-    WorldPosition,
+    EntitySlots, FacetHeader, LOGIN_MESSAGE_TYPES, MessageError, PLAYER_SLICE_ASSET, ServerMessage,
+    SlotRead, WorldPosition,
 };
 use thiserror::Error;
 
@@ -54,6 +54,11 @@ enum Read {
     Other { type_index: u64 },
 }
 
+/// The entity number of a facet call's header (`target`, `entity`).
+const fn facet_entity(target: u64, entity: u64) -> u64 {
+    FacetHeader { target, entity }.entity_number()
+}
+
 fn decode(received: &Received) -> Result<Read, ViewError> {
     let envelope = &received.envelope;
     let Some(decoded) = ServerMessage::from_envelope(envelope) else {
@@ -66,17 +71,19 @@ fn decode(received: &Received) -> Result<Read, ViewError> {
         ServerMessage::DamageDealt(hit) => Read::Combat {
             type_index,
             event: CombatEvent::Dealt {
-                attacker: hit.head_b,
+                attacker: facet_entity(hit.head_a, hit.head_b),
             },
         },
         ServerMessage::OnDamage(hit) => Read::Combat {
             type_index,
-            event: CombatEvent::Taken { target: hit.head_a },
+            event: CombatEvent::Taken {
+                target: facet_entity(hit.head_a, hit.head_b),
+            },
         },
         ServerMessage::DeathRecap(death) => Read::Combat {
             type_index,
             event: CombatEvent::Died {
-                player: death.head_a,
+                player: facet_entity(death.head_a, death.head_b),
             },
         },
         ServerMessage::ClientAddEntry(entry) => Read::Entry {
@@ -532,12 +539,12 @@ mod tests {
     fn the_view_counts_hits_damage_and_deaths() {
         let mut view = combat_view();
         let messages = [
-            ServerMessage::DamageDealt(DamageDealtMsg::hit(MOB, OWN, HIT)),
-            ServerMessage::DamageDealt(DamageDealtMsg::hit(MOB, OTHER, HIT)),
-            ServerMessage::OnDamage(OnDamageMsg::hit(OWN, MOB, HIT)),
-            ServerMessage::OnDamage(OnDamageMsg::hit(OTHER, MOB, HIT)),
-            ServerMessage::DeathRecap(DeathRecapMsg::of(OWN, MOB)),
-            ServerMessage::DeathRecap(DeathRecapMsg::of(OTHER, MOB)),
+            ServerMessage::DamageDealt(DamageDealtMsg::hit(OWN, MOB, HIT, false)),
+            ServerMessage::DamageDealt(DamageDealtMsg::hit(OTHER, MOB, HIT, false)),
+            ServerMessage::OnDamage(OnDamageMsg::hit(OWN, HIT)),
+            ServerMessage::OnDamage(OnDamageMsg::hit(OTHER, HIT)),
+            ServerMessage::DeathRecap(DeathRecapMsg::of(OWN)),
+            ServerMessage::DeathRecap(DeathRecapMsg::of(OTHER)),
         ];
         for message in &messages {
             assert_eq!(

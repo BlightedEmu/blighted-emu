@@ -11,10 +11,12 @@
 //! `SharedDataStrm-part7.pak`). The lists follow the name numbers, with a `none` row first in
 //! some lists and two extra rows (`Chroma`, `ChromaCutout`) in the male race list.
 
-use std::io::Read;
+use std::io::{Read, Write};
 
 use data_encoding::BASE64;
+use flate2::Compression;
 use flate2::read::ZlibDecoder;
+use flate2::write::ZlibEncoder;
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
 use nw_messages::{LOOK_CHOICES, PlayerLook};
 
@@ -118,6 +120,43 @@ pub fn saved_backstory(appearance: &serde_json::Value) -> Option<String> {
     (!backstory.is_empty()).then(|| backstory.to_owned())
 }
 
+/// The JSON key of the character level in the creation settings.
+const CURRENT_LEVEL_KEY: &[u8] = b"\"currentLevel\":";
+
+/// The character's `PublishedData` for the character select screen (character-select note): the
+/// stored creation settings with `currentLevel` set to `level`, in the same form (base64 of zlib
+/// data of the JSON). The screen draws the character from its `visualsBlob`; without it the
+/// character is a blank body. `None` when the settings are missing or have no level.
+pub fn published_data(appearance: &serde_json::Value, level: u32) -> Option<String> {
+    let mut text = inflated(appearance.get(CREATION_PARAMS_KEY)?.as_str()?)?;
+    let start = text
+        .windows(CURRENT_LEVEL_KEY.len())
+        .position(|window| window == CURRENT_LEVEL_KEY)?
+        + CURRENT_LEVEL_KEY.len();
+    let digits = text[start..]
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit() || **byte == b'-')
+        .count();
+    if digits == 0 {
+        return None;
+    }
+    text.splice(start..start + digits, level.to_string().into_bytes());
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&text).ok()?;
+    Some(BASE64.encode(&encoder.finish().ok()?))
+}
+
+/// The JSON bytes of creation settings `params` (base64 of zlib data); its text is not UTF-8.
+fn inflated(params: &str) -> Option<Vec<u8>> {
+    let compressed = BASE64.decode(params.trim().as_bytes()).ok()?;
+    let mut inflated = Vec::new();
+    ZlibDecoder::new(compressed.as_slice())
+        .take(MAX_PARAMS_BYTES)
+        .read_to_end(&mut inflated)
+        .ok()?;
+    Some(inflated)
+}
+
 /// The root element of the `visualsBlob` in a stored appearance.
 fn saved_visuals(appearance: &serde_json::Value) -> Option<Element> {
     visuals(appearance.get(CREATION_PARAMS_KEY)?.as_str()?)
@@ -158,13 +197,7 @@ fn number_after(name: &str, prefix: &str) -> Option<u8> {
 
 /// The root element of the `visualsBlob` of creation settings `params`.
 fn visuals(params: &str) -> Option<Element> {
-    let compressed = BASE64.decode(params.trim().as_bytes()).ok()?;
-    let mut inflated = Vec::new();
-    ZlibDecoder::new(compressed.as_slice())
-        .take(MAX_PARAMS_BYTES)
-        .read_to_end(&mut inflated)
-        .ok()?;
-    let text: String = inflated.iter().copied().map(char::from).collect();
+    let text: String = inflated(params)?.into_iter().map(char::from).collect();
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     let blob: Vec<u8> = json
         .get(VISUALS_BLOB_KEY)?
@@ -177,10 +210,6 @@ fn visuals(params: &str) -> Option<Element> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
-
-    use flate2::Compression;
-    use flate2::write::ZlibEncoder;
     use nw_formats::objectstream::write_object_stream;
 
     use super::*;
@@ -236,7 +265,7 @@ mod tests {
                 json.push(byte);
             }
         }
-        json.extend(br#""}"#);
+        json.extend(br#"","position":{"x":0.0,"y":0.0,"z":0.0},"currentLevel":0}"#);
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
         encoder.write_all(&json).expect("compress");
         BASE64.encode(&encoder.finish().expect("compress"))
@@ -244,6 +273,19 @@ mod tests {
 
     fn appearance(params: String) -> serde_json::Value {
         serde_json::json!({ "Name": "Test", CREATION_PARAMS_KEY: params })
+    }
+
+    #[test]
+    fn published_data_is_the_saved_settings_at_the_level() {
+        const LEVEL: u32 = 1;
+        let saved = appearance(params(&names(&MALE_NAMES)));
+        let published = published_data(&saved, LEVEL).expect("published");
+        let text = inflated(&published).expect("inflate");
+        let level = br#""currentLevel":1}"#;
+        assert!(text.ends_with(level), "the level is written in");
+        let again = appearance(published);
+        assert_eq!(saved_look(&again), saved_look(&saved), "the look stays");
+        assert_eq!(published_data(&serde_json::json!({}), LEVEL), None);
     }
 
     #[test]
