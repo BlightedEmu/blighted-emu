@@ -429,6 +429,9 @@ pub(super) struct Tutorial {
     bag_taken: bool,
     /// Whether a chest gather runs.
     gathering: bool,
+    /// The interaction id of the last accepted gather: the client repeats its last input records
+    /// in later messages, so one press comes up to three times.
+    last_interaction: Option<u64>,
     chest_looted: bool,
     /// Orders due later, with their times.
     later: Vec<(u64, Order)>,
@@ -468,6 +471,7 @@ impl Tutorial {
             moved_to_water: false,
             bag_taken: false,
             gathering: false,
+            last_interaction: None,
             chest_looted: false,
             later: Vec::new(),
             assets: AssetScript::of(level),
@@ -606,10 +610,14 @@ impl Tutorial {
     /// The client starts interaction `request` at `now_ms`: a use of the chest is accepted, and
     /// the gather ends after the retail gather time, with the potions the first time.
     pub(super) fn interact(&mut self, request: InteractionRequest, now_ms: u64) -> Vec<Order> {
-        if request.target[..GDE_REF_PREFIX_LEN] != CHEST_PREFIX || self.gathering {
+        if request.target[..GDE_REF_PREFIX_LEN] != CHEST_PREFIX
+            || self.gathering
+            || self.last_interaction == Some(request.interaction)
+        {
             return Vec::new();
         }
         self.gathering = true;
+        self.last_interaction = Some(request.interaction);
         let done_at = now_ms + CHEST_GATHER_MS;
         self.later.push((done_at, Order::EndGather(request)));
         self.later.push((
@@ -1207,9 +1215,21 @@ pub(crate) mod tests {
         let done = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + CHEST_GATHER_MS);
         assert!(done.contains(&Order::EndGather(request)));
         assert!(done.contains(&Order::GiveItem(CHEST_ITEM.to_owned(), CHEST_QUANTITY)));
-        tutorial.interact(request, NOW + CHEST_GATHER_MS);
+        assert!(
+            tutorial.interact(request, NOW + CHEST_GATHER_MS).is_empty(),
+            "a repeated record of the same press starts nothing"
+        );
+        let press_again = InteractionRequest {
+            interaction: request.interaction + 1,
+            ..request
+        };
+        assert!(
+            !tutorial
+                .interact(press_again, NOW + CHEST_GATHER_MS)
+                .is_empty()
+        );
         let again = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + 2 * CHEST_GATHER_MS);
-        assert!(again.contains(&Order::EndGather(request)));
+        assert!(again.contains(&Order::EndGather(press_again)));
         assert!(
             !again.contains(&Order::GiveItem(CHEST_ITEM.to_owned(), CHEST_QUANTITY)),
             "the potions come once"
