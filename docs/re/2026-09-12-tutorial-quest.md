@@ -254,9 +254,10 @@ stamina is above 0.
   0) stayed invisible while it fought; the next mobs, with the same card bytes, showed. Mob
   numbers now start one above the base. **Inferred:** the client drops a `GdeRef` whose low
   32 bits are 0.
-- **Not done.** Area tasks use an 18 m circle around `OverrideLocation`; the ruins trigger
-  fired 10 m away through the closed door (2026-09-14). The real trigger volumes are client
-  level data that the server does not read yet.
+- Area tasks use a circle around `OverrideLocation`, sized per `TP_TargetTag` just above the
+  distance at which retail fired it (EnterRuins 7 m, First_Fight 5.5 m, ChestDiscovery 4.5 m,
+  ForClimb 25 m, TF 20.5 m; others 18 m). One 18 m circle fired the ruins trigger through the
+  closed door (2026-09-14). **Not done:** the real trigger volumes (client level data).
 - Implemented: a handoff carries the open-world quest's task states, timers and the tracker
   version; the next sim goes on with them.
 - The sim read the oldest position of each input message; the client sends the newest record
@@ -271,8 +272,48 @@ stamina is above 0.
   Sent at once, its only card came before the client could show it. It now comes after that
   delay.
 
-## 11. Not done
+## 11. Mob looks, lock-on states, gait, combat status and the exit (2026-09-16)
 
+Times are ms from the first record of the retail tutorial capture.
+
+- **Observed.** The two legionnaires share `Legion_Legionnaire_FTUE` but not a look: card asset
+  `c05fc957…` at 179393, `87a335e7…` (signifier) at 202592. The prefab table and the looks now
+  keep each prefab by vitals id and asset; each tutorial mob gets the asset of the retail mob at
+  the same spawn order place.
+- **Observed.** A live creature's first vitals carry `vitalsData` `00 <server ns> 0 ff`, the
+  server clock at the card (sailor 1: `0bbca3350847b1bf` = 13:04:38.206 at 16198). Sent now.
+- **Observed.** Right after each creature first picks the player (2415), retail sends its
+  component 4 `MB::LookTargetingComponentReplicatedState` (2443, `currentLookAtTarget`):
+  `01 01 bfa96f3ea2e36a5a`, the player's facet entity, for all 10 tutorial creatures; never
+  cleared at a 3916. Read, written and sent with the card and after each new brain target.
+- **Observed** (9 fights). Own component 28 `CombatStatus` (2913) comes about 40 ms after each
+  player hit on a mob: logged-out time = hit + 20 s, concluded time = hit + 10 s (server ns), the
+  in-combat flag 1 with the first hit. When every hit of the step killed, concluded = hit + 1 s;
+  at the concluded time the flag 0 comes alone. A mob's hit on the player (3601) changes nothing.
+  Implemented. **Unknown:** what set the flag at Thorpe's start (455733, no player hit).
+- **Unknown.** The client decides lock-on itself from slice data (the target lock component
+  checks dead and deaths door through the vitals component). The three states above are the
+  retail differences we found; whether one of them was the missing piece is not tested live.
+- **Observed** (ship-mobs note). Retail sailors started swings at 0.89-1.81 m, ran only to close
+  gaps of 4-12 m, walked or stood nearer, wandered at 0.6 m/s, and stood about 2.0 s after the
+  alert. Each tutorial kind now has a gait (swing start, run distance, walk and wander speed)
+  and its slice sight (sailor 30 m, legion, risen and swarmer 12 m, Thorpe 20 m). The open world
+  keeps one reach and one speed.
+- **Observed.** The island foes send 2415 when they first see the player (legionnaire 25 s after
+  its card, player 3.7-8.1 m away; signifier 56 s, 9.8 m; risen group 7-9 s). Implemented; the
+  sailors and Thorpe keep theirs at spawn (retail 0.3-0.6 s after the card).
+- **Observed.** Spawn delays after the cause: legionnaire 4200 ms after the door, signifier
+  5782 ms after its trigger, risen +417 ms and swarmers +1315, +2316, +3313 ms after ForClimb,
+  the last ship sailor 1 s after the first (slice wave delay). Implemented.
+- **Observed.** After the 502, retail sends 3951, then the quest-end, lore and potion bundles,
+  then the empty 6310 361 ms after the 502. The open world's first full achievement state holds
+  the tutorial's 54 bits. Implemented: the handoff waits 361 ms and carries the set bits.
+
+## 12. Not done
+
+- The own gather states of the chest (36:81, 54:100, 26:3752 at the accept; class 81 field
+  split **Unknown**).
+- Thorpe's force-grab spells, transition fragment and charge; the spawner static's changes.
 - The 250 to 280 ms wait before regen after a water dash (cause **Unknown**).
 - The general formula of the stamina a blocked hit takes.
 - The additive reactions, child 42 of the alert state.
