@@ -17,11 +17,39 @@ use nw_content::Tables;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_sim_core::Position;
 
-/// How near a player must come to a trigger area's `OverrideLocation` (our choice: the retail
-/// tutorial tasks completed 4 to 12 m from it, and the open-world start trigger with the player
-/// 17.2 m from it at its spawn; the real trigger volumes are level data the server does not
-/// read).
+/// How near a player must come to a trigger area's `OverrideLocation` when its volume has no
+/// size of its own in [`TRIGGER_RADIUS_BY_TAG`] (our choice: the open-world start trigger fired
+/// with the player 17.2 m from it at its spawn; the real trigger volumes are client level data
+/// the server does not read).
 const TRIGGER_RADIUS_M: f32 = 18.0;
+/// The size of a trigger volume by its `TP_TargetTag`, just above the distance at which retail
+/// fired it (tutorial capture, ruins-to-exit and beach-ruins-chest notes). One 18 m circle fired
+/// the ruins entry 15.6 m away through the closed door in a live run (2026-09-14) and fired too
+/// late where retail fires from farther.
+const TRIGGER_RADIUS_BY_TAG: [(&str, f32); 6] = [
+    // Fired at 6.9 m.
+    ("FTUE_EnterRuins_00_Trigger", 7.0),
+    // Fired at 4.9 m.
+    ("FTUE_First_Fight_Trigger", 5.5),
+    // Not fired with the player 10 to 11 m away for 5 s; the failsafe shares it.
+    ("FTUE_First_Fight_Trigger_Failsafe", 9.5),
+    // Fired at 4.2 m.
+    ("FTUE_Chest_Discovery_Trigger", 4.5),
+    // ForClimb fired at 24.8 m.
+    ("FTUE_Second_Fight_Trigger_Failsafe", 25.0),
+    // Fired at 20.1 m.
+    ("FTUE_TF_Trigger", 20.5),
+];
+
+/// The size of the trigger volume of tag `tag`.
+fn trigger_radius_m(tag: Option<&str>) -> f32 {
+    tag.and_then(|tag| {
+        TRIGGER_RADIUS_BY_TAG
+            .iter()
+            .find(|(known, _)| known.eq_ignore_ascii_case(tag))
+    })
+    .map_or(TRIGGER_RADIUS_M, |(_, radius)| *radius)
+}
 /// Separates the numbers of an `OverrideLocation` cell.
 const LOCATION_SEPARATOR: char = ' ';
 /// Milliseconds per second of a `TaskTimer` duration.
@@ -57,8 +85,13 @@ enum TaskKind {
     CinematicComplete(u32),
     /// Done when the in-game cutscene of this id ends.
     CutsceneComplete(u32),
-    /// Done when the player comes near the location; without one, never.
-    TriggerArea(Option<Position>),
+    /// Done when the player comes within `radius_m` of the location; without one, never.
+    TriggerArea {
+        /// The location.
+        at: Option<Position>,
+        /// The size of its volume.
+        radius_m: f32,
+    },
     /// Done after `count` kills of mobs of the type.
     KillContribution { enemy: String, count: u32 },
     /// Done when the player gets the item; without one, when it loots a container.
@@ -111,6 +144,8 @@ pub struct TaskRow {
     pub ui_screen_tag: Option<String>,
     /// `SubTask` ids in order.
     pub sub_tasks: Vec<String>,
+    /// `TP_TargetTag`: the trigger volume of an area task.
+    pub target_tag: Option<String>,
 }
 
 /// The task rows of `tables`.
@@ -129,6 +164,7 @@ pub fn task_rows(tables: &Tables) -> Vec<TaskRow> {
             kill_enemy_type: row.kill_enemy_type.clone(),
             ui_screen_tag: row.ui_screen_tag.clone(),
             sub_tasks: row.sub_task.values().cloned().collect(),
+            target_tag: row.tp_target_tag.clone(),
         })
         .collect()
 }
@@ -171,9 +207,10 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "TaskCinematicStart" => TaskKind::CinematicStart(crc()),
         "TaskCinematicComplete" => TaskKind::CinematicComplete(crc()),
         "TaskCutsceneComplete" => TaskKind::CutsceneComplete(crc()),
-        "TaskTriggerArea" => {
-            TaskKind::TriggerArea(row.override_location.as_deref().and_then(location_of))
-        }
+        "TaskTriggerArea" => TaskKind::TriggerArea {
+            at: row.override_location.as_deref().and_then(location_of),
+            radius_m: trigger_radius_m(row.target_tag.as_deref()),
+        },
         "TaskKillContribution" => TaskKind::KillContribution {
             enemy: row.kill_enemy_type.clone().unwrap_or_default(),
             count,
@@ -565,9 +602,13 @@ impl ObjectiveRun {
                         categories,
                     },
                 ) => (kills_count(enemy, vitals_id, categories), *count),
-                (TaskKind::TriggerArea(Some(at)), Event::Moved(position)) => {
-                    (at.horizontal_distance(position) <= TRIGGER_RADIUS_M, 1)
-                }
+                (
+                    TaskKind::TriggerArea {
+                        at: Some(at),
+                        radius_m,
+                    },
+                    Event::Moved(position),
+                ) => (at.horizontal_distance(position) <= *radius_m, 1),
                 (TaskKind::HaveItem(Some(item)), Event::ItemGained(gained))
                 | (TaskKind::EquipItem(item), Event::Equipped(gained)) => {
                     (item.eq_ignore_ascii_case(gained), 1)
@@ -929,6 +970,38 @@ mod tests {
             ObjectiveRun::resume(tree, &broken, LATER).is_none(),
             "a task out of the tree"
         );
+    }
+
+    #[test]
+    fn a_tagged_area_fires_at_its_own_size() {
+        let at = Position {
+            x: 717.6479,
+            y: 371.0387,
+            z: 23.0589,
+        };
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["Ruins"]),
+            TaskRow {
+                override_location: Some("717.6479 371.0387 23.0589".to_owned()),
+                target_tag: Some("FTUE_EnterRuins_00_Trigger".to_owned()),
+                ..row("Ruins", "TaskTriggerArea")
+            },
+        ];
+        let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        let outside_door = Position {
+            x: at.x + 15.6,
+            ..at
+        };
+        run.event(Event::Moved(outside_door), NOW);
+        assert!(!run.is_done("Ruins"), "15.6 m out, behind the door");
+        let inside = Position {
+            x: at.x + 6.9,
+            ..at
+        };
+        run.event(Event::Moved(inside), NOW);
+        assert!(run.is_done("Ruins"), "retail fired at 6.9 m");
+        assert!((trigger_radius_m(None) - TRIGGER_RADIUS_M).abs() < f32::EPSILON);
     }
 
     #[test]
