@@ -15,6 +15,7 @@ use crate::afflictions::{AfflictionList, ColdLong, HotLong};
 use crate::slots::{
     children_mask, read_children, read_slot_byte, write_children, write_known_children,
 };
+use crate::time_synch::NS_PER_MS;
 use crate::wire::{MessageError, Reader, Writer};
 
 /// Type index of the class.
@@ -42,6 +43,9 @@ pub const PLAYER_STAMINA_TICK_RATE: u16 = 0x5100;
 pub const PLAYER_TICK_RATE: u16 = 0;
 /// The `vitalsData` head byte of a dead creature (mob-cards note, section 5).
 const DEAD_HEAD: u8 = 1;
+/// The `vitalsData` head byte of a live creature's first state (ship-mobs-lockon-ai note,
+/// section 3.3: every retail tutorial creature card).
+const ALIVE_HEAD: u8 = 0;
 /// The `vitalsData` tail byte on every retail creature body seen (mob-cards note, section 2).
 const CREATURE_DATA_TAIL: u8 = 0xff;
 
@@ -57,6 +61,33 @@ pub struct VitalsData {
     pub b: u64,
     /// The last byte.
     pub tail: u8,
+}
+
+impl VitalsData {
+    /// The block of a creature's first state at server time `server_ms` (ms since 2000-01-01)
+    /// with health `health`. Alive, retail sends `00 <server ns> 0 ff`: the time is the server
+    /// clock at the card (sailor 1: `0bbca3350847b1bf` = 13:04:38.206 at its card at 16198 ms).
+    /// At 0 health it is the dead block.
+    pub const fn creature_first(health: u32, server_ms: u64) -> Self {
+        if health == 0 {
+            Self::DEAD
+        } else {
+            Self {
+                head: ALIVE_HEAD,
+                a: server_ms.saturating_mul(NS_PER_MS),
+                b: 0,
+                tail: CREATURE_DATA_TAIL,
+            }
+        }
+    }
+
+    /// The block of a dead creature: its head plays the death on the client.
+    const DEAD: Self = Self {
+        head: DEAD_HEAD,
+        a: 0,
+        b: 0,
+        tail: CREATURE_DATA_TAIL,
+    };
 }
 
 /// The vitals state: slot 0 and slot 1, each when sent.
@@ -166,12 +197,7 @@ impl VitalsState {
             slot_0: Some(VitalsSlot0 {
                 health_amount: Some(health as f32),
                 health_change_flags,
-                vitals_data: (health == 0).then_some(VitalsData {
-                    head: DEAD_HEAD,
-                    a: 0,
-                    b: 0,
-                    tail: CREATURE_DATA_TAIL,
-                }),
+                vitals_data: (health == 0).then_some(VitalsData::DEAD),
                 ..VitalsSlot0::default()
             }),
             slot_1: None,
@@ -589,6 +615,19 @@ mod tests {
         bytes.push(3);
         let data = slot_0(&bytes).vitals_data.expect("vitals data");
         assert_eq!((data.head, data.a, data.b, data.tail), (9, 1, 2, 3));
+    }
+
+    #[test]
+    fn a_live_creature_first_block_is_the_retail_form() {
+        // Retail sailor 1 at 16198: `00 0bbca3350847b1bf 0000000000000000 ff`.
+        const RETAIL_NS: u64 = 0x0bbc_a335_0847_b1bf;
+        const HEALTH_ALIVE: u32 = 353;
+        let server_ms = RETAIL_NS / NS_PER_MS;
+        let data = VitalsData::creature_first(HEALTH_ALIVE, server_ms);
+        assert_eq!((data.head, data.b, data.tail), (0, 0, 0xff));
+        assert_eq!(data.a, server_ms * NS_PER_MS);
+        assert!(RETAIL_NS - data.a < NS_PER_MS);
+        assert_eq!(VitalsData::creature_first(0, server_ms).head, DEAD_HEAD);
     }
 
     #[test]

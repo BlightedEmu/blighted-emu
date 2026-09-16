@@ -1776,6 +1776,7 @@ impl SimWorld {
             let owner = self.mobs.owner(entity);
             let mut card = card_of(entity, position, state, owner);
             card.asset = self.mobs.asset(entity);
+            card.server_ms = server_time;
             let previous = self.mob_health_shown.insert(entity, state.health);
             card.health_changed = previous != Some(state.health);
             card.first_damage = card.health_changed

@@ -7,7 +7,7 @@ use nw_reflect::TIME_SYNCH_MSG_TYPE_INDEX;
 use crate::wire::{BodyCodec, MessageError, Reader, Writer};
 
 /// Nanoseconds per millisecond.
-const NS_PER_MS: u64 = 1_000_000;
+pub(crate) const NS_PER_MS: u64 = 1_000_000;
 
 /// The server clock for the client.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

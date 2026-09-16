@@ -20,8 +20,8 @@ use nw_messages::{
     DYNAMIC_SLICE_SUB_ID, GDE_METADATA_COMPONENT, GdeMetadataReplicatedState, InputPosition,
     LOCAL_PLAYER_INTEREST, MAX_BUNDLE_INDEXES, MemberState, MessageError, PLAYER_SLICE_ASSET,
     PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT,
-    ServerMessage, TeleportStep, VitalsState, boss_phase_change, change_members, player_members,
-    raw_id_of_entity,
+    ServerMessage, TeleportStep, VitalsData, VitalsState, boss_phase_change, change_members,
+    player_members, raw_id_of_entity,
 };
 use nw_sim_core::Position;
 
@@ -73,6 +73,8 @@ pub(super) struct MobCard {
     pub(super) boss_phase_changed: bool,
     /// The slice asset of its look, when it has its own (a personal mob with a retail card).
     pub(super) asset: Option<[u8; ASSET_ID_LEN]>,
+    /// The server time of this bundle step (ms since 2000-01-01).
+    pub(super) server_ms: u64,
 }
 
 impl MobCard {
@@ -100,6 +102,7 @@ pub(super) const fn card_of(
         boss_phase: None,
         boss_phase_changed: false,
         asset: None,
+        server_ms: 0,
     }
 }
 
@@ -315,11 +318,8 @@ pub(super) fn mob_group(
                 mob.level,
             ),
         };
-        if let (Some(slot), Some(health)) = (
-            vitals.slot_0.as_mut(),
-            VitalsState::creature_health(mob.health).slot_0,
-        ) {
-            slot.vitals_data = health.vitals_data;
+        if let Some(slot) = vitals.slot_0.as_mut() {
+            slot.vitals_data = Some(VitalsData::creature_first(mob.health, card.server_ms));
         }
         Some(vitals)
     } else {
@@ -884,9 +884,11 @@ mod tests {
             step,
             alert_started: false,
         };
+        const CARD_SERVER_MS: u64 = 845_730_278_206;
         let card = MobCard {
             alc: Some(frame(None)),
             health_changed: false,
+            server_ms: CARD_SERVER_MS,
             ..card_of(ENTITY, at(), state(HEALTH), None)
         };
         let first = mob_group(FIRST_REMOTE_INTEREST, &card, Some(&look), true)
@@ -898,6 +900,14 @@ mod tests {
         assert_eq!(gde.asset.map(|asset| asset.id), Some(SAILOR_ASSET));
         assert_eq!(first.members[1], gatherable);
         assert_eq!(first.members[2].component, VITALS_COMPONENT);
+        let MemberState::Vitals(vitals) = &first.members[2].state else {
+            panic!("the vitals third: {first:?}");
+        };
+        assert_eq!(
+            vitals.slot_0.and_then(|slot| slot.vitals_data),
+            Some(VitalsData::creature_first(HEALTH, CARD_SERVER_MS)),
+            "a live mob's first vitals carry the card time, as on retail"
+        );
         assert_eq!(
             first.members.last().map(|member| member.component),
             Some(MOB_ALC_COMPONENT)
