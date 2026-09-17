@@ -309,10 +309,23 @@ Times are ms from the first record of the retail tutorial capture.
   then the empty 6310 361 ms after the 502. The open world's first full achievement state holds
   the tutorial's 54 bits. Implemented: the handoff waits 361 ms and carries the set bits.
 
+- **Observed.** `MB::GatheringComponentReplicatedState` (81, own component 36) has slot 1 with
+  nine children: status u8, amtRemaining f32, gatherEfficiency f32, numGathering u8,
+  gatherRefCount u32, waterGatherRefCount (width **Unknown**: in no body), isGathering flag,
+  gatherableGDEID u64, syncGatherRefCount u32. The split fits 114 different bodies of the
+  tutorial and two open-world gathering captures, each ending where the next member or group
+  starts. A grouped mask byte comes after the data of the children of the one before it.
+- **Observed.** The chest gather: at the accept (237308-237342) own 26:3752 names the chest
+  facet and 36:81 runs the gather (status 1, 2.5 left, efficiency 1.0, no other gatherer,
+  counters 1, gatherable `00000000ffffffff`); at the end (239343) 36:81 says done (status 3, 0,
+  0, counters 2, the chest facet). Implemented with readers for 81 and 3752
+  (`MB::InteractorComponentReplicatedState`: slot 0 child 0 the target, slot 1 child 0
+  `m_enabled`; 1358 bodies). The counters of later gathers go on by one per state (Inferred).
+  Not sent: 54:100 (`replicatedHideLevel` of the name tag, 1 during the gather; not part of the
+  gather, and our player card has no component 54).
+
 ## 12. Not done
 
-- The own gather states of the chest (36:81, 54:100, 26:3752 at the accept; class 81 field
-  split **Unknown**).
 - Thorpe's force-grab spells, transition fragment and charge; the spawner static's changes.
 - The 250 to 280 ms wait before regen after a water dash (cause **Unknown**).
 - The general formula of the stamina a blocked hit takes.

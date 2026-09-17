@@ -140,6 +140,8 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::CombatStatus(_)
         | MemberState::DelayedEvent(_)
         | MemberState::LookTargeting(_)
+        | MemberState::Gathering(_)
+        | MemberState::Interactor(_)
         | MemberState::PlayerComponent(_)
         | MemberState::Appearance(_)
         | MemberState::Mana(_)

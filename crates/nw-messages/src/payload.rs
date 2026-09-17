@@ -23,7 +23,9 @@ use crate::containers::{
     CONTAINER_TYPE_INDEX, ContainerState, ITEM_MANAGEMENT_TYPE_INDEX, ItemManagementState,
 };
 use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
+use crate::gathering::{GATHERING_TYPE_INDEX, GatheringState};
 use crate::gde::{GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
+use crate::interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
 use crate::objectives::{OBJECTIVES_TYPE_INDEX, ObjectivesState};
 use crate::paperdoll::{PAPERDOLL_TYPE_INDEX, PaperdollState};
 use crate::player_components::{EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PlayerComponentState};
@@ -51,6 +53,10 @@ pub enum MemberState {
     DelayedEvent(DelayedEventState),
     /// `MB::LookTargetingComponentReplicatedState`.
     LookTargeting(LookTargetingState),
+    /// `MB::GatheringComponentReplicatedState`.
+    Gathering(GatheringState),
+    /// `MB::InteractorComponentReplicatedState`.
+    Interactor(InteractorState),
     /// `MB::PlayerComponentReplicatedState`.
     PlayerComponent(PlayerComponentState),
     /// `MB::PlayerAppearanceComponentReplicatedState`.
@@ -99,6 +105,8 @@ impl MemberState {
             Self::CombatStatus(_) => COMBAT_STATUS_TYPE_INDEX,
             Self::DelayedEvent(_) => DELAYED_EVENT_TYPE_INDEX,
             Self::LookTargeting(_) => LOOK_TARGETING_TYPE_INDEX,
+            Self::Gathering(_) => GATHERING_TYPE_INDEX,
+            Self::Interactor(_) => INTERACTOR_TYPE_INDEX,
             Self::PlayerComponent(_) => PLAYER_COMPONENT_TYPE_INDEX,
             Self::Appearance(_) => PLAYER_APPEARANCE_TYPE_INDEX,
             Self::Mana(_) => MANA_TYPE_INDEX,
@@ -152,6 +160,12 @@ impl MemberState {
             }
             TypeId::FileSlot(LOOK_TARGETING_TYPE_INDEX) => {
                 LookTargetingState::read(reader).map(Self::LookTargeting)
+            }
+            TypeId::FileSlot(GATHERING_TYPE_INDEX) => {
+                GatheringState::read(reader).map(Self::Gathering)
+            }
+            TypeId::FileSlot(INTERACTOR_TYPE_INDEX) => {
+                InteractorState::read(reader).map(Self::Interactor)
             }
             TypeId::FileSlot(PLAYER_COMPONENT_TYPE_INDEX) => {
                 PlayerComponentState::read(reader).map(Self::PlayerComponent)
@@ -219,6 +233,14 @@ impl MemberState {
                 Ok(())
             }
             Self::LookTargeting(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::Gathering(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::Interactor(state) => {
                 state.write(writer);
                 Ok(())
             }

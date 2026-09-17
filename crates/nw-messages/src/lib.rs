@@ -21,8 +21,10 @@ pub mod cooldowns;
 pub mod day_phase;
 pub mod entity_slots;
 pub mod facet;
+pub mod gathering;
 pub mod gde;
 pub mod gear;
+pub mod interactor;
 pub mod items;
 pub mod level_info;
 pub mod objectives;
@@ -95,11 +97,13 @@ pub use facet::{
     InteractionValidatedMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg, TargetMsg,
     TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg, facet_entity,
 };
+pub use gathering::{GATHERING_TYPE_INDEX, GatheringState, NO_GATHERABLE};
 pub use gde::{
     AssetId, DYNAMIC_SLICE_SUB_ID, GDE_ID_LEN, GDE_METADATA_COMPONENT, GDE_METADATA_TYPE_INDEX,
     GdeMetadataReplicatedState, PLAYER_SLICE_ASSET,
 };
 pub use gear::{EquippedItem, GearItem, PlayerGear, STARTER_BAG_SLOTS, is_visible_slot};
+pub use interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
 pub use items::{FullList, ItemRecord};
 pub use level_info::{
     LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, LEVELS, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg,

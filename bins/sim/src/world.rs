@@ -71,7 +71,10 @@ use mob_timeline::{MobPose, MobTimelines, animations_of};
 use quest_tracker::QuestTracker;
 use slots::Slots;
 use stamina::Stamina;
-use statics::{STATIC_ENTITY_BASE, StaticViews, bag_emptied, bag_loot, interactor_cleared};
+use statics::{
+    STATIC_ENTITY_BASE, StaticViews, bag_emptied, bag_loot, chest_gather_ended,
+    chest_gather_started, facet_of, interactor_target,
+};
 
 use attack::Vitals;
 
@@ -370,8 +373,11 @@ struct Player {
     combat: CombatTimer,
     /// The version of its replicated lists that this server sends besides the gear.
     list_version: u64,
-    /// Own-group members to append to the next bundle (the take's cleared interactor target).
+    /// Own-group members to append to the next bundle (the interactor target of a take, the
+    /// gather states of the chest).
     extra_members: Vec<BundleMember>,
+    /// Gathers this player made, for the counters of the gather state.
+    gathers: u32,
     /// The tutorial's static level entities it sees.
     statics: StaticViews,
     /// The tutorial's asset entities it sees.
@@ -1455,10 +1461,15 @@ impl SimWorld {
                     Order::AcceptGather(request) => {
                         let accept = gather_accept(number, request);
                         send_now(&mut self.combat_messages, &player.connection, &[accept]);
+                        let started = chest_gather_started(request.target_entity, player.gathers);
+                        player.extra_members.extend(started);
                     }
                     Order::EndGather(request) => {
                         let end = gather_end(number, request);
                         send_now(&mut self.combat_messages, &player.connection, &end);
+                        let ended = chest_gather_ended(request.target_entity, player.gathers);
+                        player.extra_members.push(ended);
+                        player.gathers = player.gathers.saturating_add(1);
                     }
                     Order::Targeted { mob, tutorial_ai } => {
                         let messages = targeted(number, mob, tutorial_ai);
@@ -1626,7 +1637,9 @@ impl SimWorld {
                     &BAG_PREFIX,
                     bag_emptied(items.len()),
                 );
-                player.extra_members.push(interactor_cleared(&BAG_PREFIX));
+                player
+                    .extra_members
+                    .push(interactor_target(facet_of(&BAG_PREFIX)));
                 let mut orders: Vec<Order> = items
                     .iter()
                     .map(|item| Order::GiveItem(item.item_id.clone(), 1))
@@ -1985,6 +1998,7 @@ impl SimWorld {
                     combat: CombatTimer::default(),
                     list_version: FIRST_VERSION,
                     extra_members: Vec::new(),
+                    gathers: 0,
                     statics: StaticViews::default(),
                     assets: AssetViews::default(),
                     frozen: false,
@@ -3161,6 +3175,74 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn the_chest_gather_sends_its_own_gather_states() {
+        const GATHER_LIMIT_MS: u64 = 3_000;
+        let mut tutorial_settings = settings(MANY, MAX_PLAYERS);
+        tutorial_settings.level = TUTORIAL_LEVEL;
+        let mut world = SimWorld::new(
+            tutorial_settings,
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("tut-1"),
+            encounter::tests::sailor_combat(),
+            Arc::new(PlayerContent {
+                kill_types: encounter::tests::kill_types(),
+                tutorial_quest: Some(encounter::tests::tree()),
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a"])).expect("table");
+        let who = connection(1);
+        let mut admit = admit_at(1, TUTORIAL_START.x, true);
+        admit.position = Point::from(nw_sim_core::TUTORIAL_START);
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let spawn_at = NOW + OWN_CARD_DELAY_MS;
+        tick(&mut world, spawn_at);
+        world.heard_from(&who);
+        let pressed_at = spawn_at + 33;
+        let mut target = [0; nw_messages::wire::RAW_ID_LEN];
+        target[..nw_content::ftue_entities::GDE_REF_PREFIX_LEN]
+            .copy_from_slice(&encounter::CHEST_PREFIX);
+        let request = InteractionRequest {
+            target,
+            target_entity: facet_of(&encounter::CHEST_PREFIX),
+            interaction: 7,
+            kind: 14,
+        };
+        world.interact(&who, request, pressed_at);
+        // The own states of the next tick (a card refresh also carries empty ones).
+        let own_states = |world: &mut SimWorld, now: u64| -> Vec<MemberState> {
+            let messages = tick(world, now).messages;
+            messages
+                .iter()
+                .filter(|out| out.connection == who && out.channel == REPLICATION_CHANNEL)
+                .flat_map(|out| &out.envelopes)
+                .flat_map(|bytes| groups_in(world, &who, &bundle_in(bytes)))
+                .filter(|(number, _)| *number == 1)
+                .flat_map(|(_, update)| update.members)
+                .map(|member| member.state)
+                .collect()
+        };
+        let gathering = |states: &[MemberState], running: bool| {
+            states.iter().any(|state| {
+                matches!(state, MemberState::Gathering(gather) if gather.is_gathering == Some(running))
+            })
+        };
+        let started = own_states(&mut world, pressed_at + 33);
+        assert!(
+            started.contains(&interactor_target(request.target_entity).state),
+            "the accept names the chest: {started:?}"
+        );
+        assert!(gathering(&started, true), "and runs the gather");
+        let ended = (2..GATHER_LIMIT_MS / 33)
+            .any(|step| gathering(&own_states(&mut world, pressed_at + 33 * step), false));
+        assert!(ended, "the end sends the done gather state");
+        let entity = world.by_connection[&who];
+        let player = world.world.get::<Player>(entity).expect("player");
+        assert_eq!(player.gathers, 1, "one gather made");
     }
 
     #[test]

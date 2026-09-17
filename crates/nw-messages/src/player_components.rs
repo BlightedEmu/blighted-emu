@@ -26,7 +26,9 @@ use crate::containers::{
     ItemManagementState,
 };
 use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
+use crate::gathering::{GATHERING_TYPE_INDEX, GatheringState};
 use crate::gear::PlayerGear;
+use crate::interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
 use crate::objectives::{OBJECTIVES_TYPE_INDEX, ObjectivesState};
 use crate::paperdoll::PAPERDOLL_TYPE_INDEX;
 use crate::payload::{BundleMember, MemberState};
@@ -77,7 +79,7 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 56] = [
     (22, 3857),
     (24, 3312),
     (25, 1292),
-    (26, 3752),
+    (26, INTERACTOR_TYPE_INDEX),
     (27, 129),
     (28, COMBAT_STATUS_TYPE_INDEX),
     (29, 6234),
@@ -86,7 +88,7 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 56] = [
     (33, 982),
     (34, 4913),
     (35, 3765),
-    (36, 81),
+    (36, GATHERING_TYPE_INDEX),
     (39, 5620),
     (PLAYER_VITALS_COMPONENT, VITALS_TYPE_INDEX),
     (PLAYER_STAMINA_COMPONENT, STAMINA_TYPE_INDEX),
@@ -273,6 +275,8 @@ pub fn empty_state(class: u64) -> MemberState {
         OBJECTIVES_TYPE_INDEX => MemberState::Objectives(ObjectivesState::default()),
         PROGRESSION_TYPE_INDEX => MemberState::Progression(ProgressionState::default()),
         COOLDOWNS_TYPE_INDEX => MemberState::Cooldowns(CooldownsState::default()),
+        GATHERING_TYPE_INDEX => MemberState::Gathering(GatheringState::default()),
+        INTERACTOR_TYPE_INDEX => MemberState::Interactor(InteractorState::default()),
         _ => MemberState::Empty(EmptyState { class }),
     }
 }
@@ -454,6 +458,8 @@ fn has_own_reader(class: u64) -> bool {
             | OBJECTIVES_TYPE_INDEX
             | PROGRESSION_TYPE_INDEX
             | COOLDOWNS_TYPE_INDEX
+            | GATHERING_TYPE_INDEX
+            | INTERACTOR_TYPE_INDEX
     )
 }
 

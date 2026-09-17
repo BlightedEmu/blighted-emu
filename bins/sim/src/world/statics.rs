@@ -15,7 +15,10 @@ use std::collections::{BTreeMap, VecDeque};
 use nw_content::ftue_entities::{EntityMember, FtueEntities, GDE_REF_PREFIX_LEN, SessionIds};
 use nw_content::starter::KitItem;
 use nw_messages::items::{FullList, ITEM_BOUND, ItemRecord, SYNC_CONTAINER, SYNC_MOVED};
-use nw_messages::{BundleGroup, BundleMember, ContainerState, MemberState};
+use nw_messages::{
+    BundleGroup, BundleMember, ContainerState, GatheringState, InteractorState, MemberState,
+    NO_GATHERABLE,
+};
 use uuid::Uuid;
 
 use super::gear::instance_id;
@@ -47,8 +50,15 @@ const INTERACT_TAKEN: &[u8] = &[0x01, 0x01, 0x00];
 /// send at the take (retail values, recorded).
 const DELAYED_EVENT_TYPE_INDEX: u64 = 3139;
 const BAG_EVENT_BODIES: [&[u8]; 2] = [&[0x01, 0x01, 0x3d, 0x00], &[0x01, 0x01, 0x2e, 0x66]];
-/// `MB::InteractorComponentReplicatedState` (class 3752): the take clears the target.
-const INTERACTOR_TYPE_INDEX: u64 = 3752;
+/// The player's component of its gather state (`MB::GatheringComponentReplicatedState`).
+const GATHERING_COMPONENT: u64 = 36;
+/// `m_status` of a running and of a done gather (retail chest 1 and 3).
+const GATHER_RUNNING: u8 = 1;
+const GATHER_DONE: u8 = 3;
+/// The chest's gather (retail 237342): 2.5 left, efficiency 1, no other gatherer.
+const CHEST_AMOUNT: f32 = 2.5;
+const CHEST_EFFICIENCY: f32 = 1.0;
+const CHEST_GATHERERS: u8 = 0;
 /// List version of the bag's filled and emptied containers (retail values).
 const BAG_FILLED_VERSION: u64 = 5;
 const BAG_EMPTIED_VERSION: u64 = 6;
@@ -251,17 +261,66 @@ pub(super) fn bag_emptied(item_count: usize) -> Vec<BundleMember> {
     .collect()
 }
 
-/// The own-group member of a take (retail): the player's interactor state with the bag's entity
-/// id — the target the client is to drop.
-pub(super) fn interactor_cleared(prefix: &[u8; GDE_REF_PREFIX_LEN]) -> BundleMember {
-    let mut body = vec![0x01, 0x01];
-    body.extend(u64::from_be_bytes(*prefix).to_le_bytes());
+/// The facet entity of the static entity whose `GdeRef` starts with `prefix`: the prefix in
+/// reverse byte order (retail: chest `efa5a09f81357058`, facet `587035819fa0a5ef`).
+pub(super) const fn facet_of(prefix: &[u8; GDE_REF_PREFIX_LEN]) -> u64 {
+    u64::from_le_bytes(*prefix)
+}
+
+/// The player's interactor state naming facet entity `facet` (retail: the bag at its take, the
+/// chest at its accept, 237308).
+pub(super) const fn interactor_target(facet: u64) -> BundleMember {
     BundleMember {
         component: INTERACTOR_COMPONENT,
-        state: MemberState::Recorded {
-            class: INTERACTOR_TYPE_INDEX,
-            body,
+        state: MemberState::Interactor(InteractorState {
+            target: Some(facet),
+            enabled: None,
+        }),
+    }
+}
+
+/// The counters of a gather grow by one with each of its two states (retail chest: 1 at the
+/// start, 2 at the end; open-world gathers count on over the session).
+const STATES_PER_GATHER: u32 = 2;
+
+/// The own members when gather number `gather` (0 for the first) of the chest with facet entity
+/// `facet` starts: the interactor target and the running gather (retail 237308 and 237342).
+pub(super) fn chest_gather_started(facet: u64, gather: u32) -> [BundleMember; 2] {
+    let count = gather.saturating_mul(STATES_PER_GATHER).saturating_add(1);
+    [
+        interactor_target(facet),
+        BundleMember {
+            component: GATHERING_COMPONENT,
+            state: MemberState::Gathering(GatheringState {
+                status: Some(GATHER_RUNNING),
+                amount_remaining: Some(CHEST_AMOUNT),
+                efficiency: Some(CHEST_EFFICIENCY),
+                gatherer_count: Some(CHEST_GATHERERS),
+                gather_ref_count: Some(count),
+                is_gathering: Some(true),
+                gatherable: Some(NO_GATHERABLE),
+                sync_ref_count: Some(count),
+            }),
         },
+    ]
+}
+
+/// The own member when gather number `gather` of the chest with facet entity `facet` ends
+/// (retail 239343, with the 3746).
+pub(super) fn chest_gather_ended(facet: u64, gather: u32) -> BundleMember {
+    let count = gather.saturating_add(1).saturating_mul(STATES_PER_GATHER);
+    BundleMember {
+        component: GATHERING_COMPONENT,
+        state: MemberState::Gathering(GatheringState {
+            status: Some(GATHER_DONE),
+            amount_remaining: Some(0.0),
+            efficiency: Some(0.0),
+            gatherer_count: None,
+            gather_ref_count: Some(count),
+            is_gathering: Some(false),
+            gatherable: Some(facet),
+            sync_ref_count: Some(count),
+        }),
     }
 }
 
@@ -520,21 +579,76 @@ mod tests {
         assert_eq!(read, *state);
     }
 
+    /// The retail chest's facet entity (tutorial capture).
+    const CHEST_FACET: u64 = 0x5870_3581_9fa0_a5ef;
+
     #[test]
-    fn the_take_clears_the_players_interactor_target() {
-        let member = interactor_cleared(&BAG_PREFIX);
-        assert_eq!(member.component, 26);
-        let MemberState::Recorded { class, body } = &member.state else {
-            panic!("recorded");
-        };
-        assert_eq!(*class, INTERACTOR_TYPE_INDEX);
-        // Retail: `01 01` and the bag's entity id, the prefix as a big-endian number.
+    fn a_facet_is_the_prefix_in_reverse() {
         assert_eq!(
-            body[..],
-            [0x01, 0x01]
-                .into_iter()
-                .chain(u64::from_be_bytes(BAG_PREFIX).to_le_bytes())
-                .collect::<Vec<_>>()
+            facet_of(&super::super::encounter::CHEST_PREFIX),
+            CHEST_FACET
+        );
+    }
+
+    #[test]
+    fn the_first_chest_gather_sends_the_retail_states() {
+        let [target, running] = chest_gather_started(CHEST_FACET, 0);
+        // Retail 237308: 26:3752 `01 01 <chest facet>`.
+        const TARGET: [u8; 10] = [0x01, 0x01, 0x58, 0x70, 0x35, 0x81, 0x9f, 0xa0, 0xa5, 0xef];
+        assert_eq!(target.component, INTERACTOR_COMPONENT);
+        assert_eq!(
+            target.state,
+            MemberState::decode(nw_messages::INTERACTOR_TYPE_INDEX, &TARGET).expect("retail")
+        );
+        // Retail 237342: 36:81, the whole running gather.
+        const RUNNING: [u8; 30] = [
+            0x02, 0xdf, 0x01, 0x40, 0x20, 0, 0, 0x3f, 0x80, 0, 0, 0, 0, 0, 0, 0x01, 0x01, 0x03, 0,
+            0, 0, 0, 0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0x01,
+        ];
+        assert_eq!(running.component, GATHERING_COMPONENT);
+        assert_eq!(
+            running.state,
+            MemberState::decode(nw_messages::GATHERING_TYPE_INDEX, &RUNNING).expect("retail")
+        );
+        // Retail 239343: 36:81, the end naming the chest.
+        const ENDED: [u8; 29] = [
+            0x02, 0xd7, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02, 0x00, 0x03, 0x58, 0x70, 0x35,
+            0x81, 0x9f, 0xa0, 0xa5, 0xef, 0, 0, 0, 0x02,
+        ];
+        let ended = chest_gather_ended(CHEST_FACET, 0);
+        assert_eq!(ended.component, GATHERING_COMPONENT);
+        assert_eq!(
+            ended.state,
+            MemberState::decode(nw_messages::GATHERING_TYPE_INDEX, &ENDED).expect("retail")
+        );
+    }
+
+    #[test]
+    fn a_later_gather_counts_on() {
+        let counts = |member: &BundleMember| match member.state {
+            MemberState::Gathering(state) => (state.gather_ref_count, state.sync_ref_count),
+            _ => panic!("gathering"),
+        };
+        let [_, running] = chest_gather_started(CHEST_FACET, 1);
+        assert_eq!(counts(&running), (Some(3), Some(3)));
+        assert_eq!(
+            counts(&chest_gather_ended(CHEST_FACET, 1)),
+            (Some(4), Some(4))
+        );
+    }
+
+    #[test]
+    fn the_take_names_the_players_interactor_target() {
+        let member = interactor_target(facet_of(&BAG_PREFIX));
+        assert_eq!(member.component, 26);
+        // Retail: `01 01` and the bag's entity id, the prefix in reverse order.
+        let body: Vec<u8> = [0x01, 0x01]
+            .into_iter()
+            .chain(BAG_PREFIX.iter().rev().copied())
+            .collect();
+        assert_eq!(
+            member.state,
+            MemberState::decode(nw_messages::INTERACTOR_TYPE_INDEX, &body).expect("retail")
         );
     }
 
