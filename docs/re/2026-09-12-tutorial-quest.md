@@ -291,9 +291,24 @@ Times are ms from the first record of the retail tutorial capture.
   in-combat flag 1 with the first hit. When every hit of the step killed, concluded = hit + 1 s;
   at the concluded time the flag 0 comes alone. A mob's hit on the player (3601) changes nothing.
   Implemented. **Unknown:** what set the flag at Thorpe's start (455733, no player hit).
-- **Unknown.** The client decides lock-on itself from slice data (the target lock component
-  checks dead and deaths door through the vitals component). The three states above are the
-  retail differences we found; whether one of them was the missing piece is not tested live.
+- **Observed** (full decompile, `local-data/re-sweep`). The client lock test of
+  `Javelin::CameraLockTargetComponent` (`FUN_142c95b40`; the same checks inline in
+  `FUN_142c932a0`) refuses a target when one of these is true:
+  1. the target's flag `m_isNotTargetableWhenDead` (+0x168) is set and its vitals handler
+     (+0x260) answers true at vtable slot +0xc0;
+  2. `m_isNotTargetableWhenDeathsDoor` (+0x169) is set and the same handler answers true at
+     slot +0xc8;
+  3. an entity-addressed bus call on the target with the value 26 answers true
+     (`FUN_142c95760`; other callers pass 11 and 29; the bus and the meaning of 26 are
+     **Unknown**).
+  The lock and switch code also needs the target entity state 4 (`FUN_141720bf0`). The +0x260
+  handler is the first handler on the target entity's vitals bus (`FUN_142c98010`, slot set at
+  activation from `m_vitalsCompReqId`). The sailor slice sets both flags to 1 (ship-mobs note).
+- **Inferred.** The only server inputs to the test are the creature's vitals state (dead and
+  deaths door) and the unnamed state 26. The vitals path now matches retail (`vitalsData`,
+  health above 0). Slots +0xc0/+0xc8 are dead / deaths door by the flag names; the exact field
+  each slot reads is **Unknown** (the vitals handler vtable has no RTTI symbol).
+- **Unknown.** Whether the three states above fix lock-on; only a live test can tell.
 - **Observed** (ship-mobs note). Retail sailors started swings at 0.89-1.81 m, ran only to close
   gaps of 4-12 m, walked or stood nearer, wandered at 0.6 m/s, and stood about 2.0 s after the
   alert. Each tutorial kind now has a gait (swing start, run distance, walk and wander speed)
