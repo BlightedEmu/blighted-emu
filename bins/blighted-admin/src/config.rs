@@ -236,13 +236,13 @@ mod tests {
             studio.control_fifo,
             Path::new("local-data/logs/live/control")
         );
-        assert_eq!(studio.restart_timeout_s, 120);
+        assert_eq!(studio.restart_timeout_s, 600);
     }
 
     #[test]
     fn a_zero_restart_timeout_is_refused() {
         assert!(matches!(
-            load_changed("restart_timeout_s = 120", "restart_timeout_s = 0"),
+            load_changed("restart_timeout_s = 600", "restart_timeout_s = 0"),
             Err(AdminConfigError::Invalid {
                 key: "studio.restart_timeout_s",
                 ..

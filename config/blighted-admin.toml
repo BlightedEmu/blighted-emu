@@ -51,8 +51,9 @@ max_bots = 10000
 [studio]
 # The team's design files, the retail files they are merged over (`just bundle`, `just world`),
 # and the control FIFO that `just live` (scripts/live-stack.sh) reads. Apply writes the merged
-# files into content_dir, then restarts the sims and waits for them.
+# files into content_dir, then restarts the sims and waits for them. Each sim reads the world
+# files at start; from a spinning disk with a cold cache that takes several minutes.
 design_dir = "content"
 retail_dir = "local-data/content/retail"
 control_fifo = "local-data/logs/live/control"
-restart_timeout_s = 120
+restart_timeout_s = 600
