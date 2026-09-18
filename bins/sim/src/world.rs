@@ -29,11 +29,11 @@ use nw_messages::items::{FIRST_VERSION, FullList};
 use nw_messages::paperdoll::slot::QUICK_SLOT_1;
 use nw_messages::{
     BundleGroup, BundleMember, ClientFacetMsg, ConsumableCooldown, CooldownsState,
-    DisableCollisionMsg, GatheringInterruptedMsg, InteractionEndedMsg, InteractionRequest,
-    InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec, MeleeHitMsg,
-    MessageError, PlayerLook, PlayerSeenByAiMsg, PlayerStates, ProgressionState,
-    SelectedAsTargetMsg, ServerMessage, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg,
-    UnselectedAsTargetMsg, WorldPosition, facet_entity,
+    DisableCollisionMsg, GatheringInterruptedMsg, HealthChange, InteractionEndedMsg,
+    InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg,
+    LevelSpec, MeleeHitMsg, MessageError, PlayerLook, PlayerSeenByAiMsg, PlayerStates,
+    ProgressionState, SelectedAsTargetMsg, ServerMessage, TUTORIAL_LEVEL, TargetMsg, TeleportStep,
+    TimeSynchMsg, UnselectedAsTargetMsg, WorldPosition, facet_entity,
 };
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
@@ -395,8 +395,8 @@ struct Player {
     /// Its running consumable cooldowns, and whether they changed since the last bundle.
     cooldowns: Vec<ConsumableCooldown>,
     cooldowns_changed: bool,
-    /// Its new health after a heal, for the next bundle.
-    healed_to: Option<u32>,
+    /// The health its client last got (a card or a vitals change).
+    health_sent: Option<u32>,
     /// Its stamina.
     stamina: Stamina,
     /// Its combat status timer.
@@ -2178,7 +2178,7 @@ impl SimWorld {
                     experience_changed: false,
                     cooldowns: Vec::new(),
                     cooldowns_changed: false,
-                    healed_to: None,
+                    health_sent: None,
                     stamina: Stamina::default(),
                     combat: CombatTimer::default(),
                     list_version: FIRST_VERSION,
@@ -2502,7 +2502,17 @@ impl Neighbourhood<'_> {
                         }),
                     }
                 });
-                let health_change = player.healed_to.take();
+                // The health goes with each card; between cards, a change of it goes as its own
+                // vitals change (retail: 40 to 110 ms after each damaging 3601, flags 3 on the
+                // first damage from full health).
+                let health = vitals.health.current();
+                let health_change = (own_card == OwnCard::Without
+                    && player.health_sent != Some(health))
+                .then(|| HealthChange {
+                    health,
+                    first_damage: player.health_sent == Some(vitals.health.max()),
+                });
+                player.health_sent = Some(health);
                 let stamina = player.stamina.take_change();
                 player.combat.tick(self.now_ms);
                 let combat_status = player.combat.take_change(self.now_ms, self.server_time);
@@ -3263,6 +3273,66 @@ mod tests {
             own_groups(&mut world, card_at + 33 * (CARD_REFRESH_BUNDLES + 1)),
             vec![false],
             "the position every tick after the spawn"
+        );
+    }
+
+    #[test]
+    fn a_hit_on_the_player_sends_its_new_health_with_the_next_own_state() {
+        const HIT: u32 = 10;
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        world
+            .admit(&admit_at(1, CELL_M / 2.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let entity = world.player_by_number(1).expect("player");
+        world
+            .world
+            .get_mut::<Vitals>(entity)
+            .expect("vitals")
+            .spawned = true;
+        let card_at = NOW + OWN_CARD_DELAY_MS;
+        tick(&mut world, card_at);
+        let health_changes = |world: &mut SimWorld, now: u64| {
+            let messages = tick(world, now).messages;
+            bundle_of(&messages, &connection(1))
+                .map(|bundle| SlotRead::of(&bundle).expect("read").updates)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(SlotUpdate::is_local_player)
+                .flat_map(|update| update.members)
+                .filter_map(|member| match member.state {
+                    MemberState::Vitals(vitals) => vitals
+                        .slot_0
+                        .map(|slot| (slot.health_amount, slot.health_change_flags)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            health_changes(&mut world, card_at + 33).is_empty(),
+            "no change"
+        );
+        let max = world
+            .world
+            .get::<Vitals>(entity)
+            .expect("vitals")
+            .health
+            .max();
+        world.apply_hit(1, crate::mobs::mob_entity(0), HIT, 0, card_at + 34);
+        let left = attack::amount_of(max - HIT);
+        assert_eq!(
+            health_changes(&mut world, card_at + 66),
+            vec![(Some(left), Some(nw_messages::FIRST_DAMAGE_FLAGS))],
+            "the first damage from full health"
+        );
+        world.apply_hit(1, crate::mobs::mob_entity(0), HIT, 0, card_at + 67);
+        assert_eq!(
+            health_changes(&mut world, card_at + 99),
+            vec![(Some(attack::amount_of(max - 2 * HIT)), None)]
+        );
+        assert!(
+            health_changes(&mut world, card_at + 132).is_empty(),
+            "sent once"
         );
     }
 

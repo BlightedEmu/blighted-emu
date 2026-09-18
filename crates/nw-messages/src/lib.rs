@@ -119,8 +119,9 @@ pub use paperdoll::{
 };
 pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, MemberState};
 pub use player_components::{
-    EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS, PLAYER_VITALS_COMPONENT,
-    PlayerComponentState, PlayerStates, change_members, empty_state, gear_members, player_members,
+    EmptyState, HealthChange, PLAYER_COMPONENT_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS,
+    PLAYER_VITALS_COMPONENT, PlayerComponentState, PlayerStates, change_members, empty_state,
+    gear_members, player_members,
 };
 pub use position::{
     POSITION_IN_THE_WORLD_TYPE_INDEX, POSITION_Z_MAX, POSITION_Z_MIN,

@@ -580,9 +580,6 @@ impl SimWorld {
         let amount = (heal.health + heal.health_share * max).round() as u32;
         let healed = vitals.health.heal(amount);
         tracing::debug!(player = number, item, amount, healed, "drink");
-        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            player.healed_to = Some(healed);
-        }
         self.send_reliable(
             connection,
             &ServerMessage::AdjustFxScripts(AdjustFxScriptsMsg::on(number, HEAL_SCRIPT)),

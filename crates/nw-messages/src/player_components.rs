@@ -298,14 +298,23 @@ pub struct PlayerStates<'a> {
     pub objectives: Option<&'a ObjectivesState>,
     /// The level and experience, when known.
     pub progression: Option<ProgressionState>,
-    /// The new health after a change (a heal), when there is one.
-    pub health_change: Option<u32>,
+    /// The new health after it changed (a hit or a heal), when it did.
+    pub health_change: Option<HealthChange>,
     /// The consumable cooldowns after a change, when there is one.
     pub cooldowns: Option<&'a CooldownsState>,
     /// The stamina children that changed, when some did.
     pub stamina: Option<StaminaState>,
     /// The combat status children that changed, when some did.
     pub combat_status: Option<CombatStatusState>,
+}
+
+/// A change of a player's health.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HealthChange {
+    /// The new health.
+    pub health: u32,
+    /// It is the first damage from full health (retail `healthChangeFlags` 3).
+    pub first_damage: bool,
 }
 
 /// The members of every player component in [`PLAYER_EMPTY_COMPONENTS`] for `states`: a connected
@@ -342,10 +351,15 @@ pub fn change_members(states: PlayerStates<'_>) -> Vec<BundleMember> {
             _ => false,
         })
         .collect();
-    if let Some(health) = states.health_change {
+    if let Some(change) = states.health_change {
+        let vitals = if change.first_damage {
+            VitalsState::creature_first_damage(change.health)
+        } else {
+            VitalsState::creature_health(change.health)
+        };
         members.push(BundleMember {
             component: PLAYER_VITALS_COMPONENT,
-            state: MemberState::Vitals(VitalsState::creature_health(health)),
+            state: MemberState::Vitals(vitals),
         });
     }
     if let Some(stamina) = states.stamina {
@@ -591,7 +605,10 @@ mod tests {
             achievements: None,
             objectives: Some(&objectives),
             progression: Some(ProgressionState::experience(20)),
-            health_change: Some(HEALED),
+            health_change: Some(HealthChange {
+                health: HEALED,
+                first_damage: false,
+            }),
             cooldowns: None,
             stamina: Some(spend),
             combat_status: None,
