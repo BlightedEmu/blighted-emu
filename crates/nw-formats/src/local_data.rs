@@ -44,8 +44,6 @@ pub const PINNED_CAPITAL_METADATA_FILES: usize = 900;
 pub const PINNED_FULL_HEIGHTMAPS: usize = 98;
 /// `region.heightmap` files of 1024 x 1024 samples (the two FTUE levels).
 pub const PINNED_SMALL_HEIGHTMAPS: usize = 2;
-/// Edge length of the small heightmaps.
-pub const PINNED_SMALL_HEIGHTMAP_SIZE: u32 = 1024;
 /// Level folders with a `tracts.json`.
 pub const PINNED_LEVELS: usize = 41;
 /// Folder name of the open world level.

@@ -1,22 +1,40 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Ground height from region heightmaps (M1b spec section 5).
 
-use nw_formats::heightmap::HEIGHTMAP_SIZE;
-
-use crate::records::WorldFile;
+use crate::records::{HeightGrid, WorldFile};
 
 /// Raw heightmap units per metre where `mountainHeight` is [`TERRAIN_MOUNTAIN_HEIGHT`].
 pub const HEIGHT_UNITS_PER_METRE: f64 = 32.0;
-/// `terrain.json` `mountainHeight` of the levels whose height scale is verified.
+/// `terrain.json` `mountainHeight` of the open world, whose height scale is verified.
 pub const TERRAIN_MOUNTAIN_HEIGHT: f32 = 2048.0;
-/// Index of the last sample in a heightmap row or column.
-const LAST_SAMPLE: f64 = (HEIGHTMAP_SIZE - 1) as f64;
+/// `mountainHeight` of the FTUE levels. Observed: their raw samples / 64 put the retail tutorial
+/// creatures' spawn heights 0.5 to 1.1 m above the ground (risen, swarmers, legionnaire 2), so a
+/// full raw range spans 1024 m.
+pub const FTUE_MOUNTAIN_HEIGHT: f32 = 1024.0;
+/// The `mountainHeight` values whose height scale is verified.
+pub const VERIFIED_MOUNTAIN_HEIGHTS: [f32; 2] = [FTUE_MOUNTAIN_HEIGHT, TERRAIN_MOUNTAIN_HEIGHT];
+
+/// A raw sample of a level with `mountainHeight` `mountain_height` (one of
+/// [`VERIFIED_MOUNTAIN_HEIGHTS`]) at [`HEIGHT_UNITS_PER_METRE`]: raw samples span
+/// `mountain_height` metres.
+pub fn rescaled_sample(raw: u16, mountain_height: f32) -> u16 {
+    (f32::from(raw) * mountain_height / TERRAIN_MOUNTAIN_HEIGHT).round() as u16
+}
+
+impl HeightGrid {
+    /// Rows and columns of the square grid; `None` when the sample count is not a square.
+    pub fn edge(&self) -> Option<usize> {
+        let edge = self.samples.len().isqrt();
+        (edge > 0 && edge * edge == self.samples.len()).then_some(edge)
+    }
+}
 
 impl WorldFile {
-    /// Ground height in metres at world position (`x`, `y`). Column = local x, row =
-    /// 2047 - local y, bilinear blend of the 4 samples around the point, clamped inside the
-    /// region. `None` when the level has no terrain, when `x` or `y` is not finite, or when the
-    /// point is outside every region with a height grid.
+    /// Ground height in metres at world position (`x`, `y`). With `n` samples a side over the
+    /// region's metres, column = local x x n / size, row = n - 1 - local y x n / size; bilinear
+    /// blend of the 4 samples around the point, clamped inside the region. `None` when the level
+    /// has no terrain, when `x` or `y` is not finite, or when the point is outside every region
+    /// with a square height grid.
     pub fn height_at(&self, x: f32, y: f32) -> Option<f32> {
         if !self.level.has_terrain || !x.is_finite() || !y.is_finite() {
             return None;
@@ -34,14 +52,17 @@ impl WorldFile {
             .find(|region| region.x == index_x && region.y == index_y)?
             .heights
             .as_ref()?;
-        let column = (x - region_x * size).clamp(0.0, LAST_SAMPLE);
-        let row = (LAST_SAMPLE - (y - region_y * size)).clamp(0.0, LAST_SAMPLE);
-        let column0 = column.floor().min(LAST_SAMPLE - 1.0);
-        let row0 = row.floor().min(LAST_SAMPLE - 1.0);
+        let edge = grid.edge()?;
+        let last_sample = (edge - 1) as f64;
+        let samples_per_metre = edge as f64 / size;
+        let column = ((x - region_x * size) * samples_per_metre).clamp(0.0, last_sample);
+        let row = (last_sample - (y - region_y * size) * samples_per_metre).clamp(0.0, last_sample);
+        let column0 = column.floor().min(last_sample - 1.0);
+        let row0 = row.floor().min(last_sample - 1.0);
         let (column_weight, row_weight) = (column - column0, row - row0);
         let sample = |column: f64, row: f64| {
             grid.samples
-                .get(row as usize * HEIGHTMAP_SIZE + column as usize)
+                .get(row as usize * edge + column as usize)
                 .map(|&raw| f64::from(raw))
         };
         let blended = sample(column0, row0)? * (1.0 - column_weight) * (1.0 - row_weight)
@@ -55,7 +76,11 @@ impl WorldFile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::records::{HeightGrid, LevelInfo, Region};
+    use crate::records::{LevelInfo, Region};
+    use nw_formats::heightmap::{HEIGHTMAP_SIZE, SMALL_HEIGHTMAP_SIZE};
+
+    /// Index of the last sample in a row or column of the open-world grid.
+    const LAST_SAMPLE: f64 = (HEIGHTMAP_SIZE - 1) as f64;
 
     const REGION_SIZE: f32 = HEIGHTMAP_SIZE as f32;
     /// The test grid is region (1, 0): x from 2048 to 4096, y from 0 to 2048.
@@ -148,6 +173,46 @@ mod tests {
             samples: vec![0; 2],
         };
         assert_eq!(world(Some(grid), true).height_at(ORIGIN_X, 0.0), None);
+    }
+
+    #[test]
+    fn samples_rescale_to_the_open_world_scale() {
+        const RAW: u16 = 1274;
+        assert_eq!(rescaled_sample(RAW, TERRAIN_MOUNTAIN_HEIGHT), RAW);
+        // FTUE raw 1274 / 64 = 19.9 m, stored as 637 at 32 units per metre.
+        assert_eq!(rescaled_sample(RAW, FTUE_MOUNTAIN_HEIGHT), RAW / 2);
+    }
+
+    #[test]
+    fn a_small_grid_covers_its_own_region_size() {
+        let edge = SMALL_HEIGHTMAP_SIZE;
+        let grid = HeightGrid {
+            samples: (0..edge * edge)
+                .map(|index| (index / edge + index % edge) as u16)
+                .collect(),
+        };
+        let world = WorldFile {
+            level: LevelInfo {
+                region_size: edge as u32,
+                grid_width: 1,
+                grid_height: 1,
+                has_terrain: true,
+                ..LevelInfo::default()
+            },
+            regions: vec![Region {
+                x: 0,
+                y: 0,
+                heights: Some(grid),
+            }],
+            ..WorldFile::default()
+        };
+        let last = (edge - 1) as f64;
+        // Column 10.5, row last - 100.25.
+        assert_eq!(
+            world.height_at(10.5, 100.25),
+            Some(metres(10.5 + last - 100.25))
+        );
+        assert_eq!(world.height_at(edge as f32 + 1.0, 0.0), None);
     }
 
     #[test]

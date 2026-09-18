@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use nw_content::ids::{gatherable_ids, lore_ids, npc_ids, vitals_ids};
 use nw_content::{ContainerError, ContentBundle};
 use nw_formats::azcs::{AzcsError, decode_azcs, is_azcs};
-use nw_formats::heightmap::{HEIGHTMAP_SIZE, HeightmapError, parse_heightmap};
+use nw_formats::heightmap::{HeightmapError, parse_heightmap};
 use nw_formats::objectstream::{ObjectStreamError, lowercase_crc32, parse_object_stream};
 use nw_world::capitals::parse_capitals;
-use nw_world::height::TERRAIN_MOUNTAIN_HEIGHT;
+use nw_world::height::{VERIFIED_MOUNTAIN_HEIGHTS, rescaled_sample};
 use nw_world::metadata::{MetadataError, MetadataRecords, SkipCounts, read_metadata};
 use nw_world::records::{HeightGrid, LevelInfo, RecordCounts, Region, WorldFile};
 use nw_world::world_file::world_file_path;
@@ -306,13 +306,7 @@ pub fn build_level(
 ) -> Result<(WorldFile, SkipCounts), WorldBuildError> {
     let tracts: Tracts = parse_json(level, files, TRACTS_FILE)?;
     let terrain: Terrain = parse_json(level, files, TERRAIN_FILE)?;
-    let has_terrain = terrain.mountain_height == TERRAIN_MOUNTAIN_HEIGHT;
-    if has_terrain && tracts.region_size as usize != HEIGHTMAP_SIZE {
-        return Err(WorldBuildError::RegionSize {
-            level: level.to_owned(),
-            size: tracts.region_size,
-        });
-    }
+    let has_terrain = VERIFIED_MOUNTAIN_HEIGHTS.contains(&terrain.mountain_height);
     let mut regions = Vec::new();
     for (path, bytes) in files {
         let Some(folder) = path
@@ -331,9 +325,18 @@ pub fn build_level(
                 path: entry_path(level, path),
                 source,
             })?;
-            Some(HeightGrid {
-                samples: map.samples,
-            })
+            if map.size != tracts.region_size as usize {
+                return Err(WorldBuildError::RegionSize {
+                    level: level.to_owned(),
+                    size: tracts.region_size,
+                });
+            }
+            let samples = map
+                .samples
+                .into_iter()
+                .map(|raw| rescaled_sample(raw, terrain.mountain_height))
+                .collect();
+            Some(HeightGrid { samples })
         } else {
             None
         };
@@ -532,7 +535,9 @@ fn entry_path(level: &str, relative: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use nw_formats::heightmap::{Heightmap, encode_heightmap};
+    use nw_formats::heightmap::{
+        HEIGHTMAP_SIZE, Heightmap, SMALL_HEIGHTMAP_SIZE, encode_heightmap,
+    };
     use nw_formats::objectstream::{Element, write_object_stream};
     use nw_world::height::HEIGHT_UNITS_PER_METRE;
     use nw_world::metadata::*;
@@ -544,6 +549,8 @@ mod tests {
     const SMALL_TRACTS: &[u8] = br#"{"regionSize": 1024}"#;
     const TERRAIN: &[u8] = br#"{"oceanLevel": 40.0, "mountainHeight": 2048.0}"#;
     const FLAT_TERRAIN: &[u8] = br#"{"oceanLevel": -1000.0, "mountainHeight": 256.0}"#;
+    /// The FTUE levels' terrain: raw samples span 1024 m.
+    const FTUE_TERRAIN: &[u8] = br#"{"oceanLevel": 2.0, "mountainHeight": 1024.0}"#;
     const CAPITALS: &[u8] = br#"{"Capitals": [{"id": "a",
         "worldPosition": {"x": 2050, "y": 10, "z": 3}, "rotation": {"x": 0, "y": 0, "z": 0, "w": 1},
         "sliceName": "<PLOT>", "sliceAssetId": "b"}]}"#;
@@ -587,11 +594,16 @@ mod tests {
         write_object_stream(&root).unwrap()
     }
 
-    fn flat_heightmap() -> Vec<u8> {
+    fn flat_heightmap_of(size: usize) -> Vec<u8> {
         encode_heightmap(&Heightmap {
-            samples: vec![RAW_HEIGHT; HEIGHTMAP_SIZE * HEIGHTMAP_SIZE],
+            size,
+            samples: vec![RAW_HEIGHT; size * size],
         })
         .unwrap()
+    }
+
+    fn flat_heightmap() -> Vec<u8> {
+        flat_heightmap_of(HEIGHTMAP_SIZE)
     }
 
     fn level_files(entries: &[(&str, Vec<u8>)]) -> LevelFiles {
@@ -725,6 +737,23 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn an_ftue_level_keeps_its_small_terrain_at_the_open_world_scale() {
+        let files = level_files(&[
+            (TRACTS_FILE, SMALL_TRACTS.to_vec()),
+            (TERRAIN_FILE, FTUE_TERRAIN.to_vec()),
+            (
+                "regions/r_+00_+00/region.heightmap",
+                flat_heightmap_of(SMALL_HEIGHTMAP_SIZE),
+            ),
+        ]);
+        let (world, _) = build_level(LEVEL, &files).unwrap();
+        assert!(world.level.has_terrain);
+        assert_eq!(world.level.region_size, SMALL_REGION_SIZE);
+        // Raw 64 spans 1024 m over the full raw range: 1 m.
+        assert_eq!(world.height_at(500.0, 500.0), Some(1.0));
     }
 
     #[test]

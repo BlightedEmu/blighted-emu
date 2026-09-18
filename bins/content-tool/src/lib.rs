@@ -20,7 +20,7 @@ mod local_data_tests {
     use std::path::{Path, PathBuf};
 
     use nw_formats::azcs::{decode_azcs, is_azcs};
-    use nw_formats::heightmap::{HeightmapError, parse_heightmap};
+    use nw_formats::heightmap::{HEIGHTMAP_SIZE, SMALL_HEIGHTMAP_SIZE, parse_heightmap};
     use nw_formats::local_data::*;
     use nw_formats::objectstream::parse_object_stream;
     use nw_world::WorldFile;
@@ -193,21 +193,17 @@ mod local_data_tests {
     }
 
     #[test]
-    fn heightmaps_parse_except_the_two_small_ones() {
+    fn every_heightmap_parses_in_one_of_two_sizes() {
         let source = GameSource::open(&game_dir()).unwrap();
         let (mut full, mut small) = (0, 0);
         source
             .for_each_entry(
                 |path| path.starts_with(LEVELS_PREFIX) && path.ends_with(HEIGHTMAP_SUFFIX),
                 |path, bytes| {
-                    match parse_heightmap(&bytes) {
-                        Ok(_) => full += 1,
-                        Err(HeightmapError::UnsupportedSize { width, height })
-                            if width == PINNED_SMALL_HEIGHTMAP_SIZE
-                                && height == PINNED_SMALL_HEIGHTMAP_SIZE =>
-                        {
-                            small += 1;
-                        }
+                    match parse_heightmap(&bytes).map(|map| map.size) {
+                        Ok(HEIGHTMAP_SIZE) => full += 1,
+                        Ok(SMALL_HEIGHTMAP_SIZE) => small += 1,
+                        Ok(size) => panic!("{path}: size {size}"),
                         Err(error) => panic!("{path}: {error}"),
                     }
                     Ok::<(), SourceError>(())

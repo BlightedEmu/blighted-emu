@@ -60,7 +60,8 @@ pub struct Region {
 /// Raw heightmap samples of one region.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HeightGrid {
-    /// 2048 rows of 2048 raw samples, row 0 = north edge. Stored as little-endian bytes.
+    /// A square of raw samples (2048 a side in the open world, 1024 in the FTUE levels), row 0 =
+    /// north edge, at [`crate::height::HEIGHT_UNITS_PER_METRE`]. Stored as little-endian bytes.
     #[serde(with = "le_u16_bytes")]
     pub samples: Vec<u16>,
 }
