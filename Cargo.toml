@@ -53,6 +53,7 @@ syn = { version = "3.0.9", default-features = false, features = ["full", "parsin
 tempfile = { version = "3.27.0", default-features = false }
 thiserror = { version = "2.0.21", default-features = false, features = ["std"] }
 tokio = { version = "1.53.2", default-features = false }
+toml = { version = "0.8.23", default-features = false, features = ["parse", "display"] }
 tower = { version = "0.5.3", default-features = false, features = ["util"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "ansi", "env-filter", "std"] }
@@ -66,6 +67,7 @@ nw-carrier = { path = "crates/nw-carrier", version = "0.1.0" }
 nw-common = { path = "crates/nw-common", version = "0.1.0" }
 nw-content = { path = "crates/nw-content", version = "0.1.0" }
 nw-db = { path = "crates/nw-db", version = "0.1.0" }
+nw-design = { path = "crates/nw-design", version = "0.1.0" }
 nw-dtls = { path = "crates/nw-dtls", version = "0.1.0" }
 nw-formats = { path = "crates/nw-formats", version = "0.1.0" }
 nw-login = { path = "crates/nw-login", version = "0.1.0" }

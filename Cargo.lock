@@ -3019,6 +3019,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "nw-design"
+version = "0.1.0"
+dependencies = [
+ "nw-content",
+ "nw-formats",
+ "nw-world",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "toml",
+]
+
+[[package]]
 name = "nw-dtls"
 version = "0.1.0"
 dependencies = [

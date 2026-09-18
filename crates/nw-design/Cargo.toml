@@ -1,0 +1,23 @@
+[package]
+name = "nw-design"
+version = "0.1.0"
+description = "Design files of the Blighted Emu team (content/): loading, checks, and the merge over the client data."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nw-content.workspace = true
+nw-formats.workspace = true
+nw-world.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
