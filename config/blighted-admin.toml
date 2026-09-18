@@ -47,3 +47,12 @@ bot_character_prefix = "Adminbot"
 # local test runs); the live page marks players with these names, and the one above, as bots.
 other_bot_prefixes = ["Swarm", "Mobsb"]
 max_bots = 10000
+
+[studio]
+# The team's design files, the retail files they are merged over (`just bundle`, `just world`),
+# and the control FIFO that `just live` (scripts/live-stack.sh) reads. Apply writes the merged
+# files into content_dir, then restarts the sims and waits for them.
+design_dir = "content"
+retail_dir = "local-data/content/retail"
+control_fifo = "local-data/logs/live/control"
+restart_timeout_s = 120

@@ -21,6 +21,8 @@ use crate::live::Live;
 use crate::live::bots::bot_routes;
 use crate::live::stream::live_routes;
 use crate::relief::relief_tile;
+use crate::studio::Studio;
+use crate::studio::api::studio_routes;
 use crate::world::{SpawnKind, SpawnQuery, WorldLayer};
 use nw_world::map_tiles::tile_file;
 
@@ -39,6 +41,7 @@ pub struct AppState {
     origin: AdminOrigin,
     pub(crate) captures: Arc<Captures>,
     pub(crate) live: Option<Live>,
+    pub(crate) studio: Option<Studio>,
 }
 
 impl AppState {
@@ -57,6 +60,15 @@ impl AppState {
             origin: AdminOrigin::of(listen),
             captures: Arc::new(captures),
             live,
+            studio: None,
+        }
+    }
+
+    /// The same state with the studio routes served by `studio`.
+    pub fn with_studio(self, studio: Studio) -> Self {
+        Self {
+            studio: Some(studio),
+            ..self
         }
     }
 }
@@ -79,6 +91,7 @@ pub fn router(state: AppState) -> Router {
         .merge(capture_routes())
         .merge(live_routes())
         .merge(bot_routes())
+        .merge(studio_routes())
         .layer(axum::middleware::from_fn_with_state(
             state.origin.clone(),
             admin_guard,

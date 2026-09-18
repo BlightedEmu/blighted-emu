@@ -35,6 +35,22 @@ pub struct AdminConfig {
     pub captures: CapturesConfig,
     /// The live panel; without it the live routes are 404.
     pub live: Option<LiveConfig>,
+    /// The studio (design files and Apply); without it the studio routes are 404.
+    pub studio: Option<StudioConfig>,
+}
+
+/// The studio part of the configuration (admin studio spec sections 5.2 to 5.4).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StudioConfig {
+    /// The design files (`content/`).
+    pub design_dir: PathBuf,
+    /// The retail bundle and world files from `content-tool build` and `world`.
+    pub retail_dir: PathBuf,
+    /// The control FIFO of `scripts/live-stack.sh`.
+    pub control_fifo: PathBuf,
+    /// Longest wait for every sim to start again after Apply restarts them.
+    pub restart_timeout_s: u64,
 }
 
 /// The live panel part of the configuration.
@@ -130,6 +146,16 @@ pub fn load_admin_config(path: &Path) -> Result<AdminConfig, AdminConfigError> {
             reason: "must be at least 1",
         });
     }
+    if config
+        .studio
+        .as_ref()
+        .is_some_and(|studio| studio.restart_timeout_s == 0)
+    {
+        return Err(AdminConfigError::Invalid {
+            key: "studio.restart_timeout_s",
+            reason: "must be at least 1",
+        });
+    }
     if let Some(live) = &config.live {
         for (key, interval) in [
             ("live.scrape_interval_ms", live.scrape_interval_ms),
@@ -197,6 +223,31 @@ mod tests {
         assert!(live.scrape_interval_ms >= MIN_LIVE_INTERVAL_MS);
         assert!(live.state_interval_ms >= MIN_LIVE_INTERVAL_MS);
         assert!(live.max_bots > 0);
+    }
+
+    #[test]
+    fn the_committed_config_has_a_studio_section() {
+        let config =
+            load_admin_config(&repo_root().join("config/blighted-admin.toml")).expect("load");
+        let studio = config.studio.expect("studio section");
+        assert_eq!(studio.design_dir, Path::new("content"));
+        assert_eq!(studio.retail_dir, Path::new("local-data/content/retail"));
+        assert_eq!(
+            studio.control_fifo,
+            Path::new("local-data/logs/live/control")
+        );
+        assert_eq!(studio.restart_timeout_s, 120);
+    }
+
+    #[test]
+    fn a_zero_restart_timeout_is_refused() {
+        assert!(matches!(
+            load_changed("restart_timeout_s = 120", "restart_timeout_s = 0"),
+            Err(AdminConfigError::Invalid {
+                key: "studio.restart_timeout_s",
+                ..
+            })
+        ));
     }
 
     #[test]

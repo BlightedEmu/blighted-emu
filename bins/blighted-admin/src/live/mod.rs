@@ -60,6 +60,13 @@ impl Live {
     }
 }
 
+impl Live {
+    /// The shared live state.
+    pub fn state(&self) -> &SharedState {
+        &self.state
+    }
+}
+
 /// Starts the bus reader and the scraper of `config` on the current runtime; batches start
 /// from the routes. The streams end when `closing` turns `true`.
 pub fn start(config: &LiveConfig, closing: watch::Receiver<bool>) -> Live {

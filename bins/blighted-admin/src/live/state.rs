@@ -227,6 +227,19 @@ impl LiveState {
         }
     }
 
+    /// The ids of the sims with a recent heartbeat, sorted.
+    pub fn sim_ids(&self) -> Vec<String> {
+        self.sims.keys().map(ToString::to_string).collect()
+    }
+
+    /// How many sims of `ids` have a heartbeat that says they started after `after_ms`.
+    pub fn started_after(&self, ids: &[String], after_ms: u64) -> usize {
+        self.sims
+            .iter()
+            .filter(|(id, sim)| sim.started_at_ms > after_ms && ids.contains(&id.to_string()))
+            .count()
+    }
+
     /// The director's cell table; a new version is an event.
     pub fn table(&mut self, table: CellTable, now_ms: u64) {
         let version = table.version;
@@ -513,6 +526,19 @@ mod tests {
             .iter()
             .map(|event| event.text.as_str())
             .collect()
+    }
+
+    #[test]
+    fn started_after_counts_only_newer_starts() {
+        let mut state = LiveState::default();
+        state.heartbeat(beat("sim-a", 5, 0), NOW);
+        state.heartbeat(beat("sim-b", 20, 0), NOW);
+        assert_eq!(state.sim_ids(), ["sim-a", "sim-b"]);
+        let ids = state.sim_ids();
+        assert_eq!(state.started_after(&ids, 10), 1);
+        state.heartbeat(beat("sim-a", 30, 0), NOW);
+        assert_eq!(state.started_after(&ids, 10), 2);
+        assert_eq!(state.started_after(&["sim-gone".to_owned()], 10), 0);
     }
 
     #[test]

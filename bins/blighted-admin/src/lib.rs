@@ -10,4 +10,5 @@ pub mod live;
 pub mod relief;
 pub mod run;
 pub mod server;
+pub mod studio;
 pub mod world;

@@ -13,6 +13,7 @@ clap.workspace = true
 nw-capture.workspace = true
 nw-common.workspace = true
 nw-content.workspace = true
+nw-design.workspace = true
 nw-formats.workspace = true
 nw-world.workspace = true
 nw-testclient.workspace = true

@@ -5,12 +5,14 @@
 use std::path::Path;
 
 use nw_common::logging::{LoggingError, init_logging};
+use nw_content::client_build::load_client_build;
 use tokio::sync::watch;
 
 use crate::captures::Captures;
 use crate::config::{AdminConfigError, load_admin_config};
 use crate::live;
 use crate::server::{AppState, router};
+use crate::studio::Studio;
 use crate::world::{WorldLayer, WorldLayerError, map_dir};
 
 /// Environment variable that names the New World install folder (for `typeindex.json`).
@@ -25,6 +27,9 @@ pub enum RunError {
     /// Logging cannot start.
     #[error(transparent)]
     Logging(#[from] LoggingError),
+    /// The pinned client build cannot be read.
+    #[error("client build: {0}")]
+    ClientBuild(#[source] nw_common::config::ConfigError),
     /// The world layer cannot be loaded.
     #[error(transparent)]
     World(#[from] WorldLayerError),
@@ -45,6 +50,8 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let game_dir = std::env::var_os(GAME_DIR_ENV).map(std::path::PathBuf::from);
     let captures = Captures::load(&config.captures, game_dir.as_deref());
     let map = map_dir(&config);
+    let client_build =
+        load_client_build(&config.client_build_config).map_err(RunError::ClientBuild)?;
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -52,7 +59,19 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         .block_on(async {
             let (close, closing) = watch::channel(false);
             let live = config.live.as_ref().map(|live| live::start(live, closing));
+            let studio = config.studio.as_ref().map(|studio| {
+                Studio::new(
+                    studio,
+                    config.content_dir.clone(),
+                    &client_build,
+                    live.as_ref().map(|live| live.state().clone()),
+                )
+            });
             let state = AppState::new(world, map, config.listen, captures, live);
+            let state = match studio {
+                Some(studio) => state.with_studio(studio),
+                None => state,
+            };
             let listener = tokio::net::TcpListener::bind(config.listen)
                 .await
                 .map_err(RunError::Io)?;
