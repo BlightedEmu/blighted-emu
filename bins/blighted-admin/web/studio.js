@@ -115,24 +115,34 @@ async function pollApply() {
 elements.check.addEventListener('click', async () => {
   elements.status.classList.remove('error');
   elements.status.textContent = 'Checking…';
+  elements.check.disabled = true;
+  elements.apply.disabled = true;
   try {
     const report = await json(CHECK_URL, { method: 'POST', headers: ADMIN_HEADERS });
     showProblems(report.errors);
     elements.status.textContent = `${report.files} files, ${report.levels} levels, ${report.errors.length} problems`;
   } catch (error) {
     fail(error);
+  } finally {
+    elements.check.disabled = false;
+    elements.apply.disabled = false;
   }
 });
 
 elements.apply.addEventListener('click', async () => {
   elements.status.classList.remove('error');
   elements.status.textContent = '';
-  const response = await fetch(APPLY_URL, { method: 'POST', headers: ADMIN_HEADERS });
-  if (!response.ok && response.status !== HTTP_CONFLICT) {
-    fail(new Error(`Apply: ${response.status} ${await response.text()}`));
-    return;
+  try {
+    const response = await fetch(APPLY_URL, { method: 'POST', headers: ADMIN_HEADERS });
+    if (!response.ok) {
+      fail(new Error(`Apply: ${response.status} ${await response.text()}`));
+    }
+    if (response.ok || response.status === HTTP_CONFLICT) {
+      await pollApply();
+    }
+  } catch (error) {
+    fail(error);
   }
-  pollApply().catch(fail);
 });
 
 loadFiles().catch(fail);

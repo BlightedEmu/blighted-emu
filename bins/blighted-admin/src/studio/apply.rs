@@ -92,25 +92,32 @@ impl Studio {
         *self.apply.lock().unwrap_or_else(PoisonError::into_inner) = status;
     }
 
-    /// Starts the Apply job on the current runtime; `false` while a job runs.
+    /// Starts the Apply job on the current runtime; `false` while an Apply or a Check runs.
     pub fn start_apply(&self) -> bool {
-        {
-            let mut status = self.apply.lock().unwrap_or_else(PoisonError::into_inner);
-            if status.phase == ApplyPhase::Running {
-                return false;
-            }
-            *status = ApplyStatus::running(ApplyStep::Check, "checking the design files");
-        }
+        let Ok(permit) = self.work.clone().try_acquire_owned() else {
+            return false;
+        };
+        self.set_apply(ApplyStatus::running(
+            ApplyStep::Check,
+            "checking the design files",
+        ));
         let studio = self.clone();
         tokio::spawn(async move {
             let end = studio.run_apply().await;
             studio.set_apply(end);
+            drop(permit);
         });
         true
     }
 
+    /// The full check alone; `None` while an Apply or another Check runs.
+    pub async fn check(&self) -> Option<Result<DesignReport, String>> {
+        let _permit = self.work.try_acquire().ok()?;
+        Some(self.design(DesignMode::Check).await)
+    }
+
     /// The design step in `mode`, off the runtime threads.
-    pub async fn design(&self, mode: DesignMode) -> Result<DesignReport, String> {
+    async fn design(&self, mode: DesignMode) -> Result<DesignReport, String> {
         let paths = self.paths.clone();
         let build = self.client_build.clone();
         tokio::task::spawn_blocking(move || run_design(&paths, &build, mode))

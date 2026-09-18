@@ -6,7 +6,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
-use nw_design::{DesignError, DesignFile, DesignMode, check_schema, load_dir};
+use nw_design::{DesignError, DesignFile, check_schema, load_dir};
 use serde::Serialize;
 
 use crate::server::AppState;
@@ -18,6 +18,8 @@ pub const FILES_ROUTE: &str = "/api/studio/files";
 pub const CHECK_ROUTE: &str = "/api/studio/check";
 /// `GET`: the Apply state; `POST`: starts Apply.
 pub const APPLY_ROUTE: &str = "/api/studio/apply";
+/// The answer when the work slot is taken.
+const BUSY: &str = "an Apply or a Check runs";
 
 /// The studio routes; every `POST` needs the admin header (the guard).
 pub fn studio_routes() -> Router<AppState> {
@@ -62,9 +64,10 @@ async fn check(State(state): State<AppState>) -> Response {
     let Some(studio) = studio_of(&state) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match studio.design(DesignMode::Check).await {
-        Ok(report) => Json(report).into_response(),
-        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    match studio.check().await {
+        Some(Ok(report)) => Json(report).into_response(),
+        Some(Err(error)) => (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+        None => (StatusCode::CONFLICT, BUSY).into_response(),
     }
 }
 
@@ -78,7 +81,7 @@ async fn apply_status(State(state): State<AppState>) -> Response {
 async fn start_apply(State(state): State<AppState>) -> Response {
     match studio_of(&state) {
         Some(studio) if studio.start_apply() => StatusCode::ACCEPTED.into_response(),
-        Some(_) => (StatusCode::CONFLICT, "an Apply runs").into_response(),
+        Some(_) => (StatusCode::CONFLICT, BUSY).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -346,6 +349,19 @@ mod tests {
             (StatusCode::ACCEPTED, StatusCode::CONFLICT)
         );
         finished(&fixture).await;
+    }
+
+    #[tokio::test]
+    async fn a_check_while_apply_runs_is_refused() {
+        let fixture = fixture(true, SHORT_TIMEOUT_S);
+        read_control(&fixture.path("control"), |_| {});
+        lock(&fixture.live).heartbeat(beat(1), unix_ms());
+        let (apply, _) = call(&fixture, Method::POST, APPLY_ROUTE).await;
+        let (check, _) = call(&fixture, Method::POST, CHECK_ROUTE).await;
+        assert_eq!((apply, check), (StatusCode::ACCEPTED, StatusCode::CONFLICT));
+        finished(&fixture).await;
+        let (after, _) = call(&fixture, Method::POST, CHECK_ROUTE).await;
+        assert_eq!(after, StatusCode::OK, "the slot is free again");
     }
 
     #[tokio::test]

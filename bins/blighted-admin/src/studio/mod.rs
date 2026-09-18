@@ -10,10 +10,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nw_design::DesignPaths;
+use tokio::sync::Semaphore;
 
 use crate::config::StudioConfig;
 use crate::live::SharedState;
 use crate::studio::apply::ApplyStatus;
+
+/// Full design runs at a time.
+const ONE_RUN: usize = 1;
 
 /// What the studio routes and the Apply job share.
 #[derive(Debug, Clone)]
@@ -24,6 +28,9 @@ pub struct Studio {
     restart_timeout: Duration,
     live: Option<SharedState>,
     apply: Arc<Mutex<ApplyStatus>>,
+    /// One full design run at a time: a Check or a whole Apply. Each loads the bundle and
+    /// world files, so runs side by side would hold several copies in memory.
+    work: Arc<Semaphore>,
 }
 
 impl Studio {
@@ -46,6 +53,7 @@ impl Studio {
             restart_timeout: Duration::from_secs(config.restart_timeout_s),
             live,
             apply: Arc::default(),
+            work: Arc::new(Semaphore::new(ONE_RUN)),
         }
     }
 }
