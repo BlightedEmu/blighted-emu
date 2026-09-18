@@ -17,11 +17,11 @@ use nw_bus::MobGhost;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::{
     AlcStamp, AlcState, AssetId, BOSS_PHASE_TYPE_INDEX, BundleGroup, BundleMember, BundlePayload,
-    DYNAMIC_SLICE_SUB_ID, GDE_METADATA_COMPONENT, GdeMetadataReplicatedState, InputPosition,
-    LOCAL_PLAYER_INTEREST, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState, MessageError,
-    PLAYER_SLICE_ASSET, PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID, SPAWN_STATE_MS,
-    SPAWN_TELEPORT, ServerMessage, TeleportStep, VitalsData, VitalsState, boss_phase_change,
-    change_members, player_members, raw_id_of_entity,
+    DATA_BITS_ACTIVE, DYNAMIC_SLICE_SUB_ID, GDE_METADATA_COMPONENT, GdeMetadataReplicatedState,
+    InputPosition, LOCAL_PLAYER_INTEREST, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState,
+    MessageError, PLAYER_SLICE_ASSET, PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID,
+    SPAWN_STATE_MS, SPAWN_TELEPORT, ServerMessage, TeleportStep, VitalsData, VitalsState,
+    boss_phase_change, change_members, player_members, raw_id_of_entity,
 };
 use nw_sim_core::Position;
 
@@ -426,10 +426,30 @@ pub(super) struct OwnTeleport {
     step: TeleportStep,
 }
 
+/// The own clock `since_spawn_ms` after the first own state: it goes on from that state's number
+/// and time (anchor 0, 16-bit wrapping offset).
+const fn own_stamp(since_spawn_ms: u64) -> AlcStamp {
+    AlcStamp {
+        id: SPAWN_STATE_ID.wrapping_add((since_spawn_ms / OWN_STATE_MS) as u16),
+        anchor_us: 0,
+        offset_ms: SPAWN_STATE_MS.wrapping_add(since_spawn_ms as u16),
+    }
+}
+
+/// One state of the client's own player that neither spawns nor moves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OwnTick {
+    /// Milliseconds since the first own state.
+    pub(super) since_spawn_ms: u64,
+    /// Send the place: the body estimate is exact (the player stands still).
+    pub(super) with_position: bool,
+    /// Send the movement flags without the throttle bit (the first state after the spawn).
+    pub(super) clear_throttle: bool,
+}
+
 impl OwnTeleport {
-    /// The `count`-th server move, `since_spawn_ms` after the first own state: the own clock
-    /// goes on from that state's number and time (anchor 0, 16-bit wrapping offset), and the
-    /// teleport number from its 1.
+    /// The `count`-th server move, `since_spawn_ms` after the first own state, on the own clock
+    /// ([`own_stamp`]), with the teleport number on from the first state's 1.
     pub(super) fn of(
         count: u8,
         since_spawn_ms: u64,
@@ -437,11 +457,7 @@ impl OwnTeleport {
         step: TeleportStep,
     ) -> Self {
         Self {
-            stamp: AlcStamp {
-                id: SPAWN_STATE_ID.wrapping_add((since_spawn_ms / OWN_STATE_MS) as u16),
-                anchor_us: 0,
-                offset_ms: SPAWN_STATE_MS.wrapping_add(since_spawn_ms as u16),
-            },
+            stamp: own_stamp(since_spawn_ms),
             number: SPAWN_TELEPORT.wrapping_add(count),
             facing,
             step,
@@ -464,6 +480,7 @@ pub(super) enum OwnCard {
 /// The group of the client's own player with its `states`; `None` for a position that is not
 /// finite. When the server `moved` the player, the position is the full first state, which the
 /// client takes as its new place (retail: the move into the water, live-tutorial note section 4).
+/// Any other own state is `tick`: the own clock, and the place only when the tick says so.
 ///
 /// # Errors
 ///
@@ -474,6 +491,7 @@ pub(super) fn own_group(
     position: Position,
     card: OwnCard,
     teleport: Option<OwnTeleport>,
+    tick: OwnTick,
 ) -> Result<Option<BundleGroup>, MessageError> {
     let Some(mut group) = entity_group(
         LOCAL_PLAYER_INTEREST,
@@ -498,6 +516,14 @@ pub(super) fn own_group(
             teleport.facing,
             teleport.number,
             teleport.step,
+        ));
+    } else if let Some(alc) = group.members.last_mut() {
+        let pos = InputPosition::from_metres(position.x, position.y, position.z)
+            .filter(|_| tick.with_position);
+        alc.state = MemberState::Alc(AlcState::own_step(
+            own_stamp(tick.since_spawn_ms),
+            pos,
+            tick.clear_throttle.then_some(DATA_BITS_ACTIVE),
         ));
     }
     // Without the card, the changes (achievements, objectives, experience, gear, health) still
@@ -620,7 +646,7 @@ mod tests {
 
     #[test]
     fn the_own_player_is_the_player_prefab_in_slot_1() {
-        let group = own_group(OWN, own_states(), at(), OwnCard::Spawn, None)
+        let group = own_group(OWN, own_states(), at(), OwnCard::Spawn, None, STILL)
             .expect("encode")
             .expect("finite");
         assert_eq!(group.interest, u64::from(LOCAL_PLAYER_INTEREST));
@@ -655,7 +681,7 @@ mod tests {
             panic!("then the ALC position: {group:?}");
         };
         assert_eq!(alc.pos10, InputPosition::from_metres(10.0, 20.0, 30.0));
-        let later = own_group(OWN, own_states(), at(), OwnCard::Without, None)
+        let later = own_group(OWN, own_states(), at(), OwnCard::Without, None, STILL)
             .expect("encode")
             .expect("finite");
         assert_eq!(later.members.len(), 1, "later only the ALC position");
@@ -665,6 +691,17 @@ mod tests {
         let read = BundlePayload::decode(&payload.encode().expect("payload")).expect("read");
         assert_eq!(read.groups[0].members, group.members);
     }
+
+    /// A tick of a player who stands still, and of one who moves.
+    const STILL: OwnTick = OwnTick {
+        since_spawn_ms: 0,
+        with_position: true,
+        clear_throttle: false,
+    };
+    const MOVING: OwnTick = OwnTick {
+        with_position: false,
+        ..STILL
+    };
 
     #[test]
     fn a_server_move_sends_the_next_teleport_number_on_the_own_clock() {
@@ -682,9 +719,16 @@ mod tests {
             SPAWN_STATE_MS.wrapping_add(SINCE_SPAWN_MS as u16),
             "the own time wraps at 16 bits"
         );
-        let group = own_group(OWN, own_states(), at(), OwnCard::Without, Some(teleport))
-            .expect("encode")
-            .expect("finite");
+        let group = own_group(
+            OWN,
+            own_states(),
+            at(),
+            OwnCard::Without,
+            Some(teleport),
+            MOVING,
+        )
+        .expect("encode")
+        .expect("finite");
         assert_eq!(
             group.members.last().map(|member| &member.state),
             Some(&MemberState::Alc(AlcState::teleport(
@@ -698,10 +742,46 @@ mod tests {
     }
 
     #[test]
+    fn a_moving_player_gets_the_clock_without_a_position_but_its_spawn_does() {
+        let alc_of = |card, tick| {
+            let group = own_group(OWN, own_states(), at(), card, None, tick)
+                .expect("encode")
+                .expect("finite");
+            let last = group.members.last().expect("alc");
+            assert_eq!(last.component, PLAYER_ALC_COMPONENT);
+            last.state.clone()
+        };
+        let MemberState::Alc(moving) = alc_of(OwnCard::Without, MOVING) else {
+            panic!("an ALC");
+        };
+        assert_eq!(moving, AlcState::own_step(own_stamp(0), None, None));
+        let MemberState::Alc(spawn) = alc_of(OwnCard::Spawn, MOVING) else {
+            panic!("an ALC");
+        };
+        assert!(
+            spawn.pos10.is_some(),
+            "the spawn card sets the start position"
+        );
+        let first = OwnTick {
+            clear_throttle: true,
+            ..MOVING
+        };
+        assert_eq!(
+            alc_of(OwnCard::Without, first),
+            MemberState::Alc(AlcState::own_step(
+                own_stamp(0),
+                None,
+                Some(DATA_BITS_ACTIVE)
+            )),
+            "the first tick clears the throttle"
+        );
+    }
+
+    #[test]
     fn only_the_spawn_card_carries_the_full_first_state() {
         let pos = InputPosition::from_metres(10.0, 20.0, 30.0).expect("finite");
         let alc_of = |card: OwnCard| {
-            let group = own_group(OWN, own_states(), at(), card, None)
+            let group = own_group(OWN, own_states(), at(), card, None, STILL)
                 .expect("encode")
                 .expect("finite");
             group.members.last().expect("alc").state.clone()
@@ -711,15 +791,13 @@ mod tests {
             MemberState::Alc(AlcState::spawn(pos).expect("spawn")),
             "the first card sets the start position with the full state"
         );
+        let still = MemberState::Alc(AlcState::own_step(own_stamp(0), Some(pos), None));
         assert_eq!(
             alc_of(OwnCard::Refresh),
-            MemberState::Alc(AlcState::at_position(pos)),
-            "a refresh moves nothing: the plain position"
+            still,
+            "a refresh moves nothing: the clock and the place"
         );
-        assert_eq!(
-            alc_of(OwnCard::Without),
-            MemberState::Alc(AlcState::at_position(pos))
-        );
+        assert_eq!(alc_of(OwnCard::Without), still);
     }
 
     #[test]

@@ -19,6 +19,10 @@ const SHOULDER_RIGHT_M: f32 = 0.50;
 /// tutorial level has no ground heights to put the body on).
 const CAMERA_HEIGHT_M: f32 = 2.65;
 
+/// Below this speed (m/s) the player stands still and the body estimate is the retail stationary
+/// fit; above it the boom shortens with the camera's lag and the estimate errs by about 1 m.
+pub const STILL_SPEED_MPS: f32 = BOOM_BY_SPEED[1].0;
+
 /// The boom length at `speed_mps`.
 fn boom_m(speed_mps: f32) -> f32 {
     BOOM_BY_SPEED

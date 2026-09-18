@@ -114,6 +114,19 @@ pub(super) const fn amount_of(amount: u32) -> f32 {
     amount as f32
 }
 
+/// Half the angle of the cone in front of a player in which its swing hits (our choice: retail
+/// hits came within 12 degrees on 68 of 72 swings and at 45 degrees on a second target; the
+/// wider cone takes our body estimate's error).
+const HIT_CONE_HALF_RAD: f32 = std::f32::consts::FRAC_PI_4;
+
+/// Whether `target` is in the cone in front of a player at `from` that faces yaw `facing`.
+fn in_front(from: Position, facing: f32, target: Position) -> bool {
+    let turn = super::mob_timeline::yaw_toward(from, target) - facing;
+    let wrapped =
+        (turn + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
+    wrapped.abs() <= HIT_CONE_HALF_RAD
+}
+
 /// Whether input counter `counter` comes after `last`; the counter wraps at `u16::MAX`.
 const fn counter_is_newer(counter: u16, last: u16) -> bool {
     (counter.wrapping_sub(last) as i16) > 0
@@ -429,7 +442,11 @@ impl SimWorld {
         if edges == 0 {
             return Vec::new();
         }
-        std::iter::once(self.attack_nearest(connection, now_ms))
+        let facing = records
+            .first()
+            .and_then(|newest| newest.bit_6)
+            .map(|[yaw, _]| yaw);
+        std::iter::once(self.attack_nearest(connection, facing, now_ms))
             .chain((1..edges).map(|_| Err(AttackRefusal::TooFast)))
             .collect()
     }
@@ -488,7 +505,10 @@ impl SimWorld {
     }
 
     /// The player of `attacker` attacks the nearest living, not returning mob in reach, here or
-    /// a ghost, with the first weapon attack (M6-B spec sections 6.2 and 6.3).
+    /// a ghost, with the first weapon attack (M6-B spec sections 6.2 and 6.3). With the camera
+    /// yaw `facing`, only a mob in front of the player is in reach: retail hit mobs within 12
+    /// degrees of the facing on 68 of 72 hits and never a mob behind the player, even at 0.11 m
+    /// (hits note).
     ///
     /// # Errors
     ///
@@ -497,6 +517,7 @@ impl SimWorld {
     pub fn attack_nearest(
         &mut self,
         attacker: &ConnectionRef,
+        facing: Option<f32>,
         now_ms: u64,
     ) -> Result<AttackOutcome, AttackRefusal> {
         let entity = *self
@@ -520,6 +541,7 @@ impl SimWorld {
         let nearest = self
             .mob_states()
             .filter(|(_, _, state)| state.health > 0 && !state.returning)
+            .filter(|(_, at, _)| facing.is_none_or(|yaw| in_front(position, yaw, *at)))
             .map(|(mob, at, _)| (mob, at.horizontal_distance(position)))
             .min_by(|a, b| a.1.total_cmp(&b.1));
         tracing::debug!(
@@ -967,11 +989,11 @@ mod tests {
         let mut world = awake_fight();
         join(&mut world, 2, MOB_X + 10.0);
         assert_eq!(
-            world.attack_nearest(&connection(2), NOW),
+            world.attack_nearest(&connection(2), None, NOW),
             Err(AttackRefusal::NoTarget)
         );
         assert_eq!(
-            world.attack_nearest(&connection(7), NOW),
+            world.attack_nearest(&connection(7), None, NOW),
             Err(AttackRefusal::NotInWorld)
         );
     }
@@ -983,9 +1005,35 @@ mod tests {
         join(&mut world, 1, MOB_X + 2.0);
         tick(&mut world, NOW);
         assert!(matches!(
-            world.attack_nearest(&connection(1), NOW),
+            world.attack_nearest(&connection(1), None, NOW),
             Ok(AttackOutcome::Hit { target, .. }) if target == mob_entity(1)
         ));
+    }
+
+    #[test]
+    fn only_a_mob_in_front_is_the_target() {
+        // Yaw -90 degrees faces +x (forward = (-sin a, cos a)).
+        const FACING_EAST: f32 = -std::f32::consts::FRAC_PI_2;
+        let mut world = world_with_spawns(vec![test_spawn(MOB_X), test_spawn(MOB_X + 3.0)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, MOB_X + 2.0);
+        tick(&mut world, NOW);
+        assert!(matches!(
+            world.attack_nearest(&connection(1), Some(FACING_EAST), NOW),
+            Ok(AttackOutcome::Hit { target, .. }) if target == mob_entity(1)
+        ));
+        assert!(
+            matches!(
+                world.attack_nearest(&connection(1), Some(-FACING_EAST), NOW + INTERVAL_MS),
+                Ok(AttackOutcome::Hit { target, .. }) if target == mob_entity(0)
+            ),
+            "facing west, the mob behind before is in front"
+        );
+        assert_eq!(
+            world.attack_nearest(&connection(1), Some(0.0), NOW + 2 * INTERVAL_MS),
+            Err(AttackRefusal::NoTarget),
+            "facing north, both mobs are to the side"
+        );
     }
 
     #[test]
@@ -997,7 +1045,7 @@ mod tests {
             NOW,
         );
         assert_eq!(
-            world.attack_nearest(&connection(1), NOW),
+            world.attack_nearest(&connection(1), None, NOW),
             Err(AttackRefusal::NoTarget),
             "a returning mob is no target"
         );
@@ -1006,7 +1054,8 @@ mod tests {
             vec![mob_ghost(BORDER_X + 1.0, MOB_HEALTH, false)],
             NOW,
         );
-        let Ok(AttackOutcome::Remote(remote)) = world.attack_nearest(&connection(1), NOW) else {
+        let Ok(AttackOutcome::Remote(remote)) = world.attack_nearest(&connection(1), None, NOW)
+        else {
             panic!("a remote hit");
         };
         assert_eq!(remote.hit.target, mob());

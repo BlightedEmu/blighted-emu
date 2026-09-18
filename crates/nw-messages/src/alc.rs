@@ -61,6 +61,12 @@ const TELEPORT_CHILD: usize = 31;
 /// Slot 0 child of the time anchor (`timeAnchor`, µs since 2000-01-01; mob-animation note,
 /// section 1): a state's time is the anchor plus its offset in children 1 and 26.
 const TIME_ANCHOR_CHILD: usize = 40;
+/// Slot 0 child of the movement flags (`dataBits`). Bit 5 asks the client to throttle its input
+/// to 20 Hz (clear: 30 Hz); the client sends 998 `SetInputsThrottled` when the bit changes
+/// (network note: all 27 retail toggles followed the server's value).
+const DATA_BITS_CHILD: usize = 41;
+/// `dataBits` of a retail own state without the throttle bit (40583 ms, then 998 `00`).
+pub const DATA_BITS_ACTIVE: u8 = 211;
 /// A `worldPosRel` that puts the entity at its `pos10`.
 const AT_ANCHOR: [u8; POS3_LEN] = [0xff; POS3_LEN];
 /// `scopeData` with only the FullBody scope (bit 0).
@@ -563,6 +569,21 @@ impl AlcState {
         Ok(Self::of_slot0(children, step.position))
     }
 
+    /// A state of the client's own player on its clock `stamp`: the client takes an own state
+    /// only with its number and time, and shows the network icon and clears its input history
+    /// when none came for 2 s (network note: `FUN_14485b680`, `alc-server-timeout-for-input`).
+    /// With `pos`, it also sends the place; with `data_bits`, the movement flags.
+    pub fn own_step(stamp: AlcStamp, pos: Option<InputPosition>, data_bits: Option<u8>) -> Self {
+        let mut children: Vec<(usize, Vec<u8>)> = stamp_children(stamp).into();
+        if let Some(pos) = pos {
+            children.extend(position_children(pos));
+        }
+        if let Some(bits) = data_bits {
+            children.push((DATA_BITS_CHILD, vec![bits]));
+        }
+        Self::of_slot0(children, pos)
+    }
+
     /// One of the three states that move the client's own player to `pos`, facing `facing`
     /// (yaw, radians) when it is known, with teleport number `teleport` (retail moved the player
     /// into the water so, 118546 to 118614 ms): see [`TeleportStep`]. Each carries the number and
@@ -774,7 +795,7 @@ const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
     (36, Word(0x4a20)),
     (37, Word(0)),
     (40, Long(0)),
-    (41, Byte(243)),
+    (DATA_BITS_CHILD, Byte(243)),
     (42, Byte(83)),
     (43, Byte(0)),
     (44, Byte(20)),
@@ -1003,6 +1024,50 @@ mod tests {
         assert_eq!(SLOT0_CHILDREN.len(), 54);
         assert_eq!(SLOT1_CHILDREN.len(), 9);
         assert_eq!(SLOT0_CHILDREN[POS10_CHILD], AlcChild::Pos10);
+    }
+
+    #[test]
+    fn an_own_step_carries_its_clock_and_only_the_asked_parts() {
+        let stamp = AlcStamp {
+            id: 0x0102,
+            anchor_us: 0,
+            offset_ms: 0x0304,
+        };
+        let children_of = |state: &AlcState| -> Vec<usize> {
+            walk(&mut Reader::new(&state.bytes))
+                .expect("walk")
+                .slot0_ranges
+                .into_iter()
+                .map(|(child, _)| child)
+                .collect()
+        };
+        let clock_only = AlcState::own_step(stamp, None, None);
+        assert_eq!(
+            children_of(&clock_only),
+            [ID_REL_CHILD, TIME_REL_CHILD, ID_ABS_CHILD, TIME_ABS_CHILD]
+        );
+        assert_eq!(clock_only.pos10, None);
+        let pos = InputPosition::from_metres(1.0, 2.0, 3.0).expect("finite");
+        let full = AlcState::own_step(stamp, Some(pos), Some(DATA_BITS_ACTIVE));
+        assert_eq!(
+            children_of(&full),
+            [
+                ID_REL_CHILD,
+                TIME_REL_CHILD,
+                POS_REL_CHILD,
+                ID_ABS_CHILD,
+                TIME_ABS_CHILD,
+                POS10_CHILD,
+                DATA_BITS_CHILD
+            ]
+        );
+        assert_eq!(full.pos10, Some(pos));
+        assert_eq!(
+            full.bytes.last(),
+            Some(&DATA_BITS_ACTIVE),
+            "throttle bit 5 clear"
+        );
+        assert_eq!(DATA_BITS_ACTIVE & 0x20, 0);
     }
 
     #[test]

@@ -64,7 +64,7 @@ use gear::Gear;
 use level_assets::{ASSET_ENTITY_BASE, AssetViews, asset_gde_ref};
 use level_flow::{AchievementRules, LevelFlow};
 use members::{
-    CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, OwnTeleport, bundles, card_of,
+    CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, OwnTeleport, OwnTick, bundles, card_of,
     log_mob_group, mob_group, own_group, remote_group,
 };
 use mob_timeline::{MobPose, MobTimelines, animations_of};
@@ -345,6 +345,11 @@ struct Player {
     moved: bool,
     /// The client's last camera point and when it came, for the player's speed.
     last_camera: Option<(Position, u64)>,
+    /// The camera moved at [`crate::camera::STILL_SPEED_MPS`] or faster at its last point: the
+    /// body estimate is not exact, so the own state sends no position.
+    moving: bool,
+    /// An own state after the spawn cleared the input throttle that the spawn state sets.
+    throttle_cleared: bool,
     /// Where the player faces after the server's move, when the move says so.
     move_facing: Option<f32>,
     /// The next state of a server move still to send.
@@ -881,25 +886,24 @@ impl SimWorld {
         yaw: Option<f32>,
         now_ms: u64,
     ) -> (Result<GroundCheck, MoveError>, Position) {
-        let last = self
-            .by_connection
-            .get(connection)
-            .copied()
+        let entity = self.by_connection.get(connection).copied();
+        let last = entity
             .and_then(|entity| self.world.get_mut::<Player>(entity))
             .and_then(|mut player| player.last_camera.replace((camera, now_ms)));
-        let next = yaw.map_or(camera, |yaw| {
-            let speed_mps = last.map_or(0.0, |(at, then)| {
-                let elapsed_ms = now_ms.saturating_sub(then);
-                if elapsed_ms == 0 {
-                    0.0
-                } else {
-                    #[allow(clippy::cast_precision_loss, reason = "a gap of a few seconds")]
-                    let seconds = elapsed_ms as f32 / MS_PER_SECOND_F32;
-                    at.horizontal_distance(camera) / seconds
-                }
-            });
-            crate::camera::body_of(camera, yaw, speed_mps)
+        let speed_mps = last.map_or(0.0, |(at, then)| {
+            let elapsed_ms = now_ms.saturating_sub(then);
+            if elapsed_ms == 0 {
+                0.0
+            } else {
+                #[allow(clippy::cast_precision_loss, reason = "a gap of a few seconds")]
+                let seconds = elapsed_ms as f32 / MS_PER_SECOND_F32;
+                at.horizontal_distance(camera) / seconds
+            }
         });
+        if let Some(mut player) = entity.and_then(|entity| self.world.get_mut::<Player>(entity)) {
+            player.moving = speed_mps >= crate::camera::STILL_SPEED_MPS;
+        }
+        let next = yaw.map_or(camera, |yaw| crate::camera::body_of(camera, yaw, speed_mps));
         (self.move_to(connection, next, now_ms), next)
     }
 
@@ -1990,6 +1994,8 @@ impl SimWorld {
                     moved: false,
                     move_facing: None,
                     last_camera: None,
+                    moving: false,
+                    throttle_cleared: false,
                     teleport_step: None,
                     refused_since_ms: None,
                     own_spawned_ms: None,
@@ -2244,11 +2250,11 @@ impl Neighbourhood<'_> {
             } else {
                 None
             };
+            let since_spawn_ms = player
+                .own_spawned_ms
+                .map_or(0, |spawned| self.server_time.saturating_sub(spawned));
             let teleport = step.map(|step| {
                 player.teleport_step = step.next();
-                let since_spawn_ms = player
-                    .own_spawned_ms
-                    .map_or(0, |spawned| self.server_time.saturating_sub(spawned));
                 tracing::debug!(
                     player = own,
                     teleports = player.teleports,
@@ -2318,7 +2324,21 @@ impl Neighbourhood<'_> {
                     stamina,
                     combat_status,
                 };
-                if let Some(mut group) = own_group(own, states, own_position, own_card, teleport)? {
+                // Every own state carries the own clock. A moving player's body is an estimate that
+                // errs by about 1 m: sent, it pulled the client back and forth (live 2026-09-16,
+                // 1.0 to 1.6 m jumps at the beach bag), so it goes only while the player stands.
+                let plain_tick = own_card != OwnCard::Spawn && teleport.is_none();
+                let tick = OwnTick {
+                    since_spawn_ms,
+                    with_position: !player.moving,
+                    clear_throttle: plain_tick && !player.throttle_cleared,
+                };
+                if tick.clear_throttle {
+                    player.throttle_cleared = true;
+                }
+                if let Some(mut group) =
+                    own_group(own, states, own_position, own_card, teleport, tick)?
+                {
                     group.members.append(&mut player.extra_members);
                     groups.push(group);
                 }

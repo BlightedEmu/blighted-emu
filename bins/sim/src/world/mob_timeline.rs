@@ -671,7 +671,7 @@ impl MobTimeline {
 }
 
 /// The yaw that faces from `from` to `to` (0 faces north, +y; a positive yaw turns west).
-fn yaw_toward(from: Position, to: Position) -> f32 {
+pub(super) fn yaw_toward(from: Position, to: Position) -> f32 {
     (-(to.x - from.x)).atan2(to.y - from.y)
 }
 
