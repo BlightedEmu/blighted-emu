@@ -879,10 +879,10 @@ impl SimWorld {
         if hits.is_empty() {
             return refused(AttackRefusal::NoTarget);
         }
-        let row = match kind {
-            AttackKind::Light => self.combat.data.first_attack(),
-            AttackKind::Heavy => self.combat.data.heavy_attack(),
-        };
+        let row = self
+            .combat
+            .data
+            .weapon_attack(weapon, kind == AttackKind::Heavy);
         let Some(damage_id) = row.map(|row| row.damage_id.clone()) else {
             return refused(AttackRefusal::NotWeaponAttack);
         };

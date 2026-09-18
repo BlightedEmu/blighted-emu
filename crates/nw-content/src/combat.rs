@@ -110,7 +110,7 @@ pub struct WeaponRow {
 }
 
 /// The kind of a melee weapon, which sets the shape and time of its swing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WeaponKind {
     /// A sword (`1hSword…`, `1hLongsword…`).
     Sword,
@@ -142,6 +142,21 @@ impl WeaponKind {
         ("spear", Self::Spear),
         ("sword", Self::Sword),
     ];
+
+    /// The damage rows of its light and heavy attacks (`javelindata_damagetable`); `None` for
+    /// [`WeaponKind::Other`], which uses the config's.
+    pub const fn attack_ids(self) -> Option<(&'static str, &'static str)> {
+        Some(match self {
+            Self::Sword => ("1H_Sword_Attack1", "1H_Sword_Attack2"),
+            Self::Hatchet => ("Hatchet_Damage_PrimaryAttack", "Hatchet_Damage_HeavyAttack"),
+            Self::Rapier => ("1H_Rapier_PrimaryAttack", "1H_Rapier_HeavyAttack"),
+            Self::Spear => ("2H_Spear_PrimaryAttack", "2H_Spear_HeavyAttack"),
+            Self::GreatAxe => ("GreatAxe_PrimaryAttack", "GreatAxe_HeavyAttack"),
+            Self::WarHammer => ("Warhammer_PrimaryAttack", "Warhammer_HeavyAttack"),
+            Self::GreatSword => ("GreatSword_PrimaryAttack1", "GreatSword_HeavyAttack1"),
+            Self::Other => return None,
+        })
+    }
 
     /// The kind that the weapon id `weapon_id` names.
     pub fn of_id(weapon_id: &str) -> Self {
@@ -383,6 +398,8 @@ pub struct CombatData {
     /// The healing consumable of each item that is one, by lower-case item id.
     item_heals: HashMap<String, HealingConsumable>,
     attacks: Vec<AttackRow>,
+    /// The light and heavy attacks of each weapon kind whose rows the tables hold.
+    kind_attacks: HashMap<WeaponKind, [AttackRow; 2]>,
     spreadshot: AttackRow,
     vision_offsets: HashMap<String, f32>,
     player_max_health: u32,
@@ -430,6 +447,20 @@ impl CombatData {
             .map(attack_row)
             .collect::<Result<Vec<_>, _>>()?;
         let spreadshot = attack_row(&rows.spreadshot_damage_id)?;
+        let row_of = |id: &str| {
+            source
+                .attacks
+                .iter()
+                .find(|row| row.damage_id == id)
+                .cloned()
+        };
+        let kind_attacks = WeaponKind::NAMES
+            .iter()
+            .filter_map(|(_, kind)| {
+                let (light, heavy) = kind.attack_ids()?;
+                Some((*kind, [row_of(light)?, row_of(heavy)?]))
+            })
+            .collect();
         let weapons: HashMap<String, WeaponRow> = source
             .weapons
             .iter()
@@ -515,6 +546,7 @@ impl CombatData {
             item_weapons,
             item_heals,
             attacks,
+            kind_attacks,
             spreadshot,
             vision_offsets: source.vision_offsets.into_iter().collect(),
             player_max_health,
@@ -568,9 +600,22 @@ impl CombatData {
         &self.spreadshot
     }
 
-    /// The weapon attack `damage_id`, if it is one of the config's.
+    /// The light (`heavy` false) or heavy attack of a weapon of `kind`: its own rows, else the
+    /// config's.
+    pub fn weapon_attack(&self, kind: WeaponKind, heavy: bool) -> Option<&AttackRow> {
+        match self.kind_attacks.get(&kind) {
+            Some([light, heavy_row]) => Some(if heavy { heavy_row } else { light }),
+            None if heavy => self.heavy_attack(),
+            None => self.first_attack(),
+        }
+    }
+
+    /// The weapon attack `damage_id`, if it is one of the config's or of a weapon kind.
     pub fn attack(&self, damage_id: &str) -> Option<&AttackRow> {
-        self.attacks.iter().find(|row| row.damage_id == damage_id)
+        self.attacks
+            .iter()
+            .chain(self.kind_attacks.values().flatten())
+            .find(|row| row.damage_id == damage_id)
     }
 
     /// The out-of-combat vision offset of `creature_type`; 0 without a row.
@@ -736,6 +781,42 @@ mod tests {
         assert_eq!(
             data.first_attack().map(|row| row.damage_id.as_str()),
             Some(HEAVY)
+        );
+    }
+
+    #[test]
+    fn a_weapon_kind_attacks_with_its_own_rows() {
+        let mut source = source();
+        for (damage_id, coefficient) in [
+            ("Warhammer_PrimaryAttack", 1.0),
+            ("Warhammer_HeavyAttack", 1.3),
+        ] {
+            source.attacks.push(AttackRow {
+                damage_id: damage_id.to_owned(),
+                coefficient,
+                can_crit: true,
+                threat: 0,
+            });
+        }
+        let data = CombatData::build(source, &rows()).expect("data");
+        let id = |row: Option<&AttackRow>| row.map(|row| row.damage_id.clone());
+        assert_eq!(
+            id(data.weapon_attack(WeaponKind::WarHammer, true)),
+            Some("Warhammer_HeavyAttack".to_owned())
+        );
+        assert_eq!(
+            data.attack("Warhammer_HeavyAttack")
+                .map(|row| row.coefficient),
+            Some(1.3)
+        );
+        // A kind without rows, or another weapon, swings the config's.
+        assert_eq!(
+            id(data.weapon_attack(WeaponKind::Spear, false)),
+            id(data.first_attack())
+        );
+        assert_eq!(
+            id(data.weapon_attack(WeaponKind::Other, true)),
+            id(data.heavy_attack())
         );
     }
 
