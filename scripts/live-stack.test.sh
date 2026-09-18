@@ -52,6 +52,74 @@ else
   echo "PASS: a refused start writes nothing"
 fi
 
+# A fake stack: every program writes its pid and sleeps. The control FIFO restarts the
+# director and the sims; the other programs keep their pids.
+readonly WAIT_STEPS=300
+readonly WAIT_STEP_S=0.1
+readonly FAKE_SLEEP_S=600
+
+wait_for() {
+  local step
+  for ((step = 0; step < WAIT_STEPS; step++)); do
+    if "$@"; then
+      return 0
+    fi
+    sleep "$WAIT_STEP_S"
+  done
+  return 1
+}
+
+fake_root="$work_dir/fake"
+mkdir -p "$fake_root/target/release" "$fake_root/local-data/edge-http" "$fake_root/pids"
+touch "$fake_root/local-data/m3-test.env" "$fake_root/local-data/edge-http/edge.toml" \
+  "$fake_root/local-data/world-director.toml"
+for program in edge-http world-director sim rep-gateway blighted-admin nw-testclient; do
+  printf '#!/usr/bin/env bash\necho $$ > "%s/pids/%s"\nexec sleep %s\n' \
+    "$fake_root" "$program" "$FAKE_SLEEP_S" >"$fake_root/target/release/$program"
+  chmod +x "$fake_root/target/release/$program"
+done
+control="$fake_root/local-data/logs/live/control"
+control_log="$fake_root/local-data/logs/live/control.log"
+setsid env LIVE_STACK_ROOT="$fake_root" NW_GAME_DIR="$fake_root" "$STACK_SCRIPT" 1 \
+  >"$work_dir/stack.out" 2>&1 &
+stack_pid=$!
+if wait_for test -s "$fake_root/pids/blighted-admin" && wait_for test -p "$control"; then
+  before_edge="$(cat "$fake_root/pids/edge-http")"
+  before_director="$(cat "$fake_root/pids/world-director")"
+  before_sim="$(cat "$fake_root/pids/sim")"
+  echo "restart-world" >"$control"
+  if wait_for grep -qs "restart-world done" "$control_log" &&
+    [[ "$(cat "$fake_root/pids/world-director")" != "$before_director" ]] &&
+    [[ "$(cat "$fake_root/pids/sim")" != "$before_sim" ]] &&
+    [[ "$(cat "$fake_root/pids/edge-http")" == "$before_edge" ]]; then
+    echo "PASS: restart-world restarts the director and the sims only"
+  else
+    echo "FAIL: restart-world (log: $(cat "$control_log" 2>/dev/null))"
+    failures=$((failures + 1))
+  fi
+  echo "dance" >"$control"
+  if wait_for grep -qs "unknown: dance" "$control_log"; then
+    echo "PASS: an unknown control line is logged"
+  else
+    echo "FAIL: an unknown control line is logged"
+    failures=$((failures + 1))
+  fi
+else
+  echo "FAIL: the fake stack did not start (output: $(cat "$work_dir/stack.out"))"
+  failures=$((failures + 1))
+fi
+kill -TERM "$stack_pid" 2>/dev/null || true
+wait "$stack_pid" 2>/dev/null || true
+if wait_for test ! -e "$control" &&
+  wait_for test -z "$(pgrep -g "$stack_pid" 2>/dev/null)"; then
+  echo "PASS: a stopped stack removes the control FIFO and stops every program"
+else
+  echo "FAIL: a stopped stack removes the control FIFO and stops every program"
+  failures=$((failures + 1))
+fi
+# Whatever a failed run left behind.
+kill -TERM -- "-$stack_pid" 2>/dev/null || true
+
 if [[ "$failures" -gt 0 ]]; then
   echo "$failures test(s) failed"
   exit 1

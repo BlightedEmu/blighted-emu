@@ -9,6 +9,9 @@
 # It needs the git-ignored local files below. The servers get the secrets of the env file;
 # blighted-admin does not (its bot batches read the env file themselves). Logs go to LOG_DIR.
 # LIVE_STACK_ROOT overrides the repository folder (used by the tests).
+# The control FIFO (LOG_DIR/control) takes one command per line: `restart-world` stops the
+# world-director and the sims and starts them again (the Studio page's Apply uses it); the other
+# programs keep running. Results go to LOG_DIR/control.log.
 set -euo pipefail
 
 readonly EXIT_USAGE=2
@@ -22,6 +25,9 @@ readonly ENV_FILE="local-data/m3-test.env"
 readonly EDGE_CONFIG="local-data/edge-http/edge.toml"
 readonly DIRECTOR_CONFIG="local-data/world-director.toml"
 readonly LOG_DIR="local-data/logs/live"
+readonly CONTROL_FIFO="$LOG_DIR/control"
+readonly CONTROL_LOG="$LOG_DIR/control.log"
+readonly RESTART_WORLD="restart-world"
 readonly EDGE_LISTEN="0.0.0.0:8443"
 readonly LOGIN_URL="https://login.faqfirebase.com:8443"
 readonly GAME_URL="https://game.faqfirebase.com:8443"
@@ -77,8 +83,11 @@ pids=()
 stop_all() {
   kill "${pids[@]}" 2>/dev/null || true
   wait "${pids[@]}" 2>/dev/null || true
+  rm -f "$CONTROL_FIFO"
 }
 trap stop_all EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Starts one server with the secrets of the env file; its output goes to LOG_DIR/<name>.log.
 start_server() {
@@ -94,27 +103,63 @@ start_server() {
   pids+=("$!")
 }
 
+# Starts the world-director and the sims; their pids go to `pids` (in the world loop's shell).
+start_world() {
+  start_server director "$BIN/world-director" --config "$DIRECTOR_CONFIG"
+  sleep "$DIRECTOR_START_S"
+  local index
+  for ((index = 0; index < sims; index++)); do
+    local sim_id="sim-$((index + 1))"
+    start_server "$sim_id" env NW_SIM_SIM_ID="$sim_id" \
+      NW_SIM_METRICS_LISTEN="127.0.0.1:${SIM_METRICS_PORTS[index]}" \
+      NW_SIM_TICK_THREADS="$SIM_TICK_THREADS" NW_SIM_MAX_PLAYERS="$SIM_MAX_PLAYERS" \
+      NW_SIM_ADMIN__SNAPSHOT_INTERVAL_MS="$snapshot_interval_ms" "$BIN/sim"
+  done
+}
+
+# Runs in the background: owns the director and the sims, and reads the control FIFO. The FIFO
+# is opened read-write so the open never blocks and a stop signal ends the read at once.
+world_loop() {
+  pids=()
+  trap 'kill "${pids[@]}" 2>/dev/null || true; wait "${pids[@]}" 2>/dev/null || true; exit 0' TERM
+  start_world
+  exec 3<>"$CONTROL_FIFO"
+  local line
+  while read -r line <&3; do
+    if [[ "$line" == "$RESTART_WORLD" ]]; then
+      kill "${pids[@]}" 2>/dev/null || true
+      wait "${pids[@]}" 2>/dev/null || true
+      pids=()
+      start_world
+      echo "$RESTART_WORLD done" >>"$CONTROL_LOG"
+    else
+      echo "unknown: $line" >>"$CONTROL_LOG"
+    fi
+  done
+}
+
 start_server edge env NW_EDGE_HTTPS_LISTEN="$EDGE_LISTEN" \
   NW_EDGE_AUTH__LOGIN_FAIL_LIMIT="$LOGIN_FAIL_LIMIT" \
   "$BIN/edge-http" --config "$EDGE_CONFIG" serve
-start_server director "$BIN/world-director" --config "$DIRECTOR_CONFIG"
-sleep "$DIRECTOR_START_S"
+rm -f "$CONTROL_FIFO"
+mkfifo "$CONTROL_FIFO"
+world_loop &
+pids+=("$!")
 metrics_urls="\"$GATEWAY_METRICS_URL\", \"$DIRECTOR_METRICS_URL\""
 for ((index = 0; index < sims; index++)); do
-  sim_id="sim-$((index + 1))"
-  port="${SIM_METRICS_PORTS[index]}"
-  start_server "$sim_id" env NW_SIM_SIM_ID="$sim_id" NW_SIM_METRICS_LISTEN="127.0.0.1:$port" \
-    NW_SIM_TICK_THREADS="$SIM_TICK_THREADS" NW_SIM_MAX_PLAYERS="$SIM_MAX_PLAYERS" \
-    NW_SIM_ADMIN__SNAPSHOT_INTERVAL_MS="$snapshot_interval_ms" "$BIN/sim"
-  metrics_urls+=", \"http://127.0.0.1:$port/metrics\""
+  metrics_urls+=", \"http://127.0.0.1:${SIM_METRICS_PORTS[index]}/metrics\""
 done
-sleep "$SIM_START_S"
+sleep "$((DIRECTOR_START_S + SIM_START_S))"
 start_server gateway env NW_GATEWAY_WORKERS="$GATEWAY_WORKERS" \
   NW_GATEWAY_LIMITS__MAX_CONNECTIONS="$GATEWAY_MAX_CONNECTIONS" \
   NW_GATEWAY_LIMITS__HANDSHAKES_PER_IP_PER_SECOND="$HANDSHAKES_PER_IP_PER_SECOND" \
   "$BIN/rep-gateway" serve
 
 echo "$sims sims run; logs in $LOG_DIR. Open $PANEL_URL. Ctrl-C stops everything."
+# blighted-admin runs in the background and the script waits for it, so a stop signal reaches
+# the traps at once.
 NW_TESTCLIENT_LOGIN_URL="$LOGIN_URL" NW_TESTCLIENT_GAME_URL="$GAME_URL" \
   BLIGHTED_ADMIN_LIVE__METRICS_URLS="[$metrics_urls]" \
-  "$BIN/blighted-admin" serve
+  "$BIN/blighted-admin" serve &
+pids+=("$!")
+wait "$!"
