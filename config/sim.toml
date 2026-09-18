@@ -81,8 +81,8 @@ leash_radius_m = 50.0
 # Unknown.
 attack_reach_m = 3.0
 reach_margin_m = 1.0
-# Unknown.
-min_attack_interval_ms = 500
+# The retail sword's hit spacing, the fastest tutorial weapon (sword 400, axe 700, hammer 830 ms).
+min_attack_interval_ms = 400
 # Unknown.
 mob_attack_interval_ms = 2000
 mob_speed_mps = 3.25

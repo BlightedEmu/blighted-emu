@@ -3,6 +3,7 @@
 
 use crate::bundle::{LOCAL_PLAYER_INTEREST, ReplicatedStateBundle};
 use crate::client_add_entry::ClientAddEntryMsg;
+use crate::combat::{MeleeDamage, OnDamageMsg};
 use crate::connected::{
     Block1415acc30, CalendarConnectedMsg, ConnectedBody, TimingConfigurationConnectedMsg,
 };
@@ -17,6 +18,26 @@ use crate::spawn_point::ReceivePlayerSpawnPointMsg;
 use crate::time_change::SyncTimeChangeMsg;
 use crate::time_synch::TimeSynchMsg;
 use crate::wire::RAW_ID_LEN;
+
+/// The max health of [`melee_sample`]'s player.
+const SAMPLE_MAX_HEALTH: f32 = 856.0;
+/// The item tag of [`melee_sample`] (a retail sailor's).
+const SAMPLE_HIT_TAG: u8 = 6;
+
+/// A creature's hit of `amount` on player `target` by creature `attacker`, standing at the origin.
+pub fn melee_sample(target: u64, attacker: u64, amount: f32) -> OnDamageMsg {
+    OnDamageMsg::melee(
+        target,
+        &MeleeDamage {
+            attacker,
+            amount,
+            max_health: SAMPLE_MAX_HEALTH,
+            attacker_at: [0.0; 3],
+            tag: SAMPLE_HIT_TAG,
+            scale: 1.0,
+        },
+    )
+}
 
 /// One message of each login type, in the captured order; the entry names entity `own`.
 pub fn login_samples(own: u64) -> Vec<ServerMessage> {

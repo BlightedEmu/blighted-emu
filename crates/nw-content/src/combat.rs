@@ -404,6 +404,9 @@ impl CombatData {
                 ))
             })
             .collect();
+        // A consumable's id is its item id: every retail health potion has no `ItemStatsRef`
+        // (live 2026-09-16: `PotionHealthT1` never healed). An item that names a consumable by
+        // its stats is kept too; its own consumable row wins.
         let item_heals = source
             .item_stats
             .iter()
@@ -413,6 +416,7 @@ impl CombatData {
                     consumables.get(&stats.to_lowercase())?.clone(),
                 ))
             })
+            .chain(consumables.clone())
             .collect();
         let categories: HashMap<String, CategoryMods> = source.categories.into_iter().collect();
         let base: HashMap<u32, MobType> = source
@@ -575,8 +579,8 @@ mod tests {
                 "PotionHeal".to_owned(),
             )],
             heals: vec![("PotionHeal".to_owned(), POTION_HEAL, POTION_SHARE)],
+            // As in the retail tables: the potion has no stats row.
             item_stats: vec![
-                ("PotionHealthT1".to_owned(), "PotionHealthT1".to_owned()),
                 (SWORD_ITEM.to_owned(), "SwordT1".to_owned()),
                 ("Shield".to_owned(), "NoWeaponRow".to_owned()),
             ],

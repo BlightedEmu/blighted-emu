@@ -52,8 +52,9 @@ pub const DEFAULT_LEASH_RADIUS_M: f32 = 50.0;
 pub const DEFAULT_ATTACK_REACH_M: f32 = 3.0;
 /// Default reach margin for the lag between client and server.
 pub const DEFAULT_REACH_MARGIN_M: f32 = 1.0;
-/// Default shortest time between two attacks of a player.
-pub const DEFAULT_MIN_ATTACK_INTERVAL_MS: u64 = 500;
+/// Default shortest time between two attacks of a player: the retail sword's hit spacing, the
+/// fastest of the tutorial weapons (swing note: sword 400, axe 700, hammer 830 ms).
+pub const DEFAULT_MIN_ATTACK_INTERVAL_MS: u64 = 400;
 /// Default time between two hits of a mob.
 pub const DEFAULT_MOB_ATTACK_INTERVAL_MS: u64 = 2_000;
 /// Default mob speed: the player combat run (M6-A spec F8).

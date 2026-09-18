@@ -168,6 +168,10 @@ struct SpawnPoint {
 /// the capture: 14.6 / 0.2 for the signifier's `Legionnaire_LightStab` (Observed). Thorpe's
 /// attacks took 91.25 per unit; the cause of the difference is Unknown.
 const BLOCK_STAMINA_PER_MOD: f32 = 73.0;
+/// The 3601 item scale of the sailors' hits (swing note: 0.6006 on every sailor hit).
+const SAILOR_HIT_SCALE: f32 = 0.6006;
+/// The 3601 item scale of the island foes' and Thorpe's hits (0.5612 on all of them).
+const ISLAND_HIT_SCALE: f32 = 0.5612;
 /// Ship sailors (damage mod 0.5): both landed hits did 12.97; cooldown 1-2 s + attack 1.5-2.0 s;
 /// run 5.5 m/s; hit at 456 ms. Block stamina: no blocked sailor hit took stamina in the capture,
 /// so it is [`BLOCK_STAMINA_PER_MOD`] x the club primary's `BlockStaminaDmgMod` 0.26 (Inferred).
@@ -189,6 +193,8 @@ const SAILOR_PACE: Pace = Pace {
     },
     // Its sailor slice ambient vision 30 m (tutorial-ai-behavior note).
     sight_m: 30.0,
+    hit_tag: 6,
+    hit_scale: SAILOR_HIT_SCALE,
 };
 /// Legionnaire and signifier (damage mod 0.7): 18.70 (262336); cooldown 1-1.5 s + stab about
 /// 0.9-1.2 s; run 5.5 m/s; hit at 627 ms. A blocked light stab took 14.6 stamina (266620).
@@ -209,6 +215,8 @@ const LEGION_PACE: Pace = Pace {
     },
     // Its legion slice ambient vision 12 m (tutorial-ai-behavior note).
     sight_m: 12.0,
+    hit_tag: 5,
+    hit_scale: ISLAND_HIT_SCALE,
 };
 /// Risen corruption entity (damage mod 0.9): 18.24 (295343); cooldown 0.75-1 s + swipe about
 /// 0.8-0.9 s; run 4.5 m/s; hit at 555 ms. Block stamina: [`BLOCK_STAMINA_PER_MOD`] x the
@@ -230,6 +238,8 @@ const RISEN_PACE: Pace = Pace {
     },
     // Its risen slice ambient vision 12 m (tutorial-ai-behavior note).
     sight_m: 12.0,
+    hit_tag: 6,
+    hit_scale: ISLAND_HIT_SCALE,
 };
 /// Corruption swarmers (damage mod 0.25): 7.07 (296477); rate limit 0.25 s + slash (length
 /// Unknown; our choice 1 s); run 1.5 m/s; hit at 533 ms. Block stamina: [`BLOCK_STAMINA_PER_MOD`]
@@ -251,6 +261,8 @@ const SWARMER_PACE: Pace = Pace {
     },
     // Its swarmer slice ambient vision 12 m (tutorial-ai-behavior note).
     sight_m: 12.0,
+    hit_tag: 4,
+    hit_scale: ISLAND_HIT_SCALE,
 };
 /// Thorpe (damage mod 1.125): 25.6 (457997); cooldown 1.15-2.25 s + attack 1.4-2.2 s; run
 /// 4.5 m/s; hit at 611 ms (stab). A blocked stab took 25.55 stamina (481395, 489462).
@@ -271,6 +283,8 @@ const THORPE_PACE: Pace = Pace {
     },
     // Its Thorpe slice ambient vision 20 m (tutorial-ai-behavior note).
     sight_m: 20.0,
+    hit_tag: 4,
+    hit_scale: ISLAND_HIT_SCALE,
 };
 
 /// Experience points per island foe killed (retail: 20 per legion or corrupted kill, 120 in all;
@@ -287,13 +301,28 @@ const fn point(x: f32, y: f32, z: f32) -> Position {
     Position { x, y, z }
 }
 
+/// The floor heights of the tutorial fights (height note, retail ALC z from the second state on;
+/// the cards carried 0.4 to 1.0 m more and the creatures dropped within 100 ms). Each creature
+/// keeps its floor: the ship's deck and the ruins are not in the height map.
+///
+/// The ship's deck: the three sailors' medians 89.38 to 89.45, the player 89.42.
+const SHIP_DECK_Z: f32 = 89.42;
+/// The ruin top of the first legionnaire (26.37 to 26.88; card 27.35).
+const RUIN_TOP_Z: f32 = 26.45;
+/// The courtyard of the second legionnaire (20.26 to 20.42; card 20.99).
+const COURTYARD_Z: f32 = 20.33;
+/// The floor of the risen and the swarmers (21.32 to 21.41; cards 21.74 and 21.81).
+const CORRUPTION_FLOOR_Z: f32 = 21.36;
+/// Thorpe's arena floor where he spawns (22.21 for y below 227.5; card 22.25).
+const THORPE_FLOOR_Z: f32 = 22.21;
+
 const SAILOR_VITALS: &str = "Corrupted_Sailor_1H_Club_FTUE";
 const SAILOR_CATEGORY: Option<&str> = Some("Corrupted_Sailor_1H_Club");
 /// The first sailor (retail spawn point `sp01`).
 const FIRST_SAILOR: SpawnPoint = SpawnPoint {
     vitals: SAILOR_VITALS,
     category: SAILOR_CATEGORY,
-    at: point(467.617, 846.008, 90.16),
+    at: point(467.617, 846.008, SHIP_DECK_Z),
     role: Role::Sailor,
     collision: SAILOR_COLLISION,
     pace: SAILOR_PACE,
@@ -306,11 +335,11 @@ pub(super) const LAST_SAILOR_DELAY_MS: u64 = 1_000;
 /// The two later sailors (retail `sp01` and `sp02` of the second wave).
 const LATER_SAILORS: [SpawnPoint; 2] = [
     SpawnPoint {
-        at: point(468.734, 847.221, 89.99),
+        at: point(468.734, 847.221, SHIP_DECK_Z),
         ..FIRST_SAILOR
     },
     SpawnPoint {
-        at: point(468.734, 845.17, 89.99),
+        at: point(468.734, 845.17, SHIP_DECK_Z),
         delay_ms: LAST_SAILOR_DELAY_MS,
         ..FIRST_SAILOR
     },
@@ -322,7 +351,7 @@ const SWARMER_VITALS: &str = "Corruption_Entity_Crawler_FTUE";
 const SWARMER: SpawnPoint = SpawnPoint {
     vitals: SWARMER_VITALS,
     category: CORRUPTION_CATEGORY,
-    at: point(580.06, 383.2, 21.74),
+    at: point(580.06, 383.2, CORRUPTION_FLOOR_Z),
     role: Role::Foe,
     collision: SWARMER_COLLISION,
     pace: SWARMER_PACE,
@@ -336,7 +365,7 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
         &[SpawnPoint {
             vitals: LEGION_VITALS,
             category: LEGION_CATEGORY,
-            at: point(668.27, 385.16, 27.35),
+            at: point(668.27, 385.16, RUIN_TOP_Z),
             role: Role::Foe,
             collision: LEGION_COLLISION,
             pace: LEGION_PACE,
@@ -350,7 +379,7 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
         &[SpawnPoint {
             vitals: LEGION_VITALS,
             category: LEGION_CATEGORY,
-            at: point(621.6, 419.5, 20.99),
+            at: point(621.6, 419.5, COURTYARD_Z),
             role: Role::Foe,
             collision: LEGION_COLLISION,
             pace: LEGION_PACE,
@@ -365,7 +394,7 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
             SpawnPoint {
                 vitals: "Corruption_Entity",
                 category: CORRUPTION_CATEGORY,
-                at: point(579.62, 381.91, 21.74),
+                at: point(579.62, 381.91, CORRUPTION_FLOOR_Z),
                 role: Role::Foe,
                 collision: CORRUPTION_COLLISION,
                 pace: RISEN_PACE,
@@ -376,12 +405,12 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
             },
             SWARMER,
             SpawnPoint {
-                at: point(580.67, 379.57, 21.74),
+                at: point(580.67, 379.57, CORRUPTION_FLOOR_Z),
                 delay_ms: 2_316,
                 ..SWARMER
             },
             SpawnPoint {
-                at: point(578.21, 380.97, 21.81),
+                at: point(578.21, 380.97, CORRUPTION_FLOOR_Z),
                 delay_ms: 3_313,
                 ..SWARMER
             },
@@ -392,7 +421,7 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
         &[SpawnPoint {
             vitals: "Damned_Commander_FTUE",
             category: None,
-            at: point(490.25, 209.89, 22.83),
+            at: point(490.25, 209.89, THORPE_FLOOR_Z),
             role: Role::Captain,
             collision: LEGION_COLLISION,
             pace: THORPE_PACE,

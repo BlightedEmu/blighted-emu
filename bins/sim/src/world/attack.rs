@@ -25,7 +25,7 @@ use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::paperdoll::slot;
 use nw_messages::{
     AdjustFxScriptsMsg, ConsumableCooldown, DamageDealtMsg, DeathRecapMsg, InputRecord,
-    MeleeHitMsg, OnDamageMsg, ServerMessage,
+    MeleeDamage, MeleeHitMsg, OnDamageMsg, ServerMessage,
 };
 use nw_sim_core::{Damage, Health, MobState, PlayerAttack, died, hurt, mob_hit, player_hit};
 
@@ -77,6 +77,8 @@ pub(super) struct Vitals {
     last_attack_ms: Option<u64>,
     /// The attack bits of the last input record.
     attack_bits: u8,
+    /// The counter (`u16` after the mask) of the newest input record read.
+    input_counter: Option<u16>,
     /// The player holds block (the newest input record, [`ClientInputMsg::blocking`]).
     ///
     /// [`ClientInputMsg::blocking`]: nw_messages::ClientInputMsg::blocking
@@ -97,6 +99,7 @@ impl Vitals {
             spawned,
             last_attack_ms: None,
             attack_bits: 0,
+            input_counter: None,
             blocking: false,
             dodge_held: false,
             quick_slot_held: false,
@@ -109,6 +112,11 @@ impl Vitals {
 #[allow(clippy::cast_precision_loss, reason = "health stays far below 2^24")]
 pub(super) const fn amount_of(amount: u32) -> f32 {
     amount as f32
+}
+
+/// Whether input counter `counter` comes after `last`; the counter wraps at `u16::MAX`.
+const fn counter_is_newer(counter: u16, last: u16) -> bool {
+    (counter.wrapping_sub(last) as i16) > 0
 }
 
 /// What an attack sees of its target.
@@ -296,12 +304,15 @@ impl SimWorld {
         };
         let player = &mut *player;
         let Some(gear) = player.gear.as_mut() else {
+            tracing::debug!(player = number, "drink: no gear");
             return;
         };
         let Some(item) = gear.worn_item(slot::QUICK_SLOT_1).map(str::to_owned) else {
+            tracing::debug!(player = number, "drink: quick slot 1 is empty");
             return;
         };
         let Some(heal) = data.heal_of_item(&item) else {
+            tracing::debug!(player = number, item, "drink: the item does not heal");
             return;
         };
         let group = lowercase_crc32(&heal.cooldown_id);
@@ -312,6 +323,7 @@ impl SimWorld {
             .iter()
             .any(|cooldown| cooldown.group == group)
         {
+            tracing::debug!(player = number, item, "drink: the cooldown runs");
             return;
         }
         gear.use_one(slot::QUICK_SLOT_1);
@@ -330,6 +342,7 @@ impl SimWorld {
         // The heal fits a `u32`: it is below the max health and a flat amount.
         let amount = (heal.health + heal.health_share * max).round() as u32;
         let healed = vitals.health.heal(amount);
+        tracing::debug!(player = number, item, amount, healed, "drink");
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             player.healed_to = Some(healed);
         }
@@ -368,11 +381,11 @@ impl SimWorld {
 
     /// Keeps whether the player holds block, starts a dodge roll on a new press of the dodge key
     /// and a drink on a new press of quick slot 1 (the first, newest record), then gives one
-    /// result
-    /// per rising edge of the attack bits in `records`, in record order: a record that
-    /// sets any attack bit the record before it did not set (M6-B spec section 6.1). The first
-    /// edge attacks; the others of the same message are [`AttackRefusal::TooFast`]. The bits of
-    /// the last record carry over to the next message. Nothing for a connection without a player.
+    /// result per rising edge of the attack bits in the records of `records` not read before,
+    /// oldest first: a record that sets any attack bit the record before it did not set (M6-B
+    /// spec section 6.1). The first edge attacks; the others of the same message are
+    /// [`AttackRefusal::TooFast`]. The bits and counter of the newest record carry over to the
+    /// next message. Nothing for a connection without a player.
     pub fn attack_input(
         &mut self,
         connection: &ConnectionRef,
@@ -394,8 +407,18 @@ impl SimWorld {
         let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) else {
             return Vec::new();
         };
+        // The client sends the newest record first, then older copies with fewer fields (swing
+        // note: counters 7290, 7289, 7288); each record counts once, oldest first.
         let mut edges = 0;
-        for bits in records.iter().map(InputRecord::attack_bits) {
+        for record in records.iter().rev() {
+            if vitals
+                .input_counter
+                .is_some_and(|last| !counter_is_newer(record.u16_after_mask, last))
+            {
+                continue;
+            }
+            vitals.input_counter = Some(record.u16_after_mask);
+            let bits = record.attack_bits();
             if bits & !vitals.attack_bits != 0 {
                 edges += 1;
             }
@@ -600,7 +623,12 @@ impl SimWorld {
             return None;
         }
         let connection = player.connection.clone();
+        let attacker_at = self.attacker_position(attacker);
+        let (tag, scale) = self
+            .mobs
+            .hit_style(attacker, (1.0 - self.combat.player_armor_share) as f32);
         let mut vitals = self.world.get_mut::<Vitals>(entity)?;
+        let max_health = amount_of(vitals.health.max());
         let damage = vitals.health.take(amount);
         if damage == Damage::Killed {
             vitals.dead_since_ms = Some(now_ms);
@@ -608,9 +636,17 @@ impl SimWorld {
         if damage == Damage::AlreadyDead {
             return None;
         }
+        let melee = MeleeDamage {
+            attacker,
+            amount: amount_of(amount),
+            max_health,
+            attacker_at,
+            tag,
+            scale,
+        };
         self.send_reliable(
             connection.clone(),
-            &ServerMessage::OnDamage(OnDamageMsg::hit(target, amount_of(amount))),
+            &ServerMessage::OnDamage(OnDamageMsg::melee(target, &melee)),
         );
         if damage == Damage::Hurt {
             return Some(AttackOutcome::Hit { target, amount });
@@ -626,6 +662,16 @@ impl SimWorld {
         Some(AttackOutcome::Killed { target })
     }
 
+    /// Where mob `attacker` stands, here or as a ghost; the origin when it is neither (retail
+    /// always names the creature's position in a hit on a player).
+    fn attacker_position(&mut self, attacker: u64) -> [f32; 3] {
+        let at = match self.mobs.get_mut(attacker) {
+            Some(mob) => Some(mob.brain.position()),
+            None => self.ghost(attacker).map(|(_, ghost)| ghost.position),
+        };
+        at.map_or([0.0; 3], |at| [at.x, at.y, at.z])
+    }
+
     /// The player with entity number `number`.
     pub(super) fn player_by_number(&mut self, number: u64) -> Option<Entity> {
         let mut query = self.world.query::<(Entity, &Player)>();
@@ -635,28 +681,33 @@ impl SimWorld {
             .map(|(entity, _)| entity)
     }
 
-    /// Starts the swings `started` at `now_ms` (their animation) and gives the swings that hit
-    /// now: each lands its mob's hit delay after its start (retail: the hit came a fixed time
-    /// after the attack started, per creature; creature-animation note, section 5.1).
+    /// Starts the swings `started` at `now_ms`, server time `server_ms` (their animation) and
+    /// gives the swings that hit now: each lands its mob's hit delay after its start (retail: the
+    /// hit came a fixed time after the attack started, per creature; creature-animation note,
+    /// section 5.1).
     pub(super) fn swings_landing(
         &mut self,
         started: Vec<MobAttackIntent>,
         now_ms: u64,
+        server_ms: u64,
     ) -> Vec<MobAttackIntent> {
         for swing in started {
             self.mob_timelines.attacked(swing.mob);
             let lands_ms = now_ms.saturating_add(self.mobs.hit_delay_ms(swing.mob));
-            self.swings.push((lands_ms, swing));
+            self.swings.push((lands_ms, server_ms, swing));
         }
         let (landing, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.swings)
             .into_iter()
-            .partition(|(lands_ms, _)| now_ms >= *lands_ms);
+            .partition(|(lands_ms, _, _)| now_ms >= *lands_ms);
         self.swings = later;
         landing
             .into_iter()
-            .map(|(_, swing)| swing)
-            // A mob that died before its swing landed does not hit.
-            .filter(|swing| self.mobs.health(swing.mob).is_some_and(|health| health > 0))
+            // A mob that died or reeled from a player's hit before its swing landed does not hit.
+            .filter(|(_, started_ms, swing)| {
+                self.mobs.health(swing.mob).is_some_and(|health| health > 0)
+                    && !self.mob_timelines.reeled_since(swing.mob, *started_ms)
+            })
+            .map(|(_, _, swing)| swing)
             .collect()
     }
 
@@ -683,8 +734,14 @@ impl SimWorld {
                     amount = hit.amount,
                     "mob attack"
                 );
+                let reach_m = self.mobs.hit_reach_m(intent.mob);
                 if let Some(entity) = self.player_by_number(intent.target) {
                     let vitals = *self.world.get::<Vitals>(entity)?;
+                    // A swing at a player who moved away misses: retail sends no hit message.
+                    let body = self.world.get::<Body>(entity)?.motion.position();
+                    if body.horizontal_distance(at) > reach_m {
+                        return None;
+                    }
                     // Spawn protection: a mob cannot hit a player whose client has not spawned
                     // into the world yet (it would die at the loading screen otherwise).
                     if !vitals.spawned {
@@ -743,7 +800,7 @@ mod tests {
     };
     use crate::world::{MESSAGE_CHANNEL, MoveError, Outgoing, WorldSettings};
     use nw_bus::{Ghost, MobGhost, Point};
-    use nw_messages::{DamageDealtMsg, DeathRecapMsg, OnDamageMsg, ServerMessage};
+    use nw_messages::{DamageDealtMsg, DeathRecapMsg, ServerMessage};
     use nw_reflect::Envelope;
 
     const LIGHT: &str = "1H_Sword_Attack1";
@@ -751,7 +808,7 @@ mod tests {
     /// 64 x 1.0 x (1 - 0.35), rounded.
     const SWORD_HIT: u32 = 42;
     const MOB_HEALTH: u32 = 1000;
-    const INTERVAL_MS: u64 = 500;
+    const INTERVAL_MS: u64 = crate::config::DEFAULT_MIN_ATTACK_INTERVAL_MS;
     const TICK_MS: u64 = 33;
     const MOB_RESPAWN_MS: u64 = 360_000;
     /// The committed `min_respawn_ms`.
@@ -792,6 +849,21 @@ mod tests {
         }
     }
 
+    /// The records of one message in the client's order, newest first, from `masks` oldest first,
+    /// with counters from `first_counter` up.
+    fn message(first_counter: u16, masks: &[u32]) -> Vec<InputRecord> {
+        let mut records: Vec<InputRecord> = masks
+            .iter()
+            .zip(first_counter..)
+            .map(|(&mask, counter)| InputRecord {
+                u16_after_mask: counter,
+                ..record(mask)
+            })
+            .collect();
+        records.reverse();
+        records
+    }
+
     /// A fight after one tick, which wakes the mob.
     fn awake_fight() -> SimWorld {
         let mut world = fight();
@@ -815,14 +887,15 @@ mod tests {
     #[test]
     fn a_held_bit_does_not_attack_again() {
         let mut world = awake_fight();
-        let held = [record(FIRST_ATTACK_BIT)];
-        assert_eq!(world.attack_input(&connection(1), &held, NOW).len(), 1);
+        let pressed = message(1, &[FIRST_ATTACK_BIT]);
+        assert_eq!(world.attack_input(&connection(1), &pressed, NOW).len(), 1);
+        let held = message(2, &[FIRST_ATTACK_BIT]);
         assert!(
             world
                 .attack_input(&connection(1), &held, NOW + INTERVAL_MS)
                 .is_empty()
         );
-        let again = [record(0), record(FIRST_ATTACK_BIT)];
+        let again = message(3, &[0, FIRST_ATTACK_BIT]);
         assert_eq!(
             world
                 .attack_input(&connection(1), &again, NOW + 2 * INTERVAL_MS)
@@ -832,14 +905,39 @@ mod tests {
     }
 
     #[test]
+    fn an_older_copy_with_fewer_bits_is_not_a_new_press() {
+        let mut world = awake_fight();
+        assert_eq!(
+            world
+                .attack_input(&connection(1), &message(5, &[FIRST_ATTACK_BIT]), NOW)
+                .len(),
+            1
+        );
+        // The next message repeats record 5 without its attack bit after the held record 6.
+        let mut next = message(6, &[FIRST_ATTACK_BIT]);
+        next.push(InputRecord {
+            u16_after_mask: 5,
+            ..record(0)
+        });
+        assert!(
+            world
+                .attack_input(&connection(1), &next, NOW + INTERVAL_MS)
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn edges_inside_one_message_count_once_each() {
         let mut world = awake_fight();
-        let records = [
-            record(FIRST_ATTACK_BIT | SECOND_ATTACK_BIT),
-            record(0),
-            record(FIRST_ATTACK_BIT),
-            record(FIRST_ATTACK_BIT),
-        ];
+        let records = message(
+            1,
+            &[
+                FIRST_ATTACK_BIT | SECOND_ATTACK_BIT,
+                0,
+                FIRST_ATTACK_BIT,
+                FIRST_ATTACK_BIT,
+            ],
+        );
         let results = world.attack_input(&connection(1), &records, NOW);
         assert_eq!(results.len(), 2, "{results:?}");
         assert!(results[0].is_ok());
@@ -850,13 +948,10 @@ mod tests {
     fn extra_edges_in_one_message_are_too_fast_without_a_search() {
         let mut world = awake_fight();
         join(&mut world, 2, MOB_X + 10.0);
-        let records = [
-            record(FIRST_ATTACK_BIT),
-            record(0),
-            record(FIRST_ATTACK_BIT),
-            record(0),
-            record(FIRST_ATTACK_BIT),
-        ];
+        let records = message(
+            1,
+            &[FIRST_ATTACK_BIT, 0, FIRST_ATTACK_BIT, 0, FIRST_ATTACK_BIT],
+        );
         assert_eq!(
             world.attack_input(&connection(2), &records, NOW),
             vec![
@@ -1083,25 +1178,44 @@ mod tests {
             block_stamina: crate::mobs::DEFAULT_BLOCK_STAMINA,
             gait: nw_sim_core::Gait::uniform(3.0, 5.5),
             sight_m: 20.0,
+            hit_tag: crate::mobs::DEFAULT_HIT_TAG,
+            hit_scale: 1.0,
         };
         let mob = world
             .mobs
             .spawn_personal(test_spawn(MOB_X), 1, false, Some(pace), None, NOW)
             .expect("rows");
         let swing = MobAttackIntent { mob, target: 1 };
-        assert!(world.swings_landing(vec![swing], NOW).is_empty());
         assert!(
             world
-                .swings_landing(Vec::new(), NOW + DELAY_MS - 1)
+                .swings_landing(vec![swing], NOW, SERVER_TIME)
                 .is_empty()
         );
-        assert_eq!(world.swings_landing(Vec::new(), NOW + DELAY_MS), [swing]);
         assert!(
             world
-                .swings_landing(Vec::new(), NOW + DELAY_MS + 1)
+                .swings_landing(Vec::new(), NOW + DELAY_MS - 1, SERVER_TIME)
+                .is_empty()
+        );
+        assert_eq!(
+            world.swings_landing(Vec::new(), NOW + DELAY_MS, SERVER_TIME),
+            [swing]
+        );
+        assert!(
+            world
+                .swings_landing(Vec::new(), NOW + DELAY_MS + 1, SERVER_TIME)
                 .is_empty(),
             "once"
         );
+    }
+
+    #[test]
+    fn a_swing_at_a_player_out_of_reach_misses() {
+        let mut world = fight();
+        join(&mut world, 2, MOB_X + 10.0);
+        let swing = |target| MobAttackIntent { mob: mob(), target };
+        assert!(world.mob_hits(vec![swing(2)], NOW).is_empty(), "10 m away");
+        assert!(messages_to(&world.take_messages(), 2).is_empty());
+        assert_eq!(world.mob_hits(vec![swing(1)], NOW).len(), 1, "2 m away");
     }
 
     #[test]
@@ -1156,7 +1270,12 @@ mod tests {
                 assert_eq!(*target, 1);
                 let messages = messages_to(&output.messages, 1);
                 assert!(
-                    messages.contains(&ServerMessage::OnDamage(OnDamageMsg::hit(1, amount(*hit)))),
+                    messages.iter().any(|message| matches!(
+                        message,
+                        ServerMessage::OnDamage(damage)
+                            if damage.items[0].amount == amount(*hit)
+                                && damage.u64_c == mob().swap_bytes()
+                    )),
                     "{messages:?}"
                 );
                 assert!(
@@ -1220,13 +1339,17 @@ mod tests {
     fn a_remote_mob_hit_sends_the_player_a_3601() {
         let mut world = border();
         assert!(world.apply_hit(1, mob(), SWORD_HIT, 0, NOW).is_some());
+        let messages = messages_to(&world.take_messages(), 1);
+        let [ServerMessage::OnDamage(damage)] = messages.as_slice() else {
+            panic!("{messages:?}");
+        };
+        assert_eq!(damage.items[0].amount, amount(SWORD_HIT));
         assert_eq!(
-            messages_to(&world.take_messages(), 1),
-            vec![ServerMessage::OnDamage(OnDamageMsg::hit(
-                1,
-                amount(SWORD_HIT)
-            ))]
+            damage.u64_c,
+            mob().swap_bytes(),
+            "the attacker's facet entity"
         );
+        assert_eq!(damage.raw_2, [0x02, 0x00], "a direct hit");
     }
 
     #[test]

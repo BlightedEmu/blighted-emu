@@ -344,11 +344,11 @@ impl WorldView {
 #[cfg(test)]
 mod tests {
     use nw_messages::test_support::{
-        FIRST_OTHER_SLOT, entity_group, login_samples, players_bundle,
+        FIRST_OTHER_SLOT, entity_group, login_samples, melee_sample, players_bundle,
     };
     use nw_messages::{
         AssetId, BodyCodec, BundleGroup, ClientAddEntryMsg, DYNAMIC_SLICE_SUB_ID, DamageDealtMsg,
-        DeathRecapMsg, GDE_ID_LEN, LOCAL_PLAYER_INTEREST, LOGIN_CLIENT_CONTEXT, OnDamageMsg,
+        DeathRecapMsg, GDE_ID_LEN, LOCAL_PLAYER_INTEREST, LOGIN_CLIENT_CONTEXT,
         ReplicatedStateBundle,
     };
     use nw_reflect::{Envelope, TypeId};
@@ -541,8 +541,8 @@ mod tests {
         let messages = [
             ServerMessage::DamageDealt(DamageDealtMsg::hit(OWN, MOB, HIT, false)),
             ServerMessage::DamageDealt(DamageDealtMsg::hit(OTHER, MOB, HIT, false)),
-            ServerMessage::OnDamage(OnDamageMsg::hit(OWN, HIT)),
-            ServerMessage::OnDamage(OnDamageMsg::hit(OTHER, HIT)),
+            ServerMessage::OnDamage(melee_sample(OWN, MOB, HIT)),
+            ServerMessage::OnDamage(melee_sample(OTHER, MOB, HIT)),
             ServerMessage::DeathRecap(DeathRecapMsg::of(OWN)),
             ServerMessage::DeathRecap(DeathRecapMsg::of(OTHER)),
         ];

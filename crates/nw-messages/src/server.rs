@@ -318,7 +318,7 @@ mod tests {
     fn combat_messages_decode_by_their_index() {
         let samples = [
             ServerMessage::DamageDealt(DamageDealtMsg::hit(ENTITY, ENTITY + 1, 5.0, false)),
-            ServerMessage::OnDamage(OnDamageMsg::hit(ENTITY, 5.0)),
+            ServerMessage::OnDamage(crate::test_support::melee_sample(ENTITY, ENTITY + 1, 5.0)),
             ServerMessage::DeathRecap(DeathRecapMsg::of(ENTITY)),
             ServerMessage::MeleeHit(MeleeHitMsg::on(ENTITY, true)),
             ServerMessage::AdjustFxScripts(AdjustFxScriptsMsg::on(ENTITY, POTION_HEAL_SCRIPT)),

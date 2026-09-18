@@ -182,8 +182,22 @@ impl AssetScript {
                 .last()
                 .map_or(spawn_ms, |last| last.group.time_ms);
             if let Some(gone_ms) = entity.despawns.last().filter(|gone| **gone > last_spawn_ms) {
+                // The hide follows the last change before it, so the change goes out first
+                // (retail: the boss area trigger's change at 15206 + 2316 ms, its stop 14 ms
+                // later; timed from its spawn it went 2.1 s early live and the change was lost).
+                let last_change = entity
+                    .changes
+                    .iter()
+                    .rev()
+                    .find(|change| change.group.time_ms <= *gone_ms)
+                    .and_then(|change| Some((change.group.time_ms, change.cause.as_ref()?)));
                 let (hide_when, hide_delay) = if *gone_ms == RETAIL_WATER_MOVE_MS {
                     (When::WaterMove, 0)
+                } else if let Some((change_ms, cause)) = last_change {
+                    (
+                        When::of(Some(cause)),
+                        cause.delay_ms + (gone_ms - change_ms),
+                    )
                 } else {
                     (when.clone(), delay_ms + (gone_ms - spawn_ms))
                 };
@@ -323,6 +337,39 @@ mod tests {
                 retail_gde_ref: [0; 16],
             }],
         }
+    }
+
+    #[test]
+    fn a_hide_after_a_change_waits_for_the_change() {
+        // The boss area trigger (asset 15): shown 22565 ms after a passthrough, changed 2316 ms
+        // after bit 15206, stopped 14 ms after the change.
+        const TF_BIT: u32 = 15_206;
+        const PREFIX: [u8; GDE_REF_PREFIX_LEN] = [0xff, 0x78, 0x60, 0x38, 0x81, 0x41, 0x00, 0x84];
+        let passthrough = LevelEvent::Client {
+            message_type: PASSTHROUGH,
+            id: PREFIX.to_vec(),
+        };
+        let tf = LevelEvent::Achievements { bits: vec![TF_BIT] };
+        let trigger = entity(
+            group(392_153, Some(passthrough), 22_565),
+            vec![group(394_754, Some(tf), 2_316)],
+            vec![394_768],
+        );
+        let mut script = AssetScript::of(&FtueLevel {
+            statics: FtueEntities::default(),
+            static_causes: Vec::new(),
+            assets: vec![trigger],
+            mobs: Vec::new(),
+        });
+        script.on(Trigger::Passthrough(PREFIX), 0);
+        assert_eq!(script.take_due(22_565), [(0, Step::Show)]);
+        // Live: the bit came 24.97 s after the passthrough.
+        script.on(Trigger::Achievement(TF_BIT), 24_967);
+        assert!(script.take_due(27_282).is_empty(), "no early hide");
+        assert_eq!(
+            script.take_due(27_297),
+            [(0, Step::Change(0)), (0, Step::Hide)]
+        );
     }
 
     #[test]

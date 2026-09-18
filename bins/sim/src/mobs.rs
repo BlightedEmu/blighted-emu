@@ -95,11 +95,20 @@ pub struct MobChanges {
     pub unspawned: usize,
 }
 
+/// How far past the distance where a mob starts its swing the swing still lands (our choice:
+/// retail hits landed 0.77 to 2.19 m from the player's body; sailors start at 1.8 m).
+pub const SWING_HIT_MARGIN_M: f32 = 1.0;
+
+/// The item tag of the hits of a mob without a pace (our choice: the retail sailors' and risen's
+/// tag; the open world's are Unknown).
+pub const DEFAULT_HIT_TAG: u8 = 6;
+
 /// The stamina a blocked swing of a mob without a pace takes (Inferred: the retail signifier's
 /// light stab, a level 1 mob, took 14.6; the swings of other mobs are Unknown).
 pub const DEFAULT_BLOCK_STAMINA: f32 = 14.6;
 
-/// How a personal mob fights when not as its rows and the config say.
+/// How a personal mob fights when not as its rows and the config say. A paced mob stands on the
+/// floor height of its spawn point; the height map does not move it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pace {
     /// Its attack factor, in place of the config's `mob_attack_factor`.
@@ -117,6 +126,11 @@ pub struct Pace {
     pub gait: Gait,
     /// How far it sees, in place of the config's sight.
     pub sight_m: f32,
+    /// The item tag of its hits on a player (3601; meaning Unknown).
+    pub hit_tag: u8,
+    /// The item scale of its hits on a player: the share of the raw damage that the player's
+    /// armor let through.
+    pub hit_scale: f32,
 }
 
 /// A mob spawned for one player.
@@ -346,6 +360,25 @@ impl Mobs {
             .map_or(DEFAULT_BLOCK_STAMINA, |pace| pace.block_stamina)
     }
 
+    /// How far from mob `entity` its swing lands on a player: where its gait starts a swing, plus
+    /// [`SWING_HIT_MARGIN_M`].
+    pub fn hit_reach_m(&self, entity: u64) -> f32 {
+        let gait = spawn_index(entity)
+            .and_then(|index| self.personal.get(&index)?.pace)
+            .map_or(self.settings.gait, |pace| pace.gait);
+        gait.swing_start_m + SWING_HIT_MARGIN_M
+    }
+
+    /// The item tag and scale of the hits of mob `entity`: its pace's, else [`DEFAULT_HIT_TAG`]
+    /// and `default_scale`.
+    pub fn hit_style(&self, entity: u64, default_scale: f32) -> (u8, f32) {
+        spawn_index(entity)
+            .and_then(|index| self.personal.get(&index)?.pace)
+            .map_or((DEFAULT_HIT_TAG, default_scale), |pace| {
+                (pace.hit_tag, pace.hit_scale)
+            })
+    }
+
     /// The level of mob `entity`, when it lives here.
     pub fn level(&self, entity: u64) -> Option<u32> {
         self.spawn_of(spawn_index(entity)?).map(|spawn| spawn.level)
@@ -479,11 +512,16 @@ impl Mobs {
                     ..self.settings
                 });
             let is_personal = personal.is_some();
+            let paced = personal.is_some_and(|personal| personal.pace.is_some());
             let action = brain_step(&mut mob.brain, &seen, now_ms, &settings, &mut self.dice);
             match action {
-                BrainAction::MoveTo(to) => {
+                // A paced mob keeps the floor height of its spawn: the retail tutorial creatures
+                // stayed on one floor per fight, a ruin or a deck that the height map does not
+                // hold (height note: 0.3 to 6 m above it, Thorpe's arena with no terrain).
+                BrainAction::MoveTo(to) if !paced => {
                     mob.brain.set_height(height_after_move(ground, to));
                 }
+                BrainAction::MoveTo(_) => {}
                 BrainAction::Attack(target) => {
                     intents.push(MobAttackIntent {
                         mob: mob_entity(index),
@@ -883,6 +921,8 @@ mod tests {
             block_stamina: DEFAULT_BLOCK_STAMINA,
             gait: Gait::uniform(3.0, 5.5),
             sight_m: 20.0,
+            hit_tag: DEFAULT_HIT_TAG,
+            hit_scale: 1.0,
         };
         const START: u64 = 1_000;
         let mut mobs = mobs(Vec::new());

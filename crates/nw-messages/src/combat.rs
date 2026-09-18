@@ -48,6 +48,9 @@ const HIT_FLAG_ABSORBED: u16 = 0x0400;
 const CAMERA_SHAKE_ABSORBED: u32 = 0x664b_2673;
 /// The item tag of an absorbed hit (retail Thorpe intermission; meaning Unknown).
 const ABSORBED_TAG: u8 = 6;
+/// Flags (little-endian `u16`) of every retail 3601 of a creature's melee hit (swing note:
+/// `02 00` on all tutorial hits; the Azoth catalog names it a direct hit).
+const MELEE_HIT_FLAGS: u16 = 0x0002;
 
 /// One damage item (`FUN_145b56640`, `FUN_145ce6260`): a tag byte and two big-endian `f32`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -253,19 +256,44 @@ pub struct OnDamageMsg {
     pub items: Vec<DamageItem>,
 }
 
+/// A creature's melee hit on a player, as retail sends it in its 3601 (swing note, retail
+/// tutorial 262336: `… f124cd79ce631910 0200 3cb103b6 441b5771 43d1fa3d 41a2fb39 01 05 4195a15e
+/// 3f0fa8d4`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeleeDamage {
+    /// The entity number of the creature.
+    pub attacker: u64,
+    /// The damage.
+    pub amount: f32,
+    /// The player's max health.
+    pub max_health: f32,
+    /// Where the creature stood, x, y and z in metres.
+    pub attacker_at: [f32; 3],
+    /// The item tag: sailor 6, signifier 5, risen 6, swarmer 4, Thorpe 4 (meaning Unknown).
+    pub tag: u8,
+    /// The item scale: the share of the raw damage the player's armor let through (retail 0.6006
+    /// for sailors, 0.5612 for the others).
+    pub scale: f32,
+}
+
 impl OnDamageMsg {
-    /// Damage of `amount` to player `target`: a call to its vitals component; every other field
-    /// 0 (their meaning is Unknown).
-    pub fn hit(target: u64, amount: f32) -> Self {
+    /// The creature hit `damage` on player `target`: a call to its vitals component that names
+    /// the creature's facet entity, the direct-hit flags, the share of the max health lost, the
+    /// creature's position and one item.
+    pub fn melee(target: u64, damage: &MeleeDamage) -> Self {
         let header = FacetHeader::of_child(component::VITALS, component::STATS_CHILD, target);
         Self {
             head_a: header.target,
             head_b: header.entity,
-            u64_c: 0,
-            raw_2: [0; 2],
-            u32_d: 0,
-            triple: [0; 3],
-            items: one_hit(amount),
+            u64_c: damage.attacker.swap_bytes(),
+            raw_2: MELEE_HIT_FLAGS.to_le_bytes(),
+            u32_d: (damage.amount / damage.max_health).to_bits(),
+            triple: damage.attacker_at.map(f32::to_bits),
+            items: vec![DamageItem {
+                tag: damage.tag,
+                amount: damage.amount,
+                scale: damage.scale,
+            }],
         }
     }
 }
@@ -757,9 +785,28 @@ mod tests {
     }
 
     #[test]
-    fn a_3601_head_is_42_bytes() {
-        let body = OnDamageMsg::hit(TARGET, AMOUNT).encode().expect("encode");
+    fn a_melee_hit_has_the_retail_fields() {
+        // Retail 262336: the signifier hit the player for 18.70.
+        const SIGNIFIER_FACET: u64 = 0xf124_cd79_ce63_1910;
+        const RETAIL_TAIL: [u8; 34] = [
+            0xf1, 0x24, 0xcd, 0x79, 0xce, 0x63, 0x19, 0x10, 0x02, 0x00, 0x3c, 0xb1, 0x03, 0xb6,
+            0x44, 0x1b, 0x57, 0x71, 0x43, 0xd1, 0xfa, 0x3d, 0x41, 0xa2, 0xfb, 0x39, 0x01, 0x05,
+            0x41, 0x95, 0xa1, 0x5e, 0x3f, 0x0f,
+        ];
+        let damage = MeleeDamage {
+            attacker: SIGNIFIER_FACET.swap_bytes(),
+            amount: f32::from_bits(0x4195_a15e),
+            // The retail player's max health, 865.587.
+            max_health: f32::from_bits(0x4458_6593),
+            attacker_at: [0x441b_5771, 0x43d1_fa3d, 0x41a2_fb39].map(f32::from_bits),
+            tag: 5,
+            scale: f32::from_bits(0x3f0f_a8d4),
+        };
+        let body = OnDamageMsg::melee(TARGET, &damage)
+            .encode()
+            .expect("encode");
         assert_eq!(body.len(), 42 + 1 + 9);
+        assert_eq!(body[16..16 + RETAIL_TAIL.len()], RETAIL_TAIL);
     }
 
     #[test]

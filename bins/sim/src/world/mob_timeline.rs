@@ -506,15 +506,16 @@ impl MobTimeline {
 
     /// A hit at `now_ms` on a creature that can reel: the first hit of a chain plays the light
     /// reaction, the second the heavy one and starts the limit; while the limit runs, a hit only
-    /// makes it longer (retail plays an additive reaction then; not sent here).
-    fn hurt(&mut self, now_ms: u64) {
+    /// makes it longer (retail plays an additive reaction then; not sent here). Whether a
+    /// reaction plays.
+    fn hurt(&mut self, now_ms: u64) -> bool {
         if now_ms.saturating_sub(self.last_hurt_ms) >= REACTION_LIMIT_MS {
             self.reactions_in_chain = 0;
         }
         self.last_hurt_ms = now_ms;
         if now_ms < self.reaction_limit_until_ms {
             self.reaction_limit_until_ms = now_ms + REACTION_LIMIT_MS;
-            return;
+            return false;
         }
         self.reactions_in_chain += 1;
         self.reaction = Some(if self.reactions_in_chain == 1 {
@@ -524,6 +525,7 @@ impl MobTimeline {
             self.reaction_limit_until_ms = now_ms + REACTION_LIMIT_MS;
             (Fragment::ReactHeavy, now_ms + REACT_HEAVY_MS)
         });
+        true
     }
 
     /// The frame of `now_ms` (a server clock that may step back a little: differences saturate
@@ -685,6 +687,8 @@ pub(super) struct MobTimelines {
     attacked: HashSet<u64>,
     /// Mobs that the player hit since the last frame.
     hurt: HashSet<u64>,
+    /// When each mob last started a reaction (server ms).
+    reeled_ms: HashMap<u64, u64>,
 }
 
 impl MobTimelines {
@@ -715,10 +719,19 @@ impl MobTimelines {
             timeline.attack_until_ms = now_ms + ATTACK_MS;
         }
         let can_react = animations.is_some_and(|animations| animations.reactions.is_some());
-        if self.hurt.remove(&mob) && can_react && !pose.dead {
-            timeline.hurt(now_ms);
+        if self.hurt.remove(&mob) && can_react && !pose.dead && timeline.hurt(now_ms) {
+            self.reeled_ms.insert(mob, now_ms);
         }
         timeline.advance(now_ms, pose, animations)
+    }
+
+    /// Whether mob `mob` started a reaction at or after `since_ms` (server ms): retail dropped a
+    /// creature's swing when a player's hit made it reel before the swing landed (swing note,
+    /// 205594, 207659, 296654, 305722).
+    pub(super) fn reeled_since(&self, mob: u64, since_ms: u64) -> bool {
+        self.reeled_ms
+            .get(&mob)
+            .is_some_and(|&reeled| reeled >= since_ms)
     }
 
     /// Forgets the mobs not in `shown`.
@@ -726,6 +739,7 @@ impl MobTimelines {
         self.by_mob.retain(|mob, _| shown.contains(mob));
         self.attacked.retain(|mob| shown.contains(mob));
         self.hurt.retain(|mob| shown.contains(mob));
+        self.reeled_ms.retain(|mob, _| shown.contains(mob));
     }
 }
 
@@ -1015,6 +1029,23 @@ mod tests {
         assert!(facing.abs() < TURN_EPSILON_RAD, "it faces north: {facing}");
         let frame = timelines.advance(MOB, now + TICK_MS, &pose(1.2, MobState::Attack), None);
         assert_eq!(frame.facing, Some(facing), "the card faces the same way");
+    }
+
+    #[test]
+    fn a_reaction_is_kept_for_the_swings_that_started_before_it() {
+        let mut timelines = MobTimelines::default();
+        let fighting = pose(1.0, MobState::Attack);
+        timelines.advance(MOB, START, &fighting, Some(&FTUE_SAILOR));
+        let swing_started = START + SPAWN_MS;
+        assert!(!timelines.reeled_since(MOB, swing_started));
+        timelines.hurt(MOB);
+        let reeled = swing_started + TICK_MS;
+        timelines.advance(MOB, reeled, &fighting, Some(&FTUE_SAILOR));
+        assert!(timelines.reeled_since(MOB, swing_started));
+        assert!(
+            !timelines.reeled_since(MOB, reeled + 1),
+            "a later swing is not dropped"
+        );
     }
 
     #[test]

@@ -460,8 +460,9 @@ pub struct SimWorld {
     combat_messages: Vec<Outgoing>,
     /// Potions pressed: the player number and when the drink works.
     drinks: Vec<(u64, u64)>,
-    /// Mob swings that have not hit yet, with the time they hit.
-    swings: Vec<(u64, MobAttackIntent)>,
+    /// Mob swings that have not hit yet: the time they hit, the server time they started, and
+    /// the swing.
+    swings: Vec<(u64, u64, MobAttackIntent)>,
 }
 
 /// A new player before it is in the world.
@@ -1130,7 +1131,7 @@ impl SimWorld {
         let ghosts = self.ghosts_out();
         let mobs_started = Instant::now();
         let swings = self.tick_mobs(now_ms);
-        let intents = self.swings_landing(swings, now_ms);
+        let intents = self.swings_landing(swings, now_ms, server_time);
         let mob_hits = self.mob_hits(intents, now_ms);
         let mob_seconds = mobs_started.elapsed().as_secs_f64();
         self.tick_tutorials(now_ms);
@@ -1402,11 +1403,16 @@ impl SimWorld {
                         player.flow.set_achievement(&self.achievement_rules, &id);
                         set_bits.extend(self.achievement_rules.bit(&id));
                     }
-                    Order::Asset(asset, step) => match step {
-                        Step::Show => player.assets.show(asset, asset_gde_ref(number, asset)),
-                        Step::Change(change) => player.assets.change(asset, change),
-                        Step::Hide => player.assets.hide(asset),
-                    },
+                    Order::Asset(asset, step) => {
+                        tracing::debug!(player = number, asset, ?step, "level asset");
+                        match step {
+                            Step::Show => {
+                                player.assets.show(asset, asset_gde_ref(number, asset));
+                            }
+                            Step::Change(change) => player.assets.change(asset, change),
+                            Step::Hide => player.assets.hide(asset),
+                        }
+                    }
                     Order::RemoveItem(id) => {
                         if let Some(gear) = player.gear.as_mut() {
                             gear.remove(&id);

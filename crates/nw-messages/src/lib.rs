@@ -68,7 +68,7 @@ pub use client_input::{
 };
 pub use combat::{
     DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, DamageDealtMsg, DamageItem, DeathRecapMsg,
-    HIT_TAG, MAX_RESPAWN_PAYLOAD, MELEE_HIT_TYPE_INDEX, MeleeHitMsg, NEUTRAL_SCALE,
+    HIT_TAG, MAX_RESPAWN_PAYLOAD, MELEE_HIT_TYPE_INDEX, MeleeDamage, MeleeHitMsg, NEUTRAL_SCALE,
     ON_DAMAGE_TYPE_INDEX, OnDamageMsg, REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
 };
 pub use components::{

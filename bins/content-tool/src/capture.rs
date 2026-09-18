@@ -227,8 +227,8 @@ mod tests {
 
     use nw_messages::{
         ALC_TYPE_INDEX, BodyCodec, BundleMember, ClientInputMsg, DAMAGE_DEALT_TYPE_INDEX,
-        DEATH_RECAP_TYPE_INDEX, DamageDealtMsg, DeathRecapMsg, InputPosition, MemberState,
-        ON_DAMAGE_TYPE_INDEX, OnDamageMsg, POSITION_IN_THE_WORLD_TYPE_INDEX,
+        DEATH_RECAP_TYPE_INDEX, DamageDealtMsg, DeathRecapMsg, InputPosition, MeleeDamage,
+        MemberState, ON_DAMAGE_TYPE_INDEX, OnDamageMsg, POSITION_IN_THE_WORLD_TYPE_INDEX,
         PositionInTheWorldReplicatedState, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
         REPLICATED_STATE_BUNDLE_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX, ReplicatedStateBundle,
         RequestRespawnMsg, VITALS_TYPE_INDEX, Writer,
@@ -385,7 +385,19 @@ mod tests {
             ),
             envelope(
                 ON_DAMAGE_TYPE_INDEX,
-                OnDamageMsg::hit(ATTACKER, 9.0).encode().expect("3601"),
+                OnDamageMsg::melee(
+                    ATTACKER,
+                    &MeleeDamage {
+                        attacker: TARGET,
+                        amount: 9.0,
+                        max_health: 856.0,
+                        attacker_at: [0.0; 3],
+                        tag: 6,
+                        scale: 1.0,
+                    },
+                )
+                .encode()
+                .expect("3601"),
             ),
             envelope(
                 DEATH_RECAP_TYPE_INDEX,
