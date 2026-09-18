@@ -190,6 +190,7 @@ const SAILOR_PACE: Pace = Pace {
         run_beyond_m: 4.0,
         walk_speed_mps: 1.25,
         wander_speed_mps: 0.6,
+        strafe_speed_mps: 0.0,
     },
     // Its sailor slice ambient vision 30 m (tutorial-ai-behavior note).
     sight_m: 30.0,
@@ -212,6 +213,7 @@ const LEGION_PACE: Pace = Pace {
         run_beyond_m: 3.0,
         walk_speed_mps: 1.25,
         wander_speed_mps: 1.1,
+        strafe_speed_mps: 0.0,
     },
     // Its legion slice ambient vision 12 m (tutorial-ai-behavior note).
     sight_m: 12.0,
@@ -235,6 +237,7 @@ const RISEN_PACE: Pace = Pace {
         run_beyond_m: 4.5,
         walk_speed_mps: 2.0,
         wander_speed_mps: 1.1,
+        strafe_speed_mps: 0.0,
     },
     // Its risen slice ambient vision 12 m (tutorial-ai-behavior note).
     sight_m: 12.0,
@@ -258,12 +261,16 @@ const SWARMER_PACE: Pace = Pace {
         run_beyond_m: 1.0,
         walk_speed_mps: 1.5,
         wander_speed_mps: 0.5,
+        strafe_speed_mps: 0.0,
     },
     // Its swarmer slice ambient vision 12 m (tutorial-ai-behavior note).
     sight_m: 12.0,
     hit_tag: 4,
     hit_scale: ISLAND_HIT_SCALE,
 };
+/// How fast Thorpe circles the player between swings (our choice inside retail's 0.6 to 1.25 m/s
+/// strafes; boss note, live run 2026-09-16: ours stood still).
+const THORPE_STRAFE_MPS: f32 = 0.9;
 /// Thorpe (damage mod 1.125): 25.6 (457997); cooldown 1.15-2.25 s + attack 1.4-2.2 s; run
 /// 4.5 m/s; hit at 611 ms (stab). A blocked stab took 25.55 stamina (481395, 489462).
 ///
@@ -280,6 +287,7 @@ const THORPE_PACE: Pace = Pace {
         run_beyond_m: 9.0,
         walk_speed_mps: 1.5,
         wander_speed_mps: 1.5,
+        strafe_speed_mps: THORPE_STRAFE_MPS,
     },
     // Its Thorpe slice ambient vision 20 m (tutorial-ai-behavior note).
     sight_m: 20.0,
