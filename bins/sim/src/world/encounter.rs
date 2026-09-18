@@ -287,6 +287,11 @@ const THORPE_PACE: Pace = Pace {
     hit_scale: ISLAND_HIT_SCALE,
 };
 
+/// How long after its spawn a mob that picks the player at once announces it: the client must
+/// have made the mob first (facets note: retail 955 came 629 to 634 ms after the sailors' cards;
+/// sent in the spawn tick live 2026-09-16, the client could not find the mob).
+const SPAWN_PICK_DELAY_MS: u64 = 600;
+
 /// Experience points per island foe killed (retail: 20 per legion or corrupted kill, 120 in all;
 /// xp-potion-exit note, section 1).
 const FOE_EXPERIENCE: u32 = 20;
@@ -529,6 +534,9 @@ struct Fighter {
     batch: usize,
     /// Its pick of the player (2415) went out.
     announced: bool,
+    /// When a mob that picks the player at its spawn announces it; `None` for a mob that picks
+    /// the player when it first sees it.
+    announce_at_ms: Option<u64>,
     /// How long its body stays after its death.
     corpse_ms: u64,
 }
@@ -624,13 +632,13 @@ impl Tutorial {
 
     /// The first sailor comes when it is due at `now_ms`, or at once when `now`: it waits, held,
     /// for the end of the quick-time lesson.
-    fn first_sailor_comes(&mut self, mobs: &mut Mobs, now: bool, orders: &mut Vec<Order>) {
+    fn first_sailor_comes(&mut self, mobs: &mut Mobs, now: bool) {
         if self
             .first_sailor_at_ms
             .is_some_and(|at| now || self.now_ms >= at)
         {
             self.first_sailor_at_ms = None;
-            self.spawn_batch(&[FIRST_SAILOR], mobs, true, orders);
+            self.spawn_batch(&[FIRST_SAILOR], mobs, true);
             tracing::info!(
                 player = self.owner,
                 "tutorial: the first sailor comes and waits"
@@ -639,19 +647,13 @@ impl Tutorial {
     }
 
     /// Spawns the mobs of `points` as one batch, held idle when `held`; a mob that fights at once
-    /// targets the player (an order in `orders`).
-    fn spawn_batch(
-        &mut self,
-        points: &[SpawnPoint],
-        mobs: &mut Mobs,
-        held: bool,
-        orders: &mut Vec<Order>,
-    ) {
+    /// targets the player [`SPAWN_PICK_DELAY_MS`] later (`announce_targets`).
+    fn spawn_batch(&mut self, points: &[SpawnPoint], mobs: &mut Mobs, held: bool) {
         let batch = self.batches.len();
         self.batches.push(Vec::new());
         for point in points {
             if point.delay_ms == 0 {
-                self.spawn(point, batch, mobs, held, orders);
+                self.spawn(point, batch, mobs, held);
             } else {
                 let at_ms = self.now_ms.saturating_add(point.delay_ms);
                 self.coming.push((at_ms, batch, *point));
@@ -660,7 +662,7 @@ impl Tutorial {
     }
 
     /// Spawns the mobs whose time came, in the order they are due.
-    fn spawn_coming(&mut self, mobs: &mut Mobs, orders: &mut Vec<Order>) {
+    fn spawn_coming(&mut self, mobs: &mut Mobs) {
         let now_ms = self.now_ms;
         let (mut due, coming): (Vec<_>, Vec<_>) = std::mem::take(&mut self.coming)
             .into_iter()
@@ -668,18 +670,11 @@ impl Tutorial {
         self.coming = coming;
         due.sort_by_key(|(at_ms, _, _)| *at_ms);
         for (_, batch, point) in due {
-            self.spawn(&point, batch, mobs, false, orders);
+            self.spawn(&point, batch, mobs, false);
         }
     }
 
-    fn spawn(
-        &mut self,
-        point: &SpawnPoint,
-        batch: usize,
-        mobs: &mut Mobs,
-        held: bool,
-        orders: &mut Vec<Order>,
-    ) {
+    fn spawn(&mut self, point: &SpawnPoint, batch: usize, mobs: &mut Mobs, held: bool) {
         let spawn = spawn_of(point);
         let vitals_id = spawn.vitals_id;
         let asset = self
@@ -705,14 +700,15 @@ impl Tutorial {
         // Retail: the sailors and Thorpe pick the player 0.3-0.6 s after their cards; the island's
         // foes when they first see it (legionnaire 25 s after its card with the player 3.7-8.1 m
         // away, signifier 56 s and 9.8 m, the risen group 7-9 s): see `announce_targets`.
-        let announced = !held && point.role != Role::Foe;
+        let picks_at_spawn = !held && point.role != Role::Foe;
         self.fighters.push(Fighter {
             entity,
             vitals_id,
             role: point.role,
             collision: point.collision,
             batch,
-            announced,
+            announced: false,
+            announce_at_ms: picks_at_spawn.then_some(self.now_ms + SPAWN_PICK_DELAY_MS),
             corpse_ms: point.corpse_ms,
         });
         // Thorpe fights the player from his spawn (retail 2415 at 451137 with the player 26.5 m
@@ -723,18 +719,17 @@ impl Tutorial {
         {
             nw_sim_core::hurt(&mut mob.brain, self.owner, 0, self.now_ms);
         }
-        if announced {
-            orders.push(Order::Targeted {
-                mob: entity,
-                tutorial_ai: point.role == Role::Sailor,
-            });
-        }
     }
 
-    /// The pick of the player (2415) of each mob whose brain first took the player as its target.
+    /// The pick of the player (2415) of each mob whose spawn pick is due, or whose brain first
+    /// took the player as its target.
     fn announce_targets(&mut self, mobs: &Mobs, orders: &mut Vec<Order>) {
         for fighter in &mut self.fighters {
-            if !fighter.announced && mobs.target(fighter.entity) == Some(self.owner) {
+            let due = fighter.announce_at_ms.map_or_else(
+                || mobs.target(fighter.entity) == Some(self.owner),
+                |at| self.now_ms >= at,
+            );
+            if !fighter.announced && due {
                 fighter.announced = true;
                 orders.push(Order::Targeted {
                     mob: fighter.entity,
@@ -752,7 +747,7 @@ impl Tutorial {
         self.now_ms = now_ms;
         // A lesson that ends before the first sailor's time brings it at once.
         let mut orders = Vec::new();
-        self.first_sailor_comes(mobs, true, &mut orders);
+        self.first_sailor_comes(mobs, true);
         mobs.release(self.owner, now_ms);
         self.wave = ShipWave::First;
         tracing::info!(player = self.owner, "tutorial: the first sailor fights");
@@ -855,7 +850,9 @@ impl Tutorial {
                 prefix.copy_from_slice(&entity[..GDE_REF_PREFIX_LEN]);
                 Trigger::Passthrough(prefix)
             }
-            ClientFacetMsg::AckLevelInfo { .. } | ClientFacetMsg::UiScreenOpened { .. } => {
+            ClientFacetMsg::AckLevelInfo { .. }
+            | ClientFacetMsg::UiScreenOpened { .. }
+            | ClientFacetMsg::TimeSyncRequest { .. } => {
                 return;
             }
         };
@@ -920,8 +917,8 @@ impl Tutorial {
     ) -> Vec<Order> {
         self.now_ms = now_ms;
         let mut orders = Vec::new();
-        self.first_sailor_comes(mobs, false, &mut orders);
-        self.spawn_coming(mobs, &mut orders);
+        self.first_sailor_comes(mobs, false);
+        self.spawn_coming(mobs);
         self.end_captain(mobs, now_ms, &mut orders);
         self.announce_targets(mobs, &mut orders);
         let (dead, living): (Vec<Fighter>, Vec<Fighter>) = self
@@ -975,7 +972,7 @@ impl Tutorial {
         }
         if self.wave == ShipWave::First && dead.iter().any(|dead| dead.role == Role::Sailor) {
             self.wave = ShipWave::Later;
-            self.spawn_batch(&LATER_SAILORS, mobs, false, &mut orders);
+            self.spawn_batch(&LATER_SAILORS, mobs, false);
             tracing::info!(player = self.owner, "tutorial: two more sailors come");
         }
         self.corpses.retain(|(mob, gone_at_ms)| {
@@ -1071,7 +1068,7 @@ impl Tutorial {
                         .iter()
                         .filter(|(after, _)| after.eq_ignore_ascii_case(&task));
                     for (_, points) in fights {
-                        self.spawn_batch(points, mobs, false, orders);
+                        self.spawn_batch(points, mobs, false);
                     }
                     tracing::debug!(player = self.owner, %task, "tutorial task done");
                 }
@@ -1292,17 +1289,20 @@ pub(crate) mod tests {
         let second = tutorial.fighters[0].entity;
         assert_eq!(
             orders,
-            [
-                Order::Died {
-                    mob: first,
-                    collision: SAILOR_COLLISION
-                },
-                Order::Targeted {
-                    mob: second,
-                    tutorial_ai: true
-                },
-            ]
+            [Order::Died {
+                mob: first,
+                collision: SAILOR_COLLISION
+            }],
+            "the client must have the new sailor before its pick"
         );
+        let picked = |mob| {
+            [Order::Targeted {
+                mob,
+                tutorial_ai: true,
+            }]
+        };
+        let orders = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + SPAWN_PICK_DELAY_MS);
+        assert_eq!(orders, picked(second));
         let third_at = NOW + LATER_SAILORS[1].delay_ms;
         let orders = tutorial.tick(&mut mobs, &kill_types(), SHIP, third_at);
         assert_eq!(
@@ -1310,16 +1310,13 @@ pub(crate) mod tests {
             2,
             "and the last one a second later"
         );
+        assert!(orders.is_empty());
         let third = tutorial.fighters[1].entity;
-        assert_eq!(
-            orders,
-            [Order::Targeted {
-                mob: third,
-                tutorial_ai: true
-            }]
-        );
+        let picked_at = third_at + SPAWN_PICK_DELAY_MS;
+        let orders = tutorial.tick(&mut mobs, &kill_types(), SHIP, picked_at);
+        assert_eq!(orders, picked(third));
         kill_all(&mut mobs, &tutorial);
-        let door_at = third_at + 1;
+        let door_at = picked_at + 1;
         let orders = tutorial.tick(&mut mobs, &kill_types(), SHIP, door_at);
         assert_eq!(
             orders,
@@ -1424,8 +1421,7 @@ pub(crate) mod tests {
         let mut mobs = Mobs::new(Vec::new().into(), &sailor_combat());
         let (mut tutorial, _) =
             Tutorial::start(OWNER, tree(), &FtueLevel::default(), &mut mobs, NOW);
-        let mut orders = Vec::new();
-        tutorial.spawn_batch(FIGHTS_AFTER[2].1, &mut mobs, false, &mut orders);
+        tutorial.spawn_batch(FIGHTS_AFTER[2].1, &mut mobs, false);
         assert!(tutorial.fighters.is_empty(), "none at the trigger");
         let vitals: Vec<u32> = FIGHTS_AFTER[2]
             .1
@@ -1557,7 +1553,7 @@ pub(crate) mod tests {
         let mut mobs = Mobs::new(Vec::new().into(), &sailor_combat());
         let (mut tutorial, _) =
             Tutorial::start(OWNER, tree(), &FtueLevel::default(), &mut mobs, NOW);
-        tutorial.spawn_batch(FIGHTS_AFTER[3].1, &mut mobs, false, &mut Vec::new());
+        tutorial.spawn_batch(FIGHTS_AFTER[3].1, &mut mobs, false);
         let thorpe = tutorial.fighters[0].entity;
         let max = mobs.get_mut(thorpe).expect("Thorpe").health.max();
         let hurt_to = |mobs: &mut Mobs, share: f64| {

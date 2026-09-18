@@ -24,8 +24,10 @@ pub mod component {
     pub const GRID_TRACKING: u64 = 0x3946_bc0c_0a40_83da;
     /// `DamageReceiverComponent` (mob-cards note, section 4.1).
     pub const DAMAGE_RECEIVER: u64 = 0xccc4_7f92_daf6_bfc1;
-    /// `StatusEffectsComponent` (live-tutorial note, section 7).
-    pub const STATUS_EFFECTS: u64 = 0x198b_1950_2047_20ba;
+    /// `StatusEffectsComponent`, on the child entity "Stats" ([`STATS_CHILD`]): 62,354 retail
+    /// calls of 606 players (facets note). On the tutorial capture's player it equals the main
+    /// entity plus `0x198b_1950_2047_20ba`, which live 2026-09-16 the client could not find.
+    pub const STATUS_EFFECTS: u64 = 0x5630_dc38_1f27_432b;
     /// `VitalsComponent`, on the child entity "Stats" ([`STATS_CHILD`]).
     pub const VITALS: u64 = 0xeeef_fb82_abaf_e4b1;
     /// The XOR of the player prefab's main entity `RootPlayer` and its child `Stats`.
@@ -53,6 +55,8 @@ pub const CINEMATIC_ENDED_TYPE_INDEX: u64 = 6542;
 pub const REQUEST_CUTSCENE_TYPE_INDEX: u64 = 6703;
 /// Type index of `PlayerCutsceneComponentServerFacet_OnClientCutsceneEnded`.
 pub const CUTSCENE_ENDED_TYPE_INDEX: u64 = 6705;
+/// Type index of `TimeComponentServerFacet_SyncToClient`: the client asks for the time of day.
+pub const TIME_SYNC_REQUEST_TYPE_INDEX: u64 = 4248;
 /// Type index of `PlayerArenaComponentServerFacet_NotifyPlayerOfFtueQTECompletion`.
 pub const QTE_COMPLETED_TYPE_INDEX: u64 = 6638;
 /// Type index of `PlayerComponentServerFacet_TriggerAreaEntityPassthrough`.
@@ -184,6 +188,12 @@ pub enum ClientFacetMsg {
     /// 6705: the client's cutscene ended.
     CutsceneEnded {
         /// The header.
+        header: FacetHeader,
+    },
+    /// 4248: the client's time component asks for the time of day (facets note: retail answers
+    /// with 4246 and 4247 at entry and after the exit, and sends them at no other time).
+    TimeSyncRequest {
+        /// The header: the player's `TimeComponent`.
         header: FacetHeader,
     },
     /// 6638: the client finished a tutorial quick-time sequence; its id is the CRC-32 of its
@@ -318,6 +328,7 @@ impl ClientFacetMsg {
                 })
             }),
             CUTSCENE_ENDED_TYPE_INDEX => read(|header, _| Ok(Self::CutsceneEnded { header })),
+            TIME_SYNC_REQUEST_TYPE_INDEX => read(|header, _| Ok(Self::TimeSyncRequest { header })),
             QTE_COMPLETED_TYPE_INDEX => read(|header, reader| {
                 Ok(Self::QteCompleted {
                     header,
@@ -596,7 +607,11 @@ impl AdjustFxScriptsMsg {
     /// The script of CRC `script` turns on for player `player`.
     pub const fn on(player: u64, script: u32) -> Self {
         Self {
-            header: FacetHeader::of(component::STATUS_EFFECTS, player),
+            header: FacetHeader::of_child(
+                component::STATUS_EFFECTS,
+                component::STATS_CHILD,
+                player,
+            ),
             script,
             on: true,
         }
@@ -904,6 +919,15 @@ mod tests {
         assert_eq!(
             ClientFacetMsg::decode(UPDATE_PHASING_TYPE_INDEX, &body),
             None
+        );
+        // 4248 is the header alone (facets note: retail 1432 ms).
+        let mut writer = Writer::new();
+        soul(component::TIME).write(&mut writer);
+        assert_eq!(
+            ClientFacetMsg::decode(TIME_SYNC_REQUEST_TYPE_INDEX, &writer.finish()),
+            Some(Ok(ClientFacetMsg::TimeSyncRequest {
+                header: soul(component::TIME),
+            }))
         );
     }
 }

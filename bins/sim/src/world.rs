@@ -81,6 +81,7 @@ use attack::Vitals;
 use crate::combat::{AttackOutcome, CombatSettings};
 use crate::login::{
     SessionIds, WorldIds, level_change_messages, login_level_info, login_messages, phase_id,
+    time_answers,
 };
 use crate::mobs::{MobAttackIntent, MobChanges, Mobs};
 use crate::objectives::{Effect, Event, ObjectiveRun};
@@ -114,6 +115,9 @@ const ALERT_STAND_MS: u64 = 2_000;
 /// end, the lore, the potions) go out before the handoff (retail: 3951 at 653944, the bundles to
 /// 654011, the empty 6310 at 654271, 361 ms after the 502).
 const LEAVE_DELAY_MS: u64 = 361;
+/// How long after the empty phasing of a leave the handoff starts (retail 6310 at 654271 ms, the
+/// open world's level change at 654344 ms).
+const PHASING_BEFORE_HANDOFF_MS: u64 = 73;
 
 /// How long a row of refused moves may run before the server moves the player back to the last
 /// good position. A refused move leaves the client where it was — but it never sees that, because
@@ -341,6 +345,8 @@ struct Player {
     flow: LevelFlow,
     /// When the player leaves the tutorial, once its client asked to (502).
     leave_at_ms: Option<u64>,
+    /// When the empty phasing of the leave went out; the handoff waits for it.
+    phasing_left_ms: Option<u64>,
     /// Whether the server moved the player: its next own state moves it ([`OwnTeleport`]).
     moved: bool,
     /// The client's last camera point and when it came, for the player's speed.
@@ -1590,6 +1596,7 @@ impl SimWorld {
                 player.leave_at_ms = Some(now_ms.saturating_add(LEAVE_DELAY_MS));
                 player.flow.leave()
             }
+            ClientFacetMsg::TimeSyncRequest { header } => time_answers(&self.ids, header).to_vec(),
             _ => {
                 let client_context = player.client_context;
                 player.flow.answer(message, client_context)
@@ -1724,11 +1731,24 @@ impl SimWorld {
             {
                 continue;
             }
-            player.frozen = true;
+            // The empty phasing goes first and the handoff a while later: sent in the same tick,
+            // the open world's level change reached the client before it, and the client dropped
+            // it (facets note; retail 6310 at 654271 ms, the level change at 654344 ms).
             if leaves {
-                let left = player.flow.left();
-                send_now(&mut self.combat_messages, &player.connection, &[left]);
+                match player.phasing_left_ms {
+                    None => {
+                        player.phasing_left_ms = Some(now_ms);
+                        let left = player.flow.left();
+                        send_now(&mut self.combat_messages, &player.connection, &[left]);
+                        continue;
+                    }
+                    Some(left_ms) if now_ms < left_ms.saturating_add(PHASING_BEFORE_HANDOFF_MS) => {
+                        continue;
+                    }
+                    Some(_) => {}
+                }
             }
+            player.frozen = true;
             starts.push(HandoffStart {
                 target: target.clone(),
                 offer: handoff_offer(&player, body, vitals, now_ms, Some(OPEN_WORLD_START), None),
@@ -1991,6 +2011,7 @@ impl SimWorld {
                     client_context: arrival.client_context,
                     flow: arrival.flow,
                     leave_at_ms: None,
+                    phasing_left_ms: None,
                     moved: false,
                     move_facing: None,
                     last_camera: None,
@@ -3166,12 +3187,15 @@ mod tests {
             ],
             "the answer to the level, then the loading screen at once"
         );
-        let output = tick(&mut world, NOW + level_flow::LEVEL_INFO_AGAIN_MS + 33);
+        let left_at = NOW + level_flow::LEVEL_INFO_AGAIN_MS + 33;
+        let output = tick(&mut world, left_at);
         let left = messages_for(&output.messages, &who);
         let [ServerMessage::UpdatePhasing(empty)] = left.as_slice() else {
-            panic!("the empty phasing at the handoff: {left:?}");
+            panic!("the empty phasing before the handoff: {left:?}");
         };
         assert!(empty.entries.is_empty());
+        assert!(output.handoffs.is_empty(), "the phasing goes first");
+        let output = tick(&mut world, left_at + PHASING_BEFORE_HANDOFF_MS);
         assert_eq!(output.handoffs.len(), 1, "a request leaves from anywhere");
         let offer = &output.handoffs[0].offer;
         assert!(offer.enter_level);

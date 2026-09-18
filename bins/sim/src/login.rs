@@ -15,7 +15,6 @@
 //! calls of the player's time component: their ids are its [`FacetHeader`] (tutorial-intro note,
 //! section 0), else the client drops them.
 
-use nw_messages::facet::component;
 use nw_messages::{
     Block1415acc30, CalendarConnectedMsg, ClientAddEntryMsg, ConnectedBody, FacetHeader,
     LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec, MessageError, OBSERVED_DAY_PHASE,
@@ -121,7 +120,6 @@ pub fn login_messages(
     server_time: u64,
     level_info: &LevelInfoChangedMsg,
 ) -> Result<Vec<Vec<u8>>, MessageError> {
-    let time = FacetHeader::of(component::TIME, entity);
     let session_block = Block1415acc30 {
         value: session.value,
         first: session.first,
@@ -142,6 +140,16 @@ pub fn login_messages(
         ServerMessage::ClientAddEntry(ClientAddEntryMsg::for_entity(entity)),
         ServerMessage::PlayerSpawnPoint(ReceivePlayerSpawnPointMsg),
         ServerMessage::TimeSynch(TimeSynchMsg::at_server_ms(server_time)),
+        ServerMessage::LevelInfoChanged(level_info.clone()),
+    ];
+    messages.iter().map(ServerMessage::envelope).collect()
+}
+
+/// The answer to the client's time request (4248) with header `time`: the time change, then the
+/// day phase. Sent with the login, they reached the client before its player existed and it
+/// dropped them, so its clock stayed unset (live 2026-09-16: the potion cooldown showed the date).
+pub fn time_answers(world: &WorldIds, time: FacetHeader) -> [ServerMessage; 2] {
+    [
         ServerMessage::TimeChange(SyncTimeChangeMsg {
             ids: [time.target, time.entity],
             f32s_at_16: OBSERVED_TIME_CHANGE_F32S_AT_16,
@@ -154,9 +162,7 @@ pub fn login_messages(
             u64_at_8: time.entity,
             u32_at_16: OBSERVED_DAY_PHASE,
         }),
-        ServerMessage::LevelInfoChanged(level_info.clone()),
-    ];
-    messages.iter().map(ServerMessage::envelope).collect()
+    ]
 }
 
 /// The messages that move a player's client into another level (retail end of the tutorial, in
@@ -194,6 +200,7 @@ fn random_u64() -> Result<u64, getrandom::Error> {
 
 #[cfg(test)]
 mod tests {
+    use nw_messages::facet::component;
     use nw_messages::{BodyCodec, LOGIN_MESSAGE_TYPES, OPEN_WORLD_LEVEL};
     use nw_reflect::Envelope;
 
@@ -244,31 +251,22 @@ mod tests {
     }
 
     #[test]
-    fn the_time_messages_call_the_player_time_component() {
+    fn the_time_answers_call_the_asking_time_component_in_order() {
         let world = WorldIds::random(START_TIME).expect("world");
-        let session = SessionIds::random().expect("session");
-        let level_info = login_level_info(OPEN_WORLD_LEVEL, SERVER_TIME, 1);
-        let envelopes =
-            login_messages(&world, session, ENTITY, SERVER_TIME, &level_info).expect("messages");
         let time = FacetHeader::of(component::TIME, ENTITY);
-        let mut checked = 0;
-        for bytes in &envelopes {
-            match ServerMessage::from_envelope(&Envelope::decode(bytes).expect("envelope")) {
-                Some(Ok(ServerMessage::TimeChange(message))) => {
-                    assert_eq!(message.ids, [time.target, time.entity]);
-                    checked += 1;
-                }
-                Some(Ok(ServerMessage::DayPhase(message))) => {
-                    assert_eq!(
-                        (message.component, message.u64_at_8),
-                        (time.target, time.entity)
-                    );
-                    checked += 1;
-                }
-                _ => {}
-            }
-        }
-        assert_eq!(checked, 2);
+        let [
+            ServerMessage::TimeChange(change),
+            ServerMessage::DayPhase(phase),
+        ] = time_answers(&world, time)
+        else {
+            panic!("the time change, then the day phase");
+        };
+        assert_eq!(change.ids, [time.target, time.entity]);
+        assert_eq!(change.time, world.time_change_time);
+        assert_eq!(
+            (phase.component, phase.u64_at_8),
+            (time.target, time.entity)
+        );
     }
 
     #[test]

@@ -57,6 +57,13 @@ pub fn login_samples(own: u64) -> Vec<ServerMessage> {
         ServerMessage::ClientAddEntry(ClientAddEntryMsg::for_entity(own)),
         ServerMessage::PlayerSpawnPoint(ReceivePlayerSpawnPointMsg),
         ServerMessage::TimeSynch(TimeSynchMsg { time: 5 }),
+        ServerMessage::LevelInfoChanged(LevelInfoChangedMsg::open_world(1, 12, 1)),
+    ]
+}
+
+/// One answer to the client's time request: the time change, then the day phase.
+pub fn time_samples() -> Vec<ServerMessage> {
+    vec![
         ServerMessage::TimeChange(SyncTimeChangeMsg {
             ids: [6, 7],
             f32s_at_16: [1.0; 3],
@@ -69,7 +76,6 @@ pub fn login_samples(own: u64) -> Vec<ServerMessage> {
             u64_at_8: 11,
             u32_at_16: 2,
         }),
-        ServerMessage::LevelInfoChanged(LevelInfoChangedMsg::open_world(1, 12, 1)),
     ]
 }
 

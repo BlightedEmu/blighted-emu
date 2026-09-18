@@ -20,7 +20,8 @@ use nw_reflect::{Envelope, TypeId};
 
 use crate::wire::{BodyCodec, MessageError};
 
-/// Type indexes of [`ServerMessage`], in the order of the captured login.
+/// Type indexes of [`ServerMessage`]: the login in the captured order, the answer to the
+/// client's time request, then the bundle.
 pub const SERVER_MESSAGE_TYPES: [u64; 10] = [
     TimingConfigurationConnectedMsg::TYPE_INDEX,
     CalendarConnectedMsg::TYPE_INDEX,
@@ -28,17 +29,18 @@ pub const SERVER_MESSAGE_TYPES: [u64; 10] = [
     ClientAddEntryMsg::TYPE_INDEX,
     ReceivePlayerSpawnPointMsg::TYPE_INDEX,
     TimeSynchMsg::TYPE_INDEX,
+    LevelInfoChangedMsg::TYPE_INDEX,
     SyncTimeChangeMsg::TYPE_INDEX,
     SyncDayPhaseMsg::TYPE_INDEX,
-    LevelInfoChangedMsg::TYPE_INDEX,
     ReplicatedStateBundle::TYPE_INDEX,
 ];
 
-/// Type indexes of the login messages, in the captured order: every type of
-/// [`SERVER_MESSAGE_TYPES`] but the bundle, which comes after them.
-pub const LOGIN_MESSAGE_TYPES: &[u64] = SERVER_MESSAGE_TYPES
-    .split_at(SERVER_MESSAGE_TYPES.len() - 1)
-    .0;
+/// Type indexes of the login messages, in the captured order: the first seven types of
+/// [`SERVER_MESSAGE_TYPES`]. The time change and the day phase are not among them: retail sends
+/// them as the answer to the client's time request (4248), once its player exists (facets note).
+pub const LOGIN_MESSAGE_TYPES: &[u64] = SERVER_MESSAGE_TYPES.split_at(LOGIN_MESSAGES).0;
+/// How many login messages there are.
+const LOGIN_MESSAGES: usize = 7;
 
 /// One server message of M4.
 #[derive(Debug, Clone, PartialEq)]
@@ -257,7 +259,7 @@ impl ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::login_samples;
+    use crate::test_support::{login_samples, time_samples};
 
     const ENTITY: u64 = 4;
 
@@ -265,6 +267,7 @@ mod tests {
 
     fn samples() -> Vec<ServerMessage> {
         let mut samples = login_samples(ENTITY);
+        samples.extend(time_samples());
         samples.push(ServerMessage::Bundle(ReplicatedStateBundle {
             leading: None,
             byte_3: 0,
@@ -312,6 +315,11 @@ mod tests {
                 0x6a, 0x5a, 0xf7, 0xe1, 0xe0, 0xd6, 0x01
             ]
         );
+        // Another retail player (facets note): header `33e9e69df0f79674 e113c90dd7307efa`.
+        const OTHER: u64 = 0xfa7e_30d7_0dc9_13e1;
+        let other = AdjustFxScriptsMsg::on(OTHER, POTION_HEAL_SCRIPT);
+        assert_eq!(other.header.target, 0x33e9_e69d_f0f7_9674);
+        assert_eq!(other.header.entity, 0xe113_c90d_d730_7efa);
     }
 
     #[test]
