@@ -6,9 +6,11 @@
 pub mod error;
 pub mod file;
 pub mod load;
+pub mod rows;
 pub mod schema;
 
 pub use error::{DesignError, Problem};
 pub use file::{Action, DesignFile, DesignSet, Kind, struct_fields};
 pub use load::{DESIGN_SCHEMA, TODO_FILE, load_dir};
+pub use rows::{DESIGN_SOURCE_PREFIX, apply_tables};
 pub use schema::check_schema;

@@ -4,11 +4,12 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use nw_content::Tables;
 use nw_content::generated::{
     ArmorItemDefinitions, ConsumableItemDefinitions, LootTablesData, MasterItemDefinitions,
     NPCData, ObjectiveTasks, Objectives, PerkData, VitalsData, WeaponItemDefinitions,
 };
-use nw_content::table::FromDatasheet;
+use nw_content::table::{FromDatasheet, Table};
 use serde::de::{self, DeserializeOwned, Visitor};
 use serde::{Deserialize, Serialize};
 
@@ -174,12 +175,27 @@ pub struct DesignSet {
 pub(crate) trait Row: FromDatasheet + Serialize + DeserializeOwned + Clone {
     /// The serde name of the id field.
     const KEY_FIELD: &'static str;
+    /// The id of the row.
+    fn key(&self) -> &str;
+    /// Sets the id of the row.
+    fn set_key(&mut self, key: String);
+    /// The table list of this type in `tables`.
+    fn tables_mut(tables: &mut Tables) -> &mut Vec<Table<Self>>;
 }
 
 macro_rules! row {
     ($ty:ty, $key:ident, $list:ident) => {
         impl Row for $ty {
             const KEY_FIELD: &'static str = stringify!($key);
+            fn key(&self) -> &str {
+                &self.$key
+            }
+            fn set_key(&mut self, key: String) {
+                self.$key = key;
+            }
+            fn tables_mut(tables: &mut Tables) -> &mut Vec<Table<Self>> {
+                &mut tables.$list
+            }
         }
     };
 }
