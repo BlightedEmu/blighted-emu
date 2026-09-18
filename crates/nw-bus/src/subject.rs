@@ -10,6 +10,11 @@ pub fn sim_input(world: Uuid, sim: &BusId) -> String {
     format!("nw.{world}.sim.{sim}.input")
 }
 
+/// Admin tool to one sim, request/reply: a GM command for a target the sim owns.
+pub fn sim_admin(world: Uuid, sim: &BusId) -> String {
+    format!("nw.{world}.sim.{sim}.admin")
+}
+
 /// Sim, every second.
 pub fn sim_heartbeat(world: Uuid, sim: &BusId) -> String {
     format!("nw.{world}.sim.{sim}.heartbeat")
@@ -86,6 +91,7 @@ mod tests {
         let gateway = BusId::try_from("gw-1".to_owned()).expect("id");
         let prefix = "nw.00000000-0000-0000-0000-000000000000";
         assert_eq!(sim_input(world, &sim), format!("{prefix}.sim.sim-1.input"));
+        assert_eq!(sim_admin(world, &sim), format!("{prefix}.sim.sim-1.admin"));
         assert_eq!(
             sim_heartbeat(world, &sim),
             format!("{prefix}.sim.sim-1.heartbeat")
