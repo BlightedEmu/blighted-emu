@@ -37,7 +37,7 @@ use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{ClientFacetMsg, InteractionRequest};
 
 use super::asset_script::{AssetScript, Step, Trigger};
-use crate::mobs::{Mobs, Pace, VitalsSpawn};
+use crate::mobs::{Capsule, MobReach, Mobs, Pace, VitalsSpawn};
 use crate::objectives::{Effect, Event, KillTypes, ObjectiveRun, ObjectiveTree, TaskProgress};
 
 /// When the first sailor comes after the quest starts (retail: its card came 15.9 s after the
@@ -168,6 +168,54 @@ struct SpawnPoint {
 /// the capture: 14.6 / 0.2 for the signifier's `Legionnaire_LightStab` (Observed). Thorpe's
 /// attacks took 91.25 per unit; the cause of the difference is Unknown.
 const BLOCK_STAMINA_PER_MOD: f32 = 73.0;
+/// The body capsules of the tutorial creatures (collision note, section 2: their slices'
+/// `CharacterComponent`; the legionnaire, risen and swarmer share one).
+const SAILOR_CAPSULE: Capsule = Capsule {
+    radius_m: 0.4,
+    height_m: 1.82,
+};
+const ISLAND_CAPSULE: Capsule = Capsule {
+    radius_m: 0.5,
+    height_m: 1.8,
+};
+const THORPE_CAPSULE: Capsule = Capsule {
+    radius_m: 0.7,
+    height_m: 1.4,
+};
+/// The lunges of their swings (collision note, section 3: the `Homing` and `CAGE-Damage` clips of
+/// their attacks; the reach of the hit shape in front of the body is Inferred from the clips'
+/// shapes, and every retail mob hit landed inside it plus the player's radius).
+const SAILOR_REACH: MobReach = MobReach {
+    lunge_stop_m: 0.5,
+    lunge_max_m: 2.0,
+    lunge_turn_rad: std::f32::consts::FRAC_PI_4,
+    reach_m: 1.4,
+};
+const LEGION_REACH: MobReach = MobReach {
+    lunge_stop_m: 0.5,
+    lunge_max_m: 2.0,
+    lunge_turn_rad: std::f32::consts::FRAC_PI_4,
+    reach_m: 2.0,
+};
+const RISEN_REACH: MobReach = MobReach {
+    lunge_stop_m: 0.25,
+    lunge_max_m: 2.0,
+    lunge_turn_rad: std::f32::consts::FRAC_PI_2,
+    reach_m: 1.5,
+};
+const SWARMER_REACH: MobReach = MobReach {
+    lunge_stop_m: 1.0,
+    lunge_max_m: 1.5,
+    lunge_turn_rad: std::f32::consts::PI,
+    reach_m: 1.0,
+};
+/// Thorpe's stab: its hit box reaches 1.5 m in front of his root (Observed).
+const THORPE_REACH: MobReach = MobReach {
+    lunge_stop_m: 1.25,
+    lunge_max_m: 2.5,
+    lunge_turn_rad: std::f32::consts::PI,
+    reach_m: 1.5,
+};
 /// The 3601 item scale of the sailors' hits (swing note: 0.6006 on every sailor hit).
 const SAILOR_HIT_SCALE: f32 = 0.6006;
 /// The 3601 item scale of the island foes' and Thorpe's hits (0.5612 on all of them).
@@ -190,12 +238,13 @@ const SAILOR_PACE: Pace = Pace {
         run_beyond_m: 4.0,
         walk_speed_mps: 1.25,
         wander_speed_mps: 0.6,
-        strafe_speed_mps: 0.0,
     },
     // Its sailor slice ambient vision 30 m (tutorial-ai-behavior note).
     sight_m: 30.0,
     hit_tag: 6,
     hit_scale: SAILOR_HIT_SCALE,
+    capsule: SAILOR_CAPSULE,
+    reach: Some(SAILOR_REACH),
 };
 /// Legionnaire and signifier (damage mod 0.7): 18.70 (262336); cooldown 1-1.5 s + stab about
 /// 0.9-1.2 s; run 5.5 m/s; hit at 627 ms. A blocked light stab took 14.6 stamina (266620).
@@ -213,12 +262,13 @@ const LEGION_PACE: Pace = Pace {
         run_beyond_m: 3.0,
         walk_speed_mps: 1.25,
         wander_speed_mps: 1.1,
-        strafe_speed_mps: 0.0,
     },
     // Its legion slice ambient vision 12 m (tutorial-ai-behavior note).
     sight_m: 12.0,
     hit_tag: 5,
     hit_scale: ISLAND_HIT_SCALE,
+    capsule: ISLAND_CAPSULE,
+    reach: Some(LEGION_REACH),
 };
 /// Risen corruption entity (damage mod 0.9): 18.24 (295343); cooldown 0.75-1 s + swipe about
 /// 0.8-0.9 s; run 4.5 m/s; hit at 555 ms. Block stamina: [`BLOCK_STAMINA_PER_MOD`] x the
@@ -237,12 +287,13 @@ const RISEN_PACE: Pace = Pace {
         run_beyond_m: 4.5,
         walk_speed_mps: 2.0,
         wander_speed_mps: 1.1,
-        strafe_speed_mps: 0.0,
     },
     // Its risen slice ambient vision 12 m (tutorial-ai-behavior note).
     sight_m: 12.0,
     hit_tag: 6,
     hit_scale: ISLAND_HIT_SCALE,
+    capsule: ISLAND_CAPSULE,
+    reach: Some(RISEN_REACH),
 };
 /// Corruption swarmers (damage mod 0.25): 7.07 (296477); rate limit 0.25 s + slash (length
 /// Unknown; our choice 1 s); run 1.5 m/s; hit at 533 ms. Block stamina: [`BLOCK_STAMINA_PER_MOD`]
@@ -261,16 +312,14 @@ const SWARMER_PACE: Pace = Pace {
         run_beyond_m: 1.0,
         walk_speed_mps: 1.5,
         wander_speed_mps: 0.5,
-        strafe_speed_mps: 0.0,
     },
     // Its swarmer slice ambient vision 12 m (tutorial-ai-behavior note).
     sight_m: 12.0,
     hit_tag: 4,
     hit_scale: ISLAND_HIT_SCALE,
+    capsule: ISLAND_CAPSULE,
+    reach: Some(SWARMER_REACH),
 };
-/// How fast Thorpe circles the player between swings (our choice inside retail's 0.6 to 1.25 m/s
-/// strafes; boss note, live run 2026-09-16: ours stood still).
-const THORPE_STRAFE_MPS: f32 = 0.9;
 /// Thorpe (damage mod 1.125): 25.6 (457997); cooldown 1.15-2.25 s + attack 1.4-2.2 s; run
 /// 4.5 m/s; hit at 611 ms (stab). A blocked stab took 25.55 stamina (481395, 489462).
 ///
@@ -287,12 +336,13 @@ const THORPE_PACE: Pace = Pace {
         run_beyond_m: 9.0,
         walk_speed_mps: 1.5,
         wander_speed_mps: 1.5,
-        strafe_speed_mps: THORPE_STRAFE_MPS,
     },
     // Its Thorpe slice ambient vision 20 m (tutorial-ai-behavior note).
     sight_m: 20.0,
     hit_tag: 4,
     hit_scale: ISLAND_HIT_SCALE,
+    capsule: THORPE_CAPSULE,
+    reach: Some(THORPE_REACH),
 };
 
 /// How long after its spawn a mob that picks the player at once announces it: the client must

@@ -76,12 +76,14 @@ pub struct Mob {
 }
 
 /// A mob that hits a target this tick.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MobAttackIntent {
     /// The mob's entity number.
     pub mob: u64,
     /// The target's entity number.
     pub target: u64,
+    /// Where the target was when the swing started: the mob aims there.
+    pub target_at: Position,
 }
 
 /// What changes of cells did.
@@ -107,6 +109,39 @@ pub const DEFAULT_HIT_TAG: u8 = 6;
 /// light stab, a level 1 mob, took 14.6; the swings of other mobs are Unknown).
 pub const DEFAULT_BLOCK_STAMINA: f32 = 14.6;
 
+/// The upright capsule of a body: its radius and height (collision note: the `CharacterComponent`
+/// capsules of the creature slices).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Capsule {
+    /// Its radius.
+    pub radius_m: f32,
+    /// Its height, from its feet.
+    pub height_m: f32,
+}
+
+/// The body of a mob without a pace (our choice: the legionnaire's, risen's and swarmer's
+/// capsule).
+pub const DEFAULT_MOB_CAPSULE: Capsule = Capsule {
+    radius_m: 0.5,
+    height_m: 1.8,
+};
+
+/// How a mob's swing reaches its target (collision note, section 3: each retail creature lunged
+/// forward in its swing until the bodies touched, so every retail mob hit landed 0.79 to 1.65 m
+/// from the player).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MobReach {
+    /// The lunge stops this near the target, or where the two bodies touch.
+    pub lunge_stop_m: f32,
+    /// The longest lunge.
+    pub lunge_max_m: f32,
+    /// It lunges only at a target within this angle of where it aimed at the swing start
+    /// (radians).
+    pub lunge_turn_rad: f32,
+    /// How far in front of its body the hit shape reaches.
+    pub reach_m: f32,
+}
+
 /// How a personal mob fights when not as its rows and the config say. A paced mob stands on the
 /// floor height of its spawn point; the height map does not move it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -131,6 +166,11 @@ pub struct Pace {
     /// The item scale of its hits on a player: the share of the raw damage that the player's
     /// armor let through.
     pub hit_scale: f32,
+    /// Its body.
+    pub capsule: Capsule,
+    /// How its swing reaches; `None`: it lands within its gait's swing start plus
+    /// [`SWING_HIT_MARGIN_M`].
+    pub reach: Option<MobReach>,
 }
 
 /// A mob spawned for one player.
@@ -360,6 +400,28 @@ impl Mobs {
             .map_or(DEFAULT_BLOCK_STAMINA, |pace| pace.block_stamina)
     }
 
+    /// The body of mob `entity`: its pace's, else [`DEFAULT_MOB_CAPSULE`].
+    pub fn capsule(&self, entity: u64) -> Capsule {
+        spawn_index(entity)
+            .and_then(|index| self.personal.get(&index)?.pace)
+            .map_or(DEFAULT_MOB_CAPSULE, |pace| pace.capsule)
+    }
+
+    /// How the swing of mob `entity` reaches, when its pace says.
+    pub fn reach(&self, entity: u64) -> Option<MobReach> {
+        spawn_index(entity)
+            .and_then(|index| self.personal.get(&index)?.pace)
+            .and_then(|pace| pace.reach)
+    }
+
+    /// Mob `entity` lunges up to `max_m` toward `to` in its swing, inside its leash; where it is
+    /// then.
+    pub fn lunge(&mut self, entity: u64, to: Position, max_m: f32) -> Option<Position> {
+        let leash_m = self.settings.leash_radius_m;
+        let mob = self.get_mut(entity)?;
+        Some(mob.brain.lunge(to, max_m, leash_m))
+    }
+
     /// How far from mob `entity` its swing lands on a player: where its gait starts a swing, plus
     /// [`SWING_HIT_MARGIN_M`].
     pub fn hit_reach_m(&self, entity: u64) -> f32 {
@@ -523,9 +585,14 @@ impl Mobs {
                 }
                 BrainAction::MoveTo(_) => {}
                 BrainAction::Attack(target) => {
+                    let target_at = seen
+                        .iter()
+                        .find(|player| player.entity == target)
+                        .map_or(at, |player| player.position);
                     intents.push(MobAttackIntent {
                         mob: mob_entity(index),
                         target,
+                        target_at,
                     });
                     if let Some(personal) = self.personal.get_mut(&index)
                         && let Some(pace) = personal.pace
@@ -923,6 +990,8 @@ mod tests {
             sight_m: 20.0,
             hit_tag: DEFAULT_HIT_TAG,
             hit_scale: 1.0,
+            capsule: DEFAULT_MOB_CAPSULE,
+            reach: None,
         };
         const START: u64 = 1_000;
         let mut mobs = mobs(Vec::new());
@@ -984,7 +1053,8 @@ mod tests {
             intents,
             vec![MobAttackIntent {
                 mob: mob_entity(0),
-                target: PLAYER
+                target: PLAYER,
+                target_at: player_at(101.0).position,
             }]
         );
     }

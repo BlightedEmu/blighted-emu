@@ -105,6 +105,52 @@ pub struct WeaponRow {
     pub crit_multiplier: f64,
     /// It fires spread shots (a blunderbuss): its attacks come as 2719 requests.
     pub spread_shot: bool,
+    /// What kind of weapon it is.
+    pub kind: WeaponKind,
+}
+
+/// The kind of a melee weapon, which sets the shape and time of its swing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeaponKind {
+    /// A sword (`1hSword…`, `1hLongsword…`).
+    Sword,
+    /// A hatchet.
+    Hatchet,
+    /// A rapier.
+    Rapier,
+    /// A spear.
+    Spear,
+    /// A great axe.
+    GreatAxe,
+    /// A war hammer.
+    WarHammer,
+    /// A greatsword.
+    GreatSword,
+    /// Any other weapon (ranged, magic or unknown).
+    Other,
+}
+
+impl WeaponKind {
+    /// The names in retail weapon ids, longest match first (`1hHatchetT1`, `2hWarHammerT2`,
+    /// `1hGreatSword_HalloweenT5`): a greatsword id also holds "sword".
+    const NAMES: [(&'static str, Self); 7] = [
+        ("greatsword", Self::GreatSword),
+        ("greataxe", Self::GreatAxe),
+        ("warhammer", Self::WarHammer),
+        ("hatchet", Self::Hatchet),
+        ("rapier", Self::Rapier),
+        ("spear", Self::Spear),
+        ("sword", Self::Sword),
+    ];
+
+    /// The kind that the weapon id `weapon_id` names.
+    pub fn of_id(weapon_id: &str) -> Self {
+        let id = weapon_id.to_lowercase();
+        Self::NAMES
+            .iter()
+            .find(|(name, _)| id.contains(name))
+            .map_or(Self::Other, |(_, kind)| *kind)
+    }
 }
 
 /// A consumable that heals: a potion.
@@ -221,6 +267,7 @@ impl CombatSource {
                             crit_multiplier: row.crit_damage_multiplier.unwrap_or(PLAIN_MOD),
                             spread_shot: row.ranged_attack_profile.as_deref()
                                 == Some(SPREAD_SHOT_PROFILE),
+                            kind: WeaponKind::of_id(&row.weapon_id),
                         },
                     )
                 })
@@ -544,6 +591,20 @@ impl CombatData {
 mod tests {
     use super::*;
 
+    #[test]
+    fn retail_weapon_ids_name_their_kind() {
+        assert_eq!(WeaponKind::of_id("1hSwordT2"), WeaponKind::Sword);
+        assert_eq!(WeaponKind::of_id("1hLongswordT2"), WeaponKind::Sword);
+        assert_eq!(
+            WeaponKind::of_id("1hGreatSword_HalloweenT5"),
+            WeaponKind::GreatSword
+        );
+        assert_eq!(WeaponKind::of_id("1hhatchetBLostT2"), WeaponKind::Hatchet);
+        assert_eq!(WeaponKind::of_id("2hWarHammerT2"), WeaponKind::WarHammer);
+        assert_eq!(WeaponKind::of_id("2hGreatAxeT2"), WeaponKind::GreatAxe);
+        assert_eq!(WeaponKind::of_id("BlunderbussT2"), WeaponKind::Other);
+    }
+
     const PLAYER_HEALTH: u32 = 856;
     const LEVEL: u32 = 20;
     const LEVEL_HEALTH: f64 = 1872.2;
@@ -598,6 +659,7 @@ mod tests {
                     crit_chance: 0.03,
                     crit_multiplier: 1.3,
                     spread_shot: false,
+                    kind: WeaponKind::Sword,
                 },
             )],
             consumables: vec![(

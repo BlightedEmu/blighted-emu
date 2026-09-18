@@ -197,7 +197,9 @@ pub fn check(data: &CombatData, spawns: &[VitalsSpawn], nwdb: &[NwdbCreature]) -
 
 #[cfg(test)]
 mod tests {
-    use nw_content::combat::{AttackRow, CombatRows, CombatSource, LevelRow, MobType, WeaponRow};
+    use nw_content::combat::{
+        AttackRow, CombatRows, CombatSource, LevelRow, MobType, WeaponKind, WeaponRow,
+    };
     use nw_formats::objectstream::lowercase_crc32;
 
     use super::*;
@@ -236,6 +238,7 @@ mod tests {
                     crit_chance: 0.0,
                     crit_multiplier: 1.0,
                     spread_shot: false,
+                    kind: WeaponKind::Sword,
                 },
             )],
             attacks: rows

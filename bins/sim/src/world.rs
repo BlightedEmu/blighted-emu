@@ -48,6 +48,7 @@ mod attack;
 mod combat_status;
 mod encounter;
 mod gear;
+mod hit_shape;
 mod level_assets;
 mod level_flow;
 mod members;

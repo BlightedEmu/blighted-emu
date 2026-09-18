@@ -10,7 +10,7 @@
 //! same bytes; `encode` refuses a record whose fixed fields do not match its mask.
 
 use crate::position::{height_from_raw, height_to_raw};
-use crate::wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};
+use crate::wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer, entity_of_raw_id};
 
 /// File slot of `ReceiveInputFromClient`.
 pub const RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX: u64 = 1589;
@@ -427,6 +427,12 @@ impl InputRecord {
     /// Whether the player let go of the attack key in this record.
     pub fn attack_released(&self) -> bool {
         self.slot_bit(ATTACK_RELEASE_VALUE, ATTACK_RELEASE_BIT)
+    }
+
+    /// The entity the player locked on in this record: the id of row 3 (lock-on note: retail
+    /// sent it only while locked on a target).
+    pub fn lock_target(&self) -> Option<u64> {
+        entity_of_raw_id(&self.row_3_id?.0)
     }
 
     /// The weapon key the player pressed in this record: 0 for the first, 1 for the second.
@@ -1209,6 +1215,17 @@ mod tests {
         assert!(down.attack_pressed() && !down.attack_released());
         assert!(!held.attack_pressed() && !held.attack_released());
         assert!(!up.attack_pressed() && up.attack_released());
+    }
+
+    #[test]
+    fn the_target_row_names_the_locked_entity() {
+        const MOB: u64 = 0x4_0000_0004;
+        let locked = InputRecord {
+            row_3_id: Some((crate::wire::raw_id_of_entity(MOB), 0)),
+            ..InputRecord::default()
+        };
+        assert_eq!(locked.lock_target(), Some(MOB));
+        assert_eq!(InputRecord::default().lock_target(), None);
     }
 
     #[test]

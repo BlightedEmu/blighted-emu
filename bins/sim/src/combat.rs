@@ -153,7 +153,7 @@ pub struct CombatSettings {
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support {
     use nw_content::combat::{
-        AttackRow, CombatData, CombatRows, CombatSource, LevelRow, MobType, WeaponRow,
+        AttackRow, CombatData, CombatRows, CombatSource, LevelRow, MobType, WeaponKind, WeaponRow,
     };
 
     /// The vitals id of the test mob type.
@@ -195,6 +195,7 @@ pub mod test_support {
                     crit_chance: 0.0,
                     crit_multiplier: 1.0,
                     spread_shot: false,
+                    kind: WeaponKind::Sword,
                 },
             )],
             attacks: rows

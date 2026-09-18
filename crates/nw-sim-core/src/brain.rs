@@ -30,8 +30,6 @@ pub struct Gait {
     pub walk_speed_mps: f32,
     /// Its speed while it wanders near its spawn.
     pub wander_speed_mps: f32,
-    /// Its speed while it circles its target between swings; 0: it stands.
-    pub strafe_speed_mps: f32,
 }
 
 impl Gait {
@@ -43,7 +41,6 @@ impl Gait {
             run_beyond_m: reach_m,
             walk_speed_mps: speed_mps,
             wander_speed_mps: speed_mps,
-            strafe_speed_mps: 0.0,
         }
     }
 }
@@ -155,8 +152,6 @@ pub struct Brain {
     last_step_ms: Option<u64>,
     last_attack_ms: Option<u64>,
     wander_to: Option<Position>,
-    /// The way it circles its target: 1 one way, -1 the other; it turns after each swing.
-    strafe_side: f32,
 }
 
 impl Brain {
@@ -182,7 +177,6 @@ impl Brain {
             last_step_ms: None,
             last_attack_ms: None,
             wander_to: None,
-            strafe_side: 1.0,
         }
     }
 
@@ -214,6 +208,12 @@ impl Brain {
     /// Its next hit comes one attack interval after `now_ms` at the earliest.
     pub const fn wait_to_attack(&mut self, now_ms: u64) {
         self.last_attack_ms = Some(now_ms);
+    }
+
+    /// Moves the mob up to `max_m` toward `to`, inside the leash circle of `leash_m` around its
+    /// spawn (the lunge of its swing); returns where it is then.
+    pub fn lunge(&mut self, to: Position, max_m: f32, leash_m: f32) -> Position {
+        self.walk(to, max_m, leash_m)
     }
 
     /// Puts the mob on the ground at height `z`.
@@ -391,39 +391,10 @@ fn fight(
         .last_attack_ms
         .is_none_or(|last| now_ms.saturating_sub(last) >= settings.mob_attack_interval_ms);
     if !ready {
-        return strafe(
-            brain,
-            target.position,
-            reach(gait.strafe_speed_mps),
-            settings,
-        );
-    }
-    brain.last_attack_ms = Some(now_ms);
-    brain.strafe_side = -brain.strafe_side;
-    BrainAction::Attack(target.entity)
-}
-
-/// A mob that waits for its next swing circles `target` by `step_m` at the same distance, on
-/// its strafe side; with no step it stands.
-fn strafe(
-    brain: &mut Brain,
-    target: Position,
-    step_m: f32,
-    settings: &BrainSettings,
-) -> BrainAction {
-    let distance = target.horizontal_distance(brain.position);
-    if step_m <= 0.0 || distance <= ARRIVED_M {
         return BrainAction::None;
     }
-    let angle = brain.strafe_side * step_m / distance;
-    let (sin, cos) = angle.sin_cos();
-    let (dx, dy) = (brain.position.x - target.x, brain.position.y - target.y);
-    let to = Position {
-        x: target.x + dx * cos - dy * sin,
-        y: target.y + dx * sin + dy * cos,
-        z: brain.position.z,
-    };
-    BrainAction::MoveTo(brain.walk(to, step_m, settings.leash_radius_m))
+    brain.last_attack_ms = Some(now_ms);
+    BrainAction::Attack(target.entity)
 }
 
 /// An idle mob with no target: wanders, or falls asleep after quiet time.
@@ -548,42 +519,9 @@ mod tests {
                 run_beyond_m: 4.0,
                 walk_speed_mps: 1.25,
                 wander_speed_mps: 0.6,
-                strafe_speed_mps: 0.0,
             },
             ..settings()
         }
-    }
-
-    #[test]
-    fn a_mob_with_a_strafe_circles_its_target_between_swings() {
-        const STRAFE_MPS: f32 = 0.9;
-        let settings = BrainSettings {
-            gait: Gait {
-                strafe_speed_mps: STRAFE_MPS,
-                ..paced().gait
-            },
-            ..paced()
-        };
-        let mut dice = Dice::new(SEED);
-        let mut brain = awake(0);
-        let player = east(1.5);
-        let view = [seen(PLAYER, player)];
-        assert_eq!(
-            step(&mut brain, &view, TICK_MS, &settings, &mut dice),
-            BrainAction::Attack(PLAYER)
-        );
-        let before = brain.position();
-        let BrainAction::MoveTo(to) = step(&mut brain, &view, 2 * TICK_MS, &settings, &mut dice)
-        else {
-            panic!("it strafes while it waits");
-        };
-        let moved = to.horizontal_distance(before);
-        assert!((moved - STRAFE_MPS * TICK_MS as f32 / 1000.0).abs() < NEAR_ZERO_M);
-        assert!(
-            (to.horizontal_distance(player) - before.horizontal_distance(player)).abs()
-                < NEAR_ZERO_M,
-            "it keeps its distance"
-        );
     }
 
     #[test]
