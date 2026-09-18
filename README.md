@@ -55,6 +55,8 @@ just infra-test
 | `just codegen` | Regenerates the table structs in `crates/nw-content/src/generated` |
 | `just bundle` | Builds the retail content bundle into `local-data/content/retail/` |
 | `just world` | Builds one retail world file per level into `local-data/content/retail/` (run `just bundle` first) |
+| `just design` | Merges the design files of `content/` over the retail files into `local-data/content/` (run `just bundle` and `just world` first) |
+| `just check-design` | Checks the design files against the retail files; writes nothing |
 | `just capture-check` | Decodes every capture ledger under `local-data/captures/` and prints counts |
 | `just map-tiles` | Writes the open world map tiles into `local-data/content/map/` from your install |
 
@@ -66,11 +68,14 @@ The server reads game rules from your own New World install. Nothing from the ga
 export NW_GAME_DIR="/path/to/steamapps/common/New World"
 just bundle
 just world
+just design
 ```
 
 `just bundle` writes the retail bundle `local-data/content/retail/bundle-<build>.bin`, then reloads it and checks every table and row. The pinned client build is in `config/client-build.toml`.
 
 `just world` writes the retail world files `local-data/content/retail/world-<build>-<level>.bin` for each of the 41 levels (about 620 MB in all), reloads each file, and prints the record counts, the skipped metadata fields, and the spawn IDs that no datasheet row has.
+
+`just design` reads the retail files, merges the team's design files from `content/` over them (see [content/README.md](content/README.md)), and writes `local-data/content/bundle-<build>.bin` and `local-data/content/world-<build>-<level>.bin`: the files the servers and the admin tools read. It does not read the game install. With no design files, the merged files are equal to the retail files. When a design file has a problem, it prints each one and writes nothing.
 
 ### Recovery
 
@@ -198,7 +203,7 @@ NATS carries the messages between the gateway, the director and the `sim` proces
 
 Set up once:
 
-1. Build the world files from your install: `just bundle`, then `just world`. The director reads the ground height for `start_positions`; each `sim` reads it for the move checks.
+1. Build the world files from your install: `just bundle`, then `just world`, then `just design`. The director reads the ground height for `start_positions`; each `sim` reads it for the move checks.
 2. `world_id` in `config/world-director.toml`, `config/sim.toml` and `config/rep-gateway.toml` must be the `[[world]] id` in `config/edge.toml` (the example files match).
 3. Run the world database migrations with `edge-http migrate` after an update (M5 adds the entity numbers).
 

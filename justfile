@@ -73,6 +73,15 @@ bundle:
 world:
     cargo run -p content-tool -- world
 
+# Merge the design files of content/ over the retail files and write the bundle and world files
+# the servers read into local-data/content/. Run `just bundle` and `just world` first.
+design:
+    cargo run --release -p content-tool -- design
+
+# Check the design files of content/ against the retail files; writes nothing.
+check-design:
+    cargo run --release -p content-tool -- design --check
+
 # Write the open world map tiles into local-data/content/map/ from your install (README "Admin tools").
 map-tiles:
     cargo run --release -p content-tool -- map-tiles

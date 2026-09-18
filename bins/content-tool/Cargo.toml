@@ -16,6 +16,7 @@ nw-carrier.workspace = true
 nw-messages.workspace = true
 nw-common.workspace = true
 nw-content.workspace = true
+nw-design.workspace = true
 nw-formats.workspace = true
 nw-oodle.workspace = true
 nw-reflect.workspace = true

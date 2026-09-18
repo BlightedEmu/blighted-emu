@@ -5,6 +5,7 @@ use nw_common::config::ConfigError;
 use nw_content::ContainerError;
 use nw_content::combat::CombatDataError;
 use nw_content::fill::FillError;
+use nw_design::DesignRunError;
 
 use crate::codegen::CodegenError;
 use crate::combat::NwdbError;
@@ -64,6 +65,15 @@ pub enum ToolError {
     /// The tutorial static entity scan failed.
     #[error(transparent)]
     FtueEntities(#[from] FtueEntitiesError),
+    /// The design step cannot read or write a retail or merged file.
+    #[error("design: {0}")]
+    Design(#[from] DesignRunError),
+    /// The design step found problems in design files.
+    #[error("design check found {count} problems")]
+    DesignErrors {
+        /// Problems found.
+        count: usize,
+    },
     /// The command reads the game install, and none was given.
     #[error("this command reads the game install: set NW_GAME_DIR or pass --game-dir")]
     MissingGameDir,

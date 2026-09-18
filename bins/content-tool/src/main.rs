@@ -32,12 +32,15 @@ use nw_content::client_build::load_client_build;
 use nw_content::combat::{CombatData, CombatRows};
 use nw_content::ftue_entities::ftue_entities_path;
 use nw_content::mob_prefabs::mob_prefabs_path;
+use nw_design::{DesignMode, DesignPaths, DesignReport, run_design};
 use nw_world::WorldFile;
 use nw_world::metadata::SkipCounts;
 use nw_world::records::RecordCounts;
 use nw_world::world_file::world_file_path;
 
 const DEFAULT_CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
+/// The team's design files (admin studio spec section 5).
+const DEFAULT_DESIGN_DIR: &str = "content";
 const DEFAULT_GENERATED_DIR: &str = "crates/nw-content/src/generated";
 /// Client type table in the install folder.
 const TYPE_INDEX_FILE: &str = "typeindex.json";
@@ -91,6 +94,22 @@ enum Command {
         /// `local-data/content/retail/bundle-<build>.bin`).
         #[arg(long)]
         bundle: Option<PathBuf>,
+    },
+    /// Merges the design files over the retail files and writes the bundle and world files the
+    /// servers read. Needs no game install.
+    Design {
+        /// The design files.
+        #[arg(long, default_value = DEFAULT_DESIGN_DIR)]
+        design: PathBuf,
+        /// The retail bundle and world files from `build` and `world`.
+        #[arg(long, default_value = DEFAULT_RETAIL_DIR)]
+        retail_dir: PathBuf,
+        /// Where the merged files go.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        out_dir: PathBuf,
+        /// Runs every check and writes nothing.
+        #[arg(long)]
+        check: bool,
     },
     /// Decodes capture ledgers with the carrier and message codecs; prints counts only.
     CaptureCheck {
@@ -181,6 +200,23 @@ fn main() -> ExitCode {
     }
 }
 
+fn print_design(report: &DesignReport, out_dir: &Path) {
+    let target = if report.written {
+        out_dir.display().to_string()
+    } else {
+        "nothing written".to_owned()
+    };
+    println!(
+        "design: {} files, {} levels, {} errors -> {target}",
+        report.files,
+        report.levels,
+        report.errors.len()
+    );
+    for error in &report.errors {
+        println!("  {error}");
+    }
+}
+
 /// The install folder, for the commands that read it.
 fn game_dir(game_dir: Option<&Path>) -> Result<&Path, ToolError> {
     game_dir.ok_or(ToolError::MissingGameDir)
@@ -219,6 +255,30 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             let bundle = bundle.unwrap_or_else(|| default_retail_bundle_path(&client_build));
             let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
             print_world(&run_world(&source, &client_build, &bundle, &out_dir)?);
+        }
+        Command::Design {
+            design,
+            retail_dir,
+            out_dir,
+            check,
+        } => {
+            let mode = if check {
+                DesignMode::Check
+            } else {
+                DesignMode::Write
+            };
+            let paths = DesignPaths {
+                design_dir: design,
+                retail_dir,
+                out_dir,
+            };
+            let report = run_design(&paths, &client_build, mode)?;
+            print_design(&report, &paths.out_dir);
+            if !report.errors.is_empty() {
+                return Err(ToolError::DesignErrors {
+                    count: report.errors.len(),
+                });
+            }
         }
         Command::CaptureCheck { ledgers, names } => {
             let names = match names {
