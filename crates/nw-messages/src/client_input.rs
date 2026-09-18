@@ -199,10 +199,6 @@ impl Bit8 {
     }
 }
 
-/// The mask bits that are 0 in every movement-only record and set in fights (attack input
-/// note); which one is a light attack, a heavy attack or an ability is Unknown.
-pub const ATTACK_MASK_BITS: [u32; 4] = [9, 10, 13, 15];
-
 /// One record (`FUN_142a25d90`). `None` means the field is not in the record.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct InputRecord {
@@ -384,6 +380,18 @@ const DODGE_SLOT_BIT: u32 = 3;
 /// section 2.1; Inferred from one use).
 const QUICK_SLOT_1_VALUE: usize = 1;
 const QUICK_SLOT_1_BIT: u32 = 23;
+/// The slot value and bit of an attack key press: set in one record only (input note: the
+/// client's action set, 317 retail presses; the mask bits 9, 10, 13 and 15 that we read before are
+/// field presence bits in 873 to 1042 of about 1200 records).
+const ATTACK_PRESS_VALUE: usize = 2;
+const ATTACK_PRESS_BIT: u32 = 40;
+/// The slot value and bit of the attack key's release: set in one record only.
+const ATTACK_RELEASE_VALUE: usize = 2;
+const ATTACK_RELEASE_BIT: u32 = 31;
+/// Slots of a client record (19 words of the action set, as 10 values).
+const ACTION_SLOTS: u8 = 19;
+/// The neutral scaled bytes of a record.
+const NEUTRAL_SLOT_BYTES: [u8; SLOT_BYTES] = [128; SLOT_BYTES];
 
 impl InputRecord {
     fn slot_bit(&self, value: usize, bit: u32) -> bool {
@@ -408,13 +416,25 @@ impl InputRecord {
         self.slot_bit(QUICK_SLOT_1_VALUE, QUICK_SLOT_1_BIT)
     }
 
-    /// The attack bits of the mask: bit `n` of the result is [`ATTACK_MASK_BITS`]`[n]`.
-    pub fn attack_bits(&self) -> u8 {
-        ATTACK_MASK_BITS
-            .iter()
-            .enumerate()
-            .filter(|(_, bit)| mask_bit(self.mask, **bit))
-            .fold(0, |bits, (index, _)| bits | 1 << index)
+    /// Whether the player pressed the attack key in this record.
+    pub fn attack_pressed(&self) -> bool {
+        self.slot_bit(ATTACK_PRESS_VALUE, ATTACK_PRESS_BIT)
+    }
+
+    /// Whether the player let go of the attack key in this record.
+    pub fn attack_released(&self) -> bool {
+        self.slot_bit(ATTACK_RELEASE_VALUE, ATTACK_RELEASE_BIT)
+    }
+}
+
+/// The slots of a record with only `bit` of value `value` set.
+fn one_action(value: usize, bit: u32) -> InputSlots {
+    let mut values = vec![0; usize::from(ACTION_SLOTS).div_ceil(2)];
+    values[value] = 1 << bit;
+    InputSlots {
+        count: ACTION_SLOTS,
+        values,
+        bytes: NEUTRAL_SLOT_BYTES,
     }
 }
 
@@ -432,20 +452,24 @@ impl ClientInputMsg {
         }
     }
 
-    /// An input with a record that holds `position` and attack bit 9, then a record with only
-    /// `position` that releases the bit, so that the next attack input is a rising edge again
-    /// (M6-B spec sections 6.1 and 9.2). With no prefix integer, bit 9 is the cursor bit of row
-    /// 4, so the first record carries a gate byte of 0: the light attack.
-    pub fn attack(position: InputPosition) -> Self {
-        let press = InputRecord {
-            mask: 1 << BIT_7 | 1 << ATTACK_MASK_BITS[0],
+    /// A light attack at `position`: the press in the record of counter `counter`, the release
+    /// in the next, newest first, as the client sends them.
+    pub fn attack(position: InputPosition, counter: u16) -> Self {
+        let record = |counter, slots| InputRecord {
+            mask: 1 << BIT_7,
+            u16_after_mask: counter,
             bit_7: Some(position),
-            row_4: Some(0),
+            slots,
             ..InputRecord::default()
         };
-        let release = Self::position(position).records;
         Self {
-            records: [vec![press], release].concat(),
+            records: vec![
+                record(
+                    counter.wrapping_add(1),
+                    one_action(ATTACK_RELEASE_VALUE, ATTACK_RELEASE_BIT),
+                ),
+                record(counter, one_action(ATTACK_PRESS_VALUE, ATTACK_PRESS_BIT)),
+            ],
             ..Self::default()
         }
     }
@@ -1125,45 +1149,69 @@ mod tests {
     }
 
     #[test]
-    fn attack_bits_read_bits_9_10_13_15() {
-        let record = |mask| InputRecord {
-            mask,
+    fn the_retail_attack_records_press_hold_and_release() {
+        // Retail records u1857 (key down), u1858 (held) and u1860 (key up) of the tutorial.
+        let record = |values: [u64; 10]| InputRecord {
+            slots: InputSlots {
+                count: ACTION_SLOTS,
+                values: values.to_vec(),
+                bytes: NEUTRAL_SLOT_BYTES,
+            },
             ..InputRecord::default()
         };
-        assert_eq!(record(0).attack_bits(), 0);
-        assert_eq!(record(1 << 9).attack_bits(), 0b0001);
-        assert_eq!(record(1 << 10).attack_bits(), 0b0010);
-        assert_eq!(record(1 << 13).attack_bits(), 0b0100);
-        assert_eq!(record(1 << 15).attack_bits(), 0b1000);
-        assert_eq!(
-            record(1 << 7 | 1 << 8 | 1 << 11).attack_bits(),
+        let down = record([
+            576_460_752_303_423_488,
             0,
-            "not attack bits"
-        );
+            1_099_511_627_776,
+            536_872_960,
+            0,
+            549_755_813_888,
+            288_230_376_168_488_960,
+            288_793_326_239_350_784,
+            144_123_984_168_878_080,
+            0,
+        ]);
+        let held = record([
+            0,
+            0,
+            9_223_372_036_854_775_808,
+            0,
+            576_460_752_303_423_488,
+            549_755_813_888,
+            0,
+            288_793_326_239_350_784,
+            144_115_188_092_633_088,
+            0,
+        ]);
+        let up = record([
+            576_460_752_303_423_488,
+            0,
+            2_147_483_648,
+            0,
+            0,
+            0,
+            0,
+            288_793_326_239_350_784,
+            180_143_985_094_819_840,
+            16_384,
+        ]);
+        assert!(down.attack_pressed() && !down.attack_released());
+        assert!(!held.attack_pressed() && !held.attack_released());
+        assert!(!up.attack_pressed() && up.attack_released());
     }
 
     #[test]
-    fn an_attack_input_sets_bit_9_and_the_position() {
-        let input = ClientInputMsg::attack(position());
-        let body = input.encode().expect("encode");
-        let decoded = ClientInputMsg::decode(&body).expect("decode");
+    fn an_attack_input_presses_then_releases_newest_first() {
+        const COUNTER: u16 = 40;
+        let input = ClientInputMsg::attack(position(), COUNTER);
+        let decoded = ClientInputMsg::decode(&input.encode().expect("encode")).expect("decode");
         assert_eq!(decoded, input);
         assert_eq!(decoded.newest_position(), Some(position()));
-        assert_eq!(decoded.records[0].attack_bits(), 0b0001);
-    }
-
-    #[test]
-    fn an_attack_input_ends_with_a_release() {
-        let decoded =
-            ClientInputMsg::decode(&ClientInputMsg::attack(position()).encode().expect("encode"))
-                .expect("decode");
-        let bits: Vec<u8> = decoded
-            .records
-            .iter()
-            .map(InputRecord::attack_bits)
-            .collect();
-        assert_eq!(bits, vec![0b0001, 0], "the next attack input rises again");
-        assert_eq!(decoded.records[1].bit_7, Some(position()));
+        let [release, press] = decoded.records.as_slice() else {
+            panic!("two records");
+        };
+        assert!(press.attack_pressed() && press.u16_after_mask == COUNTER);
+        assert!(release.attack_released() && release.u16_after_mask == COUNTER + 1);
     }
 
     #[test]

@@ -75,8 +75,8 @@ pub(super) struct Vitals {
     /// `true`.
     pub(super) spawned: bool,
     last_attack_ms: Option<u64>,
-    /// The attack bits of the last input record.
-    attack_bits: u8,
+    /// The counter of the record whose attack key press still waits for its release.
+    attack_pressed_at: Option<u16>,
     /// The counter (`u16` after the mask) of the newest input record read.
     input_counter: Option<u16>,
     /// The player holds block (the newest input record, [`ClientInputMsg::blocking`]).
@@ -98,7 +98,7 @@ impl Vitals {
             dead_since_ms: None,
             spawned,
             last_attack_ms: None,
-            attack_bits: 0,
+            attack_pressed_at: None,
             input_counter: None,
             blocking: false,
             dodge_held: false,
@@ -125,6 +125,32 @@ fn in_front(from: Position, facing: f32, target: Position) -> bool {
     let wrapped =
         (turn + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
     wrapped.abs() <= HIT_CONE_HALF_RAD
+}
+
+/// Milliseconds per client input record (retail: 34 ms apart, median; input note).
+const INPUT_RECORD_MS: u16 = 33;
+/// The shortest hold of the attack key that is a heavy attack (input note: retail light holds
+/// 35 to 314 ms, heavy holds from 432 ms; the limit between them is our choice).
+const HEAVY_HOLD_MS: u16 = 400;
+
+/// A player's weapon attack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttackKind {
+    /// A tap of the attack key.
+    Light,
+    /// A long hold of the attack key.
+    Heavy,
+}
+
+impl AttackKind {
+    /// The attack of a key held for `records` input records.
+    const fn of_hold(records: u16) -> Self {
+        if records.saturating_mul(INPUT_RECORD_MS) >= HEAVY_HOLD_MS {
+            Self::Heavy
+        } else {
+            Self::Light
+        }
+    }
 }
 
 /// Whether input counter `counter` comes after `last`; the counter wraps at `u16::MAX`.
@@ -421,33 +447,40 @@ impl SimWorld {
             return Vec::new();
         };
         // The client sends the newest record first, then older copies with fewer fields (swing
-        // note: counters 7290, 7289, 7288); each record counts once, oldest first.
-        let mut edges = 0;
+        // note: counters 7290, 7289, 7288); each record counts once, oldest first. An attack is a
+        // press and its release: a short hold is the light attack, a long one the heavy attack.
+        let mut attacks = Vec::new();
         for record in records.iter().rev() {
+            let counter = record.u16_after_mask;
             if vitals
                 .input_counter
-                .is_some_and(|last| !counter_is_newer(record.u16_after_mask, last))
+                .is_some_and(|last| !counter_is_newer(counter, last))
             {
                 continue;
             }
-            vitals.input_counter = Some(record.u16_after_mask);
-            let bits = record.attack_bits();
-            if bits & !vitals.attack_bits != 0 {
-                edges += 1;
+            vitals.input_counter = Some(counter);
+            if record.attack_pressed() {
+                vitals.attack_pressed_at = Some(counter);
             }
-            vitals.attack_bits = bits;
+            if record.attack_released() {
+                let held_records = vitals
+                    .attack_pressed_at
+                    .take()
+                    .map_or(0, |pressed| counter.wrapping_sub(pressed));
+                attacks.push(AttackKind::of_hold(held_records));
+            }
         }
-        // Every edge of one message has the same receive time, so only the first can attack: the
+        // Every attack of one message has the same receive time, so only the first can hit: the
         // others are too fast, and a client cannot make the loop search for targets per record.
-        if edges == 0 {
+        let Some(&first) = attacks.first() else {
             return Vec::new();
-        }
+        };
         let facing = records
             .first()
             .and_then(|newest| newest.bit_6)
             .map(|[yaw, _]| yaw);
-        std::iter::once(self.attack_nearest(connection, facing, now_ms))
-            .chain((1..edges).map(|_| Err(AttackRefusal::TooFast)))
+        std::iter::once(self.attack_nearest(connection, facing, first, now_ms))
+            .chain(attacks[1..].iter().map(|_| Err(AttackRefusal::TooFast)))
             .collect()
     }
 
@@ -518,6 +551,7 @@ impl SimWorld {
         &mut self,
         attacker: &ConnectionRef,
         facing: Option<f32>,
+        kind: AttackKind,
         now_ms: u64,
     ) -> Result<AttackOutcome, AttackRefusal> {
         let entity = *self
@@ -556,13 +590,11 @@ impl SimWorld {
             .filter(|(_, distance)| *distance <= reach_m)
             .map(|(mob, _)| mob)
             .ok_or(AttackRefusal::NoTarget)?;
-        let damage_id = self
-            .combat
-            .data
-            .first_attack()
-            .ok_or(AttackRefusal::NotWeaponAttack)?
-            .damage_id
-            .clone();
+        let row = match kind {
+            AttackKind::Light => self.combat.data.first_attack(),
+            AttackKind::Heavy => self.combat.data.heavy_attack(),
+        };
+        let damage_id = row.ok_or(AttackRefusal::NotWeaponAttack)?.damage_id.clone();
         self.attack(attacker, target, &damage_id, now_ms)
     }
 
@@ -860,26 +892,38 @@ mod tests {
         world.mobs.get_mut(mob()).expect("mob").health
     }
 
-    /// Mask bits 9 and 10, the first two attack bits.
-    const FIRST_ATTACK_BIT: u32 = 1 << 9;
-    const SECOND_ATTACK_BIT: u32 = 1 << 10;
-
-    fn record(mask: u32) -> InputRecord {
-        InputRecord {
-            mask,
-            ..InputRecord::default()
-        }
+    /// What one input record of a test does with the attack key.
+    #[derive(Clone, Copy)]
+    enum Key {
+        Press,
+        Hold,
+        Release,
     }
 
-    /// The records of one message in the client's order, newest first, from `masks` oldest first,
-    /// with counters from `first_counter` up.
-    fn message(first_counter: u16, masks: &[u32]) -> Vec<InputRecord> {
-        let mut records: Vec<InputRecord> = masks
+    /// The records of one message in the client's order, newest first, from `keys` oldest first,
+    /// with counters from `first_counter` up (retail press: value 2 bit 40; release: value 2
+    /// bit 31).
+    fn message(first_counter: u16, keys: &[Key]) -> Vec<InputRecord> {
+        const ACTION_VALUES: usize = 10;
+        let mut records: Vec<InputRecord> = keys
             .iter()
             .zip(first_counter..)
-            .map(|(&mask, counter)| InputRecord {
-                u16_after_mask: counter,
-                ..record(mask)
+            .map(|(key, counter)| {
+                let mut values = vec![0; ACTION_VALUES];
+                values[2] = match key {
+                    Key::Press => 1 << 40,
+                    Key::Hold => 0,
+                    Key::Release => 1 << 31,
+                };
+                InputRecord {
+                    u16_after_mask: counter,
+                    slots: nw_messages::InputSlots {
+                        count: 19,
+                        values,
+                        bytes: [128; 4],
+                    },
+                    ..InputRecord::default()
+                }
             })
             .collect();
         records.reverse();
@@ -894,9 +938,13 @@ mod tests {
     }
 
     #[test]
-    fn a_rising_edge_attacks_once() {
+    fn a_tap_is_one_light_attack() {
         let mut world = awake_fight();
-        let results = world.attack_input(&connection(1), &[record(FIRST_ATTACK_BIT)], NOW);
+        let results = world.attack_input(
+            &connection(1),
+            &message(1, &[Key::Press, Key::Release]),
+            NOW,
+        );
         assert_eq!(
             results,
             vec![Ok(AttackOutcome::Hit {
@@ -907,40 +955,34 @@ mod tests {
     }
 
     #[test]
-    fn a_held_bit_does_not_attack_again() {
+    fn the_hold_picks_the_light_or_the_heavy_attack() {
+        // Retail light holds 35 to 314 ms, heavy holds from 432 ms.
+        assert_eq!(AttackKind::of_hold(9), AttackKind::Light, "297 ms");
+        assert_eq!(AttackKind::of_hold(13), AttackKind::Heavy, "429 ms");
+    }
+
+    #[test]
+    fn a_press_attacks_at_its_release_in_a_later_message() {
         let mut world = awake_fight();
-        let pressed = message(1, &[FIRST_ATTACK_BIT]);
-        assert_eq!(world.attack_input(&connection(1), &pressed, NOW).len(), 1);
-        let held = message(2, &[FIRST_ATTACK_BIT]);
-        assert!(
-            world
-                .attack_input(&connection(1), &held, NOW + INTERVAL_MS)
-                .is_empty()
-        );
-        let again = message(3, &[0, FIRST_ATTACK_BIT]);
+        let pressed = message(1, &[Key::Press, Key::Hold]);
+        assert!(world.attack_input(&connection(1), &pressed, NOW).is_empty());
+        let released = message(3, &[Key::Release]);
         assert_eq!(
             world
-                .attack_input(&connection(1), &again, NOW + 2 * INTERVAL_MS)
+                .attack_input(&connection(1), &released, NOW + INTERVAL_MS)
                 .len(),
             1
         );
     }
 
     #[test]
-    fn an_older_copy_with_fewer_bits_is_not_a_new_press() {
+    fn an_older_copy_is_not_read_again() {
         let mut world = awake_fight();
-        assert_eq!(
-            world
-                .attack_input(&connection(1), &message(5, &[FIRST_ATTACK_BIT]), NOW)
-                .len(),
-            1
-        );
-        // The next message repeats record 5 without its attack bit after the held record 6.
-        let mut next = message(6, &[FIRST_ATTACK_BIT]);
-        next.push(InputRecord {
-            u16_after_mask: 5,
-            ..record(0)
-        });
+        let tap = message(5, &[Key::Press, Key::Release]);
+        assert_eq!(world.attack_input(&connection(1), &tap, NOW).len(), 1);
+        // The next message repeats records 5 and 6 after the new record 7.
+        let mut next = message(7, &[Key::Hold]);
+        next.extend(tap);
         assert!(
             world
                 .attack_input(&connection(1), &next, NOW + INTERVAL_MS)
@@ -949,30 +991,19 @@ mod tests {
     }
 
     #[test]
-    fn edges_inside_one_message_count_once_each() {
-        let mut world = awake_fight();
-        let records = message(
-            1,
-            &[
-                FIRST_ATTACK_BIT | SECOND_ATTACK_BIT,
-                0,
-                FIRST_ATTACK_BIT,
-                FIRST_ATTACK_BIT,
-            ],
-        );
-        let results = world.attack_input(&connection(1), &records, NOW);
-        assert_eq!(results.len(), 2, "{results:?}");
-        assert!(results[0].is_ok());
-        assert_eq!(results[1], Err(AttackRefusal::TooFast));
-    }
-
-    #[test]
-    fn extra_edges_in_one_message_are_too_fast_without_a_search() {
+    fn extra_attacks_in_one_message_are_too_fast_without_a_search() {
         let mut world = awake_fight();
         join(&mut world, 2, MOB_X + 10.0);
         let records = message(
             1,
-            &[FIRST_ATTACK_BIT, 0, FIRST_ATTACK_BIT, 0, FIRST_ATTACK_BIT],
+            &[
+                Key::Press,
+                Key::Release,
+                Key::Press,
+                Key::Release,
+                Key::Press,
+                Key::Release,
+            ],
         );
         assert_eq!(
             world.attack_input(&connection(2), &records, NOW),
@@ -989,11 +1020,11 @@ mod tests {
         let mut world = awake_fight();
         join(&mut world, 2, MOB_X + 10.0);
         assert_eq!(
-            world.attack_nearest(&connection(2), None, NOW),
+            world.attack_nearest(&connection(2), None, AttackKind::Light, NOW),
             Err(AttackRefusal::NoTarget)
         );
         assert_eq!(
-            world.attack_nearest(&connection(7), None, NOW),
+            world.attack_nearest(&connection(7), None, AttackKind::Light, NOW),
             Err(AttackRefusal::NotInWorld)
         );
     }
@@ -1005,7 +1036,7 @@ mod tests {
         join(&mut world, 1, MOB_X + 2.0);
         tick(&mut world, NOW);
         assert!(matches!(
-            world.attack_nearest(&connection(1), None, NOW),
+            world.attack_nearest(&connection(1), None, AttackKind::Light, NOW),
             Ok(AttackOutcome::Hit { target, .. }) if target == mob_entity(1)
         ));
     }
@@ -1019,18 +1050,23 @@ mod tests {
         join(&mut world, 1, MOB_X + 2.0);
         tick(&mut world, NOW);
         assert!(matches!(
-            world.attack_nearest(&connection(1), Some(FACING_EAST), NOW),
+            world.attack_nearest(&connection(1), Some(FACING_EAST), AttackKind::Light, NOW),
             Ok(AttackOutcome::Hit { target, .. }) if target == mob_entity(1)
         ));
         assert!(
             matches!(
-                world.attack_nearest(&connection(1), Some(-FACING_EAST), NOW + INTERVAL_MS),
+                world.attack_nearest(&connection(1), Some(-FACING_EAST), AttackKind::Light, NOW + INTERVAL_MS),
                 Ok(AttackOutcome::Hit { target, .. }) if target == mob_entity(0)
             ),
             "facing west, the mob behind before is in front"
         );
         assert_eq!(
-            world.attack_nearest(&connection(1), Some(0.0), NOW + 2 * INTERVAL_MS),
+            world.attack_nearest(
+                &connection(1),
+                Some(0.0),
+                AttackKind::Light,
+                NOW + 2 * INTERVAL_MS
+            ),
             Err(AttackRefusal::NoTarget),
             "facing north, both mobs are to the side"
         );
@@ -1045,7 +1081,7 @@ mod tests {
             NOW,
         );
         assert_eq!(
-            world.attack_nearest(&connection(1), None, NOW),
+            world.attack_nearest(&connection(1), None, AttackKind::Light, NOW),
             Err(AttackRefusal::NoTarget),
             "a returning mob is no target"
         );
@@ -1054,7 +1090,8 @@ mod tests {
             vec![mob_ghost(BORDER_X + 1.0, MOB_HEALTH, false)],
             NOW,
         );
-        let Ok(AttackOutcome::Remote(remote)) = world.attack_nearest(&connection(1), None, NOW)
+        let Ok(AttackOutcome::Remote(remote)) =
+            world.attack_nearest(&connection(1), None, AttackKind::Light, NOW)
         else {
             panic!("a remote hit");
         };

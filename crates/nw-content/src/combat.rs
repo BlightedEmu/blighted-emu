@@ -491,9 +491,14 @@ impl CombatData {
         &self.weapon
     }
 
-    /// The first of the config's weapon attacks.
+    /// The first of the config's weapon attacks: the light attack.
     pub fn first_attack(&self) -> Option<&AttackRow> {
         self.attacks.first()
+    }
+
+    /// The second of the config's weapon attacks: the heavy attack.
+    pub fn heavy_attack(&self) -> Option<&AttackRow> {
+        self.attacks.get(1)
     }
 
     /// The weapon attack `damage_id`, if it is one of the config's.

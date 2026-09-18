@@ -62,9 +62,8 @@ pub use bundle::{
 };
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use client_input::{
-    ATTACK_MASK_BITS, Bit8, ClientInputMsg, HeadStep9, INPUT_Z_MAX, INPUT_Z_MIN, InputHead,
-    InputPosition, InputRecord, InputSlots, InteractionRequest,
-    RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+    Bit8, ClientInputMsg, HeadStep9, INPUT_Z_MAX, INPUT_Z_MIN, InputHead, InputPosition,
+    InputRecord, InputSlots, InteractionRequest, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
 };
 pub use combat::{
     DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, DamageDealtMsg, DamageItem, DeathRecapMsg,

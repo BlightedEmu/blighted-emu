@@ -1539,7 +1539,7 @@ mod tests {
     /// An attack input at `x`.
     fn attack_at(connection: ConnectionRef, x: f32) -> SimInput {
         let at = InputPosition::from_metres(x, Y, Z).expect("finite");
-        let body = ClientInputMsg::attack(at).encode().expect("input");
+        let body = ClientInputMsg::attack(at, 1).encode().expect("input");
         client_message(connection, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, body)
     }
 

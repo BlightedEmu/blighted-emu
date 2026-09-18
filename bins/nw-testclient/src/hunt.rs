@@ -378,6 +378,11 @@ impl HuntReport {
     }
 }
 
+/// The input records of one attack: the press and the release.
+const ATTACK_RECORDS: u16 = 2;
+/// The counter of a bot's first input record; the server reads only records after the last.
+const FIRST_INPUT_COUNTER: u16 = 1;
+
 /// One bot during its run.
 struct HuntBot {
     hunter: Hunter,
@@ -385,6 +390,8 @@ struct HuntBot {
     view: CombatView,
     own: Option<WorldPosition>,
     clock: BundleClock,
+    /// The counter of the next attack's input records; each attack takes two.
+    input_counter: u16,
 }
 
 impl FleetBot for HuntBot {
@@ -418,7 +425,9 @@ impl FleetBot for HuntBot {
                 send_input(client, &ClientInputMsg::position(position))
             }
             Some(HuntAction::Attack(position)) => {
-                send_input(client, &ClientInputMsg::attack(position))
+                let counter = self.input_counter;
+                self.input_counter = counter.wrapping_add(ATTACK_RECORDS);
+                send_input(client, &ClientInputMsg::attack(position, counter))
             }
             Some(HuntAction::Respawn) => client.send_message(
                 INPUT_CHANNEL,
@@ -481,6 +490,7 @@ pub async fn run_hunt(
         view: CombatView::default(),
         own: None,
         clock: BundleClock::new(),
+        input_counter: FIRST_INPUT_COUNTER,
     });
     run_fleet(http, fleet, new_client, new_bot, stop, report).await
 }
