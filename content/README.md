@@ -44,8 +44,10 @@ Do not copy client values into a file; name only what you change.
 ## Spawn and NPC points
 
 A retail point has no id of its own, so it gets a **point key**: `<type id>_<x>_<y>_<z>`, with the
-position rounded to 0.1 m (and `_2`, `_3`, ... when two points share a key). The admin map shows
-the key of each point. A point file also names its level with `map`:
+position rounded to 0.1 m (and `_2`, `_3`, ... when two points share a key). To find the key of
+a mob spawn, turn on "Mob spawns" on the admin Map page, zoom in, and click the spawn: the status
+line shows its design key. NPC points are not on the map yet. A point file also names its level
+with `map`:
 
 ```toml
 schema = 1

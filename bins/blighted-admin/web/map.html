@@ -67,7 +67,8 @@
     document.getElementById('fit').addEventListener('click', () => { map.fit(); showStatus(); });
     map.onSelect((item) => {
       if (item && item.id) {
-        status.textContent = `${item.kind} ${item.id}${item.level === null ? '' : ` level ${item.level}`} at ${item.x.toFixed(1)}, ${item.y.toFixed(1)}`;
+        const key = item.key ? ` · design key ${item.key}` : '';
+        status.textContent = `${item.kind} ${item.id}${item.level === null ? '' : ` level ${item.level}`} at ${item.x.toFixed(1)}, ${item.y.toFixed(1)}${key}`;
       }
     });
     showStatus();

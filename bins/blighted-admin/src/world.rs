@@ -119,6 +119,8 @@ pub struct SpawnPoint {
     pub id: String,
     /// Spawn level of a mob.
     pub level: Option<u32>,
+    /// Design key of a mob spawn: the `id` of a `spawn_point` design file (content/README.md).
+    pub key: Option<String>,
     /// East, metres.
     pub x: f32,
     /// North, metres.
@@ -334,13 +336,14 @@ impl WorldLayer {
                 .cloned()
                 .unwrap_or_else(|| format!("{crc:08x}"))
         };
-        let (kind, id, level, [x, y, z]) = match point {
+        let (kind, id, level, key, [x, y, z]) = match point {
             PointRef::Vitals(index) => {
                 let spawn = &self.world.vitals[index];
                 (
                     SpawnKind::Vitals,
                     named(&self.names.vitals, spawn.vitals_id),
                     Some(spawn.level),
+                    self.world.vitals_keys.get(index).cloned(),
                     spawn.position,
                 )
             }
@@ -349,6 +352,7 @@ impl WorldLayer {
                 (
                     SpawnKind::Gatherables,
                     named(&self.names.gatherables, gatherable.gatherable_id),
+                    None,
                     None,
                     gatherable.position,
                 )
@@ -359,6 +363,7 @@ impl WorldLayer {
                     SpawnKind::Landmarks,
                     landmark.landmark_data.clone(),
                     None,
+                    None,
                     landmark.position,
                 )
             }
@@ -367,6 +372,7 @@ impl WorldLayer {
             kind,
             id,
             level,
+            key,
             x,
             y,
             z,
@@ -425,7 +431,7 @@ pub(crate) mod tests {
                 },
             )
             .collect();
-        WorldFile {
+        let mut world = WorldFile {
             level: LevelInfo {
                 name: "test".to_owned(),
                 region_size: REGION_M,
@@ -456,7 +462,9 @@ pub(crate) mod tests {
                 ..Landmark::default()
             }],
             ..WorldFile::default()
-        }
+        };
+        world.fill_point_keys();
+        world
     }
 
     pub(crate) fn test_names() -> SpawnNames {
@@ -514,6 +522,16 @@ pub(crate) mod tests {
                 (SpawnKind::Landmarks, "Shrine", None),
             ]
         );
+    }
+
+    #[test]
+    fn a_mob_spawn_has_its_design_key() {
+        let points = test_layer(CAP)
+            .spawns(&query((0.0, 0.0), (2_048.0, 2_048.0), &ALL))
+            .expect("query");
+        let keys: Vec<Option<&str>> = points.iter().map(|point| point.key.as_deref()).collect();
+        let expected = format!("{}_100.0_100.0_5.0", lowercase_crc32(VITALS_ID));
+        assert_eq!(keys, [Some(expected.as_str()), None, None]);
     }
 
     #[test]
