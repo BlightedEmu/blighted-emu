@@ -10,9 +10,10 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use nw_content::ftue_entities::{AssetGroup, FtueLevel, GDE_REF_LEN, RefTarget, SessionIds};
-use nw_messages::{BundleGroup, BundleMember, MemberState};
+use nw_messages::{BundleGroup, BundleMember, MemberState, raw_id_of_entity};
 use uuid::Uuid;
 
+use super::asset_script::SpellCast;
 use super::slots::Slot;
 
 /// First slot key of an asset entity: its index in the table is added. Keys are never sent; they
@@ -28,12 +29,30 @@ pub(super) fn asset_gde_ref(player: u64, index: usize) -> [u8; GDE_REF_LEN] {
     *Uuid::new_v5(&namespace, &(index as u64).to_be_bytes()).as_bytes()
 }
 
+/// The `GdeRef` of cast `number` of spell slice `index` for player `player`: new per cast
+/// (boss note: retail made one per cast), and never an [`asset_gde_ref`].
+pub(super) fn spell_gde_ref(player: u64, index: usize, number: u32) -> [u8; GDE_REF_LEN] {
+    let namespace = Uuid::from_u64_pair(ASSET_GDE_REF_NAMESPACE, player);
+    let mut name = (index as u64).to_be_bytes().to_vec();
+    name.extend(number.to_be_bytes());
+    *Uuid::new_v5(&namespace, &name).as_bytes()
+}
+
+/// The class of a spell slice's spell state (2912), whose body holds where the spell aims: the
+/// `f32` x and y at these offsets (boss note: retail the player's place at the cast).
+const SPELL_CLASS: u64 = 2912;
+const SPELL_X_AT: usize = 6;
+const SPELL_Y_AT: usize = 10;
+const F32_LEN: usize = 4;
+
 /// One shown asset entity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AssetView {
     gde_ref: [u8; GDE_REF_LEN],
     /// Its change groups to send, by index in the table, in order.
     pending: VecDeque<usize>,
+    /// The cast of a spell slice.
+    cast: Option<SpellCast>,
 }
 
 /// The asset entities one player sees, with the changes not sent yet.
@@ -50,6 +69,20 @@ impl AssetViews {
             AssetView {
                 gde_ref,
                 pending: VecDeque::new(),
+                cast: None,
+            },
+        );
+    }
+
+    /// Shows spell slice `index` with `GdeRef` `gde_ref` for `cast`: its bodies name the caster
+    /// and where it aims.
+    pub(super) fn cast(&mut self, index: usize, gde_ref: [u8; GDE_REF_LEN], cast: SpellCast) {
+        self.shown.insert(
+            index,
+            AssetView {
+                gde_ref,
+                pending: VecDeque::new(),
+                cast: Some(cast),
             },
         );
     }
@@ -91,11 +124,27 @@ impl AssetViews {
             let change = self.shown.get_mut(&index)?.pending.pop_front()?;
             entity.changes.get(change)?
         };
-        let bodies = group.patched_bodies(ids, |target| match target {
+        let cast = self.shown.get(&index).and_then(|view| view.cast);
+        let mut bodies = group.patched_bodies(ids, |target| match target {
             RefTarget::Asset(other) => self.shown.get(&other).map(|view| view.gde_ref),
             // No asset body of the tutorial names a mob that is not a spell's caster.
-            RefTarget::Mob(_) => None,
+            RefTarget::Mob(_) => cast.map(|cast| raw_id_of_entity(cast.caster)),
         });
+        if let Some(cast) = cast {
+            let spells = group
+                .group
+                .members
+                .iter()
+                .zip(&mut bodies)
+                .filter(|(member, _)| member.class == SPELL_CLASS);
+            for (_, body) in spells {
+                for (at, bits) in [SPELL_X_AT, SPELL_Y_AT].into_iter().zip(cast.at_bits) {
+                    if let Some(field) = body.get_mut(at..at + F32_LEN) {
+                        field.copy_from_slice(&bits.to_be_bytes());
+                    }
+                }
+            }
+        }
         Some(BundleGroup {
             interest: u64::from(slot.interest),
             members: group
@@ -173,6 +222,57 @@ mod tests {
             }],
             mobs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_spell_names_its_caster_and_aims_at_the_cast_place() {
+        const CASTER_AT: usize = 44;
+        const THORPE: u64 = 0x4_0000_0009;
+        let spell = vec![0xee; CASTER_AT + GDE_REF_LEN];
+        let mut level = level();
+        level.assets[0].spawns = vec![group(
+            SPELL_CLASS,
+            spell,
+            vec![BodyRef {
+                member: 0,
+                at: CASTER_AT,
+                form: IdForm::GdeRef,
+                target: RefTarget::Mob(9),
+            }],
+        )];
+        let cast = SpellCast {
+            caster: THORPE,
+            at_bits: [480.85_f32.to_bits(), 227.1_f32.to_bits()],
+            number: 2,
+        };
+        let gde_ref = spell_gde_ref(PLAYER, 0, cast.number);
+        assert_ne!(
+            gde_ref,
+            spell_gde_ref(PLAYER, 0, cast.number + 1),
+            "per cast"
+        );
+        assert_ne!(gde_ref, asset_gde_ref(PLAYER, 0));
+        let mut views = AssetViews::default();
+        views.cast(0, gde_ref, cast);
+        let new = Slot {
+            interest: 16,
+            new: true,
+        };
+        let shown = views
+            .group(ASSET_ENTITY_BASE, new, &level, &ids())
+            .expect("spell");
+        let MemberState::Recorded { body, .. } = &shown.members[0].state else {
+            panic!("recorded");
+        };
+        assert_eq!(body[CASTER_AT..], raw_id_of_entity(THORPE));
+        assert_eq!(
+            body[SPELL_X_AT..SPELL_X_AT + F32_LEN],
+            480.85_f32.to_be_bytes()
+        );
+        assert_eq!(
+            body[SPELL_Y_AT..SPELL_Y_AT + F32_LEN],
+            227.1_f32.to_be_bytes()
+        );
     }
 
     fn ids() -> SessionIds {

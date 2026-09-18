@@ -30,10 +30,10 @@ use nw_messages::paperdoll::slot::QUICK_SLOT_1;
 use nw_messages::{
     BundleGroup, BundleMember, ClientFacetMsg, ConsumableCooldown, CooldownsState,
     DisableCollisionMsg, GatheringInterruptedMsg, InteractionEndedMsg, InteractionRequest,
-    InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec, MessageError,
-    PlayerLook, PlayerSeenByAiMsg, PlayerStates, ProgressionState, SelectedAsTargetMsg,
-    ServerMessage, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg, UnselectedAsTargetMsg,
-    WorldPosition, facet_entity,
+    InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg, LevelSpec, MeleeHitMsg,
+    MessageError, PlayerLook, PlayerSeenByAiMsg, PlayerStates, ProgressionState,
+    SelectedAsTargetMsg, ServerMessage, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg,
+    UnselectedAsTargetMsg, WorldPosition, facet_entity,
 };
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
@@ -60,9 +60,9 @@ mod statics;
 
 use asset_script::Step;
 use combat_status::CombatTimer;
-use encounter::{BAG_PREFIX, Order, Tutorial};
+use encounter::{BAG_PREFIX, Order, Shove, Tutorial};
 use gear::Gear;
-use level_assets::{ASSET_ENTITY_BASE, AssetViews, asset_gde_ref};
+use level_assets::{ASSET_ENTITY_BASE, AssetViews, asset_gde_ref, spell_gde_ref};
 use level_flow::{AchievementRules, LevelFlow};
 use members::{
     CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, OwnTeleport, OwnTick, bundles, card_of,
@@ -214,6 +214,20 @@ pub enum MoveError {
     /// The player is dead.
     #[error("the player is dead")]
     Dead,
+    /// The server moves the player now (a pull or push); its client's moves wait.
+    #[error("the server moves the player")]
+    Pushed,
+}
+
+/// A move of the player that the server makes over time (a boss's pull or push).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Push {
+    from: Position,
+    to: Position,
+    start_ms: u64,
+    end_ms: u64,
+    /// The player got to `to`: the next tick ends the push, after its last own state.
+    arrived: bool,
 }
 
 /// Messages for one connection.
@@ -361,6 +375,8 @@ struct Player {
     throttle_cleared: bool,
     /// Where the player faces after the server's move, when the move says so.
     move_facing: Option<f32>,
+    /// The server moves the player now: its own states carry the place.
+    push: Option<Push>,
     /// The next state of a server move still to send.
     teleport_step: Option<TeleportStep>,
     /// Server time of the first refused move in the current row; `None` after a good move.
@@ -479,6 +495,8 @@ pub struct SimWorld {
     swings: Vec<PendingMobSwing>,
     /// Player swings that have not hit yet.
     player_swings: Vec<PlayerSwing>,
+    /// Swings that a tutorial script started, for the next tick.
+    scripted_swings: Vec<MobAttackIntent>,
 }
 
 /// A new player before it is in the world.
@@ -537,6 +555,7 @@ impl SimWorld {
             drinks: Vec::new(),
             swings: Vec::new(),
             player_swings: Vec::new(),
+            scripted_swings: Vec::new(),
             combat,
             world: World::new(),
             by_connection: HashMap::new(),
@@ -831,6 +850,13 @@ impl SimWorld {
             .is_some_and(|player| player.frozen)
         {
             return Err(MoveError::Frozen);
+        }
+        if self
+            .world
+            .get::<Player>(entity)
+            .is_some_and(|player| player.push.is_some())
+        {
+            return Err(MoveError::Pushed);
         }
         // The client sends movement only once it has spawned into the world, so the first move
         // ends the player's spawn protection (see [`attack::Vitals`]).
@@ -1146,7 +1172,8 @@ impl SimWorld {
         let handoffs = self.start_handoffs(now_ms);
         let ghosts = self.ghosts_out();
         let mobs_started = Instant::now();
-        let swings = self.tick_mobs(now_ms);
+        let mut swings = self.tick_mobs(now_ms);
+        swings.append(&mut self.scripted_swings);
         let intents = self.swings_landing(swings, now_ms, server_time);
         let mob_hits = self.mob_hits(intents, now_ms);
         let mob_seconds = mobs_started.elapsed().as_secs_f64();
@@ -1155,6 +1182,7 @@ impl SimWorld {
         self.tick_quests(now_ms);
         self.drink_due(now_ms, server_time);
         self.tick_stamina(now_ms);
+        self.tick_pushes(now_ms);
         let mut messages = self.take_messages();
         let bundled = self.bundles(now_ms, server_time)?;
         messages.extend(bundled.outgoing);
@@ -1394,6 +1422,84 @@ impl SimWorld {
 
     /// Carries out the tutorial `orders` for player `number` at `now_ms`; an item it gets goes
     /// back to its tutorial as an event, whose orders are carried out too.
+    /// Carries out `order` of the tutorial of player `number` (`entity`) at `now_ms` when it is a
+    /// mob order: a move fragment, a scripted swing at the player, or a server move of the player
+    /// from the mob. Whether it was one.
+    fn mob_order(&mut self, entity: Entity, number: u64, order: &Order, now_ms: u64) -> bool {
+        let body_at = self
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position());
+        match *order {
+            Order::PlayMove {
+                mob,
+                fragment,
+                length_ms,
+            } => self.mob_timelines.play(mob, fragment, length_ms),
+            Order::Swing { mob, mob_move } => {
+                if let Some(target_at) = body_at {
+                    self.scripted_swings.push(MobAttackIntent {
+                        mob,
+                        target: number,
+                        target_at,
+                        mob_move: Some(mob_move),
+                    });
+                }
+            }
+            Order::Shove {
+                mob,
+                shove,
+                length_ms,
+            } => {
+                let mob_at = self.mobs.get_mut(mob).map(|mob| mob.brain.position());
+                if let (Some(from), Some(mob_at)) = (body_at, mob_at)
+                    && let Some(to) = shoved_to(from, mob_at, shove)
+                    && let Some(mut player) = self.world.get_mut::<Player>(entity)
+                {
+                    player.push = Some(Push {
+                        from,
+                        to,
+                        start_ms: now_ms,
+                        end_ms: now_ms.saturating_add(length_ms),
+                        arrived: false,
+                    });
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Moves the players that the server moves at `now_ms` along their pushes; a push that got
+    /// to its end stops at the next tick, after the own state that sent its end.
+    fn tick_pushes(&mut self, now_ms: u64) {
+        let limits = &self.settings.limits;
+        let mut query = self.world.query::<(&mut Player, &mut Body)>();
+        for (mut player, mut body) in query.iter_mut(&mut self.world) {
+            let Some(push) = player.push else {
+                continue;
+            };
+            if push.arrived {
+                player.push = None;
+                continue;
+            }
+            let length_ms = push.end_ms.saturating_sub(push.start_ms).max(1);
+            #[allow(clippy::cast_precision_loss, reason = "a push lasts under a second")]
+            let share = (now_ms.saturating_sub(push.start_ms) as f32 / length_ms as f32).min(1.0);
+            let along = |from: f32, to: f32| from + (to - from) * share;
+            let at = Position {
+                x: along(push.from.x, push.to.x),
+                y: along(push.from.y, push.to.y),
+                z: along(push.from.z, push.to.z),
+            };
+            body.motion = Motion::new(at, now_ms, limits);
+            player.push = Some(Push {
+                arrived: share >= 1.0,
+                ..push
+            });
+        }
+    }
+
     fn carry_out(&mut self, number: u64, orders: Vec<Order>, now_ms: u64) {
         let Some(entity) = self.player_by_number(number) else {
             return;
@@ -1403,6 +1509,9 @@ impl SimWorld {
             let mut gained = Vec::new();
             let mut set_bits = Vec::new();
             for order in pending.drain(..) {
+                if self.mob_order(entity, number, &order, now_ms) {
+                    continue;
+                }
                 if let Order::MoveTo(position, facing) = order {
                     if let Some(mut body) = self.world.get_mut::<Body>(entity) {
                         body.motion = Motion::new(position, now_ms, &self.settings.limits);
@@ -1426,6 +1535,10 @@ impl SimWorld {
                         match step {
                             Step::Show => {
                                 player.assets.show(asset, asset_gde_ref(number, asset));
+                            }
+                            Step::Cast(cast) => {
+                                let gde_ref = spell_gde_ref(number, asset, cast.number);
+                                player.assets.cast(asset, gde_ref, cast);
                             }
                             Step::Change(change) => player.assets.change(asset, change),
                             Step::Hide => player.assets.hide(asset),
@@ -1513,7 +1626,14 @@ impl SimWorld {
                         player.experience = player.experience.saturating_add(points);
                         player.experience_changed = true;
                     }
-                    Order::MoveTo(..) => {}
+                    Order::Blow => {
+                        let blow = ServerMessage::MeleeHit(MeleeHitMsg::on(number, false));
+                        send_now(&mut self.combat_messages, &player.connection, &[blow]);
+                    }
+                    Order::MoveTo(..)
+                    | Order::PlayMove { .. }
+                    | Order::Swing { .. }
+                    | Order::Shove { .. } => {}
                 }
             }
             let Some(tutorial) = self.tutorials.get_mut(&number) else {
@@ -2045,6 +2165,7 @@ impl SimWorld {
                     phasing_left_ms: None,
                     moved: false,
                     move_facing: None,
+                    push: None,
                     last_camera: None,
                     moving: false,
                     throttle_cleared: false,
@@ -2100,6 +2221,28 @@ impl SimWorld {
 
 /// Queues `messages` for the client of `connection` on the reliable message channel; a message
 /// that cannot be encoded is logged and left out.
+/// Where `shove` moves a player at `from` away from or toward a mob at `mob_at`, on the line
+/// between them, at the player's height; `None` when they stand on one spot.
+fn shoved_to(from: Position, mob_at: Position, shove: Shove) -> Option<Position> {
+    let distance = from.horizontal_distance(mob_at);
+    if distance <= f32::EPSILON {
+        return None;
+    }
+    let (east, north) = (
+        (from.x - mob_at.x) / distance,
+        (from.y - mob_at.y) / distance,
+    );
+    let (base, metres) = match shove {
+        Shove::To(metres) => (mob_at, metres),
+        Shove::Away(metres) => (from, metres),
+    };
+    Some(Position {
+        x: base.x + east * metres,
+        y: base.y + north * metres,
+        z: from.z,
+    })
+}
+
 fn send_now(outgoing: &mut Vec<Outgoing>, connection: &ConnectionRef, messages: &[ServerMessage]) {
     let envelopes: Vec<Vec<u8>> = messages
         .iter()
@@ -2382,7 +2525,7 @@ impl Neighbourhood<'_> {
                 let plain_tick = own_card != OwnCard::Spawn && teleport.is_none();
                 let tick = OwnTick {
                     since_spawn_ms,
-                    with_position: !player.moving,
+                    with_position: !player.moving || player.push.is_some(),
                     clear_throttle: plain_tick && !player.throttle_cleared,
                 };
                 if tick.clear_throttle {
@@ -2758,6 +2901,71 @@ mod tests {
             .get_mut::<Vitals>(entity)
             .expect("vitals")
             .spawned = true;
+    }
+
+    #[test]
+    fn a_shove_moves_the_player_and_holds_its_client_moves() {
+        const MOB_X: f32 = CELL_M / 2.0;
+        const SHOVE_MS: u64 = 200;
+        let mut world = world_with_spawns(vec![test_spawn(MOB_X)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, MOB_X + 4.0);
+        tick(&mut world, NOW);
+        let entity = world.player_by_number(1).expect("player");
+        let at = |world: &SimWorld| {
+            world
+                .world
+                .get::<Body>(entity)
+                .expect("body")
+                .motion
+                .position()
+        };
+        let start = at(&world);
+        let pull = Order::Shove {
+            mob: crate::mobs::mob_entity(0),
+            shove: Shove::To(2.0),
+            length_ms: SHOVE_MS,
+        };
+        assert!(world.mob_order(entity, 1, &pull, NOW));
+        assert!(matches!(
+            world.move_to(&connection(1), start, NOW + 1),
+            Err(MoveError::Pushed)
+        ));
+        world.tick_pushes(NOW + SHOVE_MS / 2);
+        assert!((at(&world).x - (MOB_X + 3.0)).abs() < 1e-3, "halfway");
+        world.tick_pushes(NOW + SHOVE_MS);
+        assert!((at(&world).x - (MOB_X + 2.0)).abs() < 1e-3, "2 m in front");
+        world.tick_pushes(NOW + SHOVE_MS + 1);
+        assert!(
+            world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .push
+                .is_none()
+        );
+        assert!(!matches!(
+            world.move_to(&connection(1), at(&world), NOW + SHOVE_MS + 2),
+            Err(MoveError::Pushed)
+        ));
+    }
+
+    #[test]
+    fn a_push_away_goes_further_from_the_mob() {
+        let mob = Position {
+            x: 0.0,
+            y: 0.0,
+            z: 22.0,
+        };
+        let player = Position {
+            x: 3.0,
+            y: 4.0,
+            z: 22.5,
+        };
+        let pushed = shoved_to(player, mob, Shove::Away(5.0)).expect("pushed");
+        assert!((pushed.horizontal_distance(mob) - 10.0).abs() < 1e-4);
+        assert_eq!(pushed.z, player.z);
+        assert_eq!(shoved_to(mob, mob, Shove::To(2.0)), None);
     }
 
     /// The entity numbers in the replication bundles of one connection this tick.

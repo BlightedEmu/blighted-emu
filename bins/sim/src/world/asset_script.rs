@@ -17,10 +17,11 @@
 //! A spawn marker (the AI spawner slice) comes with the mob it marks: retail sends it at most
 //! [`MARKER_LEAD_MS`] before the mob's card. An entity carded before the move into the water goes
 //! with the move (retail stops them all then); another goes the retail time after its spawn. An
-//! entity without a position is a spell slice of a mob's attack, not of the level, and is not
-//! played.
+//! entity without a position is a spell slice of a mob's attack, not of the level: it plays
+//! when its mob casts it ([`AssetScript::cast`]).
 
 use nw_content::ftue_entities::{FtueLevel, GDE_REF_PREFIX_LEN, GroupCause, LevelEvent};
+use nw_content::mob_prefabs::ASSET_ID_LEN;
 
 /// The client calls of the retail causes.
 const PASSTHROUGH: u64 = 560;
@@ -55,11 +56,22 @@ pub(super) enum Trigger {
     WaterMove,
 }
 
+/// One cast of a mob's spell slice: the caster, where it aims (x and y, the bits of the `f32`
+/// metres) and the cast's number, which makes its `GdeRef` new.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SpellCast {
+    pub(super) caster: u64,
+    pub(super) at_bits: [u32; 2],
+    pub(super) number: u32,
+}
+
 /// What a planned group does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Step {
     /// The entity comes into view.
     Show,
+    /// The spell slice comes into view for this cast.
+    Cast(SpellCast),
     /// Its change group of this index goes out.
     Change(usize),
     /// It leaves the view.
@@ -138,10 +150,22 @@ struct Plan {
     done: bool,
 }
 
+/// A spell slice of the level table: when it came in the capture, when its changes came and
+/// when it left.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Spell {
+    asset: usize,
+    asset_id: [u8; ASSET_ID_LEN],
+    spawn_ms: u64,
+    change_ms: Vec<u64>,
+    gone_ms: Option<u64>,
+}
+
 /// The asset entity groups of one player's tutorial.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AssetScript {
     plans: Vec<Plan>,
+    spells: Vec<Spell>,
     /// Groups whose event happened, with their times.
     due: Vec<(u64, usize, Step)>,
 }
@@ -150,11 +174,23 @@ impl AssetScript {
     /// The plans of the asset entities of `level`.
     pub(super) fn of(level: &FtueLevel) -> Self {
         let mut plans = Vec::new();
+        let mut spells = Vec::new();
         for (asset, entity) in level.assets.iter().enumerate() {
             let Some(spawn) = entity.spawns.first() else {
                 continue;
             };
             if entity.position.is_none() {
+                spells.push(Spell {
+                    asset,
+                    asset_id: entity.asset,
+                    spawn_ms: spawn.group.time_ms,
+                    change_ms: entity
+                        .changes
+                        .iter()
+                        .map(|change| change.group.time_ms)
+                        .collect(),
+                    gone_ms: entity.despawns.first().copied(),
+                });
                 continue;
             }
             let spawn_ms = spawn.group.time_ms;
@@ -219,7 +255,33 @@ impl AssetScript {
         }
         Self {
             plans,
+            spells,
             due: Vec::new(),
+        }
+    }
+
+    /// A mob casts the spell slice of asset `asset_id` with `cast` in an attack that started at
+    /// `started_ms`; the capture's cast of it started at `retail_started_ms`. The slice comes,
+    /// changes and goes the capture's times after that start.
+    pub(super) fn cast(
+        &mut self,
+        asset_id: &[u8; ASSET_ID_LEN],
+        cast: SpellCast,
+        started_ms: u64,
+        retail_started_ms: u64,
+    ) {
+        let Some(spell) = self.spells.iter().find(|spell| spell.asset_id == *asset_id) else {
+            return;
+        };
+        let at = |retail_ms: u64| started_ms + retail_ms.saturating_sub(retail_started_ms);
+        self.due
+            .push((at(spell.spawn_ms), spell.asset, Step::Cast(cast)));
+        for (change, change_ms) in spell.change_ms.iter().enumerate() {
+            self.due
+                .push((at(*change_ms), spell.asset, Step::Change(change)));
+        }
+        if let Some(gone_ms) = spell.gone_ms {
+            self.due.push((at(gone_ms), spell.asset, Step::Hide));
         }
     }
 
@@ -241,7 +303,7 @@ impl AssetScript {
             .partition(|(at, _, _)| now_ms >= *at);
         self.due = later;
         // A show goes before the changes due with it, so a change has a shown entity.
-        due.sort_by_key(|(at, _, step)| (*at, *step != Step::Show));
+        due.sort_by_key(|(at, _, step)| (*at, !matches!(step, Step::Show | Step::Cast(_))));
         due.into_iter()
             .map(|(_, asset, step)| (asset, step))
             .collect()
@@ -337,6 +399,40 @@ mod tests {
                 retail_gde_ref: [0; 16],
             }],
         }
+    }
+
+    #[test]
+    fn a_cast_spell_plays_at_the_capture_times_after_its_attack_starts() {
+        // The capture's attack started 650 ms before the spell's card; the spell changed 1016 ms
+        // and left 2483 ms after its card.
+        const RETAIL_ATTACK_MS: u64 = 449_350;
+        const SPELL: [u8; 16] = [7; 16];
+        const STARTED: u64 = 10_000;
+        let mut spell = entity(
+            group(450_000, None, 0),
+            vec![group(451_016, None, 0)],
+            vec![452_483],
+        );
+        spell.position = None;
+        spell.asset = SPELL;
+        let mut script = AssetScript::of(&FtueLevel {
+            statics: FtueEntities::default(),
+            static_causes: Vec::new(),
+            assets: vec![spell],
+            mobs: Vec::new(),
+        });
+        let cast = SpellCast {
+            caster: 9,
+            at_bits: [1, 2],
+            number: 1,
+        };
+        script.cast(&[8; 16], cast, STARTED, RETAIL_ATTACK_MS);
+        assert!(script.take_due(u64::MAX).is_empty(), "no such spell");
+        script.cast(&SPELL, cast, STARTED, RETAIL_ATTACK_MS);
+        assert!(script.take_due(STARTED + 649).is_empty());
+        assert_eq!(script.take_due(STARTED + 650), [(0, Step::Cast(cast))]);
+        assert_eq!(script.take_due(STARTED + 1_666), [(0, Step::Change(0))]);
+        assert_eq!(script.take_due(STARTED + 3_133), [(0, Step::Hide)]);
     }
 
     #[test]

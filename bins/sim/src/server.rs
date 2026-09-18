@@ -567,7 +567,7 @@ impl Loop {
             tracing::trace!(x = next.x, y = next.y, z = next.z, "client move");
         }
         match result {
-            Ok(GroundCheck::Checked) | Err(MoveError::NotInWorld) => {}
+            Ok(GroundCheck::Checked) | Err(MoveError::NotInWorld | MoveError::Pushed) => {}
             Ok(GroundCheck::NoGround) => {
                 metrics::counter!(METRIC_MOVES_WITHOUT_GROUND).increment(1);
             }

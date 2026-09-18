@@ -36,7 +36,7 @@ use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{ClientFacetMsg, InteractionRequest};
 
-use super::asset_script::{AssetScript, Step, Trigger};
+use super::asset_script::{AssetScript, SpellCast, Step, Trigger};
 use crate::mobs::{
     Capsule, MobMove, MobReach, Mobs, MoveFragment, MoveHit, Pace, PhaseTwo, VitalsSpawn,
 };
@@ -429,6 +429,64 @@ const THORPE_PHASE_TWO: PhaseTwo = PhaseTwo {
     fire_tag: FIRE_TAG,
 };
 
+/// His shoulder charge's outro: an `Attack_Upwards_Slash` (0.38, half fire) 117 ms in (retail
+/// 506949 to 507066, 38.235 + 38.235).
+const THORPE_CHARGE_OUTRO: MobMove = MobMove {
+    fragment: fragment(68, 27, 0x77),
+    length_ms: 1_504,
+    hits: &[thorpe_hit(117, 0.38, 0.5, 1.1)],
+    tag: SLASH_TAG,
+};
+/// His phase transition, combat tell and charge (boss note, `commander_controllerdefs.xml`).
+const THORPE_PHASE_TRANSITION: MoveFragment = fragment(66, 47, 0x2d);
+const THORPE_COMBAT_TELL: MoveFragment = fragment(76, 12, 0x44);
+const THORPE_CHARGE_START: MoveFragment = fragment(55, 24, 0xda);
+const THORPE_CHARGE_LOOP: MoveFragment = fragment(56, 25, 0x04);
+/// The tell starts this long after the transition ends (retail 503682 to 503750) and plays
+/// 1367 ms; the charge start plays 1364 ms, its loop 468 ms.
+const TELL_AFTER_TRANSITION_MS: u64 = 68;
+const TELL_MS: u64 = 1_367;
+const CHARGE_START_MS: u64 = 1_364;
+const CHARGE_LOOP_MS: u64 = 468;
+/// His charge speed (retail 25.7 m/s) and where it stops before the player (Inferred: the
+/// retail loop ended about 2 m from the player).
+const CHARGE_SPEED_MPS: f32 = 25.7;
+const CHARGE_STOP_M: f32 = 2.0;
+/// Milliseconds per second.
+const MS_PER_SECOND_F32: f32 = 1_000.0;
+/// The shockwave of his transition: 7748 ms after it starts it pushes the player 5 m away.
+const SHOCKWAVE_AT_MS: u64 = 7_748;
+const SHOCKWAVE_PUSH_M: f32 = 5.0;
+/// How long a server move of the player takes (retail grab pulls: 200 to 300 ms; our choice for
+/// the shockwave too).
+const SHOVE_MS: u64 = 282;
+/// His force grab: its fragment and length (retail 2200 to 2232 ms).
+const THORPE_FORCE_GRAB: MoveFragment = fragment(47, 14, 0xb8);
+const GRAB_MS: u64 = 2_210;
+/// The start of the capture's first grab fragment, which the level table's grab spells follow.
+const RETAIL_FIRST_GRAB_MS: u64 = 454_984;
+/// His first grab may come this long into his fight (retail 3.6 s after the fountain cutscene
+/// ended); later ones at least [`GRAB_INTERVAL_MS`] apart (retail 11.3 and 12.2 s).
+const GRAB_FIRST_MS: u64 = 3_617;
+const GRAB_INTERVAL_MS: u64 = 11_250;
+/// He grabs only a player this far away (retail grabs started at 6.6 to 13 m).
+const GRAB_MIN_DISTANCE_M: f32 = 6.5;
+/// The spell slices of the grab: `thorpe_force_grab_attach` and `thorpe_force_grab`.
+const GRAB_SPELLS: [[u8; ASSET_ID_LEN]; 2] = [
+    [
+        0xd0, 0xb2, 0x9f, 0x87, 0x6d, 0x90, 0x5f, 0xc9, 0x90, 0xf9, 0x73, 0x9c, 0x2e, 0x16, 0x9e,
+        0x2b,
+    ],
+    [
+        0x1e, 0xe9, 0x6b, 0x79, 0x10, 0x9f, 0x50, 0x18, 0xa1, 0x9e, 0x46, 0x4b, 0x4b, 0x5b, 0x21,
+        0xda,
+    ],
+];
+/// The pull: when the spell's first change comes (retail 456719, 1735 ms into the first grab),
+/// to 2 m in front of him (retail 1.1 to 3.9 m).
+const GRAB_PULL_AT_MS: u64 = 1_735;
+const GRAB_PULL_STOP_M: f32 = 2.0;
+
 /// Thorpe (damage mod 1.125): 25.6 (457997). His AI cools down 1.0-1.35 s after each attack
 /// (behavior tree); run 4.5 m/s.
 ///
@@ -690,6 +748,42 @@ pub(super) enum Order {
         /// Its `CharacterComponent` constant.
         collision: u64,
     },
+    /// This mob plays this move fragment for this long.
+    PlayMove {
+        /// The mob's entity number.
+        mob: u64,
+        /// The fragment.
+        fragment: MoveFragment,
+        /// How long it plays.
+        length_ms: u64,
+    },
+    /// This mob swings this move at the player.
+    Swing {
+        /// The mob's entity number.
+        mob: u64,
+        /// The move.
+        mob_move: MobMove,
+    },
+    /// The server moves the player for `length_ms` as `shove` says from mob `mob`.
+    Shove {
+        /// The mob's entity number.
+        mob: u64,
+        /// Where to.
+        shove: Shove,
+        /// How long the move takes.
+        length_ms: u64,
+    },
+    /// A creature's blow reaches the player without damage (2218).
+    Blow,
+}
+
+/// Where the server moves the player, from a mob.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) enum Shove {
+    /// To this distance in front of the mob (a pull).
+    To(f32),
+    /// This far further away from the mob (a push).
+    Away(f32),
 }
 
 /// A living tutorial mob.
@@ -751,6 +845,16 @@ pub(super) struct Tutorial {
     now_ms: u64,
     /// When the first sailor comes; `None` once it came.
     first_sailor_at_ms: Option<u64>,
+    /// Thorpe casts or charges until this time: he starts no other script then.
+    captain_busy_until_ms: u64,
+    /// When Thorpe may grab next; `None` before his fight.
+    next_grab_ms: Option<u64>,
+    /// Thorpe's force grabs so far.
+    grabs: u32,
+    /// Thorpe's charge runs from the first to the second time.
+    charge: Option<(u64, u64)>,
+    /// The time of the last tick of Thorpe's script.
+    captain_ticked_ms: u64,
 }
 
 impl Tutorial {
@@ -791,6 +895,11 @@ impl Tutorial {
             batches: Vec::new(),
             now_ms,
             first_sailor_at_ms: Some(now_ms.saturating_add(FIRST_SAILOR_DELAY_MS)),
+            captain_busy_until_ms: 0,
+            next_grab_ms: None,
+            grabs: 0,
+            charge: None,
+            captain_ticked_ms: now_ms,
         };
         tutorial.assets.on(Trigger::Start, now_ms);
         let mut orders = Vec::new();
@@ -1091,6 +1200,7 @@ impl Tutorial {
         self.first_sailor_comes(mobs, false);
         self.spawn_coming(mobs);
         self.end_captain(mobs, now_ms, &mut orders);
+        self.captain_moves(mobs, position, now_ms, &mut orders);
         self.announce_targets(mobs, &mut orders);
         let (dead, living): (Vec<Fighter>, Vec<Fighter>) = self
             .fighters
@@ -1200,8 +1310,9 @@ impl Tutorial {
                 CaptainPhase::First if below(CAPTAIN_INTERMISSION_FRACTION) => {
                     let until_ms = now_ms + CAPTAIN_INTERMISSION_MS;
                     self.captain = CaptainPhase::Intermission { until_ms };
-                    mobs.freeze(captain, now_ms + CAPTAIN_TRANSITION_MS);
                     mobs.absorb(captain, until_ms);
+                    let busy_until_ms = self.transition(captain, now_ms, orders);
+                    mobs.freeze(captain, busy_until_ms);
                     orders.push(Order::BossPhase {
                         mob: captain,
                         phase: CAPTAIN_INTERMISSION_PHASE,
@@ -1226,6 +1337,130 @@ impl Tutorial {
                 _ => {}
             }
         }
+    }
+
+    /// Thorpe's phase transition starts at `now_ms` (retail 493283): its fragment plays for the
+    /// whole transition; his shockwave knocks the player away (retail 501031: a 2218 with no
+    /// damage and a 5 m push); then he tells and charges (503750 to 507066). Until when he is
+    /// busy.
+    fn transition(&mut self, captain: u64, now_ms: u64, orders: &mut Vec<Order>) -> u64 {
+        let play = |fragment, length_ms| Order::PlayMove {
+            mob: captain,
+            fragment,
+            length_ms,
+        };
+        orders.push(play(THORPE_PHASE_TRANSITION, CAPTAIN_TRANSITION_MS));
+        let shockwave_ms = now_ms + SHOCKWAVE_AT_MS;
+        self.later.push((shockwave_ms, Order::Blow));
+        self.later.push((
+            shockwave_ms,
+            Order::Shove {
+                mob: captain,
+                shove: Shove::Away(SHOCKWAVE_PUSH_M),
+                length_ms: SHOVE_MS,
+            },
+        ));
+        let tell_ms = now_ms + CAPTAIN_TRANSITION_MS + TELL_AFTER_TRANSITION_MS;
+        let charge_ms = tell_ms + TELL_MS;
+        let loop_ms = charge_ms + CHARGE_START_MS;
+        let outro_ms = loop_ms + CHARGE_LOOP_MS;
+        self.later
+            .push((tell_ms, play(THORPE_COMBAT_TELL, TELL_MS)));
+        self.later
+            .push((charge_ms, play(THORPE_CHARGE_START, CHARGE_START_MS)));
+        self.later
+            .push((loop_ms, play(THORPE_CHARGE_LOOP, CHARGE_LOOP_MS)));
+        self.later.push((
+            outro_ms,
+            Order::Swing {
+                mob: captain,
+                mob_move: THORPE_CHARGE_OUTRO,
+            },
+        ));
+        self.charge = Some((loop_ms, outro_ms));
+        self.captain_busy_until_ms = outro_ms + THORPE_CHARGE_OUTRO.length_ms;
+        self.captain_busy_until_ms
+    }
+
+    /// Thorpe's charge and force grabs at `now_ms`, with the player at `position`. In his charge
+    /// loop he runs at the player at 25.7 m/s (retail 506481 to 506949, 12 m). He grabs a player
+    /// at least [`GRAB_MIN_DISTANCE_M`] away, at most once per [`GRAB_INTERVAL_MS`] (retail
+    /// 454984, 467215, 478467 and 517247): his grab fragment plays, the spell slices come with
+    /// him and the player's place, and the spell pulls the player in front of him.
+    fn captain_moves(
+        &mut self,
+        mobs: &mut Mobs,
+        position: Position,
+        now_ms: u64,
+        orders: &mut Vec<Order>,
+    ) {
+        let last_tick_ms = std::mem::replace(&mut self.captain_ticked_ms, now_ms);
+        let Some(captain) = self
+            .fighters
+            .iter()
+            .find(|fighter| fighter.role == Role::Captain)
+            .map(|fighter| fighter.entity)
+        else {
+            return;
+        };
+        let Some(at) = mobs
+            .get_mut(captain)
+            .filter(|mob| !mob.health.is_dead())
+            .map(|mob| mob.brain.position())
+        else {
+            return;
+        };
+        if let Some((start_ms, end_ms)) = self.charge {
+            if now_ms >= end_ms {
+                self.charge = None;
+            } else if now_ms >= start_ms {
+                // He runs only from the loop's start, not from the tick before it.
+                let running_ms = now_ms.saturating_sub(last_tick_ms.max(start_ms));
+                #[allow(clippy::cast_precision_loss, reason = "one tick of milliseconds")]
+                let step_m = CHARGE_SPEED_MPS * running_ms as f32 / MS_PER_SECOND_F32;
+                let left_m = (position.horizontal_distance(at) - CHARGE_STOP_M).max(0.0);
+                mobs.lunge(captain, position, step_m.min(left_m));
+            }
+        }
+        let next_grab_ms = *self.next_grab_ms.get_or_insert(now_ms + GRAB_FIRST_MS);
+        let fighting = matches!(self.captain, CaptainPhase::First | CaptainPhase::Second);
+        if !fighting
+            || now_ms < next_grab_ms
+            || now_ms < self.captain_busy_until_ms
+            || position.horizontal_distance(at) < GRAB_MIN_DISTANCE_M
+        {
+            return;
+        }
+        self.grabs += 1;
+        self.next_grab_ms = Some(now_ms + GRAB_INTERVAL_MS);
+        self.captain_busy_until_ms = now_ms + GRAB_MS;
+        mobs.freeze(captain, now_ms + GRAB_MS);
+        orders.push(Order::PlayMove {
+            mob: captain,
+            fragment: THORPE_FORCE_GRAB,
+            length_ms: GRAB_MS,
+        });
+        let cast = SpellCast {
+            caster: captain,
+            at_bits: [position.x.to_bits(), position.y.to_bits()],
+            number: self.grabs,
+        };
+        for spell in &GRAB_SPELLS {
+            self.assets.cast(spell, cast, now_ms, RETAIL_FIRST_GRAB_MS);
+        }
+        self.later.push((
+            now_ms + GRAB_PULL_AT_MS,
+            Order::Shove {
+                mob: captain,
+                shove: Shove::To(GRAB_PULL_STOP_M),
+                length_ms: SHOVE_MS,
+            },
+        ));
+        tracing::info!(
+            player = self.owner,
+            grab = self.grabs,
+            "tutorial: Thorpe's force grab"
+        );
     }
 
     /// Turns `effects` into orders, and starts the fights of the tasks they finish.
@@ -1718,6 +1953,116 @@ pub(crate) mod tests {
                 Order::HideStatic(BAG_PREFIX),
             ]
         );
+    }
+
+    /// A tutorial with Thorpe in his fight.
+    fn thorpe_fight() -> (Tutorial, Mobs, u64) {
+        let mut mobs = Mobs::new(Vec::new().into(), &sailor_combat());
+        let (mut tutorial, _) =
+            Tutorial::start(OWNER, tree(), &FtueLevel::default(), &mut mobs, NOW);
+        tutorial.spawn_batch(FIGHTS_AFTER[3].1, &mut mobs, false);
+        let thorpe = tutorial.fighters[0].entity;
+        (tutorial, mobs, thorpe)
+    }
+
+    #[test]
+    fn thorpe_grabs_a_far_player_and_pulls_it_in_front_of_him() {
+        let (mut tutorial, mut mobs, thorpe) = thorpe_fight();
+        let kill_types = KillTypes::default();
+        let at = mobs.get_mut(thorpe).expect("Thorpe").brain.position();
+        let near = Position {
+            x: at.x + 3.0,
+            ..at
+        };
+        let far = Position {
+            x: at.x + 10.0,
+            ..at
+        };
+        let grabs = |orders: &[Order]| {
+            orders
+                .iter()
+                .filter(|order| {
+                    matches!(order, Order::PlayMove { fragment, .. } if *fragment == THORPE_FORCE_GRAB)
+                })
+                .count()
+        };
+        assert_eq!(grabs(&tutorial.tick(&mut mobs, &kill_types, far, NOW)), 0);
+        let first = NOW + GRAB_FIRST_MS;
+        assert_eq!(
+            grabs(&tutorial.tick(&mut mobs, &kill_types, near, first)),
+            0,
+            "not a near player"
+        );
+        assert_eq!(
+            grabs(&tutorial.tick(&mut mobs, &kill_types, far, first + 1)),
+            1
+        );
+        let pull = tutorial.tick(&mut mobs, &kill_types, far, first + 1 + GRAB_PULL_AT_MS);
+        assert!(pull.contains(&Order::Shove {
+            mob: thorpe,
+            shove: Shove::To(GRAB_PULL_STOP_M),
+            length_ms: SHOVE_MS,
+        }));
+        assert_eq!(
+            grabs(&tutorial.tick(&mut mobs, &kill_types, far, first + GRAB_INTERVAL_MS)),
+            0,
+            "one grab per interval"
+        );
+        assert_eq!(
+            grabs(&tutorial.tick(&mut mobs, &kill_types, far, first + 1 + GRAB_INTERVAL_MS)),
+            1
+        );
+    }
+
+    #[test]
+    fn thorpe_transitions_knocks_the_player_away_then_charges() {
+        let (mut tutorial, mut mobs, thorpe) = thorpe_fight();
+        let at = mobs.get_mut(thorpe).expect("Thorpe").brain.position();
+        let near = Position {
+            x: at.x + 3.0,
+            ..at
+        };
+        let max = mobs.get_mut(thorpe).expect("Thorpe").health.max();
+        mobs.get_mut(thorpe).expect("Thorpe").health.take(max / 2);
+        let kill_types = KillTypes::default();
+        let orders = tutorial.tick(&mut mobs, &kill_types, near, NOW);
+        assert!(orders.contains(&Order::PlayMove {
+            mob: thorpe,
+            fragment: THORPE_PHASE_TRANSITION,
+            length_ms: CAPTAIN_TRANSITION_MS,
+        }));
+        let shockwave = tutorial.tick(&mut mobs, &kill_types, near, NOW + SHOCKWAVE_AT_MS);
+        assert!(shockwave.contains(&Order::Blow));
+        assert!(shockwave.contains(&Order::Shove {
+            mob: thorpe,
+            shove: Shove::Away(SHOCKWAVE_PUSH_M),
+            length_ms: SHOVE_MS,
+        }));
+        let tell_ms = NOW + CAPTAIN_TRANSITION_MS + TELL_AFTER_TRANSITION_MS;
+        let tell = tutorial.tick(&mut mobs, &kill_types, near, tell_ms);
+        assert!(tell.contains(&Order::PlayMove {
+            mob: thorpe,
+            fragment: THORPE_COMBAT_TELL,
+            length_ms: TELL_MS,
+        }));
+        let far = Position {
+            x: at.x + 12.0,
+            ..at
+        };
+        let loop_ms = tell_ms + TELL_MS + CHARGE_START_MS;
+        tutorial.tick(&mut mobs, &kill_types, far, loop_ms);
+        let charged = tutorial.tick(&mut mobs, &kill_types, far, loop_ms + 100);
+        let ran = mobs.get_mut(thorpe).expect("Thorpe").brain.position();
+        assert!(
+            (ran.horizontal_distance(at) - CHARGE_SPEED_MPS * 0.1).abs() < 0.01,
+            "he runs 2.57 m in 100 ms"
+        );
+        assert!(charged.is_empty());
+        let outro = tutorial.tick(&mut mobs, &kill_types, far, loop_ms + CHARGE_LOOP_MS);
+        assert!(outro.contains(&Order::Swing {
+            mob: thorpe,
+            mob_move: THORPE_CHARGE_OUTRO,
+        }));
     }
 
     #[test]
