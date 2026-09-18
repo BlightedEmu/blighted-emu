@@ -16,7 +16,7 @@ pub const WORLD_MAGIC: [u8; 4] = *b"NWWF";
 pub const WORLD_FORMAT_VERSION: u16 = 1;
 /// Version of the record types. Raise it when any type in `records` changes; the golden test
 /// in this module fails until it is raised.
-pub const WORLD_SCHEMA_VERSION: u32 = 1;
+pub const WORLD_SCHEMA_VERSION: u32 = 2;
 /// Header fields of the world file.
 pub const WORLD_CONTAINER: ContainerSpec = ContainerSpec {
     magic: WORLD_MAGIC,
@@ -71,7 +71,7 @@ mod tests {
         2, 1, 201, 1, 100, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 192, 63, 1, 172, 2, 1,
         1, 101, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 172, 2, 1, 1, 99, 0, 0, 128, 63, 0, 0,
         0, 64, 0, 0, 64, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 1, 0, 0, 0, 63, 1,
-        115, 1, 1, 118, 1, 97,
+        115, 1, 1, 118, 1, 97, 1, 1, 110, 1, 1, 107,
     ];
 
     /// One record of every kind. Every integer is 128 or more and every optional field is set,
@@ -141,6 +141,8 @@ mod tests {
                 variant_name: Some("v".to_owned()),
                 slice_asset_id: "a".to_owned(),
             }],
+            npc_keys: vec!["n".to_owned()],
+            vitals_keys: vec!["k".to_owned()],
         }
     }
 

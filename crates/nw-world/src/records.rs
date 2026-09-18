@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The typed world data of one level (M1b spec section 4).
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// A world position in metres: x, y, z (z up).
@@ -27,6 +29,10 @@ pub struct WorldFile {
     pub encounters: Vec<EncounterPoint>,
     /// Placement records from `*.capitals.json`.
     pub capitals: Vec<Capital>,
+    /// Stable design key of each NPC point, in the order of `npcs` (see [`point_keys`]).
+    pub npc_keys: Vec<String>,
+    /// Stable design key of each vitals spawn, in the order of `vitals` (see [`point_keys`]).
+    pub vitals_keys: Vec<String>,
 }
 
 /// Level frame from `tracts.json` and `terrain.json`.
@@ -188,7 +194,52 @@ pub struct RecordCounts {
     pub capitals: usize,
 }
 
+/// Metres of one step of a point key coordinate (0.1 m).
+const KEY_STEPS_PER_METRE: f32 = 10.0;
+/// Number of the first repeat of a point key (`_2`).
+const FIRST_REPEAT: usize = 2;
+
+/// The design key of each point, in input order: `<type id>_<x>_<y>_<z>`, every coordinate
+/// rounded to 0.1 m with one decimal, and `_2`, `_3`, ... on later points with an equal key.
+pub fn point_keys(points: impl IntoIterator<Item = (u32, Position)>) -> Vec<String> {
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    points
+        .into_iter()
+        .map(|(type_id, [x, y, z])| {
+            let key = format!(
+                "{type_id}_{}_{}_{}",
+                key_coordinate(x),
+                key_coordinate(y),
+                key_coordinate(z)
+            );
+            let count = seen.entry(key.clone()).or_insert(0);
+            *count += 1;
+            if *count < FIRST_REPEAT {
+                key
+            } else {
+                format!("{key}_{count}")
+            }
+        })
+        .collect()
+}
+
+fn key_coordinate(value: f32) -> String {
+    // Adding 0.0 turns -0.0 into 0.0.
+    let rounded = (value * KEY_STEPS_PER_METRE).round() / KEY_STEPS_PER_METRE + 0.0;
+    format!("{rounded:.1}")
+}
+
 impl WorldFile {
+    /// Sets `npc_keys` and `vitals_keys` from the current points.
+    pub fn fill_point_keys(&mut self) {
+        self.npc_keys = point_keys(self.npcs.iter().map(|npc| (npc.npc_id, npc.position)));
+        self.vitals_keys = point_keys(
+            self.vitals
+                .iter()
+                .map(|spawn| (spawn.vitals_id, spawn.position)),
+        );
+    }
+
     /// Counts the records of each kind.
     pub fn counts(&self) -> RecordCounts {
         RecordCounts {
@@ -271,6 +322,40 @@ mod tests {
     use super::*;
 
     const ODD_LENGTH_BYTES: [u8; 2] = [1, 0xab];
+
+    #[test]
+    fn a_point_key_rounds_to_a_tenth() {
+        assert_eq!(
+            point_keys([(12, [100.04, -3.26, 7.0])]),
+            ["12_100.0_-3.3_7.0"]
+        );
+    }
+
+    #[test]
+    fn negative_zero_prints_as_zero() {
+        assert_eq!(point_keys([(1, [-0.01, 0.0, 0.0])]), ["1_0.0_0.0_0.0"]);
+    }
+
+    #[test]
+    fn equal_keys_get_a_count() {
+        let position = [5.0, 6.0, 7.0];
+        assert_eq!(
+            point_keys([(3, position), (3, position), (3, position)]),
+            ["3_5.0_6.0_7.0", "3_5.0_6.0_7.0_2", "3_5.0_6.0_7.0_3"]
+        );
+    }
+
+    #[test]
+    fn fill_point_keys_keys_every_vitals_spawn_and_npc() {
+        let mut world = WorldFile {
+            npcs: vec![NpcPoint::default()],
+            vitals: vec![VitalsSpawn::default(), VitalsSpawn::default()],
+            ..WorldFile::default()
+        };
+        world.fill_point_keys();
+        assert_eq!(world.npc_keys, ["0_0.0_0.0_0.0"]);
+        assert_eq!(world.vitals_keys, ["0_0.0_0.0_0.0", "0_0.0_0.0_0.0_2"]);
+    }
 
     #[test]
     fn height_grid_is_stored_as_little_endian_pairs() {

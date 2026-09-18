@@ -360,7 +360,7 @@ pub fn build_level(
             })?,
         );
     }
-    let world = WorldFile {
+    let mut world = WorldFile {
         level: LevelInfo {
             name: level.to_owned(),
             region_size: tracts.region_size,
@@ -377,7 +377,9 @@ pub fn build_level(
         landmarks: records.landmarks,
         encounters: records.encounters,
         capitals,
+        ..WorldFile::default()
     };
+    world.fill_point_keys();
     Ok((world, skipped))
 }
 
@@ -690,6 +692,14 @@ mod tests {
             Some((f64::from(RAW_HEIGHT) / HEIGHT_UNITS_PER_METRE) as f32)
         );
         assert_eq!(skipped, SkipCounts::default());
+    }
+
+    #[test]
+    fn build_level_gives_every_vitals_spawn_a_key() {
+        let (world, _) = build_level(LEVEL, &terrain_level()).unwrap();
+        assert_eq!(world.vitals_keys.len(), world.vitals.len());
+        assert!(world.vitals_keys.iter().all(|key| !key.is_empty()));
+        assert_eq!(world.npc_keys.len(), world.npcs.len());
     }
 
     #[test]
