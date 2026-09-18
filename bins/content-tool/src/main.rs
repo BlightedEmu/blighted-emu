@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use content_tool::build::{DEFAULT_CONTENT_DIR, default_bundle_path, run_build};
+use content_tool::build::{
+    DEFAULT_CONTENT_DIR, DEFAULT_RETAIL_DIR, default_bundle_path, default_retail_bundle_path,
+    run_build,
+};
 use content_tool::capture::CaptureReport;
 use content_tool::codegen::run_codegen;
 use content_tool::combat::{CombatCheck, DEFAULT_LEVEL, DEFAULT_NWDB_DIR, check, read_nwdb};
@@ -57,7 +60,7 @@ const SHOWN_UNREAD_CARDS: usize = 20;
 struct Cli {
     /// New World install folder (the folder that holds `assets/` and `Bin64/`).
     #[arg(long, env = "NW_GAME_DIR")]
-    game_dir: PathBuf,
+    game_dir: Option<PathBuf>,
     /// File with the pinned client build.
     #[arg(long, default_value = DEFAULT_CLIENT_BUILD_CONFIG)]
     client_build_config: PathBuf,
@@ -75,16 +78,17 @@ enum Command {
     },
     /// Writes the content bundle and checks it by reloading it.
     Build {
-        /// Bundle file (default: `local-data/content/bundle-<build>.bin`).
+        /// Bundle file (default: `local-data/content/retail/bundle-<build>.bin`).
         #[arg(long)]
         out: Option<PathBuf>,
     },
     /// Writes one world file per level and checks each by reloading it.
     World {
         /// Output folder for `world-<build>-<level>.bin`.
-        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        #[arg(long, default_value = DEFAULT_RETAIL_DIR)]
         out_dir: PathBuf,
-        /// Content bundle for the spawn ID check (default: `local-data/content/bundle-<build>.bin`).
+        /// Content bundle for the spawn ID check (default:
+        /// `local-data/content/retail/bundle-<build>.bin`).
         #[arg(long)]
         bundle: Option<PathBuf>,
     },
@@ -177,11 +181,16 @@ fn main() -> ExitCode {
     }
 }
 
+/// The install folder, for the commands that read it.
+fn game_dir(game_dir: Option<&Path>) -> Result<&Path, ToolError> {
+    game_dir.ok_or(ToolError::MissingGameDir)
+}
+
 fn run(cli: Cli) -> Result<(), ToolError> {
     let client_build = load_client_build(&cli.client_build_config)?;
     match cli.command {
         Command::Codegen { out_dir } => {
-            let source = GameSource::open(&cli.game_dir)?;
+            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
             let summary = run_codegen(&source, &client_build, &out_dir)?;
             println!(
                 "codegen: {} datasheets, {} table types, {} files written, {} stale files removed",
@@ -192,8 +201,8 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             );
         }
         Command::Build { out } => {
-            let out = out.unwrap_or_else(|| default_bundle_path(&client_build));
-            let source = GameSource::open(&cli.game_dir)?;
+            let out = out.unwrap_or_else(|| default_retail_bundle_path(&client_build));
+            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
             let summary = run_build(&source, &client_build, &out)?;
             println!(
                 "build: {} datasheets, {} rows, {} text files, {} text entries, {} duplicate text keys, {} keyless text entries -> {}",
@@ -207,13 +216,16 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             );
         }
         Command::World { out_dir, bundle } => {
-            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
-            let source = GameSource::open(&cli.game_dir)?;
+            let bundle = bundle.unwrap_or_else(|| default_retail_bundle_path(&client_build));
+            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
             print_world(&run_world(&source, &client_build, &bundle, &out_dir)?);
         }
         Command::CaptureCheck { ledgers, names } => {
             let names = match names {
-                Some(names) => TypeNames::load(&cli.game_dir.join(TYPE_INDEX_FILE), &names)?,
+                Some(names) => TypeNames::load(
+                    &game_dir(cli.game_dir.as_deref())?.join(TYPE_INDEX_FILE),
+                    &names,
+                )?,
                 None => TypeNames::default(),
             };
             let report = run_capture_check(&ledgers)?;
@@ -230,7 +242,7 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             y_index,
             formats_only,
         } => {
-            let source = GameSource::open(&cli.game_dir)?;
+            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
             print_map_tiles(&run_map_tiles(
                 &source,
                 &level,
@@ -267,7 +279,7 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
             let global_args = [
                 OsString::from("--game-dir"),
-                cli.game_dir.into_os_string(),
+                game_dir(cli.game_dir.as_deref())?.as_os_str().to_owned(),
                 OsString::from("--client-build-config"),
                 cli.client_build_config.into_os_string(),
             ];

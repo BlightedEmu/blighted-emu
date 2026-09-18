@@ -64,11 +64,12 @@ test-local:
 codegen:
     cargo run -p content-tool -- codegen
 
-# Build the content bundle into local-data/content/ from your install.
+# Build the retail content bundle into local-data/content/retail/ from your install.
 bundle:
     cargo run -p content-tool -- build
 
-# Build one world file per level into local-data/content/ from your install. Run `just bundle` first.
+# Build one retail world file per level into local-data/content/retail/ from your install. Run
+# `just bundle` first.
 world:
     cargo run -p content-tool -- world
 

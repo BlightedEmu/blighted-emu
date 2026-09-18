@@ -64,6 +64,9 @@ pub enum ToolError {
     /// The tutorial static entity scan failed.
     #[error(transparent)]
     FtueEntities(#[from] FtueEntitiesError),
+    /// The command reads the game install, and none was given.
+    #[error("this command reads the game install: set NW_GAME_DIR or pass --game-dir")]
+    MissingGameDir,
     /// The capture check found decode failures.
     #[error("capture check found {count} decode failures")]
     CaptureFailures {

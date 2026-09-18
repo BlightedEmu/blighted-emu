@@ -32,9 +32,18 @@ pub struct BuildSummary {
     pub keyless_text_entries: usize,
 }
 
-/// The default bundle path for a client build.
+/// Folder for the client data as read from the install (the retail files), before the design
+/// files of `content/` are merged on top (`content-tool design`).
+pub const DEFAULT_RETAIL_DIR: &str = "local-data/content/retail";
+
+/// The default bundle path for a client build: the merged bundle that the servers read.
 pub fn default_bundle_path(client_build: &str) -> PathBuf {
     bundle_path(Path::new(DEFAULT_CONTENT_DIR), client_build)
+}
+
+/// The default retail bundle path for a client build.
+pub fn default_retail_bundle_path(client_build: &str) -> PathBuf {
+    bundle_path(Path::new(DEFAULT_RETAIL_DIR), client_build)
 }
 
 /// Builds the bundle from `source`, writes it to `out`, reloads it and checks the counts.
@@ -105,6 +114,14 @@ mod tests {
         assert_eq!(
             default_bundle_path("22469132"),
             PathBuf::from("local-data/content/bundle-22469132.bin")
+        );
+    }
+
+    #[test]
+    fn default_retail_bundle_path_is_in_the_retail_folder() {
+        assert_eq!(
+            default_retail_bundle_path("22469132"),
+            PathBuf::from("local-data/content/retail/bundle-22469132.bin")
         );
     }
 

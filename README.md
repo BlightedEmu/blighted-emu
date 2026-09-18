@@ -53,8 +53,8 @@ just infra-test
 | `just test-infra` | Tests that need PostgreSQL, Valkey and NATS, with the login, gateway and world walk (run `just infra-up` first) |
 | `just test-local` | Tests that read your New World install (`NW_GAME_DIR`) |
 | `just codegen` | Regenerates the table structs in `crates/nw-content/src/generated` |
-| `just bundle` | Builds the content bundle into `local-data/content/` |
-| `just world` | Builds one world file per level into `local-data/content/` (run `just bundle` first) |
+| `just bundle` | Builds the retail content bundle into `local-data/content/retail/` |
+| `just world` | Builds one retail world file per level into `local-data/content/retail/` (run `just bundle` first) |
 | `just capture-check` | Decodes every capture ledger under `local-data/captures/` and prints counts |
 | `just map-tiles` | Writes the open world map tiles into `local-data/content/map/` from your install |
 
@@ -68,9 +68,9 @@ just bundle
 just world
 ```
 
-`just bundle` writes `local-data/content/bundle-<build>.bin`, then reloads it and checks every table and row. The pinned client build is in `config/client-build.toml`.
+`just bundle` writes the retail bundle `local-data/content/retail/bundle-<build>.bin`, then reloads it and checks every table and row. The pinned client build is in `config/client-build.toml`.
 
-`just world` writes `local-data/content/world-<build>-<level>.bin` for each of the 41 levels (about 620 MB in all), reloads each file, and prints the record counts, the skipped metadata fields, and the spawn IDs that no datasheet row has.
+`just world` writes the retail world files `local-data/content/retail/world-<build>-<level>.bin` for each of the 41 levels (about 620 MB in all), reloads each file, and prints the record counts, the skipped metadata fields, and the spawn IDs that no datasheet row has.
 
 ### Recovery
 
