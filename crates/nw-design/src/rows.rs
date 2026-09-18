@@ -43,7 +43,7 @@ impl RowVisitor for ApplyRow<'_> {
         let mut matching = list
             .iter_mut()
             .flat_map(|table| table.rows.iter_mut())
-            .filter(|row| row.key() == file.id)
+            .filter(|row| same_id(row.key(), &file.id))
             .peekable();
         match file.action {
             Action::Override => {
@@ -63,7 +63,7 @@ impl RowVisitor for ApplyRow<'_> {
                     return Err(file_error(Problem::UnknownId));
                 }
                 for table in list.iter_mut() {
-                    table.rows.retain(|row| row.key() != file.id);
+                    table.rows.retain(|row| !same_id(row.key(), &file.id));
                 }
                 Ok(())
             }
@@ -76,7 +76,7 @@ impl RowVisitor for ApplyRow<'_> {
                         let base_row = list
                             .iter()
                             .flat_map(|table| &table.rows)
-                            .find(|row| row.key() == base)
+                            .find(|row| same_id(row.key(), base))
                             .ok_or_else(|| file_error(Problem::UnknownBase))?;
                         merged(base_row, file)?
                     }
@@ -96,6 +96,12 @@ impl RowVisitor for ApplyRow<'_> {
             }
         }
     }
+}
+
+/// True when two ids name one record: the server finds records by the crc32 of the lower-case
+/// id, so case does not count.
+fn same_id(left: &str, right: &str) -> bool {
+    left.eq_ignore_ascii_case(right)
 }
 
 /// `row` with the fields of `file` set. A field whose value does not fit gives `WrongType`.
@@ -296,6 +302,21 @@ mod tests {
         let mut tables = tables();
         let errors = apply_tables(&file(Action::Add, "C", Some("Z"), ""), &mut tables);
         assert_eq!(errors[0].problem, Problem::UnknownBase);
+    }
+
+    #[test]
+    fn ids_match_without_case_as_the_server_finds_them() {
+        let mut tables = tables();
+        let errors = apply_tables(&file(Action::Add, "a", Some("b"), ""), &mut tables);
+        assert_eq!(errors[0].problem, Problem::IdExists);
+        let errors = apply_tables(
+            &file(Action::Override, "a", None, "max_roll = 50"),
+            &mut tables,
+        );
+        assert_eq!(errors, []);
+        assert_eq!(rows(&tables)[0].max_roll, Some(50));
+        let errors = apply_tables(&file(Action::Add, "C", Some("b"), ""), &mut tables);
+        assert_eq!(errors, []);
     }
 
     #[test]

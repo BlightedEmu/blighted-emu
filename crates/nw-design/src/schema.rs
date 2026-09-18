@@ -48,10 +48,12 @@ pub(crate) fn point_fields(kind: Kind) -> &'static [(&'static str, PointValue)] 
 /// Checks names, folders, actions, field names, point values, full `add` rows and duplicate ids.
 pub fn check_schema(set: &DesignSet) -> Vec<DesignError> {
     let mut errors = Vec::new();
-    let mut seen: HashMap<(Kind, Option<&str>, &str), &Path> = HashMap::new();
+    // Ids are compared without case, as the server finds records (see `rows::same_id`).
+    let mut seen: HashMap<(Kind, Option<&str>, String), &Path> = HashMap::new();
     for file in &set.files {
         check_file(file, &mut errors);
-        match seen.get(&(file.kind, file.map.as_deref(), file.id.as_str())) {
+        let key = (file.kind, file.map.as_deref(), file.id.to_ascii_lowercase());
+        match seen.get(&key) {
             Some(other) => errors.push(DesignError::file(
                 &file.path,
                 Problem::DuplicateId {
@@ -59,7 +61,7 @@ pub fn check_schema(set: &DesignSet) -> Vec<DesignError> {
                 },
             )),
             None => {
-                seen.insert((file.kind, file.map.as_deref(), &file.id), &file.path);
+                seen.insert(key, &file.path);
             }
         }
     }
@@ -262,6 +264,19 @@ mod tests {
                 other: "loot/tables/LT_A.toml".into()
             }
         );
+    }
+
+    #[test]
+    fn ids_that_differ_only_in_case_are_one_id() {
+        let errors = problems(&[
+            ("loot/tables/LT_A.toml", LOOT_OVERRIDE),
+            (
+                "loot/tables/lt_a.toml",
+                &LOOT_OVERRIDE.replace("LT_A", "lt_a"),
+            ),
+        ]);
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(errors[0].problem, Problem::DuplicateId { .. }));
     }
 
     #[test]
