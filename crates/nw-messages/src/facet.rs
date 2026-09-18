@@ -55,6 +55,10 @@ pub const CINEMATIC_ENDED_TYPE_INDEX: u64 = 6542;
 pub const REQUEST_CUTSCENE_TYPE_INDEX: u64 = 6703;
 /// Type index of `PlayerCutsceneComponentServerFacet_OnClientCutsceneEnded`.
 pub const CUTSCENE_ENDED_TYPE_INDEX: u64 = 6705;
+/// Type index of `PaperdollComponentServerFacet_ServerUnequipItem`.
+pub const UNEQUIP_ITEM_TYPE_INDEX: u64 = 3896;
+/// Type index of `PaperdollComponentServerFacet_ServerSwapItems`.
+pub const SWAP_ITEMS_TYPE_INDEX: u64 = 3900;
 /// Type index of `TimeComponentServerFacet_SyncToClient`: the client asks for the time of day.
 pub const TIME_SYNC_REQUEST_TYPE_INDEX: u64 = 4248;
 /// Type index of `PlayerArenaComponentServerFacet_NotifyPlayerOfFtueQTECompletion`.
@@ -252,6 +256,35 @@ pub enum ClientFacetMsg {
         /// A byte of unknown meaning (0 in the capture).
         flag: u8,
     },
+    /// 3900: the client asks to swap the items of two paperdoll slots (ranged note; an all-zero
+    /// instance is an empty slot).
+    SwapItems {
+        /// The header.
+        header: FacetHeader,
+        /// The first slot.
+        slot_a: u32,
+        /// The second slot.
+        slot_b: u32,
+        /// The instance id of the first slot's item.
+        instance_a: [u8; RAW_ID_LEN],
+        /// The instance id of the second slot's item.
+        instance_b: [u8; RAW_ID_LEN],
+        /// A byte of unknown meaning (0 in the captures).
+        flag: u8,
+    },
+    /// 3896: the client asks to take off the item of a paperdoll slot (ranged note).
+    UnequipItem {
+        /// The header.
+        header: FacetHeader,
+        /// The paperdoll slot.
+        slot: u32,
+        /// The bag slot to put it in; `u32::MAX` for the first free one (Inferred).
+        bag_slot: u32,
+        /// How many (Inferred; 0 and 1 in the captures).
+        quantity: u32,
+        /// A byte of unknown meaning (1 in the captures).
+        flag: u8,
+    },
     /// 502: the client asks to leave the tutorial for the open world.
     ReturnToMainWorld {
         /// The header.
@@ -312,6 +345,25 @@ impl ClientFacetMsg {
                     equip_slot: reader.u32()?,
                     quantity: reader.u32()?,
                     instance: reader.raw_id()?,
+                    flag: reader.u8()?,
+                })
+            }),
+            SWAP_ITEMS_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::SwapItems {
+                    header,
+                    slot_a: reader.u32()?,
+                    slot_b: reader.u32()?,
+                    instance_a: reader.raw_id()?,
+                    instance_b: reader.raw_id()?,
+                    flag: reader.u8()?,
+                })
+            }),
+            UNEQUIP_ITEM_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::UnequipItem {
+                    header,
+                    slot: reader.u32()?,
+                    bag_slot: reader.u32()?,
+                    quantity: reader.u32()?,
                     flag: reader.u8()?,
                 })
             }),

@@ -48,6 +48,14 @@ const HIT_FLAG_ABSORBED: u16 = 0x0400;
 const CAMERA_SHAKE_ABSORBED: u32 = 0x664b_2673;
 /// The item tag of an absorbed hit (retail Thorpe intermission; meaning Unknown).
 const ABSORBED_TAG: u8 = 6;
+/// Hit flags: a pellet of a spread shot (ranged note: `0x21` on every pellet 2071).
+const HIT_FLAG_PELLET: u16 = 0x0001;
+/// Hit flags: the hit was a crit (ranged note: `0x61` on crit pellets).
+const HIT_FLAG_CRIT: u16 = 0x0040;
+/// The item tag of a pellet (ranged note: tag 5 on most pellet hits).
+const PELLET_TAG: u8 = 5;
+/// The camera shake of a pellet: none.
+const NO_CAMERA_SHAKE: u32 = 0;
 /// Flags (little-endian `u16`) of every retail 3601 of a creature's melee hit (swing note:
 /// `02 00` on all tutorial hits; the Azoth catalog names it a direct hit).
 const MELEE_HIT_FLAGS: u16 = 0x0002;
@@ -182,6 +190,38 @@ impl DamageDealtMsg {
             u32_e: CAMERA_SHAKE_SMALL,
             raw_2: flags.to_le_bytes(),
             items: one_hit(amount),
+        }
+    }
+}
+
+impl DamageDealtMsg {
+    /// One pellet of a spread shot by player `attacker` on `target`: `amount` after the armor,
+    /// which let `scale` of the raw damage through, a `crit` or not, `killed` when it killed the
+    /// target (ranged note: no camera shake, flags `0x21`, `0x40` on a crit, `0x08` on the kill).
+    pub fn pellet(
+        attacker: u64,
+        target: u64,
+        amount: f32,
+        scale: f32,
+        crit: bool,
+        killed: bool,
+    ) -> Self {
+        let mut flags = HIT_FLAG_CAN_CRIT | HIT_FLAG_PELLET;
+        if crit {
+            flags |= HIT_FLAG_CRIT;
+        }
+        if killed {
+            flags |= HIT_FLAG_KILLED;
+        }
+        Self {
+            u32_e: NO_CAMERA_SHAKE,
+            raw_2: flags.to_le_bytes(),
+            items: vec![DamageItem {
+                tag: PELLET_TAG,
+                amount,
+                scale,
+            }],
+            ..Self::hit(attacker, target, amount, false)
         }
     }
 }
@@ -782,6 +822,15 @@ mod tests {
         );
         let killing = DamageDealtMsg::hit(ATTACKER, TARGET, AMOUNT, true);
         assert_eq!(killing.raw_2, [0x28, 0x00]);
+    }
+
+    #[test]
+    fn a_pellet_has_the_retail_flags() {
+        let pellet = DamageDealtMsg::pellet(ATTACKER, TARGET, AMOUNT, 0.8, false, false);
+        assert_eq!((pellet.raw_2, pellet.u32_e), ([0x21, 0x00], 0));
+        assert_eq!(pellet.items[0].tag, 5);
+        let crit_kill = DamageDealtMsg::pellet(ATTACKER, TARGET, AMOUNT, 0.8, true, true);
+        assert_eq!(crit_kill.raw_2, [0x69, 0x00]);
     }
 
     #[test]

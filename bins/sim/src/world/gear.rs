@@ -63,6 +63,8 @@ pub(super) enum EquipRefusal {
     WrongSlot,
     /// The worn item has no free bag slot to go to.
     BagFull,
+    /// A slot's item is not the one the request names.
+    NotWorn,
 }
 
 /// What a player wears and carries.
@@ -77,6 +79,8 @@ pub(super) struct Gear {
     version: u64,
     /// Whether the states changed since they were sent.
     changed: bool,
+    /// The main-hand option slot of the weapon in the hand.
+    active_weapon: u32,
 }
 
 impl Gear {
@@ -98,6 +102,7 @@ impl Gear {
             bag: vec![None; STARTER_BAG_SLOTS],
             version: FIRST_GEAR_VERSION,
             changed: false,
+            active_weapon: slot::MAIN_HAND_OPTION_1,
         })
     }
 
@@ -110,6 +115,7 @@ impl Gear {
             bag: vec![None; STARTER_BAG_SLOTS],
             version: FIRST_GEAR_VERSION,
             changed: false,
+            active_weapon: slot::MAIN_HAND_OPTION_1,
         };
         for carried in items {
             let Some(item) = kits.item(&carried.item_id) else {
@@ -205,16 +211,98 @@ impl Gear {
             .map(|(_, stack)| stack.item_id.as_str())
     }
 
-    /// The weapon in the hand: the worn main-hand item of the lowest weapon option slot (Inferred:
-    /// retail's first island hits are the slot 24 weapon's), with its gear score.
+    /// The weapon in the hand, with its gear score: the item of the option slot the player picked
+    /// last, else the worn main-hand item of the lowest option slot (Inferred: retail's first
+    /// island hits are the slot 24 weapon's).
     pub(super) fn main_weapon(&self) -> Option<(&str, u32)> {
+        self.main_hand()
+            .find(|(slot_id, _)| *slot_id == self.active_weapon)
+            .or_else(|| self.main_hand().min_by_key(|(slot_id, _)| *slot_id))
+            .map(|(_, stack)| (stack.item_id.as_str(), stack.item.gear_score))
+    }
+
+    /// The worn main-hand weapons, with their gear scores.
+    pub(super) fn main_hand_weapons(&self) -> impl Iterator<Item = (&str, u32)> {
+        self.main_hand()
+            .map(|(_, stack)| (stack.item_id.as_str(), stack.item.gear_score))
+    }
+
+    /// The worn items of the main-hand option slots.
+    fn main_hand(&self) -> impl Iterator<Item = (u32, &Stack)> {
         self.worn
             .iter()
             .filter(|(slot_id, _)| {
                 (slot::MAIN_HAND_OPTION_1..=slot::MAIN_HAND_OPTION_3).contains(slot_id)
             })
-            .min_by_key(|(slot_id, _)| *slot_id)
-            .map(|(_, stack)| (stack.item_id.as_str(), stack.item.gear_score))
+            .map(|(slot_id, stack)| (*slot_id, stack))
+    }
+
+    /// The player picks the weapon of main-hand option `option` (0 for the first key).
+    pub(super) fn pick_weapon(&mut self, option: u32) {
+        let picked = slot::MAIN_HAND_OPTION_1.saturating_add(option);
+        if picked <= slot::MAIN_HAND_OPTION_3 {
+            self.active_weapon = picked;
+        }
+    }
+
+    /// Swaps the worn items of paperdoll slots `slot_a` and `slot_b`, which hold the items of
+    /// instance `instance_a` and `instance_b` (all zero: the slot is empty); each must fit the
+    /// other slot.
+    pub(super) fn swap(
+        &mut self,
+        slot_a: u32,
+        slot_b: u32,
+        instance_a: [u8; RAW_ID_LEN],
+        instance_b: [u8; RAW_ID_LEN],
+    ) -> Result<(), EquipRefusal> {
+        let holds = |gear: &Self, slot_id: u32, instance: [u8; RAW_ID_LEN]| match gear
+            .worn
+            .iter()
+            .find(|(worn, _)| *worn == slot_id)
+        {
+            Some((_, stack)) => stack.item.instance == instance,
+            None => instance == [0; RAW_ID_LEN],
+        };
+        if !holds(self, slot_a, instance_a) || !holds(self, slot_b, instance_b) {
+            return Err(EquipRefusal::NotWorn);
+        }
+        let fits_other = self.worn.iter().all(|(slot_id, stack)| match *slot_id {
+            id if id == slot_a => fits(stack.kind, slot_b),
+            id if id == slot_b => fits(stack.kind, slot_a),
+            _ => true,
+        });
+        if !fits_other {
+            return Err(EquipRefusal::WrongSlot);
+        }
+        for (slot_id, _) in &mut self.worn {
+            if *slot_id == slot_a {
+                *slot_id = slot_b;
+            } else if *slot_id == slot_b {
+                *slot_id = slot_a;
+            }
+        }
+        self.changed = true;
+        Ok(())
+    }
+
+    /// Takes off the worn item of paperdoll slot `slot_id` into bag slot `bag_slot`, or the first
+    /// free one when that is taken or out of range (`u32::MAX`: any).
+    pub(super) fn unequip(&mut self, slot_id: u32, bag_slot: u32) -> Result<(), EquipRefusal> {
+        let worn = self
+            .worn
+            .iter()
+            .position(|(worn, _)| *worn == slot_id)
+            .ok_or(EquipRefusal::NotWorn)?;
+        let wanted = usize::try_from(bag_slot)
+            .ok()
+            .filter(|index| self.bag.get(*index).is_some_and(Option::is_none));
+        let free = wanted
+            .or_else(|| self.bag.iter().position(Option::is_none))
+            .ok_or(EquipRefusal::BagFull)?;
+        let (_, stack) = self.worn.remove(worn);
+        self.bag[free] = Some(stack);
+        self.changed = true;
+        Ok(())
     }
 
     /// The states after a change, at a new version, once; `None` without a change.
@@ -345,8 +433,8 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) const BACKSTORY: &str = "Archetype_Mystic";
-    const CHARACTER: Uuid = Uuid::from_u128(0x2b87_684d_c82c_46a4_90e4_c764_0247_7507);
-    const SWORD: &str = "1hSwordT2_FTUE";
+    pub(crate) const CHARACTER: Uuid = Uuid::from_u128(0x2b87_684d_c82c_46a4_90e4_c764_0247_7507);
+    pub(crate) const SWORD: &str = "1hSwordT2_FTUE";
     const STAFF: &str = "MysticArchetype_2hStaffLife";
     const POTION: &str = "PotionHealthT1";
     const POTION_SLOT: u32 = 14;
@@ -519,5 +607,58 @@ pub(crate) mod tests {
         );
         let back = gear.bag[0].as_ref().expect("the sword is in the bag");
         assert_eq!(back.item_id, SWORD);
+    }
+
+    #[test]
+    fn weapons_swap_slots_and_the_picked_one_is_in_the_hand() {
+        const SECOND_OPTION: u32 = slot::MAIN_HAND_OPTION_1 + 1;
+        const ANY_BAG_SLOT: u32 = u32::MAX;
+        const EMPTY: [u8; RAW_ID_LEN] = [0; RAW_ID_LEN];
+        let kits = kits();
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
+        assert_eq!(
+            gear.swap(slot::MAIN_HAND_OPTION_1, SECOND_OPTION, EMPTY, EMPTY),
+            Err(EquipRefusal::NotWorn),
+            "the ids must match the worn items"
+        );
+        assert_eq!(
+            gear.swap(
+                slot::CHEST,
+                SECOND_OPTION,
+                instance("MysticArchetypeChest"),
+                EMPTY
+            ),
+            Err(EquipRefusal::WrongSlot)
+        );
+        assert_eq!(
+            gear.swap(
+                slot::MAIN_HAND_OPTION_1,
+                SECOND_OPTION,
+                instance(SWORD),
+                EMPTY
+            ),
+            Ok(())
+        );
+        assert!(gear.take_change().is_some());
+        assert_eq!(gear.main_weapon(), Some((SWORD, 75)), "the only weapon");
+        gear.pick_weapon(0);
+        assert_eq!(
+            gear.main_weapon(),
+            Some((SWORD, 75)),
+            "an empty pick keeps one"
+        );
+        gear.pick_weapon(1);
+        assert_eq!(gear.main_weapon(), Some((SWORD, 75)));
+        assert_eq!(gear.main_hand_weapons().collect::<Vec<_>>(), [(SWORD, 75)]);
+        assert_eq!(
+            gear.unequip(slot::MAIN_HAND_OPTION_1, ANY_BAG_SLOT),
+            Err(EquipRefusal::NotWorn)
+        );
+        assert_eq!(gear.unequip(SECOND_OPTION, ANY_BAG_SLOT), Ok(()));
+        assert_eq!(gear.main_weapon(), None);
+        assert_eq!(
+            gear.bag[0].as_ref().map(|stack| stack.item_id.as_str()),
+            Some(SWORD)
+        );
     }
 }

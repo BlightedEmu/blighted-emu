@@ -25,6 +25,10 @@ pub const DEFAULT_PLAYER_VITALS_ID: &str = "Player";
 pub const DEFAULT_WEAPON_ID: &str = "SwordT1";
 /// The light and heavy sword attacks of `DamageData`.
 pub const DEFAULT_ATTACK_DAMAGE_IDS: [&str; 2] = ["1H_Sword_Attack1", "1H_Sword_Attack2"];
+/// The `DamageData` row of one blunderbuss pellet (ranged note: coefficient 0.19 per pellet).
+pub const DEFAULT_SPREADSHOT_DAMAGE_ID: &str = "Blunderbuss_Primary_Attack";
+/// The `RangedAttackProfile` of a weapon that fires spread shots.
+const SPREAD_SHOT_PROFILE: &str = "Blunderbuss";
 
 /// The config rows a `sim` needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +39,8 @@ pub struct CombatRows {
     pub weapon_id: String,
     /// The `DamageData` rows of the weapon's attacks.
     pub attack_damage_ids: Vec<String>,
+    /// The `DamageData` row of one pellet of a spread shot.
+    pub spreadshot_damage_id: String,
 }
 
 impl Default for CombatRows {
@@ -43,6 +49,7 @@ impl Default for CombatRows {
             player_vitals_id: DEFAULT_PLAYER_VITALS_ID.to_owned(),
             weapon_id: DEFAULT_WEAPON_ID.to_owned(),
             attack_damage_ids: DEFAULT_ATTACK_DAMAGE_IDS.map(str::to_owned).to_vec(),
+            spreadshot_damage_id: DEFAULT_SPREADSHOT_DAMAGE_ID.to_owned(),
         }
     }
 }
@@ -96,6 +103,8 @@ pub struct WeaponRow {
     pub crit_chance: f64,
     /// Crit damage multiplier.
     pub crit_multiplier: f64,
+    /// It fires spread shots (a blunderbuss): its attacks come as 2719 requests.
+    pub spread_shot: bool,
 }
 
 /// A consumable that heals: a potion.
@@ -210,6 +219,8 @@ impl CombatSource {
                             base_damage: row.base_damage.map_or(0.0, |damage| damage as f64),
                             crit_chance: row.crit_chance.unwrap_or(0.0),
                             crit_multiplier: row.crit_damage_multiplier.unwrap_or(PLAIN_MOD),
+                            spread_shot: row.ranged_attack_profile.as_deref()
+                                == Some(SPREAD_SHOT_PROFILE),
                         },
                     )
                 })
@@ -325,6 +336,7 @@ pub struct CombatData {
     /// The healing consumable of each item that is one, by lower-case item id.
     item_heals: HashMap<String, HealingConsumable>,
     attacks: Vec<AttackRow>,
+    spreadshot: AttackRow,
     vision_offsets: HashMap<String, f32>,
     player_max_health: u32,
 }
@@ -357,18 +369,20 @@ impl CombatData {
             .find(|(id, _)| *id == rows.weapon_id)
             .map(|(_, weapon)| *weapon)
             .ok_or_else(|| CombatDataError::MissingWeapon(rows.weapon_id.clone()))?;
+        let attack_row = |wanted: &String| {
+            source
+                .attacks
+                .iter()
+                .find(|row| row.damage_id == *wanted)
+                .cloned()
+                .ok_or_else(|| CombatDataError::MissingAttack(wanted.clone()))
+        };
         let attacks = rows
             .attack_damage_ids
             .iter()
-            .map(|wanted| {
-                source
-                    .attacks
-                    .iter()
-                    .find(|row| row.damage_id == *wanted)
-                    .cloned()
-                    .ok_or_else(|| CombatDataError::MissingAttack(wanted.clone()))
-            })
+            .map(attack_row)
             .collect::<Result<Vec<_>, _>>()?;
+        let spreadshot = attack_row(&rows.spreadshot_damage_id)?;
         let weapons: HashMap<String, WeaponRow> = source
             .weapons
             .iter()
@@ -454,6 +468,7 @@ impl CombatData {
             item_weapons,
             item_heals,
             attacks,
+            spreadshot,
             vision_offsets: source.vision_offsets.into_iter().collect(),
             player_max_health,
         })
@@ -501,6 +516,11 @@ impl CombatData {
         self.attacks.get(1)
     }
 
+    /// The attack of one pellet of a spread shot.
+    pub const fn spreadshot_attack(&self) -> &AttackRow {
+        &self.spreadshot
+    }
+
     /// The weapon attack `damage_id`, if it is one of the config's.
     pub fn attack(&self, damage_id: &str) -> Option<&AttackRow> {
         self.attacks.iter().find(|row| row.damage_id == damage_id)
@@ -538,6 +558,7 @@ mod tests {
     const SWORD_BASE: f64 = 64.0;
     const LIGHT: &str = "1H_Sword_Attack1";
     const HEAVY: &str = "1H_Sword_Attack2";
+    const PELLET: &str = "Blunderbuss_Primary_Attack";
     const VISION_OFFSET: f32 = 5.0;
 
     fn rows() -> CombatRows {
@@ -545,6 +566,7 @@ mod tests {
             player_vitals_id: "Player".to_owned(),
             weapon_id: "SwordT1".to_owned(),
             attack_damage_ids: vec![LIGHT.to_owned(), HEAVY.to_owned()],
+            spreadshot_damage_id: PELLET.to_owned(),
         }
     }
 
@@ -575,6 +597,7 @@ mod tests {
                     base_damage: SWORD_BASE,
                     crit_chance: 0.03,
                     crit_multiplier: 1.3,
+                    spread_shot: false,
                 },
             )],
             consumables: vec![(
@@ -601,6 +624,12 @@ mod tests {
                     coefficient: 1.2,
                     can_crit: true,
                     threat: 1,
+                },
+                AttackRow {
+                    damage_id: PELLET.to_owned(),
+                    coefficient: 0.19,
+                    can_crit: true,
+                    threat: 0,
                 },
             ],
             vision_offsets: vec![("Beast".to_owned(), VISION_OFFSET)],

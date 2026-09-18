@@ -79,6 +79,8 @@ pub struct CombatConfig {
     pub weapon_id: String,
     /// The `DamageData` rows of the weapon's attacks.
     pub attack_damage_ids: Vec<String>,
+    /// The `DamageData` row of one pellet of a spread shot.
+    pub spreadshot_damage_id: String,
     /// Share of a player's damage that mob armor takes off, 0 to below 1.
     pub armor_share: f64,
     /// Share of a mob's damage that player armor takes off, 0 to below 1.
@@ -124,6 +126,7 @@ impl Default for CombatConfig {
             player_vitals_id: rows.player_vitals_id,
             weapon_id: rows.weapon_id,
             attack_damage_ids: rows.attack_damage_ids,
+            spreadshot_damage_id: rows.spreadshot_damage_id,
             armor_share: DEFAULT_ARMOR_SHARE,
             player_armor_share: DEFAULT_PLAYER_ARMOR_SHARE,
             mob_attack_factor: DEFAULT_MOB_ATTACK_FACTOR,
@@ -153,6 +156,7 @@ impl CombatConfig {
             player_vitals_id: self.player_vitals_id.clone(),
             weapon_id: self.weapon_id.clone(),
             attack_damage_ids: self.attack_damage_ids.clone(),
+            spreadshot_damage_id: self.spreadshot_damage_id.clone(),
         }
     }
 

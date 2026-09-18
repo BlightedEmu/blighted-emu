@@ -21,11 +21,13 @@ use bevy_ecs::entity::Entity;
 use nw_bus::{BusId, ConnectionRef, Hit};
 use std::sync::Arc;
 
+use nw_content::combat::{AttackRow, WeaponRow};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::paperdoll::slot;
 use nw_messages::{
     AdjustFxScriptsMsg, ConsumableCooldown, DamageDealtMsg, DeathRecapMsg, InputRecord,
-    MeleeDamage, MeleeHitMsg, OnDamageMsg, ServerMessage,
+    MeleeDamage, MeleeHitMsg, OnDamageMsg, ServerMessage, SpreadshotProcessedMsg,
+    SpreadshotRequestMsg,
 };
 use nw_sim_core::{Damage, Health, MobState, PlayerAttack, died, hurt, mob_hit, player_hit};
 
@@ -79,6 +81,8 @@ pub(super) struct Vitals {
     attack_pressed_at: Option<u16>,
     /// The counter (`u16` after the mask) of the newest input record read.
     input_counter: Option<u16>,
+    /// When the player last fired a spread shot.
+    last_shot_ms: Option<u64>,
     /// The player holds block (the newest input record, [`ClientInputMsg::blocking`]).
     ///
     /// [`ClientInputMsg::blocking`]: nw_messages::ClientInputMsg::blocking
@@ -100,6 +104,7 @@ impl Vitals {
             last_attack_ms: None,
             attack_pressed_at: None,
             input_counter: None,
+            last_shot_ms: None,
             blocking: false,
             dodge_held: false,
             quick_slot_held: false,
@@ -126,6 +131,18 @@ fn in_front(from: Position, facing: f32, target: Position) -> bool {
         (turn + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
     wrapped.abs() <= HIT_CONE_HALF_RAD
 }
+
+/// The shortest time between two spread shots (our choice: retail's shortest gap was 266 ms).
+const SPREADSHOT_MIN_INTERVAL_MS: u64 = 250;
+/// How far a pellet reaches (our choice; the blunderbuss range is Unknown, and the client names
+/// the targets it hit).
+const SPREADSHOT_RANGE_M: f32 = 30.0;
+/// The pellets of a shot that uses the eight-pellet config.
+const EIGHT_PELLETS: usize = 8;
+/// The pellet config id of the answer on six-pellet shots (ranged note).
+const SIX_PELLET_CONFIG: u64 = 230;
+/// The pellet config id of the answer on eight-pellet shots (ranged note).
+const EIGHT_PELLET_CONFIG: u64 = 231;
 
 /// Milliseconds per client input record (retail: 34 ms apart, median; input note).
 const INPUT_RECORD_MS: u16 = 33;
@@ -156,6 +173,18 @@ impl AttackKind {
 /// Whether input counter `counter` comes after `last`; the counter wraps at `u16::MAX`.
 const fn counter_is_newer(counter: u16, last: u16) -> bool {
     (counter.wrapping_sub(last) as i16) > 0
+}
+
+/// One hit a player lands: who, on what, with which weapon and attack row.
+struct Strike<'a> {
+    entity: Entity,
+    number: u64,
+    attacker: &'a ConnectionRef,
+    target: u64,
+    view: &'a TargetView,
+    /// The weapon in the hand and its gear score; `None`: the config's weapon.
+    held: Option<(WeaponRow, u32)>,
+    row: &'a AttackRow,
 }
 
 /// What an attack sees of its target.
@@ -239,6 +268,43 @@ impl SimWorld {
             .and_then(|(item, gear_score)| {
                 Some((*self.combat.data.weapon_of_item(item)?, gear_score))
             });
+        let row = row.clone();
+        let outcome = self.strike(
+            Strike {
+                entity,
+                number,
+                attacker,
+                target,
+                view: &view,
+                held,
+                row: &row,
+            },
+            now_ms,
+            |amount, _, killed, _| DamageDealtMsg::hit(number, target, amount, killed),
+        )?;
+        Ok(outcome)
+    }
+
+    /// Lands one hit of `strike` at `now_ms`: rolls the damage of its weapon (else the config's)
+    /// and row against the target's level, applies it here or sends it to the target's sim, and
+    /// tells the attacker with the message `dealt` makes of the amount, the crit, the kill and the
+    /// share of the damage the armor let through. A mob that absorbs hits (Thorpe in his
+    /// intermission) takes none.
+    fn strike(
+        &mut self,
+        strike: Strike<'_>,
+        now_ms: u64,
+        dealt: impl Fn(f32, bool, bool, f32) -> DamageDealtMsg,
+    ) -> Result<AttackOutcome, AttackRefusal> {
+        let Strike {
+            entity,
+            number,
+            attacker,
+            target,
+            view,
+            held,
+            row,
+        } = strike;
         let weapon = held.map_or_else(|| *self.combat.data.weapon(), |(weapon, _)| weapon);
         let armor_share = held
             .zip(self.combat.data.level(view.level))
@@ -252,12 +318,10 @@ impl SimWorld {
             crit_chance: weapon.crit_chance,
             crit_multiplier: weapon.crit_multiplier,
         };
-        let threat_base = row.threat;
-        // A mob that absorbs hits (Thorpe in his intermission) takes no damage.
+        if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
+            vitals.last_attack_ms = Some(now_ms);
+        }
         if view.owner.is_none() && self.mobs.absorbing(target, now_ms) {
-            if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
-                vitals.last_attack_ms = Some(now_ms);
-            }
             if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                 player.combat.hit(now_ms, false);
             }
@@ -268,17 +332,18 @@ impl SimWorld {
             return Ok(AttackOutcome::Hit { target, amount: 0 });
         }
         let hit = player_hit(&attack, armor_share, &mut self.dice);
-        let threat = threat_base.saturating_add(u64::from(hit.amount));
-        if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
-            vitals.last_attack_ms = Some(now_ms);
-        }
-        let outcome = match view.owner {
+        let threat = row.threat.saturating_add(u64::from(hit.amount));
+        let outcome = match &view.owner {
             None => self
                 .apply_hit(target, number, hit.amount, threat, now_ms)
                 .ok_or(AttackRefusal::TargetDead)?,
-            Some(owner) => {
-                AttackOutcome::Remote(self.remote_hit(owner, target, number, hit.amount, threat))
-            }
+            Some(owner) => AttackOutcome::Remote(self.remote_hit(
+                owner.clone(),
+                target,
+                number,
+                hit.amount,
+                threat,
+            )),
         };
         let killed = matches!(outcome, AttackOutcome::Killed { .. });
         if matches!(outcome, AttackOutcome::Hit { .. }) {
@@ -289,14 +354,110 @@ impl SimWorld {
         }
         self.send_reliable(
             attacker.clone(),
-            &ServerMessage::DamageDealt(DamageDealtMsg::hit(
-                number,
-                target,
+            &ServerMessage::DamageDealt(dealt(
                 amount_of(hit.amount),
+                hit.crit,
                 killed,
+                (1.0 - armor_share) as f32,
             )),
         );
         Ok(outcome)
+    }
+
+    /// The player of `shooter` fires the spread shot `request` at `now_ms` with the spread-shot
+    /// weapon it wears (ranged note): the answer goes to the shooter at once, then each pellet that
+    /// hit a living mob in range lands as one hit. Retail trusts the targets the client names.
+    pub fn spreadshot(
+        &mut self,
+        shooter: &ConnectionRef,
+        request: &SpreadshotRequestMsg,
+        now_ms: u64,
+    ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
+        let refused = |refusal| vec![Err(refusal)];
+        let Some(entity) = self.by_connection.get(shooter).copied() else {
+            return refused(AttackRefusal::NotInWorld);
+        };
+        let (Some(player), Some(body), Some(vitals)) = (
+            self.world.get::<Player>(entity),
+            self.world.get::<Body>(entity),
+            self.world.get::<Vitals>(entity),
+        ) else {
+            return refused(AttackRefusal::NotInWorld);
+        };
+        if vitals.health.is_dead() {
+            return refused(AttackRefusal::Dead);
+        }
+        if vitals
+            .last_shot_ms
+            .is_some_and(|last| now_ms.saturating_sub(last) < SPREADSHOT_MIN_INTERVAL_MS)
+        {
+            return refused(AttackRefusal::TooFast);
+        }
+        let number = player.number;
+        let position = body.motion.position();
+        let data = Arc::clone(&self.combat.data);
+        let held = player.gear.as_ref().and_then(|gear| {
+            gear.main_hand_weapons().find_map(|(item, gear_score)| {
+                let weapon = *data.weapon_of_item(item)?;
+                weapon.spread_shot.then_some((weapon, gear_score))
+            })
+        });
+        let Some(held) = held else {
+            return refused(AttackRefusal::NotWeaponAttack);
+        };
+        if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
+            vitals.last_shot_ms = Some(now_ms);
+        }
+        let row = data.spreadshot_attack();
+        let config = if request.pellets.len() == EIGHT_PELLETS {
+            EIGHT_PELLET_CONFIG
+        } else {
+            SIX_PELLET_CONFIG
+        };
+        self.send_reliable(
+            shooter.clone(),
+            &ServerMessage::SpreadshotProcessed(SpreadshotProcessedMsg {
+                request: request.clone(),
+                damage: lowercase_crc32(&row.damage_id),
+                config,
+            }),
+        );
+        request
+            .pellet_targets()
+            .into_iter()
+            .map(|target| {
+                if spawn_index(target).is_none() {
+                    return Err(AttackRefusal::UnknownTarget);
+                }
+                let view = self
+                    .target_view(target)
+                    .ok_or(AttackRefusal::UnknownTarget)?;
+                if view.dead {
+                    return Err(AttackRefusal::TargetDead);
+                }
+                if view.returning {
+                    return Err(AttackRefusal::Returning);
+                }
+                if view.position.horizontal_distance(position) > SPREADSHOT_RANGE_M {
+                    return Err(AttackRefusal::OutOfReach);
+                }
+                self.strike(
+                    Strike {
+                        entity,
+                        number,
+                        attacker: shooter,
+                        target,
+                        view: &view,
+                        held: Some(held),
+                        row,
+                    },
+                    now_ms,
+                    |amount, crit, killed, scale| {
+                        DamageDealtMsg::pellet(number, target, amount, scale, crit, killed)
+                    },
+                )
+            })
+            .collect()
     }
 
     /// The hit and death messages since the last call.
@@ -450,6 +611,7 @@ impl SimWorld {
         // note: counters 7290, 7289, 7288); each record counts once, oldest first. An attack is a
         // press and its release: a short hold is the light attack, a long one the heavy attack.
         let mut attacks = Vec::new();
+        let mut weapon_key = None;
         for record in records.iter().rev() {
             let counter = record.u16_after_mask;
             if vitals
@@ -459,6 +621,7 @@ impl SimWorld {
                 continue;
             }
             vitals.input_counter = Some(counter);
+            weapon_key = record.weapon_key_pressed().or(weapon_key);
             if record.attack_pressed() {
                 vitals.attack_pressed_at = Some(counter);
             }
@@ -469,6 +632,23 @@ impl SimWorld {
                     .map_or(0, |pressed| counter.wrapping_sub(pressed));
                 attacks.push(AttackKind::of_hold(held_records));
             }
+        }
+        let data = Arc::clone(&self.combat.data);
+        let spread_shot = self
+            .world
+            .get_mut::<Player>(entity)
+            .and_then(|mut player| {
+                let gear = player.gear.as_mut()?;
+                if let Some(key) = weapon_key {
+                    gear.pick_weapon(key);
+                }
+                let (item, _) = gear.main_weapon()?;
+                Some(data.weapon_of_item(item)?.spread_shot)
+            })
+            .unwrap_or(false);
+        // A spread-shot weapon fires through its own request (2719), not the attack key.
+        if spread_shot {
+            return Vec::new();
         }
         // Every attack of one message has the same receive time, so only the first can hit: the
         // others are too fast, and a client cannot make the loop search for targets per record.
@@ -847,14 +1027,19 @@ mod tests {
     use crate::combat::RespawnRefusal;
     use crate::combat::test_support::TEST_PLAYER_HEALTH;
     use crate::combat::tests::test_combat;
+    use crate::config::tests::committed;
     use crate::mobs::mob_entity;
+    use crate::world::gear::{self, Gear};
     use crate::world::tests::{
         BORDER_X, CELL_M, NOW, SERVER_TIME, admit_at, connection, join, slot, table, test_spawn,
         tick, world_with_spawns,
     };
     use crate::world::{MESSAGE_CHANNEL, MoveError, Outgoing, WorldSettings};
     use nw_bus::{Ghost, MobGhost, Point};
-    use nw_messages::{DamageDealtMsg, DeathRecapMsg, ServerMessage};
+    use nw_content::combat::{CombatData, CombatRows, DEFAULT_SPREADSHOT_DAMAGE_ID};
+    use nw_messages::{
+        BodyCodec, DamageDealtMsg, DeathRecapMsg, FacetHeader, RAW_ID_LEN, ServerMessage, SpreadHit,
+    };
     use nw_reflect::Envelope;
 
     const LIGHT: &str = "1H_Sword_Attack1";
@@ -877,9 +1062,14 @@ mod tests {
 
     /// A world with one mob and player 1 two metres from it.
     fn fight() -> SimWorld {
+        fight_at(MOB_X + 2.0)
+    }
+
+    /// A world with one mob and player 1 at `x`.
+    fn fight_at(x: f32) -> SimWorld {
         let mut world = world_with_spawns(vec![test_spawn(MOB_X)]);
         world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
-        join(&mut world, 1, MOB_X + 2.0);
+        join(&mut world, 1, x);
         world
     }
 
@@ -1141,6 +1331,130 @@ mod tests {
         let mut player = world.world.get_mut::<Player>(entity).expect("player");
         let status = player.combat.take_change(NOW, NOW).expect("in combat");
         assert_eq!(status.in_combat, Some(true), "the hit starts the combat");
+    }
+
+    /// [`fight_at`] `x` with player 1 wearing the kit sword, whose stats are a spread-shot weapon.
+    fn shooter_at(x: f32) -> SimWorld {
+        const BLUNDERBUSS: &str = "BlunderbussT2";
+        let mut source = crate::combat::test_support::test_source();
+        let sword = source.weapons[0].1;
+        source.weapons.push((
+            BLUNDERBUSS.to_owned(),
+            WeaponRow {
+                spread_shot: true,
+                ..sword
+            },
+        ));
+        source
+            .item_stats
+            .push((gear::tests::SWORD.to_owned(), BLUNDERBUSS.to_owned()));
+        let data = CombatData::build(source, &CombatRows::default()).expect("data");
+        let mut world = fight_at(x);
+        world.combat = committed().combat_settings(Arc::new(data), Arc::from([]));
+        let entity = world.by_connection[&connection(1)];
+        world.world.get_mut::<Player>(entity).expect("player").gear = Gear::starter(
+            &gear::tests::kits(),
+            gear::tests::CHARACTER,
+            Some(gear::tests::BACKSTORY),
+        );
+        world
+    }
+
+    /// A shot of `pellets` pellets on [`mob`], whose last pellet missed.
+    fn shot(pellets: usize) -> SpreadshotRequestMsg {
+        const HIT: [u8; 2] = [0x00, 0x10];
+        const MISS: [u8; 2] = [0xff, 0xfe];
+        let mut pellets = vec![HIT; pellets];
+        if let Some(last) = pellets.last_mut() {
+            *last = MISS;
+        }
+        SpreadshotRequestMsg {
+            header: FacetHeader::of(0, 1),
+            frame: 0,
+            flag: 1,
+            seed: 0,
+            origin: [MOB_X + 2.0, 0.0, 0.0],
+            direction: [0; 6],
+            pellets,
+            hits: vec![SpreadHit {
+                raw_id: [0; RAW_ID_LEN],
+                facet_entity: mob().swap_bytes(),
+                extra: 0,
+            }],
+            times: vec![0],
+        }
+    }
+
+    #[test]
+    fn each_pellet_that_hit_is_one_hit_after_the_answer() {
+        const SIX: usize = 6;
+        const EIGHT: usize = 8;
+        let mut world = shooter_at(MOB_X + 2.0);
+        let request = shot(SIX);
+        let results = world.spreadshot(&connection(1), &request, NOW);
+        assert_eq!(results.len(), SIX - 1, "the missed pellet does nothing");
+        assert!(results.iter().all(|result| matches!(
+            result,
+            Ok(AttackOutcome::Hit { target, .. }) if *target == mob()
+        )));
+        let messages = messages_to(&world.take_messages(), 1);
+        let expected = SpreadshotProcessedMsg {
+            request,
+            damage: lowercase_crc32(DEFAULT_SPREADSHOT_DAMAGE_ID),
+            config: SIX_PELLET_CONFIG,
+        };
+        let ServerMessage::SpreadshotProcessed(answer) = &messages[0] else {
+            panic!("the answer comes first: {:?}", messages[0]);
+        };
+        // The answer does not carry the frame, origin and times, so compare its bytes.
+        assert_eq!(answer.encode(), expected.encode());
+        // 64 x 1.0: the held weapon's gear score against armor rating 0 lets all of it through.
+        const PELLET_HIT: u32 = 64;
+        const ALL_THROUGH: f32 = 1.0;
+        let pellet =
+            DamageDealtMsg::pellet(1, mob(), amount(PELLET_HIT), ALL_THROUGH, false, false);
+        assert_eq!(
+            messages[1..],
+            vec![ServerMessage::DamageDealt(pellet); SIX - 1]
+        );
+        assert_eq!(
+            world
+                .spreadshot(
+                    &connection(1),
+                    &shot(EIGHT),
+                    NOW + SPREADSHOT_MIN_INTERVAL_MS - 1
+                )
+                .as_slice(),
+            [Err(AttackRefusal::TooFast)]
+        );
+        world.spreadshot(
+            &connection(1),
+            &shot(EIGHT),
+            NOW + SPREADSHOT_MIN_INTERVAL_MS,
+        );
+        assert!(matches!(
+            &messages_to(&world.take_messages(), 1)[0],
+            ServerMessage::SpreadshotProcessed(answer) if answer.config == EIGHT_PELLET_CONFIG
+        ));
+    }
+
+    #[test]
+    fn a_shot_without_a_spread_shot_weapon_is_refused() {
+        let mut world = fight();
+        assert_eq!(
+            world.spreadshot(&connection(1), &shot(1), NOW).as_slice(),
+            [Err(AttackRefusal::NotWeaponAttack)]
+        );
+        assert!(messages_to(&world.take_messages(), 1).is_empty());
+    }
+
+    #[test]
+    fn a_pellet_out_of_range_is_refused() {
+        let mut world = shooter_at(MOB_X + SPREADSHOT_RANGE_M + 1.0);
+        assert_eq!(
+            world.spreadshot(&connection(1), &shot(2), NOW).as_slice(),
+            [Err(AttackRefusal::OutOfReach)]
+        );
     }
 
     #[test]

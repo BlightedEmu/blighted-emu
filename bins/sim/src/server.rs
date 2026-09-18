@@ -23,7 +23,8 @@ use nw_common::time::unix_ms;
 use nw_db::{PgPool, SaveOutcome, SavedPosition, save_character_position};
 use nw_messages::{
     BodyCodec, ClientFacetMsg, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
-    REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
+    REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX,
+    SpreadshotRequestMsg,
 };
 use nw_reflect::Envelope;
 use nw_sim_core::{Ground, GroundCheck, Position, TickClock};
@@ -480,6 +481,7 @@ impl Loop {
                 self.client_input(connection, &envelope.body);
             }
             Some(REQUEST_RESPAWN_TYPE_INDEX) => self.respawn_request(connection, &envelope.body),
+            Some(SPREADSHOT_REQUEST_TYPE_INDEX) => self.spreadshot(connection, &envelope.body),
             Some(index) if let Some(facet) = ClientFacetMsg::decode(index, &envelope.body) => {
                 let Ok(facet) = facet else {
                     metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
@@ -516,6 +518,18 @@ impl Loop {
             self.world.interact(connection, request, now_ms);
         }
         for result in self.world.attack_input(connection, &input.records, now_ms) {
+            self.attack_result(result);
+        }
+    }
+
+    /// The player fires a spread shot (ranged note).
+    fn spreadshot(&mut self, connection: &ConnectionRef, body: &[u8]) {
+        let Ok(request) = SpreadshotRequestMsg::decode(body) else {
+            metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
+            return;
+        };
+        let now_ms = self.now_ms();
+        for result in self.world.spreadshot(connection, &request, now_ms) {
             self.attack_result(result);
         }
     }

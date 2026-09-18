@@ -388,6 +388,9 @@ const ATTACK_PRESS_BIT: u32 = 40;
 /// The slot value and bit of the attack key's release: set in one record only.
 const ATTACK_RELEASE_VALUE: usize = 2;
 const ATTACK_RELEASE_BIT: u32 = 31;
+/// The slot values and bits of the presses of the first and second weapon keys (input note: the
+/// weapon in the hand changed 331 to 418 ms after each).
+const WEAPON_KEYS: [(usize, u32); 2] = [(0, 9), (3, 13)];
 /// Slots of a client record (19 words of the action set, as 10 values).
 const ACTION_SLOTS: u8 = 19;
 /// The neutral scaled bytes of a record.
@@ -424,6 +427,14 @@ impl InputRecord {
     /// Whether the player let go of the attack key in this record.
     pub fn attack_released(&self) -> bool {
         self.slot_bit(ATTACK_RELEASE_VALUE, ATTACK_RELEASE_BIT)
+    }
+
+    /// The weapon key the player pressed in this record: 0 for the first, 1 for the second.
+    pub fn weapon_key_pressed(&self) -> Option<u32> {
+        (0_u32..)
+            .zip(WEAPON_KEYS)
+            .find(|(_, (value, bit))| self.slot_bit(*value, *bit))
+            .map(|(key, _)| key)
     }
 }
 

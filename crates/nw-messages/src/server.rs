@@ -14,6 +14,7 @@ use crate::facet::{
 use crate::level_info::LevelInfoChangedMsg;
 use crate::self_ident::PlayerManagerSelfIdentificationMsg;
 use crate::spawn_point::ReceivePlayerSpawnPointMsg;
+use crate::spreadshot::SpreadshotProcessedMsg;
 use crate::time_change::SyncTimeChangeMsg;
 use crate::time_synch::TimeSynchMsg;
 use nw_reflect::{Envelope, TypeId};
@@ -81,6 +82,8 @@ pub enum ServerMessage {
     CutsceneGranted(CutsceneGrantedMsg),
     /// 6709.
     CutsceneEndFinalized(CutsceneEndFinalizedMsg),
+    /// 2570.
+    SpreadshotProcessed(SpreadshotProcessedMsg),
     /// 3951.
     TeleportWithLoadingScreen(TeleportWithLoadingScreenMsg),
     /// 3743.
@@ -141,6 +144,9 @@ impl ServerMessage {
             CutsceneGrantedMsg::TYPE_INDEX => {
                 CutsceneGrantedMsg::decode(body).map(Self::CutsceneGranted)
             }
+            SpreadshotProcessedMsg::TYPE_INDEX => {
+                SpreadshotProcessedMsg::decode(body).map(Self::SpreadshotProcessed)
+            }
             CutsceneEndFinalizedMsg::TYPE_INDEX => {
                 CutsceneEndFinalizedMsg::decode(body).map(Self::CutsceneEndFinalized)
             }
@@ -194,6 +200,7 @@ impl ServerMessage {
             Self::UpdatePhasing(_) => UpdatePhasingMsg::TYPE_INDEX,
             Self::CutsceneGranted(_) => CutsceneGrantedMsg::TYPE_INDEX,
             Self::CutsceneEndFinalized(_) => CutsceneEndFinalizedMsg::TYPE_INDEX,
+            Self::SpreadshotProcessed(_) => SpreadshotProcessedMsg::TYPE_INDEX,
             Self::TeleportWithLoadingScreen(_) => TeleportWithLoadingScreenMsg::TYPE_INDEX,
             Self::InteractionValidated(_) => InteractionValidatedMsg::TYPE_INDEX,
             Self::InteractionEnded(_) => InteractionEndedMsg::TYPE_INDEX,
@@ -244,6 +251,7 @@ impl ServerMessage {
             Self::UpdatePhasing(message) => message.encode(),
             Self::CutsceneGranted(message) => message.encode(),
             Self::CutsceneEndFinalized(message) => message.encode(),
+            Self::SpreadshotProcessed(message) => message.encode(),
             Self::TeleportWithLoadingScreen(message) => message.encode(),
             Self::InteractionValidated(message) => message.encode(),
             Self::InteractionEnded(message) => message.encode(),

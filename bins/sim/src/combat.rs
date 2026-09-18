@@ -194,11 +194,13 @@ pub mod test_support {
                     base_damage: TEST_SWORD_DAMAGE,
                     crit_chance: 0.0,
                     crit_multiplier: 1.0,
+                    spread_shot: false,
                 },
             )],
             attacks: rows
                 .attack_damage_ids
                 .iter()
+                .chain([&rows.spreadshot_damage_id])
                 .map(|id| AttackRow {
                     damage_id: id.clone(),
                     coefficient: 1.0,

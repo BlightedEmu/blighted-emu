@@ -329,6 +329,8 @@ impl LevelFlow {
             | ClientFacetMsg::QteCompleted { .. }
             | ClientFacetMsg::UiScreenOpened { .. }
             | ClientFacetMsg::TimeSyncRequest { .. }
+            | ClientFacetMsg::SwapItems { .. }
+            | ClientFacetMsg::UnequipItem { .. }
             | ClientFacetMsg::TriggerAreaPassthrough { .. }
             | ClientFacetMsg::TakeAllItems { .. }
             | ClientFacetMsg::EquipItem { .. }

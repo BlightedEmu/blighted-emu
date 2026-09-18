@@ -852,7 +852,9 @@ impl Tutorial {
             }
             ClientFacetMsg::AckLevelInfo { .. }
             | ClientFacetMsg::UiScreenOpened { .. }
-            | ClientFacetMsg::TimeSyncRequest { .. } => {
+            | ClientFacetMsg::TimeSyncRequest { .. }
+            | ClientFacetMsg::SwapItems { .. }
+            | ClientFacetMsg::UnequipItem { .. } => {
                 return;
             }
         };

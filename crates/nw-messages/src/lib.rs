@@ -37,6 +37,7 @@ pub mod self_ident;
 pub mod server;
 mod slots;
 pub mod spawn_point;
+pub mod spreadshot;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
 pub mod time_change;
@@ -131,6 +132,10 @@ pub use self_ident::{
 };
 pub use server::{LOGIN_MESSAGE_TYPES, SERVER_MESSAGE_TYPES, ServerMessage};
 pub use spawn_point::{RECEIVE_PLAYER_SPAWN_POINT_MSG_TYPE_INDEX, ReceivePlayerSpawnPointMsg};
+pub use spreadshot::{
+    SPREADSHOT_PROCESSED_TYPE_INDEX, SPREADSHOT_REQUEST_TYPE_INDEX, SpreadHit,
+    SpreadshotProcessedMsg, SpreadshotRequestMsg,
+};
 pub use time_change::{
     OBSERVED_TIME_CHANGE_F32S_AT_16, OBSERVED_TIME_CHANGE_F32S_AT_60,
     OBSERVED_TIME_CHANGE_U32S_AT_28, SYNC_TIME_CHANGE_MSG_TYPE_INDEX, SyncTimeChangeMsg,

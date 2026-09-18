@@ -1586,6 +1586,28 @@ impl SimWorld {
                     })
                     .ok()
             }),
+            ClientFacetMsg::SwapItems {
+                slot_a,
+                slot_b,
+                instance_a,
+                instance_b,
+                ..
+            } => {
+                if let Some(gear) = player.gear.as_mut()
+                    && let Err(refusal) = gear.swap(slot_a, slot_b, instance_a, instance_b)
+                {
+                    tracing::debug!(?refusal, slot_a, slot_b, "swap refused");
+                }
+                None
+            }
+            ClientFacetMsg::UnequipItem { slot, bag_slot, .. } => {
+                if let Some(gear) = player.gear.as_mut()
+                    && let Err(refusal) = gear.unequip(slot, bag_slot)
+                {
+                    tracing::debug!(?refusal, slot, bag_slot, "unequip refused");
+                }
+                None
+            }
             _ => None,
         };
         let backstory = player.backstory.clone();

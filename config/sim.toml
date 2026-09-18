@@ -64,6 +64,8 @@ max_connections = 5
 player_vitals_id = "Player"
 weapon_id = "SwordT1"
 attack_damage_ids = ["1H_Sword_Attack1", "1H_Sword_Attack2"]
+# One blunderbuss pellet (0.19 of the weapon's base damage).
+spreadshot_damage_id = "Blunderbuss_Primary_Attack"
 armor_share = 0.35
 # Retail 3601 hits on a new character in starter armor keep 0.6006 of the damage.
 player_armor_share = 0.3994
