@@ -316,6 +316,12 @@ The live page (`/live`) shows the running servers: tiles (sims, players, bots, C
 
 `just live <sims>` starts a whole local test world for it (edge-http on port 8443, the director, 1 to 8 sims with snapshots every 250 ms, the gateway) and then the panel; Ctrl-C stops all of them. Build with `cargo build --release` and set `NW_GAME_DIR` first. `LIVE_STACK_SNAPSHOT_MS=0 just live 8` runs it with snapshots off, to compare tick times. The exit test is in `docs/re/2026-09-06-admin-live-panel.md`.
 
+### Studio
+
+The studio page (`/studio`) shows the team's design files in `content/` (see [content/README.md](content/README.md)) with their problems. **Check** runs the full check against the retail files and writes nothing. **Apply** checks, writes the merged bundle and world files into `content_dir` (as `just design` does), then restarts the world-director and the sims through the control FIFO of `just live` (`local-data/logs/live/control`, line `restart-world`) and waits until every sim sends a heartbeat with a new start time (`[studio] restart_timeout_s`). A design problem stops Apply before anything is written. Without `just live` (no FIFO), Apply writes the files and tells you to restart the sims yourself. Players on the local world are disconnected by the restart.
+
+To find the design key of a mob spawn, turn on "Mob spawns" on the Map page and click a spawn.
+
 ## Rules for contributors
 
 - Never commit game files, captures, or `deploy/.env`. Put local game data in `local-data/` (ignored by git).
