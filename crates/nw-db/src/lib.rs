@@ -6,6 +6,7 @@
 //! `edge-http migrate`; the server checks the schema version at start.
 
 mod account;
+mod admin;
 mod character;
 mod connect;
 mod entity;
@@ -19,6 +20,10 @@ pub mod test_db;
 
 pub use account::{
     account_by_id, create_password_account, discord_account, password_login, set_banned,
+};
+pub use admin::{
+    AdminRank, AuditEntry, AuditRow, admin_rank, audit_rows, insert_audit, remove_admin_rank,
+    set_admin_rank,
 };
 pub use character::{
     character_by_id, character_name_taken, characters_for_account, delete_character,
