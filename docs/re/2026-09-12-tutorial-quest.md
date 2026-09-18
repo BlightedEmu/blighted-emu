@@ -375,9 +375,46 @@ Live run 19:16-19:25Z (tutorial to the boss cave). Retail source: the tutorial l
   `CannotBeTargeted`, hostility (an AI target is an enemy). **Unknown:** which player-side,
   line-of-sight or score gate fails; one instrumented run must show it.
 
-## 13. Not done
+## 13. Combat and boss work of 2026-09-16 (after the second live video)
 
-- Thorpe's force-grab spells, transition fragment and charge; the spawner static's changes.
+Sources: the tutorial ledger, the game paks (`javelindata_damagetable*`,
+`javelindata_itemdefinitions_weapons`, the animation databases, `commander_controllerdefs.xml`,
+the creature slices) and Server.pak behavior trees. Not live-tested yet.
+
+- **Observed.** The blunderbuss fires through 2719 `RequestSpreadshot`; the server answers with
+  2570 (the request echo, the CRC-32 of `blunderbuss_primary_attack`, config 230 for six pellets)
+  and one pellet 2071 per hit. We ignored 2719, so the blunderbuss did no damage. Implemented.
+- **Observed.** Each weapon attack has a damage clip (`CAGE-Damage`) live for about 0.1 s and a
+  homing clip (radius 3.75 or 4.5 m, 45 or 60 degrees). Implemented as a wedge per weapon kind
+  (reach 1.6 to 2.6 m; the reaches are Inferred or our choice), hit in the middle of the damage
+  window after the press (light) or the release (heavy), up to 5 mobs (our choice). Scored on the
+  retail swings, a 1.6 m, ±45 degree wedge kept 67 of 67 retail hits.
+- **Observed.** Each weapon kind has its own damage rows (`Warhammer_PrimaryAttack`,
+  `Warhammer_HeavyAttack` 1.3, ...). Implemented.
+- **Observed.** The 1589 target row (row 3) holds the locked target. Retail locked on only from
+  the first legionnaire (202 s), never on the ship. Logged (`lock target`) and used to aim the
+  swing. **Unknown:** why our client did not lock on.
+- **Observed.** Creatures lunge in their swing until the bodies touch; all 17 retail mob hits
+  landed 0.79 to 1.65 m from the player. Implemented per creature (capsules: sailor 0.4, island
+  foes 0.5, Thorpe 0.7, player 0.4 m).
+- **Observed.** Thorpe's attacks: Stab 01/02, Swipe L/R (phase 1); Stab 02, Swipe R, Flurry (three
+  hits), Overhead (phase 2); cooldown 1.0 to 1.35 s after each; phase 2 does 2.2 x damage with a
+  fire part (3601 second item, tag 9; byte-checked with 513963). Fight tags `08 01 0b` until his
+  first reaction, `08 81 13` in phase 2. Implemented.
+- **Observed.** Force grab (every 11 to 12 s at a player 6.6 to 13 m away): fragment (47, 14,
+  0xb8), the table's spell slices `thorpe_force_grab_attach` and `thorpe_force_grab` with his id
+  and the player's place, then a pull to about 2 m in front of him 1735 ms into the grab.
+  Implemented; the pull is a plain position path. **Unknown:** whether the client needs the
+  slayer-state child (13 = 4) during the pull.
+- **Observed.** Transition: `Phase_Transition_1_to_2` for 10.4 s; a shockwave at +7748 ms (2218,
+  no 3601, the player 5 m back); then `Combat_Tell` and the shoulder charge (25.7 m/s, outro hit
+  0.38, half fire). Implemented; the push length (282 ms) is our choice.
+
+## 14. Not done
+
+- The spawner static's changes.
 - The 250 to 280 ms wait before regen after a water dash (cause **Unknown**).
 - The general formula of the stamina a blocked hit takes.
 - The additive reactions, child 42 of the alert state.
+- The body part of a player hit (2071 bytes 40-43, CRC-32 of the bone name): we always send the
+  torso, which retail sent on 25 of 70 hits.
