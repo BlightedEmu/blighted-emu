@@ -20,6 +20,8 @@ use crate::schema::check_schema;
 
 /// Extension of bundle and world files.
 const BIN_EXTENSION: &str = ".bin";
+/// Extension of a merged file while it is written; renamed when every file is written.
+const TEMP_EXTENSION: &str = "tmp";
 
 /// The folders of the design step.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,7 +117,9 @@ pub fn run_design(
 }
 
 /// Writes the merged bundle, the merged world files of `changed_maps`, and copies of the other
-/// retail world files. One world file is in memory at a time.
+/// retail world files. One world file is in memory at a time. Every file is first written under
+/// a temporary name; only when all are written are they renamed, so a failed write leaves the
+/// files from before (and no temporary file).
 fn write_merged(
     paths: &DesignPaths,
     client_build: &str,
@@ -125,18 +129,65 @@ fn write_merged(
     changed_maps: &BTreeSet<&str>,
 ) -> Result<(), DesignRunError> {
     std::fs::create_dir_all(&paths.out_dir)?;
-    bundle.save(&bundle_path(&paths.out_dir, client_build))?;
+    let mut written: Vec<PathBuf> = Vec::new();
+    let result = write_temp_files(
+        paths,
+        client_build,
+        set,
+        bundle,
+        maps,
+        changed_maps,
+        &mut written,
+    )
+    .and_then(|()| {
+        for target in &written {
+            std::fs::rename(temp_path(target), target)?;
+        }
+        Ok(())
+    });
+    if result.is_err() {
+        for target in &written {
+            // A temporary file that is already renamed or was never made is not there.
+            let _ = std::fs::remove_file(temp_path(target));
+        }
+    }
+    result
+}
+
+/// Writes each merged file under its temporary name; `written` gets each final path as soon as
+/// its temporary file is begun.
+fn write_temp_files(
+    paths: &DesignPaths,
+    client_build: &str,
+    set: &DesignSet,
+    bundle: &ContentBundle,
+    maps: &BTreeSet<String>,
+    changed_maps: &BTreeSet<&str>,
+    written: &mut Vec<PathBuf>,
+) -> Result<(), DesignRunError> {
+    let bundle_out = bundle_path(&paths.out_dir, client_build);
+    written.push(bundle_out.clone());
+    bundle.save(&temp_path(&bundle_out))?;
     for map in maps {
         let out = world_file_path(&paths.out_dir, client_build, map);
+        written.push(out.clone());
         if changed_maps.contains(map.as_str()) {
             let mut world = load_world(&paths.retail_dir, client_build, map)?;
             apply_world(set, map, &mut world);
-            world.save(&out, client_build)?;
+            world.save(&temp_path(&out), client_build)?;
         } else {
-            std::fs::copy(world_file_path(&paths.retail_dir, client_build, map), out)?;
+            std::fs::copy(
+                world_file_path(&paths.retail_dir, client_build, map),
+                temp_path(&out),
+            )?;
         }
     }
     Ok(())
+}
+
+/// The temporary name of a merged file: `<name>.tmp` in place of `<name>.bin`.
+fn temp_path(target: &Path) -> PathBuf {
+    target.with_extension(TEMP_EXTENSION)
 }
 
 fn load_world(dir: &Path, client_build: &str, map: &str) -> Result<WorldFile, DesignRunError> {
@@ -293,6 +344,23 @@ mod tests {
         spawn_file(&paths.design_dir, MAP, &key, "level = 66");
         let report = run_design(paths, BUILD, DesignMode::Check).unwrap();
         assert_eq!(report.errors.len(), 1, "{:?}", report.errors);
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_new_file() {
+        let folders = folders();
+        let paths = &folders.paths;
+        let world_out = world_file_path(&paths.out_dir, BUILD, MAP);
+        // A folder where the temporary world file goes makes that write fail after the bundle.
+        std::fs::create_dir_all(world_out.with_extension(TEMP_EXTENSION)).unwrap();
+        assert!(run_design(paths, BUILD, DesignMode::Write).is_err());
+        assert!(!bundle_path(&paths.out_dir, BUILD).exists());
+        assert!(!world_out.exists());
+        let temp_files = std::fs::read_dir(&paths.out_dir)
+            .unwrap()
+            .filter(|entry| entry.as_ref().unwrap().path().is_file())
+            .count();
+        assert_eq!(temp_files, 0);
     }
 
     #[test]
