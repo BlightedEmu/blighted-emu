@@ -32,6 +32,9 @@ const INDEX: &str = "index.html";
 const LIVE_PAGE: &str = "live.html";
 /// The live page.
 pub const LIVE_PAGE_ROUTE: &str = "/live";
+const STUDIO_PAGE: &str = "studio.html";
+/// The studio page.
+pub const STUDIO_PAGE_ROUTE: &str = "/studio";
 
 /// What every route shares.
 #[derive(Debug, Clone)]
@@ -80,6 +83,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             LIVE_PAGE_ROUTE,
             get(|| web_file(UrlPath(LIVE_PAGE.to_owned()))),
+        )
+        .route(
+            STUDIO_PAGE_ROUTE,
+            get(|| web_file(UrlPath(STUDIO_PAGE.to_owned()))),
         )
         .route("/web/{file}", get(web_file))
         .route("/api/world/info", get(world_info))
@@ -260,6 +267,21 @@ mod tests {
             (StatusCode::OK, Some(crate::assets::HTML))
         );
         assert!(String::from_utf8_lossy(&body).contains("/web/live.js"));
+    }
+
+    #[tokio::test]
+    async fn the_studio_page_is_served_at_studio() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (status, content_type, body) = get(app(dir.path()), STUDIO_PAGE_ROUTE).await;
+        assert_eq!(
+            (status, content_type.as_deref()),
+            (StatusCode::OK, Some(crate::assets::HTML))
+        );
+        assert!(String::from_utf8_lossy(&body).contains("/web/studio.js"));
+        for file in ["studio.js", "apply.js"] {
+            let (status, _, _) = get(app(dir.path()), &format!("/web/{file}")).await;
+            assert_eq!(status, StatusCode::OK, "{file}");
+        }
     }
 
     #[tokio::test]

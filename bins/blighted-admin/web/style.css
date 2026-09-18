@@ -444,3 +444,16 @@ summary.section-head:hover h2 { color: var(--accent); }
   #left, #right { border: 0; border-bottom: 1px solid var(--line); max-height: 40vh; }
   .centre .chart { flex: none; height: 360px; }
 }
+
+/* Studio: the Apply line (bar + word + detail) and the problem list. */
+.apply { display: flex; flex-direction: column; gap: 8px; padding: 14px var(--gutter); border-top: 2px solid var(--rule); border-bottom: 1px solid var(--line); }
+.apply p { margin: 0; }
+.apply b { font: 600 12px var(--font-sign); letter-spacing: 0.08em; text-transform: uppercase; color: var(--mute); }
+.apply-bar { height: 6px; background: var(--line); }
+.apply-bar i { display: block; height: 100%; width: calc(var(--done, 0) * 100%); background: var(--accent); transition: width 150ms var(--ease-out); }
+.apply[data-phase="done"] b { color: var(--state-ready); }
+.apply[data-phase="done"] .apply-bar i { background: var(--state-ready); }
+.apply[data-phase="failed"] b { color: var(--alert); }
+.apply[data-phase="failed"] .apply-bar i { background: var(--alert); }
+.problems-block { padding: 14px var(--gutter); }
+.problems li:not(.muted) { color: var(--alert); overflow-wrap: anywhere; }

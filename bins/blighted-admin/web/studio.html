@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Studio · Blighted Emu</title>
+  <link rel="stylesheet" href="/web/style.css">
+  <script src="/web/theme.js"></script>
+</head>
+<body>
+  <nav class="rail" aria-label="Pages">
+    <a href="/">Home</a>
+    <a href="/live">Live</a>
+    <a href="/studio" aria-current="page">Studio</a>
+    <a href="/web/map.html">Map</a>
+    <a href="/web/captures.html">Captures</a>
+    <button type="button" class="theme" id="theme"></button>
+  </nav>
+  <main class="work">
+    <header class="masthead">
+      <h1>Blighted Emu <span>· Studio</span></h1>
+      <div class="end">
+        <span class="status" id="status" role="status"></span>
+        <button type="button" id="check">Check</button>
+        <button type="button" id="apply">Apply</button>
+      </div>
+    </header>
+    <section class="apply" id="apply-line" data-phase="idle" aria-label="Apply">
+      <div class="apply-bar"><i id="apply-bar"></i></div>
+      <p><b id="apply-word">Idle</b> <span id="apply-detail" class="muted">Apply checks the design files, writes the merged content, and restarts the local world.</span></p>
+    </section>
+    <section class="problems-block" aria-label="Problems">
+      <div class="section-head"><h2>Problems</h2></div>
+      <ul class="list problems" id="problems"><li class="muted">None found.</li></ul>
+    </section>
+    <details class="players" open>
+      <summary class="section-head"><h2>Design files</h2><span class="status" id="files-count"></span></summary>
+      <div class="table-scroll">
+        <table class="grid">
+          <thead>
+            <tr><th>Kind</th><th>Id</th><th>Action</th><th>Map</th><th>File</th></tr>
+          </thead>
+          <tbody id="files"></tbody>
+        </table>
+      </div>
+    </details>
+  </main>
+  <script type="module" src="/web/studio.js"></script>
+</body>
+</html>
