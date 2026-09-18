@@ -144,6 +144,21 @@ const SIX_PELLET_CONFIG: u64 = 230;
 /// The pellet config id of the answer on eight-pellet shots (ranged note).
 const EIGHT_PELLET_CONFIG: u64 = 231;
 
+/// How long after the press of the attack key a swing hits (retail: 0.44 s; hits note). A long
+/// hold hits at its release.
+const SWING_HIT_MS: u64 = 440;
+
+/// A player swing that has not hit yet.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct PlayerSwing {
+    attacker: ConnectionRef,
+    /// The camera yaw of the input that swung.
+    facing: Option<f32>,
+    kind: AttackKind,
+    /// When it hits.
+    due_ms: u64,
+}
+
 /// Milliseconds per client input record (retail: 34 ms apart, median; input note).
 const INPUT_RECORD_MS: u16 = 33;
 /// The shortest hold of the attack key that is a heavy attack (input note: retail light holds
@@ -580,12 +595,12 @@ impl SimWorld {
     }
 
     /// Keeps whether the player holds block, starts a dodge roll on a new press of the dodge key
-    /// and a drink on a new press of quick slot 1 (the first, newest record), then gives one
-    /// result per rising edge of the attack bits in the records of `records` not read before,
-    /// oldest first: a record that sets any attack bit the record before it did not set (M6-B
-    /// spec section 6.1). The first edge attacks; the others of the same message are
-    /// [`AttackRefusal::TooFast`]. The bits and counter of the newest record carry over to the
-    /// next message. Nothing for a connection without a player.
+    /// and a drink on a new press of quick slot 1 (the first, newest record), then reads the
+    /// attacks (a press and its release) in the records of `records` not read before, oldest
+    /// first. The first attack swings: it hits [`SWING_HIT_MS`] after its press, at the latest
+    /// at `now_ms` ([`SimWorld::player_swings_due`]). The others of the same message are
+    /// [`AttackRefusal::TooFast`], which this returns. The counter of the newest record carries
+    /// over to the next message. Nothing for a connection without a player.
     pub fn attack_input(
         &mut self,
         connection: &ConnectionRef,
@@ -630,7 +645,10 @@ impl SimWorld {
                     .attack_pressed_at
                     .take()
                     .map_or(0, |pressed| counter.wrapping_sub(pressed));
-                attacks.push(AttackKind::of_hold(held_records));
+                attacks.push((
+                    AttackKind::of_hold(held_records),
+                    u64::from(held_records.saturating_mul(INPUT_RECORD_MS)),
+                ));
             }
         }
         let data = Arc::clone(&self.combat.data);
@@ -652,15 +670,38 @@ impl SimWorld {
         }
         // Every attack of one message has the same receive time, so only the first can hit: the
         // others are too fast, and a client cannot make the loop search for targets per record.
-        let Some(&first) = attacks.first() else {
+        let Some(&(kind, held_ms)) = attacks.first() else {
             return Vec::new();
         };
         let facing = records
             .first()
             .and_then(|newest| newest.bit_6)
             .map(|[yaw, _]| yaw);
-        std::iter::once(self.attack_nearest(connection, facing, first, now_ms))
-            .chain(attacks[1..].iter().map(|_| Err(AttackRefusal::TooFast)))
+        let pressed_ms = now_ms.saturating_sub(held_ms);
+        self.player_swings.push(PlayerSwing {
+            attacker: connection.clone(),
+            facing,
+            kind,
+            due_ms: pressed_ms.saturating_add(SWING_HIT_MS).max(now_ms),
+        });
+        attacks[1..]
+            .iter()
+            .map(|_| Err(AttackRefusal::TooFast))
+            .collect()
+    }
+
+    /// Lands the player swings due at `now_ms`: each hits the nearest mob in front of its
+    /// player then ([`SimWorld::attack_nearest`]).
+    pub(super) fn player_swings_due(
+        &mut self,
+        now_ms: u64,
+    ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
+        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.player_swings)
+            .into_iter()
+            .partition(|swing| now_ms >= swing.due_ms);
+        self.player_swings = later;
+        due.into_iter()
+            .map(|swing| self.attack_nearest(&swing.attacker, swing.facing, swing.kind, now_ms))
             .collect()
     }
 
@@ -1128,20 +1169,40 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_is_one_light_attack() {
+    fn a_tap_is_one_light_attack_that_hits_after_the_swing_time() {
+        // The tap's press came one record before its release.
+        const HELD_MS: u64 = INPUT_RECORD_MS as u64;
         let mut world = awake_fight();
-        let results = world.attack_input(
+        let refused = world.attack_input(
             &connection(1),
             &message(1, &[Key::Press, Key::Release]),
             NOW,
         );
+        assert!(refused.is_empty());
+        let due = NOW - HELD_MS + SWING_HIT_MS;
+        assert!(
+            world.player_swings_due(due - 1).is_empty(),
+            "still swinging"
+        );
         assert_eq!(
-            results,
+            world.player_swings_due(due),
             vec![Ok(AttackOutcome::Hit {
                 target: mob(),
                 amount: SWORD_HIT
             })]
         );
+        assert!(world.player_swings_due(due).is_empty(), "it hits once");
+    }
+
+    #[test]
+    fn a_long_hold_hits_at_its_release() {
+        const HOLD_RECORDS: usize = 20;
+        let mut world = awake_fight();
+        let mut keys = vec![Key::Press];
+        keys.extend(std::iter::repeat_n(Key::Hold, HOLD_RECORDS));
+        keys.push(Key::Release);
+        world.attack_input(&connection(1), &message(1, &keys), NOW);
+        assert_eq!(world.player_swings_due(NOW).len(), 1);
     }
 
     #[test]
@@ -1155,11 +1216,13 @@ mod tests {
     fn a_press_attacks_at_its_release_in_a_later_message() {
         let mut world = awake_fight();
         let pressed = message(1, &[Key::Press, Key::Hold]);
-        assert!(world.attack_input(&connection(1), &pressed, NOW).is_empty());
+        world.attack_input(&connection(1), &pressed, NOW);
+        assert!(world.player_swings_due(NOW + SWING_HIT_MS).is_empty());
         let released = message(3, &[Key::Release]);
+        world.attack_input(&connection(1), &released, NOW + INTERVAL_MS);
         assert_eq!(
             world
-                .attack_input(&connection(1), &released, NOW + INTERVAL_MS)
+                .player_swings_due(NOW + INTERVAL_MS + SWING_HIT_MS)
                 .len(),
             1
         );
@@ -1169,13 +1232,15 @@ mod tests {
     fn an_older_copy_is_not_read_again() {
         let mut world = awake_fight();
         let tap = message(5, &[Key::Press, Key::Release]);
-        assert_eq!(world.attack_input(&connection(1), &tap, NOW).len(), 1);
+        world.attack_input(&connection(1), &tap, NOW);
+        assert_eq!(world.player_swings_due(NOW + SWING_HIT_MS).len(), 1);
         // The next message repeats records 5 and 6 after the new record 7.
         let mut next = message(7, &[Key::Hold]);
         next.extend(tap);
+        world.attack_input(&connection(1), &next, NOW + INTERVAL_MS);
         assert!(
             world
-                .attack_input(&connection(1), &next, NOW + INTERVAL_MS)
+                .player_swings_due(NOW + INTERVAL_MS + SWING_HIT_MS)
                 .is_empty()
         );
     }
@@ -1197,11 +1262,11 @@ mod tests {
         );
         assert_eq!(
             world.attack_input(&connection(2), &records, NOW),
-            vec![
-                Err(AttackRefusal::NoTarget),
-                Err(AttackRefusal::TooFast),
-                Err(AttackRefusal::TooFast)
-            ]
+            vec![Err(AttackRefusal::TooFast), Err(AttackRefusal::TooFast)]
+        );
+        assert_eq!(
+            world.player_swings_due(NOW + SWING_HIT_MS),
+            vec![Err(AttackRefusal::NoTarget)]
         );
     }
 

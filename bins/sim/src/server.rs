@@ -760,6 +760,9 @@ impl Loop {
         for hit in output.mob_hits {
             self.attack_result(Ok(hit));
         }
+        for result in output.player_attacks {
+            self.attack_result(result);
+        }
         for death in &output.deaths {
             metrics::counter!(METRIC_DEATHS, KIND_LABEL => PLAYER_KIND).increment(1);
             self.save(death);

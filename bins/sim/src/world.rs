@@ -76,9 +76,9 @@ use statics::{
     chest_gather_started, facet_of, interactor_target,
 };
 
-use attack::Vitals;
+use attack::{PlayerSwing, Vitals};
 
-use crate::combat::{AttackOutcome, CombatSettings};
+use crate::combat::{AttackOutcome, AttackRefusal, CombatSettings};
 use crate::login::{
     SessionIds, WorldIds, level_change_messages, login_level_info, login_messages, phase_id,
     time_answers,
@@ -272,6 +272,8 @@ pub struct TickOutput {
     pub ghosts: Vec<(BusId, Vec<Ghost>)>,
     /// What the mobs' hits on players did this tick.
     pub mob_hits: Vec<AttackOutcome>,
+    /// What the players' swings that landed this tick did.
+    pub player_attacks: Vec<Result<AttackOutcome, AttackRefusal>>,
     /// Players who died since the last tick, to save at once (M6-A spec section 8).
     pub deaths: Vec<Departure>,
     /// Time of the mob part of the tick, in seconds.
@@ -474,6 +476,8 @@ pub struct SimWorld {
     /// Mob swings that have not hit yet: the time they hit, the server time they started, and
     /// the swing.
     swings: Vec<(u64, u64, MobAttackIntent)>,
+    /// Player swings that have not hit yet.
+    player_swings: Vec<PlayerSwing>,
 }
 
 /// A new player before it is in the world.
@@ -531,6 +535,7 @@ impl SimWorld {
             combat_messages: Vec::new(),
             drinks: Vec::new(),
             swings: Vec::new(),
+            player_swings: Vec::new(),
             combat,
             world: World::new(),
             by_connection: HashMap::new(),
@@ -1144,6 +1149,7 @@ impl SimWorld {
         let intents = self.swings_landing(swings, now_ms, server_time);
         let mob_hits = self.mob_hits(intents, now_ms);
         let mob_seconds = mobs_started.elapsed().as_secs_f64();
+        let player_attacks = self.player_swings_due(now_ms);
         self.tick_tutorials(now_ms);
         self.tick_quests(now_ms);
         self.drink_due(now_ms, server_time);
@@ -1156,6 +1162,7 @@ impl SimWorld {
             handoffs,
             ghosts,
             mob_hits,
+            player_attacks,
             deaths: std::mem::take(&mut self.deaths),
             mob_seconds,
             bundle_members: bundled.members,
