@@ -1471,7 +1471,10 @@ impl SimWorld {
     }
 
     /// Moves the players that the server moves at `now_ms` along their pushes; a push that got
-    /// to its end stops at the next tick, after the own state that sent its end.
+    /// to its end stops at the next tick, after the own state that sent its end. The end goes as
+    /// a server move too, which a moving client takes (live 2026-09-18: a running player
+    /// followed 1 of 5 grab pulls; retail also set slayer-state children whose meaning is
+    /// Unknown).
     fn tick_pushes(&mut self, now_ms: u64) {
         let limits = &self.settings.limits;
         let mut query = self.world.query::<(&mut Player, &mut Body)>();
@@ -1493,10 +1496,12 @@ impl SimWorld {
                 z: along(push.from.z, push.to.z),
             };
             body.motion = Motion::new(at, now_ms, limits);
-            player.push = Some(Push {
-                arrived: share >= 1.0,
-                ..push
-            });
+            let arrived = share >= 1.0;
+            if arrived {
+                player.moved = true;
+                player.move_facing = None;
+            }
+            player.push = Some(Push { arrived, ..push });
         }
     }
 
@@ -2531,11 +2536,14 @@ impl Neighbourhood<'_> {
                 };
                 // Every own state carries the own clock. A moving player's body is an estimate that
                 // errs by about 1 m: sent, it pulled the client back and forth (live 2026-09-16,
-                // 1.0 to 1.6 m jumps at the beach bag), so it goes only while the player stands.
+                // 1.0 to 1.6 m jumps at the beach bag), so it goes only while the player stands,
+                // and not while its moves are refused: that body is the last good one, behind
+                // the client (live 2026-09-18: 529 refused moves while running and dodging).
                 let plain_tick = own_card != OwnCard::Spawn && teleport.is_none();
                 let tick = OwnTick {
                     since_spawn_ms,
-                    with_position: !player.moving || player.push.is_some(),
+                    with_position: (!player.moving && player.refused_since_ms.is_none())
+                        || player.push.is_some(),
                     clear_throttle: plain_tick && !player.throttle_cleared,
                 };
                 if tick.clear_throttle {
@@ -2945,6 +2953,10 @@ mod tests {
         assert!((at(&world).x - (MOB_X + 3.0)).abs() < 1e-3, "halfway");
         world.tick_pushes(NOW + SHOVE_MS);
         assert!((at(&world).x - (MOB_X + 2.0)).abs() < 1e-3, "2 m in front");
+        assert!(
+            world.world.get::<Player>(entity).expect("player").moved,
+            "the end goes as a server move"
+        );
         world.tick_pushes(NOW + SHOVE_MS + 1);
         assert!(
             world
@@ -3334,6 +3346,55 @@ mod tests {
             health_changes(&mut world, card_at + 132).is_empty(),
             "sent once"
         );
+    }
+
+    #[test]
+    fn a_refused_move_holds_the_own_position_until_a_move_is_taken() {
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        world
+            .admit(&admit_at(1, CELL_M / 2.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let entity = world.player_by_number(1).expect("player");
+        world
+            .world
+            .get_mut::<Vitals>(entity)
+            .expect("vitals")
+            .spawned = true;
+        let card_at = NOW + OWN_CARD_DELAY_MS;
+        tick(&mut world, card_at);
+        let own_positions = |world: &mut SimWorld, now: u64| {
+            let messages = tick(world, now).messages;
+            bundle_of(&messages, &connection(1))
+                .map(|bundle| SlotRead::of(&bundle).expect("read").updates)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(SlotUpdate::is_local_player)
+                .flat_map(|update| update.members)
+                .filter_map(|member| match member.state {
+                    MemberState::Alc(alc) => Some(alc.pos10.is_some()),
+                    _ => None,
+                })
+                .collect::<Vec<bool>>()
+        };
+        let start = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let far = Position {
+            x: start.x + 1_000.0,
+            ..start
+        };
+        assert!(world.move_to(&connection(1), far, card_at + 1).is_err());
+        assert_eq!(own_positions(&mut world, card_at + 33), vec![false]);
+        let near = Position {
+            x: start.x + 0.5,
+            ..start
+        };
+        assert!(world.move_to(&connection(1), near, card_at + 300).is_ok());
+        assert_eq!(own_positions(&mut world, card_at + 333), vec![true]);
     }
 
     #[test]
@@ -4079,8 +4140,20 @@ mod tests {
             Err(MoveError::Refused(MoveRefusal::TooFast))
         );
         let outgoing = tick(&mut world, later).messages;
-        let (_, own_x) = positions_seen_by(&world, &outgoing, &a)[0];
-        assert!((own_x - SPEED_MPS).abs() < CLOSE_M);
+        assert!(
+            positions_seen_by(&world, &outgoing, &a)
+                .iter()
+                .all(|(entity, _)| *entity != 1),
+            "no own position while its moves are refused"
+        );
+        let (_, seen_x) = positions_seen_by(&world, &outgoing, &b)
+            .into_iter()
+            .find(|(entity, _)| *entity == 1)
+            .expect("b sees a");
+        assert!(
+            (seen_x - SPEED_MPS).abs() < CLOSE_M,
+            "others see the last good move"
+        );
         assert_eq!(
             world.move_to(&connection(9), at(1.0), later),
             Err(MoveError::NotInWorld)
