@@ -137,6 +137,8 @@ pub(super) struct Animations {
     phase_two_tags: Option<[u8; FRAG_TAGS_LEN]>,
     /// How long its light and heavy reactions play.
     reaction_ms: (u64, u64),
+    /// The scope ticks of its death fragment: its dead states carry the ticks until then.
+    death_ticks: u32,
 }
 
 impl Animations {
@@ -194,6 +196,7 @@ const FTUE_SAILOR: Animations = Animations {
     alert_after_hurt: false,
     phase_two_tags: None,
     reaction_ms: CREATURE_REACTION_MS,
+    death_ticks: SAILOR_DEATH_TICKS,
 };
 /// The legionnaire and the signifier (`Legion_Legionnaire_FTUE`; creature-animation note,
 /// section 1). Retail's chase uses action 13 with the `Move_Combat` fragment.
@@ -216,6 +219,7 @@ const FTUE_LEGIONNAIRE: Animations = Animations {
     alert_after_hurt: false,
     phase_two_tags: None,
     reaction_ms: CREATURE_REACTION_MS,
+    death_ticks: LEGION_DEATH_TICKS,
 };
 /// The corruption swarmer (`Corruption_Entity_Crawler_FTUE`; creature-animation note, section 2).
 /// Its combat idle and reactions were never seen (each died from one hit): it stands in its idle
@@ -239,6 +243,7 @@ const FTUE_SWARMER: Animations = Animations {
     alert_after_hurt: false,
     phase_two_tags: None,
     reaction_ms: CREATURE_REACTION_MS,
+    death_ticks: SWARMER_DEATH_TICKS,
 };
 /// The risen corruption entity (`Corruption_Entity`; creature-animation note, section 3). Retail
 /// never sent a plain idle: it rummages.
@@ -261,6 +266,7 @@ const FTUE_RISEN: Animations = Animations {
     alert_after_hurt: false,
     phase_two_tags: None,
     reaction_ms: CREATURE_REACTION_MS,
+    death_ticks: RISEN_DEATH_TICKS,
 };
 /// Thorpe (`Damned_Commander_FTUE`; creature-animation note, section 4). He never stands idle:
 /// he strafes between attacks.
@@ -285,7 +291,17 @@ const FTUE_THORPE: Animations = Animations {
         0x08, 0x81, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ]),
     reaction_ms: THORPE_REACTION_MS,
+    death_ticks: THORPE_DEATH_TICKS,
 };
+/// The last scope tick of each creature's death fragment in its retail dead states (dead-mob
+/// note: sailor 0x38, legionnaire 0x32, risen 0x49, Thorpe 0x64). The swarmer's is Unknown: our
+/// choice, the legionnaire's.
+const SAILOR_DEATH_TICKS: u32 = 0x38;
+const LEGION_DEATH_TICKS: u32 = 0x32;
+const RISEN_DEATH_TICKS: u32 = 0x49;
+const THORPE_DEATH_TICKS: u32 = 0x64;
+const SWARMER_DEATH_TICKS: u32 = LEGION_DEATH_TICKS;
+
 /// The creature slices of the tutorial's mobs, with their fragments.
 const CREATURES: [([u8; 16], &Animations); 6] = [
     (
@@ -684,14 +700,16 @@ impl MobTimeline {
         }
         let ticks = self.ticks_at(now_ms);
         let high_changed = ticks >> u8::BITS != self.ticks >> u8::BITS;
-        // Retail sends only the number and time after the death fragment.
+        // A dead mob's states carry the ticks until its death fragment ends, then only the number
+        // and time (retail sailor to tick 0x38, legionnaire 0x32; without them the client played
+        // the death again at each state, live 2026-09-18).
         let scope = animations.and_then(|animations| {
             if changed {
                 Some(StepScope::Changed(
                     self.animation(animations, now_ms, facing_gap),
                 ))
             } else {
-                (!pose.dead).then_some(StepScope::Ticks {
+                (!pose.dead || ticks <= animations.death_ticks).then_some(StepScope::Ticks {
                     ticks,
                     high_changed,
                     look_pose_seconds: animations
@@ -1228,7 +1246,7 @@ mod tests {
     }
 
     #[test]
-    fn the_anchor_moves_on_after_a_minute_and_a_dead_mob_sends_only_its_clock() {
+    fn the_anchor_moves_on_after_a_minute_and_a_dead_mob_plays_out_its_death() {
         let mut timelines = MobTimelines::default();
         let idle = pose(1.0, MobState::Idle);
         timelines.advance(MOB, START, &idle, Some(&FTUE_SAILOR));
@@ -1249,7 +1267,7 @@ mod tests {
             scope_entry(&death).map(|entry| entry.fragment),
             Some(FTUE_SAILOR.death.fragment)
         );
-        let after = timelines
+        let dying = timelines
             .advance(
                 MOB,
                 later + TICK_MS + DEAD_STATE_MS,
@@ -1258,7 +1276,21 @@ mod tests {
             )
             .step
             .expect("due");
-        assert_eq!(after.scope, None);
+        assert!(
+            matches!(dying.scope, Some(StepScope::Ticks { .. })),
+            "the death fragment's ticks go on"
+        );
+        let death_ms = u64::from(SAILOR_DEATH_TICKS) * MS_PER_SECOND / TICKS_PER_SECOND;
+        let after = timelines
+            .advance(
+                MOB,
+                later + TICK_MS + death_ms + DEAD_STATE_MS,
+                &dead,
+                Some(&FTUE_SAILOR),
+            )
+            .step
+            .expect("due");
+        assert_eq!(after.scope, None, "then only the clock");
         timelines.keep_only(&HashSet::new());
         let again = timelines.advance(MOB, later, &idle, None);
         assert_eq!(
