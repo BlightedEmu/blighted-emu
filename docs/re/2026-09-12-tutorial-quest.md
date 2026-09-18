@@ -339,7 +339,43 @@ Times are ms from the first record of the retail tutorial capture.
   Not sent: 54:100 (`replicatedHideLevel` of the name tag, 1 during the gather; not part of the
   gather, and our player card has no component 54).
 
-## 12. Not done
+## 12. Live test of 2026-09-16 and its fixes
+
+Live run 19:16-19:25Z (tutorial to the boss cave). Retail source: the tutorial ledger.
+
+- **Observed.** The FTUE heightmaps are 1024 x 1024 (one sample per metre, `regionSize` 1024); the
+  map tool read only 2048 x 2048, so the tutorial world file had no terrain. Their raw / 64 puts
+  the retail creatures' cards 0.5 to 1.1 m above the ground (Inferred: `mountainHeight` 1024).
+  The tool now reads both sizes and stores every grid at 32 units per metre.
+- **Observed.** Retail creatures do not follow the height map. About 50 to 100 ms after the card
+  each drops to its fight's floor and stays on it: ship deck 89.42, ruin top 26.45, courtyard
+  20.33, risen and swarmers 21.36, Thorpe 22.21 (his arena has no terrain). Our mobs kept their
+  card z (0.4 to 1.0 m higher; floating). Tutorial mobs now spawn on these floors and keep them.
+- **Observed.** Our 3601 sent zeros. Retail: attacker facet entity, flags `02 00`, damage / max
+  health as `f32`, the attacker's x, y, z, item tag (sailor 6, legion 5, risen 6, swarmer 4,
+  Thorpe 4) and scale (sailor 0.6006, others 0.5612). Sent now. **Inferred:** our zeros made the
+  client stagger the player at every hit (hammer swings every 2.5 to 3 s; retail hits do not
+  break a swing).
+- **Observed.** Each 1589 repeats older records with fewer mask bits (counters 7290, 7289, 7288);
+  read newest to oldest they made a false attack edge in nearly every message. Each record now
+  counts once, oldest first, by its counter.
+- **Observed.** Retail dropped a creature's swing when a player hit made it reel before the swing
+  landed (205594, 207659, 296654, 305722); retail hits landed 0.77 to 2.19 m from the body. A
+  reeled mob's swing now drops, and a swing misses beyond its gait's swing start + 1 m.
+- **Observed.** `PotionHealthT1` has no `ItemStatsRef`, so the heal lookup by stats never found
+  it. Consumables are now found by their own id (400 + 10 %, cooldown 25 s).
+- **Observed.** Retail has no health regen in the tutorial (health only falls, except the potion);
+  open-world regen starts about 3 s after the exit (rule **Unknown**).
+- **Observed.** The boss cutscene (6703 `c723c42d`) is started by the client when component 10 of
+  `ftue_v2_enc_thorpe` turns active. Our area trigger (asset 15) was hidden 2.1 s before its
+  `010108` change, so the change was lost. A hide now follows the last change before it.
+  **Unknown:** whether the lost change was the cause.
+- **Observed.** The client lock test (`FUN_142c866e0`) passes every gate that reads mob data:
+  vitals bits from `vitalsData` head (1 dead, 2 deaths door), game-mode flag 26
+  `CannotBeTargeted`, hostility (an AI target is an enemy). **Unknown:** which player-side,
+  line-of-sight or score gate fails; one instrumented run must show it.
+
+## 13. Not done
 
 - Thorpe's force-grab spells, transition fragment and charge; the spawner static's changes.
 - The 250 to 280 ms wait before regen after a water dash (cause **Unknown**).
