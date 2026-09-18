@@ -36,7 +36,7 @@ use super::mob_timeline::yaw_toward;
 use super::stamina::Dodge;
 use super::{Body, MESSAGE_CHANNEL, Outgoing, Player, Position, SimWorld};
 use crate::combat::{AttackOutcome, AttackRefusal, RemoteHit, RespawnRefusal};
-use crate::mobs::{Capsule, MobAttackIntent, spawn_index};
+use crate::mobs::{Capsule, MobAttackIntent, MoveHit, MoveStrike, spawn_index};
 
 /// How high above the sea a player still swims (Inferred: retail swam at 0.0 to 1.55 m above the
 /// tutorial's sea and walked onto the beach at 3.5 m).
@@ -139,6 +139,18 @@ const EIGHT_PELLETS: usize = 8;
 const SIX_PELLET_CONFIG: u64 = 230;
 /// The pellet config id of the answer on eight-pellet shots (ranged note).
 const EIGHT_PELLET_CONFIG: u64 = 231;
+
+/// A mob swing that has not hit yet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct PendingMobSwing {
+    /// When it hits.
+    lands_ms: u64,
+    /// The server time it started.
+    started_ms: u64,
+    swing: MobAttackIntent,
+    /// The hit of its move, when the mob has moves.
+    hit: Option<MoveHit>,
+}
 
 /// Where a player aims a swing.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -938,6 +950,20 @@ impl SimWorld {
         threat: u64,
         now_ms: u64,
     ) -> Option<AttackOutcome> {
+        self.apply_hit_with(target, attacker, amount, threat, now_ms, None)
+    }
+
+    /// [`SimWorld::apply_hit`] of a hit of a mob move `strike`: a player's 3601 carries the
+    /// move's item tag and, in a second phase, the fire part as a second item.
+    fn apply_hit_with(
+        &mut self,
+        target: u64,
+        attacker: u64,
+        amount: u32,
+        threat: u64,
+        now_ms: u64,
+        strike: Option<&MoveStrike>,
+    ) -> Option<AttackOutcome> {
         if spawn_index(target).is_some() {
             let mob = self.mobs.get_mut(target)?;
             if mob.health.is_dead() || !hurt(&mut mob.brain, attacker, threat, now_ms) {
@@ -972,13 +998,21 @@ impl SimWorld {
         if damage == Damage::AlreadyDead {
             return None;
         }
+        let total = amount_of(amount);
+        let fire_share = strike
+            .filter(|strike| strike.phase_two.is_some())
+            .map_or(0.0, |strike| strike.hit.fire_share as f32);
         let melee = MeleeDamage {
             attacker,
-            amount: amount_of(amount),
+            amount: total * (1.0 - fire_share),
             max_health,
             attacker_at,
-            tag,
+            tag: strike.map_or(tag, |strike| strike.tag),
             scale,
+            fire: strike
+                .and_then(|strike| strike.phase_two)
+                .filter(|_| fire_share > 0.0)
+                .map(|(_, fire_tag)| (fire_tag, total * fire_share)),
         };
         self.send_reliable(
             connection.clone(),
@@ -1026,24 +1060,45 @@ impl SimWorld {
         started: Vec<MobAttackIntent>,
         now_ms: u64,
         server_ms: u64,
-    ) -> Vec<MobAttackIntent> {
+    ) -> Vec<(MobAttackIntent, Option<MoveHit>)> {
         for swing in started {
-            self.mob_timelines.attacked(swing.mob);
-            let lands_ms = now_ms.saturating_add(self.mobs.hit_delay_ms(swing.mob));
-            self.swings.push((lands_ms, server_ms, swing));
+            let pending = |lands_after_ms: u64, hit| PendingMobSwing {
+                lands_ms: now_ms.saturating_add(lands_after_ms),
+                started_ms: server_ms,
+                swing,
+                hit,
+            };
+            match swing.mob_move {
+                Some(mob_move) => {
+                    self.mob_timelines
+                        .play(swing.mob, mob_move.fragment, mob_move.length_ms);
+                    for hit in mob_move.hits {
+                        self.swings.push(pending(hit.at_ms, Some(*hit)));
+                    }
+                }
+                None => {
+                    self.mob_timelines.attacked(swing.mob);
+                    self.swings
+                        .push(pending(self.mobs.hit_delay_ms(swing.mob), None));
+                }
+            }
         }
         let (landing, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.swings)
             .into_iter()
-            .partition(|(lands_ms, _, _)| now_ms >= *lands_ms);
+            .partition(|pending| now_ms >= pending.lands_ms);
         self.swings = later;
         landing
             .into_iter()
             // A mob that died or reeled from a player's hit before its swing landed does not hit.
-            .filter(|(_, started_ms, swing)| {
-                self.mobs.health(swing.mob).is_some_and(|health| health > 0)
-                    && !self.mob_timelines.reeled_since(swing.mob, *started_ms)
+            .filter(|pending| {
+                self.mobs
+                    .health(pending.swing.mob)
+                    .is_some_and(|health| health > 0)
+                    && !self
+                        .mob_timelines
+                        .reeled_since(pending.swing.mob, pending.started_ms)
             })
-            .map(|(_, _, swing)| swing)
+            .map(|pending| (pending.swing, pending.hit))
             .collect()
     }
 
@@ -1090,16 +1145,32 @@ impl SimWorld {
     /// sim.
     pub(super) fn mob_hits(
         &mut self,
-        intents: Vec<MobAttackIntent>,
+        intents: Vec<(MobAttackIntent, Option<MoveHit>)>,
         now_ms: u64,
     ) -> Vec<AttackOutcome> {
         let armor_share = self.combat.player_armor_share;
         intents
             .into_iter()
-            .filter_map(|intent| {
+            .filter_map(|(intent, move_hit)| {
                 let mob = self.mobs.get_mut(intent.mob)?;
                 let at = mob.brain.position();
-                let hit = mob_hit(&mob.attack, armor_share);
+                let mut hit = mob_hit(&mob.attack, armor_share);
+                let strike = move_hit
+                    .zip(intent.mob_move)
+                    .map(|(hit, mob_move)| MoveStrike {
+                        hit,
+                        tag: mob_move.tag,
+                        phase_two: self
+                            .mobs
+                            .phase_two(intent.mob)
+                            .map(|phase| (phase.damage_mult, phase.fire_tag)),
+                    });
+                if let Some(strike) = &strike {
+                    let mult = strike.phase_two.map_or(1.0, |(mult, _)| mult);
+                    let scaled = f64::from(hit.amount) * strike.hit.damage_scale * mult;
+                    // A hit of a few hundred points.
+                    hit.amount = scaled.round() as u32;
+                }
                 tracing::debug!(
                     mob = intent.mob,
                     target = intent.target,
@@ -1125,7 +1196,10 @@ impl SimWorld {
                     if now_ms < vitals.dodging_until_ms {
                         return None;
                     }
-                    let block_stamina = self.mobs.block_stamina(intent.mob);
+                    let block_stamina = strike.map_or_else(
+                        || self.mobs.block_stamina(intent.mob),
+                        |strike| strike.hit.block_stamina,
+                    );
                     let mut player = self.world.get_mut::<Player>(entity)?;
                     // A block holds while the player has stamina; the hit takes some of it (Inferred:
                     // retail never let a blocked hit find the stamina at 0).
@@ -1141,7 +1215,14 @@ impl SimWorld {
                     if blocked {
                         return None;
                     }
-                    return self.apply_hit(intent.target, intent.mob, hit.amount, 0, now_ms);
+                    return self.apply_hit_with(
+                        intent.target,
+                        intent.mob,
+                        hit.amount,
+                        0,
+                        now_ms,
+                        strike.as_ref(),
+                    );
                 }
                 let (owner, ghost) = self.ghost(intent.target)?;
                 let owner = owner.clone();
@@ -1810,6 +1891,8 @@ mod tests {
             hit_scale: 1.0,
             capsule: crate::mobs::DEFAULT_MOB_CAPSULE,
             reach: None,
+            moves: &[],
+            phase_two: None,
         };
         let mob = world
             .mobs
@@ -1823,6 +1906,7 @@ mod tests {
                 y: 10.0,
                 z: 50.0,
             },
+            mob_move: None,
         };
         assert!(
             world
@@ -1836,7 +1920,7 @@ mod tests {
         );
         assert_eq!(
             world.swings_landing(Vec::new(), NOW + DELAY_MS, SERVER_TIME),
-            [swing]
+            [(swing, None)]
         );
         assert!(
             world
@@ -1858,14 +1942,19 @@ mod tests {
                 y: 10.0,
                 z: 50.0,
             },
+            mob_move: None,
         };
         assert!(
-            world.mob_hits(vec![swing(2, MOB_X + 10.0)], NOW).is_empty(),
+            world
+                .mob_hits(vec![(swing(2, MOB_X + 10.0), None)], NOW)
+                .is_empty(),
             "10 m away"
         );
         assert!(messages_to(&world.take_messages(), 2).is_empty());
         assert_eq!(
-            world.mob_hits(vec![swing(1, MOB_X + 2.0)], NOW).len(),
+            world
+                .mob_hits(vec![(swing(1, MOB_X + 2.0), None)], NOW)
+                .len(),
             1,
             "2 m away"
         );
@@ -1891,6 +1980,8 @@ mod tests {
             hit_scale: 1.0,
             capsule: crate::mobs::DEFAULT_MOB_CAPSULE,
             reach: Some(REACH),
+            moves: &[],
+            phase_two: None,
         };
         // Player 1 stands 3 m east of the paced mob: out of its 1.4 m reach until it lunges.
         let mut world = fight_at(MOB_X + 3.0);
@@ -1907,17 +1998,28 @@ mod tests {
             mob,
             target: 1,
             target_at: at(aimed_x),
+            mob_move: None,
         };
-        assert_eq!(world.mob_hits(vec![swing(MOB_X + 3.0)], NOW).len(), 1);
+        assert_eq!(
+            world.mob_hits(vec![(swing(MOB_X + 3.0), None)], NOW).len(),
+            1
+        );
         let lunged = world.mobs.get_mut(mob).expect("mob").brain.position();
         // It lunges its longest 2 m, which leaves 1 m to the player.
         assert!((at(MOB_X + 3.0).horizontal_distance(lunged) - 1.0).abs() < 1e-3);
         // Next to the player, it stops where the bodies touch: 0.5 + 0.4 m.
-        assert_eq!(world.mob_hits(vec![swing(MOB_X + 3.0)], NOW).len(), 1);
+        assert_eq!(
+            world.mob_hits(vec![(swing(MOB_X + 3.0), None)], NOW).len(),
+            1
+        );
         let touching = world.mobs.get_mut(mob).expect("mob").brain.position();
         assert!((at(MOB_X + 3.0).horizontal_distance(touching) - 0.9).abs() < 1e-3);
         // Aimed west of itself, the player east is beyond its lunge turn and behind its wedge.
-        assert!(world.mob_hits(vec![swing(MOB_X - 10.0)], NOW).is_empty());
+        assert!(
+            world
+                .mob_hits(vec![(swing(MOB_X - 10.0), None)], NOW)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1989,6 +2091,130 @@ mod tests {
             now += TICK_MS;
             assert!(now < NOW + LONG_AFTER_MS, "the mob never hit");
         }
+    }
+
+    /// A fight with a boss beside player 1: one move of two hits, and a second phase with
+    /// double damage and a fire half.
+    fn boss_fight() -> (SimWorld, u64, MobAttackIntent) {
+        const HITS: [MoveHit; 2] = [
+            MoveHit {
+                at_ms: 300,
+                damage_scale: 1.0,
+                fire_share: 0.5,
+                block_stamina: 10.0,
+            },
+            MoveHit {
+                at_ms: 900,
+                damage_scale: 0.5,
+                fire_share: 0.5,
+                block_stamina: 10.0,
+            },
+        ];
+        const MOVE: crate::mobs::MobMove = crate::mobs::MobMove {
+            fragment: crate::mobs::MoveFragment {
+                fragment: 53,
+                action: 19,
+                tail: 0x8e,
+            },
+            length_ms: 2_800,
+            hits: &HITS,
+            tag: 4,
+        };
+        const MOVES: [crate::mobs::MobMove; 1] = [MOVE];
+        let pace = crate::mobs::Pace {
+            attack_factor: 1.0,
+            swing_gap_ms: (1_000, 1_000),
+            speed_mps: 5.5,
+            hit_delay_ms: 0,
+            block_stamina: crate::mobs::DEFAULT_BLOCK_STAMINA,
+            gait: nw_sim_core::Gait::uniform(3.0, 5.5),
+            sight_m: 20.0,
+            hit_tag: crate::mobs::DEFAULT_HIT_TAG,
+            hit_scale: 1.0,
+            capsule: crate::mobs::DEFAULT_MOB_CAPSULE,
+            reach: None,
+            moves: &MOVES,
+            phase_two: Some(crate::mobs::PhaseTwo {
+                moves: &MOVES,
+                damage_mult: 2.0,
+                fire_tag: 9,
+            }),
+        };
+        let mut world = fight();
+        let boss = world
+            .mobs
+            .spawn_personal(test_spawn(MOB_X), 1, false, Some(pace), None, NOW)
+            .expect("rows");
+        let swing = MobAttackIntent {
+            mob: boss,
+            target: 1,
+            target_at: Position {
+                x: MOB_X + 2.0,
+                y: 10.0,
+                z: 50.0,
+            },
+            mob_move: Some(MOVE),
+        };
+        (world, boss, swing)
+    }
+
+    #[test]
+    fn each_hit_of_a_move_lands_at_its_time() {
+        let (mut world, _, swing) = boss_fight();
+        assert!(
+            world
+                .swings_landing(vec![swing], NOW, SERVER_TIME)
+                .is_empty()
+        );
+        let first = world.swings_landing(Vec::new(), NOW + 300, SERVER_TIME);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].1.map(|hit| hit.at_ms), Some(300));
+        assert!(
+            world
+                .swings_landing(Vec::new(), NOW + 899, SERVER_TIME)
+                .is_empty()
+        );
+        let second = world.swings_landing(Vec::new(), NOW + 900, SERVER_TIME);
+        assert_eq!(second[0].1.map(|hit| hit.at_ms), Some(900));
+    }
+
+    #[test]
+    fn a_second_phase_hit_is_larger_and_half_fire() {
+        let (mut world, boss, swing) = boss_fight();
+        let hit = swing.mob_move.expect("move").hits[0];
+        let first_phase = world.mob_hits(vec![(swing, Some(hit))], NOW);
+        let [AttackOutcome::Hit { amount: base, .. }] = first_phase.as_slice() else {
+            panic!("a hit: {first_phase:?}");
+        };
+        let damage_items = |world: &mut SimWorld| -> Vec<(u8, f32)> {
+            messages_to(&world.take_messages(), 1)
+                .into_iter()
+                .find_map(|message| match message {
+                    ServerMessage::OnDamage(damage) => Some(
+                        damage
+                            .items
+                            .iter()
+                            .map(|item| (item.tag, item.amount))
+                            .collect(),
+                    ),
+                    _ => None,
+                })
+                .expect("a 3601")
+        };
+        assert_eq!(damage_items(&mut world), vec![(4, amount(*base))]);
+        world.mobs.enter_phase_two(boss);
+        let second_phase = world.mob_hits(vec![(swing, Some(hit))], NOW);
+        let [
+            AttackOutcome::Hit {
+                amount: doubled, ..
+            },
+        ] = second_phase.as_slice()
+        else {
+            panic!("a hit: {second_phase:?}");
+        };
+        assert_eq!(*doubled, 2 * base);
+        let half = amount(*doubled) / 2.0;
+        assert_eq!(damage_items(&mut world), vec![(4, half), (9, half)]);
     }
 
     #[test]

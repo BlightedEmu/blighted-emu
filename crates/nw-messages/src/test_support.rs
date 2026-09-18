@@ -35,6 +35,7 @@ pub fn melee_sample(target: u64, attacker: u64, amount: f32) -> OnDamageMsg {
             attacker_at: [0.0; 3],
             tag: SAMPLE_HIT_TAG,
             scale: 1.0,
+            fire: None,
         },
     )
 }

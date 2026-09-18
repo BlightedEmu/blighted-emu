@@ -84,6 +84,14 @@ pub struct MobAttackIntent {
     pub target: u64,
     /// Where the target was when the swing started: the mob aims there.
     pub target_at: Position,
+    /// The move it swings, when its pace has moves.
+    pub mob_move: Option<MobMove>,
+}
+
+/// One of `moves` at random; `None` when there are none.
+fn pick(moves: &[MobMove], dice: &mut Dice) -> Option<MobMove> {
+    let count = u32::try_from(moves.len()).ok().filter(|count| *count > 0)?;
+    moves.get(usize::try_from(dice.below(count)).ok()?).copied()
 }
 
 /// What changes of cells did.
@@ -142,6 +150,68 @@ pub struct MobReach {
     pub reach_m: f32,
 }
 
+/// One full-body fragment of a creature: its fragment and action numbers (its controller
+/// definitions) and the last byte of a retail entry of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoveFragment {
+    /// The fragment number.
+    pub fragment: u16,
+    /// The action number.
+    pub action: u16,
+    /// The last byte of the retail entry.
+    pub tail: u8,
+}
+
+/// One hit of a mob move.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MoveHit {
+    /// When it lands, after the move starts.
+    pub at_ms: u64,
+    /// Its share of the pace's hit: its damage row's coefficient over the coefficient of the row
+    /// the pace's attack factor was fitted to.
+    pub damage_scale: f64,
+    /// The share of its damage that is fire in a second phase (its row's `AI_FireDMG` affix).
+    pub fire_share: f64,
+    /// The stamina it takes from a player who blocks it.
+    pub block_stamina: f32,
+}
+
+/// An attack that a mob picks from its pace.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MobMove {
+    /// The fragment it plays.
+    pub fragment: MoveFragment,
+    /// How long the fragment plays.
+    pub length_ms: u64,
+    /// Its hits.
+    pub hits: &'static [MoveHit],
+    /// The 3601 item tag of its hits.
+    pub tag: u8,
+}
+
+/// The second phase of a boss.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PhaseTwo {
+    /// The moves it picks from then.
+    pub moves: &'static [MobMove],
+    /// Its damage then, as a multiple of the first phase's.
+    pub damage_mult: f64,
+    /// The 3601 item tag of the fire part of its hits.
+    pub fire_tag: u8,
+}
+
+/// How a mob hits with one hit of a move: its damage multiple, its item tags and the stamina
+/// a block costs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MoveStrike {
+    /// The hit.
+    pub hit: MoveHit,
+    /// The item tag of the hit.
+    pub tag: u8,
+    /// In a second phase: its damage multiple and the item tag of the fire part.
+    pub phase_two: Option<(f64, u8)>,
+}
+
 /// How a personal mob fights when not as its rows and the config say. A paced mob stands on the
 /// floor height of its spawn point; the height map does not move it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -171,6 +241,11 @@ pub struct Pace {
     /// How its swing reaches; `None`: it lands within its gait's swing start plus
     /// [`SWING_HIT_MARGIN_M`].
     pub reach: Option<MobReach>,
+    /// The attacks it picks from, at random; empty: one swing of [`Pace::hit_delay_ms`]. With
+    /// moves, the swing gap is the time after a move's end.
+    pub moves: &'static [MobMove],
+    /// Its second phase, for a boss.
+    pub phase_two: Option<PhaseTwo>,
 }
 
 /// A mob spawned for one player.
@@ -187,6 +262,8 @@ struct Personal {
     frozen_until_ms: u64,
     /// Hits do no damage until this time.
     absorb_until_ms: u64,
+    /// It fights in its pace's second phase.
+    in_phase_two: bool,
     /// The slice asset of its retail card, when its vitals id has more than one look.
     asset: Option<[u8; ASSET_ID_LEN]>,
 }
@@ -310,6 +387,7 @@ impl Mobs {
                 swing_gap_ms,
                 frozen_until_ms: 0,
                 absorb_until_ms: 0,
+                in_phase_two: false,
                 asset,
             },
         );
@@ -398,6 +476,20 @@ impl Mobs {
         spawn_index(entity)
             .and_then(|index| self.personal.get(&index)?.pace)
             .map_or(DEFAULT_BLOCK_STAMINA, |pace| pace.block_stamina)
+    }
+
+    /// Personal mob `entity` fights in its pace's second phase from now on.
+    pub fn enter_phase_two(&mut self, entity: u64) {
+        if let Some(personal) = spawn_index(entity).and_then(|index| self.personal.get_mut(&index))
+        {
+            personal.in_phase_two = true;
+        }
+    }
+
+    /// The second phase of mob `entity`, while it fights in it.
+    pub fn phase_two(&self, entity: u64) -> Option<PhaseTwo> {
+        let personal = self.personal.get(&spawn_index(entity)?)?;
+        personal.pace?.phase_two.filter(|_| personal.in_phase_two)
     }
 
     /// The body of mob `entity`: its pace's, else [`DEFAULT_MOB_CAPSULE`].
@@ -589,20 +681,29 @@ impl Mobs {
                         .iter()
                         .find(|player| player.entity == target)
                         .map_or(at, |player| player.position);
+                    let mut mob_move = None;
+                    if let Some(personal) = self.personal.get_mut(&index)
+                        && let Some(pace) = personal.pace
+                    {
+                        let moves = pace
+                            .phase_two
+                            .filter(|_| personal.in_phase_two)
+                            .map_or(pace.moves, |phase| phase.moves);
+                        mob_move = pick(moves, &mut self.dice);
+                        let (shortest, longest) = pace.swing_gap_ms;
+                        let spread =
+                            u32::try_from(longest.saturating_sub(shortest)).unwrap_or(u32::MAX);
+                        let length_ms = mob_move.map_or(0, |picked: MobMove| picked.length_ms);
+                        personal.swing_gap_ms = length_ms
+                            + shortest
+                            + u64::from(self.dice.below(spread.saturating_add(1)));
+                    }
                     intents.push(MobAttackIntent {
                         mob: mob_entity(index),
                         target,
                         target_at,
+                        mob_move,
                     });
-                    if let Some(personal) = self.personal.get_mut(&index)
-                        && let Some(pace) = personal.pace
-                    {
-                        let (shortest, longest) = pace.swing_gap_ms;
-                        let spread =
-                            u32::try_from(longest.saturating_sub(shortest)).unwrap_or(u32::MAX);
-                        personal.swing_gap_ms =
-                            shortest + u64::from(self.dice.below(spread.saturating_add(1)));
-                    }
                 }
                 BrainAction::Respawned | BrainAction::Home => mob.health.refill(),
                 BrainAction::None => {}
@@ -977,6 +1078,76 @@ mod tests {
     }
 
     #[test]
+    fn a_mob_with_moves_swings_them_and_waits_for_their_end() {
+        const COOLDOWN_MS: u64 = 1_000;
+        const FIRST: MobMove = MobMove {
+            fragment: MoveFragment {
+                fragment: 58,
+                action: 28,
+                tail: 0xa5,
+            },
+            length_ms: 2_000,
+            hits: &[],
+            tag: 5,
+        };
+        const SECOND: MobMove = MobMove {
+            length_ms: 500,
+            ..FIRST
+        };
+        const FIRST_MOVES: [MobMove; 1] = [FIRST];
+        const SECOND_MOVES: [MobMove; 1] = [SECOND];
+        const PACE: Pace = Pace {
+            attack_factor: 0.25,
+            swing_gap_ms: (COOLDOWN_MS, COOLDOWN_MS),
+            speed_mps: 5.5,
+            hit_delay_ms: 0,
+            block_stamina: DEFAULT_BLOCK_STAMINA,
+            gait: Gait::uniform(3.0, 5.5),
+            sight_m: 20.0,
+            hit_tag: DEFAULT_HIT_TAG,
+            hit_scale: 1.0,
+            capsule: DEFAULT_MOB_CAPSULE,
+            reach: None,
+            moves: &FIRST_MOVES,
+            phase_two: Some(PhaseTwo {
+                moves: &SECOND_MOVES,
+                damage_mult: 2.2,
+                fire_tag: 9,
+            }),
+        };
+        const START: u64 = 1_000;
+        let mut mobs = mobs(Vec::new());
+        let boss = mobs
+            .spawn_personal(
+                spawn_at(100.0, TEST_MOB, TEST_LEVEL),
+                PLAYER,
+                false,
+                Some(PACE),
+                None,
+                START,
+            )
+            .expect("rows");
+        let mut swings = Vec::new();
+        let mut now = START;
+        while swings.len() < 2 {
+            for intent in mobs.tick(&[player_at(101.0)], now, &Flat) {
+                swings.push((now, intent.mob_move));
+            }
+            now += TICK_MS;
+        }
+        assert_eq!(swings[0].1, Some(FIRST));
+        assert!(swings[1].0 - swings[0].0 >= FIRST.length_ms + COOLDOWN_MS);
+        assert_eq!(mobs.phase_two(boss), None);
+        mobs.enter_phase_two(boss);
+        assert!(mobs.phase_two(boss).is_some());
+        let next = (0..)
+            .map(|tick| now + tick * TICK_MS)
+            .find_map(|at| mobs.tick(&[player_at(101.0)], at, &Flat).first().copied())
+            .expect("a swing");
+        assert_eq!(next.mob_move, Some(SECOND));
+    }
+
+    #[test]
     fn a_paced_mob_waits_one_interval_after_its_fight_starts_and_between_hits() {
         const GAP_MS: u64 = 6_000;
         const SPREAD_MS: u64 = 1_000;
@@ -992,6 +1163,8 @@ mod tests {
             hit_scale: 1.0,
             capsule: DEFAULT_MOB_CAPSULE,
             reach: None,
+            moves: &[],
+            phase_two: None,
         };
         const START: u64 = 1_000;
         let mut mobs = mobs(Vec::new());
@@ -1055,6 +1228,7 @@ mod tests {
                 mob: mob_entity(0),
                 target: PLAYER,
                 target_at: player_at(101.0).position,
+                mob_move: None,
             }]
         );
     }

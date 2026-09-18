@@ -314,26 +314,33 @@ pub struct MeleeDamage {
     /// The item scale: the share of the raw damage the player's armor let through (retail 0.6006
     /// for sailors, 0.5612 for the others).
     pub scale: f32,
+    /// A second, fire part: its item tag and amount (retail Thorpe in his second phase: tag 9).
+    pub fire: Option<(u8, f32)>,
 }
 
 impl OnDamageMsg {
     /// The creature hit `damage` on player `target`: a call to its vitals component that names
-    /// the creature's facet entity, the direct-hit flags, the share of the max health lost, the
-    /// creature's position and one item.
+    /// the creature's facet entity, the direct-hit flags, the share of the max health lost by
+    /// all parts, the creature's position and one item per part.
     pub fn melee(target: u64, damage: &MeleeDamage) -> Self {
         let header = FacetHeader::of_child(component::VITALS, component::STATS_CHILD, target);
+        let items: Vec<DamageItem> = std::iter::once((damage.tag, damage.amount))
+            .chain(damage.fire)
+            .map(|(tag, amount)| DamageItem {
+                tag,
+                amount,
+                scale: damage.scale,
+            })
+            .collect();
+        let total: f32 = items.iter().map(|item| item.amount).sum();
         Self {
             head_a: header.target,
             head_b: header.entity,
             u64_c: damage.attacker.swap_bytes(),
             raw_2: MELEE_HIT_FLAGS.to_le_bytes(),
-            u32_d: (damage.amount / damage.max_health).to_bits(),
+            u32_d: (total / damage.max_health).to_bits(),
             triple: damage.attacker_at.map(f32::to_bits),
-            items: vec![DamageItem {
-                tag: damage.tag,
-                amount: damage.amount,
-                scale: damage.scale,
-            }],
+            items,
         }
     }
 }
@@ -850,12 +857,36 @@ mod tests {
             attacker_at: [0x441b_5771, 0x43d1_fa3d, 0x41a2_fb39].map(f32::from_bits),
             tag: 5,
             scale: f32::from_bits(0x3f0f_a8d4),
+            fire: None,
         };
         let body = OnDamageMsg::melee(TARGET, &damage)
             .encode()
             .expect("encode");
         assert_eq!(body.len(), 42 + 1 + 9);
         assert_eq!(body[16..16 + RETAIL_TAIL.len()], RETAIL_TAIL);
+    }
+
+    #[test]
+    fn a_second_phase_hit_carries_its_fire_part() {
+        // Retail 513963: Thorpe's flurry, 21.13 slash and 7.043 fire.
+        const RETAIL_TAIL: [u8; 37] = [
+            0x02, 0x00, 0x3d, 0x05, 0x50, 0xdc, 0x43, 0xf0, 0x1c, 0x25, 0x43, 0x6a, 0x2e, 0x5c,
+            0x41, 0xba, 0x14, 0x01, 0x02, 0x04, 0x41, 0xa9, 0x09, 0xaf, 0x3f, 0x0f, 0xa8, 0xd4,
+            0x09, 0x40, 0xe1, 0x62, 0x3f, 0x3f, 0x0f, 0xa8, 0xd4,
+        ];
+        let damage = MeleeDamage {
+            attacker: 0x096a_42da_e6b1_8c60_u64.swap_bytes(),
+            amount: f32::from_bits(0x41a9_09af),
+            max_health: f32::from_bits(0x4458_6593),
+            attacker_at: [0x43f0_1c25, 0x436a_2e5c, 0x41ba_1401].map(f32::from_bits),
+            tag: 4,
+            scale: f32::from_bits(0x3f0f_a8d4),
+            fire: Some((9, f32::from_bits(0x40e1_623f))),
+        };
+        let body = OnDamageMsg::melee(TARGET, &damage)
+            .encode()
+            .expect("encode");
+        assert_eq!(body[24..], RETAIL_TAIL);
     }
 
     #[test]

@@ -394,6 +394,7 @@ mod tests {
                         attacker_at: [0.0; 3],
                         tag: 6,
                         scale: 1.0,
+                        fire: None,
                     },
                 )
                 .encode()

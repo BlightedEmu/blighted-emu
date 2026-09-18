@@ -37,7 +37,9 @@ use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{ClientFacetMsg, InteractionRequest};
 
 use super::asset_script::{AssetScript, Step, Trigger};
-use crate::mobs::{Capsule, MobReach, Mobs, Pace, VitalsSpawn};
+use crate::mobs::{
+    Capsule, MobMove, MobReach, Mobs, MoveFragment, MoveHit, Pace, PhaseTwo, VitalsSpawn,
+};
 use crate::objectives::{Effect, Event, KillTypes, ObjectiveRun, ObjectiveTree, TaskProgress};
 
 /// When the first sailor comes after the quest starts (retail: its card came 15.9 s after the
@@ -245,6 +247,8 @@ const SAILOR_PACE: Pace = Pace {
     hit_scale: SAILOR_HIT_SCALE,
     capsule: SAILOR_CAPSULE,
     reach: Some(SAILOR_REACH),
+    moves: &[],
+    phase_two: None,
 };
 /// Legionnaire and signifier (damage mod 0.7): 18.70 (262336); cooldown 1-1.5 s + stab about
 /// 0.9-1.2 s; run 5.5 m/s; hit at 627 ms. A blocked light stab took 14.6 stamina (266620).
@@ -269,6 +273,8 @@ const LEGION_PACE: Pace = Pace {
     hit_scale: ISLAND_HIT_SCALE,
     capsule: ISLAND_CAPSULE,
     reach: Some(LEGION_REACH),
+    moves: &[],
+    phase_two: None,
 };
 /// Risen corruption entity (damage mod 0.9): 18.24 (295343); cooldown 0.75-1 s + swipe about
 /// 0.8-0.9 s; run 4.5 m/s; hit at 555 ms. Block stamina: [`BLOCK_STAMINA_PER_MOD`] x the
@@ -294,6 +300,8 @@ const RISEN_PACE: Pace = Pace {
     hit_scale: ISLAND_HIT_SCALE,
     capsule: ISLAND_CAPSULE,
     reach: Some(RISEN_REACH),
+    moves: &[],
+    phase_two: None,
 };
 /// Corruption swarmers (damage mod 0.25): 7.07 (296477); rate limit 0.25 s + slash (length
 /// Unknown; our choice 1 s); run 1.5 m/s; hit at 533 ms. Block stamina: [`BLOCK_STAMINA_PER_MOD`]
@@ -319,30 +327,133 @@ const SWARMER_PACE: Pace = Pace {
     hit_scale: ISLAND_HIT_SCALE,
     capsule: ISLAND_CAPSULE,
     reach: Some(SWARMER_REACH),
+    moves: &[],
+    phase_two: None,
 };
-/// Thorpe (damage mod 1.125): 25.6 (457997); cooldown 1.15-2.25 s + attack 1.4-2.2 s; run
-/// 4.5 m/s; hit at 611 ms (stab). A blocked stab took 25.55 stamina (481395, 489462).
+/// Thorpe's block stamina per unit of an attack's `BlockStaminaDmgMod` (stab 0.28: retail 25.55
+/// at 481395 and 489462).
+const THORPE_BLOCK_PER_MOD: f32 = 91.25;
+/// The damage coefficient of the row Thorpe's attack factor fits: `Attack_Stab_02` 0.28 (25.6 at
+/// 457997).
+const THORPE_REFERENCE_COEF: f64 = 0.28;
+
+/// One hit of a Thorpe move at `at_ms` after its start, of the damage row with coefficient
+/// `coef`, fire share `fire` (its `AI_FireDMG` affix) and `BlockStaminaDmgMod` `block`
+/// (`javelindata_damagetable_damned_commander_ftue`).
+const fn thorpe_hit(at_ms: u64, coef: f64, fire: f64, block: f32) -> MoveHit {
+    MoveHit {
+        at_ms,
+        damage_scale: coef / THORPE_REFERENCE_COEF,
+        fire_share: fire,
+        block_stamina: THORPE_BLOCK_PER_MOD * block,
+    }
+}
+
+const fn fragment(fragment: u16, action: u16, tail: u8) -> MoveFragment {
+    MoveFragment {
+        fragment,
+        action,
+        tail,
+    }
+}
+
+/// The 3601 item tags of Thorpe's hits (Inferred: slash, thrust, fire).
+const SLASH_TAG: u8 = 4;
+const THRUST_TAG: u8 = 5;
+const FIRE_TAG: u8 = 9;
+
+/// Thorpe's attacks (boss note, from `commander_controllerdefs.xml` and the retail fight): the
+/// fragment, its length, and when each hit landed after it started.
+const THORPE_STAB_01: MobMove = MobMove {
+    fragment: fragment(58, 28, 0xa5),
+    length_ms: 1_434,
+    hits: &[thorpe_hit(595, 0.27, 0.25, 0.28)],
+    tag: THRUST_TAG,
+};
+const THORPE_STAB_02: MobMove = MobMove {
+    fragment: fragment(59, 29, 0x85),
+    length_ms: 1_528,
+    hits: &[thorpe_hit(811, 0.28, 0.25, 0.28)],
+    tag: THRUST_TAG,
+};
+const THORPE_SWIPE_L: MobMove = MobMove {
+    fragment: fragment(48, 30, 0x6d),
+    length_ms: 2_040,
+    hits: &[thorpe_hit(1_020, 0.27, 0.25, 0.23)],
+    tag: SLASH_TAG,
+};
+const THORPE_SWIPE_R: MobMove = MobMove {
+    fragment: fragment(50, 33, 0xd1),
+    length_ms: 2_180,
+    hits: &[thorpe_hit(944, 0.27, 0.25, 0.29)],
+    tag: SLASH_TAG,
+};
+/// Three hits: two `Attack_Flurry_Combo` and the `Attack_Flurry_Finisher`.
+const THORPE_FLURRY: MobMove = MobMove {
+    fragment: fragment(53, 19, 0x8e),
+    length_ms: 2_800,
+    hits: &[
+        thorpe_hit(781, 0.14, 0.25, 0.2),
+        thorpe_hit(1_249, 0.14, 0.25, 0.2),
+        thorpe_hit(1_915, 0.23, 0.5, 0.35),
+    ],
+    tag: SLASH_TAG,
+};
+/// No retail overhead slash landed: its hit time is our choice, the middle of the fragment.
+const THORPE_OVERHEAD: MobMove = MobMove {
+    fragment: fragment(54, 23, 0x2f),
+    length_ms: 2_233,
+    hits: &[thorpe_hit(1_116, 0.42, 0.5, 0.6335)],
+    tag: SLASH_TAG,
+};
+/// His first phase: the stabs and swipes of the retail fight.
+const THORPE_MOVES: [MobMove; 4] = [
+    THORPE_STAB_01,
+    THORPE_STAB_02,
+    THORPE_SWIPE_L,
+    THORPE_SWIPE_R,
+];
+/// His second phase: retail swung the flurry 4 times in 7 attacks, so it is in twice.
+const THORPE_PHASE_TWO_MOVES: [MobMove; 5] = [
+    THORPE_STAB_02,
+    THORPE_SWIPE_R,
+    THORPE_FLURRY,
+    THORPE_FLURRY,
+    THORPE_OVERHEAD,
+];
+/// Thorpe's second phase: status `AI_FTUE_Thorpe_Phase_2` adds 1.2 to his damage (retail: stab
+/// 42.259 + 14.086 = 0.28 x 2.2 of 91.47).
+const THORPE_PHASE_TWO: PhaseTwo = PhaseTwo {
+    moves: &THORPE_PHASE_TWO_MOVES,
+    damage_mult: 2.2,
+    fire_tag: FIRE_TAG,
+};
+
+/// Thorpe (damage mod 1.125): 25.6 (457997). His AI cools down 1.0-1.35 s after each attack
+/// (behavior tree); run 4.5 m/s.
 ///
-/// Gait (tutorial-ai-behavior note, section 6): attacks at 4 m, runs beyond 9 m, walks at the
-/// `WalkToTarget` max 1.5 m/s.
+/// Gait (boss note): he started his attacks 1.1 to 3.4 m from the player and closed the gap in
+/// a straight line at 1.33 to 1.76 m/s; he runs beyond 9 m.
 const THORPE_PACE: Pace = Pace {
     attack_factor: 0.2604,
-    swing_gap_ms: (2_550, 4_450),
+    swing_gap_ms: (1_000, 1_350),
     speed_mps: 4.5,
     hit_delay_ms: 611,
-    block_stamina: 25.55,
+    block_stamina: THORPE_BLOCK_PER_MOD * 0.28,
     gait: Gait {
-        swing_start_m: 4.0,
+        swing_start_m: 3.4,
         run_beyond_m: 9.0,
-        walk_speed_mps: 1.5,
-        wander_speed_mps: 1.5,
+        walk_speed_mps: 1.4,
+        wander_speed_mps: 1.4,
     },
     // Its Thorpe slice ambient vision 20 m (tutorial-ai-behavior note).
     sight_m: 20.0,
-    hit_tag: 4,
+    hit_tag: SLASH_TAG,
     hit_scale: ISLAND_HIT_SCALE,
     capsule: THORPE_CAPSULE,
     reach: Some(THORPE_REACH),
+    moves: &THORPE_MOVES,
+    phase_two: Some(THORPE_PHASE_TWO),
 };
 
 /// How long after its spawn a mob that picks the player at once announces it: the client must
@@ -1099,6 +1210,7 @@ impl Tutorial {
                 }
                 CaptainPhase::Intermission { until_ms } if now_ms >= until_ms => {
                     mob.health.refill();
+                    mobs.enter_phase_two(captain);
                     self.captain = CaptainPhase::Second;
                 }
                 CaptainPhase::Second if below(CAPTAIN_END_FRACTION) => {

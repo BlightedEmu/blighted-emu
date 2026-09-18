@@ -20,6 +20,8 @@ use nw_messages::{
 };
 use nw_sim_core::{MobState, Position};
 
+use crate::mobs::MoveFragment;
+
 /// The number of the first state of a mob (retail sailors 1 to 3).
 const FIRST_STATE_ID: u16 = 2;
 /// An idle mob sends a state once per this many ms (retail sailor 1 while held: 16584 to 29048).
@@ -41,8 +43,9 @@ const SPAWN_MS: u64 = 1350;
 const ATTACK_MS: u64 = 1500;
 /// How long a reaction plays: `r_R2_F` 769-784 ms, `r_R3_F` 831-836 ms (legion and risen;
 /// creature-animation note, section 5.2).
-const REACT_LIGHT_MS: u64 = 775;
-const REACT_HEAVY_MS: u64 = 835;
+const CREATURE_REACTION_MS: (u64, u64) = (775, 835);
+/// Thorpe's reactions: `r_R2_F` 850-903 ms, `r_R3_F` 1296-1303 ms (boss note).
+const THORPE_REACTION_MS: (u64, u64) = (870, 1_300);
 /// After the second reaction of a chain, hits do not make a mob reel until this long after the
 /// last hit (retail `ReactionLimiter_Active`, off 2.0-2.08 s after the last hit; section 0.4).
 const REACTION_LIMIT_MS: u64 = 2_000;
@@ -86,6 +89,8 @@ pub(super) enum Fragment {
     ReactHeavy,
     /// It dies.
     Death,
+    /// It plays a move of its pace (an attack of a boss).
+    Play(MoveFragment),
 }
 
 /// One fragment of a creature: its fragment and action numbers and the last byte of a retail
@@ -125,6 +130,13 @@ pub(super) struct Animations {
     calm_tags: [u8; FRAG_TAGS_LEN],
     /// The tags of a fighting mob.
     alert_tags: [u8; FRAG_TAGS_LEN],
+    /// It shows its fighting tags only from its first reaction on (retail Thorpe: `08 01 0b`
+    /// until his first reaction at 461718, through his first force grab and attacks).
+    alert_after_hurt: bool,
+    /// Its fighting tags in a boss's second phase (retail Thorpe from 503682: `08 81 13`).
+    phase_two_tags: Option<[u8; FRAG_TAGS_LEN]>,
+    /// How long its light and heavy reactions play.
+    reaction_ms: (u64, u64),
 }
 
 impl Animations {
@@ -148,6 +160,7 @@ impl Animations {
                 Some((_, heavy)) => heavy,
                 None => return None,
             },
+            Fragment::Play(played) => entry(played.fragment, played.action, played.tail),
         })
     }
 }
@@ -178,6 +191,9 @@ const FTUE_SAILOR: Animations = Animations {
     alert_tags: [
         0x04, 0x03, 0x28, 0x08, 0x8b, 0x82, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
     ],
+    alert_after_hurt: false,
+    phase_two_tags: None,
+    reaction_ms: CREATURE_REACTION_MS,
 };
 /// The legionnaire and the signifier (`Legion_Legionnaire_FTUE`; creature-animation note,
 /// section 1). Retail's chase uses action 13 with the `Move_Combat` fragment.
@@ -197,6 +213,9 @@ const FTUE_LEGIONNAIRE: Animations = Animations {
     alert_tags: [
         0x85, 0x02, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ],
+    alert_after_hurt: false,
+    phase_two_tags: None,
+    reaction_ms: CREATURE_REACTION_MS,
 };
 /// The corruption swarmer (`Corruption_Entity_Crawler_FTUE`; creature-animation note, section 2).
 /// Its combat idle and reactions were never seen (each died from one hit): it stands in its idle
@@ -217,6 +236,9 @@ const FTUE_SWARMER: Animations = Animations {
     alert_tags: [
         0x50, 0x40, 0x40, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ],
+    alert_after_hurt: false,
+    phase_two_tags: None,
+    reaction_ms: CREATURE_REACTION_MS,
 };
 /// The risen corruption entity (`Corruption_Entity`; creature-animation note, section 3). Retail
 /// never sent a plain idle: it rummages.
@@ -236,6 +258,9 @@ const FTUE_RISEN: Animations = Animations {
     alert_tags: [
         0x0b, 0xb1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ],
+    alert_after_hurt: false,
+    phase_two_tags: None,
+    reaction_ms: CREATURE_REACTION_MS,
 };
 /// Thorpe (`Damned_Commander_FTUE`; creature-animation note, section 4). He never stands idle:
 /// he strafes between attacks.
@@ -255,6 +280,11 @@ const FTUE_THORPE: Animations = Animations {
     alert_tags: [
         0x08, 0x81, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ],
+    alert_after_hurt: true,
+    phase_two_tags: Some([
+        0x08, 0x81, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]),
+    reaction_ms: THORPE_REACTION_MS,
 };
 /// The creature slices of the tutorial's mobs, with their fragments.
 const CREATURES: [([u8; 16], &Animations); 6] = [
@@ -327,6 +357,8 @@ pub(super) struct MobPose {
     pub(super) dead: bool,
     /// Where its target is, while it fights.
     pub(super) target: Option<Position>,
+    /// It fights in a boss's second phase.
+    pub(super) phase_two: bool,
 }
 
 impl MobPose {
@@ -367,6 +399,13 @@ struct MobTimeline {
     /// The scope time of its newest state.
     ticks: u32,
     attack_until_ms: u64,
+    /// The move it plays, and until when.
+    play: Option<(MoveFragment, u64)>,
+    /// A hit made it react once: a creature with [`Animations::alert_after_hurt`] shows its
+    /// fighting tags from then on.
+    reacted: bool,
+    /// It fights in a boss's second phase.
+    phase_two: bool,
     /// The reaction it plays, and until when.
     reaction: Option<(Fragment, u64)>,
     /// Full reactions since the chain started.
@@ -405,6 +444,9 @@ impl MobTimeline {
             entry_start_ms: now_ms,
             ticks: 0,
             attack_until_ms: now_ms,
+            play: None,
+            reacted: false,
+            phase_two: false,
             reaction: None,
             reactions_in_chain: 0,
             last_hurt_ms: now_ms,
@@ -472,10 +514,10 @@ impl MobTimeline {
                 tail: entry.tail,
             },
             ticks: self.ticks_at(now_ms),
-            tags: if self.alert {
-                animations.alert_tags
-            } else {
-                animations.calm_tags
+            tags: match (self.alert, self.phase_two) {
+                (false, _) => animations.calm_tags,
+                (true, true) => animations.phase_two_tags.unwrap_or(animations.alert_tags),
+                (true, false) => animations.alert_tags,
             },
         }
     }
@@ -484,6 +526,8 @@ impl MobTimeline {
     fn fragment_at(&self, pose: &MobPose, now_ms: u64) -> Fragment {
         if pose.dead {
             Fragment::Death
+        } else if let Some((played, _)) = self.play.filter(|(_, until)| now_ms < *until) {
+            Fragment::Play(played)
         } else if now_ms < self.attack_until_ms {
             Fragment::Attack
         } else if let Some((reaction, _)) = self.reaction.filter(|(_, until)| now_ms < *until) {
@@ -508,7 +552,7 @@ impl MobTimeline {
     /// reaction, the second the heavy one and starts the limit; while the limit runs, a hit only
     /// makes it longer (retail plays an additive reaction then; not sent here). Whether a
     /// reaction plays.
-    fn hurt(&mut self, now_ms: u64) -> bool {
+    fn hurt(&mut self, now_ms: u64, (light_ms, heavy_ms): (u64, u64)) -> bool {
         if now_ms.saturating_sub(self.last_hurt_ms) >= REACTION_LIMIT_MS {
             self.reactions_in_chain = 0;
         }
@@ -518,12 +562,13 @@ impl MobTimeline {
             return false;
         }
         self.reactions_in_chain += 1;
+        self.reacted = true;
         self.reaction = Some(if self.reactions_in_chain == 1 {
-            (Fragment::ReactLight, now_ms + REACT_LIGHT_MS)
+            (Fragment::ReactLight, now_ms + light_ms)
         } else {
             self.reactions_in_chain = 0;
             self.reaction_limit_until_ms = now_ms + REACTION_LIMIT_MS;
-            (Fragment::ReactHeavy, now_ms + REACT_HEAVY_MS)
+            (Fragment::ReactHeavy, now_ms + heavy_ms)
         });
         true
     }
@@ -541,6 +586,7 @@ impl MobTimeline {
         if moved {
             self.last_moved_ms = Some(now_ms);
         }
+        self.phase_two = pose.phase_two;
         // The first time it fights, it turns to its target in its alert.
         let alert_started = pose.fighting()
             && !pose.dead
@@ -619,7 +665,11 @@ impl MobTimeline {
             self.fragment = fragment;
             self.entry_start_id = self.id;
             self.entry_start_ms = now_ms;
-            self.alert = pose.fighting() || fragment == Fragment::Attack;
+            self.alert = if animations.is_some_and(|animations| animations.alert_after_hurt) {
+                self.reacted
+            } else {
+                pose.fighting() || matches!(fragment, Fragment::Attack | Fragment::Play(_))
+            };
             // The look pose starts with the alert and plays on while the mob lives.
             if self.alert && self.look_pose_start.is_none() {
                 self.look_pose_start = Some((self.id, now_ms));
@@ -687,6 +737,8 @@ pub(super) struct MobTimelines {
     attacked: HashSet<u64>,
     /// Mobs that the player hit since the last frame.
     hurt: HashSet<u64>,
+    /// Mobs that started a move since the last frame: its fragment and length.
+    played: HashMap<u64, (MoveFragment, u64)>,
     /// When each mob last started a reaction (server ms).
     reeled_ms: HashMap<u64, u64>,
 }
@@ -695,6 +747,11 @@ impl MobTimelines {
     /// Mob `mob` swings at its target.
     pub(super) fn attacked(&mut self, mob: u64) {
         self.attacked.insert(mob);
+    }
+
+    /// Mob `mob` plays the move fragment `fragment` for `length_ms`.
+    pub(super) fn play(&mut self, mob: u64, fragment: MoveFragment, length_ms: u64) {
+        self.played.insert(mob, (fragment, length_ms));
     }
 
     /// A player hit mob `mob`.
@@ -718,8 +775,17 @@ impl MobTimelines {
         if self.attacked.remove(&mob) {
             timeline.attack_until_ms = now_ms + ATTACK_MS;
         }
-        let can_react = animations.is_some_and(|animations| animations.reactions.is_some());
-        if self.hurt.remove(&mob) && can_react && !pose.dead && timeline.hurt(now_ms) {
+        if let Some((fragment, length_ms)) = self.played.remove(&mob) {
+            timeline.play = Some((fragment, now_ms + length_ms));
+        }
+        let reaction_ms = animations
+            .filter(|animations| animations.reactions.is_some())
+            .map(|animations| animations.reaction_ms);
+        if self.hurt.remove(&mob)
+            && let Some(reaction_ms) = reaction_ms
+            && !pose.dead
+            && timeline.hurt(now_ms, reaction_ms)
+        {
             self.reeled_ms.insert(mob, now_ms);
         }
         timeline.advance(now_ms, pose, animations)
@@ -739,6 +805,7 @@ impl MobTimelines {
         self.by_mob.retain(|mob, _| shown.contains(mob));
         self.attacked.retain(|mob| shown.contains(mob));
         self.hurt.retain(|mob| shown.contains(mob));
+        self.played.retain(|mob, _| shown.contains(mob));
         self.reeled_ms.retain(|mob, _| shown.contains(mob));
     }
 }
@@ -768,6 +835,7 @@ mod tests {
             brain: Some(brain),
             dead: false,
             target: None,
+            phase_two: false,
         }
     }
 
@@ -783,6 +851,43 @@ mod tests {
             Some(StepScope::Changed(animation)) => Some(animation),
             _ => None,
         }
+    }
+
+    #[test]
+    fn thorpe_plays_his_moves_and_shows_his_fight_tags_after_a_reaction() {
+        const STAB: MoveFragment = MoveFragment {
+            fragment: 58,
+            action: 28,
+            tail: 0xa5,
+        };
+        const STAB_MS: u64 = 1_434;
+        let mut timelines = MobTimelines::default();
+        let fighting = pose(1.0, MobState::Attack);
+        timelines.advance(MOB, START, &fighting, Some(&FTUE_THORPE));
+        let changed = |timelines: &mut MobTimelines, now, pose: &MobPose| {
+            let frame = timelines.advance(MOB, now, pose, Some(&FTUE_THORPE));
+            frame
+                .step
+                .as_ref()
+                .and_then(animation_of)
+                .expect("a new fragment")
+        };
+        timelines.play(MOB, STAB, STAB_MS);
+        let mut now = START + SPAWN_MS;
+        let stab = changed(&mut timelines, now, &fighting);
+        assert_eq!(stab.entry.fragment, STAB.fragment);
+        assert_eq!(stab.tags, FTUE_THORPE.calm_tags, "no reaction yet");
+        now += STAB_MS;
+        timelines.hurt(MOB);
+        let reaction = changed(&mut timelines, now, &fighting);
+        assert_eq!(reaction.tags, FTUE_THORPE.alert_tags);
+        now += THORPE_REACTION_MS.0;
+        let phase_two = MobPose {
+            phase_two: true,
+            ..fighting
+        };
+        let after = changed(&mut timelines, now, &phase_two);
+        assert_eq!(Some(after.tags), FTUE_THORPE.phase_two_tags);
     }
 
     #[test]
@@ -1076,7 +1181,7 @@ mod tests {
             Some(FTUE_SAILOR.reactions.expect("known").1.fragment)
         );
         // While the limit runs, a hit does not start another reaction.
-        now += REACT_HEAVY_MS;
+        now += CREATURE_REACTION_MS.1;
         timelines.advance(MOB, now, &fighting, Some(&FTUE_SAILOR));
         timelines.hurt(MOB);
         now += TICK_MS;

@@ -77,7 +77,7 @@ use statics::{
     chest_gather_started, facet_of, interactor_target,
 };
 
-use attack::{PlayerSwing, Vitals};
+use attack::{PendingMobSwing, PlayerSwing, Vitals};
 
 use crate::combat::{AttackOutcome, AttackRefusal, CombatSettings};
 use crate::login::{
@@ -476,7 +476,7 @@ pub struct SimWorld {
     drinks: Vec<(u64, u64)>,
     /// Mob swings that have not hit yet: the time they hit, the server time they started, and
     /// the swing.
-    swings: Vec<(u64, u64, MobAttackIntent)>,
+    swings: Vec<PendingMobSwing>,
     /// Player swings that have not hit yet.
     player_swings: Vec<PlayerSwing>,
 }
@@ -1904,6 +1904,7 @@ impl SimWorld {
                     brain: self.mobs.brain_state(entity),
                     dead: state.health == 0,
                     target,
+                    phase_two: self.mobs.phase_two(entity).is_some(),
                 };
                 let frame = self.mob_timelines.advance(
                     entity,
