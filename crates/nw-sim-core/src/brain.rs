@@ -137,10 +137,86 @@ pub enum BrainAction {
     Home,
 }
 
+/// What an awake mob without a target does (admin studio spec section 6.5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Behaviour {
+    /// It wanders near its spawn and attacks a player in sight.
+    #[default]
+    Wander,
+    /// It stands at its spawn and attacks a player in sight.
+    Guard,
+    /// It walks its route and attacks a player in sight; after a fight it goes back to where it
+    /// left the route.
+    Patrol,
+    /// It stands at its spawn and fights only a player who hit it.
+    Idle,
+}
+
+/// How a route goes on after its last point.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RouteMode {
+    /// Back to the first point.
+    #[default]
+    Loop,
+    /// Back along the points, then forward again.
+    BackAndForth,
+    /// It stays at the last point.
+    Once,
+}
+
+/// The points a patrolling mob walks (admin studio spec section 6.4).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Route {
+    /// The points, in order.
+    pub points: Vec<Position>,
+    /// The wait at each point (missing: no wait).
+    pub waits_ms: Vec<u64>,
+    /// What comes after the last point.
+    pub mode: RouteMode,
+}
+
+/// Where a mob is on its route.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct RouteWalk {
+    route: Route,
+    next: usize,
+    backwards: bool,
+    wait_until_ms: u64,
+}
+
+impl RouteWalk {
+    /// Goes on to the point after `next`, as the mode says; `false` at the end of a once route.
+    fn advance(&mut self) -> bool {
+        let last = self.route.points.len().saturating_sub(1);
+        match self.route.mode {
+            RouteMode::Loop => self.next = if self.next >= last { 0 } else { self.next + 1 },
+            RouteMode::Once if self.next >= last => return false,
+            RouteMode::Once => self.next += 1,
+            RouteMode::BackAndForth => {
+                if last == 0 {
+                    return true;
+                }
+                if self.backwards && self.next == 0 || !self.backwards && self.next >= last {
+                    self.backwards = !self.backwards;
+                }
+                self.next = if self.backwards {
+                    self.next - 1
+                } else {
+                    self.next + 1
+                };
+            }
+        }
+        true
+    }
+}
+
 /// One mob's mind.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Brain {
     state: MobState,
+    /// Where it respawns.
+    home: Position,
+    /// The centre of its leash: its home, or for a patrol the point where it left its route.
     spawn: Position,
     position: Position,
     sight_m: f32,
@@ -152,6 +228,8 @@ pub struct Brain {
     last_step_ms: Option<u64>,
     last_attack_ms: Option<u64>,
     wander_to: Option<Position>,
+    behaviour: Behaviour,
+    route: Option<RouteWalk>,
 }
 
 impl Brain {
@@ -167,6 +245,7 @@ impl Brain {
     pub fn new(spawn: Position, sight_m: f32) -> Self {
         Self {
             state: MobState::Asleep,
+            home: spawn,
             spawn,
             position: spawn,
             sight_m,
@@ -177,7 +256,22 @@ impl Brain {
             last_step_ms: None,
             last_attack_ms: None,
             wander_to: None,
+            behaviour: Behaviour::Wander,
+            route: None,
         }
+    }
+
+    /// What it does without a target from now on.
+    pub const fn set_behaviour(&mut self, behaviour: Behaviour) {
+        self.behaviour = behaviour;
+    }
+
+    /// The route it walks with [`Behaviour::Patrol`], from its first point.
+    pub fn set_route(&mut self, route: Route) {
+        self.route = (!route.points.is_empty()).then_some(RouteWalk {
+            route,
+            ..RouteWalk::default()
+        });
     }
 
     /// It sees players `sight_m` far from now on.
@@ -228,13 +322,16 @@ impl Brain {
     }
 
     /// The target to chase now: the top threat that is still near, else the nearest player in
-    /// sight. Threat of an attacker that is not near is dropped.
+    /// sight (not for [`Behaviour::Idle`]). Threat of an attacker that is not near is dropped.
     fn choose_target(&mut self, seen: &[Seen]) -> Option<Seen> {
         while let Some(top) = self.threat.top() {
             if let Some(found) = seen.iter().find(|player| player.entity == top) {
                 return Some(*found);
             }
             self.threat.forget(top);
+        }
+        if self.behaviour == Behaviour::Idle {
+            return None;
         }
         seen.iter()
             .filter(|player| player.position.horizontal_distance(self.position) <= self.sight_m)
@@ -308,7 +405,14 @@ pub fn step(
             if now_ms.saturating_sub(brain.since_ms) < settings.mob_respawn_ms {
                 return BrainAction::None;
             }
-            brain.position = brain.spawn;
+            brain.position = brain.home;
+            brain.spawn = brain.home;
+            if let Some(walk) = &mut brain.route {
+                *walk = RouteWalk {
+                    route: std::mem::take(&mut walk.route),
+                    ..RouteWalk::default()
+                };
+            }
             brain.threat.clear();
             brain.target = None;
             brain.last_player_ms = now_ms;
@@ -409,6 +513,11 @@ fn idle(
         brain.enter(MobState::Asleep, now_ms);
         return BrainAction::None;
     }
+    match brain.behaviour {
+        Behaviour::Wander => {}
+        Behaviour::Guard | Behaviour::Idle => return BrainAction::None,
+        Behaviour::Patrol => return patrol(brain, now_ms, max_m),
+    }
     let to = match brain.wander_to {
         Some(to) => to,
         None if now_ms.saturating_sub(brain.since_ms) >= settings.wander_pause_ms => {
@@ -422,6 +531,53 @@ fn idle(
     if at.horizontal_distance(to) <= ARRIVED_M {
         brain.wander_to = None;
         brain.since_ms = now_ms;
+    }
+    BrainAction::MoveTo(at)
+}
+
+/// A patrolling mob with no target: walks to its next route point, waits there, and goes on.
+/// Its leash centre follows it, so a fight starts where it left the route.
+fn patrol(brain: &mut Brain, now_ms: u64, max_m: f32) -> BrainAction {
+    let Some(walk) = &mut brain.route else {
+        return BrainAction::None;
+    };
+    if now_ms < walk.wait_until_ms {
+        return BrainAction::None;
+    }
+    let Some(&to) = walk.route.points.get(walk.next) else {
+        return BrainAction::None;
+    };
+    let distance = brain.position.horizontal_distance(to);
+    let at = if distance <= max_m {
+        Position {
+            z: brain.position.z,
+            ..to
+        }
+    } else {
+        let share = max_m / distance;
+        Position {
+            x: brain.position.x + (to.x - brain.position.x) * share,
+            y: brain.position.y + (to.y - brain.position.y) * share,
+            z: brain.position.z,
+        }
+    };
+    if at.horizontal_distance(to) <= ARRIVED_M {
+        let wait_ms = walk
+            .route
+            .waits_ms
+            .get(walk.next)
+            .copied()
+            .unwrap_or_default();
+        if walk.advance() {
+            walk.wait_until_ms = now_ms + wait_ms;
+        } else {
+            walk.wait_until_ms = u64::MAX;
+        }
+    }
+    brain.position = at;
+    brain.spawn = at;
+    if distance <= ARRIVED_M {
+        return BrainAction::None;
     }
     BrainAction::MoveTo(at)
 }
@@ -666,6 +822,175 @@ mod tests {
                 assert!(to.horizontal_distance(SPAWN) <= settings().wander_radius_m + NEAR_ZERO_M);
             }
         }
+    }
+
+    fn north(metres: f32) -> Position {
+        Position {
+            y: SPAWN.y + metres,
+            ..SPAWN
+        }
+    }
+
+    /// Steps every tick from `from` to `to` with the same view and `settings`.
+    fn run_with(
+        brain: &mut Brain,
+        view: &[Seen],
+        from: u64,
+        to: u64,
+        settings: &BrainSettings,
+    ) -> Vec<BrainAction> {
+        let mut dice = Dice::new(SEED);
+        (from..=to)
+            .step_by(TICK_MS as usize)
+            .map(|now| step(brain, view, now, settings, &mut dice))
+            .collect()
+    }
+
+    #[test]
+    fn a_guard_stands_still_and_attacks_on_sight() {
+        let mut brain = awake(0);
+        brain.set_behaviour(Behaviour::Guard);
+        let far = [seen(PLAYER, east(90.0))];
+        let actions = run_with(&mut brain, &far, TICK_MS, 20_000, &settings());
+        assert!(
+            actions.iter().all(|action| *action == BrainAction::None),
+            "no wander"
+        );
+        assert_eq!(brain.position(), SPAWN);
+        let near = [seen(PLAYER, east(10.0))];
+        run_with(&mut brain, &near, 20_033, 25_000, &settings());
+        assert!(matches!(brain.state(), MobState::Chase | MobState::Attack));
+    }
+
+    #[test]
+    fn an_idle_mob_ignores_a_player_in_sight_but_fights_back() {
+        let mut brain = awake(0);
+        brain.set_behaviour(Behaviour::Idle);
+        let near = [seen(PLAYER, east(5.0))];
+        let actions = run_with(&mut brain, &near, TICK_MS, 10_000, &settings());
+        assert!(actions.iter().all(|action| *action == BrainAction::None));
+        assert_eq!(brain.state(), MobState::Idle);
+        assert!(hurt(&mut brain, PLAYER, 1, 10_033));
+        run_with(&mut brain, &near, 10_066, 12_000, &settings());
+        assert!(matches!(brain.state(), MobState::Chase | MobState::Attack));
+    }
+
+    #[test]
+    fn a_patrol_walks_a_route_longer_than_its_leash_and_loops() {
+        const LEG_M: f32 = 120.0;
+        let mut brain = awake(0);
+        brain.set_behaviour(Behaviour::Patrol);
+        brain.set_route(Route {
+            points: vec![east(LEG_M), SPAWN],
+            waits_ms: vec![1_000, 0],
+            mode: RouteMode::Loop,
+        });
+        // A player near enough all the way, so the mob stays awake.
+        let wide = BrainSettings {
+            wake_radius_m: 1_000.0,
+            ..settings()
+        };
+        let view = [seen(PLAYER, north(95.0))];
+        let mut far_m: f32 = 0.0;
+        let mut back = false;
+        let mut dice = Dice::new(SEED);
+        let mut now = TICK_MS;
+        while now < 200_000 {
+            step(&mut brain, &view, now, &wide, &mut dice);
+            let from_spawn = brain.position().horizontal_distance(SPAWN);
+            far_m = far_m.max(from_spawn);
+            if far_m > LEG_M - 1.0 && from_spawn < 1.0 {
+                back = true;
+                break;
+            }
+            now += TICK_MS;
+        }
+        assert!(
+            far_m > settings().leash_radius_m,
+            "it walked past the leash radius"
+        );
+        assert!(back, "it looped back to the first point");
+    }
+
+    #[test]
+    fn a_patrol_back_and_forth_and_once() {
+        let mut brain = awake(0);
+        brain.set_behaviour(Behaviour::Patrol);
+        brain.set_route(Route {
+            points: vec![east(10.0), east(20.0)],
+            waits_ms: Vec::new(),
+            mode: RouteMode::Once,
+        });
+        let view = [seen(PLAYER, north(95.0))];
+        run_with(&mut brain, &view, TICK_MS, 30_000, &settings());
+        assert!(
+            brain.position().horizontal_distance(east(20.0)) < 0.1,
+            "once: stays at the end"
+        );
+        let mut brain = awake(0);
+        brain.set_behaviour(Behaviour::Patrol);
+        brain.set_route(Route {
+            points: vec![east(10.0), east(20.0)],
+            waits_ms: Vec::new(),
+            mode: RouteMode::BackAndForth,
+        });
+        let mut dice = Dice::new(SEED);
+        let mut visits_first_again = false;
+        let mut reached_end = false;
+        for tick in 1..2_000 {
+            step(&mut brain, &view, tick * TICK_MS, &settings(), &mut dice);
+            let at = brain.position();
+            reached_end |= at.horizontal_distance(east(20.0)) < 0.1;
+            if reached_end && at.horizontal_distance(east(10.0)) < 0.1 {
+                visits_first_again = true;
+                break;
+            }
+        }
+        assert!(
+            visits_first_again,
+            "back and forth: it comes back to the first point"
+        );
+    }
+
+    #[test]
+    fn a_patrol_returns_to_where_it_left_and_respawns_at_home() {
+        let mut brain = awake(0);
+        brain.set_behaviour(Behaviour::Patrol);
+        brain.set_route(Route {
+            points: vec![east(100.0)],
+            waits_ms: Vec::new(),
+            mode: RouteMode::Once,
+        });
+        let quiet = [seen(PLAYER, north(95.0))];
+        run_with(&mut brain, &quiet, TICK_MS, 20_000, &settings());
+        let left_at = brain.position();
+        assert!(left_at.horizontal_distance(SPAWN) > 50.0);
+        let near = Position {
+            y: left_at.y + 8.0,
+            ..left_at
+        };
+        run_with(
+            &mut brain,
+            &[seen(PLAYER, near)],
+            20_033,
+            21_000,
+            &settings(),
+        );
+        assert!(matches!(brain.state(), MobState::Chase | MobState::Attack));
+        run_with(&mut brain, &quiet, 21_033, 60_000, &settings());
+        assert!(
+            brain.position().horizontal_distance(left_at) < 30.0
+                || brain.position().horizontal_distance(east(100.0)) < 0.1
+        );
+        died(&mut brain, 60_033);
+        run_with(
+            &mut brain,
+            &quiet,
+            60_066,
+            60_066 + settings().mob_respawn_ms,
+            &settings(),
+        );
+        assert_eq!(brain.position(), SPAWN, "it respawns at its spawn");
     }
 
     #[test]
