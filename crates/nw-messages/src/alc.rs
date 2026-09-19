@@ -572,9 +572,19 @@ impl AlcState {
     /// A state of the client's own player on its clock `stamp`: the client takes an own state
     /// only with its number and time, and shows the network icon and clears its input history
     /// when none came for 2 s (network note: `FUN_14485b680`, `alc-server-timeout-for-input`).
-    /// With `pos`, it also sends the place; with `data_bits`, the movement flags.
-    pub fn own_step(stamp: AlcStamp, pos: Option<InputPosition>, data_bits: Option<u8>) -> Self {
+    /// With `pos`, it also sends the place; with `data_bits`, the movement flags; when
+    /// `anchored`, the clock's anchor (the client's 'now' for its cooldowns is the anchor plus
+    /// the offset; clock note).
+    pub fn own_step(
+        stamp: AlcStamp,
+        pos: Option<InputPosition>,
+        data_bits: Option<u8>,
+        anchored: bool,
+    ) -> Self {
         let mut children: Vec<(usize, Vec<u8>)> = stamp_children(stamp).into();
+        if anchored {
+            children.push((TIME_ANCHOR_CHILD, stamp.anchor_us.to_be_bytes().to_vec()));
+        }
         if let Some(pos) = pos {
             children.extend(position_children(pos));
         }
@@ -641,11 +651,11 @@ impl AlcState {
     /// # Errors
     ///
     /// Returns [`MessageError`] when a prefix value cannot be encoded.
-    pub fn spawn(pos: InputPosition) -> Result<Self, MessageError> {
+    pub fn spawn(pos: InputPosition, anchor_us: u64) -> Result<Self, MessageError> {
         let mut writer = Writer::new();
         writer.u8(SLOT_BITS[0] | SLOT_BITS[1]);
-        write_children(&mut writer, &SPAWN_SLOT0, pos)?;
-        write_children(&mut writer, &SPAWN_SLOT1, pos)?;
+        write_children(&mut writer, &SPAWN_SLOT0, pos, anchor_us)?;
+        write_children(&mut writer, &SPAWN_SLOT1, pos, anchor_us)?;
         Ok(Self {
             bytes: writer.finish(),
             pos10: Some(pos),
@@ -726,16 +736,16 @@ enum SpawnValue {
     Prefixed(u64),
     /// An `f32`.
     Float(f32),
-    /// A `u64`.
-    Long(u64),
     /// Fixed bytes: a `pos3`, a `quat` (tag and extra bytes), a `frag`, or a blob (count and
     /// bytes).
     Raw(&'static [u8]),
     /// The `pos10` position.
     Position,
+    /// The clock anchor (µs since 2000-01-01).
+    Anchor,
 }
 
-use SpawnValue::{Byte, Float, Long, Position as SpawnPosition, Prefixed, Raw, Word};
+use SpawnValue::{Anchor, Byte, Float, Position as SpawnPosition, Prefixed, Raw, Word};
 
 /// `worldPosRel` 0 on each axis (the relative part of the position; `0x7f` is the zero step).
 const ZERO_POS3: [u8; POS3_LEN] = [0x7f; POS3_LEN];
@@ -794,7 +804,7 @@ const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
     (35, Float(0.0)),
     (36, Word(0x4a20)),
     (37, Word(0)),
-    (40, Long(0)),
+    (TIME_ANCHOR_CHILD, Anchor),
     (DATA_BITS_CHILD, Byte(243)),
     (42, Byte(83)),
     (43, Byte(0)),
@@ -822,6 +832,7 @@ fn write_children(
     writer: &mut Writer,
     children: &[(usize, SpawnValue)],
     pos: InputPosition,
+    anchor_us: u64,
 ) -> Result<(), MessageError> {
     let present = children
         .iter()
@@ -841,13 +852,13 @@ fn write_children(
             Float(value) => {
                 writer.f32(value);
             }
-            Long(value) => {
-                writer.u64(value);
-            }
             Raw(bytes) => {
                 writer.bytes(bytes);
             }
             SpawnPosition => pos.write(writer),
+            Anchor => {
+                writer.u64(anchor_us);
+            }
         }
     }
     Ok(())
@@ -1041,14 +1052,14 @@ mod tests {
                 .map(|(child, _)| child)
                 .collect()
         };
-        let clock_only = AlcState::own_step(stamp, None, None);
+        let clock_only = AlcState::own_step(stamp, None, None, false);
         assert_eq!(
             children_of(&clock_only),
             [ID_REL_CHILD, TIME_REL_CHILD, ID_ABS_CHILD, TIME_ABS_CHILD]
         );
         assert_eq!(clock_only.pos10, None);
         let pos = InputPosition::from_metres(1.0, 2.0, 3.0).expect("finite");
-        let full = AlcState::own_step(stamp, Some(pos), Some(DATA_BITS_ACTIVE));
+        let full = AlcState::own_step(stamp, Some(pos), Some(DATA_BITS_ACTIVE), false);
         assert_eq!(
             children_of(&full),
             [
@@ -1068,6 +1079,31 @@ mod tests {
             "throttle bit 5 clear"
         );
         assert_eq!(DATA_BITS_ACTIVE & 0x20, 0);
+        // Retail re-anchor (clock note): `00 03 01 2f ef 71 ce 55` after the time children.
+        const RETAIL_ANCHOR_US: u64 = 0x0003_012f_ef71_ce55;
+        let anchored = AlcState::own_step(
+            AlcStamp {
+                anchor_us: RETAIL_ANCHOR_US,
+                ..stamp
+            },
+            None,
+            None,
+            true,
+        );
+        assert_eq!(
+            children_of(&anchored),
+            [
+                ID_REL_CHILD,
+                TIME_REL_CHILD,
+                ID_ABS_CHILD,
+                TIME_ABS_CHILD,
+                TIME_ANCHOR_CHILD
+            ]
+        );
+        assert_eq!(
+            anchored.bytes[anchored.bytes.len() - 8..],
+            RETAIL_ANCHOR_US.to_be_bytes()
+        );
     }
 
     #[test]
@@ -1233,7 +1269,14 @@ mod tests {
             y: POS10_Y,
             z_raw: POS10_Z_RAW,
         };
-        let state = AlcState::spawn(pos).expect("spawn");
+        // Retail first own ALC anchor (clock note): 845730262399198 µs since 2000-01-01.
+        const RETAIL_ANCHOR_US: u64 = 0x0003_012f_ebdd_b8de;
+        let state = AlcState::spawn(pos, RETAIL_ANCHOR_US).expect("spawn");
+        let at = state
+            .bytes
+            .windows(8)
+            .position(|window| window == RETAIL_ANCHOR_US.to_be_bytes());
+        assert!(at.is_some(), "the spawn state carries the anchor");
         let mut reader = Reader::new(&state.bytes);
         assert_eq!(reader.u8().expect("mask"), SLOT_BITS[0] | SLOT_BITS[1]);
         assert_eq!(reader.wide_prefixed().expect("slot 0"), RETAIL_FIRST_SLOT0);

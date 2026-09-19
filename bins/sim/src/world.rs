@@ -66,8 +66,8 @@ use gear::Gear;
 use level_assets::{ASSET_ENTITY_BASE, AssetViews, asset_gde_ref, spell_gde_ref};
 use level_flow::{AchievementRules, LevelFlow};
 use members::{
-    CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, OwnTeleport, OwnTick, bundles, card_of,
-    log_mob_group, mob_group, own_group, remote_group,
+    CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, OwnClock, OwnTeleport, OwnTick, bundles,
+    card_of, log_mob_group, mob_group, own_group, remote_group,
 };
 use mob_timeline::{MobPose, MobTimelines, animations_of};
 use quest_tracker::QuestTracker;
@@ -2461,19 +2461,21 @@ impl Neighbourhood<'_> {
             } else {
                 None
             };
-            let since_spawn_ms = player
-                .own_spawned_ms
-                .map_or(0, |spawned| self.server_time.saturating_sub(spawned));
+            let spawn_ms = player.own_spawned_ms.unwrap_or(self.server_time);
+            let clock = OwnClock {
+                since_spawn_ms: self.server_time.saturating_sub(spawn_ms),
+                spawn_ms,
+            };
             let teleport = step.map(|step| {
                 player.teleport_step = step.next();
                 tracing::debug!(
                     player = own,
                     teleports = player.teleports,
-                    since_spawn_ms,
+                    since_spawn_ms = clock.since_spawn_ms,
                     ?step,
                     "own teleport"
                 );
-                OwnTeleport::of(player.teleports, since_spawn_ms, player.move_facing, step)
+                OwnTeleport::of(player.teleports, clock, player.move_facing, step)
             });
             let mut groups: Vec<BundleGroup> = Vec::new();
             if own_sent {
@@ -2552,7 +2554,7 @@ impl Neighbourhood<'_> {
                 // the client (live 2026-09-18: 529 refused moves while running and dodging).
                 let plain_tick = own_card != OwnCard::Spawn && teleport.is_none();
                 let tick = OwnTick {
-                    since_spawn_ms,
+                    clock,
                     with_position: (!player.moving && player.refused_since_ms.is_none())
                         || player.push.is_some(),
                     clear_throttle: plain_tick && !player.throttle_cleared,

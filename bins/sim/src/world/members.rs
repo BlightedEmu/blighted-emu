@@ -212,11 +212,15 @@ pub(super) fn entity_group(
 /// # Errors
 ///
 /// Returns [`MessageError`] when the state cannot be encoded.
-fn full_first_position(group: &mut BundleGroup, position: Position) -> Result<(), MessageError> {
+fn full_first_position(
+    group: &mut BundleGroup,
+    position: Position,
+    anchor_us: u64,
+) -> Result<(), MessageError> {
     if let Some(pos) = InputPosition::from_metres(position.x, position.y, position.z)
         && let Some(alc) = group.members.last_mut()
     {
-        alc.state = MemberState::Alc(AlcState::spawn(pos)?);
+        alc.state = MemberState::Alc(AlcState::spawn(pos, anchor_us)?);
     }
     Ok(())
 }
@@ -238,7 +242,7 @@ pub(super) fn remote_group(
         return Ok(None);
     };
     if carded {
-        full_first_position(&mut group, position)?;
+        full_first_position(&mut group, position, NO_ANCHOR_US)?;
     }
     Ok(Some(group))
 }
@@ -426,21 +430,64 @@ pub(super) struct OwnTeleport {
     step: TeleportStep,
 }
 
-/// The own clock `since_spawn_ms` after the first own state: it goes on from that state's number
-/// and time (anchor 0, 16-bit wrapping offset).
-const fn own_stamp(since_spawn_ms: u64) -> AlcStamp {
-    AlcStamp {
-        id: SPAWN_STATE_ID.wrapping_add((since_spawn_ms / OWN_STATE_MS) as u16),
-        anchor_us: 0,
-        offset_ms: SPAWN_STATE_MS.wrapping_add(since_spawn_ms as u16),
+/// The own clock re-anchors this often, before its 16-bit ms offset wraps (clock note: retail
+/// sent a new anchor every 60017 to 60050 ms).
+const OWN_ANCHOR_PERIOD_MS: u64 = 60_000;
+/// The own states this soon after an anchor carry it again (retail: the next 2 to 5 own states,
+/// about 16 ms apart).
+const OWN_ANCHOR_REPEAT_MS: u64 = 100;
+/// Microseconds per millisecond.
+const US_PER_MS: u64 = 1_000;
+/// The anchor of a spawn state of an entity that is not the client's own player.
+const NO_ANCHOR_US: u64 = 0;
+
+/// The clock of the client's own player: the client's 'now' is its anchor plus its offset, and
+/// the cooldowns count down on it (clock note: with anchor 0 the potion's cooldown showed the
+/// date). The anchor is the server time in µs since 2000-01-01, as the cooldown ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct OwnClock {
+    /// Milliseconds since the first own state.
+    pub(super) since_spawn_ms: u64,
+    /// The server time of the first own state (ms since 2000-01-01).
+    pub(super) spawn_ms: u64,
+}
+
+impl OwnClock {
+    /// Milliseconds since the first anchor: the first own state's offset was
+    /// [`SPAWN_STATE_MS`].
+    const fn elapsed_ms(self) -> u64 {
+        self.since_spawn_ms + SPAWN_STATE_MS as u64
+    }
+
+    /// The first anchor: the first own state's server time less its offset.
+    const fn first_anchor_us(self) -> u64 {
+        self.spawn_ms.saturating_sub(SPAWN_STATE_MS as u64) * US_PER_MS
+    }
+
+    /// The number and time of the own state now: the number goes on from the first state's,
+    /// the anchor moves on each [`OWN_ANCHOR_PERIOD_MS`].
+    const fn stamp(self) -> AlcStamp {
+        let elapsed = self.elapsed_ms();
+        let periods = elapsed / OWN_ANCHOR_PERIOD_MS;
+        AlcStamp {
+            id: SPAWN_STATE_ID.wrapping_add((self.since_spawn_ms / OWN_STATE_MS) as u16),
+            anchor_us: self.first_anchor_us() + periods * OWN_ANCHOR_PERIOD_MS * US_PER_MS,
+            // Below the period, which fits 16 bits.
+            offset_ms: (elapsed % OWN_ANCHOR_PERIOD_MS) as u16,
+        }
+    }
+
+    /// Whether the own state now carries its anchor: soon after one starts.
+    const fn anchored(self) -> bool {
+        self.elapsed_ms() % OWN_ANCHOR_PERIOD_MS < OWN_ANCHOR_REPEAT_MS
     }
 }
 
 /// One state of the client's own player that neither spawns nor moves it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct OwnTick {
-    /// Milliseconds since the first own state.
-    pub(super) since_spawn_ms: u64,
+    /// The own clock.
+    pub(super) clock: OwnClock,
     /// Send the place: the body estimate is exact (the player stands still).
     pub(super) with_position: bool,
     /// Send the movement flags without the throttle bit (the first state after the spawn).
@@ -448,16 +495,11 @@ pub(super) struct OwnTick {
 }
 
 impl OwnTeleport {
-    /// The `count`-th server move, `since_spawn_ms` after the first own state, on the own clock
-    /// ([`own_stamp`]), with the teleport number on from the first state's 1.
-    pub(super) fn of(
-        count: u8,
-        since_spawn_ms: u64,
-        facing: Option<f32>,
-        step: TeleportStep,
-    ) -> Self {
+    /// The `count`-th server move on the own clock `clock`, with the teleport number on from the
+    /// first state's 1.
+    pub(super) fn of(count: u8, clock: OwnClock, facing: Option<f32>, step: TeleportStep) -> Self {
         Self {
-            stamp: own_stamp(since_spawn_ms),
+            stamp: clock.stamp(),
             number: SPAWN_TELEPORT.wrapping_add(count),
             facing,
             step,
@@ -504,7 +546,7 @@ pub(super) fn own_group(
         return Ok(None);
     };
     if card == OwnCard::Spawn {
-        full_first_position(&mut group, position)?;
+        full_first_position(&mut group, position, tick.clock.first_anchor_us())?;
     } else if let (Some(teleport), Some(pos), Some(alc)) = (
         teleport,
         InputPosition::from_metres(position.x, position.y, position.z),
@@ -521,9 +563,10 @@ pub(super) fn own_group(
         let pos = InputPosition::from_metres(position.x, position.y, position.z)
             .filter(|_| tick.with_position);
         alc.state = MemberState::Alc(AlcState::own_step(
-            own_stamp(tick.since_spawn_ms),
+            tick.clock.stamp(),
             pos,
             tick.clear_throttle.then_some(DATA_BITS_ACTIVE),
+            tick.clock.anchored(),
         ));
     }
     // Without the card, the changes (achievements, objectives, experience, gear, health) still
@@ -692,9 +735,17 @@ mod tests {
         assert_eq!(read.groups[0].members, group.members);
     }
 
+    /// The server time of the first own state (retail 845730262408 ms since 2000-01-01).
+    const SPAWN_MS: u64 = 845_730_262_408;
+    /// The own clock at the first own state.
+    const SPAWN_CLOCK: OwnClock = OwnClock {
+        since_spawn_ms: 0,
+        spawn_ms: SPAWN_MS,
+    };
+
     /// A tick of a player who stands still, and of one who moves.
     const STILL: OwnTick = OwnTick {
-        since_spawn_ms: 0,
+        clock: SPAWN_CLOCK,
         with_position: true,
         clear_throttle: false,
     };
@@ -704,20 +755,50 @@ mod tests {
     };
 
     #[test]
+    fn the_own_clock_runs_on_the_server_time_and_anchors_each_minute() {
+        // The client's 'now' is the anchor plus the offset: the server time.
+        let now_us = |clock: OwnClock| {
+            let stamp = clock.stamp();
+            stamp.anchor_us + u64::from(stamp.offset_ms) * US_PER_MS
+        };
+        assert_eq!(now_us(SPAWN_CLOCK), SPAWN_MS * US_PER_MS);
+        assert!(SPAWN_CLOCK.anchored(), "the first states carry the anchor");
+        let later = OwnClock {
+            since_spawn_ms: 30_000,
+            ..SPAWN_CLOCK
+        };
+        assert_eq!(now_us(later), (SPAWN_MS + 30_000) * US_PER_MS);
+        assert!(!later.anchored());
+        let next_minute = OwnClock {
+            since_spawn_ms: OWN_ANCHOR_PERIOD_MS - u64::from(SPAWN_STATE_MS) + 16,
+            ..SPAWN_CLOCK
+        };
+        assert_eq!(next_minute.stamp().offset_ms, 16);
+        assert!(next_minute.anchored(), "a new anchor goes again");
+        assert_eq!(
+            now_us(next_minute),
+            (SPAWN_MS + next_minute.since_spawn_ms) * US_PER_MS
+        );
+    }
+
+    #[test]
     fn a_server_move_sends_the_next_teleport_number_on_the_own_clock() {
         const SINCE_SPAWN_MS: u64 = 117_000;
         let pos = InputPosition::from_metres(10.0, 20.0, 30.0).expect("finite");
         const FACING: f32 = 1.434;
-        let teleport = OwnTeleport::of(1, SINCE_SPAWN_MS, Some(FACING), TeleportStep::Confirm);
+        let clock = OwnClock {
+            since_spawn_ms: SINCE_SPAWN_MS,
+            spawn_ms: SPAWN_MS,
+        };
+        let teleport = OwnTeleport::of(1, clock, Some(FACING), TeleportStep::Confirm);
         assert_eq!(teleport.number, SPAWN_TELEPORT + 1, "retail: 1, then 2");
         assert_eq!(
             teleport.stamp.id,
             SPAWN_STATE_ID + (SINCE_SPAWN_MS / OWN_STATE_MS) as u16
         );
         assert_eq!(
-            teleport.stamp.offset_ms,
-            SPAWN_STATE_MS.wrapping_add(SINCE_SPAWN_MS as u16),
-            "the own time wraps at 16 bits"
+            teleport.stamp.offset_ms, 57_009,
+            "the time counts from the anchor of the second minute"
         );
         let group = own_group(
             OWN,
@@ -754,7 +835,10 @@ mod tests {
         let MemberState::Alc(moving) = alc_of(OwnCard::Without, MOVING) else {
             panic!("an ALC");
         };
-        assert_eq!(moving, AlcState::own_step(own_stamp(0), None, None));
+        assert_eq!(
+            moving,
+            AlcState::own_step(SPAWN_CLOCK.stamp(), None, None, true)
+        );
         let MemberState::Alc(spawn) = alc_of(OwnCard::Spawn, MOVING) else {
             panic!("an ALC");
         };
@@ -769,9 +853,10 @@ mod tests {
         assert_eq!(
             alc_of(OwnCard::Without, first),
             MemberState::Alc(AlcState::own_step(
-                own_stamp(0),
+                SPAWN_CLOCK.stamp(),
                 None,
-                Some(DATA_BITS_ACTIVE)
+                Some(DATA_BITS_ACTIVE),
+                true
             )),
             "the first tick clears the throttle"
         );
@@ -788,10 +873,15 @@ mod tests {
         };
         assert_eq!(
             alc_of(OwnCard::Spawn),
-            MemberState::Alc(AlcState::spawn(pos).expect("spawn")),
+            MemberState::Alc(AlcState::spawn(pos, SPAWN_CLOCK.first_anchor_us()).expect("spawn")),
             "the first card sets the start position with the full state"
         );
-        let still = MemberState::Alc(AlcState::own_step(own_stamp(0), Some(pos), None));
+        let still = MemberState::Alc(AlcState::own_step(
+            SPAWN_CLOCK.stamp(),
+            Some(pos),
+            None,
+            true,
+        ));
         assert_eq!(
             alc_of(OwnCard::Refresh),
             still,
