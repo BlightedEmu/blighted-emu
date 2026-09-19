@@ -2,9 +2,11 @@
 //! `blighted-admin`: local admin web tools on a loopback address (admin tools spec): the world map,
 //! the capture viewer and the live panel.
 
+pub mod access;
 pub mod assets;
 pub mod captures;
 pub mod config;
+pub mod gm;
 pub mod guard;
 pub mod live;
 pub mod relief;

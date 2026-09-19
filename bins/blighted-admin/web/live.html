@@ -66,6 +66,14 @@
         <ul class="list log" id="events"></ul>
         <h2>Selection</h2>
         <div class="selection" id="selection"><p class="hint">Click a player, a bot or a mob on the map, or a row of the players table.</p></div>
+        <form class="gm" id="gm-teleport" hidden>
+          <strong>Teleport</strong>
+          <input type="text" id="gm-x" inputmode="decimal" aria-label="x (metres)" placeholder="x">
+          <input type="text" id="gm-y" inputmode="decimal" aria-label="y (metres)" placeholder="y">
+          <input type="text" id="gm-z" inputmode="decimal" aria-label="z (metres)" placeholder="z">
+          <button type="submit">Move</button>
+          <span class="status" id="gm-status" role="status"></span>
+        </form>
       </aside>
     </div>
     <details class="players" id="players-panel" open>

@@ -5,6 +5,10 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use nw_common::config::{ConfigError, load_config};
+use nw_db::DatabaseConfig;
+use nw_login::config::TlsConfig;
+
+use crate::access::AccessMode;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -37,6 +41,33 @@ pub struct AdminConfig {
     pub live: Option<LiveConfig>,
     /// The studio (design files and Apply); without it the studio routes are 404.
     pub studio: Option<StudioConfig>,
+    /// Who may use the site; without it, local mode.
+    pub access: Option<AccessConfig>,
+}
+
+/// The access part of the configuration (admin studio spec sections 4 and 9).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessConfig {
+    /// Local (loopback, no login) or server (HTTPS, logins, ranks).
+    pub mode: AccessMode,
+    /// Server mode: the host names (and ports) the site is reached by, for the request checks.
+    #[serde(default)]
+    pub hosts: Vec<String>,
+    /// The global database of the game accounts; server mode needs it, local mode uses it only
+    /// for the audit log.
+    pub global_database: Option<DatabaseConfig>,
+    /// Name of the variable that holds the global database password.
+    pub global_database_password_env: Option<String>,
+    /// Server mode: the certificate and key.
+    pub tls: Option<TlsConfig>,
+}
+
+impl AccessConfig {
+    /// The mode, and local mode when the section is absent.
+    pub fn mode_of(access: Option<&Self>) -> AccessMode {
+        access.map_or(AccessMode::Local, |access| access.mode)
+    }
 }
 
 /// The studio part of the configuration (admin studio spec sections 5.2 to 5.4).
@@ -137,8 +168,23 @@ pub enum AdminConfigError {
 /// Returns [`AdminConfigError`] when the file cannot be read or a value is not allowed.
 pub fn load_admin_config(path: &Path) -> Result<AdminConfig, AdminConfigError> {
     let config: AdminConfig = load_config(path, ADMIN_ENV_PREFIX)?;
-    if !config.listen.ip().is_loopback() {
-        return Err(AdminConfigError::NotLoopback(config.listen));
+    match config.access.as_ref() {
+        Some(access) if access.mode == AccessMode::Server => {
+            let complete = access.tls.is_some()
+                && access.global_database.is_some()
+                && access.global_database_password_env.is_some()
+                && !access.hosts.is_empty();
+            if !complete {
+                return Err(AdminConfigError::Invalid {
+                    key: "access",
+                    reason: "server mode needs tls, global_database, global_database_password_env and hosts",
+                });
+            }
+        }
+        _ if !config.listen.ip().is_loopback() => {
+            return Err(AdminConfigError::NotLoopback(config.listen));
+        }
+        _ => {}
     }
     if config.max_spawns_per_request == 0 {
         return Err(AdminConfigError::Invalid {
@@ -297,6 +343,42 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    const SERVER_ACCESS: &str = "mode = \"server\"\nhosts = [\"admin.example.test\"]\nglobal_database_password_env = \"NW_SECRET_GLOBAL_DATABASE_PASSWORD\"\nglobal_database = { url = \"postgres://nw@127.0.0.1:5432/nw_global\", max_connections = 2 }\ntls = { certificate_pem_path = \"cert.pem\", private_key_pem_path = \"key.pem\" }\n";
+
+    #[test]
+    fn the_committed_config_is_local_mode() {
+        let config =
+            load_admin_config(&repo_root().join("config/blighted-admin.toml")).expect("load");
+        assert_eq!(
+            config.access.map(|access| access.mode),
+            Some(AccessMode::Local)
+        );
+    }
+
+    #[test]
+    fn server_mode_needs_tls_a_database_and_hosts() {
+        assert!(matches!(
+            load_changed("mode = \"local\"", "mode = \"server\""),
+            Err(AdminConfigError::Invalid { key: "access", .. })
+        ));
+    }
+
+    #[test]
+    fn server_mode_may_listen_off_loopback() {
+        let committed =
+            std::fs::read_to_string(repo_root().join("config/blighted-admin.toml")).expect("read");
+        let changed = committed
+            .replace("mode = \"local\"\n", SERVER_ACCESS)
+            .replace("listen = \"127.0.0.1:", "listen = \"0.0.0.0:");
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("blighted-admin.toml");
+        std::fs::write(&path, changed).expect("write");
+        let config = load_admin_config(&path).expect("server config");
+        let access = config.access.expect("access");
+        assert_eq!(access.mode, AccessMode::Server);
+        assert_eq!(access.hosts, ["admin.example.test"]);
     }
 
     #[test]

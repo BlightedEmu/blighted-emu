@@ -2,14 +2,27 @@
 //! `serve`: reads the configuration, the world file and the content bundle names, starts the
 //! live readers when `[live]` is set, and serves the admin pages until Ctrl-C.
 
+use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
+
+use axum_server::Handle;
+use axum_server::tls_rustls::RustlsConfig;
+use nw_db::AdminRank;
+use nw_login::config::TlsConfig;
+use nw_login::install_crypto_provider;
+use nw_login::password::PasswordHasher;
 
 use nw_common::logging::{LoggingError, init_logging};
 use nw_content::client_build::load_client_build;
 use tokio::sync::watch;
 
+use crate::access::store::Store;
+use crate::access::{Access, AccessMode};
 use crate::captures::Captures;
-use crate::config::{AdminConfigError, load_admin_config};
+use crate::config::{AccessConfig, AdminConfig, AdminConfigError, load_admin_config};
+use crate::gm::Commands;
+use crate::guard::AdminOrigin;
 use crate::live;
 use crate::server::{AppState, router};
 use crate::studio::Studio;
@@ -36,7 +49,24 @@ pub enum RunError {
     /// The runtime, the listener or the server failed.
     #[error("server failed")]
     Io(#[source] std::io::Error),
+    /// The variable named by `global_database_password_env` is not set.
+    #[error("the variable {0} with the global database password is not set")]
+    MissingSecret(String),
+    /// The global database cannot be reached or is not migrated (`edge-http migrate`).
+    #[error("global database: {0}")]
+    Database(String),
+    /// The password hasher cannot start.
+    #[error(transparent)]
+    Password(#[from] nw_login::password::PasswordError),
+    /// The TLS certificate or key cannot be read (server mode).
+    #[error("TLS certificate or key")]
+    Tls(#[source] std::io::Error),
 }
+
+/// Time the HTTPS server gives open requests after Ctrl-C.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
+/// Parallel password hashes in server mode (0: one per CPU).
+const HASH_PARALLEL: usize = 0;
 
 /// Serves the admin pages of `config_path` until Ctrl-C.
 ///
@@ -57,6 +87,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         .build()
         .map_err(RunError::Io)?
         .block_on(async {
+            let access = access_of(&config).await?;
             let (close, closing) = watch::channel(false);
             let live = config.live.as_ref().map(|live| live::start(live, closing));
             let studio = config.studio.as_ref().map(|studio| {
@@ -72,6 +103,20 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
                 Some(studio) => state.with_studio(studio),
                 None => state,
             };
+            let state = state.with_access(access, origin_of(&config));
+            let state = match &config.live {
+                Some(live) => {
+                    state.with_commands(Commands::over_bus(&live.nats_url, live.world_id))
+                }
+                None => state,
+            };
+            if let Some(tls) = config
+                .access
+                .as_ref()
+                .and_then(|access| access.tls.as_ref())
+            {
+                return serve_https(config.listen, tls, router(state), close).await;
+            }
             let listener = tokio::net::TcpListener::bind(config.listen)
                 .await
                 .map_err(RunError::Io)?;
@@ -86,4 +131,161 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
                 .await
                 .map_err(RunError::Io)
         })
+}
+
+/// A rank change could not be made.
+#[derive(Debug, thiserror::Error)]
+pub enum RankError {
+    /// The configuration cannot be used.
+    #[error(transparent)]
+    Config(#[from] AdminConfigError),
+    /// `[access]` names no global database.
+    #[error("[access] needs global_database and global_database_password_env")]
+    NoDatabase,
+    /// The variable with the password is not set.
+    #[error("the variable {0} with the global database password is not set")]
+    MissingSecret(String),
+    /// The database failed.
+    #[error("global database: {0}")]
+    Database(String),
+    /// No password login has this name.
+    #[error("no account has the login name {0}")]
+    UnknownUser(String),
+    /// The runtime cannot start.
+    #[error("runtime")]
+    Io(#[source] std::io::Error),
+}
+
+/// Gives the account of the login `username` the rank `rank`, or removes its rank when `rank`
+/// is `None` (`blighted-admin grant-rank` / `revoke-rank`). Returns `false` when there was no
+/// rank to remove.
+pub fn change_rank(
+    config_path: &Path,
+    username: &str,
+    rank: Option<AdminRank>,
+) -> Result<bool, RankError> {
+    let config = load_admin_config(config_path)?;
+    let (database, password_env) = config
+        .access
+        .as_ref()
+        .and_then(|access| {
+            access
+                .global_database
+                .as_ref()
+                .zip(access.global_database_password_env.as_ref())
+        })
+        .ok_or(RankError::NoDatabase)?;
+    let password =
+        std::env::var(password_env).map_err(|_| RankError::MissingSecret(password_env.clone()))?;
+    let username = username.trim().to_lowercase();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(RankError::Io)?
+        .block_on(async {
+            let database_error =
+                |error: &dyn std::fmt::Display| RankError::Database(error.to_string());
+            let pool = nw_db::connect(database, &password)
+                .await
+                .map_err(|error| database_error(&error))?;
+            let (account, _) = nw_db::password_login(&pool, &username)
+                .await
+                .map_err(|error| database_error(&error))?
+                .ok_or_else(|| RankError::UnknownUser(username.clone()))?;
+            match rank {
+                Some(rank) => nw_db::set_admin_rank(&pool, account.id, rank, None)
+                    .await
+                    .map(|()| true)
+                    .map_err(|error| database_error(&error)),
+                None => nw_db::remove_admin_rank(&pool, account.id)
+                    .await
+                    .map_err(|error| database_error(&error)),
+            }
+        })
+}
+
+/// The access of `config`: local mode without login, or server mode with the global database
+/// and the password hasher. A configured global database also keeps the audit log in local mode.
+async fn access_of(config: &AdminConfig) -> Result<Access, RunError> {
+    let mode = AccessConfig::mode_of(config.access.as_ref());
+    let database = config.access.as_ref().and_then(|access| {
+        access
+            .global_database
+            .as_ref()
+            .zip(access.global_database_password_env.as_ref())
+    });
+    let store = match database {
+        Some((database, password_env)) => {
+            let password = std::env::var(password_env)
+                .map_err(|_| RunError::MissingSecret(password_env.clone()))?;
+            let pool = nw_db::connect(database, &password)
+                .await
+                .map_err(|error| RunError::Database(error.to_string()))?;
+            nw_db::check_schema(&pool, &nw_db::GLOBAL_MIGRATOR)
+                .await
+                .map_err(|error| RunError::Database(error.to_string()))?;
+            Some(Store::Postgres(pool))
+        }
+        None => None,
+    };
+    let hasher = match mode {
+        AccessMode::Server => Some(PasswordHasher::new(HASH_PARALLEL)?),
+        AccessMode::Local => None,
+    };
+    Ok(Access::new(mode, store, hasher))
+}
+
+/// The request checks of `config`: the `[access] hosts` over HTTPS in server mode, else the
+/// listen address.
+fn origin_of(config: &AdminConfig) -> AdminOrigin {
+    match config.access.as_ref() {
+        Some(access) if access.mode == AccessMode::Server => AdminOrigin::server(&access.hosts),
+        _ => AdminOrigin::of(config.listen),
+    }
+}
+
+/// The TLS settings of `tls`; a missing or bad file is an error, never plain HTTP.
+pub async fn tls_config(tls: &TlsConfig) -> Result<RustlsConfig, RunError> {
+    install_crypto_provider();
+    RustlsConfig::from_pem_file(&tls.certificate_pem_path, &tls.private_key_pem_path)
+        .await
+        .map_err(RunError::Tls)
+}
+
+/// Serves `app` over HTTPS on `listen` until Ctrl-C (server mode).
+async fn serve_https(
+    listen: SocketAddr,
+    tls: &TlsConfig,
+    app: axum::Router,
+    close: watch::Sender<bool>,
+) -> Result<(), RunError> {
+    let tls = tls_config(tls).await?;
+    let handle = Handle::new();
+    let shutdown = handle.clone();
+    tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            let _ = close.send(true);
+            shutdown.graceful_shutdown(Some(SHUTDOWN_GRACE));
+        }
+    });
+    tracing::info!(%listen, "serving HTTPS");
+    axum_server::bind_rustls(listen, tls)
+        .handle(handle)
+        .serve(app.into_make_service())
+        .await
+        .map_err(RunError::Io)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_missing_certificate_refuses_to_start() {
+        let tls = TlsConfig {
+            certificate_pem_path: "no-such-cert.pem".into(),
+            private_key_pem_path: "no-such-key.pem".into(),
+        };
+        assert!(matches!(tls_config(&tls).await, Err(RunError::Tls(_))));
+    }
 }

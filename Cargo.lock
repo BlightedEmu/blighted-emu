@@ -584,6 +584,7 @@ name = "blighted-admin"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "axum-server",
  "clap",
  "futures-util",
  "http-body-util",
@@ -591,6 +592,7 @@ dependencies = [
  "nw-capture",
  "nw-common",
  "nw-content",
+ "nw-db",
  "nw-design",
  "nw-formats",
  "nw-login",

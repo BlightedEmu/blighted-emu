@@ -20,28 +20,44 @@ pub const ADMIN_HEADER_VALUE: &str = "1";
 const LOCALHOST: &str = "localhost";
 
 const HTTP_SCHEME: &str = "http://";
+const HTTPS_SCHEME: &str = "https://";
 
-/// The hosts of this server: the listen address and, on a loopback address, `localhost`.
+/// The hosts of this server and the scheme of its pages.
 #[derive(Debug, Clone)]
-pub struct AdminOrigin(Arc<[String]>);
+pub struct AdminOrigin {
+    hosts: Arc<[String]>,
+    scheme: &'static str,
+}
 
 impl AdminOrigin {
-    /// The hosts of a server on `listen`.
+    /// The hosts of a local server on `listen`: the listen address and, on a loopback address,
+    /// `localhost`; plain HTTP.
     pub fn of(listen: SocketAddr) -> Self {
         let mut hosts = vec![listen.to_string()];
         if listen.ip().is_loopback() {
             hosts.push(format!("{LOCALHOST}:{}", listen.port()));
         }
-        Self(hosts.into())
+        Self {
+            hosts: hosts.into(),
+            scheme: HTTP_SCHEME,
+        }
+    }
+
+    /// The hosts of a server-mode site (`[access] hosts`); HTTPS.
+    pub fn server(hosts: &[String]) -> Self {
+        Self {
+            hosts: hosts.into(),
+            scheme: HTTPS_SCHEME,
+        }
     }
 
     fn allows_host(&self, host: &[u8]) -> bool {
-        self.0.iter().any(|own| own.as_bytes() == host)
+        self.hosts.iter().any(|own| own.as_bytes() == host)
     }
 
     fn allows_origin(&self, origin: &[u8]) -> bool {
         origin
-            .strip_prefix(HTTP_SCHEME.as_bytes())
+            .strip_prefix(self.scheme.as_bytes())
             .is_some_and(|host| self.allows_host(host))
     }
 }

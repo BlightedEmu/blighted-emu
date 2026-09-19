@@ -3,6 +3,7 @@
 // events) and the bot batch buttons.
 
 import { KINDS, mobEntity, playerEntity, selectionRows } from './entity.js';
+import { sendTeleport, teleportRequest } from './gm.js';
 import { WorldMap } from './map.js';
 import { SERIES, SIGNAL } from './palette.js';
 import { STATUS_GROUPS, isMarked, nextStatuses, statusText } from './status.js';
@@ -280,7 +281,45 @@ function select(key) {
   map.follow(key);
   showMap();
   showSelection();
+  showTeleport();
 }
+
+const teleportForm = document.getElementById('gm-teleport');
+const teleportStatus = document.getElementById('gm-status');
+const teleportFields = ['gm-x', 'gm-y', 'gm-z'].map((id) => document.getElementById(id));
+
+/** Shows the teleport form for a selected player or bot, filled with its position. */
+function showTeleport() {
+  const entity = selectedKey === null ? undefined : entities().get(selectedKey);
+  const player = entity && entity.kind !== KINDS.MOB;
+  teleportForm.hidden = !player;
+  teleportStatus.textContent = '';
+  if (player) {
+    [entity.x, entity.y, entity.z].forEach((value, index) => {
+      teleportFields[index].value = value.toFixed(1);
+    });
+  }
+}
+
+teleportForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const entity = selectedKey === null ? undefined : entities().get(selectedKey);
+  if (!entity) {
+    return;
+  }
+  const { request, error } = teleportRequest(entity.entity, ...teleportFields.map((field) => field.value));
+  if (error) {
+    teleportStatus.textContent = error;
+    return;
+  }
+  teleportStatus.textContent = 'Sending…';
+  try {
+    const answer = await sendTeleport(request);
+    teleportStatus.textContent = answer.ok ? 'Moved.' : answer.text;
+  } catch (failure) {
+    teleportStatus.textContent = `Not sent: ${failure.message ?? failure}`;
+  }
+});
 
 /** A list item that says the list is empty. */
 function emptyItem(text) {

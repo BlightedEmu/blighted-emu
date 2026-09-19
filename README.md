@@ -322,6 +322,21 @@ The studio page (`/studio`) shows the team's design files in `content/` (see [co
 
 To find the design key of a mob spawn, turn on "Mob spawns" on the Map page and click a spawn.
 
+### Server mode, ranks and GM commands
+
+By default (`[access] mode = "local"`) the admin site listens on a loopback address and has no login: the user on this PC has every right. For the community server, set `mode = "server"` with `hosts` (the names the site is reached by), `global_database` and `global_database_password_env` (the game's account database) and `tls` (certificate and key). The site then serves HTTPS only, and refuses to start when a TLS file is missing. Run `edge-http migrate` after an update: the ranks and the audit log are tables of the global database.
+
+Users log in with their game account and need an admin rank: `csr`, `game_master` or `head_admin`. Give or remove one from the server shell:
+
+```bash
+blighted-admin grant-rank ada game_master
+blighted-admin revoke-rank ada
+```
+
+Five wrong passwords in 10 minutes lock a name for 15 minutes. The session cookie is `HttpOnly`, `Secure` and `SameSite=Strict`, and lasts 12 hours. In server mode the design routes (Check, Apply) and bot batches are refused: design work happens on a team member's own PC and reaches the server through git.
+
+GM commands go to the sim that owns the target, found from the sim snapshots, and wait up to 5 s for its answer. Every command (and every login) writes a row to the audit log (`/api/gm/audit`; a head admin sees all rows, others their own). On the live page, select a player or bot to move it with **Teleport** (game master rank).
+
 ## Rules for contributors
 
 - Never commit game files, captures, or `deploy/.env`. Put local game data in `local-data/` (ignored by git).

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Log in · Blighted Emu</title>
+  <link rel="stylesheet" href="/web/style.css">
+  <script src="/web/theme.js"></script>
+</head>
+<body>
+  <main class="work login-page">
+    <header class="masthead">
+      <h1>Blighted Emu <span>· Admin</span></h1>
+    </header>
+    <form class="login" id="login">
+      <p class="muted">Log in with your game account. It needs an admin rank.</p>
+      <label>Name <input type="text" id="username" autocomplete="username" required></label>
+      <label>Password <input type="password" id="password" autocomplete="current-password" required></label>
+      <button type="submit">Log in</button>
+      <p class="status error" id="status" role="status"></p>
+    </form>
+  </main>
+  <script type="module" src="/web/login.js"></script>
+</body>
+</html>

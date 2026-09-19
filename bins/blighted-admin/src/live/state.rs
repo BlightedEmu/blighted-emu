@@ -240,6 +240,19 @@ impl LiveState {
             .count()
     }
 
+    /// The sim whose newest snapshot holds the player with entity number `entity`.
+    pub fn sim_of_player(&self, entity: u64) -> Option<BusId> {
+        self.snapshots
+            .iter()
+            .find(|(_, snapshots)| {
+                snapshots
+                    .players
+                    .iter()
+                    .any(|player| player.entity == entity)
+            })
+            .map(|(sim, _)| sim.clone())
+    }
+
     /// The director's cell table; a new version is an event.
     pub fn table(&mut self, table: CellTable, now_ms: u64) {
         let version = table.version;
@@ -526,6 +539,17 @@ mod tests {
             .iter()
             .map(|event| event.text.as_str())
             .collect()
+    }
+
+    #[test]
+    fn the_sim_of_a_player_comes_from_its_snapshot() {
+        let mut state = LiveState::default();
+        state.snapshot_part(part(NOW, 0, 1, &[5, 6]));
+        assert_eq!(
+            state.sim_of_player(6).map(|sim| sim.to_string()),
+            Some("sim-a".to_owned())
+        );
+        assert_eq!(state.sim_of_player(7), None);
     }
 
     #[test]

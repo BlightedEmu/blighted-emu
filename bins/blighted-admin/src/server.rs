@@ -12,10 +12,14 @@ use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use serde::Deserialize;
 
+use crate::access::Access;
+use crate::access::api::{LOGIN_PAGE_ROUTE, access_guard, access_routes, local_access};
 use crate::assets::asset;
 use crate::captures::Captures;
 use crate::captures::api::capture_routes;
 use crate::captures::catalog::search;
+use crate::gm::Commands;
+use crate::gm::api::gm_routes;
 use crate::guard::{AdminOrigin, admin_guard};
 use crate::live::Live;
 use crate::live::bots::bot_routes;
@@ -33,6 +37,7 @@ const LIVE_PAGE: &str = "live.html";
 /// The live page.
 pub const LIVE_PAGE_ROUTE: &str = "/live";
 const STUDIO_PAGE: &str = "studio.html";
+const LOGIN_PAGE: &str = "login.html";
 /// The studio page.
 pub const STUDIO_PAGE_ROUTE: &str = "/studio";
 
@@ -45,6 +50,8 @@ pub struct AppState {
     pub(crate) captures: Arc<Captures>,
     pub(crate) live: Option<Live>,
     pub(crate) studio: Option<Studio>,
+    pub(crate) access: Access,
+    pub(crate) commands: Option<Commands>,
 }
 
 impl AppState {
@@ -64,6 +71,26 @@ impl AppState {
             captures: Arc::new(captures),
             live,
             studio: None,
+            access: local_access(),
+            commands: None,
+        }
+    }
+
+    /// The same state with GM commands sent by `commands`.
+    pub fn with_commands(self, commands: Commands) -> Self {
+        Self {
+            commands: Some(commands),
+            ..self
+        }
+    }
+
+    /// The same state with `access` (server mode: logins and ranks) and the request checks of
+    /// `origin`.
+    pub fn with_access(self, access: Access, origin: AdminOrigin) -> Self {
+        Self {
+            access,
+            origin,
+            ..self
         }
     }
 
@@ -88,6 +115,10 @@ pub fn router(state: AppState) -> Router {
             STUDIO_PAGE_ROUTE,
             get(|| web_file(UrlPath(STUDIO_PAGE.to_owned()))),
         )
+        .route(
+            LOGIN_PAGE_ROUTE,
+            get(|| web_file(UrlPath(LOGIN_PAGE.to_owned()))),
+        )
         .route("/web/{file}", get(web_file))
         .route("/api/world/info", get(world_info))
         .route("/api/world/tiles/{level}/{row}/{column}", get(map_tile))
@@ -99,6 +130,12 @@ pub fn router(state: AppState) -> Router {
         .merge(live_routes())
         .merge(bot_routes())
         .merge(studio_routes())
+        .merge(access_routes())
+        .merge(gm_routes())
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            access_guard,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.origin.clone(),
             admin_guard,

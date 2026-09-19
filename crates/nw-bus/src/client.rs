@@ -42,6 +42,13 @@ pub enum BusError {
     NoReplySubject,
 }
 
+impl BusError {
+    /// True when a request got no answer in its time-out.
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, Self::Request(error) if error.kind() == async_nats::RequestErrorKind::TimedOut)
+    }
+}
+
 /// A connection to NATS.
 #[derive(Debug, Clone)]
 pub struct Bus {

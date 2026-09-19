@@ -1,7 +1,7 @@
 # blighted-admin configuration (Blighted Emu admin tools, spec section 6). This file holds no secret.
 # Any key below can be overridden with BLIGHTED_ADMIN_<KEY>, nested keys joined by "__".
 
-# The admin pages. Only a loopback address is allowed: the tools have no login.
+# The admin pages. In local mode ([access]) only a loopback address is allowed: there is no login.
 listen = "127.0.0.1:9180"
 log_filter = "info"
 client_build_config = "config/client-build.toml"
@@ -57,3 +57,13 @@ design_dir = "content"
 retail_dir = "local-data/content/retail"
 control_fifo = "local-data/logs/live/control"
 restart_timeout_s = 600
+
+[access]
+# "local": loopback only, no login, every right (a team member's own PC).
+# "server": HTTPS, logins with the game accounts, ranks and an audit log (the community server).
+# Server mode also needs (see README "Admin tools"):
+#   hosts = ["admin.example.org"]
+#   global_database = { url = "postgres://nw@127.0.0.1:5432/nw_global", max_connections = 5 }
+#   global_database_password_env = "NW_SECRET_GLOBAL_DATABASE_PASSWORD"
+#   tls = { certificate_pem_path = "...", private_key_pem_path = "..." }
+mode = "local"

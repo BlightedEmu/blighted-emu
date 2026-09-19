@@ -1,0 +1,403 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! The login routes and the access guard (admin studio spec section 9.1).
+
+use axum::Router;
+use axum::extract::{Request, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Json, Redirect, Response};
+use axum::routing::{get, post};
+use nw_common::time::unix_ms;
+use nw_login::keys::{new_random_token, token_hash};
+use serde::{Deserialize, Serialize};
+
+use crate::access::session::{Actor, SESSION_TTL_MS};
+use crate::access::{Access, AccessMode, SESSION_COOKIE, session_token};
+use crate::server::AppState;
+
+/// The login page.
+pub const LOGIN_PAGE_ROUTE: &str = "/login";
+/// `POST`: log in.
+pub const LOGIN_ROUTE: &str = "/api/auth/login";
+/// `POST`: log out.
+pub const LOGOUT_ROUTE: &str = "/api/auth/logout";
+/// `GET`: who is logged in.
+pub const ME_ROUTE: &str = "/api/auth/me";
+/// Prefix of the web files, which need no session.
+const WEB_PREFIX: &str = "/web/";
+/// Pages that send a visitor without a session to the login page.
+const PAGES: [&str; 3] = ["/", "/live", "/studio"];
+/// Changing routes that only local mode allows: design work and bot batches are for a
+/// team member's own PC (spec section 4).
+const LOCAL_ONLY_PREFIXES: [&str; 2] = ["/api/studio/", "/api/live/bots"];
+const MS_PER_SECOND: u64 = 1000;
+
+/// The login routes.
+pub fn access_routes() -> Router<AppState> {
+    Router::new()
+        .route(LOGIN_ROUTE, post(login))
+        .route(LOGOUT_ROUTE, post(logout))
+        .route(ME_ROUTE, get(me))
+}
+
+/// What the login form sends.
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    username: String,
+    password: String,
+}
+
+/// Who is logged in, and the mode.
+#[derive(Debug, Serialize)]
+struct MeView {
+    mode: &'static str,
+    actor: Actor,
+}
+
+/// Puts the request's [`Actor`] into its extensions. In server mode a request without a session
+/// gets the login page (pages) or 401 (the rest), except the login page, its API and the web
+/// files; the local-only routes get 403.
+pub async fn access_guard(
+    State(state): State<AppState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let access = &state.access;
+    let path = request.uri().path().to_owned();
+    let changing = request.method() != Method::GET && request.method() != Method::HEAD;
+    if access.mode() == AccessMode::Server
+        && changing
+        && LOCAL_ONLY_PREFIXES
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+    {
+        return (StatusCode::FORBIDDEN, "local mode only").into_response();
+    }
+    match access.actor(request.headers()) {
+        Some(actor) => {
+            request.extensions_mut().insert(actor);
+            next.run(request).await
+        }
+        None => {
+            let public =
+                path == LOGIN_PAGE_ROUTE || path == LOGIN_ROUTE || path.starts_with(WEB_PREFIX);
+            if public {
+                next.run(request).await
+            } else if !changing && PAGES.contains(&path.as_str()) {
+                Redirect::to(LOGIN_PAGE_ROUTE).into_response()
+            } else {
+                StatusCode::UNAUTHORIZED.into_response()
+            }
+        }
+    }
+}
+
+async fn login(State(state): State<AppState>, Json(form): Json<LoginRequest>) -> Response {
+    let access = &state.access;
+    let (Some(store), Some(hasher)) = (access.store(), access.hasher()) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if access.mode() != AccessMode::Server {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let username = form.username.trim().to_lowercase();
+    let now_ms = unix_ms();
+    if access.sessions().locked(&username, now_ms) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "locked for a while: too many failed logins",
+        )
+            .into_response();
+    }
+    let record = match store.login(&username).await {
+        Ok(record) => record,
+        Err(error) => return server_error(&error),
+    };
+    let stored = record.as_ref().map(|record| record.password_hash.clone());
+    let good = match hasher.verify(form.password, stored).await {
+        Ok(good) => good,
+        Err(error) => return server_error(&error),
+    };
+    let Some(record) = record.filter(|_| good) else {
+        access.sessions().failed(&username, now_ms);
+        return (StatusCode::UNAUTHORIZED, "wrong name or password").into_response();
+    };
+    access.sessions().succeeded(&username);
+    if record.banned {
+        return (StatusCode::FORBIDDEN, "the account is banned").into_response();
+    }
+    let rank = match store.rank(record.account).await {
+        Ok(Some(rank)) => rank,
+        Ok(None) => {
+            return (StatusCode::FORBIDDEN, "the account has no admin rank").into_response();
+        }
+        Err(error) => return server_error(&error),
+    };
+    let Ok(token) = new_random_token() else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let actor = Actor {
+        account: Some(record.account),
+        username: username.clone(),
+        rank,
+    };
+    access
+        .sessions()
+        .open(token_hash(&token), actor.clone(), now_ms);
+    access
+        .record(&actor, "login", &username, serde_json::Value::Null, "done")
+        .await;
+    let mut response = Json(&actor).into_response();
+    if let Ok(cookie) =
+        HeaderValue::from_str(&session_cookie(&token, SESSION_TTL_MS / MS_PER_SECOND))
+    {
+        response.headers_mut().insert(header::SET_COOKIE, cookie);
+    }
+    response
+}
+
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(token) = session_token(&headers) {
+        state.access.sessions().close(&token_hash(&token));
+    }
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    if let Ok(cookie) = HeaderValue::from_str(&session_cookie("", 0)) {
+        response.headers_mut().insert(header::SET_COOKIE, cookie);
+    }
+    response
+}
+
+async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let mode = match state.access.mode() {
+        AccessMode::Local => "local",
+        AccessMode::Server => "server",
+    };
+    match state.access.actor(&headers) {
+        Some(actor) => Json(MeView { mode, actor }).into_response(),
+        None => StatusCode::UNAUTHORIZED.into_response(),
+    }
+}
+
+/// The `Set-Cookie` value of a session token that lives `max_age_s` seconds.
+fn session_cookie(token: &str, max_age_s: u64) -> String {
+    format!(
+        "{SESSION_COOKIE}={token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age_s}"
+    )
+}
+
+fn server_error(error: &dyn std::error::Error) -> Response {
+    tracing::warn!(%error, "login failed");
+    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+}
+
+/// The access of an app without login: local mode, no store.
+pub fn local_access() -> Access {
+    Access::new(AccessMode::Local, None, None)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use nw_db::AdminRank;
+    use nw_login::password::PasswordHasher;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::access::session::LOCK_FAILS;
+    use crate::access::store::memory::MemoryStore;
+    use crate::access::store::{LoginRecord, Store};
+    use crate::captures::Captures;
+    use crate::guard::{ADMIN_HEADER, ADMIN_HEADER_VALUE, AdminOrigin};
+    use crate::server::{AppState, router};
+    use crate::world::tests::test_layer;
+
+    const CAP: usize = 5_000;
+    const LISTEN: &str = "127.0.0.1:9180";
+    const PASSWORD: &str = "correct horse";
+    const GM: &str = "gm";
+    const NO_RANK: &str = "player";
+    const ONE_HASH: usize = 1;
+
+    struct Fixture {
+        memory: Arc<Mutex<MemoryStore>>,
+        state: AppState,
+    }
+
+    async fn fixture() -> Fixture {
+        let hasher = PasswordHasher::new(ONE_HASH).expect("hasher");
+        let hash = hasher.hash(PASSWORD.to_owned()).await.expect("hash");
+        let mut memory = MemoryStore::default();
+        for (index, name) in [GM, NO_RANK].into_iter().enumerate() {
+            let account = Uuid::from_u128(u128::try_from(index).expect("index") + 1);
+            memory.logins.insert(
+                name.to_owned(),
+                LoginRecord {
+                    account,
+                    banned: false,
+                    password_hash: hash.clone(),
+                },
+            );
+            if name == GM {
+                memory.ranks.insert(account, AdminRank::GameMaster);
+            }
+        }
+        let memory = Arc::new(Mutex::new(memory));
+        let access = Access::new(
+            AccessMode::Server,
+            Some(Store::Memory(memory.clone())),
+            Some(hasher),
+        );
+        let listen = LISTEN.parse().expect("address");
+        let state = AppState::new(
+            test_layer(CAP),
+            std::env::temp_dir(),
+            listen,
+            Captures::default(),
+            None,
+        )
+        .with_access(access, AdminOrigin::of(listen));
+        Fixture { memory, state }
+    }
+
+    fn request(method: Method, uri: &str, cookie: Option<&str>, body: &str) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::HOST, LISTEN)
+            .header(ADMIN_HEADER, ADMIN_HEADER_VALUE)
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(cookie) = cookie {
+            builder = builder.header(header::COOKIE, cookie);
+        }
+        builder.body(Body::from(body.to_owned())).expect("request")
+    }
+
+    async fn send(fixture: &Fixture, request: Request<Body>) -> Response {
+        router(fixture.state.clone())
+            .oneshot(request)
+            .await
+            .expect("response")
+    }
+
+    fn form(username: &str, password: &str) -> String {
+        serde_json::json!({ "username": username, "password": password }).to_string()
+    }
+
+    /// Logs in `username` and gives the `name=value` part of its session cookie.
+    async fn log_in(fixture: &Fixture, username: &str) -> (StatusCode, Option<String>) {
+        let response = send(
+            fixture,
+            request(Method::POST, LOGIN_ROUTE, None, &form(username, PASSWORD)),
+        )
+        .await;
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        (response.status(), cookie)
+    }
+
+    #[tokio::test]
+    async fn a_good_login_gives_a_strict_session_cookie_and_an_audit_row() {
+        let fixture = fixture().await;
+        let (status, cookie) = log_in(&fixture, "GM").await;
+        assert_eq!(status, StatusCode::OK);
+        let cookie = cookie.expect("cookie");
+        for flag in ["HttpOnly", "Secure", "SameSite=Strict", "Path=/"] {
+            assert!(cookie.contains(flag), "{flag} in {cookie}");
+        }
+        let pair = cookie.split(';').next().expect("pair").to_owned();
+        let response = send(&fixture, request(Method::GET, ME_ROUTE, Some(&pair), "")).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body")
+            .to_bytes();
+        let me: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(me["actor"]["rank"], "game_master");
+        let audit = &crate::access::store::memory::lock(&fixture.memory).audit;
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].command, "login");
+    }
+
+    #[tokio::test]
+    async fn a_wrong_password_and_no_rank_are_refused() {
+        let fixture = fixture().await;
+        let wrong = send(
+            &fixture,
+            request(Method::POST, LOGIN_ROUTE, None, &form(GM, "nope")),
+        )
+        .await;
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+        let unknown = send(
+            &fixture,
+            request(Method::POST, LOGIN_ROUTE, None, &form("ghost", PASSWORD)),
+        )
+        .await;
+        assert_eq!(unknown.status(), StatusCode::UNAUTHORIZED);
+        let (no_rank, cookie) = log_in(&fixture, NO_RANK).await;
+        assert_eq!(no_rank, StatusCode::FORBIDDEN);
+        assert!(cookie.is_none());
+    }
+
+    #[tokio::test]
+    async fn five_wrong_passwords_lock_even_the_right_one() {
+        let fixture = fixture().await;
+        for _ in 0..LOCK_FAILS {
+            send(
+                &fixture,
+                request(Method::POST, LOGIN_ROUTE, None, &form(GM, "nope")),
+            )
+            .await;
+        }
+        let (status, cookie) = log_in(&fixture, GM).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(cookie.is_none());
+    }
+
+    #[tokio::test]
+    async fn without_a_session_pages_go_to_login_and_data_is_refused() {
+        let fixture = fixture().await;
+        let page = send(&fixture, request(Method::GET, "/live", None, "")).await;
+        assert_eq!(page.status(), StatusCode::SEE_OTHER);
+        assert_eq!(page.headers()[header::LOCATION], LOGIN_PAGE_ROUTE);
+        let data = send(&fixture, request(Method::GET, "/api/world/info", None, "")).await;
+        assert_eq!(data.status(), StatusCode::UNAUTHORIZED);
+        let login_page = send(&fixture, request(Method::GET, LOGIN_PAGE_ROUTE, None, "")).await;
+        assert_eq!(login_page.status(), StatusCode::OK);
+        let script = send(&fixture, request(Method::GET, "/web/login.js", None, "")).await;
+        assert_eq!(script.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn design_and_bot_routes_are_local_only() {
+        let fixture = fixture().await;
+        let (_, cookie) = log_in(&fixture, GM).await;
+        let pair = cookie
+            .expect("cookie")
+            .split(';')
+            .next()
+            .expect("pair")
+            .to_owned();
+        for uri in ["/api/studio/apply", "/api/live/bots"] {
+            let response = send(&fixture, request(Method::POST, uri, Some(&pair), "{}")).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{uri}");
+        }
+        let logout = send(
+            &fixture,
+            request(Method::POST, LOGOUT_ROUTE, Some(&pair), ""),
+        )
+        .await;
+        assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+        let after = send(&fixture, request(Method::GET, ME_ROUTE, Some(&pair), "")).await;
+        assert_eq!(after.status(), StatusCode::UNAUTHORIZED);
+    }
+}

@@ -9,10 +9,12 @@ publish.workspace = true
 
 [dependencies]
 axum.workspace = true
+axum-server.workspace = true
 clap.workspace = true
 nw-capture.workspace = true
 nw-common.workspace = true
 nw-content.workspace = true
+nw-db.workspace = true
 nw-design.workspace = true
 nw-formats.workspace = true
 nw-world.workspace = true
