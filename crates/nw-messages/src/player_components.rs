@@ -43,6 +43,18 @@ pub const PLAYER_COMPONENT_TYPE_INDEX: u64 = 3935;
 const NO_SLOT: u8 = 0;
 /// Slots of type 3935: base slot 0 plus two add-slot calls (`FUN_146713160`).
 const PLAYER_COMPONENT_SLOTS: u8 = 3;
+/// Slot-byte bit for slot 1.
+const SLOT_1_BIT: u8 = 0b010;
+/// Children registered on slot 1 (death note, 2026-09-18).
+const SLOT_1_CHILDREN: u8 = 22;
+/// Slot 1 child 12: `onDeathRespawnCooldown`, an `f32`. A change of it to 0 or more opens the
+/// client's death screen (`FUN_14683dba0`, `Hud.LocalPlayer.OnPlayerDeath`).
+const CHILD_ON_DEATH_RESPAWN_COOLDOWN: u16 = 1 << 12;
+/// The `onDeathRespawnCooldown` of an open-world death (retail: 0.0 in all three captured
+/// deaths; the meaning of other values is Unknown).
+const OPEN_WORLD_RESPAWN_COOLDOWN: f32 = 0.0;
+/// The component of the player's 3935 state.
+pub const PLAYER_COMPONENT_COMPONENT: u64 = 9;
 /// Slot-byte bit for slot 2 (packet `group1`: `characterId`, `playerConnected`, …).
 const SLOT_2_BIT: u8 = 0b100;
 /// Children registered on slot 2, in constructor order.
@@ -67,7 +79,7 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 56] = [
     (4, 2406),
     (5, 3290),
     (6, 2768),
-    (9, 3935),
+    (PLAYER_COMPONENT_COMPONENT, PLAYER_COMPONENT_TYPE_INDEX),
     (10, 3829),
     (12, PLAYER_APPEARANCE_TYPE_INDEX),
     (13, 603),
@@ -161,10 +173,13 @@ impl EmptyState {
 }
 
 /// `MB::PlayerComponentReplicatedState` (type 3935, component 9). Slot 2 holds
-/// `characterId` and `playerConnected` (local-player-check note). Other slot-2 children and
-/// slots 0 and 1 are not encoded here.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// `characterId` and `playerConnected` (local-player-check note) of slot 2, and the
+/// `onDeathRespawnCooldown` of slot 1 (death note). Other children and slot 0 are not encoded
+/// here.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PlayerComponentState {
+    /// Slot 1 child 12: the respawn cooldown that opens the death screen, when sent.
+    pub on_death_respawn_cooldown: Option<f32>,
     /// Slot 2 child 0: the 16-byte character id, when sent.
     pub character_id: Option<[u8; RAW_ID_LEN]>,
     /// Slot 2 child 3: whether this player is connected, when sent.
@@ -175,8 +190,19 @@ impl PlayerComponentState {
     /// The first body of a local player: `characterId` is `id`, `playerConnected` is true.
     pub const fn connected(id: [u8; RAW_ID_LEN]) -> Self {
         Self {
+            on_death_respawn_cooldown: None,
             character_id: Some(id),
             player_connected: Some(true),
+        }
+    }
+
+    /// The change at the player's death that opens its death screen (retail
+    /// `09 9f3d 02 80 20 00000000`, 7 to 55 ms after the 4299).
+    pub const fn died() -> Self {
+        Self {
+            on_death_respawn_cooldown: Some(OPEN_WORLD_RESPAWN_COOLDOWN),
+            character_id: None,
+            player_connected: None,
         }
     }
 
@@ -184,62 +210,87 @@ impl PlayerComponentState {
     ///
     /// # Errors
     ///
-    /// Returns [`MessageError`] when the body ends early, sets slot 0 or 1, or sets a slot-2
-    /// child this reader does not size.
+    /// Returns [`MessageError`] when the body ends early, sets slot 0, or sets a child this
+    /// reader does not size.
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         let slots = read_slot_byte(reader, FIELD, PLAYER_COMPONENT_SLOTS)?;
-        if slots & !SLOT_2_BIT != 0 {
+        if slots & !(SLOT_1_BIT | SLOT_2_BIT) != 0 {
             return Err(MessageError::Unsized {
                 field: FIELD,
                 byte: slots,
             });
         }
-        if slots & SLOT_2_BIT == 0 {
-            return Ok(Self::default());
-        }
         let mut state = Self::default();
-        read_children(reader, FIELD, SLOT_2_CHILDREN, |reader, child| {
-            match 1 << child {
-                CHILD_CHARACTER_ID => state.character_id = Some(read_presence_id(reader)?),
-                CHILD_PLAYER_CONNECTED => state.player_connected = Some(reader.boolean()?),
-                _ => {
-                    return Err(MessageError::Unsized {
-                        field: FIELD,
-                        byte: child,
-                    });
+        let unsized_child = |child| MessageError::Unsized {
+            field: FIELD,
+            byte: child,
+        };
+        if slots & SLOT_1_BIT != 0 {
+            read_children(reader, FIELD, SLOT_1_CHILDREN, |reader, child| {
+                if 1_u32 << child != u32::from(CHILD_ON_DEATH_RESPAWN_COOLDOWN) {
+                    return Err(unsized_child(child));
                 }
-            }
-            Ok(())
-        })?;
+                state.on_death_respawn_cooldown = Some(reader.f32()?);
+                Ok(())
+            })?;
+        }
+        if slots & SLOT_2_BIT != 0 {
+            read_children(reader, FIELD, SLOT_2_CHILDREN, |reader, child| {
+                match 1 << child {
+                    CHILD_CHARACTER_ID => state.character_id = Some(read_presence_id(reader)?),
+                    CHILD_PLAYER_CONNECTED => state.player_connected = Some(reader.boolean()?),
+                    _ => return Err(unsized_child(child)),
+                }
+                Ok(())
+            })?;
+        }
         Ok(state)
     }
 
     /// Writes the state for the bundle path. A slot without a known child is not sent.
     pub fn write(&self, writer: &mut Writer) {
+        let cooldown = self.on_death_respawn_cooldown;
         let character_id = self.character_id;
         let player_connected = self.player_connected;
-        let children = children_mask(&[
+        let slot_2_children = children_mask(&[
             character_id.is_some(),
             false,
             false,
             player_connected.is_some(),
         ]);
-        if children == 0 {
-            writer.u8(NO_SLOT);
-            return;
+        let slots = if cooldown.is_some() {
+            SLOT_1_BIT
+        } else {
+            NO_SLOT
+        } | if slot_2_children == 0 {
+            NO_SLOT
+        } else {
+            SLOT_2_BIT
+        };
+        writer.u8(slots);
+        if let Some(cooldown) = cooldown {
+            write_known_children(
+                writer,
+                CHILD_ON_DEATH_RESPAWN_COOLDOWN,
+                SLOT_1_CHILDREN,
+                |writer, _| {
+                    writer.f32(cooldown);
+                },
+            );
         }
-        writer.u8(SLOT_2_BIT);
-        write_known_children(writer, children, SLOT_2_CHILDREN, |writer, child| {
-            if 1 << child == CHILD_CHARACTER_ID {
-                character_id.map(|id| {
-                    writer
-                        .u8(PRESENCE_FLAG_FIXED | PRESENCE_FLAG_UUID_TEXT)
-                        .bytes(&id)
-                });
-            } else {
-                player_connected.map(|connected| writer.boolean(connected));
-            }
-        });
+        if slot_2_children != 0 {
+            write_known_children(writer, slot_2_children, SLOT_2_CHILDREN, |writer, child| {
+                if 1 << child == CHILD_CHARACTER_ID {
+                    character_id.map(|id| {
+                        writer
+                            .u8(PRESENCE_FLAG_FIXED | PRESENCE_FLAG_UUID_TEXT)
+                            .bytes(&id)
+                    });
+                } else {
+                    player_connected.map(|connected| writer.boolean(connected));
+                }
+            });
+        }
     }
 }
 
@@ -354,6 +405,14 @@ pub fn change_members(states: PlayerStates<'_>) -> Vec<BundleMember> {
         })
         .collect();
     if let Some(change) = states.health_change {
+        // A death opens the client's death screen through the 3935 respawn cooldown, which goes
+        // with the dead vitals (death note).
+        if change.life.is_some_and(|life| life.is_dead()) {
+            members.push(BundleMember {
+                component: PLAYER_COMPONENT_COMPONENT,
+                state: MemberState::PlayerComponent(PlayerComponentState::died()),
+            });
+        }
         let vitals = match change.life {
             Some(life) => VitalsState::player_life(change.health, life),
             None if change.first_damage => VitalsState::creature_first_damage(change.health),
@@ -589,6 +648,60 @@ mod tests {
     }
 
     #[test]
+    fn the_death_cooldown_is_the_retail_slot_1_child_12() {
+        // Retail: `09 9f3d 02 80 20 00000000` (death note: all three captured deaths).
+        const RETAIL_BODY: [u8; 7] = [0x02, 0x80, 0x20, 0, 0, 0, 0];
+        let state = PlayerComponentState::read(&mut Reader::new(&RETAIL_BODY)).expect("read");
+        assert_eq!(state, PlayerComponentState::died());
+        let mut writer = Writer::new();
+        state.write(&mut writer);
+        assert_eq!(writer.finish(), RETAIL_BODY);
+    }
+
+    #[test]
+    fn a_death_sends_the_respawn_cooldown_with_the_dead_vitals() {
+        const SPAWNED_MS: u64 = 5_000;
+        let death = PlayerStates {
+            character_id: CHARACTER_ID,
+            look: None,
+            health: Some(HEALTH),
+            gear: None,
+            achievements: None,
+            objectives: None,
+            progression: None,
+            health_change: Some(HealthChange {
+                health: 0,
+                first_damage: false,
+                life: Some(VitalsData::player_dead(SPAWNED_MS)),
+            }),
+            cooldowns: None,
+            stamina: None,
+            combat_status: None,
+        };
+        let members = change_members(death);
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].component, PLAYER_COMPONENT_COMPONENT);
+        assert_eq!(
+            members[0].state,
+            MemberState::PlayerComponent(PlayerComponentState::died())
+        );
+        assert_eq!(members[1].component, PLAYER_VITALS_COMPONENT);
+        let alive = PlayerStates {
+            health_change: Some(HealthChange {
+                health: HEALTH.1,
+                first_damage: false,
+                life: Some(VitalsData::player_alive(SPAWNED_MS)),
+            }),
+            ..death
+        };
+        assert_eq!(
+            change_members(alive).len(),
+            1,
+            "a respawn sends the vitals only"
+        );
+    }
+
+    #[test]
     fn the_changes_are_the_states_given_and_a_health_change() {
         const HEALED: u32 = 865;
         let objectives = ObjectivesState::default();
@@ -801,11 +914,13 @@ mod tests {
     }
 
     #[test]
-    fn slot_1_of_a_player_component_stops_the_walk() {
-        let mut reader = Reader::new(&[0b010]);
-        assert!(matches!(
-            PlayerComponentState::read(&mut reader),
-            Err(MessageError::Unsized { .. })
-        ));
+    fn slot_0_or_another_slot_1_child_stops_the_walk() {
+        // Slot 0; slot 1 child 0, whose width is Unknown.
+        for body in [&[0b001][..], &[0b010, 0b001, 0]] {
+            assert!(matches!(
+                PlayerComponentState::read(&mut Reader::new(body)),
+                Err(MessageError::Unsized { .. })
+            ));
+        }
     }
 }

@@ -93,6 +93,11 @@ impl VitalsData {
         }
     }
 
+    /// It is the block of a dead body.
+    pub const fn is_dead(&self) -> bool {
+        self.head == DEAD_HEAD
+    }
+
     /// The block of a player who lives again at server time `server_ms` (retail 483 to 488 ms
     /// after the respawn request 1938).
     pub const fn player_alive(server_ms: u64) -> Self {
