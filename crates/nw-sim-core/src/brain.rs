@@ -572,7 +572,7 @@ fn patrol(brain: &mut Brain, now_ms: u64, max_m: f32) -> BrainAction {
             .copied()
             .unwrap_or_default();
         if walk.advance() {
-            walk.wait_until_ms = now_ms + wait_ms;
+            walk.wait_until_ms = now_ms.saturating_add(wait_ms);
         } else {
             walk.wait_until_ms = u64::MAX;
         }

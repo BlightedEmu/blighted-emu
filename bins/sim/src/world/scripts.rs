@@ -18,6 +18,11 @@ use nw_sim_core::Position;
 
 /// Block steps one script may take in one tick (spec section 6.6).
 pub(crate) const STEP_LIMIT: u32 = 1_000;
+/// Runs one script may have at once; a trigger or a fork beyond it is dropped with a log line,
+/// so a fork inside a loop cannot grow the runs for ever.
+pub(crate) const MAX_RUNS_PER_SCRIPT: usize = 1_000;
+/// The note of a run that was not started because its script has [`MAX_RUNS_PER_SCRIPT`].
+const TOO_MANY_RUNS: &str = "too many runs: this one is dropped";
 /// Run log lines kept between two ticks; older ones are dropped.
 const LOG_LIMIT: usize = 512;
 /// The `quest_state` values.
@@ -164,6 +169,9 @@ pub(crate) struct Scripts {
     runs: Vec<Run>,
     pending: Vec<ScriptEvent>,
     log: VecDeque<ScriptLogLine>,
+    /// The players on this sim at the last tick. One that arrives (a login or a handoff from
+    /// another sim) is not "entering" an area it already stands in.
+    present: HashSet<u64>,
 }
 
 fn number(graph_node: &nw_world::script::ScriptNode, name: &str) -> Option<f64> {
@@ -336,9 +344,7 @@ impl Scripts {
 
     /// Queues `event` for the triggers of the next script tick.
     pub(crate) fn push(&mut self, event: ScriptEvent) {
-        if !self.scripts.is_empty() {
-            self.pending.push(event);
-        }
+        self.pending.push(event);
     }
 
     /// The run log lines since the last call.
@@ -387,6 +393,9 @@ impl Scripts {
                         let before = state.inside.insert(node, now.clone()).unwrap_or_default();
                         let entering = matches!(compiled_node.block, Block::EntersArea { .. });
                         for (number, _) in players {
+                            if !self.present.contains(number) {
+                                continue;
+                            }
                             let fires = if entering {
                                 now.contains(number) && !before.contains(number)
                             } else {
@@ -446,7 +455,24 @@ impl Scripts {
                 }
             }
         }
-        self.runs.extend(started);
+        self.present = players.iter().map(|(number, _)| *number).collect();
+        for run in started {
+            self.add_run(run);
+        }
+    }
+
+    /// Adds `run` unless its script has [`MAX_RUNS_PER_SCRIPT`] runs.
+    fn add_run(&mut self, run: Run) {
+        let running = self
+            .runs
+            .iter()
+            .filter(|other| other.script == run.script)
+            .count();
+        if running >= MAX_RUNS_PER_SCRIPT {
+            self.note(&run, TOO_MANY_RUNS);
+        } else {
+            self.runs.push(run);
+        }
     }
 }
 
@@ -483,6 +509,7 @@ impl SimWorld {
     /// Fires the triggers and walks the runs.
     pub(super) fn tick_scripts(&mut self, now_ms: u64) {
         if self.scripts.scripts.is_empty() {
+            self.scripts.pending.clear();
             return;
         }
         let players: Vec<(u64, Position)> = {
@@ -496,9 +523,18 @@ impl SimWorld {
         engine.fire_triggers(&players, now_ms);
         let mut queue: VecDeque<Run> = std::mem::take(&mut engine.runs).into();
         let mut steps = vec![0_u32; engine.scripts.len()];
+        let mut runs = vec![0_usize; engine.scripts.len()];
+        for run in &queue {
+            runs[run.script] += 1;
+        }
         let mut kept = Vec::new();
         while let Some(mut run) = queue.pop_front() {
             loop {
+                // A waiting run costs no step.
+                if run.wait_until.is_some_and(|until| now_ms < until) {
+                    kept.push(run);
+                    break;
+                }
                 if steps[run.script] >= STEP_LIMIT {
                     kept.push(run);
                     break;
@@ -515,6 +551,11 @@ impl SimWorld {
                             break;
                         };
                         for fork in next {
+                            if runs[run.script] >= MAX_RUNS_PER_SCRIPT {
+                                engine.note(&run, TOO_MANY_RUNS);
+                                break;
+                            }
+                            runs[run.script] += 1;
                             queue.push_back(Run {
                                 node: fork,
                                 wait_until: None,
@@ -675,9 +716,14 @@ impl SimWorld {
 
     /// Whether this sim owns the cell of `at`.
     pub(super) fn owns(&self, at: Point) -> bool {
+        self.owns_position(Position::from(at))
+    }
+
+    /// Whether this sim owns the cell of `position`.
+    pub(super) fn owns_position(&self, position: Position) -> bool {
         self.cells
             .as_ref()
-            .is_some_and(|cells| cells.owners.owner_at(Position::from(at)) == Some(cells.me))
+            .is_some_and(|cells| cells.owners.owner_at(position) == Some(cells.me))
     }
 
     /// How many of `item` player `number` carries; `None` when it is not here or has no bag.
@@ -831,13 +877,19 @@ mod tests {
     }
 
     #[test]
-    fn an_area_fires_on_entry_and_on_leaving() {
+    fn an_area_fires_on_leaving_and_on_entry() {
         let mut world = script_world(vec![("area", area_script())]);
         world.tick_scripts(NOW);
-        assert_eq!((flag_of(&world, "in"), flag_of(&world, "out")), (1, 0));
+        assert_eq!(
+            (flag_of(&world, "in"), flag_of(&world, "out")),
+            (0, 0),
+            "a player who arrives inside does not enter"
+        );
         teleport(&mut world, PLAYER_X + 50.0);
         world.tick_scripts(NOW + TICK_MS);
-        assert_eq!(flag_of(&world, "out"), 1);
+        teleport(&mut world, PLAYER_X);
+        world.tick_scripts(NOW + 2 * TICK_MS);
+        assert_eq!((flag_of(&world, "in"), flag_of(&world, "out")), (1, 1));
         let blocks: Vec<String> = world
             .take_script_log()
             .into_iter()
@@ -846,12 +898,113 @@ mod tests {
         assert_eq!(
             blocks,
             [
-                "player_enters_area",
-                "set_flag",
                 "player_leaves_area",
+                "set_flag",
+                "player_enters_area",
                 "set_flag"
             ]
         );
+    }
+
+    #[test]
+    fn a_player_handed_in_inside_an_area_does_not_enter_it() {
+        let mut world = script_world(vec![("area", area_script())]);
+        world.tick_scripts(NOW);
+        world.leave(&connection(PLAYER)).expect("left");
+        world.tick_scripts(NOW + TICK_MS);
+        world
+            .admit(&admit_at(PLAYER, PLAYER_X, false), NOW, NOW)
+            .expect("back");
+        world.tick_scripts(NOW + 2 * TICK_MS);
+        assert_eq!(flag_of(&world, "in"), 0);
+    }
+
+    #[test]
+    fn an_event_started_by_a_script_runs_its_event_starts_scripts() {
+        use nw_world::script::{EventWave, GameEvent};
+        let starter = ScriptGraph {
+            nodes: vec![
+                node(
+                    "tick",
+                    "timer",
+                    &[("every_ms", ScriptValue::Number(TIMER_MS))],
+                ),
+                node(
+                    "start",
+                    "start_event",
+                    &[
+                        ("event", ScriptValue::Text("raid".to_owned())),
+                        ("at", ScriptValue::Position([PLAYER_X, 10.0, 50.0])),
+                    ],
+                ),
+            ],
+            links: vec![link("tick", NEXT, "start")],
+        };
+        let reaction = ScriptGraph {
+            nodes: vec![
+                node(
+                    "began",
+                    "event_starts",
+                    &[("event", ScriptValue::Text("raid".to_owned()))],
+                ),
+                node("mark", "set_flag", &flag("raided", 1.0)),
+            ],
+            links: vec![link("began", NEXT, "mark")],
+        };
+        let mut world = script_world(Vec::new());
+        world.set_design(&LevelDesign {
+            scripts: BTreeMap::from([
+                ("a_reaction".to_owned(), reaction),
+                ("b_starter".to_owned(), starter),
+            ]),
+            events: BTreeMap::from([(
+                "raid".to_owned(),
+                GameEvent {
+                    waves: vec![EventWave {
+                        vitals: TEST_MOB.to_owned(),
+                        level: TEST_LEVEL,
+                        count: 1,
+                        delay_ms: 0,
+                        offset: [0.0, 0.0, 0.0],
+                    }],
+                    end_after_ms: None,
+                    end_when_cleared: false,
+                },
+            )]),
+        });
+        let fire = NOW + TIMER_MS as u64;
+        world.tick_scripts(NOW);
+        world.tick_scripts(fire);
+        world.tick_scripts(fire + TICK_MS);
+        assert_eq!(flag_of(&world, "raided"), 1);
+    }
+
+    #[test]
+    fn a_fork_in_a_loop_stops_at_the_run_limit() {
+        let graph = ScriptGraph {
+            nodes: vec![
+                node(
+                    "tick",
+                    "timer",
+                    &[("every_ms", ScriptValue::Number(TIMER_MS))],
+                ),
+                node("pause", "wait", &[("ms", ScriptValue::Number(0.0))]),
+                node("split", "set_flag", &flag("x", 1.0)),
+            ],
+            links: vec![
+                link("tick", NEXT, "pause"),
+                link("pause", NEXT, "split"),
+                link("split", NEXT, "pause"),
+                link("split", NEXT, "pause"),
+            ],
+        };
+        let mut world = script_world(vec![("fork", graph)]);
+        let mut now = NOW;
+        for _ in 0..40 {
+            now += TIMER_MS as u64;
+            world.tick_scripts(now);
+        }
+        assert!(world.scripts.runs.len() <= MAX_RUNS_PER_SCRIPT);
     }
 
     #[test]
