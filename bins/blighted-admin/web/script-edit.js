@@ -2,7 +2,7 @@
 // The script editor's graph changes and file text, with no page access (admin studio spec
 // section 7.5). A graph is { nodes: [{ id, block, x, y, values }], links: [{ from, output, to }] }.
 
-import { badId, designPath, header, quoted } from './design.js';
+import { badId, designPath, header, isWritableNumber, quoted } from './design.js';
 
 const SCRIPT_KIND = 'script';
 const POSITION_AXES = 3;
@@ -21,15 +21,15 @@ export function valueOf(kind, text) {
   }
   if (kind === 'position') {
     const parts = trimmed.split(',').map((part) => Number(part.trim()));
-    return parts.length === POSITION_AXES && parts.every(Number.isFinite)
+    return parts.length === POSITION_AXES && parts.every(isWritableNumber)
       ? { value: parts }
       : { error: 'A position is x, y, z in metres.' };
   }
   const number = Number(trimmed);
-  const whole = Number.isInteger(number) && number >= 0;
+  const whole = Number.isSafeInteger(number) && number >= 0;
   switch (kind) {
     case 'number':
-      return Number.isFinite(number) && number > 0 ? { value: number } : { error: 'A number above 0.' };
+      return isWritableNumber(number) && number > 0 ? { value: number } : { error: 'A number above 0.' };
     case 'whole':
       return whole ? { value: number } : { error: 'A whole number, 0 or more.' };
     default:

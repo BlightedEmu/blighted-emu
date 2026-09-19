@@ -3,7 +3,7 @@
 // override of the record or as a new record from it (`base`). Design files never copy client
 // values (admin studio spec section 5.1).
 
-import { badId, header, quoted } from './design.js';
+import { badId, header, isWritableNumber, quoted } from './design.js';
 
 const TRUE_TEXT = 'true';
 const FALSE_TEXT = 'false';
@@ -19,7 +19,7 @@ function parsed(name, text, client) {
   const number = Number(trimmed);
   switch (typeof client) {
     case 'number':
-      return Number.isFinite(number) && trimmed !== '' ? { value: number } : { error: `${name} must be a number.` };
+      return isWritableNumber(number) && trimmed !== '' ? { value: number } : { error: `${name} must be a number, whole numbers up to ${Number.MAX_SAFE_INTEGER}.` };
     case 'boolean':
       return trimmed === TRUE_TEXT || trimmed === FALSE_TEXT
         ? { value: trimmed === TRUE_TEXT }
@@ -30,7 +30,7 @@ function parsed(name, text, client) {
       if (trimmed === TRUE_TEXT || trimmed === FALSE_TEXT) {
         return { value: trimmed === TRUE_TEXT };
       }
-      return Number.isFinite(number) ? { value: number } : { value: text };
+      return isWritableNumber(number) ? { value: number } : { value: text };
   }
 }
 

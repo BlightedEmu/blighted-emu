@@ -73,3 +73,10 @@ test('nodes get new ids and their links go with them', () => {
 test('blocks are known by name', () => {
   assert.equal(BLOCKS[0].outputs[0], 'next');
 });
+
+test('a block value past 2^53 is refused', () => {
+  assert.ok(valueOf('whole', '1e21').error);
+  assert.ok(valueOf('number', '1e21').error);
+  assert.ok(valueOf('position', '1e21, 0, 0').error);
+  assert.deepEqual(valueOf('position', '1.5, 2, 3'), { value: [1.5, 2, 3] });
+});

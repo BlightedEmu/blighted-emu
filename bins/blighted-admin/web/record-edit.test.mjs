@@ -69,3 +69,8 @@ test('a new record names its base and a new id', () => {
   );
   assert.ok(addFile({ kind: 'item', folder: 'items', id: 'x' }, '../bad', {}).error);
 });
+
+test('a whole number past 2^53 is refused, not written as 1e+21', () => {
+  assert.ok(changedFields(CLIENT, { tier: '1e21' }).error);
+  assert.deepEqual(changedFields(CLIENT, { weight: '2.5' }), { ok: { weight: 2.5 } });
+});

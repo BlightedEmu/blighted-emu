@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { designPath, editHeaders, fieldsOf, groupFile, pathFile, profileFile } from './design.js';
+import { designPath, editHeaders, fieldsOf, groupFile, isWritableNumber, pathFile, profileFile, quoted } from './design.js';
 
 const MAP = 'newworld_vitaeeterna';
 
@@ -89,4 +89,22 @@ test('an edit names the version it opened, or asks for a new file', () => {
   assert.deepEqual(editHeaders(admin, 'a1b2'), { 'X-Blighted-Admin': '1', 'If-Match': 'a1b2' });
   assert.deepEqual(editHeaders(admin, null), { 'X-Blighted-Admin': '1', 'If-None-Match': '*' });
   assert.deepEqual(admin, { 'X-Blighted-Admin': '1' });
+});
+
+test('a quoted text is a valid TOML string', () => {
+  assert.equal(quoted('a\uD800b'), '"a\uFFFDb"', 'a lone surrogate');
+  assert.equal(quoted('\uDC00'), '"\uFFFD"');
+  assert.equal(quoted('\uD83D\uDE00'), '"\uD83D\uDE00"', 'a pair stays');
+  assert.equal(quoted('x\u007Fy'), '"x\\u007Fy"');
+  assert.equal(quoted('say "hi"\n'), '"say \\"hi\\"\\n"');
+});
+
+test('a number a file holds exactly is writable', () => {
+  assert.equal(isWritableNumber(1.5), true);
+  assert.equal(isWritableNumber(Number.MAX_SAFE_INTEGER), true);
+  assert.equal(isWritableNumber(1e21), false);
+  assert.equal(isWritableNumber(2 ** 63), false);
+  assert.equal(isWritableNumber(Number.NaN), false);
+  assert.ok(profileFile({ id: 'g', behaviour: 'guard', numbers: { respawn_ms: '1e21' } }).error);
+  assert.ok(pathFile({ id: 'w', map: 'lv', mode: 'loop', waits: '9223372036854775808', points: [{ x: 1, y: 2, z: 3 }] }).error);
 });

@@ -49,9 +49,26 @@ function float(value) {
   return Number.isInteger(value) ? value.toFixed(1) : String(value);
 }
 
-/** A TOML basic string (JSON escapes are TOML escapes). */
+/** A lone UTF-16 surrogate: not a character, and TOML has no escape for it. */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+/** DEL, which a TOML basic string must escape (JSON leaves it as is). */
+const DELETE_CHAR = /\u007F/g;
+const REPLACEMENT_CHAR = '\uFFFD';
+
+/**
+ * A TOML basic string: JSON escapes are TOML escapes, once a lone surrogate is a replacement
+ * character and DEL is escaped.
+ */
 export function quoted(text) {
-  return JSON.stringify(text);
+  return JSON.stringify(String(text).replace(LONE_SURROGATE, REPLACEMENT_CHAR)).replace(DELETE_CHAR, '\\u007F');
+}
+
+/**
+ * True for a number a design file can hold exactly: finite, and a whole number only up to 2^53
+ * (a larger one would be written as `1e+21` or lose digits).
+ */
+export function isWritableNumber(value) {
+  return Number.isFinite(value) && (!Number.isInteger(value) || Number.isSafeInteger(value));
 }
 
 /** The header lines of a design file; `map` and `base` only when given. */
@@ -92,7 +109,7 @@ export function profileFile({ id, behaviour, numbers }) {
       continue;
     }
     const value = Number(text);
-    const good = whole ? Number.isInteger(value) && value >= 0 : Number.isFinite(value) && value > 0;
+    const good = whole ? Number.isSafeInteger(value) && value >= 0 : isWritableNumber(value) && value > 0;
     if (!good) {
       return { error: `${name} must be ${whole ? 'a whole number, 0 or more' : 'a number above 0'}.` };
     }
@@ -108,7 +125,7 @@ function wholeList(text) {
     return [];
   }
   const values = parts.map(Number);
-  return parts.every((part) => part !== '') && values.every((value) => Number.isInteger(value) && value >= 0)
+  return parts.every((part) => part !== '') && values.every((value) => Number.isSafeInteger(value) && value >= 0)
     ? values
     : null;
 }
