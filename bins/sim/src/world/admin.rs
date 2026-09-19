@@ -17,6 +17,8 @@ pub const MAX_GM_SPAWN: u32 = 50;
 /// Metres between GM mobs of one command, on a ring around the point.
 const GM_SPAWN_SPACING_M: f32 = 2.0;
 const LOWEST_LEVEL: u32 = 1;
+/// The answer for a player whose character has no bag (no starter kit row for it).
+pub const NO_BAG: &str = "the player has no bag (its character has no starter kit)";
 const HIGHEST_LEVEL: u32 = 65;
 
 /// A player that takes no damage (GM god mode).
@@ -154,6 +156,15 @@ impl SimWorld {
         let Some(target) = self.player_by_number(entity) else {
             return AdminReply::NotMine;
         };
+        let has_bag = self
+            .world
+            .get::<Player>(target)
+            .is_some_and(|player| player.gear.is_some());
+        if !has_bag {
+            return AdminReply::Failed {
+                reason: NO_BAG.to_owned(),
+            };
+        }
         let Some(item) = self.content.kits.item(item_id).cloned() else {
             return AdminReply::Failed {
                 reason: format!("no item {item_id}"),
@@ -172,7 +183,7 @@ impl SimWorld {
             AdminReply::Done
         } else {
             AdminReply::Failed {
-                reason: "the bag is full or not loaded".to_owned(),
+                reason: "the bag is full".to_owned(),
             }
         }
     }
@@ -408,6 +419,25 @@ mod tests {
             ),
             AdminReply::Failed { .. }
         ));
+    }
+
+    #[test]
+    fn a_player_without_a_bag_is_told_apart_from_a_full_bag() {
+        let mut world = admitted();
+        let reply = world.admin(
+            &command(AdminAction::GiveItem {
+                entity: PLAYER,
+                item: "AnyItem".to_owned(),
+                quantity: 1,
+            }),
+            NOW,
+        );
+        assert_eq!(
+            reply,
+            AdminReply::Failed {
+                reason: NO_BAG.to_owned()
+            }
+        );
     }
 
     #[test]
