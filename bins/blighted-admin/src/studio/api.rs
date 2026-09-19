@@ -6,15 +6,16 @@ use std::path::Path;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::{Query, State};
+use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use nw_design::{
-    DesignError, DesignFile, check_delete, check_put, check_schema, delete_file, design_path,
-    load_dir, write_file,
+    DesignError, DesignFile, Kind, check_delete, check_put, check_schema, delete_file, design_path,
+    load_dir, record_field_names, write_file,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::server::AppState;
 use crate::studio::Studio;
@@ -24,12 +25,20 @@ pub const FILES_ROUTE: &str = "/api/studio/files";
 /// `GET`: one design file's text; `PUT`: writes it when the check finds nothing; `DELETE`:
 /// removes it when no other file needs it. The file is `?path=`, relative to the design folder.
 pub const FILE_ROUTE: &str = "/api/studio/file";
+/// Search of the client records of a kind: `?q=` (id or name, any case).
+pub const RECORDS_ROUTE: &str = "/api/studio/records/{kind}";
+/// One client record with its field names and the design files that change or copy it.
+pub const RECORD_ROUTE: &str = "/api/studio/records/{kind}/{id}";
 /// The full check; writes nothing.
 pub const CHECK_ROUTE: &str = "/api/studio/check";
 /// `GET`: the Apply state; `POST`: starts Apply.
 pub const APPLY_ROUTE: &str = "/api/studio/apply";
 /// The answer when the work slot is taken.
 const BUSY: &str = "an Apply or a Check runs";
+/// Most records one search returns.
+const SEARCH_LIMIT: usize = 200;
+/// The answer to a kind the record routes do not serve.
+const NO_RECORDS: &str = "this kind has no client records";
 /// The answer to a path outside the design folder.
 const BAD_PATH: &str = "the path must name a .toml file inside the design folder";
 
@@ -43,6 +52,8 @@ pub fn studio_routes() -> Router<AppState> {
                 .put(put_design_file)
                 .delete(delete_design_file),
         )
+        .route(RECORDS_ROUTE, get(search_records))
+        .route(RECORD_ROUTE, get(read_record))
         .route(CHECK_ROUTE, post(check))
         .route(APPLY_ROUTE, get(apply_status).post(start_apply))
 }
@@ -58,6 +69,23 @@ struct FilesView {
 #[derive(Debug, Deserialize)]
 struct FileParams {
     path: String,
+}
+
+/// The query of the records route.
+#[derive(Debug, Deserialize)]
+struct SearchParams {
+    #[serde(default)]
+    q: String,
+}
+
+/// One client record and the design files about it.
+#[derive(Debug, Serialize)]
+struct RecordView {
+    id: String,
+    name: Option<String>,
+    fields: Map<String, Value>,
+    field_names: Vec<&'static str>,
+    files: Vec<DesignFile>,
 }
 
 /// The problems that refused an edit.
@@ -95,6 +123,75 @@ async fn files(State(state): State<AppState>) -> Response {
     match loaded {
         Ok(view) => Json(view).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// The catalogue kind of a route's `kind`; `None` for a kind with no client records.
+fn catalog_kind(name: &str) -> Option<Kind> {
+    Kind::from_name(name).filter(|kind| !record_field_names(*kind).is_empty())
+}
+
+async fn search_records(
+    State(state): State<AppState>,
+    UrlPath(kind): UrlPath<String>,
+    Query(params): Query<SearchParams>,
+) -> Response {
+    let Some(studio) = studio_of(&state) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(kind) = catalog_kind(&kind) else {
+        return (StatusCode::NOT_FOUND, NO_RECORDS).into_response();
+    };
+    match studio.catalog().await {
+        Ok(catalog) => Json(catalog.search(kind, &params.q, SEARCH_LIMIT)).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    }
+}
+
+async fn read_record(
+    State(state): State<AppState>,
+    UrlPath((kind, id)): UrlPath<(String, String)>,
+) -> Response {
+    let Some(studio) = studio_of(&state) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(kind) = catalog_kind(&kind) else {
+        return (StatusCode::NOT_FOUND, NO_RECORDS).into_response();
+    };
+    let catalog = match studio.catalog().await {
+        Ok(catalog) => catalog,
+        Err(error) => return (StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    };
+    let Some(record) = catalog.record(kind, &id) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let design_dir = studio.paths.design_dir.clone();
+    let record_id = record.id.clone();
+    let files = tokio::task::spawn_blocking(move || {
+        let (set, _) = load_dir(&design_dir);
+        set.files
+            .into_iter()
+            .filter(|file| {
+                file.kind == kind
+                    && (file.id.eq_ignore_ascii_case(&record_id)
+                        || file
+                            .base
+                            .as_deref()
+                            .is_some_and(|base| base.eq_ignore_ascii_case(&record_id)))
+            })
+            .collect::<Vec<_>>()
+    })
+    .await;
+    match files {
+        Ok(files) => Json(RecordView {
+            id: record.id.clone(),
+            name: record.name.clone(),
+            fields: record.fields(),
+            field_names: record_field_names(kind),
+            files,
+        })
+        .into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
 }
 
@@ -233,7 +330,8 @@ mod tests {
     use crate::guard::{ADMIN_HEADER, ADMIN_HEADER_VALUE};
     use crate::live::{SharedState, lock, shared};
     use crate::server::{AppState, router};
-    use crate::studio::Studio;
+    use crate::studio::catalog::tests::{SWORD, SWORD_NAME, TIER};
+    use crate::studio::{Studio, catalog};
     use crate::world::tests::test_layer;
 
     const CAP: usize = 5_000;
@@ -315,7 +413,7 @@ mod tests {
         let retail = root.path().join("retail");
         ContentBundle {
             client_build: BUILD.to_owned(),
-            ..ContentBundle::default()
+            ..catalog::tests::bundle()
         }
         .save(&bundle_path(&retail, BUILD))
         .expect("bundle");
@@ -421,6 +519,35 @@ mod tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    #[tokio::test]
+    async fn records_are_searched_and_read_with_their_design_files() {
+        let fixture = fixture(false, LONG_TIMEOUT_S);
+        let (status, hits) = call(&fixture, Method::GET, "/api/studio/records/item?q=IRON").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(hits[0]["id"], SWORD);
+        assert_eq!(hits[0]["name"], SWORD_NAME);
+        let (status, _) = call(&fixture, Method::GET, "/api/studio/records/path").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let override_text = format!(
+            "schema = 1\nkind = \"item\"\naction = \"override\"\nid = \"{SWORD}\"\ntier = 3\n"
+        );
+        let (status, _) = put(&fixture, &format!("items/{SWORD}.toml"), &override_text).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let uri = format!("/api/studio/records/item/{}", SWORD.to_uppercase());
+        let (status, record) = call(&fixture, Method::GET, &uri).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(record["id"], SWORD);
+        assert_eq!(record["fields"]["tier"], TIER);
+        assert!(
+            record["field_names"]
+                .as_array()
+                .is_some_and(|names| names.iter().any(|name| name == "gear_score_override"))
+        );
+        assert_eq!(record["files"][0]["fields"]["tier"], 3);
+        let (status, _) = call(&fixture, Method::GET, "/api/studio/records/item/NoSuchItem").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

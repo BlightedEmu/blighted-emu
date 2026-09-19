@@ -4,17 +4,21 @@
 
 pub mod api;
 pub mod apply;
+pub mod catalog;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use nw_content::ContentBundle;
+use nw_content::bundle::bundle_path;
 use nw_design::DesignPaths;
-use tokio::sync::Semaphore;
+use tokio::sync::{OnceCell, Semaphore};
 
 use crate::config::StudioConfig;
 use crate::live::SharedState;
 use crate::studio::apply::ApplyStatus;
+use crate::studio::catalog::Catalog;
 
 /// Full design runs at a time.
 const ONE_RUN: usize = 1;
@@ -31,6 +35,8 @@ pub struct Studio {
     /// One full design run at a time: a Check or a whole Apply. Each loads the bundle and
     /// world files, so runs side by side would hold several copies in memory.
     work: Arc<Semaphore>,
+    /// The client records, read from the retail bundle at the first editor request.
+    catalog: Arc<OnceCell<Arc<Catalog>>>,
 }
 
 impl Studio {
@@ -54,6 +60,29 @@ impl Studio {
             live,
             apply: Arc::default(),
             work: Arc::new(Semaphore::new(ONE_RUN)),
+            catalog: Arc::default(),
         }
+    }
+
+    /// The client records; the first call reads the retail bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the retail bundle cannot be read.
+    pub async fn catalog(&self) -> Result<Arc<Catalog>, String> {
+        let path = bundle_path(&self.paths.retail_dir, &self.client_build);
+        let build = Arc::clone(&self.client_build);
+        self.catalog
+            .get_or_try_init(|| async move {
+                tokio::task::spawn_blocking(move || {
+                    let bundle = ContentBundle::load(&path, &build)
+                        .map_err(|error| format!("{}: {error}", path.display()))?;
+                    Ok(Arc::new(Catalog::of_bundle(&bundle)))
+                })
+                .await
+                .map_err(|error| error.to_string())?
+            })
+            .await
+            .cloned()
     }
 }

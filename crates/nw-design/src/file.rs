@@ -207,6 +207,8 @@ pub(crate) trait Row: FromDatasheet + Serialize + DeserializeOwned + Clone {
     fn set_key(&mut self, key: String);
     /// The table list of this type in `tables`.
     fn tables_mut(tables: &mut Tables) -> &mut Vec<Table<Self>>;
+    /// The table list of this type in `tables`, to read.
+    fn tables(tables: &Tables) -> &Vec<Table<Self>>;
 }
 
 macro_rules! row {
@@ -221,6 +223,9 @@ macro_rules! row {
             }
             fn tables_mut(tables: &mut Tables) -> &mut Vec<Table<Self>> {
                 &mut tables.$list
+            }
+            fn tables(tables: &Tables) -> &Vec<Table<Self>> {
+                &tables.$list
             }
         }
     };
