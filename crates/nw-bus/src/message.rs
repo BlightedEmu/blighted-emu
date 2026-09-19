@@ -299,6 +299,9 @@ pub struct HandoffOffer {
     /// The player's experience points (the tutorial's kills give some).
     #[serde(default)]
     pub experience: u32,
+    /// The player's coins (quest rewards give some).
+    #[serde(default)]
+    pub coins: u64,
     /// The player's quests: the active one with its run, and the finished ones.
     #[serde(default)]
     pub quests: PlayerQuests,
@@ -689,6 +692,7 @@ mod tests {
             client_context: 1,
             enter_level: false,
             experience: 0,
+            coins: 0,
             achievements: vec![14809, 15317],
             items: Some(vec![CarriedItem {
                 item_id: "PotionHealthT1".to_owned(),

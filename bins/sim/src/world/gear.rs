@@ -503,6 +503,45 @@ impl Gear {
         Some(self.states())
     }
 
+    /// How many of `item_id` (any case) the bag holds.
+    pub(super) fn bag_count(&self, item_id: &str) -> u32 {
+        self.bag
+            .iter()
+            .flatten()
+            .filter(|stack| stack.item_id.eq_ignore_ascii_case(item_id))
+            .map(|stack| stack.item.quantity)
+            .sum()
+    }
+
+    /// Takes `quantity` of `item_id` (any case) out of the bag, emptying the slots of stacks it
+    /// uses up; whether the bag held that many (it changes nothing when not).
+    pub(super) fn take(&mut self, item_id: &str, quantity: u32) -> bool {
+        if self.bag_count(item_id) < quantity {
+            return false;
+        }
+        let mut left = quantity;
+        for entry in &mut self.bag {
+            if left == 0 {
+                break;
+            }
+            let Some(stack) = entry
+                .as_mut()
+                .filter(|stack| stack.item_id.eq_ignore_ascii_case(item_id))
+            else {
+                continue;
+            };
+            let taken = left.min(stack.item.quantity);
+            stack.item.quantity -= taken;
+            left -= taken;
+            if stack.item.quantity == 0 {
+                *entry = None;
+            }
+        }
+        self.changed = true;
+        self.unsaved = true;
+        true
+    }
+
     /// Removes every stack of `item_id`, worn or in the bag; whether there was one.
     pub(super) fn remove(&mut self, item_id: &str) -> bool {
         let before = self.worn.len();
@@ -644,6 +683,11 @@ pub(crate) mod tests {
 
     /// A kit of [`BACKSTORY`]: a chest and the sword at login, the staff in the bag.
     pub(crate) fn kits() -> StarterKits {
+        kits_with(&[])
+    }
+
+    /// [`kits`] with the master rows of `extra` items too: (item id, item class).
+    pub(crate) fn kits_with(extra: &[(&str, &str)]) -> StarterKits {
         let row = |item_id: &str, item_class: &str| ItemRow {
             item_id: item_id.to_owned(),
             item_class: Some(item_class.to_owned()),
@@ -652,17 +696,20 @@ pub(crate) mod tests {
             bind_on_pickup: true,
             ..ItemRow::default()
         };
+        let mut rows = vec![
+            row("MysticArchetypeChest", "EquippableChest+Armor+Light"),
+            row(SWORD, "Weapon+EquippableMainHand+Sword+Melee"),
+            row(STAFF, "Weapon+EquippableTwoHand+LifeStaff+Magic"),
+            row(POTION, "Consumable+Potion"),
+            row(FLINT, "Resource"),
+        ];
+        rows.extend(
+            extra
+                .iter()
+                .map(|(item_id, item_class)| row(item_id, item_class)),
+        );
         StarterKits::build(StarterSource {
-            item_sheets: vec![(
-                "MasterItemDefinitions_Quest".to_owned(),
-                vec![
-                    row("MysticArchetypeChest", "EquippableChest+Armor+Light"),
-                    row(SWORD, "Weapon+EquippableMainHand+Sword+Melee"),
-                    row(STAFF, "Weapon+EquippableTwoHand+LifeStaff+Magic"),
-                    row(POTION, "Consumable+Potion"),
-                    row(FLINT, "Resource"),
-                ],
-            )],
+            item_sheets: vec![("MasterItemDefinitions_Quest".to_owned(), rows)],
             backstories: vec![(
                 BACKSTORY.to_owned(),
                 format!("MysticArchetypeChest:1,{SWORD}:1,{STAFF}:0"),
@@ -699,6 +746,25 @@ pub(crate) mod tests {
             Gear::starter(&kits, CHARACTER, Some("Archetype_Nobody")),
             None
         );
+    }
+
+    #[test]
+    fn a_craft_takes_ingredients_out_of_the_bag_only() {
+        const FLINTS: u32 = 3;
+        let kits = kits();
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
+        let flint = kits.item(FLINT).expect("flint");
+        assert!(gear.add(flint, FLINTS));
+        assert_eq!(gear.bag_count("flintt1"), FLINTS);
+        assert!(!gear.take(FLINT, FLINTS + 1), "not that many");
+        assert_eq!(gear.bag_count(FLINT), FLINTS, "nothing taken");
+        assert!(gear.take(FLINT, 2));
+        assert_eq!(gear.bag_count(FLINT), 1);
+        assert!(gear.take(FLINT, 1));
+        assert_eq!(gear.bag_count(FLINT), 0, "the slot is empty");
+        assert!(gear.carried().iter().all(|item| item.item_id != FLINT));
+        assert_eq!(gear.bag_count(SWORD), 0, "a worn item is not in the bag");
+        assert!(!gear.take(SWORD, 1));
     }
 
     #[test]

@@ -2651,6 +2651,7 @@ mod tests {
                 items: None,
                 drawn_weapon: None,
                 experience: 0,
+                coins: 0,
                 quests: PlayerQuests::default(),
                 achievements: Vec::new(),
             };

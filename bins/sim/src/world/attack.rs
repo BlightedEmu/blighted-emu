@@ -40,6 +40,7 @@ use super::stamina::Dodge;
 use super::{Body, MESSAGE_CHANNEL, Outgoing, Player, Position, SimWorld};
 use crate::combat::{AttackOutcome, AttackRefusal, RemoteHit, RespawnRefusal};
 use crate::mobs::{Capsule, MobAttackIntent, MoveHit, MoveStrike, spawn_index};
+use crate::objectives::Event;
 
 /// How high above the sea a player still swims (Inferred: retail swam at 0.0 to 1.55 m above the
 /// tutorial's sea and walked onto the beach at 3.5 m).
@@ -1137,6 +1138,27 @@ impl SimWorld {
         self.give_loot(killer, loot, now_ms);
     }
 
+    /// Mob `mob`, killed by player `killer`, counts for the kill tasks of the killer's quest
+    /// (`TaskKillContribution`; the tutorial counts its kills in its encounter).
+    fn quest_kill(&mut self, mob: u64, killer: u64, now_ms: u64) {
+        let content = Arc::clone(&self.content);
+        let Some((vitals_id, categories)) = self
+            .mobs
+            .vitals_of(mob)
+            .and_then(|vitals| content.kill_types.of(vitals))
+        else {
+            return;
+        };
+        self.quest_event(
+            killer,
+            Event::Killed {
+                vitals_id,
+                categories,
+            },
+            now_ms,
+        );
+    }
+
     /// [`SimWorld::apply_hit`] of a hit of a mob move `strike`: a player's 3601 carries the
     /// move's item tag and, in a second phase, the fire part as a second item.
     fn apply_hit_with(
@@ -1163,6 +1185,7 @@ impl SimWorld {
             self.mobs.wake(target);
             if matches!(outcome, AttackOutcome::Killed { .. }) {
                 self.drop_loot(target, attacker, now_ms);
+                self.quest_kill(target, attacker, now_ms);
                 self.note_kill(target, attacker);
             }
             return Some(outcome);

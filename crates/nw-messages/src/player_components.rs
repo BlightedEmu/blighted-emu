@@ -18,8 +18,9 @@ use crate::achievements::{ACHIEVEMENT_TYPE_INDEX, AchievementState};
 use crate::appearance::PlayerLook;
 use crate::appearance::{PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState};
 use crate::components::{
-    COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DAMAGE_RECEIVER_TYPE_INDEX, DamageReceiverState,
-    MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState,
+    COMBAT_STATUS_TYPE_INDEX, CURRENCY_TYPE_INDEX, CombatStatusState, CurrencyState,
+    DAMAGE_RECEIVER_TYPE_INDEX, DamageReceiverState, MANA_TYPE_INDEX, ManaState,
+    STAMINA_TYPE_INDEX, StaminaState,
 };
 use crate::containers::{
     BAG_COMPONENT, CONTAINER_TYPE_INDEX, ContainerState, ITEM_MANAGEMENT_TYPE_INDEX,
@@ -116,7 +117,7 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 56] = [
     (55, 4176),
     (56, 3147),
     (57, 1566),
-    (60, 3786),
+    (crate::components::CURRENCY_COMPONENT, CURRENCY_TYPE_INDEX),
     (61, 1755),
     (62, 3183),
     (65, 911),
@@ -325,6 +326,7 @@ pub fn empty_state(class: u64) -> MemberState {
         DAMAGE_RECEIVER_TYPE_INDEX => MemberState::DamageReceiver(DamageReceiverState::default()),
         OBJECTIVES_TYPE_INDEX => MemberState::Objectives(ObjectivesState::default()),
         PROGRESSION_TYPE_INDEX => MemberState::Progression(ProgressionState::default()),
+        CURRENCY_TYPE_INDEX => MemberState::Currency(CurrencyState::default()),
         COOLDOWNS_TYPE_INDEX => MemberState::Cooldowns(CooldownsState::default()),
         GATHERING_TYPE_INDEX => MemberState::Gathering(GatheringState::default()),
         INTERACTOR_TYPE_INDEX => MemberState::Interactor(InteractorState::default()),
@@ -349,6 +351,8 @@ pub struct PlayerStates<'a> {
     pub objectives: Option<&'a ObjectivesState>,
     /// The level and experience, when known.
     pub progression: Option<ProgressionState>,
+    /// The coins, with the card and after a change.
+    pub currency: Option<CurrencyState>,
     /// The new health after it changed (a hit or a heal), when it did.
     pub health_change: Option<HealthChange>,
     /// The consumable cooldowns after a change, when there is one.
@@ -396,6 +400,7 @@ pub fn change_members(states: PlayerStates<'_>) -> Vec<BundleMember> {
             ACHIEVEMENT_TYPE_INDEX => states.achievements.is_some(),
             OBJECTIVES_TYPE_INDEX => states.objectives.is_some(),
             PROGRESSION_TYPE_INDEX => states.progression.is_some(),
+            CURRENCY_TYPE_INDEX => states.currency.is_some(),
             COOLDOWNS_TYPE_INDEX => states.cooldowns.is_some(),
             COMBAT_STATUS_TYPE_INDEX => states.combat_status.is_some(),
             PAPERDOLL_TYPE_INDEX | CONTAINER_TYPE_INDEX | ITEM_MANAGEMENT_TYPE_INDEX => {
@@ -443,6 +448,7 @@ pub fn gear_members(gear: &PlayerGear) -> impl Iterator<Item = BundleMember> + '
         achievements: None,
         objectives: None,
         progression: None,
+        currency: None,
         health_change: None,
         cooldowns: None,
         stamina: None,
@@ -472,6 +478,11 @@ fn player_state(states: PlayerStates<'_>, component: u64, class: u64) -> MemberS
         && let Some(progression) = states.progression
     {
         return MemberState::Progression(progression);
+    }
+    if class == CURRENCY_TYPE_INDEX
+        && let Some(currency) = states.currency
+    {
+        return MemberState::Currency(currency);
     }
     if class == COOLDOWNS_TYPE_INDEX
         && let Some(cooldowns) = states.cooldowns
@@ -535,6 +546,7 @@ fn has_own_reader(class: u64) -> bool {
             | COOLDOWNS_TYPE_INDEX
             | GATHERING_TYPE_INDEX
             | INTERACTOR_TYPE_INDEX
+            | CURRENCY_TYPE_INDEX
     )
 }
 
@@ -579,6 +591,7 @@ mod tests {
             achievements: None,
             objectives: None,
             progression: None,
+            currency: None,
             health_change: None,
             cooldowns: None,
             stamina: None,
@@ -612,6 +625,7 @@ mod tests {
             achievements: None,
             objectives: None,
             progression: None,
+            currency: None,
             health_change: None,
             cooldowns: None,
             stamina: None,
@@ -669,6 +683,7 @@ mod tests {
             achievements: None,
             objectives: None,
             progression: None,
+            currency: None,
             health_change: Some(HealthChange {
                 health: 0,
                 first_damage: false,
@@ -720,6 +735,7 @@ mod tests {
             achievements: None,
             objectives: Some(&objectives),
             progression: Some(ProgressionState::experience(20)),
+            currency: None,
             health_change: Some(HealthChange {
                 health: HEALED,
                 first_damage: false,
@@ -776,6 +792,7 @@ mod tests {
             achievements: None,
             objectives: None,
             progression: None,
+            currency: None,
             health_change: None,
             cooldowns: None,
             stamina: None,
@@ -829,6 +846,7 @@ mod tests {
             achievements: None,
             objectives: None,
             progression: None,
+            currency: None,
             health_change: None,
             cooldowns: None,
             stamina: None,

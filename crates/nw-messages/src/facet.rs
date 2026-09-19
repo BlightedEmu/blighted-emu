@@ -43,6 +43,8 @@ pub mod component {
     pub const TUTORIAL_AI: u64 = 0xd128_17b1_c795_98a5;
     /// The XOR of a tutorial sailor's main entity and the child that holds its tutorial AI.
     pub const TUTORIAL_AI_CHILD: u64 = 0x37 << 32;
+    /// `CraftingComponent` (beach-quests note: the 2993 and 2997 target less the Soul entity).
+    pub const CRAFTING: u64 = 0xf7e4_6d7c_2327_3ef2;
 }
 
 /// Type index of `PlayerComponentServerFacet_OnAckLevelInfoChanged`.
@@ -99,6 +101,18 @@ pub const ADJUST_FX_SCRIPTS_TYPE_INDEX: u64 = 608;
 pub const DISABLE_COLLISION_TYPE_INDEX: u64 = 1793;
 /// Type index of `PlayerComponentClientFacet_OnTeleportWithLoadingScreen`.
 pub const TELEPORT_WITH_LOADING_SCREEN_TYPE_INDEX: u64 = 3951;
+/// Type index of `ConversationComponentServerFacet_RequestAcceptObjective`.
+pub const ACCEPT_OBJECTIVE_TYPE_INDEX: u64 = 3772;
+/// Type index of `ConversationComponentServerFacet_RequestCompleteObjective`.
+pub const COMPLETE_OBJECTIVE_TYPE_INDEX: u64 = 794;
+/// Type index of `CraftingComponentServerFacet_SetCraftingDetails`.
+pub const SET_CRAFTING_DETAILS_TYPE_INDEX: u64 = 2997;
+/// Type index of `CraftingComponentServerFacet_CancelCrafting`.
+pub const CANCEL_CRAFTING_TYPE_INDEX: u64 = 2999;
+/// Type index of `CraftingComponentClientFacet_OnCraftingProgressUpdate`.
+pub const CRAFTING_PROGRESS_TYPE_INDEX: u64 = 2993;
+/// The ingredient kind of an item named by its id (beach-quests note: every captured ingredient).
+pub const INGREDIENT_ITEM: u8 = 1;
 
 /// The facet entity of the entity whose entry id names entity number `entity_number`
 /// (`ClientAddEntryMsg::for_entity`): the entry id starts with the big-endian entity number, and
@@ -160,8 +174,19 @@ impl FacetHeader {
     }
 }
 
-/// A facet call from the client that the server answers or acts on.
+/// One ingredient of a craft request (2997).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CraftIngredient {
+    /// Its kind ([`INGREDIENT_ITEM`] for an item).
+    pub kind: u8,
+    /// How many.
+    pub quantity: u32,
+    /// CRC-32 of the lowercase item id.
+    pub item: u32,
+}
+
+/// A facet call from the client that the server answers or acts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientFacetMsg {
     /// 5181: the client loaded the level of a `LevelInfoChangedMsg` with this client context.
     AckLevelInfo {
@@ -306,6 +331,41 @@ pub enum ClientFacetMsg {
         /// A byte of unknown meaning (0 in the capture).
         flag: u8,
     },
+    /// 3772: the player accepts the quest an NPC offers (beach-quests note, section 2).
+    AcceptObjective {
+        /// The header.
+        header: FacetHeader,
+        /// CRC-32 of the lowercase objective id.
+        objective: u32,
+    },
+    /// 794: the player turns a finished quest in at its NPC.
+    CompleteObjective {
+        /// The header.
+        header: FacetHeader,
+        /// CRC-32 of the lowercase objective id.
+        objective: u32,
+    },
+    /// 2997: the player crafts at the station it uses.
+    SetCraftingDetails {
+        /// The header (the player's `CraftingComponent`).
+        header: FacetHeader,
+        /// CRC-32 of the lowercase recipe id.
+        recipe: u32,
+        /// How many to craft.
+        quantity: u32,
+        /// A number of unknown meaning (0 in the captures).
+        unknown: u32,
+        /// A number of unknown meaning: `0x0064_0000` for the tools, 0 for food (Inferred: its
+        /// high half is the tools' gear score 100).
+        details: u32,
+        /// The ingredients the player picked.
+        ingredients: Vec<CraftIngredient>,
+    },
+    /// 2999: the player closes the crafting window.
+    CancelCrafting {
+        /// The header.
+        header: FacetHeader,
+    },
 }
 
 impl ClientFacetMsg {
@@ -415,6 +475,43 @@ impl ClientFacetMsg {
                     flag: reader.u8()?,
                 })
             }),
+            ACCEPT_OBJECTIVE_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::AcceptObjective {
+                    header,
+                    objective: reader.u32()?,
+                })
+            }),
+            COMPLETE_OBJECTIVE_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::CompleteObjective {
+                    header,
+                    objective: reader.u32()?,
+                })
+            }),
+            SET_CRAFTING_DETAILS_TYPE_INDEX => read(|header, reader| {
+                let recipe = reader.u32()?;
+                let quantity = reader.u32()?;
+                let unknown = reader.u32()?;
+                let details = reader.u32()?;
+                let count = reader.u8()?;
+                let ingredients = (0..count)
+                    .map(|_| {
+                        Ok(CraftIngredient {
+                            kind: reader.u8()?,
+                            quantity: reader.u32()?,
+                            item: reader.u32()?,
+                        })
+                    })
+                    .collect::<Result<_, MessageError>>()?;
+                Ok(Self::SetCraftingDetails {
+                    header,
+                    recipe,
+                    quantity,
+                    unknown,
+                    details,
+                    ingredients,
+                })
+            }),
+            CANCEL_CRAFTING_TYPE_INDEX => read(|header, _| Ok(Self::CancelCrafting { header })),
             _ => return None,
         })
     }
@@ -622,6 +719,77 @@ impl BodyCodec for InteractionValidatedMsg {
     }
 }
 
+/// 2993: the progress of the player's craft: the recipe crafted and how many, then an empty
+/// update when the station is idle again (beach-quests note: retail sends both 1,057 ms after the
+/// request, and one more empty update after the close).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CraftProgressMsg {
+    /// The header (the player's `CraftingComponent`).
+    pub header: FacetHeader,
+    /// The recipe id; empty when idle.
+    pub recipe: Vec<u8>,
+    /// How many were crafted.
+    pub quantity: u32,
+    /// A number of unknown meaning: 1 with a recipe, 0 when idle.
+    pub extra: u32,
+}
+
+/// The [`CraftProgressMsg::extra`] of a finished craft.
+const CRAFTED_EXTRA: u32 = 1;
+
+impl CraftProgressMsg {
+    /// Player `player` crafted `quantity` of recipe `recipe`.
+    pub fn crafted(player: u64, recipe: &str, quantity: u32) -> Self {
+        Self {
+            header: FacetHeader::of(component::CRAFTING, player),
+            recipe: recipe.as_bytes().to_vec(),
+            quantity,
+            extra: CRAFTED_EXTRA,
+        }
+    }
+
+    /// Player `player`'s station is idle.
+    pub const fn idle(player: u64) -> Self {
+        Self {
+            header: FacetHeader::of(component::CRAFTING, player),
+            recipe: Vec::new(),
+            quantity: 0,
+            extra: 0,
+        }
+    }
+}
+
+impl BodyCodec for CraftProgressMsg {
+    const TYPE_INDEX: u64 = CRAFTING_PROGRESS_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        // A `usize` length fits 64 bits.
+        writer.wide_prefixed(self.recipe.len() as u64);
+        Ok(writer
+            .bytes(&self.recipe)
+            .u32(self.quantity)
+            .u32(self.extra)
+            .finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let header = FacetHeader::read(&mut reader)?;
+        // A length past the body fails the read below.
+        let length = usize::try_from(reader.wide_prefixed()?).unwrap_or(usize::MAX);
+        let message = Self {
+            header,
+            recipe: reader.bytes(length)?.to_vec(),
+            quantity: reader.u32()?,
+            extra: reader.u32()?,
+        };
+        reader.finish()?;
+        Ok(message)
+    }
+}
+
 /// A facet call that is its header only.
 macro_rules! header_only_message {
     ($(#[$doc:meta])* $name:ident, $type_index:expr) => {
@@ -814,6 +982,90 @@ mod tests {
     fn soul(component: u64) -> FacetHeader {
         // The entity number whose entry id reverses to the Soul entity.
         FacetHeader::of(component, SOUL_ENTITY.swap_bytes())
+    }
+
+    #[test]
+    fn the_quest_calls_read_the_retail_bodies() {
+        // Retail 3772 and 794 of 12_skinningknife (`f52332f7`), beach-quests note.
+        const ACCEPT: &str = "8120e72f6a93d58d650f7a09cf50b550f52332f7";
+        const SKINNING_KNIFE: u32 = 0xf523_32f7;
+        let header = FacetHeader {
+            target: 0x8120_e72f_6a93_d58d,
+            entity: SOUL_ENTITY,
+        };
+        assert_eq!(
+            ClientFacetMsg::decode(ACCEPT_OBJECTIVE_TYPE_INDEX, &hex(ACCEPT)),
+            Some(Ok(ClientFacetMsg::AcceptObjective {
+                header,
+                objective: SKINNING_KNIFE
+            }))
+        );
+        assert_eq!(
+            ClientFacetMsg::decode(COMPLETE_OBJECTIVE_TYPE_INDEX, &hex(ACCEPT)),
+            Some(Ok(ClientFacetMsg::CompleteObjective {
+                header,
+                objective: SKINNING_KNIFE
+            }))
+        );
+    }
+
+    #[test]
+    fn a_craft_request_reads_its_ingredients_and_the_answer_is_retail() {
+        // Retail 2997 of the skinning knife: FlintT1 x1 and WoodT1 x1 (beach-quests note).
+        const REQUEST: &str = concat!(
+            "5cf3e785f277f442650f7a09cf50b550",
+            "a546f7c5",
+            "00000001",
+            "00000000",
+            "00640000",
+            "02",
+            "01000000010c9280c8",
+            "01000000018a914427"
+        );
+        const CRAFTED: &str = concat!(
+            "5cf3e785f277f442650f7a09cf50b550",
+            "11316853",
+            "6b696e6e696e674b6e69666554310000000100000001"
+        );
+        const IDLE: &str = "5cf3e785f277f442650f7a09cf50b550000000000000000000";
+        let header = soul(component::CRAFTING);
+        assert_eq!(
+            ClientFacetMsg::decode(SET_CRAFTING_DETAILS_TYPE_INDEX, &hex(REQUEST)),
+            Some(Ok(ClientFacetMsg::SetCraftingDetails {
+                header,
+                recipe: 0xa546_f7c5,
+                quantity: 1,
+                unknown: 0,
+                details: 0x0064_0000,
+                ingredients: vec![
+                    CraftIngredient {
+                        kind: INGREDIENT_ITEM,
+                        quantity: 1,
+                        item: 0x0c92_80c8,
+                    },
+                    CraftIngredient {
+                        kind: INGREDIENT_ITEM,
+                        quantity: 1,
+                        item: 0x8a91_4427,
+                    },
+                ],
+            }))
+        );
+        assert_eq!(
+            ClientFacetMsg::decode(CANCEL_CRAFTING_TYPE_INDEX, &hex(&IDLE[..32])),
+            Some(Ok(ClientFacetMsg::CancelCrafting { header }))
+        );
+        let player = SOUL_ENTITY.swap_bytes();
+        let crafted = CraftProgressMsg::crafted(player, "1hSkinningKnifeT1", 1);
+        assert_eq!(crafted.encode().expect("encode"), hex(CRAFTED));
+        assert_eq!(
+            CraftProgressMsg::idle(player).encode().expect("encode"),
+            hex(IDLE)
+        );
+        assert_eq!(
+            CraftProgressMsg::decode(&hex(CRAFTED)).expect("decode"),
+            crafted
+        );
     }
 
     #[test]

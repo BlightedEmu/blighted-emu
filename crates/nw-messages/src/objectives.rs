@@ -38,16 +38,21 @@ pub enum TaskWireState {
     Active,
     /// It is done.
     Complete,
+    /// It stopped undone: a branch of a partial container that another branch finished
+    /// (beach-quests note: `SwapTimerNeverComplete_container` of `12_skinningknife`, progress 2).
+    Inactive,
 }
 
 impl TaskWireState {
     const ACTIVE: u8 = 1;
     const COMPLETE: u8 = 2;
+    const INACTIVE: u8 = 4;
 
     const fn byte(self) -> u8 {
         match self {
             Self::Active => Self::ACTIVE,
             Self::Complete => Self::COMPLETE,
+            Self::Inactive => Self::INACTIVE,
         }
     }
 
@@ -55,6 +60,7 @@ impl TaskWireState {
         match byte {
             Self::ACTIVE => Ok(Self::Active),
             Self::COMPLETE => Ok(Self::Complete),
+            Self::INACTIVE => Ok(Self::Inactive),
             byte => Err(MessageError::Unsized { field: FIELD, byte }),
         }
     }
@@ -224,7 +230,7 @@ impl ObjectivesState {
     /// # Errors
     ///
     /// Returns [`MessageError`] when the body ends early, sets slot 0 or a child other than 1
-    /// to 4, sends a list in the delta form, or a task state is not 1 or 2.
+    /// to 4, sends a list in the delta form, or a task state is not 1, 2 or 4.
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         let slots = read_slot_byte(reader, FIELD, SLOTS)?;
         let mut state = Self::default();
@@ -363,6 +369,43 @@ mod tests {
         assert_eq!(state, expected);
         let mut writer = Writer::new();
         expected.write(&mut writer).expect("write");
+        assert_eq!(writer.finish(), bytes);
+    }
+
+    #[test]
+    fn a_stopped_branch_is_inactive() {
+        // Retail 12_skinningknife task list after the knife (beach-quests note, q2 fragment
+        // 21238): wire task 17, two children done, state 4.
+        const RETAIL: &str = "02 10 00 01 db9803 0f
+            ff4dcb963adf2874 00 e8c3135a 00000001 02
+            ff4dcb963adf2874 01 32edcfd1 00000001 02
+            ff4dcb963adf2874 02 872c6d15 00000001 02
+            ff4dcb963adf2874 13 39d64279 00000004 02
+            ff4dcb963adf2874 06 91915849 00000001 02
+            ff4dcb963adf2874 08 f8522a74 00000002 02
+            ff4dcb963adf2874 07 5b3e6aa2 00000001 02
+            ff4dcb963adf2874 0a a49a7a51 00000001 02
+            ff4dcb963adf2874 0d 403c9da3 00000003 02
+            ff4dcb963adf2874 0e 873461ce 00000001 02
+            ff4dcb963adf2874 0f b55ade17 00000001 02
+            ff4dcb963adf2874 11 cfc907fc 00000002 04
+            ff4dcb963adf2874 0c b55ade17 00000001 02
+            ff4dcb963adf2874 0b 03ce66c4 00000001 02
+            ff4dcb963adf2874 12 2f7459a3 00000001 02";
+        const STOPPED: u8 = 0x11;
+        let bytes = hex(RETAIL);
+        let mut reader = Reader::new(&bytes);
+        let state = ObjectivesState::read(&mut reader).expect("read");
+        reader.finish().expect("whole body");
+        let tasks = state.tasks.clone().expect("tasks").elements;
+        let stopped = tasks
+            .iter()
+            .find(|entry| entry.index == STOPPED)
+            .expect("stopped");
+        assert_eq!(stopped.state, TaskWireState::Inactive);
+        assert_eq!(stopped.progress, 2);
+        let mut writer = Writer::new();
+        state.write(&mut writer).expect("write");
         assert_eq!(writer.finish(), bytes);
     }
 

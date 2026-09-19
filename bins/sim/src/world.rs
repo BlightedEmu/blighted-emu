@@ -26,10 +26,11 @@ use nw_bus::{
     MOB_STATES, MobGhost, PlayerQuests, Point, QuestRun, ScriptLogLine, SimSlot, SnapMob,
     SnapPlayer,
 };
+use nw_messages::client_input::{CRAFTING_STATION_KIND, TALK_KIND};
 use nw_messages::items::{FIRST_VERSION, FullList};
 use nw_messages::paperdoll::slot::QUICK_SLOT_1;
 use nw_messages::{
-    BundleGroup, BundleMember, ClientFacetMsg, ConsumableCooldown, CooldownsState,
+    BundleGroup, BundleMember, ClientFacetMsg, ConsumableCooldown, CooldownsState, CurrencyState,
     DisableCollisionMsg, GatheringInterruptedMsg, HealthChange, InteractionEndedMsg,
     InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg,
     LevelSpec, MeleeHitMsg, MessageError, PlayerLook, PlayerSeenByAiMsg, PlayerStates,
@@ -48,6 +49,8 @@ mod admin;
 mod asset_script;
 mod attack;
 mod combat_status;
+mod conversation;
+mod crafting;
 mod encounter;
 mod events;
 mod gathering;
@@ -413,6 +416,11 @@ struct Player {
     /// Its experience points, and whether they changed since the last bundle.
     experience: u32,
     experience_changed: bool,
+    /// Its coins, and whether they changed since the last bundle.
+    coins: u64,
+    coins_changed: bool,
+    /// The crafting station it uses, from its interaction with one until it closes it.
+    station: Option<&'static crafting::Station>,
     /// Its running consumable cooldowns, and whether they changed since the last bundle.
     cooldowns: Vec<ConsumableCooldown>,
     cooldowns_changed: bool,
@@ -519,6 +527,8 @@ pub struct SimWorld {
     nodes: Nodes,
     /// The gathers that run.
     open_gathers: Vec<OpenGather>,
+    /// The crafts that run.
+    crafts: Vec<crafting::PendingCraft>,
     /// The dead mobs that were skinned, and those whose corpse state the bundles sent.
     skinned: HashSet<u64>,
     skinned_shown: HashSet<u64>,
@@ -588,6 +598,8 @@ struct Arrival {
     drawn_weapon: Option<u32>,
     /// Its experience points.
     experience: u32,
+    /// Its coins.
+    coins: u64,
     /// Its saved or carried quests.
     quests: PlayerQuests,
 }
@@ -619,6 +631,7 @@ impl SimWorld {
             look_targets: HashMap::new(),
             nodes: Nodes::default(),
             open_gathers: Vec::new(),
+            crafts: Vec::new(),
             skinned: HashSet::new(),
             skinned_shown: HashSet::new(),
             content,
@@ -730,6 +743,7 @@ impl SimWorld {
             items: admit.items.clone(),
             drawn_weapon: None,
             experience: 0,
+            coins: 0,
             quests: admit.quests.clone(),
         };
         self.check(&arrival)?;
@@ -842,6 +856,7 @@ impl SimWorld {
             items: offer.items.clone(),
             drawn_weapon: offer.drawn_weapon,
             experience: offer.experience,
+            coins: offer.coins,
             quests: offer.quests.clone(),
         };
         self.check(&arrival)?;
@@ -1309,6 +1324,7 @@ impl SimWorld {
         self.tick_hands(now_ms, server_time);
         self.tick_pushes(now_ms);
         self.gathers_due(now_ms);
+        self.crafts_due(now_ms);
         self.tick_phasing();
         let mut messages = self.take_messages();
         let bundled = self.bundles(now_ms, server_time)?;
@@ -1392,17 +1408,8 @@ impl SimWorld {
                 .and_then(|entity| self.world.get::<Player>(entity))
                 .and_then(|player| player.gear.as_ref().map(Gear::carried))
                 .unwrap_or_default();
-            let held: Vec<(&str, bool)> = carried
-                .iter()
-                .map(|item| {
-                    (
-                        item.item_id.as_str(),
-                        matches!(item.place, ItemPlace::Worn(_)),
-                    )
-                })
-                .collect();
             if let Some(tutorial) = self.tutorials.get_mut(&number) {
-                orders.extend(tutorial.sync_held(&held, &mut self.mobs, now_ms));
+                orders.extend(tutorial.sync_held(&held_items(&carried), &mut self.mobs, now_ms));
             }
             self.carry_out(number, orders, now_ms);
             self.update_quest_tracker(number);
@@ -1410,7 +1417,8 @@ impl SimWorld {
     }
 
     /// Gives the quest tracker of player `number` its tutorial's or its quest's task list; a
-    /// quest that finished is completed.
+    /// quest that finished is completed, unless it waits for its turn-in at its NPC (retail: the
+    /// client asks to complete it, 794, when the player talks to the NPC).
     fn update_quest_tracker(&mut self, number: u64) {
         let Some(entity) = self.player_by_number(number) else {
             return;
@@ -1418,7 +1426,8 @@ impl SimWorld {
         let (tasks, finished) = if let Some(tutorial) = self.tutorials.get(&number) {
             (tutorial.progress(), tutorial.finished())
         } else if let Some(quest) = self.quests.get(&number) {
-            (quest.run.progress(), quest.run.finished())
+            let waits = quest.def.turn_in.is_some();
+            (quest.run.progress(), quest.run.finished() && !waits)
         } else {
             return;
         };
@@ -1503,8 +1512,9 @@ impl SimWorld {
             return;
         };
         let tasks = quest.progress();
-        // A finished quest's end states went out from the other sim; its tracker stays empty.
-        let finished = quest.finished();
+        // A finished quest's end states went out from the other sim; its tracker stays empty. One
+        // that waits for its turn-in goes on waiting.
+        let finished = quest.finished() && def.turn_in.is_none();
         let id = def.id.clone();
         self.quests.insert(number, ActiveQuest { def, run: quest });
         if finished {
@@ -1523,12 +1533,20 @@ impl SimWorld {
         }
     }
 
-    /// Ends the finished active quest of player `number`: it joins the done list and its item
-    /// reward goes into the bag.
+    /// Ends the finished active quest of player `number`: it joins the done list, its
+    /// achievement is set, and its rewards go to the player: the coins and experience of its
+    /// success game event, and its items into the bag.
     fn complete_quest(&mut self, number: u64) {
         let Some(quest) = self.quests.remove(&number) else {
             return;
         };
+        let reward = quest
+            .def
+            .success_event
+            .as_deref()
+            .and_then(|event| self.content.rewards.get(event))
+            .cloned()
+            .unwrap_or_default();
         tracing::info!(player = number, objective = %quest.def.id, "quest done");
         self.scripts.push(scripts::ScriptEvent::QuestDone {
             player: number,
@@ -1545,10 +1563,22 @@ impl SimWorld {
                 player.done_quests.push(quest.def.id.clone());
             }
             player.quests_unsaved = true;
+            if let Some(achievement) = &quest.def.achievement {
+                player
+                    .flow
+                    .set_achievement(&self.achievement_rules, achievement);
+            }
+            if reward.coins > 0 {
+                player.coins = player.coins.saturating_add(reward.coins);
+                player.coins_changed = true;
+            }
+            if reward.experience > 0 {
+                player.experience = player.experience.saturating_add(reward.experience);
+                player.experience_changed = true;
+            }
         }
-        if let Some(reward) = quest.def.reward {
-            self.give_loot(number, vec![reward], self.last_now_ms);
-        }
+        let items: Vec<(String, u32)> = quest.def.reward.into_iter().chain(reward.item).collect();
+        self.give_loot(number, items, self.last_now_ms);
     }
 
     /// Feeds game event `event` to the quest of player `number`.
@@ -1619,6 +1649,15 @@ impl SimWorld {
             };
             let mut effects = quest.run.tick(now_ms);
             effects.extend(quest.run.event(Event::Moved(position), now_ms));
+            // Items the player holds meet the item tasks, also those that start later.
+            let carried = self
+                .player_by_number(number)
+                .and_then(|entity| self.world.get::<Player>(entity))
+                .and_then(|player| player.gear.as_ref().map(Gear::carried))
+                .unwrap_or_default();
+            if let Some(quest) = self.quests.get_mut(&number) {
+                effects.extend(quest.run.sync_held(&held_items(&carried), now_ms));
+            }
             if !effects.is_empty() {
                 self.mark_quests_unsaved(number);
             }
@@ -1789,7 +1828,7 @@ impl SimWorld {
                             .zip(player.gear.as_mut())
                             .is_some_and(|(item, gear)| gear.add(item, quantity));
                         if given {
-                            gained.push(id);
+                            gained.push((id, quantity));
                         } else {
                             tracing::warn!(player = number, item = %id, "tutorial item not given");
                         }
@@ -1871,8 +1910,15 @@ impl SimWorld {
             for bit in set_bits {
                 tutorial.achievement(bit, now_ms);
             }
-            for id in &gained {
-                pending.extend(tutorial.event(Event::ItemGained(id), &mut self.mobs, now_ms));
+            for (id, quantity) in &gained {
+                pending.extend(tutorial.event(
+                    Event::ItemGained {
+                        item: id,
+                        quantity: *quantity,
+                    },
+                    &mut self.mobs,
+                    now_ms,
+                ));
             }
         }
     }
@@ -1883,7 +1929,8 @@ impl SimWorld {
     }
 
     /// The client of `connection` starts interaction `request` at `now_ms` (the use of a static
-    /// entity, from its input): its tutorial answers a use of the chest.
+    /// entity, from its input): its tutorial answers a use of the chest; in the open world it is
+    /// a talk to an NPC, the use of a crafting station or a gather, by its kind.
     pub fn interact(
         &mut self,
         connection: &ConnectionRef,
@@ -1899,8 +1946,13 @@ impl SimWorld {
             return;
         };
         let Some(tutorial) = self.tutorials.get_mut(&number) else {
-            if let Some(&entity) = self.by_connection.get(connection) {
-                self.gather_open_world(entity, number, request, now_ms);
+            let Some(&entity) = self.by_connection.get(connection) else {
+                return;
+            };
+            match request.kind {
+                TALK_KIND => self.talk(entity, number, request),
+                CRAFTING_STATION_KIND => self.open_station(entity, number, request),
+                _ => self.gather_open_world(entity, number, request, now_ms),
             }
             return;
         };
@@ -1926,15 +1978,41 @@ impl SimWorld {
         let Some(&entity) = self.by_connection.get(connection) else {
             return Ok(());
         };
-        if let ClientFacetMsg::CancelInteraction { interaction, .. } = message {
-            self.cancel_gather(entity, interaction);
+        let Some(number) = self.world.get::<Player>(entity).map(|player| player.number) else {
             return Ok(());
+        };
+        match &message {
+            ClientFacetMsg::CancelInteraction { interaction, .. } => {
+                self.cancel_gather(entity, *interaction);
+                return Ok(());
+            }
+            ClientFacetMsg::AcceptObjective { objective, .. } => {
+                self.accept_objective(entity, number, *objective, now_ms);
+                return Ok(());
+            }
+            ClientFacetMsg::CompleteObjective { objective, .. } => {
+                self.turn_in(entity, number, *objective);
+                return Ok(());
+            }
+            ClientFacetMsg::SetCraftingDetails {
+                recipe,
+                quantity,
+                ingredients,
+                ..
+            } => {
+                self.craft(entity, number, *recipe, *quantity, ingredients, now_ms);
+                return Ok(());
+            }
+            ClientFacetMsg::CancelCrafting { .. } => {
+                self.close_station(entity, number);
+                return Ok(());
+            }
+            _ => {}
         }
         let tutorial = self.is_tutorial();
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return Ok(());
         };
-        let number = player.number;
         let ended_cutscene = player.flow.cutscene();
         let equipped = match message {
             ClientFacetMsg::EquipItem {
@@ -1985,7 +2063,7 @@ impl SimWorld {
             ClientFacetMsg::TimeSyncRequest { header } => time_answers(&self.ids, header).to_vec(),
             _ => {
                 let client_context = player.client_context;
-                player.flow.answer(message, client_context)
+                player.flow.answer(&message, client_context)
             }
         };
         send_now(&mut self.combat_messages, connection, &answers);
@@ -2001,6 +2079,7 @@ impl SimWorld {
                 ClientFacetMsg::UiScreenOpened { screen, .. } => {
                     Some(Event::UiScreenOpened(screen))
                 }
+                ClientFacetMsg::EquipItem { .. } => equipped.as_deref().map(Event::Equipped),
                 _ => None,
             };
             if let Some(event) = event {
@@ -2427,6 +2506,9 @@ impl SimWorld {
                     quests_unsaved: false,
                     experience: arrival.experience,
                     experience_changed: false,
+                    coins: arrival.coins,
+                    coins_changed: false,
+                    station: None,
                     cooldowns: Vec::new(),
                     cooldowns_changed: false,
                     health_sent: None,
@@ -2784,6 +2866,10 @@ impl Neighbourhood<'_> {
                     std::mem::take(&mut player.experience_changed)
                         .then(|| ProgressionState::experience(player.experience))
                 };
+                // The coins: whole with the first card, then after each change (retail own c60
+                // with each quest reward, beach-quests note).
+                let currency = (first || std::mem::take(&mut player.coins_changed))
+                    .then(|| CurrencyState::of(player.coins));
                 // The cooldowns and a heal after a potion.
                 let cooldowns = std::mem::take(&mut player.cooldowns_changed).then(|| {
                     player.list_version += 1;
@@ -2830,6 +2916,7 @@ impl Neighbourhood<'_> {
                     achievements: achievements.as_ref(),
                     objectives: objectives.as_ref(),
                     progression,
+                    currency,
                     health_change,
                     cooldowns: cooldowns.as_ref(),
                     stamina,
@@ -3016,9 +3103,24 @@ fn handoff_offer(
         items: player.gear.as_ref().map(Gear::carried),
         drawn_weapon: player.gear.as_ref().and_then(Gear::drawn),
         experience: player.experience,
+        coins: player.coins,
         quests,
         achievements: player.flow.achievement_bits(),
     }
+}
+
+/// The items of `carried` as item tasks read them: item id, quantity and whether it is worn.
+fn held_items(carried: &[CarriedItem]) -> Vec<(&str, u32, bool)> {
+    carried
+        .iter()
+        .map(|item| {
+            (
+                item.item_id.as_str(),
+                item.quantity,
+                matches!(item.place, ItemPlace::Worn(_)),
+            )
+        })
+        .collect()
 }
 
 /// The sim of `table` that owns the cell at `position`; `None` when the table does not fit its
@@ -4093,7 +4195,8 @@ mod tests {
             gather_ms: FLINT_GATHER_MS,
             respawn_ms: FLINT_RESPAWN_MS,
             loot_table: Some(FLINT.to_owned()),
-            skinning: false,
+            tradeskill: None,
+            tool_required: false,
         }]);
         let loot = LootTables::build(LootSource {
             rows: vec![
@@ -4215,6 +4318,451 @@ mod tests {
         let grown_at = pressed_at + GATHER_END_MS + FLINT_RESPAWN_MS.1;
         let grown = tick(&mut world, grown_at).messages;
         assert_eq!(node_states(&world, &grown), [HEALTHY], "it grows back");
+    }
+
+    /// The beach quests' items (item id, class), recipes, rewards and gatherables.
+    const KNIFE: &str = "1hSkinningKnifeT1";
+    const WOOD: &str = "WoodT1";
+    const PORK: &str = "PorkT1";
+    const RATION: &str = "FoodHealthRecoveryT1";
+    const MEAT_POUCH: &str = "QuestReward_MB_Meat_Pouch";
+    const MYSTIC_FEET: &str = "MysticArchetypeFeet_Upgrade";
+    const RATION_RECIPE: &str = "Procedural_HealthRecoveryT1";
+    /// The objectives (retail rows of build 25810808, with their quest-chain cells).
+    const SKINNING_KNIFE: &str = "12_skinningknife";
+    const BOAR_FEAST: &str = "12_boarfeast";
+    const BOAR_FEAST_MYSTIC: &str = "12_boarfeast_mystic";
+
+    /// A world with the beach quests, their content, one boar (the test mob) at `CELL_M / 2`
+    /// and player 1 (a mystic, so it has `Archetype_Theurgist`) next to it, spawned, who turned
+    /// in `12_getoffbeach`.
+    fn beach_world() -> SimWorld {
+        use crate::objectives::{KillTypes, TaskBook};
+        use crate::player_content::{ObjectiveRow, QuestBook};
+        use nw_content::achievements::AchievementIndexes;
+        use nw_content::crafting::{Ingredient, IngredientKind, Recipe, Recipes};
+        use nw_content::rewards::{Reward, Rewards};
+        const ACHIEVEMENTS: [&str; 6] = [
+            "S_getoffbeach_mb",
+            "S_skinningknife_mb",
+            "S_boarfeast_mb",
+            "Archetype_Theurgist",
+            "SwapActive_01_AelstromMB_01",
+            "SwapActive_01_AelstromMB_03",
+        ];
+        let objective = |id: &str, root: &str, requirement: &str, event: &str| ObjectiveRow {
+            id: id.to_owned(),
+            root: root.to_owned(),
+            requirement: Some(requirement.to_owned()),
+            achievement: Some(if root.starts_with("12_skinning") {
+                "S_skinningknife_mb".to_owned()
+            } else {
+                "S_boarfeast_mb".to_owned()
+            }),
+            turn_in: Some("01_UrdaMB_01".to_owned()),
+            success_event: Some(event.to_owned()),
+            ..ObjectiveRow::default()
+        };
+        let quests = QuestBook::build(
+            [
+                objective(
+                    SKINNING_KNIFE,
+                    "12_skinningknife_container",
+                    "S_getoffbeach_mb",
+                    "01_skinningknife_success",
+                ),
+                objective(
+                    BOAR_FEAST,
+                    "12_boarfeast_container",
+                    "S_skinningknife_mb && !Archetype_Theurgist",
+                    "01_boarfeast_success",
+                ),
+                ObjectiveRow {
+                    reward_item: Some(gear::tests::POTION.to_owned()),
+                    reward_quantity: Some(5),
+                    ..objective(
+                        BOAR_FEAST_MYSTIC,
+                        "12_boarfeast_container",
+                        "S_skinningknife_mb && Archetype_Theurgist",
+                        "01_boarfeast_success_mystic",
+                    )
+                },
+            ],
+            TaskBook::new(crate::objectives::tests::beach_rows()),
+        );
+        let reward = |coins, experience, item: &str| Reward {
+            coins,
+            experience,
+            item: Some((item.to_owned(), 1)),
+        };
+        let item = |name: &str| Ingredient {
+            kind: IngredientKind::Item(name.to_owned()),
+            quantity: 1,
+        };
+        let mut combat = test_combat();
+        combat.spawns = vec![test_spawn(CELL_M / 2.0)].into();
+        let mut world = SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            combat,
+            Arc::new(PlayerContent {
+                kits: gear::tests::kits_with(&[
+                    (WOOD, "Resource+Wood"),
+                    (KNIFE, "EquippableTool+Axe+SkinningKnife"),
+                    (PORK, "Consumable+RawFood"),
+                    (RATION, "Consumable+Food"),
+                    (MEAT_POUCH, "Resource+LootContainer"),
+                    (MYSTIC_FEET, "EquippableFeet+Armor+Light"),
+                ]),
+                achievements: AchievementIndexes::build(
+                    (100..)
+                        .zip(ACHIEVEMENTS)
+                        .map(|(bit, id)| (id.to_owned(), bit)),
+                ),
+                archetype_unlocks: vec![(
+                    gear::tests::BACKSTORY.to_owned(),
+                    "Archetype_Theurgist".to_owned(),
+                )],
+                kill_types: KillTypes::build([(TEST_MOB.to_owned(), "Boar,Hostile".to_owned())]),
+                quests,
+                gatherables: Gatherables::build([Gatherable {
+                    id: "Boar".to_owned(),
+                    gather_ms: 15_000,
+                    respawn_ms: (1_260_000, 1_800_000),
+                    loot_table: None,
+                    tradeskill: Some("Skinning".to_owned()),
+                    tool_required: true,
+                }]),
+                recipes: Recipes::build(
+                    [
+                        Recipe {
+                            id: KNIFE.to_owned(),
+                            item: KNIFE.to_owned(),
+                            quantity: 1,
+                            ingredients: vec![item(gear::tests::FLINT), item(WOOD)],
+                            stations: vec!["camp1".to_owned()],
+                        },
+                        Recipe {
+                            id: RATION_RECIPE.to_owned(),
+                            item: RATION.to_owned(),
+                            quantity: 1,
+                            ingredients: vec![Ingredient {
+                                kind: IngredientKind::Category("FoodIngredientT1".to_owned()),
+                                quantity: 1,
+                            }],
+                            stations: vec!["camp1".to_owned()],
+                        },
+                    ],
+                    [(PORK.to_owned(), "Meats,FoodIngredientT1".to_owned())],
+                ),
+                rewards: Rewards::build([
+                    (
+                        "01_skinningknife_success".to_owned(),
+                        reward(225, 275, MEAT_POUCH),
+                    ),
+                    (
+                        "01_boarfeast_success_mystic".to_owned(),
+                        reward(250, 350, MYSTIC_FEET),
+                    ),
+                ]),
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a"])).expect("table");
+        let mut admit = admit_at(1, CELL_M / 2.0 + 1.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        tick(&mut world, NOW + OWN_CARD_DELAY_MS);
+        world.heard_from(&connection(1));
+        let entity = world.by_connection[&connection(1)];
+        let rules = world.achievement_rules.clone();
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .flow
+            .set_achievement(&rules, "S_getoffbeach_mb");
+        world
+    }
+
+    #[test]
+    fn the_skinning_knife_and_boar_feast_quests_run_from_talk_to_turn_in() {
+        use nw_formats::objectstream::lowercase_crc32;
+        use nw_messages::FacetHeader;
+        /// Retail Urda's Campfire and the talk name (beach-quests note).
+        const CAMPFIRE: [u8; nw_messages::wire::RAW_ID_LEN] =
+            0xff21_e713_8c5a_804d_0000_0000_0000_0000_u128.to_be_bytes();
+        const NPC: [u8; nw_messages::wire::RAW_ID_LEN] = [0x27; nw_messages::wire::RAW_ID_LEN];
+        const KNIFE_SLOT: u32 = 35;
+        const CRAFT_MS: u64 = 1_057;
+        const TICK_MS: u64 = 33;
+        const SKIN_MS: u64 = 7_500;
+        const LETHAL: u32 = 100_000;
+        let mut world = beach_world();
+        let who = connection(1);
+        let entity = world.by_connection[&who];
+        let mut now = NOW + OWN_CARD_DELAY_MS;
+        let step = |world: &mut SimWorld, now: &mut u64, ms: u64| {
+            *now += ms;
+            tick(world, *now).messages
+        };
+        let request = |target, kind, interaction| InteractionRequest {
+            target,
+            target_entity: 0x1234,
+            interaction,
+            kind,
+            gatherable: (kind == nw_messages::client_input::GATHER_KIND)
+                .then(|| lowercase_crc32("Boar")),
+        };
+        let answers = |messages: &[Outgoing]| -> Vec<(u8, u8, Vec<u8>)> {
+            messages_to(messages, 1)
+                .into_iter()
+                .filter_map(|message| match message {
+                    ServerMessage::InteractionValidated(answer) => {
+                        Some((answer.kind, answer.status, answer.name))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let crafted = |messages: &[Outgoing]| -> Vec<(Vec<u8>, u32)> {
+            messages_to(messages, 1)
+                .into_iter()
+                .filter_map(|message| match message {
+                    ServerMessage::CraftProgress(progress) => {
+                        Some((progress.recipe, progress.quantity))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let header = FacetHeader::of(0, 1);
+        let holds = |world: &SimWorld, item: &str| -> u32 {
+            world
+                .world
+                .get::<Player>(entity)
+                .and_then(|player| player.gear.as_ref())
+                .map(Gear::carried)
+                .unwrap_or_default()
+                .iter()
+                .filter(|stack| stack.item_id == item)
+                .map(|stack| stack.quantity)
+                .sum()
+        };
+        let has = |world: &SimWorld, achievement: &str| {
+            world.world.get::<Player>(entity).is_some_and(|player| {
+                player
+                    .flow
+                    .has_achievement(&world.achievement_rules, achievement)
+            })
+        };
+        let wallet = |world: &SimWorld| {
+            let player = world.world.get::<Player>(entity).expect("player");
+            (player.coins, player.experience)
+        };
+        let facet = |world: &mut SimWorld, message: ClientFacetMsg, at: u64| {
+            world.facet_message(&who, message, at).expect("facet");
+        };
+        let accept = |objective: &str| ClientFacetMsg::AcceptObjective {
+            header,
+            objective: lowercase_crc32(objective),
+        };
+        let complete = |objective: &str| ClientFacetMsg::CompleteObjective {
+            header,
+            objective: lowercase_crc32(objective),
+        };
+        let craft = |recipe: &str, items: &[&str]| ClientFacetMsg::SetCraftingDetails {
+            header,
+            recipe: lowercase_crc32(recipe),
+            quantity: 1,
+            unknown: 0,
+            details: 0,
+            ingredients: items
+                .iter()
+                .map(|item| nw_messages::CraftIngredient {
+                    kind: nw_messages::facet::INGREDIENT_ITEM,
+                    quantity: 1,
+                    item: lowercase_crc32(item),
+                })
+                .collect(),
+        };
+
+        // Aelstrom: the talk is accepted, then the quest.
+        world.interact(
+            &who,
+            request(NPC, nw_messages::client_input::TALK_KIND, 1),
+            now,
+        );
+        let talk = step(&mut world, &mut now, TICK_MS);
+        assert_eq!(
+            answers(&talk),
+            [(
+                nw_messages::client_input::TALK_KIND,
+                1,
+                b"@01_Reese".to_vec()
+            )]
+        );
+        facet(&mut world, accept(SKINNING_KNIFE), now);
+        assert_eq!(
+            world.quests.get(&1).map(|quest| quest.def.id.as_str()),
+            Some(SKINNING_KNIFE)
+        );
+        assert!(has(&world, "SwapActive_01_AelstromMB_01"), "its first task");
+
+        // Flint and wood, then the knife at Urda's Campfire.
+        world.give_loot(
+            1,
+            vec![(gear::tests::FLINT.to_owned(), 1), (WOOD.to_owned(), 1)],
+            now,
+        );
+        step(&mut world, &mut now, TICK_MS);
+        let station = nw_messages::client_input::CRAFTING_STATION_KIND;
+        world.interact(&who, request(CAMPFIRE, station, 2), now);
+        let opened = step(&mut world, &mut now, TICK_MS);
+        assert_eq!(
+            answers(&opened),
+            [(station, 1, b"@ui_watcherscampfire".to_vec())]
+        );
+        facet(&mut world, craft(KNIFE, &[gear::tests::FLINT, WOOD]), now);
+        assert_eq!(
+            holds(&world, gear::tests::FLINT),
+            0,
+            "the ingredients are taken"
+        );
+        assert_eq!(holds(&world, KNIFE), 0, "not yet made");
+        let made = step(&mut world, &mut now, CRAFT_MS);
+        assert_eq!(
+            crafted(&made),
+            [(KNIFE.as_bytes().to_vec(), 1), (Vec::new(), 0)],
+            "the craft, then idle"
+        );
+        assert_eq!(holds(&world, KNIFE), 1);
+        step(&mut world, &mut now, TICK_MS);
+        assert!(
+            world
+                .quests
+                .get(&1)
+                .is_some_and(|quest| quest.run.finished()),
+            "the knife ends the tasks"
+        );
+        assert!(world.quests.contains_key(&1), "it waits for its turn-in");
+        facet(&mut world, ClientFacetMsg::CancelCrafting { header }, now);
+
+        // The turn-in at Urda: achievement, coins, experience and the meat pouch.
+        facet(&mut world, complete(BOAR_FEAST), now);
+        assert!(
+            world.quests.contains_key(&1),
+            "another quest's turn-in does nothing"
+        );
+        facet(&mut world, complete(SKINNING_KNIFE), now);
+        assert!(!world.quests.contains_key(&1));
+        assert!(has(&world, "S_skinningknife_mb"));
+        assert_eq!(wallet(&world), (225, 275));
+        assert_eq!(holds(&world, MEAT_POUCH), 1);
+
+        // The boar feast: the mystic's variant only.
+        facet(&mut world, accept(BOAR_FEAST), now);
+        assert!(!world.quests.contains_key(&1), "not offered to a mystic");
+        facet(&mut world, accept(BOAR_FEAST_MYSTIC), now);
+        assert!(world.quests.contains_key(&1));
+        let boar = crate::mobs::mob_entity(0);
+        world.apply_hit(boar, 1, LETHAL, 0, now);
+        let corpse = raw_id_of_entity(boar);
+        let gather = nw_messages::client_input::GATHER_KIND;
+        world.interact(&who, request(corpse, gather, 3), now);
+        let refused = step(&mut world, &mut now, TICK_MS);
+        assert_eq!(
+            answers(&refused),
+            [(gather, 2, Vec::new())],
+            "no knife equipped"
+        );
+        let knife = world
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref())
+            .map(Gear::carried)
+            .unwrap_or_default()
+            .into_iter()
+            .find_map(|stack| match stack.place {
+                ItemPlace::Bag(bag_slot) if stack.item_id == KNIFE => Some(u32::from(bag_slot)),
+                _ => None,
+            })
+            .expect("the knife in the bag");
+        let character = world.world.get::<Player>(entity).expect("player").character;
+        facet(
+            &mut world,
+            ClientFacetMsg::EquipItem {
+                header,
+                bag_slot: knife,
+                equip_slot: KNIFE_SLOT,
+                quantity: 1,
+                instance: gear::instance_id(character, KNIFE),
+                flag: 0,
+            },
+            now,
+        );
+        world.interact(&who, request(corpse, gather, 4), now);
+        let accepted = step(&mut world, &mut now, TICK_MS);
+        assert_eq!(answers(&accepted), [(gather, 1, Vec::new())]);
+        step(&mut world, &mut now, SKIN_MS);
+        assert_eq!(holds(&world, PORK), 1, "the quest drop");
+
+        // The Light Ration at the campfire, then the turn-in at Aelstrom.
+        world.interact(&who, request(CAMPFIRE, station, 5), now);
+        facet(&mut world, craft(RATION_RECIPE, &[PORK]), now);
+        assert_eq!(holds(&world, PORK), 0, "the pork is cooked");
+        step(&mut world, &mut now, CRAFT_MS);
+        assert_eq!(holds(&world, RATION), 1);
+        step(&mut world, &mut now, TICK_MS);
+        facet(&mut world, complete(BOAR_FEAST_MYSTIC), now);
+        assert!(!world.quests.contains_key(&1));
+        assert!(has(&world, "S_boarfeast_mb"));
+        assert_eq!(wallet(&world), (225 + 250, 275 + 350));
+        assert_eq!(holds(&world, gear::tests::POTION), 5);
+        assert_eq!(holds(&world, MYSTIC_FEET), 1);
+        let done = world
+            .world
+            .get::<Player>(entity)
+            .map(|player| player.done_quests.clone())
+            .unwrap_or_default();
+        assert_eq!(done, [SKINNING_KNIFE, BOAR_FEAST_MYSTIC]);
+    }
+
+    #[test]
+    fn the_coins_go_out_with_the_card_and_after_a_change() {
+        let mut world = beach_world();
+        let entity = world.by_connection[&connection(1)];
+        let coins_sent = |world: &mut SimWorld, now: u64| -> Vec<u64> {
+            let messages = tick(world, now).messages;
+            bundle_of(&messages, &connection(1))
+                .map(|bundle| groups_in(world, &connection(1), &bundle))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(number, _)| *number == 1)
+                .flat_map(|(_, update)| update.members)
+                .filter_map(|member| match member.state {
+                    MemberState::Currency(state) => state.coins,
+                    _ => None,
+                })
+                .collect()
+        };
+        let later = NOW + 2 * OWN_CARD_DELAY_MS;
+        assert!(
+            coins_sent(&mut world, later).is_empty(),
+            "no change, no coins"
+        );
+        if let Some(mut player) = world.world.get_mut::<Player>(entity) {
+            player.coins = 375;
+            player.coins_changed = true;
+        }
+        assert_eq!(coins_sent(&mut world, later + 33), [375]);
+        let player = world.world.get::<Player>(entity).expect("player");
+        let body = world.world.get::<Body>(entity).expect("body");
+        let vitals = world.world.get::<Vitals>(entity).expect("vitals");
+        let offer = handoff_offer(player, body, vitals, later, None, PlayerQuests::default());
+        assert_eq!(offer.coins, 375, "a handoff carries them");
     }
 
     #[test]
@@ -4705,6 +5253,7 @@ mod tests {
             reward_item: Some(gear::tests::FLINT.to_owned()),
             reward_quantity: Some(2),
             repeatable,
+            ..ObjectiveRow::default()
         };
         let quests = QuestBook::build(
             [

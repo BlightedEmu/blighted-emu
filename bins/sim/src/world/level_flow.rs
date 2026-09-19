@@ -295,10 +295,10 @@ impl LevelFlow {
     /// The answers to `message` from a client in `client_context`.
     pub(super) fn answer(
         &mut self,
-        message: ClientFacetMsg,
+        message: &ClientFacetMsg,
         client_context: u8,
     ) -> Vec<ServerMessage> {
-        match message {
+        match *message {
             ClientFacetMsg::AckLevelInfo {
                 client_context: acked,
                 ..
@@ -345,7 +345,11 @@ impl LevelFlow {
             | ClientFacetMsg::TriggerAreaPassthrough { .. }
             | ClientFacetMsg::TakeAllItems { .. }
             | ClientFacetMsg::EquipItem { .. }
-            | ClientFacetMsg::ReturnToMainWorld { .. } => Vec::new(),
+            | ClientFacetMsg::ReturnToMainWorld { .. }
+            | ClientFacetMsg::AcceptObjective { .. }
+            | ClientFacetMsg::CompleteObjective { .. }
+            | ClientFacetMsg::SetCraftingDetails { .. }
+            | ClientFacetMsg::CancelCrafting { .. } => Vec::new(),
         }
     }
 
@@ -409,6 +413,19 @@ impl LevelFlow {
         {
             achievements.set(bit);
         }
+    }
+
+    /// Whether the player has achievement `id` of `rules`; an id the content does not have is
+    /// one it has not.
+    pub(super) fn has_achievement(&self, rules: &AchievementRules, id: &str) -> bool {
+        let (Some(achievements), Some(bit)) = (self.achievements.as_ref(), rules.indexes.index(id))
+        else {
+            return false;
+        };
+        achievements
+            .bits
+            .get((bit / u8::BITS) as usize)
+            .is_some_and(|value| value & (1 << (bit % u8::BITS)) != 0)
     }
 
     /// Clears achievement `id` (a quest's `TaskLockAchievement`).
@@ -599,14 +616,14 @@ mod tests {
             header: header(component::PLAYER),
             client_context: LOGIN_CLIENT_CONTEXT,
         };
-        let answers = flow.answer(ack, LOGIN_CLIENT_CONTEXT);
+        let answers = flow.answer(&ack, LOGIN_CLIENT_CONTEXT);
         let [ServerMessage::UpdatePhasing(phasing)] = answers.as_slice() else {
             panic!("one phasing update: {answers:?}");
         };
         assert_eq!(phasing.header, header(component::GRID_TRACKING));
         assert_eq!((phasing.mode, phasing.sequence), (3, 1));
         assert_eq!(phasing.entries[0].phase_id, PHASE);
-        let other_context = flow.answer(ack, LOGIN_CLIENT_CONTEXT + 1);
+        let other_context = flow.answer(&ack, LOGIN_CLIENT_CONTEXT + 1);
         assert!(other_context.is_empty(), "an ack of another level");
     }
 
@@ -633,7 +650,7 @@ mod tests {
             header: header(component::PLAYER),
             client_context: LOGIN_CLIENT_CONTEXT,
         };
-        open_world.answer(ack, LOGIN_CLIENT_CONTEXT);
+        open_world.answer(&ack, LOGIN_CLIENT_CONTEXT);
         let Some(ServerMessage::UpdatePhasing(update)) = open_world.phasing_at(BEACH.0, BEACH.1)
         else {
             panic!("the cells around the player");
@@ -668,7 +685,7 @@ mod tests {
         let mut flow = flow();
         let crew = lowercase_crc32("ftue_01_solesurvivor_confrontingcrewmember_igc");
         let granted = flow.answer(
-            ClientFacetMsg::RequestCutscene {
+            &ClientFacetMsg::RequestCutscene {
                 header: header(component::PLAYER_CUTSCENE),
                 cutscene: crew,
             },
@@ -683,7 +700,7 @@ mod tests {
             })]
         );
         let ended = flow.answer(
-            ClientFacetMsg::CutsceneEnded {
+            &ClientFacetMsg::CutsceneEnded {
                 header: header(component::PLAYER_CUTSCENE),
             },
             LOGIN_CLIENT_CONTEXT,

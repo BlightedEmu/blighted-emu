@@ -7,9 +7,10 @@ use crate::combat::{DamageDealtMsg, DeathRecapMsg, MeleeHitMsg, OnDamageMsg};
 use crate::connected::{CalendarConnectedMsg, TimingConfigurationConnectedMsg};
 use crate::day_phase::SyncDayPhaseMsg;
 use crate::facet::{
-    AdjustFxScriptsMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg, DisableCollisionMsg,
-    GatheringInterruptedMsg, InteractionEndedMsg, InteractionValidatedMsg, PlayerSeenByAiMsg,
-    SelectedAsTargetMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg,
+    AdjustFxScriptsMsg, CraftProgressMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg,
+    DisableCollisionMsg, GatheringInterruptedMsg, InteractionEndedMsg, InteractionValidatedMsg,
+    PlayerSeenByAiMsg, SelectedAsTargetMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg,
+    UpdatePhasingMsg,
 };
 use crate::level_info::LevelInfoChangedMsg;
 use crate::self_ident::PlayerManagerSelfIdentificationMsg;
@@ -100,12 +101,14 @@ pub enum ServerMessage {
     UnselectedAsTarget(UnselectedAsTargetMsg),
     /// 1793.
     DisableCollision(DisableCollisionMsg),
+    /// 2993.
+    CraftProgress(CraftProgressMsg),
 }
 
 impl ServerMessage {
     /// Decodes `body` when `type_index` is one of [`SERVER_MESSAGE_TYPES`], a combat message of
     /// M6-B (2071, 3601, 4299, 2218) or a tutorial facet call (6310, 6707, 6709, 3951, 3743, 3746,
-    /// 2724, 955, 2415, 3916, 1793); `None` otherwise.
+    /// 2724, 955, 2415, 3916, 1793, 2993); `None` otherwise.
     pub fn decode(type_index: u64, body: &[u8]) -> Option<Result<Self, MessageError>> {
         let message = match type_index {
             TimingConfigurationConnectedMsg::TYPE_INDEX => {
@@ -174,6 +177,7 @@ impl ServerMessage {
             DisableCollisionMsg::TYPE_INDEX => {
                 DisableCollisionMsg::decode(body).map(Self::DisableCollision)
             }
+            CraftProgressMsg::TYPE_INDEX => CraftProgressMsg::decode(body).map(Self::CraftProgress),
             _ => return None,
         };
         Some(message)
@@ -209,6 +213,7 @@ impl ServerMessage {
             Self::SelectedAsTarget(_) => SelectedAsTargetMsg::TYPE_INDEX,
             Self::UnselectedAsTarget(_) => UnselectedAsTargetMsg::TYPE_INDEX,
             Self::DisableCollision(_) => DisableCollisionMsg::TYPE_INDEX,
+            Self::CraftProgress(_) => CraftProgressMsg::TYPE_INDEX,
         }
     }
 
@@ -260,6 +265,7 @@ impl ServerMessage {
             Self::SelectedAsTarget(message) => message.encode(),
             Self::UnselectedAsTarget(message) => message.encode(),
             Self::DisableCollision(message) => message.encode(),
+            Self::CraftProgress(message) => message.encode(),
         }
     }
 }

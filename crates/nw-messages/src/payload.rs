@@ -14,8 +14,8 @@ use crate::achievements::{ACHIEVEMENT_TYPE_INDEX, AchievementState};
 use crate::alc::{ALC_TYPE_INDEX, AlcState};
 use crate::appearance::{PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState};
 use crate::components::{
-    COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DAMAGE_RECEIVER_TYPE_INDEX,
-    DELAYED_EVENT_TYPE_INDEX, DamageReceiverState, DelayedEventState,
+    COMBAT_STATUS_TYPE_INDEX, CURRENCY_TYPE_INDEX, CombatStatusState, CurrencyState,
+    DAMAGE_RECEIVER_TYPE_INDEX, DELAYED_EVENT_TYPE_INDEX, DamageReceiverState, DelayedEventState,
     GATHERABLE_CONTROLLER_TYPE_INDEX, GatherableControllerState, INTERACT_TYPE_INDEX,
     InteractState, LOOK_TARGETING_TYPE_INDEX, LookTargetingState, MANA_TYPE_INDEX, ManaState,
     STAMINA_TYPE_INDEX, StaminaState,
@@ -76,6 +76,8 @@ pub enum MemberState {
     GatherableController(GatherableControllerState),
     /// `MB::InteractReplicatedState`.
     Interact(InteractState),
+    /// The player's currency.
+    Currency(CurrencyState),
     /// `MB::ItemManagementComponentReplicatedState`.
     ItemManagement(ItemManagementState),
     /// `ObjectivesComponentReplicatedState`.
@@ -119,6 +121,7 @@ impl MemberState {
             Self::DamageReceiver(_) => DAMAGE_RECEIVER_TYPE_INDEX,
             Self::GatherableController(_) => GATHERABLE_CONTROLLER_TYPE_INDEX,
             Self::Interact(_) => INTERACT_TYPE_INDEX,
+            Self::Currency(_) => CURRENCY_TYPE_INDEX,
             Self::ItemManagement(_) => ITEM_MANAGEMENT_TYPE_INDEX,
             Self::Objectives(_) => OBJECTIVES_TYPE_INDEX,
             Self::Progression(_) => PROGRESSION_TYPE_INDEX,
@@ -192,6 +195,9 @@ impl MemberState {
             }
             TypeId::FileSlot(INTERACT_TYPE_INDEX) => {
                 InteractState::read(reader).map(Self::Interact)
+            }
+            TypeId::FileSlot(CURRENCY_TYPE_INDEX) => {
+                CurrencyState::read(reader).map(Self::Currency)
             }
             TypeId::FileSlot(ACHIEVEMENT_TYPE_INDEX) => {
                 AchievementState::read(reader).map(Self::Achievement)
@@ -275,6 +281,10 @@ impl MemberState {
                 Ok(())
             }
             Self::Interact(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::Currency(state) => {
                 state.write(writer);
                 Ok(())
             }

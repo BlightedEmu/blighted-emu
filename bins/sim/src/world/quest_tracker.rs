@@ -14,7 +14,7 @@ use nw_messages::items::FullList;
 use nw_messages::{ObjectiveRecord, ObjectivesState, TaskEntry, TaskWireState};
 use uuid::Uuid;
 
-use crate::objectives::TaskProgress;
+use crate::objectives::{TaskProgress, TaskStatus};
 
 /// The version of the first lists (retail first own card).
 const FIRST_VERSION: u64 = 3;
@@ -99,10 +99,10 @@ impl QuestTracker {
                 index: task.index,
                 task: task.task,
                 progress: task.progress,
-                state: if task.done {
-                    TaskWireState::Complete
-                } else {
-                    TaskWireState::Active
+                state: match task.status {
+                    TaskStatus::Running => TaskWireState::Active,
+                    TaskStatus::Done => TaskWireState::Complete,
+                    TaskStatus::Stopped => TaskWireState::Inactive,
                 },
             })
             .collect()
@@ -125,10 +125,11 @@ impl QuestTracker {
         }
     }
 
-    /// Takes the quest's task list `tasks` and whether it `finished`; queues the states that
-    /// change the client's tracker.
+    /// Takes the quest's task list `tasks` and whether it `finished` (a quest with a turn-in NPC
+    /// finishes at its turn-in, after its last task); queues the states that change the client's
+    /// tracker.
     pub(super) fn update(&mut self, tasks: Vec<TaskProgress>, finished: bool) {
-        if self.ended || tasks == self.tasks {
+        if self.ended || (tasks == self.tasks && !finished) {
             return;
         }
         self.tasks = tasks;
@@ -178,7 +179,11 @@ mod tests {
             index,
             task: u32::from(index),
             progress,
-            done,
+            status: if done {
+                TaskStatus::Done
+            } else {
+                TaskStatus::Running
+            },
         }
     }
 
@@ -233,5 +238,39 @@ mod tests {
         assert_eq!(empty.tasks.map(|list| list.elements), Some(Vec::new()));
         tracker.update(vec![task(133, 5, true)], true);
         assert_eq!(tracker.take_change(), None, "once only");
+    }
+
+    #[test]
+    fn a_turn_in_ends_a_quest_whose_tasks_are_all_done_already() {
+        const QUEST: &str = "12_skinningknife";
+        let mut tracker = QuestTracker::new(QUEST, PLAYER);
+        let done = vec![task(19, 4, true)];
+        tracker.update(done.clone(), false);
+        assert!(tracker.take_change().is_some(), "the last task list");
+        tracker.update(done.clone(), false);
+        assert_eq!(tracker.take_change(), None, "it waits for the turn-in");
+        tracker.update(done, true);
+        let completed = tracker.take_change().expect("completed");
+        assert_eq!(
+            completed.completed.map(|list| list.elements),
+            Some(vec![tracker.instance])
+        );
+    }
+
+    #[test]
+    fn a_stopped_branch_goes_out_inactive() {
+        let mut tracker = QuestTracker::new(TUTORIAL, PLAYER);
+        tracker.update(
+            vec![TaskProgress {
+                index: 17,
+                task: 17,
+                progress: 2,
+                status: TaskStatus::Stopped,
+            }],
+            false,
+        );
+        let change = tracker.take_change().expect("change");
+        let entries = change.tasks.expect("tasks").elements;
+        assert_eq!(entries[0].state, TaskWireState::Inactive);
     }
 }

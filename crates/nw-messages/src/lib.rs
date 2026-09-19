@@ -72,11 +72,12 @@ pub use combat::{
     ON_DAMAGE_TYPE_INDEX, OnDamageMsg, REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
 };
 pub use components::{
-    BOSS_PHASE_TYPE_INDEX, COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DAMAGE_RECEIVER_TYPE_INDEX,
-    DELAYED_EVENT_TYPE_INDEX, DamageReceiverState, DelayedEventState,
-    GATHERABLE_CONTROLLER_TYPE_INDEX, GatherableControllerState, INTERACT_TYPE_INDEX,
-    InteractState, LOOK_TARGETING_TYPE_INDEX, LookTargetingState, MANA_TYPE_INDEX, ManaState,
-    STAMINA_TYPE_INDEX, StaminaState, boss_phase_change,
+    BOSS_PHASE_TYPE_INDEX, COMBAT_STATUS_TYPE_INDEX, CURRENCY_COMPONENT, CURRENCY_TYPE_INDEX,
+    CombatStatusState, CurrencyState, DAMAGE_RECEIVER_TYPE_INDEX, DELAYED_EVENT_TYPE_INDEX,
+    DamageReceiverState, DelayedEventState, GATHERABLE_CONTROLLER_TYPE_INDEX,
+    GatherableControllerState, INTERACT_TYPE_INDEX, InteractState, LOOK_TARGETING_TYPE_INDEX,
+    LookTargetingState, MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState,
+    boss_phase_change,
 };
 pub use connected::{
     Block1415acc30, CALENDAR_CONNECTED_MSG_TYPE_INDEX, CalendarConnectedMsg, ConnectedBody,
@@ -92,10 +93,10 @@ pub use cooldowns::{
 pub use day_phase::{OBSERVED_DAY_PHASE, SYNC_DAY_PHASE_MSG_TYPE_INDEX, SyncDayPhaseMsg};
 pub use entity_slots::{EntitySlots, SlotRead, SlotUpdate};
 pub use facet::{
-    AdjustFxScriptsMsg, ClientFacetMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg,
-    DisableCollisionMsg, FacetHeader, GatheringInterruptedMsg, InteractionEndedMsg,
-    InteractionValidatedMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg, TargetMsg,
-    TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg, facet_entity,
+    AdjustFxScriptsMsg, ClientFacetMsg, CraftIngredient, CraftProgressMsg, CutsceneEndFinalizedMsg,
+    CutsceneGrantedMsg, DisableCollisionMsg, FacetHeader, GatheringInterruptedMsg,
+    InteractionEndedMsg, InteractionValidatedMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg,
+    TargetMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg, facet_entity,
 };
 pub use gathering::{GATHERING_TYPE_INDEX, GatheringState, NO_GATHERABLE};
 pub use gde::{

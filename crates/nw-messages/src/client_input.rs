@@ -171,6 +171,10 @@ pub enum Bit8 {
 
 /// The interaction kind of a gather.
 pub const GATHER_KIND: u8 = 14;
+/// The interaction kind of a crafting station (beach-quests note: Urda's Campfire).
+pub const CRAFTING_STATION_KIND: u8 = 20;
+/// The interaction kind of a talk to an NPC (beach-quests note: Aelstrom and Urda).
+pub const TALK_KIND: u8 = 63;
 /// Where a gather's body holds the CRC-32 of its gatherable (after the kind, the kind and the
 /// facet entity again).
 const GATHERABLE_AT: usize = 42;

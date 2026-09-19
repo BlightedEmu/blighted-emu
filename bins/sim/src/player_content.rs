@@ -2,8 +2,11 @@
 //! The content a sim needs for its players besides combat: the starter kit of each archetype
 //! pick, the bit of each achievement, the look of each mob prefab, and the quests.
 
+use nw_content::crafting::Recipes;
 use nw_content::gathering::Gatherables;
 use nw_content::loot::{LootTables, MobLoot};
+use nw_content::rewards::Rewards;
+use nw_formats::objectstream::lowercase_crc32;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -37,6 +40,15 @@ pub struct QuestDef {
     pub reward: Option<(String, u32)>,
     /// `Repeatable`: it can run again after it is done.
     pub repeatable: bool,
+    /// `RequiredAchievementID`: the achievement expression an NPC offers it on.
+    pub requirement: Option<String>,
+    /// `AchievementId`: set at completion; the next quest of the chain requires it.
+    pub achievement: Option<String>,
+    /// `NPCDestinationId`: the NPC the player turns it in at; without one it is done when its
+    /// tree is.
+    pub turn_in: Option<String>,
+    /// `SuccessGameEventID`: the game event whose reward the completion gives.
+    pub success_event: Option<String>,
 }
 
 /// The `Objectives` cells a quest needs.
@@ -52,13 +64,29 @@ pub struct ObjectiveRow {
     pub reward_quantity: Option<i64>,
     /// `Repeatable`.
     pub repeatable: bool,
+    /// `RequiredAchievementID`.
+    pub requirement: Option<String>,
+    /// `AchievementId`.
+    pub achievement: Option<String>,
+    /// `NPCDestinationId`.
+    pub turn_in: Option<String>,
+    /// `SuccessGameEventID`.
+    pub success_event: Option<String>,
 }
 
-/// Every objective by lowercase id, with the task rows to build their trees.
+/// Every objective by lowercase id and by the CRC-32 of that id, with the task rows to build
+/// their trees.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct QuestBook {
     tasks: TaskBook,
     objectives: HashMap<String, ObjectiveRow>,
+    /// The lowercase id of each objective by its CRC-32 (the client names quests so: 3772, 794).
+    by_crc: HashMap<u32, String>,
+}
+
+/// A cell that is empty or missing as `None`.
+fn cell(value: Option<&String>) -> Option<String> {
+    value.filter(|text| !text.is_empty()).cloned()
 }
 
 impl QuestBook {
@@ -75,6 +103,10 @@ impl QuestBook {
                     reward_item: row.item_reward_name.clone(),
                     reward_quantity: row.item_reward_qty,
                     repeatable: row.repeatable.unwrap_or_default(),
+                    requirement: cell(row.required_achievement_id.as_ref()),
+                    achievement: cell(row.achievement_id.as_ref()),
+                    turn_in: cell(row.npc_destination_id.as_ref()),
+                    success_event: cell(row.success_game_event_id.as_ref()),
                 }),
             TaskBook::new(task_rows(tables)),
         )
@@ -86,10 +118,20 @@ impl QuestBook {
         for row in objectives {
             by_id.entry(row.id.to_lowercase()).or_insert(row);
         }
+        let by_crc = by_id
+            .keys()
+            .map(|id| (lowercase_crc32(id), id.clone()))
+            .collect();
         Self {
             tasks,
             objectives: by_id,
+            by_crc,
         }
+    }
+
+    /// The quest whose lowercase id has the CRC-32 `crc`, as [`QuestBook::quest`].
+    pub fn quest_by_crc(&self, crc: u32) -> Option<QuestDef> {
+        self.quest(self.by_crc.get(&crc)?)
     }
 
     /// The quest of objective `id` (any case); `None` when there is no such objective or its
@@ -114,8 +156,101 @@ impl QuestBook {
             tree: Arc::new(tree),
             reward,
             repeatable: row.repeatable,
+            requirement: row.requirement.clone(),
+            achievement: row.achievement.clone(),
+            turn_in: row.turn_in.clone(),
+            success_event: row.success_event.clone(),
         })
     }
+}
+
+/// One token of an achievement expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Token<'a> {
+    Name(&'a str),
+    Not,
+    And,
+    Or,
+    Open,
+    Close,
+}
+
+/// The tokens of `expression`; `None` when it holds another character.
+fn tokens(expression: &str) -> Option<Vec<Token<'_>>> {
+    let mut tokens = Vec::new();
+    let mut rest = expression.trim_start();
+    while let Some(first) = rest.chars().next() {
+        let (token, length) = match first {
+            '!' => (Token::Not, 1),
+            '(' => (Token::Open, 1),
+            ')' => (Token::Close, 1),
+            '&' if rest.starts_with("&&") => (Token::And, 2),
+            '|' if rest.starts_with("||") => (Token::Or, 2),
+            name if name.is_ascii_alphanumeric() || name == '_' => {
+                let length = rest
+                    .find(|next: char| !(next.is_ascii_alphanumeric() || next == '_'))
+                    .unwrap_or(rest.len());
+                (Token::Name(&rest[..length]), length)
+            }
+            _ => return None,
+        };
+        tokens.push(token);
+        rest = rest[length..].trim_start();
+    }
+    Some(tokens)
+}
+
+/// Reads an expression of `tokens` from `at`: terms joined by `||`.
+fn any_of(tokens: &[Token<'_>], at: &mut usize, has: &dyn Fn(&str) -> bool) -> Option<bool> {
+    let mut value = all_of(tokens, at, has)?;
+    while tokens.get(*at) == Some(&Token::Or) {
+        *at += 1;
+        // Every term is read, so a bad one later fails the whole expression.
+        value |= all_of(tokens, at, has)?;
+    }
+    Some(value)
+}
+
+/// Reads a term: factors joined by `&&`.
+fn all_of(tokens: &[Token<'_>], at: &mut usize, has: &dyn Fn(&str) -> bool) -> Option<bool> {
+    let mut value = factor(tokens, at, has)?;
+    while tokens.get(*at) == Some(&Token::And) {
+        *at += 1;
+        value &= factor(tokens, at, has)?;
+    }
+    Some(value)
+}
+
+/// Reads a factor: a name, a `!` factor or a bracketed expression.
+fn factor(tokens: &[Token<'_>], at: &mut usize, has: &dyn Fn(&str) -> bool) -> Option<bool> {
+    let token = *tokens.get(*at)?;
+    *at += 1;
+    match token {
+        Token::Name(name) => Some(has(name)),
+        Token::Not => factor(tokens, at, has).map(|value| !value),
+        Token::Open => {
+            let value = any_of(tokens, at, has)?;
+            (tokens.get(*at) == Some(&Token::Close)).then(|| {
+                *at += 1;
+                value
+            })
+        }
+        Token::And | Token::Or | Token::Close => None,
+    }
+}
+
+/// Whether the achievement expression `expression` (`RequiredAchievementID`: names joined by
+/// `&&` and `||`, `!` before a name or a bracket) holds for a player who has the achievements
+/// that `has` names. An expression this cannot read does not hold.
+pub fn requirement_met(expression: &str, has: impl Fn(&str) -> bool) -> bool {
+    let Some(tokens) = tokens(expression) else {
+        return false;
+    };
+    if tokens.is_empty() {
+        return true;
+    }
+    let mut at = 0;
+    any_of(&tokens, &mut at, &has).is_some_and(|value| value && at == tokens.len())
 }
 
 /// What a client needs to show one mob prefab (mob-cards note, section 2).
@@ -251,6 +386,10 @@ pub struct PlayerContent {
     pub tutorial_level: FtueLevel,
     /// The gatherables.
     pub gatherables: Gatherables,
+    /// The crafting recipes.
+    pub recipes: Recipes,
+    /// The reward of each game event, for quest completions.
+    pub rewards: Rewards,
     /// Every loot table and bucket, for gathering and mob kills.
     pub loot: LootTables,
     /// What each mob type drops when killed.
@@ -280,6 +419,8 @@ impl PlayerContent {
             quests: QuestBook::from_tables(tables),
             tutorial_level,
             gatherables: Gatherables::from_tables(tables),
+            recipes: Recipes::from_tables(tables),
+            rewards: Rewards::from_tables(tables),
             loot: LootTables::from_tables(tables),
             mob_loot: MobLoot::from_tables(tables),
         }
@@ -291,6 +432,54 @@ mod tests {
     use super::*;
 
     const SAILOR: u32 = 2_288_616_137;
+
+    #[test]
+    fn a_requirement_reads_the_retail_expressions() {
+        // Retail RequiredAchievementID cells (beach-quests note).
+        const GET_OFF_BEACH: &str = "!S_introtosettlement && !Watched_IGC_Aelstrom_WW";
+        const BOAR_FEAST: &str = "S_skinningknife_mb && !Archetype_Mercenary && \
+            !Archetype_Warmonger && !Archetype_Tracker && !Archetype_Musketeer && \
+            !Archetype_Occultist && !Archetype_Theurgist && !Archetype_Wanderer";
+        const BOAR_FEAST_MYSTIC: &str = "S_skinningknife_mb && Archetype_Theurgist";
+        let mystic = |name: &str| ["S_skinningknife_mb", "Archetype_Theurgist"].contains(&name);
+        let nobody = |_: &str| false;
+        assert!(requirement_met(GET_OFF_BEACH, nobody));
+        assert!(!requirement_met(GET_OFF_BEACH, |name| name == "S_introtosettlement"));
+        assert!(requirement_met(BOAR_FEAST_MYSTIC, mystic));
+        assert!(
+            !requirement_met(BOAR_FEAST, mystic),
+            "the mystic gets its own variant"
+        );
+        assert!(requirement_met(BOAR_FEAST, |name| name == "S_skinningknife_mb"));
+        assert!(requirement_met("(A || B) && !C", |name| name == "B"));
+        assert!(!requirement_met("(A || B) && !C", |name| name != "A"));
+        assert!(requirement_met("", nobody), "no requirement");
+        assert!(!requirement_met("A &&", |_| true), "a cut expression");
+        assert!(!requirement_met("(A", |_| true));
+        assert!(!requirement_met("A = B", |_| true));
+    }
+
+    #[test]
+    fn a_quest_is_found_by_the_crc_of_its_id() {
+        // Retail 3772 of 12_skinningknife.
+        const SKINNING_KNIFE: u32 = 0xf523_32f7;
+        let book = QuestBook::build(
+            [ObjectiveRow {
+                id: "12_skinningknife".to_owned(),
+                root: "root".to_owned(),
+                turn_in: Some("01_UrdaMB_01".to_owned()),
+                ..ObjectiveRow::default()
+            }],
+            TaskBook::new(vec![crate::objectives::TaskRow {
+                task_id: "root".to_owned(),
+                kind: "ConsecutiveTaskContainer".to_owned(),
+                ..crate::objectives::TaskRow::default()
+            }]),
+        );
+        let quest = book.quest_by_crc(SKINNING_KNIFE).expect("quest");
+        assert_eq!(quest.turn_in.as_deref(), Some("01_UrdaMB_01"));
+        assert!(book.quest_by_crc(0).is_none());
+    }
 
     #[test]
     fn prefab_bodies_become_states_and_bad_ones_are_left_out() {

@@ -1138,7 +1138,11 @@ impl Tutorial {
             | ClientFacetMsg::TimeSyncRequest { .. }
             | ClientFacetMsg::SwapItems { .. }
             | ClientFacetMsg::UnequipItem { .. }
-            | ClientFacetMsg::CancelInteraction { .. } => {
+            | ClientFacetMsg::CancelInteraction { .. }
+            | ClientFacetMsg::AcceptObjective { .. }
+            | ClientFacetMsg::CompleteObjective { .. }
+            | ClientFacetMsg::SetCraftingDetails { .. }
+            | ClientFacetMsg::CancelCrafting { .. } => {
                 return;
             }
         };
@@ -1151,10 +1155,10 @@ impl Tutorial {
     }
 
     /// The orders of the quest's waiting item tasks that the player's items `held` (item id,
-    /// worn) already meet, at `now_ms`.
+    /// quantity, worn) already meet, at `now_ms`.
     pub(super) fn sync_held(
         &mut self,
-        held: &[(&str, bool)],
+        held: &[(&str, u32, bool)],
         mobs: &mut Mobs,
         now_ms: u64,
     ) -> Vec<Order> {
@@ -1811,7 +1815,14 @@ pub(crate) mod tests {
             orders.contains(&Order::Experience(FOE_EXPERIENCE)),
             "an island foe gives experience: {orders:?}"
         );
-        let orders = tutorial.event(Event::ItemGained(CHEST_ITEM), &mut mobs, NOW);
+        let orders = tutorial.event(
+            Event::ItemGained {
+                item: CHEST_ITEM,
+                quantity: 1,
+            },
+            &mut mobs,
+            NOW,
+        );
         assert!(tutorial.run.finished());
         let mut rewards: Vec<Order> = LEAVING_LORE
             .iter()
@@ -1821,7 +1832,14 @@ pub(crate) mod tests {
         assert_eq!(orders, rewards, "the end gives the lore and fresh potions");
         assert!(
             tutorial
-                .event(Event::ItemGained(CHEST_ITEM), &mut mobs, NOW)
+                .event(
+                    Event::ItemGained {
+                        item: CHEST_ITEM,
+                        quantity: 1,
+                    },
+                    &mut mobs,
+                    NOW
+                )
                 .is_empty(),
             "once"
         );

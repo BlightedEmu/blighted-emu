@@ -11,6 +11,9 @@ use crate::Tables;
 
 /// The tradeskill of a gatherable that is skinned.
 const SKINNING: &str = "Skinning";
+/// The `Restriction` of a gatherable that needs its tradeskill's tool (a corpse needs a skinning
+/// knife; bushes say `ItemRequired` and retail gathered them by hand).
+const TOOL_REQUIRED: &str = "ToolRequired";
 /// Milliseconds per second.
 const MS_PER_SECOND: f64 = 1_000.0;
 
@@ -25,14 +28,23 @@ pub struct Gatherable {
     pub respawn_ms: (u64, u64),
     /// `FinalLootTable`.
     pub loot_table: Option<String>,
-    /// It is a corpse to skin (`Tradeskill` Skinning).
-    pub skinning: bool,
+    /// `Tradeskill`: Skinning for a corpse to skin.
+    pub tradeskill: Option<String>,
+    /// It needs its tradeskill's tool (`Restriction` ToolRequired).
+    pub tool_required: bool,
 }
 
 /// The gatherables by the CRC-32 of their lowercase id.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Gatherables {
     by_crc: HashMap<u32, Gatherable>,
+}
+
+impl Gatherable {
+    /// It is a corpse to skin (`Tradeskill` Skinning).
+    pub fn skinning(&self) -> bool {
+        self.tradeskill.as_deref() == Some(SKINNING)
+    }
 }
 
 /// Seconds of a datasheet as whole ms.
@@ -54,7 +66,8 @@ impl Gatherables {
                     gather_ms: ms_of(row.base_gather_time),
                     respawn_ms: (ms_of(row.min_respawn_rate), ms_of(row.max_respawn_rate)),
                     loot_table: row.final_loot_table.clone(),
-                    skinning: row.tradeskill.as_deref() == Some(SKINNING),
+                    tradeskill: row.tradeskill.clone(),
+                    tool_required: row.restriction.as_deref() == Some(TOOL_REQUIRED),
                 }),
         )
     }
@@ -86,7 +99,8 @@ mod tests {
             gather_ms: 250,
             respawn_ms: (60_000, 90_000),
             loot_table: Some("SingleStone".to_owned()),
-            skinning: false,
+            tradeskill: None,
+            tool_required: false,
         }]);
         // Retail flint request: crc `a417137f`.
         let flint = gatherables.get(0xa417_137f).cloned().expect("flint");

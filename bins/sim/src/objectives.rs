@@ -59,6 +59,12 @@ const CATEGORY_SEPARATOR: char = ',';
 /// Joins a kill type to the rest of a longer vitals id (`Legion_Legionnaire` names
 /// `Legion_Legionnaire_FTUE`).
 const ID_PART_SEPARATOR: char = '_';
+/// The `UIScreenTag` of a `TaskGameEvent` that designers made to never end (beach-quests note:
+/// the slice-swap timer branch of `12_skinningknife` waits on it, so the knife ends its partial
+/// container).
+const NEVER_TRUE_TAG: &str = "neverbetrue";
+/// The chance of a quest drop when its task names none, in percent.
+const ALWAYS_PERCENT: u32 = 100;
 
 /// What a task waits for.
 #[derive(Debug, Clone, PartialEq)]
@@ -96,12 +102,34 @@ enum TaskKind {
     KillContribution { enemy: String, count: u32 },
     /// Done when the player gets the item; without one, when it loots a container.
     HaveItem(Option<String>),
+    /// Done when the player holds `count` of the item, in the bag or worn (`TaskHaveItems`).
+    HaveItems { item: String, count: u32 },
+    /// Done after the player gathered `count` of the item; a corpse of `drop`'s enemy that the
+    /// player skins while it waits drops it (`TaskGatherItems`).
+    GatherItems {
+        item: String,
+        count: u32,
+        drop: Option<QuestDrop>,
+    },
+    /// Done when the player crafts the recipe of this id (`TaskCraftRecipe`).
+    CraftRecipe(String),
+    /// Never done: a `TaskGameEvent` on [`NEVER_TRUE_TAG`].
+    Never,
     /// Done when the player equips the item.
     EquipItem(String),
     /// Done when the client opens the UI screen of this id.
     OpenUiScreen(u32),
     /// A task type this server does not run: done at once, so the tree goes on.
     Unsupported,
+}
+
+/// The item a gather task adds when the player skins a corpse of its enemy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct QuestDrop {
+    /// `ItemDropVC`: the enemy type, as a kill task names one.
+    enemy: String,
+    /// `ItemDropProbability`, in percent.
+    percent: u32,
 }
 
 /// One task of a tree.
@@ -146,6 +174,12 @@ pub struct TaskRow {
     pub sub_tasks: Vec<String>,
     /// `TP_TargetTag`: the trigger volume of an area task.
     pub target_tag: Option<String>,
+    /// `CraftingRecipeID`.
+    pub crafting_recipe_id: Option<String>,
+    /// `ItemDropVC`.
+    pub item_drop_vc: Option<String>,
+    /// `ItemDropProbability`.
+    pub item_drop_probability: Option<i64>,
 }
 
 /// Every task row with an index by lowercase task id, made once for the trees of many
@@ -197,6 +231,9 @@ pub fn task_rows(tables: &Tables) -> Vec<TaskRow> {
             ui_screen_tag: row.ui_screen_tag.clone(),
             sub_tasks: row.sub_task.values().cloned().collect(),
             target_tag: row.tp_target_tag.clone(),
+            crafting_recipe_id: row.crafting_recipe_id.clone(),
+            item_drop_vc: row.item_drop_vc.clone(),
+            item_drop_probability: row.item_drop_probability,
         })
         .collect()
 }
@@ -248,6 +285,36 @@ fn kind_of(row: &TaskRow) -> TaskKind {
             count,
         },
         "TaskHaveAndReturnItems" => TaskKind::HaveItem(row.item_name.clone()),
+        "TaskHaveItems" => TaskKind::HaveItems {
+            item: item(),
+            count,
+        },
+        "TaskGatherItems" => TaskKind::GatherItems {
+            item: item(),
+            count,
+            drop: row
+                .item_drop_vc
+                .clone()
+                .filter(|enemy| !enemy.is_empty())
+                .map(|enemy| QuestDrop {
+                    enemy,
+                    percent: row
+                        .item_drop_probability
+                        .and_then(|percent| u32::try_from(percent).ok())
+                        .unwrap_or(ALWAYS_PERCENT),
+                }),
+        },
+        "TaskCraftRecipe" => {
+            TaskKind::CraftRecipe(row.crafting_recipe_id.clone().unwrap_or_default())
+        }
+        "TaskGameEvent"
+            if row
+                .ui_screen_tag
+                .as_deref()
+                .is_some_and(|tag| tag.eq_ignore_ascii_case(NEVER_TRUE_TAG)) =>
+        {
+            TaskKind::Never
+        }
         "TaskEquipItem" => TaskKind::EquipItem(item()),
         "TaskOpenUiScreen" => {
             TaskKind::OpenUiScreen(lowercase_crc32(row.ui_screen_tag.as_deref().unwrap_or("")))
@@ -350,8 +417,13 @@ pub enum Event<'a> {
     },
     /// The player is here.
     Moved(Position),
-    /// The player got this item.
-    ItemGained(&'a str),
+    /// The player got this many of this item.
+    ItemGained {
+        /// The item id.
+        item: &'a str,
+        /// How many.
+        quantity: u32,
+    },
     /// The player took all items of a container.
     ContainerLooted,
     /// The player equipped this item.
@@ -360,21 +432,34 @@ pub enum Event<'a> {
     UiScreenOpened(u32),
     /// The player got this achievement.
     AchievementSet(&'a str),
+    /// The player crafted the recipe of this id.
+    Crafted(&'a str),
 }
 
-/// A task the quest tracker shows: a task that is done, or that runs and has progress
-/// (objectives-state note, section 5).
+/// Where a task the quest tracker shows stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+    /// It runs.
+    Running,
+    /// It is done.
+    Done,
+    /// It stopped undone: a branch of a partial container that another branch finished.
+    Stopped,
+}
+
+/// A task the quest tracker shows: a task that is done, or that runs and has progress, or that
+/// stopped after it had some (objectives-state note, section 5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskProgress {
     /// Its number on the wire (children first).
     pub index: u8,
-    /// CRC-32 of its lowercase id.
+    /// CRC-32 of the lowercase id.
     pub task: u32,
     /// Children done for a container; kills or items so far for a counting task; 1 for another
     /// task that is done.
     pub progress: u32,
-    /// Whether it is done.
-    pub done: bool,
+    /// Where it stands.
+    pub status: TaskStatus,
 }
 
 /// What the tree asks of the server.
@@ -586,7 +671,12 @@ impl ObjectiveRun {
             .iter()
             .map(|index| {
                 let task = &self.tree.tasks[*index];
-                let done = self.states[*index] == TaskState::Done;
+                // A listed task that is idle had progress, then its partial container stopped it.
+                let status = match self.states[*index] {
+                    TaskState::Done => TaskStatus::Done,
+                    TaskState::Active { .. } => TaskStatus::Running,
+                    TaskState::Idle => TaskStatus::Stopped,
+                };
                 let progress = match (&task.kind, self.states[*index]) {
                     (TaskKind::Consecutive | TaskKind::Partial | TaskKind::Simple, _) => {
                         task.children
@@ -594,7 +684,12 @@ impl ObjectiveRun {
                             .filter(|child| self.states[**child] == TaskState::Done)
                             .count() as u32
                     }
-                    (TaskKind::KillContribution { count, .. }, TaskState::Done) => *count,
+                    (
+                        TaskKind::KillContribution { count, .. }
+                        | TaskKind::HaveItems { count, .. }
+                        | TaskKind::GatherItems { count, .. },
+                        TaskState::Done,
+                    ) => *count,
                     (_, TaskState::Active { progress, .. }) => progress,
                     _ => 1,
                 };
@@ -602,30 +697,47 @@ impl ObjectiveRun {
                     index: self.tree.wire_index[*index],
                     task: lowercase_crc32(&task.id),
                     progress,
-                    done,
+                    status,
                 }
             })
             .collect()
     }
 
-    /// Completes the waiting item tasks that the player's items `held` (item id, worn) already
-    /// meet: a have-item task by any stack of its item, an equip task by its item worn. Item
-    /// events count only for tasks that wait when they come; an item the player took before its
-    /// task started would else never count (beach-ruins-chest note: the chest's potions taken
-    /// before `ChestDiscovery`).
-    pub fn sync_held(&mut self, held: &[(&str, bool)], now_ms: u64) -> Vec<Effect> {
+    /// Completes the waiting item tasks that the player's items `held` (item id, quantity,
+    /// worn) already meet: a have-item task by any stack of its item, a have-items task by its
+    /// count of the item, an equip task by its item worn; a have-items task short of its count
+    /// shows how many the player holds. Item events count only for tasks that wait when they
+    /// come; an item the player took before its task started would else never count
+    /// (beach-ruins-chest note: the chest's potions taken before `ChestDiscovery`).
+    pub fn sync_held(&mut self, held: &[(&str, u32, bool)], now_ms: u64) -> Vec<Effect> {
         let mut effects = Vec::new();
         for index in 0..self.states.len() {
-            if !matches!(self.states[index], TaskState::Active { .. }) {
+            let TaskState::Active { progress, due_ms } = self.states[index] else {
                 continue;
-            }
-            let met = match &self.tree.tasks[index].kind {
-                TaskKind::HaveItem(Some(item)) => {
-                    held.iter().any(|(id, _)| id.eq_ignore_ascii_case(item))
+            };
+            let holds = |item: &str| -> u32 {
+                held.iter()
+                    .filter(|(id, _, _)| id.eq_ignore_ascii_case(item))
+                    .map(|(_, quantity, _)| *quantity)
+                    .sum()
+            };
+            let tree = Arc::clone(&self.tree);
+            let met = match &tree.tasks[index].kind {
+                TaskKind::HaveItem(Some(item)) => holds(item) > 0,
+                TaskKind::HaveItems { item, count } => {
+                    let holding = holds(item);
+                    if holding < *count && holding != progress {
+                        self.states[index] = TaskState::Active {
+                            progress: holding,
+                            due_ms,
+                        };
+                        self.list(index);
+                    }
+                    holding >= *count
                 }
                 TaskKind::EquipItem(item) => held
                     .iter()
-                    .any(|(id, worn)| *worn && id.eq_ignore_ascii_case(item)),
+                    .any(|(id, _, worn)| *worn && id.eq_ignore_ascii_case(item)),
                 _ => false,
             };
             if met {
@@ -633,6 +745,27 @@ impl ObjectiveRun {
             }
         }
         effects
+    }
+
+    /// The items the waiting gather tasks drop for a corpse of `vitals_id` and `categories`
+    /// that the player skins: each item and its chance in percent.
+    pub fn quest_drops(&self, vitals_id: &str, categories: &[String]) -> Vec<(String, u32)> {
+        self.tree
+            .tasks
+            .iter()
+            .zip(&self.states)
+            .filter(|(_, state)| matches!(state, TaskState::Active { .. }))
+            .filter_map(|(task, _)| match &task.kind {
+                TaskKind::GatherItems {
+                    item,
+                    drop: Some(drop),
+                    ..
+                } if kills_count(&drop.enemy, vitals_id, categories) => {
+                    Some((item.clone(), drop.percent))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Lists task `index` in the tracker once it has progress.
@@ -654,39 +787,49 @@ impl ObjectiveRun {
             let TaskState::Active { progress, due_ms } = self.states[index] else {
                 continue;
             };
-            let (matches, count) = match (&self.tree.tasks[index].kind, event) {
+            // Whether the event counts, how many it counts and how many the task needs.
+            let (matches, step, count) = match (&self.tree.tasks[index].kind, event) {
                 (TaskKind::CinematicStart(id), Event::CinematicStarted(seen))
                 | (TaskKind::CinematicComplete(id), Event::CinematicEnded(seen))
                 | (TaskKind::CutsceneComplete(id), Event::CutsceneEnded(seen))
-                | (TaskKind::OpenUiScreen(id), Event::UiScreenOpened(seen)) => (*id == seen, 1),
+                | (TaskKind::OpenUiScreen(id), Event::UiScreenOpened(seen)) => (*id == seen, 1, 1),
                 (
                     TaskKind::KillContribution { enemy, count },
                     Event::Killed {
                         vitals_id,
                         categories,
                     },
-                ) => (kills_count(enemy, vitals_id, categories), *count),
+                ) => (kills_count(enemy, vitals_id, categories), 1, *count),
                 (
                     TaskKind::TriggerArea {
                         at: Some(at),
                         radius_m,
                     },
                     Event::Moved(position),
-                ) => (at.horizontal_distance(position) <= *radius_m, 1),
-                (TaskKind::HaveItem(Some(item)), Event::ItemGained(gained))
-                | (TaskKind::EquipItem(item), Event::Equipped(gained)) => {
-                    (item.eq_ignore_ascii_case(gained), 1)
+                ) => (at.horizontal_distance(position) <= *radius_m, 1, 1),
+                (TaskKind::HaveItem(Some(wanted)), Event::ItemGained { item, .. })
+                | (TaskKind::EquipItem(wanted), Event::Equipped(item))
+                | (TaskKind::CraftRecipe(wanted), Event::Crafted(item)) => {
+                    (wanted.eq_ignore_ascii_case(item), 1, 1)
                 }
-                (TaskKind::HaveItem(None), Event::ContainerLooted) => (true, 1),
+                (
+                    TaskKind::GatherItems {
+                        item: wanted,
+                        count,
+                        ..
+                    },
+                    Event::ItemGained { item, quantity },
+                ) => (wanted.eq_ignore_ascii_case(item), quantity, *count),
+                (TaskKind::HaveItem(None), Event::ContainerLooted) => (true, 1, 1),
                 (TaskKind::HasAchievement(wanted), Event::AchievementSet(set)) => {
-                    (wanted.eq_ignore_ascii_case(set), 1)
+                    (wanted.eq_ignore_ascii_case(set), 1, 1)
                 }
-                _ => (false, 1),
+                _ => (false, 1, 1),
             };
             if !matches {
                 continue;
             }
-            let progress = progress.saturating_add(1);
+            let progress = progress.saturating_add(step);
             if progress >= count {
                 self.complete(index, now_ms, &mut effects);
             } else {
@@ -813,7 +956,7 @@ impl ObjectiveRun {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const NOW: u64 = 1000;
@@ -911,11 +1054,15 @@ mod tests {
         // Sword 7, Hatchet 8, Soldier 9, Axe 10, Hammer 11, Destroyer 12, Pick 13, Area 14,
         // Root 15.
         let (mut run, _) = ObjectiveRun::start(tree, NOW);
-        let entry = |index, task: &str, progress, done| TaskProgress {
+        let entry = |index, task: &str, progress, done: bool| TaskProgress {
             index,
             task: lowercase_crc32(task),
             progress,
-            done,
+            status: if done {
+                TaskStatus::Done
+            } else {
+                TaskStatus::Running
+            },
         };
         assert_eq!(
             run.progress(),
@@ -1054,15 +1201,21 @@ mod tests {
         let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
         let (mut run, _) = ObjectiveRun::start(tree, NOW);
         // The potions came while the timer ran: the event found no waiting task.
-        run.event(Event::ItemGained("PotionHealthT1"), NOW);
+        run.event(
+            Event::ItemGained {
+                item: "PotionHealthT1",
+                quantity: 1,
+            },
+            NOW,
+        );
         run.tick(NOW + TIMER_MS);
         assert!(run.is_active("Potions"));
-        run.sync_held(&[("PotionHealthT1", false)], NOW + TIMER_MS);
+        run.sync_held(&[("PotionHealthT1", 1, false)], NOW + TIMER_MS);
         assert!(run.is_done("Potions"), "held in the bag");
         assert!(run.is_active("Equip"), "not worn yet");
-        run.sync_held(&[("PotionHealthT1", false)], NOW + TIMER_MS);
+        run.sync_held(&[("PotionHealthT1", 1, false)], NOW + TIMER_MS);
         assert!(run.is_active("Equip"));
-        run.sync_held(&[("PotionHealthT1", true)], NOW + TIMER_MS);
+        run.sync_held(&[("PotionHealthT1", 1, true)], NOW + TIMER_MS);
         assert!(run.is_done("Equip"), "worn in its quick slot");
     }
 
@@ -1306,7 +1459,7 @@ mod tests {
                 }
                 RetailStep::Move(position) => run.event(Event::Moved(position), now),
                 RetailStep::Loot => run.event(Event::ContainerLooted, now),
-                RetailStep::Gain(item) => run.event(Event::ItemGained(item), now),
+                RetailStep::Gain(item) => run.event(Event::ItemGained { item, quantity: 1 }, now),
                 RetailStep::Equip(item) => run.event(Event::Equipped(item), now),
                 RetailStep::Wait(ms) => {
                     now += ms;
@@ -1336,6 +1489,238 @@ mod tests {
         set.dedup();
         assert_eq!(set, RETAIL_ACHIEVEMENTS);
         assert!(effects.contains(&Effect::RemoveItem("1hSwordT2_FTUE".to_owned())));
+    }
+
+    /// The retail task rows of `12_skinningknife` and `12_boarfeast` (build 25810808), as their
+    /// trees use them.
+    pub(crate) fn beach_rows() -> Vec<TaskRow> {
+        let unlock =
+            |id: &str, achievement: &str| with_item(id, "TaskUnlockAchievement", achievement);
+        let have = |id: &str, item: &str| TaskRow {
+            target_qty: Some(1),
+            ..with_item(id, "TaskHaveItems", item)
+        };
+        vec![
+            container(
+                "12_skinningknife_container",
+                "ConsecutiveTaskContainer",
+                &[
+                    "12_skinningknife_01_Walkaway_01_Aelstrom_p01_Off",
+                    "12_skinningknife_02_TutorialUnlock",
+                    "12_skinningknife_03_timerAndGather_container_partial",
+                ],
+            ),
+            unlock(
+                "12_skinningknife_01_Walkaway_01_Aelstrom_p01_Off",
+                "SwapActive_01_AelstromMB_01",
+            ),
+            unlock(
+                "12_skinningknife_02_TutorialUnlock",
+                "tutorial_gathering_bushflint",
+            ),
+            container(
+                "12_skinningknife_03_timerAndGather_container_partial",
+                "PartialTaskContainer",
+                &[
+                    "12_skinningknife_03_HaveKnife_container",
+                    "12_skinningknife_03_gatherThenCraft_container",
+                    "12_skinningknife_03_SwapTimerNeverComplete_container",
+                ],
+            ),
+            container(
+                "12_skinningknife_03_HaveKnife_container",
+                "ConsecutiveTaskContainer",
+                &[
+                    "12_skinningknife_03_HaveKnife",
+                    "12_skinningknife_03_SliceSwap_01_Aelstrom_p03_On",
+                ],
+            ),
+            have("12_skinningknife_03_HaveKnife", "1hSkinningKnifeT1"),
+            unlock(
+                "12_skinningknife_03_SliceSwap_01_Aelstrom_p03_On",
+                "SwapActive_01_AelstromMB_03",
+            ),
+            container(
+                "12_skinningknife_03_gatherThenCraft_container",
+                "ConsecutiveTaskContainer",
+                &[
+                    "12_skinningknife_03_gather_container",
+                    "12_skinningknife_03_TaskHaveItems_1_1hSkinningKnifeT1",
+                ],
+            ),
+            container(
+                "12_skinningknife_03_gather_container",
+                "SimpleTaskContainer",
+                &[
+                    "12_skinningknife_03_TaskHaveItems_1_FlintT1",
+                    "12_skinningknife_03_TaskHaveItems_1_WoodT1",
+                ],
+            ),
+            have("12_skinningknife_03_TaskHaveItems_1_FlintT1", "FlintT1"),
+            have("12_skinningknife_03_TaskHaveItems_1_WoodT1", "WoodT1"),
+            have(
+                "12_skinningknife_03_TaskHaveItems_1_1hSkinningKnifeT1",
+                "1hSkinningKnifeT1",
+            ),
+            container(
+                "12_skinningknife_03_SwapTimerNeverComplete_container",
+                "ConsecutiveTaskContainer",
+                &[
+                    "12_skinningknife_03_swapDelay",
+                    "12_skinningknife_03_NeverTrue_task",
+                ],
+            ),
+            TaskRow {
+                duration: Some(TIMER_S),
+                ..row("12_skinningknife_03_swapDelay", "TaskTimer")
+            },
+            TaskRow {
+                ui_screen_tag: Some("neverbetrue".to_owned()),
+                ..row("12_skinningknife_03_NeverTrue_task", "TaskGameEvent")
+            },
+            container(
+                "12_boarfeast_container",
+                "ConsecutiveTaskContainer",
+                &[
+                    "12_boarfeast_01_kill_1_Boar",
+                    "12_boarfeast_02_equip_skinning",
+                    "12_boarfeast_03_TaskGatherItems_1_RedMeatT1",
+                    "12_boarfeast_05_01_TaskGameEvent_1_Craft_CookingT1",
+                    "12_boarfeast_05_02_TaskHaveItems_1_LightRation",
+                ],
+            ),
+            TaskRow {
+                kill_enemy_type: Some("Boar".to_owned()),
+                target_qty: Some(1),
+                ..row("12_boarfeast_01_kill_1_Boar", "TaskKillContribution")
+            },
+            with_item(
+                "12_boarfeast_02_equip_skinning",
+                "TaskEquipItem",
+                "1hSkinningKnifeT1",
+            ),
+            TaskRow {
+                target_qty: Some(1),
+                item_drop_vc: Some("Boar".to_owned()),
+                item_drop_probability: Some(100),
+                ..with_item(
+                    "12_boarfeast_03_TaskGatherItems_1_RedMeatT1",
+                    "TaskGatherItems",
+                    "PorkT1",
+                )
+            },
+            TaskRow {
+                crafting_recipe_id: Some("Procedural_HealthRecoveryT1".to_owned()),
+                ..with_item(
+                    "12_boarfeast_05_01_TaskGameEvent_1_Craft_CookingT1",
+                    "TaskCraftRecipe",
+                    "FoodHealthRecoveryT1",
+                )
+            },
+            have(
+                "12_boarfeast_05_02_TaskHaveItems_1_LightRation",
+                "FoodHealthRecoveryT1",
+            ),
+        ]
+    }
+
+    #[test]
+    fn the_knife_ends_the_skinning_knife_quest_and_the_timer_branch_stops() {
+        let tree = Arc::new(
+            ObjectiveTree::build(&beach_rows(), "12_skinningknife_container").expect("tree"),
+        );
+        let (mut run, effects) = ObjectiveRun::start(tree, NOW);
+        assert_eq!(
+            achievements(&effects),
+            [
+                "SwapActive_01_AelstromMB_01",
+                "tutorial_gathering_bushflint"
+            ]
+        );
+        // The slice-swap timer runs out; its never-true task keeps the branch open.
+        run.tick(NOW + TIMER_MS);
+        assert!(run.is_done("12_skinningknife_03_swapDelay"));
+        assert!(!run.finished());
+        run.sync_held(&[("FlintT1", 1, false)], NOW + TIMER_MS);
+        assert!(run.is_done("12_skinningknife_03_TaskHaveItems_1_FlintT1"));
+        assert!(!run.is_done("12_skinningknife_03_gather_container"));
+        run.sync_held(
+            &[("FlintT1", 1, false), ("WoodT1", 1, false)],
+            NOW + TIMER_MS,
+        );
+        assert!(run.is_done("12_skinningknife_03_gather_container"));
+        let effects = run.sync_held(&[("1hSkinningKnifeT1", 1, false)], NOW + TIMER_MS);
+        assert!(run.finished(), "the knife ends it");
+        assert!(effects.contains(&Effect::Achievement(
+            "SwapActive_01_AelstromMB_03".to_owned()
+        )));
+        let stopped = run
+            .progress()
+            .into_iter()
+            .find(|entry| {
+                entry.task
+                    == lowercase_crc32("12_skinningknife_03_SwapTimerNeverComplete_container")
+            })
+            .expect("listed");
+        assert_eq!(stopped.status, TaskStatus::Stopped, "retail state 4");
+        assert_eq!(stopped.progress, 1, "its timer done");
+    }
+
+    #[test]
+    fn the_boar_feast_runs_on_a_kill_an_equip_a_skinning_and_a_craft() {
+        let tree =
+            Arc::new(ObjectiveTree::build(&beach_rows(), "12_boarfeast_container").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        let boar = categories_of("Boar,Hostile");
+        assert!(
+            run.quest_drops("Boar", &boar).is_empty(),
+            "no drop before its task"
+        );
+        run.event(
+            Event::Killed {
+                vitals_id: "Boar",
+                categories: &boar,
+            },
+            NOW,
+        );
+        run.event(Event::Equipped("1hSkinningKnifeT1"), NOW);
+        assert_eq!(run.quest_drops("Boar", &boar), [("PorkT1".to_owned(), 100)]);
+        assert!(run.quest_drops("Wolf", &[]).is_empty(), "another enemy");
+        run.event(
+            Event::ItemGained {
+                item: "PorkT1",
+                quantity: 2,
+            },
+            NOW,
+        );
+        assert!(run.is_done("12_boarfeast_03_TaskGatherItems_1_RedMeatT1"));
+        run.event(Event::Crafted("procedural_healthrecoveryt1"), NOW);
+        assert!(!run.finished(), "the ration must be in the bag");
+        run.sync_held(&[("FoodHealthRecoveryT1", 1, false)], NOW);
+        assert!(run.finished());
+    }
+
+    #[test]
+    fn a_have_items_task_shows_how_many_the_player_holds() {
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["Stones"]),
+            TaskRow {
+                target_qty: Some(3),
+                ..with_item("Stones", "TaskHaveItems", "FlintT1")
+            },
+        ];
+        let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        run.sync_held(&[("FlintT1", 1, false), ("FlintT1", 1, true)], NOW);
+        let stones = |run: &ObjectiveRun| {
+            run.progress()
+                .into_iter()
+                .find(|entry| entry.task == lowercase_crc32("Stones"))
+                .map(|entry| (entry.progress, entry.status))
+        };
+        assert_eq!(stones(&run), Some((2, TaskStatus::Running)));
+        run.sync_held(&[("FlintT1", 3, false)], NOW);
+        assert_eq!(stones(&run), Some((3, TaskStatus::Done)));
     }
 
     #[test]

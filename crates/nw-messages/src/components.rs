@@ -6,8 +6,8 @@
 //! `MB::DelayedEventComponentReplicatedState` (type 3139),
 //! `MB::LookTargetingComponentReplicatedState` (type 2443), `MB::ManaComponentReplicatedState`
 //! (type 1652), `MB::DamageReceiverComponentReplicatedState` (type 1528) and
-//! `MB::GatherableControllerReplicatedState` (type 12) and `MB::InteractReplicatedState`
-//! (type 2930). Each table ends every reached captured
+//! `MB::GatherableControllerReplicatedState` (type 12), `MB::InteractReplicatedState`
+//! (type 2930) and the player's currency (type 3786). Each table ends every reached captured
 //! body of its class.
 
 use crate::slots::{children_mask, read_slot_0, write_known};
@@ -27,6 +27,10 @@ pub const DAMAGE_RECEIVER_TYPE_INDEX: u64 = 1528;
 pub const GATHERABLE_CONTROLLER_TYPE_INDEX: u64 = 12;
 /// Type index of `MB::InteractReplicatedState`.
 pub const INTERACT_TYPE_INDEX: u64 = 2930;
+/// Type index of the player's currency state (own player component 60).
+pub const CURRENCY_TYPE_INDEX: u64 = 3786;
+/// The own player component of the currency.
+pub const CURRENCY_COMPONENT: u64 = 60;
 /// Type index of `MB::BossPhaseComponentReplicatedState`.
 pub const BOSS_PHASE_TYPE_INDEX: u64 = 403;
 /// The slot byte and child mask of a boss phase change: slot 0, child 0 (the phase) only.
@@ -62,6 +66,9 @@ const GATHERABLE_CONTROLLER_CHILDREN: u8 = 1;
 /// retail `01 01 00` on a taken bag and a depleted node, `01 01 01` on a node that grew back). The
 /// other children are Unknown, so a body that sets one is not read.
 const INTERACT_CHILDREN: u8 = 1;
+/// The sized child of the currency: child 0, the coins (a `u64`; beach-quests note: retail
+/// `01 01 0000000000000177`, 375 coins after two quest rewards). The other children are Unknown.
+const CURRENCY_CHILDREN: u8 = 1;
 
 /// `MB::StaminaComponentReplicatedState`: six big-endian `f32` children (`FUN_14671a230`).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -416,6 +423,46 @@ impl InteractState {
     }
 }
 
+/// The player's currency: its coins.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CurrencyState {
+    /// Child 0, the coins.
+    pub coins: Option<u64>,
+}
+
+impl CurrencyState {
+    /// The state of a player with `coins` coins.
+    pub const fn of(coins: u64) -> Self {
+        Self { coins: Some(coins) }
+    }
+
+    /// Reads the state from the bundle path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the body ends early or sets an unsized child.
+    pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let mut state = Self::default();
+        read_slot_0(reader, "currency", CURRENCY_CHILDREN, |reader, _| {
+            state.coins = Some(reader.u64()?);
+            Ok(())
+        })?;
+        Ok(state)
+    }
+
+    /// Writes the state for the bundle path.
+    pub fn write(&self, writer: &mut Writer) {
+        write_known(
+            writer,
+            children_mask(&[self.coins.is_some()]),
+            CURRENCY_CHILDREN,
+            |writer, _| {
+                self.coins.map(|coins| writer.u64(coins));
+            },
+        );
+    }
+}
+
 /// `MB::ManaComponentReplicatedState` (`FUN_1467088c0`): four big-endian `f32` children. The
 /// names of the first two are Unknown (short strings the decompiler does not show); both are 100
 /// on the captured first bodies.
@@ -631,6 +678,18 @@ mod tests {
         let mut writer = Writer::new();
         gatherable.write(&mut writer);
         assert_eq!(writer.finish(), RETAIL_GATHERABLE);
+    }
+
+    #[test]
+    fn the_currency_is_its_coins() {
+        // Retail after the second quest reward: 375 coins (beach-quests note).
+        const RETAIL: [u8; 10] = [0x01, 0x01, 0, 0, 0, 0, 0, 0, 0x01, 0x77];
+        const COINS: u64 = 375;
+        let state = CurrencyState::read(&mut Reader::new(&RETAIL)).expect("read");
+        assert_eq!(state, CurrencyState::of(COINS));
+        let mut writer = Writer::new();
+        state.write(&mut writer);
+        assert_eq!(writer.finish(), RETAIL);
     }
 
     #[test]

@@ -61,6 +61,12 @@ pub(super) const PLAYER_LOOT_LEVEL: u32 = 1;
 pub(super) const MOB_LEVEL: u32 = 1;
 /// Milliseconds per second.
 const MS_PER_SECOND: f32 = 1_000.0;
+/// The paperdoll slot of each tradeskill's tool (beach-quests note: retail equips of the
+/// skinning knife, the pick and the hatchet). A gatherable that needs its tool is gathered only
+/// with an item in that slot.
+const TOOL_SLOTS: [(&str, u32); 3] = [("Skinning", 35), ("Mining", 36), ("Logging", 33)];
+/// The roll of a quest drop's chance, in percent.
+const PERCENT: u32 = 100;
 
 /// A gather that runs.
 #[derive(Debug, Clone, PartialEq)]
@@ -108,6 +114,14 @@ impl SimWorld {
             return;
         };
         let mob = entity_of_raw_id(&request.target).filter(|mob| spawn_index(*mob).is_some());
+        if !self.holds_tool(entity, &gatherable) {
+            tracing::debug!(player = number, gatherable = %gatherable.id, "gather without its tool");
+            if let Some(player) = self.world.get::<Player>(entity) {
+                let refusal = gather_answer(number, request, GATHER_BUSY, NO_NAME);
+                send_now(&mut self.combat_messages, &player.connection, &[refusal]);
+            }
+            return;
+        }
         let started = match mob {
             Some(mob) => self.start_skinning(mob, number),
             None => self
@@ -123,7 +137,7 @@ impl SimWorld {
             send_now(&mut self.combat_messages, &player.connection, &[refusal]);
             return;
         }
-        let (duration_ms, run) = if gatherable.skinning {
+        let (duration_ms, run) = if gatherable.skinning() {
             #[allow(clippy::cast_precision_loss, reason = "a gather time of seconds")]
             let skin_ms = (gatherable.gather_ms as f32 / SKINNING_EFFICIENCY) as u64;
             (
@@ -158,6 +172,25 @@ impl SimWorld {
             mob,
             end_ms: now_ms.saturating_add(duration_ms),
         });
+    }
+
+    /// Whether player `entity` may gather `gatherable`: one that needs its tradeskill's tool
+    /// (`Restriction` ToolRequired) only with an item in the tool's slot (Inferred: retail
+    /// answered the skinning knife's absence with the client's "No equipped Knife" prompt, live
+    /// 2026-09-18). A tradeskill without a known slot needs no tool.
+    fn holds_tool(&self, entity: Entity, gatherable: &Gatherable) -> bool {
+        let slot = TOOL_SLOTS
+            .iter()
+            .find(|(tradeskill, _)| gatherable.tradeskill.as_deref() == Some(*tradeskill))
+            .map(|(_, slot)| *slot);
+        match slot {
+            Some(slot) if gatherable.tool_required => self
+                .world
+                .get::<Player>(entity)
+                .and_then(|player| player.gear.as_ref())
+                .is_some_and(|gear| gear.worn_item(slot).is_some()),
+            _ => true,
+        }
     }
 
     /// Player `number` starts to skin `mob`: only a dead mob that nobody skinned or skins.
@@ -201,7 +234,7 @@ impl SimWorld {
             tags: &[],
         };
         let dice = &mut self.dice;
-        let loot = gather
+        let mut loot = gather
             .gatherable
             .loot_table
             .as_deref()
@@ -211,6 +244,9 @@ impl SimWorld {
                     .roll(table, levels, &mut |below| dice.below(below))
             })
             .unwrap_or_default();
+        if let Some(mob) = gather.mob {
+            loot.extend(self.quest_drops(gather.number, mob));
+        }
         match gather.mob {
             Some(mob) => {
                 self.skinned.insert(mob);
@@ -243,6 +279,27 @@ impl SimWorld {
         self.give_loot(gather.number, loot, now_ms);
     }
 
+    /// The items the quest of player `number` drops for the corpse of `mob` it skinned: one of
+    /// each waiting gather task's item whose enemy the mob is, at the task's chance.
+    fn quest_drops(&mut self, number: u64, mob: u64) -> Vec<(String, u32)> {
+        let Some(quest) = self.quests.get(&number) else {
+            return Vec::new();
+        };
+        let Some((vitals_id, categories)) = self
+            .mobs
+            .vitals_of(mob)
+            .and_then(|vitals| self.content.kill_types.of(vitals))
+        else {
+            return Vec::new();
+        };
+        let drops = quest.run.quest_drops(vitals_id, categories);
+        drops
+            .into_iter()
+            .filter(|(_, percent)| self.dice.below(PERCENT) < *percent)
+            .map(|(item, _)| (item, 1))
+            .collect()
+    }
+
     /// Puts rolled `loot` into the bag of player `number`; each item that fits is an event of
     /// its quest. An item with no master row, or that does not fit, is lost with a log line.
     pub(super) fn give_loot(&mut self, number: u64, loot: Vec<(String, u32)>, now_ms: u64) {
@@ -262,14 +319,21 @@ impl SimWorld {
                     .is_some_and(|gear| gear.add(item, quantity));
                 if added {
                     tracing::debug!(player = number, item = %item_id, quantity, "looted");
-                    gained.push(item_id);
+                    gained.push((item_id, quantity));
                 } else {
                     tracing::info!(player = number, item = %item_id, quantity, "loot lost: no bag or a full bag");
                 }
             }
         }
-        for item_id in &gained {
-            self.quest_event(number, Event::ItemGained(item_id), now_ms);
+        for (item, quantity) in &gained {
+            self.quest_event(
+                number,
+                Event::ItemGained {
+                    item,
+                    quantity: *quantity,
+                },
+                now_ms,
+            );
         }
     }
 
