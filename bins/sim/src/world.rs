@@ -1478,12 +1478,25 @@ impl SimWorld {
             .collect();
         let finished: Vec<&str> = done.iter().map(String::as_str).collect();
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            player.quest = Some(QuestTracker::new(&def.id, number).after(&finished, number));
+            // The new lists go on above the ones the client has from the quest before.
+            let shown = player.quest.as_ref().map_or(0, QuestTracker::version);
+            player.quest = Some(
+                QuestTracker::new(&def.id, number)
+                    .after(&finished, number)
+                    .above(shown),
+            );
             player.done_quests.clone_from(&done);
             player.quests_unsaved = true;
         }
         self.quests.insert(number, ActiveQuest { def, run });
         self.quest_effects(number, effects, now_ms);
+        let tasks = self.quests.get(&number).map(|quest| quest.run.progress());
+        if let Some(tasks) = tasks
+            && let Some(mut player) = self.world.get_mut::<Player>(entity)
+            && let Some(tracker) = player.quest.as_mut()
+        {
+            tracker.accept(tasks);
+        }
         self.update_quest_tracker(number);
         Ok(())
     }
@@ -4610,6 +4623,17 @@ mod tests {
             Some(SKINNING_KNIFE)
         );
         assert!(has(&world, "SwapActive_01_AelstromMB_01"), "its first task");
+        let accepted = world
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.quest.clone()?.take_change())
+            .expect("the accept state");
+        assert!(
+            accepted
+                .active
+                .is_some_and(|active| active.elements.len() == 1),
+            "the journal gets the quest as active"
+        );
 
         // Flint and wood, then the knife at Urda's Campfire.
         world.give_loot(

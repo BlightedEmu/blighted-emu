@@ -18,6 +18,9 @@ use crate::objectives::{TaskProgress, TaskStatus};
 
 /// The version of the first lists (retail first own card).
 const FIRST_VERSION: u64 = 3;
+/// How many bundles in a row carry the state of an accepted quest (retail: 4, all at one
+/// version, quest-journal note).
+const ACCEPT_REPEATS: usize = 4;
 /// Names the objective instance ids this server makes.
 const INSTANCE_NAMESPACE: u64 = 0x6f62_6a65_6374_6976;
 
@@ -125,6 +128,20 @@ impl QuestTracker {
         }
     }
 
+    /// The player accepted the quest, whose task list is `tasks`: the client learns it is tracked
+    /// and active, with its tasks, in [`ACCEPT_REPEATS`] bundles at one new version (retail reply
+    /// to a 3772; without the active record the journal shows nothing, live 2026-09-18).
+    pub(super) fn accept(&mut self, tasks: Vec<TaskProgress>) {
+        self.tasks = tasks;
+        self.version += 1;
+        let state = ObjectivesState {
+            completed: None,
+            ..self.first_state()
+        };
+        self.pending
+            .extend(std::iter::repeat_n(state, ACCEPT_REPEATS));
+    }
+
     /// Takes the quest's task list `tasks` and whether it `finished` (a quest with a turn-in NPC
     /// finishes at its turn-in, after its last task); queues the states that change the client's
     /// tracker.
@@ -185,6 +202,39 @@ mod tests {
                 TaskStatus::Running
             },
         }
+    }
+
+    #[test]
+    fn an_accept_sends_the_quest_tracked_and_active_above_the_old_lists() {
+        const OLD_VERSION: u64 = 40;
+        let mut tracker = QuestTracker::new("12_skinningknife", PLAYER)
+            .after(&[TUTORIAL], PLAYER)
+            .above(OLD_VERSION);
+        tracker.accept(vec![task(0, 0, false)]);
+        let states: Vec<_> = std::iter::from_fn(|| tracker.take_change()).collect();
+        assert_eq!(states.len(), ACCEPT_REPEATS);
+        let state = &states[0];
+        assert!(
+            states.iter().all(|repeat| repeat == state),
+            "one state, repeated"
+        );
+        assert_eq!(state.completed, None, "retail sends no completed list");
+        let version = |list: Option<u64>| list.expect("list");
+        assert!(version(state.tracked.as_ref().and_then(|list| list.version)) > OLD_VERSION);
+        assert_eq!(
+            state.tracked.as_ref().map(|list| list.elements.clone()),
+            Some(vec![tracker.instance])
+        );
+        assert_eq!(
+            state.active.as_ref().map(|list| list.elements.len()),
+            Some(1)
+        );
+        assert_eq!(
+            state.tasks.as_ref().map(|list| list.elements.len()),
+            Some(1)
+        );
+        tracker.update(vec![task(0, 0, false)], false);
+        assert_eq!(tracker.take_change(), None, "no change, nothing more");
     }
 
     #[test]
