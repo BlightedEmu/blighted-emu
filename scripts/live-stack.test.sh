@@ -74,8 +74,9 @@ mkdir -p "$fake_root/target/release" "$fake_root/local-data/edge-http" "$fake_ro
 touch "$fake_root/local-data/m3-test.env" "$fake_root/local-data/edge-http/edge.toml" \
   "$fake_root/local-data/world-director.toml"
 for program in edge-http world-director sim rep-gateway blighted-admin nw-testclient; do
-  printf '#!/usr/bin/env bash\necho $$ > "%s/pids/%s"\nexec sleep %s\n' \
-    "$fake_root" "$program" "$FAKE_SLEEP_S" >"$fake_root/target/release/$program"
+  printf '#!/usr/bin/env bash\necho "$*" > "%s/pids/%s.args"\nenv > "%s/pids/%s.env"\necho $$ > "%s/pids/%s"\nexec sleep %s\n' \
+    "$fake_root" "$program" "$fake_root" "$program" "$fake_root" "$program" "$FAKE_SLEEP_S" \
+    >"$fake_root/target/release/$program"
   chmod +x "$fake_root/target/release/$program"
 done
 control="$fake_root/local-data/logs/live/control"
@@ -118,6 +119,34 @@ else
   failures=$((failures + 1))
 fi
 # Whatever a failed run left behind.
+kill -TERM -- "-$stack_pid" 2>/dev/null || true
+
+expect "an instance that is not 1 to 9 is refused" "$EXIT_USAGE" "LIVE_STACK_INSTANCE" \
+  env LIVE_STACK_ROOT="$work_dir" NW_GAME_DIR="$work_dir" LIVE_STACK_INSTANCE=10 "$STACK_SCRIPT"
+
+# A second instance: its own ports, world id, logs, edge config copy and bot names.
+rm -f "$fake_root/pids/"*
+echo 'id = "8d0f4c2e-0000-4000-8000-000000000001"' >"$fake_root/local-data/edge-http/edge.toml"
+setsid env LIVE_STACK_ROOT="$fake_root" NW_GAME_DIR="$fake_root" LIVE_STACK_INSTANCE=2 \
+  "$STACK_SCRIPT" 1 >"$work_dir/stack2.out" 2>&1 &
+stack_pid=$!
+second_world="8d0f4c2e-0000-4000-8000-000000000002"
+if wait_for test -s "$fake_root/pids/blighted-admin" &&
+  grep -q "NW_SIM_WORLD_ID=$second_world" "$fake_root/pids/sim.env" &&
+  grep -q "NW_SIM_METRICS_LISTEN=127.0.0.1:9202" "$fake_root/pids/sim.env" &&
+  grep -q "BLIGHTED_ADMIN_LISTEN=127.0.0.1:9280" "$fake_root/pids/blighted-admin.env" &&
+  grep -q "BLIGHTED_ADMIN_LIVE__BOT_CHARACTER_PREFIX=Instbot" "$fake_root/pids/blighted-admin.env" &&
+  grep -q "NW_GATEWAY_UDP_LISTEN=0.0.0.0:33535" "$fake_root/pids/rep-gateway.env" &&
+  grep -q "local-data/logs/live-2/edge.toml" "$fake_root/pids/edge-http.args" &&
+  grep -q "$second_world" "$fake_root/local-data/logs/live-2/edge.toml" &&
+  test -p "$fake_root/local-data/logs/live-2/control"; then
+  echo "PASS: a second instance gets its own ports, world id, logs and bot names"
+else
+  echo "FAIL: a second instance gets its own ports, world id, logs and bot names (output: $(cat "$work_dir/stack2.out"))"
+  failures=$((failures + 1))
+fi
+kill -TERM "$stack_pid" 2>/dev/null || true
+wait "$stack_pid" 2>/dev/null || true
 kill -TERM -- "-$stack_pid" 2>/dev/null || true
 
 if [[ "$failures" -gt 0 ]]; then

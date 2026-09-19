@@ -12,10 +12,23 @@
 # The control FIFO (LOG_DIR/control) takes one command per line: `restart-world` stops the
 # world-director and the sims and starts them again (the Studio page's Apply uses it); the other
 # programs keep running. Results go to LOG_DIR/control.log.
+# LIVE_STACK_INSTANCE=2 (up to 9) starts a second test world next to the first: every port moves
+# up by 100 per instance, the world id ends in the instance number, the logs go to
+# local-data/logs/live-<instance>/, and the bots get their own names (edge config copied there).
 set -euo pipefail
 
 readonly EXIT_USAGE=2
 readonly EXIT_MISSING=3
+readonly INSTANCE="${LIVE_STACK_INSTANCE:-1}"
+if [[ ! "$INSTANCE" =~ ^[1-9]$ ]]; then
+  echo "live stack: LIVE_STACK_INSTANCE must be 1 to 9, not '$INSTANCE'" >&2
+  exit "$EXIT_USAGE"
+fi
+readonly PORTS_PER_INSTANCE=100
+readonly SHIFT=$(((INSTANCE - 1) * PORTS_PER_INSTANCE))
+readonly FIRST_WORLD_ID="8d0f4c2e-0000-4000-8000-000000000001"
+WORLD_ID="$(printf '8d0f4c2e-0000-4000-8000-%012d' "$INSTANCE")"
+readonly WORLD_ID
 # The director splits the map into strips of equal width, west to east. With 5 or more sims the
 # westmost strip (x below 2,048 m) is sea with no start point, so that sim stays empty.
 readonly DEFAULT_SIMS=4
@@ -24,18 +37,33 @@ readonly BIN="target/release"
 readonly ENV_FILE="local-data/m3-test.env"
 readonly EDGE_CONFIG="local-data/edge-http/edge.toml"
 readonly DIRECTOR_CONFIG="local-data/world-director.toml"
-readonly LOG_DIR="local-data/logs/live"
+if ((INSTANCE == 1)); then
+  readonly LOG_DIR="local-data/logs/live"
+else
+  readonly LOG_DIR="local-data/logs/live-$INSTANCE"
+fi
 readonly CONTROL_FIFO="$LOG_DIR/control"
 readonly CONTROL_LOG="$LOG_DIR/control.log"
 readonly RESTART_WORLD="restart-world"
-readonly EDGE_LISTEN="0.0.0.0:8443"
-readonly LOGIN_URL="https://login.faqfirebase.com:8443"
-readonly GAME_URL="https://game.faqfirebase.com:8443"
-readonly PANEL_URL="http://127.0.0.1:9180/live"
+readonly EDGE_PORT=$((8443 + SHIFT))
+readonly EDGE_LISTEN="0.0.0.0:$EDGE_PORT"
+readonly EDGE_METRICS_LISTEN="127.0.0.1:$((9100 + SHIFT))"
+readonly GATEWAY_PORT=$((33435 + SHIFT))
+readonly LOGIN_URL="https://login.faqfirebase.com:$EDGE_PORT"
+readonly GAME_URL="https://game.faqfirebase.com:$EDGE_PORT"
+readonly ADMIN_LISTEN="127.0.0.1:$((9180 + SHIFT))"
+readonly PANEL_URL="http://$ADMIN_LISTEN/live"
 # The sim metrics ports that local-data/nw-testclient.toml reads (port 9103 is the director's).
-readonly SIM_METRICS_PORTS=(9102 9104 9105 9106 9107 9108 9109 9110)
-readonly GATEWAY_METRICS_URL="http://127.0.0.1:9101/metrics"
-readonly DIRECTOR_METRICS_URL="http://127.0.0.1:9103/metrics"
+readonly SIM_METRICS_PORTS=(
+  $((9102 + SHIFT)) $((9104 + SHIFT)) $((9105 + SHIFT)) $((9106 + SHIFT))
+  $((9107 + SHIFT)) $((9108 + SHIFT)) $((9109 + SHIFT)) $((9110 + SHIFT))
+)
+readonly GATEWAY_METRICS_LISTEN="127.0.0.1:$((9101 + SHIFT))"
+readonly DIRECTOR_METRICS_LISTEN="127.0.0.1:$((9103 + SHIFT))"
+readonly GATEWAY_METRICS_URL="http://$GATEWAY_METRICS_LISTEN/metrics"
+readonly DIRECTOR_METRICS_URL="http://$DIRECTOR_METRICS_LISTEN/metrics"
+# Bot names of a second world (letters only), so they never share an account with the first.
+readonly INSTANCE_BOT_PREFIX="Instbot"
 readonly DEFAULT_SNAPSHOT_INTERVAL_MS=250
 readonly SIM_TICK_THREADS=4
 # Bots do not spread evenly over the sims' cells: each sim takes twice its usual 2,000.
@@ -105,12 +133,14 @@ start_server() {
 
 # Starts the world-director and the sims; their pids go to `pids` (in the world loop's shell).
 start_world() {
-  start_server director "$BIN/world-director" --config "$DIRECTOR_CONFIG"
+  start_server director env NW_DIRECTOR_WORLD_ID="$WORLD_ID" \
+    NW_DIRECTOR_METRICS_LISTEN="$DIRECTOR_METRICS_LISTEN" \
+    "$BIN/world-director" --config "$DIRECTOR_CONFIG"
   sleep "$DIRECTOR_START_S"
   local index
   for ((index = 0; index < sims; index++)); do
     local sim_id="sim-$((index + 1))"
-    start_server "$sim_id" env NW_SIM_SIM_ID="$sim_id" \
+    start_server "$sim_id" env NW_SIM_SIM_ID="$sim_id" NW_SIM_WORLD_ID="$WORLD_ID" \
       NW_SIM_METRICS_LISTEN="127.0.0.1:${SIM_METRICS_PORTS[index]}" \
       NW_SIM_TICK_THREADS="$SIM_TICK_THREADS" NW_SIM_MAX_PLAYERS="$SIM_MAX_PLAYERS" \
       NW_SIM_ADMIN__SNAPSHOT_INTERVAL_MS="$snapshot_interval_ms" "$BIN/sim"
@@ -138,9 +168,17 @@ world_loop() {
   done
 }
 
+# A second world gets a copy of the edge config with its world id and gateway port.
+edge_config="$EDGE_CONFIG"
+if ((INSTANCE > 1)); then
+  edge_config="$LOG_DIR/edge.toml"
+  sed -e "s/$FIRST_WORLD_ID/$WORLD_ID/" \
+    -e "s/127\.0\.0\.1:33435/127.0.0.1:$GATEWAY_PORT/" "$EDGE_CONFIG" >"$edge_config"
+fi
 start_server edge env NW_EDGE_HTTPS_LISTEN="$EDGE_LISTEN" \
+  NW_EDGE_METRICS_LISTEN="$EDGE_METRICS_LISTEN" \
   NW_EDGE_AUTH__LOGIN_FAIL_LIMIT="$LOGIN_FAIL_LIMIT" \
-  "$BIN/edge-http" --config "$EDGE_CONFIG" serve
+  "$BIN/edge-http" --config "$edge_config" serve
 rm -f "$CONTROL_FIFO"
 mkfifo "$CONTROL_FIFO"
 world_loop &
@@ -151,6 +189,8 @@ for ((index = 0; index < sims; index++)); do
 done
 sleep "$((DIRECTOR_START_S + SIM_START_S))"
 start_server gateway env NW_GATEWAY_WORKERS="$GATEWAY_WORKERS" \
+  NW_GATEWAY_WORLD_ID="$WORLD_ID" NW_GATEWAY_UDP_LISTEN="0.0.0.0:$GATEWAY_PORT" \
+  NW_GATEWAY_METRICS_LISTEN="$GATEWAY_METRICS_LISTEN" \
   NW_GATEWAY_LIMITS__MAX_CONNECTIONS="$GATEWAY_MAX_CONNECTIONS" \
   NW_GATEWAY_LIMITS__HANDSHAKES_PER_IP_PER_SECOND="$HANDSHAKES_PER_IP_PER_SECOND" \
   "$BIN/rep-gateway" serve
@@ -158,8 +198,18 @@ start_server gateway env NW_GATEWAY_WORKERS="$GATEWAY_WORKERS" \
 echo "$sims sims run; logs in $LOG_DIR. Open $PANEL_URL. Ctrl-C stops everything."
 # blighted-admin runs in the background and the script waits for it, so a stop signal reaches
 # the traps at once.
-NW_TESTCLIENT_LOGIN_URL="$LOGIN_URL" NW_TESTCLIENT_GAME_URL="$GAME_URL" \
-  BLIGHTED_ADMIN_LIVE__METRICS_URLS="[$metrics_urls]" \
-  "$BIN/blighted-admin" serve &
+admin_env=(
+  NW_TESTCLIENT_LOGIN_URL="$LOGIN_URL" NW_TESTCLIENT_GAME_URL="$GAME_URL"
+  BLIGHTED_ADMIN_LISTEN="$ADMIN_LISTEN" BLIGHTED_ADMIN_LIVE__WORLD_ID="$WORLD_ID"
+  BLIGHTED_ADMIN_LIVE__METRICS_URLS="[$metrics_urls]"
+  BLIGHTED_ADMIN_STUDIO__CONTROL_FIFO="$CONTROL_FIFO"
+)
+if ((INSTANCE > 1)); then
+  admin_env+=(
+    BLIGHTED_ADMIN_LIVE__BOT_ACCOUNT_PREFIX="${INSTANCE_BOT_PREFIX,,}"
+    BLIGHTED_ADMIN_LIVE__BOT_CHARACTER_PREFIX="$INSTANCE_BOT_PREFIX"
+  )
+fi
+env "${admin_env[@]}" "$BIN/blighted-admin" serve &
 pids+=("$!")
 wait "$!"
