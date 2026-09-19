@@ -12,7 +12,7 @@ use nw_world::world_file::world_file_path;
 use serde::Serialize;
 
 use crate::error::{DesignError, Problem};
-use crate::file::DesignSet;
+use crate::file::{DesignSet, Kind};
 use crate::load::load_dir;
 use crate::points::apply_world;
 use crate::rows::apply_tables;
@@ -90,7 +90,11 @@ pub fn run_design(
     errors.extend(apply_tables(&set, &mut bundle.tables));
     let maps = retail_maps(&paths.retail_dir, client_build)?;
     let mut changed_maps = BTreeSet::new();
-    for file in set.files.iter().filter(|file| file.kind.is_point()) {
+    // An AI profile goes into every level's world file.
+    if set.files.iter().any(|file| file.kind == Kind::AiProfile) {
+        changed_maps.extend(maps.iter().map(String::as_str));
+    }
+    for file in set.files.iter().filter(|file| file.kind.needs_map()) {
         match file.map.as_deref() {
             Some(map) if maps.contains(map) => {
                 changed_maps.insert(map);
@@ -361,6 +365,21 @@ mod tests {
             .filter(|entry| entry.as_ref().unwrap().path().is_file())
             .count();
         assert_eq!(temp_files, 0);
+    }
+
+    #[test]
+    fn a_profile_alone_reaches_every_world_file() {
+        let folders = folders();
+        let paths = &folders.paths;
+        write(
+            &paths.design_dir,
+            "ai/guards.toml",
+            "schema = 1\nkind = \"ai_profile\"\naction = \"add\"\nid = \"guards\"\nbehaviour = \"guard\"\n",
+        );
+        let report = run_design(paths, BUILD, DesignMode::Write).unwrap();
+        assert_eq!(report.errors, []);
+        let merged = WorldFile::load(&world_file_path(&paths.out_dir, BUILD, MAP), BUILD).unwrap();
+        assert!(merged.ai_profiles.contains_key("guards"));
     }
 
     #[test]

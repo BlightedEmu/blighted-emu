@@ -40,6 +40,9 @@ Do not copy client values into a file; name only what you change.
 | `objective_task` | `quests/tasks/` | `ObjectiveTasks` | `TaskID` |
 | `spawn_point` | `spawns/<map>/` | creature spawn points of a world file | point key |
 | `npc_point` | `npcs/<map>/` | NPC points of a world file | point key |
+| `ai_profile` | `ai/` | (own) a behaviour and brain numbers | profile id |
+| `path` | `paths/<map>/` | (own) a patrol path of one level | path id |
+| `spawn_group` | `spawns/<map>/` | (own) new mob spawns of one level | group id |
 
 ## Spawn and NPC points
 
@@ -61,6 +64,57 @@ level = 30
 Point fields: `spawn_point` takes `vitals_id`, `category_id` (text ids), `level` (1 to 65) and
 `position` (`[x, y, z]` in metres); `npc_point` takes `npc_id`, `faction_type` (0 to 255) and
 `position`. Points can be changed or disabled, not added.
+
+## AI profiles, paths and spawn groups
+
+The last three kinds have no client record: they are only ever `add`.
+
+```toml
+# ai/gate_guard.toml: every number is optional and keeps the sim's [combat] value when missing.
+schema = 1
+kind = "ai_profile"
+action = "add"
+id = "gate_guard"
+behaviour = "guard"        # wander (default) | guard | patrol | idle
+sight_m = 25.0
+speed_mps = 4.0
+respawn_ms = 60000
+```
+
+- `wander`: walks near its spawn, attacks a player in sight.
+- `guard`: stands at its spawn, attacks a player in sight, then goes back.
+- `patrol`: walks its `path`, attacks a player in sight, then goes back to where it left the path.
+- `idle`: stands at its spawn and fights only a player who hits it.
+
+Other numbers: `wake_radius_m`, `wander_radius_m`, `wander_pause_ms`, `leash_radius_m`,
+`attack_reach_m`, `attack_interval_ms`.
+
+```toml
+# paths/newworld_vitaeeterna/gate_walk.toml
+schema = 1
+kind = "path"
+action = "add"
+id = "gate_walk"
+map = "newworld_vitaeeterna"
+points = [[100.0, 200.0, 30.0], [140.0, 200.0, 30.0]]
+waits_ms = [3000, 0]       # optional: the wait at each point
+mode = "back_and_forth"    # loop (default) | back_and_forth | once
+
+# spawns/newworld_vitaeeterna/gate_wolves.toml
+schema = 1
+kind = "spawn_group"
+action = "add"
+id = "gate_wolves"
+map = "newworld_vitaeeterna"
+vitals = "Wolf_Alpha"      # a VitalsData id
+level = 20
+points = [[100.0, 205.0, 30.0], [102.0, 207.0, 30.0]]
+ai_profile = "gate_guard"  # optional
+path = "gate_walk"         # optional: a path of the same level
+```
+
+A `spawn_point` file may also set `ai_profile` and `path`. A spawn group's spawns get the keys
+`<group id>_1`, `<group id>_2`, ...
 
 ## Checks
 

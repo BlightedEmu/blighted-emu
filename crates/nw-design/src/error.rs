@@ -100,6 +100,12 @@ pub enum Problem {
     /// A `disable` file names fields.
     #[error("`disable` takes no fields")]
     FieldsNotAllowed,
+    /// A field the kind needs is missing.
+    #[error("missing field")]
+    MissingField,
+    /// The field names a profile or path that no design file makes.
+    #[error("no design file makes {0}")]
+    UnknownReference(String),
     /// The kind has no field of this name.
     #[error("unknown field")]
     UnknownField,

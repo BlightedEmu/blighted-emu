@@ -14,9 +14,9 @@ pub(crate) const MAX_LEVEL: i64 = 65;
 /// Coordinates of a position.
 pub(crate) const POSITION_AXES: usize = 3;
 
-/// The value a point field holds.
+/// The value a field of a point or own kind holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PointValue {
+pub(crate) enum FieldValue {
     /// A datasheet id as text; the world file stores its lower-case crc32.
     Id,
     /// A creature level, [`MIN_LEVEL`] to [`MAX_LEVEL`].
@@ -25,21 +25,71 @@ pub(crate) enum PointValue {
     Byte,
     /// `[x, y, z]` in metres.
     Position,
+    /// One or more `[x, y, z]`.
+    Positions,
+    /// The id of an AI profile file.
+    ProfileRef,
+    /// The id of a path file of the same level.
+    PathRef,
+    /// `wander`, `guard`, `patrol` or `idle`.
+    Behaviour,
+    /// `loop`, `back_and_forth` or `once`.
+    PathMode,
+    /// A number of metres (or metres per second) above 0.
+    Metres,
+    /// A whole number of milliseconds, 0 or more.
+    Millis,
+    /// A list of whole numbers of milliseconds.
+    MillisList,
 }
 
-/// The fields a point kind may change.
-pub(crate) fn point_fields(kind: Kind) -> &'static [(&'static str, PointValue)] {
+/// One field of a point or own kind: name, value, and whether every `add` needs it.
+pub(crate) type FieldSpec = (&'static str, FieldValue, bool);
+
+/// Behaviour names in files.
+pub(crate) const BEHAVIOURS: [&str; 4] = ["wander", "guard", "patrol", "idle"];
+/// Path mode names in files.
+pub(crate) const PATH_MODES: [&str; 3] = ["loop", "back_and_forth", "once"];
+
+/// The fields of a point or own kind.
+pub(crate) fn record_fields(kind: Kind) -> &'static [FieldSpec] {
     match kind {
         Kind::SpawnPoint => &[
-            ("category_id", PointValue::Id),
-            ("level", PointValue::Level),
-            ("position", PointValue::Position),
-            ("vitals_id", PointValue::Id),
+            ("ai_profile", FieldValue::ProfileRef, false),
+            ("category_id", FieldValue::Id, false),
+            ("level", FieldValue::Level, false),
+            ("path", FieldValue::PathRef, false),
+            ("position", FieldValue::Position, false),
+            ("vitals_id", FieldValue::Id, false),
         ],
         Kind::NpcPoint => &[
-            ("faction_type", PointValue::Byte),
-            ("npc_id", PointValue::Id),
-            ("position", PointValue::Position),
+            ("faction_type", FieldValue::Byte, false),
+            ("npc_id", FieldValue::Id, false),
+            ("position", FieldValue::Position, false),
+        ],
+        Kind::AiProfile => &[
+            ("attack_interval_ms", FieldValue::Millis, false),
+            ("attack_reach_m", FieldValue::Metres, false),
+            ("behaviour", FieldValue::Behaviour, false),
+            ("leash_radius_m", FieldValue::Metres, false),
+            ("respawn_ms", FieldValue::Millis, false),
+            ("sight_m", FieldValue::Metres, false),
+            ("speed_mps", FieldValue::Metres, false),
+            ("wake_radius_m", FieldValue::Metres, false),
+            ("wander_pause_ms", FieldValue::Millis, false),
+            ("wander_radius_m", FieldValue::Metres, false),
+        ],
+        Kind::Path => &[
+            ("mode", FieldValue::PathMode, false),
+            ("points", FieldValue::Positions, true),
+            ("waits_ms", FieldValue::MillisList, false),
+        ],
+        Kind::SpawnGroup => &[
+            ("ai_profile", FieldValue::ProfileRef, false),
+            ("level", FieldValue::Level, true),
+            ("path", FieldValue::PathRef, false),
+            ("points", FieldValue::Positions, true),
+            ("vitals", FieldValue::Id, true),
         ],
         _ => &[],
     }
@@ -65,7 +115,43 @@ pub fn check_schema(set: &DesignSet) -> Vec<DesignError> {
             }
         }
     }
+    check_references(set, &mut errors);
     errors
+}
+
+/// Every `ai_profile` names a profile file, and every `path` a path file of the same level.
+fn check_references(set: &DesignSet, errors: &mut Vec<DesignError>) {
+    let made = |kind: Kind, map: Option<&str>, id: &str| {
+        set.files.iter().any(|file| {
+            file.kind == kind
+                && file.action == Action::Add
+                && file.id.eq_ignore_ascii_case(id)
+                && (map.is_none() || file.map.as_deref() == map)
+        })
+    };
+    for file in &set.files {
+        for (field, kind, map) in [
+            ("ai_profile", Kind::AiProfile, None),
+            ("path", Kind::Path, file.map.as_deref()),
+        ] {
+            if !record_fields(file.kind)
+                .iter()
+                .any(|(name, _, _)| *name == field)
+            {
+                continue;
+            }
+            let Some(id) = file.fields.get(field).and_then(toml::Value::as_str) else {
+                continue;
+            };
+            if !made(kind, map, id) {
+                errors.push(DesignError::field(
+                    &file.path,
+                    field,
+                    Problem::UnknownReference(format!("{} {id}", kind.name())),
+                ));
+            }
+        }
+    }
 }
 
 fn check_file(file: &DesignFile, errors: &mut Vec<DesignError>) {
@@ -73,7 +159,7 @@ fn check_file(file: &DesignFile, errors: &mut Vec<DesignError>) {
     if path.file_stem().and_then(|stem| stem.to_str()) != Some(file.id.as_str()) {
         errors.push(DesignError::file(path, Problem::NameMismatch));
     }
-    let expected = match (file.kind.is_point(), &file.map) {
+    let expected = match (file.kind.needs_map(), &file.map) {
         (false, _) => Some(file.kind.folder().to_owned()),
         (true, Some(map)) => Some(format!("{}/{map}", file.kind.folder())),
         (true, None) => {
@@ -100,7 +186,7 @@ fn check_file(file: &DesignFile, errors: &mut Vec<DesignError>) {
     }
     match file.kind.visit_row(RowCheck { file }) {
         Some(row_errors) => errors.extend(row_errors),
-        None => check_point_fields(file, errors),
+        None => check_record_fields(file, errors),
     }
 }
 
@@ -144,37 +230,85 @@ pub(crate) fn row_from_toml<T: Row>(row: toml::Table) -> Result<T, String> {
     serde_json::from_value(json).map_err(|error| error.to_string())
 }
 
-fn check_point_fields(file: &DesignFile, errors: &mut Vec<DesignError>) {
-    let allowed = point_fields(file.kind);
+fn check_record_fields(file: &DesignFile, errors: &mut Vec<DesignError>) {
+    let fields = record_fields(file.kind);
     for (name, value) in &file.fields {
-        let Some((_, expected)) = allowed.iter().find(|(known, _)| known == name) else {
+        let Some((_, expected, _)) = fields.iter().find(|(known, _, _)| known == name) else {
             errors.push(DesignError::field(&file.path, name, Problem::UnknownField));
             continue;
         };
-        if let Err(problem) = check_point_value(*expected, value) {
+        if let Err(problem) = check_field_value(*expected, value) {
             errors.push(DesignError::field(&file.path, name, problem));
+        }
+    }
+    if file.action == Action::Add {
+        for (name, _, required) in fields {
+            if *required && !file.fields.contains_key(*name) {
+                errors.push(DesignError::field(&file.path, name, Problem::MissingField));
+            }
         }
     }
 }
 
-fn check_point_value(expected: PointValue, value: &toml::Value) -> Result<(), Problem> {
+fn wrong(what: &str) -> Problem {
+    Problem::WrongType(what.to_owned())
+}
+
+fn check_field_value(expected: FieldValue, value: &toml::Value) -> Result<(), Problem> {
+    let text = |names: &[&str]| -> Result<(), Problem> {
+        let found = value.as_str().ok_or_else(|| wrong(&names.join(", ")))?;
+        if names.contains(&found) {
+            Ok(())
+        } else {
+            Err(Problem::OutOfRange(names.join(", ")))
+        }
+    };
     match expected {
-        PointValue::Id => value
-            .as_str()
+        FieldValue::Id | FieldValue::ProfileRef | FieldValue::PathRef => {
+            value.as_str().map(drop).ok_or_else(|| wrong("a text id"))
+        }
+        FieldValue::Level => in_range(value, MIN_LEVEL, MAX_LEVEL),
+        FieldValue::Byte => in_range(value, 0, i64::from(u8::MAX)),
+        FieldValue::Position => position_of(value)
             .map(drop)
-            .ok_or_else(|| Problem::WrongType("a text id".to_owned())),
-        PointValue::Level => in_range(value, MIN_LEVEL, MAX_LEVEL),
-        PointValue::Byte => in_range(value, 0, i64::from(u8::MAX)),
-        PointValue::Position => position_of(value)
-            .map(drop)
-            .ok_or_else(|| Problem::WrongType("[x, y, z] in metres".to_owned())),
+            .ok_or_else(|| wrong("[x, y, z] in metres")),
+        FieldValue::Positions => {
+            let points = value
+                .as_array()
+                .filter(|points| !points.is_empty())
+                .ok_or_else(|| wrong("a list of [x, y, z]"))?;
+            if points.iter().all(|point| position_of(point).is_some()) {
+                Ok(())
+            } else {
+                Err(wrong("a list of [x, y, z]"))
+            }
+        }
+        FieldValue::Behaviour => text(&BEHAVIOURS),
+        FieldValue::PathMode => text(&PATH_MODES),
+        FieldValue::Metres => match value {
+            toml::Value::Float(number) if number.is_finite() && *number > 0.0 => Ok(()),
+            toml::Value::Integer(number) if *number > 0 => Ok(()),
+            _ => Err(wrong("a number above 0")),
+        },
+        FieldValue::Millis => in_range(value, 0, i64::MAX),
+        FieldValue::MillisList => {
+            let list = value
+                .as_array()
+                .ok_or_else(|| wrong("a list of milliseconds"))?;
+            if list
+                .iter()
+                .all(|item| item.as_integer().is_some_and(|ms| ms >= 0))
+            {
+                Ok(())
+            } else {
+                Err(wrong("a list of milliseconds"))
+            }
+        }
     }
 }
 
 fn in_range(value: &toml::Value, min: i64, max: i64) -> Result<(), Problem> {
-    let number = value
-        .as_integer()
-        .ok_or_else(|| Problem::WrongType("a whole number".to_owned()))?;
+    let number = value.as_integer().ok_or_else(|| wrong("a whole number"))?;
     if (min..=max).contains(&number) {
         Ok(())
     } else {
@@ -233,6 +367,95 @@ mod tests {
 
     fn spawn_path() -> String {
         format!("spawns/{MAP}/12_1.0_2.0_3.0.toml")
+    }
+
+    const PROFILE: &str = "schema = 1\nkind = \"ai_profile\"\naction = \"add\"\nid = \"guard_fast\"\nbehaviour = \"guard\"\nspeed_mps = 4.5\nrespawn_ms = 60000\n";
+
+    fn path_file(id: &str, map: &str) -> String {
+        format!(
+            "schema = 1\nkind = \"path\"\naction = \"add\"\nid = \"{id}\"\nmap = \"{map}\"\npoints = [[1.0, 2.0, 3.0], [4, 5, 6]]\nwaits_ms = [1000, 0]\nmode = \"back_and_forth\"\n"
+        )
+    }
+
+    fn group_file(fields: &str) -> String {
+        format!(
+            "schema = 1\nkind = \"spawn_group\"\naction = \"add\"\nid = \"wolves\"\nmap = \"{MAP}\"\nvitals = \"Wolf\"\nlevel = 10\npoints = [[10.0, 20.0, 5.0]]\n{fields}"
+        )
+    }
+
+    #[test]
+    fn profiles_paths_and_groups_pass_with_their_references() {
+        let errors = problems(&[
+            ("ai/guard_fast.toml", PROFILE),
+            (&format!("paths/{MAP}/gate.toml"), &path_file("gate", MAP)),
+            (
+                &format!("spawns/{MAP}/wolves.toml"),
+                &group_file("ai_profile = \"guard_fast\"\npath = \"gate\"\n"),
+            ),
+        ]);
+        assert_eq!(errors, []);
+    }
+
+    #[test]
+    fn a_missing_profile_or_a_path_of_another_level_is_an_error() {
+        let errors = problems(&[
+            ("paths/other/gate.toml", &path_file("gate", "other")),
+            (
+                &format!("spawns/{MAP}/wolves.toml"),
+                &group_file("ai_profile = \"nope\"\npath = \"gate\"\n"),
+            ),
+        ]);
+        let fields: Vec<_> = errors.iter().map(|error| error.field.as_deref()).collect();
+        assert_eq!(fields, [Some("ai_profile"), Some("path")]);
+        assert!(
+            errors
+                .iter()
+                .all(|error| matches!(error.problem, Problem::UnknownReference(_)))
+        );
+    }
+
+    #[test]
+    fn a_group_needs_its_fields_and_a_profile_its_values() {
+        let group = "schema = 1\nkind = \"spawn_group\"\naction = \"add\"\nid = \"wolves\"\nmap = \"lv\"\nlevel = 10\n";
+        let profile = PROFILE
+            .replace("\"guard\"", "\"dance\"")
+            .replace("4.5", "-1");
+        let errors = problems(&[
+            ("spawns/lv/wolves.toml", group),
+            ("ai/guard_fast.toml", &profile),
+        ]);
+        let found: Vec<_> = errors
+            .iter()
+            .map(|error| (error.field.as_deref().unwrap_or(""), error.problem.clone()))
+            .collect();
+        assert!(found.contains(&("points", Problem::MissingField)));
+        assert!(found.contains(&("vitals", Problem::MissingField)));
+        assert!(
+            found.iter().any(|(field, problem)| *field == "behaviour"
+                && matches!(problem, Problem::OutOfRange(_)))
+        );
+        assert!(
+            found.iter().any(|(field, problem)| *field == "speed_mps"
+                && matches!(problem, Problem::WrongType(_)))
+        );
+    }
+
+    #[test]
+    fn own_kinds_can_only_be_added() {
+        let errors = problems(&[(
+            "ai/guard_fast.toml",
+            &PROFILE.replace("\"add\"", "\"override\""),
+        )]);
+        assert_eq!(errors[0].problem, Problem::ActionNotAllowed);
+    }
+
+    #[test]
+    fn a_spawn_point_may_name_a_profile() {
+        let errors = problems(&[
+            ("ai/guard_fast.toml", PROFILE),
+            (&spawn_path(), &spawn("ai_profile = \"guard_fast\"\n")),
+        ]);
+        assert_eq!(errors, []);
     }
 
     #[test]

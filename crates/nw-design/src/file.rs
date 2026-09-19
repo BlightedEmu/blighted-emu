@@ -41,11 +41,17 @@ pub enum Kind {
     SpawnPoint,
     /// A retail NPC point of a world file.
     NpcPoint,
+    /// An AI profile: a behaviour and brain numbers for spawns (spec section 6.5).
+    AiProfile,
+    /// A patrol path of one level (spec section 6.4).
+    Path,
+    /// New mob spawns of one level, with their profile and path (spec section 7.1).
+    SpawnGroup,
 }
 
 /// Every kind with its name in files and its folder under the design folder. Point kinds add
 /// `/<map>` to the folder.
-const KINDS: [(Kind, &str, &str); 12] = [
+const KINDS: [(Kind, &str, &str); 15] = [
     (Kind::Item, "item", "items"),
     (Kind::Weapon, "weapon", "items/weapons"),
     (Kind::Armor, "armor", "items/armor"),
@@ -58,6 +64,9 @@ const KINDS: [(Kind, &str, &str); 12] = [
     (Kind::ObjectiveTask, "objective_task", "quests/tasks"),
     (Kind::SpawnPoint, "spawn_point", "spawns"),
     (Kind::NpcPoint, "npc_point", "npcs"),
+    (Kind::AiProfile, "ai_profile", "ai"),
+    (Kind::Path, "path", "paths"),
+    (Kind::SpawnGroup, "spawn_group", "spawns"),
 ];
 
 impl Kind {
@@ -79,15 +88,30 @@ impl Kind {
         Self::entry(self).2
     }
 
-    /// True for the world file point kinds.
+    /// True for the retail world file point kinds.
     pub fn is_point(self) -> bool {
         matches!(self, Self::SpawnPoint | Self::NpcPoint)
     }
 
-    /// True when files of this kind may use `action`. Points can only be changed or disabled;
-    /// new spawns come with spawn groups (spec step S4).
+    /// True for the kinds that the client data does not have: only design files make them.
+    pub fn is_own(self) -> bool {
+        matches!(self, Self::AiProfile | Self::Path | Self::SpawnGroup)
+    }
+
+    /// True for the kinds of one level: their files name it with `map` and lie in
+    /// `<folder>/<map>/`.
+    pub fn needs_map(self) -> bool {
+        self.is_point() || matches!(self, Self::Path | Self::SpawnGroup)
+    }
+
+    /// True when files of this kind may use `action`. Retail points can only be changed or
+    /// disabled (new spawns come with spawn groups); own kinds can only be added.
     pub fn allows(self, action: Action) -> bool {
-        !self.is_point() || action != Action::Add
+        if self.is_own() {
+            action == Action::Add
+        } else {
+            !self.is_point() || action != Action::Add
+        }
     }
 
     fn entry(self) -> &'static (Kind, &'static str, &'static str) {
@@ -110,7 +134,9 @@ impl Kind {
             Self::Npc => visitor.visit::<NPCData>(),
             Self::Objective => visitor.visit::<Objectives>(),
             Self::ObjectiveTask => visitor.visit::<ObjectiveTasks>(),
-            Self::SpawnPoint | Self::NpcPoint => return None,
+            Self::SpawnPoint | Self::NpcPoint | Self::AiProfile | Self::Path | Self::SpawnGroup => {
+                return None;
+            }
         })
     }
 }
