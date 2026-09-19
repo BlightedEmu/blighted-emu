@@ -37,6 +37,9 @@ const CONTENT_LEVEL: &str = "MinContLevel";
 const GLOBAL_MOD: &str = "GlobalMod";
 /// How deep `[LTID]` entries may nest (retail tables nest 3 deep).
 const MAX_DEPTH: u8 = 8;
+/// Most table rolls and bucket picks of one roll: a design table that rolls itself with a large
+/// quantity would otherwise run for ever (quantity to the power of [`MAX_DEPTH`]).
+pub const MAX_ROLL_STEPS: u32 = 10_000;
 /// The `RowPlaceholders` value of the bucket sheet row that names each column's bucket.
 const BUCKET_NAMES_ROW: &str = "FIRSTROW";
 
@@ -260,7 +263,8 @@ impl LootTables {
         below: &mut impl FnMut(u32) -> u32,
     ) -> Vec<(String, u32)> {
         let mut drops: BTreeMap<String, u32> = BTreeMap::new();
-        self.roll_into(table, context, below, 0, &mut drops);
+        let mut steps = 0;
+        self.roll_into(table, context, below, 0, &mut steps, &mut drops);
         drops.into_iter().collect()
     }
 
@@ -270,11 +274,17 @@ impl LootTables {
         context: LootContext<'_>,
         below: &mut impl FnMut(u32) -> u32,
         depth: u8,
+        steps: &mut u32,
         drops: &mut BTreeMap<String, u32>,
     ) {
-        let Some(table) = self.tables.get(table).filter(|_| depth < MAX_DEPTH) else {
+        let Some(table) = self
+            .tables
+            .get(table)
+            .filter(|_| depth < MAX_DEPTH && *steps < MAX_ROLL_STEPS)
+        else {
             return;
         };
+        *steps += 1;
         let draw = |below: &mut dyn FnMut(u32) -> u32| match &table.roll {
             Roll::Random(max) => Some(below((*max).max(1))),
             Roll::EnemyLevel => Some(context.enemy),
@@ -313,20 +323,29 @@ impl LootTables {
             let count = count_of(entry.quantity, below);
             if let Some(inner) = entry.item.strip_prefix(TABLE_PREFIX) {
                 for _ in 0..count {
-                    self.roll_into(inner, context, below, depth + 1, drops);
+                    if *steps >= MAX_ROLL_STEPS {
+                        break;
+                    }
+                    self.roll_into(inner, context, below, depth + 1, steps, drops);
                 }
             } else if let Some(bucket) = entry.item.strip_prefix(BUCKET_PREFIX) {
                 let items = self.buckets.get(bucket).map_or(&[][..], Vec::as_slice);
                 for _ in 0..count {
+                    if *steps >= MAX_ROLL_STEPS {
+                        break;
+                    }
+                    *steps += 1;
                     if let Some((item, range)) = pick(items, below) {
                         let amount = count_of(*range, below);
                         if amount > 0 {
-                            *drops.entry(item.clone()).or_default() += amount;
+                            let total = drops.entry(item.clone()).or_default();
+                            *total = total.saturating_add(amount);
                         }
                     }
                 }
             } else if count > 0 {
-                *drops.entry(entry.item.clone()).or_default() += count;
+                let total = drops.entry(entry.item.clone()).or_default();
+                *total = total.saturating_add(count);
             }
         }
     }
@@ -626,6 +645,24 @@ mod tests {
             tables.roll("Odd", mob, &mut first),
             [("Bone".to_owned(), 1)]
         );
+    }
+
+    #[test]
+    fn a_table_that_rolls_itself_many_times_stops_at_the_step_limit() {
+        let rows = vec![
+            loot(
+                "Bomb",
+                &[(1, "[LTID]Bomb"), (2, "Stick")],
+                Some("AND"),
+                None,
+            ),
+            loot("Bomb_Qty", &[(1, "1000"), (2, "4294967295")], None, None),
+            probs("Bomb_Probs", &[(1, "0"), (2, "0")], 100),
+        ];
+        let tables = tables(rows, Vec::new());
+        let mut first = |_: u32| 0;
+        let drops = tables.roll("Bomb", LEVELS, &mut first);
+        assert_eq!(drops, [("Stick".to_owned(), u32::MAX)], "the sum saturates");
     }
 
     #[test]
