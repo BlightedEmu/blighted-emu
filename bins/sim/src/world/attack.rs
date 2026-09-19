@@ -140,8 +140,10 @@ const MAX_SWING_TARGETS: usize = 5;
 /// refused shots the client showed, 2026-09-18). The ammo (two loads, then a reload) limits the
 /// rate as retail does.
 const SPREADSHOT_MIN_INTERVAL_MS: u64 = 200;
-/// How long after an attack input a spread shot request shows that the attack was a shot
-/// (Inferred: the client sends its 2719 with the attack; the network adds up to a few ticks).
+/// How near an attack key press a spread shot request shows that the attack was a shot. The
+/// client sends its 2719 at the press, before the input that carries the key's release (live
+/// 2026-09-18: the release came 0.2 to 0.5 s after the shot); the network adds a few ticks
+/// (Inferred).
 const SHOT_PAIR_MS: u64 = 300;
 /// How far a pellet reaches (our choice; the blunderbuss range is Unknown, and the client names
 /// the targets it hit).
@@ -182,11 +184,11 @@ pub(super) struct PlayerSwing {
     kind: AttackKind,
     /// When it hits.
     due_ms: u64,
-    /// When its attack input came.
-    received_ms: u64,
+    /// When its attack key was pressed.
+    pressed_ms: u64,
     /// The melee option slot to take in hand when it lands, while the server holds a spread-shot
-    /// weapon: unless a shot request came since [`PlayerSwing::received_ms`], the attack was a
-    /// swing of the weapon the client holds.
+    /// weapon: unless a shot request came within [`SHOT_PAIR_MS`] of [`PlayerSwing::pressed_ms`],
+    /// the attack was a swing of the weapon the client holds.
     hand: Option<u32>,
 }
 
@@ -777,7 +779,7 @@ impl SimWorld {
             } else {
                 due_ms
             },
-            received_ms: now_ms,
+            pressed_ms: now_ms.saturating_sub(held_ms),
             hand,
         });
         attacks[1..]
@@ -808,8 +810,8 @@ impl SimWorld {
     }
 
     /// Whether `swing`, made while the server held a spread-shot weapon, was a swing of the melee
-    /// option `slot_id`: then the server's hand takes that weapon. A shot request since the
-    /// attack shows it was a shot.
+    /// option `slot_id`: then the server's hand takes that weapon. A shot request from
+    /// [`SHOT_PAIR_MS`] before the press on shows it was a shot.
     fn melee_hand(&mut self, swing: &PlayerSwing, slot_id: u32) -> bool {
         let Some(entity) = self.by_connection.get(&swing.attacker).copied() else {
             return false;
@@ -818,7 +820,7 @@ impl SimWorld {
             .world
             .get::<Vitals>(entity)
             .and_then(|vitals| vitals.shot_requested_ms)
-            .is_some_and(|requested| requested >= swing.received_ms);
+            .is_some_and(|requested| requested.saturating_add(SHOT_PAIR_MS) >= swing.pressed_ms);
         if shot {
             return false;
         }
@@ -1964,6 +1966,51 @@ mod tests {
         world.spreadshot(&connection(1), &shot(2), NOW + INPUT_RECORD_MS as u64);
         assert!(world.player_swings_due(lands_at()).is_empty());
         assert_ne!(drawn(&world), Some(slot::MAIN_HAND_OPTION_2));
+    }
+
+    #[test]
+    fn a_shot_before_the_attack_input_is_the_shot_and_nothing_switches() {
+        let mut world = gun_and_blade_at(MOB_X + 2.0);
+        let entity = world.by_connection[&connection(1)];
+        let gear_change = |world: &mut SimWorld| {
+            world
+                .world
+                .get_mut::<Player>(entity)
+                .and_then(|mut player| player.gear.as_mut()?.take_change())
+        };
+        gear_change(&mut world);
+        // The client sends the shot at the press; the release comes in a later input.
+        world.spreadshot(&connection(1), &shot(2), NOW);
+        let released_ms = NOW + SHOT_PAIR_MS;
+        world.attack_input(
+            &connection(1),
+            &message(1, &[Key::Press, Key::Release]),
+            released_ms,
+        );
+        assert!(
+            world
+                .player_swings_due(released_ms + light_hit_ms() + SHOT_PAIR_MS)
+                .is_empty()
+        );
+        assert_ne!(drawn(&world), Some(slot::MAIN_HAND_OPTION_2));
+        // The shot's ammo change goes out; then a swing with no shot follows the client's hand.
+        gear_change(&mut world);
+        world.attack_input(
+            &connection(1),
+            &message(3, &[Key::Press, Key::Release]),
+            released_ms + LONG_AFTER_MS,
+        );
+        world.player_swings_due(released_ms + LONG_AFTER_MS + light_hit_ms() + SHOT_PAIR_MS);
+        assert_eq!(
+            drawn(&world),
+            Some(slot::MAIN_HAND_OPTION_2),
+            "a swing with no shot"
+        );
+        assert_eq!(
+            gear_change(&mut world),
+            None,
+            "the client is not told to switch"
+        );
     }
 
     #[test]

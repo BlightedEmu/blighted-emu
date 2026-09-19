@@ -342,11 +342,14 @@ impl Gear {
 
     /// The weapon of main-hand option slot `slot_id` is in the client's hand already (its attack
     /// showed it): drawn and in the hand at once, the option put away keeping the time `time_ns`.
+    /// The client is not told: a sent change makes it switch weapons (live 2026-09-18).
     pub(super) fn take_in_hand(&mut self, slot_id: u32, time_ns: u64) {
         let option = slot_id.saturating_sub(slot::MAIN_HAND_OPTION_1);
+        let changed = self.changed;
         if self.draw(option, 0, time_ns) {
             self.attach_at_ms = None;
             self.attached = true;
+            self.changed = changed;
         }
     }
 
