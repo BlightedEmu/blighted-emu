@@ -126,12 +126,24 @@ async fn edit_list(
     }
 }
 
+/// The issue link of a task: none, or a GitHub issue address (the page makes it a link, so
+/// any other scheme, such as `javascript:`, is refused).
+fn issue_of(issue: Option<String>) -> Result<Option<String>, Refusal> {
+    match issue.filter(|issue| !issue.trim().is_empty()) {
+        Some(issue) if parse_issue_url(&issue).is_none() => {
+            Err((StatusCode::BAD_REQUEST, BAD_ISSUE_URL))
+        }
+        issue => Ok(issue.map(|issue| issue.trim().to_owned())),
+    }
+}
+
 /// A new open task of `list`.
 fn push_task(list: &mut TodoList, new: NewTask) -> Result<(), Refusal> {
     let title = new.title.trim();
     if title.is_empty() {
         return Err((StatusCode::BAD_REQUEST, NO_TITLE));
     }
+    let issue = issue_of(new.issue)?;
     let id = list.next_id();
     list.task.push(Task {
         id,
@@ -140,7 +152,7 @@ fn push_task(list: &mut TodoList, new: NewTask) -> Result<(), Refusal> {
         kind: new.kind,
         state: TaskState::Open,
         taken_by: None,
-        issue: new.issue,
+        issue,
         records: new.records,
     });
     Ok(())
@@ -176,6 +188,7 @@ async fn change(
         if title.is_empty() {
             return Err((StatusCode::BAD_REQUEST, NO_TITLE));
         }
+        let issue = issue_of(change.issue)?;
         let task = list.get_mut(&id).ok_or((StatusCode::NOT_FOUND, NO_TASK))?;
         *task = Task {
             id: task.id.clone(),
@@ -184,7 +197,7 @@ async fn change(
             kind: change.kind,
             state: change.state,
             taken_by: change.taken_by.filter(|name| !name.trim().is_empty()),
-            issue: change.issue.filter(|issue| !issue.trim().is_empty()),
+            issue,
             records: change.records,
         };
         Ok(())
@@ -427,6 +440,15 @@ mod tests {
             )
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+        let script_link = json!({"title": "x", "kind": "other", "issue": "javascript:alert(1)"});
+        let (status, _) = fixture
+            .call(Method::POST, TODO_ROUTE, Some(script_link))
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "only a GitHub issue is a link"
+        );
     }
 
     fn git(dir: &Path, args: &[&str]) {

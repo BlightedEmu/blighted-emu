@@ -11,6 +11,8 @@ const CHANGED_URL = '/api/todo/changed';
 const HEADERS = Object.freeze({ 'X-Blighted-Admin': '1', 'Content-Type': 'application/json' });
 const KINDS = Object.freeze(['quest', 'loot', 'spawn', 'path', 'ai', 'script', 'item', 'event', 'other']);
 const STATES = Object.freeze(['open', 'taken', 'done']);
+/** Only a GitHub address becomes a link (a hand-edited todo.toml could hold another scheme). */
+const GITHUB_PREFIX = 'https://github.com/';
 
 const elements = {
   status: document.getElementById('status'),
@@ -92,7 +94,7 @@ function taskItem(task) {
     }, 'danger'),
   );
   item.append(head);
-  if (task.issue) {
+  if (task.issue?.startsWith(GITHUB_PREFIX)) {
     const link = element('a', null, task.issue);
     link.href = task.issue;
     link.rel = 'noreferrer';
