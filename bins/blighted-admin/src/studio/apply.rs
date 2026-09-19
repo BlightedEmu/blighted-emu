@@ -103,11 +103,25 @@ impl Studio {
         ));
         let studio = self.clone();
         tokio::spawn(async move {
-            let end = studio.run_apply().await;
+            let job = tokio::spawn({
+                let studio = studio.clone();
+                async move { studio.run_apply().await }
+            });
+            let end = job.await.unwrap_or_else(|error| studio.stopped(&error));
             studio.set_apply(end);
             drop(permit);
         });
         true
+    }
+
+    /// The end state of an Apply job that stopped with `error` (a panic) at its last step.
+    pub(crate) fn stopped(&self, error: &tokio::task::JoinError) -> ApplyStatus {
+        let step = self.apply_status().step.unwrap_or(ApplyStep::Check);
+        ApplyStatus::ended(
+            ApplyPhase::Failed,
+            step,
+            format!("the Apply job stopped: {error}"),
+        )
     }
 
     /// The full check alone; `None` while an Apply or another Check runs.
@@ -153,6 +167,7 @@ impl Studio {
                 Ok(_) => {}
             }
         }
+        self.reload_world().await;
         self.set_apply(ApplyStatus::running(
             ApplyStep::Restart,
             "restarting the world",
@@ -184,18 +199,21 @@ impl Studio {
                 "world restarting; no live panel to watch the sims",
             );
         };
-        if ids.is_empty() {
-            return ApplyStatus::ended(
-                ApplyPhase::Done,
-                ApplyStep::Restart,
-                "world restarting; no sims were running",
-            );
-        }
         let deadline = tokio::time::Instant::now() + self.restart_timeout;
         loop {
-            let back = lock(live).started_after(&ids, restart_ms);
-            let detail = format!("{back} of {} sims back", ids.len());
-            if back == ids.len() {
+            // With no sim known before the restart (none had sent a heartbeat yet), the first
+            // sim back ends the wait.
+            let (back, detail) = if ids.is_empty() {
+                let back = lock(live).started_since(restart_ms);
+                (
+                    back,
+                    format!("{back} sims back; no sim was known before the restart"),
+                )
+            } else {
+                let back = lock(live).started_after(&ids, restart_ms);
+                (back, format!("{back} of {} sims back", ids.len()))
+            };
+            if back > 0 && back >= ids.len() {
                 return ApplyStatus::ended(ApplyPhase::Done, ApplyStep::WaitSims, detail);
             }
             if tokio::time::Instant::now() >= deadline {

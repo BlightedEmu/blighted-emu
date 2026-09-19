@@ -4,6 +4,7 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum_server::Handle;
@@ -25,7 +26,7 @@ use crate::gm::Commands;
 use crate::guard::AdminOrigin;
 use crate::live;
 use crate::server::{AppState, router};
-use crate::studio::Studio;
+use crate::studio::{LoadWorld, Studio};
 use crate::world::{WorldLayer, WorldLayerError, map_dir};
 
 /// Environment variable that names the New World install folder (for `typeindex.json`).
@@ -93,16 +94,22 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
             let access = access_of(&config).await?;
             let (close, closing) = watch::channel(false);
             let live = config.live.as_ref().map(|live| live::start(live, closing));
+            let live_state = live.as_ref().map(|live| live.state().clone());
+            let state = AppState::new(world, map, config.listen, captures, live);
+            let reload_config = Arc::new(config.clone());
+            let load_world: LoadWorld = Arc::new(move || {
+                WorldLayer::load(&reload_config).map_err(|error| error.to_string())
+            });
             let studio = config.studio.as_ref().map(|studio| {
                 Studio::new(
                     studio,
                     config.content_dir.clone(),
                     &client_build,
-                    live.as_ref().map(|live| live.state().clone()),
+                    live_state,
                 )
+                .map(|studio| studio.with_world_reload(state.world.clone(), load_world))
             });
             let studio = studio.transpose().map_err(RunError::Studio)?;
-            let state = AppState::new(world, map, config.listen, captures, live);
             let state = match studio {
                 Some(studio) => state.with_studio(studio),
                 None => state,

@@ -22,6 +22,7 @@ use crate::live::SharedState;
 use crate::studio::apply::ApplyStatus;
 use crate::studio::catalog::Catalog;
 use crate::todo::github::GitHub;
+use crate::world::{WorldLayer, WorldSlot};
 
 /// Full design runs at a time.
 const ONE_RUN: usize = 1;
@@ -44,6 +45,26 @@ pub struct Studio {
     pub(crate) todo_lock: Arc<AsyncMutex<()>>,
     /// The issue source of the to-do import.
     pub(crate) github: GitHub,
+    /// The map's world layer and how to read it again after an Apply writes new merged files.
+    world: Option<WorldReload>,
+}
+
+/// Reads the world layer from the merged files.
+pub type LoadWorld = Arc<dyn Fn() -> Result<WorldLayer, String> + Send + Sync>;
+
+/// The map's world layer and how Apply reads it again.
+#[derive(Clone)]
+struct WorldReload {
+    slot: WorldSlot,
+    load: LoadWorld,
+}
+
+impl std::fmt::Debug for WorldReload {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorldReload")
+            .finish_non_exhaustive()
+    }
 }
 
 impl Studio {
@@ -79,7 +100,34 @@ impl Studio {
             catalog: Arc::default(),
             todo_lock: Arc::default(),
             github,
+            world: None,
         })
+    }
+
+    /// The same studio that, after an Apply writes the merged files, puts the layer `load`
+    /// reads in `slot`, so the map shows the new world without an admin restart.
+    pub fn with_world_reload(self, slot: WorldSlot, load: LoadWorld) -> Self {
+        Self {
+            world: Some(WorldReload { slot, load }),
+            ..self
+        }
+    }
+
+    /// Reads the world layer again into the map's slot, off the async threads; a failure keeps
+    /// the old layer.
+    async fn reload_world(&self) {
+        let Some(reload) = self.world.clone() else {
+            return;
+        };
+        let loaded = tokio::task::spawn_blocking(move || {
+            (reload.load)().map(|layer| reload.slot.set(layer))
+        })
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(|loaded| loaded);
+        if let Err(error) = loaded {
+            tracing::warn!(%error, "the map keeps the old world");
+        }
     }
 
     /// The client records; the first call reads the retail bundle, in the work slot, so it

@@ -274,6 +274,14 @@ impl LiveState {
             .count()
     }
 
+    /// How many sims have a heartbeat that says they started after `after_ms`.
+    pub fn started_since(&self, after_ms: u64) -> usize {
+        self.sims
+            .values()
+            .filter(|sim| sim.started_at_ms > after_ms)
+            .count()
+    }
+
     /// The sim whose newest snapshot holds the player with entity number `entity`.
     pub fn sim_of_player(&self, entity: u64) -> Option<BusId> {
         self.snapshots

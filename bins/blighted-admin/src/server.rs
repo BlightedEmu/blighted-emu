@@ -30,7 +30,7 @@ use crate::studio::api::studio_routes;
 use crate::studio::loot::loot_routes;
 use crate::studio::quests::quest_routes;
 use crate::todo::api::todo_routes;
-use crate::world::{SpawnKind, SpawnQuery, WorldLayer};
+use crate::world::{SpawnKind, SpawnQuery, WorldLayer, WorldSlot};
 use nw_world::map_tiles::tile_file;
 
 /// Content type of map tiles.
@@ -59,7 +59,7 @@ pub const SCRIPTS_PAGE_ROUTE: &str = "/scripts";
 /// What every route shares.
 #[derive(Debug, Clone)]
 pub struct AppState {
-    pub(crate) world: Arc<WorldLayer>,
+    pub(crate) world: WorldSlot,
     map_dir: Arc<PathBuf>,
     origin: AdminOrigin,
     pub(crate) captures: Arc<Captures>,
@@ -80,7 +80,7 @@ impl AppState {
         live: Option<Live>,
     ) -> Self {
         Self {
-            world: Arc::new(world),
+            world: WorldSlot::new(world),
             map_dir: Arc::new(map_dir),
             origin: AdminOrigin::of(listen),
             captures: Arc::new(captures),
@@ -183,7 +183,7 @@ async fn web_file(UrlPath(file): UrlPath<String>) -> Response {
 }
 
 async fn world_info(State(state): State<AppState>) -> Response {
-    Json(state.world.info()).into_response()
+    Json(state.world.get().info()).into_response()
 }
 
 async fn map_tile(
@@ -201,7 +201,7 @@ async fn relief(
     State(state): State<AppState>,
     UrlPath((level, row, column)): UrlPath<(u8, u32, u32)>,
 ) -> Response {
-    let world = Arc::clone(&state.world);
+    let world = state.world.get();
     let drawn = tokio::task::spawn_blocking(move || {
         relief_tile(world.world(), world.tiles(), level, row, column)
     })
@@ -229,7 +229,7 @@ struct HeightView {
 
 async fn ground_height(State(state): State<AppState>, Query(at): Query<HeightParams>) -> Response {
     Json(HeightView {
-        z: state.world.ground_height(at.x, at.y),
+        z: state.world.get().ground_height(at.x, at.y),
     })
     .into_response()
 }
@@ -245,7 +245,7 @@ struct SpawnParams {
 
 async fn spawns(State(state): State<AppState>, Query(params): Query<SpawnParams>) -> Response {
     let answer = SpawnKind::parse_list(&params.kinds).and_then(|kinds| {
-        state.world.spawns(&SpawnQuery {
+        state.world.get().spawns(&SpawnQuery {
             min_x: params.min_x,
             min_y: params.min_y,
             max_x: params.max_x,

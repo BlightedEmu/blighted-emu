@@ -928,6 +928,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_waits_for_sims_that_sent_no_heartbeat_before() {
+        let fixture = fixture(true, LONG_TIMEOUT_S);
+        let live = fixture.live.clone();
+        read_control(&fixture.path("control"), move |line| {
+            if line == "restart-world" {
+                lock(&live).heartbeat(beat(unix_ms() + 1), unix_ms());
+            }
+        });
+        call(&fixture, Method::POST, APPLY_ROUTE).await;
+        let end = finished(&fixture).await;
+        assert_eq!(end["phase"], "done", "{end}");
+        assert_eq!(
+            end["detail"],
+            "1 sims back; no sim was known before the restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_reads_the_map_world_again() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let slot = crate::world::WorldSlot::new(test_layer(CAP));
+        let before = slot.get();
+        let loads = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&loads);
+        let mut fixture = fixture(false, LONG_TIMEOUT_S);
+        fixture.studio = fixture.studio.clone().with_world_reload(
+            slot.clone(),
+            Arc::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(test_layer(CAP))
+            }),
+        );
+        call(&fixture, Method::POST, APPLY_ROUTE).await;
+        assert_eq!(finished(&fixture).await["phase"], "done");
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        assert!(
+            !Arc::ptr_eq(&before, &slot.get()),
+            "the slot holds the new layer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stopped_apply_job_ends_failed_at_its_step() {
+        let fixture = fixture(false, LONG_TIMEOUT_S);
+        let error = tokio::spawn(async { panic!("job") })
+            .await
+            .expect_err("panic");
+        let end = fixture.studio.stopped(&error);
+        assert_eq!(end.phase, crate::studio::apply::ApplyPhase::Failed);
+        assert_eq!(end.step, Some(crate::studio::apply::ApplyStep::Check));
+        assert!(
+            end.detail.starts_with("the Apply job stopped"),
+            "{}",
+            end.detail
+        );
+    }
+
+    #[tokio::test]
     async fn the_apply_route_needs_the_admin_header() {
         let fixture = fixture(false, LONG_TIMEOUT_S);
         let response = fixture

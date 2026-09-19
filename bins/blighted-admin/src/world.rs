@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use nw_common::config::ConfigError;
 use nw_content::bundle::bundle_path;
@@ -169,6 +170,27 @@ enum PointRef {
     Vitals(usize),
     Gatherable(usize),
     Landmark(usize),
+}
+
+/// The world layer the routes read; an Apply that writes new merged files puts a new one in.
+#[derive(Debug, Clone)]
+pub struct WorldSlot(Arc<RwLock<Arc<WorldLayer>>>);
+
+impl WorldSlot {
+    /// A slot holding `layer`.
+    pub fn new(layer: WorldLayer) -> Self {
+        Self(Arc::new(RwLock::new(Arc::new(layer))))
+    }
+
+    /// The layer now in the slot.
+    pub fn get(&self) -> Arc<WorldLayer> {
+        Arc::clone(&self.0.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Puts `layer` in the slot; readers that hold the old one keep it until they finish.
+    pub fn set(&self, layer: WorldLayer) {
+        *self.0.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(layer);
+    }
 }
 
 /// The world file, its spawn names, the tile grid, and a cell index of the points.
