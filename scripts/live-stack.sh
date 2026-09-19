@@ -117,17 +117,27 @@ trap stop_all EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# 1 after a restart-world: the restarted servers add to their logs instead of starting new ones,
+# so the log of a run before an Apply stays.
+append_logs=0
+
 # Starts one server with the secrets of the env file; its output goes to LOG_DIR/<name>.log.
 start_server() {
   local name="$1"
   shift
+  local log="$LOG_DIR/$name.log"
+  if ((append_logs)); then
+    echo "=== $RESTART_WORLD $(date -Is) ===" >>"$log"
+  else
+    : >"$log"
+  fi
   (
     set -a
     # shellcheck source=/dev/null
     . "$ENV_FILE"
     set +a
     exec "$@"
-  ) >"$LOG_DIR/$name.log" 2>&1 &
+  ) >>"$log" 2>&1 &
   pids+=("$!")
 }
 
@@ -160,6 +170,7 @@ world_loop() {
       kill "${pids[@]}" 2>/dev/null || true
       wait "${pids[@]}" 2>/dev/null || true
       pids=()
+      append_logs=1
       start_world
       echo "$RESTART_WORLD done" >>"$CONTROL_LOG"
     else

@@ -74,7 +74,7 @@ mkdir -p "$fake_root/target/release" "$fake_root/local-data/edge-http" "$fake_ro
 touch "$fake_root/local-data/m3-test.env" "$fake_root/local-data/edge-http/edge.toml" \
   "$fake_root/local-data/world-director.toml"
 for program in edge-http world-director sim rep-gateway blighted-admin nw-testclient; do
-  printf '#!/usr/bin/env bash\necho "$*" > "%s/pids/%s.args"\nenv > "%s/pids/%s.env"\necho $$ > "%s/pids/%s"\nexec sleep %s\n' \
+  printf '#!/usr/bin/env bash\necho "$*" > "%s/pids/%s.args"\nenv > "%s/pids/%s.env"\necho $$ > "%s/pids/%s"\necho "started $$"\nexec sleep %s\n' \
     "$fake_root" "$program" "$fake_root" "$program" "$fake_root" "$program" "$FAKE_SLEEP_S" \
     >"$fake_root/target/release/$program"
   chmod +x "$fake_root/target/release/$program"
@@ -96,6 +96,13 @@ if wait_for test -s "$fake_root/pids/blighted-admin" && wait_for test -p "$contr
     echo "PASS: restart-world restarts the director and the sims only"
   else
     echo "FAIL: restart-world (log: $(cat "$control_log" 2>/dev/null))"
+    failures=$((failures + 1))
+  fi
+  sim_log="$fake_root/local-data/logs/live/sim-1.log"
+  if [[ "$(grep -c '^started ' "$sim_log")" == 2 ]] && grep -q "^=== restart-world " "$sim_log"; then
+    echo "PASS: a restarted sim adds to its log"
+  else
+    echo "FAIL: a restarted sim adds to its log ($(cat "$sim_log" 2>/dev/null))"
     failures=$((failures + 1))
   fi
   echo "dance" >"$control"
