@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Library part of `content-tool`: code generation, bundle building, world file building, the
-//! capture check, the mob prefab table and the tutorial static entity table.
+//! capture check, the mob prefab table, the creature animation table and the tutorial static
+//! entity table.
 
 pub mod build;
 pub mod capture;
 pub mod codegen;
 pub mod combat;
+pub mod creature_animations;
 pub mod error;
 pub mod extra_members;
 pub mod ftue_entities;

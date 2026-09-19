@@ -17,6 +17,7 @@ use content_tool::build::{
 use content_tool::capture::CaptureReport;
 use content_tool::codegen::run_codegen;
 use content_tool::combat::{CombatCheck, DEFAULT_LEVEL, DEFAULT_NWDB_DIR, check, read_nwdb};
+use content_tool::creature_animations::{CreatureAnimationsReport, build_rows};
 use content_tool::error::ToolError;
 use content_tool::ftue_entities::{FtueScan, Timeline, read_ledger, write_table};
 use content_tool::map_tiles::{DEFAULT_MAP_DIR, MapTilesReport, YIndex, run_map_tiles};
@@ -30,8 +31,9 @@ use nw_capture::{CLIENT_TO_SERVER, CaptureError, SERVER_TO_CLIENT, TypeNames};
 use nw_content::ContentBundle;
 use nw_content::client_build::load_client_build;
 use nw_content::combat::{CombatData, CombatRows};
+use nw_content::creature_animations::{creature_animations_path, write_rows};
 use nw_content::ftue_entities::ftue_entities_path;
-use nw_content::mob_prefabs::mob_prefabs_path;
+use nw_content::mob_prefabs::{MobPrefabs, mob_prefabs_path};
 use nw_design::{DesignMode, DesignPaths, DesignReport, run_design};
 use nw_world::WorldFile;
 use nw_world::metadata::SkipCounts;
@@ -172,6 +174,16 @@ enum Command {
         /// Output file (default: `local-data/content/ftue-entities-<build>.json`).
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+    /// Builds the creature animation table from the game paks, for the creatures of the mob
+    /// prefab table (`local-data/content/mob-prefabs-<build>.json`).
+    CreatureAnimations {
+        /// Output file (default: `local-data/content/creature-animations-<build>.json`).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Content bundle for the weapon tags (default: `local-data/content/bundle-<build>.bin`).
+        #[arg(long)]
+        bundle: Option<PathBuf>,
     },
     /// Worker of `mob-prefabs`: reads one ledger and prints its tally as JSON.
     #[command(name = "mob-prefabs-ledger", hide = true)]
@@ -353,6 +365,19 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             write_table(&out, &scan.table)?;
             print_ftue_entities(&scan, &out);
         }
+        Command::CreatureAnimations { out, bundle } => {
+            let content_dir = Path::new(DEFAULT_CONTENT_DIR);
+            let out = out.unwrap_or_else(|| creature_animations_path(content_dir, &client_build));
+            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
+            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
+            let prefabs = MobPrefabs::load(content_dir, &client_build)
+                .map_err(content_tool::creature_animations::CreatureAnimationsError::from)?;
+            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
+            let (rows, report) = build_rows(&source, &prefabs, &tables)?;
+            write_rows(&out, &rows)
+                .map_err(content_tool::creature_animations::CreatureAnimationsError::from)?;
+            print_creature_animations(&report, &out);
+        }
         Command::MobPrefabsLedger { ledger, entry } => {
             let tally = scan_ledger(
                 &LedgerSource {
@@ -370,6 +395,18 @@ fn run(cli: Cli) -> Result<(), ToolError> {
         }
     }
     Ok(())
+}
+
+fn print_creature_animations(report: &CreatureAnimationsReport, out: &Path) {
+    println!(
+        "creature-animations: {} of {} creature assets -> {}",
+        report.creatures,
+        report.assets,
+        out.display()
+    );
+    for (asset, why) in &report.skipped {
+        println!("  skipped {asset}: {why}");
+    }
 }
 
 fn run_mob_prefabs(

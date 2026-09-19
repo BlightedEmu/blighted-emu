@@ -9,6 +9,7 @@ use nw_design::DesignRunError;
 
 use crate::codegen::CodegenError;
 use crate::combat::NwdbError;
+use crate::creature_animations::CreatureAnimationsError;
 use crate::ftue_entities::FtueEntitiesError;
 use crate::map_tiles::MapTilesError;
 use crate::mob_prefabs::MobPrefabsError;
@@ -62,6 +63,9 @@ pub enum ToolError {
     /// The mob prefab scan failed.
     #[error(transparent)]
     MobPrefabs(#[from] MobPrefabsError),
+    /// The creature animation build failed.
+    #[error(transparent)]
+    CreatureAnimations(#[from] CreatureAnimationsError),
     /// The tutorial static entity scan failed.
     #[error(transparent)]
     FtueEntities(#[from] FtueEntitiesError),
