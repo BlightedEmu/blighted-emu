@@ -39,10 +39,13 @@ pub const LIVE_PAGE_ROUTE: &str = "/live";
 const STUDIO_PAGE: &str = "studio.html";
 const LOGIN_PAGE: &str = "login.html";
 const GM_PAGE: &str = "gm.html";
+const RECORDS_PAGE: &str = "records.html";
 /// The GM page.
 pub const GM_PAGE_ROUTE: &str = "/gm";
 /// The studio page.
 pub const STUDIO_PAGE_ROUTE: &str = "/studio";
+/// The record editor page.
+pub const RECORDS_PAGE_ROUTE: &str = "/records";
 
 /// What every route shares.
 #[derive(Debug, Clone)]
@@ -119,6 +122,10 @@ pub fn router(state: AppState) -> Router {
             get(|| web_file(UrlPath(STUDIO_PAGE.to_owned()))),
         )
         .route(GM_PAGE_ROUTE, get(|| web_file(UrlPath(GM_PAGE.to_owned()))))
+        .route(
+            RECORDS_PAGE_ROUTE,
+            get(|| web_file(UrlPath(RECORDS_PAGE.to_owned()))),
+        )
         .route(
             LOGIN_PAGE_ROUTE,
             get(|| web_file(UrlPath(LOGIN_PAGE.to_owned()))),
@@ -344,10 +351,25 @@ mod tests {
             (StatusCode::OK, Some(crate::assets::HTML))
         );
         assert!(String::from_utf8_lossy(&body).contains("/web/studio.js"));
-        for file in ["studio.js", "apply.js", "design.js", "editors.js"] {
+        for file in [
+            "studio.js",
+            "apply.js",
+            "design.js",
+            "editors.js",
+            "record-edit.js",
+            "records.js",
+        ] {
             let (status, _, _) = get(app(dir.path()), &format!("/web/{file}")).await;
             assert_eq!(status, StatusCode::OK, "{file}");
         }
+    }
+
+    #[tokio::test]
+    async fn the_records_page_is_served_at_records() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (status, _, body) = get(app(dir.path()), RECORDS_PAGE_ROUTE).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(String::from_utf8_lossy(&body).contains("/web/records.js"));
     }
 
     #[tokio::test]

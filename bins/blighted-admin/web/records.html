@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Records · Blighted Emu</title>
+  <link rel="stylesheet" href="/web/style.css">
+  <script src="/web/theme.js"></script>
+</head>
+<body>
+  <nav class="rail" aria-label="Pages">
+    <a href="/">Home</a>
+    <a href="/live">Live</a>
+    <a href="/studio">Studio</a>
+    <a href="/records" aria-current="page">Records</a>
+    <a href="/gm">GM</a>
+    <a href="/web/map.html">Map</a>
+    <a href="/web/captures.html">Captures</a>
+    <button type="button" class="theme" id="theme"></button>
+  </nav>
+  <main class="work">
+    <header class="masthead">
+      <h1>Blighted Emu <span>· Records</span></h1>
+      <div class="end"><span class="status" id="status" role="status"></span></div>
+    </header>
+    <form class="gm records-search" id="search">
+      <select id="kind" aria-label="kind"></select>
+      <input type="search" id="query" aria-label="id or name" placeholder="id or name" class="wide">
+      <button type="submit">Search</button>
+    </form>
+    <section class="problems-block" aria-label="Problems">
+      <ul class="list problems" id="problems"></ul>
+    </section>
+    <div class="records">
+      <ul class="list records-hits" id="hits" aria-label="Records found"></ul>
+      <section class="records-form" id="record" hidden aria-label="Record">
+        <div class="section-head"><h2 id="record-title"></h2><span class="status" id="record-file"></span></div>
+        <div class="gm">
+          <button type="button" id="save">Save</button>
+          <button type="button" class="danger" id="remove">Remove design file</button>
+          <input type="text" id="new-id" aria-label="id of a new record" placeholder="new id" class="wide">
+          <button type="button" id="save-new">Save as new record</button>
+        </div>
+        <div class="gm" id="copies"></div>
+        <div class="gm">
+          <input type="search" id="field-filter" aria-label="field filter" placeholder="field" class="wide">
+          <label><input type="checkbox" id="changed-only"> Changed only</label>
+        </div>
+        <div class="table-scroll">
+          <table class="grid">
+            <thead><tr><th>Field</th><th>Design value</th><th>Client value</th></tr></thead>
+            <tbody id="fields"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+  <script type="module" src="/web/records.js"></script>
+</body>
+</html>

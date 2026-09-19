@@ -1,0 +1,239 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// The records page: search the client records of a table kind, change their fields in an
+// override file, or save a new record made from one (admin studio spec sections 7.6, 7.7).
+
+import { errorRows } from '/web/apply.js';
+import { addFile, changedFields, overrideFile, valueText } from '/web/record-edit.js';
+
+const RECORDS_URL = '/api/studio/records';
+const FILE_URL = '/api/studio/file';
+const ADMIN_HEADERS = Object.freeze({ 'X-Blighted-Admin': '1' });
+const HTTP_REFUSED = 422;
+/** The kinds and their names, in the order of the kind list. */
+const KINDS = Object.freeze([
+  ['item', 'Items'],
+  ['weapon', 'Weapon stats'],
+  ['armor', 'Armor stats'],
+  ['consumable', 'Consumables'],
+  ['perk', 'Perks'],
+  ['loot_table', 'Loot tables'],
+  ['mob', 'Mobs'],
+  ['npc', 'NPCs'],
+  ['objective', 'Quests'],
+  ['objective_task', 'Quest tasks'],
+]);
+const KIND_PARAMETER = 'kind';
+const ID_PARAMETER = 'id';
+
+const elements = {
+  status: document.getElementById('status'),
+  kind: document.getElementById('kind'),
+  query: document.getElementById('query'),
+  hits: document.getElementById('hits'),
+  problems: document.getElementById('problems'),
+  record: document.getElementById('record'),
+  title: document.getElementById('record-title'),
+  file: document.getElementById('record-file'),
+  copies: document.getElementById('copies'),
+  newId: document.getElementById('new-id'),
+  filter: document.getElementById('field-filter'),
+  changedOnly: document.getElementById('changed-only'),
+  fields: document.getElementById('fields'),
+};
+/** The open record: { kind, folder, id, name, fields, field_names, files }, and the design file it edits. */
+let open = null;
+let editing = null;
+
+function say(text, isError = false) {
+  elements.status.classList.toggle('error', isError);
+  elements.status.textContent = text;
+}
+
+function showProblems(errors) {
+  elements.problems.replaceChildren(...errorRows(errors).map((row) => {
+    const item = document.createElement('li');
+    item.textContent = `${row.file}${row.field ? ` · ${row.field}` : ''}: ${row.problem}`;
+    return item;
+  }));
+}
+
+async function json(url) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`${url}: ${response.status} ${await response.text()}`);
+  }
+  return response.json();
+}
+
+async function search() {
+  const kind = elements.kind.value;
+  const hits = await json(`${RECORDS_URL}/${kind}?q=${encodeURIComponent(elements.query.value)}`);
+  elements.hits.replaceChildren(...hits.map((hit) => {
+    const item = document.createElement('li');
+    item.className = 'clickable';
+    item.textContent = hit.name ? `${hit.name} · ${hit.id}` : hit.id;
+    item.addEventListener('click', () => openRecord(kind, hit.id).catch(fail));
+    return item;
+  }));
+  say(`${hits.length} records`);
+}
+
+/** The text inputs of the fields table, by field name. */
+function inputs() {
+  return Object.fromEntries(
+    [...elements.fields.querySelectorAll('input')].map((input) => [input.name, input.value]),
+  );
+}
+
+function drawFields() {
+  const filter = elements.filter.value.trim().toLowerCase();
+  for (const row of elements.fields.rows) {
+    const name = row.dataset.field;
+    const changed = row.querySelector('input').value.trim() !== '';
+    row.hidden = (filter !== '' && !name.includes(filter)) || (elements.changedOnly.checked && !changed);
+  }
+  elements.file.textContent = editing ? editing.path : 'no design file';
+}
+
+function fieldRow(name, clientValue, designValue) {
+  const row = document.createElement('tr');
+  row.dataset.field = name;
+  const label = document.createElement('td');
+  label.textContent = name;
+  const client = document.createElement('td');
+  client.className = 'muted';
+  client.textContent = valueText(clientValue);
+  const cell = document.createElement('td');
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.name = name;
+  input.className = 'wide';
+  input.value = valueText(designValue);
+  input.setAttribute('aria-label', `${name} design value`);
+  input.addEventListener('input', drawFields);
+  cell.append(input);
+  row.append(label, cell, client);
+  return row;
+}
+
+/** Shows `record` with the values of `file` (a design file of it, or null) in the inputs. */
+function show(record, file) {
+  open = record;
+  editing = file;
+  elements.record.hidden = false;
+  elements.title.textContent = file?.action === 'add'
+    ? `${file.id} (new, from ${record.name ?? record.id})`
+    : `${record.name ?? record.id} · ${record.id}`;
+  const values = file?.fields ?? {};
+  elements.fields.replaceChildren(
+    ...record.field_names.map((name) => fieldRow(name, record.fields[name], values[name])),
+  );
+  elements.copies.replaceChildren(...record.files.filter((copy) => copy !== file).map((copy) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.textContent = copy.action === 'add' ? `Open new record ${copy.id}` : `Open ${copy.action} file`;
+    button.addEventListener('click', () => show(record, copy));
+    return button;
+  }));
+  drawFields();
+  const url = new URL(window.location.href);
+  url.searchParams.set(KIND_PARAMETER, record.kind);
+  url.searchParams.set(ID_PARAMETER, record.id);
+  window.history.replaceState(null, '', url);
+}
+
+async function openRecord(kind, id) {
+  const record = { kind, ...(await json(`${RECORDS_URL}/${kind}/${encodeURIComponent(id)}`)) };
+  const own = record.files.find((file) => file.action === 'override' && file.id.toLowerCase() === id.toLowerCase());
+  show(record, own ?? null);
+  say(`Opened ${record.id}.`);
+}
+
+async function put(written) {
+  const response = await fetch(`${FILE_URL}?path=${encodeURIComponent(written.path)}`, {
+    method: 'PUT',
+    headers: ADMIN_HEADERS,
+    body: written.text,
+  });
+  if (response.status === HTTP_REFUSED) {
+    showProblems((await response.json()).errors);
+    say(`Not saved: ${written.path} has problems.`, true);
+    return false;
+  }
+  if (!response.ok) {
+    say(`Not saved: ${response.status} ${await response.text()}`, true);
+    return false;
+  }
+  showProblems([]);
+  say(`Saved ${written.path}. Apply on the Studio page to use it.`);
+  return true;
+}
+
+async function save(asNew) {
+  const changes = changedFields(open.fields, inputs());
+  if (changes.error) {
+    say(changes.error, true);
+    return;
+  }
+  const newId = asNew ? elements.newId.value.trim() : editing?.action === 'add' ? editing.id : null;
+  const written = newId === null ? overrideFile(open, changes.ok) : addFile(open, newId, changes.ok);
+  if (written.error) {
+    say(written.error, true);
+    return;
+  }
+  if (newId === null && Object.keys(changes.ok).length === 0) {
+    say('No field differs from the client value.', true);
+    return;
+  }
+  if (await put(written)) {
+    await openRecord(open.kind, open.id);
+  }
+}
+
+async function remove() {
+  if (!editing || !window.confirm(`Remove ${editing.path}? The client values come back.`)) {
+    return;
+  }
+  const response = await fetch(`${FILE_URL}?path=${encodeURIComponent(editing.path)}`, {
+    method: 'DELETE',
+    headers: ADMIN_HEADERS,
+  });
+  if (response.status === HTTP_REFUSED) {
+    showProblems((await response.json()).errors);
+    say(`Not removed: other files need ${editing.path}.`, true);
+    return;
+  }
+  if (!response.ok) {
+    say(`Not removed: ${response.status} ${await response.text()}`, true);
+    return;
+  }
+  say(`Removed ${editing.path}.`);
+  await openRecord(open.kind, open.id);
+}
+
+function fail(error) {
+  say(String(error.message ?? error), true);
+}
+
+elements.kind.replaceChildren(...KINDS.map(([kind, name]) => {
+  const option = document.createElement('option');
+  option.value = kind;
+  option.textContent = name;
+  return option;
+}));
+document.getElementById('search').addEventListener('submit', (event) => {
+  event.preventDefault();
+  search().catch(fail);
+});
+document.getElementById('save').addEventListener('click', () => save(false).catch(fail));
+document.getElementById('save-new').addEventListener('click', () => save(true).catch(fail));
+document.getElementById('remove').addEventListener('click', () => remove().catch(fail));
+elements.filter.addEventListener('input', drawFields);
+elements.changedOnly.addEventListener('change', drawFields);
+
+const start = new URL(window.location.href).searchParams;
+if (start.get(KIND_PARAMETER) && start.get(ID_PARAMETER)) {
+  elements.kind.value = start.get(KIND_PARAMETER);
+  openRecord(start.get(KIND_PARAMETER), start.get(ID_PARAMETER)).catch(fail);
+}
+say('Search for a record. The first search reads the client data and takes a few seconds.');

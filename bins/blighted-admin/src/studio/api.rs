@@ -82,6 +82,8 @@ struct SearchParams {
 #[derive(Debug, Serialize)]
 struct RecordView {
     id: String,
+    /// The folder of this kind's design files.
+    folder: &'static str,
     name: Option<String>,
     fields: Map<String, Value>,
     field_names: Vec<&'static str>,
@@ -185,6 +187,7 @@ async fn read_record(
     match files {
         Ok(files) => Json(RecordView {
             id: record.id.clone(),
+            folder: kind.folder(),
             name: record.name.clone(),
             fields: record.fields(),
             field_names: record_field_names(kind),
@@ -539,6 +542,7 @@ mod tests {
         let (status, record) = call(&fixture, Method::GET, &uri).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(record["id"], SWORD);
+        assert_eq!(record["folder"], "items");
         assert_eq!(record["fields"]["tier"], TIER);
         assert!(
             record["field_names"]

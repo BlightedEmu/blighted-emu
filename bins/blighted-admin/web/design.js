@@ -37,12 +37,16 @@ function float(value) {
 }
 
 /** A TOML basic string (JSON escapes are TOML escapes). */
-function quoted(text) {
+export function quoted(text) {
   return JSON.stringify(text);
 }
 
-function header(kind, id, map) {
-  const lines = [`schema = ${DESIGN_SCHEMA}`, `kind = ${quoted(kind)}`, 'action = "add"', `id = ${quoted(id)}`];
+/** The header lines of a design file; `map` and `base` only when given. */
+export function header(kind, action, id, { map = null, base = null } = {}) {
+  const lines = [`schema = ${DESIGN_SCHEMA}`, `kind = ${quoted(kind)}`, `action = ${quoted(action)}`, `id = ${quoted(id)}`];
+  if (base) {
+    lines.push(`base = ${quoted(base)}`);
+  }
   if (map) {
     lines.push(`map = ${quoted(map)}`);
   }
@@ -53,12 +57,13 @@ function pointsLine(points) {
   return `points = [${points.map((point) => `[${[point.x, point.y, point.z].map(float).join(', ')}]`).join(', ')}]`;
 }
 
-function badId(id) {
+/** The error text of an id that is not also a safe file name; null for a good one. */
+export function badId(id) {
   return ID_PATTERN.test(id) ? null : 'The id must be letters, digits, _ or - only.';
 }
 
 function file(kind, id, map, lines) {
-  return { path: designPath(kind, id, map), text: `${[...header(kind, id, map), ...lines].join('\n')}\n` };
+  return { path: designPath(kind, id, map), text: `${[...header(kind, 'add', id, { map }), ...lines].join('\n')}\n` };
 }
 
 /** The AI profile file of the form, or { error }. Empty numbers are left out. */
