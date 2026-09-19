@@ -22,6 +22,7 @@ use nw_world::WorldFile;
 use nw_world::world_file::world_file_path;
 
 use crate::config::{SimConfig, SimConfigError, load_sim_config};
+use crate::mob_ai::resolve_ai;
 use crate::mobs::spawns_of_level;
 use crate::player_content::{MobLooks, PlayerContent};
 use crate::server::{
@@ -188,6 +189,7 @@ async fn serve_async(
         heartbeat_interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
         heartbeat_misses: config.heartbeat_misses,
         combat: config.combat_settings(combat, spawns_of_level(&config.level, &ground.vitals)),
+        mob_ai: resolve_ai(&ground, &config.brain_settings()),
         content,
         snapshot_interval: (config.admin.snapshot_interval_ms != 0)
             .then(|| std::time::Duration::from_millis(config.admin.snapshot_interval_ms)),

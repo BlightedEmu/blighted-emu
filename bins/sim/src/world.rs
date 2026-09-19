@@ -87,6 +87,7 @@ use crate::login::{
     SessionIds, WorldIds, level_change_messages, login_level_info, login_messages, phase_id,
     time_answers,
 };
+use crate::mob_ai::MobAi;
 use crate::mobs::{MobAttackIntent, MobChanges, Mobs};
 use crate::objectives::{Effect, Event, ObjectiveRun};
 use crate::player_content::{MobLooks, OPEN_WORLD_OBJECTIVE, PlayerContent, TUTORIAL_OBJECTIVE};
@@ -596,6 +597,11 @@ impl SimWorld {
     /// Whether the player of `connection` is here.
     pub fn has(&self, connection: &ConnectionRef) -> bool {
         self.by_connection.contains_key(connection)
+    }
+
+    /// The design AI of the level's spawns (`mob_ai::resolve_ai`); set before the first cells.
+    pub fn set_mob_ai(&mut self, ai: Arc<[Option<MobAi>]>) {
+        self.mobs.set_ai(ai);
     }
 
     /// Players in the world.

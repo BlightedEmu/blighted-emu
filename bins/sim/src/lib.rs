@@ -8,6 +8,7 @@ pub mod config;
 pub mod forward;
 pub mod gateways;
 pub mod login;
+pub mod mob_ai;
 pub mod mobs;
 pub mod objectives;
 pub mod player_content;

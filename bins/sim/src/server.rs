@@ -36,6 +36,7 @@ use crate::combat::{AttackOutcome, AttackRefusal, CombatSettings, RemoteHit};
 use crate::forward::{Forward, ForwardTable};
 use crate::gateways::GatewayTracker;
 use crate::login::WorldIds;
+use crate::mob_ai::MobAi;
 use crate::mobs::{MobChanges, spawn_index};
 use crate::player_content::PlayerContent;
 use crate::saves::SaveQueue;
@@ -185,6 +186,8 @@ pub struct LoopSettings {
     pub content: Arc<PlayerContent>,
     /// Time between two admin snapshots on the bus; `None` is off.
     pub snapshot_interval: Option<Duration>,
+    /// The design AI of the level's spawns, in spawn order.
+    pub mob_ai: Arc<[Option<MobAi>]>,
 }
 
 /// The loop's failure.
@@ -287,6 +290,7 @@ pub async fn serve(
         id: settings.sim_id.clone(),
         generation: started_at_ms,
     };
+    let mob_ai = Arc::clone(&settings.mob_ai);
     let (handoff_results, mut answers) = mpsc::channel(RESULT_QUEUE);
     let mut state = Loop {
         world: SimWorld::new(
@@ -318,6 +322,7 @@ pub async fn serve(
         started: Instant::now(),
         started_at_ms,
     };
+    state.world.set_mob_ai(mob_ai);
     let mut clock = TickClock::new(0);
     let mut poll = tokio::time::interval(POLL);
     let mut save_timer = tokio::time::interval(state.settings.save_interval);
@@ -1227,6 +1232,7 @@ mod tests {
             combat: test_combat(),
             content: Arc::default(),
             snapshot_interval: None,
+            mob_ai: Arc::from([]),
         }
     }
 

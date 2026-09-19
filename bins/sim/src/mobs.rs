@@ -24,12 +24,13 @@ use nw_bus::{MOB_ENTITY_BASE, MOB_STATES, MobGhost, SnapMob};
 use nw_content::combat::CombatData;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_sim_core::{
-    Brain, BrainAction, BrainSettings, Dice, Gait, Ground, Health, MobAttack, MobState, Position,
-    Seen, SpatialGrid, TUTORIAL_FOLDER, brain_step, forget, mob_max_health,
+    Behaviour, Brain, BrainAction, BrainSettings, Dice, Gait, Ground, Health, MobAttack, MobState,
+    Position, Seen, SpatialGrid, TUTORIAL_FOLDER, brain_step, forget, mob_max_health,
 };
 pub use nw_world::records::VitalsSpawn;
 
 use crate::combat::CombatSettings;
+use crate::mob_ai::MobAi;
 
 /// A player scans for mobs to wake again after moving this far (about 2 s of running); far less
 /// than the wake radius, so a mob wakes before the player can reach it.
@@ -278,6 +279,8 @@ pub struct Mobs {
     personal: HashMap<u32, Personal>,
     /// GM mobs by index, with their spawns; their indexes follow the spawn list too.
     gm: BTreeMap<u32, VitalsSpawn>,
+    /// The design AI of each spawn of the spawn list (empty: none).
+    ai: Arc<[Option<MobAi>]>,
     next_personal: u32,
     data: Arc<CombatData>,
     settings: BrainSettings,
@@ -325,6 +328,7 @@ impl Mobs {
             spawns,
             personal: HashMap::new(),
             gm: BTreeMap::new(),
+            ai: Arc::from([]),
             next_personal,
             data: Arc::clone(&combat.data),
             settings: combat.brain,
@@ -398,6 +402,16 @@ impl Mobs {
             },
         );
         Some(mob_entity(index))
+    }
+
+    /// The design AI of the spawn list, in spawn order; set before the first cells.
+    pub fn set_ai(&mut self, ai: Arc<[Option<MobAi>]>) {
+        self.ai = ai;
+    }
+
+    /// The design AI of spawn `index`, when a design file gave it one.
+    fn ai_of(&self, index: u32) -> Option<&MobAi> {
+        self.ai.get(index as usize)?.as_ref()
     }
 
     /// Spawns a GM mob of `spawn`; its entity number, or `None` without its rows.
@@ -602,7 +616,19 @@ impl Mobs {
                     continue;
                 }
                 match self.make(spawn) {
-                    Some(mob) => {
+                    Some(mut mob) => {
+                        if let Some(ai) = self.ai_of(index) {
+                            mob.brain.set_behaviour(ai.behaviour);
+                            if let Some(sight_m) = ai.sight_m {
+                                mob.brain.set_sight(sight_m);
+                            }
+                            if let Some(route) = &ai.route {
+                                mob.brain.set_route(route.clone());
+                            }
+                            if ai.behaviour == Behaviour::Patrol {
+                                self.awake.insert(index);
+                            }
+                        }
                         self.live.insert(index, mob);
                         changes.spawned += 1;
                     }
@@ -691,14 +717,19 @@ impl Mobs {
                 .map(|(entity, position)| Seen { entity, position })
                 .collect();
             self.brain_runs += 1;
+            let designed = self.ai.get(index as usize).and_then(Option::as_ref);
+            let base = designed.map_or(self.settings, |ai| ai.settings);
             let settings = personal
                 .and_then(|personal| Some((personal.swing_gap_ms, personal.pace?)))
-                .map_or(self.settings, |(swing_gap_ms, pace)| BrainSettings {
+                .map_or(base, |(swing_gap_ms, pace)| BrainSettings {
                     mob_attack_interval_ms: swing_gap_ms,
                     mob_speed_mps: pace.speed_mps,
                     gait: pace.gait,
                     ..self.settings
                 });
+            // A patrolling mob walks away from its spawn, where the wake scan looks: it stays
+            // awake.
+            let patrols = designed.is_some_and(|ai| ai.behaviour == Behaviour::Patrol);
             let is_personal = personal.is_some();
             let paced = personal.is_some_and(|personal| personal.pace.is_some());
             let action = brain_step(&mut mob.brain, &seen, now_ms, &settings, &mut self.dice);
@@ -742,7 +773,7 @@ impl Mobs {
                 BrainAction::Respawned | BrainAction::Home => mob.health.refill(),
                 BrainAction::None => {}
             }
-            let stays_awake = is_personal || self.gm.contains_key(&index);
+            let stays_awake = is_personal || patrols || self.gm.contains_key(&index);
             if mob.brain.state() == MobState::Asleep && !stays_awake {
                 self.awake.remove(&index);
             } else {
@@ -972,6 +1003,70 @@ mod tests {
         assert_eq!(
             mobs.spawn_gm(spawn_at(10.0, "no_such_mob", TEST_LEVEL)),
             None
+        );
+    }
+
+    fn designed(behaviour: nw_sim_core::Behaviour, route: Option<nw_sim_core::Route>) -> MobAi {
+        MobAi {
+            behaviour,
+            settings: test_combat().brain,
+            sight_m: None,
+            route,
+        }
+    }
+
+    /// The position of mob `entity` after ticking from `from_ms` to `to_ms` with a player near
+    /// enough to wake the mobs and too far to be seen.
+    fn walk(mobs: &mut Mobs, entity: u64, from_ms: u64, to_ms: u64) -> Position {
+        let player = Seen {
+            entity: PLAYER,
+            position: Position {
+                x: 50.0,
+                y: 1060.0,
+                z: HEIGHT,
+            },
+        };
+        for now in (from_ms..=to_ms).step_by(TICK_MS as usize) {
+            mobs.tick(&[player], now, &Flat);
+        }
+        mobs.get_mut(entity).expect("mob").brain.position()
+    }
+
+    #[test]
+    fn a_guard_spawn_stands_and_a_patrol_spawn_walks_its_route_awake() {
+        const ROUTE_END_X: f32 = 90.0;
+        let mut mobs = mobs(vec![
+            spawn_at(10.0, TEST_MOB, TEST_LEVEL),
+            spawn_at(10.0, TEST_MOB, TEST_LEVEL),
+        ]);
+        let route = nw_sim_core::Route {
+            points: vec![Position {
+                x: ROUTE_END_X,
+                y: 1000.0,
+                z: HEIGHT,
+            }],
+            waits_ms: Vec::new(),
+            mode: nw_sim_core::RouteMode::Once,
+        };
+        mobs.set_ai(Arc::from([
+            Some(designed(nw_sim_core::Behaviour::Guard, None)),
+            Some(designed(nw_sim_core::Behaviour::Patrol, Some(route))),
+        ]));
+        mobs.set_cells(every);
+        let guard = walk(&mut mobs, mob_entity(0), 0, 40_000);
+        assert!(
+            (guard.x - 10.0).abs() < 0.01,
+            "the guard stands at its spawn: {guard:?}"
+        );
+        let patrol = mobs.get_mut(mob_entity(1)).expect("mob").brain.position();
+        assert!(
+            (patrol.x - ROUTE_END_X).abs() < 0.1,
+            "the patrol reached its route end: {patrol:?}"
+        );
+        let later = walk(&mut mobs, mob_entity(1), 40_033, 200_000);
+        assert!(
+            (later.x - ROUTE_END_X).abs() < 0.1,
+            "it stays awake and at its end"
         );
     }
 
