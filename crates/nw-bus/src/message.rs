@@ -184,6 +184,8 @@ pub struct Admit {
     pub backstory: Option<String>,
     /// The character's saved items; `None` when it never saved items (it gets its starter kit).
     pub items: Option<Vec<CarriedItem>>,
+    /// The character's saved quests; empty when it never saved any.
+    pub quests: PlayerQuests,
 }
 
 /// The answer to [`Admit`].
@@ -297,14 +299,23 @@ pub struct HandoffOffer {
     /// The player's experience points (the tutorial's kills give some).
     #[serde(default)]
     pub experience: u32,
-    /// The player's run of its open-world quest, when one runs.
+    /// The player's quests: the active one with its run, and the finished ones.
     #[serde(default)]
-    pub quest: Option<QuestRun>,
+    pub quests: PlayerQuests,
     /// The set achievement bits of the level the player leaves; a taker that changes the level
     /// keeps them (retail: the open world's first full achievement state held the tutorial's 54
     /// bits).
     #[serde(default)]
     pub achievements: Vec<u32>,
+}
+
+/// A player's quests (admin studio spec section 6.3), as a join or a handoff carries them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerQuests {
+    /// The active objective (its id) and its run.
+    pub active: Option<(String, QuestRun)>,
+    /// The ids of the finished objectives.
+    pub done: Vec<String>,
 }
 
 /// A player's run of a quest, as a handoff carries it to the next sim.
@@ -641,6 +652,7 @@ mod tests {
                 quantity: 5,
                 place: ItemPlace::Bag(0),
             }]),
+            quests: PlayerQuests::default(),
         });
         round_trip(AdmitReply::Admitted);
         round_trip(AdmitReply::Refused {
@@ -684,18 +696,24 @@ mod tests {
                 place: ItemPlace::Worn(14),
             }]),
             drawn_weapon: Some(25),
-            quest: Some(QuestRun {
-                tasks: vec![
-                    QuestTask::Done,
-                    QuestTask::Active {
-                        progress: 1,
-                        due_in_ms: Some(500),
+            quests: PlayerQuests {
+                active: Some((
+                    "12_GetOffBeach".to_owned(),
+                    QuestRun {
+                        tasks: vec![
+                            QuestTask::Done,
+                            QuestTask::Active {
+                                progress: 1,
+                                due_in_ms: Some(500),
+                            },
+                            QuestTask::Idle,
+                        ],
+                        listed: vec![0, 1],
+                        tracker_version: 7,
                     },
-                    QuestTask::Idle,
-                ],
-                listed: vec![0, 1],
-                tracker_version: 7,
-            }),
+                )),
+                done: vec!["01_SoleSurvivor2".to_owned()],
+            },
         };
         round_trip(HandoffMessage::Offer(Box::new(offer)));
         round_trip(HandoffMessage::Cancel {

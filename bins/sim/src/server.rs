@@ -16,13 +16,13 @@ use std::time::{Duration, Instant};
 use nw_bus::{
     AdminAction, AdminCommand, AdminReply, Admit, AdmitReply, Bus, BusError, BusId, CarriedItem,
     CellTable, ConnectionRef, GatewayOutput, Ghosts, HandoffMessage, HandoffReply, Heartbeat, Hit,
-    Incoming, InputBatch, ItemPlace, OutputBatch, Point, Publisher, SimHeartbeat, SimInput,
-    SimSlot, SimSnapshot, snapshot_parts, split_batches, subject,
+    Incoming, InputBatch, ItemPlace, OutputBatch, PlayerQuests, Point, Publisher, SimHeartbeat,
+    SimInput, SimSlot, SimSnapshot, snapshot_parts, split_batches, subject,
 };
 use nw_common::time::unix_ms;
 use nw_db::{
-    PgPool, SaveOutcome, SavedItem, SavedPlace, SavedPosition, save_character_items,
-    save_character_position,
+    PgPool, SaveOutcome, SavedItem, SavedPlace, SavedPosition, SavedQuests, save_character_items,
+    save_character_position, save_character_quests,
 };
 use nw_messages::{
     BodyCodec, ClientFacetMsg, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
@@ -42,7 +42,7 @@ use crate::login::WorldIds;
 use crate::mob_ai::MobAi;
 use crate::mobs::{MobChanges, spawn_index};
 use crate::player_content::PlayerContent;
-use crate::saves::{ItemSave, SaveQueue};
+use crate::saves::{ItemSave, QuestSave, SaveQueue};
 use crate::world::{
     Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
 };
@@ -209,6 +209,7 @@ pub enum ServeError {
 enum SaveKind {
     Position,
     Items,
+    Quests,
 }
 
 type SaveResult = (SaveKind, Uuid, bool);
@@ -275,6 +276,7 @@ struct Loop {
     forwards: ForwardTable,
     queue: SaveQueue<SavedPosition>,
     item_queue: SaveQueue<ItemSave>,
+    quest_queue: SaveQueue<QuestSave>,
     saves: JoinSet<SaveResult>,
     handoff_results: mpsc::Sender<HandoffResult>,
     started: Instant,
@@ -329,6 +331,7 @@ pub async fn serve(
         db,
         queue: SaveQueue::default(),
         item_queue: SaveQueue::default(),
+        quest_queue: SaveQueue::default(),
         saves: JoinSet::new(),
         handoff_results,
         started: Instant::now(),
@@ -403,6 +406,9 @@ impl Loop {
         }
         if let Some(unsaved) = self.item_queue.latest(message.character) {
             message.items = Some(unsaved.items.clone());
+        }
+        if let Some(unsaved) = self.quest_queue.latest(message.character) {
+            message.quests = unsaved.quests.clone();
         }
         let reply = match self.world.admit(&message, self.now_ms(), server_time()) {
             Ok(login) => {
@@ -1034,6 +1040,9 @@ impl Loop {
         for (character, items) in self.item_queue.retry() {
             self.spawn_item_save(character, items);
         }
+        for (character, quests) in self.quest_queue.retry() {
+            self.spawn_quest_save(character, quests);
+        }
     }
 
     fn save(&mut self, departure: &Departure) {
@@ -1058,36 +1067,61 @@ impl Loop {
                 self.spawn_item_save(departure.character, save);
             }
         }
+        if let Some(quests) = &departure.quests {
+            let save = QuestSave {
+                quests: quests.clone(),
+                taken_at_ms: unix_ms(),
+            };
+            if let Some(save) = self.quest_queue.want(departure.character, save) {
+                self.spawn_quest_save(departure.character, save);
+            }
+        }
+    }
+
+    /// Runs `store`, a save of `kind` of `character`, as a task; a newer stored value is a
+    /// finished save too.
+    fn spawn_store(
+        &mut self,
+        kind: SaveKind,
+        character: Uuid,
+        store: impl Future<Output = Result<SaveOutcome, nw_db::DbError>> + Send + 'static,
+    ) {
+        self.saves.spawn(async move {
+            let ok = match store.await {
+                Ok(SaveOutcome::Saved | SaveOutcome::Older) => true,
+                Err(error) => {
+                    tracing::error!(%error, %character, ?kind, "save failed");
+                    false
+                }
+            };
+            (kind, character, ok)
+        });
     }
 
     fn spawn_save(&mut self, character: Uuid, position: SavedPosition) {
         let db = self.db.clone();
-        self.saves.spawn(async move {
-            // A newer stored position is a finished save too.
-            let ok = match save_character_position(&db, character, &position).await {
-                Ok(SaveOutcome::Saved | SaveOutcome::Older) => true,
-                Err(error) => {
-                    tracing::error!(%error, %character, "position save failed");
-                    false
-                }
-            };
-            (SaveKind::Position, character, ok)
+        self.spawn_store(SaveKind::Position, character, async move {
+            save_character_position(&db, character, &position).await
         });
     }
 
     fn spawn_item_save(&mut self, character: Uuid, save: ItemSave) {
         let db = self.db.clone();
-        self.saves.spawn(async move {
-            let items = saved_items(&save.items);
-            // A newer stored list is a finished save too.
-            let ok = match save_character_items(&db, character, &items, save.taken_at_ms).await {
-                Ok(SaveOutcome::Saved | SaveOutcome::Older) => true,
-                Err(error) => {
-                    tracing::error!(%error, %character, "item save failed");
-                    false
-                }
-            };
-            (SaveKind::Items, character, ok)
+        self.spawn_store(SaveKind::Items, character, async move {
+            save_character_items(&db, character, &saved_items(&save.items), save.taken_at_ms).await
+        });
+    }
+
+    fn spawn_quest_save(&mut self, character: Uuid, save: QuestSave) {
+        let db = self.db.clone();
+        self.spawn_store(SaveKind::Quests, character, async move {
+            save_character_quests(
+                &db,
+                character,
+                &saved_quests(&save.quests),
+                save.taken_at_ms,
+            )
+            .await
         });
     }
 
@@ -1114,6 +1148,11 @@ impl Loop {
                     self.spawn_item_save(character, next);
                 }
             }
+            SaveKind::Quests => {
+                if let Some(next) = self.quest_queue.finished(character, ok) {
+                    self.spawn_quest_save(character, next);
+                }
+            }
         }
     }
 
@@ -1129,10 +1168,22 @@ impl Loop {
             }
         })
         .await;
-        let waiting = self.queue.waiting() + self.item_queue.waiting();
+        let waiting = self.queue.waiting() + self.item_queue.waiting() + self.quest_queue.waiting();
         if drained.is_err() || waiting > 0 {
-            tracing::error!(waiting, "positions or items not saved at shutdown");
+            tracing::error!(waiting, "positions, items or quests not saved at shutdown");
         }
+    }
+}
+
+/// The quests as the database stores them: the run as JSON.
+fn saved_quests(quests: &PlayerQuests) -> SavedQuests {
+    SavedQuests {
+        active: quests.active.as_ref().and_then(|(objective, run)| {
+            serde_json::to_value(run)
+                .ok()
+                .map(|run| (objective.clone(), run))
+        }),
+        done: quests.done.clone(),
     }
 }
 
@@ -1217,8 +1268,12 @@ mod tests {
     use nw_bus::{HandoffOffer, Subscription};
     use nw_db::test_db::with_test_schema;
     use nw_db::{
-        NewCharacter, WORLD_MIGRATOR, character_items, character_position, insert_character,
+        NewCharacter, WORLD_MIGRATOR, character_items, character_position, character_quests,
+        insert_character,
     };
+
+    /// A finished objective a test player carries.
+    const DONE_QUEST: &str = "01_SoleSurvivor2";
     use nw_messages::{
         ALC_TYPE_INDEX, DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, EntitySlots,
         GDE_METADATA_TYPE_INDEX, InputPosition, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
@@ -1649,6 +1704,7 @@ mod tests {
             look: None,
             backstory: None,
             items: None,
+            quests: PlayerQuests::default(),
         }
     }
 
@@ -1991,7 +2047,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_leave_saves_the_items() {
+    async fn a_leave_saves_the_items_and_quests() {
         with_test_schema(async |db| {
             WORLD_MIGRATOR.run(db).await.expect("migrate");
             let ada = character(db).await;
@@ -2002,12 +2058,23 @@ mod tests {
             assert_eq!(character_items(db, ada.1).await.expect("load"), None);
             let mut first = admit_at(gateway.connection(CONNECTION), ada, BORDER_X);
             first.items = Some(Vec::new());
+            first.quests = PlayerQuests {
+                active: None,
+                done: vec![DONE_QUEST.to_owned()],
+            };
             admit(&bus, world_id, sim.id(), &first).await;
             sim.stop().await;
             assert_eq!(
                 character_items(db, ada.1).await.expect("load"),
                 Some(Vec::new()),
                 "an empty bag is saved as empty, not as never saved"
+            );
+            assert_eq!(
+                character_quests(db, ada.1).await.expect("load"),
+                Some(SavedQuests {
+                    active: None,
+                    done: vec![DONE_QUEST.to_owned()],
+                })
             );
         })
         .await;
@@ -2540,7 +2607,7 @@ mod tests {
                 items: None,
                 drawn_weapon: None,
                 experience: 0,
-                quest: None,
+                quests: PlayerQuests::default(),
                 achievements: Vec::new(),
             };
             let subject = subject::sim_handoff(world_id, &id);

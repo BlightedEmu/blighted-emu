@@ -23,6 +23,7 @@ nw-reflect.workspace = true
 nw-sim-core.workspace = true
 nw-world.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
@@ -34,7 +35,6 @@ nw-sim-core = { workspace = true, features = ["test-util"] }
 nw-bus = { workspace = true, features = ["test-util"] }
 nw-carrier.workspace = true
 nw-db = { workspace = true, features = ["test-util"] }
-serde_json.workspace = true
 
 [features]
 # `combat::test_support`: combat rows for other crates' tests.

@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Saves in order (M4 spec section 7.5), with no I/O: positions, and items (admin studio S5). At
+//! Saves in order (M4 spec section 7.5), with no I/O: positions, items (admin studio S5) and
+//! quests (S7). At
 //! most one save of a character runs at a time, so an older value can never land after a newer
 //! one. While it runs, only the newest wanted value waits. A failed save waits for the next retry
 //! round, unless a newer value already waits.
 
 use std::collections::HashMap;
 
-use nw_bus::CarriedItem;
+use nw_bus::{CarriedItem, PlayerQuests};
 use uuid::Uuid;
 
 /// The item list of a character to save, with the Unix time it was taken.
@@ -16,6 +17,16 @@ pub struct ItemSave {
     pub items: Vec<CarriedItem>,
     /// Unix milliseconds when the list was taken: a save of an older list never overwrites a
     /// newer one.
+    pub taken_at_ms: u64,
+}
+
+/// The quests of a character to save, with the Unix time they were taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestSave {
+    /// The active run and the finished objectives.
+    pub quests: PlayerQuests,
+    /// Unix milliseconds when the state was taken: a save of an older state never overwrites
+    /// a newer one.
     pub taken_at_ms: u64,
 }
 

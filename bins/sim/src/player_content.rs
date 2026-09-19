@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The content a sim needs for its players besides combat: the starter kit of each archetype
-//! pick, the bit of each achievement, the look of each mob prefab, and the tutorial quest.
+//! pick, the bit of each achievement, the look of each mob prefab, and the quests.
 
 use nw_content::gathering::Gatherables;
 use nw_content::loot::{LootTables, MobLoot};
@@ -14,7 +14,7 @@ use nw_content::mob_prefabs::{ASSET_ID_LEN, MobPrefabs, PrefabKey, PrefabMember}
 use nw_content::starter::StarterKits;
 use nw_messages::{AlcState, AssetId, BundleMember, MemberState, VitalsState};
 
-use crate::objectives::{KillTypes, ObjectiveTree, task_rows};
+use crate::objectives::{KillTypes, ObjectiveTree, TaskBook, task_rows};
 
 /// The tutorial quest's objective id (`Objectives`).
 pub const TUTORIAL_OBJECTIVE: &str = "01_SoleSurvivor2";
@@ -25,6 +25,98 @@ pub const OPEN_WORLD_OBJECTIVE: &str = "12_GetOffBeach";
 pub const OPEN_WORLD_QUEST_ROOT: &str = "12_getoffbeach_container";
 /// The root task of the tutorial quest `01_SoleSurvivor2` (live-tutorial note, appendix A).
 pub const TUTORIAL_QUEST_ROOT: &str = "01_SoleSurvivor2_Container";
+
+/// One objective a player can run (admin studio spec section 6.3).
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuestDef {
+    /// `ObjectiveID`.
+    pub id: String,
+    /// Its task tree.
+    pub tree: Arc<ObjectiveTree>,
+    /// `ItemRewardName` and `ItemRewardQty`, given at completion.
+    pub reward: Option<(String, u32)>,
+    /// `Repeatable`: it can run again after it is done.
+    pub repeatable: bool,
+}
+
+/// The `Objectives` cells a quest needs.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ObjectiveRow {
+    /// `ObjectiveID`.
+    pub id: String,
+    /// `Task`: the root task.
+    pub root: String,
+    /// `ItemRewardName`.
+    pub reward_item: Option<String>,
+    /// `ItemRewardQty`.
+    pub reward_quantity: Option<i64>,
+    /// `Repeatable`.
+    pub repeatable: bool,
+}
+
+/// Every objective by lowercase id, with the task rows to build their trees.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct QuestBook {
+    tasks: TaskBook,
+    objectives: HashMap<String, ObjectiveRow>,
+}
+
+impl QuestBook {
+    /// The objectives and task rows of `tables`.
+    pub fn from_tables(tables: &Tables) -> Self {
+        Self::build(
+            tables
+                .objectives
+                .iter()
+                .flat_map(|table| &table.rows)
+                .map(|row| ObjectiveRow {
+                    id: row.objective_id.clone(),
+                    root: row.task.clone(),
+                    reward_item: row.item_reward_name.clone(),
+                    reward_quantity: row.item_reward_qty,
+                    repeatable: row.repeatable.unwrap_or_default(),
+                }),
+            TaskBook::new(task_rows(tables)),
+        )
+    }
+
+    /// The book of `objectives` over `tasks`; the first row of an id wins.
+    pub fn build(objectives: impl IntoIterator<Item = ObjectiveRow>, tasks: TaskBook) -> Self {
+        let mut by_id = HashMap::new();
+        for row in objectives {
+            by_id.entry(row.id.to_lowercase()).or_insert(row);
+        }
+        Self {
+            tasks,
+            objectives: by_id,
+        }
+    }
+
+    /// The quest of objective `id` (any case); `None` when there is no such objective or its
+    /// root task is not a task row.
+    pub fn quest(&self, id: &str) -> Option<QuestDef> {
+        let row = self.objectives.get(&id.to_lowercase())?;
+        let tree = self.tasks.tree(&row.root)?;
+        let reward = row
+            .reward_item
+            .as_ref()
+            .filter(|item| !item.is_empty())
+            .map(|item| {
+                let quantity = row
+                    .reward_quantity
+                    .and_then(|quantity| u32::try_from(quantity).ok())
+                    .filter(|quantity| *quantity > 0)
+                    .unwrap_or(1);
+                (item.clone(), quantity)
+            });
+        Some(QuestDef {
+            id: row.id.clone(),
+            tree: Arc::new(tree),
+            reward,
+            repeatable: row.repeatable,
+        })
+    }
+}
 
 /// What a client needs to show one mob prefab (mob-cards note, section 2).
 #[derive(Debug, Clone, PartialEq)]
@@ -152,8 +244,8 @@ pub struct PlayerContent {
     pub kill_types: KillTypes,
     /// The task tree of the tutorial quest; `None` when the content lacks it.
     pub tutorial_quest: Option<Arc<ObjectiveTree>>,
-    /// The task tree of the first open-world quest; `None` when the content lacks it.
-    pub open_world_quest: Option<Arc<ObjectiveTree>>,
+    /// Every quest; the first open-world quest is one of them.
+    pub quests: QuestBook,
     /// The tutorial level's entities: its static entities, its asset entities and the retail
     /// causes of their groups.
     pub tutorial_level: FtueLevel,
@@ -185,8 +277,7 @@ impl PlayerContent {
             kill_types: KillTypes::from_tables(tables),
             tutorial_quest: ObjectiveTree::build(&task_rows(tables), TUTORIAL_QUEST_ROOT)
                 .map(Arc::new),
-            open_world_quest: ObjectiveTree::build(&task_rows(tables), OPEN_WORLD_QUEST_ROOT)
-                .map(Arc::new),
+            quests: QuestBook::from_tables(tables),
             tutorial_level,
             gatherables: Gatherables::from_tables(tables),
             loot: LootTables::from_tables(tables),

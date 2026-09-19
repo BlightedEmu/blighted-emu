@@ -148,6 +148,38 @@ pub struct TaskRow {
     pub target_tag: Option<String>,
 }
 
+/// Every task row with an index by lowercase task id, made once for the trees of many
+/// objectives.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TaskBook {
+    rows: Vec<TaskRow>,
+    by_id: HashMap<String, usize>,
+}
+
+impl TaskBook {
+    /// The book of `rows`.
+    pub fn new(rows: Vec<TaskRow>) -> Self {
+        let by_id = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.task_id.to_lowercase(), index))
+            .collect();
+        Self { rows, by_id }
+    }
+
+    /// The tree under task `root`, as [`ObjectiveTree::build`].
+    pub fn tree(&self, root: &str) -> Option<ObjectiveTree> {
+        ObjectiveTree::build_with(
+            &|id| {
+                self.by_id
+                    .get(&id.to_lowercase())
+                    .and_then(|index| self.rows.get(*index))
+            },
+            root,
+        )
+    }
+}
+
 /// The task rows of `tables`.
 pub fn task_rows(tables: &Tables) -> Vec<TaskRow> {
     tables
@@ -232,12 +264,17 @@ impl ObjectiveTree {
             .iter()
             .map(|row| (row.task_id.to_lowercase(), row))
             .collect();
+        Self::build_with(&|id| by_id.get(&id.to_lowercase()).copied(), root)
+    }
+
+    /// The tree under task `root`, with `find` giving the row of a task id.
+    fn build_with<'r>(find: &dyn Fn(&str) -> Option<&'r TaskRow>, root: &str) -> Option<Self> {
         let mut tree = Self {
             tasks: Vec::new(),
             wire_index: Vec::new(),
         };
         let mut path = Vec::new();
-        tree.add(&by_id, root, None, &mut path)?;
+        tree.add(find, root, None, &mut path)?;
         tree.wire_index = vec![0; tree.tasks.len()];
         let mut next = 0;
         tree.number_children_first(0, &mut next);
@@ -254,9 +291,9 @@ impl ObjectiveTree {
         *next += 1;
     }
 
-    fn add(
+    fn add<'r>(
         &mut self,
-        by_id: &HashMap<String, &TaskRow>,
+        find: &dyn Fn(&str) -> Option<&'r TaskRow>,
         id: &str,
         parent: Option<usize>,
         path: &mut Vec<String>,
@@ -265,7 +302,7 @@ impl ObjectiveTree {
         if path.contains(&key) {
             return None;
         }
-        let row = by_id.get(&key)?;
+        let row = find(&key)?;
         let index = self.tasks.len();
         self.tasks.push(Task {
             id: row.task_id.clone(),
@@ -277,7 +314,7 @@ impl ObjectiveTree {
         let children: Vec<usize> = row
             .sub_tasks
             .iter()
-            .filter_map(|child| self.add(by_id, child, Some(index), path))
+            .filter_map(|child| self.add(find, child, Some(index), path))
             .collect();
         path.pop();
         self.tasks[index].children = children;

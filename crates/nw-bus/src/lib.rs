@@ -21,8 +21,8 @@ pub use message::{
     Admit, AdmitReply, CarriedItem, CellTable, ConnectionRef, GatewayOutput, Ghost, Ghosts,
     HandoffMessage, HandoffOffer, HandoffReply, Heartbeat, Hit, InputBatch, ItemPlace, Join,
     JoinReply, MAX_BATCH_BYTES, MAX_BUS_MESSAGE_BYTES, MAX_GHOST_BYTES, MOB_ENTITY_BASE, MobGhost,
-    OutputBatch, Point, QuestRun, QuestTask, ResumeOf, SimHeartbeat, SimInput, SimSlot, decode,
-    encode, heartbeat_silence, split_batches,
+    OutputBatch, PlayerQuests, Point, QuestRun, QuestTask, ResumeOf, SimHeartbeat, SimInput,
+    SimSlot, decode, encode, heartbeat_silence, split_batches,
 };
 pub use publisher::Publisher;
 pub use snapshot::{

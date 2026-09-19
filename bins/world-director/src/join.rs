@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! One join (M5 spec section 3.1): check the account, load the position and the items, take an
-//! entity number, and ask the owner of the cell to take the player.
+//! One join (M5 spec section 3.1): check the account, load the position, the items and the
+//! quests, take an entity number, and ask the owner of the cell to take the player.
 
 use std::time::Duration;
 
 use nw_bus::{
-    Admit, AdmitReply, Bus, CarriedItem, ItemPlace, Join, MOB_ENTITY_BASE, Point, SimSlot, subject,
+    Admit, AdmitReply, Bus, CarriedItem, ItemPlace, Join, MOB_ENTITY_BASE, PlayerQuests, Point,
+    QuestRun, SimSlot, subject,
 };
 use nw_db::{
-    PgPool, SavedItem, SavedPlace, SavedPosition, character_by_id, character_items,
-    character_position, next_entity_number,
+    PgPool, SavedItem, SavedPlace, SavedPosition, SavedQuests, character_by_id, character_items,
+    character_position, character_quests, next_entity_number,
 };
 use nw_login::look::{saved_backstory, saved_look};
 use nw_sim_core::{Position, TUTORIAL_FOLDER, TUTORIAL_START};
@@ -163,13 +164,20 @@ pub async fn route_join(
         ),
     };
     let tutorial = tutorial.filter(|_| starts_in_tutorial(saved.as_ref()));
-    // The tutorial always starts from the starter kit (admin studio S5 plan).
-    let items = match tutorial {
-        Some(_) => None,
-        None => character_items(&context.db, join.character)
-            .await
-            .map_err(database)?
-            .map(carried_items),
+    // The tutorial always starts from the starter kit and no quest (admin studio S5, S7).
+    let (items, quests) = match tutorial {
+        Some(_) => (None, PlayerQuests::default()),
+        None => (
+            character_items(&context.db, join.character)
+                .await
+                .map_err(database)?
+                .map(carried_items),
+            character_quests(&context.db, join.character)
+                .await
+                .map_err(database)?
+                .map(player_quests)
+                .unwrap_or_default(),
+        ),
     };
     let (sim, position) = match tutorial {
         Some(tutorial) => (tutorial.clone(), TUTORIAL_START),
@@ -202,6 +210,7 @@ pub async fn route_join(
         look: saved_look(&character.appearance).map(|look| look.choices()),
         backstory: saved_backstory(&character.appearance),
         items,
+        quests,
     };
     let reply = context
         .bus
@@ -215,6 +224,24 @@ pub async fn route_join(
     match reply {
         AdmitReply::Admitted => Ok((sim, entity)),
         AdmitReply::Refused { reason } => Err(JoinRefusal::SimRefused(reason)),
+    }
+}
+
+/// The saved quests as a sim runs them; an active run that no longer reads is dropped.
+fn player_quests(saved: SavedQuests) -> PlayerQuests {
+    let active =
+        saved.active.and_then(
+            |(objective, run)| match serde_json::from_value::<QuestRun>(run) {
+                Ok(run) => Some((objective, run)),
+                Err(error) => {
+                    tracing::warn!(%error, objective, "saved quest run does not read");
+                    None
+                }
+            },
+        );
+    PlayerQuests {
+        active,
+        done: saved.done,
     }
 }
 
@@ -236,6 +263,29 @@ fn carried_items(saved: Vec<SavedItem>) -> Vec<CarriedItem> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_quests_read_their_run_and_drop_a_bad_one() {
+        let run = QuestRun {
+            tasks: vec![nw_bus::QuestTask::Done],
+            listed: vec![0],
+            tracker_version: 4,
+        };
+        let good = player_quests(SavedQuests {
+            active: Some((
+                "12_GetOffBeach".to_owned(),
+                serde_json::to_value(&run).expect("json"),
+            )),
+            done: vec!["01_SoleSurvivor2".to_owned()],
+        });
+        assert_eq!(good.active, Some(("12_GetOffBeach".to_owned(), run)));
+        assert_eq!(good.done, ["01_SoleSurvivor2"]);
+        let bad = player_quests(SavedQuests {
+            active: Some(("Q".to_owned(), serde_json::json!({"tasks": "no"}))),
+            done: Vec::new(),
+        });
+        assert_eq!(bad.active, None);
+    }
 
     #[test]
     fn saved_items_keep_their_places() {
