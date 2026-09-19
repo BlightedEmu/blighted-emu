@@ -5,8 +5,9 @@ const GM_PREFIX = '/api/gm/';
 const ADMIN_HEADERS = Object.freeze({ 'X-Blighted-Admin': '1', 'Content-Type': 'application/json' });
 /** Most GM mobs one spawn makes (the sim's limit). */
 export const MAX_SPAWN = 50;
-const LOWEST_LEVEL = 1;
-const HIGHEST_LEVEL = 65;
+/** Lowest and highest creature level. */
+export const LOWEST_LEVEL = 1;
+export const HIGHEST_LEVEL = 65;
 
 function numbers(texts) {
   const trimmed = texts.map((text) => String(text).trim());

@@ -34,6 +34,47 @@
       <div class="section-head"><h2>Problems</h2></div>
       <ul class="list problems" id="problems"><li class="muted">None found.</li></ul>
     </section>
+    <section class="editor" aria-label="Editors">
+      <div class="section-head">
+        <h2>Editors</h2>
+        <div class="tabs" role="group" aria-label="Kind">
+          <button type="button" data-editor="ai_profile">AI profile</button>
+          <button type="button" data-editor="path">Path</button>
+          <button type="button" data-editor="spawn_group">Spawn group</button>
+        </div>
+        <span class="status" id="editor-status" role="status"></span>
+      </div>
+      <form class="gm" id="form-ai_profile" data-kind="ai_profile">
+        <input type="text" name="id" aria-label="profile id" placeholder="profile id" class="wide">
+        <select name="behaviour" aria-label="behaviour"></select>
+        <span id="profile-numbers" class="gm"></span>
+      </form>
+      <form class="gm" id="form-path" data-kind="path" hidden>
+        <input type="text" name="id" aria-label="path id" placeholder="path id" class="wide">
+        <select name="mode" aria-label="mode"></select>
+        <input type="text" name="waits" aria-label="waits at each point (ms, split by commas)" placeholder="waits ms: 3000, 0" class="wide">
+      </form>
+      <form class="gm" id="form-spawn_group" data-kind="spawn_group" hidden>
+        <input type="text" name="id" aria-label="group id" placeholder="group id" class="wide">
+        <input type="text" name="vitals" aria-label="vitals id" placeholder="vitals id" class="wide">
+        <input type="text" name="level" inputmode="numeric" aria-label="level" placeholder="level">
+        <input type="text" name="profile" list="profile-ids" aria-label="AI profile (optional)" placeholder="AI profile" class="wide">
+        <input type="text" name="path" list="path-ids" aria-label="path (optional)" placeholder="path" class="wide">
+      </form>
+      <datalist id="profile-ids"></datalist>
+      <datalist id="path-ids"></datalist>
+      <div class="gm">
+        <span class="muted" id="editor-points"></span>
+        <button type="button" id="editor-undo">Undo point</button>
+        <button type="button" id="editor-clear">Clear points</button>
+        <button type="button" id="editor-new">New</button>
+        <button type="button" id="editor-save">Save</button>
+        <button type="button" class="danger" id="editor-delete">Delete</button>
+      </div>
+      <section class="chart editor-map" id="editor-map-box" aria-label="Editor map">
+        <canvas class="map" id="editor-map"></canvas>
+      </section>
+    </section>
     <details class="players" open>
       <summary class="section-head"><h2>Design files</h2><span class="status" id="files-count"></span></summary>
       <div class="table-scroll">

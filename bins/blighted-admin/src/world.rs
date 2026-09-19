@@ -132,6 +132,8 @@ pub struct SpawnPoint {
 /// The world facts the map page needs.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WorldInfo {
+    /// The level name, as design files name it with `map`.
+    pub level: String,
     /// Edge of the square world, metres.
     pub world_m: u32,
     /// Ocean height, metres.
@@ -271,11 +273,17 @@ impl WorldLayer {
     /// The world facts of the map page.
     pub fn info(&self) -> WorldInfo {
         WorldInfo {
+            level: self.world.level.name.clone(),
             world_m: world_m(&self.world),
             ocean_level: self.world.level.ocean_level,
             map_tiles: self.map_tiles,
             tiles: self.tiles.clone(),
         }
+    }
+
+    /// Ground height in metres at (`x`, `y`); `None` off the terrain.
+    pub fn ground_height(&self, x: f32, y: f32) -> Option<f32> {
+        self.world.height_at(x, y)
     }
 
     /// The tile grid.
@@ -501,6 +509,7 @@ pub(crate) mod tests {
     fn info_gives_the_world_size() {
         let info = test_layer(CAP).info();
         assert_eq!((info.world_m, info.ocean_level), (REGION_M, OCEAN_M));
+        assert_eq!(info.level, "test");
         assert!(!info.map_tiles);
         assert_eq!(info.tiles.world_m, REGION_M);
     }

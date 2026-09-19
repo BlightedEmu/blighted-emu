@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// The studio page: the design files of content/, the full check, and Apply.
+// The studio page: the design files of content/, their editors, the full check, and Apply.
 
 import { applyLine, errorRows } from '/web/apply.js';
+import { startEditors } from '/web/editors.js';
 
 const FILES_URL = '/api/studio/files';
 const CHECK_URL = '/api/studio/check';
 const APPLY_URL = '/api/studio/apply';
+const WORLD_INFO_URL = '/api/world/info';
 const ADMIN_HEADERS = Object.freeze({ 'X-Blighted-Admin': '1' });
 const POLL_MS = 500;
 const HTTP_CONFLICT = 409;
@@ -61,9 +63,15 @@ function showFiles(view) {
     elements.files.replaceChildren(...view.files.map((file) => {
       const row = document.createElement('tr');
       row.append(cell(file.kind), cell(file.id), cell(file.action), cell(file.map ?? ''), cell(file.path, 'muted'));
+      if (editors.opens(file)) {
+        row.className = 'clickable';
+        row.title = 'Open in the editor';
+        row.addEventListener('click', () => editors.open(file));
+      }
       return row;
     }));
   }
+  editors.setFiles(view.files);
   showProblems(view.errors);
 }
 
@@ -145,5 +153,9 @@ elements.apply.addEventListener('click', async () => {
   }
 });
 
+const editors = startEditors(await (await fetch(WORLD_INFO_URL)).json(), {
+  showProblems,
+  onSaved: () => loadFiles(),
+});
 loadFiles().catch(fail);
 pollApply().catch(fail);

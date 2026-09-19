@@ -1,30 +1,48 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The studio routes: the design files, the full check, and Apply.
+//! The studio routes: the design files, one file's text and its edits, the full check, and
+//! Apply.
+
+use std::path::Path;
+use std::sync::Arc;
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
-use nw_design::{DesignError, DesignFile, check_schema, load_dir};
-use serde::Serialize;
+use nw_design::{
+    DesignError, DesignFile, check_delete, check_put, check_schema, delete_file, design_path,
+    load_dir, write_file,
+};
+use serde::{Deserialize, Serialize};
 
 use crate::server::AppState;
 use crate::studio::Studio;
 
 /// The design files with their schema problems.
 pub const FILES_ROUTE: &str = "/api/studio/files";
+/// `GET`: one design file's text; `PUT`: writes it when the check finds nothing; `DELETE`:
+/// removes it when no other file needs it. The file is `?path=`, relative to the design folder.
+pub const FILE_ROUTE: &str = "/api/studio/file";
 /// The full check; writes nothing.
 pub const CHECK_ROUTE: &str = "/api/studio/check";
 /// `GET`: the Apply state; `POST`: starts Apply.
 pub const APPLY_ROUTE: &str = "/api/studio/apply";
 /// The answer when the work slot is taken.
 const BUSY: &str = "an Apply or a Check runs";
+/// The answer to a path outside the design folder.
+const BAD_PATH: &str = "the path must name a .toml file inside the design folder";
 
 /// The studio routes; every `POST` needs the admin header (the guard).
 pub fn studio_routes() -> Router<AppState> {
     Router::new()
         .route(FILES_ROUTE, get(files))
+        .route(
+            FILE_ROUTE,
+            get(read_design_file)
+                .put(put_design_file)
+                .delete(delete_design_file),
+        )
         .route(CHECK_ROUTE, post(check))
         .route(APPLY_ROUTE, get(apply_status).post(start_apply))
 }
@@ -34,6 +52,26 @@ pub fn studio_routes() -> Router<AppState> {
 struct FilesView {
     files: Vec<DesignFile>,
     errors: Vec<DesignError>,
+}
+
+/// The file of a file route.
+#[derive(Debug, Deserialize)]
+struct FileParams {
+    path: String,
+}
+
+/// The problems that refused an edit.
+#[derive(Debug, Serialize)]
+struct Refused {
+    errors: Vec<DesignError>,
+}
+
+/// How an edit of one design file ended.
+enum EditOutcome {
+    Done,
+    Refused(Vec<DesignError>),
+    Missing,
+    Failed(String),
 }
 
 fn studio_of(state: &AppState) -> Option<&Studio> {
@@ -57,6 +95,90 @@ async fn files(State(state): State<AppState>) -> Response {
     match loaded {
         Ok(view) => Json(view).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn read_design_file(
+    State(state): State<AppState>,
+    Query(params): Query<FileParams>,
+) -> Response {
+    let Some(studio) = studio_of(&state) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(relative) = design_path(&params.path) else {
+        return (StatusCode::BAD_REQUEST, BAD_PATH).into_response();
+    };
+    match tokio::fs::read_to_string(studio.paths.design_dir.join(relative)).await {
+        Ok(text) => text.into_response(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            StatusCode::NOT_FOUND.into_response()
+        }
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+async fn put_design_file(
+    State(state): State<AppState>,
+    Query(params): Query<FileParams>,
+    text: String,
+) -> Response {
+    edit(&state, &params.path, Some(text)).await
+}
+
+async fn delete_design_file(
+    State(state): State<AppState>,
+    Query(params): Query<FileParams>,
+) -> Response {
+    edit(&state, &params.path, None).await
+}
+
+/// Writes `text` to the design file `raw` (removes it when `None`) unless the check finds a
+/// problem. It takes the work slot, so no Apply or Check reads the folder meanwhile.
+async fn edit(state: &AppState, raw: &str, text: Option<String>) -> Response {
+    let Some(studio) = studio_of(state) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(relative) = design_path(raw) else {
+        return (StatusCode::BAD_REQUEST, BAD_PATH).into_response();
+    };
+    let Ok(permit) = Arc::clone(&studio.work).try_acquire_owned() else {
+        return (StatusCode::CONFLICT, BUSY).into_response();
+    };
+    let dir = studio.paths.design_dir.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        edit_blocking(&dir, &relative, text.as_deref())
+    })
+    .await;
+    match outcome {
+        Ok(EditOutcome::Done) => StatusCode::NO_CONTENT.into_response(),
+        Ok(EditOutcome::Refused(errors)) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, Json(Refused { errors })).into_response()
+        }
+        Ok(EditOutcome::Missing) => StatusCode::NOT_FOUND.into_response(),
+        Ok(EditOutcome::Failed(error)) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, error).into_response()
+        }
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+fn edit_blocking(dir: &Path, relative: &Path, text: Option<&str>) -> EditOutcome {
+    let errors = match text {
+        Some(text) => check_put(dir, relative, text),
+        None if !dir.join(relative).is_file() => return EditOutcome::Missing,
+        None => check_delete(dir, relative),
+    };
+    if !errors.is_empty() {
+        return EditOutcome::Refused(errors);
+    }
+    let written = match text {
+        Some(text) => write_file(dir, relative, text),
+        None => delete_file(dir, relative),
+    };
+    match written {
+        Ok(()) => EditOutcome::Done,
+        Err(error) => EditOutcome::Failed(error.to_string()),
     }
 }
 
@@ -244,20 +366,26 @@ mod tests {
         });
     }
 
-    fn request(method: Method, uri: &str) -> Request<Body> {
+    fn request(method: Method, uri: &str, body: &str) -> Request<Body> {
         Request::builder()
             .method(method)
             .uri(uri)
             .header(header::HOST, LISTEN)
             .header(ADMIN_HEADER, ADMIN_HEADER_VALUE)
-            .body(Body::empty())
+            .body(Body::from(body.to_owned()))
             .expect("request")
     }
 
-    async fn call(fixture: &Fixture, method: Method, uri: &str) -> (StatusCode, Value) {
+    /// The status and raw body of `method uri` with `body`.
+    async fn send(
+        fixture: &Fixture,
+        method: Method,
+        uri: &str,
+        body: &str,
+    ) -> (StatusCode, Vec<u8>) {
         let response = fixture
             .app()
-            .oneshot(request(method, uri))
+            .oneshot(request(method, uri, body))
             .await
             .expect("response");
         let status = response.status();
@@ -267,10 +395,95 @@ mod tests {
             .await
             .expect("body")
             .to_bytes();
+        (status, bytes.to_vec())
+    }
+
+    async fn call(fixture: &Fixture, method: Method, uri: &str) -> (StatusCode, Value) {
+        let (status, bytes) = send(fixture, method, uri, "").await;
         (
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    const PATH_FILE: &str = "paths/lv/walk.toml";
+    const PATH_TEXT: &str = "schema = 1\nkind = \"path\"\naction = \"add\"\nid = \"walk\"\nmap = \"lv\"\npoints = [[1.0, 2.0, 3.0]]\n";
+    const GROUP_FILE: &str = "spawns/lv/wolves.toml";
+    const GROUP_TEXT: &str = "schema = 1\nkind = \"spawn_group\"\naction = \"add\"\nid = \"wolves\"\nmap = \"lv\"\nvitals = \"Wolf\"\nlevel = 5\npoints = [[1.0, 2.0, 3.0]]\npath = \"walk\"\n";
+
+    fn file_uri(path: &str) -> String {
+        format!("{FILE_ROUTE}?path={}", path.replace('/', "%2F"))
+    }
+
+    async fn put(fixture: &Fixture, path: &str, text: &str) -> (StatusCode, Value) {
+        let (status, bytes) = send(fixture, Method::PUT, &file_uri(path), text).await;
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_put_writes_a_file_that_get_returns() {
+        let fixture = fixture(false, LONG_TIMEOUT_S);
+        let (status, _) = put(&fixture, PATH_FILE, PATH_TEXT).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, text) = send(&fixture, Method::GET, &file_uri(PATH_FILE), "").await;
+        assert_eq!(
+            (status, text.as_slice()),
+            (StatusCode::OK, PATH_TEXT.as_bytes())
+        );
+        let (status, _) = send(&fixture, Method::GET, &file_uri("paths/lv/none.toml"), "").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn a_path_outside_the_design_folder_is_refused() {
+        let fixture = fixture(false, LONG_TIMEOUT_S);
+        for path in ["../x.toml", "/tmp/x.toml", "ai/x.txt", "todo.toml"] {
+            let (status, _) = put(&fixture, path, PATH_TEXT).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+            let (status, _) = send(&fixture, Method::GET, &file_uri(path), "").await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{path}");
+        }
+        assert!(!fixture.path("x.toml").exists());
+    }
+
+    #[tokio::test]
+    async fn a_put_with_problems_is_refused_and_writes_nothing() {
+        let fixture = fixture(false, LONG_TIMEOUT_S);
+        let (status, body) = put(&fixture, GROUP_FILE, GROUP_TEXT).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["errors"][0]["problem"]["code"], "unknown_reference");
+        assert!(!fixture.path("content").join(GROUP_FILE).exists());
+        put(&fixture, PATH_FILE, PATH_TEXT).await;
+        let (status, _) = put(&fixture, GROUP_FILE, GROUP_TEXT).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn a_delete_that_another_file_needs_is_refused() {
+        let fixture = fixture(false, LONG_TIMEOUT_S);
+        put(&fixture, PATH_FILE, PATH_TEXT).await;
+        put(&fixture, GROUP_FILE, GROUP_TEXT).await;
+        let (status, body) = call(&fixture, Method::DELETE, &file_uri(PATH_FILE)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["errors"][0]["path"], GROUP_FILE);
+        let (status, _) = call(&fixture, Method::DELETE, &file_uri(GROUP_FILE)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = call(&fixture, Method::DELETE, &file_uri(GROUP_FILE)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn an_edit_while_apply_runs_is_refused() {
+        let fixture = fixture(true, SHORT_TIMEOUT_S);
+        read_control(&fixture.path("control"), |_| {});
+        lock(&fixture.live).heartbeat(beat(1), unix_ms());
+        call(&fixture, Method::POST, APPLY_ROUTE).await;
+        let (status, _) = put(&fixture, PATH_FILE, PATH_TEXT).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        finished(&fixture).await;
     }
 
     /// The Apply state once it is no longer running.

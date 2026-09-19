@@ -10,7 +10,7 @@ use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::access::Access;
 use crate::access::api::{LOGIN_PAGE_ROUTE, access_guard, access_routes, local_access};
@@ -128,6 +128,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/world/tiles/{level}/{row}/{column}", get(map_tile))
         .route("/api/world/relief/{level}/{row}/{column}", get(relief))
         .route("/api/world/spawns", get(spawns))
+        .route(HEIGHT_ROUTE, get(ground_height))
         .route("/api/captures/sessions", get(sessions))
         .route("/api/captures/types/{idx}", get(type_label))
         .merge(capture_routes())
@@ -183,6 +184,27 @@ async fn relief(
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+/// Ground height at `?x=&y=` (metres): `{ "z": metres }`, `null` off the terrain.
+pub const HEIGHT_ROUTE: &str = "/api/world/height";
+
+#[derive(Debug, Deserialize)]
+struct HeightParams {
+    x: f32,
+    y: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct HeightView {
+    z: Option<f32>,
+}
+
+async fn ground_height(State(state): State<AppState>, Query(at): Query<HeightParams>) -> Response {
+    Json(HeightView {
+        z: state.world.ground_height(at.x, at.y),
+    })
+    .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -241,6 +263,9 @@ mod tests {
     use crate::captures::Captures;
     use crate::captures::catalog::SessionEntry;
     use crate::world::tests::{REGION_M, test_layer};
+
+    /// Ground height of the south-east land quarter of the test world.
+    const LAND_M: f64 = 100.0;
 
     const CAP: usize = 5_000;
     const LISTEN: &str = "127.0.0.1:9180";
@@ -319,7 +344,7 @@ mod tests {
             (StatusCode::OK, Some(crate::assets::HTML))
         );
         assert!(String::from_utf8_lossy(&body).contains("/web/studio.js"));
-        for file in ["studio.js", "apply.js"] {
+        for file in ["studio.js", "apply.js", "design.js", "editors.js"] {
             let (status, _, _) = get(app(dir.path()), &format!("/web/{file}")).await;
             assert_eq!(status, StatusCode::OK, "{file}");
         }
@@ -351,6 +376,18 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let info: serde_json::Value = serde_json::from_slice(&body).expect("json");
         assert_eq!(info["world_m"], REGION_M);
+    }
+
+    #[tokio::test]
+    async fn height_gives_the_ground_or_null() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (status, _, body) = get(app(dir.path()), &format!("{HEIGHT_ROUTE}?x=1500&y=200")).await;
+        assert_eq!(status, StatusCode::OK);
+        let land: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(land["z"], LAND_M);
+        let (_, _, body) = get(app(dir.path()), &format!("{HEIGHT_ROUTE}?x=-5&y=200")).await;
+        let off: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert!(off["z"].is_null());
     }
 
     #[tokio::test]

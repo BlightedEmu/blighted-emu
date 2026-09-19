@@ -43,6 +43,8 @@ pub fn asset(name: &str) -> Option<Asset> {
         "studio.html" => (HTML, include_str!("../web/studio.html")),
         "studio.js" => (JS, include_str!("../web/studio.js")),
         "apply.js" => (JS, include_str!("../web/apply.js")),
+        "design.js" => (JS, include_str!("../web/design.js")),
+        "editors.js" => (JS, include_str!("../web/editors.js")),
         "captures.html" => (HTML, include_str!("../web/captures.html")),
         "captures.js" => (JS, include_str!("../web/captures.js")),
         _ => return None,
