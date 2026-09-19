@@ -253,6 +253,39 @@ impl LiveState {
             .map(|(sim, _)| sim.clone())
     }
 
+    /// The sim whose newest snapshot holds the awake mob `entity`.
+    pub fn sim_of_mob(&self, entity: u64) -> Option<BusId> {
+        self.snapshots
+            .iter()
+            .find(|(_, snapshots)| snapshots.mobs.iter().any(|mob| mob.entity == entity))
+            .map(|(sim, _)| sim.clone())
+    }
+
+    /// Where the player `entity` is in its sim's newest snapshot.
+    pub fn player_position(&self, entity: u64) -> Option<[f32; 3]> {
+        self.snapshots
+            .values()
+            .flat_map(|snapshots| &snapshots.players)
+            .find(|player| player.entity == entity)
+            .map(|player| [player.x, player.y, player.z])
+    }
+
+    /// The sim that owns the cell of (`x`, `y`) in the newest cell table.
+    pub fn sim_at(&self, x: f32, y: f32) -> Option<BusId> {
+        let table = self.table.as_ref()?;
+        if !(x >= 0.0 && y >= 0.0 && table.cell_size_m > 0.0) {
+            return None;
+        }
+        let column = (x / table.cell_size_m) as u32;
+        let row = (y / table.cell_size_m) as u32;
+        if column >= table.columns || row >= table.rows {
+            return None;
+        }
+        let index = row as usize * table.columns as usize + column as usize;
+        let slot = (*table.owners.get(index)?)?;
+        table.sims.get(usize::from(slot)).map(|sim| sim.id.clone())
+    }
+
     /// The director's cell table; a new version is an event.
     pub fn table(&mut self, table: CellTable, now_ms: u64) {
         let version = table.version;
@@ -478,6 +511,8 @@ fn ticks(delta: &Scrape) -> (Option<f64>, Option<f64>) {
 
 #[cfg(test)]
 mod tests {
+    use nw_bus::SimSlot;
+
     use super::*;
 
     const NOW: u64 = 1_000_000;
@@ -748,6 +783,41 @@ mod tests {
         assert_eq!(state.view().tiles.bots, 0);
         state.bots(110);
         assert_eq!(state.view().tiles.bots, 110);
+    }
+
+    #[test]
+    fn the_sim_of_a_point_comes_from_the_cell_table() {
+        let mut state = LiveState::default();
+        assert_eq!(state.sim_at(10.0, 10.0), None, "no table yet");
+        let slot = |name: &str| SimSlot {
+            id: sim(name),
+            generation: 1,
+        };
+        state.table(
+            CellTable {
+                version: 1,
+                cell_size_m: 1024.0,
+                columns: 2,
+                rows: 1,
+                sims: vec![slot("sim-a"), slot("sim-b")],
+                owners: vec![Some(0), Some(1)],
+            },
+            NOW,
+        );
+        assert_eq!(state.sim_at(10.0, 10.0), Some(sim("sim-a")));
+        assert_eq!(state.sim_at(1500.0, 10.0), Some(sim("sim-b")));
+        assert_eq!(state.sim_at(3000.0, 10.0), None, "off the grid");
+        assert_eq!(state.sim_at(-1.0, 10.0), None);
+    }
+
+    #[test]
+    fn mobs_and_player_positions_come_from_snapshots() {
+        let mut state = LiveState::default();
+        state.snapshot_part(part(NOW, 0, 1, &[5]));
+        assert_eq!(state.sim_of_mob(100), Some(sim("sim-a")));
+        assert_eq!(state.sim_of_mob(9), None);
+        assert_eq!(state.player_position(5), Some([1.0, 2.0, 3.0]));
+        assert_eq!(state.player_position(6), None);
     }
 
     #[test]

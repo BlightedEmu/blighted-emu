@@ -110,6 +110,55 @@ pub async fn remove_admin_rank(pool: &PgPool, account: Uuid) -> Result<bool, DbE
     Ok(done.rows_affected() > 0)
 }
 
+/// One account with an admin rank.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RankRow {
+    /// The account.
+    pub account: Uuid,
+    /// Its password login name, when it has one.
+    pub username: Option<String>,
+    /// The rank.
+    pub rank: AdminRank,
+    /// Who gave it.
+    pub given_by: Option<Uuid>,
+    /// When, Unix time in milliseconds.
+    pub given_at_unix_ms: i64,
+}
+
+/// A row of `admin_rank` with the login name: account, name, rank, given by, given at (ms).
+type RankRecord = (Uuid, Option<String>, String, Option<Uuid>, i64);
+
+/// Every account with an admin rank, highest rank first, then by name.
+pub async fn admin_ranks(pool: &PgPool) -> Result<Vec<RankRow>, DbError> {
+    let rows: Vec<RankRecord> = sqlx::query_as(
+        "SELECT admin_rank.account_id, password_login.username, admin_rank.rank, \
+         admin_rank.given_by, CAST(EXTRACT(EPOCH FROM admin_rank.given_at) * 1000 AS BIGINT) \
+         FROM admin_rank LEFT JOIN password_login \
+         ON password_login.account_id = admin_rank.account_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut ranks: Vec<RankRow> = rows
+        .into_iter()
+        .filter_map(|(account, username, rank, given_by, given_at_unix_ms)| {
+            Some(RankRow {
+                account,
+                username,
+                rank: AdminRank::from_name(&rank)?,
+                given_by,
+                given_at_unix_ms,
+            })
+        })
+        .collect();
+    ranks.sort_by(|left, right| {
+        right
+            .rank
+            .cmp(&left.rank)
+            .then_with(|| left.username.cmp(&right.username))
+    });
+    Ok(ranks)
+}
+
 /// Adds an audit row; returns its id.
 pub async fn insert_audit(pool: &PgPool, entry: &AuditEntry) -> Result<i64, DbError> {
     let (id,): (i64,) = sqlx::query_as(
@@ -228,6 +277,10 @@ mod infra_tests {
             let own = audit_rows(pool, Some(account.id), AUDIT_LIMIT)
                 .await
                 .expect("own");
+            let listed = admin_ranks(pool).await.expect("ranks");
+            assert_eq!(listed.len(), 1);
+            assert_eq!(listed[0].username.as_deref(), Some("gm"));
+            assert_eq!(listed[0].rank, AdminRank::GameMaster);
             let removed = remove_admin_rank(pool, account.id).await.expect("remove");
             (rank, changed, removed, rows, own)
         })
