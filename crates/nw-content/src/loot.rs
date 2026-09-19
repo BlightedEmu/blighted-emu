@@ -12,6 +12,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use nw_formats::objectstream::lowercase_crc32;
+
 use crate::Tables;
 
 /// The suffixes of a table's quantity and threshold rows.
@@ -319,6 +321,71 @@ impl LootTables {
     }
 }
 
+/// The full chance of a mob drop, in percent.
+pub const FULL_CHANCE_PERCENT: u32 = 100;
+
+/// What a killed mob type rolls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobDrop {
+    /// `LootTableId`.
+    pub table: String,
+    /// `LootDropChance`, read as a percent (its unit is Unknown); 100 when the row has none.
+    pub chance_percent: u32,
+}
+
+/// The drop of every mob type by the CRC-32 of its lowercase `VitalsID`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MobLoot {
+    by_crc: HashMap<u32, MobDrop>,
+}
+
+impl MobLoot {
+    /// The mob drops of `tables` (`VitalsData`).
+    pub fn from_tables(tables: &Tables) -> Self {
+        Self::build(
+            tables
+                .vitals_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .map(|row| {
+                    (
+                        row.vitals_id.clone(),
+                        row.loot_table_id.clone(),
+                        row.loot_drop_chance,
+                    )
+                }),
+        )
+    }
+
+    /// The drops of `(vitals id, loot table, drop chance)` rows; a row with no table drops
+    /// nothing.
+    pub fn build(rows: impl IntoIterator<Item = (String, Option<String>, Option<i64>)>) -> Self {
+        let by_crc = rows
+            .into_iter()
+            .filter_map(|(vitals_id, table, chance)| {
+                let table = table.filter(|table| !table.trim().is_empty())?;
+                let chance_percent = chance.map_or(FULL_CHANCE_PERCENT, |chance| {
+                    u32::try_from(chance.clamp(0, i64::from(FULL_CHANCE_PERCENT)))
+                        .unwrap_or(FULL_CHANCE_PERCENT)
+                });
+                Some((
+                    lowercase_crc32(&vitals_id),
+                    MobDrop {
+                        table,
+                        chance_percent,
+                    },
+                ))
+            })
+            .collect();
+        Self { by_crc }
+    }
+
+    /// The drop of the mob type whose lowercase id has the CRC-32 `vitals_crc`.
+    pub fn of(&self, vitals_crc: u32) -> Option<&MobDrop> {
+        self.by_crc.get(&vitals_crc)
+    }
+}
+
 /// A number from `low` to `high` of `(low, high)`.
 fn count_of((low, high): (u32, u32), below: &mut impl FnMut(u32) -> u32) -> u32 {
     low + below(high.saturating_sub(low).saturating_add(1))
@@ -490,6 +557,37 @@ mod tests {
         assert_eq!(
             tables.roll("Loop", LEVELS, &mut first),
             [("Stick".to_owned(), u32::from(MAX_DEPTH))]
+        );
+    }
+
+    #[test]
+    fn a_mob_type_drops_its_table_at_its_chance() {
+        let loot = MobLoot::build([
+            (
+                "Wolf_Alpha".to_owned(),
+                Some("WolfLoot".to_owned()),
+                Some(25),
+            ),
+            ("Boar".to_owned(), Some("BoarLoot".to_owned()), None),
+            ("Ghost".to_owned(), None, Some(50)),
+            ("Odd".to_owned(), Some("OddLoot".to_owned()), Some(900)),
+        ]);
+        let of = |id: &str| loot.of(lowercase_crc32(id)).cloned();
+        assert_eq!(
+            of("wolf_alpha"),
+            Some(MobDrop {
+                table: "WolfLoot".to_owned(),
+                chance_percent: 25
+            })
+        );
+        assert_eq!(
+            of("Boar").map(|drop| drop.chance_percent),
+            Some(FULL_CHANCE_PERCENT)
+        );
+        assert_eq!(of("Ghost"), None, "no table: no loot");
+        assert_eq!(
+            of("Odd").map(|drop| drop.chance_percent),
+            Some(FULL_CHANCE_PERCENT)
         );
     }
 

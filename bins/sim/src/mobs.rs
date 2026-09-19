@@ -585,6 +585,12 @@ impl Mobs {
         self.spawn_of(spawn_index(entity)?).map(|spawn| spawn.level)
     }
 
+    /// The `vitals_id` (CRC-32 of the lowercase `VitalsID`) of mob `entity`, when it lives here.
+    pub fn vitals_of(&self, entity: u64) -> Option<u32> {
+        self.spawn_of(spawn_index(entity)?)
+            .map(|spawn| spawn.vitals_id)
+    }
+
     /// The entity mob `entity` chases or hits, when it lives here.
     pub fn target(&self, entity: u64) -> Option<u64> {
         self.live.get(&spawn_index(entity)?)?.brain.target()

@@ -607,7 +607,7 @@ pub(crate) mod tests {
     pub(crate) const CHARACTER: Uuid = Uuid::from_u128(0x2b87_684d_c82c_46a4_90e4_c764_0247_7507);
     pub(crate) const SWORD: &str = "1hSwordT2_FTUE";
     const STAFF: &str = "MysticArchetype_2hStaffLife";
-    const POTION: &str = "PotionHealthT1";
+    pub(crate) const POTION: &str = "PotionHealthT1";
     /// A resource the kit does not give: the bag takes it from a gather.
     pub(crate) const FLINT: &str = "FlintT1";
     const POTION_SLOT: u32 = 14;

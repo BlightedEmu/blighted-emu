@@ -22,6 +22,7 @@ use nw_bus::{BusId, ConnectionRef, Hit};
 use std::sync::Arc;
 
 use nw_content::combat::{AttackRow, WeaponKind, WeaponRow};
+use nw_content::loot::{FULL_CHANCE_PERCENT, LootLevels};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::paperdoll::slot;
 use nw_messages::{
@@ -31,6 +32,7 @@ use nw_messages::{
 };
 use nw_sim_core::{Damage, Health, MobState, PlayerAttack, died, hurt, mob_hit, player_hit};
 
+use super::gathering::{MOB_LEVEL, PLAYER_LOOT_LEVEL};
 use super::gear::unix_ns;
 use super::hit_shape::{MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, Wedge, homing, swing_shape, turn};
 use super::mob_timeline::yaw_toward;
@@ -975,6 +977,35 @@ impl SimWorld {
         self.apply_hit_with(target, attacker, amount, threat, now_ms, None)
     }
 
+    /// Rolls the loot of mob `mob`, killed by `killer`, into the killer's bag (admin studio spec
+    /// section 6.2; a dropped loot bag at the mob is Unknown). A killer on another sim, a mob type
+    /// with no loot table and the tutorial give nothing.
+    pub(super) fn drop_loot(&mut self, mob: u64, killer: u64, now_ms: u64) {
+        if self.is_tutorial() || self.player_by_number(killer).is_none() {
+            return;
+        }
+        let Some(drop) = self
+            .mobs
+            .vitals_of(mob)
+            .and_then(|vitals| self.content.mob_loot.of(vitals))
+        else {
+            return;
+        };
+        if self.dice.below(FULL_CHANCE_PERCENT) >= drop.chance_percent {
+            return;
+        }
+        let levels = LootLevels {
+            enemy: self.mobs.level(mob).unwrap_or(MOB_LEVEL),
+            content: PLAYER_LOOT_LEVEL,
+        };
+        let content = Arc::clone(&self.content);
+        let dice = &mut self.dice;
+        let loot = content
+            .loot
+            .roll(&drop.table, levels, &mut |below| dice.below(below));
+        self.give_loot(killer, loot, now_ms);
+    }
+
     /// [`SimWorld::apply_hit`] of a hit of a mob move `strike`: a player's 3601 carries the
     /// move's item tag and, in a second phase, the fire part as a second item.
     fn apply_hit_with(
@@ -999,6 +1030,9 @@ impl SimWorld {
                 Damage::Hurt | Damage::AlreadyDead => AttackOutcome::Hit { target, amount },
             };
             self.mobs.wake(target);
+            if matches!(outcome, AttackOutcome::Killed { .. }) {
+                self.drop_loot(target, attacker, now_ms);
+            }
             return Some(outcome);
         }
         let entity = self.player_by_number(target)?;

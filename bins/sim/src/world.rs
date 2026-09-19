@@ -2861,7 +2861,7 @@ mod tests {
     use nw_bus::CellTable;
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
     use nw_content::gathering::{Gatherable, Gatherables};
-    use nw_content::loot::{LootRow, LootSource, LootTables};
+    use nw_content::loot::{LootLevels, LootRow, LootSource, LootTables, MobLoot};
     use nw_messages::{
         ALC_TYPE_INDEX, GDE_METADATA_TYPE_INDEX, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
         LOOK_CHOICES, MemberState, OPEN_WORLD_LEVEL, PAPERDOLL_TYPE_INDEX,
@@ -4388,6 +4388,108 @@ mod tests {
         give_flint(&mut world);
         assert_eq!(world.positions()[0].items, None);
         assert_eq!(world.leave(&connection(1)).expect("left").items, None);
+    }
+
+    #[test]
+    fn ten_thousand_kills_drop_loot_at_the_simulated_chances() {
+        const KILLS: u32 = 10_000;
+        const TABLE: &str = "WolfLoot";
+        const MAX_ROLL: i64 = 100_000;
+        /// An AND entry drops when the roll reaches it: 30 % of the rolls.
+        const POTION_THRESHOLD: &str = "70000";
+        const POTION_CHANCE: f64 = 0.3;
+        /// One percentage point.
+        const MAX_GAP: f64 = 0.01;
+        const SIMULATOR_SEED: u64 = 0x5eed;
+        let row = |id: &str, cells: &[(u32, &str)], and_or: Option<&str>, max_roll| LootRow {
+            id: id.to_owned(),
+            and_or: and_or.map(str::to_owned),
+            conditions: None,
+            max_roll,
+            cells: cells
+                .iter()
+                .map(|(index, cell)| (*index, (*cell).to_owned()))
+                .collect(),
+        };
+        let tables = LootTables::build(LootSource {
+            rows: vec![
+                row(
+                    TABLE,
+                    &[(1, gear::tests::FLINT), (2, gear::tests::POTION)],
+                    Some("AND"),
+                    None,
+                ),
+                row(&format!("{TABLE}_Qty"), &[(1, "1"), (2, "1")], None, None),
+                row(
+                    &format!("{TABLE}_Probs"),
+                    &[(1, "0"), (2, POTION_THRESHOLD)],
+                    None,
+                    Some(MAX_ROLL),
+                ),
+            ],
+            bucket_items: Vec::new(),
+        });
+        let mut combat = test_combat();
+        combat.spawns = vec![test_spawn(CELL_M / 2.0)].into();
+        let mut world = SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            combat,
+            Arc::new(PlayerContent {
+                kits: gear::tests::kits(),
+                loot: tables.clone(),
+                mob_loot: MobLoot::build([(TEST_MOB.to_owned(), Some(TABLE.to_owned()), None)]),
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a"])).expect("table");
+        let mut admit = admit_at(1, CELL_M / 2.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        for _ in 0..KILLS {
+            world.drop_loot(crate::mobs::mob_entity(0), 1, NOW);
+        }
+        let carried = world
+            .departures()
+            .pop()
+            .and_then(|departure| departure.items)
+            .expect("items");
+        let count = |item: &str| -> u32 {
+            carried
+                .iter()
+                .filter(|stack| stack.item_id == item)
+                .map(|stack| stack.quantity)
+                .sum()
+        };
+        assert_eq!(
+            count(gear::tests::FLINT),
+            KILLS,
+            "the 0 threshold always drops"
+        );
+        let kill_rate = f64::from(count(gear::tests::POTION)) / f64::from(KILLS);
+        let mut dice = Dice::new(SIMULATOR_SEED);
+        let levels = LootLevels {
+            enemy: TEST_LEVEL,
+            content: 1,
+        };
+        let simulated: u32 = (0..KILLS)
+            .map(|_| {
+                tables
+                    .roll(TABLE, levels, &mut |below| dice.below(below))
+                    .iter()
+                    .filter(|(item, _)| item == gear::tests::POTION)
+                    .map(|(_, quantity)| *quantity)
+                    .sum::<u32>()
+            })
+            .sum();
+        let simulated_rate = f64::from(simulated) / f64::from(KILLS);
+        assert!(
+            (kill_rate - simulated_rate).abs() <= MAX_GAP,
+            "kills {kill_rate}, simulator {simulated_rate}"
+        );
+        assert!((kill_rate - POTION_CHANCE).abs() <= MAX_GAP, "{kill_rate}");
     }
 
     #[test]

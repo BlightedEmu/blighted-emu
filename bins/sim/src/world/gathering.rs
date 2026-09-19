@@ -55,10 +55,10 @@ const SKINNING_EFFICIENCY: f32 = 2.0;
 const HAND_EFFICIENCY: f32 = 1.0;
 /// The gatherers of an open-world node (retail 1).
 const ONE_GATHERER: u8 = 1;
-/// The level loot tables read for the gatherer (`MinContLevel`; our choice: the server keeps no
+/// The level loot tables read for the player (`MinContLevel`; our choice: the server keeps no
 /// player level yet) and for a mob without one.
-const GATHERER_LEVEL: u32 = 1;
-const MOB_LEVEL: u32 = 1;
+pub(super) const PLAYER_LOOT_LEVEL: u32 = 1;
+pub(super) const MOB_LEVEL: u32 = 1;
 /// Milliseconds per second.
 const MS_PER_SECOND: f32 = 1_000.0;
 
@@ -197,7 +197,7 @@ impl SimWorld {
                 .mob
                 .and_then(|mob| self.mobs.level(mob))
                 .unwrap_or(MOB_LEVEL),
-            content: GATHERER_LEVEL,
+            content: PLAYER_LOOT_LEVEL,
         };
         let dice = &mut self.dice;
         let loot = gather
@@ -239,23 +239,36 @@ impl SimWorld {
         let ended = chest_gather_ended(gather.request.target_entity, player.gathers);
         player.extra_members.push(ended);
         player.gathers = player.gathers.saturating_add(1);
+        self.give_loot(gather.number, loot, now_ms);
+    }
+
+    /// Puts rolled `loot` into the bag of player `number`; each item that fits is an event of
+    /// its quest. An item with no master row, or that does not fit, is lost with a log line.
+    pub(super) fn give_loot(&mut self, number: u64, loot: Vec<(String, u32)>, now_ms: u64) {
+        let Some(entity) = self.player_by_number(number) else {
+            return;
+        };
         let mut gained = Vec::new();
-        for (item_id, quantity) in loot {
-            let Some(item) = self.content.kits.item(&item_id) else {
-                tracing::debug!(item = %item_id, "gathered item without a master row");
-                continue;
-            };
-            let added = player
-                .gear
-                .as_mut()
-                .is_some_and(|gear| gear.add(item, quantity));
-            tracing::debug!(player = gather.number, item = %item_id, quantity, added, "gathered");
-            if added {
-                gained.push(item_id);
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            for (item_id, quantity) in loot {
+                let Some(item) = self.content.kits.item(&item_id) else {
+                    tracing::debug!(item = %item_id, "loot item without a master row");
+                    continue;
+                };
+                let added = player
+                    .gear
+                    .as_mut()
+                    .is_some_and(|gear| gear.add(item, quantity));
+                if added {
+                    tracing::debug!(player = number, item = %item_id, quantity, "looted");
+                    gained.push(item_id);
+                } else {
+                    tracing::info!(player = number, item = %item_id, quantity, "loot lost: no bag or a full bag");
+                }
             }
         }
         for item_id in &gained {
-            self.quest_event(gather.number, Event::ItemGained(item_id), now_ms);
+            self.quest_event(number, Event::ItemGained(item_id), now_ms);
         }
     }
 
