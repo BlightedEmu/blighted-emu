@@ -39,6 +39,12 @@ export function itemRequest(entity, itemText, quantityText) {
   return { request: { entity, item, quantity } };
 }
 
+/** The quest start request for a player and the objective field text, or an error text. */
+export function questRequest(entity, objectiveText) {
+  const objective = String(objectiveText).trim();
+  return objective === '' ? { error: 'Name an objective id.' } : { request: { entity, objective } };
+}
+
 /** The spawn request of the spawn form's field texts, or an error text. */
 export function spawnRequest({ vitals, level, count, x, y, z }) {
   const id = String(vitals).trim();

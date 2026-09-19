@@ -10,7 +10,7 @@ use nw_sim_core::Motion;
 use nw_world::records::VitalsSpawn;
 
 use super::attack::Vitals;
-use super::{Body, Player, SimWorld};
+use super::{Body, Player, QuestRefusal, SimWorld};
 
 /// Most GM mobs one command spawns.
 pub const MAX_GM_SPAWN: u32 = 50;
@@ -45,6 +45,15 @@ impl SimWorld {
                 quantity,
             } => self.give_item(*entity, item, *quantity),
             AdminAction::TakeItem { entity, item } => self.take_item(*entity, item),
+            AdminAction::StartQuest { entity, objective } => {
+                match self.start_quest(*entity, objective, now_ms) {
+                    Ok(()) => AdminReply::Done,
+                    Err(QuestRefusal::NoPlayer) => AdminReply::NotMine,
+                    Err(refusal) => AdminReply::Failed {
+                        reason: refusal.to_string(),
+                    },
+                }
+            }
             AdminAction::SpawnMobs {
                 vitals,
                 level,
@@ -403,6 +412,24 @@ mod tests {
         );
         assert!(world.apply_hit(PLAYER, 1, 10, 0, NOW).is_some());
         assert!(health(&mut world) < full);
+    }
+
+    #[test]
+    fn an_unknown_quest_fails_and_another_player_is_not_mine() {
+        let mut world = admitted();
+        let start = |entity| {
+            command(AdminAction::StartQuest {
+                entity,
+                objective: "NoSuchQuest".to_owned(),
+            })
+        };
+        assert_eq!(
+            world.admin(&start(PLAYER), NOW),
+            AdminReply::Failed {
+                reason: QuestRefusal::NoQuest.to_string()
+            }
+        );
+        assert_eq!(world.admin(&start(PLAYER + 1), NOW), AdminReply::NotMine);
     }
 
     #[test]

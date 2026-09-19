@@ -34,6 +34,8 @@ pub const KILL_ROUTE: &str = "/api/gm/kill";
 pub const GOD_ROUTE: &str = "/api/gm/god";
 /// `POST`: puts items into a player's bag.
 pub const GIVE_ITEM_ROUTE: &str = "/api/gm/give-item";
+/// `POST`: starts a quest for a player.
+pub const START_QUEST_ROUTE: &str = "/api/gm/start-quest";
 /// `POST`: takes an item from a player.
 pub const TAKE_ITEM_ROUTE: &str = "/api/gm/take-item";
 /// `POST`: spawns GM mobs at a point.
@@ -67,6 +69,7 @@ pub fn gm_routes() -> Router<AppState> {
         .route(KILL_ROUTE, post(kill))
         .route(GOD_ROUTE, post(god))
         .route(GIVE_ITEM_ROUTE, post(give_item))
+        .route(START_QUEST_ROUTE, post(start_quest))
         .route(TAKE_ITEM_ROUTE, post(take_item))
         .route(SPAWN_ROUTE, post(spawn))
         .route(DESPAWN_ROUTE, post(despawn))
@@ -111,6 +114,15 @@ pub struct GodRequest {
     pub entity: u64,
     /// True: no damage.
     pub on: bool,
+}
+
+/// A quest for a player.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestRequest {
+    /// The player.
+    pub entity: u64,
+    /// The objective id.
+    pub objective: String,
 }
 
 /// Items for a player.
@@ -445,6 +457,31 @@ async fn give_item(
             entity: request.entity,
             item: request.item.clone(),
             quantity: request.quantity.unwrap_or(1),
+        },
+    )
+    .await
+}
+
+async fn start_quest(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Actor>,
+    Json(request): Json<QuestRequest>,
+) -> Response {
+    let gm = gm(
+        &state,
+        &actor,
+        "start_quest",
+        player(request.entity),
+        &request,
+    );
+    if let Some(refused) = gm.refused(GM_RANK).await {
+        return refused;
+    }
+    gm.send(
+        Owner::Player(request.entity),
+        AdminAction::StartQuest {
+            entity: request.entity,
+            objective: request.objective.clone(),
         },
     )
     .await
@@ -853,6 +890,19 @@ mod tests {
             [AdminAction::TeleportPlayer { entity: PLAYER, .. }]
         ));
         assert_eq!(results(&fixture), ["done"]);
+    }
+
+    #[tokio::test]
+    async fn a_quest_start_goes_to_the_players_sim() {
+        let fixture = fixture();
+        answer_next(&fixture, Some(AdminReply::Done));
+        let body = serde_json::json!({ "entity": PLAYER, "objective": "12_GetOffBeach" });
+        let request = post(START_QUEST_ROUTE, &body);
+        assert_eq!(status(&fixture, request).await, StatusCode::OK);
+        assert!(matches!(
+            &sent(&fixture)[..],
+            [AdminAction::StartQuest { entity: PLAYER, objective }] if objective == "12_GetOffBeach"
+        ));
     }
 
     #[tokio::test]

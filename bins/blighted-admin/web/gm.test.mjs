@@ -2,7 +2,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { MAX_SPAWN, itemRequest, spawnRequest, teleportRequest } from './gm.js';
+import { MAX_SPAWN, itemRequest, questRequest, spawnRequest, teleportRequest } from './gm.js';
+
+test('a quest start names its objective', () => {
+  assert.deepEqual(questRequest(41, ' 12_GetOffBeach '), { request: { entity: 41, objective: '12_GetOffBeach' } });
+  assert.ok(questRequest(41, ' ').error);
+});
 
 test('numbers make a teleport request', () => {
   assert.deepEqual(teleportRequest(41, '10', ' 20.5', '-3'), { request: { entity: 41, x: 10, y: 20.5, z: -3 } });

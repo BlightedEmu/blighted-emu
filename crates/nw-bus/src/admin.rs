@@ -50,7 +50,7 @@ pub enum AdminAction {
         /// True: no damage.
         on: bool,
     },
-    /// Puts items into the player's bag (for this session: items are not saved yet).
+    /// Puts items into the player's bag.
     GiveItem {
         /// The player.
         entity: u64,
@@ -58,6 +58,13 @@ pub enum AdminAction {
         item: String,
         /// How many.
         quantity: u32,
+    },
+    /// Starts a quest for the player (one at a time; a done quest only when repeatable).
+    StartQuest {
+        /// The player.
+        entity: u64,
+        /// The objective id (`Objectives` `ObjectiveID`).
+        objective: String,
     },
     /// Takes every stack of an item from the player.
     TakeItem {
@@ -68,7 +75,7 @@ pub enum AdminAction {
     },
     /// Spawns `count` GM mobs of a mob type around a point.
     SpawnMobs {
-        /// The vitals id (`VitalsData` `VitalsID`).
+        /// The vitals id (`VitalsBaseData` `VitalsID`).
         vitals: String,
         /// Their level.
         level: u32,

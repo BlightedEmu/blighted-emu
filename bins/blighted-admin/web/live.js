@@ -3,7 +3,7 @@
 // events) and the bot batch buttons.
 
 import { KINDS, mobEntity, playerEntity, selectionRows } from './entity.js';
-import { itemRequest, sendGm, spawnRequest, teleportRequest } from './gm.js';
+import { itemRequest, questRequest, sendGm, spawnRequest, teleportRequest } from './gm.js';
 import { WorldMap } from './map.js';
 import { SERIES, SIGNAL } from './palette.js';
 import { STATUS_GROUPS, isMarked, nextStatuses, statusText } from './status.js';
@@ -392,6 +392,17 @@ document.getElementById('gm-item').addEventListener('submit', (event) => {
   sendItem('give-item');
 });
 document.getElementById('gm-take').addEventListener('click', () => sendItem('take-item'));
+document.getElementById('gm-quest').addEventListener('submit', (event) => {
+  event.preventDefault();
+  onSelected((entity) => {
+    const { request, error } = questRequest(entity.entity, document.getElementById('gm-quest-id').value);
+    if (error) {
+      gmStatus.textContent = error;
+    } else {
+      gm('start-quest', request);
+    }
+  });
+});
 
 document.getElementById('gm-despawn').addEventListener('click', () => {
   onSelected((entity) => gm('despawn', { entities: [entity.entity] }));
