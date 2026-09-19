@@ -7,6 +7,7 @@ pub mod height;
 pub mod map_tiles;
 pub mod metadata;
 pub mod records;
+pub mod script;
 pub mod world_file;
 
 pub use records::WorldFile;
