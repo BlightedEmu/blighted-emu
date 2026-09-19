@@ -79,6 +79,11 @@ export function simulationRequest(table, rollsText, enemyText, contentText, tags
   return { request: { table, rolls, enemy_level: enemy, content_level: content, tags } };
 }
 
+/** The rows of a quest task tree (`/api/studio/quest-tree/...`), depth first, with their depth. */
+export function treeRows(node, depth = 0) {
+  return [{ id: node.id, kind: node.kind, depth }, ...node.children.flatMap((child) => treeRows(child, depth + 1))];
+}
+
 /** The override file of `record` (`/api/studio/records/...`) with `changes`. */
 export function overrideFile(record, changes) {
   return file(`${record.folder}/${record.id}.toml`, header(record.kind, 'override', record.id), changes);

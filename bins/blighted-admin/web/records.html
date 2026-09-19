@@ -52,6 +52,10 @@
           <input type="text" name="tags" class="wide" placeholder="loot tags: Common, Boss" aria-label="mob loot tags, split by commas">
           <button type="submit">Simulate</button>
         </form>
+        <section id="quest-tree" hidden aria-label="Quest task tree">
+          <b>Task tree</b>
+          <ul class="list" id="quest-tree-rows"></ul>
+        </section>
         <div class="table-scroll" id="simulation" hidden>
           <table class="grid">
             <thead><tr><th>Item</th><th class="num">Chance</th><th class="num">Mean quantity</th></tr></thead>

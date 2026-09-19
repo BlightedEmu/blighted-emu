@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { addFile, changedFields, overrideFile, simulationRequest, valueText } from './record-edit.js';
+import { addFile, changedFields, overrideFile, simulationRequest, treeRows, valueText } from './record-edit.js';
 
 const CLIENT = Object.freeze({ tier: 2, name: '@Sword_Name', can_salvage: true, perk1: null, weight: 1.5 });
 
@@ -44,6 +44,19 @@ test('a simulation needs a roll count in range and whole levels', () => {
   assert.ok(simulationRequest('LT_Wolf', '0', '1', '1').error);
   assert.ok(simulationRequest('LT_Wolf', '100001', '1', '1').error);
   assert.ok(simulationRequest('LT_Wolf', '10', 'x', '1').error);
+});
+
+test('a quest tree flattens depth first', () => {
+  const tree = {
+    id: 'root',
+    kind: 'ConsecutiveTaskContainer',
+    children: [{ id: 'a', kind: 'TaskTimer', children: [] }, { id: 'b', kind: null, children: [] }],
+  };
+  assert.deepEqual(treeRows(tree), [
+    { id: 'root', kind: 'ConsecutiveTaskContainer', depth: 0 },
+    { id: 'a', kind: 'TaskTimer', depth: 1 },
+    { id: 'b', kind: null, depth: 1 },
+  ]);
 });
 
 test('a new record names its base and a new id', () => {

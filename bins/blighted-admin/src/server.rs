@@ -28,6 +28,7 @@ use crate::relief::relief_tile;
 use crate::studio::Studio;
 use crate::studio::api::studio_routes;
 use crate::studio::loot::loot_routes;
+use crate::studio::quests::quest_routes;
 use crate::todo::api::todo_routes;
 use crate::world::{SpawnKind, SpawnQuery, WorldLayer};
 use nw_world::map_tiles::tile_file;
@@ -152,6 +153,7 @@ pub fn router(state: AppState) -> Router {
         .merge(bot_routes())
         .merge(studio_routes())
         .merge(loot_routes())
+        .merge(quest_routes())
         .merge(todo_routes())
         .merge(access_routes())
         .merge(gm_routes())

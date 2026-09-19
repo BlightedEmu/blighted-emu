@@ -3,13 +3,18 @@
 // override file, or save a new record made from one (admin studio spec sections 7.6, 7.7).
 
 import { errorRows } from '/web/apply.js';
-import { addFile, changedFields, overrideFile, simulationRequest, valueText } from '/web/record-edit.js';
+import { addFile, changedFields, overrideFile, simulationRequest, treeRows, valueText } from '/web/record-edit.js';
 
 const RECORDS_URL = '/api/studio/records';
 const FILE_URL = '/api/studio/file';
 const SIMULATE_URL = '/api/studio/loot/simulate';
 const NO_LOOT_URL = '/api/studio/loot/no-loot';
 const LOOT_TABLE_KIND = 'loot_table';
+const OBJECTIVE_KIND = 'objective';
+const OBJECTIVE_TASK_KIND = 'objective_task';
+const QUEST_TREE_URL = '/api/studio/quest-tree';
+/** Indent of one tree level, in em. */
+const TREE_INDENT_EM = 1.25;
 const MOB_KIND = 'mob';
 const PERCENT = 100;
 const CHANCE_DECIMALS = 2;
@@ -49,6 +54,8 @@ const elements = {
   simulate: document.getElementById('simulate'),
   simulation: document.getElementById('simulation'),
   simulationRows: document.getElementById('simulation-rows'),
+  questTree: document.getElementById('quest-tree'),
+  questTreeRows: document.getElementById('quest-tree-rows'),
 };
 /** The open record: { kind, folder, id, name, fields, field_names, files }, and the design file it edits. */
 let open = null;
@@ -198,10 +205,26 @@ function show(record, file) {
   drawFields();
   elements.simulate.hidden = record.kind !== LOOT_TABLE_KIND;
   elements.simulation.hidden = true;
+  elements.questTree.hidden = record.kind !== OBJECTIVE_KIND;
+  if (record.kind === OBJECTIVE_KIND) {
+    showQuestTree(record.id).catch(fail);
+  }
   const url = new URL(window.location.href);
   url.searchParams.set(KIND_PARAMETER, record.kind);
   url.searchParams.set(ID_PARAMETER, record.id);
   window.history.replaceState(null, '', url);
+}
+
+async function showQuestTree(objective) {
+  const tree = await json(`${QUEST_TREE_URL}/${encodeURIComponent(objective)}`);
+  elements.questTreeRows.replaceChildren(...treeRows(tree).map((row) => {
+    const item = document.createElement('li');
+    item.className = 'clickable';
+    item.style.paddingLeft = `${row.depth * TREE_INDENT_EM}em`;
+    item.textContent = `${row.id} · ${row.kind ?? 'no task record'}`;
+    item.addEventListener('click', () => openRecord(OBJECTIVE_TASK_KIND, row.id).catch(fail));
+    return item;
+  }));
 }
 
 async function openRecord(kind, id) {

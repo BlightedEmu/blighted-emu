@@ -6,6 +6,7 @@ pub mod api;
 pub mod apply;
 pub mod catalog;
 pub mod loot;
+pub mod quests;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
