@@ -479,7 +479,9 @@ mod tests {
         // Retail own vitals after a death: `01 0d 00000000 01 <spawn ns> 0..0 ff 03`.
         const SPAWNED_MS: u64 = 845_730_262_408;
         let mut writer = Writer::new();
-        VitalsState::player_life(0, VitalsData::player_dead(SPAWNED_MS)).write(&mut writer);
+        VitalsState::player_life(0, VitalsData::player_dead(SPAWNED_MS))
+            .write(&mut writer)
+            .expect("write");
         let mut expected = vec![0x01, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x01];
         expected.extend((SPAWNED_MS * NS_PER_MS).to_be_bytes());
         expected.extend([0; 8]);
