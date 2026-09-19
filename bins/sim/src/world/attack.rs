@@ -90,6 +90,8 @@ pub(super) struct Vitals {
     lock_target: Option<u64>,
     /// When the player last fired a spread shot.
     last_shot_ms: Option<u64>,
+    /// When the client last asked to fire a spread shot, fired or refused.
+    shot_requested_ms: Option<u64>,
     /// The player holds block (the newest input record, [`ClientInputMsg::blocking`]).
     ///
     /// [`ClientInputMsg::blocking`]: nw_messages::ClientInputMsg::blocking
@@ -113,6 +115,7 @@ impl Vitals {
             input_counter: None,
             lock_target: None,
             last_shot_ms: None,
+            shot_requested_ms: None,
             blocking: false,
             dodge_held: false,
             quick_slot_held: false,
@@ -131,8 +134,14 @@ pub(super) const fn amount_of(amount: u32) -> f32 {
 /// two).
 const MAX_SWING_TARGETS: usize = 5;
 
-/// The shortest time between two spread shots (our choice: retail's shortest gap was 266 ms).
-const SPREADSHOT_MIN_INTERVAL_MS: u64 = 250;
+/// The shortest time between two spread shots (our choice: retail's shortest gap was 266 ms, and
+/// the 33 ms tick and network jitter shorten the gap the sim sees; at 250 ms the live tutorial
+/// refused shots the client showed, 2026-09-18). The ammo (two loads, then a reload) limits the
+/// rate as retail does.
+const SPREADSHOT_MIN_INTERVAL_MS: u64 = 200;
+/// How long after an attack input a spread shot request shows that the attack was a shot
+/// (Inferred: the client sends its 2719 with the attack; the network adds up to a few ticks).
+const SHOT_PAIR_MS: u64 = 300;
 /// How far a pellet reaches (our choice; the blunderbuss range is Unknown, and the client names
 /// the targets it hit).
 const SPREADSHOT_RANGE_M: f32 = 30.0;
@@ -172,6 +181,12 @@ pub(super) struct PlayerSwing {
     kind: AttackKind,
     /// When it hits.
     due_ms: u64,
+    /// When its attack input came.
+    received_ms: u64,
+    /// The melee option slot to take in hand when it lands, while the server holds a spread-shot
+    /// weapon: unless a shot request came since [`PlayerSwing::received_ms`], the attack was a
+    /// swing of the weapon the client holds.
+    hand: Option<u32>,
 }
 
 /// Milliseconds per client input record (retail: 34 ms apart, median; input note).
@@ -427,15 +442,24 @@ impl SimWorld {
         if vitals.health.is_dead() {
             return refused(AttackRefusal::Dead);
         }
-        if vitals
+        let too_fast = vitals
             .last_shot_ms
-            .is_some_and(|last| now_ms.saturating_sub(last) < SPREADSHOT_MIN_INTERVAL_MS)
-        {
-            return refused(AttackRefusal::TooFast);
-        }
+            .is_some_and(|last| now_ms.saturating_sub(last) < SPREADSHOT_MIN_INTERVAL_MS);
         let number = player.number;
         let position = body.motion.position();
+        if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
+            vitals.shot_requested_ms = Some(now_ms);
+        }
+        if too_fast {
+            return refused(AttackRefusal::TooFast);
+        }
         let data = Arc::clone(&self.combat.data);
+        // A shot shows the spread-shot weapon in the client's hand: the server's hand follows
+        // when it holds another option (a weapon key it missed, or a handoff).
+        self.take_in_hand(entity, number, |weapon| weapon.spread_shot);
+        let Some(player) = self.world.get::<Player>(entity) else {
+            return refused(AttackRefusal::NotInWorld);
+        };
         let held = player.gear.as_ref().and_then(|gear| {
             let (item, gear_score) = gear.main_weapon()?;
             let weapon = *data.weapon_of_item(item)?;
@@ -687,18 +711,47 @@ impl SimWorld {
         if let Some(key) = weapon_key
             && let Some(mut player) = self.world.get_mut::<Player>(entity)
             && let Some(gear) = player.gear.as_mut()
+            && gear.draw(key, now_ms, unix_ns(self.server_ms))
         {
-            gear.draw(key, now_ms, unix_ns(self.server_ms));
-        }
-        let weapon = self.held_weapon(entity).map(|(weapon, _)| weapon);
-        // A spread-shot weapon fires through its own request (2719), not the attack key.
-        if weapon.is_some_and(|weapon| weapon.spread_shot) {
-            return Vec::new();
+            tracing::debug!(player = number, key, "weapon drawn");
         }
         // Every attack of one message has the same receive time, so only the first can hit: the
         // others are too fast, and a client cannot make the loop search for targets per record.
         let Some(&(kind, held_ms)) = attacks.first() else {
             return Vec::new();
+        };
+        let held = self.held_weapon(entity).map(|(weapon, _)| weapon);
+        // A spread-shot weapon fires through its own request (2719), not the attack key. The
+        // server's hand can be behind the client's, so the attack lands as a swing of the melee
+        // option unless a shot request comes with it ([`SimWorld::player_swings_due`]).
+        let (weapon, hand) = if held.is_some_and(|weapon| weapon.spread_shot) {
+            let data = Arc::clone(&self.combat.data);
+            let melee = self.world.get::<Player>(entity).and_then(|player| {
+                player.gear.as_ref()?.option_with(|item| {
+                    data.weapon_of_item(item)
+                        .is_some_and(|weapon| weapon.kind.swings())
+                })
+            });
+            let Some(slot_id) = melee else {
+                return Vec::new();
+            };
+            let kind = self
+                .world
+                .get::<Player>(entity)
+                .and_then(|player| player.gear.as_ref()?.worn_item(slot_id))
+                .and_then(|item| data.weapon_of_item(item))
+                .map_or(WeaponKind::Other, |weapon| weapon.kind);
+            (kind, Some(slot_id))
+        } else {
+            (held.map_or(WeaponKind::Other, |weapon| weapon.kind), None)
+        };
+        let Some(shape) = swing_shape(weapon, kind) else {
+            tracing::debug!(
+                player = number,
+                ?weapon,
+                "attack with a weapon that does not swing"
+            );
+            return vec![Err(AttackRefusal::NotWeaponAttack)];
         };
         let facing = records
             .first()
@@ -710,7 +763,7 @@ impl SimWorld {
             AttackKind::Light => now_ms.saturating_sub(held_ms),
             AttackKind::Heavy => now_ms,
         };
-        let shape = swing_shape(weapon.map_or(WeaponKind::Other, |weapon| weapon.kind), kind);
+        let due_ms = started_ms.saturating_add(shape.hit_ms()).max(now_ms);
         self.player_swings.push(PlayerSwing {
             attacker: connection.clone(),
             aim: Aim {
@@ -718,7 +771,13 @@ impl SimWorld {
                 lock_target,
             },
             kind,
-            due_ms: started_ms.saturating_add(shape.hit_ms()).max(now_ms),
+            due_ms: if hand.is_some() {
+                due_ms.max(now_ms.saturating_add(SHOT_PAIR_MS))
+            } else {
+                due_ms
+            },
+            received_ms: now_ms,
+            hand,
         });
         attacks[1..]
             .iter()
@@ -736,8 +795,70 @@ impl SimWorld {
             .partition(|swing| now_ms >= swing.due_ms);
         self.player_swings = later;
         due.into_iter()
-            .flat_map(|swing| self.swing(&swing.attacker, swing.aim, swing.kind, now_ms))
+            .flat_map(|swing| {
+                if let Some(slot_id) = swing.hand
+                    && !self.melee_hand(&swing, slot_id)
+                {
+                    return Vec::new();
+                }
+                self.swing(&swing.attacker, swing.aim, swing.kind, now_ms)
+            })
             .collect()
+    }
+
+    /// Whether `swing`, made while the server held a spread-shot weapon, was a swing of the melee
+    /// option `slot_id`: then the server's hand takes that weapon. A shot request since the
+    /// attack shows it was a shot.
+    fn melee_hand(&mut self, swing: &PlayerSwing, slot_id: u32) -> bool {
+        let Some(entity) = self.by_connection.get(&swing.attacker).copied() else {
+            return false;
+        };
+        let shot = self
+            .world
+            .get::<Vitals>(entity)
+            .and_then(|vitals| vitals.shot_requested_ms)
+            .is_some_and(|requested| requested >= swing.received_ms);
+        if shot {
+            return false;
+        }
+        let time_ns = unix_ns(self.server_ms);
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            let number = player.number;
+            if let Some(gear) = player.gear.as_mut() {
+                gear.take_in_hand(slot_id, time_ns);
+                tracing::debug!(
+                    player = number,
+                    slot_id,
+                    "melee attack with no shot: hand follows"
+                );
+            }
+        }
+        true
+    }
+
+    /// The server's hand of player `entity` (`number`) takes the lowest main-hand option whose
+    /// weapon `wanted` picks, when it holds another one.
+    fn take_in_hand(&mut self, entity: Entity, number: u64, wanted: impl Fn(&WeaponRow) -> bool) {
+        if self
+            .held_weapon(entity)
+            .is_some_and(|(weapon, _)| wanted(&weapon))
+        {
+            return;
+        }
+        let data = Arc::clone(&self.combat.data);
+        let time_ns = unix_ns(self.server_ms);
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        let Some(gear) = player.gear.as_mut() else {
+            return;
+        };
+        let Some(slot_id) = gear.option_with(|item| data.weapon_of_item(item).is_some_and(&wanted))
+        else {
+            return;
+        };
+        gear.take_in_hand(slot_id, time_ns);
+        tracing::debug!(player = number, slot_id, "hand follows the client");
     }
 
     /// The block, dodge and quick slot keys of the newest input record `newest` of player
@@ -854,7 +975,9 @@ impl SimWorld {
         let weapon = self
             .held_weapon(entity)
             .map_or(WeaponKind::Other, |(weapon, _)| weapon.kind);
-        let shape = swing_shape(weapon, kind);
+        let Some(shape) = swing_shape(weapon, kind) else {
+            return refused(AttackRefusal::NotWeaponAttack);
+        };
         let candidates: Vec<(u64, Position, Capsule)> = self
             .mob_states()
             .filter(|(_, _, state)| state.health > 0 && !state.returning)
@@ -892,11 +1015,18 @@ impl SimWorld {
             .collect();
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
         hits.truncate(MAX_SWING_TARGETS);
+        // The nearest mob, its distance and its height above the player: why a swing missed.
+        let nearest_mob = candidates
+            .iter()
+            .map(|(mob, at, _)| (*mob, at.horizontal_distance(position), at.z - position.z))
+            .min_by(|a, b| a.1.total_cmp(&b.1));
         tracing::debug!(
             attacker = ?attacker,
             x = position.x,
             y = position.y,
             facing,
+            ?weapon,
+            ?nearest_mob,
             hits = ?hits,
             "player swing"
         );
@@ -1243,6 +1373,12 @@ impl SimWorld {
                     // A swing at a player who moved away misses: retail sends no hit message.
                     let body = self.world.get::<Body>(entity)?.motion.position();
                     if !self.mob_swing_reaches(&intent, at, body) {
+                        tracing::debug!(
+                            mob = intent.mob,
+                            distance = at.horizontal_distance(body),
+                            dz = body.z - at.z,
+                            "mob swing missed: out of reach"
+                        );
                         return None;
                     }
                     // Spawn protection: a mob cannot hit a player whose client has not spawned
@@ -1252,6 +1388,7 @@ impl SimWorld {
                     }
                     // A swing into a dodge roll misses: retail sends no hit message then.
                     if now_ms < vitals.dodging_until_ms {
+                        tracing::debug!(mob = intent.mob, "mob swing missed: dodge");
                         return None;
                     }
                     let block_stamina = strike.map_or_else(
@@ -1400,7 +1537,9 @@ mod tests {
 
     /// When a sword light attack hits after its press.
     fn light_hit_ms() -> u64 {
-        swing_shape(WeaponKind::Other, AttackKind::Light).hit_ms()
+        swing_shape(WeaponKind::Other, AttackKind::Light)
+            .expect("swings")
+            .hit_ms()
     }
 
     /// A fight after one tick, which wakes the mob.
@@ -1444,7 +1583,9 @@ mod tests {
         keys.extend(std::iter::repeat_n(Key::Hold, HOLD_RECORDS));
         keys.push(Key::Release);
         world.attack_input(&connection(1), &message(1, &keys), NOW);
-        let heavy_ms = swing_shape(WeaponKind::Other, AttackKind::Heavy).hit_ms();
+        let heavy_ms = swing_shape(WeaponKind::Other, AttackKind::Heavy)
+            .expect("swings")
+            .hit_ms();
         assert!(world.player_swings_due(NOW + heavy_ms - 1).is_empty());
         assert_eq!(world.player_swings_due(NOW + heavy_ms).len(), 1);
     }
@@ -1712,6 +1853,113 @@ mod tests {
         );
         world.tick_hands(NOW, SERVER_TIME);
         world
+    }
+
+    /// [`fight_at`] `x` with player 1 holding a blunderbuss in main-hand option 1 (the kit sword
+    /// with spread-shot stats) and a melee weapon in option 2 (the kit staff with the test
+    /// sword's stats).
+    fn gun_and_blade_at(x: f32) -> SimWorld {
+        const BLUNDERBUSS: &str = "BlunderbussT2";
+        let mut source = crate::combat::test_support::test_source();
+        let (blade, sword) = source.weapons[0].clone();
+        source.weapons.push((
+            BLUNDERBUSS.to_owned(),
+            WeaponRow {
+                spread_shot: true,
+                kind: WeaponKind::Blunderbuss,
+                max_loaded_ammo: BLUNDERBUSS_SHOTS,
+                reload_ms: BLUNDERBUSS_RELOAD_MS,
+                ..sword
+            },
+        ));
+        source
+            .item_stats
+            .push((gear::tests::SWORD.to_owned(), BLUNDERBUSS.to_owned()));
+        source
+            .item_stats
+            .push((gear::tests::STAFF.to_owned(), blade));
+        let data = CombatData::build(source, &CombatRows::default()).expect("data");
+        let mut world = fight_at(x);
+        world.combat = committed().combat_settings(Arc::new(data), Arc::from([]));
+        let entity = world.by_connection[&connection(1)];
+        let mut gear = Gear::starter(
+            &gear::tests::kits(),
+            gear::tests::CHARACTER,
+            Some(gear::tests::BACKSTORY),
+        )
+        .expect("gear");
+        let kits = gear::tests::kits();
+        assert!(gear.add(kits.item(gear::tests::STAFF).expect("staff"), 1));
+        let staff = gear::instance_id(gear::tests::CHARACTER, gear::tests::STAFF);
+        assert_eq!(
+            gear.equip(0, slot::MAIN_HAND_OPTION_2, 1, staff),
+            Ok(gear::tests::STAFF.to_owned())
+        );
+        world.world.get_mut::<Player>(entity).expect("player").gear = Some(gear);
+        world.tick_hands(NOW, SERVER_TIME);
+        tick(&mut world, NOW);
+        world
+    }
+
+    /// When a tap at [`NOW`] made while the server holds the blunderbuss lands: after its hit
+    /// time and the wait for a shot request.
+    fn lands_at() -> u64 {
+        NOW + light_hit_ms().max(SHOT_PAIR_MS)
+    }
+
+    fn drawn(world: &SimWorld) -> Option<u32> {
+        let entity = world.by_connection[&connection(1)];
+        world.world.get::<Player>(entity)?.gear.as_ref()?.drawn()
+    }
+
+    #[test]
+    fn a_melee_attack_with_no_shot_takes_the_melee_weapon_in_hand() {
+        let mut world = gun_and_blade_at(MOB_X + 2.0);
+        world.attack_input(
+            &connection(1),
+            &message(1, &[Key::Press, Key::Release]),
+            NOW,
+        );
+        let early = world.player_swings_due(NOW + SHOT_PAIR_MS - 1);
+        assert!(early.is_empty(), "it waits for a shot request: {early:?}");
+        let landed = world.player_swings_due(lands_at());
+        assert!(
+            matches!(landed.as_slice(), [Ok(AttackOutcome::Hit { target, .. })] if *target == mob()),
+            "{landed:?}"
+        );
+        assert_eq!(drawn(&world), Some(slot::MAIN_HAND_OPTION_2));
+    }
+
+    #[test]
+    fn an_attack_with_a_shot_is_the_shot() {
+        let mut world = gun_and_blade_at(MOB_X + 2.0);
+        world.attack_input(
+            &connection(1),
+            &message(1, &[Key::Press, Key::Release]),
+            NOW,
+        );
+        world.spreadshot(&connection(1), &shot(2), NOW + INPUT_RECORD_MS as u64);
+        assert!(world.player_swings_due(lands_at()).is_empty());
+        assert_ne!(drawn(&world), Some(slot::MAIN_HAND_OPTION_2));
+    }
+
+    #[test]
+    fn a_shot_takes_the_spread_shot_weapon_in_hand() {
+        let mut world = gun_and_blade_at(MOB_X + 2.0);
+        world.attack_input(
+            &connection(1),
+            &message(1, &[Key::Press, Key::Release]),
+            NOW,
+        );
+        world.player_swings_due(lands_at());
+        assert_eq!(drawn(&world), Some(slot::MAIN_HAND_OPTION_2), "the blade");
+        let later = lands_at() + SPREADSHOT_MIN_INTERVAL_MS;
+        let results = world.spreadshot(&connection(1), &shot(2), later);
+        assert!(
+            matches!(results.as_slice(), [Ok(AttackOutcome::Hit { .. })]),
+            "{results:?}"
+        );
+        assert_eq!(drawn(&world), Some(slot::MAIN_HAND_OPTION_1));
     }
 
     /// A shot of `pellets` pellets on [`mob`], whose last pellet missed.

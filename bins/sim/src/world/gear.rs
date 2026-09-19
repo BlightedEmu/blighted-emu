@@ -324,11 +324,11 @@ impl Gear {
 
     /// The player draws main-hand option `option` (0 for the first key) at `now_ms`: its weapon
     /// reaches the hand [`ATTACH_MS`] later, and the option put away keeps the time `time_ns`
-    /// (client-gates note: retail answered each weapon key so).
-    pub(super) fn draw(&mut self, option: u32, now_ms: u64, time_ns: u64) {
+    /// (client-gates note: retail answered each weapon key so). Whether it was a new draw.
+    pub(super) fn draw(&mut self, option: u32, now_ms: u64, time_ns: u64) -> bool {
         let picked = slot::MAIN_HAND_OPTION_1.saturating_add(option);
         if picked > slot::MAIN_HAND_OPTION_3 || self.drawn == Some(picked) {
-            return;
+            return false;
         }
         if let Some(stowed) = self.drawn.and_then(ammo_index) {
             self.ammo[stowed].time_ns = time_ns;
@@ -337,6 +337,25 @@ impl Gear {
         self.attached = false;
         self.attach_at_ms = Some(now_ms.saturating_add(ATTACH_MS));
         self.changed = true;
+        true
+    }
+
+    /// The weapon of main-hand option slot `slot_id` is in the client's hand already (its attack
+    /// showed it): drawn and in the hand at once, the option put away keeping the time `time_ns`.
+    pub(super) fn take_in_hand(&mut self, slot_id: u32, time_ns: u64) {
+        let option = slot_id.saturating_sub(slot::MAIN_HAND_OPTION_1);
+        if self.draw(option, 0, time_ns) {
+            self.attach_at_ms = None;
+            self.attached = true;
+        }
+    }
+
+    /// The lowest main-hand option slot whose item `wanted` picks.
+    pub(super) fn option_with(&self, wanted: impl Fn(&str) -> bool) -> Option<u32> {
+        self.main_hand()
+            .filter(|(_, stack)| wanted(&stack.item_id))
+            .map(|(slot_id, _)| slot_id)
+            .min()
     }
 
     /// Gives main-hand options 1 and 2 the shots and reload time of their weapons by
@@ -616,7 +635,7 @@ pub(crate) mod tests {
     pub(crate) const BACKSTORY: &str = "Archetype_Mystic";
     pub(crate) const CHARACTER: Uuid = Uuid::from_u128(0x2b87_684d_c82c_46a4_90e4_c764_0247_7507);
     pub(crate) const SWORD: &str = "1hSwordT2_FTUE";
-    const STAFF: &str = "MysticArchetype_2hStaffLife";
+    pub(crate) const STAFF: &str = "MysticArchetype_2hStaffLife";
     pub(crate) const POTION: &str = "PotionHealthT1";
     /// A resource the kit does not give: the bag takes it from a gather.
     pub(crate) const FLINT: &str = "FlintT1";

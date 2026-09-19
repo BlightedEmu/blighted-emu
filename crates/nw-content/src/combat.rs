@@ -116,53 +116,109 @@ pub struct WeaponRow {
     pub reload_ms: u64,
 }
 
-/// The kind of a melee weapon, which sets the shape and time of its swing.
+/// The kind of a weapon. A melee kind sets the shape and time of its swing; a ranged or magic
+/// kind hits through its own client requests (the blunderbuss's 2719; the others' are Unknown).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WeaponKind {
     /// A sword (`1hSword…`, `1hLongsword…`).
     Sword,
-    /// A hatchet.
+    /// A hatchet (`1hHatchet…`, `1hThrowingAxe…`).
     Hatchet,
     /// A rapier.
     Rapier,
+    /// A flail.
+    Flail,
     /// A spear.
     Spear,
     /// A great axe.
     GreatAxe,
-    /// A war hammer.
+    /// A war hammer (`2hWarhammer…`, `2hDemoHammer…`).
     WarHammer,
     /// A greatsword.
     GreatSword,
-    /// Any other weapon (ranged, magic or unknown).
+    /// A bow.
+    Bow,
+    /// A musket.
+    Musket,
+    /// A blunderbuss.
+    Blunderbuss,
+    /// A fire staff (`2hStaffFire…`, `2hFireStaff…`).
+    FireStaff,
+    /// A life staff (`2hStaffLife…`, `2hLifeStaff…`).
+    LifeStaff,
+    /// An ice gauntlet (`1hGauntletIce…`, `2hIceGauntlet…`).
+    IceGauntlet,
+    /// A void gauntlet (`1hGauntletVoid…`, `2hVoidGauntlet…`).
+    VoidGauntlet,
+    /// Any other item in a weapon slot (a tool such as a skinning knife, or an unknown id).
     Other,
 }
 
 impl WeaponKind {
-    /// The names in retail weapon ids, longest match first (`1hHatchetT1`, `2hWarHammerT2`,
-    /// `1hGreatSword_HalloweenT5`): a greatsword id also holds "sword".
-    const NAMES: [(&'static str, Self); 7] = [
+    /// The names in retail weapon ids (content bundle strings, 2026-09-18), longest match first:
+    /// a greatsword id also holds "sword", a throwing axe "axe".
+    const NAMES: [(&'static str, Self); 21] = [
         ("greatsword", Self::GreatSword),
         ("greataxe", Self::GreatAxe),
         ("warhammer", Self::WarHammer),
+        ("demohammer", Self::WarHammer),
+        ("throwingaxe", Self::Hatchet),
         ("hatchet", Self::Hatchet),
         ("rapier", Self::Rapier),
+        ("flail", Self::Flail),
         ("spear", Self::Spear),
+        ("blunderbuss", Self::Blunderbuss),
+        ("musket", Self::Musket),
+        ("bow", Self::Bow),
+        ("stafffire", Self::FireStaff),
+        ("firestaff", Self::FireStaff),
+        ("stafflife", Self::LifeStaff),
+        ("lifestaff", Self::LifeStaff),
+        ("gauntletice", Self::IceGauntlet),
+        ("icegauntlet", Self::IceGauntlet),
+        ("gauntletvoid", Self::VoidGauntlet),
+        ("voidgauntlet", Self::VoidGauntlet),
         ("sword", Self::Sword),
     ];
 
-    /// The damage rows of its light and heavy attacks (`javelindata_damagetable`); `None` for
-    /// [`WeaponKind::Other`], which uses the config's.
+    /// The damage rows of its light and heavy attacks (`javelindata_damagetable`); `None` for a
+    /// kind that does not swing.
     pub const fn attack_ids(self) -> Option<(&'static str, &'static str)> {
         Some(match self {
             Self::Sword => ("1H_Sword_Attack1", "1H_Sword_Attack2"),
             Self::Hatchet => ("Hatchet_Damage_PrimaryAttack", "Hatchet_Damage_HeavyAttack"),
             Self::Rapier => ("1H_Rapier_PrimaryAttack", "1H_Rapier_HeavyAttack"),
+            Self::Flail => ("1H_Flail_LightAttack1", "1H_Flail_HeavyAttackChain_1"),
             Self::Spear => ("2H_Spear_PrimaryAttack", "2H_Spear_HeavyAttack"),
             Self::GreatAxe => ("GreatAxe_PrimaryAttack", "GreatAxe_HeavyAttack"),
             Self::WarHammer => ("Warhammer_PrimaryAttack", "Warhammer_HeavyAttack"),
             Self::GreatSword => ("GreatSword_PrimaryAttack1", "GreatSword_HeavyAttack1"),
-            Self::Other => return None,
+            Self::Bow
+            | Self::Musket
+            | Self::Blunderbuss
+            | Self::FireStaff
+            | Self::LifeStaff
+            | Self::IceGauntlet
+            | Self::VoidGauntlet
+            | Self::Other => return None,
         })
+    }
+
+    /// It hits with a swing in front of the body (a melee weapon, or an item of another kind,
+    /// which swings as a sword): not a ranged or magic weapon.
+    pub const fn swings(self) -> bool {
+        matches!(
+            self,
+            Self::Sword
+                | Self::Hatchet
+                | Self::Rapier
+                | Self::Flail
+                | Self::Spear
+                | Self::GreatAxe
+                | Self::WarHammer
+                | Self::GreatSword
+                | Self::Other
+        )
     }
 
     /// The kind that the weapon id `weapon_id` names.
@@ -662,7 +718,27 @@ mod tests {
         assert_eq!(WeaponKind::of_id("1hhatchetBLostT2"), WeaponKind::Hatchet);
         assert_eq!(WeaponKind::of_id("2hWarHammerT2"), WeaponKind::WarHammer);
         assert_eq!(WeaponKind::of_id("2hGreatAxeT2"), WeaponKind::GreatAxe);
-        assert_eq!(WeaponKind::of_id("BlunderbussT2"), WeaponKind::Other);
+        assert_eq!(WeaponKind::of_id("BlunderbussT2"), WeaponKind::Blunderbuss);
+        assert_eq!(WeaponKind::of_id("2hDemoHammerT3"), WeaponKind::WarHammer);
+        assert_eq!(WeaponKind::of_id("1hThrowingAxeT2"), WeaponKind::Hatchet);
+        assert_eq!(WeaponKind::of_id("1hFlailT2"), WeaponKind::Flail);
+        assert_eq!(WeaponKind::of_id("2hBowT2"), WeaponKind::Bow);
+        assert_eq!(WeaponKind::of_id("2hMusketT2"), WeaponKind::Musket);
+        assert_eq!(WeaponKind::of_id("2hStaffFireT2"), WeaponKind::FireStaff);
+        assert_eq!(
+            WeaponKind::of_id("2hLifeStaff_WinterT5"),
+            WeaponKind::LifeStaff
+        );
+        assert_eq!(
+            WeaponKind::of_id("1hGauntletIceT2"),
+            WeaponKind::IceGauntlet
+        );
+        assert_eq!(
+            WeaponKind::of_id("2hVoidGauntletT2"),
+            WeaponKind::VoidGauntlet
+        );
+        assert_eq!(WeaponKind::of_id("1hSkinningKnifeT1"), WeaponKind::Other);
+        assert!(WeaponKind::Flail.swings() && !WeaponKind::Bow.swings());
     }
 
     const PLAYER_HEALTH: u32 = 856;

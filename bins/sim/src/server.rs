@@ -24,6 +24,7 @@ use nw_db::{
     PgPool, SaveOutcome, SavedItem, SavedPlace, SavedPosition, SavedQuests, save_character_items,
     save_character_position, save_character_quests,
 };
+use nw_messages::facet::TIME_SYNC_REQUEST_TYPE_INDEX;
 use nw_messages::{
     BodyCodec, ClientFacetMsg, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
     REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX,
@@ -524,7 +525,9 @@ impl Loop {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
             return;
         };
-        self.world.heard_from(connection);
+        if says_in_game(envelope.type_index()) {
+            self.world.heard_from(connection);
+        }
         match envelope.type_index() {
             Some(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX) => {
                 self.client_input(connection, &envelope.body);
@@ -578,6 +581,7 @@ impl Loop {
             return;
         };
         let now_ms = self.now_ms();
+        tracing::debug!(pellets = request.pellets.len(), "spread shot");
         for result in self.world.spreadshot(connection, &request, now_ms) {
             self.attack_result(result);
         }
@@ -707,7 +711,10 @@ impl Loop {
                 count_mob_death(outcome);
                 outcome.label()
             }
-            Err(refusal) => refusal.reason(),
+            Err(refusal) => {
+                tracing::debug!(reason = refusal.reason(), "attack refused");
+                refusal.reason()
+            }
         };
         metrics::counter!(METRIC_ATTACKS, RESULT_LABEL => label).increment(1);
         if let Ok(AttackOutcome::Remote(remote)) = result {
@@ -1244,6 +1251,15 @@ fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// A client message of `type_index` shows that its client is in the game: an input or a time sync
+/// request (see [`SimWorld::heard_from`]). The teardown calls of a level change do not.
+const fn says_in_game(type_index: Option<u64>) -> bool {
+    matches!(
+        type_index,
+        Some(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX | TIME_SYNC_REQUEST_TYPE_INDEX)
+    )
+}
+
 fn server_time() -> u64 {
     unix_ms().saturating_sub(SERVER_EPOCH_UNIX_MS)
 }
@@ -1274,6 +1290,16 @@ mod metric_tests {
             !text.contains(PLAYER_KIND),
             "a player death counts with its departure"
         );
+    }
+
+    #[test]
+    fn only_an_input_or_a_time_sync_shows_the_client_in_the_game() {
+        /// A teardown call of a level change (live 2026-09-18).
+        const TEARDOWN_TYPE_INDEX: u64 = 4143;
+        assert!(says_in_game(Some(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX)));
+        assert!(says_in_game(Some(TIME_SYNC_REQUEST_TYPE_INDEX)));
+        assert!(!says_in_game(Some(TEARDOWN_TYPE_INDEX)));
+        assert!(!says_in_game(None));
     }
 }
 

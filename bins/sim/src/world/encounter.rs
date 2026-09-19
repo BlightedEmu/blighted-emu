@@ -180,9 +180,11 @@ const ISLAND_CAPSULE: Capsule = Capsule {
     radius_m: 0.5,
     height_m: 1.8,
 };
+/// Thorpe's body: radius 0.7 m (Observed); height Inferred: the slice's 1.4 m is the height
+/// between the two round ends, so the whole body stands 1.4 + 2 x 0.7 = 2.8 m (a 2.5 m boss).
 const THORPE_CAPSULE: Capsule = Capsule {
     radius_m: 0.7,
-    height_m: 1.4,
+    height_m: 2.8,
 };
 /// The lunges of their swings (collision note, section 3: the `Homing` and `CAGE-Damage` clips of
 /// their attacks; the reach of the hit shape in front of the body is Inferred from the clips'
@@ -211,10 +213,13 @@ const SWARMER_REACH: MobReach = MobReach {
     lunge_turn_rad: std::f32::consts::PI,
     reach_m: 1.0,
 };
-/// Thorpe's stab: its hit box reaches 1.5 m in front of his root (Observed).
+/// Thorpe's stab: its hit box reaches 1.5 m in front of his root (Observed). His behaviour tree
+/// keeps attacking while the target is nearer than 6 m (Observed, Server.pak
+/// `ftue_thorpe_combatbehavior`), so his moves step in up to 4 m (Inferred: 6 m less his reach
+/// and the player's radius).
 const THORPE_REACH: MobReach = MobReach {
     lunge_stop_m: 1.25,
-    lunge_max_m: 2.5,
+    lunge_max_m: 4.0,
     lunge_turn_rad: std::f32::consts::PI,
     reach_m: 1.5,
 };

@@ -33,6 +33,8 @@ pub mod slot {
     pub const QUICK_SLOT_1: u32 = 14;
     /// `MAIN_HAND_OPTION_1`, the main hand.
     pub const MAIN_HAND_OPTION_1: u32 = 24;
+    /// `MAIN_HAND_OPTION_2`, the second weapon.
+    pub const MAIN_HAND_OPTION_2: u32 = 25;
     /// `MAIN_HAND_OPTION_3`.
     pub const MAIN_HAND_OPTION_3: u32 = 26;
     /// `OFF_HAND_OPTION_1`, the off hand.

@@ -900,11 +900,13 @@ impl SimWorld {
         Ok(level_change)
     }
 
-    /// Notes that the client of `connection` sent a message. A client sends nothing between the
-    /// login and its spawn: its first message after the own spawn card comes in the same moment it
-    /// logs `player spawn succeeds, in game` (live 2026-09-10). So that message ends the hold on
-    /// the replication stream and the spawn protection. Before the card it means nothing, and a
-    /// player who already spawned is not changed.
+    /// Notes that the client of `connection` is in the game: it sent a time sync request or an
+    /// input. Its first time sync request after the own spawn card comes in the same moment it
+    /// logs `player spawn succeeds, in game` (live 2026-09-10 and 2026-09-18). So that message ends
+    /// the hold on the replication stream and the spawn protection. Other messages do not: after a
+    /// level change the client sends its teardown calls (4143, 3970 and more) while it unloads the
+    /// old level, and mob cards sent then show a name plate without a model (live 2026-09-18).
+    /// Before the card it means nothing, and a player who already spawned is not changed.
     pub fn heard_from(&mut self, connection: &ConnectionRef) {
         let Some(&entity) = self.by_connection.get(connection) else {
             return;
@@ -3709,6 +3711,10 @@ mod tests {
                         let slot = vitals.slot_0?;
                         Some((slot.health_amount, slot.vitals_data?.head))
                     }
+                    // The respawn cooldown, as a health of -1 and head 0xff.
+                    MemberState::PlayerComponent(state) => state
+                        .on_death_respawn_cooldown
+                        .map(|_| (Some(-1.0), u8::MAX)),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
@@ -3716,8 +3722,8 @@ mod tests {
         world.apply_hit(1, crate::mobs::mob_entity(0), LETHAL, 0, card_at + 1);
         assert_eq!(
             lives(&mut world, card_at + 33),
-            vec![(Some(0.0), 1)],
-            "the dead block opens the death screen"
+            vec![(Some(-1.0), u8::MAX), (Some(0.0), 1)],
+            "the respawn cooldown and the dead block open the death screen"
         );
         let respawn_at = card_at + RESPAWN_AFTER_MS;
         world

@@ -21,6 +21,12 @@ pub(super) const PLAYER_CAPSULE: Capsule = Capsule {
     height_m: 2.0,
 };
 
+/// How far apart in height two bodies may stand and still touch (Inferred): the server's height
+/// of a body on a ledge, a pool rim or a slope the height map does not hold can be off by a
+/// metre (live 2026-09-18: the player on the rim of Thorpe's pool stood above his capsule on
+/// 37% of the swings the client showed landing).
+const STEP_SLACK_M: f32 = 1.0;
+
 /// Half the arc of a mob swing in front of its body (our choice: retail mob hits found the player
 /// within 18 degrees of the mob's facing on 16 of 17 hits).
 pub(super) const MOB_SWING_HALF_ARC_RAD: f32 = FRAC_PI_4;
@@ -122,32 +128,53 @@ const WAR_HAMMER_HEAVY: SwingShape = SwingShape {
     window_ms: (467, 567),
     ..WAR_HAMMER_LIGHT
 };
-/// Greatsword: window 433-533 ms; reach Inferred from its box; homing 4.5 m, 60 degrees.
-const GREAT_SWORD: SwingShape = SwingShape {
+/// Greatsword: window 433-533 ms; homing 4.5 m, 60 degrees. Reach Inferred: the live
+/// greatsword landed on Thorpe at 3 to 4 m between the two bodies' middles (2026-09-18), and the
+/// heavy attack steps further in.
+const GREAT_SWORD_LIGHT: SwingShape = SwingShape {
     window_ms: (433, 533),
-    reach_m: 2.4,
+    reach_m: 3.0,
     half_arc_rad: degrees(60.0),
     homing_radius_m: 4.5,
     homing_angle_rad: degrees(60.0),
 };
+const GREAT_SWORD_HEAVY: SwingShape = SwingShape {
+    reach_m: 3.3,
+    ..GREAT_SWORD_LIGHT
+};
+/// Flail: its clips were not extracted; window, reach and arc our choice, as a one-handed
+/// weapon of the hatchet's length.
+const FLAIL: SwingShape = HATCHET_LIGHT;
 
-/// The shape of attack `attack` with a weapon of `kind`; a weapon of another kind swings as a
-/// sword (our choice). The heavy attacks of the rapier, great axe and greatsword were not
-/// extracted: they swing as their light attack.
-pub(super) const fn swing_shape(kind: WeaponKind, attack: AttackKind) -> SwingShape {
-    match (kind, attack) {
+/// The shape of attack `attack` with a weapon of `kind`; an item of another kind swings as a
+/// sword (our choice); `None` for a ranged or magic weapon, which does not swing. The heavy
+/// attacks of the rapier and great axe were not extracted: they swing as their light attack.
+pub(super) const fn swing_shape(kind: WeaponKind, attack: AttackKind) -> Option<SwingShape> {
+    Some(match (kind, attack) {
         (WeaponKind::Sword | WeaponKind::Other, AttackKind::Light) => SWORD_LIGHT,
         (WeaponKind::Sword | WeaponKind::Other, AttackKind::Heavy) => SWORD_HEAVY,
         (WeaponKind::Hatchet, AttackKind::Light) => HATCHET_LIGHT,
         (WeaponKind::Hatchet, AttackKind::Heavy) => HATCHET_HEAVY,
         (WeaponKind::Rapier, _) => RAPIER,
+        (WeaponKind::Flail, _) => FLAIL,
         (WeaponKind::Spear, AttackKind::Light) => SPEAR_LIGHT,
         (WeaponKind::Spear, AttackKind::Heavy) => SPEAR_HEAVY,
         (WeaponKind::GreatAxe, _) => GREAT_AXE,
         (WeaponKind::WarHammer, AttackKind::Light) => WAR_HAMMER_LIGHT,
         (WeaponKind::WarHammer, AttackKind::Heavy) => WAR_HAMMER_HEAVY,
-        (WeaponKind::GreatSword, _) => GREAT_SWORD,
-    }
+        (WeaponKind::GreatSword, AttackKind::Light) => GREAT_SWORD_LIGHT,
+        (WeaponKind::GreatSword, AttackKind::Heavy) => GREAT_SWORD_HEAVY,
+        (
+            WeaponKind::Bow
+            | WeaponKind::Musket
+            | WeaponKind::Blunderbuss
+            | WeaponKind::FireStaff
+            | WeaponKind::LifeStaff
+            | WeaponKind::IceGauntlet
+            | WeaponKind::VoidGauntlet,
+            _,
+        ) => return None,
+    })
 }
 
 /// The turn from yaw `facing` to yaw `toward`, -π to π.
@@ -186,7 +213,8 @@ impl Wedge {
         if distance > self.reach_m + body.radius_m {
             return None;
         }
-        let overlaps = at.z < self.from.z + self.own.height_m && self.from.z < at.z + body.height_m;
+        let overlaps = at.z < self.from.z + self.own.height_m + STEP_SLACK_M
+            && self.from.z < at.z + body.height_m + STEP_SLACK_M;
         if !overlaps {
             return None;
         }
@@ -274,15 +302,23 @@ mod tests {
     #[test]
     fn a_body_above_or_below_is_not_hit() {
         let above = Position {
-            z: ORIGIN.z + PLAYER_CAPSULE.height_m + 0.1,
+            z: ORIGIN.z + PLAYER_CAPSULE.height_m + STEP_SLACK_M + 0.1,
             ..at(0.0, 1.0)
         };
         assert_eq!(sword().touches(above, BODY), None);
         let below = Position {
-            z: ORIGIN.z - BODY.height_m - 0.1,
+            z: ORIGIN.z - BODY.height_m - STEP_SLACK_M - 0.1,
             ..at(0.0, 1.0)
         };
         assert_eq!(sword().touches(below, BODY), None);
+        let on_a_ledge = Position {
+            z: ORIGIN.z - BODY.height_m - STEP_SLACK_M + 0.1,
+            ..at(0.0, 1.0)
+        };
+        assert!(
+            sword().touches(on_a_ledge, BODY).is_some(),
+            "a body a step below still touches"
+        );
     }
 
     #[test]
@@ -300,17 +336,45 @@ mod tests {
 
     #[test]
     fn each_weapon_hits_inside_its_damage_window() {
-        assert_eq!(
-            swing_shape(WeaponKind::Sword, AttackKind::Light).hit_ms(),
-            383
-        );
-        assert_eq!(
-            swing_shape(WeaponKind::WarHammer, AttackKind::Light).hit_ms(),
-            466
-        );
+        let hit_ms = |kind| swing_shape(kind, AttackKind::Light).map(|shape| shape.hit_ms());
+        assert_eq!(hit_ms(WeaponKind::Sword), Some(383));
+        assert_eq!(hit_ms(WeaponKind::WarHammer), Some(466));
         assert_eq!(
             swing_shape(WeaponKind::Other, AttackKind::Heavy),
-            SWORD_HEAVY
+            Some(SWORD_HEAVY)
         );
+    }
+
+    #[test]
+    fn every_melee_kind_swings_and_no_ranged_or_magic_kind_does() {
+        let kinds = [
+            WeaponKind::Sword,
+            WeaponKind::Hatchet,
+            WeaponKind::Rapier,
+            WeaponKind::Flail,
+            WeaponKind::Spear,
+            WeaponKind::GreatAxe,
+            WeaponKind::WarHammer,
+            WeaponKind::GreatSword,
+            WeaponKind::Bow,
+            WeaponKind::Musket,
+            WeaponKind::Blunderbuss,
+            WeaponKind::FireStaff,
+            WeaponKind::LifeStaff,
+            WeaponKind::IceGauntlet,
+            WeaponKind::VoidGauntlet,
+            WeaponKind::Other,
+        ];
+        for kind in kinds {
+            for attack in [AttackKind::Light, AttackKind::Heavy] {
+                assert_eq!(
+                    swing_shape(kind, attack).is_some(),
+                    kind.swings(),
+                    "{kind:?} {attack:?}"
+                );
+            }
+        }
+        let reach = |attack| swing_shape(WeaponKind::GreatSword, attack).map(|shape| shape.reach_m);
+        assert!(reach(AttackKind::Heavy) > reach(AttackKind::Light));
     }
 }
