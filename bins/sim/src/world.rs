@@ -43,6 +43,7 @@ use nw_sim_core::{
 use thiserror::Error;
 use uuid::Uuid;
 
+mod admin;
 mod asset_script;
 mod attack;
 mod combat_status;

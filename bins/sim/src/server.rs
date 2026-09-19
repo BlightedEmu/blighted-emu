@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nw_bus::{
-    Admit, AdmitReply, Bus, BusError, BusId, CellTable, ConnectionRef, GatewayOutput, Ghosts,
-    HandoffMessage, HandoffReply, Heartbeat, Hit, Incoming, InputBatch, OutputBatch, Point,
+    AdminCommand, Admit, AdmitReply, Bus, BusError, BusId, CellTable, ConnectionRef, GatewayOutput,
+    Ghosts, HandoffMessage, HandoffReply, Heartbeat, Hit, Incoming, InputBatch, OutputBatch, Point,
     Publisher, SimHeartbeat, SimInput, SimSlot, SimSnapshot, snapshot_parts, split_batches,
     subject,
 };
@@ -218,6 +218,7 @@ struct Inbox {
     hits: nw_bus::Subscription<Hit>,
     tables: nw_bus::Subscription<CellTable>,
     beats: nw_bus::Subscription<Heartbeat>,
+    admin: nw_bus::Subscription<AdminCommand>,
 }
 
 impl Inbox {
@@ -232,6 +233,7 @@ impl Inbox {
             beats: bus
                 .subscribe(subject::all_gateway_heartbeats(world_id))
                 .await?,
+            admin: bus.subscribe(subject::sim_admin(world_id, sim)).await?,
         };
         bus.flush().await?;
         Ok(inbox)
@@ -329,6 +331,10 @@ pub async fn serve(
                 Ok(admit) => state.admit(admit),
                 Err(error) => tracing::warn!(%error, "bad admit message"),
             },
+            Some(command) = inbox.admin.next() => match command {
+                Ok(command) => state.admin(command),
+                Err(error) => tracing::warn!(%error, "bad admin command"),
+            },
             Some(batch) = inbox.inputs.next() => match batch {
                 Ok(batch) => state.inputs(batch.message),
                 Err(error) => tracing::warn!(%error, "bad input batch"),
@@ -403,6 +409,13 @@ impl Loop {
     }
 
     /// Answers a request from its own task, so a slow NATS link never stops the tick.
+    /// A GM command from the admin tool, between ticks.
+    fn admin(&mut self, command: Incoming<AdminCommand>) {
+        let reply = self.world.admin(&command.message, self.now_ms());
+        tracing::info!(request = %command.message.request, ?reply, "admin command");
+        self.reply(command, reply);
+    }
+
     fn reply<T: Send + Sync + 'static, R: serde::Serialize + Send + Sync + 'static>(
         &self,
         request: Incoming<T>,
