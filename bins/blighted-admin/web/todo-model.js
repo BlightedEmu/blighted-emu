@@ -35,3 +35,8 @@ export function changeBody(task) {
     records: task.records,
   };
 }
+
+/** The headers of a change of `task`: `If-Match` its version, so a change made meanwhile wins. */
+export function taskHeaders(headers, task) {
+  return Object.freeze({ ...headers, 'If-Match': task.version });
+}

@@ -2,13 +2,15 @@
 // The to-do page: tasks of content/todo.toml, GitHub issue import, and the changed design files
 // to link before a commit (admin studio spec section 10).
 
-import { ALL_STATES, changeBody, tasksIn, withRecord, withoutRecord } from '/web/todo-model.js';
+import { ALL_STATES, changeBody, taskHeaders, tasksIn, withRecord, withoutRecord } from '/web/todo-model.js';
 
 const TODO_URL = '/api/todo';
 const TASK_URL = '/api/todo/task';
 const IMPORT_URL = '/api/todo/import';
 const CHANGED_URL = '/api/todo/changed';
 const HEADERS = Object.freeze({ 'X-Blighted-Admin': '1', 'Content-Type': 'application/json' });
+/** The status of a change refused because the task changed after the list was read. */
+const HTTP_CHANGED = 412;
 const KINDS = Object.freeze(['quest', 'loot', 'spawn', 'path', 'ai', 'script', 'item', 'event', 'other']);
 const STATES = Object.freeze(['open', 'taken', 'done']);
 /** Only a GitHub address becomes a link (a hand-edited todo.toml could hold another scheme). */
@@ -38,9 +40,13 @@ function options(select, values, labels = values) {
   }));
 }
 
-/** Sends `body` to `url` and shows the list it answers with. */
-async function send(url, method, body) {
-  const response = await fetch(url, { method, headers: HEADERS, body: body ? JSON.stringify(body) : undefined });
+/** Sends `body` to `url` with `headers` and shows the list it answers with. */
+async function send(url, method, body, headers = HEADERS) {
+  const response = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  if (response.status === HTTP_CHANGED) {
+    await loadList();
+    throw new Error('Someone changed this task after you read the list. The list is fresh now: make the change again.');
+  }
   if (!response.ok) {
     throw new Error(`${response.status} ${await response.text()}`);
   }
@@ -67,7 +73,7 @@ function button(text, onClick, className) {
 }
 
 function save(task) {
-  return send(`${TASK_URL}/${encodeURIComponent(task.id)}`, 'PUT', changeBody(task));
+  return send(`${TASK_URL}/${encodeURIComponent(task.id)}`, 'PUT', changeBody(task), taskHeaders(HEADERS, task));
 }
 
 function taskItem(task) {
@@ -89,7 +95,7 @@ function taskItem(task) {
     button('Save', () => save({ ...task, state: state.value, taken_by: takenBy.value })),
     button('Delete', async () => {
       if (window.confirm(`Delete task ${task.id}?`)) {
-        await send(`${TASK_URL}/${encodeURIComponent(task.id)}`, 'DELETE');
+        await send(`${TASK_URL}/${encodeURIComponent(task.id)}`, 'DELETE', null, taskHeaders(HEADERS, task));
       }
     }, 'danger'),
   );
@@ -170,11 +176,12 @@ document.getElementById('import').addEventListener('submit', (event) => {
     .catch(fail);
 });
 document.getElementById('refresh-changed').addEventListener('click', () => loadChanged().catch(fail));
-fetch(TODO_URL)
-  .then((response) => response.json())
-  .then((list) => {
-    view = list;
-    draw();
-  })
-  .catch(fail);
+/** Reads the list again and shows it. */
+async function loadList() {
+  const response = await fetch(TODO_URL);
+  view = await response.json();
+  draw();
+}
+
+loadList().catch(fail);
 loadChanged().catch(fail);

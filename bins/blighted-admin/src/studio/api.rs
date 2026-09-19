@@ -647,6 +647,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_first_catalogue_load_waits_for_the_work_slot() {
+        let fixture = fixture(false, LONG_TIMEOUT_S);
+        let held = Arc::clone(&fixture.studio.work)
+            .try_acquire_owned()
+            .expect("slot");
+        let studio = fixture.studio.clone();
+        let load = tokio::spawn(async move { studio.catalog().await.map(|_| ()) });
+        tokio::time::sleep(POLL).await;
+        assert!(!load.is_finished(), "it waits while an Apply runs");
+        drop(held);
+        let loaded = tokio::time::timeout(Duration::from_secs(LONG_TIMEOUT_S), load)
+            .await
+            .expect("in time")
+            .expect("task");
+        assert_eq!(loaded, Ok(()));
+    }
+
+    #[tokio::test]
     async fn the_blocks_route_lists_the_registry() {
         let fixture = fixture(false, LONG_TIMEOUT_S);
         let (status, blocks) = call(&fixture, Method::GET, BLOCKS_ROUTE).await;

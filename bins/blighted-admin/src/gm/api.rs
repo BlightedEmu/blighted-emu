@@ -627,7 +627,7 @@ async fn events(State(state): State<AppState>, Extension(actor): Extension<Actor
         }
     }
     Json(EventsView {
-        defined: state.world.event_ids(),
+        defined: state.world.event_ids().await,
         running,
     })
     .into_response()

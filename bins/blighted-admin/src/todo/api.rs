@@ -7,10 +7,10 @@ use std::path::Path;
 
 use axum::Router;
 use axum::extract::{Path as UrlPath, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post, put};
-use nw_design::TODO_FILE;
+use nw_design::{TODO_FILE, file_version};
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
@@ -21,7 +21,8 @@ use crate::todo::{Task, TaskKind, TaskState, TodoList, editor_url, load, save};
 
 /// `GET`: the list; `POST`: a new task.
 pub const TODO_ROUTE: &str = "/api/todo";
-/// `PUT`: changes one task; `DELETE`: removes it.
+/// `PUT`: changes one task; `DELETE`: removes it. With `If-Match: <version>` (the task's
+/// `version` in the list) the edit is refused with 412 when the task changed meanwhile.
 pub const TASK_ROUTE: &str = "/api/todo/task/{id}";
 /// `POST`: a new task from a GitHub issue.
 pub const IMPORT_ROUTE: &str = "/api/todo/import";
@@ -29,6 +30,7 @@ pub const IMPORT_ROUTE: &str = "/api/todo/import";
 pub const CHANGED_ROUTE: &str = "/api/todo/changed";
 const NO_TITLE: &str = "a task needs a title";
 const NO_TASK: &str = "no such task";
+const TASK_CHANGED: &str = "someone changed this task after the list was read";
 const BAD_ISSUE_URL: &str =
     "not a GitHub issue address (https://github.com/<owner>/<repo>/issues/<number>)";
 /// The `git` program.
@@ -46,8 +48,44 @@ pub fn todo_routes() -> Router<AppState> {
 /// The list with the editor page of every linked design file.
 #[derive(Debug, Serialize)]
 struct ListView {
-    tasks: Vec<Task>,
+    tasks: Vec<TaskView>,
     editors: BTreeMap<String, String>,
+}
+
+/// One task and its version, which a change sends back in `If-Match`.
+#[derive(Debug, Serialize)]
+struct TaskView {
+    #[serde(flatten)]
+    task: Task,
+    version: String,
+}
+
+/// The version of `task`: the [`file_version`] of its JSON text.
+fn task_version(task: &Task) -> String {
+    file_version(&serde_json::to_string(task).unwrap_or_default())
+}
+
+/// The version an edit of one task expects, from its `If-Match` header.
+fn expected_version(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::IF_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().trim_matches('"').to_owned())
+}
+
+/// The task `id` of `list`, refused when it is gone or is not the `expected` version.
+fn task_to_edit<'list>(
+    list: &'list mut TodoList,
+    id: &str,
+    expected: Option<&str>,
+) -> Result<&'list mut Task, Refusal> {
+    let task = list.get_mut(id).ok_or((StatusCode::NOT_FOUND, NO_TASK))?;
+    match expected {
+        Some(version) if task_version(task) != version => {
+            Err((StatusCode::PRECONDITION_FAILED, TASK_CHANGED))
+        }
+        _ => Ok(task),
+    }
 }
 
 /// A new task.
@@ -99,30 +137,51 @@ fn view(list: TodoList) -> ListView {
         .flat_map(|task| &task.records)
         .map(|record| (record.clone(), editor_url(record)))
         .collect();
-    ListView {
-        tasks: list.task,
-        editors,
-    }
+    let tasks = list
+        .task
+        .into_iter()
+        .map(|task| TaskView {
+            version: task_version(&task),
+            task,
+        })
+        .collect();
+    ListView { tasks, editors }
 }
 
-/// Runs `edit` on the list under the studio's to-do lock and saves it; the answer of `edit`
-/// when it refuses, else the new list.
+/// How a list edit ended.
+enum ListEdit {
+    Saved(TodoList),
+    Refused(Refusal),
+    Failed(String),
+}
+
+/// Runs `edit` on the list under the studio's to-do lock and saves it, off the async threads;
+/// the answer of `edit` when it refuses, else the new list.
 async fn edit_list(
     studio: &Studio,
-    edit: impl FnOnce(&mut TodoList) -> Result<(), Refusal>,
+    edit: impl FnOnce(&mut TodoList) -> Result<(), Refusal> + Send + 'static,
 ) -> Response {
     let _held = studio.todo_lock.lock().await;
-    let design_dir = &studio.paths.design_dir;
-    let mut list = match load(design_dir) {
-        Ok(list) => list,
-        Err(error) => return failed(error),
-    };
-    if let Err(refused) = edit(&mut list) {
-        return refused.into_response();
-    }
-    match save(design_dir, &list) {
-        Ok(()) => Json(view(list)).into_response(),
-        Err(error) => failed(error),
+    let design_dir = studio.paths.design_dir.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let mut list = match load(&design_dir) {
+            Ok(list) => list,
+            Err(error) => return ListEdit::Failed(error),
+        };
+        if let Err(refused) = edit(&mut list) {
+            return ListEdit::Refused(refused);
+        }
+        match save(&design_dir, &list) {
+            Ok(()) => ListEdit::Saved(list),
+            Err(error) => ListEdit::Failed(error),
+        }
+    })
+    .await;
+    match outcome {
+        Ok(ListEdit::Saved(list)) => Json(view(list)).into_response(),
+        Ok(ListEdit::Refused(refused)) => refused.into_response(),
+        Ok(ListEdit::Failed(error)) => failed(error),
+        Err(error) => failed(error.to_string()),
     }
 }
 
@@ -162,15 +221,17 @@ async fn list(State(state): State<AppState>) -> Response {
     let Some(studio) = state.studio.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match load(&studio.paths.design_dir) {
-        Ok(list) => Json(view(list)).into_response(),
-        Err(error) => failed(error),
+    let design_dir = studio.paths.design_dir.clone();
+    match tokio::task::spawn_blocking(move || load(&design_dir)).await {
+        Ok(Ok(list)) => Json(view(list)).into_response(),
+        Ok(Err(error)) => failed(error),
+        Err(error) => failed(error.to_string()),
     }
 }
 
 async fn add(State(state): State<AppState>, Json(new): Json<NewTask>) -> Response {
     match state.studio.as_ref() {
-        Some(studio) => edit_list(studio, |list| push_task(list, new)).await,
+        Some(studio) => edit_list(studio, move |list| push_task(list, new)).await,
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -178,18 +239,20 @@ async fn add(State(state): State<AppState>, Json(new): Json<NewTask>) -> Respons
 async fn change(
     State(state): State<AppState>,
     UrlPath(id): UrlPath<String>,
+    headers: HeaderMap,
     Json(change): Json<TaskChange>,
 ) -> Response {
     let Some(studio) = state.studio.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    edit_list(studio, |list| {
+    let expected = expected_version(&headers);
+    edit_list(studio, move |list| {
         let title = change.title.trim();
         if title.is_empty() {
             return Err((StatusCode::BAD_REQUEST, NO_TITLE));
         }
         let issue = issue_of(change.issue)?;
-        let task = list.get_mut(&id).ok_or((StatusCode::NOT_FOUND, NO_TASK))?;
+        let task = task_to_edit(list, &id, expected.as_deref())?;
         *task = Task {
             id: task.id.clone(),
             title: title.to_owned(),
@@ -205,16 +268,18 @@ async fn change(
     .await
 }
 
-async fn remove(State(state): State<AppState>, UrlPath(id): UrlPath<String>) -> Response {
+async fn remove(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+    headers: HeaderMap,
+) -> Response {
     let Some(studio) = state.studio.as_ref() else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    edit_list(studio, |list| {
-        let before = list.task.len();
+    let expected = expected_version(&headers);
+    edit_list(studio, move |list| {
+        task_to_edit(list, &id, expected.as_deref())?;
         list.task.retain(|task| task.id != id);
-        if list.task.len() == before {
-            return Err((StatusCode::NOT_FOUND, NO_TASK));
-        }
         Ok(())
     })
     .await
@@ -238,7 +303,7 @@ async fn import(State(state): State<AppState>, Json(request): Json<ImportRequest
         issue: Some(read.html_url),
         records: Vec::new(),
     };
-    edit_list(studio, |list| push_task(list, new)).await
+    edit_list(studio, move |list| push_task(list, new)).await
 }
 
 /// The output lines of `git <args>` run in `dir`.
@@ -348,6 +413,27 @@ mod tests {
             uri: &str,
             body: Option<Value>,
         ) -> (StatusCode, Value) {
+            self.send(method, uri, body, None).await
+        }
+
+        /// `call` with `If-Match: version`.
+        async fn call_with(
+            &self,
+            method: Method,
+            uri: &str,
+            body: Option<Value>,
+            version: &str,
+        ) -> (StatusCode, Value) {
+            self.send(method, uri, body, Some(version)).await
+        }
+
+        async fn send(
+            &self,
+            method: Method,
+            uri: &str,
+            body: Option<Value>,
+            version: Option<&str>,
+        ) -> (StatusCode, Value) {
             let app = router(
                 AppState::new(
                     test_layer(CAP),
@@ -358,12 +444,16 @@ mod tests {
                 )
                 .with_studio(self.studio.clone()),
             );
-            let request = Request::builder()
+            let mut request = Request::builder()
                 .method(method)
                 .uri(uri)
                 .header(header::HOST, LISTEN)
                 .header(ADMIN_HEADER, ADMIN_HEADER_VALUE)
-                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(version) = version {
+                request = request.header(header::IF_MATCH, version);
+            }
+            let request = request
                 .body(Body::from(
                     body.map(|body| body.to_string()).unwrap_or_default(),
                 ))
@@ -419,6 +509,33 @@ mod tests {
             (status, removed["tasks"].as_array().map(Vec::len)),
             (StatusCode::OK, Some(0))
         );
+    }
+
+    #[tokio::test]
+    async fn a_change_of_a_task_that_changed_meanwhile_is_refused() {
+        let fixture = Fixture::new();
+        let new = json!({"title": "Boar loot", "kind": "loot"});
+        let (_, list) = fixture.call(Method::POST, TODO_ROUTE, Some(new)).await;
+        let opened = list["tasks"][0]["version"]
+            .as_str()
+            .expect("version")
+            .to_owned();
+        let take = |name: &str| json!({"title": "Boar loot", "kind": "loot", "state": "taken", "taken_by": name});
+        let first = fixture
+            .call_with(Method::PUT, "/api/todo/task/t1", Some(take("Ada")), &opened)
+            .await;
+        assert_eq!(first.0, StatusCode::OK);
+        assert_ne!(first.1["tasks"][0]["version"], opened.as_str());
+        let second = fixture
+            .call_with(Method::PUT, "/api/todo/task/t1", Some(take("Bob")), &opened)
+            .await;
+        assert_eq!(second.0, StatusCode::PRECONDITION_FAILED);
+        let removed = fixture
+            .call_with(Method::DELETE, "/api/todo/task/t1", None, &opened)
+            .await;
+        assert_eq!(removed.0, StatusCode::PRECONDITION_FAILED);
+        let (_, list) = fixture.call(Method::GET, TODO_ROUTE, None).await;
+        assert_eq!(list["tasks"][0]["taken_by"], "Ada");
     }
 
     #[tokio::test]

@@ -82,7 +82,8 @@ impl Studio {
         })
     }
 
-    /// The client records; the first call reads the retail bundle.
+    /// The client records; the first call reads the retail bundle, in the work slot, so it
+    /// waits for a running Apply or Check instead of holding a second bundle beside it.
     ///
     /// # Errors
     ///
@@ -90,9 +91,15 @@ impl Studio {
     pub async fn catalog(&self) -> Result<Arc<Catalog>, String> {
         let path = bundle_path(&self.paths.retail_dir, &self.client_build);
         let build = Arc::clone(&self.client_build);
+        let work = Arc::clone(&self.work);
         self.catalog
             .get_or_try_init(|| async move {
+                let permit = work
+                    .acquire_owned()
+                    .await
+                    .map_err(|error| error.to_string())?;
                 tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
                     let bundle = ContentBundle::load(&path, &build)
                         .map_err(|error| format!("{}: {error}", path.display()))?;
                     Ok(Arc::new(Catalog::of_bundle(&bundle)))

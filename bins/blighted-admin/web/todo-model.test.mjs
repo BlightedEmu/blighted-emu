@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { changeBody, tasksIn, withRecord, withoutRecord } from './todo-model.js';
+import { changeBody, taskHeaders, tasksIn, withRecord, withoutRecord } from './todo-model.js';
 
 const TASK = Object.freeze({
   id: 't1',
@@ -37,4 +37,13 @@ test('a change sends every field but the id', () => {
     issue: null,
     records: ['mobs/Wolf.toml'],
   });
+});
+
+test('a task change names the version of the task it read', () => {
+  const headers = taskHeaders({ 'X-Blighted-Admin': '1' }, { id: 't1', version: 'c0ffee' });
+  assert.deepEqual(headers, { 'X-Blighted-Admin': '1', 'If-Match': 'c0ffee' });
+});
+
+test('a change body leaves the version out', () => {
+  assert.equal('version' in changeBody({ title: 'x', kind: 'other', state: 'open', records: [], version: 'c0ffee' }), false);
 });

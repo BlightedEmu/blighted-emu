@@ -4,7 +4,7 @@
 //! box queries.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nw_common::config::ConfigError;
 use nw_content::bundle::bundle_path;
@@ -289,22 +289,15 @@ impl WorldLayer {
     }
 
     /// The ids of this level's events in the merged design data, read now (Apply writes it while
-    /// the admin runs); none without the file.
-    pub fn event_ids(&self) -> Vec<String> {
-        let Some(path) = &self.design_data else {
+    /// the admin runs) off the async threads; none without the file.
+    pub async fn event_ids(&self) -> Vec<String> {
+        let Some(path) = self.design_data.clone() else {
             return Vec::new();
         };
-        match DesignData::load(path) {
-            Ok(mut data) => data
-                .levels
-                .remove(&self.world.level.name)
-                .map(|level| level.events.into_keys().collect())
-                .unwrap_or_default(),
-            Err(error) => {
-                tracing::warn!(%error, "design data");
-                Vec::new()
-            }
-        }
+        let level = self.world.level.name.clone();
+        tokio::task::spawn_blocking(move || level_event_ids(&path, &level))
+            .await
+            .unwrap_or_default()
     }
 
     /// The tile grid.
@@ -424,6 +417,21 @@ fn world_m(world: &WorldFile) -> u32 {
 
 fn cell_of(metres: f32) -> i64 {
     (metres / SPAWN_CELL_M).floor() as i64
+}
+
+/// The event ids of `level` in the design data file `path`; none when it cannot be read.
+fn level_event_ids(path: &Path, level: &str) -> Vec<String> {
+    match DesignData::load(path) {
+        Ok(mut data) => data
+            .levels
+            .remove(level)
+            .map(|level| level.events.into_keys().collect())
+            .unwrap_or_default(),
+        Err(error) => {
+            tracing::warn!(%error, "design data");
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(test)]
