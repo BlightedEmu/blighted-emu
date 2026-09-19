@@ -1,36 +1,55 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Position saves in order (M4 spec section 7.5), with no I/O. At most one save of a character
-//! runs at a time, so an older position can never land after a newer one. While it runs, only the
-//! newest wanted position waits. A failed save waits for the next retry round, unless a newer
-//! position already waits.
+//! Saves in order (M4 spec section 7.5), with no I/O: positions, and items (admin studio S5). At
+//! most one save of a character runs at a time, so an older value can never land after a newer
+//! one. While it runs, only the newest wanted value waits. A failed save waits for the next retry
+//! round, unless a newer value already waits.
 
 use std::collections::HashMap;
 
-use nw_db::SavedPosition;
+use nw_bus::CarriedItem;
 use uuid::Uuid;
 
-/// The saves of every character.
-#[derive(Debug, Default)]
-pub struct SaveQueue {
-    running: HashMap<Uuid, SavedPosition>,
-    waiting: HashMap<Uuid, SavedPosition>,
+/// The item list of a character to save, with the Unix time it was taken.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ItemSave {
+    /// Every item stack of the character.
+    pub items: Vec<CarriedItem>,
+    /// Unix milliseconds when the list was taken: a save of an older list never overwrites a
+    /// newer one.
+    pub taken_at_ms: u64,
 }
 
-impl SaveQueue {
-    /// `character` should be saved at `position`. Returns the position when the caller must start
+/// The saves of one kind of every character.
+#[derive(Debug)]
+pub struct SaveQueue<T> {
+    running: HashMap<Uuid, T>,
+    waiting: HashMap<Uuid, T>,
+}
+
+impl<T> Default for SaveQueue<T> {
+    fn default() -> Self {
+        Self {
+            running: HashMap::new(),
+            waiting: HashMap::new(),
+        }
+    }
+}
+
+impl<T: Clone> SaveQueue<T> {
+    /// `character` should be saved with `value`. Returns the value when the caller must start
     /// the save now; with a save of that character running, it waits.
-    pub fn want(&mut self, character: Uuid, position: SavedPosition) -> Option<SavedPosition> {
+    pub fn want(&mut self, character: Uuid, value: T) -> Option<T> {
         if self.running.contains_key(&character) {
-            self.waiting.insert(character, position);
+            self.waiting.insert(character, value);
             return None;
         }
         self.waiting.remove(&character);
-        self.running.insert(character, position.clone());
-        Some(position)
+        self.running.insert(character, value.clone());
+        Some(value)
     }
 
-    /// The running save of `character` ended. Returns the next position to start now, if any.
-    pub fn finished(&mut self, character: Uuid, ok: bool) -> Option<SavedPosition> {
+    /// The running save of `character` ended. Returns the next value to start now, if any.
+    pub fn finished(&mut self, character: Uuid, ok: bool) -> Option<T> {
         let done = self.running.remove(&character)?;
         if let Some(next) = self.waiting.remove(&character) {
             self.running.insert(character, next.clone());
@@ -43,7 +62,7 @@ impl SaveQueue {
     }
 
     /// Starts every waiting save whose character has none running (the retry round).
-    pub fn retry(&mut self) -> Vec<(Uuid, SavedPosition)> {
+    pub fn retry(&mut self) -> Vec<(Uuid, T)> {
         let ready: Vec<Uuid> = self
             .waiting
             .keys()
@@ -53,15 +72,15 @@ impl SaveQueue {
         ready
             .into_iter()
             .filter_map(|character| {
-                let position = self.waiting.remove(&character)?;
-                self.running.insert(character, position.clone());
-                Some((character, position))
+                let value = self.waiting.remove(&character)?;
+                self.running.insert(character, value.clone());
+                Some((character, value))
             })
             .collect()
     }
 
-    /// The newest position of `character` that may not be in the database yet.
-    pub fn latest(&self, character: Uuid) -> Option<&SavedPosition> {
+    /// The newest value of `character` that may not be in the database yet.
+    pub fn latest(&self, character: Uuid) -> Option<&T> {
         self.waiting
             .get(&character)
             .or_else(|| self.running.get(&character))
@@ -72,7 +91,7 @@ impl SaveQueue {
         self.running.is_empty()
     }
 
-    /// Positions that wait for a retry.
+    /// Values that wait for a retry.
     pub fn waiting(&self) -> usize {
         self.waiting.len()
     }
@@ -80,6 +99,8 @@ impl SaveQueue {
 
 #[cfg(test)]
 mod tests {
+    use nw_db::SavedPosition;
+
     use super::*;
 
     const LEVEL: &str = "newworld_vitaeeterna";

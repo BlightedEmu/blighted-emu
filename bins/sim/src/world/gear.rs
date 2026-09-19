@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! A player's items: what it wears and what is in its bag, sent as the gear states of its own
 //! player. A login wears the kit of its archetype pick (starter-kit note); the tutorial then
-//! takes the sword, fills the bag and equips from it (live-tutorial note, section 5). There is
-//! no item store yet, so every login starts from the kit again.
+//! takes the sword, fills the bag and equips from it (live-tutorial note, section 5). Outside the
+//! tutorial the items are saved (admin studio S5), and a login starts from the saved items.
 
 use nw_bus::{CarriedItem, ItemPlace};
 use nw_content::starter::{EquipSlot, KitItem, StarterKits};
@@ -117,6 +117,8 @@ pub(super) struct Gear {
     version: u64,
     /// Whether the states changed since they were sent.
     changed: bool,
+    /// Whether the items changed since they were last taken for a save.
+    unsaved: bool,
     /// The main-hand option slot drawn; `None`: every weapon is sheathed.
     drawn: Option<u32>,
     /// The drawn weapon reaches the hand at this time.
@@ -148,6 +150,7 @@ impl Gear {
             bag: vec![None; STARTER_BAG_SLOTS],
             version: FIRST_GEAR_VERSION,
             changed: false,
+            unsaved: false,
             drawn: None,
             attach_at_ms: None,
             attached: false,
@@ -171,6 +174,7 @@ impl Gear {
             bag: vec![None; STARTER_BAG_SLOTS],
             version: FIRST_GEAR_VERSION,
             changed: false,
+            unsaved: false,
             drawn,
             attach_at_ms: None,
             attached: drawn.is_some(),
@@ -221,6 +225,15 @@ impl Gear {
         worn.chain(bag).collect()
     }
 
+    /// The items to save when they changed since the last call; `None` when they did not.
+    pub(super) fn take_unsaved(&mut self) -> Option<Vec<CarriedItem>> {
+        if !self.unsaved {
+            return None;
+        }
+        self.unsaved = false;
+        Some(self.carried())
+    }
+
     /// The whole gear states.
     pub(super) fn states(&self) -> PlayerGear {
         let equipped: Vec<EquippedItem> = self
@@ -247,6 +260,7 @@ impl Gear {
         self.worn
             .push((slot_id, stack(self.character, item, quantity)));
         self.changed = true;
+        self.unsaved = true;
     }
 
     /// Uses one of the stack worn in paperdoll slot `slot_id`: its item id; `None` when the slot
@@ -260,6 +274,7 @@ impl Gear {
             self.worn.remove(at);
         }
         self.changed = true;
+        self.unsaved = true;
         Some(item_id)
     }
 
@@ -432,6 +447,7 @@ impl Gear {
             }
         }
         self.changed = true;
+        self.unsaved = true;
         Ok(())
     }
 
@@ -452,6 +468,7 @@ impl Gear {
         let (_, stack) = self.worn.remove(worn);
         self.bag[free] = Some(stack);
         self.changed = true;
+        self.unsaved = true;
         Ok(())
     }
 
@@ -477,6 +494,7 @@ impl Gear {
             }
         }
         self.changed |= removed;
+        self.unsaved |= removed;
         removed
     }
 
@@ -491,6 +509,7 @@ impl Gear {
         {
             stack.item.quantity = stack.item.quantity.saturating_add(quantity);
             self.changed = true;
+            self.unsaved = true;
             return true;
         }
         let Some(free) = self.bag.iter_mut().find(|entry| entry.is_none()) else {
@@ -498,6 +517,7 @@ impl Gear {
         };
         *free = Some(stack(self.character, item, quantity));
         self.changed = true;
+        self.unsaved = true;
         true
     }
 
@@ -550,6 +570,7 @@ impl Gear {
         }
         self.worn.push((slot_id, put_on));
         self.changed = true;
+        self.unsaved = true;
         Ok(item_id)
     }
 }
@@ -745,6 +766,25 @@ pub(crate) mod tests {
             Some(POTION),
             "a taken bag slot sends it to a free one"
         );
+    }
+
+    #[test]
+    fn a_change_of_items_is_taken_for_a_save_once() {
+        let kits = kits();
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
+        assert_eq!(gear.take_unsaved(), None, "a new kit has nothing to save");
+        gear.draw(slot::MAIN_HAND_OPTION_1, 0, 0);
+        assert_eq!(
+            gear.take_unsaved(),
+            None,
+            "drawing a weapon changes no item"
+        );
+        let flint = kits.item(FLINT).expect("flint").clone();
+        assert!(gear.add(&flint, 1));
+        assert_eq!(gear.take_unsaved(), Some(gear.carried()));
+        assert_eq!(gear.take_unsaved(), None);
+        assert!(gear.remove(FLINT));
+        assert!(gear.take_unsaved().is_some());
     }
 
     #[test]

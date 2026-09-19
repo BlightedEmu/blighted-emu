@@ -258,6 +258,9 @@ pub struct Departure {
     pub position: Position,
     /// Server time of the last good move: a save of an older move never overwrites a newer one.
     pub moved_at_ms: u64,
+    /// The items to save; `None` when there is nothing to save (no change since the last save,
+    /// or the tutorial, which always starts from the starter kit).
+    pub items: Option<Vec<CarriedItem>>,
 }
 
 /// A handoff that a tick started: the player is frozen until [`SimWorld::handoff_done`].
@@ -1181,12 +1184,29 @@ impl SimWorld {
             .sum()
     }
 
-    /// Every player's character and position, for the periodic save.
+    /// Every player's character and position, for the periodic save, with the items that
+    /// changed since the last save.
     pub fn positions(&mut self) -> Vec<Departure> {
-        let mut query = self.world.query::<(&Player, &Body)>();
+        let saves_items = !self.is_tutorial();
+        let mut query = self.world.query::<(&mut Player, &Body)>();
         query
-            .iter(&self.world)
-            .map(|(player, body)| departure_of(player, body))
+            .iter_mut(&mut self.world)
+            .map(|(mut player, body)| {
+                let items = player
+                    .gear
+                    .as_mut()
+                    .filter(|_| saves_items)
+                    .and_then(Gear::take_unsaved);
+                departure_of(&player, body, items)
+            })
+            .collect()
+    }
+
+    /// Every player's departure with all its items, for the saves at shutdown.
+    pub fn departures(&self) -> Vec<Departure> {
+        self.by_connection
+            .values()
+            .filter_map(|entity| self.departure(*entity))
             .collect()
     }
 
@@ -2287,10 +2307,16 @@ impl SimWorld {
             .map(|(entity, _)| entity)
     }
 
+    /// The departure of `entity` with all its items (outside the tutorial).
     fn departure(&self, entity: Entity) -> Option<Departure> {
         let player = self.world.get::<Player>(entity)?;
         let body = self.world.get::<Body>(entity)?;
-        Some(departure_of(player, body))
+        let items = player
+            .gear
+            .as_ref()
+            .filter(|_| !self.is_tutorial())
+            .map(Gear::carried);
+        Some(departure_of(player, body, items))
     }
 }
 
@@ -2431,12 +2457,13 @@ fn gather_end(number: u64, request: InteractionRequest) -> [ServerMessage; 2] {
     ]
 }
 
-fn departure_of(player: &Player, body: &Body) -> Departure {
+fn departure_of(player: &Player, body: &Body, items: Option<Vec<CarriedItem>>) -> Departure {
     Departure {
         connection: player.connection.clone(),
         character: player.character,
         position: body.motion.position(),
         moved_at_ms: body.motion.moved_ms(),
+        items,
     }
 }
 
@@ -4304,6 +4331,60 @@ mod tests {
             Some(gear::tests::BACKSTORY),
             "a handoff offer carries it on"
         );
+    }
+
+    /// A world of `level` with the test kits and one player wearing its starter kit.
+    fn world_with_kit_player(level: LevelSpec, x: f32) -> SimWorld {
+        let mut combat = test_combat();
+        combat.spawns = Vec::new().into();
+        let mut level_settings = settings(MANY, MAX_PLAYERS);
+        level_settings.level = level;
+        let mut world = SimWorld::new(
+            level_settings,
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            combat,
+            Arc::new(PlayerContent {
+                kits: gear::tests::kits(),
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        let mut admit = admit_at(1, x, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        world
+    }
+
+    fn give_flint(world: &mut SimWorld) {
+        let flint = gear::tests::kits()
+            .item(gear::tests::FLINT)
+            .expect("flint")
+            .clone();
+        let mut query = world.world.query::<&mut Player>();
+        let mut player = query.iter_mut(&mut world.world).next().expect("player");
+        assert!(player.gear.as_mut().expect("gear").add(&flint, 1));
+    }
+
+    #[test]
+    fn items_are_saved_when_they_change_and_at_a_leave() {
+        let mut world = world_with_kit_player(settings(MANY, MAX_PLAYERS).level, CELL_M / 2.0);
+        assert_eq!(world.positions()[0].items, None, "nothing changed yet");
+        give_flint(&mut world);
+        let saved = world.positions()[0].items.clone().expect("changed items");
+        assert!(saved.iter().any(|item| item.item_id == gear::tests::FLINT));
+        assert_eq!(world.positions()[0].items, None, "taken once");
+        let departure = world.leave(&connection(1)).expect("left");
+        assert_eq!(departure.items, Some(saved), "a leave saves every item");
+    }
+
+    #[test]
+    fn the_tutorial_saves_no_items() {
+        let mut world = world_with_kit_player(TUTORIAL_LEVEL, nw_sim_core::TUTORIAL_START.x);
+        give_flint(&mut world);
+        assert_eq!(world.positions()[0].items, None);
+        assert_eq!(world.leave(&connection(1)).expect("left").items, None);
     }
 
     #[test]

@@ -14,13 +14,16 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nw_bus::{
-    AdminAction, AdminCommand, AdminReply, Admit, AdmitReply, Bus, BusError, BusId, CellTable,
-    ConnectionRef, GatewayOutput, Ghosts, HandoffMessage, HandoffReply, Heartbeat, Hit, Incoming,
-    InputBatch, OutputBatch, Point, Publisher, SimHeartbeat, SimInput, SimSlot, SimSnapshot,
-    snapshot_parts, split_batches, subject,
+    AdminAction, AdminCommand, AdminReply, Admit, AdmitReply, Bus, BusError, BusId, CarriedItem,
+    CellTable, ConnectionRef, GatewayOutput, Ghosts, HandoffMessage, HandoffReply, Heartbeat, Hit,
+    Incoming, InputBatch, ItemPlace, OutputBatch, Point, Publisher, SimHeartbeat, SimInput,
+    SimSlot, SimSnapshot, snapshot_parts, split_batches, subject,
 };
 use nw_common::time::unix_ms;
-use nw_db::{PgPool, SaveOutcome, SavedPosition, save_character_position};
+use nw_db::{
+    PgPool, SaveOutcome, SavedItem, SavedPlace, SavedPosition, save_character_items,
+    save_character_position,
+};
 use nw_messages::{
     BodyCodec, ClientFacetMsg, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
     REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX,
@@ -39,7 +42,7 @@ use crate::login::WorldIds;
 use crate::mob_ai::MobAi;
 use crate::mobs::{MobChanges, spawn_index};
 use crate::player_content::PlayerContent;
-use crate::saves::SaveQueue;
+use crate::saves::{ItemSave, SaveQueue};
 use crate::world::{
     Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
 };
@@ -201,7 +204,14 @@ pub enum ServeError {
     Random(#[from] getrandom::Error),
 }
 
-type SaveResult = (Uuid, bool);
+/// What one save task stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveKind {
+    Position,
+    Items,
+}
+
+type SaveResult = (SaveKind, Uuid, bool);
 
 /// The answer to one handoff offer.
 struct HandoffResult {
@@ -263,7 +273,8 @@ struct Loop {
     world: SimWorld,
     gateways: GatewayTracker,
     forwards: ForwardTable,
-    queue: SaveQueue,
+    queue: SaveQueue<SavedPosition>,
+    item_queue: SaveQueue<ItemSave>,
     saves: JoinSet<SaveResult>,
     handoff_results: mpsc::Sender<HandoffResult>,
     started: Instant,
@@ -317,6 +328,7 @@ pub async fn serve(
         bus,
         db,
         queue: SaveQueue::default(),
+        item_queue: SaveQueue::default(),
         saves: JoinSet::new(),
         handoff_results,
         started: Instant::now(),
@@ -381,13 +393,16 @@ impl Loop {
         u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// Adds the player of an admit. A position of this sim that is still waiting to be saved is
-    /// newer than the database, so it wins.
+    /// Adds the player of an admit. A position or an item list of this sim that is still waiting
+    /// to be saved is newer than the database, so it wins.
     fn admit(&mut self, admit: Incoming<Admit>) {
         let mut message = admit.message.clone();
         if let Some(unsaved) = self.queue.latest(message.character) {
             let [x, y, z] = unsaved.metres();
             message.position = Point { x, y, z };
+        }
+        if let Some(unsaved) = self.item_queue.latest(message.character) {
+            message.items = Some(unsaved.items.clone());
         }
         let reply = match self.world.admit(&message, self.now_ms(), server_time()) {
             Ok(login) => {
@@ -1002,12 +1017,22 @@ impl Loop {
     }
 
     /// Saves every player and retries every save that failed before.
+    /// The save round: every position, and the items that changed.
     fn save_all(&mut self) {
-        for departure in self.world.positions() {
-            self.save(&departure);
+        let departures = self.world.positions();
+        self.save_round(&departures);
+    }
+
+    /// Saves `departures`, and starts the waiting saves again.
+    fn save_round(&mut self, departures: &[Departure]) {
+        for departure in departures {
+            self.save(departure);
         }
         for (character, position) in self.queue.retry() {
             self.spawn_save(character, position);
+        }
+        for (character, items) in self.item_queue.retry() {
+            self.spawn_item_save(character, items);
         }
     }
 
@@ -1024,6 +1049,15 @@ impl Loop {
         if let Some(position) = self.queue.want(departure.character, position) {
             self.spawn_save(departure.character, position);
         }
+        if let Some(items) = &departure.items {
+            let save = ItemSave {
+                items: items.clone(),
+                taken_at_ms: unix_ms(),
+            };
+            if let Some(save) = self.item_queue.want(departure.character, save) {
+                self.spawn_item_save(departure.character, save);
+            }
+        }
     }
 
     fn spawn_save(&mut self, character: Uuid, position: SavedPosition) {
@@ -1037,13 +1071,29 @@ impl Loop {
                     false
                 }
             };
-            (character, ok)
+            (SaveKind::Position, character, ok)
         });
     }
 
-    /// A save ended; the next wanted position of that character starts now.
+    fn spawn_item_save(&mut self, character: Uuid, save: ItemSave) {
+        let db = self.db.clone();
+        self.saves.spawn(async move {
+            let items = saved_items(&save.items);
+            // A newer stored list is a finished save too.
+            let ok = match save_character_items(&db, character, &items, save.taken_at_ms).await {
+                Ok(SaveOutcome::Saved | SaveOutcome::Older) => true,
+                Err(error) => {
+                    tracing::error!(%error, %character, "item save failed");
+                    false
+                }
+            };
+            (SaveKind::Items, character, ok)
+        });
+    }
+
+    /// A save ended; the next wanted value of that character and kind starts now.
     fn saved(&mut self, result: Result<SaveResult, tokio::task::JoinError>) {
-        let (character, ok) = match result {
+        let (kind, character, ok) = match result {
             Ok(result) => result,
             Err(error) => {
                 tracing::error!(%error, "save task failed");
@@ -1053,8 +1103,17 @@ impl Loop {
         if !ok {
             metrics::counter!(METRIC_FAILED_SAVES).increment(1);
         }
-        if let Some(next) = self.queue.finished(character, ok) {
-            self.spawn_save(character, next);
+        match kind {
+            SaveKind::Position => {
+                if let Some(next) = self.queue.finished(character, ok) {
+                    self.spawn_save(character, next);
+                }
+            }
+            SaveKind::Items => {
+                if let Some(next) = self.item_queue.finished(character, ok) {
+                    self.spawn_item_save(character, next);
+                }
+            }
         }
     }
 
@@ -1062,20 +1121,34 @@ impl Loop {
     /// for every save.
     async fn finish(&mut self) {
         self.flush();
-        self.save_all();
+        let departures = self.world.departures();
+        self.save_round(&departures);
         let drained = tokio::time::timeout(SHUTDOWN_SAVE_WAIT, async {
             while let Some(saved) = self.saves.join_next().await {
                 self.saved(saved);
             }
         })
         .await;
-        if drained.is_err() || self.queue.waiting() > 0 {
-            tracing::error!(
-                waiting = self.queue.waiting(),
-                "positions not saved at shutdown"
-            );
+        let waiting = self.queue.waiting() + self.item_queue.waiting();
+        if drained.is_err() || waiting > 0 {
+            tracing::error!(waiting, "positions or items not saved at shutdown");
         }
     }
+}
+
+/// The item list as the database stores it.
+fn saved_items(items: &[CarriedItem]) -> Vec<SavedItem> {
+    items
+        .iter()
+        .map(|item| SavedItem {
+            item_id: item.item_id.clone(),
+            quantity: item.quantity,
+            place: match item.place {
+                ItemPlace::Worn(slot) => SavedPlace::Worn(slot),
+                ItemPlace::Bag(slot) => SavedPlace::Bag(slot),
+            },
+        })
+        .collect()
 }
 
 /// Milliseconds since 2000-01-01. The unit of the retail `TimeSynchMsg` is Unknown.
@@ -1143,7 +1216,9 @@ mod tests {
     use nw_bus::test_support::test_bus;
     use nw_bus::{HandoffOffer, Subscription};
     use nw_db::test_db::with_test_schema;
-    use nw_db::{NewCharacter, WORLD_MIGRATOR, character_position, insert_character};
+    use nw_db::{
+        NewCharacter, WORLD_MIGRATOR, character_items, character_position, insert_character,
+    };
     use nw_messages::{
         ALC_TYPE_INDEX, DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, EntitySlots,
         GDE_METADATA_TYPE_INDEX, InputPosition, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
@@ -1911,6 +1986,29 @@ mod tests {
             sim.stop().await;
             let saved = character_position(db, ada.1).await.expect("load");
             assert!(saved.is_some(), "the shutdown save is missing");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_leave_saves_the_items() {
+        with_test_schema(async |db| {
+            WORLD_MIGRATOR.run(db).await.expect("migrate");
+            let ada = character(db).await;
+            let bus = test_bus().await;
+            let world_id = Uuid::new_v4();
+            let gateway = TestGateway::start(&bus, world_id, true).await;
+            let sim = Running::start(&bus, settings(world_id, "sim"), db).await;
+            assert_eq!(character_items(db, ada.1).await.expect("load"), None);
+            let mut first = admit_at(gateway.connection(CONNECTION), ada, BORDER_X);
+            first.items = Some(Vec::new());
+            admit(&bus, world_id, sim.id(), &first).await;
+            sim.stop().await;
+            assert_eq!(
+                character_items(db, ada.1).await.expect("load"),
+                Some(Vec::new()),
+                "an empty bag is saved as empty, not as never saved"
+            );
         })
         .await;
     }
