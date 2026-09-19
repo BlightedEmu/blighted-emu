@@ -69,10 +69,14 @@ pub async fn admin_guard(
     request: Request,
     next: Next,
 ) -> Response {
-    let own_host = request
-        .headers()
-        .get(header::HOST)
-        .is_some_and(|host| origin.allows_host(host.as_bytes()));
+    // HTTP/1 names the host in the `Host` header, HTTP/2 in the URI (`:authority`).
+    let own_host = match request.headers().get(header::HOST) {
+        Some(host) => origin.allows_host(host.as_bytes()),
+        None => request
+            .uri()
+            .authority()
+            .is_some_and(|authority| origin.allows_host(authority.as_str().as_bytes())),
+    };
     if !own_host {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -131,6 +135,24 @@ mod tests {
             .body(Body::empty())
             .expect("request");
         assert_eq!(status(request).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn an_http2_request_names_its_host_in_the_uri() {
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("https://{LISTEN}/test"))
+            .header(ADMIN_HEADER, ADMIN_HEADER_VALUE)
+            .body(Body::empty())
+            .expect("request");
+        assert_eq!(status(request).await, StatusCode::OK);
+        let other = Request::builder()
+            .method("POST")
+            .uri("https://example.com/test")
+            .header(ADMIN_HEADER, ADMIN_HEADER_VALUE)
+            .body(Body::empty())
+            .expect("request");
+        assert_eq!(status(other).await, StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
