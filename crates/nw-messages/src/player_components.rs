@@ -34,7 +34,7 @@ use crate::paperdoll::PAPERDOLL_TYPE_INDEX;
 use crate::payload::{BundleMember, MemberState};
 use crate::progression::{PROGRESSION_TYPE_INDEX, ProgressionState};
 use crate::slots::{children_mask, read_children, read_slot_byte, write_known_children};
-use crate::vitals::{VITALS_TYPE_INDEX, VitalsState};
+use crate::vitals::{VITALS_TYPE_INDEX, VitalsData, VitalsState};
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
 
 /// Type index of `MB::PlayerComponentReplicatedState`.
@@ -315,6 +315,8 @@ pub struct HealthChange {
     pub health: u32,
     /// It is the first damage from full health (retail `healthChangeFlags` 3).
     pub first_damage: bool,
+    /// The player died or lives again: its new `vitalsData`.
+    pub life: Option<VitalsData>,
 }
 
 /// The members of every player component in [`PLAYER_EMPTY_COMPONENTS`] for `states`: a connected
@@ -352,10 +354,10 @@ pub fn change_members(states: PlayerStates<'_>) -> Vec<BundleMember> {
         })
         .collect();
     if let Some(change) = states.health_change {
-        let vitals = if change.first_damage {
-            VitalsState::creature_first_damage(change.health)
-        } else {
-            VitalsState::creature_health(change.health)
+        let vitals = match change.life {
+            Some(life) => VitalsState::player_life(change.health, life),
+            None if change.first_damage => VitalsState::creature_first_damage(change.health),
+            None => VitalsState::creature_health(change.health),
         };
         members.push(BundleMember {
             component: PLAYER_VITALS_COMPONENT,
@@ -608,6 +610,7 @@ mod tests {
             health_change: Some(HealthChange {
                 health: HEALED,
                 first_damage: false,
+                life: None,
             }),
             cooldowns: None,
             stamina: Some(spend),

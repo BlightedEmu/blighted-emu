@@ -81,6 +81,29 @@ impl VitalsData {
         }
     }
 
+    /// The block of a player who died: the dead head and the server time of its last spawn
+    /// `spawned_ms` in ns (open-world note: retail sent it 55 to 72 ms after the 4299; the client
+    /// then opened its death screen).
+    pub const fn player_dead(spawned_ms: u64) -> Self {
+        Self {
+            head: DEAD_HEAD,
+            a: spawned_ms.saturating_mul(NS_PER_MS),
+            b: 0,
+            tail: CREATURE_DATA_TAIL,
+        }
+    }
+
+    /// The block of a player who lives again at server time `server_ms` (retail 483 to 488 ms
+    /// after the respawn request 1938).
+    pub const fn player_alive(server_ms: u64) -> Self {
+        Self {
+            head: ALIVE_HEAD,
+            a: server_ms.saturating_mul(NS_PER_MS),
+            b: 0,
+            tail: CREATURE_DATA_TAIL,
+        }
+    }
+
     /// The block of a dead creature: its head plays the death on the client.
     const DEAD: Self = Self {
         head: DEAD_HEAD,
@@ -189,6 +212,21 @@ impl VitalsState {
     /// [`FIRST_DAMAGE_FLAGS`] (retail: every tutorial creature's first hit, `01 09 <health> 03`).
     pub fn creature_first_damage(health: u32) -> Self {
         Self::creature_change(health, Some(FIRST_DAMAGE_FLAGS))
+    }
+
+    /// A player's death or new life: its health `health`, its `vitalsData` `data` and
+    /// `healthChangeFlags` [`FIRST_DAMAGE_FLAGS`] (retail `01 0d <health> <data> 03`).
+    #[allow(clippy::cast_precision_loss, reason = "health stays far below 2^24")]
+    pub fn player_life(health: u32, data: VitalsData) -> Self {
+        Self {
+            slot_0: Some(VitalsSlot0 {
+                health_amount: Some(health as f32),
+                health_change_flags: Some(FIRST_DAMAGE_FLAGS),
+                vitals_data: Some(data),
+                ..VitalsSlot0::default()
+            }),
+            slot_1: None,
+        }
     }
 
     #[allow(clippy::cast_precision_loss, reason = "health stays far below 2^24")]
@@ -435,6 +473,21 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn a_player_death_has_the_retail_bytes() {
+        // Retail own vitals after a death: `01 0d 00000000 01 <spawn ns> 0..0 ff 03`.
+        const SPAWNED_MS: u64 = 845_730_262_408;
+        let mut writer = Writer::new();
+        VitalsState::player_life(0, VitalsData::player_dead(SPAWNED_MS)).write(&mut writer);
+        let mut expected = vec![0x01, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x01];
+        expected.extend((SPAWNED_MS * NS_PER_MS).to_be_bytes());
+        expected.extend([0; 8]);
+        expected.extend([0xff, FIRST_DAMAGE_FLAGS]);
+        assert_eq!(writer.finish(), expected);
+        let alive = VitalsData::player_alive(SPAWNED_MS);
+        assert_eq!((alive.head, alive.a), (ALIVE_HEAD, SPAWNED_MS * NS_PER_MS));
+    }
 
     #[test]
     fn a_first_damage_is_the_retail_body() {

@@ -33,7 +33,7 @@ use nw_messages::{
     InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg,
     LevelSpec, MeleeHitMsg, MessageError, PlayerLook, PlayerSeenByAiMsg, PlayerStates,
     ProgressionState, SelectedAsTargetMsg, ServerMessage, TUTORIAL_LEVEL, TargetMsg, TeleportStep,
-    TimeSynchMsg, UnselectedAsTargetMsg, WorldPosition, facet_entity,
+    TimeSynchMsg, UnselectedAsTargetMsg, VitalsData, WorldPosition, facet_entity,
 };
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
@@ -398,6 +398,8 @@ struct Player {
     cooldowns_changed: bool,
     /// The health its client last got (a card or a vitals change).
     health_sent: Option<u32>,
+    /// The server time of its last spawn or respawn (ms since 2000-01-01).
+    life_ms: u64,
     /// Its stamina.
     stamina: Stamina,
     /// Its combat status timer.
@@ -2195,6 +2197,7 @@ impl SimWorld {
                     cooldowns: Vec::new(),
                     cooldowns_changed: false,
                     health_sent: None,
+                    life_ms: 0,
                     stamina: Stamina::default(),
                     combat: CombatTimer::default(),
                     list_version: FIRST_VERSION,
@@ -2437,6 +2440,7 @@ impl Neighbourhood<'_> {
             if first_card {
                 player.own_card_sent = true;
                 player.own_spawned_ms = Some(self.server_time);
+                player.life_ms = self.server_time;
             }
             let own_carded = first_card
                 || (self.local_player_card
@@ -2524,11 +2528,25 @@ impl Neighbourhood<'_> {
                 // vitals change (retail: 40 to 110 ms after each damaging 3601, flags 3 on the
                 // first damage from full health).
                 let health = vitals.health.current();
-                let health_change = (own_card == OwnCard::Without
+                // A death and a new life go even with a card: the client shows its death screen
+                // and takes its moves again only on them (open-world note).
+                let life = match player.health_sent {
+                    Some(sent) if sent > 0 && health == 0 => {
+                        Some(VitalsData::player_dead(player.life_ms))
+                    }
+                    Some(0) if health > 0 => {
+                        player.life_ms = self.server_time;
+                        Some(VitalsData::player_alive(self.server_time))
+                    }
+                    _ => None,
+                };
+                let health_change = ((own_card == OwnCard::Without
                     && player.health_sent != Some(health))
+                    || life.is_some())
                 .then(|| HealthChange {
                     health,
                     first_damage: player.health_sent == Some(vitals.health.max()),
+                    life,
                 });
                 player.health_sent = Some(health);
                 let stamina = player.stamina.take_change();
@@ -3359,6 +3377,64 @@ mod tests {
         assert!(
             health_changes(&mut world, card_at + 132).is_empty(),
             "sent once"
+        );
+    }
+
+    #[test]
+    fn a_death_and_a_respawn_go_to_the_own_vitals() {
+        const LETHAL: u32 = 100_000;
+        /// Far beyond the committed `min_respawn_ms`.
+        const RESPAWN_AFTER_MS: u64 = 60_000;
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        world
+            .admit(&admit_at(1, CELL_M / 2.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let entity = world.player_by_number(1).expect("player");
+        world
+            .world
+            .get_mut::<Vitals>(entity)
+            .expect("vitals")
+            .spawned = true;
+        let card_at = NOW + OWN_CARD_DELAY_MS;
+        tick(&mut world, card_at);
+        let lives = |world: &mut SimWorld, now: u64| {
+            let messages = tick(world, now).messages;
+            bundle_of(&messages, &connection(1))
+                .map(|bundle| SlotRead::of(&bundle).expect("read").updates)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(SlotUpdate::is_local_player)
+                .flat_map(|update| update.members)
+                .filter_map(|member| match member.state {
+                    MemberState::Vitals(vitals) => {
+                        let slot = vitals.slot_0?;
+                        Some((slot.health_amount, slot.vitals_data?.head))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        world.apply_hit(1, crate::mobs::mob_entity(0), LETHAL, 0, card_at + 1);
+        assert_eq!(
+            lives(&mut world, card_at + 33),
+            vec![(Some(0.0), 1)],
+            "the dead block opens the death screen"
+        );
+        let respawn_at = card_at + RESPAWN_AFTER_MS;
+        world
+            .request_respawn(&connection(1), respawn_at)
+            .expect("respawn");
+        let max = world
+            .world
+            .get::<Vitals>(entity)
+            .expect("vitals")
+            .health
+            .max();
+        assert_eq!(
+            lives(&mut world, respawn_at + 33),
+            vec![(Some(attack::amount_of(max)), 0)],
+            "alive again at full health"
         );
     }
 
