@@ -1071,6 +1071,34 @@ mod tests {
     }
 
     #[test]
+    fn a_patrol_spawn_walks_its_route_with_no_player_in_the_world() {
+        const ROUTE_END_X: f32 = 40.0;
+        let mut mobs = mobs(vec![spawn_at(10.0, TEST_MOB, TEST_LEVEL)]);
+        let route = nw_sim_core::Route {
+            points: vec![Position {
+                x: ROUTE_END_X,
+                y: 1000.0,
+                z: HEIGHT,
+            }],
+            waits_ms: Vec::new(),
+            mode: nw_sim_core::RouteMode::Once,
+        };
+        mobs.set_ai(Arc::from([Some(designed(
+            nw_sim_core::Behaviour::Patrol,
+            Some(route),
+        ))]));
+        mobs.set_cells(every);
+        for now in (0..=100_000).step_by(TICK_MS as usize) {
+            mobs.tick(&[], now, &Flat);
+        }
+        let patrol = mobs.get_mut(mob_entity(0)).expect("mob").brain.position();
+        assert!(
+            (patrol.x - ROUTE_END_X).abs() < 0.1,
+            "the patrol walked alone: {patrol:?}"
+        );
+    }
+
+    #[test]
     fn mobs_of_owned_cells_spawn_and_lost_cells_remove_them() {
         let mut mobs = mobs(vec![
             spawn_at(100.0, TEST_MOB, TEST_LEVEL),

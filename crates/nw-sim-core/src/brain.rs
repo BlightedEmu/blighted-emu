@@ -434,7 +434,8 @@ pub fn step(
             BrainAction::Home
         }
         MobState::Asleep => {
-            if player_near {
+            // A patrol walks its route with no player near: it never sleeps.
+            if player_near || brain.behaviour == Behaviour::Patrol {
                 brain.enter(MobState::Idle, now_ms);
             }
             BrainAction::None
@@ -509,7 +510,9 @@ fn idle(
     settings: &BrainSettings,
     dice: &mut Dice,
 ) -> BrainAction {
-    if now_ms.saturating_sub(brain.last_player_ms) >= settings.sleep_after_ms {
+    if brain.behaviour != Behaviour::Patrol
+        && now_ms.saturating_sub(brain.last_player_ms) >= settings.sleep_after_ms
+    {
         brain.enter(MobState::Asleep, now_ms);
         return BrainAction::None;
     }
@@ -910,6 +913,27 @@ mod tests {
             "it walked past the leash radius"
         );
         assert!(back, "it looped back to the first point");
+    }
+
+    #[test]
+    fn a_patrol_wakes_and_walks_with_no_player_near() {
+        const LEG_M: f32 = 30.0;
+        let mut brain = Brain::new(SPAWN, SIGHT_M);
+        brain.set_behaviour(Behaviour::Patrol);
+        brain.set_route(Route {
+            points: vec![east(LEG_M)],
+            waits_ms: Vec::new(),
+            mode: RouteMode::Once,
+        });
+        let mut dice = Dice::new(SEED);
+        let quiet_ms = settings().sleep_after_ms * 3;
+        run(&mut brain, &[], 0, quiet_ms, &mut dice);
+        assert_ne!(brain.state(), MobState::Asleep, "a patrol does not sleep");
+        assert!(
+            brain.position().horizontal_distance(east(LEG_M)) < ARRIVED_M,
+            "it walked its route alone: {:?}",
+            brain.position()
+        );
     }
 
     #[test]
