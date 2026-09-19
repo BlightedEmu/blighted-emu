@@ -120,10 +120,14 @@ mod tests {
             ..BUNDLE_CONTAINER
         };
         let bytes = encode_container(&spec, BUILD, &body).unwrap();
-        assert!(matches!(
-            ContentBundle::from_bytes(&bytes, BUILD),
-            Err(ContainerError::SchemaMismatch { .. })
-        ));
+        let error = ContentBundle::from_bytes(&bytes, BUILD).expect_err("other schema");
+        assert!(matches!(error, ContainerError::SchemaMismatch { .. }));
+        assert!(
+            error
+                .to_string()
+                .ends_with("just bundle, just world, then just design"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -63,7 +63,10 @@ pub enum ContainerError {
         found: u16,
     },
     /// The body was written with another schema.
-    #[error("schema hash is {found:08x}, expected {expected:08x}; rebuild the file")]
+    #[error(
+        "schema hash is {found:08x}, expected {expected:08x}; rebuild the content files: \
+         just bundle, just world, then just design"
+    )]
     SchemaMismatch {
         /// Schema hash the caller expects.
         expected: u32,
