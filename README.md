@@ -330,7 +330,9 @@ On a loot table the records page also has the **drop simulator**: it rolls the t
 
 The to-do page (`/todo`) keeps the team's tasks in `content/todo.toml`: add a task, or import a GitHub issue (a one-time copy; set `[studio] github_token_env` for a private repository), mark who took it and when it is done, and link the design files it touches. "Changed design files" lists what differs from the last commit, to link before you commit.
 
-Items are saved: the world database keeps every character's items (`character_item`), the director sends them with each join, and a sim saves them when they change and when the player leaves. A character that never saved items gets its starter kit; the tutorial always starts from the kit and saves nothing. Run `edge-http migrate` after this update.
+Quests: a game master starts any objective for the selected player with **Start quest** on the live page. A player runs one quest at a time; a finished quest gives its item reward (`ItemRewardName`, `ItemRewardQty`) and starts again only when it is repeatable. The world database keeps the active run and the finished quests (`character_quest`). On the records page, an objective shows its task tree.
+
+Items are saved: the world database keeps every character's items (`character_item`), the director sends them with each join, and a sim saves them when they change and when the player leaves. A character that never saved items gets its starter kit; the tutorial always starts from the kit and saves nothing. Run `edge-http migrate` after this update (items and quests are new world database tables).
 
 ### Server mode, ranks and GM commands
 
