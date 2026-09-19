@@ -14,6 +14,7 @@ pub mod generated;
 pub mod ftue_entities;
 pub mod gathering;
 pub mod ids;
+pub mod loot;
 pub mod mob_prefabs;
 pub mod starter;
 pub mod table;

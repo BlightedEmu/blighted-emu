@@ -2860,7 +2860,8 @@ mod tests {
 
     use nw_bus::CellTable;
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
-    use nw_content::gathering::{Gatherable, Gatherables, GatheringSource, LootRow};
+    use nw_content::gathering::{Gatherable, Gatherables};
+    use nw_content::loot::{LootRow, LootSource, LootTables};
     use nw_messages::{
         ALC_TYPE_INDEX, GDE_METADATA_TYPE_INDEX, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
         LOOK_CHOICES, MemberState, OPEN_WORLD_LEVEL, PAPERDOLL_TYPE_INDEX,
@@ -3905,19 +3906,20 @@ mod tests {
                 .map(|(index, cell)| (*index, (*cell).to_owned()))
                 .collect(),
         };
-        let gatherables = Gatherables::build(GatheringSource {
-            gatherables: vec![Gatherable {
-                id: FLINT.to_owned(),
-                gather_ms: FLINT_GATHER_MS,
-                respawn_ms: FLINT_RESPAWN_MS,
-                loot_table: Some(FLINT.to_owned()),
-                skinning: false,
-            }],
-            loot_rows: vec![
+        let gatherables = Gatherables::build([Gatherable {
+            id: FLINT.to_owned(),
+            gather_ms: FLINT_GATHER_MS,
+            respawn_ms: FLINT_RESPAWN_MS,
+            loot_table: Some(FLINT.to_owned()),
+            skinning: false,
+        }]);
+        let loot = LootTables::build(LootSource {
+            rows: vec![
                 loot(FLINT, &[(1, gear::tests::FLINT)], Some("AND"), None),
                 loot(&format!("{FLINT}_Qty"), &[(1, "1")], None, None),
                 loot(&format!("{FLINT}_Probs"), &[(1, "0")], None, Some(ALWAYS)),
             ],
+            bucket_items: Vec::new(),
         });
         let mut combat = test_combat();
         combat.spawns = Vec::new().into();
@@ -3930,6 +3932,7 @@ mod tests {
             Arc::new(PlayerContent {
                 kits: gear::tests::kits(),
                 gatherables,
+                loot,
                 ..PlayerContent::default()
             }),
         );

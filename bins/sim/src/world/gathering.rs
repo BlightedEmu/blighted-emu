@@ -9,7 +9,8 @@
 use std::collections::HashMap;
 
 use bevy_ecs::entity::Entity;
-use nw_content::gathering::{Gatherable, LootLevels};
+use nw_content::gathering::Gatherable;
+use nw_content::loot::LootLevels;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     BundleGroup, BundleMember, GatherableControllerState, GdeMetadataReplicatedState,
@@ -205,7 +206,7 @@ impl SimWorld {
             .as_deref()
             .map(|table| {
                 self.content
-                    .gatherables
+                    .loot
                     .roll(table, levels, &mut |below| dice.below(below))
             })
             .unwrap_or_default();

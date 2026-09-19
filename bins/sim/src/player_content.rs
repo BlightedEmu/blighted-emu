@@ -3,6 +3,7 @@
 //! pick, the bit of each achievement, the look of each mob prefab, and the tutorial quest.
 
 use nw_content::gathering::Gatherables;
+use nw_content::loot::LootTables;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -156,8 +157,10 @@ pub struct PlayerContent {
     /// The tutorial level's entities: its static entities, its asset entities and the retail
     /// causes of their groups.
     pub tutorial_level: FtueLevel,
-    /// The gatherables and their loot tables.
+    /// The gatherables.
     pub gatherables: Gatherables,
+    /// Every loot table and bucket, for gathering and mob kills.
+    pub loot: LootTables,
 }
 
 impl PlayerContent {
@@ -184,6 +187,7 @@ impl PlayerContent {
                 .map(Arc::new),
             tutorial_level,
             gatherables: Gatherables::from_tables(tables),
+            loot: LootTables::from_tables(tables),
         }
     }
 }
