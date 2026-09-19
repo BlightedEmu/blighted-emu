@@ -65,6 +65,7 @@ mod scripts;
 mod slots;
 mod stamina;
 mod statics;
+mod walked_floor;
 
 use asset_script::Step;
 use combat_status::CombatTimer;
@@ -489,6 +490,8 @@ pub struct SimWorld {
     settings: WorldSettings,
     ids: WorldIds,
     ground: Arc<dyn Ground + Send + Sync>,
+    /// The floor the players walked on: where a server push may go.
+    walked_floor: walked_floor::WalkedFloor,
     me: SimSlot,
     cells: Option<Cells>,
     /// Tutorial sims only: the open-world sim that owns [`OPEN_WORLD_START`], where the exit
@@ -639,6 +642,7 @@ impl SimWorld {
             mob_changes: MobChanges::default(),
             dice: Dice::new(combat.seed),
             deaths: Vec::new(),
+            walked_floor: walked_floor::WalkedFloor::default(),
             combat_messages: Vec::new(),
             drinks: Vec::new(),
             swings: Vec::new(),
@@ -1020,6 +1024,7 @@ impl SimWorld {
             }
             Ok(check) => {
                 player.refused_since_ms = None;
+                self.walked_floor.walked(next);
                 Ok(check)
             }
         }
@@ -1713,6 +1718,8 @@ impl SimWorld {
                 let mob_at = self.mobs.get_mut(mob).map(|mob| mob.brain.position());
                 if let (Some(from), Some(mob_at)) = (body_at, mob_at)
                     && let Some(to) = shoved_to(from, mob_at, shove)
+                    && let to = self.walked_floor.reach(from, to)
+                    && to != from
                     && let Some(mut player) = self.world.get_mut::<Player>(entity)
                 {
                     player.push = Some(Push {
@@ -2571,8 +2578,6 @@ impl SimWorld {
     }
 }
 
-/// Queues `messages` for the client of `connection` on the reliable message channel; a message
-/// that cannot be encoded is logged and left out.
 /// Where `shove` moves a player at `from` away from or toward a mob at `mob_at`, on the line
 /// between them, at the player's height; `None` when they stand on one spot.
 fn shoved_to(from: Position, mob_at: Position, shove: Shove) -> Option<Position> {
@@ -2595,6 +2600,8 @@ fn shoved_to(from: Position, mob_at: Position, shove: Shove) -> Option<Position>
     })
 }
 
+/// Queues `messages` for the client of `connection` on the reliable message channel; a message
+/// that cannot be encoded is logged and left out.
 fn send_now(outgoing: &mut Vec<Outgoing>, connection: &ConnectionRef, messages: &[ServerMessage]) {
     let envelopes: Vec<Vec<u8>> = messages
         .iter()
@@ -3372,6 +3379,22 @@ mod tests {
             shove: Shove::To(2.0),
             length_ms: SHOVE_MS,
         };
+        assert!(world.mob_order(entity, 1, &pull, NOW));
+        assert!(
+            world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .push
+                .is_none(),
+            "no push over floor nobody walked on"
+        );
+        // The players walked between the mob and the player: open floor.
+        for step in 0..=16 {
+            #[allow(clippy::cast_precision_loss, reason = "a few steps")]
+            let x = MOB_X + step as f32 / 4.0;
+            world.walked_floor.walked(Position { x, ..start });
+        }
         assert!(world.mob_order(entity, 1, &pull, NOW));
         assert!(matches!(
             world.move_to(&connection(1), start, NOW + 1),
