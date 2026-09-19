@@ -14,6 +14,7 @@ use nw_content::{ContainerError, ContentBundle, Tables};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_world::WorldFile;
 use nw_world::map_tiles::{TILES_FILE, TilesIndex};
+use nw_world::script::{DesignData, design_data_path};
 use nw_world::world_file::world_file_path;
 use serde::Serialize;
 
@@ -179,6 +180,8 @@ pub struct WorldLayer {
     map_tiles: bool,
     cells: HashMap<(i64, i64), Vec<PointRef>>,
     max_spawns: usize,
+    /// The merged design data file (scripts and events), when the layer came from files.
+    design_data: Option<PathBuf>,
 }
 
 impl WorldLayer {
@@ -226,6 +229,7 @@ impl WorldLayer {
             map_tiles,
             cells,
             max_spawns,
+            design_data: None,
         }
     }
 
@@ -262,12 +266,10 @@ impl WorldLayer {
                     });
                 }
             };
-        Ok(Self::new(
-            world,
-            names,
-            tiles,
-            config.max_spawns_per_request,
-        ))
+        Ok(Self {
+            design_data: Some(design_data_path(&config.content_dir, &build)),
+            ..Self::new(world, names, tiles, config.max_spawns_per_request)
+        })
     }
 
     /// The world facts of the map page.
@@ -284,6 +286,25 @@ impl WorldLayer {
     /// Ground height in metres at (`x`, `y`); `None` off the terrain.
     pub fn ground_height(&self, x: f32, y: f32) -> Option<f32> {
         self.world.height_at(x, y)
+    }
+
+    /// The ids of this level's events in the merged design data, read now (Apply writes it while
+    /// the admin runs); none without the file.
+    pub fn event_ids(&self) -> Vec<String> {
+        let Some(path) = &self.design_data else {
+            return Vec::new();
+        };
+        match DesignData::load(path) {
+            Ok(mut data) => data
+                .levels
+                .remove(&self.world.level.name)
+                .map(|level| level.events.into_keys().collect())
+                .unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!(%error, "design data");
+                Vec::new()
+            }
+        }
     }
 
     /// The tile grid.

@@ -19,6 +19,8 @@ use crate::server::AppState;
 pub const STREAM_ROUTE: &str = "/api/live/stream";
 /// The one-view route.
 pub const VIEW_ROUTE: &str = "/api/live/view";
+/// The script run log lines.
+pub const SCRIPT_LOG_ROUTE: &str = "/api/live/script-log";
 /// The name of each stream event.
 pub const STATE_EVENT: &str = "state";
 /// The content type of the stream.
@@ -29,6 +31,14 @@ pub fn live_routes() -> Router<AppState> {
     Router::new()
         .route(STREAM_ROUTE, get(stream_views))
         .route(VIEW_ROUTE, get(one_view))
+        .route(SCRIPT_LOG_ROUTE, get(script_log))
+}
+
+async fn script_log(State(state): State<AppState>) -> Response {
+    match &state.live {
+        Some(live) => Json(lock(&live.state).script_lines()).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 async fn one_view(State(state): State<AppState>) -> Response {

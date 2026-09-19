@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use nw_bus::{Bus, BusError, CellTable, SimHeartbeat, SimSnapshot, subject};
+use nw_bus::{Bus, BusError, CellTable, ScriptLog, SimHeartbeat, SimSnapshot, subject};
 use nw_common::time::unix_ms;
 use uuid::Uuid;
 
@@ -18,6 +18,7 @@ enum Message {
     Heartbeat(SimHeartbeat),
     Table(CellTable),
     Snapshot(SimSnapshot),
+    ScriptLog(ScriptLog),
 }
 
 impl Message {
@@ -26,6 +27,7 @@ impl Message {
             Self::Heartbeat(beat) => state.heartbeat(beat, now_ms),
             Self::Table(table) => state.table(table, now_ms),
             Self::Snapshot(part) => state.snapshot_part(part),
+            Self::ScriptLog(log) => state.script_log(log),
         }
     }
 }
@@ -56,6 +58,9 @@ async fn read(nats_url: &str, world: Uuid, state: &SharedState) -> Result<(), Bu
     let mut snapshots = bus
         .subscribe::<SimSnapshot>(subject::all_sim_snapshots(world))
         .await?;
+    let mut script_logs = bus
+        .subscribe::<ScriptLog>(subject::all_sim_script_logs(world))
+        .await?;
     bus.flush().await?;
     tracing::info!("reading the bus");
     loop {
@@ -63,6 +68,7 @@ async fn read(nats_url: &str, world: Uuid, state: &SharedState) -> Result<(), Bu
             next = beats.next() => next.map(|got| got.map(|got| Message::Heartbeat(got.message))),
             next = tables.next() => next.map(|got| got.map(|got| Message::Table(got.message))),
             next = snapshots.next() => next.map(|got| got.map(|got| Message::Snapshot(got.message))),
+            next = script_logs.next() => next.map(|got| got.map(|got| Message::ScriptLog(got.message))),
         };
         match next {
             None => return Ok(()),

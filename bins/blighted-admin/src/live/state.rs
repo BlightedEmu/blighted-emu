@@ -6,7 +6,10 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use nw_bus::{BusId, CellTable, MOB_STATES, SimHeartbeat, SimSnapshot, SnapMob, SnapPlayer};
+use nw_bus::{
+    BusId, CellTable, MOB_STATES, ScriptLog, ScriptLogLine, SimHeartbeat, SimSnapshot, SnapMob,
+    SnapPlayer,
+};
 use nw_common::prometheus::Scrape;
 use rep_gateway::server::{
     METRIC_BYTES_IN, METRIC_BYTES_OUT, METRIC_DATAGRAMS_IN, METRIC_DATAGRAMS_OUT,
@@ -18,6 +21,8 @@ use sim::server::{METRIC_BUNDLE_MEMBERS, METRIC_TICK_SECONDS, ONE_TICK_SECONDS};
 pub const SIM_SILENT_MS: u64 = 3_000;
 /// Events the log keeps.
 pub const EVENTS_KEPT: usize = 200;
+/// Script run log lines kept for the script editor.
+pub const SCRIPT_LINES_KEPT: usize = 500;
 /// The tick quantile of the p99 tile.
 const P99: f64 = 0.99;
 const MS_PER_SECOND: f64 = 1_000.0;
@@ -192,9 +197,38 @@ pub struct LiveState {
     bots: u32,
     events: VecDeque<EventView>,
     bot_prefixes: Vec<String>,
+    script_lines: VecDeque<ScriptLineView>,
+}
+
+/// One script run log line with the sim that ran it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScriptLineView {
+    /// The sim.
+    pub sim: String,
+    /// The line.
+    #[serde(flatten)]
+    pub line: ScriptLogLine,
 }
 
 impl LiveState {
+    /// The run log lines of a sim; the newest [`SCRIPT_LINES_KEPT`] stay.
+    pub fn script_log(&mut self, log: ScriptLog) {
+        for line in log.lines {
+            if self.script_lines.len() == SCRIPT_LINES_KEPT {
+                self.script_lines.pop_front();
+            }
+            self.script_lines.push_back(ScriptLineView {
+                sim: log.sim.to_string(),
+                line,
+            });
+        }
+    }
+
+    /// The kept run log lines, oldest first.
+    pub fn script_lines(&self) -> Vec<ScriptLineView> {
+        self.script_lines.iter().cloned().collect()
+    }
+
     /// An empty state that marks players whose names start with one of `bot_prefixes` as bots.
     pub fn new(bot_prefixes: Vec<String>) -> Self {
         Self {
@@ -516,6 +550,27 @@ mod tests {
     use super::*;
 
     const NOW: u64 = 1_000_000;
+
+    #[test]
+    fn script_lines_keep_the_newest() {
+        let mut state = LiveState::default();
+        let line = |node: usize| ScriptLogLine {
+            time_ms: 1,
+            script: "s".to_owned(),
+            node: node.to_string(),
+            block: "wait".to_owned(),
+            player: None,
+            note: String::new(),
+        };
+        state.script_log(ScriptLog {
+            sim: BusId::try_from("sim-1".to_owned()).expect("id"),
+            lines: (0..=SCRIPT_LINES_KEPT).map(line).collect(),
+        });
+        let lines = state.script_lines();
+        assert_eq!(lines.len(), SCRIPT_LINES_KEPT);
+        assert_eq!(lines[0].line.node, "1", "the oldest was dropped");
+        assert_eq!(lines[0].sim, "sim-1");
+    }
     const URL: &str = "http://127.0.0.1:9102/metrics";
     const OTHER_URL: &str = "http://127.0.0.1:9104/metrics";
     const SECOND_MS: u64 = 1_000;

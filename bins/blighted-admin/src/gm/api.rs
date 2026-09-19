@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use nw_bus::{AdminAction, AdminCommand, AdminReply, BusId, Point};
+use nw_bus::{AdminAction, AdminCommand, AdminReply, BusId, Point, RunningEvent};
 use nw_db::AdminRank;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -34,6 +34,12 @@ pub const KILL_ROUTE: &str = "/api/gm/kill";
 pub const GOD_ROUTE: &str = "/api/gm/god";
 /// `POST`: puts items into a player's bag.
 pub const GIVE_ITEM_ROUTE: &str = "/api/gm/give-item";
+/// `POST`: starts an event at a point.
+pub const START_EVENT_ROUTE: &str = "/api/gm/start-event";
+/// `POST`: stops a running event on every sim.
+pub const STOP_EVENT_ROUTE: &str = "/api/gm/stop-event";
+/// `GET`: the events of the level and the running ones.
+pub const EVENTS_ROUTE: &str = "/api/gm/events";
 /// `POST`: starts a quest for a player.
 pub const START_QUEST_ROUTE: &str = "/api/gm/start-quest";
 /// `POST`: takes an item from a player.
@@ -70,6 +76,9 @@ pub fn gm_routes() -> Router<AppState> {
         .route(GOD_ROUTE, post(god))
         .route(GIVE_ITEM_ROUTE, post(give_item))
         .route(START_QUEST_ROUTE, post(start_quest))
+        .route(START_EVENT_ROUTE, post(start_event))
+        .route(STOP_EVENT_ROUTE, post(stop_event))
+        .route(EVENTS_ROUTE, get(events))
         .route(TAKE_ITEM_ROUTE, post(take_item))
         .route(SPAWN_ROUTE, post(spawn))
         .route(DESPAWN_ROUTE, post(despawn))
@@ -114,6 +123,33 @@ pub struct GodRequest {
     pub entity: u64,
     /// True: no damage.
     pub on: bool,
+}
+
+/// An event to start at a point.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventStartRequest {
+    /// The event id.
+    pub event: String,
+    /// East, metres.
+    pub x: f32,
+    /// North, metres.
+    pub y: f32,
+    /// Up, metres.
+    pub z: f32,
+}
+
+/// An event to stop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventStopRequest {
+    /// The event id.
+    pub event: String,
+}
+
+/// The events of the level and the running ones, by sim.
+#[derive(Debug, Serialize)]
+struct EventsView {
+    defined: Vec<String>,
+    running: Vec<(String, RunningEvent)>,
 }
 
 /// A quest for a player.
@@ -286,6 +322,9 @@ fn answer(reply: Result<AdminReply, SendError>) -> (StatusCode, String) {
             StatusCode::UNPROCESSABLE_ENTITY,
             format!("failed: {reason}"),
         ),
+        Ok(AdminReply::Events { running }) => {
+            (StatusCode::OK, format!("{} events running", running.len()))
+        }
         Err(SendError::Timeout) => (StatusCode::GATEWAY_TIMEOUT, "timeout".to_owned()),
         Err(SendError::Bus(error)) => (StatusCode::BAD_GATEWAY, format!("bus: {error}")),
     }
@@ -485,6 +524,113 @@ async fn start_quest(
         },
     )
     .await
+}
+
+async fn start_event(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Actor>,
+    Json(request): Json<EventStartRequest>,
+) -> Response {
+    let gm = gm(
+        &state,
+        &actor,
+        "start_event",
+        request.event.clone(),
+        &request,
+    );
+    if let Some(refused) = gm.refused(GM_RANK).await {
+        return refused;
+    }
+    gm.send(
+        Owner::Point(request.x, request.y),
+        AdminAction::StartEvent {
+            event: request.event.clone(),
+            at: Point {
+                x: request.x,
+                y: request.y,
+                z: request.z,
+            },
+        },
+    )
+    .await
+}
+
+/// Every sim the live state shows.
+fn all_sims(state: &AppState) -> Vec<BusId> {
+    state.live.as_ref().map_or_else(Vec::new, |live| {
+        lock(live.state())
+            .sim_ids()
+            .into_iter()
+            .filter_map(|id| BusId::try_from(id).ok())
+            .collect()
+    })
+}
+
+async fn stop_event(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Actor>,
+    Json(request): Json<EventStopRequest>,
+) -> Response {
+    let gm = gm(
+        &state,
+        &actor,
+        "stop_event",
+        request.event.clone(),
+        &request,
+    );
+    if let Some(refused) = gm.refused(GM_RANK).await {
+        return refused;
+    }
+    let Some(commands) = &state.commands else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut stopped = Vec::new();
+    for sim in all_sims(&state) {
+        let reply = gm
+            .send_to(
+                commands,
+                &sim,
+                AdminAction::StopEvent {
+                    event: request.event.clone(),
+                },
+            )
+            .await;
+        if matches!(reply, Ok(AdminReply::Done)) {
+            stopped.push(sim.to_string());
+        }
+    }
+    let (status, result) = if stopped.is_empty() {
+        (StatusCode::NOT_FOUND, "not running".to_owned())
+    } else {
+        (StatusCode::OK, format!("stopped on {}", stopped.join(", ")))
+    };
+    gm.audit(&result).await;
+    (status, result).into_response()
+}
+
+async fn events(State(state): State<AppState>, Extension(actor): Extension<Actor>) -> Response {
+    if actor.rank < GM_RANK {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(commands) = &state.commands else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let mut running = Vec::new();
+    for sim in all_sims(&state) {
+        let command = AdminCommand {
+            request: Uuid::new_v4(),
+            actor: actor.account,
+            action: AdminAction::ListEvents,
+        };
+        if let Ok(AdminReply::Events { running: here }) = commands.send(&sim, &command).await {
+            running.extend(here.into_iter().map(|event| (sim.to_string(), event)));
+        }
+    }
+    Json(EventsView {
+        defined: state.world.event_ids(),
+        running,
+    })
+    .into_response()
 }
 
 async fn take_item(
@@ -997,6 +1143,21 @@ mod tests {
             status(&fixture, post(SPAWN_ROUTE, &off_grid)).await,
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn an_event_starts_on_the_sim_of_its_point() {
+        let fixture = fixture();
+        answer_next(&fixture, Some(AdminReply::Done));
+        let body = serde_json::json!({ "event": "invasion", "x": 100.0, "y": 100.0, "z": 5.0 });
+        assert_eq!(
+            status(&fixture, post(START_EVENT_ROUTE, &body)).await,
+            StatusCode::OK
+        );
+        assert!(matches!(
+            &sent(&fixture)[..],
+            [AdminAction::StartEvent { event, .. }] if event == "invasion"
+        ));
     }
 
     #[tokio::test]

@@ -56,7 +56,7 @@ pub const TODO_PAGE_ROUTE: &str = "/todo";
 /// What every route shares.
 #[derive(Debug, Clone)]
 pub struct AppState {
-    world: Arc<WorldLayer>,
+    pub(crate) world: Arc<WorldLayer>,
     map_dir: Arc<PathBuf>,
     origin: AdminOrigin,
     pub(crate) captures: Arc<Captures>,
