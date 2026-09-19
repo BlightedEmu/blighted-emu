@@ -73,6 +73,14 @@
       </div>
       <section class="chart editor-map" id="editor-map-box" aria-label="Editor map">
         <canvas class="map" id="editor-map"></canvas>
+        <form class="map-tools gm" id="editor-goto">
+          <input type="text" name="x" inputmode="decimal" aria-label="x (metres)" placeholder="x">
+          <input type="text" name="y" inputmode="decimal" aria-label="y (metres)" placeholder="y">
+          <button type="submit">Go</button>
+          <button type="button" id="editor-zoom-in">Zoom in</button>
+          <button type="button" id="editor-zoom-out">Zoom out</button>
+          <button type="button" id="editor-fit">Whole world</button>
+        </form>
       </section>
     </section>
     <details class="players" open>

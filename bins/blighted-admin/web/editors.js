@@ -5,6 +5,7 @@
 import { BEHAVIOURS, PATH_MODES, PROFILE_NUMBERS, designPath, fieldsOf, groupFile, pathFile, profileFile } from './design.js';
 import { WorldMap } from './map.js';
 import { SIGNAL } from './palette.js';
+import { boxAround, screenToWorld } from './view.js';
 
 const FILE_URL = '/api/studio/file';
 const HEIGHT_URL = '/api/world/height';
@@ -12,6 +13,8 @@ const ADMIN_HEADERS = Object.freeze({ 'X-Blighted-Admin': '1' });
 const HTTP_REFUSED = 422;
 /** Points are kept to a tenth of a metre, as point keys are. */
 const POINT_SCALE = 10;
+/** Metres around a "Go" point or a file's points when the map shows them. */
+const GOTO_MARGIN_M = 60;
 const PATH_COLOUR = SIGNAL.YELLOW;
 const POINT_COLOUR = SIGNAL.RED;
 const PROFILE = 'ai_profile';
@@ -62,7 +65,6 @@ export function startEditors(info, { showProblems, onSaved }) {
   let loaded = null;
   /** The level of the file in the form; the map shows only `info.level`. */
   let level = info.level;
-  let mapCursor = null;
 
   options(forms[PROFILE].elements.behaviour, BEHAVIOURS);
   options(forms[PATH].elements.mode, PATH_MODES);
@@ -77,9 +79,7 @@ export function startEditors(info, { showProblems, onSaved }) {
     return input;
   }));
 
-  const map = new WorldMap(document.getElementById('editor-map'), info, (point) => {
-    mapCursor = point;
-  });
+  const map = new WorldMap(document.getElementById('editor-map'), info);
 
   function say(text, isError = false) {
     status.classList.toggle('error', isError);
@@ -172,15 +172,13 @@ export function startEditors(info, { showProblems, onSaved }) {
     }
   }
 
-  async function addPoint() {
-    if (!mapCursor) {
-      return;
-    }
+  /** Adds the ground point under the screen pixel (`px`, `py`) of the map. */
+  async function addPoint(px, py) {
     if (level !== info.level) {
       say(`The map shows ${info.level}; points of ${level} cannot be placed on it.`, true);
       return;
     }
-    const { x, y } = mapCursor;
+    const { x, y } = screenToWorld(map.currentView(), px, py);
     const response = await fetch(`${HEIGHT_URL}?x=${x}&y=${y}`);
     const { z } = await response.json();
     if (z === null) {
@@ -239,11 +237,18 @@ export function startEditors(info, { showProblems, onSaved }) {
 
   const failed = (error) => say(String(error.message ?? error), true);
   for (const tab of tabs) {
-    tab.addEventListener('click', () => show(tab.dataset.editor));
+    tab.addEventListener('click', () => {
+      // Another kind is another file; the points stay, so a group can reuse a path's points.
+      if (tab.dataset.editor !== kind) {
+        loaded = null;
+        level = info.level;
+      }
+      show(tab.dataset.editor);
+    });
   }
   document.getElementById('editor-map').addEventListener('contextmenu', (event) => {
     event.preventDefault();
-    addPoint().catch(failed);
+    addPoint(event.offsetX, event.offsetY).catch(failed);
   });
   document.getElementById('editor-undo').addEventListener('click', () => {
     points.pop();
@@ -253,6 +258,20 @@ export function startEditors(info, { showProblems, onSaved }) {
     points = [];
     drawPoints();
   });
+  document.getElementById('editor-goto').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const fields = event.target.elements;
+    const x = Number(fields.x.value);
+    const y = Number(fields.y.value);
+    if (fields.x.value.trim() === '' || fields.y.value.trim() === '' || !Number.isFinite(x) || !Number.isFinite(y)) {
+      say('x and y must be numbers (metres).', true);
+      return;
+    }
+    map.fit(boxAround([{ x, y }], GOTO_MARGIN_M));
+  });
+  document.getElementById('editor-zoom-in').addEventListener('click', () => map.zoom(1));
+  document.getElementById('editor-zoom-out').addEventListener('click', () => map.zoom(-1));
+  document.getElementById('editor-fit').addEventListener('click', () => map.fit());
   document.getElementById('editor-new').addEventListener('click', () => clear(kind));
   document.getElementById('editor-save').addEventListener('click', () => save().catch(failed));
   document.getElementById('editor-delete').addEventListener('click', () => remove().catch(failed));
@@ -281,6 +300,9 @@ export function startEditors(info, { showProblems, onSaved }) {
       loaded = file.path;
       level = file.map ?? info.level;
       drawPoints();
+      if (points.length > 0 && level === info.level) {
+        map.fit(boxAround(points, GOTO_MARGIN_M));
+      }
       const elsewhere = file.map && file.map !== info.level ? ` Its level is ${file.map}; the map shows ${info.level}.` : '';
       say(`Opened ${file.path}.${elsewhere}`);
     },
