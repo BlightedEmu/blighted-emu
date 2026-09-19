@@ -34,7 +34,9 @@ use nw_sim_core::{Damage, Health, MobState, PlayerAttack, died, hurt, mob_hit, p
 
 use super::gathering::{MOB_LEVEL, PLAYER_LOOT_LEVEL};
 use super::gear::unix_ns;
-use super::hit_shape::{MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, Wedge, homing, swing_shape, turn};
+use super::hit_shape::{
+    MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, Wedge, homing, stepped_in, swing_shape, turn,
+};
 use super::mob_timeline::yaw_toward;
 use super::stamina::Dodge;
 use super::{Body, MESSAGE_CHANNEL, Outgoing, Player, Position, SimWorld};
@@ -986,32 +988,43 @@ impl SimWorld {
             .filter(|(_, _, state)| state.health > 0 && !state.returning)
             .map(|(mob, at, _)| (mob, at, self.mobs.capsule(mob)))
             .collect();
+        // The homing target: the one the client named, else the best one in the attack's
+        // homing reach; with no camera yaw, the nearest mob.
         let locked = aim
             .lock_target
-            .and_then(|target| candidates.iter().find(|(mob, _, _)| *mob == target))
-            .map(|(_, at, _)| yaw_toward(position, *at));
+            .and_then(|target| candidates.iter().position(|(mob, _, _)| *mob == target));
         let nearest = || {
             candidates
                 .iter()
+                .enumerate()
                 .min_by(|a, b| {
-                    a.1.horizontal_distance(position)
-                        .total_cmp(&b.1.horizontal_distance(position))
+                    a.1.1
+                        .horizontal_distance(position)
+                        .total_cmp(&b.1.1.horizontal_distance(position))
                 })
-                .map(|(_, at, _)| yaw_toward(position, *at))
+                .map(|(index, _)| index)
         };
-        let facing = locked.or_else(|| match aim.facing {
-            Some(facing) => Some(homing(
+        let target = locked.or_else(|| match aim.facing {
+            Some(facing) => homing(
                 &shape,
                 position,
                 facing,
                 candidates.iter().map(|(_, at, _)| *at),
-            )),
+            ),
             None => nearest(),
         });
-        let Some(facing) = facing else {
-            return refused(AttackRefusal::NoTarget);
+        // The homing turns the attacker to its target and steps it in before the blade swings.
+        let (from, facing) = match target.map(|index| candidates[index].1) {
+            Some(at) => {
+                let from = stepped_in(&shape, position, at);
+                (from, yaw_toward(from, at))
+            }
+            None => match aim.facing {
+                Some(facing) => (position, facing),
+                None => return refused(AttackRefusal::NoTarget),
+            },
         };
-        let wedge = Wedge::of_swing(&shape, position, facing);
+        let wedge = Wedge::of_swing(&shape, from, facing);
         let mut hits: Vec<(f32, u64)> = candidates
             .iter()
             .filter_map(|(mob, at, body)| Some((wedge.touches(*at, *body)?, *mob)))
@@ -1030,6 +1043,7 @@ impl SimWorld {
             facing,
             ?weapon,
             ?nearest_mob,
+            stepped_m = from.horizontal_distance(position),
             hits = ?hits,
             "player swing"
         );
@@ -1691,6 +1705,44 @@ mod tests {
         assert_eq!(
             world.swing(&connection(7), Aim::default(), AttackKind::Light, NOW),
             vec![Err(AttackRefusal::NotInWorld)]
+        );
+    }
+
+    #[test]
+    fn a_swing_steps_in_to_a_mob_in_its_homing_reach() {
+        /// Out of the sword's wedge where the player stands, inside its 3.75 m homing radius.
+        const AWAY_M: f32 = 3.5;
+        let mut world = fight_at(MOB_X + AWAY_M);
+        tick(&mut world, NOW);
+        let entity = world.by_connection[&connection(1)];
+        let from = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let mob_at = Position { x: MOB_X, ..from };
+        let aim = Aim {
+            facing: Some(yaw_toward(from, mob_at)),
+            lock_target: None,
+        };
+        assert!(matches!(
+            world.swing(&connection(1), aim, AttackKind::Light, NOW).as_slice(),
+            [Ok(AttackOutcome::Hit { target, .. })] if *target == mob()
+        ));
+        let behind = Aim {
+            facing: Some(yaw_toward(mob_at, from)),
+            lock_target: None,
+        };
+        assert_eq!(
+            world.swing(
+                &connection(1),
+                behind,
+                AttackKind::Light,
+                NOW + LONG_AFTER_MS
+            ),
+            vec![Err(AttackRefusal::NoTarget)],
+            "no homing to a mob behind"
         );
     }
 
