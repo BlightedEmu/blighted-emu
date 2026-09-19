@@ -28,6 +28,7 @@
       <select id="kind" aria-label="kind"></select>
       <input type="search" id="query" aria-label="id or name" placeholder="id or name" class="wide">
       <button type="submit">Search</button>
+      <button type="button" id="no-loot">Mobs with no loot</button>
     </form>
     <section class="problems-block" aria-label="Problems">
       <ul class="list problems" id="problems"></ul>
@@ -43,6 +44,19 @@
           <button type="button" id="save-new">Save as new record</button>
         </div>
         <div class="gm" id="copies"></div>
+        <form class="gm" id="simulate" hidden>
+          <b>Drop simulator</b>
+          <input type="text" name="rolls" inputmode="numeric" value="10000" aria-label="rolls">
+          <input type="text" name="enemy" inputmode="numeric" value="1" aria-label="enemy level">
+          <input type="text" name="content" inputmode="numeric" value="1" aria-label="player level">
+          <button type="submit">Simulate</button>
+        </form>
+        <div class="table-scroll" id="simulation" hidden>
+          <table class="grid">
+            <thead><tr><th>Item</th><th class="num">Chance</th><th class="num">Mean quantity</th></tr></thead>
+            <tbody id="simulation-rows"></tbody>
+          </table>
+        </div>
         <div class="gm">
           <input type="search" id="field-filter" aria-label="field filter" placeholder="field" class="wide">
           <label><input type="checkbox" id="changed-only"> Changed only</label>

@@ -3,10 +3,17 @@
 // override file, or save a new record made from one (admin studio spec sections 7.6, 7.7).
 
 import { errorRows } from '/web/apply.js';
-import { addFile, changedFields, overrideFile, valueText } from '/web/record-edit.js';
+import { addFile, changedFields, overrideFile, simulationRequest, valueText } from '/web/record-edit.js';
 
 const RECORDS_URL = '/api/studio/records';
 const FILE_URL = '/api/studio/file';
+const SIMULATE_URL = '/api/studio/loot/simulate';
+const NO_LOOT_URL = '/api/studio/loot/no-loot';
+const LOOT_TABLE_KIND = 'loot_table';
+const MOB_KIND = 'mob';
+const PERCENT = 100;
+const CHANCE_DECIMALS = 2;
+const QUANTITY_DECIMALS = 2;
 const ADMIN_HEADERS = Object.freeze({ 'X-Blighted-Admin': '1' });
 const HTTP_REFUSED = 422;
 /** The kinds and their names, in the order of the kind list. */
@@ -39,6 +46,9 @@ const elements = {
   filter: document.getElementById('field-filter'),
   changedOnly: document.getElementById('changed-only'),
   fields: document.getElementById('fields'),
+  simulate: document.getElementById('simulate'),
+  simulation: document.getElementById('simulation'),
+  simulationRows: document.getElementById('simulation-rows'),
 };
 /** The open record: { kind, folder, id, name, fields, field_names, files }, and the design file it edits. */
 let open = null;
@@ -65,9 +75,7 @@ async function json(url) {
   return response.json();
 }
 
-async function search() {
-  const kind = elements.kind.value;
-  const hits = await json(`${RECORDS_URL}/${kind}?q=${encodeURIComponent(elements.query.value)}`);
+function showHits(kind, hits) {
   elements.hits.replaceChildren(...hits.map((hit) => {
     const item = document.createElement('li');
     item.className = 'clickable';
@@ -75,7 +83,59 @@ async function search() {
     item.addEventListener('click', () => openRecord(kind, hit.id).catch(fail));
     return item;
   }));
+}
+
+async function search() {
+  const kind = elements.kind.value;
+  const hits = await json(`${RECORDS_URL}/${kind}?q=${encodeURIComponent(elements.query.value)}`);
+  showHits(kind, hits);
   say(`${hits.length} records`);
+}
+
+async function noLoot() {
+  const mobs = await json(NO_LOOT_URL);
+  elements.kind.value = MOB_KIND;
+  showHits(MOB_KIND, mobs);
+  say(`${mobs.length} mob types have no loot table.`);
+}
+
+async function simulate() {
+  const form = elements.simulate.elements;
+  const made = simulationRequest(open.id, form.rolls.value, form.enemy.value, form.content.value);
+  if (made.error) {
+    say(made.error, true);
+    return;
+  }
+  say('Simulating with the design files merged…');
+  const response = await fetch(SIMULATE_URL, {
+    method: 'POST',
+    headers: { ...ADMIN_HEADERS, 'Content-Type': 'application/json' },
+    body: JSON.stringify(made.request),
+  });
+  if (!response.ok) {
+    say(`Not simulated: ${response.status} ${await response.text()}`, true);
+    return;
+  }
+  const result = await response.json();
+  elements.simulation.hidden = false;
+  elements.simulationRows.replaceChildren(...result.items.map((item) => {
+    const row = document.createElement('tr');
+    const cells = [
+      item.item,
+      `${(item.chance * PERCENT).toFixed(CHANCE_DECIMALS)} %`,
+      item.mean_quantity.toFixed(QUANTITY_DECIMALS),
+    ];
+    row.append(...cells.map((text, index) => {
+      const cell = document.createElement('td');
+      cell.textContent = text;
+      if (index > 0) {
+        cell.className = 'num';
+      }
+      return cell;
+    }));
+    return row;
+  }));
+  say(`${result.rolls} rolls of ${result.table}: ${result.items.length} items dropped.`);
 }
 
 /** The text inputs of the fields table, by field name. */
@@ -136,6 +196,8 @@ function show(record, file) {
     return button;
   }));
   drawFields();
+  elements.simulate.hidden = record.kind !== LOOT_TABLE_KIND;
+  elements.simulation.hidden = true;
   const url = new URL(window.location.href);
   url.searchParams.set(KIND_PARAMETER, record.kind);
   url.searchParams.set(ID_PARAMETER, record.id);
@@ -229,6 +291,11 @@ document.getElementById('save').addEventListener('click', () => save(false).catc
 document.getElementById('save-new').addEventListener('click', () => save(true).catch(fail));
 document.getElementById('remove').addEventListener('click', () => remove().catch(fail));
 elements.filter.addEventListener('input', drawFields);
+document.getElementById('no-loot').addEventListener('click', () => noLoot().catch(fail));
+elements.simulate.addEventListener('submit', (event) => {
+  event.preventDefault();
+  simulate().catch(fail);
+});
 elements.changedOnly.addEventListener('change', drawFields);
 
 const start = new URL(window.location.href).searchParams;

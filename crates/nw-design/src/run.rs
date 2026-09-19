@@ -67,27 +67,60 @@ pub enum DesignRunError {
     Io(#[from] std::io::Error),
 }
 
-/// Runs the design step on `paths` for `client_build`.
-pub fn run_design(
+/// The retail bundle with the table-kind design files merged in memory.
+#[derive(Debug)]
+pub struct MergedBundle {
+    /// The merged bundle.
+    pub bundle: ContentBundle,
+    /// The design files without a schema problem.
+    pub set: DesignSet,
+    /// Every design file read.
+    pub files: usize,
+    /// The problems so far.
+    pub errors: Vec<DesignError>,
+}
+
+/// Reads the design files of `paths` and merges the table kinds into the retail bundle of
+/// `client_build`, in memory. Files with a schema problem are left out, so each problem is
+/// reported once.
+pub fn merged_bundle(
     paths: &DesignPaths,
     client_build: &str,
-    mode: DesignMode,
-) -> Result<DesignReport, DesignRunError> {
+) -> Result<MergedBundle, DesignRunError> {
     let (loaded, mut errors) = load_dir(&paths.design_dir);
     let schema_errors = check_schema(&loaded);
-    // Files with a schema error are not merged, so each problem is reported once.
+    let files = loaded.files.len();
     let set = DesignSet {
         files: loaded
             .files
-            .iter()
+            .into_iter()
             .filter(|file| !schema_errors.iter().any(|error| error.path == file.path))
-            .cloned()
             .collect(),
     };
     errors.extend(schema_errors);
     let mut bundle =
         ContentBundle::load(&bundle_path(&paths.retail_dir, client_build), client_build)?;
     errors.extend(apply_tables(&set, &mut bundle.tables));
+    Ok(MergedBundle {
+        bundle,
+        set,
+        files,
+        errors,
+    })
+}
+
+/// Runs the design step on `paths` for `client_build`.
+pub fn run_design(
+    paths: &DesignPaths,
+    client_build: &str,
+    mode: DesignMode,
+) -> Result<DesignReport, DesignRunError> {
+    let MergedBundle {
+        bundle,
+        set,
+        files,
+        mut errors,
+    } = merged_bundle(paths, client_build)?;
     let maps = retail_maps(&paths.retail_dir, client_build)?;
     let mut changed_maps = BTreeSet::new();
     // An AI profile goes into every level's world file.
@@ -108,7 +141,7 @@ pub fn run_design(
         errors.extend(apply_world(&set, map, &mut world));
     }
     let mut report = DesignReport {
-        files: loaded.files.len(),
+        files,
         levels: maps.len(),
         written: false,
         errors,

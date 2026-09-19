@@ -104,6 +104,11 @@ impl Catalog {
             .collect()
     }
 
+    /// Every record of `kind`, in table order.
+    pub fn entries(&self, kind: Kind) -> &[CatalogEntry] {
+        self.kinds.get(&kind).map_or(&[], Vec::as_slice)
+    }
+
     /// The record of `kind` with `id` (any case, as the server finds records).
     pub fn record(&self, kind: Kind, id: &str) -> Option<&CatalogEntry> {
         self.kinds

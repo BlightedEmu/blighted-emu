@@ -558,6 +558,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_simulator_checks_its_request_and_no_loot_lists_mobs() {
+        use crate::studio::loot::{NO_LOOT_ROUTE, SIMULATE_ROUTE};
+        let fixture = fixture(false, LONG_TIMEOUT_S);
+        let body = |table: &str, rolls: u32| {
+            format!(r#"{{"table":"{table}","rolls":{rolls},"enemy_level":1,"content_level":1}}"#)
+        };
+        let post = |uri: &str, text: String| {
+            Request::builder()
+                .method(Method::POST)
+                .uri(uri)
+                .header(header::HOST, LISTEN)
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(ADMIN_HEADER, ADMIN_HEADER_VALUE)
+                .body(Body::from(text))
+                .expect("request")
+        };
+        let too_many = fixture
+            .app()
+            .oneshot(post(SIMULATE_ROUTE, body("Any", 100_001)))
+            .await
+            .expect("response");
+        assert_eq!(too_many.status(), StatusCode::BAD_REQUEST);
+        let missing = fixture
+            .app()
+            .oneshot(post(SIMULATE_ROUTE, body("NoSuchTable", 10)))
+            .await
+            .expect("response");
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let (status, mobs) = call(&fixture, Method::GET, NO_LOOT_ROUTE).await;
+        assert_eq!((status, mobs), (StatusCode::OK, serde_json::json!([])));
+    }
+
+    #[tokio::test]
     async fn a_put_writes_a_file_that_get_returns() {
         let fixture = fixture(false, LONG_TIMEOUT_S);
         let (status, _) = put(&fixture, PATH_FILE, PATH_TEXT).await;

@@ -598,6 +598,7 @@ dependencies = [
  "nw-login",
  "nw-messages",
  "nw-reflect",
+ "nw-sim-core",
  "nw-testclient",
  "nw-world",
  "png",

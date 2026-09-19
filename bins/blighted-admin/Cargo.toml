@@ -21,6 +21,7 @@ nw-world.workspace = true
 nw-testclient.workspace = true
 nw-bus.workspace = true
 nw-login.workspace = true
+nw-sim-core.workspace = true
 futures-util.workspace = true
 rep-gateway.workspace = true
 reqwest.workspace = true

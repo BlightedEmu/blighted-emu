@@ -63,6 +63,21 @@ function file(path, lines, changes) {
   return { path, text: `${[...lines, ...Object.entries(changes).map(([name, value]) => valueLine(name, value))].join('\n')}\n` };
 }
 
+/** Most rolls of one simulation (the server's limit). */
+export const MAX_ROLLS = 100000;
+
+/** The drop simulator request of a loot table and the form texts, or { error }. */
+export function simulationRequest(table, rollsText, enemyText, contentText) {
+  const [rolls, enemy, content] = [rollsText, enemyText, contentText].map((text) => Number(String(text).trim()));
+  if (!Number.isInteger(rolls) || rolls < 1 || rolls > MAX_ROLLS) {
+    return { error: `Rolls must be 1 to ${MAX_ROLLS}.` };
+  }
+  if (![enemy, content].every((level) => Number.isInteger(level) && level >= 0)) {
+    return { error: 'Levels must be whole numbers.' };
+  }
+  return { request: { table, rolls, enemy_level: enemy, content_level: content } };
+}
+
 /** The override file of `record` (`/api/studio/records/...`) with `changes`. */
 export function overrideFile(record, changes) {
   return file(`${record.folder}/${record.id}.toml`, header(record.kind, 'override', record.id), changes);

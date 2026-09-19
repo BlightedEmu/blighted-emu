@@ -20,5 +20,7 @@ pub use load::{DESIGN_SCHEMA, TODO_FILE, load_dir, parse_file};
 pub use points::apply_world;
 pub use records::{ClientRecord, client_records, record_field_names};
 pub use rows::{DESIGN_SOURCE_PREFIX, apply_tables};
-pub use run::{DesignMode, DesignPaths, DesignReport, DesignRunError, run_design};
+pub use run::{
+    DesignMode, DesignPaths, DesignReport, DesignRunError, MergedBundle, merged_bundle, run_design,
+};
 pub use schema::check_schema;

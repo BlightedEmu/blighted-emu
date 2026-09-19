@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { addFile, changedFields, overrideFile, valueText } from './record-edit.js';
+import { addFile, changedFields, overrideFile, simulationRequest, valueText } from './record-edit.js';
 
 const CLIENT = Object.freeze({ tier: 2, name: '@Sword_Name', can_salvage: true, perk1: null, weight: 1.5 });
 
@@ -35,6 +35,15 @@ test('an override names only the changed fields', () => {
     file.text,
     'schema = 1\nkind = "item"\naction = "override"\nid = "1hSwordT2"\ntier = 3\nname = "A \\"big\\" one"\n',
   );
+});
+
+test('a simulation needs a roll count in range and whole levels', () => {
+  assert.deepEqual(simulationRequest('LT_Wolf', '10000', '12', '1'), {
+    request: { table: 'LT_Wolf', rolls: 10000, enemy_level: 12, content_level: 1 },
+  });
+  assert.ok(simulationRequest('LT_Wolf', '0', '1', '1').error);
+  assert.ok(simulationRequest('LT_Wolf', '100001', '1', '1').error);
+  assert.ok(simulationRequest('LT_Wolf', '10', 'x', '1').error);
 });
 
 test('a new record names its base and a new id', () => {
