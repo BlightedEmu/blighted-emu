@@ -74,7 +74,7 @@ const FIELD: &str = "player component";
 
 /// (component index, class type index) of each replicated component of the player prefab, other
 /// than the spawn card and the position.
-pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 56] = [
+pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 57] = [
     (1, 6951),
     (2, 5437),
     (4, 2406),
@@ -114,6 +114,7 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 56] = [
     (49, 3152),
     (50, 4321),
     (51, 1994),
+    (54, PLAYER_NAME_TAG_TYPE_INDEX),
     (55, 4176),
     (56, 3147),
     (57, 1566),
@@ -133,8 +134,49 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 56] = [
     (77, 2938),
 ];
 
-/// An empty state of a generic-reader class without a reader of its own here: one slot byte of
-/// 0.
+/// Type index of `MB::PlayerNameTagComponentReplicatedState` (component 54).
+pub const PLAYER_NAME_TAG_TYPE_INDEX: u64 = 100;
+/// Type index of `MB::FactionComponentReplicatedState` (component 49).
+const FACTION_TYPE_INDEX: u64 = 3152;
+/// Type index of `MB::ChargeComponentReplicatedState` (component 48).
+const CHARGE_TYPE_INDEX: u64 = 5257;
+/// Type index of `MB::AudioProxyComponentReplicatedState` (component 13).
+const AUDIO_PROXY_TYPE_INDEX: u64 = 603;
+/// Type index of `MB::ObjectiveInteractorComponentReplicatedState` (component 10).
+const OBJECTIVE_INTERACTOR_TYPE_INDEX: u64 = 3829;
+
+/// The first bodies retail gives these classes on every new player's card, the same for all
+/// (targeting note, 2026-09-18: beach capture q1). Our card left them empty, and the client then
+/// never picked a lock-on or attack target (Inferred: its relation filter reads the faction).
+/// Classes whose first body names the character (groups, abilities, attributes, status
+/// effects, contribution) are not among them.
+const RETAIL_FIRST_BODIES: [(u64, &[u8]); 5] = [
+    // Slot 1 children 0 and 6, slot 2 children 1 and 3: all 0.
+    (
+        FACTION_TYPE_INDEX,
+        &[0x06, 0x41, 0x00, 0x00, 0x0a, 0x00, 0x00],
+    ),
+    // Slot 0 child 0: 1.
+    (
+        PLAYER_NAME_TAG_TYPE_INDEX,
+        &[0x01, 0x01, 0x00, 0x00, 0x00, 0x01],
+    ),
+    (CHARGE_TYPE_INDEX, &[0x01, 0x01, 0x00]),
+    (AUDIO_PROXY_TYPE_INDEX, &[0x01, 0x01, 0x00]),
+    (OBJECTIVE_INTERACTOR_TYPE_INDEX, &[0x01, 0x08, 0x00]),
+];
+
+/// The first body of player component `class`: retail's when it is in
+/// [`RETAIL_FIRST_BODIES`], else one slot byte of 0 (no slot set).
+fn first_body(class: u64) -> &'static [u8] {
+    RETAIL_FIRST_BODIES
+        .iter()
+        .find(|(retail, _)| *retail == class)
+        .map_or(&[NO_SLOT], |(_, body)| body)
+}
+
+/// The first state of a generic-reader class without a reader of its own here: retail's fixed
+/// first body where it is known ([`RETAIL_FIRST_BODIES`]), else one slot byte of 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EmptyState {
     /// The class type index.
@@ -150,26 +192,31 @@ impl EmptyState {
                 .any(|(_, player_class)| *player_class == class)
     }
 
-    /// Reads an empty body of `class`.
+    /// Reads the first body of `class`: an empty one, or retail's fixed one.
     ///
     /// # Errors
     ///
-    /// Returns [`MessageError::Unsized`] for a body that sets a slot: this server does not know
-    /// the children of these classes, so a bundle walk stops there.
+    /// Returns [`MessageError::Unsized`] for another body that sets a slot: this server does not
+    /// know the children of these classes, so a bundle walk stops there.
     pub(crate) fn read(class: u64, reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         let byte = reader.u8()?;
-        if byte != NO_SLOT {
-            return Err(MessageError::Unsized {
-                field: "player component",
-                byte,
-            });
+        let body = first_body(class);
+        let unsized_body = MessageError::Unsized {
+            field: "player component",
+            byte,
+        };
+        if byte == NO_SLOT {
+            return Ok(Self { class });
+        }
+        if body.first() != Some(&byte) || reader.bytes(body.len() - 1)? != &body[1..] {
+            return Err(unsized_body);
         }
         Ok(Self { class })
     }
 
-    /// Writes the empty body.
-    pub(crate) fn write(writer: &mut Writer) {
-        writer.u8(NO_SLOT);
+    /// Writes the first body.
+    pub(crate) fn write(&self, writer: &mut Writer) {
+        writer.bytes(first_body(self.class));
     }
 }
 
@@ -522,6 +569,9 @@ fn player_state(states: PlayerStates<'_>, component: u64, class: u64) -> MemberS
             MemberState::Vitals(VitalsState::player(health, health_max))
         }
         (STAMINA_TYPE_INDEX, _, Some(_)) => MemberState::Stamina(StaminaState::player()),
+        (DAMAGE_RECEIVER_TYPE_INDEX, _, _) => {
+            MemberState::DamageReceiver(DamageReceiverState::player())
+        }
         (MANA_TYPE_INDEX, _, Some(_)) => MemberState::Mana(ManaState::player()),
         _ => empty_state(class),
     }
@@ -582,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn without_look_and_health_every_other_component_is_one_zero_byte() {
+    fn without_look_and_health_every_other_component_is_empty_or_its_retail_first_body() {
         let states = PlayerStates {
             character_id: CHARACTER_ID,
             look: None,
@@ -608,9 +658,34 @@ mod tests {
                 continue;
             }
             let bytes = member.encode().expect("member");
-            assert_eq!(bytes.last(), Some(&NO_SLOT), "{member:?}");
-            assert!(bytes.len() <= MAX_EMPTY_MEMBER_BYTES, "{member:?}");
+            let class = member.state.type_index();
+            if class == DAMAGE_RECEIVER_TYPE_INDEX {
+                assert_eq!(
+                    member.state,
+                    MemberState::DamageReceiver(DamageReceiverState::player())
+                );
+                continue;
+            }
+            assert!(bytes.ends_with(first_body(class)), "{member:?}");
+            if first_body(class) == [NO_SLOT] {
+                assert!(bytes.len() <= MAX_EMPTY_MEMBER_BYTES, "{member:?}");
+            }
         }
+        // Retail: the faction is `064100000a0000`, the name tag `010100000001`.
+        let body_of = |class: u64| {
+            members
+                .iter()
+                .find(|member| member.state.type_index() == class)
+                .map(|member| member.encode().expect("member"))
+        };
+        assert!(
+            body_of(FACTION_TYPE_INDEX)
+                .is_some_and(|bytes| bytes.ends_with(&[0x06, 0x41, 0x00, 0x00, 0x0a, 0x00, 0x00]))
+        );
+        assert!(
+            body_of(PLAYER_NAME_TAG_TYPE_INDEX)
+                .is_some_and(|bytes| bytes.ends_with(&[0x01, 0x01, 0x00, 0x00, 0x00, 0x01]))
+        );
         reads_back(&members);
     }
 
@@ -644,6 +719,9 @@ mod tests {
                 VITALS_TYPE_INDEX => MemberState::Vitals(VitalsState::player(HEALTH.0, HEALTH.1)),
                 STAMINA_TYPE_INDEX => MemberState::Stamina(StaminaState::player()),
                 MANA_TYPE_INDEX => MemberState::Mana(ManaState::player()),
+                DAMAGE_RECEIVER_TYPE_INDEX => {
+                    MemberState::DamageReceiver(DamageReceiverState::player())
+                }
                 _ => empty_state(class),
             };
             assert_eq!(member.state, expected);

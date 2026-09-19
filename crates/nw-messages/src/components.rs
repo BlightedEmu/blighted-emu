@@ -59,6 +59,8 @@ const DELAYED_EVENT_CHILDREN: u8 = 2;
 /// `debugCritChance` (names from the Azoth catalog field note; the last two are four bytes each per
 /// the damage-events note).
 const DAMAGE_RECEIVER_CHILDREN: u8 = 3;
+/// The `blockWeaponSlotAlias` of a player's first damage receiver state (retail own card).
+const PLAYER_BLOCK_WEAPON_SLOT_ALIAS: u32 = 0x20;
 /// The sized child of the gatherable controller: `gatherableState` (a byte). The width of child 1
 /// (`replenishTime`) is Unknown, so a body that sets it is not read.
 const GATHERABLE_CONTROLLER_CHILDREN: u8 = 1;
@@ -302,6 +304,16 @@ pub struct DamageReceiverState {
 }
 
 impl DamageReceiverState {
+    /// The first state of a player (retail own card: `01 03 00 00000020`, not blocking, block
+    /// weapon slot alias 0x20).
+    pub const fn player() -> Self {
+        Self {
+            is_block_active: Some(false),
+            block_weapon_slot_alias: Some(PLAYER_BLOCK_WEAPON_SLOT_ALIAS),
+            debug_crit_chance: None,
+        }
+    }
+
     /// Reads the state from the bundle path.
     ///
     /// # Errors

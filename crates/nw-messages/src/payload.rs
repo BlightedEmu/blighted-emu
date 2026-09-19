@@ -295,8 +295,8 @@ impl MemberState {
                 Ok(())
             }
             Self::Cooldowns(state) => state.write(writer),
-            Self::Empty(_) => {
-                EmptyState::write(writer);
+            Self::Empty(state) => {
+                state.write(writer);
                 Ok(())
             }
             Self::Recorded { body, .. } => {
