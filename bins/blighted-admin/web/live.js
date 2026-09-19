@@ -3,7 +3,7 @@
 // events) and the bot batch buttons.
 
 import { KINDS, mobEntity, playerEntity, selectionRows } from './entity.js';
-import { eventStartRequest, itemRequest, questRequest, sendGm, spawnRequest, teleportRequest } from './gm.js';
+import { eventStartRequest, eventStopRequest, itemRequest, questRequest, sendGm, spawnRequest, teleportRequest } from './gm.js';
 import { WorldMap } from './map.js';
 import { SERIES, SIGNAL } from './palette.js';
 import { STATUS_GROUPS, isMarked, nextStatuses, statusText } from './status.js';
@@ -458,10 +458,19 @@ document.getElementById('gm-events').addEventListener('submit', (event) => {
   }
 });
 document.getElementById('gm-event-stop').addEventListener('click', () => {
-  gm('stop-event', { event: eventSelect.value }).then(() => loadEvents());
+  const { request, error } = eventStopRequest(eventSelect.value);
+  if (error) {
+    gmStatus.textContent = error;
+  } else {
+    gm('stop-event', request).then(() => loadEvents());
+  }
 });
-document.getElementById('gm-events-refresh').addEventListener('click', () => loadEvents().catch(() => {}));
-loadEvents().catch(() => {});
+/** Lists the events; a failed read shows in the list. */
+function refreshEvents() {
+  loadEvents().catch((error) => eventsRunning.replaceChildren(emptyItem(`Events: ${error.message ?? error}`)));
+}
+document.getElementById('gm-events-refresh').addEventListener('click', refreshEvents);
+refreshEvents();
 
 document.getElementById('map').addEventListener('contextmenu', (event) => {
   if (!mapCursor) {

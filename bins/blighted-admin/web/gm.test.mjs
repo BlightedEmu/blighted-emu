@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { MAX_SPAWN, eventStartRequest, itemRequest, questRequest, spawnRequest, teleportRequest } from './gm.js';
+import { MAX_SPAWN, eventStartRequest, eventStopRequest, itemRequest, questRequest, spawnRequest, teleportRequest } from './gm.js';
 
 test('an event start needs an event and a point', () => {
   assert.deepEqual(eventStartRequest('invasion', '1', '2', '3'), { request: { event: 'invasion', x: 1, y: 2, z: 3 } });
@@ -41,4 +41,9 @@ test('a spawn request checks the level and the count', () => {
   assert.ok(spawnRequest({ ...fields, level: '66' }).error);
   assert.ok(spawnRequest({ ...fields, count: String(MAX_SPAWN + 1) }).error);
   assert.ok(spawnRequest({ ...fields, x: 'far' }).error);
+});
+
+test('a stop names an event', () => {
+  assert.deepEqual(eventStopRequest(' invasion '), { request: { event: 'invasion' } });
+  assert.ok(eventStopRequest('').error);
 });

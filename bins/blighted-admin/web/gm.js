@@ -59,6 +59,12 @@ export function eventStartRequest(eventText, xText, yText, zText) {
   return { request: { event, x, y, z } };
 }
 
+/** The stop request of the picked event, or an error text. */
+export function eventStopRequest(eventText) {
+  const event = String(eventText).trim();
+  return event === '' ? { error: 'Pick the event to stop.' } : { request: { event } };
+}
+
 /** The spawn request of the spawn form's field texts, or an error text. */
 export function spawnRequest({ vitals, level, count, x, y, z }) {
   const id = String(vitals).trim();

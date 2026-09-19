@@ -63,7 +63,7 @@ function showFiles(view) {
     elements.files.replaceChildren(...view.files.map((file) => {
       const row = document.createElement('tr');
       row.append(cell(file.kind), cell(file.id), cell(file.action), cell(file.map ?? ''), cell(file.path, 'muted'));
-      if (editors.opens(file)) {
+      if (editors?.opens(file)) {
         row.className = 'clickable';
         row.title = 'Open in the editor';
         row.addEventListener('click', () => editors.open(file));
@@ -71,7 +71,7 @@ function showFiles(view) {
       return row;
     }));
   }
-  editors.setFiles(view.files);
+  editors?.setFiles(view.files);
   showProblems(view.errors);
 }
 
@@ -153,9 +153,15 @@ elements.apply.addEventListener('click', async () => {
   }
 });
 
-const editors = startEditors(await (await fetch(WORLD_INFO_URL)).json(), {
-  showProblems,
-  onSaved: () => loadFiles(),
-});
+/** The editors; null when the world info cannot be read (the file list and Apply still work). */
+let editors = null;
+try {
+  editors = startEditors(await json(WORLD_INFO_URL), {
+    showProblems,
+    onSaved: () => loadFiles(),
+  });
+} catch (error) {
+  fail(new Error(`The editors need the world info: ${error.message ?? error}`));
+}
 loadFiles().catch(fail);
 pollApply().catch(fail);

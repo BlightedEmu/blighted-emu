@@ -320,21 +320,25 @@ async function remove() {
   await loadFiles();
 }
 
+/** Shows the run log of the open script, and polls again after a failed read too. */
 async function pollLog() {
-  const id = elements.id.value.trim();
-  const response = await fetch(LOG_URL);
-  if (response.ok) {
-    const lines = (await response.json()).filter((line) => line.script === id);
-    elements.log.replaceChildren(...lines.map((line) => {
-      const item = document.createElement('li');
-      const time = document.createElement('time');
-      time.textContent = new Date(line.time_ms).toLocaleTimeString();
-      const player = line.player === null ? '' : ` · player ${line.player}`;
-      item.append(time, `${line.node} · ${line.block}${player}${line.note ? ` · ${line.note}` : ''}`);
-      return item;
-    }));
+  try {
+    const id = elements.id.value.trim();
+    const response = await fetch(LOG_URL);
+    if (response.ok) {
+      const lines = (await response.json()).filter((line) => line.script === id);
+      elements.log.replaceChildren(...lines.map((line) => {
+        const item = document.createElement('li');
+        const time = document.createElement('time');
+        time.textContent = new Date(line.time_ms).toLocaleTimeString();
+        const player = line.player === null ? '' : ` · player ${line.player}`;
+        item.append(time, `${line.node} · ${line.block}${player}${line.note ? ` · ${line.note}` : ''}`);
+        return item;
+      }));
+    }
+  } finally {
+    setTimeout(() => pollLog().catch(fail), LOG_POLL_MS);
   }
-  setTimeout(() => pollLog().catch(() => {}), LOG_POLL_MS);
 }
 
 function fail(error) {
