@@ -27,6 +27,8 @@ const STATE_DONE: &str = "done";
 const PERCENT: u32 = 100;
 /// The note of a block that needs a player in a run without one.
 const NO_PLAYER: &str = "no player: nothing done";
+/// The note of a block whose point is in another sim's cells.
+const OTHER_SIM: &str = "the point is another sim's: nothing done";
 
 /// The state of an objective a `quest_state` block asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -616,6 +618,11 @@ impl SimWorld {
                 count,
                 at,
             } => {
+                // Every sim of the level runs a timer; only the owner of the point spawns.
+                if !self.owns(*at) {
+                    engine.note(run, OTHER_SIM);
+                    return next();
+                }
                 match self.spawn_gm(vitals, *level, *at, *count) {
                     Ok(entities) => {
                         engine.note(run, &format!("{} spawned", entities.len()));
@@ -666,6 +673,13 @@ impl SimWorld {
         }
     }
 
+    /// Whether this sim owns the cell of `at`.
+    pub(super) fn owns(&self, at: Point) -> bool {
+        self.cells
+            .as_ref()
+            .is_some_and(|cells| cells.owners.owner_at(Position::from(at)) == Some(cells.me))
+    }
+
     /// How many of `item` player `number` carries; `None` when it is not here or has no bag.
     fn carried(&mut self, number: u64, item: &str) -> Option<u32> {
         let entity = self.player_by_number(number)?;
@@ -714,7 +728,7 @@ mod tests {
     use nw_world::script::{ScriptLink, ScriptNode};
     use uuid::Uuid;
 
-    use super::super::tests::{NOW, admit_at, connection, world_with_spawns};
+    use super::super::tests::{NOW, admit_at, connection, table, world_with_spawns};
     use super::*;
     use crate::combat::test_support::{TEST_LEVEL, TEST_MOB};
 
@@ -755,6 +769,7 @@ mod tests {
     /// A world with one player and the scripts of `scripts`.
     fn script_world(scripts: Vec<(&str, ScriptGraph)>) -> SimWorld {
         let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a"])).expect("table");
         world
             .admit(&admit_at(PLAYER, PLAYER_X, true), NOW, NOW)
             .expect("admit");
@@ -911,6 +926,39 @@ mod tests {
                 "despawn_mobs 2 removed"
             ]
         );
+    }
+
+    #[test]
+    fn only_the_owner_of_the_point_spawns() {
+        let graph = ScriptGraph {
+            nodes: vec![
+                node(
+                    "tick",
+                    "timer",
+                    &[("every_ms", ScriptValue::Number(TIMER_MS))],
+                ),
+                node(
+                    "spawn",
+                    "spawn_mobs",
+                    &[
+                        ("vitals", ScriptValue::Text(TEST_MOB.to_owned())),
+                        ("level", ScriptValue::Number(f64::from(TEST_LEVEL))),
+                        ("count", ScriptValue::Number(1.0)),
+                        ("at", ScriptValue::Position([PLAYER_X, 10.0, 50.0])),
+                    ],
+                ),
+            ],
+            links: vec![link("tick", NEXT, "spawn")],
+        };
+        let mut world = script_world(vec![("spawner", graph)]);
+        // The point's column now belongs to another sim.
+        world
+            .set_table(&table(&["sim-other", "sim-a"]))
+            .expect("table");
+        world.tick_scripts(NOW);
+        world.tick_scripts(NOW + TIMER_MS as u64);
+        assert!(world.mobs.gm_mobs().is_empty());
+        assert_eq!(world.take_script_log()[1].note, OTHER_SIM);
     }
 
     #[test]

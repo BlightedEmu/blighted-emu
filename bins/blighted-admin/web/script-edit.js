@@ -10,11 +10,6 @@ const MAX_PERCENT = 100;
 /** The node keys that are not block values. */
 const NODE_KEYS = Object.freeze(['id', 'block', 'x', 'y']);
 
-/** A TOML float: always with a decimal point. */
-function float(value) {
-  return Number.isInteger(value) ? value.toFixed(1) : String(value);
-}
-
 /** The value of `text` for a value of `kind` (the block registry's kinds), or { error }; empty text is { value: null }. */
 export function valueOf(kind, text) {
   const trimmed = String(text).trim();
@@ -52,9 +47,9 @@ export function valueText(value) {
 
 function valueLine(name, value) {
   if (Array.isArray(value)) {
-    return `${name} = [${value.map(float).join(', ')}]`;
+    return `${name} = [${value.map(String).join(', ')}]`;
   }
-  return `${name} = ${typeof value === 'number' ? float(value) : quoted(value)}`;
+  return `${name} = ${typeof value === 'number' ? String(value) : quoted(value)}`;
 }
 
 /** The file of script `id` of level `map`, or { error }. */

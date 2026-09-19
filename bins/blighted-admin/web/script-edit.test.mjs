@@ -42,7 +42,7 @@ test('a script file writes nodes with their place and values, then links', () =>
   assert.equal(
     file.text,
     'schema = 1\nkind = "script"\naction = "add"\nid = "greeting"\nmap = "lv"\n'
-      + '\n[[nodes]]\nid = "enter"\nblock = "player_enters_area"\nx = 40\ny = 60\ncenter = [1.0, 2.0, 3.5]\nradius_m = 10.0\n'
+      + '\n[[nodes]]\nid = "enter"\nblock = "player_enters_area"\nx = 40\ny = 60\ncenter = [1, 2, 3.5]\nradius_m = 10\n'
       + '\n[[nodes]]\nid = "gift"\nblock = "give_item"\nx = 260\ny = 60\nitem = "FlintT1"\n'
       + '\n[[links]]\nfrom = "enter"\noutput = "next"\nto = "gift"\n',
   );

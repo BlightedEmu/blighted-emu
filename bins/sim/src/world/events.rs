@@ -60,6 +60,9 @@ impl SimWorld {
             .def(id)
             .map(|(name, def)| (name.clone(), def.clone()))
             .ok_or_else(|| format!("no event {id} on this level"))?;
+        if !self.owns(at) {
+            return Err(format!("the point of {name} is another sim's"));
+        }
         if self.events.running.iter().any(|event| event.id == name) {
             return Err(format!("event {name} already runs"));
         }
@@ -158,7 +161,7 @@ impl SimWorld {
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{NOW, world_with_spawns};
+    use super::super::tests::{NOW, table, world_with_spawns};
     use super::*;
     use crate::world::scripts::Scripts;
     use nw_world::script::LevelDesign;
@@ -184,6 +187,7 @@ mod tests {
 
     fn event_world(end_when_cleared: bool) -> SimWorld {
         let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a"])).expect("table");
         let design = LevelDesign {
             events: BTreeMap::from([(
                 EVENT.to_owned(),
