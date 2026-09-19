@@ -2,7 +2,7 @@
 //! PostgreSQL migrations and records (M2 spec sections 5.1 and 7).
 //!
 //! The global database holds accounts, logins, launcher sessions and the global character name
-//! table. Each world has its own database with its characters and their saved positions. Migrations run only through
+//! table. Each world has its own database with its characters and their saved positions and items. Migrations run only through
 //! `edge-http migrate`; the server checks the schema version at start.
 
 mod account;
@@ -11,6 +11,7 @@ mod character;
 mod connect;
 mod entity;
 mod error;
+mod items;
 mod migrate;
 mod position;
 mod session;
@@ -32,6 +33,7 @@ pub use character::{
 pub use connect::{DatabaseConfig, connect, connect_options};
 pub use entity::{MAX_ENTITY_NUMBER, next_entity_number};
 pub use error::DbError;
+pub use items::{SavedItem, SavedPlace, character_items, save_character_items};
 pub use migrate::{GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 pub use position::{SaveOutcome, SavedPosition, character_position, save_character_position};
 pub use session::{create_launcher_session, delete_launcher_session, launcher_session_account};
