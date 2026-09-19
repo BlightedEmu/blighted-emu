@@ -335,7 +335,9 @@ blighted-admin revoke-rank ada
 
 Five wrong passwords in 10 minutes lock a name for 15 minutes. The session cookie is `HttpOnly`, `Secure` and `SameSite=Strict`, and lasts 12 hours. In server mode the design routes (Check, Apply) and bot batches are refused: design work happens on a team member's own PC and reaches the server through git.
 
-GM commands go to the sim that owns the target, found from the sim snapshots, and wait up to 5 s for its answer. Every command (and every login) writes a row to the audit log (`/api/gm/audit`; a head admin sees all rows, others their own). On the live page, select a player or bot to move it with **Teleport** (game master rank).
+GM commands go to the sim that owns the target, found from the sim snapshots and the cell table, and wait up to 5 s for its answer. Every command (and every login) writes a row to the audit log. On the live page, select a player or bot for: **Teleport** to a point or to another player, **Heal**, **Kill**, **God on/off**, **Kick**, and **Give/Take** an item (items are not saved yet). The **GM mobs** form spawns up to 50 mobs of a vitals id at a point (right-click the map to fill x and y); they stay awake and respawn until a GM despawns them. The GM page (`/gm`) shows the audit log (a head admin sees all rows, others their own), bans and unbans by login name, and, for head admins, the ranks. Kick needs the CSR rank, rank changes the head admin rank, everything else the game master rank. There is no chat, mute or coin command yet: the server has no chat and no currency.
+
+`LIVE_STACK_INSTANCE=2 just live` starts a second test world next to the first: every port moves up by 100 (admin on 9280), with its own world id and bot names.
 
 ## Rules for contributors
 
