@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use nw_content::bundle::bundle_path;
 use nw_content::{ContainerError, ContentBundle};
 use nw_world::WorldFile;
+use nw_world::script::{DesignDataError, design_data_path};
 use nw_world::world_file::world_file_path;
 use serde::Serialize;
 
@@ -17,6 +18,7 @@ use crate::load::load_dir;
 use crate::points::apply_world;
 use crate::rows::apply_tables;
 use crate::schema::check_schema;
+use crate::scripts::design_data;
 
 /// Extension of bundle and world files.
 const BIN_EXTENSION: &str = ".bin";
@@ -65,6 +67,9 @@ pub enum DesignRunError {
     /// A folder cannot be listed or a file copied.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// The design data cannot be written.
+    #[error(transparent)]
+    DesignData(#[from] DesignDataError),
 }
 
 /// The retail bundle with the table-kind design files merged in memory.
@@ -205,6 +210,9 @@ fn write_temp_files(
     let bundle_out = bundle_path(&paths.out_dir, client_build);
     written.push(bundle_out.clone());
     bundle.save(&temp_path(&bundle_out))?;
+    let data_out = design_data_path(&paths.out_dir, client_build);
+    written.push(data_out.clone());
+    std::fs::write(temp_path(&data_out), design_data(set).to_json(&data_out)?)?;
     for map in maps {
         let out = world_file_path(&paths.out_dir, client_build, map);
         written.push(out.clone());
@@ -413,6 +421,30 @@ mod tests {
         assert_eq!(report.errors, []);
         let merged = WorldFile::load(&world_file_path(&paths.out_dir, BUILD, MAP), BUILD).unwrap();
         assert!(merged.ai_profiles.contains_key("guards"));
+    }
+
+    #[test]
+    fn scripts_and_events_reach_the_design_data() {
+        use nw_world::script::DesignData;
+
+        use crate::scripts::tests::{EVENT, SCRIPT};
+        let folders = folders();
+        let paths = &folders.paths;
+        write(
+            &paths.design_dir,
+            &format!("scripts/{MAP}/greeting.toml"),
+            SCRIPT,
+        );
+        write(
+            &paths.design_dir,
+            &format!("events/{MAP}/invasion.toml"),
+            EVENT,
+        );
+        let report = run_design(paths, BUILD, DesignMode::Write).unwrap();
+        assert_eq!(report.errors, []);
+        let data = DesignData::load(&design_data_path(&paths.out_dir, BUILD)).unwrap();
+        assert!(data.levels[MAP].scripts.contains_key("greeting"));
+        assert!(data.levels[MAP].events.contains_key("invasion"));
     }
 
     #[test]

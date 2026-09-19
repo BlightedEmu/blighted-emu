@@ -12,6 +12,7 @@ pub mod records;
 pub mod rows;
 pub mod run;
 pub mod schema;
+pub mod scripts;
 
 pub use edit::{check_delete, check_put, delete_file, design_path, write_file};
 pub use error::{DesignError, Problem};
@@ -24,3 +25,4 @@ pub use run::{
     DesignMode, DesignPaths, DesignReport, DesignRunError, MergedBundle, merged_bundle, run_design,
 };
 pub use schema::check_schema;
+pub use scripts::design_data;

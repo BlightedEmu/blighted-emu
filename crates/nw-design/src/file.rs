@@ -47,11 +47,15 @@ pub enum Kind {
     Path,
     /// New mob spawns of one level, with their profile and path (spec section 7.1).
     SpawnGroup,
+    /// A visual block script of one level (spec section 7.5).
+    Script,
+    /// An event of one level: waves of mobs a GM starts (spec section 8.3).
+    Event,
 }
 
 /// Every kind with its name in files and its folder under the design folder. Point kinds add
 /// `/<map>` to the folder.
-const KINDS: [(Kind, &str, &str); 15] = [
+const KINDS: [(Kind, &str, &str); 17] = [
     (Kind::Item, "item", "items"),
     (Kind::Weapon, "weapon", "items/weapons"),
     (Kind::Armor, "armor", "items/armor"),
@@ -67,6 +71,8 @@ const KINDS: [(Kind, &str, &str); 15] = [
     (Kind::AiProfile, "ai_profile", "ai"),
     (Kind::Path, "path", "paths"),
     (Kind::SpawnGroup, "spawn_group", "spawns"),
+    (Kind::Script, "script", "scripts"),
+    (Kind::Event, "event", "events"),
 ];
 
 impl Kind {
@@ -114,13 +120,20 @@ impl Kind {
 
     /// True for the kinds that the client data does not have: only design files make them.
     pub fn is_own(self) -> bool {
-        matches!(self, Self::AiProfile | Self::Path | Self::SpawnGroup)
+        matches!(
+            self,
+            Self::AiProfile | Self::Path | Self::SpawnGroup | Self::Script | Self::Event
+        )
     }
 
     /// True for the kinds of one level: their files name it with `map` and lie in
     /// `<folder>/<map>/`.
     pub fn needs_map(self) -> bool {
-        self.is_point() || matches!(self, Self::Path | Self::SpawnGroup)
+        self.is_point()
+            || matches!(
+                self,
+                Self::Path | Self::SpawnGroup | Self::Script | Self::Event
+            )
     }
 
     /// True when files of this kind may use `action`. Retail points can only be changed or
@@ -153,7 +166,13 @@ impl Kind {
             Self::Npc => visitor.visit::<NPCData>(),
             Self::Objective => visitor.visit::<Objectives>(),
             Self::ObjectiveTask => visitor.visit::<ObjectiveTasks>(),
-            Self::SpawnPoint | Self::NpcPoint | Self::AiProfile | Self::Path | Self::SpawnGroup => {
+            Self::SpawnPoint
+            | Self::NpcPoint
+            | Self::AiProfile
+            | Self::Path
+            | Self::SpawnGroup
+            | Self::Script
+            | Self::Event => {
                 return None;
             }
         })

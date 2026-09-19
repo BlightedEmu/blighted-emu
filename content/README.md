@@ -43,6 +43,8 @@ Do not copy client values into a file; name only what you change.
 | `ai_profile` | `ai/` | (own) a behaviour and brain numbers | profile id |
 | `path` | `paths/<map>/` | (own) a patrol path of one level | path id |
 | `spawn_group` | `spawns/<map>/` | (own) new mob spawns of one level | group id |
+| `script` | `scripts/<map>/` | (own) a visual block script of one level | script id |
+| `event` | `events/<map>/` | (own) waves of mobs a GM starts | event id |
 
 ## Spawn and NPC points
 
@@ -115,6 +117,68 @@ path = "gate_walk"         # optional: a path of the same level
 
 A `spawn_point` file may also set `ai_profile` and `path`. A spawn group's spawns get the keys
 `<group id>_1`, `<group id>_2`, ...
+
+## Scripts and events
+
+Make scripts with the script editor (`/scripts`); it writes this form. A script is nodes (a
+`block` and its values, with the editor's `x` and `y`) and links from a node's output to another
+node. A condition has the outputs `true` and `false`; every other block has `next`.
+
+```toml
+# scripts/newworld_vitaeeterna/gate_greeting.toml
+schema = 1
+kind = "script"
+action = "add"
+id = "gate_greeting"
+map = "newworld_vitaeeterna"
+
+[[nodes]]
+id = "enter"
+block = "player_enters_area"
+x = 40
+y = 60
+center = [100.0, 200.0, 30.0]
+radius_m = 15.0
+
+[[nodes]]
+id = "gift"
+block = "give_item"
+x = 260
+y = 60
+item = "FlintT1"
+
+[[links]]
+from = "enter"
+output = "next"
+to = "gift"
+```
+
+Blocks: triggers `player_enters_area`, `player_leaves_area`, `mob_dies`, `timer`, `quest_done`,
+`event_starts`; conditions `random_chance`, `has_item`, `quest_state`, `flag_is`, `mobs_alive`;
+actions `spawn_mobs`, `despawn_mobs`, `give_item`, `start_quest`, `set_flag`, `start_event`; and
+`wait`. The check refuses a script with no trigger, a node nothing links into, a link to an
+unknown node or output, a missing or wrong value, and a loop with no `wait`.
+
+```toml
+# events/newworld_vitaeeterna/town_invasion.toml
+schema = 1
+kind = "event"
+action = "add"
+id = "town_invasion"
+map = "newworld_vitaeeterna"
+end_after_ms = 600000      # optional
+end_when_cleared = true    # optional: ends when every wave is dead
+
+[[waves]]
+vitals = "Wolf_Alpha"
+level = 20
+count = 5
+delay_ms = 0               # optional
+offset = [0.0, 0.0, 0.0]   # optional: from the point the GM picks
+```
+
+Scripts and events go into `design-<build>.json` beside the merged files; the sims read it at
+start.
 
 ## Checks
 

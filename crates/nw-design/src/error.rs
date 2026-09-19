@@ -133,4 +133,7 @@ pub enum Problem {
     /// There is no retail world file for the map.
     #[error("no retail world file for this map")]
     UnknownMap,
+    /// A script graph problem.
+    #[error("script: {0}")]
+    Script(String),
 }

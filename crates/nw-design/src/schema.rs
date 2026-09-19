@@ -6,6 +6,7 @@ use std::path::Path;
 
 use crate::error::{DesignError, Problem};
 use crate::file::{Action, DesignFile, DesignSet, Kind, Row, RowVisitor, struct_fields};
+use crate::scripts::{LINKS, NODES, WAVES, check_event_references, check_script_or_event};
 
 /// Lowest creature level of a spawn point.
 pub(crate) const MIN_LEVEL: i64 = 1;
@@ -41,6 +42,14 @@ pub(crate) enum FieldValue {
     Millis,
     /// A list of whole numbers of milliseconds.
     MillisList,
+    /// `true` or `false`.
+    Bool,
+    /// The `[[nodes]]` of a script (read by `scripts::script_of`).
+    ScriptNodes,
+    /// The `[[links]]` of a script.
+    ScriptLinks,
+    /// The `[[waves]]` of an event (read by `scripts::event_of`).
+    EventWaves,
 }
 
 /// One field of a point or own kind: name, value, and whether every `add` needs it.
@@ -84,6 +93,15 @@ pub(crate) fn record_fields(kind: Kind) -> &'static [FieldSpec] {
             ("points", FieldValue::Positions, true),
             ("waits_ms", FieldValue::MillisList, false),
         ],
+        Kind::Script => &[
+            (LINKS, FieldValue::ScriptLinks, false),
+            (NODES, FieldValue::ScriptNodes, true),
+        ],
+        Kind::Event => &[
+            ("end_after_ms", FieldValue::Millis, false),
+            ("end_when_cleared", FieldValue::Bool, false),
+            (WAVES, FieldValue::EventWaves, true),
+        ],
         Kind::SpawnGroup => &[
             ("ai_profile", FieldValue::ProfileRef, false),
             ("level", FieldValue::Level, true),
@@ -116,6 +134,7 @@ pub fn check_schema(set: &DesignSet) -> Vec<DesignError> {
         }
     }
     check_references(set, &mut errors);
+    check_event_references(set, &mut errors);
     errors
 }
 
@@ -186,7 +205,10 @@ fn check_file(file: &DesignFile, errors: &mut Vec<DesignError>) {
     }
     match file.kind.visit_row(RowCheck { file }) {
         Some(row_errors) => errors.extend(row_errors),
-        None => check_record_fields(file, errors),
+        None => {
+            check_record_fields(file, errors);
+            check_script_or_event(file, errors);
+        }
     }
 }
 
@@ -291,6 +313,14 @@ fn check_field_value(expected: FieldValue, value: &toml::Value) -> Result<(), Pr
             _ => Err(wrong("a number above 0")),
         },
         FieldValue::Millis => in_range(value, 0, i64::MAX),
+        FieldValue::Bool => value
+            .as_bool()
+            .map(drop)
+            .ok_or_else(|| wrong("true or false")),
+        FieldValue::ScriptNodes | FieldValue::ScriptLinks | FieldValue::EventWaves => value
+            .as_array()
+            .map(drop)
+            .ok_or_else(|| wrong("a list of tables")),
         FieldValue::MillisList => {
             let list = value
                 .as_array()
