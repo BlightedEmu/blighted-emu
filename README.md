@@ -322,6 +322,12 @@ The studio page (`/studio`) shows the team's design files in `content/` (see [co
 
 To find the design key of a mob spawn, turn on "Mob spawns" on the Map page and click a spawn.
 
+The **Editors** on the studio page write one design file each (through `/api/studio/file`, which runs the schema check first and refuses a file with a problem): an AI profile form, and a map for patrol paths and spawn groups (right-click adds a point; its height comes from the terrain; **Go** moves the map to an x, y). Click a row of the design file list to open it again.
+
+The records page (`/records`) searches the client records of the table kinds (items, weapon, armor and consumable stats, perks, loot tables, mobs, NPCs, quests and quest tasks) by id or English name. A record shows every field with its client value; **Save** writes an `override` file with only the fields you changed, and **Save as new record** writes an `add` file with `base` set to the open record (the item creator). Apply on the studio page to use the files.
+
+Items are saved: the world database keeps every character's items (`character_item`), the director sends them with each join, and a sim saves them when they change and when the player leaves. A character that never saved items gets its starter kit; the tutorial always starts from the kit and saves nothing. Run `edge-http migrate` after this update.
+
 ### Server mode, ranks and GM commands
 
 By default (`[access] mode = "local"`) the admin site listens on a loopback address and has no login: the user on this PC has every right. For the community server, set `mode = "server"` with `hosts` (the names the site is reached by), `global_database` and `global_database_password_env` (the game's account database) and `tls` (certificate and key). The site then serves HTTPS only, and refuses to start when a TLS file is missing. Run `edge-http migrate` after an update: the ranks and the audit log are tables of the global database.
