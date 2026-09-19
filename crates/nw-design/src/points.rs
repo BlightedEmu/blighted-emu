@@ -406,6 +406,7 @@ pub(crate) mod tests {
             base: None,
             map: Some(map.to_owned()),
             fields: fields.parse().unwrap(),
+            version: String::new(),
         }
     }
 
@@ -424,6 +425,7 @@ pub(crate) mod tests {
             base: None,
             map: map.map(str::to_owned),
             fields: fields.parse().unwrap(),
+            version: String::new(),
         }
     }
 

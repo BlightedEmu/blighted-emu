@@ -3,6 +3,7 @@
 // override file, or save a new record made from one (admin studio spec sections 7.6, 7.7).
 
 import { errorRows } from '/web/apply.js';
+import { CHANGED_TEXT, HTTP_CHANGED, editHeaders } from '/web/design.js';
 import { addFile, changedFields, overrideFile, simulationRequest, treeRows, valueText } from '/web/record-edit.js';
 
 const RECORDS_URL = '/api/studio/records';
@@ -235,11 +236,16 @@ async function openRecord(kind, id) {
 }
 
 async function put(written) {
+  const version = editing?.path === written.path ? editing.version : null;
   const response = await fetch(`${FILE_URL}?path=${encodeURIComponent(written.path)}`, {
     method: 'PUT',
-    headers: ADMIN_HEADERS,
+    headers: editHeaders(ADMIN_HEADERS, version),
     body: written.text,
   });
+  if (response.status === HTTP_CHANGED) {
+    say(`Not saved: ${CHANGED_TEXT}`, true);
+    return false;
+  }
   if (response.status === HTTP_REFUSED) {
     showProblems((await response.json()).errors);
     say(`Not saved: ${written.path} has problems.`, true);
@@ -281,8 +287,12 @@ async function remove() {
   }
   const response = await fetch(`${FILE_URL}?path=${encodeURIComponent(editing.path)}`, {
     method: 'DELETE',
-    headers: ADMIN_HEADERS,
+    headers: editHeaders(ADMIN_HEADERS, editing.version),
   });
+  if (response.status === HTTP_CHANGED) {
+    say(`Not removed: ${CHANGED_TEXT}`, true);
+    return;
+  }
   if (response.status === HTTP_REFUSED) {
     showProblems((await response.json()).errors);
     say(`Not removed: other files need ${editing.path}.`, true);

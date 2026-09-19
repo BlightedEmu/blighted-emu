@@ -2,7 +2,9 @@
 // The studio editors: forms for AI profiles, patrol paths and spawn groups, and a map to place
 // their points (right-click adds one). Each Save writes one design file through the file route.
 
-import { BEHAVIOURS, PATH_MODES, PROFILE_NUMBERS, designPath, fieldsOf, groupFile, pathFile, profileFile } from './design.js';
+import {
+  BEHAVIOURS, CHANGED_TEXT, HTTP_CHANGED, PATH_MODES, PROFILE_NUMBERS, designPath, editHeaders, fieldsOf, groupFile, pathFile, profileFile,
+} from './design.js';
 import { WorldMap } from './map.js';
 import { SIGNAL } from './palette.js';
 import { boxAround, screenToWorld } from './view.js';
@@ -63,6 +65,8 @@ export function startEditors(info, { showProblems, onSaved }) {
   let points = [];
   /** The path of the file the form was loaded from; null for a new file. */
   let loaded = null;
+  /** The version of `loaded` this form opened or last saved. */
+  let loadedVersion = null;
   /** The level of the file in the form; the map shows only `info.level`. */
   let level = info.level;
 
@@ -196,7 +200,12 @@ export function startEditors(info, { showProblems, onSaved }) {
       say(written.error, true);
       return;
     }
-    const response = await fetch(fileUrl(written.path), { method: 'PUT', headers: ADMIN_HEADERS, body: written.text });
+    const version = loaded === written.path ? loadedVersion : null;
+    const response = await fetch(fileUrl(written.path), { method: 'PUT', headers: editHeaders(ADMIN_HEADERS, version), body: written.text });
+    if (response.status === HTTP_CHANGED) {
+      say(`Not saved: ${CHANGED_TEXT}`, true);
+      return;
+    }
     if (response.status === HTTP_REFUSED) {
       showProblems((await response.json()).errors);
       say(`Not saved: ${written.path} has problems (see Problems).`, true);
@@ -212,6 +221,7 @@ export function startEditors(info, { showProblems, onSaved }) {
       say(`Saved ${written.path}. Apply to use it.`);
     }
     loaded = written.path;
+    loadedVersion = response.headers.get('ETag');
     await onSaved();
   }
 
@@ -220,7 +230,12 @@ export function startEditors(info, { showProblems, onSaved }) {
     if (!window.confirm(`Remove ${path}?`)) {
       return;
     }
-    const response = await fetch(fileUrl(path), { method: 'DELETE', headers: ADMIN_HEADERS });
+    const headers = loaded ? editHeaders(ADMIN_HEADERS, loadedVersion) : ADMIN_HEADERS;
+    const response = await fetch(fileUrl(path), { method: 'DELETE', headers });
+    if (response.status === HTTP_CHANGED) {
+      say(`Not removed: ${CHANGED_TEXT}`, true);
+      return;
+    }
     if (response.status === HTTP_REFUSED) {
       showProblems((await response.json()).errors);
       say(`Not removed: other files need ${path} (see Problems).`, true);
@@ -298,6 +313,7 @@ export function startEditors(info, { showProblems, onSaved }) {
       fill(form);
       points = form.points ?? [];
       loaded = file.path;
+      loadedVersion = file.version;
       level = file.map ?? info.level;
       drawPoints();
       if (points.length > 0 && level === info.level) {

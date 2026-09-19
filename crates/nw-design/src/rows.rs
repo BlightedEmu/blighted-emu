@@ -198,6 +198,7 @@ mod tests {
                 base: base.map(str::to_owned),
                 map: None,
                 fields: fields.parse().unwrap(),
+                version: String::new(),
             }],
         }
     }

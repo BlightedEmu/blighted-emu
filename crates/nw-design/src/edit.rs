@@ -6,9 +6,12 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::DesignError;
 use crate::file::DesignSet;
-use crate::load::{DESIGN_EXTENSION, TODO_FILE, load_dir, parse_file, sort_files};
+use crate::load::{DESIGN_EXTENSION, TODO_FILE, file_version, load_dir, parse_file, sort_files};
 use crate::run::temp_path;
 use crate::schema::check_schema;
+
+/// Why an edit through a symbolic link is refused.
+pub const LINK_REFUSED: &str = "the path goes through a symbolic link";
 
 /// The design file `raw` names, relative to the design folder: plain folder names only (no
 /// `..`, no root), ending in `.toml`, and not the to-do list.
@@ -26,6 +29,36 @@ pub fn design_path(raw: &str) -> Option<PathBuf> {
     (is_design && relative != Path::new(TODO_FILE)).then_some(relative)
 }
 
+/// What an edit expects to find at its path, so it replaces only the text its editor opened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expected {
+    /// Any file or none.
+    Anything,
+    /// No file: the edit makes a new one.
+    Nothing,
+    /// The file whose text has this [`file_version`].
+    Version(String),
+}
+
+/// Whether the file at `relative` under `dir` is what `expected` names.
+///
+/// # Errors
+///
+/// Refuses a path through a symbolic link (see [`no_link`]); otherwise the read error, other
+/// than a missing file.
+pub fn is_expected(dir: &Path, relative: &Path, expected: &Expected) -> std::io::Result<bool> {
+    let version = match expected {
+        Expected::Anything => return no_link(dir, relative).map(|()| true),
+        Expected::Nothing => None,
+        Expected::Version(version) => Some(version),
+    };
+    match read_file(dir, relative) {
+        Ok(text) => Ok(version.is_some_and(|version| *version == file_version(&text))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(version.is_none()),
+        Err(error) => Err(error),
+    }
+}
+
 /// The problems that refuse writing `text` to `relative`: every problem of that file, and every
 /// problem of another file that the write would add.
 pub fn check_put(dir: &Path, relative: &Path, text: &str) -> Vec<DesignError> {
@@ -38,9 +71,24 @@ pub fn check_delete(dir: &Path, relative: &Path) -> Vec<DesignError> {
     blocking(dir, relative, None)
 }
 
+/// The text of `relative` under `dir`.
+///
+/// # Errors
+///
+/// Refuses a path through a symbolic link (see [`no_link`]); otherwise the read error.
+pub fn read_file(dir: &Path, relative: &Path) -> std::io::Result<String> {
+    no_link(dir, relative)?;
+    std::fs::read_to_string(dir.join(relative))
+}
+
 /// Writes `text` to `relative` under `dir`, through a temporary file renamed at the end, so a
 /// reader sees the old file or the new one.
+///
+/// # Errors
+///
+/// Refuses a path through a symbolic link (see [`no_link`]); otherwise the write error.
 pub fn write_file(dir: &Path, relative: &Path, text: &str) -> std::io::Result<()> {
+    no_link(dir, relative)?;
     let target = dir.join(relative);
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent)?;
@@ -55,8 +103,34 @@ pub fn write_file(dir: &Path, relative: &Path, text: &str) -> std::io::Result<()
 }
 
 /// Removes `relative` under `dir`.
+///
+/// # Errors
+///
+/// Refuses a path through a symbolic link (see [`no_link`]); otherwise the remove error.
 pub fn delete_file(dir: &Path, relative: &Path) -> std::io::Result<()> {
+    no_link(dir, relative)?;
     std::fs::remove_file(dir.join(relative))
+}
+
+/// Refuses `relative` when a folder or the file on its way under `dir` is a symbolic link, so
+/// an edit stays inside the design folder. The parts that do not exist yet pass.
+fn no_link(dir: &Path, relative: &Path) -> std::io::Result<()> {
+    let mut path = dir.to_path_buf();
+    for component in relative.components() {
+        path.push(component);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    LINK_REFUSED,
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 /// The problems of the set with `relative` set to `text` (removed when `None`) that are about
@@ -123,6 +197,58 @@ mod tests {
         ] {
             assert_eq!(design_path(refused), None, "{refused}");
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_edit_through_a_symbolic_link_is_refused() {
+        let dir = tempfile::tempdir().expect("dir");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("x.toml"), PROFILE).expect("write");
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("ai")).expect("folder link");
+        std::os::unix::fs::symlink(
+            outside.path().join("x.toml"),
+            dir.path().join("linked.toml"),
+        )
+        .expect("file link");
+        for raw in ["ai/x.toml", "linked.toml"] {
+            let relative = path(raw);
+            for result in [
+                read_file(dir.path(), &relative).map(|_| ()),
+                write_file(dir.path(), &relative, PROFILE),
+                delete_file(dir.path(), &relative),
+            ] {
+                let error = result.expect_err(raw);
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied, "{raw}");
+            }
+        }
+        assert!(outside.path().join("x.toml").exists());
+        let relative = path(PROFILE_PATH.replace("ai/", "paths/").as_str());
+        write_file(dir.path(), &relative, PROFILE).expect("a new folder is not a link");
+        assert_eq!(read_file(dir.path(), &relative).expect("read"), PROFILE);
+    }
+
+    #[test]
+    fn an_edit_expects_the_version_it_opened() {
+        let dir = tempfile::tempdir().expect("dir");
+        let relative = path(PROFILE_PATH);
+        assert!(is_expected(dir.path(), &relative, &Expected::Nothing).expect("new"));
+        write_file(dir.path(), &relative, PROFILE).expect("write");
+        let opened = Expected::Version(file_version(PROFILE));
+        assert!(is_expected(dir.path(), &relative, &opened).expect("same"));
+        assert!(!is_expected(dir.path(), &relative, &Expected::Nothing).expect("exists"));
+        write_file(dir.path(), &relative, &PROFILE.replace("guard", "patrol")).expect("write");
+        assert!(!is_expected(dir.path(), &relative, &opened).expect("changed"));
+        assert!(is_expected(dir.path(), &relative, &Expected::Anything).expect("any"));
+        delete_file(dir.path(), &relative).expect("delete");
+        assert!(!is_expected(dir.path(), &relative, &opened).expect("removed"));
+        let (set, _) = load_dir(dir.path());
+        assert!(set.files.is_empty());
+        write_file(dir.path(), &relative, PROFILE).expect("write");
+        assert_eq!(
+            load_dir(dir.path()).0.files[0].version,
+            file_version(PROFILE)
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@
 // values of the selected block, Save through the design file route, and the run log.
 
 import { errorRows } from '/web/apply.js';
+import { CHANGED_TEXT, HTTP_CHANGED, editHeaders } from '/web/design.js';
 import { addLink, graphOf, newNodeId, removeNode, scriptFile, valueOf, valueText } from '/web/script-edit.js';
 
 const BLOCKS_URL = '/api/studio/blocks';
@@ -269,11 +270,16 @@ async function save() {
     say(written.error, true);
     return;
   }
+  const opened = files.find((file) => file.path === written.path);
   const response = await fetch(`${FILE_URL}?path=${encodeURIComponent(written.path)}`, {
     method: 'PUT',
-    headers: ADMIN_HEADERS,
+    headers: editHeaders(ADMIN_HEADERS, opened?.version ?? null),
     body: written.text,
   });
+  if (response.status === HTTP_CHANGED) {
+    say(`Not saved: ${CHANGED_TEXT}`, true);
+    return;
+  }
   if (response.status === HTTP_REFUSED) {
     showProblems((await response.json()).errors);
     say(`Not saved: ${written.path} has problems.`, true);
@@ -295,7 +301,14 @@ async function remove() {
   if (!file || !window.confirm(`Delete ${file.path}?`)) {
     return;
   }
-  const response = await fetch(`${FILE_URL}?path=${encodeURIComponent(file.path)}`, { method: 'DELETE', headers: ADMIN_HEADERS });
+  const response = await fetch(`${FILE_URL}?path=${encodeURIComponent(file.path)}`, {
+    method: 'DELETE',
+    headers: editHeaders(ADMIN_HEADERS, file.version),
+  });
+  if (response.status === HTTP_CHANGED) {
+    say(`Not deleted: ${CHANGED_TEXT}`, true);
+    return;
+  }
   if (!response.ok) {
     say(`Not deleted: ${response.status} ${await response.text()}`, true);
     return;

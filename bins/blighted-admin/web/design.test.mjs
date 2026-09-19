@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { designPath, fieldsOf, groupFile, pathFile, profileFile } from './design.js';
+import { designPath, editHeaders, fieldsOf, groupFile, pathFile, profileFile } from './design.js';
 
 const MAP = 'newworld_vitaeeterna';
 
@@ -82,4 +82,11 @@ test('fields of a loaded file fill the form', () => {
   assert.deepEqual(form, { id: 'walk', map: MAP, mode: 'once', waits: '5, 0', points: [{ x: 1, y: 2, z: 3 }] });
   const profile = fieldsOf({ kind: 'ai_profile', id: 'g', map: null, fields: { sight_m: 25 } });
   assert.deepEqual(profile, { id: 'g', map: null, behaviour: 'wander', numbers: { sight_m: '25' } });
+});
+
+test('an edit names the version it opened, or asks for a new file', () => {
+  const admin = { 'X-Blighted-Admin': '1' };
+  assert.deepEqual(editHeaders(admin, 'a1b2'), { 'X-Blighted-Admin': '1', 'If-Match': 'a1b2' });
+  assert.deepEqual(editHeaders(admin, null), { 'X-Blighted-Admin': '1', 'If-None-Match': '*' });
+  assert.deepEqual(admin, { 'X-Blighted-Admin': '1' });
 });

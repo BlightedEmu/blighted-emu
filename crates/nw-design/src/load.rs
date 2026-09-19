@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use sha2::{Digest, Sha256};
+
 use crate::error::{DesignError, Problem};
 use crate::file::{Action, DesignFile, DesignSet, Kind};
 
@@ -20,6 +22,17 @@ const ACTION_KEY: &str = "action";
 const ID_KEY: &str = "id";
 const BASE_KEY: &str = "base";
 const MAP_KEY: &str = "map";
+/// Bytes of the text hash that make a file version.
+const VERSION_BYTES: usize = 8;
+
+/// The version of a design file's text: the start of its SHA-256, as hex.
+pub fn file_version(text: &str) -> String {
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .take(VERSION_BYTES)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 /// Reads every `*.toml` file under `dir` (except [`TODO_FILE`] at the root), sorted by kind,
 /// id and path. A file that cannot be read gives an error and the others still load. A missing
@@ -126,6 +139,7 @@ pub fn parse_file(text: &str, relative: &Path) -> Result<DesignFile, DesignError
         base,
         map,
         fields: table,
+        version: file_version(text),
     })
 }
 

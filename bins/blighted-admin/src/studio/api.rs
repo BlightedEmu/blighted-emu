@@ -7,12 +7,12 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::{Path as UrlPath, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use nw_design::{
-    DesignError, DesignFile, Kind, check_delete, check_put, check_schema, delete_file, design_path,
-    load_dir, record_field_names, write_file,
+    DesignError, DesignFile, Expected, Kind, check_delete, check_put, check_schema, delete_file,
+    design_path, file_version, is_expected, load_dir, read_file, record_field_names, write_file,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -24,6 +24,9 @@ use crate::studio::Studio;
 pub const FILES_ROUTE: &str = "/api/studio/files";
 /// `GET`: one design file's text; `PUT`: writes it when the check finds nothing; `DELETE`:
 /// removes it when no other file needs it. The file is `?path=`, relative to the design folder.
+/// An edit with `If-Match: <version>` replaces only that version of the file, and one with
+/// `If-None-Match: *` only makes a new file; otherwise the answer is 412. A done `PUT` gives
+/// the version of the written text in `ETag`.
 pub const FILE_ROUTE: &str = "/api/studio/file";
 /// Search of the client records of a kind: `?q=` (id or name, any case).
 pub const RECORDS_ROUTE: &str = "/api/studio/records/{kind}";
@@ -41,6 +44,10 @@ const BUSY: &str = "an Apply or a Check runs";
 const SEARCH_LIMIT: usize = 200;
 /// The answer to a kind the record routes do not serve.
 const NO_RECORDS: &str = "this kind has no client records";
+/// The answer to an edit whose file is not the one its editor opened.
+const CHANGED: &str = "the file changed after it was opened: open it again";
+/// The `If-None-Match` value of an edit that makes a new file.
+const ANY_FILE: &str = "*";
 /// The answer to a path outside the design folder.
 const BAD_PATH: &str = "the path must name a .toml file inside the design folder";
 
@@ -107,7 +114,8 @@ enum EditOutcome {
     Done,
     Refused(Vec<DesignError>),
     Missing,
-    Failed(String),
+    Changed,
+    Failed(std::io::Error),
 }
 
 fn studio_of(state: &AppState) -> Option<&Studio> {
@@ -214,33 +222,62 @@ async fn read_design_file(
     let Some(relative) = design_path(&params.path) else {
         return (StatusCode::BAD_REQUEST, BAD_PATH).into_response();
     };
-    match tokio::fs::read_to_string(studio.paths.design_dir.join(relative)).await {
-        Ok(text) => text.into_response(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            StatusCode::NOT_FOUND.into_response()
-        }
+    let dir = studio.paths.design_dir.clone();
+    match tokio::task::spawn_blocking(move || read_file(&dir, &relative)).await {
+        Ok(Ok(text)) => text.into_response(),
+        Ok(Err(error)) => io_error_response(&error),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// The answer to a failed read, write or removal of a design file.
+fn io_error_response(error: &std::io::Error) -> Response {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => StatusCode::NOT_FOUND.into_response(),
+        std::io::ErrorKind::PermissionDenied => {
+            (StatusCode::FORBIDDEN, error.to_string()).into_response()
+        }
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
 }
 
 async fn put_design_file(
     State(state): State<AppState>,
     Query(params): Query<FileParams>,
+    headers: HeaderMap,
     text: String,
 ) -> Response {
-    edit(&state, &params.path, Some(text)).await
+    edit(&state, &params.path, expected(&headers), Some(text)).await
 }
 
 async fn delete_design_file(
     State(state): State<AppState>,
     Query(params): Query<FileParams>,
+    headers: HeaderMap,
 ) -> Response {
-    edit(&state, &params.path, None).await
+    edit(&state, &params.path, expected(&headers), None).await
+}
+
+/// What an edit expects at its path, from its `If-Match` or `If-None-Match` header.
+fn expected(headers: &HeaderMap) -> Expected {
+    let value = |name| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.trim().trim_matches('"').to_owned())
+    };
+    if let Some(version) = value(header::IF_MATCH) {
+        Expected::Version(version)
+    } else if value(header::IF_NONE_MATCH).as_deref() == Some(ANY_FILE) {
+        Expected::Nothing
+    } else {
+        Expected::Anything
+    }
 }
 
 /// Writes `text` to the design file `raw` (removes it when `None`) unless the check finds a
 /// problem. It takes the work slot, so no Apply or Check reads the folder meanwhile.
-async fn edit(state: &AppState, raw: &str, text: Option<String>) -> Response {
+async fn edit(state: &AppState, raw: &str, expected: Expected, text: Option<String>) -> Response {
     let Some(studio) = studio_of(state) else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -251,25 +288,38 @@ async fn edit(state: &AppState, raw: &str, text: Option<String>) -> Response {
         return (StatusCode::CONFLICT, BUSY).into_response();
     };
     let dir = studio.paths.design_dir.clone();
+    let written_version = text.as_deref().map(file_version);
     let outcome = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        edit_blocking(&dir, &relative, text.as_deref())
+        edit_blocking(&dir, &relative, &expected, text.as_deref())
     })
     .await;
     match outcome {
-        Ok(EditOutcome::Done) => StatusCode::NO_CONTENT.into_response(),
+        Ok(EditOutcome::Done) => match written_version {
+            Some(version) => (StatusCode::NO_CONTENT, [(header::ETAG, version)]).into_response(),
+            None => StatusCode::NO_CONTENT.into_response(),
+        },
         Ok(EditOutcome::Refused(errors)) => {
             (StatusCode::UNPROCESSABLE_ENTITY, Json(Refused { errors })).into_response()
         }
         Ok(EditOutcome::Missing) => StatusCode::NOT_FOUND.into_response(),
-        Ok(EditOutcome::Failed(error)) => {
-            (StatusCode::INTERNAL_SERVER_ERROR, error).into_response()
-        }
+        Ok(EditOutcome::Changed) => (StatusCode::PRECONDITION_FAILED, CHANGED).into_response(),
+        Ok(EditOutcome::Failed(error)) => io_error_response(&error),
         Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
     }
 }
 
-fn edit_blocking(dir: &Path, relative: &Path, text: Option<&str>) -> EditOutcome {
+fn edit_blocking(
+    dir: &Path,
+    relative: &Path,
+    expected: &Expected,
+    text: Option<&str>,
+) -> EditOutcome {
+    match is_expected(dir, relative, expected) {
+        Ok(true) => {}
+        Ok(false) => return EditOutcome::Changed,
+        Err(error) => return EditOutcome::Failed(error),
+    }
     let errors = match text {
         Some(text) => check_put(dir, relative, text),
         None if !dir.join(relative).is_file() => return EditOutcome::Missing,
@@ -284,7 +334,7 @@ fn edit_blocking(dir: &Path, relative: &Path, text: Option<&str>) -> EditOutcome
     };
     match written {
         Ok(()) => EditOutcome::Done,
-        Err(error) => EditOutcome::Failed(error.to_string()),
+        Err(error) => EditOutcome::Failed(error),
     }
 }
 
@@ -621,6 +671,75 @@ mod tests {
         );
         let (status, _) = send(&fixture, Method::GET, &file_uri("paths/lv/none.toml"), "").await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// The status of `method` on `path` with `text` and the header `name: value`.
+    async fn send_with(
+        fixture: &Fixture,
+        method: Method,
+        path: &str,
+        text: &str,
+        (name, value): (header::HeaderName, &str),
+    ) -> (StatusCode, Option<String>) {
+        let mut request = request(method, &file_uri(path), text);
+        request
+            .headers_mut()
+            .insert(name, value.parse().expect("header"));
+        let response = fixture.app().oneshot(request).await.expect("response");
+        let version = response
+            .headers()
+            .get(header::ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        (response.status(), version)
+    }
+
+    #[tokio::test]
+    async fn an_edit_of_a_changed_file_is_refused() {
+        let fixture = fixture(false, LONG_TIMEOUT_S);
+        let new = (header::IF_NONE_MATCH, ANY_FILE);
+        let made = send_with(&fixture, Method::PUT, PATH_FILE, PATH_TEXT, new.clone()).await;
+        assert_eq!(made.0, StatusCode::NO_CONTENT);
+        assert_eq!(made.1.as_deref(), Some(file_version(PATH_TEXT).as_str()));
+        let again = send_with(&fixture, Method::PUT, PATH_FILE, PATH_TEXT, new).await;
+        assert_eq!(
+            again.0,
+            StatusCode::PRECONDITION_FAILED,
+            "it is not new now"
+        );
+        let (_, files) = call(&fixture, Method::GET, FILES_ROUTE).await;
+        let opened = files["files"][0]["version"]
+            .as_str()
+            .expect("version")
+            .to_owned();
+        let other = PATH_TEXT.replace("[[1.0", "[[5.0");
+        let first = (header::IF_MATCH, opened.as_str());
+        let saved = send_with(&fixture, Method::PUT, PATH_FILE, &other, first.clone()).await;
+        assert_eq!(saved.0, StatusCode::NO_CONTENT);
+        let late = send_with(&fixture, Method::PUT, PATH_FILE, PATH_TEXT, first.clone()).await;
+        assert_eq!(late.0, StatusCode::PRECONDITION_FAILED, "the second editor");
+        let removed = send_with(&fixture, Method::DELETE, PATH_FILE, "", first).await;
+        assert_eq!(removed.0, StatusCode::PRECONDITION_FAILED);
+        let (_, text) = send(&fixture, Method::GET, &file_uri(PATH_FILE), "").await;
+        assert_eq!(text, other.as_bytes());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_file_through_a_symbolic_link_is_refused() {
+        let fixture = fixture(false, LONG_TIMEOUT_S);
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::write(outside.path().join("walk.toml"), PATH_TEXT).expect("write");
+        std::fs::create_dir_all(fixture.path("content")).expect("dir");
+        std::os::unix::fs::symlink(outside.path(), fixture.path("content/paths")).expect("link");
+        let linked = "paths/walk.toml";
+        let (status, _) = send(&fixture, Method::GET, &file_uri(linked), "").await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = put(&fixture, linked, PATH_TEXT).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, _) = call(&fixture, Method::DELETE, &file_uri(linked)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(outside.path().join("walk.toml").exists());
     }
 
     #[tokio::test]

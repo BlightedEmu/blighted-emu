@@ -23,6 +23,19 @@ export const PROFILE_NUMBERS = Object.freeze([
   { name: 'wander_pause_ms', whole: true },
   { name: 'wander_radius_m', whole: false },
 ]);
+/** The status of an edit refused because its file changed after it was opened. */
+export const HTTP_CHANGED = 412;
+/** What a page says when an edit is refused with `HTTP_CHANGED`. */
+export const CHANGED_TEXT = 'the file changed after you opened it, or a file with this path is already there. Open it again, then try again.';
+
+/**
+ * The headers of an edit of a design file: `version` is the version the page opened (the file's
+ * `version`, or the `ETag` of its last save); null for a new file.
+ */
+export function editHeaders(headers, version) {
+  return Object.freeze({ ...headers, ...(version === null ? { 'If-None-Match': '*' } : { 'If-Match': version }) });
+}
+
 const FOLDERS = Object.freeze({ ai_profile: 'ai', path: 'paths', spawn_group: 'spawns', script: 'scripts', event: 'events' });
 
 /** The path under content/ of a file of `kind`; `map` adds its level folder. */

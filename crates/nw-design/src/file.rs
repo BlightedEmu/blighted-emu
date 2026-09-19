@@ -226,6 +226,9 @@ pub struct DesignFile {
     pub map: Option<String>,
     /// Every key except the header keys.
     pub fields: toml::Table,
+    /// The version of the file text ([`crate::file_version`]); a page sends it back so a save
+    /// replaces only the text it opened.
+    pub version: String,
 }
 
 /// Every design file, sorted by kind, then id, then path.
