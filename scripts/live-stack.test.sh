@@ -121,6 +121,26 @@ fi
 # Whatever a failed run left behind.
 kill -TERM -- "-$stack_pid" 2>/dev/null || true
 
+# A hang-up (the terminal or the shell around the script went away) also stops every program.
+rm -f "$fake_root/pids/"*
+setsid env LIVE_STACK_ROOT="$fake_root" NW_GAME_DIR="$fake_root" "$STACK_SCRIPT" 1 \
+  >"$work_dir/stack-hup.out" 2>&1 &
+stack_pid=$!
+if wait_for test -s "$fake_root/pids/blighted-admin"; then
+  kill -HUP "$stack_pid" 2>/dev/null || true
+  wait "$stack_pid" 2>/dev/null || true
+  if wait_for test -z "$(pgrep -g "$stack_pid" 2>/dev/null)"; then
+    echo "PASS: a hang-up stops every program"
+  else
+    echo "FAIL: a hang-up stops every program"
+    failures=$((failures + 1))
+  fi
+else
+  echo "FAIL: the fake stack for the hang-up test did not start"
+  failures=$((failures + 1))
+fi
+kill -TERM -- "-$stack_pid" 2>/dev/null || true
+
 expect "an instance that is not 1 to 9 is refused" "$EXIT_USAGE" "LIVE_STACK_INSTANCE" \
   env LIVE_STACK_ROOT="$work_dir" NW_GAME_DIR="$work_dir" LIVE_STACK_INSTANCE=10 "$STACK_SCRIPT"
 
