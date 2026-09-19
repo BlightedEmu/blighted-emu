@@ -61,6 +61,20 @@ impl SimWorld {
                 count,
             } => self.spawn_gm_mobs(vitals, *level, *at, *count),
             AdminAction::DespawnMobs { entities } => self.despawn_gm_mobs(entities),
+            AdminAction::StartEvent { event, at } => match self.start_event(event, *at, now_ms) {
+                Ok(()) => AdminReply::Done,
+                Err(reason) => AdminReply::Failed { reason },
+            },
+            AdminAction::StopEvent { event } => {
+                if self.stop_event(event) {
+                    AdminReply::Done
+                } else {
+                    AdminReply::NotMine
+                }
+            }
+            AdminAction::ListEvents => AdminReply::Events {
+                running: self.running_events(),
+            },
             AdminAction::Kick { .. } => AdminReply::Failed {
                 reason: "a kick is the server loop's".to_owned(),
             },
@@ -222,15 +236,28 @@ impl SimWorld {
     /// Spawns `count` GM mobs of `vitals` on a ring around `at`. The admin sends this to the
     /// sim that owns the cell of `at`.
     fn spawn_gm_mobs(&mut self, vitals: &str, level: u32, at: Point, count: u32) -> AdminReply {
+        match self.spawn_gm(vitals, level, at, count) {
+            Ok(entities) => AdminReply::Spawned { entities },
+            Err(reason) => AdminReply::Failed { reason },
+        }
+    }
+
+    /// Spawns `count` GM mobs of `vitals` at `level` on a ring around `at` (GM commands, scripts
+    /// and events); their entity numbers, or why none spawned.
+    pub(super) fn spawn_gm(
+        &mut self,
+        vitals: &str,
+        level: u32,
+        at: Point,
+        count: u32,
+    ) -> Result<Vec<u64>, String> {
         if !(LOWEST_LEVEL..=HIGHEST_LEVEL).contains(&level) {
-            return AdminReply::Failed {
-                reason: format!("level {level} is not {LOWEST_LEVEL} to {HIGHEST_LEVEL}"),
-            };
+            return Err(format!(
+                "level {level} is not {LOWEST_LEVEL} to {HIGHEST_LEVEL}"
+            ));
         }
         if count == 0 || count > MAX_GM_SPAWN {
-            return AdminReply::Failed {
-                reason: format!("count {count} is not 1 to {MAX_GM_SPAWN}"),
-            };
+            return Err(format!("count {count} is not 1 to {MAX_GM_SPAWN}"));
         }
         let mut entities = Vec::new();
         for (x, y) in ring(at.x, at.y, count) {
@@ -243,13 +270,20 @@ impl SimWorld {
             match self.mobs.spawn_gm(spawn) {
                 Some(entity) => entities.push(entity),
                 None => {
-                    return AdminReply::Failed {
-                        reason: format!("no mob type {vitals} at level {level}"),
-                    };
+                    self.remove_gm(&entities);
+                    return Err(format!("no mob type {vitals} at level {level}"));
                 }
             }
         }
-        AdminReply::Spawned { entities }
+        Ok(entities)
+    }
+
+    /// Removes the GM mobs `entities`; how many were here.
+    pub(super) fn remove_gm(&mut self, entities: &[u64]) -> usize {
+        entities
+            .iter()
+            .filter(|entity| self.mobs.remove_gm(**entity))
+            .count()
     }
 
     fn despawn_gm_mobs(&mut self, entities: &[u64]) -> AdminReply {

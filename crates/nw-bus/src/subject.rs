@@ -75,6 +75,16 @@ pub fn sim_snapshot(world: Uuid, sim: &BusId) -> String {
     format!("nw.{world}.sim.{sim}.snapshot")
 }
 
+/// Sim to admin: the run log lines of its scripts.
+pub fn sim_script_log(world: Uuid, sim: &BusId) -> String {
+    format!("nw.{world}.sim.{sim}.script")
+}
+
+/// Every sim's script log of a world (a NATS wildcard), for the admin tool.
+pub fn all_sim_script_logs(world: Uuid) -> String {
+    format!("nw.{world}.sim.*.script")
+}
+
 /// Every sim snapshot of a world (a NATS wildcard), for the admin tool.
 pub fn all_sim_snapshots(world: Uuid) -> String {
     format!("nw.{world}.sim.*.snapshot")

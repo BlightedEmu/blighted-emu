@@ -1033,6 +1033,7 @@ impl SimWorld {
             self.mobs.wake(target);
             if matches!(outcome, AttackOutcome::Killed { .. }) {
                 self.drop_loot(target, attacker, now_ms);
+                self.note_kill(target, attacker);
             }
             return Some(outcome);
         }

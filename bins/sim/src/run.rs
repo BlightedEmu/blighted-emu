@@ -19,6 +19,7 @@ use nw_content::mob_prefabs::MobPrefabs;
 use nw_db::{DbError, WORLD_MIGRATOR, check_schema};
 use nw_sim_core::level_bounds;
 use nw_world::WorldFile;
+use nw_world::script::{DesignData, LevelDesign, design_data_path};
 use nw_world::world_file::world_file_path;
 
 use crate::config::{SimConfig, SimConfigError, load_sim_config};
@@ -131,12 +132,26 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         Some(quest) => tracing::info!(tasks = quest.len(), "tutorial quest"),
         None => tracing::warn!("no tutorial quest: the tutorial ends at its exit"),
     }
+    let design = match DesignData::load(&design_data_path(&config.content_dir, &build)) {
+        Ok(mut data) => data.levels.remove(&config.level).unwrap_or_default(),
+        Err(error) => {
+            tracing::warn!(%error, "no design data: no scripts or events");
+            LevelDesign::default()
+        }
+    };
+    tracing::info!(
+        scripts = design.scripts.len(),
+        events = design.events.len(),
+        "design scripts and events"
+    );
     drop(bundle);
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(RunError::Runtime)?
-        .block_on(serve_async(config, password, world_file, combat, content))
+        .block_on(serve_async(
+            config, password, world_file, combat, content, design,
+        ))
 }
 
 async fn serve_async(
@@ -145,6 +160,7 @@ async fn serve_async(
     ground: Arc<WorldFile>,
     combat: Arc<CombatData>,
     content: Arc<PlayerContent>,
+    design: LevelDesign,
 ) -> Result<(), RunError> {
     let db = nw_db::connect(&config.world_database, &password)
         .await
@@ -190,6 +206,7 @@ async fn serve_async(
         heartbeat_misses: config.heartbeat_misses,
         combat: config.combat_settings(combat, spawns_of_level(&config.level, &ground.vitals)),
         mob_ai: resolve_ai(&ground, &config.brain_settings()),
+        design: Arc::new(design),
         content,
         snapshot_interval: (config.admin.snapshot_interval_ms != 0)
             .then(|| std::time::Duration::from_millis(config.admin.snapshot_interval_ms)),

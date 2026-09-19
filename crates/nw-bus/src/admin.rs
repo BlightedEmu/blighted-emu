@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::id::BusId;
 use crate::message::Point;
 
 /// One GM command.
@@ -89,6 +90,59 @@ pub enum AdminAction {
         /// The mobs; empty: all GM mobs here.
         entities: Vec<u64>,
     },
+    /// Starts an event of the design data at a point (admin studio spec section 8.3).
+    StartEvent {
+        /// The event id.
+        event: String,
+        /// Its point, in metres.
+        at: Point,
+    },
+    /// Stops a running event and removes its mobs.
+    StopEvent {
+        /// The event id.
+        event: String,
+    },
+    /// The events running on the sim.
+    ListEvents,
+}
+
+/// One running event of a sim.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningEvent {
+    /// The event id.
+    pub event: String,
+    /// Unix ms of its start.
+    pub started_ms: u64,
+    /// Its mobs alive now.
+    pub mobs_alive: u32,
+    /// Its waves still to spawn.
+    pub waves_left: u32,
+}
+
+/// One block a running script passed (admin studio spec section 7.5, the run log).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptLogLine {
+    /// Unix ms.
+    pub time_ms: u64,
+    /// The script id.
+    pub script: String,
+    /// The node id.
+    pub node: String,
+    /// The node's block.
+    pub block: String,
+    /// The run's player, when it has one.
+    pub player: Option<u64>,
+    /// What happened, when more than "passed".
+    pub note: String,
+}
+
+/// Sim to admin: the run log lines of one tick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptLog {
+    /// The sim.
+    pub sim: BusId,
+    /// The lines in order.
+    pub lines: Vec<ScriptLogLine>,
 }
 
 /// The sim's answer to an [`AdminCommand`].
@@ -107,6 +161,11 @@ pub enum AdminReply {
     Failed {
         /// Why, for the page and the audit log.
         reason: String,
+    },
+    /// The events running on the sim.
+    Events {
+        /// The events.
+        running: Vec<RunningEvent>,
     },
 }
 
@@ -137,6 +196,14 @@ mod tests {
             AdminReply::Done,
             AdminReply::Spawned {
                 entities: vec![1, 2],
+            },
+            AdminReply::Events {
+                running: vec![RunningEvent {
+                    event: "town_invasion".to_owned(),
+                    started_ms: 5,
+                    mobs_alive: 3,
+                    waves_left: 1,
+                }],
             },
             AdminReply::NotMine,
             AdminReply::Failed {

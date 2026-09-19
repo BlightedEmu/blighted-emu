@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use nw_bus::{
     AdminAction, AdminCommand, AdminReply, Admit, AdmitReply, Bus, BusError, BusId, CarriedItem,
     CellTable, ConnectionRef, GatewayOutput, Ghosts, HandoffMessage, HandoffReply, Heartbeat, Hit,
-    Incoming, InputBatch, ItemPlace, OutputBatch, PlayerQuests, Point, Publisher, SimHeartbeat,
-    SimInput, SimSlot, SimSnapshot, snapshot_parts, split_batches, subject,
+    Incoming, InputBatch, ItemPlace, OutputBatch, PlayerQuests, Point, Publisher, ScriptLog,
+    SimHeartbeat, SimInput, SimSlot, SimSnapshot, snapshot_parts, split_batches, subject,
 };
 use nw_common::time::unix_ms;
 use nw_db::{
@@ -46,6 +46,7 @@ use crate::saves::{ItemSave, QuestSave, SaveQueue};
 use crate::world::{
     Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
 };
+use nw_world::script::LevelDesign;
 
 /// Time between checks of the tick clock.
 pub const POLL: Duration = Duration::from_millis(5);
@@ -191,6 +192,8 @@ pub struct LoopSettings {
     pub snapshot_interval: Option<Duration>,
     /// The design AI of the level's spawns, in spawn order.
     pub mob_ai: Arc<[Option<MobAi>]>,
+    /// The scripts and events of the level.
+    pub design: Arc<LevelDesign>,
 }
 
 /// The loop's failure.
@@ -270,6 +273,7 @@ struct Loop {
     cancels: Publisher<HandoffMessage>,
     beats: Publisher<SimHeartbeat>,
     snapshots: Publisher<SimSnapshot>,
+    script_logs: Publisher<ScriptLog>,
     db: PgPool,
     world: SimWorld,
     gateways: GatewayTracker,
@@ -304,6 +308,7 @@ pub async fn serve(
         generation: started_at_ms,
     };
     let mob_ai = Arc::clone(&settings.mob_ai);
+    let design = Arc::clone(&settings.design);
     let (handoff_results, mut answers) = mpsc::channel(RESULT_QUEUE);
     let mut state = Loop {
         world: SimWorld::new(
@@ -326,6 +331,7 @@ pub async fn serve(
         cancels: Publisher::start(bus.clone(), SIM_QUEUE),
         beats: Publisher::start(bus.clone(), HEARTBEAT_QUEUE),
         snapshots: Publisher::start(bus.clone(), SIM_QUEUE),
+        script_logs: Publisher::start(bus.clone(), SIM_QUEUE),
         settings,
         bus,
         db,
@@ -338,6 +344,7 @@ pub async fn serve(
         started_at_ms,
     };
     state.world.set_mob_ai(mob_ai);
+    state.world.set_design(&design);
     let mut clock = TickClock::new(0);
     let mut poll = tokio::time::interval(POLL);
     let mut save_timer = tokio::time::interval(state.settings.save_interval);
@@ -827,6 +834,16 @@ impl Loop {
         for death in &output.deaths {
             metrics::counter!(METRIC_DEATHS, KIND_LABEL => PLAYER_KIND).increment(1);
             self.save(death);
+        }
+        if !output.script_log.is_empty() {
+            let subject = subject::sim_script_log(self.settings.world_id, &self.settings.sim_id);
+            let log = ScriptLog {
+                sim: self.settings.sim_id.clone(),
+                lines: output.script_log,
+            };
+            if !self.script_logs.send(subject, log) {
+                metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
+            }
         }
         for message in output.messages {
             self.send(message);
@@ -1363,6 +1380,7 @@ mod tests {
             content: Arc::default(),
             snapshot_interval: None,
             mob_ai: Arc::from([]),
+            design: Arc::default(),
         }
     }
 

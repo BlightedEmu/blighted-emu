@@ -23,7 +23,8 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use nw_bus::{
     Admit, BusId, CarriedItem, CellTable, ConnectionRef, Ghost, HandoffOffer, ItemPlace,
-    MOB_STATES, MobGhost, PlayerQuests, Point, QuestRun, SimSlot, SnapMob, SnapPlayer,
+    MOB_STATES, MobGhost, PlayerQuests, Point, QuestRun, ScriptLogLine, SimSlot, SnapMob,
+    SnapPlayer,
 };
 use nw_messages::items::{FIRST_VERSION, FullList};
 use nw_messages::paperdoll::slot::QUICK_SLOT_1;
@@ -48,6 +49,7 @@ mod asset_script;
 mod attack;
 mod combat_status;
 mod encounter;
+mod events;
 mod gathering;
 mod gear;
 mod hit_shape;
@@ -56,6 +58,7 @@ mod level_flow;
 mod members;
 mod mob_timeline;
 mod quest_tracker;
+mod scripts;
 mod slots;
 mod stamina;
 mod statics;
@@ -307,6 +310,8 @@ pub struct TickOutput {
     pub mob_seconds: f64,
     /// Members put in this tick's bundles: each player's own member and every other entity.
     pub bundle_members: u64,
+    /// The script run log lines of this tick.
+    pub script_log: Vec<ScriptLogLine>,
 }
 
 /// The bundle messages of some players and the members they hold.
@@ -496,6 +501,10 @@ pub struct SimWorld {
     quests: HashMap<u64, ActiveQuest>,
     /// The time of the last tick, for the quest runs that a save takes between ticks.
     last_now_ms: u64,
+    /// The scripts of the level and their runs.
+    scripts: scripts::Scripts,
+    /// The events of the level and the running ones.
+    events: events::Events,
     /// The state numbers, clock and animation of each shown mob.
     mob_timelines: MobTimelines,
     /// The health each shown mob had in the last bundle step.
@@ -601,6 +610,8 @@ impl SimWorld {
             tutorials: HashMap::new(),
             quests: HashMap::new(),
             last_now_ms: 0,
+            scripts: scripts::Scripts::default(),
+            events: events::Events::default(),
             mob_timelines: MobTimelines::default(),
             mob_health_shown: HashMap::new(),
             boss_phases: HashMap::new(),
@@ -1286,6 +1297,8 @@ impl SimWorld {
         let player_attacks = self.player_swings_due(now_ms);
         self.tick_tutorials(now_ms);
         self.tick_quests(now_ms);
+        self.tick_events(now_ms);
+        self.tick_scripts(now_ms);
         self.drink_due(now_ms, server_time);
         self.tick_stamina(now_ms);
         self.server_ms = server_time;
@@ -1303,6 +1316,7 @@ impl SimWorld {
             mob_hits,
             player_attacks,
             deaths: std::mem::take(&mut self.deaths),
+            script_log: self.take_script_log(),
             mob_seconds,
             bundle_members: bundled.members,
         })
@@ -1505,6 +1519,10 @@ impl SimWorld {
             return;
         };
         tracing::info!(player = number, objective = %quest.def.id, "quest done");
+        self.scripts.push(scripts::ScriptEvent::QuestDone {
+            player: number,
+            objective: quest.def.id.clone(),
+        });
         if let Some(entity) = self.player_by_number(number)
             && let Some(mut player) = self.world.get_mut::<Player>(entity)
         {
