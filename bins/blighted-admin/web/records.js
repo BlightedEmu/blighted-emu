@@ -222,7 +222,7 @@ async function showQuestTree(objective) {
     const item = document.createElement('li');
     item.className = 'clickable';
     item.style.paddingLeft = `${row.depth * TREE_INDENT_EM}em`;
-    item.textContent = `${row.id} · ${row.kind ?? 'no task record'}`;
+    item.textContent = `${row.id} · ${row.kind ?? 'no task record'}${row.repeat ? ' (shown above)' : ''}`;
     item.addEventListener('click', () => openRecord(OBJECTIVE_TASK_KIND, row.id).catch(fail));
     return item;
   }));

@@ -179,7 +179,11 @@ fn check_file(file: &DesignFile, errors: &mut Vec<DesignError>) {
         errors.push(DesignError::file(path, Problem::NameMismatch));
     }
     let expected = match (file.kind.needs_map(), &file.map) {
-        (false, _) => Some(file.kind.folder().to_owned()),
+        (false, Some(_)) => {
+            errors.push(DesignError::file(path, Problem::MapNotAllowed));
+            Some(file.kind.folder().to_owned())
+        }
+        (false, None) => Some(file.kind.folder().to_owned()),
         (true, Some(map)) => Some(format!("{}/{map}", file.kind.folder())),
         (true, None) => {
             errors.push(DesignError::file(path, Problem::MissingMap));
@@ -411,6 +415,23 @@ mod tests {
         format!(
             "schema = 1\nkind = \"spawn_group\"\naction = \"add\"\nid = \"wolves\"\nmap = \"{MAP}\"\nvitals = \"Wolf\"\nlevel = 10\npoints = [[10.0, 20.0, 5.0]]\n{fields}"
         )
+    }
+
+    #[test]
+    fn a_map_on_a_kind_off_the_levels_is_refused() {
+        let file = crate::load::parse_file(
+            "schema = 1\nkind = \"ai_profile\"\naction = \"add\"\nid = \"guard\"\nmap = \"lv\"\nbehaviour = \"guard\"\n",
+            Path::new("ai/guard.toml"),
+        )
+        .expect("file");
+        let errors = check_schema(&DesignSet { files: vec![file] });
+        assert_eq!(
+            errors
+                .iter()
+                .map(|error| &error.problem)
+                .collect::<Vec<_>>(),
+            [&Problem::MapNotAllowed]
+        );
     }
 
     #[test]

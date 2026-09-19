@@ -81,7 +81,7 @@ export function simulationRequest(table, rollsText, enemyText, contentText, tags
 
 /** The rows of a quest task tree (`/api/studio/quest-tree/...`), depth first, with their depth. */
 export function treeRows(node, depth = 0) {
-  return [{ id: node.id, kind: node.kind, depth }, ...node.children.flatMap((child) => treeRows(child, depth + 1))];
+  return [{ id: node.id, kind: node.kind, repeat: node.repeat, depth }, ...node.children.flatMap((child) => treeRows(child, depth + 1))];
 }
 
 /** The override file of `record` (`/api/studio/records/...`) with `changes`. */

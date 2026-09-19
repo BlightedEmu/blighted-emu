@@ -129,8 +129,8 @@ pub fn parse_file(text: &str, relative: &Path) -> Result<DesignFile, DesignError
         .ok_or_else(|| file_error(Problem::UnknownAction(action_name)))?;
     let id = take_string(&mut table, ID_KEY)
         .ok_or_else(|| file_error(Problem::MissingHeader(ID_KEY.to_owned())))?;
-    let base = take_string(&mut table, BASE_KEY);
-    let map = take_string(&mut table, MAP_KEY);
+    let base = take_text(&mut table, BASE_KEY, relative)?;
+    let map = take_text(&mut table, MAP_KEY, relative)?;
     Ok(DesignFile {
         path: relative.to_path_buf(),
         kind,
@@ -141,6 +141,23 @@ pub fn parse_file(text: &str, relative: &Path) -> Result<DesignFile, DesignError
         fields: table,
         version: file_version(text),
     })
+}
+
+/// The optional text `key` of `table`; another type is a wrong-type error.
+fn take_text(
+    table: &mut toml::Table,
+    key: &str,
+    relative: &Path,
+) -> Result<Option<String>, DesignError> {
+    match table.remove(key) {
+        None => Ok(None),
+        Some(toml::Value::String(text)) => Ok(Some(text)),
+        Some(_) => Err(DesignError::field(
+            relative,
+            key,
+            Problem::WrongType("text".to_owned()),
+        )),
+    }
 }
 
 fn take_string(table: &mut toml::Table, key: &str) -> Option<String> {
@@ -212,6 +229,18 @@ pub(crate) mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].path, Path::new("loot/tables/LT_B.toml"));
         assert!(matches!(errors[0].problem, Problem::BadToml(_)));
+    }
+
+    #[test]
+    fn a_base_or_map_that_is_not_text_is_refused() {
+        for (key, line) in [("base", "base = 5"), ("map", "map = [\"lv\"]")] {
+            let text = format!(
+                "schema = 1\nkind = \"loot_table\"\naction = \"add\"\nid = \"a\"\n{line}\n"
+            );
+            let error = parse_file(&text, Path::new("loot/tables/a.toml")).expect_err(key);
+            assert_eq!(error.field.as_deref(), Some(key));
+            assert_eq!(error.problem, Problem::WrongType("text".to_owned()));
+        }
     }
 
     #[test]

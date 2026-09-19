@@ -2,7 +2,7 @@
 //! The quest tree of the studio (admin studio spec section 7.4): an objective's task tree, from
 //! the client task records, for the records page.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use axum::Router;
 use axum::extract::{Path as UrlPath, State};
@@ -38,12 +38,16 @@ pub struct TaskNode {
     pub id: String,
     /// `Type`; `None` when there is no such task record.
     pub kind: Option<String>,
-    /// The sub-tasks in order; a task already on the path above is left out.
+    /// True when the task is already in the tree above: its sub-tasks are shown there, so a
+    /// loop or a task shared by several parents is walked once.
+    pub repeat: bool,
+    /// The sub-tasks in order.
     pub children: Vec<TaskNode>,
 }
 
-/// The tree under task `id` of `catalog`, with `path` the tasks above it.
-fn node(catalog: &Catalog, id: &str, path: &mut Vec<String>) -> TaskNode {
+/// The tree under task `id` of `catalog`, `depth` levels down; `shown` holds the tasks already
+/// in the tree.
+fn node(catalog: &Catalog, id: &str, depth: usize, shown: &mut HashSet<String>) -> TaskNode {
     let record = catalog.record(Kind::ObjectiveTask, id);
     let fields = record.map(super::catalog::CatalogEntry::fields);
     let kind = fields
@@ -56,18 +60,26 @@ fn node(catalog: &Catalog, id: &str, path: &mut Vec<String>) -> TaskNode {
         .and_then(|fields| fields.get(SUB_TASK_FIELD))
         .and_then(|value| serde_json::from_value(value.clone()).ok())
         .unwrap_or_default();
-    let key = id.to_lowercase();
-    path.push(key);
-    let mut children = Vec::new();
-    for child in sub_tasks.values() {
-        if path.len() < MAX_DEPTH && !path.contains(&child.to_lowercase()) {
-            children.push(node(catalog, child, path));
-        }
+    if !shown.insert(id.to_lowercase()) {
+        return TaskNode {
+            id: id.to_owned(),
+            kind,
+            repeat: true,
+            children: Vec::new(),
+        };
     }
-    path.pop();
+    let children = if depth < MAX_DEPTH {
+        sub_tasks
+            .values()
+            .map(|child| node(catalog, child, depth + 1, shown))
+            .collect()
+    } else {
+        Vec::new()
+    };
     TaskNode {
         id: id.to_owned(),
         kind,
+        repeat: false,
         children,
     }
 }
@@ -80,7 +92,7 @@ pub fn quest_tree_of(catalog: &Catalog, objective: &str) -> Option<TaskNode> {
         .get(ROOT_FIELD)
         .and_then(Value::as_str)
         .map(str::to_owned)?;
-    Some(node(catalog, &root, &mut Vec::new()))
+    Some(node(catalog, &root, 0, &mut HashSet::new()))
 }
 
 async fn quest_tree(
@@ -142,8 +154,10 @@ mod tests {
         .expect("objective");
         tables.objectives.push(table(vec![objective]));
         tables.objective_tasks.push(table(vec![
-            task("root", "ConsecutiveTaskContainer", &["a", "missing"]),
-            task("a", "TaskTimer", &["root"]),
+            task("root", "ConsecutiveTaskContainer", &["a", "missing", "b"]),
+            task("a", "TaskTimer", &["root", "shared"]),
+            task("b", "TaskTimer", &["shared"]),
+            task("shared", "TaskKill", &["deep"]),
         ]));
         let catalog = Catalog::of_bundle(&ContentBundle {
             tables,
@@ -151,13 +165,18 @@ mod tests {
         });
         let tree = quest_tree_of(&catalog, "q1").expect("tree");
         assert_eq!(tree.kind.as_deref(), Some("ConsecutiveTaskContainer"));
-        assert_eq!(tree.children.len(), 2);
-        assert_eq!(tree.children[0].kind.as_deref(), Some("TaskTimer"));
+        assert_eq!(tree.children.len(), 3);
+        let a = &tree.children[0];
+        assert_eq!(a.kind.as_deref(), Some("TaskTimer"));
         assert!(
-            tree.children[0].children.is_empty(),
+            a.children[0].repeat && a.children[0].children.is_empty(),
             "the loop back to root stops"
         );
+        assert_eq!(a.children[1].children.len(), 1, "shared is walked once");
         assert_eq!(tree.children[1].kind, None, "a missing task has no record");
+        let again = &tree.children[2].children[0];
+        assert_eq!((again.id.as_str(), again.repeat), ("shared", true));
+        assert!(again.children.is_empty());
         assert_eq!(quest_tree_of(&catalog, "Q2"), None);
     }
 }

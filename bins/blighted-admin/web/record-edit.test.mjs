@@ -50,12 +50,13 @@ test('a quest tree flattens depth first', () => {
   const tree = {
     id: 'root',
     kind: 'ConsecutiveTaskContainer',
-    children: [{ id: 'a', kind: 'TaskTimer', children: [] }, { id: 'b', kind: null, children: [] }],
+    repeat: false,
+    children: [{ id: 'a', kind: 'TaskTimer', repeat: false, children: [] }, { id: 'root', kind: null, repeat: true, children: [] }],
   };
   assert.deepEqual(treeRows(tree), [
-    { id: 'root', kind: 'ConsecutiveTaskContainer', depth: 0 },
-    { id: 'a', kind: 'TaskTimer', depth: 1 },
-    { id: 'b', kind: null, depth: 1 },
+    { id: 'root', kind: 'ConsecutiveTaskContainer', repeat: false, depth: 0 },
+    { id: 'a', kind: 'TaskTimer', repeat: false, depth: 1 },
+    { id: 'root', kind: null, repeat: true, depth: 1 },
   ]);
 });
 

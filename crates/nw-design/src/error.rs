@@ -97,6 +97,9 @@ pub enum Problem {
     /// A point kind without `map`.
     #[error("this kind needs `map`")]
     MissingMap,
+    /// `map` on a kind that is not on a level.
+    #[error("only a kind on a level takes `map`")]
+    MapNotAllowed,
     /// A `disable` file names fields.
     #[error("`disable` takes no fields")]
     FieldsNotAllowed,
