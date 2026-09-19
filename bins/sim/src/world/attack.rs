@@ -1003,7 +1003,7 @@ impl SimWorld {
         }
         let entity = self.player_by_number(target)?;
         let player = self.world.get::<Player>(entity)?;
-        if player.frozen {
+        if player.frozen || self.is_god(entity) {
             return None;
         }
         let connection = player.connection.clone();

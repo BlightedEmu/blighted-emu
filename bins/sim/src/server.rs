@@ -14,10 +14,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nw_bus::{
-    AdminCommand, Admit, AdmitReply, Bus, BusError, BusId, CellTable, ConnectionRef, GatewayOutput,
-    Ghosts, HandoffMessage, HandoffReply, Heartbeat, Hit, Incoming, InputBatch, OutputBatch, Point,
-    Publisher, SimHeartbeat, SimInput, SimSlot, SimSnapshot, snapshot_parts, split_batches,
-    subject,
+    AdminAction, AdminCommand, AdminReply, Admit, AdmitReply, Bus, BusError, BusId, CellTable,
+    ConnectionRef, GatewayOutput, Ghosts, HandoffMessage, HandoffReply, Heartbeat, Hit, Incoming,
+    InputBatch, OutputBatch, Point, Publisher, SimHeartbeat, SimInput, SimSlot, SimSnapshot,
+    snapshot_parts, split_batches, subject,
 };
 use nw_common::time::unix_ms;
 use nw_db::{PgPool, SaveOutcome, SavedPosition, save_character_position};
@@ -411,7 +411,10 @@ impl Loop {
     /// Answers a request from its own task, so a slow NATS link never stops the tick.
     /// A GM command from the admin tool, between ticks.
     fn admin(&mut self, command: Incoming<AdminCommand>) {
-        let reply = self.world.admin(&command.message, self.now_ms());
+        let reply = match &command.message.action {
+            AdminAction::Kick { entity } => self.kick(*entity),
+            _ => self.world.admin(&command.message, self.now_ms()),
+        };
         tracing::info!(request = %command.message.request, ?reply, "admin command");
         self.reply(command, reply);
     }
@@ -723,6 +726,25 @@ impl Loop {
             tracing::warn!(gateway = %beat.id, "gateway restarted; its players leave");
             self.drop_gateway(&beat.id);
         }
+    }
+
+    /// Saves and removes the player with entity number `entity`, and tells its gateway to close
+    /// its connection (a GM kick).
+    fn kick(&mut self, entity: u64) -> AdminReply {
+        let Some(connection) = self.world.connection_of(entity) else {
+            return AdminReply::NotMine;
+        };
+        if let Some(departure) = self.world.leave(&connection) {
+            self.save(&departure);
+        }
+        self.publish(
+            &connection.gateway,
+            GatewayOutput::Close {
+                connection: connection.connection,
+            },
+        );
+        self.count_players();
+        AdminReply::Done
     }
 
     /// Saves and removes every player of `gateway`, and tells the gateway to close them.

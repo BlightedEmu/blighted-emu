@@ -13,8 +13,11 @@
 //! A personal mob (a tutorial encounter's) belongs to one player: only that player sees it and is
 //! its target, it may be held idle until its fight starts, it stays awake, and it does not
 //! respawn: its encounter removes it.
+//!
+//! A GM mob (admin studio spec section 8.2) is spawned by a game master at any point: every player
+//! sees and fights it, it stays awake, and it respawns at its spawn until the GM removes it.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use nw_bus::{MOB_ENTITY_BASE, MOB_STATES, MobGhost, SnapMob};
@@ -273,6 +276,8 @@ pub struct Mobs {
     spawns: Arc<[VitalsSpawn]>,
     /// Personal mobs by index; their indexes follow the spawn list.
     personal: HashMap<u32, Personal>,
+    /// GM mobs by index, with their spawns; their indexes follow the spawn list too.
+    gm: BTreeMap<u32, VitalsSpawn>,
     next_personal: u32,
     data: Arc<CombatData>,
     settings: BrainSettings,
@@ -319,6 +324,7 @@ impl Mobs {
         Self {
             spawns,
             personal: HashMap::new(),
+            gm: BTreeMap::new(),
             next_personal,
             data: Arc::clone(&combat.data),
             settings: combat.brain,
@@ -392,6 +398,33 @@ impl Mobs {
             },
         );
         Some(mob_entity(index))
+    }
+
+    /// Spawns a GM mob of `spawn`; its entity number, or `None` without its rows.
+    pub fn spawn_gm(&mut self, spawn: VitalsSpawn) -> Option<u64> {
+        let mob = self.make(&spawn)?;
+        let index = self.next_personal;
+        self.next_personal = index.checked_add(1)?;
+        self.live.insert(index, mob);
+        self.awake.insert(index);
+        self.gm.insert(index, spawn);
+        Some(mob_entity(index))
+    }
+
+    /// Removes the GM mob `entity`; `false` when it is not one.
+    pub fn remove_gm(&mut self, entity: u64) -> bool {
+        let Some(index) = spawn_index(entity).filter(|index| self.gm.remove(index).is_some())
+        else {
+            return false;
+        };
+        self.live.remove(&index);
+        self.awake.remove(&index);
+        true
+    }
+
+    /// The GM mobs, by entity number.
+    pub fn gm_mobs(&self) -> Vec<u64> {
+        self.gm.keys().map(|index| mob_entity(*index)).collect()
     }
 
     /// Lets the held personal mobs of `owner` see it at `now_ms`; a paced one waits one interval
@@ -555,6 +588,7 @@ impl Mobs {
         self.spawns
             .get(index as usize)
             .or_else(|| self.personal.get(&index).map(|personal| &personal.spawn))
+            .or_else(|| self.gm.get(&index))
     }
 
     /// Spawns the mobs of the spawns that `owns`, and removes the others.
@@ -708,7 +742,8 @@ impl Mobs {
                 BrainAction::Respawned | BrainAction::Home => mob.health.refill(),
                 BrainAction::None => {}
             }
-            if mob.brain.state() == MobState::Asleep && !is_personal {
+            let stays_awake = is_personal || self.gm.contains_key(&index);
+            if mob.brain.state() == MobState::Asleep && !stays_awake {
                 self.awake.remove(&index);
             } else {
                 self.awake.insert(index);
@@ -909,6 +944,35 @@ mod tests {
 
     fn every(_: Position) -> bool {
         true
+    }
+
+    #[test]
+    fn a_gm_mob_is_everyones_stays_awake_and_can_be_removed() {
+        const LATER_MS: u64 = 600_000;
+        let mut mobs = mobs(Vec::new());
+        let entity = mobs
+            .spawn_gm(spawn_at(10.0, TEST_MOB, TEST_LEVEL))
+            .expect("gm mob");
+        assert_eq!(mobs.owner(entity), None, "every player sees it");
+        assert_eq!(mobs.gm_mobs(), [entity]);
+        assert!(mobs.health(entity).is_some());
+        mobs.tick(&[], 0, &Flat);
+        let runs = mobs.brain_runs;
+        mobs.tick(&[], LATER_MS, &Flat);
+        assert!(mobs.brain_runs > runs, "it stays awake with no player near");
+        assert!(mobs.remove_gm(entity));
+        assert!(!mobs.remove_gm(entity));
+        assert_eq!(mobs.health(entity), None);
+        assert!(mobs.gm_mobs().is_empty());
+    }
+
+    #[test]
+    fn a_gm_mob_without_rows_is_refused() {
+        let mut mobs = mobs(Vec::new());
+        assert_eq!(
+            mobs.spawn_gm(spawn_at(10.0, "no_such_mob", TEST_LEVEL)),
+            None
+        );
     }
 
     #[test]
