@@ -326,6 +326,10 @@ The **Editors** on the studio page write one design file each (through `/api/stu
 
 The records page (`/records`) searches the client records of the table kinds (items, weapon, armor and consumable stats, perks, loot tables, mobs, NPCs, quests and quest tasks) by id or English name. A record shows every field with its client value; **Save** writes an `override` file with only the fields you changed, and **Save as new record** writes an `add` file with `base` set to the open record (the item creator). Apply on the studio page to use the files.
 
+On a loot table the records page also has the **drop simulator**: it rolls the table up to 100,000 times with the server's own roll code over the client data and the design files (nothing is written) and shows each item's chance; give the mob's loot tags (`Common`, ...) for tables with a tag condition. **Mobs with no loot** lists the mob types without a loot table. A mob killed by a player rolls its table, and the items go into the killer's bag (a loot bag on the ground is not built yet).
+
+The to-do page (`/todo`) keeps the team's tasks in `content/todo.toml`: add a task, or import a GitHub issue (a one-time copy; set `[studio] github_token_env` for a private repository), mark who took it and when it is done, and link the design files it touches. "Changed design files" lists what differs from the last commit, to link before you commit.
+
 Items are saved: the world database keeps every character's items (`character_item`), the director sends them with each join, and a sim saves them when they change and when the player leaves. A character that never saved items gets its starter kit; the tutorial always starts from the kit and saves nothing. Run `edge-http migrate` after this update.
 
 ### Server mode, ranks and GM commands
