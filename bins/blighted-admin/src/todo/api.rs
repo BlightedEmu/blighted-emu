@@ -28,6 +28,7 @@ pub const IMPORT_ROUTE: &str = "/api/todo/import";
 /// `GET`: the design files that differ from the last commit.
 pub const CHANGED_ROUTE: &str = "/api/todo/changed";
 const NO_TITLE: &str = "a task needs a title";
+const NO_TASK: &str = "no such task";
 const BAD_ISSUE_URL: &str =
     "not a GitHub issue address (https://github.com/<owner>/<repo>/issues/<number>)";
 /// The `git` program.
@@ -84,12 +85,8 @@ struct ImportRequest {
     url: String,
 }
 
-fn studio_of(state: &AppState) -> Result<&Studio, Response> {
-    state
-        .studio
-        .as_ref()
-        .ok_or_else(|| StatusCode::NOT_FOUND.into_response())
-}
+/// Why a list edit was refused: the status and the text.
+type Refusal = (StatusCode, &'static str);
 
 fn failed(error: String) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, error).into_response()
@@ -112,7 +109,7 @@ fn view(list: TodoList) -> ListView {
 /// when it refuses, else the new list.
 async fn edit_list(
     studio: &Studio,
-    edit: impl FnOnce(&mut TodoList) -> Result<(), Response>,
+    edit: impl FnOnce(&mut TodoList) -> Result<(), Refusal>,
 ) -> Response {
     let _held = studio.todo_lock.lock().await;
     let design_dir = &studio.paths.design_dir;
@@ -121,7 +118,7 @@ async fn edit_list(
         Err(error) => return failed(error),
     };
     if let Err(refused) = edit(&mut list) {
-        return refused;
+        return refused.into_response();
     }
     match save(design_dir, &list) {
         Ok(()) => Json(view(list)).into_response(),
@@ -130,10 +127,10 @@ async fn edit_list(
 }
 
 /// A new open task of `list`.
-fn push_task(list: &mut TodoList, new: NewTask) -> Result<(), Response> {
+fn push_task(list: &mut TodoList, new: NewTask) -> Result<(), Refusal> {
     let title = new.title.trim();
     if title.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, NO_TITLE).into_response());
+        return Err((StatusCode::BAD_REQUEST, NO_TITLE));
     }
     let id = list.next_id();
     list.task.push(Task {
@@ -150,9 +147,8 @@ fn push_task(list: &mut TodoList, new: NewTask) -> Result<(), Response> {
 }
 
 async fn list(State(state): State<AppState>) -> Response {
-    let studio = match studio_of(&state) {
-        Ok(studio) => studio,
-        Err(refused) => return refused,
+    let Some(studio) = state.studio.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
     };
     match load(&studio.paths.design_dir) {
         Ok(list) => Json(view(list)).into_response(),
@@ -161,9 +157,9 @@ async fn list(State(state): State<AppState>) -> Response {
 }
 
 async fn add(State(state): State<AppState>, Json(new): Json<NewTask>) -> Response {
-    match studio_of(&state) {
-        Ok(studio) => edit_list(studio, |list| push_task(list, new)).await,
-        Err(refused) => refused,
+    match state.studio.as_ref() {
+        Some(studio) => edit_list(studio, |list| push_task(list, new)).await,
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
@@ -172,18 +168,15 @@ async fn change(
     UrlPath(id): UrlPath<String>,
     Json(change): Json<TaskChange>,
 ) -> Response {
-    let studio = match studio_of(&state) {
-        Ok(studio) => studio,
-        Err(refused) => return refused,
+    let Some(studio) = state.studio.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
     };
     edit_list(studio, |list| {
         let title = change.title.trim();
         if title.is_empty() {
-            return Err((StatusCode::BAD_REQUEST, NO_TITLE).into_response());
+            return Err((StatusCode::BAD_REQUEST, NO_TITLE));
         }
-        let task = list
-            .get_mut(&id)
-            .ok_or_else(|| StatusCode::NOT_FOUND.into_response())?;
+        let task = list.get_mut(&id).ok_or((StatusCode::NOT_FOUND, NO_TASK))?;
         *task = Task {
             id: task.id.clone(),
             title: title.to_owned(),
@@ -200,15 +193,14 @@ async fn change(
 }
 
 async fn remove(State(state): State<AppState>, UrlPath(id): UrlPath<String>) -> Response {
-    let studio = match studio_of(&state) {
-        Ok(studio) => studio,
-        Err(refused) => return refused,
+    let Some(studio) = state.studio.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
     };
     edit_list(studio, |list| {
         let before = list.task.len();
         list.task.retain(|task| task.id != id);
         if list.task.len() == before {
-            return Err(StatusCode::NOT_FOUND.into_response());
+            return Err((StatusCode::NOT_FOUND, NO_TASK));
         }
         Ok(())
     })
@@ -216,9 +208,8 @@ async fn remove(State(state): State<AppState>, UrlPath(id): UrlPath<String>) -> 
 }
 
 async fn import(State(state): State<AppState>, Json(request): Json<ImportRequest>) -> Response {
-    let studio = match studio_of(&state) {
-        Ok(studio) => studio,
-        Err(refused) => return refused,
+    let Some(studio) = state.studio.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
     };
     let Some(issue) = parse_issue_url(&request.url) else {
         return (StatusCode::BAD_REQUEST, BAD_ISSUE_URL).into_response();
@@ -283,9 +274,8 @@ async fn changed_files(design_dir: &Path) -> Result<Vec<String>, String> {
 }
 
 async fn changed(State(state): State<AppState>) -> Response {
-    let studio = match studio_of(&state) {
-        Ok(studio) => studio,
-        Err(refused) => return refused,
+    let Some(studio) = state.studio.as_ref() else {
+        return StatusCode::NOT_FOUND.into_response();
     };
     match changed_files(&studio.paths.design_dir).await {
         Ok(files) => Json(files).into_response(),
