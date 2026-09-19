@@ -39,6 +39,9 @@ pub enum AttackRefusal {
     /// No living, not returning mob is in reach (M6-B spec section 6.2).
     #[error("no target in reach")]
     NoTarget,
+    /// The weapon has no shot loaded.
+    #[error("no shot loaded")]
+    NoAmmo,
 }
 
 impl AttackRefusal {
@@ -54,6 +57,7 @@ impl AttackRefusal {
             Self::OutOfReach => "out_of_reach",
             Self::TooFast => "too_fast",
             Self::NoTarget => "no_target",
+            Self::NoAmmo => "no_ammo",
         }
     }
 }
@@ -196,6 +200,8 @@ pub mod test_support {
                     crit_multiplier: 1.0,
                     spread_shot: false,
                     kind: WeaponKind::Sword,
+                    max_loaded_ammo: 0,
+                    reload_ms: 0,
                 },
             )],
             attacks: rows

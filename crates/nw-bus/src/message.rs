@@ -287,6 +287,11 @@ pub struct HandoffOffer {
     /// The items the player carries; `None` when the sender kept none, so the taker gives the
     /// login kit of the backstory.
     pub items: Option<Vec<CarriedItem>>,
+    /// The main-hand option slot the player holds drawn, when it holds one (live 2026-09-18:
+    /// without it the open world took the slot-24 blunderbuss as the weapon in the hand and
+    /// dropped every greatsword swing).
+    #[serde(default)]
+    pub drawn_weapon: Option<u32>,
     /// The player's experience points (the tutorial's kills give some).
     #[serde(default)]
     pub experience: u32,
@@ -671,6 +676,7 @@ mod tests {
                 quantity: 2,
                 place: ItemPlace::Worn(14),
             }]),
+            drawn_weapon: Some(25),
             quest: Some(QuestRun {
                 tasks: vec![
                     QuestTask::Done,

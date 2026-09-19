@@ -498,6 +498,8 @@ pub struct SimWorld {
     player_swings: Vec<PlayerSwing>,
     /// Swings that a tutorial script started, for the next tick.
     scripted_swings: Vec<MobAttackIntent>,
+    /// The server time of the last tick (ms since 2000-01-01).
+    server_ms: u64,
 }
 
 /// A new player before it is in the world.
@@ -521,6 +523,8 @@ struct Arrival {
     flow: LevelFlow,
     /// The items another sim sent; `None` gives the login kit.
     items: Option<Vec<CarriedItem>>,
+    /// The main-hand option slot it held drawn on the other sim.
+    drawn_weapon: Option<u32>,
     /// Its experience points.
     experience: u32,
 }
@@ -557,6 +561,7 @@ impl SimWorld {
             swings: Vec::new(),
             player_swings: Vec::new(),
             scripted_swings: Vec::new(),
+            server_ms: 0,
             combat,
             world: World::new(),
             by_connection: HashMap::new(),
@@ -648,6 +653,7 @@ impl SimWorld {
             client_context: LOGIN_CLIENT_CONTEXT,
             flow,
             items: None,
+            drawn_weapon: None,
             experience: 0,
         };
         self.check(&arrival)?;
@@ -756,6 +762,7 @@ impl SimWorld {
             client_context,
             flow,
             items: offer.items.clone(),
+            drawn_weapon: offer.drawn_weapon,
             experience: offer.experience,
         };
         self.check(&arrival)?;
@@ -1183,6 +1190,8 @@ impl SimWorld {
         self.tick_quests(now_ms);
         self.drink_due(now_ms, server_time);
         self.tick_stamina(now_ms);
+        self.server_ms = server_time;
+        self.tick_hands(now_ms, server_time);
         self.tick_pushes(now_ms);
         let mut messages = self.take_messages();
         let bundled = self.bundles(now_ms, server_time)?;
@@ -2147,6 +2156,7 @@ impl SimWorld {
                             &self.content.kits,
                             arrival.character,
                             items,
+                            arrival.drawn_weapon,
                         )),
                         None => Gear::starter(
                             &self.content.kits,
@@ -2707,6 +2717,7 @@ fn handoff_offer(
         client_context: player.client_context,
         enter_level: enters,
         items: player.gear.as_ref().map(Gear::carried),
+        drawn_weapon: player.gear.as_ref().and_then(Gear::drawn),
         experience: player.experience,
         quest,
         achievements: player.flow.achievement_bits(),

@@ -239,6 +239,8 @@ mod tests {
                     crit_multiplier: 1.0,
                     spread_shot: false,
                     kind: WeaponKind::Sword,
+                    max_loaded_ammo: 0,
+                    reload_ms: 0,
                 },
             )],
             attacks: rows

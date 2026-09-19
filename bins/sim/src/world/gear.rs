@@ -8,11 +8,49 @@ use nw_bus::{CarriedItem, ItemPlace};
 use nw_content::starter::{EquipSlot, KitItem, StarterKits};
 use nw_messages::paperdoll::slot;
 use nw_messages::wire::RAW_ID_LEN;
-use nw_messages::{EquippedItem, GearItem, PlayerGear, STARTER_BAG_SLOTS, is_visible_slot};
+use nw_messages::{
+    EquippedItem, GearItem, Hands, LoadedAmmo, PlayerGear, STARTER_BAG_SLOTS, is_visible_slot,
+};
 use uuid::Uuid;
 
 /// The version of the first gear states (retail value).
 const FIRST_GEAR_VERSION: u64 = 3;
+/// How long a drawn weapon takes to reach the hand (retail 331 to 418 ms after the key).
+const ATTACH_MS: u64 = 331;
+/// The main-hand options whose ammo the paperdoll carries (owner children 8 and 9).
+const AMMO_OPTIONS: usize = 2;
+/// Milliseconds from 1970-01-01 to 2000-01-01, the server clock's start.
+const UNIX_MS_AT_2000: u64 = 946_684_800_000;
+/// Nanoseconds per millisecond.
+const NS_PER_MS: u64 = 1_000_000;
+
+/// The ns since 1970-01-01 at server time `server_ms` (ms since 2000-01-01): the time of a
+/// loaded-ammo state (client-gates note: retail Unix time in ns).
+pub(super) const fn unix_ns(server_ms: u64) -> u64 {
+    server_ms
+        .saturating_add(UNIX_MS_AT_2000)
+        .saturating_mul(NS_PER_MS)
+}
+
+/// The ammo of a main-hand option slot.
+fn ammo_index(slot_id: u32) -> Option<usize> {
+    let index = usize::try_from(slot_id.checked_sub(slot::MAIN_HAND_OPTION_1)?).ok()?;
+    (index < AMMO_OPTIONS).then_some(index)
+}
+
+/// The shots of one main-hand option.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Ammo {
+    /// The shots its weapon holds (0 for a melee weapon).
+    max: u8,
+    loaded: u8,
+    /// How long its weapon takes to load again.
+    reload_ms: u64,
+    /// When the empty weapon is loaded again.
+    reload_at_ms: Option<u64>,
+    /// When the option was last put away (ns since 1970-01-01).
+    time_ns: u64,
+}
 
 /// The paperdoll slots an item of `kind` may go into; an item that is not worn goes into a
 /// slot that does not show (amulet, ring, quick slots).
@@ -79,8 +117,16 @@ pub(super) struct Gear {
     version: u64,
     /// Whether the states changed since they were sent.
     changed: bool,
-    /// The main-hand option slot of the weapon in the hand.
-    active_weapon: u32,
+    /// The main-hand option slot drawn; `None`: every weapon is sheathed.
+    drawn: Option<u32>,
+    /// The drawn weapon reaches the hand at this time.
+    attach_at_ms: Option<u64>,
+    /// The drawn weapon is in the hand.
+    attached: bool,
+    /// The ammo of main-hand options 1 and 2.
+    ammo: [Ammo; AMMO_OPTIONS],
+    /// The items whose ammo [`Gear::arm`] last set, per option.
+    armed: [Option<String>; AMMO_OPTIONS],
 }
 
 impl Gear {
@@ -102,20 +148,34 @@ impl Gear {
             bag: vec![None; STARTER_BAG_SLOTS],
             version: FIRST_GEAR_VERSION,
             changed: false,
-            active_weapon: slot::MAIN_HAND_OPTION_1,
+            drawn: None,
+            attach_at_ms: None,
+            attached: false,
+            ammo: [Ammo::default(); AMMO_OPTIONS],
+            armed: [None, None],
         })
     }
 
-    /// The gear of `character` from the `items` another sim sent; an item `kits` does not know
-    /// is left out, and one whose bag slot is taken or out of range goes to a free one.
-    pub(super) fn carried_in(kits: &StarterKits, character: Uuid, items: &[CarriedItem]) -> Self {
+    /// The gear of `character` from the `items` another sim sent, with main-hand option slot
+    /// `drawn` in the hand; an item `kits` does not know is left out, and one whose bag slot is
+    /// taken or out of range goes to a free one.
+    pub(super) fn carried_in(
+        kits: &StarterKits,
+        character: Uuid,
+        items: &[CarriedItem],
+        drawn: Option<u32>,
+    ) -> Self {
         let mut gear = Self {
             character,
             worn: Vec::new(),
             bag: vec![None; STARTER_BAG_SLOTS],
             version: FIRST_GEAR_VERSION,
             changed: false,
-            active_weapon: slot::MAIN_HAND_OPTION_1,
+            drawn,
+            attach_at_ms: None,
+            attached: drawn.is_some(),
+            ammo: [Ammo::default(); AMMO_OPTIONS],
+            armed: [None, None],
         };
         for carried in items {
             let Some(item) = kits.item(&carried.item_id) else {
@@ -176,7 +236,7 @@ impl Gear {
             .iter()
             .map(|stack| stack.as_ref().map(|stack| stack.item))
             .collect();
-        PlayerGear::of(&equipped, &bag, self.version)
+        PlayerGear::of(&equipped, &bag, self.version, self.hands())
     }
 
     /// Every stack of `item` becomes one new stack of `quantity` worn in paperdoll slot
@@ -211,20 +271,23 @@ impl Gear {
             .map(|(_, stack)| stack.item_id.as_str())
     }
 
-    /// The weapon in the hand, with its gear score: the item of the option slot the player picked
-    /// last, else the worn main-hand item of the lowest option slot (Inferred: retail's first
-    /// island hits are the slot 24 weapon's).
+    /// The weapon in the hand, with its gear score: the item of the drawn option slot, else the
+    /// worn main-hand item of the lowest option slot (Inferred: retail's first island hits are
+    /// the slot 24 weapon's).
     pub(super) fn main_weapon(&self) -> Option<(&str, u32)> {
+        let held = self.held_option()?;
         self.main_hand()
-            .find(|(slot_id, _)| *slot_id == self.active_weapon)
-            .or_else(|| self.main_hand().min_by_key(|(slot_id, _)| *slot_id))
+            .find(|(slot_id, _)| *slot_id == held)
             .map(|(_, stack)| (stack.item_id.as_str(), stack.item.gear_score))
     }
 
-    /// The worn main-hand weapons, with their gear scores.
-    pub(super) fn main_hand_weapons(&self) -> impl Iterator<Item = (&str, u32)> {
+    /// The main-hand option slot in the hand: the drawn one when it holds a weapon, else the
+    /// lowest one that does.
+    fn held_option(&self) -> Option<u32> {
         self.main_hand()
-            .map(|(_, stack)| (stack.item_id.as_str(), stack.item.gear_score))
+            .find(|(slot_id, _)| Some(*slot_id) == self.drawn)
+            .or_else(|| self.main_hand().min_by_key(|(slot_id, _)| *slot_id))
+            .map(|(slot_id, _)| slot_id)
     }
 
     /// The worn items of the main-hand option slots.
@@ -237,11 +300,98 @@ impl Gear {
             .map(|(slot_id, stack)| (*slot_id, stack))
     }
 
-    /// The player picks the weapon of main-hand option `option` (0 for the first key).
-    pub(super) fn pick_weapon(&mut self, option: u32) {
+    /// The main-hand option slot drawn, when one is.
+    pub(super) const fn drawn(&self) -> Option<u32> {
+        self.drawn
+    }
+
+    /// The player draws main-hand option `option` (0 for the first key) at `now_ms`: its weapon
+    /// reaches the hand [`ATTACH_MS`] later, and the option put away keeps the time `time_ns`
+    /// (client-gates note: retail answered each weapon key so).
+    pub(super) fn draw(&mut self, option: u32, now_ms: u64, time_ns: u64) {
         let picked = slot::MAIN_HAND_OPTION_1.saturating_add(option);
-        if picked <= slot::MAIN_HAND_OPTION_3 {
-            self.active_weapon = picked;
+        if picked > slot::MAIN_HAND_OPTION_3 || self.drawn == Some(picked) {
+            return;
+        }
+        if let Some(stowed) = self.drawn.and_then(ammo_index) {
+            self.ammo[stowed].time_ns = time_ns;
+        }
+        self.drawn = Some(picked);
+        self.attached = false;
+        self.attach_at_ms = Some(now_ms.saturating_add(ATTACH_MS));
+        self.changed = true;
+    }
+
+    /// Gives main-hand options 1 and 2 the shots and reload time of their weapons by
+    /// `weapon_of(item)`, at time `time_ns`: a new weapon in an option comes loaded.
+    pub(super) fn arm(&mut self, weapon_of: impl Fn(&str) -> Option<(u8, u64)>, time_ns: u64) {
+        for (index, slot_id) in (slot::MAIN_HAND_OPTION_1..).take(AMMO_OPTIONS).enumerate() {
+            let item = self.worn_item(slot_id);
+            if item == self.armed[index].as_deref() {
+                continue;
+            }
+            let (max, reload_ms) = item.and_then(&weapon_of).unwrap_or_default();
+            self.armed[index] = item.map(str::to_owned);
+            let ammo = &mut self.ammo[index];
+            if (ammo.max, ammo.reload_ms) != (max, reload_ms) {
+                *ammo = Ammo {
+                    max,
+                    loaded: max,
+                    reload_ms,
+                    reload_at_ms: None,
+                    time_ns,
+                };
+                self.changed = true;
+            }
+        }
+    }
+
+    /// Fires one shot of the drawn option at `now_ms`; whether one was loaded. The last shot
+    /// starts the reload (retail: loaded again 1.0 to 5 s after the second shot).
+    pub(super) fn fire(&mut self, now_ms: u64) -> bool {
+        let Some(index) = self.held_option().and_then(ammo_index) else {
+            return false;
+        };
+        let ammo = &mut self.ammo[index];
+        if ammo.loaded == 0 {
+            return false;
+        }
+        ammo.loaded -= 1;
+        if ammo.loaded == 0 {
+            ammo.reload_at_ms = Some(now_ms.saturating_add(ammo.reload_ms));
+        }
+        self.changed = true;
+        true
+    }
+
+    /// Moves the hands on to `now_ms`: the drawn weapon reaches the hand, an empty weapon is
+    /// loaded again.
+    pub(super) fn tick_hands(&mut self, now_ms: u64) {
+        if self.attach_at_ms.is_some_and(|at| now_ms >= at) {
+            self.attach_at_ms = None;
+            self.attached = true;
+            self.changed = true;
+        }
+        for ammo in &mut self.ammo {
+            if ammo.reload_at_ms.is_some_and(|at| now_ms >= at) {
+                ammo.reload_at_ms = None;
+                ammo.loaded = ammo.max;
+                self.changed = true;
+            }
+        }
+    }
+
+    /// How the player holds its weapons, for the paperdoll.
+    fn hands(&self) -> Hands {
+        Hands {
+            drawn: self.drawn,
+            attached: self.attached,
+            ammo: self.ammo.map(|ammo| {
+                Some(LoadedAmmo {
+                    count: ammo.loaded,
+                    time_ns: ammo.time_ns,
+                })
+            }),
         }
     }
 
@@ -573,7 +723,7 @@ pub(crate) mod tests {
             gear.add(item, 1);
         }
         let mut carried = gear.carried();
-        let again = Gear::carried_in(&kits, CHARACTER, &carried);
+        let again = Gear::carried_in(&kits, CHARACTER, &carried, None);
         assert_eq!(again.states(), gear.states());
         carried.push(CarriedItem {
             item_id: "NoSuchItem".to_owned(),
@@ -586,12 +736,26 @@ pub(crate) mod tests {
             place: ItemPlace::Bag(0),
         };
         carried.push(potion);
-        let moved = Gear::carried_in(&kits, CHARACTER, &carried);
+        let moved = Gear::carried_in(&kits, CHARACTER, &carried, None);
         assert_eq!(
             moved.bag[1].as_ref().map(|stack| stack.item_id.as_str()),
             Some(POTION),
             "a taken bag slot sends it to a free one"
         );
+    }
+
+    #[test]
+    fn the_drawn_weapon_goes_with_the_items_to_another_sim() {
+        const SECOND_OPTION: u32 = slot::MAIN_HAND_OPTION_1 + 1;
+        let kits = kits();
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
+        gear.draw(1, 0, 0);
+        assert_eq!(gear.drawn(), Some(SECOND_OPTION));
+        let taken = Gear::carried_in(&kits, CHARACTER, &gear.carried(), gear.drawn());
+        assert_eq!(taken.drawn(), Some(SECOND_OPTION));
+        assert!(taken.hands().attached, "already in the hand");
+        let fresh = Gear::carried_in(&kits, CHARACTER, &gear.carried(), None);
+        assert_eq!(fresh.drawn(), None);
     }
 
     #[test]
@@ -607,6 +771,47 @@ pub(crate) mod tests {
         );
         let back = gear.bag[0].as_ref().expect("the sword is in the bag");
         assert_eq!(back.item_id, SWORD);
+    }
+
+    #[test]
+    fn a_drawn_weapon_reaches_the_hand_and_a_shot_weapon_reloads() {
+        const SHOTS: u8 = 2;
+        const RELOAD_MS: u64 = 1_460;
+        const NOW: u64 = 10_000;
+        const TIME_NS: u64 = 7;
+        let kits = kits();
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
+        // The kit sword is a two-shot weapon here.
+        gear.arm(
+            |item| (item == SWORD).then_some((SHOTS, RELOAD_MS)),
+            TIME_NS,
+        );
+        let hands = gear.hands();
+        assert_eq!(hands.drawn, None, "every weapon sheathed at login");
+        assert_eq!(
+            hands.ammo[0],
+            Some(LoadedAmmo {
+                count: SHOTS,
+                time_ns: TIME_NS
+            })
+        );
+        gear.draw(0, NOW, TIME_NS);
+        assert_eq!(gear.hands().drawn, Some(slot::MAIN_HAND_OPTION_1));
+        assert!(!gear.hands().attached);
+        gear.tick_hands(NOW + ATTACH_MS);
+        assert!(gear.hands().attached, "in the hand after the attach time");
+        assert!(gear.fire(NOW));
+        assert!(gear.fire(NOW));
+        assert!(!gear.fire(NOW), "empty after two shots");
+        assert_eq!(gear.hands().ammo[0].map(|ammo| ammo.count), Some(0));
+        gear.tick_hands(NOW + RELOAD_MS - 1);
+        assert!(!gear.fire(NOW + RELOAD_MS - 1));
+        gear.tick_hands(NOW + RELOAD_MS);
+        assert_eq!(gear.hands().ammo[0].map(|ammo| ammo.count), Some(SHOTS));
+        // The same weapon again keeps its shots; arming checks only changed slots.
+        assert!(gear.fire(NOW + RELOAD_MS));
+        gear.arm(|_| Some((SHOTS, RELOAD_MS)), TIME_NS);
+        assert_eq!(gear.hands().ammo[0].map(|ammo| ammo.count), Some(SHOTS - 1));
     }
 
     #[test]
@@ -641,15 +846,14 @@ pub(crate) mod tests {
         );
         assert!(gear.take_change().is_some());
         assert_eq!(gear.main_weapon(), Some((SWORD, 75)), "the only weapon");
-        gear.pick_weapon(0);
+        gear.draw(0, 0, 0);
         assert_eq!(
             gear.main_weapon(),
             Some((SWORD, 75)),
             "an empty pick keeps one"
         );
-        gear.pick_weapon(1);
+        gear.draw(1, 0, 0);
         assert_eq!(gear.main_weapon(), Some((SWORD, 75)));
-        assert_eq!(gear.main_hand_weapons().collect::<Vec<_>>(), [(SWORD, 75)]);
         assert_eq!(
             gear.unequip(slot::MAIN_HAND_OPTION_1, ANY_BAG_SLOT),
             Err(EquipRefusal::NotWorn)

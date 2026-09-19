@@ -9,7 +9,8 @@
 use crate::containers::{ContainerState, ItemManagementState, OwnedItem};
 use crate::items::{FIRST_VERSION, FullList, ITEM_BOUND, ItemRecord, SYNC_LOGIN, SYNC_OWNED};
 use crate::paperdoll::{
-    ItemVisual, Loadout, PaperdollOwner, PaperdollPublic, PaperdollState, SlotBits, slot,
+    ItemVisual, LoadedAmmo, Loadout, PaperdollOwner, PaperdollPublic, PaperdollState, SlotBits,
+    slot,
 };
 use crate::wire::RAW_ID_LEN;
 
@@ -97,16 +98,62 @@ fn record(
     }
 }
 
+/// The weapon a player holds and the ammo of its first two main-hand options (client-gates
+/// note: retail answered each weapon key with these maps).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Hands {
+    /// The main-hand option slot drawn; `None`: every weapon is sheathed.
+    pub drawn: Option<u32>,
+    /// The drawn weapon is in the hand (retail 331 to 418 ms after the key).
+    pub attached: bool,
+    /// The ammo of main-hand options 1 and 2; `None` before the server knows it.
+    pub ammo: [Option<LoadedAmmo>; 2],
+}
+
+impl Hands {
+    /// The sheathed map: every weapon slot but the drawn one.
+    fn sheathed(&self) -> SlotBits {
+        SlotBits::of(
+            std::iter::once(slot::GATHERABLE_HAND)
+                .chain(slot::MAIN_HAND_OPTION_1..=slot::OFF_HAND_OPTION_3)
+                .filter(|slot_id| Some(*slot_id) != self.drawn),
+        )
+    }
+
+    /// The attached map: the drawn weapon once it is in the hand.
+    fn attached(&self) -> SlotBits {
+        SlotBits::of(self.drawn.filter(|_| self.attached))
+    }
+
+    /// The active map: the drawn main-hand option (else the first) and the first off-hand.
+    fn active(&self) -> SlotBits {
+        SlotBits::of([
+            self.drawn.unwrap_or(slot::MAIN_HAND_OPTION_1),
+            slot::OFF_HAND_OPTION_1,
+        ])
+    }
+}
+
 impl PlayerGear {
     /// The first states of a player who wears `equipped` (in that order) and has an empty bag.
     pub fn first(equipped: &[EquippedItem]) -> Self {
-        Self::of(equipped, &[None; STARTER_BAG_SLOTS], FIRST_VERSION)
+        Self::of(
+            equipped,
+            &[None; STARTER_BAG_SLOTS],
+            FIRST_VERSION,
+            Hands::default(),
+        )
     }
 
-    /// The states of a player who wears `equipped` (in that order) and has `bag` (one entry per
-    /// bag slot), with lists of `version`. The owned-items key of a worn item is its place in
-    /// `equipped`; the loadout pairs point at those keys.
-    pub fn of(equipped: &[EquippedItem], bag: &[Option<GearItem>], version: u64) -> Self {
+    /// The states of a player who wears `equipped` (in that order), has `bag` (one entry per
+    /// bag slot) and holds its weapons as `hands`, with lists of `version`. The owned-items key
+    /// of a worn item is its place in `equipped`; the loadout pairs point at those keys.
+    pub fn of(
+        equipped: &[EquippedItem],
+        bag: &[Option<GearItem>],
+        version: u64,
+        hands: Hands,
+    ) -> Self {
         // Worn items take the counters 0.. in order; bag items the ones after them.
         let worn: Vec<(u32, &EquippedItem)> = (0_u32..).zip(equipped).collect();
         let (visible, hidden): (Vec<_>, Vec<_>) = worn
@@ -135,6 +182,8 @@ impl PlayerGear {
                 hidden_slots: Some(list(version, slots(&hidden))),
                 hidden_durability: Some(list(version, durability(&hidden))),
                 bonus_equip_load: Some(0),
+                main_hand_ammo_1: hands.ammo[0],
+                main_hand_ammo_2: hands.ammo[1],
                 is_local_player: Some(true),
                 is_loadout_panel_open: Some(false),
                 loadouts: Some(list(
@@ -153,15 +202,9 @@ impl PlayerGear {
                 ..PaperdollOwner::default()
             }),
             public: Some(PaperdollPublic {
-                sheathed: Some(SlotBits::of(
-                    std::iter::once(slot::GATHERABLE_HAND)
-                        .chain(slot::MAIN_HAND_OPTION_1..=slot::OFF_HAND_OPTION_3),
-                )),
-                attached: Some(SlotBits::default()),
-                active: Some(SlotBits::of([
-                    slot::MAIN_HAND_OPTION_1,
-                    slot::OFF_HAND_OPTION_1,
-                ])),
+                sheathed: Some(hands.sheathed()),
+                attached: Some(hands.attached()),
+                active: Some(hands.active()),
                 visible_slots: Some(list(version, slots(&visible))),
                 visuals: Some(list(
                     version,
@@ -212,6 +255,41 @@ impl PlayerGear {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_hands_give_the_retail_maps_of_a_drawn_second_weapon() {
+        // Retail after the second weapon key: sheathe `00 02 00 3d 00 00 00`, active
+        // `00 00 00 0a 00 00 00`, then attach `00 00 00 02 00 00 00`.
+        let drawn = Hands {
+            drawn: Some(slot::MAIN_HAND_OPTION_1 + 1),
+            attached: false,
+            ammo: [None; 2],
+        };
+        assert_eq!(
+            drawn.sheathed().0,
+            [0x00, 0x02, 0x00, 0x3d, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(drawn.active().0, [0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00]);
+        assert_eq!(drawn.attached().0, [0; 7]);
+        let held = Hands {
+            attached: true,
+            ..drawn
+        };
+        assert_eq!(
+            held.attached().0,
+            [0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00]
+        );
+        // Nothing drawn: everything sheathed, the first options active.
+        let stowed = Hands::default();
+        assert_eq!(
+            stowed.sheathed().0,
+            [0x00, 0x02, 0x00, 0x3f, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(
+            stowed.active().0,
+            [0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00]
+        );
+    }
     use crate::wire::{Reader, Writer};
 
     /// The retail first paperdoll of a new wanderer (paperdoll note, section 10.1), with the
@@ -327,7 +405,7 @@ mod tests {
                 ARMOR_DURABILITY,
             )),
         ];
-        let gear = PlayerGear::of(&equipped, &bag, VERSION);
+        let gear = PlayerGear::of(&equipped, &bag, VERSION, Hands::default());
         let owner = gear.paperdoll.owner.as_ref().expect("owner");
         let visible = owner.visible_items.as_ref().expect("visible");
         assert_eq!(visible.version, Some(VERSION));

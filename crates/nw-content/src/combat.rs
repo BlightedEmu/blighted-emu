@@ -94,6 +94,9 @@ pub struct LevelRow {
     pub physical_armor_rating: f64,
 }
 
+/// Milliseconds per second.
+const MS_PER_SECOND: f64 = 1_000.0;
+
 /// The player weapon.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WeaponRow {
@@ -107,6 +110,10 @@ pub struct WeaponRow {
     pub spread_shot: bool,
     /// What kind of weapon it is.
     pub kind: WeaponKind,
+    /// The shots it holds when loaded (`MaxLoadedAmmo`; the blunderbuss 2, melee weapons 0).
+    pub max_loaded_ammo: u8,
+    /// How long it takes to load again (`AutoReloadAmmoSeconds`; the blunderbuss 1.46 s).
+    pub reload_ms: u64,
 }
 
 /// The kind of a melee weapon, which sets the shape and time of its swing.
@@ -283,6 +290,14 @@ impl CombatSource {
                             spread_shot: row.ranged_attack_profile.as_deref()
                                 == Some(SPREAD_SHOT_PROFILE),
                             kind: WeaponKind::of_id(&row.weapon_id),
+                            max_loaded_ammo: row
+                                .max_loaded_ammo
+                                .and_then(|ammo| u8::try_from(ammo).ok())
+                                .unwrap_or(0),
+                            // A reload of a few seconds.
+                            reload_ms: row
+                                .auto_reload_ammo_seconds
+                                .map_or(0, |seconds| (seconds * MS_PER_SECOND).round() as u64),
                         },
                     )
                 })
@@ -705,6 +720,8 @@ mod tests {
                     crit_multiplier: 1.3,
                     spread_shot: false,
                     kind: WeaponKind::Sword,
+                    max_loaded_ammo: 0,
+                    reload_ms: 0,
                 },
             )],
             consumables: vec![(

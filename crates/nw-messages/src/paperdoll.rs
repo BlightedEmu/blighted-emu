@@ -79,14 +79,14 @@ impl SlotBits {
     }
 }
 
-/// Ammo loaded in a main-hand option (`FUN_146951510`): a byte and a 64-bit value, both of
-/// unknown meaning.
+/// Ammo loaded in a main-hand option (`FUN_146951510`, `LoadedAmmo`; client-gates note: retail
+/// 2 at rest on a blunderbuss, 1 after one shot, 0 after the second).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LoadedAmmo {
-    /// The byte.
-    pub kind: u8,
-    /// The value.
-    pub value: u64,
+    /// The shots loaded.
+    pub count: u8,
+    /// When the option was last put away: ns since 1970-01-01.
+    pub time_ns: u64,
 }
 
 /// One loadout (`FUN_14669df20`).
@@ -342,14 +342,14 @@ impl PaperdollOwner {
 
 fn read_ammo(reader: &mut Reader<'_>) -> Result<LoadedAmmo, MessageError> {
     Ok(LoadedAmmo {
-        kind: reader.u8()?,
-        value: reader.u64()?,
+        count: reader.u8()?,
+        time_ns: reader.u64()?,
     })
 }
 
 fn write_ammo(writer: &mut Writer, ammo: Option<LoadedAmmo>) {
     if let Some(ammo) = ammo {
-        writer.u8(ammo.kind).u64(ammo.value);
+        writer.u8(ammo.count).u64(ammo.time_ns);
     }
 }
 

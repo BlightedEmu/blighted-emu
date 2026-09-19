@@ -31,6 +31,7 @@ use nw_messages::{
 };
 use nw_sim_core::{Damage, Health, MobState, PlayerAttack, died, hurt, mob_hit, player_hit};
 
+use super::gear::unix_ns;
 use super::hit_shape::{MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, Wedge, homing, swing_shape, turn};
 use super::mob_timeline::yaw_toward;
 use super::stamina::Dodge;
@@ -434,14 +435,21 @@ impl SimWorld {
         let position = body.motion.position();
         let data = Arc::clone(&self.combat.data);
         let held = player.gear.as_ref().and_then(|gear| {
-            gear.main_hand_weapons().find_map(|(item, gear_score)| {
-                let weapon = *data.weapon_of_item(item)?;
-                weapon.spread_shot.then_some((weapon, gear_score))
-            })
+            let (item, gear_score) = gear.main_weapon()?;
+            let weapon = *data.weapon_of_item(item)?;
+            weapon.spread_shot.then_some((weapon, gear_score))
         });
         let Some(held) = held else {
             return refused(AttackRefusal::NotWeaponAttack);
         };
+        let fired = self
+            .world
+            .get_mut::<Player>(entity)
+            .and_then(|mut player| Some(player.gear.as_mut()?.fire(now_ms)))
+            .unwrap_or(false);
+        if !fired {
+            return refused(AttackRefusal::NoAmmo);
+        }
         if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
             vitals.last_shot_ms = Some(now_ms);
         }
@@ -678,7 +686,7 @@ impl SimWorld {
             && let Some(mut player) = self.world.get_mut::<Player>(entity)
             && let Some(gear) = player.gear.as_mut()
         {
-            gear.pick_weapon(key);
+            gear.draw(key, now_ms, unix_ns(self.server_ms));
         }
         let weapon = self.held_weapon(entity).map(|(weapon, _)| weapon);
         // A spread-shot weapon fires through its own request (2719), not the attack key.
@@ -780,6 +788,23 @@ impl SimWorld {
         let mut query = self.world.query::<&mut Player>();
         for mut player in query.iter_mut(&mut self.world) {
             player.stamina.tick(now_ms);
+        }
+    }
+
+    /// Moves every player's hands on to `now_ms` at server time `server_ms`: a new weapon in a
+    /// main-hand option gets its shots, a drawn weapon reaches the hand, an empty one is loaded.
+    pub(super) fn tick_hands(&mut self, now_ms: u64, server_ms: u64) {
+        let data = Arc::clone(&self.combat.data);
+        let weapon_of = |item: &str| {
+            let weapon = data.weapon_of_item(item)?;
+            Some((weapon.max_loaded_ammo, weapon.reload_ms))
+        };
+        let mut query = self.world.query::<&mut Player>();
+        for mut player in query.iter_mut(&mut self.world) {
+            if let Some(gear) = player.gear.as_mut() {
+                gear.arm(weapon_of, unix_ns(server_ms));
+                gear.tick_hands(now_ms);
+            }
         }
     }
 
@@ -1639,6 +1664,10 @@ mod tests {
         assert_eq!(status.in_combat, Some(true), "the hit starts the combat");
     }
 
+    /// The shots and reload time of the test blunderbuss (retail `BlunderbussT2`: 2, 1.46 s).
+    const BLUNDERBUSS_SHOTS: u8 = 2;
+    const BLUNDERBUSS_RELOAD_MS: u64 = 1_460;
+
     /// [`fight_at`] `x` with player 1 wearing the kit sword, whose stats are a spread-shot weapon.
     fn shooter_at(x: f32) -> SimWorld {
         const BLUNDERBUSS: &str = "BlunderbussT2";
@@ -1648,6 +1677,8 @@ mod tests {
             BLUNDERBUSS.to_owned(),
             WeaponRow {
                 spread_shot: true,
+                max_loaded_ammo: BLUNDERBUSS_SHOTS,
+                reload_ms: BLUNDERBUSS_RELOAD_MS,
                 ..sword
             },
         ));
@@ -1663,6 +1694,7 @@ mod tests {
             gear::tests::CHARACTER,
             Some(gear::tests::BACKSTORY),
         );
+        world.tick_hands(NOW, SERVER_TIME);
         world
     }
 

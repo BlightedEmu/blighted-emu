@@ -2411,6 +2411,7 @@ mod tests {
                 client_context: 1,
                 enter_level: false,
                 items: None,
+                drawn_weapon: None,
                 experience: 0,
                 quest: None,
                 achievements: Vec::new(),

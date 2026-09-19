@@ -102,7 +102,7 @@ pub use gde::{
     AssetId, DYNAMIC_SLICE_SUB_ID, GDE_ID_LEN, GDE_METADATA_COMPONENT, GDE_METADATA_TYPE_INDEX,
     GdeMetadataReplicatedState, PLAYER_SLICE_ASSET,
 };
-pub use gear::{EquippedItem, GearItem, PlayerGear, STARTER_BAG_SLOTS, is_visible_slot};
+pub use gear::{EquippedItem, GearItem, Hands, PlayerGear, STARTER_BAG_SLOTS, is_visible_slot};
 pub use interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
 pub use items::{FullList, ItemRecord};
 pub use level_info::{
