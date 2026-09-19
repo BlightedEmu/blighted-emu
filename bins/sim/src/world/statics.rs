@@ -16,8 +16,8 @@ use nw_content::ftue_entities::{EntityMember, FtueEntities, GDE_REF_PREFIX_LEN, 
 use nw_content::starter::KitItem;
 use nw_messages::items::{FullList, ITEM_BOUND, ItemRecord, SYNC_CONTAINER, SYNC_MOVED};
 use nw_messages::{
-    BundleGroup, BundleMember, ContainerState, GatheringState, InteractorState, MemberState,
-    NO_GATHERABLE,
+    BundleGroup, BundleMember, ContainerState, GatheringState, InteractState, InteractorState,
+    MemberState, NO_GATHERABLE,
 };
 use uuid::Uuid;
 
@@ -43,16 +43,18 @@ const INTERACTOR_COMPONENT: u64 = 26;
 const LOOT_DROP_TYPE_INDEX: u64 = 2027;
 const LOOT_DROP_ON: &[u8] = &[0x01, 0x01, 0x00, 0x00, 0x00, 0x01];
 const LOOT_DROP_OFF: &[u8] = &[0x01, 0x01, 0x00, 0x00, 0x00, 0x00];
-/// `MB::InteractReplicatedState` (class 2930) of a taken container (retail take group).
-const INTERACT_TYPE_INDEX: u64 = 2930;
-const INTERACT_TAKEN: &[u8] = &[0x01, 0x01, 0x00];
+/// The interact state of a taken container (retail take group): off.
+const INTERACT_TAKEN: InteractState = InteractState {
+    enabled: Some(false),
+};
 /// `MB::DelayedEventComponentReplicatedState` (class 3139) bodies the bag's event components
 /// send at the take (retail values, recorded).
 const DELAYED_EVENT_TYPE_INDEX: u64 = 3139;
 const BAG_EVENT_BODIES: [&[u8]; 2] = [&[0x01, 0x01, 0x3d, 0x00], &[0x01, 0x01, 0x2e, 0x66]];
 /// The player's component of its gather state (`MB::GatheringComponentReplicatedState`).
 const GATHERING_COMPONENT: u64 = 36;
-/// `m_status` of a running and of a done gather (retail chest 1 and 3).
+/// `m_status` of an idle (Inferred), a running and a done gather (retail chest 1 and 3).
+const GATHER_IDLE: u8 = 0;
 const GATHER_RUNNING: u8 = 1;
 const GATHER_DONE: u8 = 3;
 /// The chest's gather (retail 237342): 2.5 left, efficiency 1, no other gatherer.
@@ -232,10 +234,7 @@ pub(super) fn bag_emptied(item_count: usize) -> Vec<BundleMember> {
         },
         BundleMember {
             component: BAG_INTERACT_COMPONENT,
-            state: MemberState::Recorded {
-                class: INTERACT_TYPE_INDEX,
-                body: INTERACT_TAKEN.to_vec(),
-            },
+            state: MemberState::Interact(INTERACT_TAKEN),
         },
         BundleMember {
             component: BAG_LOOT_COMPONENT,
@@ -286,6 +285,29 @@ const STATES_PER_GATHER: u32 = 2;
 /// The own members when gather number `gather` (0 for the first) of the chest with facet entity
 /// `facet` starts: the interactor target and the running gather (retail 237308 and 237342).
 pub(super) fn chest_gather_started(facet: u64, gather: u32) -> [BundleMember; 2] {
+    gather_started(
+        facet,
+        gather,
+        GatherRun {
+            amount: CHEST_AMOUNT,
+            efficiency: CHEST_EFFICIENCY,
+            gatherers: CHEST_GATHERERS,
+        },
+    )
+}
+
+/// The numbers of a running gather: the amount left (its `BaseGatherTime`), the efficiency and
+/// the gatherers (gather note: retail flint 0.25, 1.0, 1; the chest 2.5, 1.0, 0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct GatherRun {
+    pub(super) amount: f32,
+    pub(super) efficiency: f32,
+    pub(super) gatherers: u8,
+}
+
+/// The own members when gather number `gather` of the object with facet entity `facet` starts:
+/// the interactor target and the running gather `run`.
+pub(super) fn gather_started(facet: u64, gather: u32, run: GatherRun) -> [BundleMember; 2] {
     let count = gather.saturating_mul(STATES_PER_GATHER).saturating_add(1);
     [
         interactor_target(facet),
@@ -293,9 +315,9 @@ pub(super) fn chest_gather_started(facet: u64, gather: u32) -> [BundleMember; 2]
             component: GATHERING_COMPONENT,
             state: MemberState::Gathering(GatheringState {
                 status: Some(GATHER_RUNNING),
-                amount_remaining: Some(CHEST_AMOUNT),
-                efficiency: Some(CHEST_EFFICIENCY),
-                gatherer_count: Some(CHEST_GATHERERS),
+                amount_remaining: Some(run.amount),
+                efficiency: Some(run.efficiency),
+                gatherer_count: Some(run.gatherers),
                 gather_ref_count: Some(count),
                 is_gathering: Some(true),
                 gatherable: Some(NO_GATHERABLE),
@@ -305,8 +327,27 @@ pub(super) fn chest_gather_started(facet: u64, gather: u32) -> [BundleMember; 2]
     ]
 }
 
-/// The own member when gather number `gather` of the chest with facet entity `facet` ends
-/// (retail 239343, with the 3746).
+/// The own member when gather number `gather` of the player stops before its end (Inferred:
+/// idle and not gathering; retail's answer to a cancel mid-gather is Unknown).
+pub(super) fn gather_stopped(gather: u32) -> BundleMember {
+    let count = gather.saturating_add(1).saturating_mul(STATES_PER_GATHER);
+    BundleMember {
+        component: GATHERING_COMPONENT,
+        state: MemberState::Gathering(GatheringState {
+            status: Some(GATHER_IDLE),
+            amount_remaining: Some(0.0),
+            efficiency: Some(0.0),
+            gatherer_count: None,
+            gather_ref_count: Some(count),
+            is_gathering: Some(false),
+            gatherable: Some(NO_GATHERABLE),
+            sync_ref_count: Some(count),
+        }),
+    }
+}
+
+/// The own member when gather number `gather` of the object with facet entity `facet` ends
+/// (retail chest 239343 and flint, with the 3746).
 pub(super) fn chest_gather_ended(facet: u64, gather: u32) -> BundleMember {
     let count = gather.saturating_add(1).saturating_mul(STATES_PER_GATHER);
     BundleMember {
@@ -355,8 +396,8 @@ fn find(entities: &FtueEntities, prefix: &[u8; GDE_REF_PREFIX_LEN]) -> Option<us
 mod tests {
     use nw_content::ftue_entities::{EntityGroup, FtueEntity};
     use nw_content::starter::{EquipSlot, KitItem};
-    use nw_messages::CONTAINER_TYPE_INDEX;
     use nw_messages::wire::{Reader, Writer};
+    use nw_messages::{CONTAINER_TYPE_INDEX, INTERACT_TYPE_INDEX};
 
     use super::*;
 

@@ -292,6 +292,7 @@ fn member_position(state: &MemberState) -> Option<[f32; 3]> {
         | MemberState::Achievement(_)
         | MemberState::DamageReceiver(_)
         | MemberState::GatherableController(_)
+        | MemberState::Interact(_)
         | MemberState::ItemManagement(_)
         | MemberState::Objectives(_)
         | MemberState::Progression(_)

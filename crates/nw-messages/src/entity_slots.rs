@@ -150,6 +150,7 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::Achievement(_)
         | MemberState::DamageReceiver(_)
         | MemberState::GatherableController(_)
+        | MemberState::Interact(_)
         | MemberState::ItemManagement(_)
         | MemberState::Objectives(_)
         | MemberState::Progression(_)

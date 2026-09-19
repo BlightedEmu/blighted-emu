@@ -48,6 +48,7 @@ mod asset_script;
 mod attack;
 mod combat_status;
 mod encounter;
+mod gathering;
 mod gear;
 mod hit_shape;
 mod level_assets;
@@ -62,6 +63,7 @@ mod statics;
 use asset_script::Step;
 use combat_status::CombatTimer;
 use encounter::{BAG_PREFIX, Order, Shove, Tutorial};
+use gathering::{GATHERABLE_ENTITY_BASE, Nodes, OpenGather};
 use gear::Gear;
 use level_assets::{ASSET_ENTITY_BASE, AssetViews, asset_gde_ref, spell_gde_ref};
 use level_flow::{AchievementRules, LevelFlow};
@@ -411,6 +413,8 @@ struct Player {
     extra_members: Vec<BundleMember>,
     /// Gathers this player made, for the counters of the gather state.
     gathers: u32,
+    /// The version of each gather node its client has, by slot key.
+    node_versions: HashMap<u64, u32>,
     /// The tutorial's static level entities it sees.
     statics: StaticViews,
     /// The tutorial's asset entities it sees.
@@ -487,6 +491,13 @@ pub struct SimWorld {
     boss_phases_shown: HashMap<u64, u32>,
     /// The last player each shown mob picked as its target, by entity number.
     look_targets: HashMap<u64, u64>,
+    /// The open world's gather nodes that left their default state.
+    nodes: Nodes,
+    /// The gathers that run.
+    open_gathers: Vec<OpenGather>,
+    /// The dead mobs that were skinned, and those whose corpse state the bundles sent.
+    skinned: HashSet<u64>,
+    skinned_shown: HashSet<u64>,
     dice: Dice,
     deaths: Vec<Departure>,
     /// Hit, death and facet messages since the last [`SimWorld::take_messages`].
@@ -553,6 +564,10 @@ impl SimWorld {
             boss_phases: HashMap::new(),
             boss_phases_shown: HashMap::new(),
             look_targets: HashMap::new(),
+            nodes: Nodes::default(),
+            open_gathers: Vec::new(),
+            skinned: HashSet::new(),
+            skinned_shown: HashSet::new(),
             content,
             mobs: Mobs::new(Arc::clone(&combat.spawns), &combat),
             mob_changes: MobChanges::default(),
@@ -1195,6 +1210,7 @@ impl SimWorld {
         self.server_ms = server_time;
         self.tick_hands(now_ms, server_time);
         self.tick_pushes(now_ms);
+        self.gathers_due(now_ms);
         self.tick_phasing();
         let mut messages = self.take_messages();
         let bundled = self.bundles(now_ms, server_time)?;
@@ -1626,7 +1642,12 @@ impl SimWorld {
                             .hide(&self.content.tutorial_level.statics, &prefix);
                     }
                     Order::AcceptGather(request) => {
-                        let accept = gather_accept(number, request);
+                        let accept = gather_answer(
+                            number,
+                            request,
+                            INTERACTION_ACCEPTED,
+                            CHEST_DISPLAY_NAME,
+                        );
                         send_now(&mut self.combat_messages, &player.connection, &[accept]);
                         let started = chest_gather_started(request.target_entity, player.gathers);
                         player.extra_members.extend(started);
@@ -1700,6 +1721,9 @@ impl SimWorld {
             return;
         };
         let Some(tutorial) = self.tutorials.get_mut(&number) else {
+            if let Some(&entity) = self.by_connection.get(connection) {
+                self.gather_open_world(entity, number, request, now_ms);
+            }
             return;
         };
         let orders = tutorial.interact(request, now_ms);
@@ -1724,6 +1748,10 @@ impl SimWorld {
         let Some(&entity) = self.by_connection.get(connection) else {
             return Ok(());
         };
+        if let ClientFacetMsg::CancelInteraction { interaction, .. } = message {
+            self.cancel_gather(entity, interaction);
+            return Ok(());
+        }
         let tutorial = self.is_tutorial();
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return Ok(());
@@ -2039,6 +2067,8 @@ impl SimWorld {
                 card.boss_phase = Some(phase);
                 card.boss_phase_changed = shown != Some(phase);
             }
+            card.skinned = self.skinned.contains(&entity);
+            card.skinned_changed = card.skinned && self.skinned_shown.insert(entity);
             let unseen = owner.is_some_and(|owner| !spawned.contains(&owner));
             if let Some(look) = content
                 .mob_looks
@@ -2079,6 +2109,11 @@ impl SimWorld {
         let mobs = &self.mobs;
         self.boss_phases
             .retain(|entity, _| mobs.health(*entity).is_some());
+        // A corpse leaves the skinned ones when its mob lives again or is gone.
+        self.skinned
+            .retain(|entity| mobs.health(*entity) == Some(0));
+        let skinned = &self.skinned;
+        self.skinned_shown.retain(|entity| skinned.contains(entity));
         // The radius is checked at start to be a finite number above 0.
         let Some(mut grid) = SpatialGrid::new(self.settings.interest_radius_m) else {
             return Ok(Bundled::default());
@@ -2092,6 +2127,7 @@ impl SimWorld {
             cards,
             mob_looks: &content.mob_looks,
             level: &content.tutorial_level,
+            nodes: &self.nodes,
             local_player_card: self.settings.local_player_card,
             now_ms,
             server_time,
@@ -2216,6 +2252,7 @@ impl SimWorld {
                     list_version: FIRST_VERSION,
                     extra_members: Vec::new(),
                     gathers: 0,
+                    node_versions: HashMap::new(),
                     statics: StaticViews::default(),
                     assets: AssetViews::default(),
                     frozen: false,
@@ -2345,16 +2382,23 @@ fn facet_number(target: &[u8; nw_messages::wire::RAW_ID_LEN]) -> u64 {
     u64::from_be_bytes(first)
 }
 
-/// The accept of player `number`'s gather `request` (3743; ftue-static-entities note, section 5).
-fn gather_accept(number: u64, request: InteractionRequest) -> ServerMessage {
+/// The answer to player `number`'s gather `request` (3743; ftue-static-entities note, section
+/// 5): `status` 1 accepts it, 2 refuses a busy one; the chest's accept names it (`name`), an
+/// open-world node's names nothing.
+fn gather_answer(
+    number: u64,
+    request: InteractionRequest,
+    status: u8,
+    name: &[u8],
+) -> ServerMessage {
     ServerMessage::InteractionValidated(InteractionValidatedMsg {
         header: nw_messages::FacetHeader::of(nw_messages::facet::component::INTERACTOR, number),
         target: request.target,
         target_entity: request.target_entity,
         interaction: request.interaction,
         kind: request.kind,
-        status: INTERACTION_ACCEPTED,
-        name: CHEST_DISPLAY_NAME.to_vec(),
+        status,
+        name: name.to_vec(),
         extra: 0,
         // An id of unknown meaning: one per player and interaction.
         id: *Uuid::new_v5(
@@ -2399,6 +2443,8 @@ struct Neighbourhood<'a> {
     mob_looks: &'a MobLooks,
     /// The tutorial level's static and asset entities.
     level: &'a FtueLevel,
+    /// The open world's gather nodes.
+    nodes: &'a Nodes,
     local_player_card: bool,
     now_ms: u64,
     server_time: u64,
@@ -2439,6 +2485,7 @@ impl Neighbourhood<'_> {
             if !(positions_only() || hold_others) {
                 numbers.extend(player.statics.numbers());
                 numbers.extend(player.assets.numbers());
+                numbers.extend(self.nodes.numbers_near(own_position));
             }
             numbers.sort_unstable();
             player.slots.keep_only(&numbers);
@@ -2620,6 +2667,13 @@ impl Neighbourhood<'_> {
                 }
             });
             for number in numbers {
+                if (GATHERABLE_ENTITY_BASE..STATIC_ENTITY_BASE).contains(&number) {
+                    if let Some(slot) = player.slots.slot(number) {
+                        let player = &mut **player;
+                        groups.extend(self.nodes.group(number, slot, &mut player.node_versions));
+                    }
+                    continue;
+                }
                 if number >= STATIC_ENTITY_BASE {
                     let (Some(ids), Some(slot)) = (statics_ids, player.slots.slot(number)) else {
                         continue;
@@ -2773,6 +2827,7 @@ mod tests {
 
     use nw_bus::CellTable;
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
+    use nw_content::gathering::{Gatherable, Gatherables, GatheringSource, LootRow};
     use nw_messages::{
         ALC_TYPE_INDEX, GDE_METADATA_TYPE_INDEX, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
         LOOK_CHOICES, MemberState, OPEN_WORLD_LEVEL, PAPERDOLL_TYPE_INDEX,
@@ -3040,6 +3095,25 @@ mod tests {
         positions_seen_by(world, outgoing, who)
             .into_iter()
             .map(|(number, _)| number)
+            .collect()
+    }
+
+    /// The reliable messages of player `number` among `outgoing`.
+    pub(super) fn messages_to(outgoing: &[Outgoing], number: u64) -> Vec<ServerMessage> {
+        outgoing
+            .iter()
+            .filter(|out| {
+                out.connection == connection(number)
+                    && out.reliable
+                    && out.channel == MESSAGE_CHANNEL
+            })
+            .flat_map(|out| &out.envelopes)
+            .map(|bytes| {
+                let envelope = Envelope::decode(bytes).expect("envelope");
+                ServerMessage::from_envelope(&envelope)
+                    .expect("known")
+                    .expect("decodes")
+            })
             .collect()
     }
 
@@ -3734,6 +3808,7 @@ mod tests {
             target_entity: facet_of(&encounter::CHEST_PREFIX),
             interaction: 7,
             kind: 14,
+            gatherable: None,
         };
         world.interact(&who, request, pressed_at);
         // The own states of the next tick (a card refresh also carries empty ones).
@@ -3766,6 +3841,161 @@ mod tests {
         let entity = world.by_connection[&who];
         let player = world.world.get::<Player>(entity).expect("player");
         assert_eq!(player.gathers, 1, "one gather made");
+    }
+
+    #[test]
+    fn an_open_world_flint_gather_fills_the_bag_and_depletes_the_node() {
+        /// Retail flint: `SingleStone` (CRC-32 of its lowercase id `a417137f`), 0.25 s, back
+        /// after 60 to 90 s, one `FlintT1`.
+        const FLINT: &str = "SingleStone";
+        const FLINT_CRC: u32 = 0xa417_137f;
+        const FLINT_GATHER_MS: u64 = 250;
+        const FLINT_RESPAWN_MS: (u64, u64) = (60_000, 90_000);
+        const ALWAYS: i64 = 100_000;
+        /// The 0.25 s gather rounded up to the 33 ms tick, plus one tick.
+        const GATHER_END_MS: u64 = 297;
+        const INTERACTION: u64 = 7;
+        const FLINT_ENTITY: u64 = 0x5b;
+        const ACCEPTED: u8 = 1;
+        const BUSY: u8 = 2;
+        const DEPLETED: u8 = 8;
+        const HEALTHY: u8 = 4;
+        const TICK_MS: u64 = 33;
+        let loot = |id: &str, cells: &[(u32, &str)], and_or: Option<&str>, max_roll| LootRow {
+            id: id.to_owned(),
+            and_or: and_or.map(str::to_owned),
+            conditions: None,
+            max_roll,
+            cells: cells
+                .iter()
+                .map(|(index, cell)| (*index, (*cell).to_owned()))
+                .collect(),
+        };
+        let gatherables = Gatherables::build(GatheringSource {
+            gatherables: vec![Gatherable {
+                id: FLINT.to_owned(),
+                gather_ms: FLINT_GATHER_MS,
+                respawn_ms: FLINT_RESPAWN_MS,
+                loot_table: Some(FLINT.to_owned()),
+                skinning: false,
+            }],
+            loot_rows: vec![
+                loot(FLINT, &[(1, gear::tests::FLINT)], Some("AND"), None),
+                loot(&format!("{FLINT}_Qty"), &[(1, "1")], None, None),
+                loot(&format!("{FLINT}_Probs"), &[(1, "0")], None, Some(ALWAYS)),
+            ],
+        });
+        let mut combat = test_combat();
+        combat.spawns = Vec::new().into();
+        let mut world = SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            combat,
+            Arc::new(PlayerContent {
+                kits: gear::tests::kits(),
+                gatherables,
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a"])).expect("table");
+        let who = connection(1);
+        let mut admit = admit_at(1, CELL_M / 2.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let spawn_at = NOW + OWN_CARD_DELAY_MS;
+        tick(&mut world, spawn_at);
+        world.heard_from(&who);
+        let request = InteractionRequest {
+            target: [0x5b; nw_messages::wire::RAW_ID_LEN],
+            target_entity: FLINT_ENTITY,
+            interaction: INTERACTION,
+            kind: nw_messages::client_input::GATHER_KIND,
+            gatherable: Some(FLINT_CRC),
+        };
+        let answers = |messages: &[Outgoing]| -> Vec<(u8, Vec<u8>)> {
+            messages_to(messages, 1)
+                .into_iter()
+                .filter_map(|message| match message {
+                    ServerMessage::InteractionValidated(answer) => {
+                        Some((answer.status, answer.name))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let flint_in_bag = |world: &SimWorld| -> u32 {
+            let entity = world.by_connection[&who];
+            world
+                .world
+                .get::<Player>(entity)
+                .and_then(|player| player.gear.as_ref())
+                .map(Gear::carried)
+                .unwrap_or_default()
+                .iter()
+                .filter(|item| item.item_id == gear::tests::FLINT)
+                .map(|item| item.quantity)
+                .sum()
+        };
+        let node_states = |world: &SimWorld, messages: &[Outgoing]| -> Vec<u8> {
+            bundle_of(messages, &who)
+                .map(|bundle| groups_in(world, &who, &bundle))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(number, _)| *number >= gathering::GATHERABLE_ENTITY_BASE)
+                .flat_map(|(_, update)| update.members)
+                .filter_map(|member| match member.state {
+                    MemberState::GatherableController(state) => state.gatherable_state,
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let pressed_at = spawn_at + TICK_MS;
+        world.interact(&who, request, pressed_at);
+        world.interact(&who, request, pressed_at + TICK_MS);
+        let accepted = tick(&mut world, pressed_at + TICK_MS).messages;
+        assert_eq!(
+            answers(&accepted),
+            [(ACCEPTED, Vec::new())],
+            "one accept with an empty name: a repeat starts nothing"
+        );
+        tick(&mut world, pressed_at + GATHER_END_MS - 1);
+        assert_eq!(flint_in_bag(&world), 0, "the gather still runs");
+        let ended = tick(&mut world, pressed_at + GATHER_END_MS).messages;
+        assert!(
+            messages_to(&ended, 1)
+                .iter()
+                .any(|message| matches!(message, ServerMessage::InteractionEnded(_))),
+            "the end goes to the client"
+        );
+        assert_eq!(flint_in_bag(&world), 1, "one flint");
+        let after_end = pressed_at + GATHER_END_MS + TICK_MS;
+        assert_eq!(
+            node_states(&world, &ended),
+            [DEPLETED],
+            "the node's card goes with the end"
+        );
+
+        world.interact(
+            &who,
+            InteractionRequest {
+                interaction: INTERACTION + 1,
+                ..request
+            },
+            after_end,
+        );
+        let refused = tick(&mut world, after_end + TICK_MS).messages;
+        assert_eq!(
+            answers(&refused),
+            [(BUSY, Vec::new())],
+            "a depleted node is busy"
+        );
+
+        let grown_at = pressed_at + GATHER_END_MS + FLINT_RESPAWN_MS.1;
+        let grown = tick(&mut world, grown_at).messages;
+        assert_eq!(node_states(&world, &grown), [HEALTHY], "it grows back");
     }
 
     #[test]

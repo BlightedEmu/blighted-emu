@@ -341,6 +341,7 @@ impl LevelFlow {
             | ClientFacetMsg::TimeSyncRequest { .. }
             | ClientFacetMsg::SwapItems { .. }
             | ClientFacetMsg::UnequipItem { .. }
+            | ClientFacetMsg::CancelInteraction { .. }
             | ClientFacetMsg::TriggerAreaPassthrough { .. }
             | ClientFacetMsg::TakeAllItems { .. }
             | ClientFacetMsg::EquipItem { .. }

@@ -12,6 +12,7 @@ pub mod fill;
 #[rustfmt::skip]
 pub mod generated;
 pub mod ftue_entities;
+pub mod gathering;
 pub mod ids;
 pub mod mob_prefabs;
 pub mod starter;

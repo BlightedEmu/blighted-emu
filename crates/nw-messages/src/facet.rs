@@ -57,6 +57,8 @@ pub const REQUEST_CUTSCENE_TYPE_INDEX: u64 = 6703;
 pub const CUTSCENE_ENDED_TYPE_INDEX: u64 = 6705;
 /// Type index of `PaperdollComponentServerFacet_ServerUnequipItem`.
 pub const UNEQUIP_ITEM_TYPE_INDEX: u64 = 3896;
+/// Type index of `InteractorComponentServerFacet_RequestCancelCommittedInteractionFromClient`.
+pub const CANCEL_INTERACTION_TYPE_INDEX: u64 = 2473;
 /// Type index of `PaperdollComponentServerFacet_ServerSwapItems`.
 pub const SWAP_ITEMS_TYPE_INDEX: u64 = 3900;
 /// Type index of `TimeComponentServerFacet_SyncToClient`: the client asks for the time of day.
@@ -285,6 +287,18 @@ pub enum ClientFacetMsg {
         /// A byte of unknown meaning (1 in the captures).
         flag: u8,
     },
+    /// 2473: the client ends its interaction: its acknowledgement of the server's end (15 to 25
+    /// ms after each 3746), or its cancel when it gives up or walks away (gather note).
+    CancelInteraction {
+        /// The header.
+        header: FacetHeader,
+        /// The object's entity id.
+        target: [u8; RAW_ID_LEN],
+        /// Its facet entity.
+        target_entity: u64,
+        /// The interaction id.
+        interaction: u64,
+    },
     /// 502: the client asks to leave the tutorial for the open world.
     ReturnToMainWorld {
         /// The header.
@@ -365,6 +379,14 @@ impl ClientFacetMsg {
                     bag_slot: reader.u32()?,
                     quantity: reader.u32()?,
                     flag: reader.u8()?,
+                })
+            }),
+            CANCEL_INTERACTION_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::CancelInteraction {
+                    header,
+                    target: reader.raw_id()?,
+                    target_entity: reader.u64()?,
+                    interaction: reader.u64()?,
                 })
             }),
             CINEMATIC_ENDED_TYPE_INDEX => read(|header, reader| {

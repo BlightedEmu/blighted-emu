@@ -17,11 +17,12 @@ use nw_bus::MobGhost;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::{
     AlcStamp, AlcState, AssetId, BOSS_PHASE_TYPE_INDEX, BundleGroup, BundleMember, BundlePayload,
-    DATA_BITS_ACTIVE, DYNAMIC_SLICE_SUB_ID, GDE_METADATA_COMPONENT, GdeMetadataReplicatedState,
-    InputPosition, LOCAL_PLAYER_INTEREST, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState,
-    MessageError, PLAYER_SLICE_ASSET, PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID,
-    SPAWN_STATE_MS, SPAWN_TELEPORT, ServerMessage, TeleportStep, VitalsData, VitalsState,
-    boss_phase_change, change_members, player_members, raw_id_of_entity,
+    DATA_BITS_ACTIVE, DYNAMIC_SLICE_SUB_ID, GATHERABLE_CONTROLLER_TYPE_INDEX,
+    GDE_METADATA_COMPONENT, GatherableControllerState, GdeMetadataReplicatedState, InputPosition,
+    LOCAL_PLAYER_INTEREST, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState, MessageError,
+    PLAYER_SLICE_ASSET, PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID, SPAWN_STATE_MS,
+    SPAWN_TELEPORT, ServerMessage, TeleportStep, VitalsData, VitalsState, boss_phase_change,
+    change_members, player_members, raw_id_of_entity,
 };
 use nw_sim_core::Position;
 
@@ -82,6 +83,10 @@ pub(super) struct MobCard {
     pub(super) look_target: Option<u64>,
     /// It picked a new target since the last bundle step.
     pub(super) look_target_changed: bool,
+    /// Its corpse was skinned.
+    pub(super) skinned: bool,
+    /// That happened since the last bundle step.
+    pub(super) skinned_changed: bool,
 }
 
 impl MobCard {
@@ -108,6 +113,8 @@ pub(super) const fn card_of(
         first_damage: false,
         boss_phase: None,
         boss_phase_changed: false,
+        skinned: false,
+        skinned_changed: false,
         asset: None,
         server_ms: 0,
         look_target: None,
@@ -371,6 +378,24 @@ pub(super) fn mob_group(
             },
         });
     }
+    // A skinned corpse's gatherable controller is depleted, on the prefab's controller component
+    // (gather note: retail boar c6:12 `01 01 08` at the skinning's end).
+    let controller = look
+        .first
+        .iter()
+        .find(|member| member.state.type_index() == GATHERABLE_CONTROLLER_TYPE_INDEX)
+        .map(|member| member.component);
+    if let Some(component) = controller
+        && card.skinned
+        && (carded || card.skinned_changed)
+    {
+        group.members.push(BundleMember {
+            component,
+            state: MemberState::GatherableController(GatherableControllerState {
+                gatherable_state: Some(DEPLETED_GATHERABLE),
+            }),
+        });
+    }
     // The look target goes with the card and after each new target, as on retail (right after
     // each first 2415; never cleared at a 3916).
     if let Some(target) = card.look_target
@@ -415,6 +440,9 @@ pub(super) fn log_mob_group(mob: u64, carded: bool, group: &BundleGroup) {
         "mob group"
     );
 }
+
+/// `gatherableState` Depleted (client enum): a skinned corpse.
+const DEPLETED_GATHERABLE: u8 = 8;
 
 /// Milliseconds per own state number (retail: the own state number goes up by one per 33 ms,
 /// live capture 117010 to 117112 ms).

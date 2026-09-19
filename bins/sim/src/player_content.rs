@@ -2,6 +2,7 @@
 //! The content a sim needs for its players besides combat: the starter kit of each archetype
 //! pick, the bit of each achievement, the look of each mob prefab, and the tutorial quest.
 
+use nw_content::gathering::Gatherables;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -155,6 +156,8 @@ pub struct PlayerContent {
     /// The tutorial level's entities: its static entities, its asset entities and the retail
     /// causes of their groups.
     pub tutorial_level: FtueLevel,
+    /// The gatherables and their loot tables.
+    pub gatherables: Gatherables,
 }
 
 impl PlayerContent {
@@ -180,6 +183,7 @@ impl PlayerContent {
             open_world_quest: ObjectiveTree::build(&task_rows(tables), OPEN_WORLD_QUEST_ROOT)
                 .map(Arc::new),
             tutorial_level,
+            gatherables: Gatherables::from_tables(tables),
         }
     }
 }

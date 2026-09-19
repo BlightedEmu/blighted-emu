@@ -587,6 +587,8 @@ pub(crate) mod tests {
     pub(crate) const SWORD: &str = "1hSwordT2_FTUE";
     const STAFF: &str = "MysticArchetype_2hStaffLife";
     const POTION: &str = "PotionHealthT1";
+    /// A resource the kit does not give: the bag takes it from a gather.
+    pub(crate) const FLINT: &str = "FlintT1";
     const POTION_SLOT: u32 = 14;
     const POTIONS: u32 = 2;
 
@@ -608,6 +610,7 @@ pub(crate) mod tests {
                     row(SWORD, "Weapon+EquippableMainHand+Sword+Melee"),
                     row(STAFF, "Weapon+EquippableTwoHand+LifeStaff+Magic"),
                     row(POTION, "Consumable+Potion"),
+                    row(FLINT, "Resource"),
                 ],
             )],
             backstories: vec![(

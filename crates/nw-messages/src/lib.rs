@@ -74,9 +74,9 @@ pub use combat::{
 pub use components::{
     BOSS_PHASE_TYPE_INDEX, COMBAT_STATUS_TYPE_INDEX, CombatStatusState, DAMAGE_RECEIVER_TYPE_INDEX,
     DELAYED_EVENT_TYPE_INDEX, DamageReceiverState, DelayedEventState,
-    GATHERABLE_CONTROLLER_TYPE_INDEX, GatherableControllerState, LOOK_TARGETING_TYPE_INDEX,
-    LookTargetingState, MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState,
-    boss_phase_change,
+    GATHERABLE_CONTROLLER_TYPE_INDEX, GatherableControllerState, INTERACT_TYPE_INDEX,
+    InteractState, LOOK_TARGETING_TYPE_INDEX, LookTargetingState, MANA_TYPE_INDEX, ManaState,
+    STAMINA_TYPE_INDEX, StaminaState, boss_phase_change,
 };
 pub use connected::{
     Block1415acc30, CALENDAR_CONNECTED_MSG_TYPE_INDEX, CalendarConnectedMsg, ConnectedBody,

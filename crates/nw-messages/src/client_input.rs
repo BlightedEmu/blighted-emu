@@ -169,6 +169,14 @@ pub enum Bit8 {
     Body(Vec<u8>),
 }
 
+/// The interaction kind of a gather.
+pub const GATHER_KIND: u8 = 14;
+/// Where a gather's body holds the CRC-32 of its gatherable (after the kind, the kind and the
+/// facet entity again).
+const GATHERABLE_AT: usize = 42;
+/// Bytes of a CRC-32.
+const CRC_LEN: usize = 4;
+
 /// The start of a bit-8 body: the object the client uses (ftue-static-entities note, section 5).
 /// The client sends it in the first record of every input until the interaction ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +189,9 @@ pub struct InteractionRequest {
     pub interaction: u64,
     /// The interaction kind (14 to gather, 28 a loot satchel).
     pub kind: u8,
+    /// A gather's gatherable: the CRC-32 of its lowercase `GatherableID` (gather note: retail
+    /// flint `a417137f` = `SingleStone`).
+    pub gatherable: Option<u32>,
 }
 
 impl Bit8 {
@@ -190,11 +201,21 @@ impl Bit8 {
             return None;
         };
         let mut reader = Reader::new(body);
+        let target = reader.raw_id().ok()?;
+        let target_entity = reader.u64().ok()?;
+        let interaction = reader.u64().ok()?;
+        let kind = reader.u8().ok()?;
+        let gatherable = (kind == GATHER_KIND)
+            .then(|| body.get(GATHERABLE_AT..GATHERABLE_AT + CRC_LEN))
+            .flatten()
+            .and_then(|bytes| <[u8; CRC_LEN]>::try_from(bytes).ok())
+            .map(u32::from_be_bytes);
         Some(InteractionRequest {
-            target: reader.raw_id().ok()?,
-            target_entity: reader.u64().ok()?,
-            interaction: reader.u64().ok()?,
-            kind: reader.u8().ok()?,
+            target,
+            target_entity,
+            interaction,
+            kind,
+            gatherable,
         })
     }
 }
@@ -1325,9 +1346,31 @@ mod tests {
                 target_entity: 2,
                 interaction: 3,
                 kind: 4,
+                gatherable: None,
             })
         );
         assert_eq!(Bit8::Empty.interaction(), None);
+    }
+
+    #[test]
+    fn a_gather_names_its_gatherable() {
+        // Retail flint request (gather note, newchar 739603): the first 46 of its 130 bytes.
+        const RETAIL_START: [u8; 46] = [
+            0x5b, 0x12, 0x3e, 0xc6, 0x38, 0xec, 0x89, 0x54, 0x9e, 0x70, 0xd2, 0x6a, 0x66, 0x94,
+            0xaf, 0xc5, 0x54, 0x89, 0xec, 0x38, 0xc6, 0x3e, 0x12, 0x5b, 0x05, 0x3c, 0xaa, 0xdb,
+            0xcc, 0xbb, 0xf4, 0xe5, 0x0e, 0x0e, 0x54, 0x89, 0xec, 0x38, 0xc6, 0x3e, 0x12, 0x5b,
+            0xa4, 0x17, 0x13, 0x7f,
+        ];
+        let request = Bit8::Body(RETAIL_START.to_vec())
+            .interaction()
+            .expect("a request");
+        assert_eq!(request.kind, GATHER_KIND);
+        assert_eq!(request.target_entity, 0x5489_ec38_c63e_125b);
+        assert_eq!(request.gatherable, Some(0xa417_137f), "SingleStone");
+        let cut = Bit8::Body(RETAIL_START[..40].to_vec())
+            .interaction()
+            .expect("a request");
+        assert_eq!(cut.gatherable, None, "too short for the gatherable");
     }
 
     #[test]

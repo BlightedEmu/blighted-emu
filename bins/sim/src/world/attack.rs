@@ -1274,16 +1274,15 @@ mod tests {
     use crate::mobs::mob_entity;
     use crate::world::gear::{self, Gear};
     use crate::world::tests::{
-        BORDER_X, CELL_M, NOW, SERVER_TIME, admit_at, connection, join, slot, table, test_spawn,
-        tick, world_with_spawns,
+        BORDER_X, CELL_M, NOW, SERVER_TIME, admit_at, connection, join, messages_to, slot, table,
+        test_spawn, tick, world_with_spawns,
     };
-    use crate::world::{MESSAGE_CHANNEL, MoveError, Outgoing, WorldSettings};
+    use crate::world::{MoveError, WorldSettings};
     use nw_bus::{Ghost, MobGhost, Point};
     use nw_content::combat::{CombatData, CombatRows, DEFAULT_SPREADSHOT_DAMAGE_ID};
     use nw_messages::{
         BodyCodec, DamageDealtMsg, DeathRecapMsg, FacetHeader, RAW_ID_LEN, ServerMessage, SpreadHit,
     };
-    use nw_reflect::Envelope;
 
     const LIGHT: &str = "1H_Sword_Attack1";
     const MOB_X: f32 = CELL_M / 2.0;
@@ -1617,25 +1616,6 @@ mod tests {
             panic!("a remote hit");
         };
         assert_eq!(remote.hit.target, mob());
-    }
-
-    /// The reliable messages of player `number` among `outgoing`.
-    fn messages_to(outgoing: &[Outgoing], number: u64) -> Vec<ServerMessage> {
-        outgoing
-            .iter()
-            .filter(|out| {
-                out.connection == connection(number)
-                    && out.reliable
-                    && out.channel == MESSAGE_CHANNEL
-            })
-            .flat_map(|out| &out.envelopes)
-            .map(|bytes| {
-                let envelope = Envelope::decode(bytes).expect("envelope");
-                ServerMessage::from_envelope(&envelope)
-                    .expect("known")
-                    .expect("decodes")
-            })
-            .collect()
     }
 
     fn amount(hit: u32) -> f32 {

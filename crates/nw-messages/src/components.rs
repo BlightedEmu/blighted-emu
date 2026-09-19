@@ -6,7 +6,8 @@
 //! `MB::DelayedEventComponentReplicatedState` (type 3139),
 //! `MB::LookTargetingComponentReplicatedState` (type 2443), `MB::ManaComponentReplicatedState`
 //! (type 1652), `MB::DamageReceiverComponentReplicatedState` (type 1528) and
-//! `MB::GatherableControllerReplicatedState` (type 12). Each table ends every reached captured
+//! `MB::GatherableControllerReplicatedState` (type 12) and `MB::InteractReplicatedState`
+//! (type 2930). Each table ends every reached captured
 //! body of its class.
 
 use crate::slots::{children_mask, read_slot_0, write_known};
@@ -24,6 +25,8 @@ pub const MANA_TYPE_INDEX: u64 = 1652;
 pub const DAMAGE_RECEIVER_TYPE_INDEX: u64 = 1528;
 /// Type index of `MB::GatherableControllerReplicatedState`.
 pub const GATHERABLE_CONTROLLER_TYPE_INDEX: u64 = 12;
+/// Type index of `MB::InteractReplicatedState`.
+pub const INTERACT_TYPE_INDEX: u64 = 2930;
 /// Type index of `MB::BossPhaseComponentReplicatedState`.
 pub const BOSS_PHASE_TYPE_INDEX: u64 = 403;
 /// The slot byte and child mask of a boss phase change: slot 0, child 0 (the phase) only.
@@ -55,6 +58,10 @@ const DAMAGE_RECEIVER_CHILDREN: u8 = 3;
 /// The sized child of the gatherable controller: `gatherableState` (a byte). The width of child 1
 /// (`replenishTime`) is Unknown, so a body that sets it is not read.
 const GATHERABLE_CONTROLLER_CHILDREN: u8 = 1;
+/// The sized child of the interact state: child 0, the interaction's `Enabled` flag (a byte;
+/// retail `01 01 00` on a taken bag and a depleted node, `01 01 01` on a node that grew back). The
+/// other children are Unknown, so a body that sets one is not read.
+const INTERACT_CHILDREN: u8 = 1;
 
 /// `MB::StaminaComponentReplicatedState`: six big-endian `f32` children (`FUN_14671a230`).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -374,6 +381,41 @@ impl GatherableControllerState {
     }
 }
 
+/// `MB::InteractReplicatedState`: whether an object can be interacted with now.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct InteractState {
+    /// Child 0, `Enabled`.
+    pub enabled: Option<bool>,
+}
+
+impl InteractState {
+    /// Reads the state from the bundle path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the body ends early or sets an unsized child.
+    pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+        let mut state = Self::default();
+        read_slot_0(reader, "interact", INTERACT_CHILDREN, |reader, _| {
+            state.enabled = Some(reader.u8()? != 0);
+            Ok(())
+        })?;
+        Ok(state)
+    }
+
+    /// Writes the state for the bundle path.
+    pub fn write(&self, writer: &mut Writer) {
+        write_known(
+            writer,
+            children_mask(&[self.enabled.is_some()]),
+            INTERACT_CHILDREN,
+            |writer, _| {
+                self.enabled.map(|enabled| writer.u8(u8::from(enabled)));
+            },
+        );
+    }
+}
+
 /// `MB::ManaComponentReplicatedState` (`FUN_1467088c0`): four big-endian `f32` children. The
 /// names of the first two are Unknown (short strings the decompiler does not show); both are 100
 /// on the captured first bodies.
@@ -589,6 +631,18 @@ mod tests {
         let mut writer = Writer::new();
         gatherable.write(&mut writer);
         assert_eq!(writer.finish(), RETAIL_GATHERABLE);
+    }
+
+    #[test]
+    fn the_interact_state_is_its_enabled_flag() {
+        // Retail: a taken bag and a depleted node, then a node that grew back.
+        for (body, enabled) in [([0x01, 0x01, 0x00], false), ([0x01, 0x01, 0x01], true)] {
+            let state = InteractState::read(&mut Reader::new(&body)).expect("read");
+            assert_eq!(state.enabled, Some(enabled));
+            let mut writer = Writer::new();
+            state.write(&mut writer);
+            assert_eq!(writer.finish(), body);
+        }
     }
 
     #[test]

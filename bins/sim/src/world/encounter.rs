@@ -1132,7 +1132,8 @@ impl Tutorial {
             | ClientFacetMsg::UiScreenOpened { .. }
             | ClientFacetMsg::TimeSyncRequest { .. }
             | ClientFacetMsg::SwapItems { .. }
-            | ClientFacetMsg::UnequipItem { .. } => {
+            | ClientFacetMsg::UnequipItem { .. }
+            | ClientFacetMsg::CancelInteraction { .. } => {
                 return;
             }
         };
@@ -1888,6 +1889,7 @@ pub(crate) mod tests {
             target_entity: 1,
             interaction: 2,
             kind: 14,
+            gatherable: None,
         };
         assert_eq!(
             tutorial.interact(request, NOW),
