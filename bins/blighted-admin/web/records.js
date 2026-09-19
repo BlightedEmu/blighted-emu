@@ -101,7 +101,7 @@ async function noLoot() {
 
 async function simulate() {
   const form = elements.simulate.elements;
-  const made = simulationRequest(open.id, form.rolls.value, form.enemy.value, form.content.value);
+  const made = simulationRequest(open.id, form.rolls.value, form.enemy.value, form.content.value, form.tags.value);
   if (made.error) {
     say(made.error, true);
     return;

@@ -34,7 +34,7 @@ Do not copy client values into a file; name only what you change.
 | `consumable` | `items/consumables/` | `ConsumableItemDefinitions` | `ConsumableID` |
 | `perk` | `perks/` | `PerkData` | `PerkID` |
 | `loot_table` | `loot/tables/` | `LootTablesData` | `LootTableID` |
-| `mob` | `mobs/` | `VitalsData` (also its `loot_table_id`) | `VitalsID` |
+| `mob` | `mobs/` | `VitalsBaseData` (also its `loot_table_id`, `loot_drop_chance`, `loot_tags`) | `VitalsID` |
 | `npc` | `npcs/types/` | `NPCData` | `NPCId` |
 | `objective` | `quests/` | `Objectives` | `ObjectiveID` |
 | `objective_task` | `quests/tasks/` | `ObjectiveTasks` | `TaskID` |
@@ -106,7 +106,7 @@ kind = "spawn_group"
 action = "add"
 id = "gate_wolves"
 map = "newworld_vitaeeterna"
-vitals = "Wolf_Alpha"      # a VitalsData id
+vitals = "Wolf_Alpha"      # a VitalsBaseData id
 level = 20
 points = [[100.0, 205.0, 30.0], [102.0, 207.0, 30.0]]
 ai_profile = "gate_guard"  # optional

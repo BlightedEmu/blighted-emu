@@ -38,8 +38,8 @@ test('an override names only the changed fields', () => {
 });
 
 test('a simulation needs a roll count in range and whole levels', () => {
-  assert.deepEqual(simulationRequest('LT_Wolf', '10000', '12', '1'), {
-    request: { table: 'LT_Wolf', rolls: 10000, enemy_level: 12, content_level: 1 },
+  assert.deepEqual(simulationRequest('LT_Wolf', '10000', '12', '1', ' Common, Boss ,'), {
+    request: { table: 'LT_Wolf', rolls: 10000, enemy_level: 12, content_level: 1, tags: ['Common', 'Boss'] },
   });
   assert.ok(simulationRequest('LT_Wolf', '0', '1', '1').error);
   assert.ok(simulationRequest('LT_Wolf', '100001', '1', '1').error);

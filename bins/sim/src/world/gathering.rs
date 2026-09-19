@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use bevy_ecs::entity::Entity;
 use nw_content::gathering::Gatherable;
-use nw_content::loot::LootLevels;
+use nw_content::loot::LootContext;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     BundleGroup, BundleMember, GatherableControllerState, GdeMetadataReplicatedState,
@@ -192,12 +192,13 @@ impl SimWorld {
     }
 
     fn end_gather(&mut self, gather: &OpenGather, now_ms: u64) {
-        let levels = LootLevels {
+        let levels = LootContext {
             enemy: gather
                 .mob
                 .and_then(|mob| self.mobs.level(mob))
                 .unwrap_or(MOB_LEVEL),
             content: PLAYER_LOOT_LEVEL,
+            tags: &[],
         };
         let dice = &mut self.dice;
         let loot = gather

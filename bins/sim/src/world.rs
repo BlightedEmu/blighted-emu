@@ -2861,7 +2861,7 @@ mod tests {
     use nw_bus::CellTable;
     use nw_carrier::sender::MAX_CHUNK_PAYLOAD;
     use nw_content::gathering::{Gatherable, Gatherables};
-    use nw_content::loot::{LootLevels, LootRow, LootSource, LootTables, MobLoot};
+    use nw_content::loot::{LootContext, LootRow, LootSource, LootTables, MobLoot, MobLootRow};
     use nw_messages::{
         ALC_TYPE_INDEX, GDE_METADATA_TYPE_INDEX, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
         LOOK_CHOICES, MemberState, OPEN_WORLD_LEVEL, PAPERDOLL_TYPE_INDEX,
@@ -4440,7 +4440,13 @@ mod tests {
             Arc::new(PlayerContent {
                 kits: gear::tests::kits(),
                 loot: tables.clone(),
-                mob_loot: MobLoot::build([(TEST_MOB.to_owned(), Some(TABLE.to_owned()), None)]),
+                mob_loot: MobLoot::build([MobLootRow {
+                    vitals_id: TEST_MOB.to_owned(),
+                    can_drop_loot: true,
+                    table: Some(TABLE.to_owned()),
+                    chance: None,
+                    tags: None,
+                }]),
                 ..PlayerContent::default()
             }),
         );
@@ -4470,9 +4476,10 @@ mod tests {
         );
         let kill_rate = f64::from(count(gear::tests::POTION)) / f64::from(KILLS);
         let mut dice = Dice::new(SIMULATOR_SEED);
-        let levels = LootLevels {
+        let levels = LootContext {
             enemy: TEST_LEVEL,
             content: 1,
+            tags: &[],
         };
         let simulated: u32 = (0..KILLS)
             .map(|_| {

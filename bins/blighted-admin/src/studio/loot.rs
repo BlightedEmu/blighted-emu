@@ -11,7 +11,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use nw_common::time::unix_ms;
-use nw_content::loot::{LootLevels, LootTables};
+use nw_content::loot::{LootContext, LootTables};
 use nw_design::{Kind, merged_bundle};
 use nw_sim_core::Dice;
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,9 @@ pub struct SimulateRequest {
     pub enemy_level: u32,
     /// `MinContLevel`.
     pub content_level: u32,
+    /// The mob's loot tags, for tables with a tag condition.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// One item of a simulation.
@@ -83,9 +86,10 @@ pub fn simulate_rolls(
     if !tables.contains(&request.table) {
         return None;
     }
-    let levels = LootLevels {
+    let levels = LootContext {
         enemy: request.enemy_level,
         content: request.content_level,
+        tags: &request.tags,
     };
     let mut totals: BTreeMap<String, (u32, u64)> = BTreeMap::new();
     for _ in 0..request.rolls {
@@ -215,6 +219,7 @@ mod tests {
             rolls: ROLLS,
             enemy_level: 1,
             content_level: 1,
+            tags: Vec::new(),
         };
         let simulation = simulate_rolls(&tables, &request, &mut Dice::new(1)).expect("table");
         assert_eq!(simulation.items[0].item, "Coin");

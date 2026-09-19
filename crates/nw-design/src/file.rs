@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use nw_content::Tables;
 use nw_content::generated::{
     ArmorItemDefinitions, ConsumableItemDefinitions, LootTablesData, MasterItemDefinitions,
-    NPCData, ObjectiveTasks, Objectives, PerkData, VitalsData, WeaponItemDefinitions,
+    NPCData, ObjectiveTasks, Objectives, PerkData, VitalsBaseData, WeaponItemDefinitions,
 };
 use nw_content::table::{FromDatasheet, Table};
 use serde::de::{self, DeserializeOwned, Visitor};
@@ -29,7 +29,7 @@ pub enum Kind {
     Perk,
     /// A `LootTablesData` row.
     LootTable,
-    /// A `VitalsData` row (a mob type, with its loot table).
+    /// A `VitalsBaseData` row (a mob type, with its loot table, drop chance and loot tags).
     Mob,
     /// An `NPCData` row.
     Npc,
@@ -149,7 +149,7 @@ impl Kind {
             Self::Consumable => visitor.visit::<ConsumableItemDefinitions>(),
             Self::Perk => visitor.visit::<PerkData>(),
             Self::LootTable => visitor.visit::<LootTablesData>(),
-            Self::Mob => visitor.visit::<VitalsData>(),
+            Self::Mob => visitor.visit::<VitalsBaseData>(),
             Self::Npc => visitor.visit::<NPCData>(),
             Self::Objective => visitor.visit::<Objectives>(),
             Self::ObjectiveTask => visitor.visit::<ObjectiveTasks>(),
@@ -260,7 +260,7 @@ row!(
 );
 row!(PerkData, perk_id, perk_data);
 row!(LootTablesData, loot_table_id, loot_tables_data);
-row!(VitalsData, vitals_id, vitals_data);
+row!(VitalsBaseData, vitals_id, vitals_base_data);
 row!(NPCData, npc_id, npc_data);
 row!(Objectives, objective_id, objectives);
 row!(ObjectiveTasks, task_id, objective_tasks);

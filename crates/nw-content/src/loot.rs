@@ -6,7 +6,9 @@
 //! entry's quantity, `a` or `a-b`) and `T_Probs` (each entry's threshold, with `MaxRoll`). An
 //! `AND` table rolls each entry and drops it when the roll reaches its threshold; an `OR` table
 //! rolls once and drops the entry with the highest threshold the roll reaches. A table with the
-//! condition `EnemyLevel` or `MinContLevel` uses that level as its roll. An entry `[LTID]X` rolls
+//! condition `EnemyLevel` or `MinContLevel` uses that level as its roll; `GlobalMod` rolls as a
+//! table with no condition (no global bonus); any other condition is a loot tag (`Common`,
+//! `Boss`, ...): the table rolls only for a mob with that tag (Inferred). An entry `[LTID]X` rolls
 //! table `X` quantity times; an entry `[LBID]X` drops quantity items of loot bucket `X`, each
 //! picked with equal chance (the bucket's tags and odds are not read: Unknown).
 
@@ -30,18 +32,23 @@ const AND: &str = "AND";
 /// The conditions whose level is a table's roll.
 const ENEMY_LEVEL: &str = "EnemyLevel";
 const CONTENT_LEVEL: &str = "MinContLevel";
+/// The condition of a table whose roll gets a global loot bonus (Inferred from its name; the
+/// creature master table has it). The server adds no bonus, so the roll is a plain one.
+const GLOBAL_MOD: &str = "GlobalMod";
 /// How deep `[LTID]` entries may nest (retail tables nest 3 deep).
 const MAX_DEPTH: u8 = 8;
 /// The `RowPlaceholders` value of the bucket sheet row that names each column's bucket.
 const BUCKET_NAMES_ROW: &str = "FIRSTROW";
 
-/// The levels a loot roll reads.
+/// What a loot roll reads: the levels and the loot tags of the mob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LootLevels {
+pub struct LootContext<'a> {
     /// The level of the mob killed or skinned (`EnemyLevel`).
     pub enemy: u32,
     /// The level of the player (`MinContLevel`).
     pub content: u32,
+    /// The mob's loot tags (`LootTags`); none for a gather.
+    pub tags: &'a [String],
 }
 
 /// One entry of a loot table: its item, table or bucket, quantity and threshold.
@@ -53,7 +60,7 @@ struct LootEntry {
 }
 
 /// What a table rolls on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum Roll {
     /// A random roll below this.
     Random(u32),
@@ -61,8 +68,8 @@ enum Roll {
     EnemyLevel,
     /// The player's level.
     ContentLevel,
-    /// A condition this server does not read: the table drops nothing.
-    Unread,
+    /// A random roll below the first, only for a mob with the loot tag of the second.
+    Tagged(u32, String),
 }
 
 /// One loot table.
@@ -209,10 +216,10 @@ impl LootTables {
                     .and_then(|roll| u32::try_from(roll).ok())
                     .unwrap_or(1);
                 let roll = match row.conditions.as_deref() {
-                    None => Roll::Random(max_roll),
+                    None | Some(GLOBAL_MOD) => Roll::Random(max_roll),
                     Some(ENEMY_LEVEL) => Roll::EnemyLevel,
                     Some(CONTENT_LEVEL) => Roll::ContentLevel,
-                    Some(_) => Roll::Unread,
+                    Some(tag) => Roll::Tagged(max_roll, tag.to_owned()),
                 };
                 (
                     (*id).to_owned(),
@@ -244,23 +251,23 @@ impl LootTables {
         self.tables.contains_key(id)
     }
 
-    /// The items loot table `table` drops at `levels`, merged by item, with `below(n)` a random
+    /// The items loot table `table` drops in `context`, merged by item, with `below(n)` a random
     /// number below `n`.
     pub fn roll(
         &self,
         table: &str,
-        levels: LootLevels,
+        context: LootContext<'_>,
         below: &mut impl FnMut(u32) -> u32,
     ) -> Vec<(String, u32)> {
         let mut drops: BTreeMap<String, u32> = BTreeMap::new();
-        self.roll_into(table, levels, below, 0, &mut drops);
+        self.roll_into(table, context, below, 0, &mut drops);
         drops.into_iter().collect()
     }
 
     fn roll_into(
         &self,
         table: &str,
-        levels: LootLevels,
+        context: LootContext<'_>,
         below: &mut impl FnMut(u32) -> u32,
         depth: u8,
         drops: &mut BTreeMap<String, u32>,
@@ -268,11 +275,15 @@ impl LootTables {
         let Some(table) = self.tables.get(table).filter(|_| depth < MAX_DEPTH) else {
             return;
         };
-        let draw = |below: &mut dyn FnMut(u32) -> u32| match table.roll {
-            Roll::Random(max) => Some(below(max.max(1))),
-            Roll::EnemyLevel => Some(levels.enemy),
-            Roll::ContentLevel => Some(levels.content),
-            Roll::Unread => None,
+        let draw = |below: &mut dyn FnMut(u32) -> u32| match &table.roll {
+            Roll::Random(max) => Some(below((*max).max(1))),
+            Roll::EnemyLevel => Some(context.enemy),
+            Roll::ContentLevel => Some(context.content),
+            Roll::Tagged(max, tag) => context
+                .tags
+                .iter()
+                .any(|own| own.eq_ignore_ascii_case(tag))
+                .then(|| below((*max).max(1))),
         };
         let dropped: Vec<&LootEntry> = if table.and {
             table
@@ -302,7 +313,7 @@ impl LootTables {
             let count = count_of(entry.quantity, below);
             if let Some(inner) = entry.item.strip_prefix(TABLE_PREFIX) {
                 for _ in 0..count {
-                    self.roll_into(inner, levels, below, depth + 1, drops);
+                    self.roll_into(inner, context, below, depth + 1, drops);
                 }
             } else if let Some(bucket) = entry.item.strip_prefix(BUCKET_PREFIX) {
                 let items = self.buckets.get(bucket).map_or(&[][..], Vec::as_slice);
@@ -324,6 +335,9 @@ impl LootTables {
 /// The full chance of a mob drop, in percent.
 pub const FULL_CHANCE_PERCENT: u32 = 100;
 
+/// Separates the tags of a `LootTags` cell.
+const TAG_SEPARATOR: char = ',';
+
 /// What a killed mob type rolls.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MobDrop {
@@ -331,6 +345,23 @@ pub struct MobDrop {
     pub table: String,
     /// `LootDropChance`, read as a percent (its unit is Unknown); 100 when the row has none.
     pub chance_percent: u32,
+    /// `LootTags`: the conditions of the tables this mob's loot rolls.
+    pub tags: Vec<String>,
+}
+
+/// One mob type's loot cells.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MobLootRow {
+    /// `VitalsID`.
+    pub vitals_id: String,
+    /// `CanDropLoot`; a `VitalsData` row has no such cell and can.
+    pub can_drop_loot: bool,
+    /// `LootTableId`.
+    pub table: Option<String>,
+    /// `LootDropChance`.
+    pub chance: Option<f64>,
+    /// `LootTags`.
+    pub tags: Option<String>,
 }
 
 /// The drop of every mob type by the CRC-32 of its lowercase `VitalsID`.
@@ -340,43 +371,71 @@ pub struct MobLoot {
 }
 
 impl MobLoot {
-    /// The mob drops of `tables` (`VitalsData`).
+    /// The mob drops of `tables`: the mob types of `VitalsBaseData`, then the few of
+    /// `VitalsData`.
     pub fn from_tables(tables: &Tables) -> Self {
-        Self::build(
-            tables
-                .vitals_data
-                .iter()
-                .flat_map(|table| &table.rows)
-                .map(|row| {
-                    (
-                        row.vitals_id.clone(),
-                        row.loot_table_id.clone(),
-                        row.loot_drop_chance,
-                    )
-                }),
-        )
+        let base = tables
+            .vitals_base_data
+            .iter()
+            .flat_map(|table| &table.rows)
+            .map(|row| MobLootRow {
+                vitals_id: row.vitals_id.clone(),
+                can_drop_loot: row.can_drop_loot,
+                table: row.loot_table_id.clone(),
+                chance: row
+                    .loot_drop_chance
+                    .as_deref()
+                    .and_then(|text| text.trim().parse().ok()),
+                tags: row.loot_tags.clone(),
+            });
+        let other = tables
+            .vitals_data
+            .iter()
+            .flat_map(|table| &table.rows)
+            .map(|row| MobLootRow {
+                vitals_id: row.vitals_id.clone(),
+                can_drop_loot: true,
+                table: row.loot_table_id.clone(),
+                chance: row.loot_drop_chance.map(|chance| chance as f64),
+                tags: None,
+            });
+        Self::build(base.chain(other))
     }
 
-    /// The drops of `(vitals id, loot table, drop chance)` rows; a row with no table drops
-    /// nothing.
-    pub fn build(rows: impl IntoIterator<Item = (String, Option<String>, Option<i64>)>) -> Self {
-        let by_crc = rows
-            .into_iter()
-            .filter_map(|(vitals_id, table, chance)| {
-                let table = table.filter(|table| !table.trim().is_empty())?;
-                let chance_percent = chance.map_or(FULL_CHANCE_PERCENT, |chance| {
-                    u32::try_from(chance.clamp(0, i64::from(FULL_CHANCE_PERCENT)))
-                        .unwrap_or(FULL_CHANCE_PERCENT)
+    /// The drops of `rows`; a row that cannot drop loot or has no table drops nothing, and the
+    /// first row of a vitals id wins.
+    pub fn build(rows: impl IntoIterator<Item = MobLootRow>) -> Self {
+        let full = f64::from(FULL_CHANCE_PERCENT);
+        let mut by_crc = HashMap::new();
+        for row in rows {
+            let can_drop = row.can_drop_loot;
+            let Some(table) = row
+                .table
+                .filter(|table| can_drop && !table.trim().is_empty())
+            else {
+                continue;
+            };
+            // A percent from 0 to 100: the cast cannot overflow.
+            let chance_percent = row.chance.map_or(FULL_CHANCE_PERCENT, |chance| {
+                chance.clamp(0.0, full).round() as u32
+            });
+            let tags = row
+                .tags
+                .as_deref()
+                .unwrap_or_default()
+                .split(TAG_SEPARATOR)
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty())
+                .map(str::to_owned)
+                .collect();
+            by_crc
+                .entry(lowercase_crc32(&row.vitals_id))
+                .or_insert(MobDrop {
+                    table,
+                    chance_percent,
+                    tags,
                 });
-                Some((
-                    lowercase_crc32(&vitals_id),
-                    MobDrop {
-                        table,
-                        chance_percent,
-                    },
-                ))
-            })
-            .collect();
+        }
         Self { by_crc }
     }
 
@@ -475,9 +534,10 @@ mod tests {
         LootTables::build(LootSource { rows, bucket_items })
     }
 
-    const LEVELS: LootLevels = LootLevels {
+    const LEVELS: LootContext<'static> = LootContext {
         enemy: 3,
         content: 1,
+        tags: &[],
     };
 
     #[test]
@@ -541,6 +601,34 @@ mod tests {
     }
 
     #[test]
+    fn a_global_mod_table_rolls_plainly_and_a_tag_table_only_for_its_tag() {
+        let rows = vec![
+            loot("Master", &[(1, "Bone")], Some("AND"), Some("GlobalMod")),
+            loot("Master_Qty", &[(1, "1")], None, None),
+            probs("Master_Probs", &[(1, "0")], 100),
+            loot("Odd", &[(1, "Bone")], Some("AND"), Some("SomethingElse")),
+            loot("Odd_Qty", &[(1, "1")], None, None),
+            probs("Odd_Probs", &[(1, "0")], 100),
+        ];
+        let tables = tables(rows, Vec::new());
+        let mut first = |_: u32| 0;
+        assert_eq!(
+            tables.roll("Master", LEVELS, &mut first),
+            [("Bone".to_owned(), 1)]
+        );
+        assert!(tables.roll("Odd", LEVELS, &mut first).is_empty());
+        let tagged = [String::from("somethingelse")];
+        let mob = LootContext {
+            tags: &tagged,
+            ..LEVELS
+        };
+        assert_eq!(
+            tables.roll("Odd", mob, &mut first),
+            [("Bone".to_owned(), 1)]
+        );
+    }
+
+    #[test]
     fn a_table_that_rolls_itself_stops() {
         let rows = vec![
             loot(
@@ -562,29 +650,43 @@ mod tests {
 
     #[test]
     fn a_mob_type_drops_its_table_at_its_chance() {
+        let row = |id: &str, table: Option<&str>, chance: Option<f64>| MobLootRow {
+            vitals_id: id.to_owned(),
+            can_drop_loot: true,
+            table: table.map(str::to_owned),
+            chance,
+            tags: None,
+        };
         let loot = MobLoot::build([
-            (
-                "Wolf_Alpha".to_owned(),
-                Some("WolfLoot".to_owned()),
-                Some(25),
-            ),
-            ("Boar".to_owned(), Some("BoarLoot".to_owned()), None),
-            ("Ghost".to_owned(), None, Some(50)),
-            ("Odd".to_owned(), Some("OddLoot".to_owned()), Some(900)),
+            MobLootRow {
+                tags: Some("Common, Wolf".to_owned()),
+                ..row("Wolf_Alpha", Some("WolfLoot"), Some(25.0))
+            },
+            row("Boar", Some("BoarLoot"), None),
+            row("Ghost", None, Some(50.0)),
+            row("Odd", Some("OddLoot"), Some(900.0)),
+            MobLootRow {
+                can_drop_loot: false,
+                ..row("Wall", Some("WallLoot"), None)
+            },
+            row("Boar", Some("SecondBoarLoot"), None),
         ]);
         let of = |id: &str| loot.of(lowercase_crc32(id)).cloned();
         assert_eq!(
             of("wolf_alpha"),
             Some(MobDrop {
                 table: "WolfLoot".to_owned(),
-                chance_percent: 25
+                chance_percent: 25,
+                tags: vec!["Common".to_owned(), "Wolf".to_owned()],
             })
         );
+        let boar = of("Boar").expect("boar");
         assert_eq!(
-            of("Boar").map(|drop| drop.chance_percent),
-            Some(FULL_CHANCE_PERCENT)
+            (boar.chance_percent, boar.table.as_str()),
+            (FULL_CHANCE_PERCENT, "BoarLoot")
         );
         assert_eq!(of("Ghost"), None, "no table: no loot");
+        assert_eq!(of("Wall"), None, "cannot drop loot");
         assert_eq!(
             of("Odd").map(|drop| drop.chance_percent),
             Some(FULL_CHANCE_PERCENT)

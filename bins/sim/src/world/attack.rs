@@ -22,7 +22,7 @@ use nw_bus::{BusId, ConnectionRef, Hit};
 use std::sync::Arc;
 
 use nw_content::combat::{AttackRow, WeaponKind, WeaponRow};
-use nw_content::loot::{FULL_CHANCE_PERCENT, LootLevels};
+use nw_content::loot::{FULL_CHANCE_PERCENT, LootContext};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::paperdoll::slot;
 use nw_messages::{
@@ -984,25 +984,26 @@ impl SimWorld {
         if self.is_tutorial() || self.player_by_number(killer).is_none() {
             return;
         }
+        let content = Arc::clone(&self.content);
         let Some(drop) = self
             .mobs
             .vitals_of(mob)
-            .and_then(|vitals| self.content.mob_loot.of(vitals))
+            .and_then(|vitals| content.mob_loot.of(vitals))
         else {
             return;
         };
         if self.dice.below(FULL_CHANCE_PERCENT) >= drop.chance_percent {
             return;
         }
-        let levels = LootLevels {
+        let context = LootContext {
             enemy: self.mobs.level(mob).unwrap_or(MOB_LEVEL),
             content: PLAYER_LOOT_LEVEL,
+            tags: &drop.tags,
         };
-        let content = Arc::clone(&self.content);
         let dice = &mut self.dice;
         let loot = content
             .loot
-            .roll(&drop.table, levels, &mut |below| dice.below(below));
+            .roll(&drop.table, context, &mut |below| dice.below(below));
         self.give_loot(killer, loot, now_ms);
     }
 
