@@ -675,7 +675,7 @@ impl SimWorld {
             },
             client_context: LOGIN_CLIENT_CONTEXT,
             flow,
-            items: None,
+            items: admit.items.clone(),
             drawn_weapon: None,
             experience: 0,
         };
@@ -3010,6 +3010,7 @@ mod tests {
             bundles_sent: 0,
             look: None,
             backstory: None,
+            items: None,
         }
     }
 

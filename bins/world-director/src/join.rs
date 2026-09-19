@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! One join (M5 spec section 3.1): check the account, load the position, take an entity number,
-//! and ask the owner of the cell to take the player.
+//! One join (M5 spec section 3.1): check the account, load the position and the items, take an
+//! entity number, and ask the owner of the cell to take the player.
 
 use std::time::Duration;
 
-use nw_bus::{Admit, AdmitReply, Bus, Join, MOB_ENTITY_BASE, Point, SimSlot, subject};
-use nw_db::{PgPool, SavedPosition, character_by_id, character_position, next_entity_number};
+use nw_bus::{
+    Admit, AdmitReply, Bus, CarriedItem, ItemPlace, Join, MOB_ENTITY_BASE, Point, SimSlot, subject,
+};
+use nw_db::{
+    PgPool, SavedItem, SavedPlace, SavedPosition, character_by_id, character_items,
+    character_position, next_entity_number,
+};
 use nw_login::look::{saved_backstory, saved_look};
 use nw_sim_core::{Position, TUTORIAL_FOLDER, TUTORIAL_START};
 use uuid::Uuid;
@@ -157,7 +162,16 @@ pub async fn route_join(
             NEW_PLAYER_COUNT,
         ),
     };
-    let (sim, position) = match tutorial.filter(|_| starts_in_tutorial(saved.as_ref())) {
+    let tutorial = tutorial.filter(|_| starts_in_tutorial(saved.as_ref()));
+    // The tutorial always starts from the starter kit (admin studio S5 plan).
+    let items = match tutorial {
+        Some(_) => None,
+        None => character_items(&context.db, join.character)
+            .await
+            .map_err(database)?
+            .map(carried_items),
+    };
+    let (sim, position) = match tutorial {
         Some(tutorial) => (tutorial.clone(), TUTORIAL_START),
         None => {
             let position = join_position(
@@ -187,6 +201,7 @@ pub async fn route_join(
         bundles_sent,
         look: saved_look(&character.appearance).map(|look| look.choices()),
         backstory: saved_backstory(&character.appearance),
+        items,
     };
     let reply = context
         .bus
@@ -203,9 +218,50 @@ pub async fn route_join(
     }
 }
 
+/// The saved items as the list a sim builds gear from.
+fn carried_items(saved: Vec<SavedItem>) -> Vec<CarriedItem> {
+    saved
+        .into_iter()
+        .map(|item| CarriedItem {
+            item_id: item.item_id,
+            quantity: item.quantity,
+            place: match item.place {
+                SavedPlace::Worn(slot) => ItemPlace::Worn(slot),
+                SavedPlace::Bag(slot) => ItemPlace::Bag(slot),
+            },
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_items_keep_their_places() {
+        let carried = carried_items(vec![
+            SavedItem {
+                item_id: "1hSwordT2_FTUE".to_owned(),
+                quantity: 1,
+                place: SavedPlace::Worn(3),
+            },
+            SavedItem {
+                item_id: "PotionHealthT1".to_owned(),
+                quantity: 5,
+                place: SavedPlace::Bag(7),
+            },
+        ]);
+        assert_eq!(
+            carried
+                .iter()
+                .map(|item| (item.item_id.as_str(), item.quantity, item.place))
+                .collect::<Vec<_>>(),
+            [
+                ("1hSwordT2_FTUE", 1, ItemPlace::Worn(3)),
+                ("PotionHealthT1", 5, ItemPlace::Bag(7)),
+            ]
+        );
+    }
 
     #[test]
     fn a_number_in_the_mob_range_is_refused() {

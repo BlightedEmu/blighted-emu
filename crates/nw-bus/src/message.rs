@@ -182,6 +182,8 @@ pub struct Admit {
     /// The backstory id of the character's archetype pick (`Archetype_Mystic`, ...), which
     /// names its starter kit; `None` when the saved creation settings do not give one.
     pub backstory: Option<String>,
+    /// The character's saved items; `None` when it never saved items (it gets its starter kit).
+    pub items: Option<Vec<CarriedItem>>,
 }
 
 /// The answer to [`Admit`].
@@ -634,6 +636,11 @@ mod tests {
             bundles_sent: 0,
             look: Some(LOOK),
             backstory: Some("Archetype_Mystic".to_owned()),
+            items: Some(vec![CarriedItem {
+                item_id: "PotionHealthT1".to_owned(),
+                quantity: 5,
+                place: ItemPlace::Bag(0),
+            }]),
         });
         round_trip(AdmitReply::Admitted);
         round_trip(AdmitReply::Refused {

@@ -1573,6 +1573,7 @@ mod tests {
             bundles_sent: 0,
             look: None,
             backstory: None,
+            items: None,
         }
     }
 
