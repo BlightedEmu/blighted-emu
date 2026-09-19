@@ -3,7 +3,7 @@
 // events) and the bot batch buttons.
 
 import { KINDS, mobEntity, playerEntity, selectionRows } from './entity.js';
-import { sendTeleport, teleportRequest } from './gm.js';
+import { itemRequest, sendGm, spawnRequest, teleportRequest } from './gm.js';
 import { WorldMap } from './map.js';
 import { SERIES, SIGNAL } from './palette.js';
 import { STATUS_GROUPS, isMarked, nextStatuses, statusText } from './status.js';
@@ -69,7 +69,9 @@ const trailsBox = document.getElementById('trails');
 const sleepingBox = document.getElementById('sleeping');
 
 const info = await (await fetch('/api/world/info')).json();
-const map = new WorldMap(document.getElementById('map'), info);
+const map = new WorldMap(document.getElementById('map'), info, (point) => {
+  mapCursor = point;
+});
 let source = null;
 let socket = SOCKET_CONNECTING;
 let view = null;
@@ -284,41 +286,138 @@ function select(key) {
   showTeleport();
 }
 
-const teleportForm = document.getElementById('gm-teleport');
-const teleportStatus = document.getElementById('gm-status');
+const gmStatus = document.getElementById('gm-status');
+const gmPlayer = document.getElementById('gm-player');
+const gmMob = document.getElementById('gm-mob');
 const teleportFields = ['gm-x', 'gm-y', 'gm-z'].map((id) => document.getElementById(id));
+const spawnFields = Object.fromEntries(
+  ['vitals', 'level', 'count', 'x', 'y', 'z'].map((name) => [name, document.getElementById(`gm-spawn-${name}`)]),
+);
+/** The world point under the pointer, for a right-click. */
+let mapCursor = null;
 
-/** Shows the teleport form for a selected player or bot, filled with its position. */
+/** The selected entity, or undefined. */
+function selectedEntity() {
+  return selectedKey === null ? undefined : entities().get(selectedKey);
+}
+
+/** Shows the GM controls of the selected player, bot or mob. */
 function showTeleport() {
-  const entity = selectedKey === null ? undefined : entities().get(selectedKey);
-  const player = entity && entity.kind !== KINDS.MOB;
-  teleportForm.hidden = !player;
-  teleportStatus.textContent = '';
-  if (player) {
+  const entity = selectedEntity();
+  gmPlayer.hidden = !entity || entity.kind === KINDS.MOB;
+  gmMob.hidden = !entity || entity.kind !== KINDS.MOB;
+  gmStatus.textContent = '';
+  if (entity && entity.kind !== KINDS.MOB) {
     [entity.x, entity.y, entity.z].forEach((value, index) => {
       teleportFields[index].value = value.toFixed(1);
     });
+    spawnFields.z.value = entity.z.toFixed(1);
   }
 }
 
-teleportForm.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const entity = selectedKey === null ? undefined : entities().get(selectedKey);
-  if (!entity) {
-    return;
-  }
-  const { request, error } = teleportRequest(entity.entity, ...teleportFields.map((field) => field.value));
-  if (error) {
-    teleportStatus.textContent = error;
-    return;
-  }
-  teleportStatus.textContent = 'Sending…';
+/** Sends a GM command and shows its answer. */
+async function gm(path, body) {
+  gmStatus.textContent = 'Sending…';
   try {
-    const answer = await sendTeleport(request);
-    teleportStatus.textContent = answer.ok ? 'Moved.' : answer.text;
+    const answer = await sendGm(path, body);
+    gmStatus.textContent = answer.ok ? `Done: ${answer.text}` : answer.text;
   } catch (failure) {
-    teleportStatus.textContent = `Not sent: ${failure.message ?? failure}`;
+    gmStatus.textContent = `Not sent: ${failure.message ?? failure}`;
   }
+}
+
+/** Runs `send` with the selected entity, or says there is none. */
+function onSelected(send) {
+  const entity = selectedEntity();
+  if (entity) {
+    send(entity);
+  } else {
+    gmStatus.textContent = 'Select a player or a mob first.';
+  }
+}
+
+document.getElementById('gm-teleport').addEventListener('submit', (event) => {
+  event.preventDefault();
+  onSelected((entity) => {
+    const { request, error } = teleportRequest(entity.entity, ...teleportFields.map((field) => field.value));
+    if (error) {
+      gmStatus.textContent = error;
+    } else {
+      gm('teleport', request);
+    }
+  });
+});
+
+document.getElementById('gm-to-player').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const toEntity = Number(document.getElementById('gm-to-entity').value.trim());
+  onSelected((entity) => {
+    if (!Number.isInteger(toEntity) || toEntity <= 0) {
+      gmStatus.textContent = 'Give the entity number of the player to go to.';
+    } else {
+      gm('teleport-to-player', { entity: entity.entity, to_entity: toEntity });
+    }
+  });
+});
+
+const PLAYER_COMMANDS = Object.freeze({
+  heal: (entity) => ['heal', { entity }],
+  kill: (entity) => ['kill', { entity }],
+  kick: (entity) => ['kick', { entity }],
+  'god-on': (entity) => ['god', { entity, on: true }],
+  'god-off': (entity) => ['god', { entity, on: false }],
+});
+for (const button of document.querySelectorAll('[data-gm]')) {
+  button.addEventListener('click', () => {
+    onSelected((entity) => gm(...PLAYER_COMMANDS[button.dataset.gm](entity.entity)));
+  });
+}
+
+function sendItem(path) {
+  onSelected((entity) => {
+    const { request, error } = itemRequest(
+      entity.entity,
+      document.getElementById('gm-item-id').value,
+      document.getElementById('gm-item-quantity').value,
+    );
+    if (error) {
+      gmStatus.textContent = error;
+    } else {
+      gm(path, path === 'give-item' ? request : { entity: request.entity, item: request.item });
+    }
+  });
+}
+document.getElementById('gm-item').addEventListener('submit', (event) => {
+  event.preventDefault();
+  sendItem('give-item');
+});
+document.getElementById('gm-take').addEventListener('click', () => sendItem('take-item'));
+
+document.getElementById('gm-despawn').addEventListener('click', () => {
+  onSelected((entity) => gm('despawn', { entities: [entity.entity] }));
+});
+document.getElementById('gm-despawn-all').addEventListener('click', () => gm('despawn', { entities: [] }));
+
+document.getElementById('gm-spawn').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const { request, error } = spawnRequest(
+    Object.fromEntries(Object.entries(spawnFields).map(([name, field]) => [name, field.value])),
+  );
+  if (error) {
+    gmStatus.textContent = error;
+  } else {
+    gm('spawn', request);
+  }
+});
+
+document.getElementById('map').addEventListener('contextmenu', (event) => {
+  if (!mapCursor) {
+    return;
+  }
+  event.preventDefault();
+  spawnFields.x.value = mapCursor.x.toFixed(1);
+  spawnFields.y.value = mapCursor.y.toFixed(1);
+  gmStatus.textContent = `Map point ${mapCursor.x.toFixed(1)}, ${mapCursor.y.toFixed(1)} set for a spawn.`;
 });
 
 /** A list item that says the list is empty. */

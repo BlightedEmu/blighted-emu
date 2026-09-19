@@ -466,3 +466,6 @@ summary.section-head:hover h2 { color: var(--accent); }
 /* GM commands of the live page. */
 .gm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 8px; }
 .gm input { width: 72px; font: 13px var(--font-body); color: var(--ink); background: var(--ground); border: 1px solid var(--line); padding: 3px 6px; }
+.gm-panel { padding-top: 8px; }
+.gm-panel h2 { margin-bottom: 4px; }
+.gm .wide { width: 150px; }

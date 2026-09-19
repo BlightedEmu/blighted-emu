@@ -38,6 +38,9 @@ const LIVE_PAGE: &str = "live.html";
 pub const LIVE_PAGE_ROUTE: &str = "/live";
 const STUDIO_PAGE: &str = "studio.html";
 const LOGIN_PAGE: &str = "login.html";
+const GM_PAGE: &str = "gm.html";
+/// The GM page.
+pub const GM_PAGE_ROUTE: &str = "/gm";
 /// The studio page.
 pub const STUDIO_PAGE_ROUTE: &str = "/studio";
 
@@ -115,6 +118,7 @@ pub fn router(state: AppState) -> Router {
             STUDIO_PAGE_ROUTE,
             get(|| web_file(UrlPath(STUDIO_PAGE.to_owned()))),
         )
+        .route(GM_PAGE_ROUTE, get(|| web_file(UrlPath(GM_PAGE.to_owned()))))
         .route(
             LOGIN_PAGE_ROUTE,
             get(|| web_file(UrlPath(LOGIN_PAGE.to_owned()))),
@@ -316,6 +320,18 @@ mod tests {
         );
         assert!(String::from_utf8_lossy(&body).contains("/web/studio.js"));
         for file in ["studio.js", "apply.js"] {
+            let (status, _, _) = get(app(dir.path()), &format!("/web/{file}")).await;
+            assert_eq!(status, StatusCode::OK, "{file}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_gm_page_is_served_at_gm() {
+        let dir = tempfile::tempdir().expect("dir");
+        let (status, _, body) = get(app(dir.path()), GM_PAGE_ROUTE).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(String::from_utf8_lossy(&body).contains("/web/gm-page.js"));
+        for file in ["gm-page.js", "gm.js"] {
             let (status, _, _) = get(app(dir.path()), &format!("/web/{file}")).await;
             assert_eq!(status, StatusCode::OK, "{file}");
         }

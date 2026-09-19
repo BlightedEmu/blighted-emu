@@ -1,29 +1,66 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// GM commands of the live page: checks what the form holds and sends it.
+// GM commands of the admin pages: checks what the forms hold and sends it.
 
-const TELEPORT_URL = '/api/gm/teleport';
+const GM_PREFIX = '/api/gm/';
 const ADMIN_HEADERS = Object.freeze({ 'X-Blighted-Admin': '1', 'Content-Type': 'application/json' });
+/** Most GM mobs one spawn makes (the sim's limit). */
+export const MAX_SPAWN = 50;
+const LOWEST_LEVEL = 1;
+const HIGHEST_LEVEL = 65;
 
-/**
- * The teleport request for a player entity and the text of the x, y and z fields, or an error
- * text when a field is not a number.
- */
+function numbers(texts) {
+  const trimmed = texts.map((text) => String(text).trim());
+  const values = trimmed.map(Number);
+  const bad = trimmed.some((text) => text === '') || values.some((value) => !Number.isFinite(value));
+  return bad ? null : values;
+}
+
+/** The teleport request for a player and the x, y and z field texts, or an error text. */
 export function teleportRequest(entity, xText, yText, zText) {
-  const texts = [xText, yText, zText].map((text) => String(text).trim());
-  const values = texts.map(Number);
-  if (texts.some((text) => text === '') || values.some((value) => !Number.isFinite(value))) {
+  const values = numbers([xText, yText, zText]);
+  if (!values) {
     return { error: 'x, y and z must be numbers (metres).' };
   }
   const [x, y, z] = values;
   return { request: { entity, x, y, z } };
 }
 
-/** Sends a teleport; gives the answer text and whether it worked. */
-export async function sendTeleport(request) {
-  const response = await fetch(TELEPORT_URL, {
+/** The give-item request for a player, an item id and a quantity text, or an error text. */
+export function itemRequest(entity, itemText, quantityText) {
+  const item = String(itemText).trim();
+  const quantity = Number(String(quantityText).trim() || '1');
+  if (item === '') {
+    return { error: 'Name an item id.' };
+  }
+  if (!Number.isInteger(quantity) || quantity < 1) {
+    return { error: 'The quantity must be a whole number of 1 or more.' };
+  }
+  return { request: { entity, item, quantity } };
+}
+
+/** The spawn request of the spawn form's field texts, or an error text. */
+export function spawnRequest({ vitals, level, count, x, y, z }) {
+  const id = String(vitals).trim();
+  const values = numbers([level, count, x, y, z]);
+  if (id === '' || !values) {
+    return { error: 'Name a vitals id; level, count, x, y and z must be numbers.' };
+  }
+  const [levelValue, countValue, xValue, yValue, zValue] = values;
+  if (!Number.isInteger(levelValue) || levelValue < LOWEST_LEVEL || levelValue > HIGHEST_LEVEL) {
+    return { error: `The level must be ${LOWEST_LEVEL} to ${HIGHEST_LEVEL}.` };
+  }
+  if (!Number.isInteger(countValue) || countValue < 1 || countValue > MAX_SPAWN) {
+    return { error: `The count must be 1 to ${MAX_SPAWN}.` };
+  }
+  return { request: { vitals: id, level: levelValue, count: countValue, x: xValue, y: yValue, z: zValue } };
+}
+
+/** Sends a GM command to `/api/gm/<path>`; gives the answer text and whether it worked. */
+export async function sendGm(path, body) {
+  const response = await fetch(`${GM_PREFIX}${path}`, {
     method: 'POST',
     headers: ADMIN_HEADERS,
-    body: JSON.stringify(request),
+    body: JSON.stringify(body),
   });
   return { ok: response.ok, text: await response.text() };
 }

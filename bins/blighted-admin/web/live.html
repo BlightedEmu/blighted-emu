@@ -12,6 +12,7 @@
     <a href="/">Home</a>
     <a href="/live" aria-current="page">Live</a>
     <a href="/studio">Studio</a>
+    <a href="/gm">GM</a>
     <a href="/web/map.html">Map</a>
     <a href="/web/captures.html">Captures</a>
     <button type="button" class="theme" id="theme"></button>
@@ -66,14 +67,54 @@
         <ul class="list log" id="events"></ul>
         <h2>Selection</h2>
         <div class="selection" id="selection"><p class="hint">Click a player, a bot or a mob on the map, or a row of the players table.</p></div>
-        <form class="gm" id="gm-teleport" hidden>
-          <strong>Teleport</strong>
-          <input type="text" id="gm-x" inputmode="decimal" aria-label="x (metres)" placeholder="x">
-          <input type="text" id="gm-y" inputmode="decimal" aria-label="y (metres)" placeholder="y">
-          <input type="text" id="gm-z" inputmode="decimal" aria-label="z (metres)" placeholder="z">
-          <button type="submit">Move</button>
-          <span class="status" id="gm-status" role="status"></span>
-        </form>
+        <div class="gm-panel" id="gm-player" hidden>
+          <h2>GM</h2>
+          <form class="gm" id="gm-teleport">
+            <strong>Teleport</strong>
+            <input type="text" id="gm-x" inputmode="decimal" aria-label="x (metres)" placeholder="x">
+            <input type="text" id="gm-y" inputmode="decimal" aria-label="y (metres)" placeholder="y">
+            <input type="text" id="gm-z" inputmode="decimal" aria-label="z (metres)" placeholder="z">
+            <button type="submit">Move</button>
+          </form>
+          <form class="gm" id="gm-to-player">
+            <strong>To player</strong>
+            <input type="text" id="gm-to-entity" inputmode="numeric" aria-label="entity of the player to go to" placeholder="entity">
+            <button type="submit">Move</button>
+          </form>
+          <div class="gm">
+            <button type="button" data-gm="heal">Heal</button>
+            <button type="button" data-gm="god-on">God on</button>
+            <button type="button" data-gm="god-off">God off</button>
+            <button type="button" class="danger" data-gm="kill">Kill</button>
+            <button type="button" class="danger" data-gm="kick">Kick</button>
+          </div>
+          <form class="gm" id="gm-item">
+            <strong>Item</strong>
+            <input type="text" id="gm-item-id" aria-label="item id" placeholder="item id" class="wide">
+            <input type="text" id="gm-item-quantity" inputmode="numeric" aria-label="quantity" placeholder="1">
+            <button type="submit">Give</button>
+            <button type="button" id="gm-take">Take</button>
+          </form>
+        </div>
+        <div class="gm-panel" id="gm-mob" hidden>
+          <h2>GM</h2>
+          <div class="gm"><button type="button" class="danger" id="gm-despawn">Despawn this GM mob</button></div>
+        </div>
+        <div class="gm-panel">
+          <h2>GM mobs</h2>
+          <p class="hint">Right-click the map to fill x and y.</p>
+          <form class="gm" id="gm-spawn">
+            <input type="text" id="gm-spawn-vitals" aria-label="vitals id" placeholder="vitals id" class="wide">
+            <input type="text" id="gm-spawn-level" inputmode="numeric" aria-label="level" placeholder="level">
+            <input type="text" id="gm-spawn-count" inputmode="numeric" aria-label="count" placeholder="count" value="1">
+            <input type="text" id="gm-spawn-x" inputmode="decimal" aria-label="x (metres)" placeholder="x">
+            <input type="text" id="gm-spawn-y" inputmode="decimal" aria-label="y (metres)" placeholder="y">
+            <input type="text" id="gm-spawn-z" inputmode="decimal" aria-label="z (metres)" placeholder="z">
+            <button type="submit">Spawn</button>
+            <button type="button" class="danger" id="gm-despawn-all">Despawn all</button>
+          </form>
+        </div>
+        <p class="status" id="gm-status" role="status"></p>
       </aside>
     </div>
     <details class="players" id="players-panel" open>
