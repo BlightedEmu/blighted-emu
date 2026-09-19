@@ -11,7 +11,7 @@ pub const DESIGN_SCHEMA: i64 = 1;
 /// The to-do list at the root of the design folder; it is not a design file.
 pub const TODO_FILE: &str = "todo.toml";
 /// Extension of design files.
-const DESIGN_EXTENSION: &str = "toml";
+pub(crate) const DESIGN_EXTENSION: &str = "toml";
 /// Byte order mark that some editors put at the start of a file.
 const BOM: char = '\u{feff}';
 const SCHEMA_KEY: &str = "schema";
@@ -37,10 +37,15 @@ pub fn load_dir(dir: &Path) -> (DesignSet, Vec<DesignError>) {
             Err(error) => errors.push(error),
         }
     }
+    sort_files(&mut files);
+    (DesignSet { files }, errors)
+}
+
+/// Sorts design files by kind, id and path, the order every check and merge reads them in.
+pub(crate) fn sort_files(files: &mut [DesignFile]) {
     files.sort_by(|left, right| {
         (left.kind, &left.id, &left.path).cmp(&(right.kind, &right.id, &right.path))
     });
-    (DesignSet { files }, errors)
 }
 
 /// Adds the `.toml` files under `dir/relative` to `out`, as `/`-separated relative paths.
@@ -82,6 +87,12 @@ fn read_file(full: &Path, relative: &Path) -> Result<DesignFile, DesignError> {
         std::fs::read(full).map_err(|error| file_error(Problem::Unreadable(error.to_string())))?;
     let text = String::from_utf8(bytes)
         .map_err(|error| file_error(Problem::Unreadable(error.to_string())))?;
+    parse_file(&text, relative)
+}
+
+/// The design file of `text`, found at `relative` in the design folder.
+pub fn parse_file(text: &str, relative: &Path) -> Result<DesignFile, DesignError> {
+    let file_error = |problem| DesignError::file(relative, problem);
     let mut table: toml::Table =
         text.trim_start_matches(BOM)
             .parse()

@@ -3,6 +3,7 @@
 //! add or disable client records. This crate loads them, checks them, and merges them over the
 //! retail content bundle and world files.
 
+pub mod edit;
 pub mod error;
 pub mod file;
 pub mod load;
@@ -11,9 +12,10 @@ pub mod rows;
 pub mod run;
 pub mod schema;
 
+pub use edit::{check_delete, check_put, delete_file, design_path, write_file};
 pub use error::{DesignError, Problem};
 pub use file::{Action, DesignFile, DesignSet, Kind, struct_fields};
-pub use load::{DESIGN_SCHEMA, TODO_FILE, load_dir};
+pub use load::{DESIGN_SCHEMA, TODO_FILE, load_dir, parse_file};
 pub use points::apply_world;
 pub use rows::{DESIGN_SOURCE_PREFIX, apply_tables};
 pub use run::{DesignMode, DesignPaths, DesignReport, DesignRunError, run_design};

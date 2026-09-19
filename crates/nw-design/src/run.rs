@@ -190,7 +190,7 @@ fn write_temp_files(
 }
 
 /// The temporary name of a merged file: `<name>.tmp` in place of `<name>.bin`.
-fn temp_path(target: &Path) -> PathBuf {
+pub(crate) fn temp_path(target: &Path) -> PathBuf {
     target.with_extension(TEMP_EXTENSION)
 }
 
