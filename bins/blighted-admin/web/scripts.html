@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Scripts · Blighted Emu</title>
+  <link rel="stylesheet" href="/web/style.css">
+  <script src="/web/theme.js"></script>
+</head>
+<body>
+  <nav class="rail" aria-label="Pages">
+    <a href="/">Home</a>
+    <a href="/live">Live</a>
+    <a href="/studio">Studio</a>
+    <a href="/records">Records</a>
+    <a href="/scripts" aria-current="page">Scripts</a>
+    <a href="/todo">To-do</a>
+    <a href="/gm">GM</a>
+    <a href="/web/map.html">Map</a>
+    <a href="/web/captures.html">Captures</a>
+    <button type="button" class="theme" id="theme"></button>
+  </nav>
+  <main class="work">
+    <header class="masthead">
+      <h1>Blighted Emu <span>· Scripts</span></h1>
+      <div class="end"><span class="status" id="status" role="status"></span></div>
+    </header>
+    <form class="gm records-search" id="script-form">
+      <select id="script-list" aria-label="script"></select>
+      <button type="button" id="open">Open</button>
+      <input type="text" id="script-id" aria-label="script id" placeholder="script id" class="wide">
+      <button type="button" id="new">New</button>
+      <button type="submit">Save</button>
+      <button type="button" class="danger" id="delete">Delete</button>
+    </form>
+    <section class="problems-block" aria-label="Problems">
+      <ul class="list problems" id="problems"></ul>
+    </section>
+    <div class="script-work">
+      <section class="script-palette" aria-label="Blocks" id="palette"></section>
+      <div class="script-canvas-box">
+        <svg class="script-canvas" id="canvas" width="1600" height="900" aria-label="Script canvas"></svg>
+      </div>
+      <section class="script-node" aria-label="Selected node" id="node-panel" hidden>
+        <h2 id="node-title"></h2>
+        <p class="muted" id="node-help"></p>
+        <form class="script-values" id="node-values"></form>
+        <button type="button" class="danger" id="node-delete">Delete node</button>
+      </section>
+    </div>
+    <section class="problems-block" aria-label="Run log">
+      <div class="section-head"><h2>Run log</h2><span class="muted">The blocks this script passed on the local world, newest last.</span></div>
+      <ul class="list log" id="run-log"></ul>
+    </section>
+  </main>
+  <script type="module" src="/web/scripts.js"></script>
+</body>
+</html>

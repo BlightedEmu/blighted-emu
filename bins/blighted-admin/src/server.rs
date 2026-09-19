@@ -44,6 +44,7 @@ const LOGIN_PAGE: &str = "login.html";
 const GM_PAGE: &str = "gm.html";
 const RECORDS_PAGE: &str = "records.html";
 const TODO_PAGE: &str = "todo.html";
+const SCRIPTS_PAGE: &str = "scripts.html";
 /// The GM page.
 pub const GM_PAGE_ROUTE: &str = "/gm";
 /// The studio page.
@@ -52,6 +53,8 @@ pub const STUDIO_PAGE_ROUTE: &str = "/studio";
 pub const RECORDS_PAGE_ROUTE: &str = "/records";
 /// The to-do page.
 pub const TODO_PAGE_ROUTE: &str = "/todo";
+/// The script editor page.
+pub const SCRIPTS_PAGE_ROUTE: &str = "/scripts";
 
 /// What every route shares.
 #[derive(Debug, Clone)]
@@ -135,6 +138,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             TODO_PAGE_ROUTE,
             get(|| web_file(UrlPath(TODO_PAGE.to_owned()))),
+        )
+        .route(
+            SCRIPTS_PAGE_ROUTE,
+            get(|| web_file(UrlPath(SCRIPTS_PAGE.to_owned()))),
         )
         .route(
             LOGIN_PAGE_ROUTE,
@@ -386,7 +393,10 @@ mod tests {
         let (status, _, body) = get(app(dir.path()), TODO_PAGE_ROUTE).await;
         assert_eq!(status, StatusCode::OK);
         assert!(String::from_utf8_lossy(&body).contains("/web/todo.js"));
-        for file in ["todo.js", "todo-model.js"] {
+        let (status, _, body) = get(app(dir.path()), SCRIPTS_PAGE_ROUTE).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(String::from_utf8_lossy(&body).contains("/web/scripts.js"));
+        for file in ["todo.js", "todo-model.js", "scripts.js", "script-edit.js"] {
             let (status, _, _) = get(app(dir.path()), &format!("/web/{file}")).await;
             assert_eq!(status, StatusCode::OK, "{file}");
         }

@@ -3,7 +3,7 @@
 // events) and the bot batch buttons.
 
 import { KINDS, mobEntity, playerEntity, selectionRows } from './entity.js';
-import { itemRequest, questRequest, sendGm, spawnRequest, teleportRequest } from './gm.js';
+import { eventStartRequest, itemRequest, questRequest, sendGm, spawnRequest, teleportRequest } from './gm.js';
 import { WorldMap } from './map.js';
 import { SERIES, SIGNAL } from './palette.js';
 import { STATUS_GROUPS, isMarked, nextStatuses, statusText } from './status.js';
@@ -420,6 +420,48 @@ document.getElementById('gm-spawn').addEventListener('submit', (event) => {
     gm('spawn', request);
   }
 });
+
+const EVENTS_URL = '/api/gm/events';
+const eventSelect = document.getElementById('gm-event');
+const eventsRunning = document.getElementById('gm-events-running');
+
+/** Lists the level's events and the running ones. */
+async function loadEvents() {
+  const response = await fetch(EVENTS_URL);
+  if (!response.ok) {
+    eventsRunning.replaceChildren(emptyItem(`Events: ${response.status} ${await response.text()}`));
+    return;
+  }
+  const events = await response.json();
+  eventSelect.replaceChildren(...events.defined.map((id) => {
+    const option = document.createElement('option');
+    option.value = id;
+    option.textContent = id;
+    return option;
+  }));
+  eventsRunning.replaceChildren(...(events.running.length === 0
+    ? [emptyItem('No event runs.')]
+    : events.running.map(([sim, event]) => {
+      const item = document.createElement('li');
+      item.textContent = `${event.event} on ${sim}: ${event.mobs_alive} mobs alive, ${event.waves_left} waves to come`;
+      return item;
+    })));
+}
+
+document.getElementById('gm-events').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const { request, error } = eventStartRequest(eventSelect.value, spawnFields.x.value, spawnFields.y.value, spawnFields.z.value);
+  if (error) {
+    gmStatus.textContent = error;
+  } else {
+    gm('start-event', request).then(() => loadEvents());
+  }
+});
+document.getElementById('gm-event-stop').addEventListener('click', () => {
+  gm('stop-event', { event: eventSelect.value }).then(() => loadEvents());
+});
+document.getElementById('gm-events-refresh').addEventListener('click', () => loadEvents().catch(() => {}));
+loadEvents().catch(() => {});
 
 document.getElementById('map').addEventListener('contextmenu', (event) => {
   if (!mapCursor) {

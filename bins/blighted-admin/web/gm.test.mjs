@@ -2,7 +2,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { MAX_SPAWN, itemRequest, questRequest, spawnRequest, teleportRequest } from './gm.js';
+import { MAX_SPAWN, eventStartRequest, itemRequest, questRequest, spawnRequest, teleportRequest } from './gm.js';
+
+test('an event start needs an event and a point', () => {
+  assert.deepEqual(eventStartRequest('invasion', '1', '2', '3'), { request: { event: 'invasion', x: 1, y: 2, z: 3 } });
+  assert.ok(eventStartRequest('', '1', '2', '3').error);
+  assert.ok(eventStartRequest('invasion', '', '2', '3').error);
+});
 
 test('a quest start names its objective', () => {
   assert.deepEqual(questRequest(41, ' 12_GetOffBeach '), { request: { entity: 41, objective: '12_GetOffBeach' } });

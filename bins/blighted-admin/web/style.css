@@ -467,6 +467,31 @@ summary.section-head:hover h2 { color: var(--accent); }
 .records-hits { max-height: 75vh; }
 .records-form .table-scroll { max-height: 65vh; overflow: auto; }
 @media (max-width: 760px) { .records { grid-template-columns: minmax(0, 1fr); } }
+/* Script editor: the blocks, the canvas, the selected node. */
+.script-work { display: grid; grid-template-columns: 200px minmax(0, 1fr) 260px; gap: 0 16px; padding: 0 var(--gutter); }
+.script-palette { display: flex; flex-direction: column; gap: 4px; max-height: 70vh; overflow: auto; }
+.script-palette h2 { margin: 8px 0 2px; font: 600 12px var(--font-sign); letter-spacing: 0.08em; text-transform: uppercase; color: var(--mute); }
+.script-palette button { text-align: left; }
+.script-canvas-box { overflow: auto; max-height: 70vh; border: 1px solid var(--line); background: var(--surface); }
+.script-canvas { display: block; }
+.script-node-box rect { fill: var(--raised); stroke: var(--line); stroke-width: 1.5; }
+.script-node-box rect.selected { stroke: var(--accent); stroke-width: 2.5; }
+.script-node-box text { fill: var(--ink); font: 12px var(--font-body); pointer-events: none; }
+.script-node-box.trigger rect { stroke: var(--signal-green); }
+.script-node-box.condition rect { stroke: var(--signal-yellow); }
+.script-node-box.action rect { stroke: var(--signal-blue); }
+.script-node-box.flow rect { stroke: var(--signal-purple); }
+.script-node-box { cursor: grab; }
+.script-port { fill: var(--surface); stroke: var(--ink); stroke-width: 1.5; cursor: crosshair; }
+.script-port.linking { fill: var(--accent); }
+.script-link { fill: none; stroke: var(--mute); stroke-width: 2; cursor: pointer; }
+.script-link:hover { stroke: var(--alert); }
+.script-node { display: flex; flex-direction: column; gap: 8px; }
+.script-values { display: flex; flex-direction: column; gap: 6px; }
+.script-values label { flex-direction: column; align-items: stretch; gap: 2px; }
+.script-values input { font: 13px var(--font-body); color: var(--ink); background: var(--ground); border: 1px solid var(--line); padding: 3px 6px; }
+@media (max-width: 1000px) { .script-work { grid-template-columns: minmax(0, 1fr); } }
+
 /* To-do page. */
 .todo-wide { width: min(420px, 100%); }
 .todo-task { gap: 6px; }

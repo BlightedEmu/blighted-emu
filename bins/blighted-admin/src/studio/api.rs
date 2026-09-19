@@ -29,6 +29,8 @@ pub const FILE_ROUTE: &str = "/api/studio/file";
 pub const RECORDS_ROUTE: &str = "/api/studio/records/{kind}";
 /// One client record with its field names and the design files that change or copy it.
 pub const RECORD_ROUTE: &str = "/api/studio/records/{kind}/{id}";
+/// The script blocks, for the script editor.
+pub const BLOCKS_ROUTE: &str = "/api/studio/blocks";
 /// The full check; writes nothing.
 pub const CHECK_ROUTE: &str = "/api/studio/check";
 /// `GET`: the Apply state; `POST`: starts Apply.
@@ -51,6 +53,10 @@ pub fn studio_routes() -> Router<AppState> {
             get(read_design_file)
                 .put(put_design_file)
                 .delete(delete_design_file),
+        )
+        .route(
+            BLOCKS_ROUTE,
+            get(|| async { Json(nw_world::script::BLOCKS) }),
         )
         .route(RECORDS_ROUTE, get(search_records))
         .route(RECORD_ROUTE, get(read_record))
@@ -588,6 +594,19 @@ mod tests {
         assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         let (status, mobs) = call(&fixture, Method::GET, NO_LOOT_ROUTE).await;
         assert_eq!((status, mobs), (StatusCode::OK, serde_json::json!([])));
+    }
+
+    #[tokio::test]
+    async fn the_blocks_route_lists_the_registry() {
+        let fixture = fixture(false, LONG_TIMEOUT_S);
+        let (status, blocks) = call(&fixture, Method::GET, BLOCKS_ROUTE).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            blocks.as_array().map(Vec::len),
+            Some(nw_world::script::BLOCKS.len())
+        );
+        assert_eq!(blocks[0]["category"], "trigger");
+        assert_eq!(blocks[0]["values"][0]["kind"], "position");
     }
 
     #[tokio::test]

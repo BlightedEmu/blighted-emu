@@ -23,7 +23,7 @@ export const PROFILE_NUMBERS = Object.freeze([
   { name: 'wander_pause_ms', whole: true },
   { name: 'wander_radius_m', whole: false },
 ]);
-const FOLDERS = Object.freeze({ ai_profile: 'ai', path: 'paths', spawn_group: 'spawns' });
+const FOLDERS = Object.freeze({ ai_profile: 'ai', path: 'paths', spawn_group: 'spawns', script: 'scripts', event: 'events' });
 
 /** The path under content/ of a file of `kind`; `map` adds its level folder. */
 export function designPath(kind, id, map) {

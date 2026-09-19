@@ -45,6 +45,20 @@ export function questRequest(entity, objectiveText) {
   return objective === '' ? { error: 'Name an objective id.' } : { request: { entity, objective } };
 }
 
+/** The event start request for an event id and the point field texts, or an error text. */
+export function eventStartRequest(eventText, xText, yText, zText) {
+  const event = String(eventText).trim();
+  const values = numbers([xText, yText, zText]);
+  if (event === '') {
+    return { error: 'Pick an event.' };
+  }
+  if (!values) {
+    return { error: 'Right-click the map, or type x, y and z, for the event point.' };
+  }
+  const [x, y, z] = values;
+  return { request: { event, x, y, z } };
+}
+
 /** The spawn request of the spawn form's field texts, or an error text. */
 export function spawnRequest({ vitals, level, count, x, y, z }) {
   const id = String(vitals).trim();

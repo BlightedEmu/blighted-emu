@@ -13,6 +13,7 @@
     <a href="/live" aria-current="page">Live</a>
     <a href="/studio">Studio</a>
     <a href="/records">Records</a>
+    <a href="/scripts">Scripts</a>
     <a href="/todo">To-do</a>
     <a href="/gm">GM</a>
     <a href="/web/map.html">Map</a>
@@ -119,6 +120,16 @@
             <button type="submit">Spawn</button>
             <button type="button" class="danger" id="gm-despawn-all">Despawn all</button>
           </form>
+        </div>
+        <div class="gm-panel">
+          <h2>GM events</h2>
+          <form class="gm" id="gm-events">
+            <select id="gm-event" aria-label="event"></select>
+            <button type="submit">Start at the spawn point</button>
+            <button type="button" class="danger" id="gm-event-stop">Stop</button>
+            <button type="button" id="gm-events-refresh">Refresh</button>
+          </form>
+          <ul class="list" id="gm-events-running"></ul>
         </div>
         <p class="status" id="gm-status" role="status"></p>
       </aside>
