@@ -101,6 +101,26 @@ impl SimWorld {
         true
     }
 
+    /// After a cell table change: the events and GM mobs whose point is now another sim's (or
+    /// every one, when this sim owns no cell) end here. The other sim does not take them over.
+    pub(super) fn drop_foreign_gm(&mut self) {
+        let foreign: Vec<String> = self
+            .events
+            .running
+            .iter()
+            .filter(|event| !self.owns(event.at))
+            .map(|event| event.id.clone())
+            .collect();
+        for id in foreign {
+            tracing::info!(event = %id, "event ended: its point moved to another sim");
+            self.stop_event(&id);
+        }
+        let mobs = self
+            .mobs
+            .gm_mobs_outside(|position| self.owns_position(position));
+        self.remove_gm(&mobs);
+    }
+
     /// The events running here.
     pub(super) fn running_events(&self) -> Vec<RunningEvent> {
         self.events
@@ -220,6 +240,17 @@ mod tests {
         world.tick_events(NOW + END_MS);
         assert!(world.running_events().is_empty());
         assert!(world.mobs.gm_mobs().is_empty(), "its mobs end with it");
+    }
+
+    #[test]
+    fn an_event_whose_point_moves_to_another_sim_ends_here() {
+        let mut world = event_world(false);
+        world.start_event(EVENT, AT, NOW).expect("start");
+        world
+            .set_table(&table(&["sim-other", "sim-a"]))
+            .expect("table");
+        assert!(world.running_events().is_empty());
+        assert!(world.mobs.gm_mobs().is_empty());
     }
 
     #[test]

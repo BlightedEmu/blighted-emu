@@ -1139,6 +1139,7 @@ impl SimWorld {
         let Some(me) = me else {
             self.cells = None;
             self.mob_changes.add(self.mobs.set_cells(|_| false));
+            self.drop_foreign_gm();
             let everyone: Vec<ConnectionRef> = self.by_connection.keys().cloned().collect();
             return Ok(self.leave_all(&everyone));
         };
@@ -1151,6 +1152,7 @@ impl SimWorld {
             sims: table.sims.clone(),
             me,
         });
+        self.drop_foreign_gm();
         Ok(Vec::new())
     }
 
@@ -1457,9 +1459,16 @@ impl SimWorld {
             return Err(QuestRefusal::Done);
         }
         let (run, effects) = ObjectiveRun::start(Arc::clone(&def.tree), now_ms);
+        // A repeated quest leaves the done list while it runs: the database keeps one row per
+        // objective, active or done.
+        let done: Vec<String> = done
+            .into_iter()
+            .filter(|id| !id.eq_ignore_ascii_case(&def.id))
+            .collect();
         let finished: Vec<&str> = done.iter().map(String::as_str).collect();
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             player.quest = Some(QuestTracker::new(&def.id, number).after(&finished, number));
+            player.done_quests.clone_from(&done);
             player.quests_unsaved = true;
         }
         self.quests.insert(number, ActiveQuest { def, run });
@@ -4766,6 +4775,27 @@ mod tests {
         assert_eq!(done.done, [QUEST]);
         assert_eq!(world.start_quest(1, QUEST, NOW), Err(QuestRefusal::Done));
         assert_eq!(world.start_quest(1, REPEATABLE_QUEST, NOW), Ok(()));
+    }
+
+    #[test]
+    fn a_repeated_quest_is_not_active_and_done_at_once() {
+        let mut world = quest_world();
+        world.start_quest(1, REPEATABLE_QUEST, NOW).expect("start");
+        world.tick_quests(NOW + QUEST_TIMER_MS);
+        world.start_quest(1, REPEATABLE_QUEST, NOW).expect("again");
+        let saved = world
+            .departures()
+            .pop()
+            .and_then(|departure| departure.quests)
+            .expect("quests");
+        assert_eq!(
+            saved.active.map(|(id, _)| id).as_deref(),
+            Some(REPEATABLE_QUEST)
+        );
+        assert!(
+            !saved.done.iter().any(|id| id == REPEATABLE_QUEST),
+            "the database keeps one row per objective"
+        );
     }
 
     #[test]

@@ -441,6 +441,15 @@ impl Mobs {
         self.gm.keys().map(|index| mob_entity(*index)).collect()
     }
 
+    /// The GM mobs whose spawn point `owns` refuses.
+    pub fn gm_mobs_outside(&self, owns: impl Fn(Position) -> bool) -> Vec<u64> {
+        self.gm
+            .iter()
+            .filter(|(_, spawn)| !owns(position_of(spawn)))
+            .map(|(index, _)| mob_entity(*index))
+            .collect()
+    }
+
     /// Lets the held personal mobs of `owner` see it at `now_ms`; a paced one waits one interval
     /// before its first hit.
     pub fn release(&mut self, owner: u64, now_ms: u64) {
