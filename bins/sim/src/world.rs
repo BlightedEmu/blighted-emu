@@ -60,6 +60,7 @@ mod level_assets;
 mod level_flow;
 mod members;
 mod mob_timeline;
+mod mob_trail;
 mod quest_tracker;
 mod scripts;
 mod slots;
@@ -492,6 +493,8 @@ pub struct SimWorld {
     ground: Arc<dyn Ground + Send + Sync>,
     /// The floor the players walked on: where a server push may go.
     walked_floor: walked_floor::WalkedFloor,
+    /// Where the mobs stood in the last moments: where a swing may find them.
+    mob_trails: mob_trail::MobTrails,
     me: SimSlot,
     cells: Option<Cells>,
     /// Tutorial sims only: the open-world sim that owns [`OPEN_WORLD_START`], where the exit
@@ -643,6 +646,7 @@ impl SimWorld {
             dice: Dice::new(combat.seed),
             deaths: Vec::new(),
             walked_floor: walked_floor::WalkedFloor::default(),
+            mob_trails: mob_trail::MobTrails::default(),
             combat_messages: Vec::new(),
             drinks: Vec::new(),
             swings: Vec::new(),
@@ -1318,6 +1322,9 @@ impl SimWorld {
         let intents = self.swings_landing(swings, now_ms, server_time);
         let mob_hits = self.mob_hits(intents, now_ms);
         let mob_seconds = mobs_started.elapsed().as_secs_f64();
+        let places: Vec<(u64, Position)> =
+            self.mob_states().map(|(mob, at, _)| (mob, at)).collect();
+        self.mob_trails.record(now_ms, places.into_iter());
         let player_attacks = self.player_swings_due(now_ms);
         self.tick_tutorials(now_ms);
         self.tick_quests(now_ms);

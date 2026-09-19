@@ -988,13 +988,23 @@ impl SimWorld {
             .filter(|(_, _, state)| state.health > 0 && !state.returning)
             .map(|(mob, at, _)| (mob, at, self.mobs.capsule(mob)))
             .collect();
+        // Each mob where it is and where it stood in the last moments: the client shows it a
+        // little behind the server (lag compensation).
+        let places: Vec<(u64, Position, Capsule)> = candidates
+            .iter()
+            .flat_map(|(mob, at, body)| {
+                std::iter::once(*at)
+                    .chain(self.mob_trails.recent(*mob))
+                    .map(move |place| (*mob, place, *body))
+            })
+            .collect();
         // The homing target: the one the client named, else the best one in the attack's
         // homing reach; with no camera yaw, the nearest mob.
         let locked = aim
             .lock_target
-            .and_then(|target| candidates.iter().position(|(mob, _, _)| *mob == target));
+            .and_then(|target| places.iter().position(|(mob, _, _)| *mob == target));
         let nearest = || {
-            candidates
+            places
                 .iter()
                 .enumerate()
                 .min_by(|a, b| {
@@ -1009,12 +1019,12 @@ impl SimWorld {
                 &shape,
                 position,
                 facing,
-                candidates.iter().map(|(_, at, _)| *at),
+                places.iter().map(|(_, at, _)| *at),
             ),
             None => nearest(),
         });
         // The homing turns the attacker to its target and steps it in before the blade swings.
-        let (from, facing) = match target.map(|index| candidates[index].1) {
+        let (from, facing) = match target.map(|index| places[index].1) {
             Some(at) => {
                 let from = stepped_in(&shape, position, at);
                 (from, yaw_toward(from, at))
@@ -1025,10 +1035,17 @@ impl SimWorld {
             },
         };
         let wedge = Wedge::of_swing(&shape, from, facing);
-        let mut hits: Vec<(f32, u64)> = candidates
-            .iter()
-            .filter_map(|(mob, at, body)| Some((wedge.touches(*at, *body)?, *mob)))
-            .collect();
+        // A mob is hit at the place where it is nearest the middle of the blade.
+        let mut hits: Vec<(f32, u64)> = Vec::new();
+        for (mob, at, body) in &places {
+            let Some(off) = wedge.touches(*at, *body) else {
+                continue;
+            };
+            match hits.iter_mut().find(|(_, hit)| hit == mob) {
+                Some(hit) => hit.0 = hit.0.min(off),
+                None => hits.push((off, *mob)),
+            }
+        }
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
         hits.truncate(MAX_SWING_TARGETS);
         // The nearest mob, its distance and its height above the player: why a swing missed.
@@ -1744,6 +1761,35 @@ mod tests {
             vec![Err(AttackRefusal::NoTarget)],
             "no homing to a mob behind"
         );
+    }
+
+    #[test]
+    fn a_swing_finds_a_mob_where_it_stood_a_moment_ago() {
+        const LUNGE_M: f32 = 4.0;
+        let mut world = fight_at(MOB_X + 1.0);
+        tick(&mut world, NOW);
+        let entity = world.by_connection[&connection(1)];
+        let from = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let shown = Position { x: MOB_X, ..from };
+        // The mob lunges away behind it on the server; the client still shows it in front.
+        let away = Position {
+            x: MOB_X - LUNGE_M,
+            ..from
+        };
+        world.mobs.lunge(mob(), away, LUNGE_M).expect("lunged");
+        let aim = Aim {
+            facing: Some(yaw_toward(from, shown)),
+            lock_target: None,
+        };
+        assert!(matches!(
+            world.swing(&connection(1), aim, AttackKind::Light, NOW).as_slice(),
+            [Ok(AttackOutcome::Hit { target, .. })] if *target == mob()
+        ));
     }
 
     #[test]
