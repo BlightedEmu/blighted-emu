@@ -26,7 +26,7 @@ use nw_messages::{
 
 /// The phase id of the single open-world phasing entry. It must not be 0 (the client drops a
 /// 0-phase entry); one phase is used for every player of this server.
-const OPEN_WORLD_PHASE_ID: u64 = 1;
+pub(crate) const OPEN_WORLD_PHASE_ID: u64 = 1;
 
 /// The phase id of a player entering `level`: the shared open-world phase, or a new random
 /// private instance for the tutorial (each tutorial player is alone, as in retail).

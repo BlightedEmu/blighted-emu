@@ -79,8 +79,20 @@ const FLAG_A0: u8 = 1;
 const IS_MASTER: u8 = 1;
 /// The `reserved` field of the open world: 0 in the captures.
 const OPEN_WORLD_RESERVED: u64 = 0;
-/// `keyType` of the single open-world phasing entry: a territory area.
+/// `keyType` of a territory or point-of-interest area entry.
 const AREA_KEY_TYPE: u8 = 1;
+/// `keyType` of a background grid cell entry.
+const GRID_KEY_TYPE: u8 = 2;
+/// The area of the start beach (open-world note: retail sent it after the tutorial exit, 654279
+/// ms; the client showed "You cannot access this area" at the beach with our key 0).
+const START_BEACH_AREA: u32 = 0x2331;
+/// The width of one phasing grid cell, metres (Azoth catalog 1635 spec: the open world is 48 x 41
+/// cells of 256 m).
+const PHASING_CELL_M: f32 = 256.0;
+/// The grid cells a player is phased in: the 2 x 2 nearest it (Inferred from retail updates).
+const NEAR_CELLS: usize = 2;
+/// Bits of the x cell in a grid key: `key_id = (cell_y << 16) | cell_x` (Observed).
+const GRID_KEY_Y_SHIFT: u32 = 16;
 /// `keyType` of the tutorial's phasing entry: a private instance.
 const INSTANCE_KEY_TYPE: u8 = 3;
 /// `extra` of the tutorial's phasing entry.
@@ -101,6 +113,55 @@ pub struct PhasingEntry {
 }
 
 impl PhasingEntry {
+    /// The start beach's area entry in `phase_id`.
+    pub const fn start_beach(phase_id: u64) -> Self {
+        Self {
+            key_type: AREA_KEY_TYPE,
+            key_id: START_BEACH_AREA,
+            phase_id,
+            extra: 0,
+        }
+    }
+
+    /// The open-world entries of a player at (`x`, `y`) in `phase_id`: the start beach's area and
+    /// the 2 x 2 grid cells nearest the player inside the grid of `level`. A sector around the
+    /// player without an entry makes the client show "You cannot access this area" (client
+    /// `FUN_143f03170`).
+    pub fn open_world(level: &LevelSpec, x: f32, y: f32, phase_id: u64) -> Vec<Self> {
+        let [origin_x, origin_y] = level.phasing_origin;
+        let [width, height] = level.phasing_bounds;
+        // The cells of one axis: the cell of the point and its neighbour on the nearer side.
+        let near = |at: f32, origin: f32, size: f32| -> Vec<u32> {
+            let cells = (size / PHASING_CELL_M).ceil();
+            let cell = ((at - origin) / PHASING_CELL_M).floor();
+            let neighbour = if (at - origin) / PHASING_CELL_M - cell < 0.5 {
+                cell - 1.0
+            } else {
+                cell + 1.0
+            };
+            let mut axis: Vec<u32> = [cell.min(neighbour), cell.max(neighbour)]
+                .into_iter()
+                .filter(|cell| (0.0..cells).contains(cell))
+                // Below the grid size, a few dozen.
+                .map(|cell| cell as u32)
+                .collect();
+            axis.truncate(NEAR_CELLS);
+            axis
+        };
+        let columns = near(x, origin_x, width);
+        let rows = near(y, origin_y, height);
+        std::iter::once(Self::start_beach(phase_id))
+            .chain(rows.iter().flat_map(|row| {
+                columns.iter().map(move |column| Self {
+                    key_type: GRID_KEY_TYPE,
+                    key_id: (row << GRID_KEY_Y_SHIFT) | column,
+                    phase_id,
+                    extra: 0,
+                })
+            }))
+            .collect()
+    }
+
     /// Reads one entry: key type, key id, phase id, extra.
     pub(crate) fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         Ok(Self {
@@ -147,12 +208,7 @@ impl LevelInfoChangedMsg {
             reserved: OPEN_WORLD_RESERVED,
             client_context,
             instance,
-            phasing: vec![PhasingEntry {
-                key_type: AREA_KEY_TYPE,
-                key_id: 0,
-                phase_id,
-                extra: 0,
-            }],
+            phasing: vec![PhasingEntry::start_beach(phase_id)],
         }
     }
 
@@ -270,6 +326,31 @@ mod tests {
         let body = message.encode().expect("encode");
         assert_eq!(body.len(), OPEN_WORLD_BODY_LEN);
         assert_eq!(LevelInfoChangedMsg::decode(&body), Ok(message));
+    }
+
+    #[test]
+    fn a_player_is_phased_in_the_beach_area_and_its_four_nearest_cells() {
+        // The retail beach spot (7305, 3093): cell x 20 (7168-7424, east half: and 21), cell y 12
+        // (3088-3344, south half: and 11).
+        let entries = PhasingEntry::open_world(&OPEN_WORLD_LEVEL, 7305.0, 3093.0, 1);
+        let keys: Vec<(u8, u32)> = entries
+            .iter()
+            .map(|entry| (entry.key_type, entry.key_id))
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                (AREA_KEY_TYPE, START_BEACH_AREA),
+                (GRID_KEY_TYPE, (11 << 16) | 20),
+                (GRID_KEY_TYPE, (11 << 16) | 21),
+                (GRID_KEY_TYPE, (12 << 16) | 20),
+                (GRID_KEY_TYPE, (12 << 16) | 21),
+            ]
+        );
+        assert!(entries.iter().all(|entry| entry.phase_id == 1));
+        // Outside the grid, only the cells inside it.
+        let corner = PhasingEntry::open_world(&OPEN_WORLD_LEVEL, 2050.0, 20.0, 1);
+        assert_eq!(corner.len(), 2, "the area and cell (0, 0)");
     }
 
     #[test]

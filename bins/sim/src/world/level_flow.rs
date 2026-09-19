@@ -17,9 +17,11 @@ use nw_content::achievements::AchievementIndexes;
 use nw_messages::facet::component;
 use nw_messages::{
     AchievementBits, AchievementState, ByteChange, ClientFacetMsg, CutsceneEndFinalizedMsg,
-    CutsceneGrantedMsg, FacetHeader, FullList, LevelInfoChangedMsg, PhasingEntry, ServerMessage,
-    TeleportWithLoadingScreenMsg, UpdatePhasingMsg,
+    CutsceneGrantedMsg, FacetHeader, FullList, LevelInfoChangedMsg, OPEN_WORLD_LEVEL, PhasingEntry,
+    ServerMessage, TeleportWithLoadingScreenMsg, UpdatePhasingMsg,
 };
+
+use crate::login::OPEN_WORLD_PHASE_ID;
 
 /// Time from a `LevelInfoChangedMsg` to the same message again (5.0 s in the retail tutorial and
 /// open world).
@@ -183,6 +185,9 @@ pub(super) struct LevelFlow {
     tutorial: bool,
     /// The sequence of the last 6310.
     phasing_sequence: u8,
+    /// The open-world phasing entries the client has; `None` until it took the level (then the
+    /// entries follow the player, [`LevelFlow::phasing_at`]).
+    phasing_entries: Option<Vec<PhasingEntry>>,
     /// The cutscene the client was allowed to play.
     cutscene: Option<u32>,
     /// `None` for a player taken without a level change (its client has them).
@@ -225,6 +230,7 @@ impl LevelFlow {
             level_info_again_at_ms: Some(now_ms.saturating_add(LEVEL_INFO_AGAIN_MS)),
             tutorial,
             phasing_sequence,
+            phasing_entries: None,
             cutscene: None,
             achievements: Some(achievements),
         }
@@ -253,6 +259,7 @@ impl LevelFlow {
             level_info_again_at_ms: None,
             tutorial: false,
             phasing_sequence,
+            phasing_entries: Some(Vec::new()),
             cutscene: None,
             achievements: None,
         }
@@ -306,6 +313,9 @@ impl LevelFlow {
                     .as_ref()
                     .map(|level| level.phasing.clone())
                     .unwrap_or_default();
+                if !self.tutorial {
+                    self.phasing_entries = Some(entries.clone());
+                }
                 vec![self.phasing(entries, mode)]
             }
             ClientFacetMsg::RequestCutscene { cutscene, .. } => {
@@ -336,6 +346,22 @@ impl LevelFlow {
             | ClientFacetMsg::EquipItem { .. }
             | ClientFacetMsg::ReturnToMainWorld { .. } => Vec::new(),
         }
+    }
+
+    /// The phasing update of an open-world player at (`x`, `y`), when its sectors changed since
+    /// the client's last entries: the start beach's area and the 2 x 2 nearest grid cells
+    /// (open-world note: retail updated them as the player moved; a sector without an entry made
+    /// the client show "You cannot access this area at this time").
+    pub(super) fn phasing_at(&mut self, x: f32, y: f32) -> Option<ServerMessage> {
+        if self.tutorial {
+            return None;
+        }
+        let entries = PhasingEntry::open_world(&OPEN_WORLD_LEVEL, x, y, OPEN_WORLD_PHASE_ID);
+        if self.phasing_entries.as_ref()? == &entries {
+            return None;
+        }
+        self.phasing_entries = Some(entries.clone());
+        Some(self.phasing(entries, OPEN_WORLD_PHASING_MODE))
     }
 
     /// The messages when the player leaves this level: the loading screen and no phases.
@@ -581,6 +607,59 @@ mod tests {
         assert_eq!(phasing.entries[0].phase_id, PHASE);
         let other_context = flow.answer(ack, LOGIN_CLIENT_CONTEXT + 1);
         assert!(other_context.is_empty(), "an ack of another level");
+    }
+
+    #[test]
+    fn open_world_phasing_follows_the_player_once_it_took_the_level() {
+        const BEACH: (f32, f32) = (7305.0, 3093.0);
+        const NEXT_CELL_EAST_M: f32 = 300.0;
+        let mut open_world = LevelFlow::after_level_info(
+            ENTITY,
+            LevelInfoChangedMsg::of_level(OPEN_WORLD_LEVEL, LOGIN_CLIENT_CONTEXT, NOW, 1),
+            NOW,
+            0,
+            &tutorial(),
+            false,
+            Some(WARMONGER),
+            &[],
+        );
+        assert_eq!(
+            open_world.phasing_at(BEACH.0, BEACH.1),
+            None,
+            "not before the client took the level"
+        );
+        let ack = ClientFacetMsg::AckLevelInfo {
+            header: header(component::PLAYER),
+            client_context: LOGIN_CLIENT_CONTEXT,
+        };
+        open_world.answer(ack, LOGIN_CLIENT_CONTEXT);
+        let Some(ServerMessage::UpdatePhasing(update)) = open_world.phasing_at(BEACH.0, BEACH.1)
+        else {
+            panic!("the cells around the player");
+        };
+        assert_eq!(
+            update.entries,
+            PhasingEntry::open_world(&OPEN_WORLD_LEVEL, BEACH.0, BEACH.1, OPEN_WORLD_PHASE_ID)
+        );
+        assert_eq!(update.sequence, 2, "after the ack's update");
+        assert_eq!(open_world.phasing_at(BEACH.0, BEACH.1), None, "no change");
+        assert!(
+            open_world
+                .phasing_at(BEACH.0 + NEXT_CELL_EAST_M, BEACH.1)
+                .is_some(),
+            "new cells"
+        );
+        assert_eq!(
+            flow().phasing_at(BEACH.0, BEACH.1),
+            None,
+            "not in the tutorial"
+        );
+        assert!(
+            LevelFlow::resumed(ENTITY, 0)
+                .phasing_at(BEACH.0, BEACH.1)
+                .is_some(),
+            "a player taken from another sim gets its cells"
+        );
     }
 
     #[test]

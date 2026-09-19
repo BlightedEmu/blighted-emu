@@ -1195,6 +1195,7 @@ impl SimWorld {
         self.server_ms = server_time;
         self.tick_hands(now_ms, server_time);
         self.tick_pushes(now_ms);
+        self.tick_phasing();
         let mut messages = self.take_messages();
         let bundled = self.bundles(now_ms, server_time)?;
         messages.extend(bundled.outgoing);
@@ -1480,6 +1481,18 @@ impl SimWorld {
             _ => return false,
         }
         true
+    }
+
+    /// Sends each open-world player the phasing of the sectors around it when they changed.
+    fn tick_phasing(&mut self) {
+        let mut query = self.world.query::<(&mut Player, &Body)>();
+        for (mut player, body) in query.iter_mut(&mut self.world) {
+            let at = body.motion.position();
+            if let Some(update) = player.flow.phasing_at(at.x, at.y) {
+                let connection = player.connection.clone();
+                send_now(&mut self.combat_messages, &connection, &[update]);
+            }
+        }
     }
 
     /// Moves the players that the server moves at `now_ms` along their pushes; a push that got
