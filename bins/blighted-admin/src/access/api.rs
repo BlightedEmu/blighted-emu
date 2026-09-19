@@ -26,10 +26,10 @@ pub const ME_ROUTE: &str = "/api/auth/me";
 /// Prefix of the web files, which need no session.
 const WEB_PREFIX: &str = "/web/";
 /// Pages that send a visitor without a session to the login page.
-const PAGES: [&str; 5] = ["/", "/live", "/studio", "/records", "/gm"];
+const PAGES: [&str; 6] = ["/", "/live", "/studio", "/records", "/todo", "/gm"];
 /// Changing routes that only local mode allows: design work and bot batches are for a
 /// team member's own PC (spec section 4).
-const LOCAL_ONLY_PREFIXES: [&str; 2] = ["/api/studio/", "/api/live/bots"];
+const LOCAL_ONLY_PREFIXES: [&str; 3] = ["/api/studio/", "/api/live/bots", "/api/todo"];
 const MS_PER_SECOND: u64 = 1000;
 
 /// The login routes.

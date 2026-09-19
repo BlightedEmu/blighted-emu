@@ -40,6 +40,9 @@ pub enum RunError {
     /// Logging cannot start.
     #[error(transparent)]
     Logging(#[from] LoggingError),
+    /// The studio cannot start.
+    #[error("studio: {0}")]
+    Studio(String),
     /// The pinned client build cannot be read.
     #[error("client build: {0}")]
     ClientBuild(#[source] nw_common::config::ConfigError),
@@ -98,6 +101,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
                     live.as_ref().map(|live| live.state().clone()),
                 )
             });
+            let studio = studio.transpose().map_err(RunError::Studio)?;
             let state = AppState::new(world, map, config.listen, captures, live);
             let state = match studio {
                 Some(studio) => state.with_studio(studio),

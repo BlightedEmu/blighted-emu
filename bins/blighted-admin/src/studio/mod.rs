@@ -13,12 +13,13 @@ use std::time::Duration;
 use nw_content::ContentBundle;
 use nw_content::bundle::bundle_path;
 use nw_design::DesignPaths;
-use tokio::sync::{OnceCell, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, OnceCell, Semaphore};
 
 use crate::config::StudioConfig;
 use crate::live::SharedState;
 use crate::studio::apply::ApplyStatus;
 use crate::studio::catalog::Catalog;
+use crate::todo::github::GitHub;
 
 /// Full design runs at a time.
 const ONE_RUN: usize = 1;
@@ -37,18 +38,31 @@ pub struct Studio {
     work: Arc<Semaphore>,
     /// The client records, read from the retail bundle at the first editor request.
     catalog: Arc<OnceCell<Arc<Catalog>>>,
+    /// One change of the to-do list at a time.
+    pub(crate) todo_lock: Arc<AsyncMutex<()>>,
+    /// The issue source of the to-do import.
+    pub(crate) github: GitHub,
 }
 
 impl Studio {
     /// A studio that merges into `out_dir` (the folder the servers read) for `client_build`, and
     /// watches the sims of `live` after a restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason when the HTTP client of the GitHub import cannot be made.
     pub fn new(
         config: &StudioConfig,
         out_dir: PathBuf,
         client_build: &str,
         live: Option<SharedState>,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, String> {
+        let token = config
+            .github_token_env
+            .as_ref()
+            .and_then(|name| std::env::var(name).ok());
+        let github = GitHub::new(&config.github_api_url, token)?;
+        Ok(Self {
             paths: Arc::new(DesignPaths {
                 design_dir: config.design_dir.clone(),
                 retail_dir: config.retail_dir.clone(),
@@ -61,7 +75,9 @@ impl Studio {
             apply: Arc::default(),
             work: Arc::new(Semaphore::new(ONE_RUN)),
             catalog: Arc::default(),
-        }
+            todo_lock: Arc::default(),
+            github,
+        })
     }
 
     /// The client records; the first call reads the retail bundle.

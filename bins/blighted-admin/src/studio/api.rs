@@ -436,9 +436,12 @@ mod tests {
             retail_dir: retail,
             control_fifo,
             restart_timeout_s,
+            github_api_url: crate::config::GITHUB_API_URL.to_owned(),
+            github_token_env: None,
         };
         let live = shared();
-        let studio = Studio::new(&config, root.path().join("out"), BUILD, Some(live.clone()));
+        let studio = Studio::new(&config, root.path().join("out"), BUILD, Some(live.clone()))
+            .expect("studio");
         Fixture { root, live, studio }
     }
 

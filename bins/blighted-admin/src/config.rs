@@ -82,6 +82,19 @@ pub struct StudioConfig {
     pub control_fifo: PathBuf,
     /// Longest wait for every sim to start again after Apply restarts them.
     pub restart_timeout_s: u64,
+    /// The GitHub API the to-do import reads issues from.
+    #[serde(default = "default_github_api_url")]
+    pub github_api_url: String,
+    /// The environment variable with a GitHub token, for issues of a private repository.
+    #[serde(default)]
+    pub github_token_env: Option<String>,
+}
+
+/// The public GitHub API.
+pub const GITHUB_API_URL: &str = "https://api.github.com";
+
+fn default_github_api_url() -> String {
+    GITHUB_API_URL.to_owned()
 }
 
 /// The live panel part of the configuration.

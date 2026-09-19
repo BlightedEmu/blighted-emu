@@ -88,6 +88,25 @@ impl Kind {
         Self::entry(self).2
     }
 
+    /// The kind whose folder holds the design file `path` (relative to the design folder);
+    /// `spawns/<map>/` gives [`Kind::SpawnGroup`], whose folder spawn point changes share. `None`
+    /// outside every kind folder.
+    pub fn of_path(path: &std::path::Path) -> Option<Self> {
+        let folder = path.parent()?;
+        KINDS
+            .iter()
+            .rev()
+            .find(|(kind, _, name)| {
+                let own = std::path::Path::new(name);
+                if kind.needs_map() {
+                    folder.parent() == Some(own)
+                } else {
+                    folder == own
+                }
+            })
+            .map(|(kind, _, _)| *kind)
+    }
+
     /// True for the retail world file point kinds.
     pub fn is_point(self) -> bool {
         matches!(self, Self::SpawnPoint | Self::NpcPoint)
@@ -338,5 +357,26 @@ mod tests {
         assert!(!Kind::SpawnPoint.allows(Action::Add));
         assert!(Kind::SpawnPoint.allows(Action::Disable));
         assert!(Kind::LootTable.allows(Action::Add));
+    }
+
+    #[test]
+    fn a_path_names_the_kind_of_its_folder() {
+        use std::path::Path;
+        assert_eq!(Kind::of_path(Path::new("items/a.toml")), Some(Kind::Item));
+        assert_eq!(
+            Kind::of_path(Path::new("items/weapons/a.toml")),
+            Some(Kind::Weapon)
+        );
+        assert_eq!(
+            Kind::of_path(Path::new("paths/lv/a.toml")),
+            Some(Kind::Path)
+        );
+        assert_eq!(
+            Kind::of_path(Path::new("spawns/lv/a.toml")),
+            Some(Kind::SpawnGroup)
+        );
+        assert_eq!(Kind::of_path(Path::new("ai/a.toml")), Some(Kind::AiProfile));
+        assert_eq!(Kind::of_path(Path::new("paths/a.toml")), None);
+        assert_eq!(Kind::of_path(Path::new("todo.toml")), None);
     }
 }

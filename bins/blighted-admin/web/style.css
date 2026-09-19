@@ -467,6 +467,10 @@ summary.section-head:hover h2 { color: var(--accent); }
 .records-hits { max-height: 75vh; }
 .records-form .table-scroll { max-height: 65vh; overflow: auto; }
 @media (max-width: 760px) { .records { grid-template-columns: minmax(0, 1fr); } }
+/* To-do page. */
+.todo-wide { width: min(420px, 100%); }
+.todo-task { gap: 6px; }
+.todo-text { margin: 0; white-space: pre-wrap; max-width: 90ch; }
 
 /* Login page (server mode). */
 .login { display: flex; flex-direction: column; gap: 12px; max-width: 360px; padding: 24px var(--gutter); }
