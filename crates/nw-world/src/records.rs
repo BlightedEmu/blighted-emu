@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The typed world data of one level (M1b spec section 4).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -33,6 +33,84 @@ pub struct WorldFile {
     pub npc_keys: Vec<String>,
     /// Stable design key of each vitals spawn, in the order of `vitals` (see [`point_keys`]).
     pub vitals_keys: Vec<String>,
+    /// The AI profiles of the design files, by id (admin studio spec section 6.5).
+    pub ai_profiles: BTreeMap<String, AiProfile>,
+    /// The patrol paths of this level's design files, by id (spec section 6.4).
+    pub paths: BTreeMap<String, PatrolPath>,
+    /// The profile and path of each vitals spawn, in the order of `vitals`; empty when no spawn
+    /// has one.
+    pub vitals_ai: Vec<SpawnAi>,
+}
+
+/// What an awake mob does without a target.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AiBehaviour {
+    /// Wanders near its spawn; attacks a player in sight.
+    #[default]
+    Wander,
+    /// Stands at its spawn; attacks a player in sight.
+    Guard,
+    /// Walks its path; attacks a player in sight.
+    Patrol,
+    /// Stands at its spawn; fights only a player who hit it.
+    Idle,
+}
+
+/// The brain numbers of a group of spawns; a missing number keeps the sim's `[combat]` value.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct AiProfile {
+    /// What it does without a target.
+    pub behaviour: AiBehaviour,
+    /// A player this near wakes it, metres.
+    pub wake_radius_m: Option<f32>,
+    /// It sees a player this far, metres.
+    pub sight_m: Option<f32>,
+    /// It wanders this far from its spawn, metres.
+    pub wander_radius_m: Option<f32>,
+    /// It pauses this long between wander walks.
+    pub wander_pause_ms: Option<u64>,
+    /// It never goes farther than this from its leash centre, metres.
+    pub leash_radius_m: Option<f32>,
+    /// It hits a target this near, metres.
+    pub attack_reach_m: Option<f32>,
+    /// Time between its hits.
+    pub attack_interval_ms: Option<u64>,
+    /// Its run speed, metres per second.
+    pub speed_mps: Option<f32>,
+    /// Time from its death to its respawn.
+    pub respawn_ms: Option<u64>,
+}
+
+/// How a path goes on after its last point.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PathMode {
+    /// Back to the first point.
+    #[default]
+    Loop,
+    /// Back along the points, then forward again.
+    BackAndForth,
+    /// The mob stays at the last point.
+    Once,
+}
+
+/// A patrol path.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PatrolPath {
+    /// The points, in order.
+    pub points: Vec<Position>,
+    /// The wait at each point, ms (missing: no wait).
+    pub waits_ms: Vec<u64>,
+    /// What comes after the last point.
+    pub mode: PathMode,
+}
+
+/// The AI profile and path ids of one spawn.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnAi {
+    /// An id of [`WorldFile::ai_profiles`].
+    pub profile: Option<String>,
+    /// An id of [`WorldFile::paths`].
+    pub path: Option<String>,
 }
 
 /// Level frame from `tracts.json` and `terrain.json`.

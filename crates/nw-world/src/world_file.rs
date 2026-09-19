@@ -16,7 +16,7 @@ pub const WORLD_MAGIC: [u8; 4] = *b"NWWF";
 pub const WORLD_FORMAT_VERSION: u16 = 1;
 /// Version of the record types. Raise it when any type in `records` changes; the golden test
 /// in this module fails until it is raised.
-pub const WORLD_SCHEMA_VERSION: u32 = 2;
+pub const WORLD_SCHEMA_VERSION: u32 = 3;
 /// Header fields of the world file.
 pub const WORLD_CONTAINER: ContainerSpec = ContainerSpec {
     magic: WORLD_MAGIC,
@@ -53,6 +53,8 @@ impl WorldFile {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use nw_content::container::encode_container;
 
     use super::*;
@@ -71,7 +73,9 @@ mod tests {
         2, 1, 201, 1, 100, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 192, 63, 1, 172, 2, 1,
         1, 101, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 172, 2, 1, 1, 99, 0, 0, 128, 63, 0, 0,
         0, 64, 0, 0, 64, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 1, 0, 0, 0, 63, 1,
-        115, 1, 1, 118, 1, 97, 1, 1, 110, 1, 1, 107,
+        115, 1, 1, 118, 1, 97, 1, 1, 110, 1, 1, 107, 1, 1, 112, 1, 0, 1, 0, 0, 0, 64, 0, 0, 0, 0,
+        0, 0, 0, 1, 1, 114, 1, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 5, 1, 1, 1, 1, 112, 1,
+        1, 114,
     ];
 
     /// One record of every kind. Every integer is 128 or more and every optional field is set,
@@ -143,6 +147,26 @@ mod tests {
             }],
             npc_keys: vec!["n".to_owned()],
             vitals_keys: vec!["k".to_owned()],
+            ai_profiles: BTreeMap::from([(
+                "p".to_owned(),
+                AiProfile {
+                    behaviour: AiBehaviour::Guard,
+                    sight_m: Some(2.0),
+                    ..AiProfile::default()
+                },
+            )]),
+            paths: BTreeMap::from([(
+                "r".to_owned(),
+                PatrolPath {
+                    points: vec![position],
+                    waits_ms: vec![5],
+                    mode: PathMode::BackAndForth,
+                },
+            )]),
+            vitals_ai: vec![SpawnAi {
+                profile: Some("p".to_owned()),
+                path: Some("r".to_owned()),
+            }],
         }
     }
 
