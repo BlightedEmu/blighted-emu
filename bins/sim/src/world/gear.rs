@@ -21,6 +21,8 @@ const ATTACH_MS: u64 = 331;
 const AMMO_OPTIONS: usize = 2;
 /// Milliseconds from 1970-01-01 to 2000-01-01, the server clock's start.
 const UNIX_MS_AT_2000: u64 = 946_684_800_000;
+/// The largest stack quantity: the world database stores it as an `INTEGER`.
+pub(crate) const MAX_STACK_QUANTITY: u32 = i32::MAX as u32;
 /// Nanoseconds per millisecond.
 const NS_PER_MS: u64 = 1_000_000;
 
@@ -501,13 +503,21 @@ impl Gear {
     /// Puts `quantity` of `item` into the bag: onto a stack of it, else into the first free
     /// slot; whether it fit.
     pub(super) fn add(&mut self, item: &KitItem, quantity: u32) -> bool {
+        if quantity == 0 {
+            return false;
+        }
+        let quantity = quantity.min(MAX_STACK_QUANTITY);
         if let Some(stack) = self
             .bag
             .iter_mut()
             .flatten()
             .find(|stack| stack.item_id == item.item_id)
         {
-            stack.item.quantity = stack.item.quantity.saturating_add(quantity);
+            stack.item.quantity = stack
+                .item
+                .quantity
+                .saturating_add(quantity)
+                .min(MAX_STACK_QUANTITY);
             self.changed = true;
             self.unsaved = true;
             return true;
@@ -785,6 +795,26 @@ pub(crate) mod tests {
         assert_eq!(gear.take_unsaved(), None);
         assert!(gear.remove(FLINT));
         assert!(gear.take_unsaved().is_some());
+    }
+
+    #[test]
+    fn a_stack_holds_one_to_the_largest_stored_quantity() {
+        let kits = kits();
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
+        let flint = kits.item(FLINT).expect("flint").clone();
+        assert!(!gear.add(&flint, 0), "no stack of nothing");
+        assert!(gear.add(&flint, MAX_STACK_QUANTITY));
+        assert!(gear.add(&flint, 1));
+        let held: u32 = gear
+            .carried()
+            .iter()
+            .filter(|stack| stack.item_id == FLINT)
+            .map(|stack| stack.quantity)
+            .sum();
+        assert_eq!(
+            held, MAX_STACK_QUANTITY,
+            "the database stores at most i32::MAX"
+        );
     }
 
     #[test]
