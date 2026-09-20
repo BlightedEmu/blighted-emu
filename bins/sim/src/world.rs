@@ -1451,7 +1451,10 @@ impl SimWorld {
             });
         }
         let ghosts = self.ghosts.values().flat_map(|ghosts| &ghosts.entities);
-        for ghost in ghosts.filter(|ghost| ghost.mob.is_none()) {
+        // A ghost player that died is no one's target either.
+        for ghost in ghosts.filter(|ghost| {
+            ghost.mob.is_none() && ghost.player.as_ref().is_none_or(|player| player.health > 0)
+        }) {
             seen.push(Seen {
                 entity: ghost.entity,
                 position: ghost.position,
@@ -1491,10 +1494,15 @@ impl SimWorld {
                 .player_by_number(number)
                 .and_then(|entity| self.world.get::<Body>(entity))
                 .map(|body| body.motion.position());
+            let alive = self
+                .player_by_number(number)
+                .and_then(|entity| self.world.get::<Vitals>(entity))
+                .is_some_and(|vitals| !vitals.health.is_dead());
             let (Some(position), Some(tutorial)) = (position, self.tutorials.get_mut(&number))
             else {
                 continue;
             };
+            tutorial.player_alive(alive);
             let mut orders =
                 tutorial.tick(&mut self.mobs, &self.content.kill_types, position, now_ms);
             // Items the player already holds meet the item tasks that start later.
@@ -1780,9 +1788,16 @@ impl SimWorld {
     /// mob order: a move fragment, a scripted swing at the player, or a server move of the player
     /// from the mob. Whether it was one.
     fn mob_order(&mut self, entity: Entity, number: u64, order: &Order, now_ms: u64) -> bool {
+        // A dead player is no one's target: no scripted swing, shove or pull reaches its body
+        // (live 2026-09-18: Thorpe's grab pulled a body 1.25 s after its death screen).
+        let alive = self
+            .world
+            .get::<Vitals>(entity)
+            .is_some_and(|vitals| !vitals.health.is_dead());
         let body_at = self
             .world
             .get::<Body>(entity)
+            .filter(|_| alive)
             .map(|body| body.motion.position());
         match *order {
             Order::PlayMove {
@@ -3652,6 +3667,66 @@ mod tests {
             world.move_to(&connection(1), at(&world), NOW + SHOVE_MS + 2),
             Err(MoveError::Pushed)
         ));
+    }
+
+    #[test]
+    fn a_dead_player_is_not_shoved_or_swung_at() {
+        const MOB_X: f32 = CELL_M / 2.0;
+        let mut world = world_with_spawns(vec![test_spawn(MOB_X)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, MOB_X + 4.0);
+        tick(&mut world, NOW);
+        let entity = world.player_by_number(1).expect("player");
+        let start = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        for step in 0..=16 {
+            #[allow(clippy::cast_precision_loss, reason = "a few steps")]
+            let x = MOB_X + step as f32 / 4.0;
+            world.walked_floor.walked(Position { x, ..start });
+        }
+        let max = world
+            .world
+            .get::<Vitals>(entity)
+            .expect("vitals")
+            .health
+            .max();
+        world
+            .world
+            .get_mut::<Vitals>(entity)
+            .expect("vitals")
+            .health
+            .take(max);
+        let mob = crate::mobs::mob_entity(0);
+        let pull = Order::Shove {
+            mob,
+            shove: Shove::To(2.0),
+            length_ms: 200,
+        };
+        assert!(world.mob_order(entity, 1, &pull, NOW));
+        assert!(
+            world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .push
+                .is_none(),
+            "no pull of a body"
+        );
+        let swings_before = world.scripted_swings.len();
+        let swing = Order::Swing {
+            mob,
+            mob_move: encounter::tests::any_mob_move(),
+        };
+        assert!(world.mob_order(entity, 1, &swing, NOW));
+        assert_eq!(
+            world.scripted_swings.len(),
+            swings_before,
+            "no swing at a body"
+        );
     }
 
     #[test]

@@ -860,6 +860,8 @@ pub(super) struct Tutorial {
     charge: Option<(u64, u64)>,
     /// The time of the last tick of Thorpe's script.
     captain_ticked_ms: u64,
+    /// The player is dead: Thorpe neither charges nor grabs it.
+    player_dead: bool,
 }
 
 impl Tutorial {
@@ -905,6 +907,7 @@ impl Tutorial {
             grabs: 0,
             charge: None,
             captain_ticked_ms: now_ms,
+            player_dead: false,
         };
         tutorial.assets.on(Trigger::Start, now_ms);
         let mut orders = Vec::new();
@@ -1196,6 +1199,11 @@ impl Tutorial {
         }
     }
 
+    /// Whether the player lives: a dead player is no target of the script.
+    pub(super) const fn player_alive(&mut self, alive: bool) {
+        self.player_dead = !alive;
+    }
+
     /// One tick at `now_ms` with the player at `position`: deaths count as kills, the next
     /// sailors come, Thorpe ends, bodies go, timers and later orders run, and areas are checked.
     pub(super) fn tick(
@@ -1405,6 +1413,12 @@ impl Tutorial {
         orders: &mut Vec<Order>,
     ) {
         let last_tick_ms = std::mem::replace(&mut self.captain_ticked_ms, now_ms);
+        // A dead player is no target; after its respawn the first grab waits again.
+        if self.player_dead {
+            self.charge = None;
+            self.next_grab_ms = None;
+            return;
+        }
         let Some(captain) = self
             .fighters
             .iter()
@@ -1543,6 +1557,11 @@ pub(crate) mod tests {
     const SHIP: Position = point(478.5, 849.7, 89.59);
     const CHEST_LOOT_TASK: &str = "01_SoleSurvivor2_Tutorial_TakeChestLoot";
     const CORRUPTED: &str = "Corrupted";
+
+    /// A mob move of the script, for tests of its orders elsewhere.
+    pub(crate) const fn any_mob_move() -> MobMove {
+        THORPE_STAB_01
+    }
 
     /// The vitals id of the ship's sailors.
     pub(crate) fn sailor_vitals() -> u32 {
@@ -2035,6 +2054,43 @@ pub(crate) mod tests {
         );
         assert_eq!(
             grabs(&tutorial.tick(&mut mobs, &kill_types, far, first + 1 + GRAB_INTERVAL_MS)),
+            1
+        );
+    }
+
+    #[test]
+    fn thorpe_does_not_grab_a_dead_player_and_waits_again_after_its_respawn() {
+        let (mut tutorial, mut mobs, thorpe) = thorpe_fight();
+        let kill_types = KillTypes::default();
+        let at = mobs.get_mut(thorpe).expect("Thorpe").brain.position();
+        let far = Position {
+            x: at.x + 10.0,
+            ..at
+        };
+        let grabs = |orders: &[Order]| {
+            orders
+                .iter()
+                .filter(|order| {
+                    matches!(order, Order::PlayMove { fragment, .. } if *fragment == THORPE_FORCE_GRAB)
+                })
+                .count()
+        };
+        tutorial.tick(&mut mobs, &kill_types, far, NOW);
+        let due = NOW + GRAB_FIRST_MS + 1;
+        tutorial.player_alive(false);
+        assert_eq!(
+            grabs(&tutorial.tick(&mut mobs, &kill_types, far, due)),
+            0,
+            "no grab of a dead player"
+        );
+        tutorial.player_alive(true);
+        assert_eq!(
+            grabs(&tutorial.tick(&mut mobs, &kill_types, far, due + 1)),
+            0,
+            "the first grab waits again after the respawn"
+        );
+        assert_eq!(
+            grabs(&tutorial.tick(&mut mobs, &kill_types, far, due + 1 + GRAB_FIRST_MS)),
             1
         );
     }
