@@ -792,6 +792,7 @@ impl SimWorld {
                 self.is_tutorial(),
                 admit.backstory.as_deref(),
                 &[],
+                0,
             ),
             None => LevelFlow::resumed(admit.entity, 0),
         };
@@ -906,6 +907,7 @@ impl SimWorld {
                 self.is_tutorial(),
                 offer.backstory.as_deref(),
                 &offer.achievements,
+                offer.achievement_version,
             ),
             None => LevelFlow::resumed(offer.entity, offer.phasing_sequence),
         };
@@ -3423,6 +3425,7 @@ fn handoff_offer(
         coins: player.coins,
         quests,
         achievements: player.flow.achievement_bits(),
+        achievement_version: player.flow.achievement_version(),
     }
 }
 

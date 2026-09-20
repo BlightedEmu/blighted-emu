@@ -310,6 +310,12 @@ pub struct HandoffOffer {
     /// bits).
     #[serde(default)]
     pub achievements: Vec<u32>,
+    /// The version of the newest achievement state the client has; the taker's first full state
+    /// goes on above it (Inferred, as for the quest tracker: the tutorial's changes ended at
+    /// version 25 and the beach sim sent its first full state at 3; retail's versions only rise,
+    /// 12065 in the tutorial and 13586 on the beach, live 2026-09-18).
+    #[serde(default)]
+    pub achievement_version: u64,
 }
 
 /// A player's quests (admin studio spec section 6.3), as a join or a handoff carries them.
@@ -772,6 +778,7 @@ mod tests {
             experience: 0,
             coins: 0,
             achievements: vec![14809, 15317],
+            achievement_version: 25,
             items: Some(vec![CarriedItem {
                 item_id: "PotionHealthT1".to_owned(),
                 quantity: 2,

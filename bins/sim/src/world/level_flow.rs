@@ -197,7 +197,8 @@ pub(super) struct LevelFlow {
 impl LevelFlow {
     /// The flow after `level_info` went to the client of entity `entity` at `now_ms`, after
     /// `phasing_sequence` updates. Every player starts with the expansion and the achievement of
-    /// its archetype pick (`backstory`).
+    /// its archetype pick (`backstory`), and keeps the `carried` bits of the level before; its
+    /// first full state goes on above `carried_version`, the newest state its client has.
     #[allow(clippy::too_many_arguments, reason = "the flow's start values")]
     pub(super) fn after_level_info(
         entity: u64,
@@ -208,10 +209,13 @@ impl LevelFlow {
         tutorial: bool,
         backstory: Option<&str>,
         carried: &[u32],
+        carried_version: u64,
     ) -> Self {
         let mut achievements = Achievements {
             bits: vec![0; BITSET_BYTES],
-            version: FIRST_ACHIEVEMENT_VERSION,
+            version: carried_version
+                .saturating_add(1)
+                .max(FIRST_ACHIEVEMENT_VERSION),
             changes: Vec::new(),
         };
         let archetype = backstory.and_then(|backstory| rules.archetypes.get(backstory).copied());
@@ -249,6 +253,14 @@ impl LevelFlow {
                     .map(move |bit| byte * u8::BITS + bit)
             })
             .collect()
+    }
+
+    /// The version of the newest achievement state, for a handoff; 0 for a player taken without
+    /// a level change.
+    pub(super) fn achievement_version(&self) -> u64 {
+        self.achievements
+            .as_ref()
+            .map_or(0, |achievements| achievements.version)
     }
 
     /// The flow of a player that a sim took without a level change: nothing is pending.
@@ -491,6 +503,7 @@ mod tests {
             true,
             Some(WARMONGER),
             &[],
+            0,
         )
     }
 
@@ -515,6 +528,7 @@ mod tests {
             panic!("a full bitset");
         };
         assert_eq!(list.elements.len(), BITSET_BYTES);
+        assert_eq!(list.version, Some(FIRST_ACHIEVEMENT_VERSION));
         assert!(bit(&first, EXPANSION_BIT));
         assert!(bit(&first, WARMONGER_BIT));
         assert!(!bit(&first, INTRO_UNLOCK_BIT));
@@ -526,6 +540,8 @@ mod tests {
         // Retail: the open world's first full state (654375) held the tutorial's bits, the door
         // bit 15317 among them.
         const CARRIED: [u32; 2] = [14_809, 15_317];
+        /// The version of the tutorial's last achievement change (live run 9: 25).
+        const CARRIED_VERSION: u64 = 25;
         let mut flow = LevelFlow::after_level_info(
             ENTITY,
             LevelInfoChangedMsg::of_level(TUTORIAL_LEVEL, LOGIN_CLIENT_CONTEXT, NOW, PHASE),
@@ -535,17 +551,29 @@ mod tests {
             false,
             Some(WARMONGER),
             &CARRIED,
+            CARRIED_VERSION,
         );
         let mut expected = vec![EXPANSION_BIT, WARMONGER_BIT, CARRIED[0], CARRIED[1]];
         expected.sort_unstable();
         assert_eq!(flow.achievement_bits(), expected);
-        assert!(flow.first_achievements().is_some());
+        let Some(AchievementBits::Full(first)) =
+            flow.first_achievements().and_then(|state| state.bits)
+        else {
+            panic!("a full state");
+        };
+        assert_eq!(
+            first.version,
+            Some(CARRIED_VERSION + 1),
+            "above the versions the client has"
+        );
         assert_eq!(
             flow.take_achievement_changes(),
             None,
             "the full state holds them"
         );
+        assert_eq!(flow.achievement_version(), CARRIED_VERSION + 1);
         assert!(LevelFlow::resumed(ENTITY, 0).achievement_bits().is_empty());
+        assert_eq!(LevelFlow::resumed(ENTITY, 0).achievement_version(), 0);
     }
 
     #[test]
@@ -640,6 +668,7 @@ mod tests {
             false,
             Some(WARMONGER),
             &[],
+            0,
         );
         assert_eq!(
             open_world.phasing_at(BEACH.0, BEACH.1),
