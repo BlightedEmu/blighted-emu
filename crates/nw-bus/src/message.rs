@@ -382,9 +382,58 @@ pub const MAX_BUS_MESSAGE_BYTES: usize = 1024 * 1024;
 /// of a bundle member holds.
 pub const MOB_ENTITY_BASE: u64 = 1 << 34;
 
-/// Most bytes of one [`Ghost`] in `postcard`: a 10-byte entity number, three 4-byte floats, and
-/// a mob's state (a 1-byte option tag, five 5-byte numbers and a 1-byte flag).
-pub const MAX_GHOST_BYTES: usize = 49;
+/// Most bytes of one [`Ghost`] in `postcard`: a 10-byte entity number, three 4-byte floats, two
+/// option tags, and the larger of a mob's state (five 5-byte numbers and a 1-byte flag) and a
+/// player's ([`PlayerGhost`]: about 210 bytes with all its visible items).
+pub const MAX_GHOST_BYTES: usize = 240;
+
+/// The paperdoll slots that show on a character (armor and weapon options; the
+/// `nw_messages::is_visible_slot` slots): a [`PlayerGhost`] carries at most one item for each.
+pub const GHOST_VISIBLE_ITEMS: usize = 11;
+
+/// One worn item that shows on a player ghost.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GhostItem {
+    /// The paperdoll slot.
+    pub slot: u8,
+    /// The client item index.
+    pub item_index: u32,
+    /// Its gear score.
+    pub gear_score: u32,
+}
+
+/// What other players see of a player near a border (replication note): its look, health,
+/// stance, block, facing, clock and the items that show on it, so the players of the other sim
+/// see it move, turn, fight and change weapons, not a statue.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PlayerGhost {
+    /// The character.
+    pub character: Uuid,
+    /// The saved look.
+    pub look: Option<[u8; LOOK_CHOICES]>,
+    /// Health now.
+    pub health: u32,
+    /// Max health.
+    pub max_health: u32,
+    /// Its facing (yaw, radians), when known.
+    pub facing: Option<f32>,
+    /// Its run toggle (the input's movement mode), when known.
+    pub run_mode: Option<bool>,
+    /// The ALC state number in which its movement mode started.
+    pub mode_started: u16,
+    /// It holds block.
+    pub blocking: bool,
+    /// The server time of its first own state (ms since 2000-01-01): its ALC clock.
+    pub spawned_ms: u64,
+    /// The version of its gear: a new one is a gear change.
+    pub gear_version: u64,
+    /// The main-hand option slot drawn.
+    pub drawn: Option<u32>,
+    /// The drawn weapon is in the hand.
+    pub attached: bool,
+    /// The items that show on it.
+    pub items: [Option<GhostItem>; GHOST_VISIBLE_ITEMS],
+}
 
 /// The state of a mob ghost (M6-A spec section 6.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -412,6 +461,9 @@ pub struct Ghost {
     pub position: Point,
     /// A mob's state; `None` for a player.
     pub mob: Option<MobGhost>,
+    /// A player's state, for the players who see it.
+    #[serde(default)]
+    pub player: Option<PlayerGhost>,
 }
 
 /// A hit on an entity of another sim (M6-A spec section 7.3), sent to the sim that owns it.
@@ -734,6 +786,7 @@ mod tests {
                 entity: CONNECTION,
                 position: POINT,
                 mob: None,
+                player: None,
             }],
         });
         round_trip(SimHeartbeat {
@@ -810,11 +863,41 @@ mod tests {
                 category_id: u32::MAX,
                 level: u32::MAX,
             }),
+            player: None,
         };
         assert!(encode(&ghost).expect("encode").len() <= MAX_GHOST_BYTES);
         round_trip(Ghost {
             position: POINT,
             ..ghost
+        });
+        let item = GhostItem {
+            slot: u8::MAX,
+            item_index: u32::MAX,
+            gear_score: u32::MAX,
+        };
+        let player = Ghost {
+            mob: None,
+            player: Some(PlayerGhost {
+                character: Uuid::from_u128(u128::MAX),
+                look: Some([u8::MAX; LOOK_CHOICES]),
+                health: u32::MAX,
+                max_health: u32::MAX,
+                facing: Some(f32::MAX),
+                run_mode: Some(true),
+                mode_started: u16::MAX,
+                blocking: true,
+                spawned_ms: u64::MAX,
+                gear_version: u64::MAX,
+                drawn: Some(u32::MAX),
+                attached: true,
+                items: [Some(item); GHOST_VISIBLE_ITEMS],
+            }),
+            ..ghost
+        };
+        assert!(encode(&player).expect("encode").len() <= MAX_GHOST_BYTES);
+        round_trip(Ghost {
+            position: POINT,
+            ..player
         });
     }
 
