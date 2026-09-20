@@ -285,19 +285,21 @@ impl Wedge {
 /// How far apart in height a homing target may be (the `Homing` clips' `Height` 5, Observed).
 const HOMING_HEIGHT_M: f32 = 5.0;
 
-/// The target of `targets` (positions) that a swing of `shape` from `from` facing `facing` homes
-/// to: the one with the lowest share of the homing radius plus share of the homing angle; `None`
-/// when none is in the homing's reach.
+/// The target of `targets` (positions and body radii) that a swing of `shape` from `from` facing
+/// `facing` homes to: the one with the lowest share of the homing radius plus share of the homing
+/// angle; `None` when none is in the homing's reach. The radius counts to the body's edge
+/// (Inferred: the live greatsword missed Thorpe, a 0.7 m body, at 5 to 7 m to his middle while
+/// the client showed it landing, 2026-09-18).
 pub(super) fn homing(
     shape: &SwingShape,
     from: Position,
     facing: f32,
-    targets: impl Iterator<Item = Position>,
+    targets: impl Iterator<Item = (Position, f32)>,
 ) -> Option<usize> {
     targets
         .enumerate()
-        .filter_map(|(index, at)| {
-            let distance = at.horizontal_distance(from);
+        .filter_map(|(index, (at, radius_m))| {
+            let distance = (at.horizontal_distance(from) - radius_m).max(0.0);
             let off = turn(facing, yaw_toward(from, at)).abs();
             let in_reach = distance <= shape.homing_radius_m
                 && off <= shape.homing_angle_rad
@@ -401,18 +403,39 @@ mod tests {
     fn homing_turns_to_the_best_target_in_its_reach() {
         let east = at(3.0, 0.0);
         let north_east = at(1.0, 1.0);
+        let body = |at: Position| (at, BODY.radius_m);
         assert_eq!(
-            homing(&SWORD_LIGHT, ORIGIN, NORTH, [east, north_east].into_iter()),
+            homing(
+                &SWORD_LIGHT,
+                ORIGIN,
+                NORTH,
+                [body(east), body(north_east)].into_iter()
+            ),
             Some(1)
         );
         let far = at(0.0, 5.0);
-        assert_eq!(homing(&SWORD_LIGHT, ORIGIN, NORTH, [far].into_iter()), None);
+        assert_eq!(
+            homing(&SWORD_LIGHT, ORIGIN, NORTH, [body(far)].into_iter()),
+            None
+        );
+        // A big body whose middle is beyond the radius but whose edge is within it.
+        const BIG_RADIUS_M: f32 = 0.7;
+        let big = at(0.0, SWORD_LIGHT.homing_radius_m + BIG_RADIUS_M - 0.1);
+        assert_eq!(
+            homing(
+                &SWORD_LIGHT,
+                ORIGIN,
+                NORTH,
+                [(big, BIG_RADIUS_M)].into_iter()
+            ),
+            Some(0)
+        );
         let high = Position {
             z: ORIGIN.z + HOMING_HEIGHT_M + 1.0,
             ..at(0.0, 2.0)
         };
         assert_eq!(
-            homing(&SWORD_LIGHT, ORIGIN, NORTH, [high].into_iter()),
+            homing(&SWORD_LIGHT, ORIGIN, NORTH, [body(high)].into_iter()),
             None
         );
     }
@@ -423,7 +446,12 @@ mod tests {
         let mob = at(0.0, 3.5);
         assert_eq!(sword().touches(mob, BODY), None);
         assert_eq!(
-            homing(&SWORD_LIGHT, ORIGIN, NORTH, [mob].into_iter()),
+            homing(
+                &SWORD_LIGHT,
+                ORIGIN,
+                NORTH,
+                [(mob, BODY.radius_m)].into_iter()
+            ),
             Some(0)
         );
         let stepped = stepped_in(&SWORD_LIGHT, ORIGIN, mob);

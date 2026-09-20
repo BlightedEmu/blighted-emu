@@ -190,25 +190,21 @@ const THORPE_CAPSULE: Capsule = Capsule {
 /// their attacks; the reach of the hit shape in front of the body is Inferred from the clips'
 /// shapes, and every retail mob hit landed inside it plus the player's radius).
 const SAILOR_REACH: MobReach = MobReach {
-    lunge_stop_m: 0.5,
     lunge_max_m: 2.0,
     lunge_turn_rad: std::f32::consts::FRAC_PI_4,
     reach_m: 1.4,
 };
 const LEGION_REACH: MobReach = MobReach {
-    lunge_stop_m: 0.5,
     lunge_max_m: 2.0,
     lunge_turn_rad: std::f32::consts::FRAC_PI_4,
     reach_m: 2.0,
 };
 const RISEN_REACH: MobReach = MobReach {
-    lunge_stop_m: 0.25,
     lunge_max_m: 2.0,
     lunge_turn_rad: std::f32::consts::FRAC_PI_2,
     reach_m: 1.5,
 };
 const SWARMER_REACH: MobReach = MobReach {
-    lunge_stop_m: 1.0,
     lunge_max_m: 1.5,
     lunge_turn_rad: std::f32::consts::PI,
     reach_m: 1.0,
@@ -218,7 +214,6 @@ const SWARMER_REACH: MobReach = MobReach {
 /// `ftue_thorpe_combatbehavior`), so his moves step in up to 4 m (Inferred: 6 m less his reach
 /// and the player's radius).
 const THORPE_REACH: MobReach = MobReach {
-    lunge_stop_m: 1.25,
     lunge_max_m: 4.0,
     lunge_turn_rad: std::f32::consts::PI,
     reach_m: 1.5,

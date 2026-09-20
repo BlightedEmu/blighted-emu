@@ -139,12 +139,9 @@ pub const DEFAULT_MOB_CAPSULE: Capsule = Capsule {
 };
 
 /// How a mob's swing reaches its target (collision note, section 3: each retail creature lunged
-/// forward in its swing until the bodies touched, so every retail mob hit landed 0.79 to 1.65 m
-/// from the player).
+/// forward in its swing, and every retail mob hit landed 0.79 to 1.65 m from the player).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MobReach {
-    /// The lunge stops this near the target, or where the two bodies touch.
-    pub lunge_stop_m: f32,
     /// The longest lunge.
     pub lunge_max_m: f32,
     /// It lunges only at a target within this angle of where it aimed at the swing start

@@ -152,6 +152,12 @@ pub(super) const fn amount_of(amount: u32) -> f32 {
     amount as f32
 }
 
+/// The gap a mob's lunge leaves between its body and the player's (Inferred: every retail mob hit
+/// landed 0.79 to 1.65 m from the player, middle to middle; a lunge until the bodies touched put
+/// mobs in the player on screen, live 2026-09-18; this gap lands a sailor at 1.2 m and Thorpe at
+/// 1.5 m, inside every creature's reach).
+const LUNGE_GAP_M: f32 = 0.4;
+
 /// The most mobs one swing hits (our choice; retail's limit is Unknown, one retail swing hit
 /// two).
 const MAX_SWING_TARGETS: usize = 5;
@@ -1119,7 +1125,7 @@ impl SimWorld {
                 &shape,
                 position,
                 facing,
-                places.iter().map(|(_, at, _)| *at),
+                places.iter().map(|(_, at, body)| (*at, body.radius_m)),
             ),
             None => nearest(),
         });
@@ -1159,6 +1165,7 @@ impl SimWorld {
             y = position.y,
             facing,
             ?weapon,
+            ?kind,
             ?nearest_mob,
             stepped_m = from.horizontal_distance(position),
             hits = ?hits,
@@ -1465,9 +1472,7 @@ impl SimWorld {
         let aim = yaw_toward(at, intent.target_at);
         let toward = yaw_toward(at, body);
         let (from, facing) = if turn(aim, toward).abs() <= reach.lunge_turn_rad {
-            let stop_m = reach
-                .lunge_stop_m
-                .max(capsule.radius_m + PLAYER_CAPSULE.radius_m);
+            let stop_m = capsule.radius_m + PLAYER_CAPSULE.radius_m + LUNGE_GAP_M;
             let lunge_m = (body.horizontal_distance(at) - stop_m).clamp(0.0, reach.lunge_max_m);
             let from = self.mobs.lunge(intent.mob, body, lunge_m).unwrap_or(at);
             (from, toward)
@@ -2650,7 +2655,6 @@ mod tests {
     #[test]
     fn a_mob_with_a_reach_lunges_to_the_player_and_hits() {
         const REACH: crate::mobs::MobReach = crate::mobs::MobReach {
-            lunge_stop_m: 0.5,
             lunge_max_m: 2.0,
             lunge_turn_rad: std::f32::consts::FRAC_PI_4,
             reach_m: 1.4,
@@ -2691,16 +2695,19 @@ mod tests {
             world.mob_hits(vec![(swing(MOB_X + 3.0), None)], NOW).len(),
             1
         );
+        // It lunges until a gap is left between the bodies: 0.5 + 0.4 + the gap.
+        let stop_m = crate::mobs::DEFAULT_MOB_CAPSULE.radius_m
+            + crate::world::hit_shape::PLAYER_CAPSULE.radius_m
+            + LUNGE_GAP_M;
         let lunged = world.mobs.get_mut(mob).expect("mob").brain.position();
-        // It lunges its longest 2 m, which leaves 1 m to the player.
-        assert!((at(MOB_X + 3.0).horizontal_distance(lunged) - 1.0).abs() < 1e-3);
-        // Next to the player, it stops where the bodies touch: 0.5 + 0.4 m.
+        assert!((at(MOB_X + 3.0).horizontal_distance(lunged) - stop_m).abs() < 1e-3);
+        // Already there, it stays: it never steps into the player.
         assert_eq!(
             world.mob_hits(vec![(swing(MOB_X + 3.0), None)], NOW).len(),
             1
         );
-        let touching = world.mobs.get_mut(mob).expect("mob").brain.position();
-        assert!((at(MOB_X + 3.0).horizontal_distance(touching) - 0.9).abs() < 1e-3);
+        let again = world.mobs.get_mut(mob).expect("mob").brain.position();
+        assert!((at(MOB_X + 3.0).horizontal_distance(again) - stop_m).abs() < 1e-3);
         // Aimed west of itself, the player east is beyond its lunge turn and behind its wedge.
         assert!(
             world
