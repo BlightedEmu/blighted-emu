@@ -1497,7 +1497,11 @@ impl SimWorld {
                 position: ghost.position,
             });
         }
-        self.mobs.tick(&seen, now_ms, &*self.ground)
+        let ground = walked_floor::WalkedGround {
+            ground: &*self.ground,
+            walked: &self.walked_floor,
+        };
+        self.mobs.tick(&seen, now_ms, &ground)
     }
 
     /// Starts the tutorial of player `number` at `now_ms`; without the quest in the content

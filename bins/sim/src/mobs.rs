@@ -41,10 +41,10 @@ pub const WAKE_RESCAN_M: f32 = 10.0;
 /// deck high above the sea bed (live 2026-09-12: the sailor dropped under the ship and vanished).
 pub const MAX_STEP_DOWN_M: f32 = 3.0;
 
-/// The height of a mob that moves to `to` on `ground`: the ground's, unless the ground lies more
-/// than [`MAX_STEP_DOWN_M`] below the mob.
+/// The height of a mob that moves to `to` on `ground`: the floor's under it, unless that lies
+/// more than [`MAX_STEP_DOWN_M`] below the mob.
 fn height_after_move(ground: &dyn Ground, to: Position) -> f32 {
-    match ground.height_at(to.x, to.y) {
+    match ground.floor_at(to.x, to.y, to.z) {
         Some(height) if to.z - height <= MAX_STEP_DOWN_M => height,
         _ => to.z,
     }

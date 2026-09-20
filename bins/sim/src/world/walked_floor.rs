@@ -6,10 +6,15 @@
 //! at the wall (live 2026-09-18: Thorpe's shockwave pushed the player 5 m through the arena wall
 //! into a pocket), and a pull never lands under a platform (live 2026-09-18: his grab pulled a
 //! player who stood in the water at 19 m under his 22.2 m platform, stuck).
+//!
+//! A moving mob stands on such floor too ([`WalkedGround`]): the height map holds only the
+//! terrain, and a boar that chased the player up onto a deck walked on the terrain 3 to 4.5 m
+//! under it, out of reach of the swings (run 10, 2026-09-18: 30 of 40 hammer swings missed with
+//! the boar more than 2.8 m below the player; the retail deck boars stood 0.4 to 0.6 m below).
 
 use std::collections::HashMap;
 
-use nw_sim_core::Position;
+use nw_sim_core::{Ground, Position};
 
 /// The side of one floor cell (our choice: about a body's width).
 const CELL_M: f32 = 1.0;
@@ -61,7 +66,7 @@ impl WalkedFloor {
     }
 
     /// The walked floor of the cell of `at` nearest its height, within [`FLOOR_REACH_M`].
-    fn floor_at(&self, at: Position) -> Option<f32> {
+    pub(super) fn floor_at(&self, at: Position) -> Option<f32> {
         self.cells
             .get(&cell_of(at))?
             .iter()
@@ -100,9 +105,29 @@ impl WalkedFloor {
     }
 }
 
+/// The level's `ground` with the floors the players `walked`: a body stands on a walked floor
+/// near its height, else on the ground.
+pub(super) struct WalkedGround<'a> {
+    pub(super) ground: &'a dyn Ground,
+    pub(super) walked: &'a WalkedFloor,
+}
+
+impl Ground for WalkedGround<'_> {
+    fn height_at(&self, x: f32, y: f32) -> Option<f32> {
+        self.ground.height_at(x, y)
+    }
+
+    fn floor_at(&self, x: f32, y: f32, z: f32) -> Option<f32> {
+        self.walked
+            .floor_at(Position { x, y, z })
+            .or_else(|| self.ground.height_at(x, y))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nw_sim_core::test_support::FlatGround;
 
     const START: Position = Position {
         x: 480.5,
@@ -115,6 +140,36 @@ mod tests {
             x: START.x + metres,
             ..START
         }
+    }
+
+    #[test]
+    fn a_body_stands_on_a_walked_floor_near_its_height_else_on_the_ground() {
+        /// Run 10: the terrain at 42.5 m under a deck the player walked at 46 m.
+        const TERRAIN_Z: f32 = 42.5;
+        const DECK_Z: f32 = 46.0;
+        let mut walked = WalkedFloor::default();
+        walked.walked(Position { z: DECK_Z, ..START });
+        let terrain = FlatGround(TERRAIN_Z);
+        let ground = WalkedGround {
+            ground: &terrain,
+            walked: &walked,
+        };
+        let floor = |at: Position| ground.floor_at(at.x, at.y, at.z);
+        assert_eq!(
+            floor(Position { z: 45.0, ..START }),
+            Some(DECK_Z),
+            "on the deck"
+        );
+        assert_eq!(
+            floor(Position {
+                z: TERRAIN_Z,
+                ..START
+            }),
+            Some(TERRAIN_Z),
+            "under the deck: the deck is out of its reach"
+        );
+        assert_eq!(floor(east(5.0)), Some(TERRAIN_Z), "where nobody walked");
+        assert_eq!(ground.height_at(START.x, START.y), Some(TERRAIN_Z));
     }
 
     #[test]

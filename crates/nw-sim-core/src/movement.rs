@@ -47,6 +47,12 @@ impl Position {
 pub trait Ground {
     /// Ground height at (`x`, `y`), or `None` where the level has no height data.
     fn height_at(&self, x: f32, y: f32) -> Option<f32>;
+
+    /// The height of the floor at (`x`, `y`) under a body at height `_z`: the ground's, unless
+    /// the implementation knows other floors there.
+    fn floor_at(&self, x: f32, y: f32, _z: f32) -> Option<f32> {
+        self.height_at(x, y)
+    }
 }
 
 impl Ground for WorldFile {
