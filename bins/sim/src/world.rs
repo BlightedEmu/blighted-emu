@@ -2326,6 +2326,7 @@ impl SimWorld {
             items,
             hands,
             in_combat: player.combat.in_combat(),
+            target: vitals.lock_target(),
         }
     }
 
@@ -2893,10 +2894,17 @@ impl Neighbourhood<'_> {
             }
             let own = player.number;
             let own_position = body.motion.position();
+            let viewer = self.replicas.get(&own);
             let others = self
                 .grid
                 .near(own_position)
-                .filter(|(number, _)| *number != own);
+                .filter(|(number, _)| *number != own)
+                .map(|(number, position)| {
+                    let pinned = viewer
+                        .zip(self.replicas.get(&number))
+                        .is_some_and(|(viewer, other)| other.fights(number, own, viewer));
+                    (number, position, pinned)
+                });
             let seen = player.interest.update(own_position, others);
             // Until the client has spawned, other entities share the offline cache with the
             // own player (local-player-check note). Hold them until the first movement.
@@ -5256,6 +5264,36 @@ mod tests {
             },
             ..InputRecord::default()
         }
+    }
+
+    #[test]
+    fn a_player_in_a_fight_stays_in_sight_over_nearer_players() {
+        const ONE: usize = 1;
+        let mut world = world_of("sim-a", settings(ONE, MAX_PLAYERS));
+        join(&mut world, 1, 0.0);
+        join(&mut world, 2, 5.0);
+        join(&mut world, 3, 40.0);
+        let first = tick(&mut world, NOW);
+        assert_eq!(
+            seen_by(&world, &first.messages, &connection(1)),
+            [1, 2],
+            "the nearest"
+        );
+        for number in [1, 3] {
+            let entity = world.player_by_number(number).expect("player");
+            world
+                .world
+                .get_mut::<Player>(entity)
+                .expect("player")
+                .combat
+                .hit(NOW + 1, false);
+        }
+        let fight = tick(&mut world, NOW + 33);
+        assert_eq!(
+            seen_by(&world, &fight.messages, &connection(1)),
+            [1, 3],
+            "the one it fights"
+        );
     }
 
     #[test]

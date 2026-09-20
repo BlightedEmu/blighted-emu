@@ -384,8 +384,8 @@ pub const MOB_ENTITY_BASE: u64 = 1 << 34;
 
 /// Most bytes of one [`Ghost`] in `postcard`: a 10-byte entity number, three 4-byte floats, two
 /// option tags, and the larger of a mob's state (five 5-byte numbers and a 1-byte flag) and a
-/// player's ([`PlayerGhost`]: about 210 bytes with all its visible items).
-pub const MAX_GHOST_BYTES: usize = 240;
+/// player's ([`PlayerGhost`]: about 226 bytes with all its visible items, its view and target).
+pub const MAX_GHOST_BYTES: usize = 256;
 
 /// The paperdoll slots that show on a character (armor and weapon options; the
 /// `nw_messages::is_visible_slot` slots): a [`PlayerGhost`] carries at most one item for each.
@@ -419,6 +419,8 @@ pub struct PlayerGhost {
     pub facing: Option<f32>,
     /// The pitch of its view (radians, positive looks down), when known.
     pub pitch: Option<f32>,
+    /// The entity it locks on or homes to (its newest input), when it has one.
+    pub target: Option<u64>,
     /// Its run toggle (the input's movement mode), when known.
     pub run_mode: Option<bool>,
     /// The ALC state number in which its movement mode started.
@@ -886,6 +888,7 @@ mod tests {
                 max_health: u32::MAX,
                 facing: Some(f32::MAX),
                 pitch: Some(f32::MAX),
+                target: Some(u64::MAX),
                 run_mode: Some(true),
                 mode_started: u16::MAX,
                 blocking: true,

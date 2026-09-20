@@ -18,9 +18,10 @@ level = "newworld_vitaeeterna"
 max_players = 2000
 # Our own choice; the retail range is Unknown.
 interest_radius_m = 100.0
-# The nearest others in a player's bundles: with the player itself they fill one bundle. The
-# retail limit is Unknown.
-max_visible_players = 47
+# Most others a player sees: those fighting it first, then the nearest. Bundles split by bytes
+# and a per-tick budget picks who goes each tick, so this is no bundle limit. Retail's 45-vs-45
+# war showed one client 180 other players; at most 500.
+max_visible_players = 200
 ground_tolerance_m = 2.0
 # Above the largest captured fall (128.6 m, movement numbers note, Check section).
 max_height_above_ground_m = 150.0

@@ -113,6 +113,11 @@ impl Vitals {
         self.blocking
     }
 
+    /// The entity the player locks on or homes to in its newest input.
+    pub(super) const fn lock_target(&self) -> Option<u64> {
+        self.lock_target
+    }
+
     pub(super) const fn new(health: Health, spawned: bool) -> Self {
         Self {
             health,

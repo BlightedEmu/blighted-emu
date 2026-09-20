@@ -73,6 +73,8 @@ pub(super) struct ReplicaSource {
     pub(super) items: Vec<EquippedItem>,
     pub(super) hands: Hands,
     pub(super) in_combat: bool,
+    /// The entity it locks on or homes to.
+    pub(super) target: Option<u64>,
 }
 
 impl ReplicaSource {
@@ -93,6 +95,7 @@ impl ReplicaSource {
             max_health: self.max_health,
             facing: self.view.map(|view| view.yaw),
             pitch: self.view.map(|view| view.pitch),
+            target: self.target,
             run_mode: self.run_mode,
             mode_started: self.mode_started,
             blocking: self.blocking,
@@ -143,6 +146,7 @@ impl ReplicaSource {
             },
             // A ghost's fight is its own sim's: near, it goes every tick anyway.
             in_combat: false,
+            target: ghost.target,
         }
     }
 
@@ -254,6 +258,14 @@ impl Replica {
     /// Whether it is in combat: it goes first.
     pub(super) const fn in_combat(&self) -> bool {
         self.source.in_combat
+    }
+
+    /// Whether it fights the player `viewer` (of replica `viewer_replica`): one targets the
+    /// other, or both are in combat. The viewer then never loses sight of it in a crowd.
+    pub(super) fn fights(&self, number: u64, viewer: u64, viewer_replica: &Self) -> bool {
+        self.source.target == Some(viewer)
+            || viewer_replica.source.target == Some(number)
+            || (self.source.in_combat && viewer_replica.source.in_combat)
     }
 
     /// Its group in slot `interest` for a viewer, at `position`: with its card when `carded`
@@ -466,6 +478,7 @@ pub(super) mod tests {
             }],
             hands: Hands::default(),
             in_combat: false,
+            target: None,
         }
     }
 

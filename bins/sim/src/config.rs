@@ -19,7 +19,13 @@ use uuid::Uuid;
 
 use crate::combat::CombatSettings;
 use crate::mobs::VitalsSpawn;
-use crate::world::{MAX_BUNDLE_MEMBERS, WorldSettings};
+use crate::world::WorldSettings;
+
+/// Most players and ghosts one player may see (our choice). Retail's 45-vs-45 war showed one
+/// client 180 other players (replication note); the per-tick budget (24 remote groups, about
+/// 1 KB) keeps the bytes of any number bounded, and each seen player costs a slot and a card
+/// refresh every 30 bundles: at 500, about 17 cards per tick.
+pub const MAX_VISIBLE_PLAYERS: usize = 500;
 
 /// Environment prefix of `sim` overrides.
 pub const SIM_ENV_PREFIX: &str = "NW_SIM_";
@@ -244,7 +250,8 @@ pub struct SimConfig {
     pub max_players: u32,
     /// Players see each other inside this radius, in metres.
     pub interest_radius_m: f32,
-    /// Most other players and ghosts in a player's bundles: the nearest.
+    /// Most other players and ghosts a player sees: those fighting it, then the nearest. Not a
+    /// bundle limit: bundles split by bytes, and the per-tick budget picks who goes in each tick.
     pub max_visible_players: usize,
     /// How far a position may be below the ground, in metres.
     pub ground_tolerance_m: f32,
@@ -359,10 +366,10 @@ impl SimConfig {
         if times.contains(&0) {
             return invalid("handoff", "times must be above 0");
         }
-        if self.max_visible_players >= MAX_BUNDLE_MEMBERS {
+        if !(1..=MAX_VISIBLE_PLAYERS).contains(&self.max_visible_players) {
             return invalid(
                 "max_visible_players",
-                "must leave room for the player itself in one bundle (at most 47)",
+                "must be at least 1 and at most 500 (the slot and card-refresh budget)",
             );
         }
         let snapshot = self.admin.snapshot_interval_ms;
@@ -515,8 +522,8 @@ pub(crate) mod tests {
     const LONGEST_HONEST_GAP_S: f32 = 2.5;
     /// The largest captured fall (movement numbers note, Check section).
     const LARGEST_CAPTURED_FALL_M: f32 = 128.6;
-    /// A bundle holds the player and 47 others (M5 spec section 7.3).
-    const ONE_BUNDLE_OF_OTHERS: usize = 47;
+    /// The committed view: more players than retail's 45-vs-45 war showed one client (180).
+    const COMMITTED_VISIBLE_PLAYERS: usize = 200;
 
     /// The committed example configuration.
     pub(crate) fn committed() -> SimConfig {
@@ -528,7 +535,7 @@ pub(crate) mod tests {
     fn the_committed_config_is_valid() {
         let config = committed();
         assert_eq!(config.level, "newworld_vitaeeterna");
-        assert_eq!(config.max_visible_players, ONE_BUNDLE_OF_OTHERS);
+        assert_eq!(config.max_visible_players, COMMITTED_VISIBLE_PLAYERS);
         assert!(config.max_height_above_ground_m > LARGEST_CAPTURED_FALL_M);
     }
 
@@ -579,11 +586,11 @@ pub(crate) mod tests {
         config.handoff_timeout_ms = 0;
         assert!(config.validate().is_err());
         let mut config = committed();
-        config.max_visible_players = MAX_BUNDLE_MEMBERS;
-        assert!(
-            config.validate().is_err(),
-            "the player and the others fill one bundle"
-        );
+        config.max_visible_players = MAX_VISIBLE_PLAYERS + 1;
+        assert!(config.validate().is_err(), "past the slot budget");
+        let mut config = committed();
+        config.max_visible_players = 0;
+        assert!(config.validate().is_err(), "a player sees someone");
         let mut config = committed();
         config.ghost_ttl_ms = 1;
         assert!(config.validate().is_err(), "ghosts live at least one tick");
