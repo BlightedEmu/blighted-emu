@@ -245,9 +245,19 @@ impl AttackKind {
     }
 }
 
-/// Whether input counter `counter` comes after `last`; the counter wraps at `u16::MAX`.
+/// How far behind the last record a record may come and still be an older copy; a record
+/// further behind is the client's new count. The client starts its record counter again at 1
+/// when it loads a level (live 2026-09-18, our run-9 capture: 11336, then 1 at the open-world
+/// load), while older copies in one input trail by a few records (Inferred: 512 records, about
+/// 17 s, is far beyond both).
+const COUNTER_RESTART_GAP: i16 = 512;
+
+/// Whether input counter `counter` comes after `last`: later, wrapping at `u16::MAX`, or so far
+/// behind that the client counts again from the start (a level load). A record seen before a
+/// restart must not hide every record after it (live 2026-09-18: no attack on the beach counted).
 pub(super) const fn counter_is_newer(counter: u16, last: u16) -> bool {
-    (counter.wrapping_sub(last) as i16) > 0
+    let ahead = counter.wrapping_sub(last) as i16;
+    ahead > 0 || ahead < -COUNTER_RESTART_GAP
 }
 
 /// One hit a player lands: who, on what, with which weapon and attack row.
@@ -1782,6 +1792,29 @@ mod tests {
                 .player_swings_due(NOW + INTERVAL_MS + light_hit_ms())
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn a_counter_that_starts_again_after_a_level_load_is_read() {
+        /// The client's count before the open-world load (run-9 capture: 11336), then 1.
+        const BEFORE_LOAD: u16 = 11_336;
+        assert!(counter_is_newer(1, BEFORE_LOAD), "the count starts again");
+        assert!(
+            !counter_is_newer(BEFORE_LOAD - 3, BEFORE_LOAD),
+            "an older copy"
+        );
+        assert!(counter_is_newer(0, u16::MAX), "the count wraps");
+        let mut world = awake_fight();
+        world.attack_input(&connection(1), &message(BEFORE_LOAD, &[Key::Hold]), NOW);
+        let restarted = message(1, &[Key::Press, Key::Release]);
+        world.attack_input(&connection(1), &restarted, NOW + INTERVAL_MS);
+        assert_eq!(
+            world
+                .player_swings_due(NOW + INTERVAL_MS + light_hit_ms())
+                .len(),
+            1,
+            "the attack after the load swings"
         );
     }
 
