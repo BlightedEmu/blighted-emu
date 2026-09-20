@@ -388,8 +388,25 @@ pub struct RequestRespawnMsg {
     pub head_b: u64,
     /// A byte that must be 0 or 1.
     pub flag: bool,
-    /// The request payload, at most [`MAX_RESPAWN_PAYLOAD`] bytes; Unknown.
+    /// The request payload, at most [`MAX_RESPAWN_PAYLOAD`] bytes: the chosen respawn point as
+    /// ASCII `[<id>]<digit>` ([`RequestRespawnMsg::respawn_point`]).
     pub payload: Vec<u8>,
+}
+
+/// The brackets around the respawn point id in a 1938 payload.
+const RESPAWN_POINT_OPEN: u8 = b'[';
+const RESPAWN_POINT_CLOSE: u8 = b']';
+
+impl RequestRespawnMsg {
+    /// The respawn point the player chose: the decimal `u64` of the payload `[<id>]<digit>`
+    /// (respawn note, 2026-09-18: 317 retail requests, e.g. `[14639843741699618923]0`; the digit
+    /// after the brackets is 0, 1, 4 or 5, meaning Unknown). `None` for another payload, such as
+    /// the empty one of a tutorial death screen.
+    pub fn respawn_point(&self) -> Option<u64> {
+        let rest = self.payload.strip_prefix(&[RESPAWN_POINT_OPEN])?;
+        let close = rest.iter().position(|byte| *byte == RESPAWN_POINT_CLOSE)?;
+        std::str::from_utf8(&rest[..close]).ok()?.parse().ok()
+    }
 }
 
 impl BodyCodec for RequestRespawnMsg {
@@ -894,6 +911,31 @@ mod tests {
         let recap = DeathRecapMsg::of(TARGET);
         assert_eq!(round(&recap), recap);
         assert_eq!(recap.head_b, TARGET.swap_bytes());
+    }
+
+    #[test]
+    fn a_retail_respawn_request_names_its_respawn_point() {
+        // Retail FFA_LightningStrikeDeath and FFA_KillNamedThenDie 1938 bodies.
+        const RETAIL: [(&str, u64); 2] = [
+            (
+                "c03ebf1b4cef52cfe131d651bfc7f13200175b31343633393834333734313639393631383932335d30",
+                14_639_843_741_699_618_923,
+            ),
+            (
+                "c03ebf1b4cef52cfe131d651bfc7f13200165b353335383230353335373739373330323831395d30",
+                5_358_205_357_797_302_819,
+            ),
+        ];
+        for (hex, point) in RETAIL {
+            let body: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex"))
+                .collect();
+            let message = RequestRespawnMsg::decode(&body).expect("decode");
+            assert_eq!(message.respawn_point(), Some(point));
+            assert_eq!(message.encode().expect("encode"), body, "retail bytes");
+        }
+        assert_eq!(RequestRespawnMsg::default().respawn_point(), None);
     }
 
     #[test]
