@@ -40,6 +40,14 @@ const QUAT_TAG_NORTH: u8 = 0x6e;
 const QUAT_TAG_NEGATIVE: u8 = 1;
 /// Slot 0 child of the offset from `pos10` (`worldPosRel`).
 const POS_REL_CHILD: usize = 10;
+/// Slot 0 child of where a character looks (`lookDir`, a quat).
+const LOOK_DIR_CHILD: usize = 12;
+/// Slot 0 children of a character's first slayer state slot: `slayerStateId` (prefix),
+/// `slayerStateIdStarted` (`u16`: the ALC state number in which it started; retail remote duel
+/// `14=28ad` with `idRel` `ad`) and `slayerSequenceId` (prefix) (replication note).
+const SLAYER_STATE_CHILD: usize = 13;
+const SLAYER_STARTED_CHILD: usize = 14;
+const SLAYER_SEQUENCE_CHILD: usize = 15;
 /// Slot 0 children of the FullBody scope time in 1/30 s ticks, low byte first
 /// (`scopeTimeBlob0Data0` to `Data3`; mob-animation note, section 3.3).
 const SCOPE_TIME_CHILDREN: [usize; 4] = [28, 38, 49, 50];
@@ -316,6 +324,46 @@ pub struct MobStep {
     pub scope: Option<StepScope>,
 }
 
+/// The first slayer state of a character (children 13 to 15): the slayer script state it is in,
+/// the ALC state number in which that state started, and the sequence of the state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlayerState {
+    /// `slayerStateId`.
+    pub state: u64,
+    /// `slayerStateIdStarted`.
+    pub started: u16,
+    /// `slayerSequenceId`.
+    pub sequence: u64,
+}
+
+impl SlayerState {
+    fn children(self) -> Result<[(usize, Vec<u8>); 3], MessageError> {
+        Ok([
+            (SLAYER_STATE_CHILD, prefixed_bytes(self.state)?),
+            (SLAYER_STARTED_CHILD, self.started.to_be_bytes().to_vec()),
+            (SLAYER_SEQUENCE_CHILD, prefixed_bytes(self.sequence)?),
+        ])
+    }
+}
+
+/// One state of another player, as the clients that see it get it (replication note: retail
+/// remote states carry their number and time, the place, the facing, where the player looks, and
+/// its slayer state).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RemoteStep {
+    /// Its number and time; its anchor goes with every state (our choice: a client that comes
+    /// into view of the player in the middle of an anchor period knows no other anchor).
+    pub stamp: AlcStamp,
+    /// Where the player is, when it goes with the state.
+    pub position: Option<InputPosition>,
+    /// Its facing (yaw, radians).
+    pub facing: Option<f32>,
+    /// Where it looks (yaw, radians).
+    pub look: Option<f32>,
+    /// Its slayer state, when it goes with the state.
+    pub slayer: Option<SlayerState>,
+}
+
 /// The `scopeTimeBlob0Data*` children of `ticks`: the low byte, and the higher ones when
 /// `with_high`.
 fn scope_time_children(ticks: u32, with_high: bool) -> Vec<(usize, Vec<u8>)> {
@@ -569,6 +617,32 @@ impl AlcState {
         Ok(Self::of_slot0(children, step.position))
     }
 
+    /// A state of another player ([`RemoteStep`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when a slayer value does not fit the prefix code.
+    pub fn remote_step(step: &RemoteStep) -> Result<Self, MessageError> {
+        let mut children: Vec<(usize, Vec<u8>)> = stamp_children(step.stamp).into();
+        children.push((
+            TIME_ANCHOR_CHILD,
+            step.stamp.anchor_us.to_be_bytes().to_vec(),
+        ));
+        if let Some(pos) = step.position {
+            children.extend(position_children(pos));
+        }
+        if let Some(yaw) = step.facing {
+            children.push((ROTATION_CHILD, rotation_bytes(yaw)));
+        }
+        if let Some(yaw) = step.look {
+            children.push((LOOK_DIR_CHILD, rotation_bytes(yaw)));
+        }
+        if let Some(slayer) = step.slayer {
+            children.extend(slayer.children()?);
+        }
+        Ok(Self::of_slot0(children, step.position))
+    }
+
     /// A state of the client's own player on its clock `stamp`: the client takes an own state
     /// only with its number and time, and shows the network icon and clears its input history
     /// when none came for 2 s (network note: `FUN_14485b680`, `alc-server-timeout-for-input`).
@@ -640,6 +714,20 @@ impl AlcState {
     /// Writes the body as read.
     pub fn write(&self, writer: &mut Writer) {
         writer.bytes(&self.bytes);
+    }
+
+    /// The slot-0 children this body sends, in child order, each with its bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the body does not walk.
+    pub fn slot0_children(&self) -> Result<Vec<(usize, Vec<u8>)>, MessageError> {
+        let walked = walk(&mut Reader::new(&self.bytes))?;
+        Ok(walked
+            .slot0_ranges
+            .into_iter()
+            .map(|(child, range)| (child, self.bytes[range].to_vec()))
+            .collect())
     }
 
     /// The first state of the client's own player, at `pos`: both slots with the children and
@@ -1328,12 +1416,7 @@ mod tests {
 
     /// The bytes of each slot-0 child of `state`.
     fn children_of(state: &AlcState) -> Vec<(usize, Vec<u8>)> {
-        walk(&mut Reader::new(&state.bytes))
-            .expect("walk")
-            .slot0_ranges
-            .into_iter()
-            .map(|(child, range)| (child, state.bytes[range].to_vec()))
-            .collect()
+        state.slot0_children().expect("walk")
     }
 
     fn child(state: &AlcState, index: usize) -> Option<Vec<u8>> {
@@ -1592,5 +1675,71 @@ mod tests {
         .expect("step");
         let present: Vec<usize> = children_of(&idle).into_iter().map(|(c, _)| c).collect();
         assert_eq!(present, [0, 1, 25, 26]);
+    }
+
+    #[test]
+    fn a_remote_state_carries_the_retail_slayer_and_place_children() {
+        // Retail remote player in the duel capture (51302 ms): `idRel` c5, `timeOffsetRel` fd,
+        // `worldPosRel` at the anchor, `rotation`, slayer state 1a started in state 28c5 with
+        // sequence ab18, and `worldPosAbs`.
+        let retail = AlcState::read(&mut Reader::new(&hex(
+            "01e7c00e80c5fd7fffffff47441a28c5ab1846121ebc452b6f312ba9",
+        )))
+        .expect("read");
+        let retail_child = |index| child(&retail, index).expect("retail child");
+        let prefix_of = |bytes: Vec<u8>| Reader::new(&bytes).prefixed().expect("prefix");
+        let slayer = SlayerState {
+            state: prefix_of(retail_child(SLAYER_STATE_CHILD)),
+            started: u16::from_be_bytes([0x28, 0xc5]),
+            sequence: prefix_of(retail_child(SLAYER_SEQUENCE_CHILD)),
+        };
+        let step = RemoteStep {
+            stamp: AlcStamp {
+                id: 0x28c5,
+                anchor_us: STAMP.anchor_us,
+                offset_ms: 0x00fd,
+            },
+            position: retail.pos10,
+            facing: Some(0.5),
+            look: Some(0.25),
+            slayer: Some(slayer),
+        };
+        let ours = AlcState::remote_step(&step).expect("step");
+        for index in [
+            ID_REL_CHILD,
+            TIME_REL_CHILD,
+            POS_REL_CHILD,
+            SLAYER_STATE_CHILD,
+            SLAYER_STARTED_CHILD,
+            SLAYER_SEQUENCE_CHILD,
+            POS10_CHILD,
+        ] {
+            assert_eq!(
+                child(&ours, index),
+                Some(retail_child(index)),
+                "child {index}"
+            );
+        }
+        assert_eq!(
+            child(&ours, TIME_ANCHOR_CHILD),
+            Some(STAMP.anchor_us.to_be_bytes().to_vec())
+        );
+        assert_eq!(child(&ours, ROTATION_CHILD), Some(rotation_bytes(0.5)));
+        assert_eq!(child(&ours, LOOK_DIR_CHILD), Some(rotation_bytes(0.25)));
+        assert_eq!(ours.pos10, retail.pos10);
+        let bare = AlcState::remote_step(&RemoteStep {
+            position: None,
+            facing: None,
+            look: None,
+            slayer: None,
+            ..step
+        })
+        .expect("step");
+        let present: Vec<usize> = children_of(&bare).into_iter().map(|(c, _)| c).collect();
+        assert_eq!(
+            present,
+            [0, 1, 25, 26, 40],
+            "a state is never without its time"
+        );
     }
 }

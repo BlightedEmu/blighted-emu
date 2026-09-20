@@ -413,6 +413,11 @@ const ATTACK_PRESS_BIT: u32 = 40;
 /// The slot value and bit of the attack key's release: set in one record only.
 const ATTACK_RELEASE_VALUE: usize = 2;
 const ATTACK_RELEASE_BIT: u32 = 31;
+/// The slot value and bit of the movement mode the run toggle key sets: set while the mode is on
+/// (replication note: in the run-toggle capture each press of value 1 bit 24 flipped it, and the
+/// retail own state's slayer state went 1a while it was set, 1b while clear, 24 times each).
+const RUN_MODE_VALUE: usize = 0;
+const RUN_MODE_BIT: u32 = 14;
 /// The slot values and bits of the presses of the first and second weapon keys (input note: the
 /// weapon in the hand changed 331 to 418 ms after each).
 const WEAPON_KEYS: [(usize, u32); 2] = [(0, 9), (3, 13)];
@@ -442,6 +447,11 @@ impl InputRecord {
     /// Whether the player presses quick slot 1 in this record.
     pub fn using_quick_slot_1(&self) -> bool {
         self.slot_bit(QUICK_SLOT_1_VALUE, QUICK_SLOT_1_BIT)
+    }
+
+    /// Whether the run toggle's movement mode is on in this record.
+    pub fn run_mode(&self) -> bool {
+        self.slot_bit(RUN_MODE_VALUE, RUN_MODE_BIT)
     }
 
     /// Whether the player pressed the attack key in this record.
@@ -484,10 +494,20 @@ impl ClientInputMsg {
     /// An input with an empty head and one record that holds only `position`, as the test client
     /// sends it.
     pub fn position(position: InputPosition) -> Self {
+        Self::position_with_block(position, false)
+    }
+
+    /// As [`Self::position`], with the block key held when `blocking`.
+    pub fn position_with_block(position: InputPosition, blocking: bool) -> Self {
         Self {
             records: vec![InputRecord {
                 mask: 1 << BIT_7,
                 bit_7: Some(position),
+                slots: if blocking {
+                    one_action(BLOCK_SLOT_VALUE, BLOCK_SLOT_BIT)
+                } else {
+                    InputSlots::default()
+                },
                 ..InputRecord::default()
             }],
             ..Self::default()
@@ -1139,6 +1159,24 @@ mod tests {
         assert!(!press(8_796_093_022_208).dodging());
         assert!(press(8_388_608).using_quick_slot_1());
         assert!(!press(8_388_608).dodging());
+        // Retail run toggle (replication note): value 0 bit 14 holds the mode.
+        let mode = |value: u64| InputRecord {
+            slots: InputSlots {
+                count: 19,
+                values: vec![value],
+                bytes: [128; SLOT_BYTES],
+            },
+            ..InputRecord::default()
+        };
+        assert!(mode(0x4000).run_mode());
+        assert!(!mode(0x80).run_mode());
+        let at = InputPosition::from_metres(1.0, 2.0, 3.0).expect("finite");
+        for blocking in [true, false] {
+            let input = ClientInputMsg::position_with_block(at, blocking);
+            let read = ClientInputMsg::decode(&input.encode().expect("encode")).expect("decode");
+            assert_eq!(read.blocking(), Some(blocking));
+            assert_eq!(read.newest_position(), Some(at));
+        }
     }
 
     fn message(records: Vec<InputRecord>) -> ClientInputMsg {
