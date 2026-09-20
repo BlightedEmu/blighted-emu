@@ -440,3 +440,27 @@ Source: the newchar ledger of 2026-09-12 (`local-data/captures/own/newchar-linux
 - **Unknown.** Which client gate rejects our targets. The lock test is a virtual of each
   `CameraLockTargetComponent`; its gates read client data that the ledger cannot show. A
   runtime probe must show it.
+
+### 15.1 The lock gates, named (2026-09-18)
+
+- **Observed.** The gate `FUN_142c95760` sends query 26 on the entity of the candidate target
+  (the mob) through `FUN_142c77f30`, an event of `GameModeParticipantComponentRequestsBus`. The
+  enum (reflection `FUN_1432d1d20`) names 26 `CannotBeTargeted`; the bus's other queries match
+  the same enum: 0xb `IgnoreGatheringTradeskillRequirements` (the gather check), 0xd
+  `IsInBossFight`, 0x17 `SendDeathRecapToAllClientsInAOI`, 0x1f `DisablePlayerInteracts`,
+  0x20 `PlayerCutsceneIgnoredByAI`.
+- **Observed.** Neither the retail legionnaire card nor ours carries a game-mode participant
+  member, so the query has no state to answer true from. **Inferred:** not the gate.
+- **Observed.** The lock component's fields (reflection `FUN_142c9dd00`): `m_isNotTargetableWhenDead`
+  0x168 and `m_isNotTargetableWhenDeathsDoor` 0x169 (the gate's +0x110/+0x111 from +0x58), the
+  vitals, player, marker, groups, ownership and stealth-invisibility request ids (0x180-0x1a8),
+  and `m_notTargetableOnInit`.
+- **Observed.** Targetable is switched by the CAGE activity `SetCameraLockTargetTargetable`
+  (`ConditionalActivityData<SetCameraLockTargetTargetableData>`). In all 748 action lists of the
+  game paks it sets "not targetable" only in death actions (`r_Death*`), `Teleport` and
+  `Phase_2_Intro`; no spawn, idle or move action does. **Inferred:** our first mob state, which
+  starts the spawn fragment where retail's legionnaire started none, does not make it
+  untargetable.
+- **Unknown.** The gate that rejects our targets is still not found from static data. Remaining
+  candidates are client state the ledger cannot show (the relation registry of `FUN_14171b010`,
+  `m_notTargetableOnInit` per prefab, the stealth/ownership requests).
