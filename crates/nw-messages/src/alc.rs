@@ -382,13 +382,18 @@ pub struct CardPlace {
 }
 
 impl CardPlace {
+    /// Its `pos10` and its offset from it: the anchor and the offset when `at` is within reach,
+    /// else `at` with no offset (the entity stands at its `pos10`).
+    fn resolved(self) -> (InputPosition, Option<[u8; POS3_LEN]>) {
+        self.anchor
+            .and_then(|anchor| Some((anchor, Some(offset_from(anchor, self.at)?))))
+            .unwrap_or((self.at, None))
+    }
+
     /// Its `worldPosRel` and `pos10` children, and the `pos10`.
     fn children(self) -> (Vec<(usize, Vec<u8>)>, InputPosition) {
-        match self
-            .anchor
-            .and_then(|anchor| Some((anchor, offset_from(anchor, self.at)?)))
-        {
-            Some((anchor, offset)) => {
+        match self.resolved() {
+            (anchor, Some(offset)) => {
                 let mut position = Writer::new();
                 anchor.write(&mut position);
                 (
@@ -399,7 +404,7 @@ impl CardPlace {
                     anchor,
                 )
             }
-            None => (position_children(self.at).into(), self.at),
+            (at, None) => (position_children(at).into(), at),
         }
     }
 }
@@ -519,8 +524,9 @@ pub struct RemoteStep {
     /// Its number and time; its anchor goes with every state (our choice: a client that comes
     /// into view of the player in the middle of an anchor period knows no other anchor).
     pub stamp: AlcStamp,
-    /// Where the player is, when it goes with the state.
-    pub position: Option<InputPosition>,
+    /// Where the player is, when it goes with the state: an offset from the anchor every viewer
+    /// shares, or a new anchor ([`StepPlace`]).
+    pub position: Option<StepPlace>,
     /// Its facing (yaw, radians).
     pub facing: Option<f32>,
     /// Where it looks.
@@ -849,8 +855,8 @@ impl AlcState {
             TIME_ANCHOR_CHILD,
             step.stamp.anchor_us.to_be_bytes().to_vec(),
         ));
-        if let Some(pos) = step.position {
-            children.extend(position_children(pos));
+        if let Some(place) = step.position {
+            children.extend(place.children());
         }
         if let Some(yaw) = step.facing {
             children.push((ROTATION_CHILD, rotation_bytes(yaw)));
@@ -861,7 +867,10 @@ impl AlcState {
         if let Some(slayer) = step.slayer {
             children.extend(slayer.children()?);
         }
-        Ok(Self::of_slot0(children, step.position))
+        Ok(Self::of_slot0(
+            children,
+            step.position.and_then(StepPlace::pos10),
+        ))
     }
 
     /// A state of the client's own player on its clock `stamp`: the client takes an own state
@@ -968,23 +977,29 @@ impl AlcState {
             .collect())
     }
 
-    /// The first state of the client's own player, at `pos`: both slots with the children and
-    /// values of the most common retail first own ALC (own-player-position note: 315 logins).
-    /// The client takes its start position only from such a full state (with the absolute
-    /// `idAbs`, `timeOffsetAbs` and `worldPosAbs` parts); a lone `pos10` leaves it at the grid
-    /// origin.
+    /// The first state of a player at `place`: both slots with the children and values of the
+    /// most common retail first own ALC (own-player-position note: 315 logins). The client takes
+    /// its start position only from such a full state (with the absolute `idAbs`,
+    /// `timeOffsetAbs` and `worldPosAbs` parts); a lone `pos10` leaves it at the grid origin. Its
+    /// `pos10` is the place's anchor and its `worldPosRel` the offset from it, so that a viewer
+    /// that sees another player from now on keeps the anchor the others have ([`CardPlace`]).
     ///
     /// # Errors
     ///
     /// Returns [`MessageError`] when a prefix value cannot be encoded.
-    pub fn spawn(pos: InputPosition, anchor_us: u64) -> Result<Self, MessageError> {
+    pub fn spawn(place: CardPlace, anchor_us: u64) -> Result<Self, MessageError> {
+        let (pos10, offset) = place.resolved();
+        let at = SpawnPlace {
+            pos10,
+            offset: offset.unwrap_or(ZERO_POS3),
+        };
         let mut writer = Writer::new();
         writer.u8(SLOT_BITS[0] | SLOT_BITS[1]);
-        write_children(&mut writer, &SPAWN_SLOT0, pos, anchor_us)?;
-        write_children(&mut writer, &SPAWN_SLOT1, pos, anchor_us)?;
+        write_children(&mut writer, &SPAWN_SLOT0, at, anchor_us)?;
+        write_children(&mut writer, &SPAWN_SLOT1, at, anchor_us)?;
         Ok(Self {
             bytes: writer.finish(),
-            pos10: Some(pos),
+            pos10: Some(pos10),
         })
     }
 
@@ -1067,11 +1082,22 @@ enum SpawnValue {
     Raw(&'static [u8]),
     /// The `pos10` position.
     Position,
+    /// The `worldPosRel` offset from `pos10`.
+    PositionOffset,
     /// The clock anchor (µs since 2000-01-01).
     Anchor,
 }
 
-use SpawnValue::{Anchor, Byte, Float, Position as SpawnPosition, Prefixed, Raw, Word};
+use SpawnValue::{
+    Anchor, Byte, Float, Position as SpawnPosition, PositionOffset, Prefixed, Raw, Word,
+};
+
+/// Where a first state puts the player: its `pos10` and its `worldPosRel` offset from it.
+#[derive(Debug, Clone, Copy)]
+struct SpawnPlace {
+    pos10: InputPosition,
+    offset: [u8; POS3_LEN],
+}
 
 /// `worldPosRel` 0 on each axis (the relative part of the position; `0x7f` is the zero step).
 const ZERO_POS3: [u8; POS3_LEN] = [0x7f; POS3_LEN];
@@ -1104,7 +1130,7 @@ const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
     (7, Word(0)),
     (8, Byte(127)),
     (9, Word(0)),
-    (10, Raw(&ZERO_POS3)),
+    (POS_REL_CHILD, PositionOffset),
     (11, Raw(&[0x66, 0xfe])),
     (12, Raw(&[0x19, 0x7f])),
     (13, Prefixed(31)),
@@ -1157,7 +1183,7 @@ const SPAWN_SLOT1: [(usize, SpawnValue); 7] = [
 fn write_children(
     writer: &mut Writer,
     children: &[(usize, SpawnValue)],
-    pos: InputPosition,
+    place: SpawnPlace,
     anchor_us: u64,
 ) -> Result<(), MessageError> {
     let present = children
@@ -1181,7 +1207,10 @@ fn write_children(
             Raw(bytes) => {
                 writer.bytes(bytes);
             }
-            SpawnPosition => pos.write(writer),
+            SpawnPosition => place.pos10.write(writer),
+            PositionOffset => {
+                writer.bytes(&place.offset);
+            }
             Anchor => {
                 writer.u64(anchor_us);
             }
@@ -1601,7 +1630,14 @@ mod tests {
         };
         // Retail first own ALC anchor (clock note): 845730262399198 µs since 2000-01-01.
         const RETAIL_ANCHOR_US: u64 = 0x0003_012f_ebdd_b8de;
-        let state = AlcState::spawn(pos, RETAIL_ANCHOR_US).expect("spawn");
+        let state = AlcState::spawn(
+            CardPlace {
+                anchor: None,
+                at: pos,
+            },
+            RETAIL_ANCHOR_US,
+        )
+        .expect("spawn");
         let at = state
             .bytes
             .windows(8)
@@ -2180,7 +2216,7 @@ mod tests {
                 anchor_us: STAMP.anchor_us,
                 offset_ms: 0x00fd,
             },
-            position: retail.pos10,
+            position: retail.pos10.map(StepPlace::Anchor),
             facing: Some(0.5),
             look: Some(LookDir {
                 yaw: 0.25,

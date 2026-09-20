@@ -20,9 +20,10 @@ use std::collections::HashMap;
 use nw_bus::{GHOST_VISIBLE_ITEMS, GhostItem, GhostSlayer, PlayerGhost};
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    AlcStamp, AlcState, BundleGroup, BundleMember, DamageReceiverState, EquippedItem, GearItem,
-    Hands, HealthChange, InputPosition, LookDir, MemberState, MessageError, PlayerGear, PlayerLook,
-    PlayerStates, RemoteStep, SecondSlayerState, SlayerState, VitalsData, VitalsState,
+    AlcStamp, AlcState, BundleGroup, BundleMember, CardPlace, DamageReceiverState, EquippedItem,
+    GearItem, Hands, HealthChange, InputPosition, LookDir, MemberState, MessageError, PlayerGear,
+    PlayerLook, PlayerStates, RemoteStep, SecondSlayerState, SlayerState, StepPlace, VitalsData,
+    VitalsState,
 };
 use nw_sim_core::Position;
 
@@ -207,7 +208,7 @@ impl ReplicaSource {
 }
 
 /// What the viewers were last sent of one player.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct ReplicaMemory {
     health: u32,
     blocking: bool,
@@ -216,6 +217,11 @@ pub(super) struct ReplicaMemory {
     action: Option<(u16, u64)>,
     /// The server time of its last new life (ms since 2000-01-01).
     life_ms: u64,
+    /// The `pos10` every viewer places it from: its states move it by offsets from it (Observed:
+    /// the retail duel's remote player got a new `pos10` in 62 of its 453 placed states; the
+    /// client drops a lock on a target that keeps getting a new one, Inferred, as for mobs in
+    /// fadbf8b).
+    anchor: Option<InputPosition>,
 }
 
 /// One player as every viewer gets it this tick.
@@ -229,16 +235,32 @@ pub(super) struct Replica {
     block_changed: bool,
     /// It started an action: the others see it now.
     action_changed: bool,
+    /// Where its state of this tick puts it: an offset from its anchor, or a new anchor.
+    place: Option<StepPlace>,
+    /// Its anchor after this tick.
+    anchor: Option<InputPosition>,
+    /// It got a new anchor while the viewers had an older one: every viewer gets it now, so no
+    /// viewer places its later offsets from the old one.
+    anchor_moved: bool,
 }
 
 impl Replica {
-    /// The player of `source` at server time `server_ms`, with what changed since `seen` (none
-    /// for a player first seen), and what the viewers saw then.
+    /// The player of `source` at `position` at server time `server_ms`, with what changed since
+    /// `seen` (none for a player first seen), and what the viewers saw then.
     pub(super) fn new(
         source: ReplicaSource,
+        position: Position,
         seen: Option<ReplicaMemory>,
         server_ms: u64,
     ) -> (Self, ReplicaMemory) {
+        let seen_anchor = seen.and_then(|seen| seen.anchor);
+        let place = InputPosition::from_metres(position.x, position.y, position.z)
+            .map(|at| StepPlace::of(seen_anchor, at));
+        let anchor = match place {
+            Some(StepPlace::Anchor(at)) => Some(at),
+            _ => seen_anchor,
+        };
+        let anchor_moved = seen.is_some() && matches!(place, Some(StepPlace::Anchor(_)));
         let clock = OwnClock {
             since_spawn_ms: server_ms.saturating_sub(source.spawned_ms),
             spawn_ms: source.spawned_ms,
@@ -280,6 +302,7 @@ impl Replica {
             gear_version: source.gear_version,
             action,
             life_ms,
+            anchor,
         };
         let replica = Self {
             gear: source.gear(),
@@ -289,6 +312,9 @@ impl Replica {
             gear_changed,
             block_changed,
             action_changed,
+            place,
+            anchor,
+            anchor_moved,
         };
         (replica, memory)
     }
@@ -299,6 +325,7 @@ impl Replica {
             || self.gear_changed
             || self.block_changed
             || self.action_changed
+            || self.anchor_moved
     }
 
     /// Whether it is in combat: it goes first.
@@ -358,7 +385,11 @@ impl Replica {
                 return Ok(None);
             };
             if let Some(alc) = group.members.last_mut() {
-                alc.state = MemberState::Alc(AlcState::spawn(pos, self.stamp.anchor_us)?);
+                let place = CardPlace {
+                    anchor: self.anchor,
+                    at: pos,
+                };
+                alc.state = MemberState::Alc(AlcState::spawn(place, self.stamp.anchor_us)?);
             }
             return Ok(Some(group));
         }
@@ -366,7 +397,7 @@ impl Replica {
             component: PLAYER_ALC_COMPONENT,
             state: MemberState::Alc(AlcState::remote_step(&RemoteStep {
                 stamp: self.stamp,
-                position: Some(pos),
+                position: self.place,
                 facing: source.view.map(|view| view.yaw),
                 look: source.view,
                 slayer: source.slayer(),
@@ -495,6 +526,11 @@ pub(super) mod tests {
 
     const SPAWNED_MS: u64 = 1_000_000;
     const MAX_HEALTH: u32 = 856;
+    const AT: Position = Position {
+        x: 7300.0,
+        y: 3090.0,
+        z: 45.0,
+    };
 
     pub(in crate::world) fn source() -> ReplicaSource {
         ReplicaSource {
@@ -552,7 +588,7 @@ pub(super) mod tests {
 
     #[test]
     fn changes_are_found_against_what_viewers_saw() {
-        let (first, seen) = Replica::new(source(), None, SPAWNED_MS + 10);
+        let (first, seen) = Replica::new(source(), AT, None, SPAWNED_MS + 10);
         assert!(!first.changed(), "a first sight is its card");
         let hit = ReplicaSource {
             health: 500,
@@ -560,7 +596,7 @@ pub(super) mod tests {
             gear_version: 4,
             ..source()
         };
-        let (changed, seen) = Replica::new(hit.clone(), Some(seen), SPAWNED_MS + 20);
+        let (changed, seen) = Replica::new(hit.clone(), AT, Some(seen), SPAWNED_MS + 20);
         assert_eq!(
             changed
                 .health_change
@@ -571,6 +607,7 @@ pub(super) mod tests {
         assert!(changed.gear_changed && changed.block_changed);
         let (dead, seen) = Replica::new(
             ReplicaSource { health: 0, ..hit },
+            AT,
             Some(seen),
             SPAWNED_MS + 30,
         );
@@ -579,7 +616,7 @@ pub(super) mod tests {
                 .and_then(|change| change.life)
                 .is_some_and(|life| life.is_dead())
         );
-        let (again, _) = Replica::new(source(), Some(seen), SPAWNED_MS + 40);
+        let (again, _) = Replica::new(source(), AT, Some(seen), SPAWNED_MS + 40);
         assert!(
             again
                 .health_change
@@ -590,13 +627,48 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_player_moves_by_offsets_from_an_anchor_every_viewer_shares() {
+        let east = |metres: f32| Position {
+            x: AT.x + metres,
+            ..AT
+        };
+        let (first, seen) = Replica::new(source(), AT, None, SPAWNED_MS);
+        assert!(
+            matches!(first.place, Some(StepPlace::Anchor(_))),
+            "a first anchor"
+        );
+        assert!(!first.changed());
+        // A step within reach is an offset, and nothing forces it to every viewer.
+        let (near, seen) = Replica::new(source(), east(1.0), Some(seen), SPAWNED_MS + 33);
+        assert!(matches!(near.place, Some(StepPlace::Offset(_))));
+        assert!(!near.changed());
+        assert_eq!(near.anchor, first.anchor, "the anchor stays");
+        // Out of reach: a new anchor, which every viewer gets now.
+        let (far, seen) = Replica::new(source(), east(3.0), Some(seen), SPAWNED_MS + 66);
+        assert!(matches!(far.place, Some(StepPlace::Anchor(_))));
+        assert!(far.changed(), "a new anchor goes to every viewer");
+        // A viewer that sees it from now on gets the shared anchor with the offset.
+        let (late, _) = Replica::new(source(), east(3.5), Some(seen), SPAWNED_MS + 99);
+        assert_eq!(late.anchor, far.anchor);
+        let group = late
+            .group(9, 1, east(3.5), true)
+            .expect("group")
+            .expect("card");
+        let MemberState::Alc(card) = &group.members.last().expect("alc").state else {
+            panic!("the card ends with its ALC");
+        };
+        assert_eq!(card.pos10, far.anchor, "the card is on the shared anchor");
+    }
+
+    #[test]
     fn near_and_fighting_players_go_first_and_far_ones_wait() {
-        let (calm, _) = Replica::new(source(), None, SPAWNED_MS);
+        let (calm, _) = Replica::new(source(), AT, None, SPAWNED_MS);
         let (fighting, _) = Replica::new(
             ReplicaSource {
                 in_combat: true,
                 ..source()
             },
+            AT,
             None,
             SPAWNED_MS,
         );

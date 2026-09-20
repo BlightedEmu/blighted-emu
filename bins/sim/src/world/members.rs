@@ -228,7 +228,13 @@ fn full_first_position(
     if let Some(pos) = InputPosition::from_metres(position.x, position.y, position.z)
         && let Some(alc) = group.members.last_mut()
     {
-        alc.state = MemberState::Alc(AlcState::spawn(pos, anchor_us)?);
+        alc.state = MemberState::Alc(AlcState::spawn(
+            CardPlace {
+                anchor: None,
+                at: pos,
+            },
+            anchor_us,
+        )?);
     }
     Ok(())
 }
@@ -923,7 +929,16 @@ mod tests {
         };
         assert_eq!(
             alc_of(OwnCard::Spawn),
-            MemberState::Alc(AlcState::spawn(pos, SPAWN_CLOCK.first_anchor_us()).expect("spawn")),
+            MemberState::Alc(
+                AlcState::spawn(
+                    CardPlace {
+                        anchor: None,
+                        at: pos,
+                    },
+                    SPAWN_CLOCK.first_anchor_us(),
+                )
+                .expect("spawn"),
+            ),
             "the first card sets the start position with the full state"
         );
         let still = MemberState::Alc(

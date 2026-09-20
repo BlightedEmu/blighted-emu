@@ -2505,9 +2505,13 @@ impl SimWorld {
         }
         let mut replicas: HashMap<u64, Replica> = HashMap::with_capacity(sources.len());
         let mut memory = HashMap::with_capacity(sources.len());
+        let places: HashMap<u64, Position> = everyone.iter().copied().collect();
         for (number, source) in sources {
+            let Some(&position) = places.get(&number) else {
+                continue;
+            };
             let seen = self.replica_memory.get(&number).copied();
-            let (replica, now_seen) = Replica::new(source, seen, server_time);
+            let (replica, now_seen) = Replica::new(source, position, seen, server_time);
             replicas.insert(number, replica);
             memory.insert(number, now_seen);
         }
@@ -6394,12 +6398,21 @@ mod tests {
                 .all(|(entity, _)| *entity != 1),
             "no own position while its moves are refused"
         );
-        let (_, seen_x) = positions_seen_by(&world, &outgoing, &b)
-            .into_iter()
-            .find(|(entity, _)| *entity == 1)
-            .expect("b sees a");
+        let seen_by_b: Vec<_> = outgoing
+            .iter()
+            .filter(|out| out.connection == b && out.channel == REPLICATION_CHANNEL)
+            .flat_map(|out| &out.envelopes)
+            .flat_map(|bytes| groups_in(&world, &b, &bundle_in(bytes)))
+            .filter(|(entity, _)| *entity == 1)
+            .collect();
+        assert!(!seen_by_b.is_empty(), "b sees a");
+        // An unmoved player is an offset from the anchor b has (the last good move), with no new
+        // pos10; a new one would be that move.
         assert!(
-            (seen_x - SPEED_MPS).abs() < CLOSE_M,
+            seen_by_b
+                .iter()
+                .filter_map(|(_, update)| update.position)
+                .all(|position| (position.x - SPEED_MPS).abs() < CLOSE_M),
             "others see the last good move"
         );
         assert_eq!(
