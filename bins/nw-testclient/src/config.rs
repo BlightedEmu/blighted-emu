@@ -117,6 +117,12 @@ pub struct SwarmConfig {
     pub min_crossings: u32,
     /// Longest gap between two own bundles, in milliseconds.
     pub max_bundle_gap_ms: u64,
+    /// Each bot changes its block this often, in milliseconds, and the run measures how fast the
+    /// others see it; absent: no block changes.
+    #[serde(default)]
+    pub block_toggle_ms: Option<u64>,
+    /// The longest p99 action-to-visible delay, in milliseconds.
+    pub max_sync_latency_ms: u64,
     /// The metrics URL of every sim.
     pub metrics_urls: Vec<String>,
     /// The pinned client build file.
@@ -182,6 +188,8 @@ impl TestClientConfig {
             max_bundle_gap: Duration::from_millis(swarm.max_bundle_gap_ms),
             path_tolerance_m: self.path_tolerance_m,
             starts: swarm.starts_m.clone(),
+            block_toggle: swarm.block_toggle_ms.map(Duration::from_millis),
+            max_sync_latency: Duration::from_millis(swarm.max_sync_latency_ms),
         })
     }
 

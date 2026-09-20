@@ -2,10 +2,12 @@
 //! `nw-testclient swarm` (M5 spec section 11): many bots log in, walk from where they appear to
 //! their own lane and then back and forth across the start line, which the operator puts on a
 //! `sim` border. Each bot follows the ground of the world file. The checks read what each bot saw
-//! of itself, and the handoffs, refused moves and tick times from the metrics of every sim.
+//! of itself, and the handoffs, refused moves and tick times from the metrics of every sim. With
+//! `block_toggle`, each bot also changes its block that often, and every bot times how fast it sees
+//! the others' changes ([`crate::sync`]): the action-to-visible delay of the player replication.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use nw_messages::WorldPosition;
 use nw_messages::{BodyCodec, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX};
@@ -20,8 +22,9 @@ use crate::fleet::{
 use crate::pair::{Check, INPUT_CHANNEL, SEND_INTERVAL};
 use crate::rep::{RepClient, RepError};
 use crate::route::{MAX_ROUTE_DURATION, Route, RouteError};
+use crate::sync::{SyncProbe, SyncTrack, quantile};
 use crate::udp::RepOutcome;
-use crate::view::OwnView;
+use crate::view::SyncView;
 use tokio::sync::watch;
 
 /// Check: every bot crossed the start line at least `min_crossings` times.
@@ -36,6 +39,11 @@ pub const HANDOFFS_FAST: &str = "handoff p99 within one tick";
 pub const BUNDLES_ARRIVED: &str = "every bot got 99 % of its bundles";
 /// Share of the own bundles (one per tick) that must arrive (M5 load spec section 7.3).
 pub const MIN_BUNDLE_SHARE: f64 = 0.99;
+/// Check: 99 % of the others' block changes were seen within `max_sync_latency`.
+pub const SYNC_FAST: &str = "action-to-visible p99 within its limit";
+/// The quantiles the summary gives of the action-to-visible delays.
+const MEDIAN: f64 = 0.5;
+const P99: f64 = 0.99;
 
 /// What the swarm needs besides the clients and the ground.
 #[derive(Debug, Clone, PartialEq)]
@@ -56,6 +64,10 @@ pub struct SwarmSettings {
     pub path_tolerance_m: f32,
     /// The director's start positions, east and north, in metres; their x are sim borders.
     pub starts: Vec<[f32; 2]>,
+    /// Each bot changes its block this often, and the action-to-visible delays are measured.
+    pub block_toggle: Option<Duration>,
+    /// The longest p99 action-to-visible delay.
+    pub max_sync_latency: Duration,
 }
 
 /// What one bot saw.
@@ -75,6 +87,8 @@ pub struct BotReport {
     pub bundles_received: u64,
     /// Own bundles that the ticks from the first one to the end of the run hold.
     pub bundles_expected: u64,
+    /// The delays from another bot's block change to its sight in this bot's bundles.
+    pub sync_delays: Vec<Duration>,
     /// Why the bot could not run, if it could not.
     pub error: Option<String>,
 }
@@ -126,11 +140,26 @@ impl SwarmReport {
                 }),
             },
         ];
+        if settings.block_toggle.is_some() {
+            checks.push(Check {
+                name: SYNC_FAST,
+                passed: quantile(&self.sync_delays(), P99)
+                    .is_some_and(|p99| p99 <= settings.max_sync_latency),
+            });
+        }
         checks.extend(
             self.sims
                 .checks(self.unread_metrics, &settings.fleet.metrics_urls),
         );
         checks
+    }
+
+    /// Every action-to-visible delay of every bot.
+    fn sync_delays(&self) -> Vec<Duration> {
+        self.bots
+            .iter()
+            .flat_map(|bot| bot.sync_delays.iter().copied())
+            .collect()
     }
 
     /// Whether every check passed.
@@ -153,10 +182,12 @@ impl SwarmReport {
             .fold(1.0, f64::min);
         let fewest = self.bots.iter().map(|bot| bot.crossings).min();
         let errors = self.bots.iter().filter(|bot| bot.error.is_some()).count();
+        let delays = self.sync_delays();
+        let millis = |share| quantile(&delays, share).unwrap_or_default().as_millis();
         format!(
             "bots {}, failed to start {errors}, fewest crossings {}, worst bundle gap {} ms, \
              fewest bundles {worst_share:.4}, handoffs {} (failed {}), within one tick: handoffs \
-             {:.4}, ticks {:.4}",
+             {:.4}, ticks {:.4}, action-to-visible p50 {} ms p99 {} ms ({} samples)",
             self.bots.len(),
             fewest.unwrap_or_default(),
             worst_gap.unwrap_or_default().as_millis(),
@@ -164,6 +195,9 @@ impl SwarmReport {
             self.sims.failed,
             ratio(self.sims.handoffs_within_tick, self.sims.handoffs),
             ratio(self.sims.ticks_within_tick, self.sims.ticks),
+            millis(MEDIAN),
+            millis(P99),
+            delays.len(),
         )
     }
 }
@@ -270,9 +304,37 @@ struct Bot {
     settings: Arc<SwarmSettings>,
     n: usize,
     ground: Arc<dyn Ground + Send + Sync>,
-    view: OwnView,
+    view: SyncView,
     walk: Option<Walk>,
     last_sent: Option<Duration>,
+    /// The block changes of every bot of the run.
+    probe: Arc<SyncProbe>,
+    /// What it saw of the others' blocks.
+    sync: SyncTrack,
+    /// It holds block, and when it changes it next.
+    blocking: bool,
+    next_toggle: Option<Duration>,
+}
+
+impl Bot {
+    /// Whether it holds block at `since`: the state changes once per `block_toggle`, from a time
+    /// spread by the bot's number, and the change goes on the probe.
+    fn block_at(&mut self, since: Duration) -> bool {
+        let Some(period) = self.settings.block_toggle else {
+            return false;
+        };
+        let due = *self.next_toggle.get_or_insert_with(|| {
+            since + period.mul_f64(self.n as f64 / self.settings.fleet.bots.max(1) as f64)
+        });
+        if since >= due
+            && let Some(own) = self.view.own_number()
+        {
+            self.blocking = !self.blocking;
+            self.next_toggle = Some(due + period);
+            self.probe.changed(own, self.blocking, Instant::now());
+        }
+        self.blocking
+    }
 }
 
 /// The route of a bot that has seen itself.
@@ -329,8 +391,13 @@ impl FleetBot for Bot {
         let mut seen = Vec::new();
         for received in outcome.messages.drain(..) {
             // A message that does not decode is not a position; the checks miss it.
-            if let Ok(Some(position)) = self.view.read(&received) {
-                seen.push(position);
+            let Ok(read) = self.view.read(&received) else {
+                continue;
+            };
+            seen.extend(read.own_position);
+            let now = Instant::now();
+            for (entity, blocking) in read.blocks {
+                self.sync.saw(&self.probe, entity, blocking, now);
             }
         }
         if self.walk.is_none() {
@@ -366,7 +433,8 @@ impl FleetBot for Bot {
         else {
             return Ok(());
         };
-        let body = ClientInputMsg::position(position).encode()?;
+        let blocking = self.block_at(since);
+        let body = ClientInputMsg::position_with_block(position, blocking).encode()?;
         client.send_message(
             INPUT_CHANNEL,
             false,
@@ -388,6 +456,7 @@ impl FleetBot for Bot {
             worst_off_route_m: track.worst_off_route_m,
             bundles_received,
             bundles_expected,
+            sync_delays: self.sync.samples().to_vec(),
             error: None,
         }
     }
@@ -410,13 +479,18 @@ pub async fn run_swarm(
     report: impl FnMut(String),
 ) -> SwarmReport {
     let fleet = Arc::new(settings.fleet.clone());
+    let probe = Arc::new(SyncProbe::default());
     let new_bot: NewBot<Bot> = Arc::new(move |n| Bot {
         settings: Arc::clone(&settings),
         n,
         ground: Arc::clone(&ground),
-        view: OwnView::default(),
+        view: SyncView::default(),
         walk: None,
         last_sent: None,
+        probe: Arc::clone(&probe),
+        sync: SyncTrack::default(),
+        blocking: false,
+        next_toggle: None,
     });
     run_fleet(http, fleet, new_client, new_bot, stop, report).await
 }
@@ -446,6 +520,7 @@ mod tests {
     const GROUND_HEIGHT: f32 = 37.5;
     const TICK: Duration = Duration::from_millis(33);
     const LONG_GAP: Duration = Duration::from_millis(400);
+    const SYNC_LIMIT: Duration = Duration::from_millis(100);
 
     fn settings() -> SwarmSettings {
         SwarmSettings {
@@ -457,6 +532,8 @@ mod tests {
             max_bundle_gap: Duration::from_millis(250),
             path_tolerance_m: 1.0,
             starts: vec![[ORIGIN, ORIGIN]],
+            block_toggle: Some(Duration::from_secs(2)),
+            max_sync_latency: SYNC_LIMIT,
         }
     }
 
@@ -603,6 +680,7 @@ mod tests {
             worst_off_route_m: 0.5,
             bundles_received: 299,
             bundles_expected: 300,
+            sync_delays: vec![Duration::from_millis(40), Duration::from_millis(70)],
             error: None,
         }
     }
@@ -629,7 +707,7 @@ mod tests {
     fn the_swarm_checks_fail_on_each_fault() {
         let settings = settings();
         assert!(good_report().passed(&settings));
-        let faults: [Fault; 11] = [
+        let faults: [Fault; 12] = [
             (BOTS_REGISTERED, |report| report.bots[0].registered = false),
             (BOTS_CROSSED, |report| report.bots[1].crossings = 1),
             (BOTS_ON_ROUTE, |report| {
@@ -648,6 +726,9 @@ mod tests {
             (METRICS_READ, |report| report.unread_metrics = 1),
             (BUNDLES_ARRIVED, |report| {
                 report.bots[1].bundles_received = 290
+            }),
+            (SYNC_FAST, |report| {
+                report.bots[0].sync_delays = vec![Duration::from_secs(1); 100];
             }),
         ];
         for (name, fault) in faults {

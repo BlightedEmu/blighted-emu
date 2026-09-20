@@ -9,6 +9,7 @@ pub mod pair;
 pub mod rep;
 pub mod route;
 pub mod swarm;
+pub mod sync;
 pub mod udp;
 pub mod view;
 pub mod walk;

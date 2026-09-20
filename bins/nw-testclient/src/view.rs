@@ -9,8 +9,8 @@
 use std::collections::BTreeMap;
 
 use nw_messages::{
-    EntitySlots, FacetHeader, LOGIN_MESSAGE_TYPES, MessageError, PLAYER_SLICE_ASSET, ServerMessage,
-    SlotRead, WorldPosition,
+    EntitySlots, FacetHeader, LOGIN_MESSAGE_TYPES, MemberState, MessageError, PLAYER_SLICE_ASSET,
+    ServerMessage, SlotRead, WorldPosition,
 };
 use thiserror::Error;
 
@@ -126,6 +126,70 @@ impl OwnView {
     /// Whether `number` is the own entity number.
     fn is_own(&self, number: u64) -> bool {
         self.own == Some(number)
+    }
+
+    /// The own entity number, once the entry message named it.
+    pub const fn own_number(&self) -> Option<u64> {
+        self.own
+    }
+}
+
+/// What a swarm bot keeps to measure how fast others see a player's action (replication note):
+/// its own position, and the block state (`isBlockActive` of 1528) of each other player as it
+/// changes in its bundles.
+#[derive(Debug, Clone, Default)]
+pub struct SyncView {
+    own: OwnView,
+    slots: EntitySlots,
+}
+
+/// One message as a [`SyncView`] read it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SyncRead {
+    /// The own position, when the message is a bundle with it.
+    pub own_position: Option<WorldPosition>,
+    /// The block states of other entities it carried, by entity number.
+    pub blocks: Vec<(u64, bool)>,
+}
+
+impl SyncView {
+    /// Reads one more message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ViewError`] for a world message or a bundle payload that does not decode.
+    pub fn read(&mut self, received: &Received) -> Result<SyncRead, ViewError> {
+        let mut read = decode(received)?;
+        let own_position = self.own.apply(&read);
+        let mut blocks = Vec::new();
+        if let Read::Bundle(bundle) = &mut read {
+            self.slots.resolve(bundle);
+            for update in &bundle.updates {
+                let Some(entity) = update.entity.filter(|entity| !self.own.is_own(*entity)) else {
+                    continue;
+                };
+                blocks.extend(
+                    update
+                        .members
+                        .iter()
+                        .filter_map(|member| match &member.state {
+                            MemberState::DamageReceiver(receiver) => {
+                                receiver.is_block_active.map(|blocking| (entity, blocking))
+                            }
+                            _ => None,
+                        }),
+                );
+            }
+        }
+        Ok(SyncRead {
+            own_position,
+            blocks,
+        })
+    }
+
+    /// The own entity number, once the entry message named it.
+    pub const fn own_number(&self) -> Option<u64> {
+        self.own.own_number()
     }
 }
 

@@ -53,6 +53,10 @@ speed_mps = 4.0
 duration_seconds = 120
 min_crossings = 4
 max_bundle_gap_ms = 250
+# Each bot changes its block every 2 s; every bot times how fast it sees the others' changes.
+block_toggle_ms = 2000
+# Two 33 ms ticks and the loopback network (replication note).
+max_sync_latency_ms = 100
 # The metrics listener of every sim.
 metrics_urls = ["http://127.0.0.1:9102/metrics"]
 client_build_config = "config/client-build.toml"
