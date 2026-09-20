@@ -38,6 +38,7 @@ use super::hit_shape::{
     MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, Wedge, homing, stepped_in, swing_shape, turn,
 };
 use super::mob_timeline::yaw_toward;
+use super::projectile::Cast;
 use super::stamina::Dodge;
 use super::{Body, MESSAGE_CHANNEL, Outgoing, Player, Position, SimWorld};
 use crate::combat::{AttackOutcome, AttackRefusal, RemoteHit, RespawnRefusal};
@@ -278,7 +279,7 @@ impl SimWorld {
     /// The player of `attacker` hits `target` with its weapon's attack `damage_id`: `reach_m`
     /// caps the distance (`None`: a hit shape checked it); the attack interval since its last
     /// hit applies unless the hit is a later target of the same swing (`same_swing`).
-    fn hit(
+    pub(super) fn hit(
         &mut self,
         attacker: &ConnectionRef,
         target: u64,
@@ -761,13 +762,18 @@ impl SimWorld {
         } else {
             (held.map_or(WeaponKind::Other, |weapon| weapon.kind), None)
         };
-        let Some(shape) = swing_shape(weapon, kind) else {
-            tracing::debug!(
-                player = number,
-                ?weapon,
-                "attack with a weapon that does not swing"
-            );
-            return vec![Err(AttackRefusal::NotWeaponAttack)];
+        // A swing hits in its damage window, a projectile leaves the weapon at its cast time.
+        let hit_ms = match (swing_shape(weapon, kind), weapon.projectile()) {
+            (Some(shape), _) => shape.hit_ms(),
+            (None, Some(projectile)) => projectile.cast_ms,
+            (None, None) => {
+                tracing::debug!(
+                    player = number,
+                    ?weapon,
+                    "attack with a weapon that neither swings nor casts"
+                );
+                return vec![Err(AttackRefusal::NotWeaponAttack)];
+            }
         };
         let facing = records
             .first()
@@ -779,7 +785,7 @@ impl SimWorld {
             AttackKind::Light => now_ms.saturating_sub(held_ms),
             AttackKind::Heavy => now_ms,
         };
-        let due_ms = started_ms.saturating_add(shape.hit_ms()).max(now_ms);
+        let due_ms = started_ms.saturating_add(hit_ms).max(now_ms);
         self.player_swings.push(PlayerSwing {
             attacker: connection.clone(),
             aim: Aim {
@@ -801,7 +807,8 @@ impl SimWorld {
             .collect()
     }
 
-    /// Lands the player swings due at `now_ms` ([`SimWorld::swing`]).
+    /// Lands the player swings and casts due at `now_ms` ([`SimWorld::swing`]), then the
+    /// projectiles that got to their mob ([`SimWorld::projectile_flights_due`]).
     pub(super) fn player_swings_due(
         &mut self,
         now_ms: u64,
@@ -810,7 +817,8 @@ impl SimWorld {
             .into_iter()
             .partition(|swing| now_ms >= swing.due_ms);
         self.player_swings = later;
-        due.into_iter()
+        let mut results: Vec<_> = due
+            .into_iter()
             .flat_map(|swing| {
                 if let Some(slot_id) = swing.hand
                     && !self.melee_hand(&swing, slot_id)
@@ -819,7 +827,9 @@ impl SimWorld {
                 }
                 self.swing(&swing.attacker, swing.aim, swing.kind, now_ms)
             })
-            .collect()
+            .collect();
+        results.extend(self.projectile_flights_due(now_ms));
+        results
     }
 
     /// Whether `swing`, made while the server held a spread-shot weapon, was a swing of the melee
@@ -991,9 +1001,6 @@ impl SimWorld {
         let weapon = self
             .held_weapon(entity)
             .map_or(WeaponKind::Other, |(weapon, _)| weapon.kind);
-        let Some(shape) = swing_shape(weapon, kind) else {
-            return refused(AttackRefusal::NotWeaponAttack);
-        };
         let candidates: Vec<(u64, Position, Capsule)> = self
             .mob_states()
             .filter(|(_, _, state)| state.health > 0 && !state.returning)
@@ -1009,6 +1016,18 @@ impl SimWorld {
                     .map(move |place| (*mob, place, *body))
             })
             .collect();
+        // A ranged or magic weapon casts its projectile.
+        if let Some(projectile) = weapon.projectile() {
+            let cast = Cast {
+                weapon,
+                projectile,
+                kind,
+            };
+            return self.cast((attacker, aim), cast, position, &places, now_ms);
+        }
+        let Some(shape) = swing_shape(weapon, kind) else {
+            return refused(AttackRefusal::NotWeaponAttack);
+        };
         // The homing target: the one the client named, else the best one in the attack's
         // homing reach; with no camera yaw, the nearest mob.
         let locked = aim
@@ -2139,6 +2158,98 @@ mod tests {
             "{results:?}"
         );
         assert_eq!(drawn(&world), Some(slot::MAIN_HAND_OPTION_1));
+    }
+
+    /// [`fight_at`] `x` with player 1 holding a weapon of `kind` (the kit sword with that kind's
+    /// stats and damage rows).
+    fn caster_at(x: f32, kind: WeaponKind) -> SimWorld {
+        const CASTER: &str = "CasterT2";
+        let mut source = crate::combat::test_support::test_source();
+        let sword = source.weapons[0].1;
+        source
+            .weapons
+            .push((CASTER.to_owned(), WeaponRow { kind, ..sword }));
+        source
+            .item_stats
+            .push((gear::tests::SWORD.to_owned(), CASTER.to_owned()));
+        let (light, heavy) = kind.attack_ids().expect("its damage rows");
+        for damage_id in [light, heavy] {
+            source.attacks.push(nw_content::combat::AttackRow {
+                damage_id: damage_id.to_owned(),
+                coefficient: 1.0,
+                can_crit: false,
+                threat: 0,
+            });
+        }
+        let data = CombatData::build(source, &CombatRows::default()).expect("data");
+        let mut world = fight_at(x);
+        world.combat = committed().combat_settings(Arc::new(data), Arc::from([]));
+        let entity = world.by_connection[&connection(1)];
+        world.world.get_mut::<Player>(entity).expect("player").gear = Gear::starter(
+            &gear::tests::kits(),
+            gear::tests::CHARACTER,
+            Some(gear::tests::BACKSTORY),
+        );
+        tick(&mut world, NOW);
+        world
+    }
+
+    #[test]
+    fn ranged_and_magic_attacks_fly_to_a_mob_far_away() {
+        /// Out of every melee reach, inside every projectile's range.
+        const AWAY_M: f32 = 15.0;
+        for kind in [
+            WeaponKind::FireStaff,
+            WeaponKind::VoidGauntlet,
+            WeaponKind::IceGauntlet,
+            WeaponKind::LifeStaff,
+            WeaponKind::Bow,
+            WeaponKind::Musket,
+        ] {
+            let mut world = caster_at(MOB_X + AWAY_M, kind);
+            let entity = world.by_connection[&connection(1)];
+            let from = world
+                .world
+                .get::<Body>(entity)
+                .expect("body")
+                .motion
+                .position();
+            let aim = Aim {
+                facing: Some(yaw_toward(from, Position { x: MOB_X, ..from })),
+                lock_target: None,
+            };
+            assert!(
+                world
+                    .swing(&connection(1), aim, AttackKind::Light, NOW)
+                    .is_empty(),
+                "{kind:?}: the projectile is on its way"
+            );
+            let projectile = kind.projectile().expect("it flies");
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a flight of a few hundred ms"
+            )]
+            let flight_ms = (AWAY_M / projectile.speed_mps * 1_000.0) as u64;
+            assert!(
+                world.player_swings_due(NOW + flight_ms / 2).is_empty(),
+                "{kind:?}: still flying"
+            );
+            let landed = world.player_swings_due(NOW + flight_ms + 1);
+            assert!(
+                matches!(landed.as_slice(), [Ok(AttackOutcome::Hit { target, .. })] if *target == mob()),
+                "{kind:?}: {landed:?}"
+            );
+            let away = Aim {
+                facing: Some(yaw_toward(Position { x: MOB_X, ..from }, from)),
+                lock_target: None,
+            };
+            assert_eq!(
+                world.swing(&connection(1), away, AttackKind::Light, NOW + LONG_AFTER_MS),
+                vec![Err(AttackRefusal::NoTarget)],
+                "{kind:?}: a cast away from the mob meets nothing"
+            );
+        }
     }
 
     /// A shot of `pellets` pellets on [`mob`], whose last pellet missed.

@@ -193,13 +193,52 @@ impl WeaponKind {
             Self::GreatAxe => ("GreatAxe_PrimaryAttack", "GreatAxe_HeavyAttack"),
             Self::WarHammer => ("Warhammer_PrimaryAttack", "Warhammer_HeavyAttack"),
             Self::GreatSword => ("GreatSword_PrimaryAttack1", "GreatSword_HeavyAttack1"),
-            Self::Bow
-            | Self::Musket
+            // The ranged and magic kinds: the weapon rows' `TooltipPrimaryAttackData` and
+            // `TooltipAlternateAttackData` (Observed, build 25810808), the damage rows their
+            // projectile spells name (`SpellData.DamageTableRow`).
+            Self::Bow => ("BowAttack1", "BowAttack2"),
+            Self::Musket => ("MusketAttack1", "MusketAttack2"),
+            Self::FireStaff => ("Firestaff_PrimaryAttackC1", "Firestaff_PrimaryAttackC2"),
+            Self::LifeStaff => ("LifeStaff_PrimaryAttackC1", "LifeStaff_PrimaryAttackC2"),
+            Self::IceGauntlet => ("IceMagic_Primary", "IceMagic_Heavy"),
+            Self::VoidGauntlet => ("VoidGauntlet_Primary", "VoidGauntlet_Heavy"),
+            // The blunderbuss fires through its own request (2719).
+            Self::Blunderbuss | Self::Other => return None,
+        })
+    }
+
+    /// The kind that the item class `item_class` (`MasterItemDefinitions.ItemClass`, such as
+    /// `Weapon+EquippableMainHand+IceMagic+Magic`) names; `None` for a class with no weapon kind
+    /// (a tool, a shield). Every weapon item has one (Observed, build 25810808), while its stats
+    /// id does not always name its kind: the starter ice gauntlet's is
+    /// `1hElementalGauntlet_IceT2` (live 2026-09-18: it swung as a sword).
+    pub fn of_item_class(item_class: &str) -> Option<Self> {
+        item_class.split(ITEM_CLASS_SEPARATOR).find_map(|class| {
+            ITEM_CLASS_KINDS
+                .iter()
+                .find(|(name, _)| class.eq_ignore_ascii_case(name))
+                .map(|(_, kind)| *kind)
+        })
+    }
+
+    /// The projectile of an attack with a ranged or magic weapon of this kind; `None` for a kind
+    /// that swings or the blunderbuss, which fires through its own request.
+    pub const fn projectile(self) -> Option<Projectile> {
+        Some(match self {
+            Self::FireStaff => FIRE_STAFF_PROJECTILE,
+            Self::LifeStaff => LIFE_STAFF_PROJECTILE,
+            Self::IceGauntlet | Self::VoidGauntlet => GAUNTLET_PROJECTILE,
+            Self::Bow => BOW_PROJECTILE,
+            Self::Musket => MUSKET_PROJECTILE,
+            Self::Sword
+            | Self::Hatchet
+            | Self::Rapier
+            | Self::Flail
+            | Self::Spear
+            | Self::GreatAxe
+            | Self::WarHammer
+            | Self::GreatSword
             | Self::Blunderbuss
-            | Self::FireStaff
-            | Self::LifeStaff
-            | Self::IceGauntlet
-            | Self::VoidGauntlet
             | Self::Other => return None,
         })
     }
@@ -230,6 +269,82 @@ impl WeaponKind {
             .map_or(Self::Other, |(_, kind)| *kind)
     }
 }
+
+/// The separator of an item class's parts.
+const ITEM_CLASS_SEPARATOR: char = '+';
+/// The item class parts that name a weapon kind (Observed: every weapon `ItemClass` of build
+/// 25810808 holds one of them).
+const ITEM_CLASS_KINDS: [(&str, WeaponKind); 15] = [
+    ("Sword", WeaponKind::Sword),
+    ("Hatchet", WeaponKind::Hatchet),
+    ("Rapier", WeaponKind::Rapier),
+    ("Flail", WeaponKind::Flail),
+    ("Spear", WeaponKind::Spear),
+    ("2HAxe", WeaponKind::GreatAxe),
+    ("2HHammer", WeaponKind::WarHammer),
+    ("GreatSword", WeaponKind::GreatSword),
+    ("Bow", WeaponKind::Bow),
+    ("Musket", WeaponKind::Musket),
+    ("Blunderbuss", WeaponKind::Blunderbuss),
+    ("FireStaff", WeaponKind::FireStaff),
+    ("LifeStaff", WeaponKind::LifeStaff),
+    ("IceMagic", WeaponKind::IceGauntlet),
+    ("VoidGauntlet", WeaponKind::VoidGauntlet),
+];
+
+/// How the projectile of a ranged or magic attack flies. Retail clients send no hit request for
+/// these weapons (Observed: the fire staff and bow capture has only inputs around 293 hits); the
+/// server casts the projectile spell (`SpellData`, `CastingTypes` Projectile) from the attack.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Projectile {
+    /// When it leaves the weapon after the attack starts.
+    pub cast_ms: u64,
+    /// How far it flies.
+    pub range_m: f32,
+    /// How fast it flies.
+    pub speed_mps: f32,
+    /// How wide it is: a body this near its line is hit.
+    pub radius_m: f32,
+}
+
+// The flight values are Inferred: the `RangedAttackProfile` assets that hold them are not in
+// the datasheets this server reads. Each range covers the spell's `CastDistance` (fire 10 m, life
+// 10 m, gauntlets 20 m) and the reach players see in retail videos.
+/// A fire staff fireball.
+const FIRE_STAFF_PROJECTILE: Projectile = Projectile {
+    cast_ms: 300,
+    range_m: 30.0,
+    speed_mps: 40.0,
+    radius_m: 0.5,
+};
+/// A life staff orb.
+const LIFE_STAFF_PROJECTILE: Projectile = Projectile {
+    cast_ms: 300,
+    range_m: 20.0,
+    speed_mps: 30.0,
+    radius_m: 0.5,
+};
+/// An ice or void gauntlet bolt.
+const GAUNTLET_PROJECTILE: Projectile = Projectile {
+    cast_ms: 250,
+    range_m: 25.0,
+    speed_mps: 40.0,
+    radius_m: 0.4,
+};
+/// A bow's arrow.
+const BOW_PROJECTILE: Projectile = Projectile {
+    cast_ms: 200,
+    range_m: 60.0,
+    speed_mps: 60.0,
+    radius_m: 0.25,
+};
+/// A musket's shot.
+const MUSKET_PROJECTILE: Projectile = Projectile {
+    cast_ms: 150,
+    range_m: 80.0,
+    speed_mps: 200.0,
+    radius_m: 0.2,
+};
 
 /// A consumable that heals: a potion.
 #[derive(Debug, Clone, PartialEq)]
@@ -272,6 +387,8 @@ pub struct CombatSource {
     pub weapons: Vec<(String, WeaponRow)>,
     /// `MasterItemDefinitions`: (item id, `ItemStatsRef`) of the items that have stats.
     pub item_stats: Vec<(String, String)>,
+    /// `MasterItemDefinitions`: (item id, `ItemClass`) of the items that have a class.
+    pub item_classes: Vec<(String, String)>,
     /// `ConsumableItemDefinitions`: (consumable id, cooldown seconds, cooldown id, status
     /// effects) of the consumables with a cooldown.
     pub consumables: Vec<(String, u32, String, String)>,
@@ -391,6 +508,12 @@ impl CombatSource {
                 .iter()
                 .flat_map(|table| &table.rows)
                 .filter_map(|row| Some((row.item_id.clone(), row.item_stats_ref.clone()?)))
+                .collect(),
+            item_classes: tables
+                .master_item_definitions
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter_map(|row| Some((row.item_id.clone(), row.item_class.clone()?)))
                 .collect(),
             attacks: tables
                 .damage_data
@@ -537,11 +660,24 @@ impl CombatData {
             .iter()
             .map(|(id, weapon)| (id.to_lowercase(), *weapon))
             .collect();
+        // An item's kind is its class's; its stats row's id is the fall-back.
+        let item_kinds: HashMap<String, WeaponKind> = source
+            .item_classes
+            .iter()
+            .filter_map(|(item, class)| {
+                Some((item.to_lowercase(), WeaponKind::of_item_class(class)?))
+            })
+            .collect();
         let item_weapons = source
             .item_stats
             .iter()
             .filter_map(|(item, stats)| {
-                Some((item.to_lowercase(), *weapons.get(&stats.to_lowercase())?))
+                let item = item.to_lowercase();
+                let mut weapon = *weapons.get(&stats.to_lowercase())?;
+                if let Some(kind) = item_kinds.get(&item) {
+                    weapon.kind = *kind;
+                }
+                Some((item, weapon))
             })
             .collect();
         let heals: HashMap<String, (f64, f64)> = source
@@ -775,6 +911,116 @@ mod tests {
         }
     }
 
+    /// The occultist's starter ice gauntlet and its stats row (retail rows, build 25810808).
+    const ICE_GAUNTLET_ITEM: &str = "OccultistArchetype_1hGauntletIce";
+    const ICE_GAUNTLET_STATS: &str = "1hElementalGauntlet_IceT2";
+
+    fn sword_row() -> WeaponRow {
+        WeaponRow {
+            base_damage: SWORD_BASE,
+            crit_chance: 0.03,
+            crit_multiplier: 1.3,
+            spread_shot: false,
+            kind: WeaponKind::Sword,
+            max_loaded_ammo: 0,
+            reload_ms: 0,
+        }
+    }
+
+    #[test]
+    fn an_item_is_the_kind_its_class_names() {
+        assert_eq!(
+            WeaponKind::of_id(ICE_GAUNTLET_STATS),
+            WeaponKind::Other,
+            "its stats id names no kind"
+        );
+        let data = CombatData::build(source(), &rows()).expect("data");
+        assert_eq!(
+            data.weapon_of_item(ICE_GAUNTLET_ITEM)
+                .map(|weapon| weapon.kind),
+            Some(WeaponKind::IceGauntlet)
+        );
+        // Every starter backstory weapon's class (retail rows).
+        let starters = [
+            ("Weapon+EquippableMainHand+Sword+Melee", WeaponKind::Sword),
+            (
+                "Weapon+EquippableMainHand+Hatchet+Melee",
+                WeaponKind::Hatchet,
+            ),
+            ("Weapon+EquippableTwoHand+2HAxe+Melee", WeaponKind::GreatAxe),
+            (
+                "Weapon+EquippableTwoHand+2HHammer+Melee",
+                WeaponKind::WarHammer,
+            ),
+            ("Weapon+EquippableTwoHand+Bow+Ranged", WeaponKind::Bow),
+            ("Weapon+EquippableTwoHand+Spear+Melee", WeaponKind::Spear),
+            ("Weapon+EquippableMainHand+Rapier+Melee", WeaponKind::Rapier),
+            ("Weapon+EquippableTwoHand+Musket+Ranged", WeaponKind::Musket),
+            (
+                "Weapon+EquippableMainHand+FireStaff+Magic",
+                WeaponKind::FireStaff,
+            ),
+            (
+                "Weapon+EquippableMainHand+IceMagic+Magic",
+                WeaponKind::IceGauntlet,
+            ),
+            (
+                "Weapon+EquippableMainHand+VoidGauntlet+Magic",
+                WeaponKind::VoidGauntlet,
+            ),
+            (
+                "Weapon+EquippableMainHand+LifeStaff+Magic",
+                WeaponKind::LifeStaff,
+            ),
+            (
+                "Weapon+EquippableTwoHand+GreatSword+Melee",
+                WeaponKind::GreatSword,
+            ),
+            (
+                "Weapon+EquippableTwoHand+Blunderbuss+Ranged",
+                WeaponKind::Blunderbuss,
+            ),
+            (
+                "Weapon+EquippableMainHand+Flail+Melee+Named",
+                WeaponKind::Flail,
+            ),
+        ];
+        for (class, kind) in starters {
+            assert_eq!(WeaponKind::of_item_class(class), Some(kind), "{class}");
+        }
+        assert_eq!(
+            WeaponKind::of_item_class("EquippableTool+Axe+SkinningKnife"),
+            None,
+            "a tool"
+        );
+        assert_eq!(
+            WeaponKind::of_item_class("Weapon+EquippableOffHand+Shield+KiteShield"),
+            None,
+            "a shield"
+        );
+    }
+
+    #[test]
+    fn ranged_and_magic_kinds_fly_and_melee_kinds_do_not() {
+        for kind in [
+            WeaponKind::FireStaff,
+            WeaponKind::LifeStaff,
+            WeaponKind::IceGauntlet,
+            WeaponKind::VoidGauntlet,
+            WeaponKind::Bow,
+            WeaponKind::Musket,
+        ] {
+            assert!(kind.projectile().is_some(), "{kind:?}");
+            assert!(kind.attack_ids().is_some(), "{kind:?}");
+            assert!(!kind.swings(), "{kind:?}");
+        }
+        assert!(
+            WeaponKind::Blunderbuss.projectile().is_none(),
+            "it fires spread shots"
+        );
+        assert!(WeaponKind::Sword.projectile().is_none());
+    }
+
     fn source() -> CombatSource {
         CombatSource {
             base_types: vec![("Boar_20".to_owned(), boar())],
@@ -788,18 +1034,16 @@ mod tests {
                     physical_armor_rating: LEVEL_ARMOR,
                 },
             )],
-            weapons: vec![(
-                "SwordT1".to_owned(),
-                WeaponRow {
-                    base_damage: SWORD_BASE,
-                    crit_chance: 0.03,
-                    crit_multiplier: 1.3,
-                    spread_shot: false,
-                    kind: WeaponKind::Sword,
-                    max_loaded_ammo: 0,
-                    reload_ms: 0,
-                },
-            )],
+            weapons: vec![
+                ("SwordT1".to_owned(), sword_row()),
+                (
+                    ICE_GAUNTLET_STATS.to_owned(),
+                    WeaponRow {
+                        kind: WeaponKind::of_id(ICE_GAUNTLET_STATS),
+                        ..sword_row()
+                    },
+                ),
+            ],
             consumables: vec![(
                 "PotionHealthT1".to_owned(),
                 POTION_COOLDOWN_S,
@@ -811,6 +1055,18 @@ mod tests {
             item_stats: vec![
                 (SWORD_ITEM.to_owned(), "SwordT1".to_owned()),
                 ("Shield".to_owned(), "NoWeaponRow".to_owned()),
+                (ICE_GAUNTLET_ITEM.to_owned(), ICE_GAUNTLET_STATS.to_owned()),
+            ],
+            // Retail classes of the two items.
+            item_classes: vec![
+                (
+                    SWORD_ITEM.to_owned(),
+                    "Weapon+EquippableMainHand+Sword+Melee".to_owned(),
+                ),
+                (
+                    ICE_GAUNTLET_ITEM.to_owned(),
+                    "Weapon+EquippableMainHand+IceMagic+Magic".to_owned(),
+                ),
             ],
             attacks: vec![
                 AttackRow {
