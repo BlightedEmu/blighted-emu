@@ -5,11 +5,13 @@
 //! An objective's root task is a tree of `ObjectiveTasks` rows. A container task runs its
 //! children: one after the other (`ConsecutiveTaskContainer`), all at once until one is done
 //! (`PartialTaskContainer`), or all at once until all are done (`SimpleTaskContainer`). A leaf
-//! task is done at once (an achievement unlock, an item removal), after a time (a timer), or on a
-//! game event (a video, a cutscene, a kill, an area, an item, an equip, a UI screen). The client
-//! plays the scenes on its own when the server sets the achievements of the tree.
+//! task is done at once (an achievement unlock, an item removal, a game event it fires), after a
+//! time (a timer), on a game event (a video, a cutscene, a kill, an area, an item, an equip, a UI
+//! screen, the gather of a quest object), or while the player is so (in or out of a point of
+//! interest, with an achievement). The client plays the scenes on its own when the server sets the
+//! achievements of the tree.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use nw_bus::{QuestRun, QuestTask};
@@ -65,6 +67,9 @@ const ID_PART_SEPARATOR: char = '_';
 const NEVER_TRUE_TAG: &str = "neverbetrue";
 /// The chance of a quest drop when its task names none, in percent.
 const ALWAYS_PERCENT: u32 = 100;
+/// The `TriggerAreaType` of an area task done when the player leaves its volume (retail sheets:
+/// `Enter` or `Leave`; an empty cell is `Enter`).
+const LEAVE_AREA_TYPE: &str = "Leave";
 
 /// What a task waits for.
 #[derive(Debug, Clone, PartialEq)]
@@ -91,12 +96,15 @@ enum TaskKind {
     CinematicComplete(u32),
     /// Done when the in-game cutscene of this id ends.
     CutsceneComplete(u32),
-    /// Done when the player comes within `radius_m` of the location; without one, never.
+    /// Done when the player comes within `radius_m` of the location, or goes out of it when it
+    /// waits for a `leave`; without a location, never.
     TriggerArea {
         /// The location.
         at: Option<Position>,
         /// The size of its volume.
         radius_m: f32,
+        /// It waits for the player to leave the volume (`TriggerAreaType` Leave).
+        leave: bool,
     },
     /// Done after `count` kills of mobs of the type.
     KillContribution { enemy: String, count: u32 },
@@ -105,11 +113,14 @@ enum TaskKind {
     /// Done when the player holds `count` of the item, in the bag or worn (`TaskHaveItems`).
     HaveItems { item: String, count: u32 },
     /// Done after the player gathered `count` of the item; a corpse of `drop`'s enemy that the
-    /// player skins while it waits drops it (`TaskGatherItems`).
+    /// player skins, or a quest object of `drop`'s gatherable that it gathers, drops it while it
+    /// waits (`TaskGatherItems`). The turn-in takes a `returned` item back
+    /// (`TaskGatherAndReturnItems`).
     GatherItems {
         item: String,
         count: u32,
         drop: Option<QuestDrop>,
+        returned: bool,
     },
     /// Done when the player crafts the recipe of this id (`TaskCraftRecipe`).
     CraftRecipe(String),
@@ -119,14 +130,27 @@ enum TaskKind {
     EquipItem(String),
     /// Done when the client opens the UI screen of this id.
     OpenUiScreen(u32),
+    /// Done while the player is in a point of interest of this `POITag` (`TaskGoToPOITag`).
+    GoToPoi(String),
+    /// Done while the player is out of every point of interest of this `POITag`
+    /// (`TaskExitPOITag`).
+    ExitPoi(String),
+    /// Fires the game event of this id and is done (`TaskTriggerGameEvent`: its whisper plays on
+    /// the client).
+    TriggerGameEvent(String),
+    /// Done after `count` game events of this id (`TaskGameEvent` with a `KillEnemyType`: the
+    /// gathers of a quest object).
+    GameEvent { event: String, count: u32 },
     /// A task type this server does not run: done at once, so the tree goes on.
     Unsupported,
 }
 
-/// The item a gather task adds when the player skins a corpse of its enemy.
+/// The item a gather task adds when the player skins a corpse of its enemy or gathers a quest
+/// object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QuestDrop {
-    /// `ItemDropVC`: the enemy type, as a kill task names one.
+    /// `ItemDropVC`: the enemy type, as a kill task names one, or the `GatherableID` of a quest
+    /// object (`MSQ_Treasure_A`).
     enemy: String,
     /// `ItemDropProbability`, in percent.
     percent: u32,
@@ -180,6 +204,10 @@ pub struct TaskRow {
     pub item_drop_vc: Option<String>,
     /// `ItemDropProbability`.
     pub item_drop_probability: Option<i64>,
+    /// `POITag`: the point of interest of a go-to or exit task.
+    pub poi_tag: Option<String>,
+    /// `TriggerAreaType`: `Enter` or `Leave` for an area task.
+    pub trigger_area_type: Option<String>,
 }
 
 /// Every task row with an index by lowercase task id, made once for the trees of many
@@ -234,6 +262,18 @@ pub fn task_rows(tables: &Tables) -> Vec<TaskRow> {
             crafting_recipe_id: row.crafting_recipe_id.clone(),
             item_drop_vc: row.item_drop_vc.clone(),
             item_drop_probability: row.item_drop_probability,
+            poi_tag: row.poi_tag.clone(),
+            trigger_area_type: row.trigger_area_type.clone(),
+        })
+        .collect()
+}
+
+/// The game events (lowercase ids) that a `TaskGameEvent` of `rows` counts.
+pub fn counted_game_events(rows: &[TaskRow]) -> HashSet<String> {
+    rows.iter()
+        .filter_map(|row| match kind_of(row) {
+            TaskKind::GameEvent { event, .. } => Some(event.to_lowercase()),
+            _ => None,
         })
         .collect()
 }
@@ -262,6 +302,19 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         .and_then(|qty| u32::try_from(qty).ok())
         .unwrap_or(1)
         .max(1);
+    let filled = |cell: &Option<String>| cell.clone().filter(|text| !text.is_empty());
+    let gather = |returned| TaskKind::GatherItems {
+        item: item(),
+        count,
+        drop: filled(&row.item_drop_vc).map(|enemy| QuestDrop {
+            enemy,
+            percent: row
+                .item_drop_probability
+                .and_then(|percent| u32::try_from(percent).ok())
+                .unwrap_or(ALWAYS_PERCENT),
+        }),
+        returned,
+    };
     match row.kind.to_ascii_lowercase().as_str() {
         "consecutivetaskcontainer" => TaskKind::Consecutive,
         "partialtaskcontainer" => TaskKind::Partial,
@@ -280,6 +333,10 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "tasktriggerarea" => TaskKind::TriggerArea {
             at: row.override_location.as_deref().and_then(location_of),
             radius_m: trigger_radius_m(row.target_tag.as_deref()),
+            leave: row
+                .trigger_area_type
+                .as_deref()
+                .is_some_and(|kind| kind.eq_ignore_ascii_case(LEAVE_AREA_TYPE)),
         },
         "taskkillcontribution" => TaskKind::KillContribution {
             enemy: row.kill_enemy_type.clone().unwrap_or_default(),
@@ -290,21 +347,8 @@ fn kind_of(row: &TaskRow) -> TaskKind {
             item: item(),
             count,
         },
-        "taskgatheritems" => TaskKind::GatherItems {
-            item: item(),
-            count,
-            drop: row
-                .item_drop_vc
-                .clone()
-                .filter(|enemy| !enemy.is_empty())
-                .map(|enemy| QuestDrop {
-                    enemy,
-                    percent: row
-                        .item_drop_probability
-                        .and_then(|percent| u32::try_from(percent).ok())
-                        .unwrap_or(ALWAYS_PERCENT),
-                }),
-        },
+        "taskgatheritems" => gather(false),
+        "taskgatherandreturnitems" => gather(true),
         "taskcraftrecipe" => {
             TaskKind::CraftRecipe(row.crafting_recipe_id.clone().unwrap_or_default())
         }
@@ -316,6 +360,14 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         {
             TaskKind::Never
         }
+        "taskgameevent" => filled(&row.kill_enemy_type).map_or(TaskKind::Unsupported, |event| {
+            TaskKind::GameEvent { event, count }
+        }),
+        "tasktriggergameevent" => {
+            filled(&row.kill_enemy_type).map_or(TaskKind::Unsupported, TaskKind::TriggerGameEvent)
+        }
+        "taskgotopoitag" => filled(&row.poi_tag).map_or(TaskKind::Unsupported, TaskKind::GoToPoi),
+        "taskexitpoitag" => filled(&row.poi_tag).map_or(TaskKind::Unsupported, TaskKind::ExitPoi),
         "taskequipitem" => TaskKind::EquipItem(item()),
         "taskopenuiscreen" => {
             TaskKind::OpenUiScreen(lowercase_crc32(row.ui_screen_tag.as_deref().unwrap_or("")))
@@ -398,6 +450,22 @@ impl ObjectiveTree {
     pub fn is_empty(&self) -> bool {
         self.tasks.is_empty()
     }
+
+    /// The items its gather-and-return tasks take back at the turn-in, with their counts.
+    pub fn returned_items(&self) -> Vec<(String, u32)> {
+        self.tasks
+            .iter()
+            .filter_map(|task| match &task.kind {
+                TaskKind::GatherItems {
+                    item,
+                    count,
+                    returned: true,
+                    ..
+                } => Some((item.clone(), *count)),
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// A game event that can complete tasks.
@@ -435,6 +503,21 @@ pub enum Event<'a> {
     AchievementSet(&'a str),
     /// The player crafted the recipe of this id.
     Crafted(&'a str),
+    /// The game event of this id happened for the player: the gather of a quest object, or one
+    /// that a task fired.
+    GameEvent(&'a str),
+}
+
+/// What the player is now, for the tasks done while it is so.
+#[derive(Clone, Copy)]
+pub struct Facts<'a> {
+    /// Its items: id, quantity, worn.
+    pub held: &'a [(&'a str, u32, bool)],
+    /// The `POITag`s of the points of interest it is in; `None` when the server does not know
+    /// them, so no go-to or exit task is judged.
+    pub places: Option<&'a [&'a str]>,
+    /// Whether it has an achievement; `None` when the server does not know.
+    pub achieved: Option<&'a dyn Fn(&str) -> bool>,
 }
 
 /// Where a task the quest tracker shows stands.
@@ -472,6 +555,8 @@ pub enum Effect {
     LockAchievement(String),
     /// Remove this item from the player.
     RemoveItem(String),
+    /// Fire this game event: its whisper plays and its reward goes to the player.
+    GameEvent(String),
     /// This task is done.
     Done(String),
 }
@@ -653,6 +738,19 @@ impl ObjectiveRun {
             .any(|(task, state)| *state == TaskState::Done && task.id.eq_ignore_ascii_case(id))
     }
 
+    /// Whether a waiting task counts game event `event`.
+    pub fn counts_game_event(&self, event: &str) -> bool {
+        self.tree
+            .tasks
+            .iter()
+            .zip(&self.states)
+            .any(|(task, state)| {
+                matches!(state, TaskState::Active { .. })
+                    && matches!(&task.kind, TaskKind::GameEvent { event: wanted, .. }
+                        if wanted.eq_ignore_ascii_case(event))
+            })
+    }
+
     /// Whether task `id` waits.
     pub fn is_active(&self, id: &str) -> bool {
         self.tree
@@ -686,7 +784,8 @@ impl ObjectiveRun {
                     (
                         TaskKind::KillContribution { count, .. }
                         | TaskKind::HaveItems { count, .. }
-                        | TaskKind::GatherItems { count, .. },
+                        | TaskKind::GatherItems { count, .. }
+                        | TaskKind::GameEvent { count, .. },
                         TaskState::Done,
                     ) => *count,
                     (_, TaskState::Active { progress, .. }) => progress,
@@ -703,22 +802,44 @@ impl ObjectiveRun {
     }
 
     /// Completes the waiting item tasks that the player's items `held` (item id, quantity,
-    /// worn) already meet: a have-item task by any stack of its item, a have-items task by its
-    /// count of the item, an equip task by its item worn; a have-items task short of its count
-    /// shows how many the player holds. Item events count only for tasks that wait when they
-    /// come; an item the player took before its task started would else never count
-    /// (beach-ruins-chest note: the chest's potions taken before `ChestDiscovery`).
+    /// worn) already meet, as [`ObjectiveRun::sync`] with nothing else known.
     pub fn sync_held(&mut self, held: &[(&str, u32, bool)], now_ms: u64) -> Vec<Effect> {
+        self.sync(
+            &Facts {
+                held,
+                places: None,
+                achieved: None,
+            },
+            now_ms,
+        )
+    }
+
+    /// Completes the waiting tasks that what the player is (`facts`) already meets: a have-item
+    /// task by any stack of its item, a have-items task by its count of the item, an equip task
+    /// by its item worn, a go-to task while the player is in its point of interest, an exit task
+    /// while it is out of it, an achievement task by its achievement; a have-items task short of
+    /// its count shows how many the player holds. Events count only for tasks that wait when
+    /// they come; an item the player took before its task started would else never count
+    /// (beach-ruins-chest note: the chest's potions taken before `ChestDiscovery`), nor would a
+    /// lore note it read before.
+    pub fn sync(&mut self, facts: &Facts<'_>, now_ms: u64) -> Vec<Effect> {
         let mut effects = Vec::new();
         for index in 0..self.states.len() {
             let TaskState::Active { progress, due_ms } = self.states[index] else {
                 continue;
             };
             let holds = |item: &str| -> u32 {
-                held.iter()
+                facts
+                    .held
+                    .iter()
                     .filter(|(id, _, _)| id.eq_ignore_ascii_case(item))
                     .map(|(_, quantity, _)| *quantity)
                     .sum()
+            };
+            let inside = |tag: &str| {
+                facts
+                    .places
+                    .map(|places| places.iter().any(|place| place.eq_ignore_ascii_case(tag)))
             };
             let tree = Arc::clone(&self.tree);
             let met = match &tree.tasks[index].kind {
@@ -734,9 +855,15 @@ impl ObjectiveRun {
                     }
                     holding >= *count
                 }
-                TaskKind::EquipItem(item) => held
+                TaskKind::EquipItem(item) => facts
+                    .held
                     .iter()
                     .any(|(id, _, worn)| *worn && id.eq_ignore_ascii_case(item)),
+                TaskKind::GoToPoi(tag) => inside(tag) == Some(true),
+                TaskKind::ExitPoi(tag) => inside(tag) == Some(false),
+                TaskKind::HasAchievement(achievement) => {
+                    facts.achieved.is_some_and(|achieved| achieved(achievement))
+                }
                 _ => false,
             };
             if met {
@@ -749,6 +876,17 @@ impl ObjectiveRun {
     /// The items the waiting gather tasks drop for a corpse of `vitals_id` and `categories`
     /// that the player skins: each item and its chance in percent.
     pub fn quest_drops(&self, vitals_id: &str, categories: &[String]) -> Vec<(String, u32)> {
+        self.drops(|drop| kills_count(&drop.enemy, vitals_id, categories))
+    }
+
+    /// The items the waiting gather tasks drop for a quest object of gatherable `gatherable`
+    /// that the player gathers: each item and its chance in percent.
+    pub fn gather_drops(&self, gatherable: &str) -> Vec<(String, u32)> {
+        self.drops(|drop| drop.enemy.eq_ignore_ascii_case(gatherable))
+    }
+
+    /// The items of the waiting gather tasks whose drop `drops`, with their chances.
+    fn drops(&self, drops: impl Fn(&QuestDrop) -> bool) -> Vec<(String, u32)> {
         self.tree
             .tasks
             .iter()
@@ -759,9 +897,7 @@ impl ObjectiveRun {
                     item,
                     drop: Some(drop),
                     ..
-                } if kills_count(&drop.enemy, vitals_id, categories) => {
-                    Some((item.clone(), drop.percent))
-                }
+                } if drops(drop) => Some((item.clone(), drop.percent)),
                 _ => None,
             })
             .collect()
@@ -803,9 +939,14 @@ impl ObjectiveRun {
                     TaskKind::TriggerArea {
                         at: Some(at),
                         radius_m,
+                        leave,
                     },
                     Event::Moved(position),
-                ) => (at.horizontal_distance(position) <= *radius_m, 1, 1),
+                ) => (
+                    (at.horizontal_distance(position) > *radius_m) == *leave,
+                    1,
+                    1,
+                ),
                 (TaskKind::HaveItem(Some(wanted)), Event::ItemGained { item, .. })
                 | (TaskKind::EquipItem(wanted), Event::Equipped(item))
                 | (TaskKind::CraftRecipe(wanted), Event::Crafted(item)) => {
@@ -823,6 +964,13 @@ impl ObjectiveRun {
                 (TaskKind::HasAchievement(wanted), Event::AchievementSet(set)) => {
                     (wanted.eq_ignore_ascii_case(set), 1, 1)
                 }
+                (
+                    TaskKind::GameEvent {
+                        event: wanted,
+                        count,
+                    },
+                    Event::GameEvent(seen),
+                ) => (wanted.eq_ignore_ascii_case(seen), 1, *count),
                 _ => (false, 1, 1),
             };
             if !matches {
@@ -892,6 +1040,10 @@ impl ObjectiveRun {
             }
             TaskKind::LockAchievement(achievement) => {
                 effects.push(Effect::LockAchievement(achievement.clone()));
+                self.complete(index, now_ms, effects);
+            }
+            TaskKind::TriggerGameEvent(event) => {
+                effects.push(Effect::GameEvent(event.clone()));
                 self.complete(index, now_ms, effects);
             }
             TaskKind::Unsupported => self.complete(index, now_ms, effects),
@@ -1501,6 +1653,128 @@ pub(crate) mod tests {
         assert!(effects.contains(&Effect::RemoveItem("1hSwordT2_FTUE".to_owned())));
     }
 
+    #[test]
+    #[ignore = "needs the build 25810808 content bundle in NW_CONTENT_DIR"]
+    fn the_real_wreck_quests_run_to_their_end_on_the_retail_steps() {
+        const BUILD: &str = "25810808";
+        /// The corrupted mariners of the second wreck (17 of the 21 spawns within 60 m of the
+        /// crewmates' pin in the level's world file).
+        const WRECK_MARINER: u32 = 2_756_893_354;
+        /// Longer than every timer of the four trees (22.5 s).
+        const STEP_MS: usize = 30_000;
+        let at = |x, y| Event::Moved(Position { x, y, z: AREA.z });
+        let dir = std::env::var("NW_CONTENT_DIR").expect("NW_CONTENT_DIR");
+        let path = nw_content::bundle::bundle_path(std::path::Path::new(&dir), BUILD);
+        let bundle = nw_content::ContentBundle::load(&path, BUILD).expect("bundle");
+        let book = TaskBook::new(task_rows(&bundle.tables));
+        let kill_types = KillTypes::from_tables(&bundle.tables);
+        let (mariner, categories) = kill_types.of(WRECK_MARINER).expect("the mariner");
+        let mut fired = Vec::new();
+        let mut set = Vec::new();
+        let mut run_quest = |root: &str, steps: &[(&[&str], bool, Option<Event<'_>>)]| {
+            let tree = Arc::new(book.tree(root).expect("tree"));
+            let returned = tree.returned_items();
+            let (mut run, mut effects) = ObjectiveRun::start(tree, NOW);
+            // Each step comes after the timers that the step before started.
+            for ((places, lore, event), now) in steps.iter().zip((NOW..).step_by(STEP_MS)) {
+                let achieved = |id: &str| *lore && id == MANIFEST_LORE;
+                effects.extend(run.tick(now));
+                effects.extend(run.sync(
+                    &Facts {
+                        held: &[],
+                        places: Some(places),
+                        achieved: Some(&achieved),
+                    },
+                    now,
+                ));
+                if let Some(event) = event {
+                    effects.extend(run.event(*event, now));
+                }
+            }
+            for effect in effects {
+                match effect {
+                    Effect::GameEvent(event) => fired.push(event),
+                    Effect::Achievement(id) => set.push(id),
+                    _ => {}
+                }
+            }
+            assert!(run.finished(), "{root}: {:?}", run.progress());
+            returned
+        };
+        let kill = Event::Killed {
+            vitals_id: mariner,
+            categories,
+        };
+        let watchtower: &[&str] = &["watchtower"];
+        let wreck_2: &[&str] = &["drowned_shipwreck_2_30125"];
+        let wreck_4: &[&str] = &["drowned_shipwreck_4_30130"];
+        let cutscene = |name: &str| Event::CutsceneEnded(lowercase_crc32(name));
+        let nodule = Event::GameEvent(NODULE_EVENT);
+        let gained = |item| Event::ItemGained { item, quantity: 1 };
+
+        // Crewmates No More: out of the camp's watchtower, to the second wreck, five kills.
+        let mut crewmates = vec![(watchtower, false, None), (&[][..], false, None)];
+        crewmates.extend([(wreck_2, false, Some(kill)); 5]);
+        assert!(run_quest("12_crewmates_container", &crewmates).is_empty());
+        // Amidst the Wreckage: the whisper, Grace's call, four nodules, her thanks.
+        let survivors = [
+            (&[][..], false, Some(at(7228.6, 3210.7))),
+            (&[][..], false, Some(at(7119.9, 3265.1))),
+            (
+                &[][..],
+                false,
+                Some(cutscene("12_Survivors_MSQ_GraceIntroHelp_MB_IGC")),
+            ),
+            (&[][..], false, Some(nodule)),
+            (&[][..], false, Some(nodule)),
+            (&[][..], false, Some(nodule)),
+            (&[][..], false, Some(nodule)),
+            (
+                &[][..],
+                false,
+                Some(cutscene("12_Survivors_MSQ_GraceOutroThanks_MB_IGC")),
+            ),
+            (&[][..], false, None),
+            (&[][..], false, None),
+        ];
+        assert!(run_quest("12_survivors_container", &survivors).is_empty());
+        // Lessons of a Pirate's Life: the manifest and three treasures, given back.
+        let pillage = [
+            (&[][..], true, Some(gained("0601_0104_Treasure_A"))),
+            (&[][..], true, Some(gained("0601_0104_Treasure_B"))),
+            (&[][..], true, Some(gained("0601_0104_Treasure_C"))),
+        ];
+        assert_eq!(
+            run_quest("12_pillageship_container", &pillage).len(),
+            3,
+            "the treasures go back"
+        );
+        // Memories of Grace: the fourth wreck's flag and wheel, the whisper, the watchtower.
+        let recover = [
+            (wreck_4, false, Some(gained("01_MSQ_GracesFlag"))),
+            (wreck_4, false, Some(gained("0601_0104_ShipWheel"))),
+            (&[][..], false, None),
+            (watchtower, false, None),
+        ];
+        assert_eq!(run_quest("12_recoveritems_container", &recover).len(), 2);
+        assert_eq!(
+            fired,
+            [
+                "01_IsabellasFirstWhisper_Isabella_01_event",
+                "12A_MB_whisper_03_interact"
+            ]
+        );
+        for wanted in [
+            "Start_IGC_GraceCallsForHelpMB",
+            "12_Survivors_MSQ_GraceOutroThanks_IGC_Unlock",
+            "SwapActive_01_GraceMB_B",
+            "SwapActive_01_GraceMB_C",
+            "MSQ_Tutorial_Autorun",
+        ] {
+            assert!(set.iter().any(|id| id == wanted), "{wanted} in {set:?}");
+        }
+    }
+
     /// The retail task rows of `12_skinningknife` and `12_boarfeast` (build 25810808), as their
     /// trees use them.
     pub(crate) fn beach_rows() -> Vec<TaskRow> {
@@ -1731,6 +2005,155 @@ pub(crate) mod tests {
         assert_eq!(stones(&run), Some((2, TaskStatus::Running)));
         run.sync_held(&[("FlintT1", 3, false)], NOW);
         assert_eq!(stones(&run), Some((3, TaskStatus::Done)));
+    }
+
+    /// The places, objects and events of the wreck quests (build 25810808 rows of
+    /// `12_crewmates` to `12_recoveritems`) in one tree: a go-to, a lore note, a fired whisper,
+    /// two nodules, a treasure to bring back, a leave area and an exit.
+    pub(crate) fn wreck_rows() -> Vec<TaskRow> {
+        let poi = |id: &str, kind: &str| TaskRow {
+            poi_tag: Some(WRECK_POI.to_owned()),
+            ..row(id, kind)
+        };
+        vec![
+            container(
+                WRECK_ROOT,
+                "ConsecutiveTaskContainer",
+                &[
+                    "GoToWreck",
+                    "ShipsManifest",
+                    "Whisper",
+                    "Nodules",
+                    "Treasure",
+                    "LeaveTrigger",
+                    "ExitWreck",
+                ],
+            ),
+            poi("GoToWreck", "TaskGoToPOITag"),
+            with_item("ShipsManifest", "TaskAchievement", MANIFEST_LORE),
+            TaskRow {
+                kill_enemy_type: Some(WHISPER_EVENT.to_owned()),
+                ..row("Whisper", "TaskTriggerGameEvent")
+            },
+            TaskRow {
+                kill_enemy_type: Some(NODULE_EVENT.to_owned()),
+                target_qty: Some(2),
+                ..row("Nodules", "TaskGameEvent")
+            },
+            TaskRow {
+                target_qty: Some(1),
+                item_drop_vc: Some(TREASURE_GATHERABLE.to_owned()),
+                item_drop_probability: Some(100),
+                ..with_item("Treasure", "TaskGatherAndReturnItems", TREASURE)
+            },
+            TaskRow {
+                override_location: Some("755.87 342.49 20.90".to_owned()),
+                trigger_area_type: Some("Leave".to_owned()),
+                ..row("LeaveTrigger", "TaskTriggerArea")
+            },
+            poi("ExitWreck", "TaskExitPOITag"),
+        ]
+    }
+    /// The root of [`wreck_rows`].
+    pub(crate) const WRECK_ROOT: &str = "12_pillageship_container";
+    /// The point of interest of [`wreck_rows`] (retail tag of territory 30129).
+    pub(crate) const WRECK_POI: &str = "drowned_shipwreck_3_30129";
+    /// The lore note of the ship's manifest.
+    pub(crate) const MANIFEST_LORE: &str = "Lore_unlock_00_Aeternum_Title_31_01";
+    /// The whisper event of Amidst the Wreckage.
+    pub(crate) const WHISPER_EVENT: &str = "01_IsabellasFirstWhisper_Isabella_01_event";
+    /// The game event of Grace's nodules.
+    pub(crate) const NODULE_EVENT: &str = "MSQ_CorruptedNodule_1_interact";
+    /// A treasure of Lessons of a Pirate's Life and its quest object.
+    pub(crate) const TREASURE: &str = "0601_0104_Treasure_A";
+    pub(crate) const TREASURE_GATHERABLE: &str = "MSQ_Treasure_A";
+
+    #[test]
+    fn the_wreck_steps_run_on_places_lore_events_and_gathers() {
+        let tree = Arc::new(ObjectiveTree::build(&wreck_rows(), WRECK_ROOT).expect("tree"));
+        assert_eq!(tree.returned_items(), [(TREASURE.to_owned(), 1)]);
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        let nothing: [(&str, u32, bool); 0] = [];
+        let sync = |run: &mut ObjectiveRun, places: &[&str], lore: bool| {
+            let achieved = |id: &str| lore && id == MANIFEST_LORE;
+            run.sync(
+                &Facts {
+                    held: &nothing,
+                    places: Some(places),
+                    achieved: Some(&achieved),
+                },
+                NOW,
+            )
+        };
+        run.sync_held(&nothing, NOW);
+        assert!(run.is_active("GoToWreck"), "unknown places judge nothing");
+        sync(&mut run, &["watchtower"], false);
+        assert!(run.is_active("GoToWreck"), "another point of interest");
+        sync(&mut run, &[WRECK_POI], false);
+        assert!(run.is_done("GoToWreck"));
+        // The manifest read before the step counts once the step waits.
+        let effects = sync(&mut run, &[WRECK_POI], true);
+        assert!(run.is_done("ShipsManifest"));
+        assert!(
+            effects.contains(&Effect::GameEvent(WHISPER_EVENT.to_owned())),
+            "the whisper fires and is done: {effects:?}"
+        );
+        assert!(run.is_done("Whisper"));
+        assert!(run.counts_game_event(NODULE_EVENT));
+        assert!(run.gather_drops(TREASURE_GATHERABLE).is_empty(), "not yet");
+        run.event(Event::GameEvent(NODULE_EVENT), NOW);
+        run.event(Event::GameEvent("other_interact"), NOW);
+        assert!(run.is_active("Nodules"));
+        run.event(Event::GameEvent("msq_corruptednodule_1_interact"), NOW);
+        assert!(run.is_done("Nodules"), "two nodules");
+        assert!(!run.counts_game_event(NODULE_EVENT));
+        assert_eq!(
+            run.gather_drops(TREASURE_GATHERABLE),
+            [(TREASURE.to_owned(), 100)]
+        );
+        assert!(run.gather_drops("MSQ_Treasure_B").is_empty());
+        run.event(
+            Event::ItemGained {
+                item: TREASURE,
+                quantity: 1,
+            },
+            NOW,
+        );
+        assert!(run.is_done("Treasure"));
+        run.event(Event::Moved(AREA), NOW);
+        assert!(run.is_active("LeaveTrigger"), "in the volume");
+        run.event(
+            Event::Moved(Position {
+                x: AREA.x + TRIGGER_RADIUS_M + 1.0,
+                ..AREA
+            }),
+            NOW,
+        );
+        assert!(run.is_done("LeaveTrigger"), "out of it");
+        sync(&mut run, &[WRECK_POI], true);
+        assert!(!run.finished(), "still at the wreck");
+        sync(&mut run, &[], true);
+        assert!(run.finished(), "left the wreck");
+    }
+
+    #[test]
+    fn a_place_or_event_task_without_its_cell_is_not_run() {
+        for kind in [
+            "TaskGoToPOITag",
+            "TaskExitPOITag",
+            "TaskTriggerGameEvent",
+            "TaskGameEvent",
+        ] {
+            assert_eq!(
+                kind_of(&row("Empty", kind)),
+                TaskKind::Unsupported,
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            counted_game_events(&wreck_rows()),
+            HashSet::from([NODULE_EVENT.to_lowercase()])
+        );
     }
 
     #[test]

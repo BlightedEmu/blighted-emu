@@ -26,7 +26,7 @@ use nw_db::{
 };
 use nw_messages::facet::TIME_SYNC_REQUEST_TYPE_INDEX;
 use nw_messages::{
-    BodyCodec, ClientFacetMsg, ClientInputMsg, InputPosition, LookDir,
+    BodyCodec, ClientFacetMsg, ClientInputMsg, InputPosition, InputRecord, LookDir,
     RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
     SPREADSHOT_REQUEST_TYPE_INDEX, SpreadshotRequestMsg,
 };
@@ -45,7 +45,8 @@ use crate::mobs::{MobChanges, spawn_index};
 use crate::player_content::PlayerContent;
 use crate::saves::{ItemSave, QuestSave, SaveQueue};
 use crate::world::{
-    CameraSample, Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
+    CameraSample, Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, Strike,
+    WorldSettings,
 };
 use nw_world::script::LevelDesign;
 
@@ -572,7 +573,12 @@ impl Loop {
         }
         let now_ms = self.now_ms();
         if let Some(request) = input.interaction() {
-            self.world.interact(connection, request, now_ms);
+            self.world
+                .interact(connection, request, &input.interaction_name(), now_ms);
+        }
+        if input.records.iter().any(InputRecord::attack_pressed) {
+            self.world
+                .strike_quest_objects(connection, Strike::Swing, now_ms);
         }
         self.world.slayer_input(connection, &input.records);
         for result in self.world.attack_input(connection, &input.records, now_ms) {
@@ -588,6 +594,8 @@ impl Loop {
         };
         let now_ms = self.now_ms();
         tracing::debug!(pellets = request.pellets.len(), "spread shot");
+        self.world
+            .strike_quest_objects(connection, Strike::Shot, now_ms);
         for result in self.world.spreadshot(connection, &request, now_ms) {
             self.attack_result(result);
         }

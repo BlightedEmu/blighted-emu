@@ -139,7 +139,9 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         mob_looks,
         creature_animations,
         tutorial_level,
+        &world_file.gatherables,
     ));
+    tracing::info!(objects = content.quest_objects.len(), "level quest objects");
     match &content.tutorial_quest {
         Some(quest) => tracing::info!(tasks = quest.len(), "tutorial quest"),
         None => tracing::warn!("no tutorial quest: the tutorial ends at its exit"),

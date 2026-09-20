@@ -204,9 +204,10 @@ impl SimWorld {
     }
 
     /// The gathers whose time came at `now_ms` end: the interaction ends (3746), the own gather
-    /// state is done, the loot of the gatherable goes into the bag and to the open-world quest,
-    /// and the node is depleted until its respawn (a corpse is skinned). The depleted nodes whose
-    /// time came grow back.
+    /// state is done, the loot of the gatherable and its quest drops go into the bag and to the
+    /// open-world quest, its game event goes to the quest (a quest object), and the node is
+    /// depleted until its respawn (a corpse is skinned). The depleted nodes whose time came grow
+    /// back.
     pub(super) fn gathers_due(&mut self, now_ms: u64) {
         self.nodes.tick(now_ms);
         let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.open_gathers)
@@ -238,9 +239,7 @@ impl SimWorld {
                     .roll(table, levels, &mut |below| dice.below(below))
             })
             .unwrap_or_default();
-        if let Some(mob) = gather.mob {
-            loot.extend(self.quest_drops(gather.number, mob));
-        }
+        loot.extend(self.quest_drops(gather.number, gather.mob, &gather.gatherable.id));
         match gather.mob {
             Some(mob) => {
                 self.skinned.insert(mob);
@@ -271,22 +270,36 @@ impl SimWorld {
         player.extra_members.push(ended);
         player.gathers = player.gathers.saturating_add(1);
         self.give_loot(gather.number, loot, now_ms);
+        if let Some(event) = &gather.gatherable.game_event {
+            self.quest_event(gather.number, Event::GameEvent(event), now_ms);
+        }
     }
 
-    /// The items the quest of player `number` drops for the corpse of `mob` it skinned: one of
-    /// each waiting gather task's item whose enemy the mob is, at the task's chance.
-    fn quest_drops(&mut self, number: u64, mob: u64) -> Vec<(String, u32)> {
+    /// The items the quest of player `number` drops for its gather of `gatherable`: the corpse
+    /// of `mob` it skinned, or a quest object. One of each waiting gather task's item whose
+    /// enemy the mob is, or whose gatherable the object is, at the task's chance.
+    fn quest_drops(
+        &mut self,
+        number: u64,
+        mob: Option<u64>,
+        gatherable: &str,
+    ) -> Vec<(String, u32)> {
         let Some(quest) = self.quests.get(&number) else {
             return Vec::new();
         };
-        let Some((vitals_id, categories)) = self
-            .mobs
-            .vitals_of(mob)
-            .and_then(|vitals| self.content.kill_types.of(vitals))
-        else {
-            return Vec::new();
+        let drops = match mob {
+            Some(mob) => {
+                let Some((vitals_id, categories)) = self
+                    .mobs
+                    .vitals_of(mob)
+                    .and_then(|vitals| self.content.kill_types.of(vitals))
+                else {
+                    return Vec::new();
+                };
+                quest.run.quest_drops(vitals_id, categories)
+            }
+            None => quest.run.gather_drops(gatherable),
         };
-        let drops = quest.run.quest_drops(vitals_id, categories);
         drops
             .into_iter()
             .filter(|(_, percent)| self.dice.below(PERCENT) < *percent)

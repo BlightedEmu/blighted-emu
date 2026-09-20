@@ -7,7 +7,7 @@
 
 use bevy_ecs::entity::Entity;
 use nw_formats::objectstream::lowercase_crc32;
-use nw_messages::InteractionRequest;
+use nw_messages::{GameModeSchedulerRefreshedMsg, InteractionRequest, ServerMessage};
 
 use super::{Player, SimWorld, gather_answer, send_now};
 use crate::player_content::requirement_met;
@@ -67,8 +67,10 @@ impl SimWorld {
 
     /// Player `number` (`entity`) turns in the quest whose lowercase id has the CRC-32
     /// `objective`: when it is the player's active quest and its tasks are done, the tracker
-    /// shows it completed and the player gets its rewards. The client asks only at the quest's
-    /// NPC; the server does not check the NPC (our choice: it has no NPC positions).
+    /// shows it completed, the player gets its rewards and gives back the items it brought, and
+    /// its game mode schedule is refreshed (6426; retail 2026-09-18: 27 ms after each 794). The
+    /// client asks only at the quest's NPC; the server does not check the NPC (our choice: it
+    /// has no NPC positions).
     pub(super) fn turn_in(&mut self, entity: Entity, number: u64, objective: u32) {
         let Some(quest) = self
             .quests
@@ -83,10 +85,14 @@ impl SimWorld {
             return;
         }
         let tasks = quest.run.progress();
-        if let Some(mut player) = self.world.get_mut::<Player>(entity)
-            && let Some(tracker) = player.quest.as_mut()
-        {
-            tracker.update(tasks, true);
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            if let Some(tracker) = player.quest.as_mut() {
+                tracker.update(tasks, true);
+            }
+            let refreshed = ServerMessage::GameModeSchedulerRefreshed(
+                GameModeSchedulerRefreshedMsg::to(number),
+            );
+            send_now(&mut self.combat_messages, &player.connection, &[refreshed]);
         }
         self.complete_quest(number);
     }

@@ -26,7 +26,7 @@ use nw_bus::{
     MOB_STATES, MobGhost, PlayerGhost, PlayerQuests, Point, QuestRun, ScriptLogLine, SimSlot,
     SnapMob, SnapPlayer,
 };
-use nw_messages::client_input::{CRAFTING_STATION_KIND, TALK_KIND};
+use nw_messages::client_input::{CRAFTING_STATION_KIND, LORE_KIND, TALK_KIND};
 use nw_messages::items::{FIRST_VERSION, FullList};
 use nw_messages::paperdoll::slot::QUICK_SLOT_1;
 use nw_messages::{
@@ -63,6 +63,7 @@ mod members;
 mod mob_timeline;
 mod mob_trail;
 mod projectile;
+mod quest_objects;
 mod quest_tracker;
 mod replica;
 mod scripts;
@@ -84,6 +85,7 @@ use members::{
     card_of, log_mob_group, mob_group, own_group, remote_group,
 };
 use mob_timeline::{Animations, MobPose, MobTimelines, animations_of};
+pub use quest_objects::Strike;
 use quest_tracker::QuestTracker;
 use replica::{RemoteCandidate, Replica, ReplicaSource};
 use slots::Slots;
@@ -102,7 +104,7 @@ use crate::login::{
 };
 use crate::mob_ai::MobAi;
 use crate::mobs::{MobAttackIntent, MobChanges, Mobs};
-use crate::objectives::{Effect, Event, ObjectiveRun};
+use crate::objectives::{Effect, Event, Facts, ObjectiveRun};
 use crate::player_content::{
     MobLooks, OPEN_WORLD_OBJECTIVE, PlayerContent, QuestDef, TUTORIAL_OBJECTIVE,
 };
@@ -451,6 +453,10 @@ struct Player {
     /// each input until it ends the interaction, and retail answers each one once (retail
     /// 2026-09-18: one 3743 for a talk the client held 20 s; ours answered all 667 inputs).
     last_interaction: Option<u64>,
+    /// The territory areas its client says it is in (2297 and 6416), for go-to and exit tasks.
+    territories: Vec<u16>,
+    /// Its hits on the level's quest objects.
+    strikes: quest_objects::Strikes,
     /// Its running consumable cooldowns, and whether they changed since the last bundle.
     cooldowns: Vec<ConsumableCooldown>,
     cooldowns_changed: bool,
@@ -1725,13 +1731,12 @@ impl SimWorld {
                     .flow
                     .set_achievement(&self.achievement_rules, achievement);
             }
-            if reward.coins > 0 {
-                player.coins = player.coins.saturating_add(reward.coins);
-                player.coins_changed = true;
-            }
-            if reward.experience > 0 {
-                player.experience = player.experience.saturating_add(reward.experience);
-                player.experience_changed = true;
+            quest_objects::grant(&mut player, &reward);
+            // The turn-in takes back the items the quest had the player bring.
+            if let Some(gear) = player.gear.as_mut() {
+                for (item, _) in quest.def.tree.returned_items() {
+                    gear.remove(&item);
+                }
             }
         }
         let items: Vec<(String, u32)> = quest.def.reward.into_iter().chain(reward.item).collect();
@@ -1757,7 +1762,7 @@ impl SimWorld {
     }
 
     /// Carries out the `effects` of player `number`'s quest: achievements are set or cleared (a
-    /// set one is an event of the quest again), items removed.
+    /// set one is an event of the quest again), items removed, game events fired.
     fn quest_effects(&mut self, number: u64, effects: Vec<Effect>, now_ms: u64) {
         let Some(entity) = self.player_by_number(number) else {
             return;
@@ -1765,6 +1770,7 @@ impl SimWorld {
         let mut pending = effects;
         while !pending.is_empty() {
             let mut set = Vec::new();
+            let mut fired = Vec::new();
             if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                 for effect in pending.drain(..) {
                     match effect {
@@ -1780,9 +1786,13 @@ impl SimWorld {
                                 gear.remove(&id);
                             }
                         }
+                        Effect::GameEvent(id) => fired.push(id),
                         Effect::Done(_) => {}
                     }
                 }
+            }
+            for event in fired {
+                self.fire_game_event(number, &event, now_ms);
             }
             let Some(quest) = self.quests.get_mut(&number) else {
                 return;
@@ -1806,14 +1816,23 @@ impl SimWorld {
             };
             let mut effects = quest.run.tick(now_ms);
             effects.extend(quest.run.event(Event::Moved(position), now_ms));
-            // Items the player holds meet the item tasks, also those that start later.
-            let carried = self
+            // What the player holds, where it is and its achievements meet the tasks, also those
+            // that start later.
+            if let Some(player) = self
                 .player_by_number(number)
                 .and_then(|entity| self.world.get::<Player>(entity))
-                .and_then(|player| player.gear.as_ref().map(Gear::carried))
-                .unwrap_or_default();
-            if let Some(quest) = self.quests.get_mut(&number) {
-                effects.extend(quest.run.sync_held(&held_items(&carried), now_ms));
+                && let Some(quest) = self.quests.get_mut(&number)
+            {
+                let carried = player.gear.as_ref().map(Gear::carried).unwrap_or_default();
+                let places = quest_objects::places(&self.content.poi_tags, &player.territories);
+                let rules = &self.achievement_rules;
+                let achieved = |id: &str| player.flow.has_achievement(rules, id);
+                let facts = Facts {
+                    held: &held_items(&carried),
+                    places: Some(&places),
+                    achieved: Some(&achieved),
+                };
+                effects.extend(quest.run.sync(&facts, now_ms));
             }
             if !effects.is_empty() {
                 self.mark_quests_unsaved(number);
@@ -2088,14 +2107,15 @@ impl SimWorld {
         self.settings.level == TUTORIAL_LEVEL
     }
 
-    /// The client of `connection` starts interaction `request` at `now_ms` (the use of a static
-    /// entity, from its input): its tutorial answers a use of the chest; in the open world it is
-    /// a talk to an NPC, the use of a crafting station or a gather, by its kind, answered once
-    /// per interaction.
+    /// The client of `connection` starts interaction `request` with the object it names `name`
+    /// at `now_ms` (the use of a static entity, from its input): its tutorial answers a use of
+    /// the chest; in the open world it is a talk to an NPC, the use of a crafting station, the
+    /// read of a lore note or a gather, by its kind, answered once per interaction.
     pub fn interact(
         &mut self,
         connection: &ConnectionRef,
         request: InteractionRequest,
+        name: &[u8],
         now_ms: u64,
     ) {
         let Some(number) = self
@@ -2119,6 +2139,7 @@ impl SimWorld {
             match request.kind {
                 TALK_KIND => self.talk(entity, number, request),
                 CRAFTING_STATION_KIND => self.open_station(entity, number, request),
+                LORE_KIND => self.read_lore(entity, number, request, name, now_ms),
                 _ => self.gather_open_world(entity, number, request, now_ms),
             }
             return;
@@ -2172,6 +2193,14 @@ impl SimWorld {
             }
             ClientFacetMsg::CancelCrafting { .. } => {
                 self.close_station(entity, number);
+                return Ok(());
+            }
+            ClientFacetMsg::TerritoryEntered { territory, .. } => {
+                self.territory_changed(entity, *territory, true);
+                return Ok(());
+            }
+            ClientFacetMsg::TerritoryExited { territory, .. } => {
+                self.territory_changed(entity, *territory, false);
                 return Ok(());
             }
             _ => {}
@@ -2784,6 +2813,8 @@ impl SimWorld {
                     coins_changed: false,
                     station: None,
                     last_interaction: None,
+                    territories: Vec::new(),
+                    strikes: quest_objects::Strikes::default(),
                     cooldowns: Vec::new(),
                     cooldowns_changed: false,
                     health_sent: None,
@@ -4583,7 +4614,7 @@ mod tests {
             kind: 14,
             gatherable: None,
         };
-        world.interact(&who, request, pressed_at);
+        world.interact(&who, request, &[], pressed_at);
         // The own states of the next tick (a card refresh also carries empty ones).
         let own_states = |world: &mut SimWorld, now: u64| -> Vec<MemberState> {
             let messages = tick(world, now).messages;
@@ -4730,8 +4761,8 @@ mod tests {
         };
 
         let pressed_at = spawn_at + TICK_MS;
-        world.interact(&who, request, pressed_at);
-        world.interact(&who, request, pressed_at + TICK_MS);
+        world.interact(&who, request, &[], pressed_at);
+        world.interact(&who, request, &[], pressed_at + TICK_MS);
         let accepted = tick(&mut world, pressed_at + TICK_MS).messages;
         assert_eq!(
             answers(&accepted),
@@ -4756,7 +4787,7 @@ mod tests {
         );
         // Inputs sent before the client took the end still hold the gather (retail: its cancel
         // came 2 to 23 ms after the 3746); they get no refusal (live run 9: 38 status-2 answers).
-        world.interact(&who, request, after_end);
+        world.interact(&who, request, &[], after_end);
         assert!(
             answers(&tick(&mut world, after_end).messages).is_empty(),
             "the ended gather is not refused"
@@ -4768,6 +4799,7 @@ mod tests {
                 interaction: INTERACTION + 1,
                 ..request
             },
+            &[],
             after_end,
         );
         let refused = tick(&mut world, after_end + TICK_MS).messages;
@@ -5056,10 +5088,10 @@ mod tests {
         // Aelstrom: the talk is accepted, then the quest.
         // The client repeats the request in each input; retail answers it once.
         let talk_request = request(NPC, nw_messages::client_input::TALK_KIND, 1);
-        world.interact(&who, talk_request, now);
-        world.interact(&who, talk_request, now);
+        world.interact(&who, talk_request, &[], now);
+        world.interact(&who, talk_request, &[], now);
         let talk = step(&mut world, &mut now, TICK_MS);
-        world.interact(&who, talk_request, now);
+        world.interact(&who, talk_request, &[], now);
         assert_eq!(
             answers(&talk),
             [(
@@ -5098,8 +5130,8 @@ mod tests {
         );
         step(&mut world, &mut now, TICK_MS);
         let station = nw_messages::client_input::CRAFTING_STATION_KIND;
-        world.interact(&who, request(CAMPFIRE, station, 2), now);
-        world.interact(&who, request(CAMPFIRE, station, 2), now);
+        world.interact(&who, request(CAMPFIRE, station, 2), &[], now);
+        world.interact(&who, request(CAMPFIRE, station, 2), &[], now);
         let opened = step(&mut world, &mut now, TICK_MS);
         assert_eq!(
             answers(&opened),
@@ -5151,7 +5183,7 @@ mod tests {
         world.apply_hit(boar, 1, LETHAL, 0, now);
         let corpse = raw_id_of_entity(boar);
         let gather = nw_messages::client_input::GATHER_KIND;
-        world.interact(&who, request(corpse, gather, 3), now);
+        world.interact(&who, request(corpse, gather, 3), &[], now);
         let refused = step(&mut world, &mut now, TICK_MS);
         assert_eq!(
             answers(&refused),
@@ -5183,14 +5215,14 @@ mod tests {
             },
             now,
         );
-        world.interact(&who, request(corpse, gather, 4), now);
+        world.interact(&who, request(corpse, gather, 4), &[], now);
         let accepted = step(&mut world, &mut now, TICK_MS);
         assert_eq!(answers(&accepted), [(gather, 1, Vec::new())]);
         step(&mut world, &mut now, SKIN_MS);
         assert_eq!(holds(&world, PORK), 1, "the quest drop");
 
         // The Light Ration at the campfire, then the turn-in at Aelstrom.
-        world.interact(&who, request(CAMPFIRE, station, 5), now);
+        world.interact(&who, request(CAMPFIRE, station, 5), &[], now);
         facet(&mut world, craft(RATION_RECIPE, &[PORK]), now);
         assert_eq!(holds(&world, PORK), 0, "the pork is cooked");
         step(&mut world, &mut now, CRAFT_MS);
@@ -5208,6 +5240,224 @@ mod tests {
             .map(|player| player.done_quests.clone())
             .unwrap_or_default();
         assert_eq!(done, [SKINNING_KNIFE, BOAR_FEAST_MYSTIC]);
+    }
+
+    #[test]
+    fn the_wreck_steps_run_from_the_accept_to_the_turn_in() {
+        use crate::objectives::TaskBook;
+        use crate::objectives::tests::{
+            MANIFEST_LORE, NODULE_EVENT, TREASURE, TREASURE_GATHERABLE, WHISPER_EVENT, WRECK_POI,
+            WRECK_ROOT, wreck_rows,
+        };
+        use crate::player_content::{ObjectiveRow, QuestBook, QuestObjects};
+        use nw_content::achievements::AchievementIndexes;
+        use nw_content::poi_tags::PoiTags;
+        use nw_content::rewards::{Reward, Rewards};
+        use nw_formats::objectstream::lowercase_crc32;
+        use nw_messages::FacetHeader;
+        use nw_messages::client_input::GATHER_KIND;
+        use nw_world::records::GatherablePoint;
+        const QUEST: &str = "12_pillageship";
+        const WRECK_TERRITORY: u16 = 30_129;
+        const WHISPER: &str = "01_IsabellasFirstWhisper_Isabella_01";
+        const NODULE: &str = "MSQ_Grace_CorruptedNodule_1";
+        const MANIFEST: &[u8] = b"@00_Aeternum_Title_31_01";
+        const TREASURE_GATHER_MS: u64 = 1_000;
+        const NODULE_RESPAWN_MS: u64 = 33_000;
+        const TICK_MS: u64 = 33;
+        const SWING_GAP_MS: u64 = 800;
+        const X: f32 = CELL_M / 2.0 + 1.0;
+        let gatherable = |id: &str, event: &str, gather_ms, respawn_ms| Gatherable {
+            id: id.to_owned(),
+            gather_ms,
+            respawn_ms: (respawn_ms, respawn_ms),
+            loot_table: None,
+            tradeskill: None,
+            tool_required: false,
+            game_event: Some(event.to_owned()),
+        };
+        let gatherables = Gatherables::build([
+            gatherable(
+                TREASURE_GATHERABLE,
+                "MSQ_Treasure_A_interact",
+                TREASURE_GATHER_MS,
+                0,
+            ),
+            gatherable(NODULE, NODULE_EVENT, 0, NODULE_RESPAWN_MS),
+        ]);
+        // The nodule stands where the player stands.
+        let nodule = GatherablePoint {
+            gatherable_id: lowercase_crc32(NODULE),
+            position: [X, 10.0, 50.0],
+            ..GatherablePoint::default()
+        };
+        let quest_objects = QuestObjects::build(
+            &[nodule],
+            &gatherables,
+            &crate::objectives::counted_game_events(&wreck_rows()),
+        );
+        let mut world = SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            test_combat(),
+            Arc::new(PlayerContent {
+                kits: gear::tests::kits_with(&[(TREASURE, "Resource")]),
+                achievements: AchievementIndexes::build([(MANIFEST_LORE.to_owned(), 100)]),
+                quests: QuestBook::build(
+                    [ObjectiveRow {
+                        id: QUEST.to_owned(),
+                        root: WRECK_ROOT.to_owned(),
+                        turn_in: Some("01_GraceMB_02".to_owned()),
+                        ..ObjectiveRow::default()
+                    }],
+                    TaskBook::new(wreck_rows()),
+                ),
+                gatherables,
+                rewards: Rewards::build([(
+                    WHISPER_EVENT.to_owned(),
+                    Reward {
+                        whisper: Some(WHISPER.to_owned()),
+                        ..Reward::default()
+                    },
+                )]),
+                poi_tags: PoiTags::build([(u32::from(WRECK_TERRITORY), WRECK_POI.to_owned())]),
+                quest_objects,
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a"])).expect("table");
+        let mut admit = admit_at(1, X, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let who = connection(1);
+        let entity = world.by_connection[&who];
+        let mut now = NOW + OWN_CARD_DELAY_MS;
+        tick(&mut world, now);
+        world.heard_from(&who);
+        world.start_quest(1, QUEST, now).expect("accepted");
+        let mut step = |world: &mut SimWorld, ms: u64| {
+            now += ms;
+            (tick(world, now).messages, now)
+        };
+        let header = FacetHeader::of(0, 1);
+        let territory = |entered| {
+            let (area, area_entity, extra, territory) = ([0; 16], 0, 0, WRECK_TERRITORY);
+            if entered {
+                ClientFacetMsg::TerritoryEntered {
+                    header,
+                    area,
+                    area_entity,
+                    extra,
+                    territory,
+                    unknown: 0,
+                }
+            } else {
+                ClientFacetMsg::TerritoryExited {
+                    header,
+                    area,
+                    area_entity,
+                    extra,
+                    territory,
+                }
+            }
+        };
+        let done = |world: &SimWorld, task: &str| {
+            world
+                .quests
+                .get(&1)
+                .is_some_and(|quest| quest.run.is_done(task))
+        };
+        let holds = |world: &SimWorld, item: &str| -> u32 {
+            world
+                .world
+                .get::<Player>(entity)
+                .and_then(|player| player.gear.as_ref())
+                .map(Gear::carried)
+                .unwrap_or_default()
+                .iter()
+                .filter(|stack| stack.item_id == item)
+                .map(|stack| stack.quantity)
+                .sum()
+        };
+        let request = |kind, interaction, gatherable| InteractionRequest {
+            target: [0x31; nw_messages::wire::RAW_ID_LEN],
+            target_entity: 0x1234,
+            interaction,
+            kind,
+            gatherable,
+        };
+
+        let (_, at) = step(&mut world, TICK_MS);
+        assert!(!done(&world, "GoToWreck"), "not at the wreck yet");
+        world
+            .facet_message(&who, territory(true), at)
+            .expect("facet");
+        let (_, at) = step(&mut world, TICK_MS);
+        assert!(done(&world, "GoToWreck"), "the client says it is in");
+
+        // The manifest: the read is accepted with its title, and its lore fires the whisper.
+        world.interact(&who, request(LORE_KIND, 1, None), MANIFEST, at);
+        let (read, at) = step(&mut world, TICK_MS);
+        let read = messages_to(&read, 1);
+        assert!(
+            read.iter().any(|message| matches!(message,
+                ServerMessage::InteractionValidated(answer)
+                    if answer.kind == LORE_KIND && answer.status == 1 && answer.name == MANIFEST)),
+            "{read:?}"
+        );
+        assert!(done(&world, "ShipsManifest"));
+        assert!(
+            read.iter().any(|message| matches!(message,
+                ServerMessage::StartWhisper(start) if start.whisper == lowercase_crc32(WHISPER))),
+            "the whisper plays: {read:?}"
+        );
+
+        // Two swings break the nodule; a shot breaks it again once it is back.
+        world.strike_quest_objects(&who, Strike::Swing, at);
+        world.strike_quest_objects(&who, Strike::Swing, at + TICK_MS);
+        assert!(world.quests[&1].run.counts_game_event(NODULE_EVENT));
+        let (_, at) = step(&mut world, SWING_GAP_MS);
+        world.strike_quest_objects(&who, Strike::Swing, at);
+        let (_, at) = step(&mut world, SWING_GAP_MS);
+        world.strike_quest_objects(&who, Strike::Shot, at);
+        assert!(!done(&world, "Nodules"), "broken until it grows back");
+        let (_, at) = step(&mut world, NODULE_RESPAWN_MS);
+        world.strike_quest_objects(&who, Strike::Shot, at);
+        assert!(done(&world, "Nodules"));
+
+        // The treasure: a gather of its quest object drops it.
+        let crc = Some(lowercase_crc32(TREASURE_GATHERABLE));
+        world.interact(&who, request(GATHER_KIND, 2, crc), &[], at);
+        step(&mut world, TICK_MS);
+        step(&mut world, TREASURE_GATHER_MS + TICK_MS);
+        assert_eq!(holds(&world, TREASURE), 1);
+        assert!(done(&world, "Treasure"));
+
+        let (_, at) = step(&mut world, TICK_MS);
+        assert!(done(&world, "LeaveTrigger"), "far from the area");
+        assert!(!world.quests[&1].run.finished(), "still at the wreck");
+        world
+            .facet_message(&who, territory(false), at)
+            .expect("facet");
+        let (_, at) = step(&mut world, TICK_MS);
+        assert!(world.quests[&1].run.finished());
+
+        // The turn-in takes the treasure back and refreshes the schedule.
+        let complete = ClientFacetMsg::CompleteObjective {
+            header,
+            objective: lowercase_crc32(QUEST),
+        };
+        world.facet_message(&who, complete, at).expect("facet");
+        let (turned_in, _) = step(&mut world, TICK_MS);
+        assert!(!world.quests.contains_key(&1));
+        assert_eq!(holds(&world, TREASURE), 0, "given back");
+        assert!(
+            messages_to(&turned_in, 1)
+                .iter()
+                .any(|message| matches!(message, ServerMessage::GameModeSchedulerRefreshed(_)))
+        );
     }
 
     #[test]

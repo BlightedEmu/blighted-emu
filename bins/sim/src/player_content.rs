@@ -6,9 +6,12 @@ use nw_content::crafting::Recipes;
 use nw_content::creature_animations::CreatureAnimations;
 use nw_content::gathering::Gatherables;
 use nw_content::loot::{LootTables, MobLoot};
+use nw_content::poi_tags::PoiTags;
 use nw_content::rewards::Rewards;
 use nw_formats::objectstream::lowercase_crc32;
-use std::collections::HashMap;
+use nw_sim_core::Position;
+use nw_world::records::GatherablePoint;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use nw_content::Tables;
@@ -18,7 +21,9 @@ use nw_content::mob_prefabs::{ASSET_ID_LEN, MobPrefabs, PrefabKey, PrefabMember}
 use nw_content::starter::StarterKits;
 use nw_messages::{AlcState, AssetId, BundleMember, MemberState, VitalsState};
 
-use crate::objectives::{KillTypes, ObjectiveTree, TaskBook, task_rows};
+use crate::objectives::{
+    KillTypes, ObjectiveTree, TaskBook, TaskRow, counted_game_events, task_rows,
+};
 
 /// The tutorial quest's objective id (`Objectives`).
 pub const TUTORIAL_OBJECTIVE: &str = "01_SoleSurvivor2";
@@ -91,8 +96,8 @@ fn cell(value: Option<&String>) -> Option<String> {
 }
 
 impl QuestBook {
-    /// The objectives and task rows of `tables`.
-    pub fn from_tables(tables: &Tables) -> Self {
+    /// The objectives of `tables` over their task rows `rows` ([`task_rows`]).
+    pub fn from_tables(tables: &Tables, rows: Vec<TaskRow>) -> Self {
         Self::build(
             tables
                 .objectives
@@ -109,7 +114,7 @@ impl QuestBook {
                     turn_in: cell(row.npc_destination_id.as_ref()),
                     success_event: cell(row.success_game_event_id.as_ref()),
                 }),
-            TaskBook::new(task_rows(tables)),
+            TaskBook::new(rows),
         )
     }
 
@@ -397,17 +402,100 @@ pub struct PlayerContent {
     pub loot: LootTables,
     /// What each mob type drops when killed.
     pub mob_loot: MobLoot,
+    /// The point-of-interest tags of each territory, for go-to and exit tasks.
+    pub poi_tags: PoiTags,
+    /// The level's quest objects that the player breaks with its weapons.
+    pub quest_objects: QuestObjects,
+}
+
+/// A quest object of the level: a gatherable point whose gather is a game event that a quest's
+/// `TaskGameEvent` counts (Grace's corruption nodules, `MSQ_CorruptedNodule_1_interact`). Retail
+/// 2026-09-18 broke them with weapon hits, with no interaction from the client.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuestObject {
+    /// The game event of its gatherable.
+    pub event: String,
+    /// Where it stands (the level's gatherable point).
+    pub position: Position,
+    /// How long it stays broken: its gatherable's `MinRespawnRate`.
+    pub respawn_ms: u64,
+}
+
+/// The quest objects of a level.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct QuestObjects {
+    objects: Vec<QuestObject>,
+}
+
+impl QuestObjects {
+    /// The quest objects among the level's gatherable `points`: those of a gatherable in
+    /// `gatherables` whose game event is one of `counted` (lowercase ids).
+    pub fn build(
+        points: &[GatherablePoint],
+        gatherables: &Gatherables,
+        counted: &HashSet<String>,
+    ) -> Self {
+        Self {
+            objects: points
+                .iter()
+                .filter_map(|point| {
+                    let gatherable = gatherables.get(point.gatherable_id)?;
+                    let event = gatherable.game_event.clone()?;
+                    counted.contains(&event.to_lowercase()).then(|| {
+                        let [x, y, z] = point.position;
+                        QuestObject {
+                            event,
+                            position: Position { x, y, z },
+                            respawn_ms: gatherable.respawn_ms.0,
+                        }
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    /// The nearest object within `reach_m` of `at` that `wanted` takes, with its index.
+    pub fn nearest(
+        &self,
+        at: Position,
+        reach_m: f32,
+        wanted: impl Fn(usize, &QuestObject) -> bool,
+    ) -> Option<(usize, &QuestObject)> {
+        self.objects
+            .iter()
+            .enumerate()
+            .map(|(index, object)| (index, object, object.position.horizontal_distance(at)))
+            .filter(|(index, object, distance)| *distance <= reach_m && wanted(*index, object))
+            .min_by(|(_, _, a), (_, _, b)| a.total_cmp(b))
+            .map(|(index, object, _)| (index, object))
+    }
+
+    /// Objects in the level.
+    pub fn len(&self) -> usize {
+        self.objects.len()
+    }
+
+    /// Whether the level has none.
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty()
+    }
 }
 
 impl PlayerContent {
     /// The player content of `tables` with the mob looks `mob_looks`, the creature animations
-    /// `creature_animations` and the tutorial level's entities `tutorial_level`.
+    /// `creature_animations`, the tutorial level's entities `tutorial_level` and the gatherable
+    /// points of the sim's level `level_gatherables`.
     pub fn new(
         tables: &Tables,
         mob_looks: MobLooks,
         creature_animations: CreatureAnimations,
         tutorial_level: FtueLevel,
+        level_gatherables: &[GatherablePoint],
     ) -> Self {
+        let rows = task_rows(tables);
+        let gatherables = Gatherables::from_tables(tables);
+        let quest_objects =
+            QuestObjects::build(level_gatherables, &gatherables, &counted_game_events(&rows));
         Self {
             kits: StarterKits::from_tables(tables),
             achievements: AchievementIndexes::from_tables(tables),
@@ -423,15 +511,16 @@ impl PlayerContent {
                 })
                 .collect(),
             kill_types: KillTypes::from_tables(tables),
-            tutorial_quest: ObjectiveTree::build(&task_rows(tables), TUTORIAL_QUEST_ROOT)
-                .map(Arc::new),
-            quests: QuestBook::from_tables(tables),
+            tutorial_quest: ObjectiveTree::build(&rows, TUTORIAL_QUEST_ROOT).map(Arc::new),
+            quests: QuestBook::from_tables(tables, rows),
             tutorial_level,
-            gatherables: Gatherables::from_tables(tables),
+            gatherables,
             recipes: Recipes::from_tables(tables),
             rewards: Rewards::from_tables(tables),
             loot: LootTables::from_tables(tables),
             mob_loot: MobLoot::from_tables(tables),
+            poi_tags: PoiTags::from_tables(tables),
+            quest_objects,
         }
     }
 }
