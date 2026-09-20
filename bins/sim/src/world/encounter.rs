@@ -1162,7 +1162,9 @@ impl Tutorial {
             | ClientFacetMsg::AcceptObjective { .. }
             | ClientFacetMsg::CompleteObjective { .. }
             | ClientFacetMsg::SetCraftingDetails { .. }
-            | ClientFacetMsg::CancelCrafting { .. } => {
+            | ClientFacetMsg::CancelCrafting { .. }
+            | ClientFacetMsg::TerritoryEntered { .. }
+            | ClientFacetMsg::TerritoryExited { .. } => {
                 return;
             }
         };

@@ -361,7 +361,9 @@ impl LevelFlow {
             | ClientFacetMsg::AcceptObjective { .. }
             | ClientFacetMsg::CompleteObjective { .. }
             | ClientFacetMsg::SetCraftingDetails { .. }
-            | ClientFacetMsg::CancelCrafting { .. } => Vec::new(),
+            | ClientFacetMsg::CancelCrafting { .. }
+            | ClientFacetMsg::TerritoryEntered { .. }
+            | ClientFacetMsg::TerritoryExited { .. } => Vec::new(),
         }
     }
 

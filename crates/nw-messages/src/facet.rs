@@ -45,6 +45,11 @@ pub mod component {
     pub const TUTORIAL_AI_CHILD: u64 = 0x37 << 32;
     /// `CraftingComponent` (beach-quests note: the 2993 and 2997 target less the Soul entity).
     pub const CRAFTING: u64 = 0xf7e4_6d7c_2327_3ef2;
+    /// `WhisperPlayerComponent` (retail 2026-09-18: the 5070 target less the player entity).
+    pub const WHISPER_PLAYER: u64 = 0x5442_5e1a_b303_2637;
+    /// `GameModeParticipantComponent` (retail 2026-09-18: the 6426 target less the player
+    /// entity).
+    pub const GAME_MODE_PARTICIPANT: u64 = 0x8de6_3359_0b8f_bee0;
 }
 
 /// Type index of `PlayerComponentServerFacet_OnAckLevelInfoChanged`.
@@ -111,6 +116,14 @@ pub const SET_CRAFTING_DETAILS_TYPE_INDEX: u64 = 2997;
 pub const CANCEL_CRAFTING_TYPE_INDEX: u64 = 2999;
 /// Type index of `CraftingComponentClientFacet_OnCraftingProgressUpdate`.
 pub const CRAFTING_PROGRESS_TYPE_INDEX: u64 = 2993;
+/// Type index of `TerritoryDetectorComponentServerFacet_AttemptTerritoryUnlock`.
+pub const TERRITORY_ENTERED_TYPE_INDEX: u64 = 2297;
+/// Type index of `TerritoryDetectorComponentServerFacet_AttemptTerritoryExit`.
+pub const TERRITORY_EXITED_TYPE_INDEX: u64 = 6416;
+/// Type index of `WhisperPlayerComponentClientFacet_RequestStartWhisper`.
+pub const START_WHISPER_TYPE_INDEX: u64 = 5070;
+/// Type index of `GameModeParticipantComponentClientFacet_OnGameModeSchedulerRefreshed`.
+pub const GAME_MODE_SCHEDULER_REFRESHED_TYPE_INDEX: u64 = 6426;
 /// The ingredient kind of an item named by its id (beach-quests note: every captured ingredient).
 pub const INGREDIENT_ITEM: u8 = 1;
 
@@ -366,6 +379,36 @@ pub enum ClientFacetMsg {
         /// The header.
         header: FacetHeader,
     },
+    /// 2297: the player came into a territory area: a point of interest or a larger area
+    /// (retail 2026-09-18: one call per area entered, three at the level load; retail sends no
+    /// answer).
+    TerritoryEntered {
+        /// The header (the player's `TerritoryDetectorComponent`).
+        header: FacetHeader,
+        /// The entity id of the area.
+        area: [u8; RAW_ID_LEN],
+        /// Its facet entity.
+        area_entity: u64,
+        /// An id of unknown meaning.
+        extra: u64,
+        /// The `TerritoryID` of the area (retail: 40148, the start beach's watchtower).
+        territory: u16,
+        /// A number of unknown meaning (0 at the first entry, other values later).
+        unknown: u32,
+    },
+    /// 6416: the player left a territory area (retail sends no answer).
+    TerritoryExited {
+        /// The header (the player's `TerritoryDetectorComponent`).
+        header: FacetHeader,
+        /// The entity id of the area.
+        area: [u8; RAW_ID_LEN],
+        /// Its facet entity.
+        area_entity: u64,
+        /// An id of unknown meaning.
+        extra: u64,
+        /// The `TerritoryID` of the area.
+        territory: u16,
+    },
 }
 
 impl ClientFacetMsg {
@@ -512,6 +555,25 @@ impl ClientFacetMsg {
                 })
             }),
             CANCEL_CRAFTING_TYPE_INDEX => read(|header, _| Ok(Self::CancelCrafting { header })),
+            TERRITORY_ENTERED_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::TerritoryEntered {
+                    header,
+                    area: reader.raw_id()?,
+                    area_entity: reader.u64()?,
+                    extra: reader.u64()?,
+                    territory: reader.u16()?,
+                    unknown: reader.u32()?,
+                })
+            }),
+            TERRITORY_EXITED_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::TerritoryExited {
+                    header,
+                    area: reader.raw_id()?,
+                    area_entity: reader.u64()?,
+                    extra: reader.u64()?,
+                    territory: reader.u16()?,
+                })
+            }),
             _ => return None,
         })
     }
@@ -942,6 +1004,62 @@ impl BodyCodec for UnselectedAsTargetMsg {
 }
 
 header_only_message!(
+    /// 6426: the player's game mode schedule changed (retail 2026-09-18: 27 ms after each quest
+    /// turn-in, and twice at the level load).
+    GameModeSchedulerRefreshedMsg,
+    GAME_MODE_SCHEDULER_REFRESHED_TYPE_INDEX
+);
+
+impl GameModeSchedulerRefreshedMsg {
+    /// The call to player `player`.
+    pub const fn to(player: u64) -> Self {
+        Self {
+            header: FacetHeader::of(component::GAME_MODE_PARTICIPANT, player),
+        }
+    }
+}
+
+/// 5070: the client plays a whisper, the voice of a game event (retail 2026-09-18: the first
+/// whisper of Amidst the Wreckage; the client answers with 5235 and the same id).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StartWhisperMsg {
+    /// The header (the player's `WhisperPlayerComponent`).
+    pub header: FacetHeader,
+    /// CRC-32 of the lowercase whisper id.
+    pub whisper: u32,
+}
+
+impl StartWhisperMsg {
+    /// Player `player` hears the whisper of CRC `whisper`.
+    pub const fn to(player: u64, whisper: u32) -> Self {
+        Self {
+            header: FacetHeader::of(component::WHISPER_PLAYER, player),
+            whisper,
+        }
+    }
+}
+
+impl BodyCodec for StartWhisperMsg {
+    const TYPE_INDEX: u64 = START_WHISPER_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        Ok(writer.u32(self.whisper).finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let message = Self {
+            header: FacetHeader::read(&mut reader)?,
+            whisper: reader.u32()?,
+        };
+        reader.finish()?;
+        Ok(message)
+    }
+}
+
+header_only_message!(
     /// 3746: the interaction is over (the gather time ran out).
     InteractionEndedMsg,
     INTERACTION_ENDED_TYPE_INDEX
@@ -971,6 +1089,8 @@ mod tests {
         "01"
     );
     const SOUL_GRANT: &str = "39a8ab5add6e878f650f7a09cf50b550a81bd1af";
+    /// The facet entity of the retail new character of 2026-09-18.
+    const RETAIL_ENTITY: u64 = 0x2715_f9bc_a18f_dece;
 
     fn hex(text: &str) -> Vec<u8> {
         (0..text.len())
@@ -1006,6 +1126,65 @@ mod tests {
                 header,
                 objective: SKINNING_KNIFE
             }))
+        );
+    }
+
+    #[test]
+    fn the_territory_calls_read_the_retail_bodies() {
+        // Retail 2026-09-18: the watchtower (40148) entered at the accept of Crewmates No More,
+        // and left on the way to the wreck.
+        const ENTERED: &str = concat!(
+            "dd2cb35d4a60bfb02715f9bca18fdece",
+            "33cb5ec44ca08ecf0570d26a6694afc5cf8ea04cc45ecb331f3ec1f5325679ad",
+            "9cd4",
+            "00000000"
+        );
+        const WATCHTOWER: u16 = 40_148;
+        let header = FacetHeader {
+            target: 0xdd2c_b35d_4a60_bfb0,
+            entity: RETAIL_ENTITY,
+        };
+        let area = hex("33cb5ec44ca08ecf0570d26a6694afc5")
+            .try_into()
+            .expect("an id");
+        assert_eq!(
+            ClientFacetMsg::decode(TERRITORY_ENTERED_TYPE_INDEX, &hex(ENTERED)),
+            Some(Ok(ClientFacetMsg::TerritoryEntered {
+                header,
+                area,
+                area_entity: 0xcf8e_a04c_c45e_cb33,
+                extra: 0x1f3e_c1f5_3256_79ad,
+                territory: WATCHTOWER,
+                unknown: 0,
+            }))
+        );
+        assert_eq!(
+            ClientFacetMsg::decode(TERRITORY_EXITED_TYPE_INDEX, &hex(&ENTERED[..100])),
+            Some(Ok(ClientFacetMsg::TerritoryExited {
+                header,
+                area,
+                area_entity: 0xcf8e_a04c_c45e_cb33,
+                extra: 0x1f3e_c1f5_3256_79ad,
+                territory: WATCHTOWER,
+            }))
+        );
+    }
+
+    #[test]
+    fn the_whisper_and_the_schedule_refresh_are_retail() {
+        // Retail 2026-09-18: 5070 of `01_IsabellasFirstWhisper_Isabella_01` and 6426 after a
+        // turn-in.
+        const WHISPER: &str = "7b5857d7549305052715f9bca18fdece52f36e05";
+        const REFRESHED: &str = "b4fc2d15ad1f9dae2715f9bca18fdece";
+        let player = RETAIL_ENTITY.swap_bytes();
+        let whisper = StartWhisperMsg::to(player, 0x52f3_6e05);
+        assert_eq!(whisper.encode().expect("encode"), hex(WHISPER));
+        assert_eq!(StartWhisperMsg::decode(&hex(WHISPER)), Ok(whisper));
+        assert_eq!(
+            GameModeSchedulerRefreshedMsg::to(player)
+                .encode()
+                .expect("encode"),
+            hex(REFRESHED)
         );
     }
 

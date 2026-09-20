@@ -175,11 +175,18 @@ pub const GATHER_KIND: u8 = 14;
 pub const CRAFTING_STATION_KIND: u8 = 20;
 /// The interaction kind of a talk to an NPC (beach-quests note: Aelstrom and Urda).
 pub const TALK_KIND: u8 = 63;
+/// The interaction kind of a lore note the player reads (retail 2026-09-18: Kubikiri's
+/// Occupation and La Rousette's Manifest on the start beach).
+pub const LORE_KIND: u8 = 47;
 /// Where a gather's body holds the CRC-32 of its gatherable (after the kind, the kind and the
 /// facet entity again).
 const GATHERABLE_AT: usize = 42;
 /// Bytes of a CRC-32.
 const CRC_LEN: usize = 4;
+/// Where a bit-8 body holds the wide prefix-coded length of the object's name, which follows it
+/// (retail 2026-09-18: `@KubikirisBurden_Title_01_01` for a lore note, `@01_Grace` for a talk,
+/// empty for a gather).
+const NAME_LENGTH_AT: usize = 60;
 
 /// The start of a bit-8 body: the object the client uses (ftue-static-entities note, section 5).
 /// The client sends it in the first record of every input until the interaction ends.
@@ -221,6 +228,17 @@ impl Bit8 {
             kind,
             gatherable,
         })
+    }
+
+    /// The name of the object of the interaction of a body; `None` for an empty one or a body
+    /// too short.
+    pub fn interaction_name(&self) -> Option<Vec<u8>> {
+        let Self::Body(body) = self else {
+            return None;
+        };
+        let mut reader = Reader::new(body.get(NAME_LENGTH_AT..)?);
+        let length = usize::try_from(reader.wide_prefixed().ok()?).ok()?;
+        reader.bytes(length).ok().map(<[u8]>::to_vec)
     }
 }
 
@@ -600,6 +618,19 @@ impl ClientInputMsg {
         self.records
             .iter()
             .find_map(|record| record.bit_8.as_ref()?.interaction())
+    }
+
+    /// The object name of the interaction of [`ClientInputMsg::interaction`]; empty when its
+    /// body is too short to name one.
+    pub fn interaction_name(&self) -> Vec<u8> {
+        self.records
+            .iter()
+            .find_map(|record| {
+                let bit_8 = record.bit_8.as_ref()?;
+                bit_8.interaction()?;
+                Some(bit_8.interaction_name().unwrap_or_default())
+            })
+            .unwrap_or_default()
     }
 }
 
@@ -1500,6 +1531,41 @@ mod tests {
             .interaction()
             .expect("a request");
         assert_eq!(cut.gatherable, None, "too short for the gatherable");
+    }
+
+    #[test]
+    fn a_lore_note_names_its_title() {
+        // Retail lore read (2026-09-18, 19:21:17): the first 89 of its 158 bytes.
+        const RETAIL_LORE: &str = concat!(
+            "53197aa7269658ee0570d26a6694afc5ee589626a77a1953c62f1d8915639c32",
+            "2f2fee589625a77a19530000000000000000000000000000000000",
+            "011c404b7562696b6972697342757264656e5f5469746c655f30315f3031"
+        );
+        let body: Vec<u8> = (0..RETAIL_LORE.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&RETAIL_LORE[at..at + 2], 16).expect("hex"))
+            .collect();
+        let lore = Bit8::Body(body.clone());
+        assert_eq!(
+            lore.interaction().map(|request| request.kind),
+            Some(LORE_KIND)
+        );
+        assert_eq!(
+            lore.interaction_name().as_deref(),
+            Some(&b"@KubikirisBurden_Title_01_01"[..])
+        );
+        assert_eq!(
+            Bit8::Body(body[..NAME_LENGTH_AT + 3].to_vec()).interaction_name(),
+            None,
+            "a name cut short"
+        );
+        let input = message(vec![InputRecord {
+            mask: 1 << 8,
+            bit_8: Some(lore),
+            ..InputRecord::default()
+        }]);
+        assert_eq!(input.interaction_name(), b"@KubikirisBurden_Title_01_01");
+        assert!(message(Vec::new()).interaction_name().is_empty());
     }
 
     #[test]

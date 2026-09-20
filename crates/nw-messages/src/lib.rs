@@ -95,9 +95,10 @@ pub use day_phase::{OBSERVED_DAY_PHASE, SYNC_DAY_PHASE_MSG_TYPE_INDEX, SyncDayPh
 pub use entity_slots::{EntitySlots, SlotRead, SlotUpdate};
 pub use facet::{
     AdjustFxScriptsMsg, ClientFacetMsg, CraftIngredient, CraftProgressMsg, CutsceneEndFinalizedMsg,
-    CutsceneGrantedMsg, DisableCollisionMsg, FacetHeader, GatheringInterruptedMsg,
-    InteractionEndedMsg, InteractionValidatedMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg,
-    TargetMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg, facet_entity,
+    CutsceneGrantedMsg, DisableCollisionMsg, FacetHeader, GameModeSchedulerRefreshedMsg,
+    GatheringInterruptedMsg, InteractionEndedMsg, InteractionValidatedMsg, PlayerSeenByAiMsg,
+    SelectedAsTargetMsg, StartWhisperMsg, TargetMsg, TeleportWithLoadingScreenMsg,
+    UnselectedAsTargetMsg, UpdatePhasingMsg, facet_entity,
 };
 pub use gathering::{GATHERING_TYPE_INDEX, GatheringState, NO_GATHERABLE};
 pub use gde::{

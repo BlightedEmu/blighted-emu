@@ -8,9 +8,9 @@ use crate::connected::{CalendarConnectedMsg, TimingConfigurationConnectedMsg};
 use crate::day_phase::SyncDayPhaseMsg;
 use crate::facet::{
     AdjustFxScriptsMsg, CraftProgressMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg,
-    DisableCollisionMsg, GatheringInterruptedMsg, InteractionEndedMsg, InteractionValidatedMsg,
-    PlayerSeenByAiMsg, SelectedAsTargetMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg,
-    UpdatePhasingMsg,
+    DisableCollisionMsg, GameModeSchedulerRefreshedMsg, GatheringInterruptedMsg,
+    InteractionEndedMsg, InteractionValidatedMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg,
+    StartWhisperMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg,
 };
 use crate::level_info::LevelInfoChangedMsg;
 use crate::self_ident::PlayerManagerSelfIdentificationMsg;
@@ -103,12 +103,16 @@ pub enum ServerMessage {
     DisableCollision(DisableCollisionMsg),
     /// 2993.
     CraftProgress(CraftProgressMsg),
+    /// 5070.
+    StartWhisper(StartWhisperMsg),
+    /// 6426.
+    GameModeSchedulerRefreshed(GameModeSchedulerRefreshedMsg),
 }
 
 impl ServerMessage {
     /// Decodes `body` when `type_index` is one of [`SERVER_MESSAGE_TYPES`], a combat message of
-    /// M6-B (2071, 3601, 4299, 2218) or a tutorial facet call (6310, 6707, 6709, 3951, 3743, 3746,
-    /// 2724, 955, 2415, 3916, 1793, 2993); `None` otherwise.
+    /// M6-B (2071, 3601, 4299, 2218) or a facet call (6310, 6707, 6709, 3951, 3743, 3746, 2724,
+    /// 955, 2415, 3916, 1793, 2993, 5070, 6426); `None` otherwise.
     pub fn decode(type_index: u64, body: &[u8]) -> Option<Result<Self, MessageError>> {
         let message = match type_index {
             TimingConfigurationConnectedMsg::TYPE_INDEX => {
@@ -178,6 +182,10 @@ impl ServerMessage {
                 DisableCollisionMsg::decode(body).map(Self::DisableCollision)
             }
             CraftProgressMsg::TYPE_INDEX => CraftProgressMsg::decode(body).map(Self::CraftProgress),
+            StartWhisperMsg::TYPE_INDEX => StartWhisperMsg::decode(body).map(Self::StartWhisper),
+            GameModeSchedulerRefreshedMsg::TYPE_INDEX => {
+                GameModeSchedulerRefreshedMsg::decode(body).map(Self::GameModeSchedulerRefreshed)
+            }
             _ => return None,
         };
         Some(message)
@@ -214,6 +222,8 @@ impl ServerMessage {
             Self::UnselectedAsTarget(_) => UnselectedAsTargetMsg::TYPE_INDEX,
             Self::DisableCollision(_) => DisableCollisionMsg::TYPE_INDEX,
             Self::CraftProgress(_) => CraftProgressMsg::TYPE_INDEX,
+            Self::StartWhisper(_) => StartWhisperMsg::TYPE_INDEX,
+            Self::GameModeSchedulerRefreshed(_) => GameModeSchedulerRefreshedMsg::TYPE_INDEX,
         }
     }
 
@@ -266,6 +276,8 @@ impl ServerMessage {
             Self::UnselectedAsTarget(message) => message.encode(),
             Self::DisableCollision(message) => message.encode(),
             Self::CraftProgress(message) => message.encode(),
+            Self::StartWhisper(message) => message.encode(),
+            Self::GameModeSchedulerRefreshed(message) => message.encode(),
         }
     }
 }
