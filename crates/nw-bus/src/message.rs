@@ -384,22 +384,22 @@ pub const MOB_ENTITY_BASE: u64 = 1 << 34;
 
 /// Most bytes of one [`Ghost`] in `postcard`: a 10-byte entity number, three 4-byte floats, two
 /// option tags, and the larger of a mob's state (five 5-byte numbers and a 1-byte flag) and a
-/// player's ([`PlayerGhost`]: about 226 bytes with all its visible items, its view and target).
-pub const MAX_GHOST_BYTES: usize = 256;
+/// player's ([`PlayerGhost`]: about 186 bytes with all its visible items, its view and target).
+pub const MAX_GHOST_BYTES: usize = 240;
 
 /// The paperdoll slots that show on a character (armor and weapon options; the
 /// `nw_messages::is_visible_slot` slots): a [`PlayerGhost`] carries at most one item for each.
 pub const GHOST_VISIBLE_ITEMS: usize = 11;
 
-/// One worn item that shows on a player ghost.
+/// One worn item that shows on a player ghost: its slot and item, all that the public paperdoll
+/// of another player names (retail sends other players the public slot only: no durability,
+/// gear score or instance; replication note).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GhostItem {
     /// The paperdoll slot.
     pub slot: u8,
     /// The client item index.
     pub item_index: u32,
-    /// Its gear score.
-    pub gear_score: u32,
 }
 
 /// What other players see of a player near a border (replication note): its look, health,
@@ -877,7 +877,6 @@ mod tests {
         let item = GhostItem {
             slot: u8::MAX,
             item_index: u32::MAX,
-            gear_score: u32::MAX,
         };
         let player = Ghost {
             mob: None,

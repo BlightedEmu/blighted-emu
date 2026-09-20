@@ -53,9 +53,11 @@ const FAR_PERIOD_TICKS: u64 = 4;
 /// Most remote players one viewer gets in one tick besides cards and changes (our choice: about
 /// 1 KB of 40-byte remote states, retail's p99 datagram of 1,028 bytes).
 pub(super) const REMOTE_GROUPS_PER_TICK: usize = 24;
-/// The ghost item of a worn item: one of a full stack, as other players see it (the durability,
-/// bind flag and instance do not show; Inferred).
+/// The ghost item of a worn item: one of a full stack, as other players see it. Its gear score,
+/// durability, bind flag and instance are not sent: other players get the public paperdoll only
+/// (Observed: every retail remote paperdoll of the duel and the 3v3 arena sets slot 2 alone).
 const SHOWN_QUANTITY: u32 = 1;
+const SHOWN_GEAR_SCORE: u32 = 0;
 
 /// What a player is now, for the players who see it: from its own sim, or from a ghost.
 #[derive(Debug, Clone, PartialEq)]
@@ -85,7 +87,6 @@ impl ReplicaSource {
             *shown = u8::try_from(worn.slot).ok().map(|slot| GhostItem {
                 slot,
                 item_index: worn.item.item_index,
-                gear_score: worn.item.gear_score,
             });
         }
         PlayerGhost {
@@ -132,7 +133,7 @@ impl ReplicaSource {
                     item: GearItem {
                         item_index: item.item_index,
                         quantity: SHOWN_QUANTITY,
-                        gear_score: item.gear_score,
+                        gear_score: SHOWN_GEAR_SCORE,
                         durability: 0,
                         bound: false,
                         instance: [0; RAW_ID_LEN],
@@ -163,11 +164,16 @@ impl ReplicaSource {
         })
     }
 
-    /// Its gear as others see it: the paperdoll of the items that show; its bag and other
-    /// containers stay its own (empty states).
+    /// Its gear as others see it: the public paperdoll of the items that show (its sheathe,
+    /// attachment and active maps, slots and looks); the owner part (durability, instances, ammo,
+    /// loadouts), its bag and other containers stay its own (Observed: retail sends other
+    /// players paperdoll slot 2 alone).
     fn gear(&self) -> PlayerGear {
+        let mut paperdoll =
+            PlayerGear::of(&self.items, &[], self.gear_version, self.hands).paperdoll;
+        paperdoll.owner = None;
         PlayerGear {
-            paperdoll: PlayerGear::of(&self.items, &[], self.gear_version, self.hands).paperdoll,
+            paperdoll,
             ..PlayerGear::default()
         }
     }
@@ -470,7 +476,7 @@ pub(super) mod tests {
                 item: GearItem {
                     item_index: 42,
                     quantity: SHOWN_QUANTITY,
-                    gear_score: 75,
+                    gear_score: SHOWN_GEAR_SCORE,
                     durability: 0,
                     bound: false,
                     instance: [0; RAW_ID_LEN],
@@ -480,6 +486,20 @@ pub(super) mod tests {
             in_combat: false,
             target: None,
         }
+    }
+
+    #[test]
+    fn others_get_the_public_paperdoll_only() {
+        let gear = source().gear();
+        assert_eq!(
+            gear.paperdoll.owner, None,
+            "no durability, instance or ammo"
+        );
+        let public = gear.paperdoll.public.expect("public");
+        assert_eq!(
+            public.visible_slots.map(|slots| slots.elements),
+            Some(vec![nw_messages::paperdoll::slot::MAIN_HAND_OPTION_1])
+        );
     }
 
     #[test]
