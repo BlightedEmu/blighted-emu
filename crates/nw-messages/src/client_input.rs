@@ -575,19 +575,17 @@ impl ClientInputMsg {
         self.records.iter().find_map(|record| record.bit_7)
     }
 
-    /// The newest position and the two view values (bit 6) of the same record, when it has
-    /// them: the client's camera point and its yaw and pitch.
-    pub fn newest_view(&self) -> Option<(InputPosition, Option<[f32; 2]>)> {
+    /// The newest position, the two view values (bit 6) and the counter (`u16` after the mask,
+    /// the client's own clock: one record per frame step, input note: 34 ms apart, median) of the
+    /// same record: the client's camera point, its yaw and pitch, and when it was. The counter is
+    /// that record's, not the newest record's: 3% of retail inputs (762 of 23,932, newchar
+    /// capture) have a newest record without a position, and timing their older position by the
+    /// newer counter made the camera look still, then too fast (live 2026-09-18: the body
+    /// estimate flipped by 1.87 m between two inputs and moves were refused).
+    pub fn newest_view(&self) -> Option<(InputPosition, Option<[f32; 2]>, u16)> {
         self.records
             .iter()
-            .find_map(|record| Some((record.bit_7?, record.bit_6)))
-    }
-
-    /// The counter (`u16` after the mask) of the newest record: the client's own clock, one
-    /// record per frame step (input note: 34 ms apart, median). `None` for an input without
-    /// records.
-    pub fn newest_counter(&self) -> Option<u16> {
-        self.records.first().map(|record| record.u16_after_mask)
+            .find_map(|record| Some((record.bit_7?, record.bit_6, record.u16_after_mask)))
     }
 
     /// Whether the player holds block now: the state of the newest record. The client sends the
@@ -1275,6 +1273,31 @@ mod tests {
         assert_eq!(decoded, input);
         assert_eq!(decoded.newest_position(), Some(position()));
         assert_eq!(decoded.encode().expect("again"), body);
+    }
+
+    #[test]
+    fn the_newest_view_carries_the_counter_of_its_own_record() {
+        const NEWEST: u16 = 41;
+        const WITH_POSITION: u16 = 40;
+        let input = ClientInputMsg {
+            records: vec![
+                InputRecord {
+                    u16_after_mask: NEWEST,
+                    ..InputRecord::default()
+                },
+                InputRecord {
+                    u16_after_mask: WITH_POSITION,
+                    bit_7: Some(position()),
+                    bit_6: Some([1.0, 0.5]),
+                    ..InputRecord::default()
+                },
+            ],
+            ..ClientInputMsg::default()
+        };
+        assert_eq!(
+            input.newest_view(),
+            Some((position(), Some([1.0, 0.5]), WITH_POSITION))
+        );
     }
 
     #[test]

@@ -562,12 +562,12 @@ impl Loop {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
             return;
         };
-        if let Some((position, view)) = input.newest_view() {
+        if let Some((position, view, counter)) = input.newest_view() {
             self.move_player(
                 connection,
                 position,
                 view.map(|[yaw, pitch]| LookDir { yaw, pitch }),
-                input.newest_counter(),
+                Some(counter),
             );
         }
         let now_ms = self.now_ms();
