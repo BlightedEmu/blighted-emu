@@ -384,8 +384,9 @@ pub const MOB_ENTITY_BASE: u64 = 1 << 34;
 
 /// Most bytes of one [`Ghost`] in `postcard`: a 10-byte entity number, three 4-byte floats, two
 /// option tags, and the larger of a mob's state (five 5-byte numbers and a 1-byte flag) and a
-/// player's ([`PlayerGhost`]: about 186 bytes with all its visible items, its view and target).
-pub const MAX_GHOST_BYTES: usize = 240;
+/// player's ([`PlayerGhost`]: about 236 bytes with all its visible items, its view, target and
+/// action).
+pub const MAX_GHOST_BYTES: usize = 288;
 
 /// The paperdoll slots that show on a character (armor and weapon options; the
 /// `nw_messages::is_visible_slot` slots): a [`PlayerGhost`] carries at most one item for each.
@@ -437,6 +438,23 @@ pub struct PlayerGhost {
     pub attached: bool,
     /// The items that show on it.
     pub items: [Option<GhostItem>; GHOST_VISIBLE_ITEMS],
+    /// The action it plays (its slayer state), when it plays one.
+    pub action: Option<GhostSlayer>,
+}
+
+/// The slayer state of a player ghost: the action it plays (ALC children 13 to 18; slayer note).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GhostSlayer {
+    /// `slayerStateId`, when it changed with the action.
+    pub state: Option<u64>,
+    /// The ALC state number in which the action started.
+    pub started: u16,
+    /// `slayerSequenceId`.
+    pub sequence: u64,
+    /// The second slot's start, when it goes with the action.
+    pub second_started: Option<u16>,
+    /// The second slot's state (as on the wire) and sequence, when it plays one.
+    pub second_playing: Option<(u64, u64)>,
 }
 
 /// The state of a mob ghost (M6-A spec section 6.3).
@@ -896,6 +914,13 @@ mod tests {
                 drawn: Some(u32::MAX),
                 attached: true,
                 items: [Some(item); GHOST_VISIBLE_ITEMS],
+                action: Some(GhostSlayer {
+                    state: Some(u64::MAX),
+                    started: u16::MAX,
+                    sequence: u64::MAX,
+                    second_started: Some(u16::MAX),
+                    second_playing: Some((u64::MAX, u64::MAX)),
+                }),
             }),
             ..ghost
         };

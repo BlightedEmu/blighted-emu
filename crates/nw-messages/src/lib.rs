@@ -52,8 +52,8 @@ pub use afflictions::{Affliction, AfflictionId, AfflictionList, ColdLong, HotLon
 pub use alc::{
     ALC_TYPE_INDEX, AlcChild, AlcStamp, AlcState, DATA_BITS_ACTIVE, FRAG_TAGS_LEN, LayerEntry,
     LookDir, MobAnimation, MobStep, POS10_CHILD, RemoteStep, SLOT0_CHILDREN, SLOT1_CHILDREN,
-    SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, ScopeEntry, SlayerState, StepScope,
-    TeleportStep,
+    SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, ScopeEntry, SecondSlayerState, SlayerState,
+    StepScope, TeleportStep,
 };
 pub use appearance::{
     LOOK_CHOICES, PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState, PlayerIconData, PlayerLook,
@@ -65,7 +65,7 @@ pub use bundle::{
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use client_input::{
     Bit8, ClientInputMsg, HeadStep9, INPUT_Z_MAX, INPUT_Z_MIN, InputHead, InputPosition,
-    InputRecord, InputSlots, InteractionRequest, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+    InputRecord, InputSlots, InteractionRequest, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, SlayerInput,
 };
 pub use combat::{
     DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, DamageDealtMsg, DamageItem, DeathRecapMsg,

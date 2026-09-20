@@ -17,15 +17,16 @@
 
 use std::collections::HashMap;
 
-use nw_bus::{GHOST_VISIBLE_ITEMS, GhostItem, PlayerGhost};
+use nw_bus::{GHOST_VISIBLE_ITEMS, GhostItem, GhostSlayer, PlayerGhost};
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     AlcStamp, AlcState, BundleGroup, BundleMember, DamageReceiverState, EquippedItem, GearItem,
     Hands, HealthChange, InputPosition, LookDir, MemberState, MessageError, PlayerGear, PlayerLook,
-    PlayerStates, RemoteStep, SlayerState, VitalsData, VitalsState,
+    PlayerStates, RemoteStep, SecondSlayerState, SlayerState, VitalsData, VitalsState,
 };
 use nw_sim_core::Position;
 
+use super::attack::counter_is_newer;
 use super::members::{EntityKind, OwnClock, PLAYER_ALC_COMPONENT, entity_group};
 
 /// The own player component of the vitals.
@@ -69,6 +70,8 @@ pub(super) struct ReplicaSource {
     pub(super) view: Option<LookDir>,
     pub(super) run_mode: Option<bool>,
     pub(super) mode_started: u16,
+    /// The action it plays, from its client or the server's follow-up ([`super::slayer`]).
+    pub(super) action: Option<SlayerState>,
     pub(super) blocking: bool,
     pub(super) spawned_ms: u64,
     pub(super) gear_version: u64,
@@ -105,6 +108,13 @@ impl ReplicaSource {
             drawn: self.hands.drawn,
             attached: self.hands.attached,
             items,
+            action: self.action.map(|action| GhostSlayer {
+                state: action.state,
+                started: action.started,
+                sequence: action.sequence,
+                second_started: action.second.map(|second| second.started),
+                second_playing: action.second.and_then(|second| second.playing),
+            }),
         }
     }
 
@@ -121,6 +131,15 @@ impl ReplicaSource {
             }),
             run_mode: ghost.run_mode,
             mode_started: ghost.mode_started,
+            action: ghost.action.map(|action| SlayerState {
+                state: action.state,
+                started: action.started,
+                sequence: action.sequence,
+                second: action.second_started.map(|started| SecondSlayerState {
+                    started,
+                    playing: action.second_playing,
+                }),
+            }),
             blocking: ghost.blocking,
             spawned_ms: ghost.spawned_ms,
             gear_version: ghost.gear_version,
@@ -151,17 +170,25 @@ impl ReplicaSource {
         }
     }
 
-    /// Its slayer state: its movement mode, when its input sent one.
+    /// Its slayer state: the newer of the action it plays and its movement mode.
     fn slayer(&self) -> Option<SlayerState> {
-        self.run_mode.map(|run| SlayerState {
-            state: if run { RUN_MODE_STATE } else { WALK_MODE_STATE },
+        let mode = self.run_mode.map(|run| SlayerState {
+            state: Some(if run { RUN_MODE_STATE } else { WALK_MODE_STATE }),
             started: self.mode_started,
             sequence: if run {
                 RUN_MODE_SEQUENCE
             } else {
                 WALK_MODE_SEQUENCE
             },
-        })
+            second: None,
+        });
+        match (self.action, mode) {
+            (Some(action), Some(mode)) if counter_is_newer(mode.started, action.started) => {
+                Some(mode)
+            }
+            (Some(action), _) => Some(action),
+            (None, mode) => mode,
+        }
     }
 
     /// Its gear as others see it: the public paperdoll of the items that show (its sheathe,
@@ -185,6 +212,8 @@ pub(super) struct ReplicaMemory {
     health: u32,
     blocking: bool,
     gear_version: u64,
+    /// The start and sequence of its action.
+    action: Option<(u16, u64)>,
     /// The server time of its last new life (ms since 2000-01-01).
     life_ms: u64,
 }
@@ -198,6 +227,8 @@ pub(super) struct Replica {
     health_change: Option<HealthChange>,
     gear_changed: bool,
     block_changed: bool,
+    /// It started an action: the others see it now.
+    action_changed: bool,
 }
 
 impl Replica {
@@ -213,6 +244,10 @@ impl Replica {
             spawn_ms: source.spawned_ms,
         };
         let health = source.health;
+        let action = source
+            .action
+            .map(|action| (action.started, action.sequence));
+        let action_changed = seen.is_some_and(|seen| seen.action != action);
         let (health_change, gear_changed, block_changed, life_ms) = match seen {
             None => (None, false, false, source.spawned_ms),
             Some(seen) => {
@@ -243,6 +278,7 @@ impl Replica {
             health,
             blocking: source.blocking,
             gear_version: source.gear_version,
+            action,
             life_ms,
         };
         let replica = Self {
@@ -252,13 +288,17 @@ impl Replica {
             health_change,
             gear_changed,
             block_changed,
+            action_changed,
         };
         (replica, memory)
     }
 
     /// Whether it changed this tick: it goes to every viewer now, whatever its priority.
     pub(super) const fn changed(&self) -> bool {
-        self.health_change.is_some() || self.gear_changed || self.block_changed
+        self.health_change.is_some()
+            || self.gear_changed
+            || self.block_changed
+            || self.action_changed
     }
 
     /// Whether it is in combat: it goes first.
@@ -468,6 +508,7 @@ pub(super) mod tests {
             }),
             run_mode: Some(true),
             mode_started: 2,
+            action: None,
             blocking: false,
             spawned_ms: SPAWNED_MS,
             gear_version: 3,

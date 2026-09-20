@@ -66,6 +66,7 @@ mod projectile;
 mod quest_tracker;
 mod replica;
 mod scripts;
+mod slayer;
 mod slots;
 mod stamina;
 mod statics;
@@ -401,6 +402,9 @@ struct Player {
     /// started: its slayer state for other players ([`replica`]).
     run_mode: Option<bool>,
     mode_started: u16,
+    /// The action it plays: the one its client started, then the server's follow-up
+    /// ([`slayer`]).
+    slayer: slayer::SlayerTrack,
     /// Which other players it got in which bundle step ([`replica::RemotePlan`]).
     remote_plan: replica::RemotePlan,
     /// The camera moved at [`crate::camera::STILL_SPEED_MPS`] or faster at its last point: the
@@ -2309,6 +2313,16 @@ impl SimWorld {
         }
     }
 
+    /// Reads the actions the client of `connection` started in the input records `records`
+    /// ([`slayer`]).
+    pub fn slayer_input(&mut self, connection: &ConnectionRef, records: &[InputRecord]) {
+        if let Some(&entity) = self.by_connection.get(connection)
+            && let Some(mut player) = self.world.get_mut::<Player>(entity)
+        {
+            player.slayer.input(records);
+        }
+    }
+
     /// What other players see of `player` now ([`replica`]).
     fn replica_source(player: &Player, vitals: &Vitals, server_ms: u64) -> ReplicaSource {
         let clock = Self::alc_clock(player, server_ms);
@@ -2324,6 +2338,7 @@ impl SimWorld {
             view: player.view,
             run_mode: player.run_mode,
             mode_started: player.mode_started,
+            action: player.slayer.current(),
             blocking: vitals.blocking(),
             spawned_ms: clock.spawn_ms,
             gear_version,
@@ -2390,6 +2405,11 @@ impl SimWorld {
             .collect();
         let own: HashSet<u64> = everyone.iter().map(|(number, _)| *number).collect();
         let mut cards: HashMap<u64, MobCard> = HashMap::new();
+        // The actions move on to this tick: the own state and the players who see it get the same.
+        for mut player in self.world.query::<&mut Player>().iter_mut(&mut self.world) {
+            let id = Self::alc_clock(&player, server_time).stamp().id;
+            player.slayer.advance(id);
+        }
         // Every player as the players who see it get it this tick: ours, then the ghosts'.
         let mut sources: Vec<(u64, ReplicaSource)> = self
             .world
@@ -2634,6 +2654,7 @@ impl SimWorld {
                     view: None,
                     run_mode: None,
                     mode_started: SPAWN_STATE_ID,
+                    slayer: slayer::SlayerTrack::default(),
                     remote_plan: replica::RemotePlan::default(),
                     moving: false,
                     throttle_cleared: false,
@@ -3103,6 +3124,7 @@ impl Neighbourhood<'_> {
                     with_position: (!player.moving && player.refused_since_ms.is_none())
                         || player.push.is_some(),
                     clear_throttle: plain_tick && !player.throttle_cleared,
+                    slayer: player.slayer.take_due(),
                 };
                 if tick.clear_throttle {
                     player.throttle_cleared = true;
@@ -5355,6 +5377,51 @@ mod tests {
             )),
             "the block: {seen:?}"
         );
+    }
+
+    #[test]
+    fn the_own_state_and_another_player_get_the_action_then_its_follow_up() {
+        /// The slayer sequence child (slayer note).
+        const SEQUENCE: usize = 15;
+        /// Retail newchar capture: record 5568 started 5055, and the server followed with 4603.
+        const STARTED: u64 = 5055;
+        const FOLLOW_UP: u64 = 4603;
+        let mut world = two_players();
+        let (a, b) = (connection(1), connection(2));
+        let attack = InputRecord {
+            u16_after_mask: 5568,
+            row_1: Some([STARTED, 0x002c_000a, 0]),
+            ..InputRecord::default()
+        };
+        world.slayer_input(&a, &[attack]);
+        let sequence_bytes = |sequence: u64| {
+            nw_messages::wire::Writer::new()
+                .prefixed(sequence)
+                .expect("prefix")
+                .finish()
+        };
+        let sequences = |world: &SimWorld, outgoing: &[Outgoing], who: &ConnectionRef| {
+            alc_children(&states_of(world, outgoing, who, 1))
+                .into_iter()
+                .filter(|(child, _)| *child == SEQUENCE)
+                .map(|(_, bytes)| bytes)
+                .collect::<Vec<_>>()
+        };
+        let first = tick(&mut world, NOW + 33);
+        assert!(
+            sequences(&world, &first.messages, &a).contains(&sequence_bytes(STARTED)),
+            "the own state echoes the action"
+        );
+        assert!(
+            sequences(&world, &first.messages, &b).contains(&sequence_bytes(STARTED)),
+            "the other player sees it in the same tick"
+        );
+        let next = tick(&mut world, NOW + 66);
+        assert!(
+            sequences(&world, &next.messages, &a).contains(&sequence_bytes(FOLLOW_UP)),
+            "the server's follow-up"
+        );
+        assert!(sequences(&world, &next.messages, &b).contains(&sequence_bytes(FOLLOW_UP)));
     }
 
     #[test]

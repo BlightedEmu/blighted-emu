@@ -21,8 +21,8 @@ use nw_messages::{
     GDE_METADATA_COMPONENT, GatherableControllerState, GdeMetadataReplicatedState, InputPosition,
     LOCAL_PLAYER_INTEREST, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState, MessageError,
     PLAYER_SLICE_ASSET, PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID, SPAWN_STATE_MS,
-    SPAWN_TELEPORT, ServerMessage, TeleportStep, VitalsData, VitalsState, boss_phase_change,
-    change_members, player_members, raw_id_of_entity,
+    SPAWN_TELEPORT, ServerMessage, SlayerState, TeleportStep, VitalsData, VitalsState,
+    boss_phase_change, change_members, player_members, raw_id_of_entity,
 };
 use nw_sim_core::Position;
 
@@ -521,6 +521,8 @@ pub(super) struct OwnTick {
     pub(super) with_position: bool,
     /// Send the movement flags without the throttle bit (the first state after the spawn).
     pub(super) clear_throttle: bool,
+    /// The slayer state that goes with this state ([`super::slayer`]).
+    pub(super) slayer: Option<SlayerState>,
 }
 
 impl OwnTeleport {
@@ -596,7 +598,8 @@ pub(super) fn own_group(
             pos,
             tick.clear_throttle.then_some(DATA_BITS_ACTIVE),
             tick.clock.anchored(),
-        ));
+            tick.slayer,
+        )?);
     }
     // Without the card, the changes (achievements, objectives, experience, gear, health) still
     // go out, before the position.
@@ -778,6 +781,7 @@ mod tests {
         clock: SPAWN_CLOCK,
         with_position: true,
         clear_throttle: false,
+        slayer: None,
     };
     const MOVING: OwnTick = OwnTick {
         with_position: false,
@@ -867,7 +871,7 @@ mod tests {
         };
         assert_eq!(
             moving,
-            AlcState::own_step(SPAWN_CLOCK.stamp(), None, None, true)
+            AlcState::own_step(SPAWN_CLOCK.stamp(), None, None, true, None).expect("step")
         );
         let MemberState::Alc(spawn) = alc_of(OwnCard::Spawn, MOVING) else {
             panic!("an ALC");
@@ -882,12 +886,16 @@ mod tests {
         };
         assert_eq!(
             alc_of(OwnCard::Without, first),
-            MemberState::Alc(AlcState::own_step(
-                SPAWN_CLOCK.stamp(),
-                None,
-                Some(DATA_BITS_ACTIVE),
-                true
-            )),
+            MemberState::Alc(
+                AlcState::own_step(
+                    SPAWN_CLOCK.stamp(),
+                    None,
+                    Some(DATA_BITS_ACTIVE),
+                    true,
+                    None
+                )
+                .expect("step")
+            ),
             "the first tick clears the throttle"
         );
     }
@@ -906,12 +914,9 @@ mod tests {
             MemberState::Alc(AlcState::spawn(pos, SPAWN_CLOCK.first_anchor_us()).expect("spawn")),
             "the first card sets the start position with the full state"
         );
-        let still = MemberState::Alc(AlcState::own_step(
-            SPAWN_CLOCK.stamp(),
-            Some(pos),
-            None,
-            true,
-        ));
+        let still = MemberState::Alc(
+            AlcState::own_step(SPAWN_CLOCK.stamp(), Some(pos), None, true, None).expect("step"),
+        );
         assert_eq!(
             alc_of(OwnCard::Refresh),
             still,

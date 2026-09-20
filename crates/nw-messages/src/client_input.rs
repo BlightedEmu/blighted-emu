@@ -470,6 +470,17 @@ impl InputRecord {
         entity_of_raw_id(&self.row_3_id?.0)
     }
 
+    /// The slayer action the client starts in this record (row 1), when it starts one.
+    pub fn slayer_input(&self) -> Option<SlayerInput> {
+        let [sequence, states, second_sequence] = self.row_1?;
+        (sequence != 0).then_some(SlayerInput {
+            sequence,
+            state: (states & STATE_MASK) as u16,
+            second_state: ((states >> SECOND_STATE_SHIFT) & STATE_MASK) as u16,
+            second_sequence,
+        })
+    }
+
     /// The weapon key the player pressed in this record: 0 for the first, 1 for the second.
     pub fn weapon_key_pressed(&self) -> Option<u32> {
         (0_u32..)
@@ -478,6 +489,28 @@ impl InputRecord {
             .map(|(key, _)| key)
     }
 }
+
+/// A slayer action the client starts: row 1 of an input record (slayer note, 2026-09-18: in the
+/// retail newchar capture, each of the 73 non-zero rows came back in the next own ALC state, its
+/// sequence as child 15, its state as child 13, its second state plus one as child 16 and its
+/// second sequence as child 18, started in the state numbered with the record's counter). The
+/// server adds its own follow-ups and the movement states; the client sends only these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlayerInput {
+    /// Row 1 value 0: the slayer sequence (`slayerSequenceId`).
+    pub sequence: u64,
+    /// Row 1 value 1, low 16 bits: the slayer state (`slayerStateId`).
+    pub state: u16,
+    /// Row 1 value 1, bits 16 to 31: the second slot's state, `0xffff` for none.
+    pub second_state: u16,
+    /// Row 1 value 2: the second slot's sequence, 0 for none.
+    pub second_sequence: u64,
+}
+
+/// The low 16 bits of row 1 value 1: one slot's state.
+const STATE_MASK: u64 = 0xffff;
+/// Where the second slot's state starts in row 1 value 1.
+const SECOND_STATE_SHIFT: u32 = 16;
 
 /// The slots of a record with only `bit` of value `value` set.
 fn one_action(value: usize, bit: u32) -> InputSlots {
@@ -1072,6 +1105,30 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    #[test]
+    fn row_1_is_the_slayer_action_the_client_starts() {
+        // Retail newchar capture, record 2286: row 1 `[1038, 0x0024001b, 5008]`.
+        let record = InputRecord {
+            row_1: Some([1038, 0x0024_001b, 5008]),
+            ..InputRecord::default()
+        };
+        assert_eq!(
+            record.slayer_input(),
+            Some(SlayerInput {
+                sequence: 1038,
+                state: 0x1b,
+                second_state: 0x24,
+                second_sequence: 5008,
+            })
+        );
+        let idle = InputRecord {
+            row_1: Some([0, 0, 0]),
+            ..InputRecord::default()
+        };
+        assert_eq!(idle.slayer_input(), None, "a zero row starts nothing");
+        assert_eq!(InputRecord::default().slayer_input(), None);
+    }
 
     const X: f32 = 11_132.5;
     const Y: f32 = 7_305.9;

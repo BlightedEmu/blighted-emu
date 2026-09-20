@@ -12,7 +12,7 @@
 
 use std::ops::Range;
 
-use crate::client_input::InputPosition;
+use crate::client_input::{InputPosition, SlayerInput};
 use crate::wire::{MessageError, Reader, Writer};
 
 /// Type index of the class.
@@ -52,6 +52,14 @@ const LOOK_DIR_CHILD: usize = 12;
 const SLAYER_STATE_CHILD: usize = 13;
 const SLAYER_STARTED_CHILD: usize = 14;
 const SLAYER_SEQUENCE_CHILD: usize = 15;
+/// Slot 0 children of the second slayer slot: its state, the state number in which it started and
+/// its sequence (slayer note: the client's row 1 second state and sequence).
+const SECOND_SLAYER_STATE_CHILD: usize = 16;
+const SECOND_SLAYER_STARTED_CHILD: usize = 17;
+const SECOND_SLAYER_SEQUENCE_CHILD: usize = 18;
+/// Child 16 carries the client's second state plus one, so "none" (`0xffff`) is 0 (Observed:
+/// row 1 `0x0024` came back as `25`, in all 7 retail rows with a second sequence).
+const SECOND_STATE_WIRE_OFFSET: u16 = 1;
 /// Slot 0 children of the FullBody scope time in 1/30 s ticks, low byte first
 /// (`scopeTimeBlob0Data0` to `Data3`; mob-animation note, section 3.3).
 const SCOPE_TIME_CHILDREN: [usize; 4] = [28, 38, 49, 50];
@@ -328,25 +336,71 @@ pub struct MobStep {
     pub scope: Option<StepScope>,
 }
 
-/// The first slayer state of a character (children 13 to 15): the slayer script state it is in,
-/// the ALC state number in which that state started, and the sequence of the state.
+/// The slayer state of a character (children 13 to 18): the slayer script state it is in, the
+/// ALC state number in which that state started and the sequence of the state, and its second
+/// slot (slayer note).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SlayerState {
-    /// `slayerStateId`.
-    pub state: u64,
+    /// `slayerStateId`; `None` when it goes on unchanged (retail leaves child 13 out then).
+    pub state: Option<u64>,
     /// `slayerStateIdStarted`.
     pub started: u16,
     /// `slayerSequenceId`.
     pub sequence: u64,
+    /// The second slot, when it goes with the state.
+    pub second: Option<SecondSlayerState>,
+}
+
+/// The second slayer slot (children 16 to 18).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecondSlayerState {
+    /// The ALC state number in which it started (child 17; retail sends it with every action the
+    /// client starts).
+    pub started: u16,
+    /// Its state (child 16, on the wire) and sequence (child 18), when it plays one.
+    pub playing: Option<(u64, u64)>,
 }
 
 impl SlayerState {
-    fn children(self) -> Result<[(usize, Vec<u8>); 3], MessageError> {
-        Ok([
-            (SLAYER_STATE_CHILD, prefixed_bytes(self.state)?),
+    /// The slayer state of the action `input` the client started, in ALC state `started`;
+    /// `state_changed` when its state is not the one the client had (retail sends child 13 only
+    /// then).
+    pub fn of_input(input: SlayerInput, started: u16, state_changed: bool) -> Self {
+        Self {
+            state: state_changed.then_some(u64::from(input.state)),
+            started,
+            sequence: input.sequence,
+            second: Some(SecondSlayerState {
+                started,
+                playing: (input.second_sequence != 0).then(|| {
+                    (
+                        u64::from(input.second_state.wrapping_add(SECOND_STATE_WIRE_OFFSET)),
+                        input.second_sequence,
+                    )
+                }),
+            }),
+        }
+    }
+
+    fn children(self) -> Result<Vec<(usize, Vec<u8>)>, MessageError> {
+        let mut children = vec![
             (SLAYER_STARTED_CHILD, self.started.to_be_bytes().to_vec()),
             (SLAYER_SEQUENCE_CHILD, prefixed_bytes(self.sequence)?),
-        ])
+        ];
+        if let Some(state) = self.state {
+            children.push((SLAYER_STATE_CHILD, prefixed_bytes(state)?));
+        }
+        if let Some(second) = self.second {
+            children.push((
+                SECOND_SLAYER_STARTED_CHILD,
+                second.started.to_be_bytes().to_vec(),
+            ));
+            if let Some((state, sequence)) = second.playing {
+                children.push((SECOND_SLAYER_STATE_CHILD, prefixed_bytes(state)?));
+                children.push((SECOND_SLAYER_SEQUENCE_CHILD, prefixed_bytes(sequence)?));
+            }
+        }
+        Ok(children)
     }
 }
 
@@ -704,14 +758,23 @@ impl AlcState {
     /// when none came for 2 s (network note: `FUN_14485b680`, `alc-server-timeout-for-input`).
     /// With `pos`, it also sends the place; with `data_bits`, the movement flags; when
     /// `anchored`, the clock's anchor (the client's 'now' for its cooldowns is the anchor plus
-    /// the offset; clock note).
+    /// the offset; clock note). With `slayer`, the slayer state the client started or the
+    /// server's follow-up (slayer note).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when a slayer value does not fit the prefix code.
     pub fn own_step(
         stamp: AlcStamp,
         pos: Option<InputPosition>,
         data_bits: Option<u8>,
         anchored: bool,
-    ) -> Self {
+        slayer: Option<SlayerState>,
+    ) -> Result<Self, MessageError> {
         let mut children: Vec<(usize, Vec<u8>)> = stamp_children(stamp).into();
+        if let Some(slayer) = slayer {
+            children.extend(slayer.children()?);
+        }
         if anchored {
             children.push((TIME_ANCHOR_CHILD, stamp.anchor_us.to_be_bytes().to_vec()));
         }
@@ -721,7 +784,7 @@ impl AlcState {
         if let Some(bits) = data_bits {
             children.push((DATA_BITS_CHILD, vec![bits]));
         }
-        Self::of_slot0(children, pos)
+        Ok(Self::of_slot0(children, pos))
     }
 
     /// One of the three states that move the client's own player to `pos`, facing `facing`
@@ -1196,14 +1259,15 @@ mod tests {
                 .map(|(child, _)| child)
                 .collect()
         };
-        let clock_only = AlcState::own_step(stamp, None, None, false);
+        let clock_only = AlcState::own_step(stamp, None, None, false, None).expect("step");
         assert_eq!(
             children_of(&clock_only),
             [ID_REL_CHILD, TIME_REL_CHILD, ID_ABS_CHILD, TIME_ABS_CHILD]
         );
         assert_eq!(clock_only.pos10, None);
         let pos = InputPosition::from_metres(1.0, 2.0, 3.0).expect("finite");
-        let full = AlcState::own_step(stamp, Some(pos), Some(DATA_BITS_ACTIVE), false);
+        let full = AlcState::own_step(stamp, Some(pos), Some(DATA_BITS_ACTIVE), false, None)
+            .expect("step");
         assert_eq!(
             children_of(&full),
             [
@@ -1233,7 +1297,9 @@ mod tests {
             None,
             None,
             true,
-        );
+            None,
+        )
+        .expect("step");
         assert_eq!(
             children_of(&anchored),
             [
@@ -1779,6 +1845,77 @@ mod tests {
     }
 
     #[test]
+    fn the_own_state_echoes_the_action_the_client_started() {
+        // Retail newchar capture, 93314 ms: input record 2286 (`0x08ee`) row 1
+        // `[1038, 0x0024001b, 5008]`; the next own state (93348 ms) carried `13=1b 14=08ee
+        // 15=8e10 16=25 17=08ee 18=904e`.
+        const STARTED: u16 = 0x08ee;
+        let input = SlayerInput {
+            sequence: 1038,
+            state: 0x1b,
+            second_state: 0x24,
+            second_sequence: 5008,
+        };
+        let stamp = AlcStamp {
+            id: STARTED,
+            anchor_us: 0,
+            offset_ms: 0,
+        };
+        let slayer = SlayerState::of_input(input, STARTED, true);
+        let state = AlcState::own_step(stamp, None, None, false, Some(slayer)).expect("step");
+        let slayer_children: Vec<(usize, Vec<u8>)> = state
+            .slot0_children()
+            .expect("walk")
+            .into_iter()
+            .filter(|(child, _)| {
+                (SLAYER_STATE_CHILD..=SECOND_SLAYER_SEQUENCE_CHILD).contains(child)
+            })
+            .collect();
+        assert_eq!(
+            slayer_children,
+            [
+                (SLAYER_STATE_CHILD, vec![0x1b]),
+                (SLAYER_STARTED_CHILD, vec![0x08, 0xee]),
+                (SLAYER_SEQUENCE_CHILD, vec![0x8e, 0x10]),
+                (SECOND_SLAYER_STATE_CHILD, vec![0x25]),
+                (SECOND_SLAYER_STARTED_CHILD, vec![0x08, 0xee]),
+                (SECOND_SLAYER_SEQUENCE_CHILD, vec![0x90, 0x4e]),
+            ]
+        );
+        // Retail 78664 ms: row 1 `[1221, 0xffff000a, 0]`, state unchanged: `14=0737 15=8513
+        // 17=0737` alone.
+        let plain = SlayerInput {
+            sequence: 1221,
+            state: 0x0a,
+            second_state: 0xffff,
+            second_sequence: 0,
+        };
+        let state = AlcState::own_step(
+            stamp,
+            None,
+            None,
+            false,
+            Some(SlayerState::of_input(plain, 0x0737, false)),
+        )
+        .expect("step");
+        let children: Vec<usize> = state
+            .slot0_children()
+            .expect("walk")
+            .into_iter()
+            .map(|(child, _)| child)
+            .filter(|child| (SLAYER_STATE_CHILD..=SECOND_SLAYER_SEQUENCE_CHILD).contains(child))
+            .collect();
+        assert_eq!(
+            children,
+            [
+                SLAYER_STARTED_CHILD,
+                SLAYER_SEQUENCE_CHILD,
+                SECOND_SLAYER_STARTED_CHILD
+            ]
+        );
+    }
+
+    #[test]
     fn a_remote_state_carries_the_retail_slayer_and_place_children() {
         // Retail remote player in the duel capture (51302 ms): `idRel` c5, `timeOffsetRel` fd,
         // `worldPosRel` at the anchor, `rotation`, slayer state 1a started in state 28c5 with
@@ -1790,9 +1927,10 @@ mod tests {
         let retail_child = |index| child(&retail, index).expect("retail child");
         let prefix_of = |bytes: Vec<u8>| Reader::new(&bytes).prefixed().expect("prefix");
         let slayer = SlayerState {
-            state: prefix_of(retail_child(SLAYER_STATE_CHILD)),
+            state: Some(prefix_of(retail_child(SLAYER_STATE_CHILD))),
             started: u16::from_be_bytes([0x28, 0xc5]),
             sequence: prefix_of(retail_child(SLAYER_SEQUENCE_CHILD)),
+            second: None,
         };
         let step = RemoteStep {
             stamp: AlcStamp {

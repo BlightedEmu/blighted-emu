@@ -232,7 +232,7 @@ impl AttackKind {
 }
 
 /// Whether input counter `counter` comes after `last`; the counter wraps at `u16::MAX`.
-const fn counter_is_newer(counter: u16, last: u16) -> bool {
+pub(super) const fn counter_is_newer(counter: u16, last: u16) -> bool {
     (counter.wrapping_sub(last) as i16) > 0
 }
 
