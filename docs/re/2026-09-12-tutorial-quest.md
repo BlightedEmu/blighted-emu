@@ -464,3 +464,19 @@ Source: the newchar ledger of 2026-09-12 (`local-data/captures/own/newchar-linux
 - **Unknown.** The gate that rejects our targets is still not found from static data. Remaining
   candidates are client state the ledger cannot show (the relation registry of `FUN_14171b010`,
   `m_notTargetableOnInit` per prefab, the stealth/ownership requests).
+
+### 15.2 Our ledger against retail (2026-09-18, live run 8)
+
+- **Observed (Azoth capture of our server, same tutorial, greatsword + blunderbuss).** The MMB
+  press sets value 2 bit 20, value 5 bit 29 and value 7 bit 51 in both ledgers. Retail's row 3
+  names the target at the press and keeps it 7.6 to 13.9 s. Ours: 60 presses, 2 targets (0.35 s
+  and 1 s), and the first lock ended with no press and no server event for the mob.
+- **Observed.** Server message types that only retail sent before the first fight are social,
+  guild, voice chat, inventory, anti-cheat and meta achievement messages; none is about targeting.
+- **Observed (own player ALC, 195-215 s retail vs 225-240 s ours).** Retail sent the own
+  `rotation` (child 11) in 938 and `lookDir` (child 12) in 408 of 1,193 own states, and child 2 in
+  1,179. Ours sent 11 and 12 in none of 450.
+- **Inferred.** Without the own facing and look direction the client's lock holds only while the
+  player still looks along the stale replicated look. Own states now carry both from the newest
+  input's view when it changed. Unknown: the client line that reads them; the effect of child 2,
+  the own state rate (retail about 60/s, ours 30/s) and our `idAbs`/`timeOffsetAbs` in every state.
