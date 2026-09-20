@@ -4651,6 +4651,7 @@ mod tests {
             loot_table: Some(FLINT.to_owned()),
             tradeskill: None,
             tool_required: false,
+            game_event: None,
         }]);
         let loot = LootTables::build(LootSource {
             rows: vec![
@@ -4855,6 +4856,7 @@ mod tests {
             coins,
             experience,
             item: Some((item.to_owned(), 1)),
+            whisper: None,
         };
         let item = |name: &str| Ingredient {
             kind: IngredientKind::Item(name.to_owned()),
@@ -4895,6 +4897,7 @@ mod tests {
                     loot_table: None,
                     tradeskill: Some("Skinning".to_owned()),
                     tool_required: true,
+                    game_event: None,
                 }]),
                 recipes: Recipes::build(
                     [

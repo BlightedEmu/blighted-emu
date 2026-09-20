@@ -32,6 +32,9 @@ pub struct Gatherable {
     pub tradeskill: Option<String>,
     /// It needs its tradeskill's tool (`Restriction` ToolRequired).
     pub tool_required: bool,
+    /// `GameEventID`: the game event of a gather of it (`MSQ_CorruptedNodule_1_interact` for a
+    /// quest nodule, which a quest's `TaskGameEvent` counts).
+    pub game_event: Option<String>,
 }
 
 /// The gatherables by the CRC-32 of their lowercase id.
@@ -68,6 +71,7 @@ impl Gatherables {
                     loot_table: row.final_loot_table.clone(),
                     tradeskill: row.tradeskill.clone(),
                     tool_required: row.restriction.as_deref() == Some(TOOL_REQUIRED),
+                    game_event: row.game_event_id.clone().filter(|event| !event.is_empty()),
                 }),
         )
     }
@@ -101,6 +105,7 @@ mod tests {
             loot_table: Some("SingleStone".to_owned()),
             tradeskill: None,
             tool_required: false,
+            game_event: None,
         }]);
         // Retail flint request: crc `a417137f`.
         let flint = gatherables.get(0xa417_137f).cloned().expect("flint");

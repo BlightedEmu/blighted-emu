@@ -2,7 +2,8 @@
 //! The rewards of game events (beach-quests note, section 1): a quest's `SuccessGameEventID`
 //! names a `GameEventData` row whose `CurrencyReward` coins, `UniversalExpAmount` experience and
 //! `ItemReward` the player gets at the turn-in (retail: 150 + 225 coins after the first two beach
-//! quests).
+//! quests). An event can also name a whisper, a voice line the client plays (retail 2026-09-18:
+//! `01_IsabellasFirstWhisper_Isabella_01` in Amidst the Wreckage).
 
 use std::collections::HashMap;
 
@@ -17,6 +18,8 @@ pub struct Reward {
     pub experience: u32,
     /// `ItemReward` and `ItemRewardQty`.
     pub item: Option<(String, u32)>,
+    /// `WhisperID`, else `WhisperId`: the whisper the client plays.
+    pub whisper: Option<String>,
 }
 
 /// Every game event's reward by lowercase event id.
@@ -58,6 +61,11 @@ impl Rewards {
                             coins: number_of(row.currency_reward.as_deref()),
                             experience: number_of(row.universal_exp_amount.as_deref()),
                             item,
+                            whisper: row
+                                .whisper_id
+                                .clone()
+                                .or_else(|| row.whisper_id_2.clone())
+                                .filter(|whisper| !whisper.is_empty()),
                         },
                     )
                 }),
@@ -91,6 +99,7 @@ mod tests {
                 coins: number_of(Some("225")),
                 experience: number_of(Some("275")),
                 item: Some(("QuestReward_MB_Meat_Pouch".to_owned(), 1)),
+                whisper: None,
             },
         )]);
         let reward = rewards.get("01_SkinningKnife_Success").expect("reward");

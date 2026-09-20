@@ -18,6 +18,7 @@ pub mod gathering;
 pub mod ids;
 pub mod loot;
 pub mod mob_prefabs;
+pub mod poi_tags;
 pub mod respawn_points;
 pub mod rewards;
 pub mod starter;
