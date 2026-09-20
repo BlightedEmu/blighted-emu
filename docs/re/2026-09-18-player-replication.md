@@ -49,12 +49,51 @@ these four states appear in the crouch-and-prone capture, so the crouch and pron
 **Unknown**; so are the states of attacks, dodges and abilities (the duel's remote `07`/`08` came
 with `slayerStateIdStarted` in child 17 and children 44 and 48).
 
+### 2.1 Slayer slots, sequences and actions (second pass)
+
+**Observed** (own retail states against own inputs: `duel_capture`, `arv_charged_attack_hold`,
+`arvaysa_walk_running_crouch_prone`, `Hive bow and spear in duels`; scanners `pcorr`, `pact`,
+`panim` in scratch):
+
+- Children 13-24 are four slayer slots of (`slayerStateId`, `slayerStateIdStarted`,
+  `slayerSequenceId`). Slot 1 carries the movement and attack states; slot 2 (16-18) holds
+  `2c`/`2d`; slot 4 (22-24) toggled `20`/sequence `b533` and `00`/`00` in the duel with no block
+  input near.
+- An attack does not change `slayerStateId` when the state stays: the client sends a new
+  `slayerStateIdStarted` (the current ALC state number) and a new `slayerSequenceId`, and child
+  17 repeats the start. Holding attack in the charged capture cycled four sequences, as prefix
+  values 1336, 5050, 2992, 5056 (bytes `b814 ba4e b02e 804f`), and the charged release gave 4313
+  (`9943`). The duel's attacks used 1336, 5050, 5056 and others (`9407`, `a507`, `9509`, `9e04`,
+  `aa05`): the ids are shared between captures, so they name actions, not a per-player counter.
+- The decoded state ids seen are small (1, 7, 8, 12, 13, 26, 27, 31, 44, 45); the sequence ids run
+  to about 5,000. The player CAGE grid (`playerdata/cage/player.grid`) has 59 aliases, 63 action
+  lists and 530 actions (541 named actions in the lists): neither its alias order nor its action
+  order gives these numbers (Attack is alias 7 and Dodge 12, which fit two states; 26 and 27, the
+  run toggle's, do not). No pak file holds the slayer script; the client builds it at run time
+  (`SlayerScriptComponent`, `SlayerScript::Module::SlayerScriptData`).
+- Crouch and prone: the capture's crouch toggles (input bit groups `v1b45 v2b45 v4b1 v6b6 v8b28
+  v8b56` and `v1b32 v1b49 v3b23 v3b56 v4b32 v7b34`) changed no slayer state, no `globalFragTags`
+  and no Mannequin scope of the own state.
+
+**Unknown:** the table from (weapon, action, combo step) to slayer state and sequence, and how the
+client shows crouch to others. The captures name too few actions per weapon, and the weapon in
+the hand is not readable from them (the own card's paperdoll lies past members our walk cannot
+read). Without the table the sim sends no attack, dodge or crouch state: a wrong sequence id
+would play another action's animation. Ways to learn it: the client's slayer script tables at
+run time (a probe started with the game, not attached to it), or a capture of each weapon's
+light, heavy and charged attacks and a dodge with the weapon named.
+
 ## 3. What the sim sends (built 2026-09-18)
 
 - Each tick every player becomes one replica that all its viewers share
-  (`bins/sim/src/world/replica.rs`): its look, the items that show on it (paperdoll only; the bag
-  stays private), its health, its block, its camera yaw as facing and look direction, its run
-  toggle as slayer state `1a`/`1b`, all on its own ALC clock (`OwnClock`).
+  (`bins/sim/src/world/replica.rs`): its look, the items that show on it (the public paperdoll
+  only, as retail: every remote paperdoll of the duel and the 3v3 arena sets slot 2 alone), its
+  health, its block, its camera yaw as facing, its view as look direction, its lock or homing
+  target, its run toggle as slayer state `1a`/`1b`, all on its own ALC clock (`OwnClock`).
+- `lookDir` (child 12) is a unit direction, not a facing quat: `(-sin yaw cos pitch, cos yaw cos
+  pitch, -sin pitch, 0)` from the input's view angles (record bit 6: yaw, pitch), in the
+  smallest-three form with w flagged 0 (Observed: own duel states against the inputs; remote tags
+  `0x10`, `0x18`, `0x30`, `0x39` the same form).
 - Card: the player prefab with the look, paperdoll and health, and a full first ALC state on the
   player's clock anchor. Later: `AlcState::remote_step` every time the player goes out (number,
   time, anchor, place, facing, look direction, slayer state), plus the vitals change, the death
@@ -63,9 +102,14 @@ with `slayerStateIdStarted` in child 17 and children 44 and 48).
   farther every fourth; at most 24 remote players per viewer per tick (about 1 KB of states,
   retail's p99 datagram); a new player's card and any change always go; card refreshes and the
   longest-waiting players go first.
+- Who a player sees (`Interest`): those that fight it first (one targets the other, or both are
+  in combat), then the nearest, at most `max_visible_players`. That is no bundle limit (bundles
+  split by bytes; the per-tick budget above bounds the bytes): 200 by default, at most 500. Each
+  seen player costs a slot and a card refresh every 30 bundles, so 500 seen means about 17 cards
+  per tick. Retail's 45-vs-45 war showed one client 180 other players.
 - Ghosts across sim borders carry the same replica (`nw_bus::PlayerGhost`, at most 240 bytes per
-  ghost), so a border player keeps moving, turning, blocking and changing weapons for the players
-  of the other sim.
+  ghost: the view, the target and the slot and item of each item that shows), so a border player
+  keeps moving, turning, blocking and changing weapons for the players of the other sim.
 
 ## 4. Measuring sync
 
@@ -83,8 +127,6 @@ NW_SECRET_TESTCLIENT_SWARM_PASSWORD=... target/release/nw-testclient swarm --bot
 
 - The slayer states of crouch, prone, sprint, attacks, dodges, blocks and abilities, and the
   meaning of `slayerSequenceId`.
-- The Mannequin scope children (28, 33, 34) of a remote player: the player fragment and action
-  numbers of attacks and emotes. Without them other players see no swing animation.
-- `lookDir` with pitch: we send the yaw only, in the `rotation` form.
-- The durability, bind flag and instance id a remote paperdoll needs: a ghost's items carry
-  none (Inferred: they do not show).
+- The slayer state and sequence of each action (section 2.1). Retail remote Mannequin scopes
+  (children 28, 33, 34) came only in a few states of the duel (`33=0700cc2c15000053` with tags
+  `0210...`), not with the attacks.
