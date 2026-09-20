@@ -132,6 +132,9 @@ pub(super) struct Gear {
     ammo: [Ammo; AMMO_OPTIONS],
     /// The items whose ammo [`Gear::arm`] last set, per option.
     armed: [Option<String>; AMMO_OPTIONS],
+    /// Weapons the hand took from the client's attacks ([`Gear::take_in_hand`]): changes the
+    /// own client is not told of, but other players must see.
+    hand_follows: u64,
 }
 
 impl Gear {
@@ -159,6 +162,7 @@ impl Gear {
             attached: false,
             ammo: [Ammo::default(); AMMO_OPTIONS],
             armed: [None, None],
+            hand_follows: 0,
         })
     }
 
@@ -183,6 +187,7 @@ impl Gear {
             attached: drawn.is_some(),
             ammo: [Ammo::default(); AMMO_OPTIONS],
             armed: [None, None],
+            hand_follows: 0,
         };
         for carried in items {
             let Some(item) = kits.item(&carried.item_id) else {
@@ -390,6 +395,7 @@ impl Gear {
             self.attach_at_ms = None;
             self.attached = true;
             self.changed = changed;
+            self.hand_follows += 1;
         }
     }
 
@@ -480,10 +486,12 @@ impl Gear {
             .collect()
     }
 
-    /// The version of the states with the changes not yet taken: a new one is a change other
-    /// players must see.
+    /// The version other players see: the version of the states with the changes not yet taken,
+    /// plus the weapons the hand took from the client's attacks. A new one is a change other
+    /// players must see; without the hand's weapons, a swap the server saw only in an attack
+    /// never reached them.
     pub(super) const fn shown_version(&self) -> u64 {
-        self.version + self.changed as u64
+        self.version + self.changed as u64 + self.hand_follows
     }
 
     /// The weapon in the hand and the ammo.
@@ -1108,6 +1116,33 @@ pub(crate) mod tests {
         assert!(gear.fire(NOW + RELOAD_MS));
         gear.arm(|_| Some((SHOTS, RELOAD_MS)), TIME_NS);
         assert_eq!(gear.hands().ammo[0].map(|ammo| ammo.count), Some(SHOTS - 1));
+    }
+
+    #[test]
+    fn other_players_see_the_weapon_the_hand_took_from_an_attack() {
+        let kits = kits();
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
+        let before = gear.shown_version();
+        gear.take_in_hand(slot::MAIN_HAND_OPTION_1, 1);
+        assert_eq!(gear.take_change(), None, "the own client is not told");
+        assert!(
+            gear.shown_version() > before,
+            "other players see the new hand"
+        );
+        assert_eq!(gear.hands().drawn, Some(slot::MAIN_HAND_OPTION_1));
+        let held = gear.shown_version();
+        gear.take_in_hand(slot::MAIN_HAND_OPTION_1, 2);
+        assert_eq!(gear.shown_version(), held, "the same weapon is no change");
+        // A later change the own client is told of keeps the number rising.
+        assert!(gear.draw(1, 0, 3));
+        assert!(gear.shown_version() > held);
+        let drawn = gear.shown_version();
+        assert!(gear.take_change().is_some());
+        assert_eq!(
+            gear.shown_version(),
+            drawn,
+            "taking the change keeps the number"
+        );
     }
 
     #[test]
