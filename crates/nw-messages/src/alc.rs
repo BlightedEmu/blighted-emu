@@ -38,6 +38,10 @@ const QUAT_TAG_Z_DERIVED: u8 = 0x46;
 const QUAT_TAG_NORTH: u8 = 0x6e;
 /// Set in a quat tag when the derived part is negative.
 const QUAT_TAG_NEGATIVE: u8 = 1;
+/// The parts of a quat (x, y, z, w).
+const QUAT_PARTS: usize = 4;
+/// The bit of a quat tag where the index of the derived part starts.
+const QUAT_DERIVED_SHIFT: u8 = 5;
 /// Slot 0 child of the offset from `pos10` (`worldPosRel`).
 const POS_REL_CHILD: usize = 10;
 /// Slot 0 child of where a character looks (`lookDir`, a quat).
@@ -358,10 +362,62 @@ pub struct RemoteStep {
     pub position: Option<InputPosition>,
     /// Its facing (yaw, radians).
     pub facing: Option<f32>,
-    /// Where it looks (yaw, radians).
-    pub look: Option<f32>,
+    /// Where it looks.
+    pub look: Option<LookDir>,
     /// Its slayer state, when it goes with the state.
     pub slayer: Option<SlayerState>,
+}
+
+/// Where a character looks (the client input's view angles, record bit 6: yaw then pitch, in
+/// radians).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LookDir {
+    /// The yaw: 0 looks north (+y), a positive yaw turns to the west.
+    pub yaw: f32,
+    /// The pitch: positive looks down (Observed: the own retail `lookDir` z is `-sin(pitch)`).
+    pub pitch: f32,
+}
+
+impl LookDir {
+    /// The `lookDir` bytes: the unit direction `(-sin yaw cos pitch, cos yaw cos pitch,
+    /// -sin pitch, 0)` in the client's smallest-three form (Observed: every own retail `lookDir`
+    /// of the duel capture against the input's view angles, and the remote ones have the same
+    /// tags: w is always 0 and flagged so).
+    pub fn bytes(self) -> Vec<u8> {
+        let (sin_yaw, cos_yaw) = self.yaw.sin_cos();
+        let (sin_pitch, cos_pitch) = self.pitch.sin_cos();
+        smallest_three([-sin_yaw * cos_pitch, cos_yaw * cos_pitch, -sin_pitch, 0.0])
+    }
+}
+
+/// The smallest-three form of the unit quat or direction `parts` (x, y, z, w;
+/// `FUN_14087a8d0`): a tag with the index of the largest part in bits 5 and 6 (derived from
+/// the others), its sign in bit 0 and a flag per part that is 0 in bits 1 to 4, then one byte
+/// per other part, in part order.
+fn smallest_three(parts: [f32; QUAT_PARTS]) -> Vec<u8> {
+    let largest = (0..QUAT_PARTS)
+        .max_by(|a, b| parts[*a].abs().total_cmp(&parts[*b].abs()))
+        .unwrap_or(QUAT_PARTS - 1);
+    let byte = |part: f32| ((part + QUAT_OFFSET) / QUAT_STEP).round().clamp(0.0, 255.0) as u8;
+    // The largest part's index is below 4.
+    let mut tag = (largest as u8) << QUAT_DERIVED_SHIFT;
+    if parts[largest] < 0.0 {
+        tag |= QUAT_TAG_NEGATIVE;
+    }
+    let mut bytes = Vec::with_capacity(QUAT_PARTS);
+    for (index, part) in parts
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != largest)
+    {
+        if *part == 0.0 {
+            tag |= QUAT_BIT_1 << index;
+        } else {
+            bytes.push(byte(*part));
+        }
+    }
+    bytes.insert(0, tag);
+    bytes
 }
 
 /// The `scopeTimeBlob0Data*` children of `ticks`: the low byte, and the higher ones when
@@ -634,8 +690,8 @@ impl AlcState {
         if let Some(yaw) = step.facing {
             children.push((ROTATION_CHILD, rotation_bytes(yaw)));
         }
-        if let Some(yaw) = step.look {
-            children.push((LOOK_DIR_CHILD, rotation_bytes(yaw)));
+        if let Some(look) = step.look {
+            children.push((LOOK_DIR_CHILD, look.bytes()));
         }
         if let Some(slayer) = step.slayer {
             children.extend(slayer.children()?);
@@ -1678,6 +1734,45 @@ mod tests {
     }
 
     #[test]
+    fn the_look_direction_is_the_retail_direction_vector() {
+        // Retail own states of the duel capture with the input's view angles (yaw, pitch):
+        // `lookDir` 0x10 = x derived, y and z bytes (w flagged 0); 0x18 = x derived, z also 0.
+        let cases = [
+            (
+                (-1.549_167_8, 0.269_884_56),
+                [0.962_950_7, 0.019_410_789, -0.268_977_85],
+            ),
+            (
+                (-1.169_047_6, 0.079_825_92),
+                [0.918_719, 0.385_442_55, -0.085_962],
+            ),
+        ];
+        for ((yaw, pitch), retail) in cases {
+            let bytes = LookDir { yaw, pitch }.bytes();
+            assert_eq!(bytes.len(), 3, "a tag and two parts");
+            assert_eq!(bytes[0], 0x10, "x derived, w zero");
+            // The state and the input were not sampled at one instant: two steps of slack.
+            let part = |byte: u8| f32::from(byte) * QUAT_STEP - QUAT_OFFSET;
+            assert!((part(bytes[1]) - retail[1]).abs() <= 2.0 * QUAT_STEP, "y {yaw}");
+            assert!((part(bytes[2]) - retail[2]).abs() <= 2.0 * QUAT_STEP, "z {yaw}");
+        }
+        // Level, looking east-north-east: x derived, y kept, z and w flagged 0 (retail `181b`).
+        let level = LookDir {
+            yaw: -2.191,
+            pitch: 0.0,
+        };
+        assert_eq!(level.bytes()[0], 0x18);
+        assert_eq!(level.bytes().len(), 2);
+        // Looking south and down: y derived and negative.
+        let south = LookDir {
+            yaw: std::f32::consts::PI,
+            pitch: 0.2,
+        };
+        assert_eq!(south.bytes()[0] & !QUAT_TAG_NEGATIVE, 0x30);
+        assert_eq!(south.bytes()[0] & QUAT_TAG_NEGATIVE, QUAT_TAG_NEGATIVE);
+    }
+
+    #[test]
     fn a_remote_state_carries_the_retail_slayer_and_place_children() {
         // Retail remote player in the duel capture (51302 ms): `idRel` c5, `timeOffsetRel` fd,
         // `worldPosRel` at the anchor, `rotation`, slayer state 1a started in state 28c5 with
@@ -1701,7 +1796,10 @@ mod tests {
             },
             position: retail.pos10,
             facing: Some(0.5),
-            look: Some(0.25),
+            look: Some(LookDir {
+                yaw: 0.25,
+                pitch: 0.0,
+            }),
             slayer: Some(slayer),
         };
         let ours = AlcState::remote_step(&step).expect("step");
@@ -1725,7 +1823,16 @@ mod tests {
             Some(STAMP.anchor_us.to_be_bytes().to_vec())
         );
         assert_eq!(child(&ours, ROTATION_CHILD), Some(rotation_bytes(0.5)));
-        assert_eq!(child(&ours, LOOK_DIR_CHILD), Some(rotation_bytes(0.25)));
+        assert_eq!(
+            child(&ours, LOOK_DIR_CHILD),
+            Some(
+                LookDir {
+                    yaw: 0.25,
+                    pitch: 0.0
+                }
+                .bytes()
+            )
+        );
         assert_eq!(ours.pos10, retail.pos10);
         let bare = AlcState::remote_step(&RemoteStep {
             position: None,

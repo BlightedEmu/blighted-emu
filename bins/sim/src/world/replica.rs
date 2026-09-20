@@ -21,7 +21,7 @@ use nw_bus::{GHOST_VISIBLE_ITEMS, GhostItem, PlayerGhost};
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     AlcStamp, AlcState, BundleGroup, BundleMember, DamageReceiverState, EquippedItem, GearItem,
-    Hands, HealthChange, InputPosition, MemberState, MessageError, PlayerGear, PlayerLook,
+    Hands, HealthChange, InputPosition, LookDir, MemberState, MessageError, PlayerGear, PlayerLook,
     PlayerStates, RemoteStep, SlayerState, VitalsData, VitalsState,
 };
 use nw_sim_core::Position;
@@ -64,7 +64,7 @@ pub(super) struct ReplicaSource {
     pub(super) look: Option<PlayerLook>,
     pub(super) health: u32,
     pub(super) max_health: u32,
-    pub(super) facing: Option<f32>,
+    pub(super) view: Option<LookDir>,
     pub(super) run_mode: Option<bool>,
     pub(super) mode_started: u16,
     pub(super) blocking: bool,
@@ -91,7 +91,8 @@ impl ReplicaSource {
             look: self.look.map(|look| look.choices()),
             health: self.health,
             max_health: self.max_health,
-            facing: self.facing,
+            facing: self.view.map(|view| view.yaw),
+            pitch: self.view.map(|view| view.pitch),
             run_mode: self.run_mode,
             mode_started: self.mode_started,
             blocking: self.blocking,
@@ -110,7 +111,10 @@ impl ReplicaSource {
             look: ghost.look.map(PlayerLook::of_choices),
             health: ghost.health,
             max_health: ghost.max_health,
-            facing: ghost.facing,
+            view: ghost.facing.map(|yaw| LookDir {
+                yaw,
+                pitch: ghost.pitch.unwrap_or_default(),
+            }),
             run_mode: ghost.run_mode,
             mode_started: ghost.mode_started,
             blocking: ghost.blocking,
@@ -305,8 +309,8 @@ impl Replica {
             state: MemberState::Alc(AlcState::remote_step(&RemoteStep {
                 stamp: self.stamp,
                 position: Some(pos),
-                facing: source.facing,
-                look: source.facing,
+                facing: source.view.map(|view| view.yaw),
+                look: source.view,
                 slayer: source.slayer(),
             })?),
         }];
@@ -440,7 +444,10 @@ pub(super) mod tests {
             look: None,
             health: MAX_HEALTH,
             max_health: MAX_HEALTH,
-            facing: Some(1.0),
+            view: Some(LookDir {
+                yaw: 1.0,
+                pitch: 0.25,
+            }),
             run_mode: Some(true),
             mode_started: 2,
             blocking: false,

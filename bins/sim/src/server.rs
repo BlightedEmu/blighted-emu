@@ -26,9 +26,9 @@ use nw_db::{
 };
 use nw_messages::facet::TIME_SYNC_REQUEST_TYPE_INDEX;
 use nw_messages::{
-    BodyCodec, ClientFacetMsg, ClientInputMsg, InputPosition, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
-    REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX,
-    SpreadshotRequestMsg,
+    BodyCodec, ClientFacetMsg, ClientInputMsg, InputPosition, LookDir,
+    RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
+    SPREADSHOT_REQUEST_TYPE_INDEX, SpreadshotRequestMsg,
 };
 use nw_reflect::Envelope;
 use nw_sim_core::{Ground, GroundCheck, Position, TickClock};
@@ -563,7 +563,11 @@ impl Loop {
             return;
         };
         if let Some((position, view)) = input.newest_view() {
-            self.move_player(connection, position, view.map(|[yaw, _]| yaw));
+            self.move_player(
+                connection,
+                position,
+                view.map(|[yaw, pitch]| LookDir { yaw, pitch }),
+            );
         }
         let now_ms = self.now_ms();
         if let Some(request) = input.interaction() {
@@ -601,12 +605,12 @@ impl Loop {
     }
 
     /// Moves the player of `connection` to the body under its camera at `position`, looking
-    /// along `yaw` when the record says, and counts a refusal.
+    /// along `view` when the record says, and counts a refusal.
     fn move_player(
         &mut self,
         connection: &ConnectionRef,
         position: InputPosition,
-        yaw: Option<f32>,
+        view: Option<LookDir>,
     ) {
         let camera = Position {
             x: position.x,
@@ -615,7 +619,7 @@ impl Loop {
         };
         let (result, next) = self
             .world
-            .move_from_camera(connection, camera, yaw, self.now_ms());
+            .move_from_camera(connection, camera, view, self.now_ms());
         if result.is_ok() {
             tracing::trace!(x = next.x, y = next.y, z = next.z, "client move");
         }

@@ -51,8 +51,9 @@ pub use achievements::{
 pub use afflictions::{Affliction, AfflictionId, AfflictionList, ColdLong, HotLong, LongForm};
 pub use alc::{
     ALC_TYPE_INDEX, AlcChild, AlcStamp, AlcState, DATA_BITS_ACTIVE, FRAG_TAGS_LEN, LayerEntry,
-    MobAnimation, MobStep, POS10_CHILD, RemoteStep, SLOT0_CHILDREN, SLOT1_CHILDREN, SPAWN_STATE_ID,
-    SPAWN_STATE_MS, SPAWN_TELEPORT, ScopeEntry, SlayerState, StepScope, TeleportStep,
+    LookDir, MobAnimation, MobStep, POS10_CHILD, RemoteStep, SLOT0_CHILDREN, SLOT1_CHILDREN,
+    SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, ScopeEntry, SlayerState, StepScope,
+    TeleportStep,
 };
 pub use appearance::{
     LOOK_CHOICES, PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState, PlayerIconData, PlayerLook,

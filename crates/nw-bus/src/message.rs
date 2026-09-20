@@ -417,6 +417,8 @@ pub struct PlayerGhost {
     pub max_health: u32,
     /// Its facing (yaw, radians), when known.
     pub facing: Option<f32>,
+    /// The pitch of its view (radians, positive looks down), when known.
+    pub pitch: Option<f32>,
     /// Its run toggle (the input's movement mode), when known.
     pub run_mode: Option<bool>,
     /// The ALC state number in which its movement mode started.
@@ -883,6 +885,7 @@ mod tests {
                 health: u32::MAX,
                 max_health: u32::MAX,
                 facing: Some(f32::MAX),
+                pitch: Some(f32::MAX),
                 run_mode: Some(true),
                 mode_started: u16::MAX,
                 blocking: true,

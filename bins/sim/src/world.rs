@@ -33,10 +33,10 @@ use nw_messages::{
     BundleGroup, BundleMember, ClientFacetMsg, ConsumableCooldown, CooldownsState, CurrencyState,
     DisableCollisionMsg, GatheringInterruptedMsg, Hands, HealthChange, InputRecord,
     InteractionEndedMsg, InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT,
-    LevelInfoChangedMsg, LevelSpec, MeleeHitMsg, MessageError, PlayerLook, PlayerSeenByAiMsg,
-    PlayerStates, ProgressionState, SPAWN_STATE_ID, SelectedAsTargetMsg, ServerMessage,
-    TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg, UnselectedAsTargetMsg, VitalsData,
-    WorldPosition, facet_entity,
+    LevelInfoChangedMsg, LevelSpec, LookDir, MeleeHitMsg, MessageError, PlayerLook,
+    PlayerSeenByAiMsg, PlayerStates, ProgressionState, SPAWN_STATE_ID, SelectedAsTargetMsg,
+    ServerMessage, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg, UnselectedAsTargetMsg,
+    VitalsData, WorldPosition, facet_entity,
 };
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
@@ -394,8 +394,8 @@ struct Player {
     moved: bool,
     /// The client's last camera point and when it came, for the player's speed.
     last_camera: Option<(Position, u64)>,
-    /// The camera yaw of its newest input (radians): where other players see it face.
-    view_yaw: Option<f32>,
+    /// The view angles of its newest input: where other players see it face and look.
+    view: Option<LookDir>,
     /// The run toggle's movement mode of its newest input, and the ALC state number in which it
     /// started: its slayer state for other players ([`replica`]).
     run_mode: Option<bool>,
@@ -1055,14 +1055,14 @@ impl SimWorld {
     }
 
     /// Moves the player of `connection` to the body under its client camera at `camera`,
-    /// looking along `yaw` (radians) when the input says ([`crate::camera::body_of`]; without a
-    /// yaw the camera point is taken as the body), received at `now_ms`. Gives the result and the
-    /// body position it checked.
+    /// looking along `view` when the input says ([`crate::camera::body_of`]; without a view the
+    /// camera point is taken as the body), received at `now_ms`. Gives the result and the body
+    /// position it checked.
     pub fn move_from_camera(
         &mut self,
         connection: &ConnectionRef,
         camera: Position,
-        yaw: Option<f32>,
+        view: Option<LookDir>,
         now_ms: u64,
     ) -> (Result<GroundCheck, MoveError>, Position) {
         let entity = self.by_connection.get(connection).copied();
@@ -1081,11 +1081,13 @@ impl SimWorld {
         });
         if let Some(mut player) = entity.and_then(|entity| self.world.get_mut::<Player>(entity)) {
             player.moving = speed_mps >= crate::camera::STILL_SPEED_MPS;
-            if yaw.is_some() {
-                player.view_yaw = yaw;
+            if view.is_some() {
+                player.view = view;
             }
         }
-        let next = yaw.map_or(camera, |yaw| crate::camera::body_of(camera, yaw, speed_mps));
+        let next = view.map_or(camera, |view| {
+            crate::camera::body_of(camera, view.yaw, speed_mps)
+        });
         (self.move_to(connection, next, now_ms), next)
     }
 
@@ -2315,7 +2317,7 @@ impl SimWorld {
             look: player.look,
             health: vitals.health.current(),
             max_health: vitals.health.max(),
-            facing: player.view_yaw,
+            view: player.view,
             run_mode: player.run_mode,
             mode_started: player.mode_started,
             blocking: vitals.blocking(),
@@ -2624,7 +2626,7 @@ impl SimWorld {
                     move_facing: None,
                     push: None,
                     last_camera: None,
-                    view_yaw: None,
+                    view: None,
                     run_mode: None,
                     mode_started: SPAWN_STATE_ID,
                     remote_plan: replica::RemotePlan::default(),
@@ -5264,7 +5266,10 @@ mod tests {
         const SLAYER_STATE: usize = 13;
         /// The run toggle's slayer state (Observed).
         const RUN_MODE_STATE: u8 = 0x1a;
-        const YAW: f32 = 1.0;
+        const VIEW: LookDir = LookDir {
+            yaw: 1.0,
+            pitch: 0.3,
+        };
         let mut world = two_players();
         let (a, b) = (connection(1), connection(2));
         let input_at = NOW + 33;
@@ -5275,7 +5280,7 @@ mod tests {
             .expect("body")
             .motion
             .position();
-        let _ = world.move_from_camera(&a, at, Some(YAW), input_at);
+        let _ = world.move_from_camera(&a, at, Some(VIEW), input_at);
         world.attack_input(&a, &[stance_record(1)], input_at);
         let outgoing = tick(&mut world, input_at);
         let seen = states_of(&world, &outgoing.messages, &b, 1);
@@ -5292,10 +5297,14 @@ mod tests {
         );
         assert_eq!(
             child(FACING),
-            Some(nw_messages::alc::rotation_bytes(YAW)),
+            Some(nw_messages::alc::rotation_bytes(VIEW.yaw)),
             "the facing"
         );
-        assert!(child(LOOK_DIR).is_some(), "where it looks");
+        assert_eq!(
+            child(LOOK_DIR),
+            Some(VIEW.bytes()),
+            "where it looks, with the pitch"
+        );
         assert!(
             seen.iter().any(|state| matches!(
                 state,
