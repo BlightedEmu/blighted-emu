@@ -595,13 +595,20 @@ impl Loop {
 
     /// The dead player asks to live again (M6-B spec section 8.2).
     fn respawn_request(&mut self, connection: &ConnectionRef, body: &[u8]) {
-        if RequestRespawnMsg::decode(body).is_err() {
+        let Ok(request) = RequestRespawnMsg::decode(body) else {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
             return;
-        }
-        let result = match self.world.request_respawn(connection, self.now_ms()) {
-            Ok(()) => RESPAWNED,
-            Err(refusal) => refusal.reason(),
+        };
+        let point = request.respawn_point();
+        let result = match self.world.request_respawn(connection, point, self.now_ms()) {
+            Ok(at) => {
+                tracing::info!(?point, x = at.x, y = at.y, z = at.z, "respawned");
+                RESPAWNED
+            }
+            Err(refusal) => {
+                tracing::info!(?point, reason = refusal.reason(), "respawn refused");
+                refusal.reason()
+            }
         };
         metrics::counter!(METRIC_RESPAWNS, RESULT_LABEL => result).increment(1);
     }

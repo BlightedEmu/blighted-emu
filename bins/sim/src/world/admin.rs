@@ -6,11 +6,10 @@
 use bevy_ecs::component::Component;
 use nw_bus::{AdminAction, AdminCommand, AdminReply, ConnectionRef, Point};
 use nw_formats::objectstream::lowercase_crc32;
-use nw_sim_core::Motion;
 use nw_world::records::VitalsSpawn;
 
 use super::attack::Vitals;
-use super::{Body, Player, QuestRefusal, SimWorld};
+use super::{Player, QuestRefusal, SimWorld};
 
 /// Most GM mobs one command spawns.
 pub const MAX_GM_SPAWN: u32 = 50;
@@ -114,12 +113,7 @@ impl SimWorld {
             y: to.y,
             z: to.z,
         };
-        if let Some(mut body) = self.world.get_mut::<Body>(target) {
-            body.motion = Motion::new(position, now_ms, &self.settings.limits);
-        }
-        if let Some(mut player) = self.world.get_mut::<Player>(target) {
-            player.moved = true;
-        }
+        self.place_player(target, position, None, now_ms);
         AdminReply::Done
     }
 

@@ -1148,6 +1148,19 @@ impl SimWorld {
         (self.move_to(connection, next, now_ms), next)
     }
 
+    /// The server puts player `entity` at `to` at `now_ms`, facing `facing` when given: its
+    /// next own state moves its client there ([`OwnTeleport`]), and a push on it ends.
+    fn place_player(&mut self, entity: Entity, to: Position, facing: Option<f32>, now_ms: u64) {
+        if let Some(mut body) = self.world.get_mut::<Body>(entity) {
+            body.motion = Motion::new(to, now_ms, &self.settings.limits);
+        }
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            player.moved = true;
+            player.move_facing = facing;
+            player.push = None;
+        }
+    }
+
     /// Removes a player.
     pub fn leave(&mut self, connection: &ConnectionRef) -> Option<Departure> {
         let entity = *self.by_connection.get(connection)?;
@@ -1901,13 +1914,7 @@ impl SimWorld {
                     continue;
                 }
                 if let Order::MoveTo(position, facing) = order {
-                    if let Some(mut body) = self.world.get_mut::<Body>(entity) {
-                        body.motion = Motion::new(position, now_ms, &self.settings.limits);
-                    }
-                    if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-                        player.moved = true;
-                        player.move_facing = Some(facing);
-                    }
+                    self.place_player(entity, position, Some(facing), now_ms);
                     continue;
                 }
                 let Some(mut player) = self.world.get_mut::<Player>(entity) else {
@@ -4171,7 +4178,7 @@ mod tests {
         );
         let respawn_at = card_at + RESPAWN_AFTER_MS;
         world
-            .request_respawn(&connection(1), respawn_at)
+            .request_respawn(&connection(1), None, respawn_at)
             .expect("respawn");
         let max = world
             .world

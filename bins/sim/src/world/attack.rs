@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use nw_content::combat::{AttackRow, WeaponKind, WeaponRow};
 use nw_content::loot::{FULL_CHANCE_PERCENT, LootContext};
+use nw_content::respawn_points::{nearest_respawn_point, respawn_point};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::paperdoll::slot;
 use nw_messages::{
@@ -30,8 +31,11 @@ use nw_messages::{
     MeleeDamage, MeleeHitMsg, OnDamageMsg, ServerMessage, SpreadshotProcessedMsg,
     SpreadshotRequestMsg,
 };
-use nw_sim_core::{Damage, Health, MobState, PlayerAttack, died, hurt, mob_hit, player_hit};
+use nw_sim_core::{
+    Damage, Health, MobState, PlayerAttack, TUTORIAL_START, died, hurt, mob_hit, player_hit,
+};
 
+use super::encounter::Tutorial;
 use super::gathering::{MOB_LEVEL, PLAYER_LOOT_LEVEL};
 use super::gear::unix_ns;
 use super::hit_shape::{
@@ -636,8 +640,13 @@ impl SimWorld {
         );
     }
 
-    /// The dead player of `connection` lives again with full health where it died, when
-    /// `min_respawn_ms` have passed since its death (M6-B spec section 8.2).
+    /// The dead player of `connection` lives again with full health, when `min_respawn_ms` have
+    /// passed since its death (M6-B spec section 8.2), at a respawn place, never where it died
+    /// (respawn note, 2026-09-18: retail moved its three open-world deaths 305 to 541 m): in the
+    /// tutorial at the start of its newest fight ([`Tutorial::respawn_at`]); in the open world
+    /// at the respawn point `point` its client chose, else at the known point nearest its death
+    /// ([`nw_content::respawn_points`]). No mob keeps it as a target, and its new place is
+    /// walked floor. Gives where it came back.
     ///
     /// # Errors
     ///
@@ -645,14 +654,18 @@ impl SimWorld {
     pub fn request_respawn(
         &mut self,
         connection: &ConnectionRef,
+        point: Option<u64>,
         now_ms: u64,
-    ) -> Result<(), RespawnRefusal> {
+    ) -> Result<Position, RespawnRefusal> {
         let min_ms = self.combat.min_respawn_ms;
-        let mut vitals = self
+        let entity = self
             .by_connection
             .get(connection)
             .copied()
-            .and_then(|entity| self.world.get_mut::<Vitals>(entity))
+            .ok_or(RespawnRefusal::NotInWorld)?;
+        let mut vitals = self
+            .world
+            .get_mut::<Vitals>(entity)
             .ok_or(RespawnRefusal::NotInWorld)?;
         let since = vitals.dead_since_ms.ok_or(RespawnRefusal::NotDead)?;
         if now_ms.saturating_sub(since) < min_ms {
@@ -660,7 +673,35 @@ impl SimWorld {
         }
         vitals.health.refill();
         vitals.dead_since_ms = None;
-        Ok(())
+        let number = self
+            .world
+            .get::<Player>(entity)
+            .map(|player| player.number)
+            .ok_or(RespawnRefusal::NotInWorld)?;
+        let died_at = self
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position())
+            .ok_or(RespawnRefusal::NotInWorld)?;
+        let to = if self.is_tutorial() {
+            self.tutorials
+                .get(&number)
+                .map_or(TUTORIAL_START, Tutorial::respawn_at)
+        } else {
+            let at = point
+                .and_then(respawn_point)
+                .unwrap_or_else(|| nearest_respawn_point([died_at.x, died_at.y, died_at.z]));
+            Position {
+                x: at[0],
+                y: at[1],
+                z: at[2],
+            }
+        };
+        self.mobs.forget(number);
+        self.scripted_swings.retain(|swing| swing.target != number);
+        self.place_player(entity, to, None, now_ms);
+        self.walked_floor.walked(to);
+        Ok(to)
     }
 
     /// Keeps whether the player holds block, starts a dodge roll on a new press of the dodge key
@@ -2886,9 +2927,10 @@ mod tests {
     #[test]
     fn a_request_after_the_wait_respawns() {
         let mut world = dead_fight();
-        assert_eq!(
-            world.request_respawn(&connection(1), NOW + MIN_RESPAWN_MS),
-            Ok(())
+        assert!(
+            world
+                .request_respawn(&connection(1), None, NOW + MIN_RESPAWN_MS)
+                .is_ok()
         );
         assert_eq!(health_of(&mut world, 1).current(), TEST_PLAYER_HEALTH);
     }
@@ -2897,7 +2939,7 @@ mod tests {
     fn a_request_too_soon_is_refused() {
         let mut world = dead_fight();
         assert_eq!(
-            world.request_respawn(&connection(1), NOW + MIN_RESPAWN_MS - 1),
+            world.request_respawn(&connection(1), None, NOW + MIN_RESPAWN_MS - 1),
             Err(RespawnRefusal::TooSoon)
         );
         assert!(health_of(&mut world, 1).is_dead());
@@ -2907,11 +2949,11 @@ mod tests {
     fn a_request_while_alive_is_refused() {
         let mut world = fight();
         assert_eq!(
-            world.request_respawn(&connection(1), NOW),
+            world.request_respawn(&connection(1), None, NOW),
             Err(RespawnRefusal::NotDead)
         );
         assert_eq!(
-            world.request_respawn(&connection(7), NOW),
+            world.request_respawn(&connection(7), None, NOW),
             Err(RespawnRefusal::NotInWorld)
         );
     }
@@ -2921,11 +2963,11 @@ mod tests {
         let mut world = dead_fight();
         let later = NOW + MIN_RESPAWN_MS;
         world
-            .request_respawn(&connection(1), later)
+            .request_respawn(&connection(1), None, later)
             .expect("respawn");
         world.apply_hit(1, mob(), SWORD_HIT, 0, later);
         assert_eq!(
-            world.request_respawn(&connection(1), later),
+            world.request_respawn(&connection(1), None, later),
             Err(RespawnRefusal::NotDead)
         );
         assert_eq!(
@@ -3107,7 +3149,7 @@ mod tests {
     }
 
     #[test]
-    fn a_mob_kills_a_player_who_then_respawns_where_it_died() {
+    fn a_mob_kills_a_player_who_then_respawns_at_a_respawn_point_not_where_it_died() {
         let mut world = fight();
         let mut deaths = Vec::new();
         let mut now = NOW;
@@ -3125,13 +3167,28 @@ mod tests {
             health_of(&mut world, 1).is_dead(),
             "no respawn without a request"
         );
-        world
-            .request_respawn(&connection(1), later)
+        // The client named no point: the known respawn point nearest the death.
+        let at = world
+            .request_respawn(&connection(1), None, later)
             .expect("respawn");
         assert_eq!(health_of(&mut world, 1).current(), TEST_PLAYER_HEALTH);
         let entity = world.player_by_number(1).expect("player");
         let body = world.world.get::<Body>(entity).expect("body");
-        assert_eq!(body.motion.position().x, MOB_X + 2.0, "where it died");
+        assert_eq!(body.motion.position(), at);
+        let nearest = nearest_respawn_point([MOB_X + 2.0, 0.0, 0.0]);
+        assert_eq!([at.x, at.y, at.z], nearest, "not where it died");
+        assert!(world.world.get::<Player>(entity).expect("player").moved);
+    }
+
+    #[test]
+    fn a_respawn_goes_to_the_point_the_client_chose() {
+        /// A retail respawn point (FFA_LightningStrikeDeath).
+        const POINT: u64 = 14_639_843_741_699_618_923;
+        let mut world = dead_fight();
+        let at = world
+            .request_respawn(&connection(1), Some(POINT), NOW + MIN_RESPAWN_MS)
+            .expect("respawn");
+        assert_eq!(Some([at.x, at.y, at.z]), respawn_point(POINT));
     }
 
     #[test]
@@ -3371,7 +3428,7 @@ mod tests {
                     Ok(AttackOutcome::Killed { .. }) => kills += 1,
                     Ok(_) => hits += 1,
                     Err(AttackRefusal::Dead) => {
-                        respawns += u64::from(world.request_respawn(&attacker, now).is_ok());
+                        respawns += u64::from(world.request_respawn(&attacker, None, now).is_ok());
                     }
                     Err(_) => {}
                 }
@@ -3401,7 +3458,7 @@ mod tests {
             "it stays until its respawn"
         );
         world
-            .request_respawn(&connection(1), NOW + MIN_RESPAWN_MS)
+            .request_respawn(&connection(1), None, NOW + MIN_RESPAWN_MS)
             .expect("respawn");
         assert_eq!(tick(&mut world, NOW + MIN_RESPAWN_MS).handoffs.len(), 1);
     }

@@ -29,7 +29,7 @@
 use std::sync::Arc;
 
 use nw_formats::objectstream::lowercase_crc32;
-use nw_sim_core::{Gait, Position};
+use nw_sim_core::{Gait, Position, TUTORIAL_START};
 
 use nw_content::ftue_entities::{FtueLevel, GDE_REF_PREFIX_LEN};
 use nw_content::mob_prefabs::ASSET_ID_LEN;
@@ -595,11 +595,24 @@ const SWARMER: SpawnPoint = SpawnPoint {
     delay_ms: 1_315,
     corpse_ms: SWARMER_CORPSE_MS,
 };
+/// A fight of the tutorial: the task that starts it, where a player who dies in it comes back,
+/// and its mobs.
+struct Fight {
+    after: &'static str,
+    /// Where the player stood when the fight started (Observed: the client's position at the
+    /// task in three live runs, 2026-09-18; the median). Retail's tutorial has one respawn place
+    /// per encounter, its `FTUE_V2_TeleportPlayer` destinations, whose level positions this
+    /// server does not read (Unknown): this is the evidence-based choice.
+    respawn: Position,
+    spawns: &'static [SpawnPoint],
+}
+
 /// The fights that start when a task is done, with the retail cards' positions.
-const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
-    (
-        "01_SoleSurvivor2_UnlockDoor",
-        &[SpawnPoint {
+const FIGHTS_AFTER: [Fight; 4] = [
+    Fight {
+        after: "01_SoleSurvivor2_UnlockDoor",
+        respawn: point(720.59, 362.05, 19.59),
+        spawns: &[SpawnPoint {
             vitals: LEGION_VITALS,
             category: LEGION_CATEGORY,
             at: point(668.27, 385.16, RUIN_TOP_Z),
@@ -610,10 +623,11 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
             delay_ms: 4_200,
             corpse_ms: LEGION_CORPSE_MS,
         }],
-    ),
-    (
-        "01_SoleSurvivor2_FTUE_First_Fight_Trigger",
-        &[SpawnPoint {
+    },
+    Fight {
+        after: "01_SoleSurvivor2_FTUE_First_Fight_Trigger",
+        respawn: point(697.25, 379.50, 24.34),
+        spawns: &[SpawnPoint {
             vitals: LEGION_VITALS,
             category: LEGION_CATEGORY,
             at: point(621.6, 419.5, COURTYARD_Z),
@@ -624,10 +638,11 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
             delay_ms: 5_782,
             corpse_ms: LEGION_CORPSE_MS,
         }],
-    ),
-    (
-        "01_SoleSurvivor2_Combat02_Trigger_Failsafe_ForClimb",
-        &[
+    },
+    Fight {
+        after: "01_SoleSurvivor2_Combat02_Trigger_Failsafe_ForClimb",
+        respawn: point(606.66, 412.75, 20.03),
+        spawns: &[
             SpawnPoint {
                 vitals: "Corruption_Entity",
                 category: CORRUPTION_CATEGORY,
@@ -652,10 +667,12 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
                 ..SWARMER
             },
         ],
-    ),
-    (
-        "01_SoleSurvivor2_FTUE_TF_cutsceneComplete",
-        &[SpawnPoint {
+    },
+    Fight {
+        after: "01_SoleSurvivor2_FTUE_TF_cutsceneComplete",
+        // The arena entry after the cutscene.
+        respawn: point(476.47, 234.96, 26.02),
+        spawns: &[SpawnPoint {
             vitals: "Damned_Commander_FTUE",
             category: None,
             at: point(490.25, 209.89, THORPE_FLOOR_Z),
@@ -665,7 +682,7 @@ const FIGHTS_AFTER: [(&str, &[SpawnPoint]); 4] = [
             delay_ms: 0,
             corpse_ms: THORPE_CORPSE_MS,
         }],
-    ),
+    },
 ];
 
 /// The spawn of `point`.
@@ -862,6 +879,10 @@ pub(super) struct Tutorial {
     captain_ticked_ms: u64,
     /// The player is dead: Thorpe neither charges nor grabs it.
     player_dead: bool,
+    /// Where the player comes back after a death: the ship's deck, the water after the ship
+    /// sank, then the start of the newest fight (the death screen: "You will gain access to a
+    /// choice of respawn locations later in the game").
+    respawn_at: Position,
 }
 
 impl Tutorial {
@@ -908,6 +929,7 @@ impl Tutorial {
             charge: None,
             captain_ticked_ms: now_ms,
             player_dead: false,
+            respawn_at: TUTORIAL_START,
         };
         tutorial.assets.on(Trigger::Start, now_ms);
         let mut orders = Vec::new();
@@ -1192,11 +1214,17 @@ impl Tutorial {
     fn move_to_water(&mut self, orders: &mut Vec<Order>) {
         if !std::mem::replace(&mut self.moved_to_water, true) {
             self.water_at_ms = None;
+            self.respawn_at = WATER_AT;
             orders.push(Order::MoveTo(WATER_AT, WATER_FACING));
             orders.push(Order::ShowIsland);
             self.assets.on(Trigger::WaterMove, self.now_ms);
             tracing::info!(player = self.owner, "tutorial: into the water");
         }
+    }
+
+    /// Where the player comes back after a death in the tutorial.
+    pub(super) const fn respawn_at(&self) -> Position {
+        self.respawn_at
     }
 
     /// Whether the player lives: a dead player is no target of the script.
@@ -1497,9 +1525,10 @@ impl Tutorial {
                 Effect::Done(task) => {
                     let fights = FIGHTS_AFTER
                         .iter()
-                        .filter(|(after, _)| after.eq_ignore_ascii_case(&task));
-                    for (_, points) in fights {
-                        self.spawn_batch(points, mobs, false);
+                        .filter(|fight| fight.after.eq_ignore_ascii_case(&task));
+                    for fight in fights {
+                        self.respawn_at = fight.respawn;
+                        self.spawn_batch(fight.spawns, mobs, false);
                     }
                     tracing::debug!(player = self.owner, %task, "tutorial task done");
                 }
@@ -1677,10 +1706,10 @@ pub(crate) mod tests {
             (RETAIL_SAILOR_VITALS, RETAIL_SAILOR_CATEGORY)
         );
         assert_eq!(
-            spawn_of(&FIGHTS_AFTER[0].1[0]).category_id,
+            spawn_of(&FIGHTS_AFTER[0].spawns[0]).category_id,
             RETAIL_LEGION_CATEGORY
         );
-        assert_eq!(spawn_of(&FIGHTS_AFTER[3].1[0]).category_id, 0);
+        assert_eq!(spawn_of(&FIGHTS_AFTER[3].spawns[0]).category_id, 0);
     }
 
     #[test]
@@ -1752,8 +1781,18 @@ pub(crate) mod tests {
         let orders = tutorial.tick(&mut mobs, &kill_types(), SHIP, picked_at);
         assert_eq!(orders, picked(third));
         kill_all(&mut mobs, &tutorial);
+        assert_eq!(
+            tutorial.respawn_at(),
+            TUTORIAL_START,
+            "a death on the ship: the deck"
+        );
         let door_at = picked_at + 1;
         let orders = tutorial.tick(&mut mobs, &kill_types(), SHIP, door_at);
+        assert_eq!(
+            tutorial.respawn_at(),
+            FIGHTS_AFTER[0].respawn,
+            "a death in the legionnaire's fight: where it started"
+        );
         assert_eq!(
             orders,
             [
@@ -1770,7 +1809,7 @@ pub(crate) mod tests {
                 Order::Achievement("FTUE_AncientRuins_Door".to_owned()),
             ]
         );
-        let legion_at = door_at + FIGHTS_AFTER[0].1[0].delay_ms;
+        let legion_at = door_at + FIGHTS_AFTER[0].spawns[0].delay_ms;
         tutorial.tick(&mut mobs, &kill_types(), SHIP, legion_at - 1);
         assert!(tutorial.fighters.is_empty(), "the legionnaire comes later");
         tutorial.tick(&mut mobs, &kill_types(), SHIP, legion_at);
@@ -1785,8 +1824,8 @@ pub(crate) mod tests {
         let at = |metres: f32| nw_sim_core::Seen {
             entity: OWNER,
             position: Position {
-                x: FIGHTS_AFTER[0].1[0].at.x + metres,
-                ..FIGHTS_AFTER[0].1[0].at
+                x: FIGHTS_AFTER[0].spawns[0].at.x + metres,
+                ..FIGHTS_AFTER[0].spawns[0].at
             },
         };
         let ground = nw_sim_core::test_support::NoGround;
@@ -1871,14 +1910,14 @@ pub(crate) mod tests {
         let mut mobs = Mobs::new(Vec::new().into(), &sailor_combat());
         let (mut tutorial, _) =
             Tutorial::start(OWNER, tree(), &FtueLevel::default(), &mut mobs, NOW);
-        tutorial.spawn_batch(FIGHTS_AFTER[2].1, &mut mobs, false);
+        tutorial.spawn_batch(FIGHTS_AFTER[2].spawns, &mut mobs, false);
         assert!(tutorial.fighters.is_empty(), "none at the trigger");
         let vitals: Vec<u32> = FIGHTS_AFTER[2]
-            .1
+            .spawns
             .iter()
             .map(|point| lowercase_crc32(point.vitals))
             .collect();
-        for (count, point) in FIGHTS_AFTER[2].1.iter().enumerate() {
+        for (count, point) in FIGHTS_AFTER[2].spawns.iter().enumerate() {
             tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + point.delay_ms - 1);
             assert_eq!(tutorial.fighters.len(), count, "not before its time");
             tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + point.delay_ms);
@@ -2004,7 +2043,7 @@ pub(crate) mod tests {
         let mut mobs = Mobs::new(Vec::new().into(), &sailor_combat());
         let (mut tutorial, _) =
             Tutorial::start(OWNER, tree(), &FtueLevel::default(), &mut mobs, NOW);
-        tutorial.spawn_batch(FIGHTS_AFTER[3].1, &mut mobs, false);
+        tutorial.spawn_batch(FIGHTS_AFTER[3].spawns, &mut mobs, false);
         let thorpe = tutorial.fighters[0].entity;
         (tutorial, mobs, thorpe)
     }
@@ -2151,7 +2190,7 @@ pub(crate) mod tests {
         let mut mobs = Mobs::new(Vec::new().into(), &sailor_combat());
         let (mut tutorial, _) =
             Tutorial::start(OWNER, tree(), &FtueLevel::default(), &mut mobs, NOW);
-        tutorial.spawn_batch(FIGHTS_AFTER[3].1, &mut mobs, false);
+        tutorial.spawn_batch(FIGHTS_AFTER[3].spawns, &mut mobs, false);
         let thorpe = tutorial.fighters[0].entity;
         let max = mobs.get_mut(thorpe).expect("Thorpe").health.max();
         let hurt_to = |mobs: &mut Mobs, share: f64| {
