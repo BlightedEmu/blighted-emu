@@ -17,7 +17,8 @@ pub const MELEE_HIT_TYPE_INDEX: u64 = 2218;
 pub const DEATH_RECAP_TYPE_INDEX: u64 = 4299;
 /// `PlayerComponentServerFacet_RequestRespawn` (client to server).
 pub const REQUEST_RESPAWN_TYPE_INDEX: u64 = 1938;
-/// The item tag of 86 of 93 captured training-dummy hits; its meaning is Unknown.
+/// The item tag of 86 of 93 captured training-dummy hits (`DamageTypeData` `Corruption`), and of a
+/// hit whose attack row names no damage type.
 pub const HIT_TAG: u8 = 11;
 /// The scale of a hit on a training dummy.
 pub const NEUTRAL_SCALE: f32 = 1.0;
@@ -44,8 +45,9 @@ const HIT_FLAG_CAN_CRIT: u16 = 0x0020;
 const HIT_FLAG_KILLED: u16 = 0x0008;
 /// Hit flags: the target absorbed the hit (retail Thorpe intermission: `0x0420`).
 const HIT_FLAG_ABSORBED: u16 = 0x0400;
-/// The camera shake of an absorbed hit (retail Thorpe intermission; name Unknown).
-const CAMERA_SHAKE_ABSORBED: u32 = 0x664b_2673;
+/// The camera shake of an absorbed hit and of a melee crit (retail Thorpe intermission, and all
+/// 10 melee crits of the newchar retail capture of 2026-09-18; name Unknown).
+const CAMERA_SHAKE_STRONG: u32 = 0x664b_2673;
 /// The item tag of an absorbed hit (retail Thorpe intermission; meaning Unknown).
 const ABSORBED_TAG: u8 = 6;
 /// Hit flags: a pellet of a spread shot (ranged note: `0x21` on every pellet 2071).
@@ -63,11 +65,13 @@ const MELEE_HIT_FLAGS: u16 = 0x0002;
 /// One damage item (`FUN_145b56640`, `FUN_145ce6260`): a tag byte and two big-endian `f32`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DamageItem {
-    /// A small kind code; Unknown.
+    /// The damage type: the `IntID` of its `DamageTypeData` row (Observed: newchar retail
+    /// capture of 2026-09-18, light sword `Slash` 4, heavy sword `Thrust` 5, greatsword `Slash` 4,
+    /// blunderbuss `Thrust` 5, Thorpe's fire part `Fire` 9).
     pub tag: u8,
     /// The hit amount (Inferred).
     pub amount: f32,
-    /// A scale: 1 on a training dummy, below 1 in fights (Inferred).
+    /// The share of the raw damage the armor let through: 1 on a training dummy.
     pub scale: f32,
 }
 
@@ -175,11 +179,6 @@ impl DamageDealtMsg {
     /// and facet entity, with a torso hit and a small camera shake (mob-cards note, section 4.3).
     pub fn hit(attacker: u64, target: u64, amount: f32, killed: bool) -> Self {
         let header = FacetHeader::of(component::DAMAGE_RECEIVER, attacker);
-        let flags = if killed {
-            HIT_FLAG_CAN_CRIT | HIT_FLAG_KILLED
-        } else {
-            HIT_FLAG_CAN_CRIT
-        };
         Self {
             head_a: header.target,
             head_b: header.entity,
@@ -188,13 +187,34 @@ impl DamageDealtMsg {
             u64_c: target.swap_bytes(),
             u32_d: HIT_VOLUME_TORSO,
             u32_e: CAMERA_SHAKE_SMALL,
-            raw_2: flags.to_le_bytes(),
+            raw_2: hit_flags(HIT_FLAG_CAN_CRIT, false, killed).to_le_bytes(),
             items: one_hit(amount),
         }
     }
 }
 
+/// The hit flags of a hit with the flags `base`: with the crit and the kill flags when so.
+const fn hit_flags(base: u16, crit: bool, killed: bool) -> u16 {
+    let crit = if crit { HIT_FLAG_CRIT } else { 0 };
+    let killed = if killed { HIT_FLAG_KILLED } else { 0 };
+    base | crit | killed
+}
+
 impl DamageDealtMsg {
+    /// A melee hit by player `attacker` on `target` of `item` (its damage type, the amount after
+    /// the armor and the share the armor let through), a `crit` or not, `killed` when it killed
+    /// the target. A crit has the crit flag and the strong camera shake (Observed: newchar retail
+    /// capture of 2026-09-18, flags `0x60` and shake `664b2673` on all 10 melee crits).
+    pub fn melee(attacker: u64, target: u64, item: DamageItem, crit: bool, killed: bool) -> Self {
+        let hit = Self::hit(attacker, target, item.amount, killed);
+        Self {
+            u32_e: if crit { CAMERA_SHAKE_STRONG } else { hit.u32_e },
+            raw_2: hit_flags(HIT_FLAG_CAN_CRIT, crit, killed).to_le_bytes(),
+            items: vec![item],
+            ..hit
+        }
+    }
+
     /// One pellet of a spread shot by player `attacker` on `target`: `amount` after the armor,
     /// which let `scale` of the raw damage through, a `crit` or not, `killed` when it killed the
     /// target (ranged note: no camera shake, flags `0x21`, `0x40` on a crit, `0x08` on the kill).
@@ -206,16 +226,9 @@ impl DamageDealtMsg {
         crit: bool,
         killed: bool,
     ) -> Self {
-        let mut flags = HIT_FLAG_CAN_CRIT | HIT_FLAG_PELLET;
-        if crit {
-            flags |= HIT_FLAG_CRIT;
-        }
-        if killed {
-            flags |= HIT_FLAG_KILLED;
-        }
         Self {
             u32_e: NO_CAMERA_SHAKE,
-            raw_2: flags.to_le_bytes(),
+            raw_2: hit_flags(HIT_FLAG_CAN_CRIT | HIT_FLAG_PELLET, crit, killed).to_le_bytes(),
             items: vec![DamageItem {
                 tag: PELLET_TAG,
                 amount,
@@ -231,7 +244,7 @@ impl DamageDealtMsg {
     /// intermission, 494210 to 499506 ms).
     pub fn absorbed(attacker: u64, target: u64) -> Self {
         Self {
-            u32_e: CAMERA_SHAKE_ABSORBED,
+            u32_e: CAMERA_SHAKE_STRONG,
             raw_2: (HIT_FLAG_CAN_CRIT | HIT_FLAG_ABSORBED).to_le_bytes(),
             items: vec![DamageItem {
                 tag: ABSORBED_TAG,
@@ -309,7 +322,7 @@ pub struct MeleeDamage {
     pub max_health: f32,
     /// Where the creature stood, x, y and z in metres.
     pub attacker_at: [f32; 3],
-    /// The item tag: sailor 6, signifier 5, risen 6, swarmer 4, Thorpe 4 (meaning Unknown).
+    /// The damage type ([`DamageItem::tag`]): sailor 6, signifier 5, risen 6, swarmer 4, Thorpe 4.
     pub tag: u8,
     /// The item scale: the share of the raw damage the player's armor let through (retail 0.6006
     /// for sailors, 0.5612 for the others).
@@ -846,6 +859,39 @@ mod tests {
         );
         let killing = DamageDealtMsg::hit(ATTACKER, TARGET, AMOUNT, true);
         assert_eq!(killing.raw_2, [0x28, 0x00]);
+    }
+
+    #[test]
+    fn a_melee_hit_dealt_has_the_retail_type_scale_and_crit() {
+        // Newchar retail capture of 2026-09-18: a light sword hit (81092 ms) and a crit (87193).
+        const RETAIL_LIGHT_TAIL: [u8; 20] = [
+            0x08, 0x5f, 0x18, 0x5a, 0x75, 0x45, 0xea, 0x13, 0x20, 0x00, 0x01, 0x04, 0x42, 0x3e,
+            0xb6, 0x57, 0x3f, 0x33, 0x7e, 0x70,
+        ];
+        const RETAIL_CRIT_TAIL: [u8; 20] = [
+            0x27, 0x5f, 0xbc, 0x85, 0x66, 0x4b, 0x26, 0x73, 0x60, 0x00, 0x01, 0x04, 0x42, 0x81,
+            0x02, 0xe0, 0x3f, 0x33, 0x7e, 0x70,
+        ];
+        const SLASH: u8 = 4;
+        let item_of = |tail: &[u8; 20]| DamageItem {
+            tag: tail[11],
+            amount: f32::from_be_bytes([tail[12], tail[13], tail[14], tail[15]]),
+            scale: f32::from_be_bytes([tail[16], tail[17], tail[18], tail[19]]),
+        };
+        let tail = |hit: DamageDealtMsg| {
+            let body = hit.encode().expect("encode");
+            body[body.len() - 20..].to_vec()
+        };
+        let light =
+            DamageDealtMsg::melee(ATTACKER, TARGET, item_of(&RETAIL_LIGHT_TAIL), false, false);
+        assert_eq!(light.items[0].tag, SLASH);
+        // The hit volume (the first 4 bytes) is the body part the client hit; ours is the torso.
+        assert_eq!(tail(light)[4..], RETAIL_LIGHT_TAIL[4..]);
+        let crit = DamageDealtMsg::melee(ATTACKER, TARGET, item_of(&RETAIL_CRIT_TAIL), true, false);
+        assert_eq!(tail(crit), RETAIL_CRIT_TAIL);
+        let crit_kill =
+            DamageDealtMsg::melee(ATTACKER, TARGET, item_of(&RETAIL_CRIT_TAIL), true, true);
+        assert_eq!(crit_kill.raw_2, [0x68, 0x00]);
     }
 
     #[test]

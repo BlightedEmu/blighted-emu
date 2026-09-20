@@ -252,6 +252,7 @@ mod tests {
                     coefficient: 1.0,
                     can_crit: false,
                     threat: 0,
+                    damage_type: None,
                 })
                 .collect(),
             player_health: vec![(rows.player_vitals_id.clone(), 1)],

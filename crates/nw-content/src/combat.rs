@@ -370,6 +370,8 @@ pub struct AttackRow {
     pub can_crit: bool,
     /// Threat it adds besides its damage.
     pub threat: u64,
+    /// The `IntID` of its `DamageType` in `DamageTypeData`, when the row names a known one.
+    pub damage_type: Option<u8>,
 }
 
 /// The plain content of the combat datasheets.
@@ -408,6 +410,12 @@ impl CombatSource {
     /// The combat content of `tables`.
     pub fn from_tables(tables: &Tables) -> Self {
         let base_rows = || tables.vitals_base_data.iter().flat_map(|table| &table.rows);
+        let damage_types: HashMap<&str, u8> = tables
+            .damage_type_data
+            .iter()
+            .flat_map(|table| &table.rows)
+            .filter_map(|row| Some((row.type_id.as_str(), u8::try_from(row.int_id).ok()?)))
+            .collect();
         Self {
             base_types: base_rows()
                 .map(|row| {
@@ -527,6 +535,10 @@ impl CombatSource {
                         .add_threat
                         .and_then(|threat| u64::try_from(threat).ok())
                         .unwrap_or(0),
+                    damage_type: row
+                        .damage_type
+                        .as_deref()
+                        .and_then(|name| damage_types.get(name).copied()),
                 })
                 .collect(),
             vision_offsets: tables
@@ -842,6 +854,85 @@ impl CombatData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::table::Table;
+    use nw_formats::datasheet::{Column, ColumnKind, Datasheet};
+
+    /// A datasheet of `type_name` with `columns` and `rows`.
+    fn sheet(type_name: &str, columns: &[(&str, ColumnKind)], rows: &[&[&str]]) -> Datasheet {
+        Datasheet {
+            type_name: type_name.to_owned(),
+            unique_id: format!("{type_name}_1"),
+            columns: columns
+                .iter()
+                .map(|(name, kind)| Column {
+                    name: (*name).to_owned(),
+                    kind: *kind,
+                })
+                .collect(),
+            rows: rows
+                .iter()
+                .map(|row| row.iter().map(|value| (*value).to_owned()).collect())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn an_attack_has_the_int_id_of_its_damage_type() {
+        use ColumnKind::{Number, String as Text};
+        // Retail `DamageTypeData` (build 25810808): Slash 4, Thrust 5.
+        let types = sheet(
+            "DamageTypeData",
+            &[
+                ("TypeID", Text),
+                ("IntID", Number),
+                ("Category", Text),
+                ("DamageBonusAgainst", Text),
+                ("DisplayName", Text),
+                ("AfflictionFrac", Number),
+                ("DamageBonusFrac", Number),
+                ("DefenseBonusFrac", Number),
+                ("MitigationBonusFrac", Number),
+            ],
+            &[
+                &[
+                    "Slash", "4", "Physical", "None", "Slash", "0", "0", "0", "0",
+                ],
+                &[
+                    "Thrust", "5", "Physical", "None", "Thrust", "0", "0", "0", "0",
+                ],
+            ],
+        );
+        let attacks = sheet(
+            "DamageData",
+            &[("DamageID", Text), ("DamageType", Text)],
+            &[
+                &["1H_Sword_Attack1", "Slash"],
+                &["1H_Sword_Attack2", "Thrust"],
+                &["Unknown_Type", "Mystery"],
+                &["No_Type", ""],
+            ],
+        );
+        let tables = Tables {
+            damage_type_data: vec![Table::fill("types", &types).expect("types")],
+            damage_data: vec![Table::fill("attacks", &attacks).expect("attacks")],
+            ..Tables::default()
+        };
+        let source = CombatSource::from_tables(&tables);
+        let types: Vec<(&str, Option<u8>)> = source
+            .attacks
+            .iter()
+            .map(|row| (row.damage_id.as_str(), row.damage_type))
+            .collect();
+        assert_eq!(
+            types,
+            [
+                ("1H_Sword_Attack1", Some(4)),
+                ("1H_Sword_Attack2", Some(5)),
+                ("Unknown_Type", None),
+                ("No_Type", None),
+            ]
+        );
+    }
 
     #[test]
     fn retail_weapon_ids_name_their_kind() {
@@ -1074,18 +1165,21 @@ mod tests {
                     coefficient: 1.0,
                     can_crit: true,
                     threat: 0,
+                    damage_type: None,
                 },
                 AttackRow {
                     damage_id: HEAVY.to_owned(),
                     coefficient: 1.2,
                     can_crit: true,
                     threat: 1,
+                    damage_type: None,
                 },
                 AttackRow {
                     damage_id: PELLET.to_owned(),
                     coefficient: 0.19,
                     can_crit: true,
                     threat: 0,
+                    damage_type: None,
                 },
             ],
             vision_offsets: vec![("Beast".to_owned(), VISION_OFFSET)],
@@ -1145,6 +1239,7 @@ mod tests {
                 coefficient,
                 can_crit: true,
                 threat: 0,
+                damage_type: None,
             });
         }
         let data = CombatData::build(source, &rows()).expect("data");

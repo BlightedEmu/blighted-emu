@@ -232,7 +232,7 @@ pub struct Pace {
     pub gait: Gait,
     /// How far it sees, in place of the config's sight.
     pub sight_m: f32,
-    /// The item tag of its hits on a player (3601; meaning Unknown).
+    /// The damage type of its hits on a player (3601; `DamageTypeData` `IntID`).
     pub hit_tag: u8,
     /// The item scale of its hits on a player: the share of the raw damage that the player's
     /// armor let through.

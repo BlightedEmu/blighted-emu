@@ -27,8 +27,8 @@ use nw_content::respawn_points::{nearest_respawn_point, respawn_point};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::paperdoll::slot;
 use nw_messages::{
-    AdjustFxScriptsMsg, ConsumableCooldown, DamageDealtMsg, DeathRecapMsg, InputRecord,
-    MeleeDamage, MeleeHitMsg, OnDamageMsg, ServerMessage, SpreadshotProcessedMsg,
+    AdjustFxScriptsMsg, ConsumableCooldown, DamageDealtMsg, DamageItem, DeathRecapMsg, HIT_TAG,
+    InputRecord, MeleeDamage, MeleeHitMsg, OnDamageMsg, ServerMessage, SpreadshotProcessedMsg,
     SpreadshotRequestMsg,
 };
 use nw_sim_core::{
@@ -375,7 +375,14 @@ impl SimWorld {
                 row: &row,
             },
             now_ms,
-            |amount, _, killed, _| DamageDealtMsg::hit(number, target, amount, killed),
+            |amount, crit, killed, scale| {
+                let item = DamageItem {
+                    tag: row.damage_type.unwrap_or(HIT_TAG),
+                    amount,
+                    scale,
+                };
+                DamageDealtMsg::melee(number, target, item, crit, killed)
+            },
         )?;
         Ok(outcome)
     }
@@ -2071,6 +2078,17 @@ mod tests {
         f32::from(u16::try_from(hit).expect("small"))
     }
 
+    /// The 2071 of a light sword hit on the mob: the config's attack rows name no damage type,
+    /// and the config's armor share.
+    fn light_hit_dealt(world: &SimWorld) -> DamageDealtMsg {
+        let item = DamageItem {
+            tag: HIT_TAG,
+            amount: amount(SWORD_HIT),
+            scale: (1.0 - world.combat.armor_share) as f32,
+        };
+        DamageDealtMsg::melee(1, mob(), item, false, false)
+    }
+
     #[test]
     fn a_hit_sends_the_attacker_a_2071() {
         let mut world = fight();
@@ -2079,12 +2097,7 @@ mod tests {
             .expect("hit");
         assert_eq!(
             messages_to(&world.take_messages(), 1),
-            vec![ServerMessage::DamageDealt(DamageDealtMsg::hit(
-                1,
-                mob(),
-                amount(SWORD_HIT),
-                false
-            ))]
+            vec![ServerMessage::DamageDealt(light_hit_dealt(&world))]
         );
         assert!(world.take_messages().is_empty(), "taken once");
         let entity = world.by_connection[&connection(1)];
@@ -2321,6 +2334,7 @@ mod tests {
                 coefficient: 1.0,
                 can_crit: false,
                 threat: 0,
+                damage_type: None,
             });
         }
         let data = CombatData::build(source, &CombatRows::default()).expect("data");
@@ -2504,12 +2518,7 @@ mod tests {
             .expect("remote hit");
         assert_eq!(
             messages_to(&world.take_messages(), 1),
-            vec![ServerMessage::DamageDealt(DamageDealtMsg::hit(
-                1,
-                mob(),
-                amount(SWORD_HIT),
-                false
-            ))]
+            vec![ServerMessage::DamageDealt(light_hit_dealt(&world))]
         );
     }
 
