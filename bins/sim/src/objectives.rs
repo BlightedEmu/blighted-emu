@@ -579,9 +579,8 @@ impl ObjectiveRun {
         (run, effects)
     }
 
-    /// The run as a handoff carries it at `now_ms`, with the client's quest tracker at
-    /// `tracker_version`.
-    pub fn export(&self, now_ms: u64, tracker_version: u64) -> QuestRun {
+    /// The run as a handoff carries it at `now_ms`.
+    pub fn export(&self, now_ms: u64) -> QuestRun {
         QuestRun {
             tasks: self
                 .states
@@ -600,7 +599,6 @@ impl ObjectiveRun {
                 .iter()
                 .filter_map(|index| u32::try_from(*index).ok())
                 .collect(),
-            tracker_version,
         }
     }
 
@@ -1171,13 +1169,11 @@ pub(crate) mod tests {
     #[test]
     fn a_run_goes_on_after_a_handoff_with_its_timer_and_kills() {
         const LATER: u64 = NOW + 50_000;
-        const TRACKER_VERSION: u64 = 9;
         let tree = Arc::new(ObjectiveTree::build(&rows(), "Root").expect("tree"));
         let (mut run, _) = ObjectiveRun::start(Arc::clone(&tree), NOW);
         let intro = lowercase_crc32("FTUE_Intro2");
         run.event(Event::CinematicStarted(intro), NOW);
-        let carried = run.export(NOW + 1, TRACKER_VERSION);
-        assert_eq!(carried.tracker_version, TRACKER_VERSION);
+        let carried = run.export(NOW + 1);
         let mut resumed = ObjectiveRun::resume(Arc::clone(&tree), &carried, LATER).expect("fits");
         assert_eq!(resumed.progress(), run.progress());
         // The timer keeps what was left of it on the new clock.

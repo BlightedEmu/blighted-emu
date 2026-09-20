@@ -242,6 +242,7 @@ fn player_quests(saved: SavedQuests) -> PlayerQuests {
     PlayerQuests {
         active,
         done: saved.done,
+        ..PlayerQuests::default()
     }
 }
 
@@ -269,7 +270,6 @@ mod tests {
         let run = QuestRun {
             tasks: vec![nw_bus::QuestTask::Done],
             listed: vec![0],
-            tracker_version: 4,
         };
         let good = player_quests(SavedQuests {
             active: Some((

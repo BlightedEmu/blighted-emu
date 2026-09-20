@@ -434,6 +434,9 @@ struct Player {
     done_quests: Vec<String>,
     /// Whether its quests changed since they were last taken for a save.
     quests_unsaved: bool,
+    /// The version of the newest quest tracker lists its client got from the sim before: this
+    /// sim's lists go on above it.
+    tracker_floor: u64,
     /// Its experience points, and whether they changed since the last bundle.
     experience: u32,
     experience_changed: bool,
@@ -469,6 +472,17 @@ struct Player {
     frozen: bool,
     handoffs: u64,
     no_handoff_before_ms: u64,
+}
+
+impl Player {
+    /// The version of the newest quest tracker lists its client has: its tracker's, or what the
+    /// sim before sent.
+    fn tracker_shown(&self) -> u64 {
+        self.quest
+            .as_ref()
+            .map_or(0, QuestTracker::version)
+            .max(self.tracker_floor)
+    }
 }
 
 /// What a client already has of the replication stream: it goes on across a handoff.
@@ -1597,7 +1611,7 @@ impl SimWorld {
         let finished: Vec<&str> = done.iter().map(String::as_str).collect();
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             // The new lists go on above the ones the client has from the quest before.
-            let shown = player.quest.as_ref().map_or(0, QuestTracker::version);
+            let shown = player.tracker_shown();
             player.quest = Some(
                 QuestTracker::new(&def.id, number)
                     .after(&finished, number)
@@ -1656,7 +1670,7 @@ impl SimWorld {
             let done: Vec<&str> = player.done_quests.iter().map(String::as_str).collect();
             let mut tracker = QuestTracker::new(&id, number)
                 .after(&done, number)
-                .above(run.tracker_version);
+                .above(player.tracker_shown());
             tracker.update(tasks, false);
             // The first own card on this sim sends the whole quest; nothing more is due.
             while tracker.take_change().is_some() {}
@@ -2743,6 +2757,7 @@ impl SimWorld {
                     quest: None,
                     done_quests: arrival.quests.done.clone(),
                     quests_unsaved: false,
+                    tracker_floor: arrival.quests.tracker_version,
                     experience: arrival.experience,
                     experience_changed: false,
                     coins: arrival.coins,
@@ -2954,15 +2969,12 @@ fn departure_of(
 /// The quests of `player` to save or carry: its active run (from `quests`, at `now_ms`) and its
 /// done list.
 fn quests_of(quests: &HashMap<u64, ActiveQuest>, now_ms: u64, player: &Player) -> PlayerQuests {
-    let tracker_version = player.quest.as_ref().map_or(0, QuestTracker::version);
     PlayerQuests {
-        active: quests.get(&player.number).map(|quest| {
-            (
-                quest.def.id.clone(),
-                quest.run.export(now_ms, tracker_version),
-            )
-        }),
+        active: quests
+            .get(&player.number)
+            .map(|quest| (quest.def.id.clone(), quest.run.export(now_ms))),
         done: player.done_quests.clone(),
+        tracker_version: player.tracker_shown(),
     }
 }
 
@@ -6148,7 +6160,7 @@ mod tests {
                     ..run
                 },
             )),
-            done: Vec::new(),
+            ..PlayerQuests::default()
         };
         world.admit(&admit, NOW, SERVER_TIME).expect("admit");
         let dropped = world
@@ -6156,6 +6168,44 @@ mod tests {
             .pop()
             .and_then(|departure| departure.quests);
         assert_eq!(dropped.and_then(|quests| quests.active), None);
+    }
+
+    #[test]
+    fn a_new_quest_lists_above_the_tracker_versions_of_the_sim_before() {
+        /// The tracker version the tutorial sim left (live run 10: 0x2c).
+        const TUTORIAL_TRACKER_VERSION: u64 = 0x2c;
+        let mut world = quest_world();
+        world.leave(&connection(1)).expect("left");
+        let mut admit = admit_at(1, CELL_M / 2.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        admit.quests = PlayerQuests {
+            tracker_version: TUTORIAL_TRACKER_VERSION,
+            ..PlayerQuests::default()
+        };
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let handed = world
+            .departures()
+            .pop()
+            .and_then(|departure| departure.quests)
+            .expect("quests");
+        assert_eq!(
+            handed.tracker_version, TUTORIAL_TRACKER_VERSION,
+            "a handoff with no quest keeps the version"
+        );
+        world.start_quest(1, QUEST, NOW).expect("start");
+        let shown: Vec<u64> = world
+            .world
+            .query::<&Player>()
+            .iter(&world.world)
+            .filter_map(|player| player.quest.as_ref().map(QuestTracker::version))
+            .collect();
+        assert!(
+            shown
+                .iter()
+                .all(|version| *version > TUTORIAL_TRACKER_VERSION)
+                && !shown.is_empty(),
+            "the client drops lists below the ones it has: {shown:?}"
+        );
     }
 
     #[test]

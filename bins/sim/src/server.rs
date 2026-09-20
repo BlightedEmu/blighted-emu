@@ -2124,8 +2124,8 @@ mod tests {
             let mut first = admit_at(gateway.connection(CONNECTION), ada, BORDER_X);
             first.items = Some(Vec::new());
             first.quests = PlayerQuests {
-                active: None,
                 done: vec![DONE_QUEST.to_owned()],
+                ..PlayerQuests::default()
             };
             admit(&bus, world_id, sim.id(), &first).await;
             sim.stop().await;

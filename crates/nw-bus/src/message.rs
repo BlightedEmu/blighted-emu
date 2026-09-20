@@ -319,6 +319,12 @@ pub struct PlayerQuests {
     pub active: Option<(String, QuestRun)>,
     /// The ids of the finished objectives.
     pub done: Vec<String>,
+    /// The version of the newest quest tracker lists the client has; the next sim's lists go on
+    /// above it, with or without an active quest (live 2026-09-18: the tutorial's lists ended at
+    /// version 44 and the beach sim started at 2, so the client dropped every beach quest list,
+    /// never tracked the accepted quest and never offered its campfire).
+    #[serde(default)]
+    pub tracker_version: u64,
 }
 
 /// A player's run of a quest, as a handoff carries it to the next sim.
@@ -328,8 +334,6 @@ pub struct QuestRun {
     pub tasks: Vec<QuestTask>,
     /// The tasks with progress (their tree index), in the order they first had it.
     pub listed: Vec<u32>,
-    /// The version of the newest quest tracker lists the client has.
-    pub tracker_version: u64,
 }
 
 /// The state of one task of a [`QuestRun`].
@@ -787,10 +791,10 @@ mod tests {
                             QuestTask::Idle,
                         ],
                         listed: vec![0, 1],
-                        tracker_version: 7,
                     },
                 )),
                 done: vec!["01_SoleSurvivor2".to_owned()],
+                tracker_version: 7,
             },
         };
         round_trip(HandoffMessage::Offer(Box::new(offer)));
