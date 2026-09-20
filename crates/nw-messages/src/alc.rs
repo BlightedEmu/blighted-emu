@@ -1753,8 +1753,14 @@ mod tests {
             assert_eq!(bytes[0], 0x10, "x derived, w zero");
             // The state and the input were not sampled at one instant: two steps of slack.
             let part = |byte: u8| f32::from(byte) * QUAT_STEP - QUAT_OFFSET;
-            assert!((part(bytes[1]) - retail[1]).abs() <= 2.0 * QUAT_STEP, "y {yaw}");
-            assert!((part(bytes[2]) - retail[2]).abs() <= 2.0 * QUAT_STEP, "z {yaw}");
+            assert!(
+                (part(bytes[1]) - retail[1]).abs() <= 2.0 * QUAT_STEP,
+                "y {yaw}"
+            );
+            assert!(
+                (part(bytes[2]) - retail[2]).abs() <= 2.0 * QUAT_STEP,
+                "z {yaw}"
+            );
         }
         // Level, looking east-north-east: x derived, y kept, z and w flagged 0 (retail `181b`).
         let level = LookDir {
