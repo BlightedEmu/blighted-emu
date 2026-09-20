@@ -125,9 +125,11 @@ impl Health {
     }
 }
 
-/// Max health of a mob: the level's base health times the type's health mod, rounded.
+/// Max health of a mob: the level's base health times the type's health mod, without the
+/// fraction (retail tutorial cards: sailor 353 and legionnaire 370, where rounding gave 354 and
+/// 371; lock-on note, 2026-09-18).
 pub fn mob_max_health(base_max_health: f64, health_mod: f64) -> u32 {
-    to_whole(base_max_health * health_mod)
+    to_whole((base_max_health * health_mod).floor())
 }
 
 /// A rounded, finite, non-negative value as a whole number.
@@ -258,9 +260,12 @@ mod tests {
     }
 
     #[test]
-    fn mob_health_is_base_times_mod_rounded() {
+    fn mob_health_is_base_times_mod_without_the_fraction() {
+        /// A product just below 371, as retail's legionnaire card (370).
+        const NEAR_371: f64 = 370.9;
         assert_eq!(mob_max_health(LEVEL_20_HEALTH, HALF), 936);
         assert_eq!(mob_max_health(LEVEL_20_HEALTH, 1.0), 1872);
+        assert_eq!(mob_max_health(NEAR_371, 1.0), 370);
     }
 
     #[test]
