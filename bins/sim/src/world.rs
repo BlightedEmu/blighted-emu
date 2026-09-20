@@ -62,6 +62,7 @@ mod level_flow;
 mod members;
 mod mob_timeline;
 mod mob_trail;
+mod projectile;
 mod quest_tracker;
 mod replica;
 mod scripts;
@@ -567,6 +568,8 @@ pub struct SimWorld {
     swings: Vec<PendingMobSwing>,
     /// Player swings that have not hit yet.
     player_swings: Vec<PlayerSwing>,
+    /// The projectiles of ranged and magic attacks on their way to their mob.
+    projectile_flights: Vec<projectile::ProjectileFlight>,
     /// Swings that a tutorial script started, for the next tick.
     scripted_swings: Vec<MobAttackIntent>,
     /// The server time of the last tick (ms since 2000-01-01).
@@ -671,6 +674,7 @@ impl SimWorld {
             drinks: Vec::new(),
             swings: Vec::new(),
             player_swings: Vec::new(),
+            projectile_flights: Vec::new(),
             scripted_swings: Vec::new(),
             server_ms: 0,
             combat,
@@ -2695,7 +2699,8 @@ impl SimWorld {
 }
 
 /// Where `shove` moves a player at `from` away from or toward a mob at `mob_at`, on the line
-/// between them, at the player's height; `None` when they stand on one spot.
+/// between them: away at the player's height, toward the mob at the mob's (it lands on the
+/// mob's floor); `None` when they stand on one spot.
 fn shoved_to(from: Position, mob_at: Position, shove: Shove) -> Option<Position> {
     let distance = from.horizontal_distance(mob_at);
     if distance <= f32::EPSILON {
@@ -2712,7 +2717,7 @@ fn shoved_to(from: Position, mob_at: Position, shove: Shove) -> Option<Position>
     Some(Position {
         x: base.x + east * metres,
         y: base.y + north * metres,
-        z: from.z,
+        z: base.z,
     })
 }
 
