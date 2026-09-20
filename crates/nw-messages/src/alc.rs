@@ -362,17 +362,21 @@ pub struct SecondSlayerState {
 }
 
 impl SlayerState {
-    /// The slayer state of the action `input` the client started, in ALC state `started`;
-    /// `state_changed` when its state is not the one the client had (retail sends child 13 only
-    /// then).
-    pub fn of_input(input: SlayerInput, started: u16, state_changed: bool) -> Self {
+    /// The slayer state of the action `input` the client started, in ALC state `started`. The
+    /// state (child 13) goes only with an action of the second slot: in the retail newchar capture
+    /// all 7 actions with a second sequence carried 13, 16 and 18, and none of the 78 without one
+    /// carried 13, even when the client's state changed (206408 ms: state 10 after 27). An echoed
+    /// 13 = 10 left the client in its attack state, and it then refused to start the Thorpe
+    /// cutscene (live 2026-09-18, Inferred).
+    pub fn of_input(input: SlayerInput, started: u16) -> Self {
+        let second_plays = input.second_sequence != 0;
         Self {
-            state: state_changed.then_some(u64::from(input.state)),
+            state: second_plays.then_some(u64::from(input.state)),
             started,
             sequence: input.sequence,
             second: Some(SecondSlayerState {
                 started,
-                playing: (input.second_sequence != 0).then(|| {
+                playing: second_plays.then(|| {
                     (
                         u64::from(input.second_state.wrapping_add(SECOND_STATE_WIRE_OFFSET)),
                         input.second_sequence,
@@ -1861,7 +1865,7 @@ mod tests {
             anchor_us: 0,
             offset_ms: 0,
         };
-        let slayer = SlayerState::of_input(input, STARTED, true);
+        let slayer = SlayerState::of_input(input, STARTED);
         let state = AlcState::own_step(stamp, None, None, false, Some(slayer)).expect("step");
         let slayer_children: Vec<(usize, Vec<u8>)> = state
             .slot0_children()
@@ -1882,37 +1886,55 @@ mod tests {
                 (SECOND_SLAYER_SEQUENCE_CHILD, vec![0x90, 0x4e]),
             ]
         );
-        // Retail 78664 ms: row 1 `[1221, 0xffff000a, 0]`, state unchanged: `14=0737 15=8513
-        // 17=0737` alone.
-        let plain = SlayerInput {
-            sequence: 1221,
-            state: 0x0a,
-            second_state: 0xffff,
-            second_sequence: 0,
-        };
-        let state = AlcState::own_step(
-            stamp,
-            None,
-            None,
-            false,
-            Some(SlayerState::of_input(plain, 0x0737, false)),
-        )
-        .expect("step");
-        let children: Vec<usize> = state
-            .slot0_children()
-            .expect("walk")
-            .into_iter()
-            .map(|(child, _)| child)
-            .filter(|child| (SLAYER_STATE_CHILD..=SECOND_SLAYER_SEQUENCE_CHILD).contains(child))
-            .collect();
-        assert_eq!(
-            children,
-            [
-                SLAYER_STARTED_CHILD,
-                SLAYER_SEQUENCE_CHILD,
-                SECOND_SLAYER_STARTED_CHILD
-            ]
-        );
+        // Retail 78664 ms: row 1 `[1221, 0xffff000a, 0]`: `14=0737 15=8513 17=0737` alone. And
+        // 206408 ms: row 1 `[5055, 0x002c000a, 0]`, state 10 after 27: `14=15c0 15=bf4e
+        // 17=15c0` alone, no 13.
+        let plain_actions = [
+            (
+                SlayerInput {
+                    sequence: 1221,
+                    state: 0x0a,
+                    second_state: 0xffff,
+                    second_sequence: 0,
+                },
+                0x0737,
+            ),
+            (
+                SlayerInput {
+                    sequence: 5055,
+                    state: 0x0a,
+                    second_state: 0x2c,
+                    second_sequence: 0,
+                },
+                0x15c0,
+            ),
+        ];
+        for (plain, started) in plain_actions {
+            let state = AlcState::own_step(
+                stamp,
+                None,
+                None,
+                false,
+                Some(SlayerState::of_input(plain, started)),
+            )
+            .expect("step");
+            let children: Vec<usize> = state
+                .slot0_children()
+                .expect("walk")
+                .into_iter()
+                .map(|(child, _)| child)
+                .filter(|child| (SLAYER_STATE_CHILD..=SECOND_SLAYER_SEQUENCE_CHILD).contains(child))
+                .collect();
+            assert_eq!(
+                children,
+                [
+                    SLAYER_STARTED_CHILD,
+                    SLAYER_SEQUENCE_CHILD,
+                    SECOND_SLAYER_STARTED_CHILD
+                ],
+                "{plain:?}"
+            );
+        }
     }
 
     #[test]

@@ -42,10 +42,8 @@ fn follow_up_of(sequence: u64) -> Option<u64> {
 pub(super) struct SlayerTrack {
     /// The counter of the newest input record read.
     counter: Option<u16>,
-    /// The client's state (child 13) as last sent.
-    state: Option<u64>,
-    /// An action the client started that no own state carried yet, and whether its state is new.
-    started: Option<(SlayerInput, bool)>,
+    /// An action the client started that no own state carried yet.
+    started: Option<SlayerInput>,
     /// The follow-up that starts in the next own state.
     follow_up: Option<u64>,
     /// The newest slayer state, and how many more own states carry it.
@@ -69,10 +67,7 @@ impl SlayerTrack {
             }
             self.counter = Some(counter);
             if let Some(input) = record.slayer_input() {
-                let state = u64::from(input.state);
-                let changed = self.state != Some(state);
-                self.state = Some(state);
-                self.started = Some((input, changed));
+                self.started = Some(input);
                 self.follow_up = None;
             }
         }
@@ -91,9 +86,9 @@ impl SlayerTrack {
     }
 
     fn next(&mut self, id: u16) -> Option<SlayerState> {
-        if let Some((input, changed)) = self.started.take() {
+        if let Some(input) = self.started.take() {
             self.follow_up = follow_up_of(input.sequence);
-            return self.start(SlayerState::of_input(input, id, changed));
+            return self.start(SlayerState::of_input(input, id));
         }
         if let Some(sequence) = self.follow_up.take() {
             return self.start(SlayerState {
@@ -152,7 +147,8 @@ mod tests {
         let started = own_state(&mut track, FIRST_STATE).expect("the action");
         assert_eq!(
             (started.state, started.started, started.sequence),
-            (Some(0x0a), FIRST_STATE, 5055)
+            (None, FIRST_STATE, 5055),
+            "retail echoes no state without a second-slot action"
         );
         let follow_up = own_state(&mut track, FIRST_STATE + 1).expect("the follow-up");
         assert_eq!(
@@ -169,7 +165,7 @@ mod tests {
     }
 
     #[test]
-    fn an_older_copy_starts_nothing_and_an_unchanged_state_is_left_out() {
+    fn an_older_copy_starts_nothing() {
         let mut track = SlayerTrack::default();
         track.input(&[attack_record(10)]);
         own_state(&mut track, 1);
@@ -183,12 +179,6 @@ mod tests {
             own_state(&mut track, 2).map(|state| state.sequence),
             Some(4603),
             "the follow-up, not the old action again"
-        );
-        track.input(&[attack_record(12)]);
-        assert_eq!(
-            own_state(&mut track, 3).map(|state| state.state),
-            Some(None),
-            "the same state goes on"
         );
     }
 }
