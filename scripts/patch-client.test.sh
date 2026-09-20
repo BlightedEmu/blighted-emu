@@ -11,11 +11,16 @@ readonly NOPS_HEX="909090909090"
 # Sonic and Steam EndSession bodies (the Steam one with a stand-in call offset).
 readonly SONIC_HEX="48895c24084889742418488954241057""4883ec20488bfa488bd9488b024c8b4008488d4a0841ffd0c6435801488b074885c0741f488b004885c0741041b802000000488d5708488d4f08ffd048c70700000000488b5c2430488b7424404883c4205fc3"
 readonly STEAM_HEX="48895c2408488954241057""4883ec20488bfa488bd94883c130e812345678488b8b280200004885c97407488b01ff5030"
+# The camera-lock check: player-target and gamepad tests, the key read, and the refusing JZ.
+readonly CAMLOCK_HEX="4038be810000000f8511111111""4038be8800000075""22""488d0d33333333""e844444444""84c00f8455555555"
+# Its JZ is the last six bytes.
+readonly CAMLOCK_JZ_DISTANCE=36
 # Fake PE layout: image base, .text at RVA 0x1000 / file 0x200, .rdata at RVA 0x2000 / file 0x300.
 readonly SIG_OFFSET=$((0x200))
 readonly SONIC_OFFSET=$((0x220))
 readonly STEAM_OFFSET=$((0x2a0))
 readonly SLOT_OFFSET=$((0x310))
+readonly CAMLOCK_OFFSET=$((0x2d0))
 # Little-endian VAs of the Sonic and Steam functions in the fake image.
 readonly SONIC_VA_HEX="2010004001000000"
 readonly STEAM_VA_HEX="a010004001000000"
@@ -28,15 +33,15 @@ pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; failures=$((failures + 1)); }
 
 # Builds a fake Bin64 with a minimal PE NewWorld.exe: the verify signature (when $2 is yes), the
-# Sonic and Steam EndSession bodies (the Steam one when $3 is yes), and a vtable slot that
-# points at the Steam function.
+# Sonic and Steam EndSession bodies (the Steam one when $3 is yes), a vtable slot that points at
+# the Steam function, and the camera-lock check (when $4 is yes).
 make_bin64() {
-  local dir="$1" with_sig="$2" with_steam="$3"
+  local dir="$1" with_sig="$2" with_steam="$3" with_camlock="${4:-yes}"
   mkdir -p "$dir"
   python3 -I - "$dir/NewWorld.exe" "$with_sig" "$with_steam" "$SIGNATURE_HEX" "$SONIC_HEX" \
-    "$STEAM_HEX" "$STEAM_VA_HEX" <<'PY'
+    "$STEAM_HEX" "$STEAM_VA_HEX" "$with_camlock" "$CAMLOCK_HEX" <<'PY'
 import struct, sys
-path, with_sig, with_steam, sig, sonic, steam, steam_va = sys.argv[1:]
+path, with_sig, with_steam, sig, sonic, steam, steam_va, with_camlock, camlock = sys.argv[1:]
 image = bytearray(0x400)
 image[0:2] = b"MZ"
 struct.pack_into("<I", image, 0x3C, 0x40)
@@ -59,6 +64,8 @@ put(0x220, sonic)
 if with_steam == "yes":
     put(0x2A0, steam)
 put(0x310, steam_va)
+if with_camlock == "yes":
+    put(0x2D0, camlock)
 open(path, "wb").write(image)
 PY
 }
@@ -112,6 +119,19 @@ else
   fail "patched copy keeps the Steam function body (got $got)"
 fi
 
+got="$(dd if="$bin64/BlightedNewWorld.exe" bs=1 skip="$((CAMLOCK_OFFSET + CAMLOCK_JZ_DISTANCE))" count=6 2>/dev/null | xxd -p)"
+if [[ "$got" == "$NOPS_HEX" ]]; then
+  pass "patched copy has NOPs at the camera-lock JZ"
+else
+  fail "patched copy has NOPs at the camera-lock JZ (got $got)"
+fi
+got="$(dd if="$bin64/BlightedNewWorld.exe" bs=1 skip="$CAMLOCK_OFFSET" count="$CAMLOCK_JZ_DISTANCE" 2>/dev/null | xxd -p | tr -d '\n')"
+if [[ "$got" == "${CAMLOCK_HEX:0:$((CAMLOCK_JZ_DISTANCE * 2))}" ]]; then
+  pass "patched copy keeps the camera-lock check before the JZ"
+else
+  fail "patched copy keeps the camera-lock check before the JZ (got $got)"
+fi
+
 # 2) --verify passes on the patched copy, and fails after tampering.
 if python3 "$PATCH_SCRIPT" "$bin64" --verify >/dev/null; then
   pass "--verify passes on a correct copy"
@@ -147,6 +167,14 @@ if python3 "$PATCH_SCRIPT" "$no_steam" >/dev/null 2>&1 || [[ -e "$no_steam/Bligh
   fail "missing Steam EndSession signature is refused"
 else
   pass "missing Steam EndSession signature is refused"
+fi
+
+no_camlock="$work_dir/no-camlock/Bin64"
+make_bin64 "$no_camlock" yes yes no
+if python3 "$PATCH_SCRIPT" "$no_camlock" >/dev/null 2>&1 || [[ -e "$no_camlock/BlightedNewWorld.exe" ]]; then
+  fail "missing camera-lock signature is refused"
+else
+  pass "missing camera-lock signature is refused"
 fi
 
 # 5) Re-running is idempotent: a second patch rebuilds the same copy from the official.

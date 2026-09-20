@@ -81,6 +81,24 @@ function. Reasoning and addresses:
 
 "Exit to main menu" is a different path and is not changed by this patch.
 
+## Third change: camera lock at mobs with mouse and keyboard
+
+Without it, the middle mouse button never locks the camera on a mob. The lock
+candidate check (build 25810808: `FUN_142c866e0`) refuses every target that is
+not a player unless the input device is a gamepad or the config key
+`javelin.enable-camera-lock-kbam-pve-targeting` is true. Retail gets that key
+from remote StackConfig layers (S3 bucket `ags-javelin-remote-config`), which
+need a signed-in player. The client reads no local file for it: its
+override-config file is looked up only inside a mounted pak, and a `javelin`
+object in it has no config component.
+
+The patch replaces the `JZ` after the key's read with six `NOP` bytes, as if
+the key were true. In build 25810808 it is at file offset `0x2C8629D` (VA
+`0x142C86C9D`), `0F 84 5E 08 00 00`. The tool finds it by its signature: the
+player-target test `CMP [RSI+0x81]`, `JNZ`, the gamepad test `CMP [RSI+0x88]`,
+`JNZ`, `LEA RCX, key`, `CALL`, `TEST AL, AL`, `JZ`. No other function reads
+the key. The PvP lock keys stay unpatched; their retail values are Unknown.
+
 ## How to make the patched copy
 
 The tool finds the function by its byte signature, not by a fixed address,
