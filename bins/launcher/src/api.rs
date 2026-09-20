@@ -179,7 +179,6 @@ mod tests {
             auth_mode: AuthMode::Password,
             allow_registration: true,
             launch_arguments: Vec::new(),
-            client_config: serde_json::Map::new(),
         })
     }
 

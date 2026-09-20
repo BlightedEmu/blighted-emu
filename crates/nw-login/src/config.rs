@@ -73,10 +73,6 @@ pub struct EdgeConfig {
     /// Worlds, one `[[world]]` block each.
     #[serde(rename = "world")]
     pub worlds: Vec<WorldConfig>,
-    /// `[client_config]`: client settings the launcher hands to the game
-    /// ([`nw_protocol::launcher_api::LauncherInfo::client_config`]).
-    #[serde(default)]
-    pub client_config: serde_json::Map<String, serde_json::Value>,
 }
 
 /// `[tls]`: PEM files from an ACME tool such as `certbot` or `lego`.
@@ -300,9 +296,6 @@ request_timeout_seconds = 10
 max_connections = 4096
 log_filter = "info"
 
-[client_config.javelin]
-enable-camera-lock-kbam-pve-targeting = true
-
 [tls]
 certificate_pem_path = "local-data/edge-http/fullchain.pem"
 private_key_pem_path = "local-data/edge-http/privkey.pem"
@@ -363,10 +356,6 @@ max_connections = 5
         assert_eq!(config.game_host(), "game.example.org");
         assert_eq!(config.worlds.len(), 1);
         assert_eq!(config.auth.mode, AuthMode::Password);
-        assert_eq!(
-            serde_json::Value::Object(config.client_config.clone()),
-            serde_json::json!({ "javelin": { "enable-camera-lock-kbam-pve-targeting": true } })
-        );
         assert_eq!(
             config.launch_arguments(),
             [
