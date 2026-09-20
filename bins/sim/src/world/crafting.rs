@@ -76,6 +76,11 @@ impl SimWorld {
             send_now(&mut self.combat_messages, &player.connection, &[refusal]);
             return;
         };
+        tracing::debug!(
+            player = number,
+            station = station.station_type,
+            "crafting station opened"
+        );
         let answer = gather_answer(number, request, STATION_ACCEPTED, station.name);
         send_now(&mut self.combat_messages, &player.connection, &[answer]);
         player

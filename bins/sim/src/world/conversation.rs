@@ -27,6 +27,7 @@ impl SimWorld {
         let Some(player) = self.world.get::<Player>(entity) else {
             return;
         };
+        tracing::debug!(player = number, target = ?request.target, "talk");
         let answer = gather_answer(number, request, TALK_ACCEPTED, TALK_NAME);
         send_now(&mut self.combat_messages, &player.connection, &[answer]);
     }
