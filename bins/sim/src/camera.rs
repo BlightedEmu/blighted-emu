@@ -23,13 +23,22 @@ const CAMERA_HEIGHT_M: f32 = 2.65;
 /// fit; above it the boom shortens with the camera's lag and the estimate errs by about 1 m.
 pub const STILL_SPEED_MPS: f32 = BOOM_BY_SPEED[1].0;
 
-/// The boom length at `speed_mps`.
+/// The boom length at `speed_mps`: the retail medians, joined by straight lines (Inferred: the
+/// camera's lag grows with the speed; steps between the medians made the body jump 0.3 to 0.4 m
+/// whenever the measured speed wobbled across one, live 2026-09-18).
 fn boom_m(speed_mps: f32) -> f32 {
+    let [(first_speed, first_boom), ..] = BOOM_BY_SPEED;
+    if speed_mps <= first_speed {
+        return first_boom;
+    }
     BOOM_BY_SPEED
-        .iter()
-        .rev()
-        .find(|(from, _)| speed_mps >= *from)
-        .map_or(BOOM_BY_SPEED[0].1, |(_, boom)| *boom)
+        .windows(2)
+        .find(|pair| speed_mps < pair[1].0)
+        .map_or(BOOM_BY_SPEED[BOOM_BY_SPEED.len() - 1].1, |pair| {
+            let [(low_speed, low_boom), (high_speed, high_boom)] = [pair[0], pair[1]];
+            let share = (speed_mps - low_speed) / (high_speed - low_speed);
+            low_boom + (high_boom - low_boom) * share
+        })
 }
 
 /// The body under the camera at `camera`, looking along yaw `yaw` (radians), moving at
@@ -65,10 +74,20 @@ mod tests {
     }
 
     #[test]
-    fn the_boom_is_shorter_at_speed() {
-        assert!((boom_m(0.0) - 4.75).abs() < f32::EPSILON);
-        assert!((boom_m(1.0) - 4.44).abs() < f32::EPSILON);
-        assert!((boom_m(3.0) - 3.23).abs() < f32::EPSILON);
-        assert!((boom_m(6.0) - 2.88).abs() < f32::EPSILON);
+    fn the_boom_is_shorter_at_speed_and_has_no_steps() {
+        for (speed, boom) in BOOM_BY_SPEED {
+            assert!(
+                (boom_m(speed) - boom).abs() < 1e-5,
+                "the retail median at {speed}"
+            );
+        }
+        assert!(
+            (boom_m(6.0) - 2.88).abs() < f32::EPSILON,
+            "the shortest above the last"
+        );
+        // Halfway between two medians, halfway between their booms.
+        assert!((boom_m(3.0) - (3.23 + 2.88) / 2.0).abs() < 1e-5);
+        // A small wobble of the speed moves the boom a little, not by a step.
+        assert!((boom_m(4.01) - boom_m(3.99)).abs() < 0.01);
     }
 }

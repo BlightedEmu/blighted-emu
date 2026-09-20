@@ -45,7 +45,7 @@ use crate::mobs::{MobChanges, spawn_index};
 use crate::player_content::PlayerContent;
 use crate::saves::{ItemSave, QuestSave, SaveQueue};
 use crate::world::{
-    Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
+    CameraSample, Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
 };
 use nw_world::script::LevelDesign;
 
@@ -567,6 +567,7 @@ impl Loop {
                 connection,
                 position,
                 view.map(|[yaw, pitch]| LookDir { yaw, pitch }),
+                input.newest_counter(),
             );
         }
         let now_ms = self.now_ms();
@@ -606,21 +607,29 @@ impl Loop {
     }
 
     /// Moves the player of `connection` to the body under its camera at `position`, looking
-    /// along `view` when the record says, and counts a refusal.
+    /// along `view` when the record says, from the record of client counter `counter`, and
+    /// counts a refusal.
     fn move_player(
         &mut self,
         connection: &ConnectionRef,
         position: InputPosition,
         view: Option<LookDir>,
+        counter: Option<u16>,
     ) {
         let camera = Position {
             x: position.x,
             y: position.y,
             z: position.z(),
         };
-        let (result, next) = self
-            .world
-            .move_from_camera(connection, camera, view, self.now_ms());
+        let (result, next) = self.world.move_from_camera(
+            connection,
+            CameraSample {
+                camera,
+                view,
+                counter,
+            },
+            self.now_ms(),
+        );
         if result.is_ok() {
             tracing::trace!(x = next.x, y = next.y, z = next.z, "client move");
         }

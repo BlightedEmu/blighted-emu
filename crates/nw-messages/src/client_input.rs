@@ -583,6 +583,13 @@ impl ClientInputMsg {
             .find_map(|record| Some((record.bit_7?, record.bit_6)))
     }
 
+    /// The counter (`u16` after the mask) of the newest record: the client's own clock, one
+    /// record per frame step (input note: 34 ms apart, median). `None` for an input without
+    /// records.
+    pub fn newest_counter(&self) -> Option<u16> {
+        self.records.first().map(|record| record.u16_after_mask)
+    }
+
     /// Whether the player holds block now: the state of the newest record. The client sends the
     /// newest record first (the counter after the mask falls by one per record in the live
     /// capture). `None` for an input without records.

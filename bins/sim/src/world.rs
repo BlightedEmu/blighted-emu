@@ -394,8 +394,8 @@ struct Player {
     phasing_left_ms: Option<u64>,
     /// Whether the server moved the player: its next own state moves it ([`OwnTeleport`]).
     moved: bool,
-    /// The client's last camera point and when it came, for the player's speed.
-    last_camera: Option<(Position, u64)>,
+    /// The client's last camera sample, when it came, and the player's speed then.
+    last_camera: Option<CameraSeen>,
     /// The view angles of its newest input: where other players see it face and look.
     view: Option<LookDir>,
     /// The run toggle's movement mode of its newest input, and the ALC state number in which it
@@ -501,6 +501,27 @@ struct ReceivedGhost {
     mob: Option<MobGhost>,
     /// A player's state, for the players who see it.
     player: Option<PlayerGhost>,
+}
+
+/// One client camera point of an input: where the camera is, the view angles of its record, and
+/// the counter of its newest record.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraSample {
+    /// The camera position.
+    pub camera: Position,
+    /// The view angles, when the record has them.
+    pub view: Option<LookDir>,
+    /// The client's record counter, when the input has records.
+    pub counter: Option<u16>,
+}
+
+/// The last camera sample of a player, when it came, and the speed it gave.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CameraSeen {
+    camera: Position,
+    now_ms: u64,
+    counter: Option<u16>,
+    speed_mps: f32,
 }
 
 /// The players of one sim.
@@ -1062,32 +1083,60 @@ impl SimWorld {
         }
     }
 
-    /// Moves the player of `connection` to the body under its client camera at `camera`,
-    /// looking along `view` when the input says ([`crate::camera::body_of`]; without a view the
-    /// camera point is taken as the body), received at `now_ms`. Gives the result and the body
-    /// position it checked.
+    /// Moves the player of `connection` to the body under the client camera of `sample`, received
+    /// at `now_ms` ([`crate::camera::body_of`]; without a yaw the camera point is taken as the
+    /// body). The speed that sets the camera boom is timed by the client's record counter, one
+    /// record per [`attack::INPUT_RECORD_MS`]: inputs often arrive in pairs a few microseconds
+    /// apart, and timed by their arrival the speed flipped between 0 and far too fast, so the body
+    /// jumped by the boom's change (0.3 to 1.9 m) and the moves were refused as too fast (live
+    /// 2026-09-18: 353 refusals). An input whose newest record is not newer than the last one is
+    /// an old copy and moves nothing. Gives the result and the body position it checked.
     pub fn move_from_camera(
         &mut self,
         connection: &ConnectionRef,
-        camera: Position,
-        view: Option<LookDir>,
+        sample: CameraSample,
         now_ms: u64,
     ) -> (Result<GroundCheck, MoveError>, Position) {
+        let CameraSample {
+            camera,
+            view,
+            counter,
+        } = sample;
         let entity = self.by_connection.get(connection).copied();
         let last = entity
-            .and_then(|entity| self.world.get_mut::<Player>(entity))
-            .and_then(|mut player| player.last_camera.replace((camera, now_ms)));
-        let speed_mps = last.map_or(0.0, |(at, then)| {
-            let elapsed_ms = now_ms.saturating_sub(then);
+            .and_then(|entity| self.world.get::<Player>(entity))
+            .and_then(|player| player.last_camera);
+        let stale = last.is_some_and(|last| match (last.counter, counter) {
+            (Some(last), Some(newest)) => !attack::counter_is_newer(newest, last),
+            _ => false,
+        });
+        if stale {
+            let at = entity
+                .and_then(|entity| self.world.get::<Body>(entity))
+                .map_or(camera, |body| body.motion.position());
+            return (Ok(GroundCheck::Checked), at);
+        }
+        let speed_mps = last.map_or(0.0, |last| {
+            let elapsed_ms = match (last.counter, counter) {
+                (Some(last), Some(newest)) => {
+                    u64::from(newest.wrapping_sub(last)) * u64::from(attack::INPUT_RECORD_MS)
+                }
+                _ => now_ms.saturating_sub(last.now_ms),
+            };
             if elapsed_ms == 0 {
-                0.0
-            } else {
-                #[allow(clippy::cast_precision_loss, reason = "a gap of a few seconds")]
-                let seconds = elapsed_ms as f32 / MS_PER_SECOND_F32;
-                at.horizontal_distance(camera) / seconds
+                return last.speed_mps;
             }
+            #[allow(clippy::cast_precision_loss, reason = "a gap of a few seconds")]
+            let seconds = elapsed_ms as f32 / MS_PER_SECOND_F32;
+            last.camera.horizontal_distance(camera) / seconds
         });
         if let Some(mut player) = entity.and_then(|entity| self.world.get_mut::<Player>(entity)) {
+            player.last_camera = Some(CameraSeen {
+                camera,
+                now_ms,
+                counter,
+                speed_mps,
+            });
             player.moving = speed_mps >= crate::camera::STILL_SPEED_MPS;
             if view.is_some() {
                 player.view = view;
@@ -5345,7 +5394,15 @@ mod tests {
             .expect("body")
             .motion
             .position();
-        let _ = world.move_from_camera(&a, at, Some(VIEW), input_at);
+        let _ = world.move_from_camera(
+            &a,
+            CameraSample {
+                camera: at,
+                view: Some(VIEW),
+                counter: None,
+            },
+            input_at,
+        );
         world.attack_input(&a, &[stance_record(1)], input_at);
         let outgoing = tick(&mut world, input_at);
         let seen = states_of(&world, &outgoing.messages, &b, 1);
@@ -6113,6 +6170,65 @@ mod tests {
         join(&mut world, 1, x + 5.0);
         world.tick(NOW + 33, SERVER_TIME).expect("tick");
         assert_eq!(world.mob_counts()[0], (MobState::Asleep, 0));
+    }
+
+    #[test]
+    fn inputs_that_arrive_together_keep_the_body_steady() {
+        /// A run: 4 m/s along x, one record per 33 ms (live 2026-09-18: inputs came in pairs a
+        /// few microseconds apart, and the body flipped by the boom's change).
+        const RUN_MPS: f32 = 4.0;
+        const YAW: f32 = -std::f32::consts::FRAC_PI_2;
+        let mut world = world();
+        let a = connection(1);
+        join(&mut world, 1, CELL_M / 2.0);
+        let entity = world.by_connection[&a];
+        let start = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let step_m = RUN_MPS * f32::from(attack::INPUT_RECORD_MS) / 1_000.0;
+        // The camera of a standing body at `start`.
+        let offset = crate::camera::body_of(start, YAW, 0.0);
+        let camera = Position {
+            x: 2.0 * start.x - offset.x,
+            y: 2.0 * start.y - offset.y,
+            z: 2.0 * start.z - offset.z,
+        };
+        let sample = |record: u16| CameraSample {
+            camera: Position {
+                x: camera.x + step_m * f32::from(record),
+                ..camera
+            },
+            view: Some(LookDir {
+                yaw: YAW,
+                pitch: 0.0,
+            }),
+            counter: Some(record),
+        };
+        let mut bodies = Vec::new();
+        for record in 1..=8_u16 {
+            // Two inputs per arrival time, as live.
+            let arrived = NOW
+                + ONE_SECOND_MS
+                + u64::from(record / 2) * u64::from(2 * attack::INPUT_RECORD_MS);
+            let (result, body) = world.move_from_camera(&a, sample(record), arrived);
+            assert!(result.is_ok(), "record {record}: {result:?}");
+            bodies.push(body.x);
+        }
+        // The first record stands; from the second the boom is the running one.
+        let steps: Vec<f32> = bodies[1..]
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .collect();
+        assert!(
+            steps.iter().all(|step| (step - step_m).abs() < 0.01),
+            "the body moves one record's run each record, also within a pair: {steps:?}"
+        );
+        // An old copy moves nothing.
+        let (_, held) = world.move_from_camera(&a, sample(3), NOW + 2 * ONE_SECOND_MS);
+        assert!((held.x - bodies[7]).abs() < f32::EPSILON, "{held:?}");
     }
 
     #[test]

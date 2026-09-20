@@ -206,7 +206,7 @@ pub(super) struct PlayerSwing {
 }
 
 /// Milliseconds per client input record (retail: 34 ms apart, median; input note).
-const INPUT_RECORD_MS: u16 = 33;
+pub(super) const INPUT_RECORD_MS: u16 = 33;
 /// The shortest hold of the attack key that is a heavy attack (input note: retail light holds
 /// 35 to 314 ms, heavy holds from 432 ms; the limit between them is our choice).
 const HEAVY_HOLD_MS: u16 = 400;
