@@ -10,9 +10,13 @@ use std::collections::HashMap;
 
 use crate::Tables;
 
-/// The bit of every achievement id.
+/// The bit of every achievement id, without case: objective tasks name achievements in another
+/// case than the sheets (Observed: `tutorial_gathering_bushflint` for
+/// `Tutorial_Gathering_BushFlint`, 19 task rows in all), and no two ids of the sheets differ in
+/// case alone (17,005 ids).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AchievementIndexes {
+    /// Bits by lowercase id.
     by_id: HashMap<String, u32>,
 }
 
@@ -34,13 +38,16 @@ impl AchievementIndexes {
     /// The indexes of `rows`: (achievement id, index).
     pub fn build(rows: impl IntoIterator<Item = (String, u32)>) -> Self {
         Self {
-            by_id: rows.into_iter().collect(),
+            by_id: rows
+                .into_iter()
+                .map(|(id, index)| (id.to_ascii_lowercase(), index))
+                .collect(),
         }
     }
 
-    /// The bit of achievement `id`.
+    /// The bit of achievement `id`, in any case.
     pub fn index(&self, id: &str) -> Option<u32> {
-        self.by_id.get(id).copied()
+        self.by_id.get(&id.to_ascii_lowercase()).copied()
     }
 }
 
@@ -62,6 +69,11 @@ mod tests {
             Some(INTRO_UNLOCK)
         );
         assert_eq!(indexes.index("Nothing"), None);
+        assert_eq!(
+            indexes.index("ftue_intro2_cinematic_unlock"),
+            Some(INTRO_UNLOCK),
+            "a task names an achievement in another case"
+        );
         assert_eq!(indexes.index("Last"), Some(LAST));
     }
 }

@@ -252,7 +252,8 @@ fn location_of(cell: &str) -> Option<Position> {
     numbers.next().is_none().then_some(position)
 }
 
-/// The kind of `row`.
+/// The kind of `row`. The type cell's case varies (Observed: `TASKUNLOCKACHIEVEMENT` and
+/// `TasklockAchievement` in the objective task sheets), so it is matched without case.
 fn kind_of(row: &TaskRow) -> TaskKind {
     let item = || row.item_name.clone().unwrap_or_default();
     let crc = || lowercase_crc32(&item());
@@ -261,35 +262,35 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         .and_then(|qty| u32::try_from(qty).ok())
         .unwrap_or(1)
         .max(1);
-    match row.kind.as_str() {
-        "ConsecutiveTaskContainer" => TaskKind::Consecutive,
-        "PartialTaskContainer" => TaskKind::Partial,
-        "SimpleTaskContainer" => TaskKind::Simple,
-        "TaskUnlockAchievement" => TaskKind::UnlockAchievement(item()),
-        "TaskLockAchievement" => TaskKind::LockAchievement(item()),
-        "TaskAchievement" => TaskKind::HasAchievement(item()),
-        "TaskRemoveItem" => TaskKind::RemoveItem(item()),
-        "TaskTimer" => TaskKind::Timer {
+    match row.kind.to_ascii_lowercase().as_str() {
+        "consecutivetaskcontainer" => TaskKind::Consecutive,
+        "partialtaskcontainer" => TaskKind::Partial,
+        "simpletaskcontainer" => TaskKind::Simple,
+        "taskunlockachievement" => TaskKind::UnlockAchievement(item()),
+        "tasklockachievement" => TaskKind::LockAchievement(item()),
+        "taskachievement" => TaskKind::HasAchievement(item()),
+        "taskremoveitem" => TaskKind::RemoveItem(item()),
+        "tasktimer" => TaskKind::Timer {
             // Durations are a few seconds: the cast cannot overflow.
             duration_ms: (row.duration.unwrap_or_default().max(0.0) * MS_PER_SECOND) as u64,
         },
-        "TaskCinematicStart" => TaskKind::CinematicStart(crc()),
-        "TaskCinematicComplete" => TaskKind::CinematicComplete(crc()),
-        "TaskCutsceneComplete" => TaskKind::CutsceneComplete(crc()),
-        "TaskTriggerArea" => TaskKind::TriggerArea {
+        "taskcinematicstart" => TaskKind::CinematicStart(crc()),
+        "taskcinematiccomplete" => TaskKind::CinematicComplete(crc()),
+        "taskcutscenecomplete" => TaskKind::CutsceneComplete(crc()),
+        "tasktriggerarea" => TaskKind::TriggerArea {
             at: row.override_location.as_deref().and_then(location_of),
             radius_m: trigger_radius_m(row.target_tag.as_deref()),
         },
-        "TaskKillContribution" => TaskKind::KillContribution {
+        "taskkillcontribution" => TaskKind::KillContribution {
             enemy: row.kill_enemy_type.clone().unwrap_or_default(),
             count,
         },
-        "TaskHaveAndReturnItems" => TaskKind::HaveItem(row.item_name.clone()),
-        "TaskHaveItems" => TaskKind::HaveItems {
+        "taskhaveandreturnitems" => TaskKind::HaveItem(row.item_name.clone()),
+        "taskhaveitems" => TaskKind::HaveItems {
             item: item(),
             count,
         },
-        "TaskGatherItems" => TaskKind::GatherItems {
+        "taskgatheritems" => TaskKind::GatherItems {
             item: item(),
             count,
             drop: row
@@ -304,10 +305,10 @@ fn kind_of(row: &TaskRow) -> TaskKind {
                         .unwrap_or(ALWAYS_PERCENT),
                 }),
         },
-        "TaskCraftRecipe" => {
+        "taskcraftrecipe" => {
             TaskKind::CraftRecipe(row.crafting_recipe_id.clone().unwrap_or_default())
         }
-        "TaskGameEvent"
+        "taskgameevent"
             if row
                 .ui_screen_tag
                 .as_deref()
@@ -315,8 +316,8 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         {
             TaskKind::Never
         }
-        "TaskEquipItem" => TaskKind::EquipItem(item()),
-        "TaskOpenUiScreen" => {
+        "taskequipitem" => TaskKind::EquipItem(item()),
+        "taskopenuiscreen" => {
             TaskKind::OpenUiScreen(lowercase_crc32(row.ui_screen_tag.as_deref().unwrap_or("")))
         }
         _ => TaskKind::Unsupported,
@@ -1087,6 +1088,19 @@ pub(crate) mod tests {
         );
         assert!(progress.contains(&entry(4, "Wait", 2, true)));
         assert!(progress.contains(&entry(15, "Root", 4, false)));
+    }
+
+    #[test]
+    fn a_task_type_is_read_in_any_case() {
+        // Retail sheets: `TASKUNLOCKACHIEVEMENT` and `TasklockAchievement`.
+        assert_eq!(
+            kind_of(&with_item("Up", "TASKUNLOCKACHIEVEMENT", "Pushed")),
+            TaskKind::UnlockAchievement("Pushed".to_owned())
+        );
+        assert_eq!(
+            kind_of(&with_item("Down", "TasklockAchievement", "Pushed")),
+            TaskKind::LockAchievement("Pushed".to_owned())
+        );
     }
 
     #[test]
