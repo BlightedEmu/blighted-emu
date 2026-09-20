@@ -27,6 +27,9 @@ pub const SYNC_CONTAINER: u8 = 3;
 /// Sync reason of an item that moved mid-session: into a bag (retail potions) or out of a
 /// taken container (the beach bag's empty records).
 pub const SYNC_MOVED: u8 = 6;
+/// Sync reason of the empty record a removed worn item leaves in its visible slot (retail
+/// 2026-09-18: the tutorial sword taken after the ship's sinking).
+pub const SYNC_REMOVED: u8 = 5;
 /// Sync reason of an owned item at login (type 5437).
 pub const SYNC_OWNED: u8 = 17;
 /// Item flags bit 0: bound to the character.
@@ -297,6 +300,8 @@ mod tests {
     const RETAIL_CHEST_PACKED: [u8; 8] = [0x00, 0x01, 0x08, 0x4a, 0xeb, 0xff, 0x05, 0x19];
     /// A retail empty bag slot (section 4).
     const RETAIL_EMPTY_PACKED: [u8; 8] = [0x00, 0x00, 0x13, 0x25, 0x00, 0xd0, 0x00, 0x00];
+    /// The record a removed worn item left in its visible slot (retail 2026-09-18, 149365).
+    const RETAIL_REMOVED_PACKED: [u8; 8] = [0x00, 0x00, 0x16, 0xf9, 0x98, 0x30, 0x00, 0x00];
     /// Two potions moved into bag slot 1 (section 10.3).
     const RETAIL_POTIONS_PACKED: [u8; 8] = [0x00, 0x02, 0x01, 0x49, 0x32, 0xa3, 0xc7, 0x10];
     const INSTANCE: [u8; RAW_ID_LEN] = [7; RAW_ID_LEN];
@@ -325,6 +330,11 @@ mod tests {
     fn the_packed_number_is_the_retail_one() {
         assert_eq!(encode(&chest())[..8], RETAIL_CHEST_PACKED);
         assert_eq!(encode(&ItemRecord::EMPTY_SLOT)[..8], RETAIL_EMPTY_PACKED);
+        let removed = ItemRecord {
+            sync_reason: SYNC_REMOVED,
+            ..ItemRecord::EMPTY_SLOT
+        };
+        assert_eq!(encode(&removed)[..8], RETAIL_REMOVED_PACKED);
         let potions = ItemRecord {
             quantity: 2,
             sync_reason: 6,

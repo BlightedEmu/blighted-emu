@@ -907,14 +907,14 @@ mod tests {
         const SWORD_GEAR_SCORE: u32 = 60;
         let gear = PlayerGear::first(&[crate::gear::EquippedItem {
             slot: crate::paperdoll::slot::MAIN_HAND_OPTION_1,
-            item: crate::gear::GearItem {
+            item: Some(crate::gear::GearItem {
                 item_index: SWORD_INDEX,
                 quantity: 1,
                 gear_score: SWORD_GEAR_SCORE,
                 durability: SWORD_DURABILITY,
                 bound: true,
                 instance: CHARACTER_ID,
-            },
+            }),
         }]);
         let states = PlayerStates {
             character_id: CHARACTER_ID,

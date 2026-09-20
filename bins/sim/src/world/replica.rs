@@ -90,7 +90,7 @@ impl ReplicaSource {
         for (shown, worn) in items.iter_mut().zip(&self.items) {
             *shown = u8::try_from(worn.slot).ok().map(|slot| GhostItem {
                 slot,
-                item_index: worn.item.item_index,
+                item_index: worn.item.map_or(0, |item| item.item_index),
             });
         }
         PlayerGhost {
@@ -150,14 +150,15 @@ impl ReplicaSource {
                 .flatten()
                 .map(|item| EquippedItem {
                     slot: u32::from(item.slot),
-                    item: GearItem {
+                    // Item index 0: the slot's item was removed.
+                    item: (item.item_index != 0).then_some(GearItem {
                         item_index: item.item_index,
                         quantity: SHOWN_QUANTITY,
                         gear_score: SHOWN_GEAR_SCORE,
                         durability: 0,
                         bound: false,
                         instance: [0; RAW_ID_LEN],
-                    },
+                    }),
                 })
                 .collect(),
             hands: Hands {
@@ -550,14 +551,14 @@ pub(super) mod tests {
             gear_version: 3,
             items: vec![EquippedItem {
                 slot: nw_messages::paperdoll::slot::MAIN_HAND_OPTION_1,
-                item: GearItem {
+                item: Some(GearItem {
                     item_index: 42,
                     quantity: SHOWN_QUANTITY,
                     gear_score: SHOWN_GEAR_SCORE,
                     durability: 0,
                     bound: false,
                     instance: [0; RAW_ID_LEN],
-                },
+                }),
             }],
             hands: Hands::default(),
             in_combat: false,

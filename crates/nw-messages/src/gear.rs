@@ -7,7 +7,9 @@
 //! number 0), as retail equip bodies do (live-tutorial note, section 5.3).
 
 use crate::containers::{ContainerState, ItemManagementState, OwnedItem};
-use crate::items::{FIRST_VERSION, FullList, ITEM_BOUND, ItemRecord, SYNC_LOGIN, SYNC_OWNED};
+use crate::items::{
+    FIRST_VERSION, FullList, ITEM_BOUND, ItemRecord, SYNC_LOGIN, SYNC_OWNED, SYNC_REMOVED,
+};
 use crate::paperdoll::{
     ItemVisual, LoadedAmmo, Loadout, PaperdollOwner, PaperdollPublic, PaperdollState, SlotBits,
     slot,
@@ -43,8 +45,11 @@ pub struct GearItem {
 pub struct EquippedItem {
     /// The paperdoll slot id ([`slot`]).
     pub slot: u32,
-    /// The item.
-    pub item: GearItem,
+    /// The item; `None`: a visible slot whose item was removed. Retail keeps such a slot in the
+    /// visible lists with an empty record and visual 0, out of the owned items and the loadout,
+    /// until an item fills it again (retail 2026-09-18: the tutorial sword; a client given a
+    /// shorter list kept the sword in the hand).
+    pub item: Option<GearItem>,
 }
 
 /// Whether paperdoll slot `slot_id` shows on the character: the armor and the weapon options.
@@ -162,13 +167,25 @@ impl PlayerGear {
         let records = |items: &[&(u32, &EquippedItem)]| -> Vec<ItemRecord> {
             items
                 .iter()
-                .map(|(counter, worn)| record(&worn.item, SYNC_LOGIN, None, *counter))
+                .map(|(counter, worn)| match &worn.item {
+                    Some(item) => record(item, SYNC_LOGIN, None, *counter),
+                    None => ItemRecord {
+                        sync_reason: SYNC_REMOVED,
+                        ..ItemRecord::EMPTY_SLOT
+                    },
+                })
                 .collect()
         };
         let visible: Vec<&(u32, &EquippedItem)> = visible.iter().collect();
-        let hidden: Vec<&(u32, &EquippedItem)> = hidden.iter().collect();
+        let hidden: Vec<&(u32, &EquippedItem)> = hidden
+            .iter()
+            .filter(|(_, worn)| worn.item.is_some())
+            .collect();
         let durability = |items: &[&(u32, &EquippedItem)]| -> Vec<u32> {
-            items.iter().map(|(_, worn)| worn.item.durability).collect()
+            items
+                .iter()
+                .map(|(_, worn)| worn.item.map_or(0, |item| item.durability))
+                .collect()
         };
         let slots = |items: &[&(u32, &EquippedItem)]| -> Vec<u32> {
             items.iter().map(|(_, worn)| worn.slot).collect()
@@ -192,8 +209,9 @@ impl PlayerGear {
                         name: FIRST_LOADOUT_NAME.to_vec(),
                         slots: equipped
                             .iter()
-                            .map(|worn| worn.slot)
                             .zip(keys.clone())
+                            .filter(|(worn, _)| worn.item.is_some())
+                            .map(|(worn, key)| (worn.slot, key))
                             .collect(),
                         flag: false,
                         extra: Vec::new(),
@@ -210,7 +228,9 @@ impl PlayerGear {
                     version,
                     visible
                         .iter()
-                        .map(|(_, worn)| ItemVisual::of(worn.item.item_index))
+                        .map(|(_, worn)| {
+                            ItemVisual::of(worn.item.map_or(0, |item| item.item_index))
+                        })
                         .collect(),
                 )),
                 loadout_swaps: None,
@@ -218,9 +238,11 @@ impl PlayerGear {
         };
         let owned = keys
             .zip(&worn)
-            .map(|(key, (counter, worn))| OwnedItem {
-                key,
-                item: record(&worn.item, SYNC_OWNED, None, *counter),
+            .filter_map(|(key, (counter, worn))| {
+                Some(OwnedItem {
+                    key,
+                    item: record(worn.item.as_ref()?, SYNC_OWNED, None, *counter),
+                })
             })
             .collect();
         let first_bag_counter = u32::try_from(equipped.len()).unwrap_or(u32::MAX);
@@ -330,7 +352,7 @@ mod tests {
     fn wanderer() -> Vec<EquippedItem> {
         let armor = |slot, item_index| EquippedItem {
             slot,
-            item: item(item_index, ARMOR_GEAR_SCORE, ARMOR_DURABILITY),
+            item: Some(item(item_index, ARMOR_GEAR_SCORE, ARMOR_DURABILITY)),
         };
         vec![
             armor(slot::CHEST, CAPTURE_CHEST_INDEX),
@@ -339,7 +361,11 @@ mod tests {
             armor(slot::FEET, CAPTURE_CHEST_INDEX + 3),
             EquippedItem {
                 slot: slot::MAIN_HAND_OPTION_1,
-                item: item(CAPTURE_SWORD_INDEX, SWORD_GEAR_SCORE, SWORD_DURABILITY),
+                item: Some(item(
+                    CAPTURE_SWORD_INDEX,
+                    SWORD_GEAR_SCORE,
+                    SWORD_DURABILITY,
+                )),
             },
         ]
     }
@@ -392,10 +418,10 @@ mod tests {
         let mut equipped = wanderer();
         equipped.push(EquippedItem {
             slot: POTION_SLOT,
-            item: GearItem {
+            item: Some(GearItem {
                 quantity: POTIONS,
                 ..item(POTION_INDEX, 0, 0)
-            },
+            }),
         });
         let bag = [
             None,
@@ -441,6 +467,52 @@ mod tests {
         assert_eq!(
             PaperdollState::read(&mut Reader::new(&bytes)),
             Ok(gear.paperdoll)
+        );
+    }
+
+    #[test]
+    fn a_removed_weapon_keeps_its_visible_slot_empty_as_retail() {
+        // Retail 2026-09-18, 149365: the tutorial sword (key 4) taken after the sinking.
+        let mut equipped = wanderer();
+        equipped[4].item = None;
+        let gear = PlayerGear::of(&equipped, &[], FIRST_VERSION, Hands::default());
+        let owner = gear.paperdoll.owner.as_ref().expect("owner");
+        let public = gear.paperdoll.public.as_ref().expect("public");
+        let slots = &public.visible_slots.as_ref().expect("slots").elements;
+        assert_eq!(slots.len(), wanderer().len(), "the list keeps slot 24");
+        assert_eq!(slots[4], slot::MAIN_HAND_OPTION_1);
+        assert_eq!(
+            owner.visible_items.as_ref().expect("items").elements[4],
+            ItemRecord {
+                sync_reason: SYNC_REMOVED,
+                ..ItemRecord::EMPTY_SLOT
+            }
+        );
+        assert_eq!(
+            owner
+                .visible_durability
+                .as_ref()
+                .expect("durability")
+                .elements[4],
+            0
+        );
+        assert_eq!(
+            public.visuals.as_ref().expect("visuals").elements[4],
+            ItemVisual::of(0)
+        );
+        let loadout = &owner.loadouts.as_ref().expect("loadouts").elements[0];
+        assert!(
+            loadout
+                .slots
+                .iter()
+                .all(|(slot_id, _)| *slot_id != slot::MAIN_HAND_OPTION_1),
+            "the loadout has no pair for it"
+        );
+        let owned = &gear.owned.owned.as_ref().expect("owned").elements;
+        assert_eq!(
+            owned.iter().map(|owned| owned.key).collect::<Vec<_>>(),
+            [0, 1, 2, 3],
+            "key 4 is gone, the others stay"
         );
     }
 
