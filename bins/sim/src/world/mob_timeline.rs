@@ -7,15 +7,17 @@
 //! timeline: the first state has number 2 and a time anchor (µs since 2000-01-01, the clock of
 //! `TimeSynchMsg`); every later state has the next number and its time after the anchor in ms.
 //! An idle mob sends one state per 333 ms, a moving mob one per tick, a dead mob one per 67 ms;
-//! the anchor moves on after about 60 s, so the 16-bit offset never wraps. For a creature whose
-//! Mannequin fragments are known ([`animations_of`]), the states also name the fragment it plays
-//! and the time in it.
+//! the anchor moves on after about 60 s, so the 16-bit offset never wraps. For a creature in the
+//! creature animation table ([`animations_of`]), the states also name the fragment it plays and
+//! the time in it.
 
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::{PI, TAU};
 
+use nw_content::creature_animations::{CreatureAnimation, CreatureAnimations};
+use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::{
-    AlcStamp, AssetId, FRAG_TAGS_LEN, InputPosition, LayerEntry, MobAnimation, MobStep, ScopeEntry,
+    AlcStamp, FRAG_TAGS_LEN, InputPosition, LayerEntry, MobAnimation, MobStep, ScopeEntry,
     StepScope,
 };
 use nw_sim_core::{MobState, Position};
@@ -77,8 +79,10 @@ pub(super) enum Fragment {
     Idle,
     /// It stands and fights.
     CombatIdle,
-    /// It walks.
+    /// It walks without a target.
     Move,
+    /// It runs at its target.
+    Chase,
     /// It turns to its target the first time it sees it.
     Alert,
     /// It swings.
@@ -93,8 +97,7 @@ pub(super) enum Fragment {
     Play(MoveFragment),
 }
 
-/// One fragment of a creature: its fragment and action numbers and the last byte of a retail
-/// entry of it.
+/// One fragment of a creature: its fragment and action numbers and the last byte of its entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FragmentEntry {
     fragment: u16,
@@ -116,15 +119,20 @@ pub(super) struct Animations {
     spawn: FragmentEntry,
     idle: FragmentEntry,
     combat_idle: FragmentEntry,
+    /// It walks without a target.
     walk: FragmentEntry,
+    /// It runs at its target.
+    chase: FragmentEntry,
     attack: FragmentEntry,
     death: FragmentEntry,
-    /// The full-body reactions to a first and a second hit; `None` when Unknown.
+    /// The full-body reactions to a first and a second hit; `None` when it has none.
     reactions: Option<(FragmentEntry, FragmentEntry)>,
     /// The alert when it first sees its target; `None` for a creature that has none.
     alert: Option<FragmentEntry>,
     /// The look pose that plays while it fights (its scope bit and entry); `None` for a
-    /// creature that has none.
+    /// creature that has none. Its bit is the `LookPose` scope's place in the creature's scope
+    /// definitions (retail masks 17, 9 and 5: sailor and legionnaire 4, swarmer 3, risen 2;
+    /// creature-animation note, section 0).
     look_pose: Option<(u8, FragmentEntry)>,
     /// The tags of a mob without a target.
     calm_tags: [u8; FRAG_TAGS_LEN],
@@ -148,6 +156,7 @@ impl Animations {
             Fragment::Idle => self.idle,
             Fragment::CombatIdle => self.combat_idle,
             Fragment::Move => self.walk,
+            Fragment::Chase => self.chase,
             Fragment::Alert => match self.alert {
                 Some(alert) => alert,
                 None => return None,
@@ -165,201 +174,371 @@ impl Animations {
             Fragment::Play(played) => entry(played.fragment, played.action, played.tail),
         })
     }
+
+    /// The animations of `creature` (its row of the creature animation table), with the retail
+    /// choices of [`RETAIL_CREATURES`] for its slice `asset`; `None` without a spawn and an idle.
+    pub(super) fn of(asset: &[u8; ASSET_ID_LEN], creature: &CreatureAnimation) -> Option<Self> {
+        let retail = RETAIL_CREATURES
+            .iter()
+            .find(|retail| retail.asset == *asset);
+        let pick = |role: Role| -> Option<FragmentEntry> {
+            let chosen = retail
+                .and_then(|retail| retail.choices.iter().find(|(chosen, _, _)| *chosen == role));
+            let (fragment, action) = match chosen {
+                Some((_, fragment, action)) => {
+                    (creature.fragment(fragment)?, creature.action(action)?)
+                }
+                None => role.by_rule(creature)?,
+            };
+            let tail = retail
+                .and_then(|retail| retail.tails.iter().find(|(tailed, _)| *tailed == role))
+                .map_or(DEFAULT_ENTRY_TAIL, |(_, tail)| *tail);
+            Some(entry(fragment, action, tail))
+        };
+        let spawn = pick(Role::Spawn)?;
+        let idle = pick(Role::Idle)?;
+        let combat_idle = pick(Role::CombatIdle).unwrap_or(idle);
+        let walk = pick(Role::Walk);
+        let chase = pick(Role::Chase);
+        let light = pick(Role::ReactLight);
+        let reactions = light.map(|light| (light, pick(Role::ReactHeavy).unwrap_or(light)));
+        let fights_quietly = retail.is_some_and(|retail| retail.fights_quietly);
+        let look_pose = pick(Role::LookPose)
+            .zip(creature.scope_bit(LOOK_POSE))
+            .map(|(layer, bit)| (bit, layer))
+            .filter(|_| !fights_quietly);
+        Some(Self {
+            spawn,
+            idle,
+            combat_idle,
+            walk: walk.or(chase).unwrap_or(idle),
+            chase: chase.or(walk).unwrap_or(combat_idle),
+            attack: pick(Role::Attack).unwrap_or(combat_idle),
+            death: pick(Role::Death).unwrap_or(idle),
+            reactions,
+            alert: pick(Role::Alert).filter(|_| !fights_quietly),
+            look_pose,
+            calm_tags: creature.tag_state(&[], &[]),
+            alert_tags: creature.tag_state(&[], &[ALERTED_TAG]),
+            alert_after_hurt: retail.is_some_and(|retail| retail.alert_after_hurt),
+            phase_two_tags: creature
+                .has_tag(PHASE_TWO_TAG)
+                .then(|| creature.tag_state(&[PHASE_ONE_TAG], &[PHASE_TWO_TAG, ALERTED_TAG])),
+            reaction_ms: retail.map_or(CREATURE_REACTION_MS, |retail| retail.reaction_ms),
+            death_ticks: retail.map_or(DEFAULT_DEATH_TICKS, |retail| retail.death_ticks),
+        })
+    }
 }
 
-/// The `scopeData` bit of the look pose: sailor and legionnaire 4, swarmer 3, risen 2 (retail
-/// masks 17, 9 and 5; creature-animation note, section 0). Thorpe sends none.
-const LOOK_POSE_SCOPE_HUMANOID: u8 = 4;
-const LOOK_POSE_SCOPE_SWARMER: u8 = 3;
-const LOOK_POSE_SCOPE_RISEN: u8 = 2;
+/// The tag every fighting creature shows (creature-animation note: retail sets it in every
+/// creature's fight; the boar's `22`, the risen's `0b b1`).
+const ALERTED_TAG: &str = "Alerted";
+/// A boss's phase tags: retail Thorpe shows `Phase_2` in place of `Phase_1` in his second phase
+/// (`08 81 0b` to `08 81 13`).
+const PHASE_ONE_TAG: &str = "Phase_1";
+const PHASE_TWO_TAG: &str = "Phase_2";
+/// The look pose's fragment, action and scope (one name for all three in every creature file).
+const LOOK_POSE: &str = "LookPose";
+/// The last byte of an entry whose retail value is Unknown (Inferred: the client takes any; retail
+/// sent several for one fragment of one creature, the boar's `Move` 0x10, 0x14, 0x1d, 0x27,
+/// 0x29).
+const DEFAULT_ENTRY_TAIL: u8 = 0;
+/// The scope ticks of a death fragment whose retail value is Unknown (our choice: the
+/// legionnaire's).
+const DEFAULT_DEATH_TICKS: u32 = LEGION_DEATH_TICKS;
+/// The parts of an attack that runs in pieces: not an attack of its own.
+const ATTACK_PIECES: [&str; 5] = ["_Start", "_Loop", "_LOOP", "_End", "_Outro"];
+const ATTACK_PREFIX: &str = "Attack";
+const ATTACK_START_SUFFIX: &str = "_Start";
 
-/// The tutorial's corrupted sailor (`Corrupted_Sailor_1H_Club_FTUE`): fragments of
-/// `damned_controllerdefs.xml` and actions of `drownedsailor.grid`, with the tags and entry bytes
-/// of the retail sailors (mob-animation note, sections 3.4 and 4; reactions `r_R2_F` then
-/// `r_R1_F`, creature-animation note, section 5.4).
-const FTUE_SAILOR: Animations = Animations {
-    spawn: entry(185, 36, 0xc7),
-    idle: entry(1, 10, 0xac),
-    combat_idle: entry(30, 12, 0x85),
-    walk: entry(182, 26, 0xeb),
-    attack: entry(109, 71, 0x85),
-    death: entry(99, 46, 0xa5),
-    reactions: Some((entry(16, 39, 0x6a), entry(12, 39, 0xab))),
-    alert: Some(entry(2, 2, 0x85)),
-    look_pose: Some((LOOK_POSE_SCOPE_HUMANOID, entry(37, 4, 0x7b))),
-    calm_tags: [
-        0x04, 0x03, 0x28, 0x08, 0x8b, 0x80, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+/// What a mob shows, by the names of its creature's fragments and actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    Spawn,
+    Idle,
+    CombatIdle,
+    Walk,
+    Chase,
+    Attack,
+    Death,
+    ReactLight,
+    ReactHeavy,
+    Alert,
+    LookPose,
+}
+
+impl Role {
+    /// The fragment and action names of the role, in order of preference (creature-animation
+    /// note: the names retail played on the tutorial creatures and the boar).
+    const fn names(self) -> (&'static [&'static str], &'static [&'static str]) {
+        match self {
+            Self::Spawn => (&["Spawn"], &["Spawn"]),
+            Self::Idle => (&["Idle"], &["Idle_No_Task"]),
+            Self::CombatIdle => (&["Combat_Idle"], &["Combat_Idle"]),
+            Self::Walk => (&["Move"], &["Move"]),
+            Self::Chase => (&["Move_Combat"], &["Move_Combat"]),
+            // A death plays the hit's direction in retail (Inferred); the plain one is ours.
+            Self::Death => (
+                &["r_Death", "r_Death_F", "r_Death_R4_F"],
+                &["Death", "Death_FB"],
+            ),
+            Self::ReactLight => (&["r_R2_F"], &["Reaction"]),
+            Self::ReactHeavy => (&["r_R3_F"], &["Reaction"]),
+            Self::Alert => (&["Alert_Turn", "Alert"], &["Alert_Turn", "Alert"]),
+            Self::LookPose => (&[LOOK_POSE], &[LOOK_POSE]),
+            // The attack is picked by [`Role::by_rule`].
+            Self::Attack => (&[], &[]),
+        }
+    }
+
+    /// The fragment and action numbers the role's names find in `creature`. An attack is the
+    /// first full attack fragment with an action of its name (our choice; retail picks one per
+    /// move: the boar's `Attack_Gore`).
+    fn by_rule(self, creature: &CreatureAnimation) -> Option<(u16, u16)> {
+        if self == Self::Attack {
+            return creature
+                .fragments()
+                .iter()
+                .filter(|name| name.starts_with(ATTACK_PREFIX))
+                .filter(|name| !ATTACK_PIECES.iter().any(|piece| name.ends_with(piece)))
+                .filter(|name| {
+                    creature
+                        .fragment(&format!("{name}{ATTACK_START_SUFFIX}"))
+                        .is_none()
+                })
+                .find_map(|name| Some((creature.fragment(name)?, creature.action(name)?)));
+        }
+        let (fragments, actions) = self.names();
+        let fragment = fragments.iter().find_map(|name| creature.fragment(name))?;
+        let action = actions.iter().find_map(|name| creature.action(name))?;
+        Some((fragment, action))
+    }
+}
+
+/// What retail showed of one creature that the rules of [`Role`] do not give (creature-animation
+/// note, sections 1 to 5; mob-animation note, sections 3.4 and 4).
+struct RetailCreature {
+    /// Its slice asset.
+    asset: [u8; ASSET_ID_LEN],
+    /// The fragment and action names retail played where the rules pick others.
+    choices: &'static [(Role, &'static str, &'static str)],
+    /// The last byte of its retail entries.
+    tails: &'static [(Role, u8)],
+    /// The scope ticks of its death fragment.
+    death_ticks: u32,
+    /// How long its light and heavy reactions play.
+    reaction_ms: (u64, u64),
+    /// See [`Animations::alert_after_hurt`].
+    alert_after_hurt: bool,
+    /// Retail sent no alert and no look pose for it.
+    fights_quietly: bool,
+}
+
+/// The tutorial's corrupted sailor (`Corrupted_Sailor_1H_Club_FTUE`): reactions `r_R2_F` then
+/// `r_R1_F` (creature-animation note, section 5.4).
+const FTUE_SAILOR: RetailCreature = RetailCreature {
+    asset: [
+        0xb7, 0xe3, 0x3b, 0x29, 0x4b, 0xcf, 0x57, 0xb8, 0xa4, 0x76, 0xab, 0xdc, 0x3a, 0x31, 0xfa,
+        0xe7,
     ],
-    alert_tags: [
-        0x04, 0x03, 0x28, 0x08, 0x8b, 0x82, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00,
+    choices: &[
+        (Role::Death, "r_Death_F", "Death"),
+        (Role::ReactHeavy, "r_R1_F", "Reaction"),
+        (Role::Alert, "Alert", "Alert_Turn"),
     ],
-    alert_after_hurt: false,
-    phase_two_tags: None,
-    reaction_ms: CREATURE_REACTION_MS,
+    tails: &[
+        (Role::Spawn, 0xc7),
+        (Role::Idle, 0xac),
+        (Role::CombatIdle, 0x85),
+        (Role::Chase, 0xeb),
+        (Role::Attack, 0x85),
+        (Role::Death, 0xa5),
+        (Role::ReactLight, 0x6a),
+        (Role::ReactHeavy, 0xab),
+        (Role::Alert, 0x85),
+        (Role::LookPose, 0x7b),
+    ],
     death_ticks: SAILOR_DEATH_TICKS,
+    reaction_ms: CREATURE_REACTION_MS,
+    alert_after_hurt: false,
+    fights_quietly: false,
 };
 /// The legionnaire and the signifier (`Legion_Legionnaire_FTUE`; creature-animation note,
-/// section 1). Retail's chase uses action 13 with the `Move_Combat` fragment.
-const FTUE_LEGIONNAIRE: Animations = Animations {
-    spawn: entry(143, 51, 0x7d),
-    idle: entry(33, 41, 0x33),
-    combat_idle: entry(12, 43, 0x05),
-    walk: entry(47, 13, 0x27),
-    attack: entry(39, 2, 0x3e),
-    death: entry(151, 50, 0x40),
-    reactions: Some((entry(110, 32, 0x96), entry(114, 32, 0x0d))),
-    alert: Some(entry(7, 12, 0x53)),
-    look_pose: Some((LOOK_POSE_SCOPE_HUMANOID, entry(45, 25, 0xe9))),
-    calm_tags: [
-        0x05, 0x02, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+/// section 1): retail's chase uses the `Move_Wander` action with the `Move_Combat` fragment.
+const LEGION_CHOICES: &[(Role, &str, &str)] = &[
+    (Role::Chase, "Move_Combat", "Move_Wander"),
+    (
+        Role::Attack,
+        "Legionnaire_LightStab",
+        "Legionnaire_LightStab",
+    ),
+    (Role::Death, "r_Death_R4_F", "Death_FB"),
+];
+const LEGION_TAILS: &[(Role, u8)] = &[
+    (Role::Spawn, 0x7d),
+    (Role::Idle, 0x33),
+    (Role::CombatIdle, 0x05),
+    (Role::Chase, 0x27),
+    (Role::Attack, 0x3e),
+    (Role::Death, 0x40),
+    (Role::ReactLight, 0x96),
+    (Role::ReactHeavy, 0x0d),
+    (Role::Alert, 0x53),
+    (Role::LookPose, 0xe9),
+];
+const FTUE_LEGIONNAIRE: RetailCreature = RetailCreature {
+    asset: [
+        0xc0, 0x5f, 0xc9, 0x57, 0x84, 0x87, 0x55, 0x59, 0xaf, 0xe8, 0x74, 0xa7, 0x8f, 0x95, 0xfb,
+        0x64,
     ],
-    alert_tags: [
-        0x85, 0x02, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ],
-    alert_after_hurt: false,
-    phase_two_tags: None,
-    reaction_ms: CREATURE_REACTION_MS,
+    choices: LEGION_CHOICES,
+    tails: LEGION_TAILS,
     death_ticks: LEGION_DEATH_TICKS,
-};
-/// The corruption swarmer (`Corruption_Entity_Crawler_FTUE`; creature-animation note, section 2).
-/// Its combat idle and reactions were never seen (each died from one hit): it stands in its idle
-/// (our choice) and does not reel.
-const FTUE_SWARMER: Animations = Animations {
-    spawn: entry(86, 74, 0xa5),
-    idle: entry(1, 66, 0x33),
-    combat_idle: entry(1, 66, 0x33),
-    walk: entry(79, 72, 0x41),
-    attack: entry(44, 39, 0xe5),
-    death: entry(171, 56, 0x72),
-    reactions: None,
-    alert: Some(entry(21, 1, 0x0f)),
-    look_pose: Some((LOOK_POSE_SCOPE_SWARMER, entry(65, 51, 0xda))),
-    calm_tags: [
-        0x10, 0x40, 0x40, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ],
-    alert_tags: [
-        0x50, 0x40, 0x40, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ],
-    alert_after_hurt: false,
-    phase_two_tags: None,
     reaction_ms: CREATURE_REACTION_MS,
+    alert_after_hurt: false,
+    fights_quietly: false,
+};
+const FTUE_SIGNIFIER: RetailCreature = RetailCreature {
+    asset: [
+        0x87, 0xa3, 0x35, 0xe7, 0x6b, 0x86, 0x50, 0xd5, 0xa4, 0x65, 0xfe, 0x08, 0x10, 0xbd, 0xa5,
+        0xdf,
+    ],
+    ..FTUE_LEGIONNAIRE
+};
+/// The corruption swarmer (`Corruption_Entity_Crawler_FTUE`; creature-animation note,
+/// section 2). Its combat idle and reactions were never seen (each died from one hit): its own
+/// files give them.
+const FTUE_SWARMER: RetailCreature = RetailCreature {
+    asset: [
+        0xe0, 0x6d, 0x1b, 0xb7, 0x31, 0x1f, 0x5a, 0xcb, 0x98, 0x57, 0xcc, 0x20, 0x46, 0x4c, 0xe4,
+        0xdf,
+    ],
+    choices: &[
+        (Role::Attack, "Attack_Crawler_Slash_R", "Attack_Throw"),
+        (Role::Death, "r_Death_R4_F", "Death"),
+        (Role::Alert, "Alert", "Alert"),
+    ],
+    tails: &[
+        (Role::Spawn, 0xa5),
+        (Role::Idle, 0x33),
+        (Role::Chase, 0x41),
+        (Role::Attack, 0xe5),
+        (Role::Death, 0x72),
+        (Role::Alert, 0x0f),
+        (Role::LookPose, 0xda),
+    ],
     death_ticks: SWARMER_DEATH_TICKS,
+    reaction_ms: CREATURE_REACTION_MS,
+    alert_after_hurt: false,
+    fights_quietly: false,
 };
 /// The risen corruption entity (`Corruption_Entity`; creature-animation note, section 3). Retail
 /// never sent a plain idle: it rummages.
-const FTUE_RISEN: Animations = Animations {
-    spawn: entry(57, 17, 0x08),
-    idle: entry(25, 27, 0x43),
-    combat_idle: entry(18, 32, 0xec),
-    walk: entry(46, 35, 0xd4),
-    attack: entry(67, 11, 0x78),
-    death: entry(4, 22, 0x8f),
-    reactions: Some((entry(13, 20, 0xc9), entry(42, 20, 0x5b))),
-    alert: Some(entry(37, 2, 0xa4)),
-    look_pose: Some((LOOK_POSE_SCOPE_RISEN, entry(8, 16, 0xde))),
-    calm_tags: [
-        0x0b, 0x31, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+const FTUE_RISEN: RetailCreature = RetailCreature {
+    asset: [
+        0xa8, 0xb6, 0x0b, 0xc7, 0xfe, 0xaf, 0x57, 0x4c, 0xbe, 0x7a, 0xe3, 0xc2, 0xd8, 0xa4, 0x8d,
+        0xec,
     ],
-    alert_tags: [
-        0x0b, 0xb1, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    choices: &[
+        (Role::Idle, "POI_Rummage_LOOP", "POI_Waypoint"),
+        (
+            Role::Attack,
+            "Attack_Stretch_Swipe_R",
+            "Attack_Stretch_Swipe_R",
+        ),
     ],
-    alert_after_hurt: false,
-    phase_two_tags: None,
-    reaction_ms: CREATURE_REACTION_MS,
+    tails: &[
+        (Role::Spawn, 0x08),
+        (Role::Idle, 0x43),
+        (Role::CombatIdle, 0xec),
+        (Role::Chase, 0xd4),
+        (Role::Attack, 0x78),
+        (Role::Death, 0x8f),
+        (Role::ReactLight, 0xc9),
+        (Role::ReactHeavy, 0x5b),
+        (Role::Alert, 0xa4),
+        (Role::LookPose, 0xde),
+    ],
     death_ticks: RISEN_DEATH_TICKS,
+    reaction_ms: CREATURE_REACTION_MS,
+    alert_after_hurt: false,
+    fights_quietly: false,
 };
 /// Thorpe (`Damned_Commander_FTUE`; creature-animation note, section 4). He never stands idle:
-/// he strafes between attacks.
-const FTUE_THORPE: Animations = Animations {
-    spawn: entry(23, 68, 0xb0),
-    idle: entry(65, 62, 0x2b),
-    combat_idle: entry(65, 62, 0x2b),
-    walk: entry(19, 61, 0xa1),
-    attack: entry(58, 28, 0xa5),
-    death: entry(5, 63, 0x14),
-    reactions: Some((entry(27, 45, 0x47), entry(31, 45, 0x43))),
-    alert: None,
-    look_pose: None,
-    calm_tags: [
-        0x08, 0x01, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+/// he strafes between attacks; his spawn plays with the `Victory` action.
+const FTUE_THORPE: RetailCreature = RetailCreature {
+    asset: [
+        0x92, 0x98, 0x31, 0xa9, 0x8d, 0xd2, 0x5e, 0x3e, 0x8b, 0xd8, 0xd4, 0x5d, 0x4e, 0x08, 0x68,
+        0xac,
     ],
-    alert_tags: [
-        0x08, 0x81, 0x0b, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    choices: &[
+        (Role::Spawn, "Spawn", "Victory"),
+        (Role::Idle, "Strafe", "Strafe"),
+        (Role::CombatIdle, "Strafe", "Strafe"),
+        (Role::Attack, "Attack_Stab_01", "Attack_Stab_02"),
     ],
-    alert_after_hurt: true,
-    phase_two_tags: Some([
-        0x08, 0x81, 0x13, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ]),
-    reaction_ms: THORPE_REACTION_MS,
+    tails: &[
+        (Role::Spawn, 0xb0),
+        (Role::Idle, 0x2b),
+        (Role::CombatIdle, 0x2b),
+        (Role::Chase, 0xa1),
+        (Role::Attack, 0xa5),
+        (Role::Death, 0x14),
+        (Role::ReactLight, 0x47),
+        (Role::ReactHeavy, 0x43),
+    ],
     death_ticks: THORPE_DEATH_TICKS,
+    reaction_ms: THORPE_REACTION_MS,
+    alert_after_hurt: true,
+    fights_quietly: true,
 };
+/// The start beach's boar (`Boar`; glide note: q3 984 spawn `07 0001 22 01 0000 1c`, q3 3215
+/// idle tail 0x0a, q3 77665 walk tail 0x29, q1 716003 death tail 0xe9 and dead ticks 0x58).
+const BOAR: RetailCreature = RetailCreature {
+    asset: [
+        0xdb, 0x96, 0xd7, 0x65, 0xb5, 0x04, 0x59, 0xd9, 0x8c, 0x9e, 0x04, 0xad, 0xaa, 0x9c, 0x94,
+        0x85,
+    ],
+    choices: &[],
+    tails: &[
+        (Role::Spawn, 0x1c),
+        (Role::Idle, 0x0a),
+        (Role::Walk, 0x29),
+        (Role::Death, 0xe9),
+    ],
+    death_ticks: BOAR_DEATH_TICKS,
+    reaction_ms: CREATURE_REACTION_MS,
+    alert_after_hurt: false,
+    fights_quietly: false,
+};
+
 /// The last scope tick of each creature's death fragment in its retail dead states (dead-mob
-/// note: sailor 0x38, legionnaire 0x32, risen 0x49, Thorpe 0x64). The swarmer's is Unknown: our
-/// choice, the legionnaire's.
+/// note: sailor 0x38, legionnaire 0x32, risen 0x49, Thorpe 0x64; glide note: boar 0x58). The
+/// swarmer's is Unknown: our choice, the legionnaire's.
 const SAILOR_DEATH_TICKS: u32 = 0x38;
 const LEGION_DEATH_TICKS: u32 = 0x32;
 const RISEN_DEATH_TICKS: u32 = 0x49;
 const THORPE_DEATH_TICKS: u32 = 0x64;
+const BOAR_DEATH_TICKS: u32 = 0x58;
 const SWARMER_DEATH_TICKS: u32 = LEGION_DEATH_TICKS;
 
-/// The creature slices of the tutorial's mobs, with their fragments.
-const CREATURES: [([u8; 16], &Animations); 6] = [
-    (
-        // b7e33b29: the corrupted sailor.
-        [
-            0xb7, 0xe3, 0x3b, 0x29, 0x4b, 0xcf, 0x57, 0xb8, 0xa4, 0x76, 0xab, 0xdc, 0x3a, 0x31,
-            0xfa, 0xe7,
-        ],
-        &FTUE_SAILOR,
-    ),
-    (
-        // c05fc957: the legionnaire.
-        [
-            0xc0, 0x5f, 0xc9, 0x57, 0x84, 0x87, 0x55, 0x59, 0xaf, 0xe8, 0x74, 0xa7, 0x8f, 0x95,
-            0xfb, 0x64,
-        ],
-        &FTUE_LEGIONNAIRE,
-    ),
-    (
-        // 87a335e7: the signifier.
-        [
-            0x87, 0xa3, 0x35, 0xe7, 0x6b, 0x86, 0x50, 0xd5, 0xa4, 0x65, 0xfe, 0x08, 0x10, 0xbd,
-            0xa5, 0xdf,
-        ],
-        &FTUE_LEGIONNAIRE,
-    ),
-    (
-        // e06d1bb7: the corruption swarmer.
-        [
-            0xe0, 0x6d, 0x1b, 0xb7, 0x31, 0x1f, 0x5a, 0xcb, 0x98, 0x57, 0xcc, 0x20, 0x46, 0x4c,
-            0xe4, 0xdf,
-        ],
-        &FTUE_SWARMER,
-    ),
-    (
-        // a8b60bc7: the risen corruption entity.
-        [
-            0xa8, 0xb6, 0x0b, 0xc7, 0xfe, 0xaf, 0x57, 0x4c, 0xbe, 0x7a, 0xe3, 0xc2, 0xd8, 0xa4,
-            0x8d, 0xec,
-        ],
-        &FTUE_RISEN,
-    ),
-    (
-        // 929831a9: Thorpe.
-        [
-            0x92, 0x98, 0x31, 0xa9, 0x8d, 0xd2, 0x5e, 0x3e, 0x8b, 0xd8, 0xd4, 0x5d, 0x4e, 0x08,
-            0x68, 0xac,
-        ],
-        &FTUE_THORPE,
-    ),
+/// The creatures retail showed, with what it showed of them.
+const RETAIL_CREATURES: [RetailCreature; 7] = [
+    FTUE_SAILOR,
+    FTUE_LEGIONNAIRE,
+    FTUE_SIGNIFIER,
+    FTUE_SWARMER,
+    FTUE_RISEN,
+    FTUE_THORPE,
+    BOAR,
 ];
 
-/// The fragments of the creature of slice `asset`, when known.
-pub(super) fn animations_of(asset: &AssetId) -> Option<&'static Animations> {
-    CREATURES
+/// The animations of every creature of `table` that has a spawn and an idle, by slice asset.
+pub(super) fn animations_of(table: &CreatureAnimations) -> HashMap<[u8; ASSET_ID_LEN], Animations> {
+    table
         .iter()
-        .find(|(id, _)| *id == asset.id)
-        .map(|(_, animations)| *animations)
+        .filter_map(|(asset, creature)| Some((*asset, Animations::of(asset, creature)?)))
+        .collect()
 }
 
 /// A mob as the bundle step sees it this tick.
@@ -554,7 +733,11 @@ impl MobTimeline {
             .last_moved_ms
             .is_some_and(|moved| now_ms.saturating_sub(moved) < MOVE_HOLD_MS)
         {
-            Fragment::Move
+            if pose.fighting() {
+                Fragment::Chase
+            } else {
+                Fragment::Move
+            }
         } else if now_ms.saturating_sub(self.born_ms) < SPAWN_MS {
             Fragment::Spawn
         } else if pose.fighting() {
@@ -871,8 +1054,206 @@ mod tests {
         }
     }
 
+    /// The creature animation rows of the tutorial's creatures and the beach boar (made by
+    /// `content-tool creature-animations` from build 25810808).
+    fn table() -> CreatureAnimations {
+        CreatureAnimations::parse(include_str!("testdata/creature-animations-tutorial.json"))
+            .expect("fixture")
+    }
+
+    fn creature(retail: &RetailCreature) -> Animations {
+        let table = table();
+        let row = table.get(&retail.asset).expect("a row");
+        Animations::of(&retail.asset, row).expect("animations")
+    }
+
+    fn sailor() -> Animations {
+        creature(&FTUE_SAILOR)
+    }
+
+    fn legionnaire() -> Animations {
+        creature(&FTUE_LEGIONNAIRE)
+    }
+
+    fn thorpe() -> Animations {
+        creature(&FTUE_THORPE)
+    }
+
+    /// A creature whose files have no reactions.
+    fn without_reactions() -> Animations {
+        const ASSET: [u8; ASSET_ID_LEN] = [7; ASSET_ID_LEN];
+        let names = |list: &[&str]| list.iter().map(|name| (*name).to_owned()).collect();
+        let row = nw_content::creature_animations::CreatureRow {
+            asset: "07".repeat(ASSET_ID_LEN),
+            slice: "slices/characters/test.dynamicslice".to_owned(),
+            fragments: names(&[
+                "Spawn",
+                "Idle",
+                "Combat_Idle",
+                "Move",
+                "Attack_Bite",
+                "r_Death",
+            ]),
+            scopes: names(&["FullBody"]),
+            actions: names(&[
+                "Spawn",
+                "Idle_No_Task",
+                "Combat_Idle",
+                "Move",
+                "Attack_Bite",
+                "Death",
+            ]),
+            tags: std::collections::BTreeMap::new(),
+            default_tags: Vec::new(),
+        };
+        let table = CreatureAnimations::of_rows(vec![row]).expect("table");
+        Animations::of(&ASSET, table.get(&ASSET).expect("row")).expect("animations")
+    }
+
+    /// The tag state that starts with `bytes`.
+    fn tags(bytes: &[u8]) -> [u8; FRAG_TAGS_LEN] {
+        let mut tags = [0; FRAG_TAGS_LEN];
+        tags[..bytes.len()].copy_from_slice(bytes);
+        tags
+    }
+
+    #[test]
+    fn the_files_give_the_retail_tutorial_entries_and_tags() {
+        // The retail values (mob-animation note, sections 3.4 and 4; creature-animation note,
+        // sections 1 to 5).
+        let sailor = sailor();
+        assert_eq!(sailor.spawn, entry(185, 36, 0xc7));
+        assert_eq!(sailor.idle, entry(1, 10, 0xac));
+        assert_eq!(sailor.combat_idle, entry(30, 12, 0x85));
+        assert_eq!(sailor.chase, entry(182, 26, 0xeb));
+        assert_eq!(sailor.attack, entry(109, 71, 0x85));
+        assert_eq!(sailor.death, entry(99, 46, 0xa5));
+        assert_eq!(
+            sailor.reactions,
+            Some((entry(16, 39, 0x6a), entry(12, 39, 0xab)))
+        );
+        assert_eq!(sailor.alert, Some(entry(2, 2, 0x85)));
+        assert_eq!(sailor.look_pose, Some((4, entry(37, 4, 0x7b))));
+        assert_eq!(
+            sailor.calm_tags,
+            tags(&[0x04, 0x03, 0x28, 0x08, 0x8b, 0x80, 0x08])
+        );
+        assert_eq!(
+            sailor.alert_tags,
+            tags(&[0x04, 0x03, 0x28, 0x08, 0x8b, 0x82, 0x08])
+        );
+        for legion in [legionnaire(), creature(&FTUE_SIGNIFIER)] {
+            assert_eq!(legion.spawn, entry(143, 51, 0x7d));
+            assert_eq!(legion.idle, entry(33, 41, 0x33));
+            assert_eq!(legion.combat_idle, entry(12, 43, 0x05));
+            assert_eq!(legion.chase, entry(47, 13, 0x27));
+            assert_eq!(legion.attack, entry(39, 2, 0x3e));
+            assert_eq!(legion.death, entry(151, 50, 0x40));
+            assert_eq!(
+                legion.reactions,
+                Some((entry(110, 32, 0x96), entry(114, 32, 0x0d)))
+            );
+            assert_eq!(legion.alert, Some(entry(7, 12, 0x53)));
+            assert_eq!(legion.look_pose, Some((4, entry(45, 25, 0xe9))));
+            assert_eq!(legion.calm_tags, tags(&[0x05, 0x02, 0x00, 0x00, 0x02]));
+            assert_eq!(legion.alert_tags, tags(&[0x85, 0x02, 0x00, 0x00, 0x02]));
+        }
+        let swarmer = creature(&FTUE_SWARMER);
+        assert_eq!(swarmer.spawn, entry(86, 74, 0xa5));
+        assert_eq!(swarmer.idle, entry(1, 66, 0x33));
+        assert_eq!(swarmer.chase, entry(79, 72, 0x41));
+        assert_eq!(swarmer.attack, entry(44, 39, 0xe5));
+        assert_eq!(swarmer.death, entry(171, 56, 0x72));
+        assert_eq!(swarmer.alert, Some(entry(21, 1, 0x0f)));
+        assert_eq!(swarmer.look_pose, Some((3, entry(65, 51, 0xda))));
+        assert_eq!(swarmer.calm_tags, tags(&[0x10, 0x40, 0x40, 0x01]));
+        assert_eq!(swarmer.alert_tags, tags(&[0x50, 0x40, 0x40, 0x01]));
+        let risen = creature(&FTUE_RISEN);
+        assert_eq!(risen.spawn, entry(57, 17, 0x08));
+        assert_eq!(risen.idle, entry(25, 27, 0x43));
+        assert_eq!(risen.combat_idle, entry(18, 32, 0xec));
+        assert_eq!(risen.chase, entry(46, 35, 0xd4));
+        assert_eq!(risen.attack, entry(67, 11, 0x78));
+        assert_eq!(risen.death, entry(4, 22, 0x8f));
+        assert_eq!(
+            risen.reactions,
+            Some((entry(13, 20, 0xc9), entry(42, 20, 0x5b)))
+        );
+        assert_eq!(risen.alert, Some(entry(37, 2, 0xa4)));
+        assert_eq!(risen.look_pose, Some((2, entry(8, 16, 0xde))));
+        assert_eq!(risen.calm_tags, tags(&[0x0b, 0x31]));
+        assert_eq!(risen.alert_tags, tags(&[0x0b, 0xb1]));
+        let thorpe = thorpe();
+        assert_eq!(thorpe.spawn, entry(23, 68, 0xb0));
+        assert_eq!(thorpe.idle, entry(65, 62, 0x2b));
+        assert_eq!(thorpe.combat_idle, entry(65, 62, 0x2b));
+        assert_eq!(thorpe.chase, entry(19, 61, 0xa1));
+        assert_eq!(thorpe.attack, entry(58, 28, 0xa5));
+        assert_eq!(thorpe.death, entry(5, 63, 0x14));
+        assert_eq!(
+            thorpe.reactions,
+            Some((entry(27, 45, 0x47), entry(31, 45, 0x43)))
+        );
+        assert_eq!((thorpe.alert, thorpe.look_pose), (None, None));
+        assert_eq!(thorpe.calm_tags, tags(&[0x08, 0x01, 0x0b]));
+        assert_eq!(thorpe.alert_tags, tags(&[0x08, 0x81, 0x0b]));
+        assert_eq!(thorpe.phase_two_tags, Some(tags(&[0x08, 0x81, 0x13])));
+        assert!(thorpe.alert_after_hurt);
+        assert_eq!(thorpe.reaction_ms, THORPE_REACTION_MS);
+        assert_eq!(sailor.phase_two_tags, None, "no phase tags");
+    }
+
+    #[test]
+    fn the_boar_walks_with_its_retail_entries_and_tags() {
+        let boar = creature(&BOAR);
+        // Retail card `07 0001 22 01 0000 1c`, idle `0c 01 17 0000 0a`, walk `0b 1b 1f 0000 29`,
+        // death `a8 04 11 0000 e9`; tags calm `02 00..`, alerted `22 00..` (glide note).
+        assert_eq!(boar.spawn, entry(34, 1, 0x1c));
+        assert_eq!(boar.idle, entry(1, 23, 0x0a));
+        assert_eq!(boar.walk, entry(27, 31, 0x29));
+        assert_eq!(boar.death, entry(4, 17, 0xe9));
+        assert_eq!(boar.death_ticks, BOAR_DEATH_TICKS);
+        assert_eq!(boar.calm_tags, tags(&[0x02]));
+        assert_eq!(boar.alert_tags, tags(&[0x22]));
+        // Not seen in the captures: from its files (Inferred).
+        assert_eq!(boar.chase, entry(26, 32, DEFAULT_ENTRY_TAIL), "Move_Combat");
+        assert_eq!(boar.attack, entry(23, 9, DEFAULT_ENTRY_TAIL), "Attack_Gore");
+        let mut timelines = MobTimelines::default();
+        let card = timelines
+            .advance(MOB, START, &pose(1.0, MobState::Idle), Some(&boar))
+            .animation
+            .expect("a known creature");
+        assert_eq!((card.entry.fragment, card.entry.action), (34, 1));
+        assert_eq!(card.tags, boar.calm_tags);
+        let wanders = timelines
+            .advance(
+                MOB,
+                START + SPAWN_MS,
+                &pose(1.2, MobState::Idle),
+                Some(&boar),
+            )
+            .step
+            .expect("moved");
+        assert_eq!(
+            scope_entry(&wanders).map(|walk| (walk.fragment, walk.action, walk.tail)),
+            Some((27, 31, 0x29)),
+            "a moving boar plays Move, not a glide"
+        );
+    }
+
+    #[test]
+    fn every_fixture_creature_has_animations() {
+        let table = table();
+        let animations = animations_of(&table);
+        assert_eq!(animations.len(), table.len());
+        for retail in &RETAIL_CREATURES {
+            assert!(animations.contains_key(&retail.asset));
+        }
+    }
+
     #[test]
     fn thorpe_plays_his_moves_and_shows_his_fight_tags_after_a_reaction() {
+        let thorpe = thorpe();
         const STAB: MoveFragment = MoveFragment {
             fragment: 58,
             action: 28,
@@ -881,9 +1262,9 @@ mod tests {
         const STAB_MS: u64 = 1_434;
         let mut timelines = MobTimelines::default();
         let fighting = pose(1.0, MobState::Attack);
-        timelines.advance(MOB, START, &fighting, Some(&FTUE_THORPE));
+        timelines.advance(MOB, START, &fighting, Some(&thorpe));
         let changed = |timelines: &mut MobTimelines, now, pose: &MobPose| {
-            let frame = timelines.advance(MOB, now, pose, Some(&FTUE_THORPE));
+            let frame = timelines.advance(MOB, now, pose, Some(&thorpe));
             frame
                 .step
                 .as_ref()
@@ -894,30 +1275,26 @@ mod tests {
         let mut now = START + SPAWN_MS;
         let stab = changed(&mut timelines, now, &fighting);
         assert_eq!(stab.entry.fragment, STAB.fragment);
-        assert_eq!(stab.tags, FTUE_THORPE.calm_tags, "no reaction yet");
+        assert_eq!(stab.tags, thorpe.calm_tags, "no reaction yet");
         now += STAB_MS;
         timelines.hurt(MOB);
         let reaction = changed(&mut timelines, now, &fighting);
-        assert_eq!(reaction.tags, FTUE_THORPE.alert_tags);
+        assert_eq!(reaction.tags, thorpe.alert_tags);
         now += THORPE_REACTION_MS.0;
         let phase_two = MobPose {
             phase_two: true,
             ..fighting
         };
         let after = changed(&mut timelines, now, &phase_two);
-        assert_eq!(Some(after.tags), FTUE_THORPE.phase_two_tags);
+        assert_eq!(Some(after.tags), thorpe.phase_two_tags);
     }
 
     #[test]
     fn a_mob_alerts_once_then_fights_with_its_look_pose() {
+        let legion = legionnaire();
         let mut timelines = MobTimelines::default();
         // Idle first, facing north after a step north.
-        timelines.advance(
-            MOB,
-            START,
-            &pose(1.0, MobState::Idle),
-            Some(&FTUE_LEGIONNAIRE),
-        );
+        timelines.advance(MOB, START, &pose(1.0, MobState::Idle), Some(&legion));
         let north = MobPose {
             position: Position {
                 y: 847.0,
@@ -925,7 +1302,7 @@ mod tests {
             },
             ..pose(1.0, MobState::Idle)
         };
-        timelines.advance(MOB, START + SPAWN_MS, &north, Some(&FTUE_LEGIONNAIRE));
+        timelines.advance(MOB, START + SPAWN_MS, &north, Some(&legion));
         let seen = START + SPAWN_MS + MOVE_HOLD_MS;
         let fighting = MobPose {
             brain: Some(MobState::Chase),
@@ -935,7 +1312,7 @@ mod tests {
             }),
             ..north
         };
-        let alert = timelines.advance(MOB, seen, &fighting, Some(&FTUE_LEGIONNAIRE));
+        let alert = timelines.advance(MOB, seen, &fighting, Some(&legion));
         assert!(alert.alert_started, "the sim holds it for the alert");
         let step = alert.step.expect("a new fragment");
         let animation = animation_of(&step).expect("changed");
@@ -947,17 +1324,14 @@ mod tests {
             animation.facing_gap.is_some_and(|gap| gap > 0.0),
             "it turns west"
         );
-        let later = timelines.advance(MOB, seen + TICK_MS, &fighting, Some(&FTUE_LEGIONNAIRE));
+        let later = timelines.advance(MOB, seen + TICK_MS, &fighting, Some(&legion));
         assert!(!later.alert_started, "once only");
         let after = timelines
-            .advance(MOB, seen + ALERT_MS, &fighting, Some(&FTUE_LEGIONNAIRE))
+            .advance(MOB, seen + ALERT_MS, &fighting, Some(&legion))
             .step
             .expect("the combat idle");
         let animation = animation_of(&after).expect("changed");
-        assert_eq!(
-            animation.entry.fragment,
-            FTUE_LEGIONNAIRE.combat_idle.fragment
-        );
+        assert_eq!(animation.entry.fragment, legion.combat_idle.fragment);
         assert_eq!(
             animation.look_pose.map(|layer| layer.entry.start_id),
             Some(step.stamp.id),
@@ -973,7 +1347,7 @@ mod tests {
                 MOB,
                 seen + ALERT_MS + IDLE_STATE_MS,
                 &fighting,
-                Some(&FTUE_LEGIONNAIRE),
+                Some(&legion),
             )
             .step
             .expect("a period");
@@ -989,8 +1363,9 @@ mod tests {
 
     #[test]
     fn thorpe_has_no_alert_and_no_look_pose() {
+        let thorpe = thorpe();
         let mut timelines = MobTimelines::default();
-        let frame = timelines.advance(MOB, START, &pose(1.0, MobState::Chase), Some(&FTUE_THORPE));
+        let frame = timelines.advance(MOB, START, &pose(1.0, MobState::Chase), Some(&thorpe));
         assert!(!frame.alert_started);
         assert_eq!(
             frame.animation.and_then(|animation| animation.look_pose),
@@ -999,33 +1374,10 @@ mod tests {
     }
 
     #[test]
-    fn every_tutorial_creature_slice_has_its_table() {
-        // The slices of the tutorial's mob cards (ftue-entities table).
-        let slices = [
-            ("b7e33b294bcf57b8a476abdc3a31fae7", &FTUE_SAILOR),
-            ("c05fc95784875559afe874a78f95fb64", &FTUE_LEGIONNAIRE),
-            ("87a335e76b8650d5a465fe0810bda5df", &FTUE_LEGIONNAIRE),
-            ("e06d1bb7311f5acb9857cc20464ce4df", &FTUE_SWARMER),
-            ("a8b60bc7feaf574cbe7ae3c2d8a48dec", &FTUE_RISEN),
-            ("929831a98dd25e3e8bd8d45d4e0868ac", &FTUE_THORPE),
-        ];
-        for (hex, table) in slices {
-            let id: Vec<u8> = (0..hex.len())
-                .step_by(2)
-                .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex"))
-                .collect();
-            let asset = AssetId {
-                id: id.try_into().expect("16 bytes"),
-                sub_id: 2,
-            };
-            assert_eq!(animations_of(&asset), Some(table), "{hex}");
-        }
-    }
-
-    #[test]
     fn the_first_frame_is_state_2_at_its_own_anchor() {
+        let sailor = sailor();
         let mut timelines = MobTimelines::default();
-        let frame = timelines.advance(MOB, START, &pose(1.0, MobState::Idle), Some(&FTUE_SAILOR));
+        let frame = timelines.advance(MOB, START, &pose(1.0, MobState::Idle), Some(&sailor));
         assert_eq!(
             frame.stamp,
             AlcStamp {
@@ -1036,20 +1388,21 @@ mod tests {
         );
         assert_eq!(frame.step, None, "the card carries the first state");
         let animation = frame.animation.expect("a known creature");
-        assert_eq!(animation.entry.fragment, FTUE_SAILOR.spawn.fragment);
+        assert_eq!(animation.entry.fragment, sailor.spawn.fragment);
         assert_eq!(animation.entry.start_id, FIRST_STATE_ID - 1);
-        assert_eq!(animation.tags, FTUE_SAILOR.calm_tags);
+        assert_eq!(animation.tags, sailor.calm_tags);
     }
 
     #[test]
     fn an_idle_mob_sends_a_state_per_period_and_then_its_idle_fragment() {
+        let sailor = sailor();
         let mut timelines = MobTimelines::default();
         let idle = pose(1.0, MobState::Idle);
-        timelines.advance(MOB, START, &idle, Some(&FTUE_SAILOR));
+        timelines.advance(MOB, START, &idle, Some(&sailor));
         let mut steps = Vec::new();
         for tick in 1..=60 {
             let now = START + tick * TICK_MS;
-            if let Some(step) = timelines.advance(MOB, now, &idle, Some(&FTUE_SAILOR)).step {
+            if let Some(step) = timelines.advance(MOB, now, &idle, Some(&sailor)).step {
                 steps.push((now, step));
             }
         }
@@ -1075,36 +1428,37 @@ mod tests {
             .expect("the idle fragment starts");
         assert!(idle_at.0 - START >= SPAWN_MS);
         let entry = scope_entry(&idle_at.1).expect("entry");
-        assert_eq!(entry.fragment, FTUE_SAILOR.idle.fragment);
+        assert_eq!(entry.fragment, sailor.idle.fragment);
         assert_eq!(entry.start_id, idle_at.1.stamp.id);
     }
 
     #[test]
     fn a_moving_mob_sends_every_tick_with_its_position_and_walk() {
+        let sailor = sailor();
         let mut timelines = MobTimelines::default();
         // Its alert plays first, while it stands.
-        timelines.advance(MOB, START, &pose(1.0, MobState::Chase), Some(&FTUE_SAILOR));
+        timelines.advance(MOB, START, &pose(1.0, MobState::Chase), Some(&sailor));
         let start = START + ALERT_MS;
-        timelines.advance(MOB, start, &pose(1.0, MobState::Chase), Some(&FTUE_SAILOR));
+        timelines.advance(MOB, start, &pose(1.0, MobState::Chase), Some(&sailor));
         let first = timelines
             .advance(
                 MOB,
                 start + TICK_MS,
                 &pose(1.2, MobState::Chase),
-                Some(&FTUE_SAILOR),
+                Some(&sailor),
             )
             .step
             .expect("moved");
         assert_eq!(
             scope_entry(&first).map(|entry| entry.fragment),
-            Some(FTUE_SAILOR.walk.fragment)
+            Some(sailor.chase.fragment)
         );
         let second = timelines
             .advance(
                 MOB,
                 start + 2 * TICK_MS,
                 &pose(1.4, MobState::Chase),
-                Some(&FTUE_SAILOR),
+                Some(&sailor),
             )
             .step
             .expect("moved");
@@ -1118,14 +1472,15 @@ mod tests {
 
     #[test]
     fn a_mob_faces_where_it_walks_then_turns_to_its_target_step_by_step() {
+        let sailor = sailor();
         let mut timelines = MobTimelines::default();
-        timelines.advance(MOB, START, &pose(1.0, MobState::Chase), Some(&FTUE_SAILOR));
+        timelines.advance(MOB, START, &pose(1.0, MobState::Chase), Some(&sailor));
         let east = timelines
             .advance(
                 MOB,
                 START + TICK_MS,
                 &pose(1.2, MobState::Chase),
-                Some(&FTUE_SAILOR),
+                Some(&sailor),
             )
             .step
             .expect("moved");
@@ -1143,7 +1498,7 @@ mod tests {
                 target: Some(north),
                 ..pose(1.2, MobState::Attack)
             };
-            let frame = timelines.advance(MOB, now, &standing, Some(&FTUE_SAILOR));
+            let frame = timelines.advance(MOB, now, &standing, Some(&sailor));
             if let Some(next) = frame.step.and_then(|step| step.facing) {
                 assert!((next - facing).abs() <= TURN_PER_STATE_RAD + f32::EPSILON);
                 facing = next;
@@ -1156,14 +1511,15 @@ mod tests {
 
     #[test]
     fn a_reaction_is_kept_for_the_swings_that_started_before_it() {
+        let sailor = sailor();
         let mut timelines = MobTimelines::default();
         let fighting = pose(1.0, MobState::Attack);
-        timelines.advance(MOB, START, &fighting, Some(&FTUE_SAILOR));
+        timelines.advance(MOB, START, &fighting, Some(&sailor));
         let swing_started = START + SPAWN_MS;
         assert!(!timelines.reeled_since(MOB, swing_started));
         timelines.hurt(MOB);
         let reeled = swing_started + TICK_MS;
-        timelines.advance(MOB, reeled, &fighting, Some(&FTUE_SAILOR));
+        timelines.advance(MOB, reeled, &fighting, Some(&sailor));
         assert!(timelines.reeled_since(MOB, swing_started));
         assert!(
             !timelines.reeled_since(MOB, reeled + 1),
@@ -1173,55 +1529,52 @@ mod tests {
 
     #[test]
     fn hits_play_a_light_then_a_heavy_reaction_then_the_limit_holds() {
+        let sailor = sailor();
         let mut timelines = MobTimelines::default();
         let fighting = pose(1.0, MobState::Attack);
-        timelines.advance(MOB, START, &fighting, Some(&FTUE_SAILOR));
+        timelines.advance(MOB, START, &fighting, Some(&sailor));
         let fragment_of = |step: Option<MobStep>| match step.and_then(|step| step.scope) {
             Some(StepScope::Changed(animation)) => Some(animation.entry.fragment),
             _ => None,
         };
         let mut now = START + SPAWN_MS;
         timelines.hurt(MOB);
-        let light = timelines
-            .advance(MOB, now, &fighting, Some(&FTUE_SAILOR))
-            .step;
+        let light = timelines.advance(MOB, now, &fighting, Some(&sailor)).step;
         assert_eq!(
             fragment_of(light),
-            Some(FTUE_SAILOR.reactions.expect("known").0.fragment)
+            Some(sailor.reactions.expect("known").0.fragment)
         );
         now += TICK_MS;
         timelines.hurt(MOB);
-        let heavy = timelines
-            .advance(MOB, now, &fighting, Some(&FTUE_SAILOR))
-            .step;
+        let heavy = timelines.advance(MOB, now, &fighting, Some(&sailor)).step;
         assert_eq!(
             fragment_of(heavy),
-            Some(FTUE_SAILOR.reactions.expect("known").1.fragment)
+            Some(sailor.reactions.expect("known").1.fragment)
         );
         // While the limit runs, a hit does not start another reaction.
         now += CREATURE_REACTION_MS.1;
-        timelines.advance(MOB, now, &fighting, Some(&FTUE_SAILOR));
+        timelines.advance(MOB, now, &fighting, Some(&sailor));
         timelines.hurt(MOB);
         now += TICK_MS;
-        let limited = timelines
-            .advance(MOB, now, &fighting, Some(&FTUE_SAILOR))
-            .step;
+        let limited = timelines.advance(MOB, now, &fighting, Some(&sailor)).step;
         assert_ne!(
             fragment_of(limited),
-            Some(FTUE_SAILOR.reactions.expect("known").0.fragment)
+            Some(sailor.reactions.expect("known").0.fragment)
         );
-        // A creature without known reactions does not reel.
-        let mut swarmers = MobTimelines::default();
-        swarmers.advance(MOB, START, &fighting, Some(&FTUE_SWARMER));
-        swarmers.hurt(MOB);
-        let step = swarmers
-            .advance(MOB, START + SPAWN_MS, &fighting, Some(&FTUE_SWARMER))
+        // A creature without reactions does not reel.
+        let plain = without_reactions();
+        let mut plains = MobTimelines::default();
+        plains.advance(MOB, START, &fighting, Some(&plain));
+        plains.hurt(MOB);
+        let step = plains
+            .advance(MOB, START + SPAWN_MS, &fighting, Some(&plain))
             .step;
-        assert_eq!(fragment_of(step), Some(FTUE_SWARMER.combat_idle.fragment));
+        assert_eq!(fragment_of(step), Some(plain.combat_idle.fragment));
     }
 
     #[test]
     fn a_swing_plays_the_attack_and_a_creature_without_fragments_sends_no_scope() {
+        let sailor = sailor();
         let mut timelines = MobTimelines::default();
         let fighting = pose(1.0, MobState::Attack);
         timelines.advance(MOB, START, &fighting, None);
@@ -1232,27 +1585,28 @@ mod tests {
             .expect("the attack starts");
         assert_eq!(step.scope, None);
         let mut sailors = MobTimelines::default();
-        sailors.advance(MOB, START, &fighting, Some(&FTUE_SAILOR));
+        sailors.advance(MOB, START, &fighting, Some(&sailor));
         sailors.attacked(MOB);
         let step = sailors
-            .advance(MOB, START + TICK_MS, &fighting, Some(&FTUE_SAILOR))
+            .advance(MOB, START + TICK_MS, &fighting, Some(&sailor))
             .step
             .expect("the attack starts");
         let Some(StepScope::Changed(animation)) = step.scope else {
             panic!("a new fragment");
         };
-        assert_eq!(animation.entry.fragment, FTUE_SAILOR.attack.fragment);
-        assert_eq!(animation.tags, FTUE_SAILOR.alert_tags);
+        assert_eq!(animation.entry.fragment, sailor.attack.fragment);
+        assert_eq!(animation.tags, sailor.alert_tags);
     }
 
     #[test]
     fn the_anchor_moves_on_after_a_minute_and_a_dead_mob_plays_out_its_death() {
+        let sailor = sailor();
         let mut timelines = MobTimelines::default();
         let idle = pose(1.0, MobState::Idle);
-        timelines.advance(MOB, START, &idle, Some(&FTUE_SAILOR));
+        timelines.advance(MOB, START, &idle, Some(&sailor));
         let later = START + ANCHOR_PERIOD_MS;
         let step = timelines
-            .advance(MOB, later, &idle, Some(&FTUE_SAILOR))
+            .advance(MOB, later, &idle, Some(&sailor))
             .step
             .expect("due");
         assert!(step.anchored);
@@ -1260,20 +1614,15 @@ mod tests {
         assert_eq!(step.stamp.offset_ms, 0);
         let dead = MobPose { dead: true, ..idle };
         let death = timelines
-            .advance(MOB, later + TICK_MS, &dead, Some(&FTUE_SAILOR))
+            .advance(MOB, later + TICK_MS, &dead, Some(&sailor))
             .step
             .expect("death");
         assert_eq!(
             scope_entry(&death).map(|entry| entry.fragment),
-            Some(FTUE_SAILOR.death.fragment)
+            Some(sailor.death.fragment)
         );
         let dying = timelines
-            .advance(
-                MOB,
-                later + TICK_MS + DEAD_STATE_MS,
-                &dead,
-                Some(&FTUE_SAILOR),
-            )
+            .advance(MOB, later + TICK_MS + DEAD_STATE_MS, &dead, Some(&sailor))
             .step
             .expect("due");
         assert!(
@@ -1286,7 +1635,7 @@ mod tests {
                 MOB,
                 later + TICK_MS + death_ms + DEAD_STATE_MS,
                 &dead,
-                Some(&FTUE_SAILOR),
+                Some(&sailor),
             )
             .step
             .expect("due");

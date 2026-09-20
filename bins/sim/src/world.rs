@@ -79,7 +79,7 @@ use members::{
     CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, OwnClock, OwnTeleport, OwnTick, bundles,
     card_of, log_mob_group, mob_group, own_group, remote_group,
 };
-use mob_timeline::{MobPose, MobTimelines, animations_of};
+use mob_timeline::{Animations, MobPose, MobTimelines, animations_of};
 use quest_tracker::QuestTracker;
 use slots::Slots;
 use stamina::Stamina;
@@ -102,6 +102,7 @@ use crate::player_content::{
     MobLooks, OPEN_WORLD_OBJECTIVE, PlayerContent, QuestDef, TUTORIAL_OBJECTIVE,
 };
 use nw_content::ftue_entities::{self, FACET_LEN, FtueLevel};
+use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::raw_id_of_entity;
 
 /// Carrier channel of the login messages and the time messages.
@@ -521,6 +522,8 @@ pub struct SimWorld {
     events: events::Events,
     /// The state numbers, clock and animation of each shown mob.
     mob_timelines: MobTimelines,
+    /// The animations of each creature slice.
+    creature_animations: HashMap<[u8; ASSET_ID_LEN], Animations>,
     /// The health each shown mob had in the last bundle step.
     mob_health_shown: HashMap<u64, u32>,
     /// The boss phase of each boss mob that left phase 0.
@@ -631,6 +634,7 @@ impl SimWorld {
             scripts: scripts::Scripts::default(),
             events: events::Events::default(),
             mob_timelines: MobTimelines::default(),
+            creature_animations: animations_of(&content.creature_animations),
             mob_health_shown: HashMap::new(),
             boss_phases: HashMap::new(),
             boss_phases_shown: HashMap::new(),
@@ -2378,7 +2382,7 @@ impl SimWorld {
                     entity,
                     server_time,
                     &pose,
-                    animations_of(&look.asset),
+                    self.creature_animations.get(&look.asset.id),
                 );
                 if frame.alert_started {
                     self.mobs.freeze(entity, now_ms + ALERT_STAND_MS);

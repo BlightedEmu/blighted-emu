@@ -1,0 +1,3910 @@
+[
+ {
+  "asset": "87a335e76b8650d5a465fe0810bda5df",
+  "slice": "slices/characters/ftue_corrupted/corrupted_legion_ftue_signifier_noshield_male.dynamicslice",
+  "fragments": [
+   "Alert",
+   "Alert_Crouch_Campfire",
+   "Alert_Interact_Low",
+   "Alert_Pray",
+   "Alert_Sleep",
+   "Alert_Sit_On_Ground",
+   "Alert_Turn",
+   "Alert_Worshipping",
+   "Block_Start",
+   "Block_End",
+   "BrokenGuard",
+   "Combat_Idle",
+   "Combat_Fidget",
+   "Combat_Turn",
+   "Crassus_ChaosLance",
+   "Crassus_ChaosSpin",
+   "Crassus_ChaosVolley",
+   "Crassus_CorruptedPhalanx",
+   "Crassus_EvasionShot",
+   "Crassus_FireRain",
+   "Crassus_ShadowStep",
+   "Crassus_ShieldRush",
+   "Crassus_Swing",
+   "Crassus_Swing_2",
+   "Crassus_Transmutation_Phase2",
+   "Crassus_Transmutation_Phase3",
+   "Deflection",
+   "Dodge_B",
+   "Dodge_L",
+   "Dodge_R",
+   "Equip",
+   "Fidget",
+   "Idle",
+   "Intro",
+   "Intro_Fidget",
+   "Intro_Idle",
+   "Legionnaire_CorruptedPhalanx",
+   "Legionnaire_HeavyStab",
+   "Legionnaire_LightStab",
+   "Legionnaire_PhantomStrike",
+   "Legionnaire_PhantomStrike_L",
+   "Legionnaire_ShieldBash",
+   "Legionnaire_ShieldRush",
+   "Legionnaire_Throw",
+   "LookPose",
+   "Move",
+   "Move_Combat",
+   "Move_Wander",
+   "POI_Conversation",
+   "POI_Craft_Mid",
+   "POI_Crouch_Campfire_Loop",
+   "POI_Crouch_Campfire_Rubhands",
+   "POI_Crouch_Campfire_End",
+   "POI_Digging",
+   "POI_Emote",
+   "POI_HandPainting",
+   "POI_HandPainting_02_End",
+   "POI_HandPainting_End",
+   "POI_Idle_Standing",
+   "POI_Interact_Low",
+   "POI_Interact_Low_End",
+   "POI_Interact_Mid",
+   "POI_Interact_Mid_End",
+   "POI_Kicking_Dirt",
+   "POI_LookAround",
+   "POI_Miner_Throw_Grenade",
+   "POI_Patrol_Fidget",
+   "POI_Patrol_Idle",
+   "POI_Pray",
+   "POI_Pray_End",
+   "POI_Pray_Euro",
+   "POI_Pray_Euro_End",
+   "POI_Priest_Cast_Spell_LOOP",
+   "POI_Priest_Cast_Spell_End",
+   "POI_Priest_Focus_Energy_LOOP",
+   "POI_Priest_Focus_Energy_End",
+   "POI_Priest_Sermon_LOOP",
+   "POI_Ritual_Channeling_LOOP",
+   "POI_Ritual_Channeling_End",
+   "POI_Sit",
+   "POI_Sit_End",
+   "POI_Sit_On_Ground",
+   "POI_Sit_On_Ground_Drinking",
+   "POI_Sit_On_Ground_Eating",
+   "POI_Sit_On_Ground_End",
+   "POI_Sleep",
+   "POI_Sleep_End",
+   "POI_Standing_Leaning",
+   "POI_Standing_Leaning_End",
+   "POI_Wave",
+   "POI_Worshipping_Praying_Kneeling",
+   "POI_Worshipping_Praying_Kneeling_End",
+   "POI_Worshipping_Praying_Standing",
+   "r_B0_Break",
+   "r_B0_F",
+   "r_B1_F",
+   "r_B2_F",
+   "r_B3_F",
+   "r_Death",
+   "r_Death_F",
+   "r_Death_B",
+   "r_R0_F",
+   "r_R0_B",
+   "r_R0_L",
+   "r_R0_R",
+   "r_R1_F",
+   "r_R1_B",
+   "r_R1_L",
+   "r_R1_R",
+   "r_R2_F",
+   "r_R2_B",
+   "r_R2_L",
+   "r_R2_R",
+   "r_R3_F",
+   "r_R3_B",
+   "r_R3_L",
+   "r_R3_R",
+   "r_R4_R",
+   "r_R4_L",
+   "r_R4_F",
+   "r_R4_B",
+   "r_R4_F_Overhead",
+   "r_Running_Block",
+   "r_Stun",
+   "r_Stun_Loop",
+   "r_Stun_End",
+   "Reaction_Breakout",
+   "Sagittarii_DrawShoot",
+   "Sagittarii_EvasionShot",
+   "Sagittarii_FireRain",
+   "Sagittarii_ShadowStep",
+   "Sagittarii_ShortSwordSwing",
+   "Sagittarii_StickyBomb",
+   "Signifer_CorruptedBlast",
+   "Signifer_CorruptedBlob",
+   "Signifer_HeroOfLegion",
+   "Signifer_HeroOfLegion_End",
+   "Signifer_HeroOfLegion_Loop",
+   "Signifer_HeroOfLegion_Reset",
+   "Signifer_Swing",
+   "Signifer_Swing_2",
+   "Signifer_TripleShot",
+   "Spawn",
+   "Spawn_Crassus",
+   "Strafe",
+   "Victory",
+   "Wait",
+   "Wander",
+   "Crassus_SummonMinion",
+   "POI_ThrowSpear",
+   "r_Death_R4_F",
+   "r_Death_R4_B"
+  ],
+  "scopes": [
+   "FullBody",
+   "UpperBody",
+   "OffHand",
+   "AimBlend",
+   "LookPose",
+   "Additive",
+   "Audio",
+   "VFX",
+   "Weapon",
+   "OffHandWeapon"
+  ],
+  "actions": [
+   "Combat_Fidget",
+   "Legionnaire_LightStab",
+   "Legionnaire_HeavyStab",
+   "Legionnaire_ShieldBash",
+   "Legionnaire_ShieldRush",
+   "Legionnaire_Throw",
+   "Legionnaire_CorruptedPhalanx",
+   "Legionnaire_PhantomStrike",
+   "Legionnaire_PhantomStrike_L",
+   "Fidget",
+   "Alert",
+   "Alert_Turn",
+   "Move_Wander",
+   "Move_Combat",
+   "Alert_Sit_On_Ground",
+   "Alert_Sleep",
+   "Alert_Crouch_Campfire",
+   "Alert_Interact_Low",
+   "Alert_Pray",
+   "Alert_Worshipping",
+   "HeroOfLegionShockwave",
+   "HeroOfLegionShockwave_Crassus",
+   "HeroOfLegion_ForceReset",
+   "IsUnderHoLEffectCheck",
+   "LookPose",
+   "Block_On",
+   "Attack_Cooldown",
+   "Block",
+   "Block_Off",
+   "Force_Block_Off",
+   "BlockBroken",
+   "Reaction",
+   "Deflection",
+   "Reaction_Additive",
+   "BrokenGuard",
+   "ReactionLimiter_Active",
+   "ReactionLimiter_VFX_ON",
+   "Stun",
+   "POI_Waypoint_Loop",
+   "POI_Waypoint",
+   "Idle_No_Task",
+   "Idle",
+   "Combat_Idle",
+   "Wait",
+   "Combat_Turn",
+   "Move",
+   "Strafe",
+   "Reaction_Breakout",
+   "Reaction_BreakoutAttack",
+   "Death_FB",
+   "Spawn",
+   "Despawn",
+   "Reset_Move",
+   "Reset_Idle",
+   "Minion_Despawn",
+   "Pushable"
+  ],
+  "tags": {
+   "1H_Caster": [
+    0,
+    0,
+    3
+   ],
+   "1H_Melee": [
+    0,
+    0,
+    1
+   ],
+   "2HBow": [
+    0,
+    2,
+    3
+   ],
+   "Alerted": [
+    0,
+    7,
+    1
+   ],
+   "Block": [
+    1,
+    6,
+    1
+   ],
+   "BlockBroken": [
+    2,
+    0,
+    1
+   ],
+   "Block_Trans": [
+    3,
+    1,
+    1
+   ],
+   "Blocking": [
+    1,
+    7,
+    1
+   ],
+   "Bow": [
+    0,
+    0,
+    2
+   ],
+   "BreakoutWindow": [
+    1,
+    5,
+    1
+   ],
+   "ChainAttack": [
+    2,
+    6,
+    1
+   ],
+   "Crassus": [
+    1,
+    0,
+    4
+   ],
+   "DoNotUseMe": [
+    4,
+    2,
+    1
+   ],
+   "End_Loop": [
+    2,
+    4,
+    1
+   ],
+   "HeadshotReactions": [
+    2,
+    5,
+    1
+   ],
+   "HoLCoolDownReset": [
+    3,
+    4,
+    1
+   ],
+   "HoLRecastCheck": [
+    3,
+    5,
+    1
+   ],
+   "HoLShockwave": [
+    3,
+    3,
+    1
+   ],
+   "IsCasting": [
+    3,
+    0,
+    1
+   ],
+   "IsHeroOfLegionOn": [
+    3,
+    2,
+    1
+   ],
+   "Legionnaire": [
+    1,
+    0,
+    2
+   ],
+   "Melee_OH": [
+    0,
+    5,
+    2
+   ],
+   "Minion": [
+    3,
+    6,
+    1
+   ],
+   "NoShield": [
+    4,
+    1,
+    1
+   ],
+   "Phantom": [
+    4,
+    0,
+    1
+   ],
+   "Phase1": [
+    1,
+    3,
+    1
+   ],
+   "Phase2": [
+    1,
+    3,
+    2
+   ],
+   "Phase3": [
+    1,
+    3,
+    3
+   ],
+   "Reaction": [
+    2,
+    1,
+    1
+   ],
+   "ReactionLimiter_Active": [
+    4,
+    4,
+    1
+   ],
+   "Reset": [
+    2,
+    2,
+    1
+   ],
+   "ResetAINoHeal": [
+    4,
+    3,
+    1
+   ],
+   "Sagittarii": [
+    1,
+    0,
+    3
+   ],
+   "Shield_OH": [
+    0,
+    5,
+    1
+   ],
+   "Signifer": [
+    1,
+    0,
+    1
+   ],
+   "Spear": [
+    0,
+    2,
+    1
+   ],
+   "Staff": [
+    0,
+    2,
+    2
+   ],
+   "Standard": [
+    3,
+    7,
+    1
+   ],
+   "StopChainAttack": [
+    2,
+    7,
+    1
+   ],
+   "Stunned": [
+    2,
+    3,
+    1
+   ],
+   "Sword": [
+    0,
+    2,
+    4
+   ]
+  },
+  "default_tags": [
+   "Legion",
+   "Corrupted",
+   "Legionnaire",
+   "NoShield",
+   "1H_Melee",
+   "Spear"
+  ]
+ },
+ {
+  "asset": "929831a98dd25e3e8bd8d45d4e0868ac",
+  "slice": "slices/characters/namedcharacters/quests/ftue_v2_thorpe.dynamicslice",
+  "fragments": [
+   "Idle",
+   "Alert",
+   "Movement",
+   "Fidget",
+   "r_Death",
+   "r_R0_F",
+   "r_R0_B",
+   "r_R0_L",
+   "r_R0_R",
+   "Deflection",
+   "POI_Patrol_Idle",
+   "r_Death_F",
+   "r_Death_B",
+   "Combat_Idle",
+   "Wander",
+   "Patrol",
+   "Sprint",
+   "Move",
+   "Move_Combat",
+   "Move_Combat_Walk",
+   "Combat_Fidget",
+   "Wait",
+   "Spawn",
+   "Reset_Move",
+   "Attack_Structure",
+   "Invasion_Special",
+   "r_R2_F",
+   "r_R2_B",
+   "r_R2_R",
+   "r_R2_L",
+   "r_R3_F",
+   "r_R3_B",
+   "r_R3_L",
+   "r_R3_R",
+   "r_R1_F",
+   "r_R1_B",
+   "r_R1_L",
+   "r_R1_R",
+   "r_Stun_Loop",
+   "r_Stun_End",
+   "r_Stun_Start",
+   "Attack_Summon_Darkness",
+   "Intro",
+   "Intro_Idle",
+   "Attack_Darkness_Calls",
+   "Attack_Hunger_Of_The_Void",
+   "Attack_Force_Grab",
+   "Attack_SwipeL_01",
+   "Attack_SwipeL_02",
+   "Attack_SwipeR_01",
+   "Attack_SwipeR_02",
+   "Attack_Double_Spin",
+   "Attack_Flurry",
+   "Attack_Overhead_Slash",
+   "Attack_Shoulder_Charge_Start",
+   "Attack_Shoulder_Charge_Loop",
+   "Attack_Shoulder_Charge_Outro",
+   "Attack_Stab_01",
+   "Attack_Stab_02",
+   "Attack_Flip_Overhead",
+   "Attack_Core_Explosion",
+   "Attack_Hunger_Of_The_Void_Start",
+   "Attack_Hunger_Of_The_Void_Outro",
+   "Combat_Turn",
+   "Strafe",
+   "Phase_Transition_1_to_2",
+   "Attack_Combo_Test",
+   "Attack_Shoulder_Charge_Leap_Outro",
+   "Attack_Combo_04",
+   "Attack_Combo_05",
+   "Attack_Combo_06",
+   "Attack_Combo_07",
+   "Attack_Combo_01",
+   "Attack_Combo_02",
+   "Attack_Combo_03",
+   "Combat_Tell",
+   "Victory",
+   "POI_MSQ_Zane_Spell",
+   "POI_MSQ_Zane_Spell_End",
+   "Outro",
+   "Intro_Idle_Loop",
+   "Thorpe_Pain_Reaction",
+   "Attack_CleaveCombo",
+   "Attack_LesserCombo",
+   "Attack_FadingMistSlash",
+   "Attack_ThrustingCombo",
+   "Attack_MistHand",
+   "Attack_ImpalingMistlock_Start",
+   "Attack_DomainOfTheOverlord",
+   "Attack_DelayedMistCross",
+   "Attack_MistBarrage",
+   "Attack_RelicRecall_Loop",
+   "Attack_RelicRecall_Successful",
+   "Attack_ShadowClones",
+   "Attack_UnholySmite",
+   "Attack_SoulDominion",
+   "Attack_RelicRecall",
+   "Attack_RelicRecall_Fail",
+   "Stance_Any_To_Normal",
+   "Stance_Normal_To_MistDispersal",
+   "Stance_Normal_To_MistCoalescence",
+   "Attack_ImpalingMistlock_Loop",
+   "Attack_ImpalingMistlock_End",
+   "Phase_Transition_1_to_3",
+   "Attack_FlyOverhead_Start",
+   "Attack_FlyOverhead_Loop",
+   "Attack_FlyOverhead_End",
+   "Attack_LesserCombo_FollowUp",
+   "Attack_CleaveCombo_FollowUp",
+   "Attack_SoulDominion_Fail",
+   "Attack_LostThorpe_HungerOfTheVoid",
+   "Lost_Thorpe_Intro",
+   "Lost_Thorpe_Intro_Idle",
+   "Lost_Thorpe_r_Death",
+   "Lost_Thorpe_Victory"
+  ],
+  "scopes": [
+   "FullBody",
+   "UpperBody",
+   "Additive",
+   "AimBlend",
+   "LookPose",
+   "Audio",
+   "VFX",
+   "Weapon"
+  ],
+  "actions": [
+   "Fidget",
+   "Alert",
+   "WalkBack",
+   "Move_Combat_Walk",
+   "Move_Wander",
+   "Attack_Cooldown",
+   "Block",
+   "Block_Off",
+   "Force_Block_Off",
+   "Combat_Fidget",
+   "Combat_Tell",
+   "Attack_Summon_Darkness",
+   "Attack_Force_Grab",
+   "Attack_Darkness_Calls",
+   "Attack_Core_Explosion",
+   "Attack_Double_Spin",
+   "Attack_Flip_Overhead",
+   "Attack_Flurry",
+   "Attack_Hunger_Of_The_Void",
+   "Attack_Hunger_Of_The_Void_Start",
+   "Attack_Hunger_Of_The_Void_Outro",
+   "Attack_Overhead_Slash",
+   "Attack_Shoulder_Charge_Start",
+   "Attack_Shoulder_Charge_Loop",
+   "Attack_Shoulder_Charge_Outro",
+   "Attack_Shoulder_Charge_Leap_Outro",
+   "Attack_Stab_01",
+   "Attack_Stab_02",
+   "Attack_SwipeL_01",
+   "Attack_SwipeL_02",
+   "Attack_SwipeR_01",
+   "Attack_SwipeR_02",
+   "Attack_Combo_01",
+   "Attack_Combo_02",
+   "Attack_Combo_03",
+   "Attack_Combo_04",
+   "Attack_Combo_05",
+   "Attack_Combo_06",
+   "Attack_Combo_07",
+   "Invasion_Special",
+   "Attack_Structure",
+   "LookPose",
+   "AimPose",
+   "SetAggressionLevel",
+   "Reaction",
+   "Reaction_Additive",
+   "Intermission",
+   "ReactionLimiter_Active",
+   "ReactionLimiter_VFX_ON",
+   "Stun",
+   "POI_Waypoint_Loop",
+   "POI_Waypoint",
+   "Idle_No_Task",
+   "Idle",
+   "Combat_Idle",
+   "Wait",
+   "Combat_Turn",
+   "Reset_Move",
+   "Reset_Idle",
+   "Move",
+   "Move_Combat",
+   "Strafe",
+   "Death",
+   "Death_FB",
+   "Despawn",
+   "Pushable",
+   "Spawn",
+   "Victory",
+   "Intro",
+   "Intro_Idle",
+   "Intro_Idle_Loop",
+   "Move_NoCollision",
+   "Phase_Transition_1_to_2",
+   "End_FTUE",
+   "Outro"
+  ],
+  "tags": {
+   "1H_Caster": [
+    0,
+    2,
+    8
+   ],
+   "1H_Melee": [
+    0,
+    2,
+    2
+   ],
+   "2H_Melee": [
+    0,
+    2,
+    4
+   ],
+   "2H_Ranged": [
+    0,
+    2,
+    5
+   ],
+   "Aim": [
+    1,
+    4,
+    2
+   ],
+   "Alerted": [
+    1,
+    7,
+    1
+   ],
+   "Axe": [
+    1,
+    0,
+    2
+   ],
+   "Block": [
+    2,
+    6,
+    1
+   ],
+   "BreakoutWindow": [
+    3,
+    1,
+    1
+   ],
+   "Buckler_OH": [
+    1,
+    0,
+    12
+   ],
+   "ChainAttack": [
+    3,
+    3,
+    1
+   ],
+   "ChargedAim": [
+    1,
+    4,
+    1
+   ],
+   "ChargedShakeAim": [
+    1,
+    4,
+    3
+   ],
+   "Club": [
+    1,
+    0,
+    3
+   ],
+   "Commander": [
+    2,
+    0,
+    2
+   ],
+   "Crafting": [
+    0,
+    2,
+    3
+   ],
+   "End_Loop": [
+    3,
+    7,
+    1
+   ],
+   "FTUE_Commander": [
+    2,
+    7,
+    1
+   ],
+   "FTUE_Thorpe": [
+    2,
+    0,
+    3
+   ],
+   "FishingPole": [
+    1,
+    0,
+    8
+   ],
+   "HipAim": [
+    1,
+    4,
+    4
+   ],
+   "Instrument": [
+    1,
+    0,
+    11
+   ],
+   "Invasion": [
+    2,
+    0,
+    4
+   ],
+   "Knife": [
+    1,
+    0,
+    10
+   ],
+   "LargeShield_OH": [
+    1,
+    0,
+    13
+   ],
+   "LookPose": [
+    2,
+    5,
+    1
+   ],
+   "Lost_Thorpe": [
+    2,
+    0,
+    6
+   ],
+   "Mist_Coalescence": [
+    3,
+    6,
+    1
+   ],
+   "Mist_Dispersal": [
+    3,
+    5,
+    1
+   ],
+   "Offhand": [
+    0,
+    0,
+    1
+   ],
+   "Oil": [
+    0,
+    1,
+    1
+   ],
+   "Phase_1": [
+    2,
+    3,
+    1
+   ],
+   "Phase_2": [
+    2,
+    3,
+    2
+   ],
+   "Phase_3": [
+    2,
+    3,
+    3
+   ],
+   "Pick": [
+    1,
+    0,
+    9
+   ],
+   "Pistol": [
+    1,
+    0,
+    5
+   ],
+   "Polearm": [
+    1,
+    0,
+    7
+   ],
+   "QuickThrowAim": [
+    1,
+    4,
+    5
+   ],
+   "Reaction": [
+    3,
+    4,
+    1
+   ],
+   "ReactionLimiter_Active": [
+    4,
+    1,
+    1
+   ],
+   "Reset": [
+    3,
+    0,
+    1
+   ],
+   "Rifle": [
+    1,
+    0,
+    6
+   ],
+   "Shield_OH": [
+    0,
+    6,
+    3
+   ],
+   "SnareDrum": [
+    0,
+    2,
+    7
+   ],
+   "Spear": [
+    1,
+    0,
+    4
+   ],
+   "Staff": [
+    1,
+    0,
+    14
+   ],
+   "StopChainAttack": [
+    4,
+    0,
+    1
+   ],
+   "Stunned": [
+    3,
+    2,
+    1
+   ],
+   "Sword": [
+    1,
+    0,
+    1
+   ],
+   "Thorpe": [
+    2,
+    0,
+    1
+   ],
+   "Torch_OH": [
+    0,
+    6,
+    1
+   ],
+   "Unarmed": [
+    0,
+    2,
+    1
+   ],
+   "Unarmed_OH": [
+    0,
+    6,
+    2
+   ],
+   "Whistle": [
+    0,
+    2,
+    6
+   ],
+   "Zane": [
+    2,
+    0,
+    5
+   ]
+  },
+  "default_tags": [
+   "1H_Swordsman",
+   "FTUE_Thorpe",
+   "Phase_1",
+   "1H_Melee",
+   "Sword"
+  ]
+ },
+ {
+  "asset": "a8b60bc7feaf574cbe7ae3c2d8a48dec",
+  "slice": "slices/characters/risen_corruption_entity.dynamicslice",
+  "fragments": [
+   "Idle",
+   "Fidget",
+   "Alert",
+   "r_Death",
+   "Dead",
+   "Movement",
+   "Combat_Turn",
+   "LookPose",
+   "Hop_Back",
+   "Run",
+   "Walk",
+   "Wander",
+   "r_R2_F",
+   "Attack_Rampage",
+   "r_R2_B",
+   "r_R2_L",
+   "r_R2_R",
+   "Combat_Idle",
+   "r_R0_B",
+   "r_R0_L",
+   "r_R0_R",
+   "r_R0_F",
+   "r_Death_Headshot",
+   "Patrol",
+   "POI_Rummage_LOOP",
+   "r_Head_B",
+   "r_Head_F",
+   "POI_EatOffGround_LOOP",
+   "Dodge_L",
+   "Dodge_R",
+   "Combat_Fidget",
+   "Ambient_Idle",
+   "LookAround",
+   "Hop_Back_Far",
+   "Fidget_Low",
+   "r_R4_Overhead",
+   "Alert_Turn",
+   "Run_Start",
+   "Walk_Start",
+   "r_Death_B",
+   "Reaction_Breakout",
+   "r_R3_F",
+   "r_R3_B",
+   "r_R3_R",
+   "r_R3_L",
+   "Move_Combat",
+   "Move",
+   "Attack_Throw",
+   "Attack_Spray_L",
+   "Attack_Spray_R",
+   "Wait",
+   "Scurry_L",
+   "Scurry_B",
+   "Scurry_R",
+   "Attack_Spray_L_Combo",
+   "Attack_Spray_R_Combo",
+   "Spawn",
+   "r_R1_B",
+   "r_R1_F",
+   "r_R1_L",
+   "r_R1_R",
+   "r_R4_F",
+   "Attack_Spray_Puddle",
+   "AVOMIT",
+   "SniffRight",
+   "Attack_Stretch_Swipe_L",
+   "Attack_Stretch_Swipe_R",
+   "Attack_Stretch_Smash",
+   "Attack_Run_Flurry",
+   "Attack_Grab_Bite",
+   "Attack_Impaler_Throw_Spike",
+   "r_R4_Headshot_F",
+   "r_R4_Headshot_L",
+   "r_R4_Headshot_R",
+   "r_R4_Headshot_B",
+   "r_R4_B",
+   "r_R4_L",
+   "r_R4_R",
+   "SniffLeft",
+   "BlightFiend_Attack_Rampage",
+   "Attack_Stretch_Smash_Combo",
+   "Attack_Impaler_DoubleThrow_Spike",
+   "Attack_Impaler_SpikeSwipe",
+   "Attack_Impaler_Swipe",
+   "r_Stun",
+   "r_Stun_Loop",
+   "r_Stun_End",
+   "Spell_Bomber_Self_Destruct",
+   "r_Explosive_B",
+   "Light_Fuse",
+   "Spell_Bomber_Warning",
+   "Reaction_BreakoutAttack",
+   "Scurry_F",
+   "POI_EatOffGround_End",
+   "POI_Rummage_End",
+   "POI_Lay",
+   "Alert_Lay",
+   "r_Death_Arena",
+   "Minion_Scavenge",
+   "Attack_Swipe_L",
+   "Attack_Swipe_R",
+   "Attack_Lunge_L",
+   "Attack_Lunge_R",
+   "Spell_Bomber_Self_Destruct_DD",
+   "r_Deathsdoor",
+   "Spell_Bomber_Warning_DD",
+   "Attack_Structure",
+   "Attack_Shivers_FrostBelch",
+   "Shivers_DeathSplinter",
+   "POI_Shivers_DeepFreeze_Awaken_1",
+   "POI_Shivers_DeepFreeze_Sleep_1",
+   "POI_Shivers_DeepFreeze_Warning_1",
+   "POI_Shivers_DeepFreeze_Awaken_2",
+   "POI_Shivers_DeepFreeze_Awaken_3",
+   "POI_Shivers_DeepFreeze_Awaken_4",
+   "POI_Shivers_DeepFreeze_Awaken_5",
+   "POI_Shivers_DeepFreeze_Sleep_2",
+   "POI_Shivers_DeepFreeze_Sleep_3",
+   "POI_Shivers_DeepFreeze_Sleep_4",
+   "POI_Shivers_DeepFreeze_Sleep_5",
+   "POI_Shivers_DeepFreeze_Warning_2",
+   "POI_Shivers_DeepFreeze_Warning_3",
+   "POI_Shivers_DeepFreeze_Warning_4",
+   "POI_Shivers_DeepFreeze_Warning_5",
+   "InqFlamekeeper_Turn",
+   "InqFlamekeeper_TurnReset",
+   "InqFlamekeeper_WalkBack",
+   "InqFlamekeeper_IdleBack",
+   "r_Death_B_Flamekeeper",
+   "r_Death_F_Flamekeeper",
+   "r_R2_F_Flamekeeper",
+   "r_R3_F_Flamekeeper",
+   "r_R4_Death_B_Flamekeeper",
+   "r_R4_Death_F_Flamekeeper",
+   "Light_Fuse_Flamethrower",
+   "Attack_Charge_Burst",
+   "r_Death_DeathBurst",
+   "Attack_BlackPowderFall",
+   "Attack_Sulfur_Bomb",
+   "Idle_Trap",
+   "Attack_Grab_Bite_Followup",
+   "Combat_Run_Start",
+   "Turn",
+   "InqFlamekeeper_FireStorm_Intro",
+   "Attack_Screech",
+   "Attack_Desperate_Charge",
+   "Attack_Desperate_Charge_Tumble1",
+   "Attack_Desperate_Charge_Tumble2",
+   "Attack_Desperate_Charge_Tumble3",
+   "r_Death_R4_F",
+   "r_Death_R4_B",
+   "Attack_Lunge",
+   "InqFlamekeeper_FireStorm_LOOP",
+   "InqFlamekeeper_FireStorm_Outro",
+   "InqFlamekeeper_FireStorm",
+   "InqFlamekeeper_FlameBlast",
+   "r_Death_F"
+  ],
+  "scopes": [
+   "FullBody",
+   "Additive",
+   "LookPose",
+   "Audio",
+   "VFX"
+  ],
+  "actions": [
+   "Alert",
+   "Alert_Turn",
+   "Fidget",
+   "Fidget_Low",
+   "Combat_Fidget",
+   "Attack",
+   "Scurry_B",
+   "Scurry_L",
+   "Scurry_R",
+   "Attack_Stretch_Swipe_L",
+   "Attack_Stretch_Swipe_R",
+   "Attack_Stretch_Smash",
+   "Attack_Stretch_Smash_Combo",
+   "Attack_Run_Flurry",
+   "Attack_Grab_Bite",
+   "LookPose",
+   "Spawn",
+   "Despawn",
+   "RangedReaction",
+   "Reaction",
+   "Reaction_Additive",
+   "Death",
+   "ReactionLimiter_Active",
+   "ReactionLimiter_VFX_ON",
+   "Stun",
+   "POI_Waypoint_Loop",
+   "POI_Waypoint",
+   "Reset_Move",
+   "Reset_Idle",
+   "Idle_No_Task",
+   "Idle",
+   "Combat_Idle",
+   "Wait",
+   "Move",
+   "Move_Combat",
+   "Strafe",
+   "Combat_Run_Start",
+   "Combat_Walk_Start",
+   "Walk_Start",
+   "Combat_Turn",
+   "Turn_ToNav",
+   "Combat_Turn_ToNav",
+   "Reaction_Breakout",
+   "Reaction_BreakoutAttack"
+  ],
+  "tags": {
+   "Alerted": [
+    1,
+    7,
+    1
+   ],
+   "AngryEarth": [
+    0,
+    2,
+    7
+   ],
+   "Arena": [
+    3,
+    7,
+    1
+   ],
+   "Base": [
+    1,
+    0,
+    1
+   ],
+   "Blackpowder": [
+    1,
+    0,
+    9
+   ],
+   "BlightFiend": [
+    0,
+    2,
+    3
+   ],
+   "Bomber": [
+    1,
+    0,
+    4
+   ],
+   "Both_Arms": [
+    0,
+    0,
+    3
+   ],
+   "BreakoutWindow": [
+    2,
+    7,
+    1
+   ],
+   "Catacombs": [
+    4,
+    2,
+    1
+   ],
+   "ChainAttack": [
+    2,
+    4,
+    1
+   ],
+   "CorruptionConstruct": [
+    0,
+    2,
+    2
+   ],
+   "DT1": [
+    1,
+    4,
+    1
+   ],
+   "DT3": [
+    1,
+    4,
+    2
+   ],
+   "DT5": [
+    1,
+    4,
+    3
+   ],
+   "End_Loop": [
+    0,
+    7,
+    1
+   ],
+   "Explosive": [
+    3,
+    5,
+    1
+   ],
+   "Feculent": [
+    1,
+    0,
+    8
+   ],
+   "FeralGhoul": [
+    1,
+    0,
+    11
+   ],
+   "Flamekeeper": [
+    1,
+    0,
+    7
+   ],
+   "HasAlreadyExploded": [
+    2,
+    6,
+    1
+   ],
+   "HeadshotReactions": [
+    3,
+    6,
+    1
+   ],
+   "Impaler": [
+    1,
+    0,
+    3
+   ],
+   "Inquisitor": [
+    0,
+    2,
+    6
+   ],
+   "Invasion": [
+    0,
+    2,
+    5
+   ],
+   "IsAttackingObjective": [
+    3,
+    0,
+    1
+   ],
+   "Left_Arm": [
+    0,
+    0,
+    1
+   ],
+   "LitFuse": [
+    3,
+    3,
+    1
+   ],
+   "LookPose": [
+    0,
+    6,
+    1
+   ],
+   "Lost": [
+    0,
+    2,
+    8
+   ],
+   "OneArm": [
+    3,
+    1,
+    1
+   ],
+   "Rafflebones": [
+    4,
+    0,
+    1
+   ],
+   "Reaction": [
+    2,
+    3,
+    1
+   ],
+   "ReactionLimiter_Active": [
+    4,
+    1,
+    1
+   ],
+   "Regurgitator": [
+    1,
+    0,
+    2
+   ],
+   "Reset": [
+    3,
+    4,
+    1
+   ],
+   "Right_Arm": [
+    0,
+    0,
+    2
+   ],
+   "Run_v2": [
+    2,
+    0,
+    1
+   ],
+   "Run_v3": [
+    2,
+    0,
+    2
+   ],
+   "Run_v4": [
+    2,
+    0,
+    3
+   ],
+   "Run_v5": [
+    2,
+    0,
+    4
+   ],
+   "Shivers": [
+    1,
+    0,
+    6
+   ],
+   "StopChainAttack": [
+    2,
+    5,
+    1
+   ],
+   "Stunned": [
+    3,
+    2,
+    1
+   ],
+   "SulfurEntity": [
+    1,
+    0,
+    10
+   ],
+   "SwampFiend": [
+    1,
+    0,
+    5
+   ],
+   "Undead": [
+    0,
+    2,
+    4
+   ],
+   "Unstable": [
+    1,
+    4,
+    4
+   ],
+   "Withered": [
+    0,
+    2,
+    1
+   ]
+  },
+  "default_tags": [
+   "Both_Arms",
+   "CorruptionConstruct",
+   "Base",
+   "DT5"
+  ]
+ },
+ {
+  "asset": "b7e33b294bcf57b8a476abdc3a31fae7",
+  "slice": "slices/characters/ftue_corrupted/corrupted_sailor_zone3_club.dynamicslice",
+  "fragments": [
+   "Idle",
+   "Alert",
+   "Movement",
+   "Attack_Primary_Close",
+   "Flee",
+   "Fidget",
+   "r_Death",
+   "r_R0_F",
+   "r_R0_B",
+   "r_R0_L",
+   "r_R0_R",
+   "r_R1_F",
+   "r_R1_B",
+   "r_R1_L",
+   "r_R1_R",
+   "r_R2_F",
+   "r_R2_B",
+   "r_R2_L",
+   "r_R2_R",
+   "r_R3_F",
+   "r_R3_B",
+   "r_R3_L",
+   "r_R3_R",
+   "Patrol",
+   "Equip",
+   "Sprint",
+   "Dodge_B",
+   "Dodge_L",
+   "Dodge_R",
+   "Combat_Idle",
+   "Block",
+   "Block_End",
+   "Block_Start",
+   "Deflection",
+   "CounterAttack",
+   "ComboBreaker",
+   "LookPose",
+   "BrokenGuard",
+   "Fire_Bow",
+   "Fire_Rifle",
+   "Strafe_Left",
+   "Strafe_Right",
+   "WalkBack",
+   "Strafe",
+   "No_Dodge",
+   "POI_LookAround",
+   "POI_Sit",
+   "POI_Sleep",
+   "POI_Wave",
+   "POI_Emote",
+   "POI_Pray_Euro",
+   "Test",
+   "HopBack",
+   "r_R4_R",
+   "r_R4_L",
+   "r_R4_F",
+   "r_R4_B",
+   "r_R4_F_Overhead",
+   "POI_Interact_Low",
+   "POI_Interact_Mid",
+   "POI_Craft_Mid",
+   "Throw_Axe",
+   "Aggro",
+   "Cast_Spells",
+   "Cast_Spells_Close",
+   "POI_Patrol_Fidget",
+   "POI_Patrol_Idle",
+   "Taunt",
+   "Wander",
+   "Attack_Primary_Far",
+   "Attack_Primary_Medium",
+   "POI_Conversation",
+   "POI_Crouch_Campfire_Loop",
+   "POI_Crouch_Campfire_Rubhands",
+   "POI_Digging",
+   "POI_HandPainting",
+   "POI_Idle_Standing",
+   "POI_Kicking_Dirt",
+   "POI_Standing_Leaning",
+   "POI_Sit_On_Ground",
+   "Alert_Sit_On_Ground",
+   "POI_Sit_On_Ground_Drinking",
+   "POI_Sit_On_Ground_Eating",
+   "POI_Worshipping_Praying_Standing",
+   "POI_Worshipping_Praying_Kneeling",
+   "POI_Skeleton_Lay_On_Back_01_LOOP",
+   "POI_Skeleton_Lay_On_Back_02_LOOP",
+   "POI_Skeleton_Lay_On_Back_03_LOOP",
+   "POI_Skeleton_Lay_On_Back_04_LOOP",
+   "POI_Skeleton_Lay_On_Stomach_01_LOOP",
+   "POI_Skeleton_Lay_On_Stomach_02_LOOP",
+   "POI_Skeleton_Lay_On_Stomach_03_LOOP",
+   "POI_Skeleton_Lay_On_Stomach_04_LOOP",
+   "POI_Skeleton_Slump_01_LOOP",
+   "POI_Skeleton_Slump_02_LOOP",
+   "POI_Skeleton_Slump_03_LOOP",
+   "POI_Skeleton_Slump_04_LOOP",
+   "POI_Skeleton_Stand_Guard_LOOP",
+   "r_Death_F",
+   "r_Death_B",
+   "PRIEST_Rolling_Death_Spell",
+   "PRIEST_AOE_Ranged_Spell",
+   "PRIEST_Cast_One_Projectile",
+   "PRIEST_Cast_Three_Projectiles",
+   "PRIEST_Close_Staff_Attack",
+   "PRIEST_Close_Overhead_Staff_Attack",
+   "PRIEST_Close_Blast_AOE_Attack",
+   "Strafe_Shooting_UpperBodyLayer",
+   "Attack_Close_1H_Sword_01",
+   "Attack_Close_1H_Sword_02",
+   "Attack_Close_1H_Sword_03",
+   "Attack_Close_1H_Sword_04",
+   "Attack_Close_1H_Axe_01",
+   "Attack_Close_1H_Axe_02",
+   "Attack_Close_2H_Axe_01",
+   "Attack_Close_2H_Axe_02",
+   "Attack_Close_2H_Axe_03",
+   "Attack_Close_2H_Spear_01",
+   "Attack_Close_2H_Spear_02",
+   "Attack_Close_2H_Spear_03",
+   "Attack_Mid_1H_Sword_01",
+   "Attack_Mid_1H_Sword_02",
+   "Attack_Mid_1H_Sword_03",
+   "Attack_Far_1H_Sword_01",
+   "Attack_Far_1H_Sword_02",
+   "Attack_Far_1H_Sword_03",
+   "Attack_Mid_2H_Axe_01",
+   "Attack_Mid_2H_Axe_02",
+   "Attack_Far_2H_Axe_01",
+   "Attack_Far_1H_Axe_01",
+   "Attack_Mid_2H_Spear_01",
+   "Attack_Mid_2H_Spear_02",
+   "Attack_Mid_2H_Spear_03",
+   "Attack_Far_2H_Spear_01",
+   "Attack_Far_2H_Spear_02",
+   "Attack_Far_2H_Spear_03",
+   "Attack_Close_1H_Knife_01",
+   "Attack_Close_1H_Knife_02",
+   "Attack_Mid_1H_Knife_01",
+   "Anubian_Archer_Immolation_Dodge",
+   "Anubian_Archer_Sun_Shot",
+   "Anubian_Archer_Burning_Volley",
+   "Anubian_Solar_Spirit",
+   "Fire_Pistol",
+   "Combat_Turn",
+   "Reaction_Breakout",
+   "Idle_No_Task",
+   "r_B0_Break",
+   "BlockReaction_Breakout",
+   "CounterAttack_OLD",
+   "Combat_Idle_No_Task",
+   "Aim",
+   "Combat_Fidget",
+   "r_Running_Block",
+   "Attack_Close_1H_ShieldBash",
+   "POI_Priest_Cast_Spell_LOOP",
+   "POI_Priest_Focus_Energy_LOOP",
+   "POI_Priest_Sermon_LOOP",
+   "Attack_Elite_Double_Slash",
+   "Attack_Elite_Shoulder_Charge_Start",
+   "Attack_Elite_Shoulder_Charge_Loop",
+   "Attack_Elite_Shoulder_Charge_End",
+   "Attack_Elite_Shoulder_Charge_End_Stab",
+   "Reaction_BreakoutAttack",
+   "Attack_Close_2H_Axe_HandleSlam",
+   "Attack_Close_2H_Axe_HandleStrike",
+   "Block_Start_2H",
+   "Block_End_2H",
+   "Attack_Combo_GreatAxeman_1",
+   "Attack_Combo_GreatAxeman_2",
+   "Attack_Combo_GreatAxeman_3",
+   "Attack_Close_2H_Axe_04",
+   "Attack_Close_2H_Axe_05",
+   "Attack_Combo_GreatAxeman_4",
+   "Fire_Pistol_Quickfire_Once",
+   "Fire_Pistol_Quickfire_Thrice",
+   "Fire_Pistol_Quickfire_Twice",
+   "Wait",
+   "Attack_Elite_Flurry",
+   "Attack_Elite_FlipOverhead",
+   "Move_Combat_Walk",
+   "Move_Combat",
+   "Move",
+   "Alert_Long",
+   "Spawn",
+   "SHAMAN_Heal",
+   "Mage_Arcane_RollingSpell",
+   "Reset_Move",
+   "Mage_Arcane_CloseAOE",
+   "Undead_Pistoleer_Spell",
+   "Fire_Pistol_Undead_Pistoleer_BreakG",
+   "Archer_Charged_Ranged_Attack",
+   "Archer_Fast_Ranged_Attack",
+   "Archer_Fast_Melee_Attack",
+   "Archer_Charged_Melee_Attack",
+   "Archer_Triple_Shot",
+   "Soldier_Force_Of_Nature",
+   "Soldier_Empowered_Strike",
+   "Soldier_Empower",
+   "Soldier_Depower",
+   "Soldier_Empowered_Combo_1",
+   "Soldier_Empowered_Combo_2",
+   "Berserk_Sword_Swing_Left",
+   "Berserk_Sword_Swing_Right",
+   "Berserk_Sword_Straight_Close",
+   "Berserk_Sword_360",
+   "Berserk_Hook_Swing_Right",
+   "Berserk_Hook_Swing_Left",
+   "Berserk_Hook_UpperCut",
+   "Berserk_Flying_Attack",
+   "Berserk_Run_Sword_Attack",
+   "Berserk_Rage_On",
+   "Soldier_Empowered_Combo_3",
+   "POI_Dryad_Shaman_Spawn_LOOP",
+   "Navigator_Fire_Left",
+   "Navigator_Fire_Right",
+   "Navigator_RapidFire",
+   "Navigator_Blade_Left",
+   "Navigator_Blade_Right",
+   "Navigator_Blade_Straight_Left",
+   "Navigator_Blade_Straight_Right",
+   "Navigator_Dash_B",
+   "Navigator_Dash_L",
+   "Navigator_Dash_R",
+   "Navigator_Melee_Dash",
+   "Navigator_Dash_Back",
+   "Navigator_Spell",
+   "Navigator_Blade_Straight_Combo",
+   "Navigator_Blade_LR_Combo",
+   "Dash_L",
+   "Dash_R",
+   "Hunter_Crossbow_Normal",
+   "Hunter_Crossbow_Special",
+   "Fire_Pistol_HopLeft",
+   "Fire_Pistol_HopRight",
+   "Hunter_SpitFire",
+   "Hunter_Torch_Swing_R",
+   "Hunter_Torch_Swing_L",
+   "Fire_Rifle_HopeLeft",
+   "Fire_Rifle_HopeRight",
+   "GraveDigger_Swing_L",
+   "GraveDigger_Swing_R",
+   "GraveDigger_Overhead_Strike",
+   "GraveDigger_Charge",
+   "GraveDigger_Storm",
+   "GraveDigger_WalkBack",
+   "Attack_Close_1H_Combo_1",
+   "Attack_Close_1H_Combo_2",
+   "Dodge_B_Fire_Pistol",
+   "GraveDigger_TurnWalkBack",
+   "GraveDigger_Idle_Back",
+   "GraveDigger_TurnWalkBackReset",
+   "GraveDigger_WalkBackFar",
+   "Drowned_Miner_Throw",
+   "Mage_Arcane_Shield",
+   "Mage_Arcane_RangedAOE",
+   "r_R3_F_Siphon",
+   "r_R3_F_BreakSiphon",
+   "Shaman_AOE_Combo",
+   "GraveDigger_StraightStab",
+   "GraveDigger_StraightStabDouble",
+   "Shaman_Bomb",
+   "Attack_1H_Axe_Combo_1",
+   "Attack_1H_Axe_Combo_2",
+   "Attack_1H_Axe_Combo_3",
+   "Miner_Torch_Swing_R",
+   "Cultist_MarkOfCorruption",
+   "Cultist_FanaticalEmpowerment",
+   "Cultist_CorruptingLight",
+   "Acolyte_Summon",
+   "Acolyte_EnergyBeam",
+   "Acolyte_EnergyDash_Start",
+   "Acolyte_EnergyDash_Loop",
+   "Acolyte_RetreatingTrap_Start",
+   "Hunter_Dash_B",
+   "Attack_Close_2H_Spear_Combo_01",
+   "Attack_Close_2H_Spear_Combo_02",
+   "Attack_Close_2H_Spear_04",
+   "Fire_Rifle_After_HopeLeft",
+   "Fire_Rifle_After_HopeRight",
+   "Fire_Rifle_Crouched_Special",
+   "r_Stun",
+   "r_Stun_Loop",
+   "r_Stun_End",
+   "PRIEST_Summon_Hounds",
+   "Attack_Structure",
+   "Invasion_Reload",
+   "Berserk_Rage_Off",
+   "Officer_OceanShield",
+   "Officer_AnchorSlam",
+   "Officer_AnchorToss",
+   "Fire_Rifle_Structure",
+   "POI_Ritual_Channeling_LOOP",
+   "POI_Miner_Throw_Grenade",
+   "Officer_AnchorDash",
+   "Invasion_Special",
+   "Reaction_BreakoutAttack_Ranged",
+   "Acolyte_EnergyDash_End",
+   "Reaction_BreakoutAttack_02",
+   "Acolyte_EnergyDash_Attack_Start",
+   "Acolyte_Cast_One_Projectile",
+   "Acolyte_Cast_Three_Projectiles",
+   "Acolyte_Close_Blast_AOE_Attack",
+   "Acolyte_EnergyBall",
+   "Officer_Combo_1",
+   "Sailor_Combo_01",
+   "Sailor_Combo_02",
+   "Sailor_Combo_03",
+   "Grenadier_Throw_Bomb",
+   "Grenadier_Throw_Molotov",
+   "Grenadier_Throw_Disease",
+   "Revive",
+   "Sailor_Combo_04",
+   "Hunter_WispFire",
+   "Hunter_WispFire_Far",
+   "POI_Pray",
+   "Mage_Summon",
+   "PRIEST_Pre_Summon_Hounds",
+   "POI_Sailor_Fidget",
+   "Gravedigger_Storm_Easy",
+   "Alert_Turn",
+   "Alert_Sleep",
+   "Alert_Crouch_Campfire",
+   "Alert_Interact_Low",
+   "Alert_Pray",
+   "Alert_Worshipping",
+   "POI_HandPainting_End",
+   "POI_Interact_Low_End",
+   "POI_Interact_Mid_End",
+   "POI_Pray_End",
+   "POI_Pray_Euro_End",
+   "POI_Priest_Cast_Spell_End",
+   "POI_Priest_Focus_Energy_End",
+   "POI_Ritual_Channeling_End",
+   "POI_Sit_End",
+   "POI_Sit_On_Ground_End",
+   "POI_Skeleton_Lay_On_Back_01_End",
+   "POI_Skeleton_Lay_On_Back_02_End",
+   "POI_Skeleton_Lay_On_Back_03_End",
+   "POI_Skeleton_Lay_On_Back_04_End",
+   "POI_Skeleton_Lay_On_Stomach_01_End",
+   "POI_Skeleton_Lay_On_Stomach_02_End",
+   "POI_Skeleton_Lay_On_Stomach_03_End",
+   "POI_Skeleton_Lay_On_Stomach_04_End",
+   "POI_Skeleton_Slump_01_End",
+   "POI_Skeleton_Slump_02_End",
+   "POI_Skeleton_Slump_03_End",
+   "POI_Sleep_End",
+   "POI_Standing_Leaning_End",
+   "POI_Worshipping_Praying_Kneeling_End",
+   "POI_HandPainting_02_End",
+   "POI_Crouch_Campfire_End",
+   "Soldier_Swamp_Earth_Barrier",
+   "Soldier_Swamp_Overhead_Slam",
+   "Soldier_Swamp_Whirlwind",
+   "Soldier_Swamp_Shoulder_Charge",
+   "Soldier_Swamp_Close_AOE",
+   "Soldier_Swamp_Swing_L",
+   "Soldier_Swamp_Swing_R",
+   "Soldier_Swamp_Swing_Combo_1",
+   "Soldier_Swamp_Swing_Combo_2",
+   "Soldier_Swamp_Swing_Combo_3",
+   "Soldier_Swamp_Swing_Combo_4",
+   "Shaman_Swamp_Mud_Heal",
+   "Shaman_Swamp_Linear_AOE",
+   "Shaman_Swamp_Summon_Minion",
+   "Shaman_Swamp_Summon_Mists",
+   "Shaman_Swamp_Ranged_AOE",
+   "Archer_Swamp_Volley",
+   "Archer_Swamp_Piercing_Shot",
+   "Archer_Swamp_Roll_Forward_Shot",
+   "Archer_Swamp_Trap",
+   "Dodge_Roll_L",
+   "Dodge_Roll_R",
+   "Dodge_Roll_B",
+   "Dodge_Roll_F",
+   "Soldier_Swamp_Shoulder_Charge_End",
+   "Dodge_Roll_B_Trap",
+   "r_MudHeal_Headshot",
+   "POI_Shaman_SpellCast",
+   "Attack_Dynasty_2H_Spear_FlippingSlash",
+   "Attack_Dynasty_2H_Spear_DoubleKick",
+   "Shaman_Swamp_Summon_Minion_Single",
+   "POI_SwampDryadSoldier_Attack_Structure",
+   "Attack_Dynasty_Musketeer_Spin_Shot_Combo",
+   "Attack_Dynasty_Musketeer_PowderBurn",
+   "Attack_Dynasty_Musketeer_DoubleGunButt_Blast",
+   "Attack_Dynasty_Musketeer_RushingShot",
+   "Attack_2H_Spear_Combo_1",
+   "Attack_Dynasty_Warrior_Rushing_Bash_Intro",
+   "Attack_Dynasty_Warrior_Spinning_Stab_Combo",
+   "Dynasty_Summoner_Siphon_Swords_LOOP",
+   "Dynasty_Summoner_Fan_Of_Swords",
+   "Dynasty_Summoner_Execution_Sword",
+   "Dynasty_Summoner_Siphon_Swords_Start",
+   "Dynasty_Summoner_Siphon_Swords_END",
+   "Dynasty_Summoner_Phantom_Blade",
+   "Dynasty_Summoner_Phantom_Blade_Whirlwind",
+   "r_B0_F",
+   "r_B1_F",
+   "r_B2_F",
+   "r_B3_F",
+   "DunePhantom_Berserker_SwordFury",
+   "Priest_Phase_Tranision",
+   "Priest_Doom_Intro",
+   "Priest_Doom_Loop",
+   "Priest_Doom_Outro",
+   "Priest_Doom_Outro_Loop",
+   "Sand_Dash_F",
+   "Sand_Dash_B",
+   "Mage_Miniboss_Buff_Minion_LOOP",
+   "Mage_Miniboss_Buff_Minion_Intro",
+   "Mage_Miniboss_Buff_Minion_Outro",
+   "Mage_Miniboss_CountPlayers",
+   "Reaction_BreakoutAttack_DirtDevil",
+   "Attack_Dreadnaught_SandDevil",
+   "Attack_Dreadnaught_SandJuggernaut",
+   "Attack_Dreadnaught_WorldSplitter",
+   "Fire_Rifle_PowerShot",
+   "Fire_Bow_SpreadShot",
+   "Attack_Dreadnaught_SandJuggernaut_Ender",
+   "Intro",
+   "Intro_Idle",
+   "Spell_DunePhantom_Dreadnought_EnragedLimited",
+   "Spell_DunePhantom_Dreadnought_EnragedUnlimited",
+   "Summon_Minion",
+   "Priest_Doom_Mine_1_Outro_Loop",
+   "Priest_Doom_Mine_2_Outro_Loop",
+   "Priest_Doom_Mine_3_Outro_Loop",
+   "Priest_Doom_Mine_4_Outro_Loop",
+   "Priest_Doom_Mine_5_Outro_Loop",
+   "Victory",
+   "Attack_Dreadnaught_SuperSandDevil",
+   "r_R2_F_Siphon",
+   "r_Death_B_Siphon",
+   "r_R4_Death_B_Siphon",
+   "r_R4_Death_F_Siphon",
+   "r_Death_F_Siphon",
+   "IceDryad_Frostgrip_Spell_ColdVein",
+   "IceDryad_Frostgrip_Spell_IceBreed",
+   "Attack_Dynasty_Warrior_Rushing_Bash_Loop",
+   "Attack_Dynasty_Warrior_Rushing_Bash_Outro",
+   "IceDryad_Frostgrip_Spell_ColdVein_Projectile",
+   "IceDryad_Frostgrip_Spell_IceBreed_Close",
+   "IceDryad_Frostgrip_Spell_IceBreed_Mid",
+   "IceDryad_Frostgrip_Spell_Icebreed_SingleShot",
+   "IceDryad_Frostgrip_Spell_ColdVein_SpreadShot",
+   "Shaman_Pirate_Stab_01",
+   "Shaman_Pirate_Overhead_01",
+   "Shaman_Pirate_Stab_02",
+   "Shaman_Pirate_Chain_Lightning",
+   "Shaman_Pirate_Lightning_Strike",
+   "Swarmancer_CommandMinion",
+   "Swarmancer_UnleashSwarm",
+   "Swarmancer_SwarmAura",
+   "Swarmancer_SwarmShot",
+   "Cultist_Channel_Empower",
+   "Idle_GRIT",
+   "Attack_Light_Attack",
+   "Attack_Heavy_Attack",
+   "InqCleric_SwipeL",
+   "InqCleric_Overhead",
+   "InqCleric_Holy_Pillar",
+   "InqCleric_Rekindle",
+   "InqCleric_Ignite_Start",
+   "InqCleric_Ignite_Loop",
+   "InqCleric_Ignite_End",
+   "r_Stagger",
+   "InqCleric_Rekindle_Self",
+   "InqMarkswoman_Eager_Ember",
+   "InqMarkswoman_Rampant_Roar",
+   "InqCleric_OverheadBreakout",
+   "Attack_Soldiers_Scream",
+   "Attack_Soldiers_Vengeance",
+   "Outro",
+   "Intro_Intermission_01",
+   "Intro_Intermission_02",
+   "Idle_Vanish",
+   "Idle_UnVanish",
+   "Heartforge_Explosive_Idle",
+   "Final_Blessing",
+   "Idle_Spell",
+   "Archer_Upyr_Baroness_Memory",
+   "Fire_Rifle_SniperChargedShot",
+   "Attack_Dig",
+   "GhastlyHatchet_SpectralSpin",
+   "GhastlyHatchet_ReflexCheck",
+   "GhastlyHatchet_ThrowNSplode",
+   "GhastlyHatchet_SideDashR",
+   "GhastlyHatchet_SideDashL",
+   "GhastlyHatchet_ThrowNSplode_Prep",
+   "GhastlyHatchet_ThrowNSplode_Far",
+   "GhastlyHatchet_ReflexCheckBackdash",
+   "Cryptkeeper_ReaperEmbrace",
+   "Cryptkeeper_Storm",
+   "Cryptkeeper_Swing_L",
+   "Cryptkeeper_Swing_R",
+   "Cryptkeeper_Tombstone",
+   "InqCleric_Rekindle_Area",
+   "Attack_Chained_Pull",
+   "Attack_Chained_Pull_Followup",
+   "MutatedNurse_SwipeR",
+   "MutatedNurse_SwipeL",
+   "MutatedNurse_WispSoulthrower",
+   "MutatedNurse_WispBoomerang",
+   "MutatedNurse_WispShot",
+   "Cryptkeeper_Overhead_Strike",
+   "Cryptkeeper_Tombstone_Finisher",
+   "Berserk_Rage_Loop",
+   "Alert_Point",
+   "Deaths_Door",
+   "Deaths_Door_End",
+   "Attack_Feral_Rush",
+   "MutatedNurse_DoubleWisp_Shot",
+   "Yonas_Phase_Transition",
+   "Attack_Feral_Rush_Start",
+   "Attack_Feral_Rush_Run",
+   "r_R3_F_Slow",
+   "r_Death_R4_F",
+   "r_Death_R4_B",
+   "InqCleric_Ignite"
+  ],
+  "scopes": [
+   "FullBody",
+   "UpperBody",
+   "OffHand",
+   "AimBlend",
+   "LookPose",
+   "Additive",
+   "Audio",
+   "VFX",
+   "Weapon",
+   "OffHandWeapon"
+  ],
+  "actions": [
+   "Alert",
+   "Alert_Turn",
+   "Equip",
+   "LookPose",
+   "AimPose",
+   "Sheathe",
+   "UnSheathe",
+   "Sheathe_Offhand",
+   "UnSheathe_Offhand",
+   "Idle_No_Task",
+   "Idle",
+   "Combat_Idle",
+   "Wait",
+   "Fidget",
+   "Combat_Fidget",
+   "POI_Waypoint_Loop",
+   "POI_Waypoint",
+   "Pushable",
+   "Minion_Despawn",
+   "Self_Kill",
+   "Self_Kill_ClearContributors",
+   "Attack_Structure",
+   "Reset_Move",
+   "Reset_Idle",
+   "Move",
+   "Move_Combat",
+   "Strafe",
+   "Combat_Run_Start",
+   "Combat_Walk_Start",
+   "Walk_Start",
+   "Combat_Turn",
+   "Turn_ToNav",
+   "Combat_Turn_ToNav",
+   "Reaction_Breakout",
+   "Reaction_BreakoutAttack",
+   "Spawn",
+   "Despawn",
+   "Stun",
+   "Reaction",
+   "Deflection",
+   "Reaction_Additive",
+   "Turn Off Block In Breakout",
+   "BrokenGuard",
+   "ReactionLimiter_Active",
+   "ReactionLimiter_VFX_ON",
+   "Death",
+   "Death_FB",
+   "Death_KillMinions",
+   "Attack_Cooldown",
+   "Block",
+   "BlockBroken",
+   "Force_Block_Off",
+   "Alert_Sit_On_Ground",
+   "Alert_Sleep",
+   "Alert_Crouch_Campfire",
+   "Alert_Interact_Low",
+   "Alert_Pray",
+   "Alert_Worshipping",
+   "Combat_Fidget",
+   "Attack",
+   "Dodge_L",
+   "Dodge_R",
+   "Dodge_B",
+   "Attack_Close_1H_Axe_01",
+   "Attack_Close_1H_Axe_02",
+   "Attack_1H_Axe_Combo_1",
+   "Attack_1H_Axe_Combo_2",
+   "Attack_1H_Axe_Combo_3",
+   "Attack_Close_1H_Combo_1",
+   "Attack_Close_1H_Combo_2",
+   "Attack_Close_1H_Sword_01",
+   "Attack_Close_1H_Sword_02",
+   "Attack_Close_1H_Sword_03",
+   "Attack_Close_1H_Sword_04",
+   "Attack_Close_1H_Knife_01",
+   "Attack_Close_1H_Knife_02",
+   "Attack_Close_2H_Axe_01",
+   "Attack_Close_2H_Axe_02",
+   "Attack_Close_2H_Axe_03",
+   "Attack_Close_2H_Axe_04",
+   "Attack_Close_2H_Axe_05",
+   "Attack_Close_2H_Axe_HandleSlam",
+   "Attack_Close_2H_Axe_HandleStrike",
+   "Attack_Combo_GreatAxeman_1",
+   "Attack_Combo_GreatAxeman_2",
+   "Attack_Combo_GreatAxeman_3",
+   "Attack_Close_1H_ShieldBash",
+   "Attack_Mid_1H_Sword_01",
+   "Attack_Mid_1H_Sword_02",
+   "Attack_Mid_1H_Sword_03",
+   "Attack_Mid_1H_Knife_01",
+   "Attack_Mid_2H_Axe_01",
+   "Attack_Mid_2H_Axe_02",
+   "Attack_Far_1H_Axe_01",
+   "Attack_Far_1H_Sword_01",
+   "Attack_Far_1H_Sword_02",
+   "Attack_Far_1H_Sword_03",
+   "Attack_Far_2H_Axe_01",
+   "Attack_Far_2H_Spear_01",
+   "Attack_Far_2H_Spear_02",
+   "Attack_Far_2H_Spear_03",
+   "Sailor_Combo_01",
+   "Sailor_Combo_02",
+   "Sailor_Combo_03",
+   "Sailor_Combo_04",
+   "MeleeAttackClose",
+   "MeleeAttackMedium",
+   "MeleeAttackFar",
+   "Officer_AnchorDash",
+   "Officer_AnchorSlam",
+   "Officer_AnchorToss"
+  ],
+  "tags": {
+   "1H_Axeman": [
+    2,
+    3,
+    6
+   ],
+   "1H_Caster": [
+    0,
+    2,
+    7
+   ],
+   "1H_Melee": [
+    0,
+    2,
+    1
+   ],
+   "1H_Ranged": [
+    0,
+    2,
+    3
+   ],
+   "1H_Swordsman": [
+    2,
+    3,
+    5
+   ],
+   "2H_Axeman": [
+    2,
+    3,
+    7
+   ],
+   "2H_Mace": [
+    1,
+    0,
+    12
+   ],
+   "2H_Melee": [
+    0,
+    2,
+    4
+   ],
+   "2H_Ranged": [
+    0,
+    2,
+    5
+   ],
+   "2H_Swordsman": [
+    2,
+    3,
+    10
+   ],
+   "Acolyte": [
+    2,
+    3,
+    2
+   ],
+   "Alerted": [
+    5,
+    1,
+    1
+   ],
+   "AnubianGuardian": [
+    4,
+    0,
+    5
+   ],
+   "Anubian_Guardian_Solar_Spirit_Buff": [
+    4,
+    4,
+    1
+   ],
+   "Anubian_Guardian_Solar_Spirit_Cooldown": [
+    4,
+    4,
+    2
+   ],
+   "Axe": [
+    1,
+    0,
+    2
+   ],
+   "Berserker": [
+    2,
+    3,
+    14
+   ],
+   "Block": [
+    5,
+    4,
+    1
+   ],
+   "BlockBroken": [
+    5,
+    5,
+    1
+   ],
+   "Block_Trans": [
+    5,
+    6,
+    1
+   ],
+   "Boss": [
+    8,
+    3,
+    1
+   ],
+   "Boss_Minion": [
+    4,
+    0,
+    3
+   ],
+   "Bow": [
+    0,
+    2,
+    2
+   ],
+   "Bowman": [
+    2,
+    3,
+    13
+   ],
+   "BreakoutWindow": [
+    7,
+    0,
+    1
+   ],
+   "CanRevive": [
+    7,
+    6,
+    1
+   ],
+   "ChainAttack": [
+    6,
+    5,
+    1
+   ],
+   "Club": [
+    1,
+    0,
+    3
+   ],
+   "Corrupted_FirstMate": [
+    4,
+    0,
+    10
+   ],
+   "Corrupted_Sailor": [
+    4,
+    0,
+    11
+   ],
+   "Crouch": [
+    0,
+    5,
+    2
+   ],
+   "Cryptkeeper": [
+    4,
+    0,
+    13
+   ],
+   "Cultist": [
+    2,
+    3,
+    3
+   ],
+   "DT1": [
+    3,
+    3,
+    1
+   ],
+   "DT3": [
+    3,
+    3,
+    2
+   ],
+   "DT5": [
+    3,
+    3,
+    3
+   ],
+   "Damned": [
+    4,
+    7,
+    1
+   ],
+   "Disease": [
+    3,
+    6,
+    3
+   ],
+   "Dryad": [
+    2,
+    0,
+    2
+   ],
+   "DunePhantom": [
+    4,
+    0,
+    4
+   ],
+   "Dungeon": [
+    8,
+    4,
+    1
+   ],
+   "Dynasty": [
+    4,
+    0,
+    2
+   ],
+   "Dynasty_Musketeer": [
+    2,
+    3,
+    21
+   ],
+   "Dynasty_Spearman": [
+    2,
+    3,
+    20
+   ],
+   "Dynasty_Warrior": [
+    2,
+    3,
+    22
+   ],
+   "Elite": [
+    6,
+    0,
+    1
+   ],
+   "Empowered": [
+    6,
+    4,
+    1
+   ],
+   "End_Loop": [
+    5,
+    3,
+    1
+   ],
+   "Enforcer": [
+    2,
+    3,
+    4
+   ],
+   "Feral": [
+    2,
+    0,
+    1
+   ],
+   "First_Mate": [
+    2,
+    3,
+    26
+   ],
+   "Fodder": [
+    8,
+    2,
+    1
+   ],
+   "Frostgrip": [
+    2,
+    3,
+    23
+   ],
+   "Ghastly": [
+    2,
+    3,
+    24
+   ],
+   "GraveDigger": [
+    2,
+    3,
+    17
+   ],
+   "Grenade": [
+    3,
+    6,
+    1
+   ],
+   "HasSummonedMinion": [
+    8,
+    1,
+    1
+   ],
+   "Hatchet": [
+    8,
+    7,
+    1
+   ],
+   "HeadshotReactions": [
+    8,
+    0,
+    1
+   ],
+   "Heartforge": [
+    4,
+    0,
+    8
+   ],
+   "Heartforge_Shield": [
+    4,
+    4,
+    3
+   ],
+   "HeartlessSeraph": [
+    1,
+    7,
+    1
+   ],
+   "Helvan": [
+    4,
+    0,
+    9
+   ],
+   "Hogsplitter": [
+    1,
+    0,
+    11
+   ],
+   "Hunter": [
+    2,
+    3,
+    16
+   ],
+   "IceDryad": [
+    4,
+    0,
+    6
+   ],
+   "Inquisitor": [
+    2,
+    0,
+    7
+   ],
+   "Invasion": [
+    2,
+    0,
+    5
+   ],
+   "InvasionSpear": [
+    7,
+    4,
+    1
+   ],
+   "Isabella_Consume": [
+    4,
+    4,
+    4
+   ],
+   "Knife": [
+    1,
+    0,
+    8
+   ],
+   "LookPose": [
+    5,
+    2,
+    1
+   ],
+   "LostThorpeRelic": [
+    2,
+    3,
+    27
+   ],
+   "Mage": [
+    2,
+    0,
+    3
+   ],
+   "Miner": [
+    2,
+    3,
+    19
+   ],
+   "Minion": [
+    7,
+    7,
+    1
+   ],
+   "Molotov": [
+    3,
+    6,
+    2
+   ],
+   "MutatedNurse": [
+    2,
+    3,
+    25
+   ],
+   "Navigator": [
+    2,
+    3,
+    15
+   ],
+   "Offhand": [
+    0,
+    0,
+    1
+   ],
+   "Officer": [
+    2,
+    3,
+    18
+   ],
+   "Oil": [
+    0,
+    1,
+    1
+   ],
+   "Pick": [
+    1,
+    0,
+    7
+   ],
+   "Pistol": [
+    1,
+    0,
+    5
+   ],
+   "Pistol_OH": [
+    1,
+    4,
+    4
+   ],
+   "Pistoleer": [
+    2,
+    3,
+    12
+   ],
+   "Raid": [
+    3,
+    3,
+    4
+   ],
+   "Reaction": [
+    7,
+    2,
+    1
+   ],
+   "ReactionLimiter_Active": [
+    9,
+    0,
+    1
+   ],
+   "ReloadRequired": [
+    0,
+    7,
+    1
+   ],
+   "Reset": [
+    7,
+    5,
+    1
+   ],
+   "Rifle": [
+    1,
+    0,
+    6
+   ],
+   "Running Block": [
+    6,
+    2,
+    1
+   ],
+   "Sailor": [
+    5,
+    7,
+    1
+   ],
+   "Season_01_Event": [
+    4,
+    0,
+    12
+   ],
+   "Shaman": [
+    2,
+    3,
+    1
+   ],
+   "Shield_OH": [
+    1,
+    4,
+    3
+   ],
+   "Shovel": [
+    8,
+    6,
+    1
+   ],
+   "SimpleMage": [
+    4,
+    0,
+    7
+   ],
+   "Siphon": [
+    6,
+    7,
+    1
+   ],
+   "Skeleton": [
+    2,
+    0,
+    6
+   ],
+   "SnareDrum": [
+    0,
+    2,
+    6
+   ],
+   "Spear": [
+    1,
+    0,
+    4
+   ],
+   "Spearman": [
+    2,
+    3,
+    8
+   ],
+   "Spy": [
+    2,
+    3,
+    11
+   ],
+   "Staff": [
+    1,
+    0,
+    9
+   ],
+   "Stand": [
+    0,
+    5,
+    1
+   ],
+   "StopChainAttack": [
+    6,
+    6,
+    1
+   ],
+   "Stunned": [
+    7,
+    1,
+    1
+   ],
+   "Swamp": [
+    4,
+    0,
+    1
+   ],
+   "Sword": [
+    1,
+    0,
+    1
+   ],
+   "Swordsman": [
+    2,
+    3,
+    9
+   ],
+   "Torch_OH": [
+    1,
+    4,
+    1
+   ],
+   "Torso_Boss_Minion": [
+    4,
+    0,
+    15
+   ],
+   "Unarmed_OH": [
+    1,
+    4,
+    2
+   ],
+   "Undead": [
+    2,
+    0,
+    4
+   ],
+   "Variant2": [
+    5,
+    0,
+    1
+   ],
+   "Warhammer": [
+    1,
+    0,
+    10
+   ],
+   "WaterShield1": [
+    3,
+    0,
+    6
+   ],
+   "WaterShield2": [
+    3,
+    0,
+    5
+   ],
+   "WaterShield3": [
+    3,
+    0,
+    4
+   ],
+   "WaterShield4": [
+    3,
+    0,
+    3
+   ],
+   "WaterShield5": [
+    3,
+    0,
+    2
+   ],
+   "WaterShield6": [
+    3,
+    0,
+    1
+   ],
+   "WaterShieldSpell": [
+    7,
+    3,
+    1
+   ],
+   "WorldBoss": [
+    9,
+    1,
+    1
+   ],
+   "Yeti_Minion": [
+    8,
+    5,
+    1
+   ],
+   "Yonas": [
+    4,
+    0,
+    14
+   ],
+   "Zone1": [
+    6,
+    3,
+    1
+   ],
+   "Zone3": [
+    6,
+    1,
+    1
+   ]
+  },
+  "default_tags": [
+   "1H_Swordsman",
+   "Corrupted_Sailor",
+   "Zone1",
+   "Damned",
+   "DT1",
+   "Sailor",
+   "1H_Melee",
+   "Club"
+  ]
+ },
+ {
+  "asset": "c05fc95784875559afe874a78f95fb64",
+  "slice": "slices/characters/ftue_corrupted/corrupted_legion_ftue_legionnaire_noshield_male.dynamicslice",
+  "fragments": [
+   "Alert",
+   "Alert_Crouch_Campfire",
+   "Alert_Interact_Low",
+   "Alert_Pray",
+   "Alert_Sleep",
+   "Alert_Sit_On_Ground",
+   "Alert_Turn",
+   "Alert_Worshipping",
+   "Block_Start",
+   "Block_End",
+   "BrokenGuard",
+   "Combat_Idle",
+   "Combat_Fidget",
+   "Combat_Turn",
+   "Crassus_ChaosLance",
+   "Crassus_ChaosSpin",
+   "Crassus_ChaosVolley",
+   "Crassus_CorruptedPhalanx",
+   "Crassus_EvasionShot",
+   "Crassus_FireRain",
+   "Crassus_ShadowStep",
+   "Crassus_ShieldRush",
+   "Crassus_Swing",
+   "Crassus_Swing_2",
+   "Crassus_Transmutation_Phase2",
+   "Crassus_Transmutation_Phase3",
+   "Deflection",
+   "Dodge_B",
+   "Dodge_L",
+   "Dodge_R",
+   "Equip",
+   "Fidget",
+   "Idle",
+   "Intro",
+   "Intro_Fidget",
+   "Intro_Idle",
+   "Legionnaire_CorruptedPhalanx",
+   "Legionnaire_HeavyStab",
+   "Legionnaire_LightStab",
+   "Legionnaire_PhantomStrike",
+   "Legionnaire_PhantomStrike_L",
+   "Legionnaire_ShieldBash",
+   "Legionnaire_ShieldRush",
+   "Legionnaire_Throw",
+   "LookPose",
+   "Move",
+   "Move_Combat",
+   "Move_Wander",
+   "POI_Conversation",
+   "POI_Craft_Mid",
+   "POI_Crouch_Campfire_Loop",
+   "POI_Crouch_Campfire_Rubhands",
+   "POI_Crouch_Campfire_End",
+   "POI_Digging",
+   "POI_Emote",
+   "POI_HandPainting",
+   "POI_HandPainting_02_End",
+   "POI_HandPainting_End",
+   "POI_Idle_Standing",
+   "POI_Interact_Low",
+   "POI_Interact_Low_End",
+   "POI_Interact_Mid",
+   "POI_Interact_Mid_End",
+   "POI_Kicking_Dirt",
+   "POI_LookAround",
+   "POI_Miner_Throw_Grenade",
+   "POI_Patrol_Fidget",
+   "POI_Patrol_Idle",
+   "POI_Pray",
+   "POI_Pray_End",
+   "POI_Pray_Euro",
+   "POI_Pray_Euro_End",
+   "POI_Priest_Cast_Spell_LOOP",
+   "POI_Priest_Cast_Spell_End",
+   "POI_Priest_Focus_Energy_LOOP",
+   "POI_Priest_Focus_Energy_End",
+   "POI_Priest_Sermon_LOOP",
+   "POI_Ritual_Channeling_LOOP",
+   "POI_Ritual_Channeling_End",
+   "POI_Sit",
+   "POI_Sit_End",
+   "POI_Sit_On_Ground",
+   "POI_Sit_On_Ground_Drinking",
+   "POI_Sit_On_Ground_Eating",
+   "POI_Sit_On_Ground_End",
+   "POI_Sleep",
+   "POI_Sleep_End",
+   "POI_Standing_Leaning",
+   "POI_Standing_Leaning_End",
+   "POI_Wave",
+   "POI_Worshipping_Praying_Kneeling",
+   "POI_Worshipping_Praying_Kneeling_End",
+   "POI_Worshipping_Praying_Standing",
+   "r_B0_Break",
+   "r_B0_F",
+   "r_B1_F",
+   "r_B2_F",
+   "r_B3_F",
+   "r_Death",
+   "r_Death_F",
+   "r_Death_B",
+   "r_R0_F",
+   "r_R0_B",
+   "r_R0_L",
+   "r_R0_R",
+   "r_R1_F",
+   "r_R1_B",
+   "r_R1_L",
+   "r_R1_R",
+   "r_R2_F",
+   "r_R2_B",
+   "r_R2_L",
+   "r_R2_R",
+   "r_R3_F",
+   "r_R3_B",
+   "r_R3_L",
+   "r_R3_R",
+   "r_R4_R",
+   "r_R4_L",
+   "r_R4_F",
+   "r_R4_B",
+   "r_R4_F_Overhead",
+   "r_Running_Block",
+   "r_Stun",
+   "r_Stun_Loop",
+   "r_Stun_End",
+   "Reaction_Breakout",
+   "Sagittarii_DrawShoot",
+   "Sagittarii_EvasionShot",
+   "Sagittarii_FireRain",
+   "Sagittarii_ShadowStep",
+   "Sagittarii_ShortSwordSwing",
+   "Sagittarii_StickyBomb",
+   "Signifer_CorruptedBlast",
+   "Signifer_CorruptedBlob",
+   "Signifer_HeroOfLegion",
+   "Signifer_HeroOfLegion_End",
+   "Signifer_HeroOfLegion_Loop",
+   "Signifer_HeroOfLegion_Reset",
+   "Signifer_Swing",
+   "Signifer_Swing_2",
+   "Signifer_TripleShot",
+   "Spawn",
+   "Spawn_Crassus",
+   "Strafe",
+   "Victory",
+   "Wait",
+   "Wander",
+   "Crassus_SummonMinion",
+   "POI_ThrowSpear",
+   "r_Death_R4_F",
+   "r_Death_R4_B"
+  ],
+  "scopes": [
+   "FullBody",
+   "UpperBody",
+   "OffHand",
+   "AimBlend",
+   "LookPose",
+   "Additive",
+   "Audio",
+   "VFX",
+   "Weapon",
+   "OffHandWeapon"
+  ],
+  "actions": [
+   "Combat_Fidget",
+   "Legionnaire_LightStab",
+   "Legionnaire_HeavyStab",
+   "Legionnaire_ShieldBash",
+   "Legionnaire_ShieldRush",
+   "Legionnaire_Throw",
+   "Legionnaire_CorruptedPhalanx",
+   "Legionnaire_PhantomStrike",
+   "Legionnaire_PhantomStrike_L",
+   "Fidget",
+   "Alert",
+   "Alert_Turn",
+   "Move_Wander",
+   "Move_Combat",
+   "Alert_Sit_On_Ground",
+   "Alert_Sleep",
+   "Alert_Crouch_Campfire",
+   "Alert_Interact_Low",
+   "Alert_Pray",
+   "Alert_Worshipping",
+   "HeroOfLegionShockwave",
+   "HeroOfLegionShockwave_Crassus",
+   "HeroOfLegion_ForceReset",
+   "IsUnderHoLEffectCheck",
+   "LookPose",
+   "Block_On",
+   "Attack_Cooldown",
+   "Block",
+   "Block_Off",
+   "Force_Block_Off",
+   "BlockBroken",
+   "Reaction",
+   "Deflection",
+   "Reaction_Additive",
+   "BrokenGuard",
+   "ReactionLimiter_Active",
+   "ReactionLimiter_VFX_ON",
+   "Stun",
+   "POI_Waypoint_Loop",
+   "POI_Waypoint",
+   "Idle_No_Task",
+   "Idle",
+   "Combat_Idle",
+   "Wait",
+   "Combat_Turn",
+   "Move",
+   "Strafe",
+   "Reaction_Breakout",
+   "Reaction_BreakoutAttack",
+   "Death_FB",
+   "Spawn",
+   "Despawn",
+   "Reset_Move",
+   "Reset_Idle",
+   "Minion_Despawn",
+   "Pushable"
+  ],
+  "tags": {
+   "1H_Caster": [
+    0,
+    0,
+    3
+   ],
+   "1H_Melee": [
+    0,
+    0,
+    1
+   ],
+   "2HBow": [
+    0,
+    2,
+    3
+   ],
+   "Alerted": [
+    0,
+    7,
+    1
+   ],
+   "Block": [
+    1,
+    6,
+    1
+   ],
+   "BlockBroken": [
+    2,
+    0,
+    1
+   ],
+   "Block_Trans": [
+    3,
+    1,
+    1
+   ],
+   "Blocking": [
+    1,
+    7,
+    1
+   ],
+   "Bow": [
+    0,
+    0,
+    2
+   ],
+   "BreakoutWindow": [
+    1,
+    5,
+    1
+   ],
+   "ChainAttack": [
+    2,
+    6,
+    1
+   ],
+   "Crassus": [
+    1,
+    0,
+    4
+   ],
+   "DoNotUseMe": [
+    4,
+    2,
+    1
+   ],
+   "End_Loop": [
+    2,
+    4,
+    1
+   ],
+   "HeadshotReactions": [
+    2,
+    5,
+    1
+   ],
+   "HoLCoolDownReset": [
+    3,
+    4,
+    1
+   ],
+   "HoLRecastCheck": [
+    3,
+    5,
+    1
+   ],
+   "HoLShockwave": [
+    3,
+    3,
+    1
+   ],
+   "IsCasting": [
+    3,
+    0,
+    1
+   ],
+   "IsHeroOfLegionOn": [
+    3,
+    2,
+    1
+   ],
+   "Legionnaire": [
+    1,
+    0,
+    2
+   ],
+   "Melee_OH": [
+    0,
+    5,
+    2
+   ],
+   "Minion": [
+    3,
+    6,
+    1
+   ],
+   "NoShield": [
+    4,
+    1,
+    1
+   ],
+   "Phantom": [
+    4,
+    0,
+    1
+   ],
+   "Phase1": [
+    1,
+    3,
+    1
+   ],
+   "Phase2": [
+    1,
+    3,
+    2
+   ],
+   "Phase3": [
+    1,
+    3,
+    3
+   ],
+   "Reaction": [
+    2,
+    1,
+    1
+   ],
+   "ReactionLimiter_Active": [
+    4,
+    4,
+    1
+   ],
+   "Reset": [
+    2,
+    2,
+    1
+   ],
+   "ResetAINoHeal": [
+    4,
+    3,
+    1
+   ],
+   "Sagittarii": [
+    1,
+    0,
+    3
+   ],
+   "Shield_OH": [
+    0,
+    5,
+    1
+   ],
+   "Signifer": [
+    1,
+    0,
+    1
+   ],
+   "Spear": [
+    0,
+    2,
+    1
+   ],
+   "Staff": [
+    0,
+    2,
+    2
+   ],
+   "Standard": [
+    3,
+    7,
+    1
+   ],
+   "StopChainAttack": [
+    2,
+    7,
+    1
+   ],
+   "Stunned": [
+    2,
+    3,
+    1
+   ],
+   "Sword": [
+    0,
+    2,
+    4
+   ]
+  },
+  "default_tags": [
+   "Legion",
+   "Corrupted",
+   "Legionnaire",
+   "NoShield",
+   "1H_Melee",
+   "Spear"
+  ]
+ },
+ {
+  "asset": "db96d765b50459d98c9e04adaa9c9485",
+  "slice": "slices/characters/boar.dynamicslice",
+  "fragments": [
+   "Idle",
+   "Ambient_Walk",
+   "Ambient_Action_01",
+   "r_Death",
+   "POI_Wallow_LOOP",
+   "Fidget",
+   "POI_Lay_Down_On_Side_LOOP",
+   "POI_Graze_LOOP",
+   "Combat_Fidget",
+   "Alert",
+   "Attack_Charge",
+   "Attack_Charge_Start",
+   "Combat_Idle",
+   "r_R0_F",
+   "r_R0_B",
+   "r_R0_L",
+   "r_R0_R",
+   "Movement",
+   "r_R2_R",
+   "r_R2_L",
+   "r_R2_B",
+   "r_R2_F",
+   "Attack_Gore",
+   "Combat_Turn",
+   "LookPose",
+   "Move_Combat",
+   "Move",
+   "Wait",
+   "Attack_Gore_Combo",
+   "Attack_Charge_End",
+   "POI_Graze",
+   "POI_Lay_Down_On_Side",
+   "POI_Wallow",
+   "Spawn",
+   "Reaction_Breakout",
+   "r_stun",
+   "r_stun_end",
+   "r_stun_loop",
+   "Alert_Lay",
+   "Alert_Wallow",
+   "Armadillo_Ball_Intro",
+   "Armadillo_Ball_Outro",
+   "r_Stagger",
+   "POI_Graze_End",
+   "POI_Lay_Down_On_Side_End",
+   "POI_Wallow_End"
+  ],
+  "scopes": [
+   "FullBody",
+   "Additive",
+   "LookPose",
+   "Audio",
+   "VFX",
+   "Weapon"
+  ],
+  "actions": [
+   "Spawn",
+   "Despawn",
+   "Fidget",
+   "Ambient_Action_01",
+   "Alert",
+   "Alert_Lay",
+   "Alert_Wallow",
+   "Combat_Fidget",
+   "Attack_Gore",
+   "Attack_Charge_Start",
+   "Attack_Charge",
+   "Attack_Charge_End",
+   "Attack_Gore_Combo",
+   "LookPose",
+   "Reaction",
+   "ReactionAdditive",
+   "Death",
+   "ReactionLimiter_Active",
+   "ReactionLimiter_VFX_ON",
+   "Reaction_Breakout",
+   "POI_Waypoint_Loop",
+   "POI_Waypoint",
+   "Idle_No_Task",
+   "Idle",
+   "Combat_Idle",
+   "Wait",
+   "Combat_Turn",
+   "Combat_Turn_ToNav",
+   "Reset_Move",
+   "Reset_Idle",
+   "Move",
+   "Move_Combat",
+   "Stun",
+   "Pushable"
+  ],
+  "tags": {
+   "Alerted": [
+    0,
+    5,
+    1
+   ],
+   "Armadillo": [
+    0,
+    0,
+    4
+   ],
+   "Boar": [
+    0,
+    0,
+    2
+   ],
+   "BreakoutWindow": [
+    1,
+    0,
+    1
+   ],
+   "ChainAttack": [
+    0,
+    7,
+    1
+   ],
+   "CurledBall": [
+    0,
+    3,
+    1
+   ],
+   "DisableLookPose": [
+    0,
+    6,
+    1
+   ],
+   "DummyWeapon": [
+    0,
+    3,
+    2
+   ],
+   "End_Loop": [
+    1,
+    4,
+    1
+   ],
+   "Pig": [
+    0,
+    0,
+    1
+   ],
+   "Reaction": [
+    1,
+    2,
+    1
+   ],
+   "ReactionLimiter_Active": [
+    1,
+    5,
+    1
+   ],
+   "Reset": [
+    1,
+    3,
+    1
+   ],
+   "Strange": [
+    0,
+    0,
+    3
+   ],
+   "Stunned": [
+    1,
+    1,
+    1
+   ]
+  },
+  "default_tags": [
+   "Boar"
+  ]
+ },
+ {
+  "asset": "e06d1bb7311f5acb9857cc20464ce4df",
+  "slice": "slices/characters/corruption_swarmer.dynamicslice",
+  "fragments": [
+   "Idle",
+   "Combat_Idle",
+   "Ambient_TurnInPlace",
+   "Combat_Turn",
+   "Patrol",
+   "Wander",
+   "Strafe",
+   "Run",
+   "Attack_1H_Running_Slash_Run",
+   "Attack_1H_Running_Slash_Attack",
+   "Attack_1H_Slash_L",
+   "Attack_2H_Slash_L_R",
+   "Fidget",
+   "Combat_Fidget",
+   "Dodge_B",
+   "Attack_1H_Stab",
+   "Attack_1H_Overhead",
+   "Attack_2H_TurnAround_Slash",
+   "Attack_2H_TurnAround_Overhead",
+   "Move",
+   "Alert",
+   "r_R0_F",
+   "r_R0_B",
+   "r_R0_L",
+   "r_R0_R",
+   "r_R2_F",
+   "r_R2_B",
+   "r_R2_L",
+   "r_R2_R",
+   "r_R3_B",
+   "r_R3_F",
+   "r_Death_F",
+   "Attack_1H_Stab_Triple",
+   "Attack_2H_Slash_L",
+   "Attack_1H_Slash_R",
+   "Attack_1H_Uppercut_Slash",
+   "Attack_2H_Flurry",
+   "Attack_2H_Running_Stab_Attack",
+   "Attack_2H_Running_Stab_Run",
+   "r_Death_B",
+   "Crawl",
+   "Crawl_Idle",
+   "Attack_Crawler_Slash_L",
+   "Attack_Crawler_Slash_R",
+   "POI_Broken_Chop_Wood_LOOP",
+   "POI_Broken_Mining_LOOP",
+   "POI_Broken_Sitting_LOOP",
+   "POI_Broken_Standing_LOOP",
+   "POI_Broken_Standing_Weapon_Out_LOOP",
+   "POI_Skeleton_Lay_On_Back_01_LOOP",
+   "POI_Skeleton_Lay_On_Back_02_LOOP",
+   "POI_Skeleton_Lay_On_Back_03_LOOP",
+   "POI_Skeleton_Lay_On_Back_04_LOOP",
+   "POI_Skeleton_Lay_On_Stomach_01_LOOP",
+   "POI_Skeleton_Lay_On_Stomach_02_LOOP",
+   "POI_Skeleton_Lay_On_Stomach_03_LOOP",
+   "POI_Skeleton_Lay_On_Stomach_04_LOOP",
+   "POI_Skeleton_Slump_01_LOOP",
+   "POI_Skeleton_Slump_02_LOOP",
+   "POI_Skeleton_Slump_03_LOOP",
+   "POI_Skeleton_Slump_04_LOOP",
+   "POI_Skeleton_Stand_Guard_LOOP",
+   "Attack_1H_Running_Slash_Start",
+   "Attack_2H_Running_Stab_Start",
+   "LookPose",
+   "POI_Interact_High_LOOP",
+   "POI_Interact_Low_LOOP",
+   "POI_Broken_Digging_LOOP",
+   "r_Death_L",
+   "r_Death_R",
+   "Attack_1H_Slash_Standing",
+   "Alert_Turn",
+   "Reaction_BreakoutAttack",
+   "Attack_1H_Slash_R_Combo",
+   "Attack_1H_Slash_L_Combo",
+   "Attack_1H_Stab_Combo",
+   "Attack_1H_Stab_Triple_Combo",
+   "r_R4_Overhead",
+   "Move_Combat",
+   "Wait",
+   "Attack_2H_Overhead",
+   "Attack_1H_Overhead_Combo",
+   "Attack_1H_Uppercut_Slash_Combo",
+   "Attack_Throw",
+   "Attack_1H_Slash_Axe",
+   "Spawn",
+   "Reset_Move",
+   "Attack_Lunge",
+   "Attack_2H_Slash_L_Combo",
+   "Attack_Scurry",
+   "Attack_Frenzy",
+   "r_Stun",
+   "r_Stun_Loop",
+   "r_Stun_End",
+   "r_R1_B",
+   "r_R1_F",
+   "r_R1_L",
+   "r_R1_R",
+   "Revive",
+   "Reaction_BreakoutAttack_02",
+   "Drink_Potion",
+   "Frenzy",
+   "Attack_Kick",
+   "r_R4_B",
+   "r_R4_F",
+   "r_R4_L",
+   "r_R4_R",
+   "r_R3_L",
+   "r_R3_R",
+   "POI_Crawler_Idle",
+   "Attack_2h_Whirlwind",
+   "Attack_1H_Ground_Pound",
+   "Alert_Lay_on_Back_01",
+   "Alert_Lay_On_Back_02",
+   "Alert_Lay_On_Back_03",
+   "Alert_Lay_On_Back_04",
+   "Alert_Lay_On_Stomach_01",
+   "Alert_Lay_On_Stomach_02",
+   "Alert_Lay_On_Stomach_03",
+   "Alert_Lay_On_Stomach_04",
+   "POI_Broken_Chop_Wood_End",
+   "POI_Broken_Mining_End",
+   "POI_Broken_Sitting_End",
+   "POI_Broken_Standing_End",
+   "POI_Broken_Standing_Weapon_Out_End",
+   "POI_Interact_High_End",
+   "POI_Interact_Low_End",
+   "POI_Skeleton_Lay_On_Back_01_End",
+   "POI_Skeleton_Lay_On_Back_02_End",
+   "POI_Skeleton_Lay_On_Back_03_End",
+   "POI_Skeleton_Lay_On_Back_04_End",
+   "POI_Skeleton_Lay_On_Stomach_01_End",
+   "POI_Skeleton_Lay_On_Stomach_02_End",
+   "POI_Skeleton_Lay_On_Stomach_03_End",
+   "POI_Skeleton_Lay_On_Stomach_04_End",
+   "POI_Skeleton_Slump_01_End",
+   "POI_Skeleton_Slump_02_End",
+   "POI_Skeleton_Slump_03_End",
+   "POI_Skeleton_Stand_Guard_End",
+   "Alert_Broken_Sitting",
+   "POI_Skeleton_Crawler_Lay_LOOP",
+   "POI_Skeleton_Crawley_Lay_END",
+   "POI_Broken_Standing_Hammer_LOOP",
+   "POI_Broken_Crouching_Hammer_LOOP",
+   "r_Death",
+   "Attack_Structure",
+   "POI_Broken_Chop_Wood_Vertical_LOOP",
+   "POI_Broken_Chop_Wood_Vertical_End",
+   "Combat_Taunt",
+   "PumpklinDisguise",
+   "Attack_Pumpklin_Lunge_Start",
+   "Attack_Pumpklin_Lunge_Loop",
+   "Attack_Pumpklin_Lunge_End",
+   "Ezra_ForgeBreak",
+   "Pumpklin_DeathsDoor",
+   "POI_PumpklinDisguise_Start",
+   "POI_PumpklinDisguise_Loop",
+   "POI_PumpklinDisguise_End",
+   "POI_Taunt",
+   "Attack_ForgeBreaker",
+   "POI_PumpklinTaunt",
+   "Attack_Pumpklin_Lunge_Full",
+   "Attack_Frosty_Leadership",
+   "Attack_2H_Deathblow",
+   "Attack_FrostySlam",
+   "Attack_MummifiedCorpse_SharedCremation",
+   "Attack_MummifiedCorpse_ExhumeLinens_Spellcast",
+   "Attack_MummifiedCorpse_ExhumeLinens_Jump_Full",
+   "Attack_MummifiedCorpse_ExhumeLinens_Spellcast_Close",
+   "r_Stagger",
+   "r_Death_R4_F",
+   "r_Death_R4_B"
+  ],
+  "scopes": [
+   "FullBody",
+   "UpperBody",
+   "Additive",
+   "LookPose",
+   "Audio",
+   "VFX",
+   "Weapon"
+  ],
+  "actions": [
+   "Alert",
+   "Alert_Turn",
+   "Alert_Lay_On_Back_01",
+   "Alert_Lay_On_Back_02",
+   "Alert_Lay_On_Back_03",
+   "Alert_Lay_On_Back_04",
+   "Alert_Lay_On_Stomach_01",
+   "Alert_Lay_On_Stomach_02",
+   "Alert_Lay_On_Stomach_03",
+   "Alert_Lay_On_Stomach_04",
+   "Alert_Broken_Sitting",
+   "Fidget",
+   "Combat_Fidget",
+   "Attack_1H_Ground_Pound",
+   "Attack_1H_Overhead",
+   "Attack_1H_Overhead_Combo",
+   "Attack_2H_Overhead",
+   "Attack_1H_Slash_L",
+   "Attack_1H_Slash_L_Combo",
+   "Attack_1H_Slash_R",
+   "Attack_1H_Slash_R_Combo",
+   "Attack_1H_Stab",
+   "Attack_1H_Stab_Combo",
+   "Attack_1H_Stab_Triple",
+   "Attack_1H_Stab_Triple_Combo",
+   "Attack_1H_Uppercut_Slash",
+   "Attack_1H_Uppercut_Slash_Combo",
+   "Attack_1H_Slash_Axe",
+   "Attack_2H_Flurry",
+   "Attack_2H_Slash_L",
+   "Attack_2H_Slash_L_Combo",
+   "Attack_2H_Slash_L_R",
+   "Attack_2H_Overhead",
+   "Attack_2H_Whirlwind",
+   "Attack_2H_TurnAround_Overhead",
+   "Attack_2H_TurnAround_Slash",
+   "Attack_Crawler_Slash_R",
+   "Attack_Crawler_Slash_L",
+   "Attack_Throw",
+   "Attack_Lunge",
+   "Attack_Scurry",
+   "Attack_Kick",
+   "DeFrenzy",
+   "Drink_Potion",
+   "Attack_1H_Running_Slash_Start",
+   "Attack_1H_Running_Slash_Run",
+   "Attack_1H_Running_Slash_Attack",
+   "Attack_2H_Running_Stab_Start",
+   "Attack_2H_Running_Stab_Run",
+   "Attack_2H_Running_Stab_Attack",
+   "LookPose",
+   "Reaction_Ranged",
+   "Reaction",
+   "Revive",
+   "Reaction_Additive",
+   "Death",
+   "ReactionLimiter_Active",
+   "ReactionLimiter_VFX_ON",
+   "Stun",
+   "POI_Waypoint_Loop",
+   "POI_Waypoint",
+   "Reset_Move",
+   "Reset_Idle",
+   "Reaction_BreakoutAttack",
+   "Reaction_BreakoutAttack_02",
+   "Idle_No_Task",
+   "Idle",
+   "Combat_Idle",
+   "Wait",
+   "Combat_Turn",
+   "Move",
+   "Move_Combat",
+   "Strafe",
+   "Spawn",
+   "Despawn",
+   "Attack_Frenzy",
+   "Self_Kill",
+   "Skeleton_Self_Kill",
+   "Pushable"
+  ],
+  "tags": {
+   "1H_Melee": [
+    0,
+    0,
+    2
+   ],
+   "1H_Ranged": [
+    0,
+    0,
+    4
+   ],
+   "2H_Melee": [
+    0,
+    0,
+    6
+   ],
+   "2H_Ranged": [
+    0,
+    0,
+    7
+   ],
+   "Alerted": [
+    0,
+    6,
+    1
+   ],
+   "AncientGuardianIce": [
+    0,
+    4,
+    2
+   ],
+   "Axe": [
+    1,
+    0,
+    2
+   ],
+   "Bow": [
+    0,
+    0,
+    3
+   ],
+   "BreakoutWindow": [
+    2,
+    5,
+    1
+   ],
+   "Broken": [
+    2,
+    1,
+    1
+   ],
+   "Buckler_OH": [
+    1,
+    0,
+    12
+   ],
+   "CanRevive": [
+    3,
+    4,
+    1
+   ],
+   "ChainAttack": [
+    2,
+    3,
+    1
+   ],
+   "Cleaver": [
+    1,
+    0,
+    20
+   ],
+   "Club": [
+    1,
+    0,
+    3
+   ],
+   "CorruptionConstruct": [
+    0,
+    4,
+    1
+   ],
+   "Crafting": [
+    0,
+    0,
+    5
+   ],
+   "Crawler": [
+    1,
+    6,
+    1
+   ],
+   "End_Loop": [
+    1,
+    5,
+    1
+   ],
+   "FishingPole": [
+    1,
+    0,
+    8
+   ],
+   "Frenzy": [
+    3,
+    5,
+    1
+   ],
+   "Greatsword": [
+    1,
+    0,
+    24
+   ],
+   "Hammer": [
+    1,
+    0,
+    15
+   ],
+   "Hard": [
+    3,
+    0,
+    1
+   ],
+   "HeadshotReactions": [
+    4,
+    0,
+    1
+   ],
+   "Hookaroon": [
+    1,
+    0,
+    22
+   ],
+   "Instrument": [
+    1,
+    0,
+    11
+   ],
+   "Kitchen": [
+    3,
+    6,
+    1
+   ],
+   "KitchenKnife": [
+    1,
+    0,
+    19
+   ],
+   "Knife": [
+    1,
+    0,
+    10
+   ],
+   "Ladel": [
+    1,
+    0,
+    18
+   ],
+   "LargeShield_OH": [
+    1,
+    0,
+    13
+   ],
+   "LookPose": [
+    0,
+    7,
+    1
+   ],
+   "Medium": [
+    2,
+    7,
+    1
+   ],
+   "Minion": [
+    3,
+    7,
+    1
+   ],
+   "MummifiedCorpse": [
+    4,
+    1,
+    1
+   ],
+   "Pick": [
+    1,
+    0,
+    9
+   ],
+   "Pistol": [
+    1,
+    0,
+    5
+   ],
+   "Pitchfork": [
+    1,
+    0,
+    16
+   ],
+   "Polearm": [
+    1,
+    0,
+    7
+   ],
+   "Prong": [
+    1,
+    0,
+    23
+   ],
+   "Pumpklin": [
+    2,
+    0,
+    1
+   ],
+   "Rake": [
+    1,
+    0,
+    21
+   ],
+   "Reaction": [
+    2,
+    2,
+    1
+   ],
+   "ReactionLimiter_Active": [
+    4,
+    2,
+    1
+   ],
+   "Reborn": [
+    3,
+    2,
+    1
+   ],
+   "Reset": [
+    3,
+    3,
+    1
+   ],
+   "Rifle": [
+    1,
+    0,
+    6
+   ],
+   "Shovel": [
+    1,
+    0,
+    17
+   ],
+   "Sickle": [
+    1,
+    0,
+    14
+   ],
+   "Skeleton": [
+    1,
+    7,
+    1
+   ],
+   "SnareDrum": [
+    0,
+    0,
+    9
+   ],
+   "Spear": [
+    1,
+    0,
+    4
+   ],
+   "StopChainAttack": [
+    2,
+    4,
+    1
+   ],
+   "Stunned": [
+    3,
+    1,
+    1
+   ],
+   "Swarmer": [
+    2,
+    6,
+    1
+   ],
+   "Sword": [
+    1,
+    0,
+    1
+   ],
+   "Unarmed": [
+    0,
+    0,
+    1
+   ],
+   "Whistle": [
+    0,
+    0,
+    8
+   ]
+  },
+  "default_tags": [
+   "Crawler",
+   "CorruptionConstruct",
+   "Swarmer",
+   "Hard"
+  ]
+ }
+]

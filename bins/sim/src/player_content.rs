@@ -3,6 +3,7 @@
 //! pick, the bit of each achievement, the look of each mob prefab, and the quests.
 
 use nw_content::crafting::Recipes;
+use nw_content::creature_animations::CreatureAnimations;
 use nw_content::gathering::Gatherables;
 use nw_content::loot::{LootTables, MobLoot};
 use nw_content::rewards::Rewards;
@@ -372,6 +373,8 @@ pub struct PlayerContent {
     pub achievements: AchievementIndexes,
     /// The look of each mob prefab.
     pub mob_looks: MobLooks,
+    /// The animation names of each creature slice.
+    pub creature_animations: CreatureAnimations,
     /// The achievement each archetype pick unlocks: (backstory id, achievement id), from
     /// `BackstoryDefinition.AchievementUnlockOverride`.
     pub archetype_unlocks: Vec<(String, String)>,
@@ -397,13 +400,19 @@ pub struct PlayerContent {
 }
 
 impl PlayerContent {
-    /// The player content of `tables` with the mob looks `mob_looks` and the tutorial level's
-    /// entities `tutorial_level`.
-    pub fn new(tables: &Tables, mob_looks: MobLooks, tutorial_level: FtueLevel) -> Self {
+    /// The player content of `tables` with the mob looks `mob_looks`, the creature animations
+    /// `creature_animations` and the tutorial level's entities `tutorial_level`.
+    pub fn new(
+        tables: &Tables,
+        mob_looks: MobLooks,
+        creature_animations: CreatureAnimations,
+        tutorial_level: FtueLevel,
+    ) -> Self {
         Self {
             kits: StarterKits::from_tables(tables),
             achievements: AchievementIndexes::from_tables(tables),
             mob_looks,
+            creature_animations,
             archetype_unlocks: tables
                 .backstory_definition
                 .iter()

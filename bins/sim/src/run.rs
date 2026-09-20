@@ -14,6 +14,7 @@ use nw_content::bundle::bundle_path;
 use nw_content::client_build::load_client_build;
 use nw_content::combat::{CombatData, CombatDataError};
 use nw_content::container::ContainerError;
+use nw_content::creature_animations::CreatureAnimations;
 use nw_content::ftue_entities::FtueLevel;
 use nw_content::mob_prefabs::MobPrefabs;
 use nw_db::{DbError, WORLD_MIGRATOR, check_schema};
@@ -109,6 +110,16 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
             MobLooks::default()
         }
     };
+    let creature_animations = match CreatureAnimations::load(&config.content_dir, &build) {
+        Ok(table) => {
+            tracing::info!(creatures = table.len(), "creature animation table");
+            table
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no creature animation table: mobs move without animations");
+            CreatureAnimations::default()
+        }
+    };
     let tutorial_level = match FtueLevel::load(&config.content_dir, &build) {
         Ok(level) => {
             tracing::info!(
@@ -126,6 +137,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let content = Arc::new(PlayerContent::new(
         &bundle.tables,
         mob_looks,
+        creature_animations,
         tutorial_level,
     ));
     match &content.tutorial_quest {
