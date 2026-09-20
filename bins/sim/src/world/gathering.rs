@@ -84,8 +84,7 @@ impl SimWorld {
     /// of the level (flint, a bush) or a dead mob to skin, named by its gatherable. A known
     /// gatherable that nobody else gathers is accepted (3743, the running gather in the own
     /// states) and ends after its gather time ([`SimWorld::gathers_due`]); a busy one is refused
-    /// (3743 status 2). The client repeats the request in each input until the end: a repeat
-    /// starts nothing.
+    /// (3743 status 2). [`SimWorld::interact`] passes each interaction once.
     pub(super) fn gather_open_world(
         &mut self,
         entity: Entity,
@@ -101,11 +100,6 @@ impl SimWorld {
             tracing::debug!(player = number, ?request, "gather of an unknown gatherable");
             return;
         };
-        if self.open_gathers.iter().any(|gather| {
-            gather.number == number && gather.request.interaction == request.interaction
-        }) {
-            return;
-        }
         let Some(position) = self
             .world
             .get::<Body>(entity)

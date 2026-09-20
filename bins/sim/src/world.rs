@@ -447,6 +447,10 @@ struct Player {
     coins_changed: bool,
     /// The crafting station it uses, from its interaction with one until it closes it.
     station: Option<&'static crafting::Station>,
+    /// The last open-world interaction its client asked for: the client repeats the request in
+    /// each input until it ends the interaction, and retail answers each one once (retail
+    /// 2026-09-18: one 3743 for a talk the client held 20 s; ours answered all 667 inputs).
+    last_interaction: Option<u64>,
     /// Its running consumable cooldowns, and whether they changed since the last bundle.
     cooldowns: Vec<ConsumableCooldown>,
     cooldowns_changed: bool,
@@ -2080,7 +2084,8 @@ impl SimWorld {
 
     /// The client of `connection` starts interaction `request` at `now_ms` (the use of a static
     /// entity, from its input): its tutorial answers a use of the chest; in the open world it is
-    /// a talk to an NPC, the use of a crafting station or a gather, by its kind.
+    /// a talk to an NPC, the use of a crafting station or a gather, by its kind, answered once
+    /// per interaction.
     pub fn interact(
         &mut self,
         connection: &ConnectionRef,
@@ -2099,6 +2104,12 @@ impl SimWorld {
             let Some(&entity) = self.by_connection.get(connection) else {
                 return;
             };
+            let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+                return;
+            };
+            if player.last_interaction.replace(request.interaction) == Some(request.interaction) {
+                return;
+            }
             match request.kind {
                 TALK_KIND => self.talk(entity, number, request),
                 CRAFTING_STATION_KIND => self.open_station(entity, number, request),
@@ -2766,6 +2777,7 @@ impl SimWorld {
                     coins: arrival.coins,
                     coins_changed: false,
                     station: None,
+                    last_interaction: None,
                     cooldowns: Vec::new(),
                     cooldowns_changed: false,
                     health_sent: None,
@@ -4734,6 +4746,13 @@ mod tests {
             [DEPLETED],
             "the node's card goes with the end"
         );
+        // Inputs sent before the client took the end still hold the gather (retail: its cancel
+        // came 2 to 23 ms after the 3746); they get no refusal (live run 9: 38 status-2 answers).
+        world.interact(&who, request, after_end);
+        assert!(
+            answers(&tick(&mut world, after_end).messages).is_empty(),
+            "the ended gather is not refused"
+        );
 
         world.interact(
             &who,
@@ -5025,12 +5044,12 @@ mod tests {
         };
 
         // Aelstrom: the talk is accepted, then the quest.
-        world.interact(
-            &who,
-            request(NPC, nw_messages::client_input::TALK_KIND, 1),
-            now,
-        );
+        // The client repeats the request in each input; retail answers it once.
+        let talk_request = request(NPC, nw_messages::client_input::TALK_KIND, 1);
+        world.interact(&who, talk_request, now);
+        world.interact(&who, talk_request, now);
         let talk = step(&mut world, &mut now, TICK_MS);
+        world.interact(&who, talk_request, now);
         assert_eq!(
             answers(&talk),
             [(
@@ -5038,6 +5057,10 @@ mod tests {
                 1,
                 b"@01_Reese".to_vec()
             )]
+        );
+        assert!(
+            answers(&step(&mut world, &mut now, TICK_MS)).is_empty(),
+            "a held talk is answered once"
         );
         facet(&mut world, accept(SKINNING_KNIFE), now);
         assert_eq!(
@@ -5065,6 +5088,7 @@ mod tests {
         );
         step(&mut world, &mut now, TICK_MS);
         let station = nw_messages::client_input::CRAFTING_STATION_KIND;
+        world.interact(&who, request(CAMPFIRE, station, 2), now);
         world.interact(&who, request(CAMPFIRE, station, 2), now);
         let opened = step(&mut world, &mut now, TICK_MS);
         assert_eq!(
