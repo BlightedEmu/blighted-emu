@@ -1145,7 +1145,7 @@ impl SimWorld {
             }
         }
         let next = view.map_or(camera, |view| {
-            crate::camera::body_of(camera, view.yaw, speed_mps)
+            crate::camera::body_of(camera, view, speed_mps)
         });
         (self.move_to(connection, next, now_ms), next)
     }
@@ -6331,7 +6331,14 @@ mod tests {
             .position();
         let step_m = RUN_MPS * f32::from(attack::INPUT_RECORD_MS) / 1_000.0;
         // The camera of a standing body at `start`.
-        let offset = crate::camera::body_of(start, YAW, 0.0);
+        let offset = crate::camera::body_of(
+            start,
+            LookDir {
+                yaw: YAW,
+                pitch: 0.0,
+            },
+            0.0,
+        );
         let camera = Position {
             x: 2.0 * start.x - offset.x,
             y: 2.0 * start.y - offset.y,

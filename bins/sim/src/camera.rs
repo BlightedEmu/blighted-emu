@@ -9,15 +9,19 @@
 //! server that took the camera as the body made mobs chase a point behind the player and refused
 //! most of its swings as out of reach (live run 2026-09-14: 141 of 218).
 
+use nw_messages::LookDir;
 use nw_sim_core::Position;
 
 /// The camera boom by the player's speed (m/s): (speed from, boom m), retail medians.
 const BOOM_BY_SPEED: [(f32, f32); 4] = [(0.0, 4.75), (0.3, 4.44), (2.0, 3.23), (4.0, 2.88)];
 /// How far the camera sits to the right of the body (retail: -0.42 to -0.54 m, median 0.50).
 const SHOULDER_RIGHT_M: f32 = 0.50;
-/// How far the camera sits above the feet (our choice: the middle of the retail 2.1 to 3.2 m; the
-/// tutorial level has no ground heights to put the body on).
-const CAMERA_HEIGHT_M: f32 = 2.65;
+/// How far the camera sits above the feet: `CAMERA_RISE_M + CAMERA_PITCH_RISE_M * sin(pitch)`, a
+/// fit of 1,599 own retail positions against the input's camera and pitch (newchar capture, run-10
+/// note: median error 0.10 m; the old fixed 2.65 m erred by 0.52 m, and by 2.5 to 4.6 m while the
+/// player looked down at a boar, so every swing at it failed the height test, live 2026-09-18).
+const CAMERA_RISE_M: f32 = 1.539;
+const CAMERA_PITCH_RISE_M: f32 = 5.321;
 
 /// Below this speed (m/s) the player stands still and the body estimate is the retail stationary
 /// fit; above it the boom shortens with the camera's lag and the estimate errs by about 1 m.
@@ -41,15 +45,19 @@ fn boom_m(speed_mps: f32) -> f32 {
         })
 }
 
-/// The body under the camera at `camera`, looking along yaw `yaw` (radians), moving at
-/// `speed_mps`.
-pub fn body_of(camera: Position, yaw: f32, speed_mps: f32) -> Position {
-    let (sin, cos) = yaw.sin_cos();
+/// How far the camera sits above the feet at camera pitch `pitch` (radians, positive looks down).
+fn camera_height_m(pitch: f32) -> f32 {
+    CAMERA_RISE_M + CAMERA_PITCH_RISE_M * pitch.sin()
+}
+
+/// The body under the camera at `camera`, looking along `view`, moving at `speed_mps`.
+pub fn body_of(camera: Position, view: LookDir, speed_mps: f32) -> Position {
+    let (sin, cos) = view.yaw.sin_cos();
     let boom = boom_m(speed_mps);
     Position {
         x: camera.x - boom * sin - SHOULDER_RIGHT_M * cos,
         y: camera.y + boom * cos - SHOULDER_RIGHT_M * sin,
-        z: camera.z - CAMERA_HEIGHT_M,
+        z: camera.z - camera_height_m(view.pitch),
     }
 }
 
@@ -67,10 +75,35 @@ mod tests {
             y: 852.74,
             z: 92.67,
         };
-        let body = body_of(camera, 2.6197, 0.0);
+        let level = LookDir {
+            yaw: 2.6197,
+            pitch: 0.0,
+        };
+        let body = body_of(camera, level, 0.0);
         assert!((body.x - 476.18).abs() < CLOSE_M, "{body:?}");
         assert!((body.y - 848.37).abs() < CLOSE_M, "{body:?}");
-        assert!((body.z - (92.67 - CAMERA_HEIGHT_M)).abs() < f32::EPSILON);
+        assert!((body.z - (92.67 - CAMERA_RISE_M)).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn the_camera_rises_with_its_pitch_as_in_retail() {
+        // Retail medians of the camera's height above the body by pitch (newchar capture):
+        // 1.75 m at 0, 2.72 m at 0.2, 3.37 m at 0.4, 4.80 m at 0.6, 5.22 m at 0.8 rad.
+        const RETAIL: [(f32, f32); 5] = [
+            (0.0, 1.75),
+            (0.2, 2.72),
+            (0.4, 3.37),
+            (0.6, 4.80),
+            (0.8, 5.22),
+        ];
+        const WITHIN_M: f32 = 0.4;
+        for (pitch, height) in RETAIL {
+            assert!(
+                (camera_height_m(pitch) - height).abs() < WITHIN_M,
+                "pitch {pitch}: {} vs {height}",
+                camera_height_m(pitch)
+            );
+        }
     }
 
     #[test]
