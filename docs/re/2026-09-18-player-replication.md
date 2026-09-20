@@ -83,6 +83,37 @@ would play another action's animation. Ways to learn it: the client's slayer scr
 run time (a probe started with the game, not attached to it), or a capture of each weapon's
 light, heavy and charged attacks and a dodge with the weapon named.
 
+### 2.2 The client names the actions it starts (third pass)
+
+Source: the retail newchar capture (`local-data/captures/own/newchar-linux-2026-09-12`),
+decoded fields of input 1589 against the own ALC slot-0 children, scratch scanners `rowone`,
+`rowmap` and `chain`.
+
+- Observed: input record row 1 (three prefix integers, `InputRecord::row_1`) is non-zero only
+  when the client starts a slayer action. Each of the 73 such rows came back in the next own
+  ALC state (dt 30 to 38 ms; once 84 to 87 ms):
+  - row 1 value 0 is the sequence: child 15;
+  - row 1 value 1, low 16 bits, is the state: child 13, sent only when it changed;
+  - row 1 value 1, bits 16 to 31, is the second slot's state, sent as that value plus one
+    (child 16: `0x0024` came back as `0x25`; `0xffff`, none, is 0);
+  - row 1 value 2 is the second slot's sequence: child 18, with child 16 only when not 0;
+  - children 14 and 17 (started) are the record's counter.
+  Example, record 2286: row 1 `[1038, 0x0024001b, 5008]`, next own state `13=1b 14=08ee
+  15=8e10 16=25 17=08ee 18=904e`. An earlier byte search (`inseq`) missed this: the row is
+  prefix-coded on its own, not the bytes of the ALC child.
+- Observed: the server made 481 further own slayer changes with no client row: the movement
+  states (state 26 sequence 2794 = run, state 27 with 2415, 1370, 1405 and others = walk;
+  states 31, 7 and 9) and fixed follow-ups of client actions, one to four states later (0 to
+  132 ms): 5047 then 487, 5055 then 4603, 5051 then 484, 5056 then 468, 5050 then 485, 3120
+  then 2030, 1221 then 463 (5 to 13 times each, never another).
+- Observed: child 2 (`slayerSeqTimeRel`) is one raw byte. It went `0x80`, `0x83`, `0x86`, …
+  about 3 per 33 ms state after an action, and was `0x7f` or `0x7d` in other echo states.
+  Its unit and meaning: Unknown; the sim does not send it.
+- Inferred from the client code: neither lock-on gate reads the own slayer state.
+  `FUN_142c95760` sends bus query 26 to the candidate target entity (its own handlers answer),
+  and `FUN_14171b010` tests relation flag bits 2 and 4 (`+0x34`) of both sides. So echoing the
+  own slayer state is not expected to make the client pick lock targets.
+
 ## 3. What the sim sends (built 2026-09-18)
 
 - Each tick every player becomes one replica that all its viewers share
@@ -125,8 +156,9 @@ NW_SECRET_TESTCLIENT_SWARM_PASSWORD=... target/release/nw-testclient swarm --bot
 
 ## 5. Unknown
 
-- The slayer states of crouch, prone, sprint, attacks, dodges, blocks and abilities, and the
-  meaning of `slayerSequenceId`.
+- The slayer states the server makes on its own (movement states 31, 7 and 9, and the
+  follow-ups of actions other than those of section 2.2) and their triggers; crouch and prone;
+  the meaning of child 2.
 - The slayer state and sequence of each action (section 2.1). Retail remote Mannequin scopes
   (children 28, 33, 34) came only in a few states of the duel (`33=0700cc2c15000053` with tags
   `0210...`), not with the attacks.
