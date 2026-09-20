@@ -763,7 +763,10 @@ impl AlcState {
     /// With `pos`, it also sends the place; with `data_bits`, the movement flags; when
     /// `anchored`, the clock's anchor (the client's 'now' for its cooldowns is the anchor plus
     /// the offset; clock note). With `slayer`, the slayer state the client started or the
-    /// server's follow-up (slayer note).
+    /// server's follow-up (slayer note). With `view`, the facing and the look direction of the
+    /// client's newest input (lock-on note: retail sent the own `rotation` in 938 and the own
+    /// `lookDir` in 408 of 1,193 own states around the first lock; ours sent neither, and the
+    /// client's locks broke within 0.35 to 1.1 s).
     ///
     /// # Errors
     ///
@@ -774,8 +777,13 @@ impl AlcState {
         data_bits: Option<u8>,
         anchored: bool,
         slayer: Option<SlayerState>,
+        view: Option<LookDir>,
     ) -> Result<Self, MessageError> {
         let mut children: Vec<(usize, Vec<u8>)> = stamp_children(stamp).into();
+        if let Some(view) = view {
+            children.push((ROTATION_CHILD, rotation_bytes(view.yaw)));
+            children.push((LOOK_DIR_CHILD, view.bytes()));
+        }
         if let Some(slayer) = slayer {
             children.extend(slayer.children()?);
         }
@@ -1263,14 +1271,14 @@ mod tests {
                 .map(|(child, _)| child)
                 .collect()
         };
-        let clock_only = AlcState::own_step(stamp, None, None, false, None).expect("step");
+        let clock_only = AlcState::own_step(stamp, None, None, false, None, None).expect("step");
         assert_eq!(
             children_of(&clock_only),
             [ID_REL_CHILD, TIME_REL_CHILD, ID_ABS_CHILD, TIME_ABS_CHILD]
         );
         assert_eq!(clock_only.pos10, None);
         let pos = InputPosition::from_metres(1.0, 2.0, 3.0).expect("finite");
-        let full = AlcState::own_step(stamp, Some(pos), Some(DATA_BITS_ACTIVE), false, None)
+        let full = AlcState::own_step(stamp, Some(pos), Some(DATA_BITS_ACTIVE), false, None, None)
             .expect("step");
         assert_eq!(
             children_of(&full),
@@ -1301,6 +1309,7 @@ mod tests {
             None,
             None,
             true,
+            None,
             None,
         )
         .expect("step");
@@ -1804,6 +1813,41 @@ mod tests {
     }
 
     #[test]
+    fn an_own_state_carries_back_the_view_of_the_input() {
+        // Retail own state of the duel capture with its input's view (yaw, pitch); the own
+        // states around the first lock of the newchar capture sent `rotation` and `lookDir`.
+        let view = LookDir {
+            yaw: -1.549_167_8,
+            pitch: 0.269_884_56,
+        };
+        let stamp = AlcStamp {
+            id: 0x0102,
+            offset_ms: 0x0304,
+            anchor_us: 0,
+        };
+        let with_view =
+            AlcState::own_step(stamp, None, None, false, None, Some(view)).expect("step");
+        let children = with_view.slot0_children().expect("walk");
+        let child = |index: usize| {
+            children
+                .iter()
+                .find(|(child, _)| *child == index)
+                .map(|(_, bytes)| bytes.clone())
+        };
+        assert_eq!(child(ROTATION_CHILD), Some(rotation_bytes(view.yaw)));
+        assert_eq!(child(LOOK_DIR_CHILD), Some(view.bytes()));
+        let without = AlcState::own_step(stamp, None, None, false, None, None).expect("step");
+        assert!(
+            without
+                .slot0_children()
+                .expect("walk")
+                .iter()
+                .all(|(child, _)| *child != ROTATION_CHILD && *child != LOOK_DIR_CHILD),
+            "no view, no facing or look"
+        );
+    }
+
+    #[test]
     fn the_look_direction_is_the_retail_direction_vector() {
         // Retail own states of the duel capture with the input's view angles (yaw, pitch):
         // `lookDir` 0x10 = x derived, y and z bytes (w flagged 0); 0x18 = x derived, z also 0.
@@ -1866,7 +1910,7 @@ mod tests {
             offset_ms: 0,
         };
         let slayer = SlayerState::of_input(input, STARTED);
-        let state = AlcState::own_step(stamp, None, None, false, Some(slayer)).expect("step");
+        let state = AlcState::own_step(stamp, None, None, false, Some(slayer), None).expect("step");
         let slayer_children: Vec<(usize, Vec<u8>)> = state
             .slot0_children()
             .expect("walk")
@@ -1916,6 +1960,7 @@ mod tests {
                 None,
                 false,
                 Some(SlayerState::of_input(plain, started)),
+                None,
             )
             .expect("step");
             let children: Vec<usize> = state

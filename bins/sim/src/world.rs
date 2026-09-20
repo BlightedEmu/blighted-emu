@@ -398,6 +398,8 @@ struct Player {
     last_camera: Option<CameraSeen>,
     /// The view angles of its newest input: where other players see it face and look.
     view: Option<LookDir>,
+    /// The view angles the newest own state carried back to its client.
+    view_sent: Option<LookDir>,
     /// The run toggle's movement mode of its newest input, and the ALC state number in which it
     /// started: its slayer state for other players ([`replica`]).
     run_mode: Option<bool>,
@@ -2723,6 +2725,7 @@ impl SimWorld {
                     push: None,
                     last_camera: None,
                     view: None,
+                    view_sent: None,
                     run_mode: None,
                     mode_started: SPAWN_STATE_ID,
                     slayer: slayer::SlayerTrack::default(),
@@ -3196,7 +3199,11 @@ impl Neighbourhood<'_> {
                         || player.push.is_some(),
                     clear_throttle: plain_tick && !player.throttle_cleared,
                     slayer: player.slayer.take_due(),
+                    view: player.view.filter(|view| Some(*view) != player.view_sent),
                 };
+                if tick.view.is_some() {
+                    player.view_sent = tick.view;
+                }
                 if tick.clear_throttle {
                     player.throttle_cleared = true;
                 }
@@ -4128,6 +4135,54 @@ mod tests {
         assert!(
             health_changes(&mut world, card_at + 132).is_empty(),
             "sent once"
+        );
+    }
+
+    #[test]
+    fn the_own_state_carries_back_a_new_view_once() {
+        /// The own `rotation` and `lookDir` children (retail sends them back in own states).
+        const ROTATION_CHILD: usize = 11;
+        const LOOK_DIR_CHILD: usize = 12;
+        let mut world = world_with_spawns(Vec::new());
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        world
+            .admit(&admit_at(1, CELL_M / 2.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let entity = world.player_by_number(1).expect("player");
+        let card_at = NOW + OWN_CARD_DELAY_MS;
+        tick(&mut world, card_at);
+        world.heard_from(&connection(1));
+        let own_children = |world: &mut SimWorld, now: u64| {
+            let messages = tick(world, now).messages;
+            bundle_of(&messages, &connection(1))
+                .map(|bundle| SlotRead::of(&bundle).expect("read").updates)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(SlotUpdate::is_local_player)
+                .flat_map(|update| update.members)
+                .filter_map(|member| match member.state {
+                    MemberState::Alc(alc) => alc.slot0_children().ok(),
+                    _ => None,
+                })
+                .flatten()
+                .map(|(child, _)| child)
+                .collect::<Vec<_>>()
+        };
+        own_children(&mut world, card_at + 33);
+        let view = LookDir {
+            yaw: 0.5,
+            pitch: 0.1,
+        };
+        world.world.get_mut::<Player>(entity).expect("player").view = Some(view);
+        let first = own_children(&mut world, card_at + 66);
+        assert!(
+            first.contains(&ROTATION_CHILD) && first.contains(&LOOK_DIR_CHILD),
+            "the new view goes back: {first:?}"
+        );
+        let next = own_children(&mut world, card_at + 99);
+        assert!(
+            !next.contains(&ROTATION_CHILD) && !next.contains(&LOOK_DIR_CHILD),
+            "an unchanged view is not sent again: {next:?}"
         );
     }
 

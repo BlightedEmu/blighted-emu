@@ -19,10 +19,10 @@ use nw_messages::{
     AlcStamp, AlcState, AssetId, BOSS_PHASE_TYPE_INDEX, BundleGroup, BundleMember, BundlePayload,
     DATA_BITS_ACTIVE, DYNAMIC_SLICE_SUB_ID, GATHERABLE_CONTROLLER_TYPE_INDEX,
     GDE_METADATA_COMPONENT, GatherableControllerState, GdeMetadataReplicatedState, InputPosition,
-    LOCAL_PLAYER_INTEREST, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState, MessageError,
-    PLAYER_SLICE_ASSET, PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID, SPAWN_STATE_MS,
-    SPAWN_TELEPORT, ServerMessage, SlayerState, TeleportStep, VitalsData, VitalsState,
-    boss_phase_change, change_members, player_members, raw_id_of_entity,
+    LOCAL_PLAYER_INTEREST, LookDir, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState,
+    MessageError, PLAYER_SLICE_ASSET, PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID,
+    SPAWN_STATE_MS, SPAWN_TELEPORT, ServerMessage, SlayerState, TeleportStep, VitalsData,
+    VitalsState, boss_phase_change, change_members, player_members, raw_id_of_entity,
 };
 use nw_sim_core::Position;
 
@@ -513,7 +513,7 @@ impl OwnClock {
 }
 
 /// One state of the client's own player that neither spawns nor moves it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct OwnTick {
     /// The own clock.
     pub(super) clock: OwnClock,
@@ -523,6 +523,9 @@ pub(super) struct OwnTick {
     pub(super) clear_throttle: bool,
     /// The slayer state that goes with this state ([`super::slayer`]).
     pub(super) slayer: Option<SlayerState>,
+    /// The facing and look direction of the client's newest input, when they changed since the
+    /// last own state (retail sends them back in the own state; lock-on note).
+    pub(super) view: Option<LookDir>,
 }
 
 impl OwnTeleport {
@@ -599,6 +602,7 @@ pub(super) fn own_group(
             tick.clear_throttle.then_some(DATA_BITS_ACTIVE),
             tick.clock.anchored(),
             tick.slayer,
+            tick.view,
         )?);
     }
     // Without the card, the changes (achievements, objectives, experience, gear, health) still
@@ -782,6 +786,7 @@ mod tests {
         with_position: true,
         clear_throttle: false,
         slayer: None,
+        view: None,
     };
     const MOVING: OwnTick = OwnTick {
         with_position: false,
@@ -871,7 +876,7 @@ mod tests {
         };
         assert_eq!(
             moving,
-            AlcState::own_step(SPAWN_CLOCK.stamp(), None, None, true, None).expect("step")
+            AlcState::own_step(SPAWN_CLOCK.stamp(), None, None, true, None, None).expect("step")
         );
         let MemberState::Alc(spawn) = alc_of(OwnCard::Spawn, MOVING) else {
             panic!("an ALC");
@@ -892,6 +897,7 @@ mod tests {
                     None,
                     Some(DATA_BITS_ACTIVE),
                     true,
+                    None,
                     None
                 )
                 .expect("step")
@@ -915,7 +921,8 @@ mod tests {
             "the first card sets the start position with the full state"
         );
         let still = MemberState::Alc(
-            AlcState::own_step(SPAWN_CLOCK.stamp(), Some(pos), None, true, None).expect("step"),
+            AlcState::own_step(SPAWN_CLOCK.stamp(), Some(pos), None, true, None, None)
+                .expect("step"),
         );
         assert_eq!(
             alc_of(OwnCard::Refresh),
