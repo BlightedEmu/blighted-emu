@@ -358,6 +358,7 @@ impl LevelFlow {
             | ClientFacetMsg::TakeAllItems { .. }
             | ClientFacetMsg::EquipItem { .. }
             | ClientFacetMsg::ReturnToMainWorld { .. }
+            | ClientFacetMsg::LookingThroughLoadout { .. }
             | ClientFacetMsg::AcceptObjective { .. }
             | ClientFacetMsg::CompleteObjective { .. }
             | ClientFacetMsg::SetCraftingDetails { .. }

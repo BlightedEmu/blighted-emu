@@ -149,6 +149,13 @@ const PHASING_BEFORE_HANDOFF_MS: u64 = 73;
 /// later moves miss the distance check too, and area tasks never see the player (live run of
 /// 2026-09-14). The honest case — one unlucky refused move — resynchronises on the next input.
 const REFUSED_RESYNC_MS: u64 = 1_000;
+/// How long the client camera still glides back after the inventory closes, while its inputs
+/// do not yet carry the body (retail 2026-09-18: 663 ms, 870114 to 870777).
+const LOADOUT_CAMERA_SETTLE_MS: u64 = 700;
+/// How far under the terrain a body estimate may be and still count as standing on it (our
+/// choice: the terrain samples are about 0.06 m apart in height; the camera estimate is good to
+/// about 0.1 m, retail median).
+const GROUNDED_SLACK_M: f32 = 0.5;
 
 /// Debug bisection knob (env `NW_RELIABLE_BUNDLES`): send the replication bundles reliably on
 /// channel 1 instead of unreliably. Off by default; used to test a client that ignores our
@@ -428,6 +435,13 @@ struct Player {
     /// A row of [`REFUSED_RESYNC_MS`] sets `moved`, so the client returns to the last good
     /// position it could not otherwise see.
     refused_since_ms: Option<u64>,
+    /// The last accepted position on or above the terrain: where a move-back goes. An accepted
+    /// body estimate can be under the terrain within the ground tolerance, and a move-back there
+    /// put the player under the world (live 2026-09-18: 12 move-backs to 1.8 m under the beach).
+    last_grounded: Option<Position>,
+    /// Until this server time the client camera does not carry the body: the inventory camera
+    /// is open, or still gliding back. Its inputs move nothing (retail held the player still).
+    camera_held_until_ms: Option<u64>,
     /// Server time of the first own state, the start of the own clock.
     own_spawned_ms: Option<u64>,
     /// Moves of the player by the server so far.
@@ -1032,7 +1046,8 @@ impl SimWorld {
     ///
     /// Returns [`MoveError`] when there is no such player, it is frozen, or a check refuses the
     /// move; then the player keeps its last good position. When moves stay refused for
-    /// [`REFUSED_RESYNC_MS`] the player is moved back there.
+    /// [`REFUSED_RESYNC_MS`] the player is moved back to its last good position on or above the
+    /// terrain.
     pub fn move_to(
         &mut self,
         connection: &ConnectionRef,
@@ -1085,29 +1100,37 @@ impl SimWorld {
                 body.motion.position(),
             )
         };
+        let grounded = self
+            .ground
+            .height_at(next.x, next.y)
+            .is_none_or(|height| next.z >= height - GROUNDED_SLACK_M);
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return result.map_err(MoveError::Refused);
         };
         match result {
             Err(refusal) => {
                 let since = player.refused_since_ms.get_or_insert(now_ms);
-                if now_ms.saturating_sub(*since) >= REFUSED_RESYNC_MS {
-                    player.moved = true;
-                    player.move_facing = None;
-                    player.refused_since_ms = None;
-                    tracing::debug!(
-                        player = player.number,
-                        x = last_good.x,
-                        y = last_good.y,
-                        z = last_good.z,
-                        "moves refused too long: player moved back"
-                    );
+                if now_ms.saturating_sub(*since) < REFUSED_RESYNC_MS {
+                    return Err(MoveError::Refused(refusal));
                 }
+                player.refused_since_ms = None;
+                let back = player.last_grounded.unwrap_or(last_good);
+                tracing::debug!(
+                    player = player.number,
+                    x = back.x,
+                    y = back.y,
+                    z = back.z,
+                    "moves refused too long: player moved back"
+                );
+                self.place_player(entity, back, None, now_ms);
                 Err(MoveError::Refused(refusal))
             }
             Ok(check) => {
                 player.refused_since_ms = None;
-                self.walked_floor.walked(next);
+                if grounded {
+                    player.last_grounded = Some(next);
+                    self.walked_floor.walked(next);
+                }
                 Ok(check)
             }
         }
@@ -1160,6 +1183,7 @@ impl SimWorld {
             let seconds = elapsed_ms as f32 / MS_PER_SECOND_F32;
             last.camera.horizontal_distance(camera) / seconds
         });
+        let mut held = false;
         if let Some(mut player) = entity.and_then(|entity| self.world.get_mut::<Player>(entity)) {
             player.last_camera = Some(CameraSeen {
                 camera,
@@ -1167,10 +1191,19 @@ impl SimWorld {
                 counter,
                 speed_mps,
             });
-            player.moving = speed_mps >= crate::camera::STILL_SPEED_MPS;
-            if view.is_some() {
+            held = player
+                .camera_held_until_ms
+                .is_some_and(|until| now_ms < until);
+            player.moving = !held && speed_mps >= crate::camera::STILL_SPEED_MPS;
+            if view.is_some() && !held {
                 player.view = view;
             }
+        }
+        if held {
+            let at = entity
+                .and_then(|entity| self.world.get::<Body>(entity))
+                .map_or(camera, |body| body.motion.position());
+            return (Ok(GroundCheck::Checked), at);
         }
         let next = view.map_or(camera, |view| {
             crate::camera::body_of(camera, view, speed_mps)
@@ -2203,6 +2236,16 @@ impl SimWorld {
                 self.territory_changed(entity, *territory, false);
                 return Ok(());
             }
+            ClientFacetMsg::LookingThroughLoadout { looking, .. } => {
+                if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                    player.camera_held_until_ms = Some(if *looking {
+                        u64::MAX
+                    } else {
+                        now_ms.saturating_add(LOADOUT_CAMERA_SETTLE_MS)
+                    });
+                }
+                return Ok(());
+            }
             _ => {}
         }
         let tutorial = self.is_tutorial();
@@ -2801,6 +2844,8 @@ impl SimWorld {
                     own_anchor: None,
                     teleport_step: None,
                     refused_since_ms: None,
+                    last_grounded: Some(motion.position()),
+                    camera_held_until_ms: None,
                     own_spawned_ms: None,
                     teleports: 0,
                     quest: None,
@@ -6826,6 +6871,96 @@ mod tests {
                 None
             ],
             "Place, then Confirm, then Hold, one per bundle"
+        );
+    }
+
+    #[test]
+    fn the_inventory_camera_moves_no_body_until_it_glided_back() {
+        let mut world = world();
+        let a = connection(1);
+        join(&mut world, 1, 0.0);
+        let loadout = |looking| ClientFacetMsg::LookingThroughLoadout {
+            header: nw_messages::FacetHeader::of(nw_messages::facet::component::PLAYER, 1),
+            looking,
+        };
+        // The camera alone, one record per input: the body is the camera point.
+        let sample = |record: u16, x: f32| CameraSample {
+            camera: at(x),
+            view: None,
+            counter: Some(record),
+        };
+        let opened = NOW + ONE_SECOND_MS;
+        world
+            .facet_message(&a, loadout(true), opened)
+            .expect("opened");
+        // Live 2026-09-18: the inventory camera glided 3.6 m down toward the body.
+        let (result, body) = world.move_from_camera(&a, sample(1, 1.0), opened + 1);
+        assert_eq!(result, Ok(GroundCheck::Checked));
+        assert_eq!(body, at(0.0), "the body stays while the inventory is open");
+        assert_eq!(world.positions()[0].position, at(0.0));
+        let closed = opened + ONE_SECOND_MS;
+        world
+            .facet_message(&a, loadout(false), closed)
+            .expect("closed");
+        let gliding = closed + LOADOUT_CAMERA_SETTLE_MS - 1;
+        let _ = world.move_from_camera(&a, sample(2, 1.0), gliding);
+        assert_eq!(
+            world.positions()[0].position,
+            at(0.0),
+            "the camera still glides back"
+        );
+        let settled = closed + LOADOUT_CAMERA_SETTLE_MS;
+        let (result, _) = world.move_from_camera(&a, sample(3, 1.0), settled);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(world.positions()[0].position, at(1.0), "moves count again");
+    }
+
+    #[test]
+    fn a_move_back_never_goes_under_the_terrain() {
+        /// The terrain height: the test players stand on it.
+        const TERRAIN_M: f32 = 50.0;
+        /// Live 2026-09-18: an estimate 1.8 m under the beach was accepted (tolerance 2 m).
+        const UNDER_M: f32 = 1.8;
+        /// Then the client stood 3 m under it, refused.
+        const DEEP_M: f32 = 3.0;
+        let mut world = SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(FlatGround(TERRAIN_M)),
+            slot("sim-a"),
+            test_combat(),
+            Arc::default(),
+        );
+        let a = connection(1);
+        join(&mut world, 1, 0.0);
+        let entity = world.player_by_number(1).expect("player");
+        let under = Position {
+            z: TERRAIN_M - UNDER_M,
+            ..at(1.0)
+        };
+        let first = NOW + ONE_SECOND_MS;
+        assert!(
+            world.move_to(&a, under, first).is_ok(),
+            "within the tolerance"
+        );
+        let deep = Position {
+            z: TERRAIN_M - DEEP_M,
+            ..at(1.0)
+        };
+        let refused = first + 1;
+        assert_eq!(
+            world.move_to(&a, deep, refused),
+            Err(MoveError::Refused(MoveRefusal::OffGround))
+        );
+        assert_eq!(
+            world.move_to(&a, deep, refused + REFUSED_RESYNC_MS),
+            Err(MoveError::Refused(MoveRefusal::OffGround))
+        );
+        assert!(world.world.get::<Player>(entity).expect("player").moved);
+        assert_eq!(
+            world.positions()[0].position,
+            at(0.0),
+            "back to the last spot on the terrain, not to the one under it"
         );
     }
 

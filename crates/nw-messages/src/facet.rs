@@ -124,6 +124,8 @@ pub const TERRITORY_EXITED_TYPE_INDEX: u64 = 6416;
 pub const START_WHISPER_TYPE_INDEX: u64 = 5070;
 /// Type index of `GameModeParticipantComponentClientFacet_OnGameModeSchedulerRefreshed`.
 pub const GAME_MODE_SCHEDULER_REFRESHED_TYPE_INDEX: u64 = 6426;
+/// Type index of `PlayerComponentServerFacet_RequestSetIsLookingThroughLoadout`.
+pub const LOOKING_THROUGH_LOADOUT_TYPE_INDEX: u64 = 3970;
 /// The ingredient kind of an item named by its id (beach-quests note: every captured ingredient).
 pub const INGREDIENT_ITEM: u8 = 1;
 
@@ -337,6 +339,15 @@ pub enum ClientFacetMsg {
         /// The interaction id.
         interaction: u64,
     },
+    /// 3970: the inventory (loadout) opened or closed. While it is open the client camera
+    /// glides to the inventory view, with the look frozen (retail 2026-09-18: camera z 24.41 to
+    /// 22.80 at pitch 0.766 while the server held the player still).
+    LookingThroughLoadout {
+        /// The header (the player's `PlayerComponent`).
+        header: FacetHeader,
+        /// Whether the inventory is open.
+        looking: bool,
+    },
     /// 502: the client asks to leave the tutorial for the open world.
     ReturnToMainWorld {
         /// The header.
@@ -510,6 +521,12 @@ impl ClientFacetMsg {
                 Ok(Self::QteCompleted {
                     header,
                     sequence: reader.u32()?,
+                })
+            }),
+            LOOKING_THROUGH_LOADOUT_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::LookingThroughLoadout {
+                    header,
+                    looking: reader.u8()? != 0,
                 })
             }),
             RETURN_TO_MAIN_WORLD_TYPE_INDEX => read(|header, reader| {
@@ -1125,6 +1142,31 @@ mod tests {
             Some(Ok(ClientFacetMsg::CompleteObjective {
                 header,
                 objective: SKINNING_KNIFE
+            }))
+        );
+    }
+
+    #[test]
+    fn the_loadout_call_reads_the_live_bodies() {
+        // Live 2026-09-18: the inventory opened at the tutorial bag, then closed.
+        const OPENED: &str = "8e03e9c98d27619daef701000000000001";
+        const CLOSED: &str = "8e03e9c98d27619daef701000000000000";
+        let header = FacetHeader {
+            target: 0x8e03_e9c9_8d27_619d,
+            entity: 0xaef7_0100_0000_0000,
+        };
+        assert_eq!(
+            ClientFacetMsg::decode(LOOKING_THROUGH_LOADOUT_TYPE_INDEX, &hex(OPENED)),
+            Some(Ok(ClientFacetMsg::LookingThroughLoadout {
+                header,
+                looking: true
+            }))
+        );
+        assert_eq!(
+            ClientFacetMsg::decode(LOOKING_THROUGH_LOADOUT_TYPE_INDEX, &hex(CLOSED)),
+            Some(Ok(ClientFacetMsg::LookingThroughLoadout {
+                header,
+                looking: false
             }))
         );
     }

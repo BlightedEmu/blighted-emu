@@ -1156,6 +1156,7 @@ impl Tutorial {
             ClientFacetMsg::AckLevelInfo { .. }
             | ClientFacetMsg::UiScreenOpened { .. }
             | ClientFacetMsg::TimeSyncRequest { .. }
+            | ClientFacetMsg::LookingThroughLoadout { .. }
             | ClientFacetMsg::SwapItems { .. }
             | ClientFacetMsg::UnequipItem { .. }
             | ClientFacetMsg::CancelInteraction { .. }
