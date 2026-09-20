@@ -495,7 +495,7 @@ impl OwnClock {
 
     /// The number and time of the own state now: the number goes on from the first state's,
     /// the anchor moves on each [`OWN_ANCHOR_PERIOD_MS`].
-    const fn stamp(self) -> AlcStamp {
+    pub(super) const fn stamp(self) -> AlcStamp {
         let elapsed = self.elapsed_ms();
         let periods = elapsed / OWN_ANCHOR_PERIOD_MS;
         AlcStamp {

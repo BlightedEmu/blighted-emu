@@ -108,6 +108,11 @@ pub(super) struct Vitals {
 }
 
 impl Vitals {
+    /// Whether the player holds block (its newest input).
+    pub(super) const fn blocking(&self) -> bool {
+        self.blocking
+    }
+
     pub(super) const fn new(health: Health, spawned: bool) -> Self {
         Self {
             health,
@@ -676,6 +681,7 @@ impl SimWorld {
         });
         if let Some(newest) = records.first() {
             self.stamina_input(entity, number, newest, swimming, now_ms);
+            self.note_movement_mode(entity, newest);
         }
         let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) else {
             return Vec::new();
@@ -3078,6 +3084,7 @@ mod tests {
                 category_id: 0,
                 level: 0,
             }),
+            player: None,
         }
     }
 
@@ -3149,6 +3156,7 @@ mod tests {
                 z: 50.0,
             },
             mob: None,
+            player: None,
         };
         let mut remote = None;
         for tick_number in 0..10 {

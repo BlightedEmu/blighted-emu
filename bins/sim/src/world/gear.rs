@@ -421,7 +421,26 @@ impl Gear {
     }
 
     /// How the player holds its weapons, for the paperdoll.
-    fn hands(&self) -> Hands {
+    /// The items that show on the player (armor and weapon options): what other players see.
+    pub(super) fn visible_items(&self) -> Vec<EquippedItem> {
+        self.worn
+            .iter()
+            .filter(|(slot_id, _)| is_visible_slot(*slot_id))
+            .map(|(slot_id, stack)| EquippedItem {
+                slot: *slot_id,
+                item: stack.item,
+            })
+            .collect()
+    }
+
+    /// The version of the states with the changes not yet taken: a new one is a change other
+    /// players must see.
+    pub(super) const fn shown_version(&self) -> u64 {
+        self.version + self.changed as u64
+    }
+
+    /// The weapon in the hand and the ammo.
+    pub(super) fn hands(&self) -> Hands {
         Hands {
             drawn: self.drawn,
             attached: self.attached,

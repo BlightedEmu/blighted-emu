@@ -3,11 +3,11 @@
 //! `bevy_ecs` world, with no I/O: the caller passes times in and sends what a tick returns.
 //!
 //! Every tick, each player gets replication bundles on channel 1, unreliable, as in the captures:
-//! the player's own position first, then the nearest players and ghosts inside the interest
-//! radius, by entity number, at most [`MAX_BUNDLE_MEMBERS`] members per bundle and one group per
-//! bundle. The full position goes out every tick, so a lost datagram costs nothing. How the retail
-//! service removes an entity from a client is Unknown, so a player who leaves the radius is simply
-//! not in the next bundles.
+//! the player's own state first, then the nearest players, mobs and ghosts inside the interest
+//! radius, at most [`MAX_BUNDLE_MEMBERS`] members' bytes per bundle. Other players go by priority
+//! ([`replica`]): near or fighting ones every tick, far ones less often, each state with its full
+//! position, so a lost datagram costs one state. How the retail service removes an entity from a
+//! client is Unknown, so a player who leaves the radius is simply not in the next bundles.
 //!
 //! With a cell table, a tick also starts the handoff of each player that is past the margin into
 //! another sim's cells (the player is frozen until the answer), and lists the players near each
@@ -23,19 +23,20 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use nw_bus::{
     Admit, BusId, CarriedItem, CellTable, ConnectionRef, Ghost, HandoffOffer, ItemPlace,
-    MOB_STATES, MobGhost, PlayerQuests, Point, QuestRun, ScriptLogLine, SimSlot, SnapMob,
-    SnapPlayer,
+    MOB_STATES, MobGhost, PlayerGhost, PlayerQuests, Point, QuestRun, ScriptLogLine, SimSlot,
+    SnapMob, SnapPlayer,
 };
 use nw_messages::client_input::{CRAFTING_STATION_KIND, TALK_KIND};
 use nw_messages::items::{FIRST_VERSION, FullList};
 use nw_messages::paperdoll::slot::QUICK_SLOT_1;
 use nw_messages::{
     BundleGroup, BundleMember, ClientFacetMsg, ConsumableCooldown, CooldownsState, CurrencyState,
-    DisableCollisionMsg, GatheringInterruptedMsg, HealthChange, InteractionEndedMsg,
-    InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg,
-    LevelSpec, MeleeHitMsg, MessageError, PlayerLook, PlayerSeenByAiMsg, PlayerStates,
-    ProgressionState, SelectedAsTargetMsg, ServerMessage, TUTORIAL_LEVEL, TargetMsg, TeleportStep,
-    TimeSynchMsg, UnselectedAsTargetMsg, VitalsData, WorldPosition, facet_entity,
+    DisableCollisionMsg, GatheringInterruptedMsg, Hands, HealthChange, InputRecord,
+    InteractionEndedMsg, InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT,
+    LevelInfoChangedMsg, LevelSpec, MeleeHitMsg, MessageError, PlayerLook, PlayerSeenByAiMsg,
+    PlayerStates, ProgressionState, SPAWN_STATE_ID, SelectedAsTargetMsg, ServerMessage,
+    TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg, UnselectedAsTargetMsg, VitalsData,
+    WorldPosition, facet_entity,
 };
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
@@ -62,6 +63,7 @@ mod members;
 mod mob_timeline;
 mod mob_trail;
 mod quest_tracker;
+mod replica;
 mod scripts;
 mod slots;
 mod stamina;
@@ -81,6 +83,7 @@ use members::{
 };
 use mob_timeline::{Animations, MobPose, MobTimelines, animations_of};
 use quest_tracker::QuestTracker;
+use replica::{RemoteCandidate, Replica, ReplicaSource};
 use slots::Slots;
 use stamina::Stamina;
 use statics::{
@@ -391,6 +394,14 @@ struct Player {
     moved: bool,
     /// The client's last camera point and when it came, for the player's speed.
     last_camera: Option<(Position, u64)>,
+    /// The camera yaw of its newest input (radians): where other players see it face.
+    view_yaw: Option<f32>,
+    /// The run toggle's movement mode of its newest input, and the ALC state number in which it
+    /// started: its slayer state for other players ([`replica`]).
+    run_mode: Option<bool>,
+    mode_started: u16,
+    /// Which other players it got in which bundle step ([`replica::RemotePlan`]).
+    remote_plan: replica::RemotePlan,
     /// The camera moved at [`crate::camera::STILL_SPEED_MPS`] or faster at its last point: the
     /// body estimate is not exact, so the own state sends no position.
     moving: bool,
@@ -483,6 +494,8 @@ struct ReceivedGhost {
     position: Position,
     /// A mob's state; `None` for a player.
     mob: Option<MobGhost>,
+    /// A player's state, for the players who see it.
+    player: Option<PlayerGhost>,
 }
 
 /// The players of one sim.
@@ -494,6 +507,8 @@ pub struct SimWorld {
     ground: Arc<dyn Ground + Send + Sync>,
     /// The floor the players walked on: where a server push may go.
     walked_floor: walked_floor::WalkedFloor,
+    /// What the viewers were last sent of each player ([`replica`]).
+    replica_memory: HashMap<u64, replica::ReplicaMemory>,
     /// Where the mobs stood in the last moments: where a swing may find them.
     mob_trails: mob_trail::MobTrails,
     me: SimSlot,
@@ -650,6 +665,7 @@ impl SimWorld {
             dice: Dice::new(combat.seed),
             deaths: Vec::new(),
             walked_floor: walked_floor::WalkedFloor::default(),
+            replica_memory: HashMap::new(),
             mob_trails: mob_trail::MobTrails::default(),
             combat_messages: Vec::new(),
             drinks: Vec::new(),
@@ -1065,6 +1081,9 @@ impl SimWorld {
         });
         if let Some(mut player) = entity.and_then(|entity| self.world.get_mut::<Player>(entity)) {
             player.moving = speed_mps >= crate::camera::STILL_SPEED_MPS;
+            if yaw.is_some() {
+                player.view_yaw = yaw;
+            }
         }
         let next = yaw.map_or(camera, |yaw| crate::camera::body_of(camera, yaw, speed_mps));
         (self.move_to(connection, next, now_ms), next)
@@ -1199,6 +1218,7 @@ impl SimWorld {
                 entity: ghost.entity,
                 position: Position::from(ghost.position),
                 mob: ghost.mob,
+                player: ghost.player,
             })
             .collect();
         self.ghosts.insert(
@@ -2257,23 +2277,75 @@ impl SimWorld {
         starts
     }
 
+    /// The clock of player `player`'s ALC states at server time `server_ms`: from its first own
+    /// state, or from now before it has one.
+    const fn alc_clock(player: &Player, server_ms: u64) -> OwnClock {
+        let spawn_ms = match player.own_spawned_ms {
+            Some(spawned) => spawned,
+            None => server_ms,
+        };
+        OwnClock {
+            since_spawn_ms: server_ms.saturating_sub(spawn_ms),
+            spawn_ms,
+        }
+    }
+
+    /// Takes the run toggle's movement mode of the newest input record `newest` of player
+    /// `entity`: a new mode starts in the player's ALC state of now.
+    fn note_movement_mode(&mut self, entity: Entity, newest: &InputRecord) {
+        let server_ms = self.server_ms;
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            let mode = Some(newest.run_mode());
+            if player.run_mode != mode {
+                player.run_mode = mode;
+                player.mode_started = Self::alc_clock(&player, server_ms).stamp().id;
+            }
+        }
+    }
+
+    /// What other players see of `player` now ([`replica`]).
+    fn replica_source(player: &Player, vitals: &Vitals, server_ms: u64) -> ReplicaSource {
+        let clock = Self::alc_clock(player, server_ms);
+        let (items, hands, gear_version) = player.gear.as_ref().map_or_else(
+            || (Vec::new(), Hands::default(), 0),
+            |gear| (gear.visible_items(), gear.hands(), gear.shown_version()),
+        );
+        ReplicaSource {
+            character: *player.character.as_bytes(),
+            look: player.look,
+            health: vitals.health.current(),
+            max_health: vitals.health.max(),
+            facing: player.view_yaw,
+            run_mode: player.run_mode,
+            mode_started: player.mode_started,
+            blocking: vitals.blocking(),
+            spawned_ms: clock.spawn_ms,
+            gear_version,
+            items,
+            hands,
+            in_combat: player.combat.in_combat(),
+        }
+    }
+
     fn ghosts_out(&mut self) -> Vec<(BusId, Vec<Ghost>)> {
         let mut lists: BTreeMap<BusId, Vec<Ghost>> = BTreeMap::new();
         if let Some(cells) = &self.cells {
             let radius = self.settings.interest_radius_m;
             let mut query = self.world.query::<(&Player, &Body, &Vitals)>();
             // A dead player is no ghost: the mobs of other sims forget it too.
-            for (player, body, _) in query
+            for (player, body, vitals) in query
                 .iter(&self.world)
                 .filter(|(_, _, vitals)| !vitals.health.is_dead())
             {
                 let position = body.motion.position();
+                let ghost = Self::replica_source(player, vitals, self.server_ms).ghost();
                 for owner in cells.owners.others_within(cells.me, position, radius) {
                     if let Some(sim) = cells.sims.get(usize::from(owner)) {
                         lists.entry(sim.id.clone()).or_default().push(Ghost {
                             entity: player.number,
                             position: Point::from(position),
                             mob: None,
+                            player: Some(ghost),
                         });
                     }
                 }
@@ -2285,6 +2357,7 @@ impl SimWorld {
                             entity,
                             position: Point::from(position),
                             mob: Some(state),
+                            player: None,
                         });
                     }
                 }
@@ -2310,11 +2383,35 @@ impl SimWorld {
             .collect();
         let own: HashSet<u64> = everyone.iter().map(|(number, _)| *number).collect();
         let mut cards: HashMap<u64, MobCard> = HashMap::new();
+        // Every player as the players who see it get it this tick: ours, then the ghosts'.
+        let mut sources: Vec<(u64, ReplicaSource)> = self
+            .world
+            .query::<(&Player, &Vitals)>()
+            .iter(&self.world)
+            .map(|(player, vitals)| {
+                (
+                    player.number,
+                    Self::replica_source(player, vitals, server_time),
+                )
+            })
+            .collect();
         for ghost in self.ghosts.values().flat_map(|ghosts| &ghosts.entities) {
             if ghost.mob.is_none() && !own.contains(&ghost.entity) {
                 everyone.push((ghost.entity, ghost.position));
+                if let Some(player) = &ghost.player {
+                    sources.push((ghost.entity, ReplicaSource::of_ghost(player)));
+                }
             }
         }
+        let mut replicas: HashMap<u64, Replica> = HashMap::with_capacity(sources.len());
+        let mut memory = HashMap::with_capacity(sources.len());
+        for (number, source) in sources {
+            let seen = self.replica_memory.get(&number).copied();
+            let (replica, now_seen) = Replica::new(source, seen, server_time);
+            replicas.insert(number, replica);
+            memory.insert(number, now_seen);
+        }
+        self.replica_memory = memory;
         // A dead mob is sent only with a prefab, whose death states play its death; without one
         // it is not sent (M6-B spec section 5.6).
         let content = Arc::clone(&self.content);
@@ -2420,6 +2517,7 @@ impl SimWorld {
             mob_looks: &content.mob_looks,
             level: &content.tutorial_level,
             nodes: &self.nodes,
+            replicas,
             local_player_card: self.settings.local_player_card,
             now_ms,
             server_time,
@@ -2526,6 +2624,10 @@ impl SimWorld {
                     move_facing: None,
                     push: None,
                     last_camera: None,
+                    view_yaw: None,
+                    run_mode: None,
+                    mode_started: SPAWN_STATE_ID,
+                    remote_plan: replica::RemotePlan::default(),
                     moving: false,
                     throttle_cleared: false,
                     teleport_step: None,
@@ -2768,6 +2870,8 @@ struct Neighbourhood<'a> {
     level: &'a FtueLevel,
     /// The open world's gather nodes.
     nodes: &'a Nodes,
+    /// Every player as the players who see it get it this tick.
+    replicas: HashMap<u64, Replica>,
     local_player_card: bool,
     now_ms: u64,
     server_time: u64,
@@ -2812,6 +2916,26 @@ impl Neighbourhood<'_> {
             }
             numbers.sort_unstable();
             player.slots.keep_only(&numbers);
+            // The other players this viewer gets this tick, by priority ([`replica`]).
+            let remote: Vec<RemoteCandidate<'_>> = numbers
+                .iter()
+                .filter_map(|number| {
+                    let replica = self.replicas.get(number)?;
+                    let position = self.positions.get(number)?;
+                    Some(RemoteCandidate {
+                        number: *number,
+                        distance_m: own_position.horizontal_distance(*position),
+                        replica,
+                        // A player without a slot yet gets one, and its card, below.
+                        new: !player.slots.assigned().contains_key(number),
+                        refresh: player.bundles_sent.wrapping_add(*number) % CARD_REFRESH_BUNDLES
+                            == 0,
+                    })
+                })
+                .collect();
+            let step = player.bundles_sent;
+            let shown_players: HashSet<u64> =
+                player.remote_plan.pick(step, &remote).into_iter().collect();
             // Until its client spawned the player, the client keeps the own states in its
             // offline portrayal cache and merges every later record of the slot into the cached
             // one; such a merge crashes it (player-component note, crashes 2 and 3). So until
@@ -3042,9 +3166,19 @@ impl Neighbourhood<'_> {
                         }
                         group
                     }
-                    Err(position) => {
-                        remote_group(slot.interest, number, EntityKind::PLAYER, position, carded)?
-                    }
+                    Err(position) => match self.replicas.get(&number) {
+                        Some(replica) if shown_players.contains(&number) => {
+                            replica.group(slot.interest, number, position, carded)?
+                        }
+                        Some(_) => None,
+                        None => remote_group(
+                            slot.interest,
+                            number,
+                            EntityKind::PLAYER,
+                            position,
+                            carded,
+                        )?,
+                    },
                 });
             }
             counted += groups
@@ -5068,6 +5202,260 @@ mod tests {
         );
     }
 
+    /// The states that `who` got of entity `entity` in every replication bundle of `outgoing`.
+    fn states_of(
+        world: &SimWorld,
+        outgoing: &[Outgoing],
+        who: &ConnectionRef,
+        entity: u64,
+    ) -> Vec<MemberState> {
+        outgoing
+            .iter()
+            .filter(|out| out.connection == *who && out.channel == REPLICATION_CHANNEL)
+            .flat_map(|out| &out.envelopes)
+            .flat_map(|bytes| groups_in(world, who, &bundle_in(bytes)))
+            .filter(|(number, _)| *number == entity)
+            .flat_map(|(_, update)| update.members)
+            .map(|member| member.state)
+            .collect()
+    }
+
+    /// The slot-0 ALC children of the remote states among `states`.
+    fn alc_children(states: &[MemberState]) -> Vec<(usize, Vec<u8>)> {
+        states
+            .iter()
+            .filter_map(|state| match state {
+                MemberState::Alc(alc) => alc.slot0_children().ok(),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Two players 5 m apart, both past their cards.
+    fn two_players() -> SimWorld {
+        let mut world = world();
+        join(&mut world, 1, 0.0);
+        join(&mut world, 2, 5.0);
+        tick(&mut world, NOW);
+        world
+    }
+
+    /// An input record of player stance keys: the run toggle's mode and block held.
+    fn stance_record(counter: u16) -> InputRecord {
+        const RUN_MODE: u64 = 0x4000;
+        const BLOCK: u64 = 1 << 62;
+        InputRecord {
+            u16_after_mask: counter,
+            slots: nw_messages::client_input::InputSlots {
+                count: 19,
+                values: vec![RUN_MODE, BLOCK],
+                bytes: [128; 4],
+            },
+            ..InputRecord::default()
+        }
+    }
+
+    #[test]
+    fn another_player_sees_the_stance_facing_and_block_in_the_next_tick() {
+        /// The ALC children of facing, look direction and slayer state (replication note).
+        const FACING: usize = 11;
+        const LOOK_DIR: usize = 12;
+        const SLAYER_STATE: usize = 13;
+        /// The run toggle's slayer state (Observed).
+        const RUN_MODE_STATE: u8 = 0x1a;
+        const YAW: f32 = 1.0;
+        let mut world = two_players();
+        let (a, b) = (connection(1), connection(2));
+        let input_at = NOW + 33;
+        let entity = world.by_connection[&a];
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let _ = world.move_from_camera(&a, at, Some(YAW), input_at);
+        world.attack_input(&a, &[stance_record(1)], input_at);
+        let outgoing = tick(&mut world, input_at);
+        let seen = states_of(&world, &outgoing.messages, &b, 1);
+        let alc = alc_children(&seen);
+        let child = |index| {
+            alc.iter()
+                .find(|(c, _)| *c == index)
+                .map(|(_, b)| b.clone())
+        };
+        assert_eq!(
+            child(SLAYER_STATE),
+            Some(vec![RUN_MODE_STATE]),
+            "the stance"
+        );
+        assert_eq!(
+            child(FACING),
+            Some(nw_messages::alc::rotation_bytes(YAW)),
+            "the facing"
+        );
+        assert!(child(LOOK_DIR).is_some(), "where it looks");
+        assert!(
+            seen.iter().any(|state| matches!(
+                state,
+                MemberState::DamageReceiver(receiver) if receiver.is_block_active == Some(true)
+            )),
+            "the block: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn another_player_sees_the_hit_and_the_death_in_the_same_tick() {
+        const HIT: u32 = 100;
+        const LETHAL: u32 = 100_000;
+        let mut world = two_players();
+        let b = connection(2);
+        let entity = world.player_by_number(1).expect("player");
+        let max = world
+            .world
+            .get::<Vitals>(entity)
+            .expect("vitals")
+            .health
+            .max();
+        world.apply_hit(1, crate::mobs::mob_entity(0), HIT, 0, NOW + 1);
+        let hit = tick(&mut world, NOW + 33);
+        let health = |states: &[MemberState]| {
+            states.iter().find_map(|state| match state {
+                MemberState::Vitals(vitals) => Some(vitals.slot_0?),
+                _ => None,
+            })
+        };
+        let after = health(&states_of(&world, &hit.messages, &b, 1)).expect("the hit");
+        assert_eq!(after.health_amount, Some(attack::amount_of(max - HIT)));
+        world.apply_hit(1, crate::mobs::mob_entity(0), LETHAL, 0, NOW + 34);
+        let death = tick(&mut world, NOW + 66);
+        let dead = health(&states_of(&world, &death.messages, &b, 1)).expect("the death");
+        assert_eq!(dead.health_amount, Some(0.0));
+        assert!(dead.vitals_data.is_some_and(|data| data.is_dead()));
+    }
+
+    #[test]
+    fn another_player_sees_a_weapon_drawn() {
+        let mut combat = test_combat();
+        combat.spawns = Vec::new().into();
+        let mut world = SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            combat,
+            Arc::new(PlayerContent {
+                kits: gear::tests::kits(),
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        for (number, x) in [(1, CELL_M / 2.0), (2, CELL_M / 2.0 + 5.0)] {
+            let mut admit = admit_at(number, x, true);
+            admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+            world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+            let entity = world.player_by_number(number).expect("player");
+            world
+                .world
+                .get_mut::<Vitals>(entity)
+                .expect("vitals")
+                .spawned = true;
+        }
+        tick(&mut world, NOW + OWN_CARD_DELAY_MS);
+        let entity = world.player_by_number(1).expect("player");
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .and_then(|mut player| Some(player.gear.as_mut()?.draw(0, NOW, 0)))
+            .expect("drawn");
+        let outgoing = tick(&mut world, NOW + OWN_CARD_DELAY_MS + 33);
+        let seen = states_of(&world, &outgoing.messages, &connection(2), 1);
+        assert!(
+            seen.iter()
+                .any(|state| matches!(state, MemberState::Paperdoll(_))),
+            "the paperdoll with the drawn weapon: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_player_of_the_sim_next_door_is_seen_whole() {
+        const GHOST: u64 = 9;
+        let mut world = world_of("sim-a", settings(MANY, MAX_PLAYERS));
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, BORDER_X - 2.0);
+        let ghost = Ghost {
+            entity: GHOST,
+            position: Point {
+                x: BORDER_X + 1.0,
+                y: 10.0,
+                z: 50.0,
+            },
+            mob: None,
+            player: Some(PlayerGhost {
+                look: Some(SAVED_LOOK),
+                run_mode: Some(true),
+                ..replica::tests::source().ghost()
+            }),
+        };
+        world.set_ghosts(&slot("sim-b").id, vec![ghost], NOW);
+        let card = tick(&mut world, NOW);
+        let carded = states_of(&world, &card.messages, &connection(1), GHOST);
+        assert!(
+            carded.iter().any(|state| matches!(
+                state,
+                MemberState::Appearance(look) if look.look == Some(PlayerLook::of_choices(SAVED_LOOK))
+            )),
+            "its look: {carded:?}"
+        );
+        world.set_ghosts(&slot("sim-b").id, vec![ghost], NOW + 33);
+        let next = tick(&mut world, NOW + 33);
+        let alc = alc_children(&states_of(&world, &next.messages, &connection(1), GHOST));
+        assert!(
+            alc.iter().any(|(child, _)| *child == 13),
+            "its stance: {alc:?}"
+        );
+    }
+
+    #[test]
+    fn a_crowd_goes_out_by_priority_within_the_budget() {
+        const CROWD: u64 = 80;
+        let mut world = world_of("sim-a", settings(MANY, CROWD as u32));
+        for number in 1..=CROWD {
+            #[allow(clippy::cast_precision_loss, reason = "a small crowd")]
+            join(&mut world, number, number as f32 * 0.2);
+        }
+        tick(&mut world, NOW);
+        // Past the cards: the viewer gets at most the budget of others in one tick, the ones it
+        // waited longest for next.
+        let viewer = connection(1);
+        let others_in = |world: &SimWorld, outgoing: &[Outgoing]| -> HashSet<u64> {
+            outgoing
+                .iter()
+                .filter(|out| out.connection == viewer && out.channel == REPLICATION_CHANNEL)
+                .flat_map(|out| &out.envelopes)
+                .flat_map(|bytes| groups_in(world, &viewer, &bundle_in(bytes)))
+                .map(|(number, _)| number)
+                .filter(|number| *number != 1)
+                .collect()
+        };
+        let mut seen = HashSet::new();
+        for step in 1..=4_u64 {
+            let outgoing = tick(&mut world, NOW + 33 * step).messages;
+            let others = others_in(&world, &outgoing);
+            assert!(
+                others.len() <= replica::REMOTE_GROUPS_PER_TICK,
+                "{} others in one tick",
+                others.len()
+            );
+            seen.extend(others);
+        }
+        assert!(
+            seen.len() > replica::REMOTE_GROUPS_PER_TICK,
+            "everyone in turn"
+        );
+    }
+
     #[test]
     fn the_own_card_wears_the_starter_kit_and_a_handoff_keeps_it() {
         let mut combat = test_combat();
@@ -5587,6 +5975,7 @@ mod tests {
                 category_id: 2,
                 level: 3,
             }),
+            player: None,
         };
         world.set_ghosts(&slot("sim-b").id, vec![ghost], NOW);
         assert_eq!(
@@ -6194,6 +6583,7 @@ mod tests {
                 z: 50.0,
             },
             mob: None,
+            player: None,
         };
         world.set_ghosts(
             &slot("sim-b").id,

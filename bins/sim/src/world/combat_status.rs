@@ -32,6 +32,11 @@ pub(super) struct CombatTimer {
 }
 
 impl CombatTimer {
+    /// Whether the player is in combat.
+    pub(super) const fn in_combat(&self) -> bool {
+        self.concluded_ms.is_some()
+    }
+
     /// The player hit a mob at `now_ms`; `killed` when the hit killed it.
     pub(super) fn hit(&mut self, now_ms: u64, killed: bool) {
         let after_ms = if killed {
