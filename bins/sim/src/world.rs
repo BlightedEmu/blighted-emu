@@ -6335,7 +6335,9 @@ mod tests {
     #[test]
     fn the_bundle_step_on_many_threads_gives_the_same_bundles() {
         const PLAYERS: u64 = 300;
-        const SPACING_M: f32 = 7.0;
+        /// Each player sees its neighbours within the radius on both sides (four or five), so
+        /// every bundle differs; a closer spacing only makes the cards of a debug build slow.
+        const SPACING_M: f32 = 40.0;
         let crowd = |threads| {
             let mut world = world_of(
                 "sim-a",
