@@ -37,7 +37,7 @@ use nw_sim_core::{
 
 use super::encounter::Tutorial;
 use super::gathering::{MOB_LEVEL, PLAYER_LOOT_LEVEL};
-use super::gear::unix_ns;
+use super::gear::{Gear, unix_ns};
 use super::hit_shape::{
     MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, Wedge, homing, stepped_in, swing_shape, turn,
 };
@@ -92,6 +92,9 @@ pub(super) struct Vitals {
     last_attack_ms: Option<u64>,
     /// The counter of the record whose attack key press still waits for its release.
     attack_pressed_at: Option<u16>,
+    /// The held attack key passed the heavy hold: its heavy attack started, and its release
+    /// starts nothing more.
+    heavy_started: bool,
     /// The counter (`u16` after the mask) of the newest input record read.
     input_counter: Option<u16>,
     /// The mob the player locked on in its newest input.
@@ -130,6 +133,7 @@ impl Vitals {
             spawned,
             last_attack_ms: None,
             attack_pressed_at: None,
+            heavy_started: false,
             input_counter: None,
             lock_target: None,
             last_shot_ms: None,
@@ -750,16 +754,27 @@ impl SimWorld {
             weapon_key = record.weapon_key_pressed().or(weapon_key);
             if record.attack_pressed() {
                 vitals.attack_pressed_at = Some(counter);
+                vitals.heavy_started = false;
             }
+            let held_records = vitals
+                .attack_pressed_at
+                .map(|pressed| counter.wrapping_sub(pressed));
+            let held_ms = |records: u16| u64::from(records.saturating_mul(INPUT_RECORD_MS));
             if record.attack_released() {
-                let held_records = vitals
-                    .attack_pressed_at
-                    .take()
-                    .map_or(0, |pressed| counter.wrapping_sub(pressed));
-                attacks.push((
-                    AttackKind::of_hold(held_records),
-                    u64::from(held_records.saturating_mul(INPUT_RECORD_MS)),
-                ));
+                vitals.attack_pressed_at = None;
+                if !std::mem::take(&mut vitals.heavy_started) {
+                    let records = held_records.unwrap_or(0);
+                    attacks.push((AttackKind::of_hold(records), held_ms(records)));
+                }
+            } else if let Some(records) = held_records
+                && !vitals.heavy_started
+                && AttackKind::of_hold(records) == AttackKind::Heavy
+            {
+                // A heavy attack starts while the key is held, once the hold passes the heavy
+                // hold (retail newchar capture: the greatsword's 2071 came 998 and 1110 ms after
+                // the press, before the releases at 1181 and 1633 ms).
+                vitals.heavy_started = true;
+                attacks.push((AttackKind::Heavy, held_ms(records)));
             }
         }
         let lock_target = records.first().and_then(InputRecord::lock_target);
@@ -783,6 +798,18 @@ impl SimWorld {
         // server's hand can be behind the client's, so the attack lands as a swing of the melee
         // option unless a shot request comes with it ([`SimWorld::player_swings_due`]).
         let (weapon, hand) = if held.is_some_and(|weapon| weapon.spread_shot) {
+            // An attack with the spread-shot weapon empty is the client's reload, not a swing:
+            // the client sends no shot then, and taking the melee option in hand made the client
+            // swap weapons when the reload ended (live 2026-09-18: after every second shot).
+            let empty = self
+                .world
+                .get::<Player>(entity)
+                .and_then(|player| player.gear.as_ref().map(Gear::held_empty))
+                .unwrap_or(false);
+            if empty {
+                tracing::debug!(player = number, "attack with an empty spread-shot weapon");
+                return Vec::new();
+            }
             let data = Arc::clone(&self.combat.data);
             let melee = self.world.get::<Player>(entity).and_then(|player| {
                 player.gear.as_ref()?.option_with(|item| {
@@ -820,11 +847,13 @@ impl SimWorld {
             .first()
             .and_then(|newest| newest.bit_6)
             .map(|[yaw, _]| yaw);
-        // A light attack starts at its press, a heavy one at its release (retail: the hit came
-        // 0.44 s after a light attack's press).
+        // A light attack starts at its press (retail: the hit came 0.44 s after a light attack's
+        // press), a heavy one when the hold passed the heavy hold.
         let started_ms = match kind {
             AttackKind::Light => now_ms.saturating_sub(held_ms),
-            AttackKind::Heavy => now_ms,
+            AttackKind::Heavy => {
+                now_ms.saturating_sub(held_ms.saturating_sub(u64::from(HEAVY_HOLD_MS)))
+            }
         };
         let due_ms = started_ms.saturating_add(hit_ms).max(now_ms);
         self.player_swings.push(PlayerSwing {
@@ -1703,18 +1732,29 @@ mod tests {
     }
 
     #[test]
-    fn a_long_hold_hits_at_its_release() {
-        const HOLD_RECORDS: usize = 20;
+    fn a_long_hold_hits_while_the_key_is_held() {
+        // Retail newchar capture: the greatsword's heavy hit (2071) came 998 ms after the press,
+        // before the release at 1181 ms.
+        const HOLD_RECORDS: u16 = 14;
         let mut world = awake_fight();
         let mut keys = vec![Key::Press];
-        keys.extend(std::iter::repeat_n(Key::Hold, HOLD_RECORDS));
-        keys.push(Key::Release);
+        keys.extend(std::iter::repeat_n(Key::Hold, usize::from(HOLD_RECORDS)));
         world.attack_input(&connection(1), &message(1, &keys), NOW);
         let heavy_ms = swing_shape(WeaponKind::Other, AttackKind::Heavy)
             .expect("swings")
             .hit_ms();
-        assert!(world.player_swings_due(NOW + heavy_ms - 1).is_empty());
-        assert_eq!(world.player_swings_due(NOW + heavy_ms).len(), 1);
+        // The heavy attack starts at the first record whose hold reaches the heavy hold.
+        let crossing_records = HEAVY_HOLD_MS.div_ceil(INPUT_RECORD_MS);
+        let passed_ms = u64::from(crossing_records * INPUT_RECORD_MS - HEAVY_HOLD_MS);
+        let due = NOW - passed_ms + heavy_ms;
+        assert!(world.player_swings_due(due - 1).is_empty());
+        assert_eq!(world.player_swings_due(due).len(), 1, "before the release");
+        let released = message(1 + HOLD_RECORDS + 1, &[Key::Release]);
+        world.attack_input(&connection(1), &released, NOW + INTERVAL_MS);
+        assert!(
+            world.player_swings_due(NOW + LONG_AFTER_MS).is_empty(),
+            "the release starts nothing more"
+        );
     }
 
     #[test]
@@ -2179,6 +2219,29 @@ mod tests {
             gear_change(&mut world),
             None,
             "the client is not told to switch"
+        );
+    }
+
+    #[test]
+    fn an_attack_with_the_gun_empty_reloads_and_swaps_nothing() {
+        let mut world = gun_and_blade_at(MOB_X + 2.0);
+        for shot_at in [NOW, NOW + SPREADSHOT_MIN_INTERVAL_MS] {
+            world.spreadshot(&connection(1), &shot(2), shot_at);
+        }
+        let empty_at = NOW + 2 * SPREADSHOT_MIN_INTERVAL_MS;
+        world.attack_input(
+            &connection(1),
+            &message(1, &[Key::Press, Key::Release]),
+            empty_at,
+        );
+        assert!(
+            world.player_swings_due(empty_at + LONG_AFTER_MS).is_empty(),
+            "no swing"
+        );
+        assert_ne!(
+            drawn(&world),
+            Some(slot::MAIN_HAND_OPTION_2),
+            "the blunderbuss stays in hand"
         );
     }
 

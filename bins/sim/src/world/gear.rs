@@ -385,6 +385,13 @@ impl Gear {
         }
     }
 
+    /// The weapon in the hand has shots but none is loaded: it reloads.
+    pub(super) fn held_empty(&self) -> bool {
+        self.held_option()
+            .and_then(ammo_index)
+            .is_some_and(|index| self.ammo[index].max > 0 && self.ammo[index].loaded == 0)
+    }
+
     /// Fires one shot of the drawn option at `now_ms`; whether one was loaded. The last shot
     /// starts the reload (retail: loaded again 1.0 to 5 s after the second shot).
     pub(super) fn fire(&mut self, now_ms: u64) -> bool {
