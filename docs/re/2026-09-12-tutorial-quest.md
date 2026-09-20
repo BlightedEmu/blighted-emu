@@ -418,3 +418,25 @@ the creature slices) and Server.pak behavior trees. Not live-tested yet.
 - The additive reactions, child 42 of the alert state.
 - The body part of a player hit (2071 bytes 40-43, CRC-32 of the bone name): we always send the
   torso, which retail sent on 25 of 70 hits.
+
+## 15. Lock-on in the retail tutorial ledger (2026-09-18)
+
+Source: the newchar ledger of 2026-09-12 (`local-data/captures/own/newchar-linux-2026-09-12`).
+
+- **Observed.** Five lock runs (input 1589 row 3), the first on the first legionnaire from
+  201.9 s to 209.5 s (raw id `26d1dfc900f49503330627c5c3df6701`). The row's `u64` is the first
+  8 raw bytes read little-endian, the client's entity id.
+- **Observed.** The middle mouse button sets input value 2 bit 20, value 5 bit 29 and value 7
+  bit 51 in one record, and that record already names the target.
+- **Observed.** The legionnaire's retail card (12 members) matches ours member by member,
+  except its GDE ref (a GUID; ours is built from the entity number, and our bodies use the
+  byte-swapped number wherever the client's entity id goes) and its max health.
+- **Observed.** Retail max health drops the fraction: sailor 353, legionnaire 370 (ours was 354
+  and 371). Fixed.
+- **Observed.** Before the first lock the server sent no targeting, aggro, faction or game-mode
+  message. Own changes were stamina, the interactor slot-1 flag, vitals, objectives, paperdoll
+  and achievements. The retail own ALC carries `slayerSeqTimeRel` (child 2) in almost every
+  state and the slayer children 13-24 when they change; ours sends neither.
+- **Unknown.** Which client gate rejects our targets. The lock test is a virtual of each
+  `CameraLockTargetComponent`; its gates read client data that the ledger cannot show. A
+  runtime probe must show it.
