@@ -21,8 +21,8 @@ use nw_messages::{
     GDE_METADATA_COMPONENT, GatherableControllerState, GdeMetadataReplicatedState, InputPosition,
     LOCAL_PLAYER_INTEREST, LookDir, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState,
     MessageError, PLAYER_SLICE_ASSET, PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID,
-    SPAWN_STATE_MS, SPAWN_TELEPORT, ServerMessage, SlayerState, TeleportStep, VitalsData,
-    VitalsState, boss_phase_change, change_members, player_members, raw_id_of_entity,
+    SPAWN_STATE_MS, SPAWN_TELEPORT, ServerMessage, SlayerState, StepPlace, TeleportStep,
+    VitalsData, VitalsState, boss_phase_change, change_members, player_members, raw_id_of_entity,
 };
 use nw_sim_core::Position;
 
@@ -568,7 +568,9 @@ pub(super) enum OwnCard {
 /// The group of the client's own player with its `states`; `None` for a position that is not
 /// finite. When the server `moved` the player, the position is the full first state, which the
 /// client takes as its new place (retail: the move into the water, live-tutorial note section 4).
-/// Any other own state is `tick`: the own clock, and the place only when the tick says so.
+/// Any other own state is `tick`: the own clock, and the place only when the tick says so, as
+/// an offset from `anchor`, the own `pos10` the client has; every state that sends a new `pos10`
+/// keeps it in `anchor`.
 ///
 /// # Errors
 ///
@@ -580,6 +582,7 @@ pub(super) fn own_group(
     card: OwnCard,
     teleport: Option<OwnTeleport>,
     tick: OwnTick,
+    anchor: &mut Option<InputPosition>,
 ) -> Result<Option<BundleGroup>, MessageError> {
     let Some(mut group) = entity_group(
         LOCAL_PLAYER_INTEREST,
@@ -606,16 +609,22 @@ pub(super) fn own_group(
             teleport.step,
         ));
     } else if let Some(alc) = group.members.last_mut() {
-        let pos = InputPosition::from_metres(position.x, position.y, position.z)
-            .filter(|_| tick.with_position);
+        let place = InputPosition::from_metres(position.x, position.y, position.z)
+            .filter(|_| tick.with_position)
+            .map(|at| StepPlace::of(*anchor, at));
         alc.state = MemberState::Alc(AlcState::own_step(
             tick.clock.stamp(),
-            pos,
+            place,
             tick.clear_throttle.then_some(DATA_BITS_ACTIVE),
             tick.clock.anchored(),
             tick.slayer,
             tick.view,
         )?);
+    }
+    if let Some(MemberState::Alc(alc)) = group.members.last().map(|alc| &alc.state)
+        && alc.pos10.is_some()
+    {
+        *anchor = alc.pos10;
     }
     // Without the card, the changes (achievements, objectives, experience, gear, health) still
     // go out, before the position.
@@ -738,9 +747,18 @@ mod tests {
 
     #[test]
     fn the_own_player_is_the_player_prefab_in_slot_1() {
-        let group = own_group(OWN, own_states(), at(), OwnCard::Spawn, None, STILL)
-            .expect("encode")
-            .expect("finite");
+        let mut anchor = None;
+        let group = own_group(
+            OWN,
+            own_states(),
+            at(),
+            OwnCard::Spawn,
+            None,
+            STILL,
+            &mut anchor,
+        )
+        .expect("encode")
+        .expect("finite");
         assert_eq!(group.interest, u64::from(LOCAL_PLAYER_INTEREST));
         let MemberState::GdeMetadata(card) = &group.members[0].state else {
             panic!("the card comes first: {group:?}");
@@ -773,10 +791,27 @@ mod tests {
             panic!("then the ALC position: {group:?}");
         };
         assert_eq!(alc.pos10, InputPosition::from_metres(10.0, 20.0, 30.0));
-        let later = own_group(OWN, own_states(), at(), OwnCard::Without, None, STILL)
-            .expect("encode")
-            .expect("finite");
+        assert_eq!(anchor, alc.pos10, "the spawn's pos10 is the own anchor");
+        let later = own_group(
+            OWN,
+            own_states(),
+            at(),
+            OwnCard::Without,
+            None,
+            STILL,
+            &mut anchor,
+        )
+        .expect("encode")
+        .expect("finite");
         assert_eq!(later.members.len(), 1, "later only the ALC position");
+        let MemberState::Alc(still) = &later.members[0].state else {
+            panic!("the ALC position: {later:?}");
+        };
+        assert_eq!(
+            still.pos10, None,
+            "a later place is an offset from the own anchor"
+        );
+        assert_eq!(anchor, alc.pos10);
         let payload = BundlePayload {
             groups: vec![group.clone()],
         };
@@ -858,6 +893,7 @@ mod tests {
             OwnCard::Without,
             Some(teleport),
             MOVING,
+            &mut None,
         )
         .expect("encode")
         .expect("finite");
@@ -876,7 +912,7 @@ mod tests {
     #[test]
     fn a_moving_player_gets_the_clock_without_a_position_but_its_spawn_does() {
         let alc_of = |card, tick| {
-            let group = own_group(OWN, own_states(), at(), card, None, tick)
+            let group = own_group(OWN, own_states(), at(), card, None, tick, &mut None)
                 .expect("encode")
                 .expect("finite");
             let last = group.members.last().expect("alc");
@@ -922,7 +958,7 @@ mod tests {
     fn only_the_spawn_card_carries_the_full_first_state() {
         let pos = InputPosition::from_metres(10.0, 20.0, 30.0).expect("finite");
         let alc_of = |card: OwnCard| {
-            let group = own_group(OWN, own_states(), at(), card, None, STILL)
+            let group = own_group(OWN, own_states(), at(), card, None, STILL, &mut None)
                 .expect("encode")
                 .expect("finite");
             group.members.last().expect("alc").state.clone()
@@ -942,8 +978,15 @@ mod tests {
             "the first card sets the start position with the full state"
         );
         let still = MemberState::Alc(
-            AlcState::own_step(SPAWN_CLOCK.stamp(), Some(pos), None, true, None, None)
-                .expect("step"),
+            AlcState::own_step(
+                SPAWN_CLOCK.stamp(),
+                Some(StepPlace::Anchor(pos)),
+                None,
+                true,
+                None,
+                None,
+            )
+            .expect("step"),
         );
         assert_eq!(
             alc_of(OwnCard::Refresh),
@@ -1244,8 +1287,7 @@ mod tests {
         let step = nw_messages::MobStep {
             stamp,
             anchored: false,
-            position: InputPosition::from_metres(at().x, at().y, at().z)
-                .map(nw_messages::StepPlace::Anchor),
+            position: InputPosition::from_metres(at().x, at().y, at().z).map(StepPlace::Anchor),
             facing: None,
             scope: None,
         };

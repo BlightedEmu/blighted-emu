@@ -43,7 +43,7 @@ const QUAT_PARTS: usize = 4;
 /// The bit of a quat tag where the index of the derived part starts.
 const QUAT_DERIVED_SHIFT: u8 = 5;
 /// Slot 0 child of the offset from `pos10` (`worldPosRel`).
-const POS_REL_CHILD: usize = 10;
+pub const POS_REL_CHILD: usize = 10;
 /// Slot 0 child of where a character looks (`lookDir`, a quat).
 const LOOK_DIR_CHILD: usize = 12;
 /// Slot 0 children of a character's first slayer state slot: `slayerStateId` (prefix),
@@ -876,7 +876,11 @@ impl AlcState {
     /// A state of the client's own player on its clock `stamp`: the client takes an own state
     /// only with its number and time, and shows the network icon and clears its input history
     /// when none came for 2 s (network note: `FUN_14485b680`, `alc-server-timeout-for-input`).
-    /// With `pos`, it also sends the place; with `data_bits`, the movement flags; when
+    /// With `place`, it also sends the place: an offset from the own `pos10` the client has, or a
+    /// new one when out of reach (lock-on note, run 10: retail sent the own `worldPosRel` as an
+    /// offset in 264 of 438 own states during a 7.5 s lock and a new `pos10` in 23; ours sent a
+    /// new `pos10` with every place, every ~200 ms, and the lock broke within 2.15 s; Inferred
+    /// cause, as for the moving mob). With `data_bits`, the movement flags; when
     /// `anchored`, the clock's anchor (the client's 'now' for its cooldowns is the anchor plus
     /// the offset; clock note). With `slayer`, the slayer state the client started or the
     /// server's follow-up (slayer note). With `view`, the facing and the look direction of the
@@ -889,7 +893,7 @@ impl AlcState {
     /// Returns [`MessageError`] when a slayer value does not fit the prefix code.
     pub fn own_step(
         stamp: AlcStamp,
-        pos: Option<InputPosition>,
+        place: Option<StepPlace>,
         data_bits: Option<u8>,
         anchored: bool,
         slayer: Option<SlayerState>,
@@ -906,13 +910,13 @@ impl AlcState {
         if anchored {
             children.push((TIME_ANCHOR_CHILD, stamp.anchor_us.to_be_bytes().to_vec()));
         }
-        if let Some(pos) = pos {
-            children.extend(position_children(pos));
+        if let Some(place) = place {
+            children.extend(place.children());
         }
         if let Some(bits) = data_bits {
             children.push((DATA_BITS_CHILD, vec![bits]));
         }
-        Ok(Self::of_slot0(children, pos))
+        Ok(Self::of_slot0(children, place.and_then(StepPlace::pos10)))
     }
 
     /// One of the three states that move the client's own player to `pos`, facing `facing`
@@ -1414,8 +1418,15 @@ mod tests {
         );
         assert_eq!(clock_only.pos10, None);
         let pos = InputPosition::from_metres(1.0, 2.0, 3.0).expect("finite");
-        let full = AlcState::own_step(stamp, Some(pos), Some(DATA_BITS_ACTIVE), false, None, None)
-            .expect("step");
+        let full = AlcState::own_step(
+            stamp,
+            Some(StepPlace::of(None, pos)),
+            Some(DATA_BITS_ACTIVE),
+            false,
+            None,
+            None,
+        )
+        .expect("step");
         assert_eq!(
             children_of(&full),
             [
@@ -1463,6 +1474,52 @@ mod tests {
             anchored.bytes[anchored.bytes.len() - 8..],
             RETAIL_ANCHOR_US.to_be_bytes()
         );
+    }
+
+    #[test]
+    fn an_own_step_near_its_anchor_sends_the_offset_alone() {
+        // Retail own state during the first lock (197015 ms): `10=60 8e 82`, no `pos10`.
+        const RETAIL_OFFSET: [u8; POS3_LEN] = [0x60, 0x8e, 0x82];
+        let stamp = AlcStamp {
+            id: 0x0605,
+            anchor_us: 0,
+            offset_ms: 0x0304,
+        };
+        let anchor = InputPosition::from_metres(480.0, 210.0, 22.0).expect("finite");
+        let steps = |byte: u8| (f32::from(byte) - f32::from(POS_REL_ZERO)) * POS_REL_STEP_M;
+        let at = InputPosition::from_metres(
+            anchor.x + steps(RETAIL_OFFSET[0]),
+            anchor.y + steps(RETAIL_OFFSET[1]),
+            anchor.z() + steps(RETAIL_OFFSET[2]),
+        )
+        .expect("finite");
+        let place = StepPlace::of(Some(anchor), at);
+        assert_eq!(place, StepPlace::Offset(RETAIL_OFFSET));
+        let state = AlcState::own_step(stamp, Some(place), None, false, None, None).expect("step");
+        assert_eq!(state.pos10, None, "the client keeps its pos10");
+        let children = state.slot0_children().expect("walk");
+        assert_eq!(
+            children.iter().map(|(child, _)| *child).collect::<Vec<_>>(),
+            [
+                ID_REL_CHILD,
+                TIME_REL_CHILD,
+                POS_REL_CHILD,
+                ID_ABS_CHILD,
+                TIME_ABS_CHILD
+            ]
+        );
+        assert!(children.contains(&(POS_REL_CHILD, RETAIL_OFFSET.to_vec())));
+        let far = InputPosition::from_metres(anchor.x + 3.0, anchor.y, anchor.z()).expect("finite");
+        let moved = AlcState::own_step(
+            stamp,
+            Some(StepPlace::of(Some(anchor), far)),
+            None,
+            false,
+            None,
+            None,
+        )
+        .expect("step");
+        assert_eq!(moved.pos10, Some(far), "out of reach: a new pos10");
     }
 
     #[test]

@@ -31,7 +31,7 @@ use nw_messages::items::{FIRST_VERSION, FullList};
 use nw_messages::paperdoll::slot::QUICK_SLOT_1;
 use nw_messages::{
     BundleGroup, BundleMember, ClientFacetMsg, ConsumableCooldown, CooldownsState, CurrencyState,
-    DisableCollisionMsg, GatheringInterruptedMsg, Hands, HealthChange, InputRecord,
+    DisableCollisionMsg, GatheringInterruptedMsg, Hands, HealthChange, InputPosition, InputRecord,
     InteractionEndedMsg, InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT,
     LevelInfoChangedMsg, LevelSpec, LookDir, MeleeHitMsg, MessageError, PlayerLook,
     PlayerSeenByAiMsg, PlayerStates, ProgressionState, SPAWN_STATE_ID, SelectedAsTargetMsg,
@@ -414,6 +414,8 @@ struct Player {
     moving: bool,
     /// An own state after the spawn cleared the input throttle that the spawn state sets.
     throttle_cleared: bool,
+    /// The own `pos10` its client has: the own places go as offsets from it ([`own_group`]).
+    own_anchor: Option<InputPosition>,
     /// Where the player faces after the server's move, when the move says so.
     move_facing: Option<f32>,
     /// The server moves the player now: its own states carry the place.
@@ -2750,6 +2752,7 @@ impl SimWorld {
                     remote_plan: replica::RemotePlan::default(),
                     moving: false,
                     throttle_cleared: false,
+                    own_anchor: None,
                     teleport_step: None,
                     refused_since_ms: None,
                     own_spawned_ms: None,
@@ -3223,9 +3226,15 @@ impl Neighbourhood<'_> {
                 if tick.clear_throttle {
                     player.throttle_cleared = true;
                 }
-                if let Some(mut group) =
-                    own_group(own, states, own_position, own_card, teleport, tick)?
-                {
+                if let Some(mut group) = own_group(
+                    own,
+                    states,
+                    own_position,
+                    own_card,
+                    teleport,
+                    tick,
+                    &mut player.own_anchor,
+                )? {
                     group.members.append(&mut player.extra_members);
                     groups.push(group);
                 }
@@ -3440,8 +3449,9 @@ mod tests {
     use nw_messages::{
         ALC_TYPE_INDEX, GDE_METADATA_TYPE_INDEX, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
         LOOK_CHOICES, MemberState, OPEN_WORLD_LEVEL, PAPERDOLL_TYPE_INDEX,
-        PLAYER_APPEARANCE_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS, PlayerAppearanceState,
-        ReplicatedStateBundle, SlotRead, SlotUpdate, VITALS_TYPE_INDEX, VitalsState,
+        PLAYER_APPEARANCE_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS, POS_REL_CHILD,
+        PlayerAppearanceState, ReplicatedStateBundle, SlotRead, SlotUpdate, VITALS_TYPE_INDEX,
+        VitalsState,
     };
     use nw_reflect::{Envelope, encode_server_messages};
     use nw_sim_core::test_support::{FlatGround, NoGround};
@@ -4288,7 +4298,12 @@ mod tests {
                 .filter(SlotUpdate::is_local_player)
                 .flat_map(|update| update.members)
                 .filter_map(|member| match member.state {
-                    MemberState::Alc(alc) => Some(alc.pos10.is_some()),
+                    MemberState::Alc(alc) => Some(
+                        alc.slot0_children()
+                            .expect("walk")
+                            .iter()
+                            .any(|(child, _)| *child == POS_REL_CHILD),
+                    ),
                     _ => None,
                 })
                 .collect::<Vec<bool>>()
@@ -5517,10 +5532,11 @@ mod tests {
                 .combat
                 .hit(NOW + 1, false);
         }
+        // The own player's later places are offsets: only the others carry a pos10 now.
         let fight = tick(&mut world, NOW + 33);
         assert_eq!(
             seen_by(&world, &fight.messages, &connection(1)),
-            [1, 3],
+            [3],
             "the one it fights"
         );
     }
