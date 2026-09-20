@@ -272,6 +272,11 @@ impl Wedge {
         if !overlaps {
             return None;
         }
+        // Bodies that overlap touch whatever the facing: so near, the yaw toward the other body
+        // says nothing (live 2026-09-18: a heavy swing at Thorpe 0.1 m away missed).
+        if distance <= self.own.radius_m + body.radius_m {
+            return Some(0.0);
+        }
         let widen = if distance > 0.0 {
             (body.radius_m / distance).min(1.0).asin()
         } else {
@@ -301,8 +306,10 @@ pub(super) fn homing(
         .filter_map(|(index, (at, radius_m))| {
             let distance = (at.horizontal_distance(from) - radius_m).max(0.0);
             let off = turn(facing, yaw_toward(from, at)).abs();
+            // A body touching the attacker is in reach at any angle (see [`Wedge::touches`]).
+            let touching = distance <= PLAYER_CAPSULE.radius_m;
             let in_reach = distance <= shape.homing_radius_m
-                && off <= shape.homing_angle_rad
+                && (touching || off <= shape.homing_angle_rad)
                 && (at.z - from.z).abs() <= HOMING_HEIGHT_M;
             in_reach.then(|| {
                 let score = distance / shape.homing_radius_m + off / shape.homing_angle_rad;
@@ -396,6 +403,33 @@ mod tests {
         assert!(
             sword().touches(on_a_ledge, BODY).is_some(),
             "a body a step below still touches"
+        );
+    }
+
+    #[test]
+    fn a_body_overlapping_the_attacker_is_hit_at_any_angle() {
+        /// Thorpe's body radius, 0.1 m behind the attacker's middle (live 2026-09-18).
+        const BIG: Capsule = Capsule {
+            radius_m: 0.7,
+            height_m: 2.8,
+        };
+        let behind = at(0.0, -0.1);
+        assert_eq!(sword().touches(behind, BIG), Some(0.0));
+        assert_eq!(
+            homing(
+                &SWORD_LIGHT,
+                ORIGIN,
+                NORTH,
+                [(behind, BIG.radius_m)].into_iter()
+            ),
+            Some(0),
+            "the homing finds it too"
+        );
+        let far_behind = at(0.0, -3.0);
+        assert_eq!(
+            sword().touches(far_behind, BIG),
+            None,
+            "a body away behind is not"
         );
     }
 
