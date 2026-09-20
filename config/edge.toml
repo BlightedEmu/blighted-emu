@@ -63,3 +63,10 @@ queue_requests_per_minute = 30
 [world.database]
 url = "postgres://nw@127.0.0.1:5432/nw_world_1"
 max_connections = 5
+
+# Client settings the launcher hands to the game as its override-config file. A retail client
+# gets these from its remote config layers, which a private server does not have.
+[client_config.javelin]
+# Camera lock-on at mobs with mouse and keyboard. Without it the client refuses every mob as a
+# lock target (its lock candidate check reads this key).
+enable-camera-lock-kbam-pve-targeting = true

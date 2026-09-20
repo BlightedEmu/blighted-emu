@@ -177,6 +177,7 @@ async fn info<A, G, R, D, X>(
         auth_mode: config.auth.mode,
         allow_registration: config.auth.allow_registration,
         launch_arguments: config.launch_arguments(),
+        client_config: config.client_config.clone(),
     })
 }
 
@@ -542,6 +543,7 @@ pub(crate) mod tests {
         assert_eq!(info.auth_mode, AuthMode::Password);
         assert!(info.allow_registration);
         assert_eq!(info.launch_arguments, valid().launch_arguments());
+        assert_eq!(info.client_config, valid().client_config);
     }
 
     #[tokio::test]

@@ -31,6 +31,11 @@ pub const OVERRIDE_CONFIG_ARG: &str = "-OverrideConfigPath";
 /// [`OVERRIDE_CONFIG_ARG`] with that value, so the client reads an absolute override-config file
 /// instead of the packed `@assets@/ClientOverride.json` that a retail client does not read.
 pub const OVERRIDE_CONFIG_ENV: &str = "NW_LAUNCHER_OVERRIDE_CONFIG";
+/// The override-config file the launcher writes from the server's client settings.
+pub const CLIENT_CONFIG_FILE: &str = "client-override.json";
+/// The Wine drive of the Linux root folder: the game under Proton reads `/a/b` as `Z:/a/b`.
+#[cfg(not(windows))]
+const WINE_ROOT_DRIVE: &str = "Z:";
 /// Default Steam program.
 #[cfg(windows)]
 pub const DEFAULT_STEAM: &str = r"C:\Program Files (x86)\Steam\steam.exe";
@@ -66,6 +71,15 @@ pub enum GameError {
     /// An argument value points to an Amazon or CloudFront host.
     #[error("the server asked for the Amazon or CloudFront address {0}")]
     Forbidden(String),
+    /// The override-config file could not be written.
+    #[error("could not write the client settings to {}: {source}", .path.display())]
+    ClientConfig {
+        /// The file.
+        path: PathBuf,
+        /// The write error.
+        #[source]
+        source: std::io::Error,
+    },
     /// The game program (Steam or Proton) could not be started.
     #[error("could not start the game: {} failed: {source}", .program.display())]
     Start {
@@ -202,11 +216,47 @@ fn override_config_pair(path: Option<&str>) -> Option<(String, String)> {
     }
 }
 
-/// Appends `-OverrideConfigPath <path>` when [`OVERRIDE_CONFIG_ENV`] holds a non-empty value, so
-/// the client reads that absolute override-config file. Returns `arguments` unchanged otherwise.
-pub fn append_override_config(mut arguments: Vec<String>) -> Vec<String> {
-    if let Some((name, value)) = override_config_pair(env::var(OVERRIDE_CONFIG_ENV).ok().as_deref())
+/// The game's name for the local file `path`.
+fn game_path(path: &Path) -> String {
+    #[cfg(windows)]
     {
+        path.display().to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        format!("{WINE_ROOT_DRIVE}{}", path.display())
+    }
+}
+
+/// Writes the server's client settings `config` into folder `dir` as the override-config file
+/// [`CLIENT_CONFIG_FILE`]; its path, or `None` when the server sends none.
+pub fn write_client_config(
+    config: &serde_json::Map<String, serde_json::Value>,
+    dir: &Path,
+) -> Result<Option<PathBuf>, GameError> {
+    if config.is_empty() {
+        return Ok(None);
+    }
+    let path = dir.join(CLIENT_CONFIG_FILE);
+    let text = serde_json::Value::Object(config.clone()).to_string();
+    std::fs::create_dir_all(dir)
+        .and_then(|()| std::fs::write(&path, text))
+        .map_err(|source| GameError::ClientConfig {
+            path: path.clone(),
+            source,
+        })?;
+    Ok(Some(path))
+}
+
+/// Appends `-OverrideConfigPath <path>`, so the client reads that absolute override-config file:
+/// the value of [`OVERRIDE_CONFIG_ENV`] when it is not empty, else the file `written` from the
+/// server's client settings. Returns `arguments` unchanged without either.
+pub fn append_override_config(mut arguments: Vec<String>, written: Option<&Path>) -> Vec<String> {
+    let path = env::var(OVERRIDE_CONFIG_ENV)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| written.map(game_path));
+    if let Some((name, value)) = override_config_pair(path.as_deref()) {
         arguments.push(name);
         arguments.push(value);
     }
@@ -387,8 +437,50 @@ mod tests {
     #[test]
     fn append_override_config_keeps_the_original_arguments_first() {
         let base = template(&["-LoginChannelOverride", KEY]);
-        let result = append_override_config(base.clone());
+        let result = append_override_config(base.clone(), None);
         assert_eq!(result[..base.len()], base[..]);
+    }
+
+    #[test]
+    fn the_server_client_settings_become_the_override_config_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        assert_eq!(
+            write_client_config(&serde_json::Map::new(), dir.path()).expect("none"),
+            None,
+            "no settings, no file"
+        );
+        let settings = serde_json::json!({
+            "javelin": { "enable-camera-lock-kbam-pve-targeting": true }
+        });
+        let serde_json::Value::Object(config) = settings.clone() else {
+            panic!("an object");
+        };
+        let path = write_client_config(&config, dir.path())
+            .expect("write")
+            .expect("a file");
+        assert_eq!(path, dir.path().join(CLIENT_CONFIG_FILE));
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        assert_eq!(written, settings);
+        if env::var(OVERRIDE_CONFIG_ENV).is_err() {
+            let base = template(&["-LoginChannelOverride", KEY]);
+            let result = append_override_config(base.clone(), Some(&path));
+            assert_eq!(
+                result[base.len()..],
+                [OVERRIDE_CONFIG_ARG.to_owned(), game_path(&path)]
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn the_game_reads_a_linux_file_on_the_wine_root_drive() {
+        assert_eq!(
+            game_path(Path::new(
+                "/home/p/.config/blighted-launcher/client-override.json"
+            )),
+            "Z:/home/p/.config/blighted-launcher/client-override.json"
+        );
     }
 
     #[test]

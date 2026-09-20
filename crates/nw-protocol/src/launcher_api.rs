@@ -67,6 +67,11 @@ pub struct LauncherInfo {
     pub allow_registration: bool,
     /// Game launch arguments; [`SESSION_PLACEHOLDER`] stands for the game session key.
     pub launch_arguments: Vec<String>,
+    /// Client settings the launcher hands to the game as its override-config file (the
+    /// `javelin.*` keys and the like that a retail client gets from its remote config layers);
+    /// empty: none.
+    #[serde(default)]
+    pub client_config: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Body of `POST /launcher/register` and `POST /launcher/login`.
@@ -176,6 +181,7 @@ mod tests {
                 "-LoginChannelOverride".to_owned(),
                 SESSION_PLACEHOLDER.to_owned(),
             ],
+            client_config: serde_json::Map::new(),
         };
         let value = json(&info);
         assert_eq!(
@@ -183,6 +189,7 @@ mod tests {
             [
                 "allow_registration",
                 "auth_mode",
+                "client_config",
                 "launch_arguments",
                 "server_name"
             ]
