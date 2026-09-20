@@ -17,7 +17,7 @@ use nw_bus::MobGhost;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::{
     AlcStamp, AlcState, AssetId, BOSS_PHASE_TYPE_INDEX, BundleGroup, BundleMember, BundlePayload,
-    DATA_BITS_ACTIVE, DYNAMIC_SLICE_SUB_ID, GATHERABLE_CONTROLLER_TYPE_INDEX,
+    CardPlace, DATA_BITS_ACTIVE, DYNAMIC_SLICE_SUB_ID, GATHERABLE_CONTROLLER_TYPE_INDEX,
     GDE_METADATA_COMPONENT, GatherableControllerState, GdeMetadataReplicatedState, InputPosition,
     LOCAL_PLAYER_INTEREST, LookDir, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState,
     MessageError, PLAYER_SLICE_ASSET, PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID,
@@ -303,9 +303,15 @@ pub(super) fn mob_group(
                 let pos =
                     InputPosition::from_metres(card.position.x, card.position.y, card.position.z);
                 match (&look.alc, pos) {
-                    (Some(first), Some(pos)) => {
-                        first.mob_first(frame.stamp, pos, frame.facing, frame.animation.as_ref())?
-                    }
+                    (Some(first), Some(at)) => first.mob_first(
+                        frame.stamp,
+                        CardPlace {
+                            anchor: frame.anchor,
+                            at,
+                        },
+                        frame.facing,
+                        frame.animation.as_ref(),
+                    )?,
                     _ => None,
                 }
             } else {
@@ -1175,6 +1181,7 @@ mod tests {
             stamp,
             animation: None,
             facing: None,
+            anchor: None,
             step,
             alert_started: false,
         };
@@ -1222,7 +1229,8 @@ mod tests {
         let step = nw_messages::MobStep {
             stamp,
             anchored: false,
-            position: InputPosition::from_metres(at().x, at().y, at().z),
+            position: InputPosition::from_metres(at().x, at().y, at().z)
+                .map(nw_messages::StepPlace::Anchor),
             facing: None,
             scope: None,
         };

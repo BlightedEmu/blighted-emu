@@ -89,6 +89,14 @@ const DATA_BITS_CHILD: usize = 41;
 pub const DATA_BITS_ACTIVE: u8 = 211;
 /// A `worldPosRel` that puts the entity at its `pos10`.
 const AT_ANCHOR: [u8; POS3_LEN] = [0xff; POS3_LEN];
+/// The `worldPosRel` byte of no step on an axis.
+const POS_REL_ZERO: u8 = 0x7f;
+/// The most `worldPosRel` steps from `pos10` on one axis, either way.
+const POS_REL_MAX_STEPS: f32 = 127.0;
+/// One `worldPosRel` step, in metres (Inferred: in the retail newchar own states, an offset of
+/// -127 steps before the next `pos10` matched -2.0992 m of its move, -121 steps -2.0001 m: 2.1 m
+/// over 127 steps).
+const POS_REL_STEP_M: f32 = 2.1 / POS_REL_MAX_STEPS;
 /// `scopeData` with only the FullBody scope (bit 0).
 const FULL_BODY_SCOPE: u64 = 1;
 /// The playback speed of a scope entry that plays at its own speed.
@@ -321,6 +329,101 @@ pub enum StepScope {
     Changed(MobAnimation),
 }
 
+/// Where a state puts an entity that moved: the client keeps the last `pos10` it got for the
+/// entity and puts it at that place plus the state's `worldPosRel` offset ("Absolute portion in
+/// delta compression"; own-player-position note). Retail moves a walking mob by offsets and sends
+/// a new `pos10` only when the offset no longer fits: 14 of the first legionnaire's 959 groups
+/// carried a new `pos10` in the newchar capture. Ours sent a new `pos10` with almost every move
+/// (3,516 of 4,804 groups), and the client dropped its lock on the moving mob within 2 s
+/// (lock-on note, run 9; Inferred cause).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum StepPlace {
+    /// A new `pos10` at this place, at zero offset.
+    Anchor(InputPosition),
+    /// An offset from the `pos10` the client has.
+    Offset([u8; POS3_LEN]),
+}
+
+impl StepPlace {
+    /// The place `at` for a client whose `pos10` for the entity is `anchor`: an offset when it is
+    /// within reach of the anchor on every axis, else a new anchor.
+    pub fn of(anchor: Option<InputPosition>, at: InputPosition) -> Self {
+        anchor
+            .and_then(|anchor| offset_from(anchor, at))
+            .map_or(Self::Anchor(at), Self::Offset)
+    }
+
+    /// Its children: `worldPosRel` and, with a new anchor, `pos10`.
+    fn children(self) -> Vec<(usize, Vec<u8>)> {
+        match self {
+            Self::Anchor(at) => position_children(at).into(),
+            Self::Offset(offset) => vec![(POS_REL_CHILD, offset.to_vec())],
+        }
+    }
+
+    /// The new `pos10`, when it sends one.
+    const fn pos10(self) -> Option<InputPosition> {
+        match self {
+            Self::Anchor(at) => Some(at),
+            Self::Offset(_) => None,
+        }
+    }
+}
+
+/// Where a first state (a card) puts an entity at `at`: at the `pos10` `anchor` the entity's
+/// later states are offsets from, plus the offset to `at`, so that a client that sees it from now
+/// on keeps the same anchor as the others; a new `pos10` at `at` when it is out of reach.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CardPlace {
+    /// The `pos10` of the entity's later states, when it has one.
+    pub anchor: Option<InputPosition>,
+    /// Where it is.
+    pub at: InputPosition,
+}
+
+impl CardPlace {
+    /// Its `worldPosRel` and `pos10` children, and the `pos10`.
+    fn children(self) -> (Vec<(usize, Vec<u8>)>, InputPosition) {
+        match self
+            .anchor
+            .and_then(|anchor| Some((anchor, offset_from(anchor, self.at)?)))
+        {
+            Some((anchor, offset)) => {
+                let mut position = Writer::new();
+                anchor.write(&mut position);
+                (
+                    vec![
+                        (POS_REL_CHILD, offset.to_vec()),
+                        (POS10_CHILD, position.finish()),
+                    ],
+                    anchor,
+                )
+            }
+            None => (position_children(self.at).into(), self.at),
+        }
+    }
+}
+
+/// The `worldPosRel` that puts an entity at `at` from the `pos10` `anchor`; `None` when an axis
+/// is more than [`POS_REL_MAX_STEPS`] steps away.
+pub fn offset_from(anchor: InputPosition, at: InputPosition) -> Option<[u8; POS3_LEN]> {
+    let step = |from: f32, to: f32| {
+        let steps = ((to - from) / POS_REL_STEP_M).round();
+        // Within ±127 steps, so the byte is 0 to 254 and never 255 (the anchor marker).
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "checked to ±127 steps"
+        )]
+        (steps.abs() <= POS_REL_MAX_STEPS).then(|| (f32::from(POS_REL_ZERO) + steps) as u8)
+    };
+    Some([
+        step(anchor.x, at.x)?,
+        step(anchor.y, at.y)?,
+        step(anchor.z(), at.z())?,
+    ])
+}
+
 /// One later state of a mob (sailor-movement note, section 5; mob-animation note, section 5).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MobStep {
@@ -329,7 +432,7 @@ pub struct MobStep {
     /// The anchor of `stamp` is new and goes with the state.
     pub anchored: bool,
     /// Where the mob is now, when it moved.
-    pub position: Option<InputPosition>,
+    pub position: Option<StepPlace>,
     /// Its new facing (yaw, radians), when it turned.
     pub facing: Option<f32>,
     /// Its animation, for a mob whose animations are known.
@@ -658,7 +761,7 @@ impl AlcState {
     pub fn mob_first(
         &self,
         stamp: AlcStamp,
-        pos: InputPosition,
+        place: CardPlace,
         facing: Option<f32>,
         animation: Option<&MobAnimation>,
     ) -> Result<Option<Self>, MessageError> {
@@ -669,7 +772,8 @@ impl AlcState {
             return Ok(None);
         }
         let mut values: Vec<(usize, Vec<u8>)> = stamp_children(stamp).into();
-        values.extend(position_children(pos));
+        let (place_children, pos10) = place.children();
+        values.extend(place_children);
         values.push((TIME_ANCHOR_CHILD, stamp.anchor_us.to_be_bytes().to_vec()));
         if let Some(yaw) = facing {
             values.push((ROTATION_CHILD, rotation_bytes(yaw)));
@@ -689,7 +793,7 @@ impl AlcState {
         bytes.extend_from_slice(&self.bytes[copied..]);
         Ok(Some(Self {
             bytes,
-            pos10: Some(pos),
+            pos10: Some(pos10),
         }))
     }
 
@@ -702,8 +806,8 @@ impl AlcState {
     /// Returns [`MessageError`] when a scope child cannot be encoded.
     pub fn mob_step(step: &MobStep) -> Result<Self, MessageError> {
         let mut children: Vec<(usize, Vec<u8>)> = stamp_children(step.stamp).into();
-        if let Some(pos) = step.position {
-            children.extend(position_children(pos));
+        if let Some(place) = step.position {
+            children.extend(place.children());
         }
         if let Some(yaw) = step.facing {
             children.push((ROTATION_CHILD, rotation_bytes(yaw)));
@@ -728,7 +832,10 @@ impl AlcState {
                 step.stamp.anchor_us.to_be_bytes().to_vec(),
             ));
         }
-        Ok(Self::of_slot0(children, step.position))
+        Ok(Self::of_slot0(
+            children,
+            step.position.and_then(StepPlace::pos10),
+        ))
     }
 
     /// A state of another player ([`RemoteStep`]).
@@ -1523,6 +1630,50 @@ mod tests {
         "000040000000"
     );
     const SAILOR_RAW_Z: u16 = 11329;
+    #[test]
+    fn a_move_within_reach_is_an_offset_from_the_anchor() {
+        let anchor = InputPosition::from_metres(477.096_92, 847.669_86, 89.417_86).expect("anchor");
+        let at = |dx: f32, dy: f32| {
+            InputPosition::from_metres(anchor.x + dx, anchor.y + dy, anchor.z()).expect("at")
+        };
+        assert_eq!(
+            offset_from(anchor, anchor),
+            Some([POS_REL_ZERO; POS3_LEN]),
+            "no step"
+        );
+        // Retail own states: -127 steps on x before the next pos10 matched -2.0992 m.
+        assert_eq!(offset_from(anchor, at(-2.0992, 0.0)).map(|o| o[0]), Some(0));
+        assert_eq!(
+            offset_from(anchor, at(2.0992, 0.0)).map(|o| o[0]),
+            Some(0xfe)
+        );
+        assert_eq!(offset_from(anchor, at(2.2, 0.0)), None, "out of reach");
+        assert_eq!(
+            StepPlace::of(Some(anchor), at(3.0, 0.0)),
+            StepPlace::Anchor(at(3.0, 0.0)),
+            "a far move is a new anchor"
+        );
+        let near = StepPlace::of(Some(anchor), at(0.5, -0.5));
+        assert!(matches!(near, StepPlace::Offset(_)));
+        assert_eq!(
+            near.children()
+                .iter()
+                .map(|(child, _)| *child)
+                .collect::<Vec<_>>(),
+            [POS_REL_CHILD],
+            "an offset sends no pos10"
+        );
+        // A card puts a late viewer on the same anchor, with the offset to where the mob is.
+        let (children, pos10) = CardPlace {
+            anchor: Some(anchor),
+            at: at(0.5, -0.5),
+        }
+        .children();
+        assert_eq!(pos10, anchor);
+        assert_eq!(children[0], near.children()[0]);
+        assert_eq!(children[1].0, POS10_CHILD);
+    }
+
     const STAMP: AlcStamp = AlcStamp {
         id: 0x0102,
         anchor_us: 845_730_278_284_365,
@@ -1586,7 +1737,15 @@ mod tests {
         assert_eq!(retail.pos10.map(|pos| pos.z_raw), Some(SAILOR_RAW_Z));
         let to = InputPosition::from_metres(468.734, 847.221, 89.99).expect("position");
         let moved = retail
-            .mob_first(STAMP, to, None, None)
+            .mob_first(
+                STAMP,
+                CardPlace {
+                    anchor: None,
+                    at: to,
+                },
+                None,
+                None,
+            )
             .expect("encode")
             .expect("moved");
         assert_eq!(moved.bytes.len(), bytes.len());
@@ -1615,7 +1774,15 @@ mod tests {
         );
         assert_eq!(
             AlcState::at_position(to)
-                .mob_first(STAMP, to, None, None)
+                .mob_first(
+                    STAMP,
+                    CardPlace {
+                        anchor: None,
+                        at: to
+                    },
+                    None,
+                    None
+                )
                 .expect("encode")
                 .map(|alc| alc.pos10),
             Some(Some(to))
@@ -1634,7 +1801,15 @@ mod tests {
             facing_gap: None,
         };
         let first = retail
-            .mob_first(STAMP, to, None, Some(&animation))
+            .mob_first(
+                STAMP,
+                CardPlace {
+                    anchor: None,
+                    at: to,
+                },
+                None,
+                Some(&animation),
+            )
             .expect("encode")
             .expect("first");
         assert_eq!(
@@ -1768,7 +1943,7 @@ mod tests {
         let walking = AlcState::mob_step(&MobStep {
             stamp: STAMP,
             anchored: false,
-            position: Some(to),
+            position: Some(StepPlace::Anchor(to)),
             facing: None,
             scope: Some(StepScope::Ticks {
                 ticks: TICKS,

@@ -18,7 +18,7 @@ use nw_content::creature_animations::{CreatureAnimation, CreatureAnimations};
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::{
     AlcStamp, FRAG_TAGS_LEN, InputPosition, LayerEntry, MobAnimation, MobStep, ScopeEntry,
-    StepScope,
+    StepPlace, StepScope,
 };
 use nw_sim_core::{MobState, Position};
 
@@ -572,6 +572,8 @@ pub(super) struct MobFrame {
     pub(super) animation: Option<MobAnimation>,
     /// Where it faces (yaw, radians), once it turned.
     pub(super) facing: Option<f32>,
+    /// The `pos10` its states' offsets start from (a card carries it with the offset).
+    pub(super) anchor: Option<InputPosition>,
     /// The new state of this tick.
     pub(super) step: Option<MobStep>,
     /// Its alert started this tick: it stands for [`ALERT_MS`].
@@ -586,6 +588,8 @@ struct MobTimeline {
     last_state_ms: u64,
     /// The position of its newest state.
     position: Position,
+    /// The `pos10` its states' offsets start from ([`StepPlace`]).
+    anchor: Option<InputPosition>,
     last_moved_ms: Option<u64>,
     born_ms: u64,
     fragment: Fragment,
@@ -626,12 +630,13 @@ struct MobTimeline {
 impl MobTimeline {
     /// A mob whose first state is at `now_ms`: retail starts the spawn fragment one state before
     /// it.
-    const fn new(now_ms: u64, position: Position) -> Self {
+    fn new(now_ms: u64, position: Position) -> Self {
         Self {
             anchor_ms: now_ms,
             id: FIRST_STATE_ID,
             last_state_ms: now_ms,
             position,
+            anchor: InputPosition::from_metres(position.x, position.y, position.z),
             last_moved_ms: None,
             born_ms: now_ms,
             fragment: Fragment::Spawn,
@@ -811,6 +816,7 @@ impl MobTimeline {
             stamp: self.stamp(now_ms),
             animation: animations.map(|animations| self.animation(animations, now_ms, None)),
             facing: self.yaw,
+            anchor: self.anchor,
             step,
             alert_started,
         }
@@ -907,14 +913,20 @@ impl MobTimeline {
         if turn.is_some() {
             self.yaw = turn;
         }
+        let position = moved
+            .then(|| InputPosition::from_metres(pose.position.x, pose.position.y, pose.position.z))
+            .flatten()
+            .map(|at| {
+                let place = StepPlace::of(self.anchor, at);
+                if let StepPlace::Anchor(anchor) = place {
+                    self.anchor = Some(anchor);
+                }
+                place
+            });
         MobStep {
             stamp: self.stamp(now_ms),
             anchored,
-            position: moved
-                .then(|| {
-                    InputPosition::from_metres(pose.position.x, pose.position.y, pose.position.z)
-                })
-                .flatten(),
+            position,
             facing: turn,
             scope,
         }
@@ -1467,7 +1479,39 @@ mod tests {
             second.scope,
             Some(StepScope::Ticks { ticks: 0 | 1, .. })
         ));
-        assert_eq!(second.position.map(|pos| pos.x), Some(1.4));
+        assert!(
+            matches!(second.position, Some(StepPlace::Offset(_))),
+            "a short walk is an offset from the spawn's pos10: {:?}",
+            second.position
+        );
+    }
+
+    #[test]
+    fn a_walking_mob_sends_offsets_and_a_new_anchor_only_out_of_reach() {
+        /// Half a metre per state: retail's 2.1 m reach holds four of them.
+        const STEP_M: f32 = 0.5;
+        const STATES: u64 = 10;
+        let mut timelines = MobTimelines::default();
+        timelines.advance(MOB, START, &pose(0.0, MobState::Chase), None);
+        let places: Vec<StepPlace> = (1..=STATES)
+            .filter_map(|n| {
+                #[allow(clippy::cast_precision_loss, reason = "a few states")]
+                let x = n as f32 * STEP_M;
+                timelines
+                    .advance(MOB, START + n * TICK_MS, &pose(x, MobState::Chase), None)
+                    .step?
+                    .position
+            })
+            .collect();
+        let anchors = places
+            .iter()
+            .filter(|place| matches!(place, StepPlace::Anchor(_)))
+            .count();
+        assert_eq!(places.len(), 10);
+        assert_eq!(
+            anchors, 2,
+            "a new pos10 each time the mob is 2.1 m past the last: {places:?}"
+        );
     }
 
     #[test]
