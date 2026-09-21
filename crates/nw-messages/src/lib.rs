@@ -12,6 +12,7 @@ pub mod alc;
 pub mod appearance;
 pub mod buildables;
 pub mod bundle;
+pub mod categorical;
 pub mod client_add_entry;
 pub mod client_input;
 pub mod combat;
@@ -30,12 +31,14 @@ pub mod interactor;
 pub mod items;
 pub mod level_info;
 pub mod loot;
+pub mod list_delta;
 pub mod objectives;
 pub mod paperdoll;
 pub mod payload;
 pub mod player_components;
 pub mod position;
 pub mod progression;
+pub mod progression_points;
 pub mod self_ident;
 pub mod server;
 mod slots;
@@ -71,6 +74,10 @@ pub use buildables::{
 pub use bundle::{
     IndexBlock, LOCAL_PLAYER_INTEREST, MAX_BUNDLE_INDEXES, OBSERVED_BUNDLE_BYTE_4,
     REPLICATED_STATE_BUNDLE_TYPE_INDEX, ReplicatedStateBundle,
+};
+pub use categorical::{
+    CATEGORICAL_PROGRESSION_COMPONENT, CATEGORICAL_PROGRESSION_TYPE_INDEX,
+    CategoricalProgressionState, MasteryChange, MasteryEntry, MasteryFields, progression_id,
 };
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use client_input::{
@@ -137,6 +144,7 @@ pub use loot::{
     LOOT_ROLLED, LOOT_TAKEN, LOOT_TRACKER_COMPONENT, LOOT_TRACKER_TYPE_INDEX, LootTrackerState,
     StoredItems, TrackedLoot,
 };
+pub use list_delta::{ListChange, ReplicatedList};
 pub use objectives::{
     OBJECTIVES_COMPONENT, OBJECTIVES_TYPE_INDEX, ObjectiveRecord, ObjectivesState, TaskEntry,
     TaskWireState,
@@ -156,6 +164,10 @@ pub use position::{
     PositionInTheWorldReplicatedState, Rotation, RotationComponent, Scale, WorldPosition,
 };
 pub use progression::{PROGRESSION_COMPONENT, PROGRESSION_TYPE_INDEX, ProgressionState};
+pub use progression_points::{
+    PROGRESSION_POINT_COMPONENT, PROGRESSION_POINT_TYPE_INDEX, PointEntry, PointPool, PoolCategory,
+    ProgressionPointState,
+};
 pub use self_ident::{
     PLAYER_MANAGER_SELF_IDENTIFICATION_MSG_TYPE_INDEX, PlayerManagerSelfIdentificationMsg,
 };

@@ -17,6 +17,10 @@
 use crate::achievements::{ACHIEVEMENT_TYPE_INDEX, AchievementState};
 use crate::appearance::PlayerLook;
 use crate::appearance::{PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState};
+use crate::categorical::{
+    CATEGORICAL_PROGRESSION_COMPONENT, CATEGORICAL_PROGRESSION_TYPE_INDEX,
+    CategoricalProgressionState,
+};
 use crate::components::{
     COMBAT_STATUS_TYPE_INDEX, CURRENCY_TYPE_INDEX, CombatStatusState, CurrencyState,
     DAMAGE_RECEIVER_TYPE_INDEX, DamageReceiverState, MANA_TYPE_INDEX, ManaState,
@@ -37,6 +41,9 @@ use crate::objectives::{OBJECTIVES_TYPE_INDEX, ObjectivesState};
 use crate::paperdoll::PAPERDOLL_TYPE_INDEX;
 use crate::payload::{BundleMember, MemberState};
 use crate::progression::{PROGRESSION_TYPE_INDEX, ProgressionState};
+use crate::progression_points::{
+    PROGRESSION_POINT_COMPONENT, PROGRESSION_POINT_TYPE_INDEX, ProgressionPointState,
+};
 use crate::slots::{children_mask, read_children, read_slot_byte, write_known_children};
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsData, VitalsState};
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
@@ -124,9 +131,12 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 57] = [
     (crate::components::CURRENCY_COMPONENT, CURRENCY_TYPE_INDEX),
     (61, 1755),
     (62, 3183),
-    (65, 911),
+    (
+        CATEGORICAL_PROGRESSION_COMPONENT,
+        CATEGORICAL_PROGRESSION_TYPE_INDEX,
+    ),
     (66, 3210),
-    (67, 3681),
+    (PROGRESSION_POINT_COMPONENT, PROGRESSION_POINT_TYPE_INDEX),
     (68, 497),
     (70, 899),
     (71, 4878),
@@ -379,6 +389,12 @@ pub fn empty_state(class: u64) -> MemberState {
         DAMAGE_RECEIVER_TYPE_INDEX => MemberState::DamageReceiver(DamageReceiverState::default()),
         OBJECTIVES_TYPE_INDEX => MemberState::Objectives(ObjectivesState::default()),
         PROGRESSION_TYPE_INDEX => MemberState::Progression(ProgressionState::default()),
+        CATEGORICAL_PROGRESSION_TYPE_INDEX => {
+            MemberState::CategoricalProgression(CategoricalProgressionState::default())
+        }
+        PROGRESSION_POINT_TYPE_INDEX => {
+            MemberState::ProgressionPoints(ProgressionPointState::default())
+        }
         CURRENCY_TYPE_INDEX => MemberState::Currency(CurrencyState::default()),
         COOLDOWNS_TYPE_INDEX => MemberState::Cooldowns(CooldownsState::default()),
         LOOT_TRACKER_TYPE_INDEX => MemberState::LootTracker(LootTrackerState::default()),
@@ -406,6 +422,11 @@ pub struct PlayerStates<'a> {
     pub objectives: Option<&'a ObjectivesState>,
     /// The level and experience, when known.
     pub progression: Option<ProgressionState>,
+    /// The weapon masteries and other categorical progressions, with the card and after a
+    /// change.
+    pub categorical_progression: Option<&'a CategoricalProgressionState>,
+    /// The progression point pools, with the card and after a change.
+    pub progression_points: Option<&'a ProgressionPointState>,
     /// The coins, with the card and after a change.
     pub currency: Option<CurrencyState>,
     /// The new health after it changed (a hit or a heal), when it did.
@@ -446,8 +467,8 @@ pub const PLAYER_VITALS_COMPONENT: u64 = 41;
 pub const PLAYER_STAMINA_COMPONENT: u64 = 42;
 
 /// The members of the states that `states` holds besides the card's: the achievements, the
-/// objectives, the progression, the gear, the combat status, a health change and a stamina
-/// change. A bundle without the card sends
+/// objectives, the progression, the categorical progression, the progression points, the gear,
+/// the combat status, a health change and a stamina change. A bundle without the card sends
 /// these changes.
 pub fn change_members(states: PlayerStates<'_>) -> Vec<BundleMember> {
     let mut members: Vec<BundleMember> = player_members(states)
@@ -455,6 +476,8 @@ pub fn change_members(states: PlayerStates<'_>) -> Vec<BundleMember> {
             ACHIEVEMENT_TYPE_INDEX => states.achievements.is_some(),
             OBJECTIVES_TYPE_INDEX => states.objectives.is_some(),
             PROGRESSION_TYPE_INDEX => states.progression.is_some(),
+            CATEGORICAL_PROGRESSION_TYPE_INDEX => states.categorical_progression.is_some(),
+            PROGRESSION_POINT_TYPE_INDEX => states.progression_points.is_some(),
             CURRENCY_TYPE_INDEX => states.currency.is_some(),
             COOLDOWNS_TYPE_INDEX => states.cooldowns.is_some(),
             COMBAT_STATUS_TYPE_INDEX => states.combat_status.is_some(),
@@ -503,6 +526,8 @@ pub fn gear_members(gear: &PlayerGear) -> impl Iterator<Item = BundleMember> + '
         achievements: None,
         objectives: None,
         progression: None,
+        categorical_progression: None,
+        progression_points: None,
         currency: None,
         health_change: None,
         cooldowns: None,
@@ -533,6 +558,16 @@ fn player_state(states: PlayerStates<'_>, component: u64, class: u64) -> MemberS
         && let Some(progression) = states.progression
     {
         return MemberState::Progression(progression);
+    }
+    if class == CATEGORICAL_PROGRESSION_TYPE_INDEX
+        && let Some(categorical) = states.categorical_progression
+    {
+        return MemberState::CategoricalProgression(categorical.clone());
+    }
+    if class == PROGRESSION_POINT_TYPE_INDEX
+        && let Some(points) = states.progression_points
+    {
+        return MemberState::ProgressionPoints(points.clone());
     }
     if class == CURRENCY_TYPE_INDEX
         && let Some(currency) = states.currency
@@ -601,6 +636,8 @@ fn has_own_reader(class: u64) -> bool {
             | DAMAGE_RECEIVER_TYPE_INDEX
             | OBJECTIVES_TYPE_INDEX
             | PROGRESSION_TYPE_INDEX
+            | CATEGORICAL_PROGRESSION_TYPE_INDEX
+            | PROGRESSION_POINT_TYPE_INDEX
             | COOLDOWNS_TYPE_INDEX
             | GATHERING_TYPE_INDEX
             | INTERACTOR_TYPE_INDEX
@@ -651,6 +688,8 @@ mod tests {
             achievements: None,
             objectives: None,
             progression: None,
+            categorical_progression: None,
+            progression_points: None,
             currency: None,
             health_change: None,
             cooldowns: None,
@@ -710,6 +749,8 @@ mod tests {
             achievements: None,
             objectives: None,
             progression: None,
+            categorical_progression: None,
+            progression_points: None,
             currency: None,
             health_change: None,
             cooldowns: None,
@@ -771,6 +812,8 @@ mod tests {
             achievements: None,
             objectives: None,
             progression: None,
+            categorical_progression: None,
+            progression_points: None,
             currency: None,
             health_change: Some(HealthChange {
                 health: 0,
@@ -823,6 +866,8 @@ mod tests {
             achievements: None,
             objectives: Some(&objectives),
             progression: Some(ProgressionState::experience(20)),
+            categorical_progression: None,
+            progression_points: None,
             currency: None,
             health_change: Some(HealthChange {
                 health: HEALED,
@@ -860,6 +905,50 @@ mod tests {
     }
 
     #[test]
+    fn the_masteries_and_point_pools_go_out_on_components_65_and_67() {
+        let masteries = CategoricalProgressionState::full(
+            crate::items::FIRST_VERSION,
+            &[crate::categorical::MasteryEntry {
+                progression_id: crate::categorical::progression_id("GreatSwordAbilityTable"),
+                rank: 1,
+                points: 10,
+            }],
+        );
+        let pools = ProgressionPointState::full(crate::items::FIRST_VERSION, &[], &[]);
+        let states = PlayerStates {
+            character_id: CHARACTER_ID,
+            look: None,
+            health: None,
+            gear: None,
+            achievements: None,
+            objectives: None,
+            progression: None,
+            categorical_progression: Some(&masteries),
+            progression_points: Some(&pools),
+            currency: None,
+            health_change: None,
+            cooldowns: None,
+            stamina: None,
+            combat_status: None,
+        };
+        let members = change_members(states);
+        assert_eq!(
+            members,
+            [
+                BundleMember {
+                    component: CATEGORICAL_PROGRESSION_COMPONENT,
+                    state: MemberState::CategoricalProgression(masteries),
+                },
+                BundleMember {
+                    component: PROGRESSION_POINT_COMPONENT,
+                    state: MemberState::ProgressionPoints(pools),
+                },
+            ]
+        );
+        reads_back(&members);
+    }
+
+    #[test]
     fn a_combat_status_change_goes_out_on_component_28() {
         // Retail 78148 of the tutorial capture.
         const RETAIL: [u8; 19] = [
@@ -880,6 +969,8 @@ mod tests {
             achievements: None,
             objectives: None,
             progression: None,
+            categorical_progression: None,
+            progression_points: None,
             currency: None,
             health_change: None,
             cooldowns: None,
@@ -934,6 +1025,8 @@ mod tests {
             achievements: None,
             objectives: None,
             progression: None,
+            categorical_progression: None,
+            progression_points: None,
             currency: None,
             health_change: None,
             cooldowns: None,

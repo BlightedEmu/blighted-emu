@@ -9,6 +9,7 @@ publish.workspace = true
 
 [dependencies]
 getrandom.workspace = true
+nw-formats.workspace = true
 nw-reflect.workspace = true
 thiserror.workspace = true
 

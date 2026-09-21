@@ -190,6 +190,8 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::TerritoryInterface(_)
         | MemberState::BuildableGrid(_)
         | MemberState::Ownership(_)
+        | MemberState::CategoricalProgression(_)
+        | MemberState::ProgressionPoints(_)
         | MemberState::Empty(_)
         | MemberState::Recorded { .. } => None,
     }

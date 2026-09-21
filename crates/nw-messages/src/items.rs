@@ -48,9 +48,9 @@ const ITEM_INDEX_BITS: u32 = 20;
 /// Durability values: 0 to 8000.
 const DURABILITY_VALUES: u64 = 8001;
 /// A list's first number: 0 is the full form.
-const FULL_FORM: u64 = 0;
+pub(crate) const FULL_FORM: u64 = 0;
 /// The version flag byte: a version follows.
-const VERSION_PRESENT: u8 = 1;
+pub(crate) const VERSION_PRESENT: u8 = 1;
 /// Most elements of a full list (`FUN_1440e8f30` limit).
 const MAX_FULL_ELEMENTS: u64 = 0x200_0000;
 const FIELD: &str = "replicated list";

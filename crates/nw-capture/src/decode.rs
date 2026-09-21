@@ -297,6 +297,8 @@ fn member_position(state: &MemberState) -> Option<[f32; 3]> {
         | MemberState::ItemManagement(_)
         | MemberState::Objectives(_)
         | MemberState::Progression(_)
+        | MemberState::CategoricalProgression(_)
+        | MemberState::ProgressionPoints(_)
         | MemberState::Cooldowns(_)
         | MemberState::LootTracker(_)
         | MemberState::GlobalStorage(_)

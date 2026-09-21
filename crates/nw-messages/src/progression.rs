@@ -47,6 +47,26 @@ impl ProgressionState {
         }
     }
 
+    /// The login state of a player at `level` (zero-based) with `experience` points and no
+    /// rested experience. Retail sends the level only above 0: a new character's login has no
+    /// level (`02 03 <xp> <rested>`), the level 67 character's has (`03 01 <level> 03 <xp>
+    /// <rested>`, progression note, section 3).
+    pub const fn login_at_level(level: u32, experience: u32) -> Self {
+        Self {
+            level: if level > 0 { Some(level) } else { None },
+            ..Self::login(experience)
+        }
+    }
+
+    /// The change at a level up to `level` (zero-based) with the new total `experience`: retail
+    /// `03 01 <level> 01 <xp>`, without the rested experience (progression note, section 3).
+    pub const fn level_up(level: u32, experience: u32) -> Self {
+        Self {
+            level: Some(level),
+            ..Self::experience(experience)
+        }
+    }
+
     /// The change after the experience became `experience`.
     pub const fn experience(experience: u32) -> Self {
         Self {
@@ -140,5 +160,41 @@ mod tests {
             assert_eq!(bytes(state), body);
         }
         assert_eq!(bytes(ProgressionState::default()), [0]);
+    }
+
+    #[test]
+    fn the_retail_level_login_and_level_up_read_and_write_the_same_bytes() {
+        // Retail level 67 login (NH-MSQ-2.1, t526359): level 66 zero-based, 2,194,660 points.
+        const LEVEL_LOGIN: [u8; 15] = [
+            0x03, 0x01, 0x00, 0x00, 0x00, 0x42, 0x03, 0x00, 0x21, 0x7c, 0xe4, 0x00, 0x00, 0x00,
+            0x00,
+        ];
+        const LOGIN_LEVEL: u32 = 66;
+        const LOGIN_EXPERIENCE: u32 = 2_194_660;
+        // Retail level up of the new character (2026-09-18, t453313): level 2, 670 points.
+        const LEVEL_UP: [u8; 11] = [0x03, 0x01, 0, 0, 0, 0x02, 0x01, 0, 0, 0x02, 0x9e];
+        const UP_LEVEL: u32 = 2;
+        const UP_EXPERIENCE: u32 = 670;
+        assert_eq!(
+            bytes(ProgressionState::login_at_level(
+                LOGIN_LEVEL,
+                LOGIN_EXPERIENCE
+            )),
+            LEVEL_LOGIN
+        );
+        assert_eq!(
+            ProgressionState::login_at_level(0, LOGIN_EXPERIENCE),
+            ProgressionState::login(LOGIN_EXPERIENCE)
+        );
+        assert_eq!(
+            bytes(ProgressionState::level_up(UP_LEVEL, UP_EXPERIENCE)),
+            LEVEL_UP
+        );
+        for body in [&LEVEL_LOGIN[..], &LEVEL_UP[..]] {
+            let mut reader = Reader::new(body);
+            let state = ProgressionState::read(&mut reader).expect("read");
+            reader.finish().expect("whole");
+            assert_eq!(bytes(state), body);
+        }
     }
 }

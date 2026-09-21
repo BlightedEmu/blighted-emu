@@ -8,6 +8,7 @@
 //! the byte index, a version and the new byte.
 
 use crate::items::FullList;
+use crate::list_delta::{ListChange, ReplicatedList, write_changes};
 use crate::slots::{SLOT_0, read_slot_0, write_known_children};
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -18,10 +19,6 @@ pub const ACHIEVEMENT_COMPONENT: u64 = 66;
 
 /// Children of slot 0.
 const ACHIEVEMENT_CHILDREN: u8 = 1;
-/// Entries per delta group.
-const DELTA_GROUP: usize = 8;
-/// The version flag byte: a version follows.
-const VERSION_PRESENT: u8 = 1;
 const FIELD: &str = "achievements";
 
 /// One changed byte of the bitset.
@@ -61,13 +58,14 @@ impl AchievementState {
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         let mut bits = None;
         read_slot_0(reader, FIELD, ACHIEVEMENT_CHILDREN, |reader, _| {
-            let rest = reader.rest();
-            let mut peek = Reader::new(rest);
-            bits = Some(if peek.wide_prefixed()? == 0 {
-                AchievementBits::Full(FullList::read(reader, |reader| reader.u8())?)
-            } else {
-                AchievementBits::Changes(read_changes(reader)?)
-            });
+            bits = Some(
+                match ReplicatedList::read(reader, FIELD, |reader| reader.u8())? {
+                    ReplicatedList::Full(list) => AchievementBits::Full(list),
+                    ReplicatedList::Changes(changes) => AchievementBits::Changes(
+                        changes.into_iter().map(ByteChange::from).collect(),
+                    ),
+                },
+            );
             Ok(())
         })?;
         Ok(Self { bits })
@@ -92,8 +90,12 @@ impl AchievementState {
                     Ok(())
                 }),
                 AchievementBits::Changes(changes) => {
-                    write_changes(writer, changes);
-                    Ok(())
+                    let changes: Vec<ListChange<u8>> =
+                        changes.iter().map(ListChange::from).collect();
+                    write_changes(writer, &changes, |writer, byte| {
+                        writer.u8(*byte);
+                        Ok(())
+                    })
                 }
             };
         });
@@ -101,52 +103,22 @@ impl AchievementState {
     }
 }
 
-fn read_changes(reader: &mut Reader<'_>) -> Result<Vec<ByteChange>, MessageError> {
-    let count = reader.wide_prefixed()?;
-    // Each entry takes at least four bytes.
-    if count > reader.remaining() as u64 {
-        return Err(MessageError::LengthMismatch { field: FIELD });
-    }
-    // At most the bytes left.
-    let mut left = count as usize;
-    let mut changes = Vec::with_capacity(left);
-    while left > 0 {
-        let mask = reader.u8()?;
-        let group = left.min(DELTA_GROUP);
-        for entry in 0..group {
-            let byte = reader.wide_prefixed()?;
-            if reader.u8()? != VERSION_PRESENT || mask & 1 << entry == 0 {
-                return Err(MessageError::Unsized {
-                    field: FIELD,
-                    byte: mask,
-                });
-            }
-            changes.push(ByteChange {
-                byte: u32::try_from(byte).map_err(|_| MessageError::CountTooLarge {
-                    count: byte,
-                    limit: u64::from(u32::MAX),
-                })?,
-                version: reader.wide_prefixed()?,
-                value: reader.u8()?,
-            });
+impl From<ListChange<u8>> for ByteChange {
+    fn from(change: ListChange<u8>) -> Self {
+        Self {
+            byte: change.index,
+            version: change.version,
+            value: change.value,
         }
-        left -= group;
     }
-    Ok(changes)
 }
 
-fn write_changes(writer: &mut Writer, changes: &[ByteChange]) {
-    // A `usize` count fits 64 bits.
-    writer.wide_prefixed(changes.len() as u64);
-    for group in changes.chunks(DELTA_GROUP) {
-        // Every entry of a group carries a value; a group has at most 8 entries.
-        writer.u8(u8::MAX >> (DELTA_GROUP - group.len()));
-        for change in group {
-            writer
-                .wide_prefixed(u64::from(change.byte))
-                .u8(VERSION_PRESENT)
-                .wide_prefixed(change.version)
-                .u8(change.value);
+impl From<&ByteChange> for ListChange<u8> {
+    fn from(change: &ByteChange) -> Self {
+        Self {
+            index: change.byte,
+            version: change.version,
+            value: change.value,
         }
     }
 }

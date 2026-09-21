@@ -18,6 +18,7 @@ use crate::buildables::{
     BuildableGridState, OWNERSHIP_TYPE_INDEX, OwnershipState, PLACEMENT_OBSTRUCTION_TYPE_INDEX,
     PlacementObstructionState, TERRITORY_INTERFACE_TYPE_INDEX, TerritoryInterfaceState,
 };
+use crate::categorical::{CATEGORICAL_PROGRESSION_TYPE_INDEX, CategoricalProgressionState};
 use crate::components::{
     COMBAT_STATUS_TYPE_INDEX, CURRENCY_TYPE_INDEX, CombatStatusState, CurrencyState,
     DAMAGE_RECEIVER_TYPE_INDEX, DELAYED_EVENT_TYPE_INDEX, DamageReceiverState, DelayedEventState,
@@ -40,6 +41,7 @@ use crate::paperdoll::{PAPERDOLL_TYPE_INDEX, PaperdollState};
 use crate::player_components::{EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PlayerComponentState};
 use crate::position::{POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState};
 use crate::progression::{PROGRESSION_TYPE_INDEX, ProgressionState};
+use crate::progression_points::{PROGRESSION_POINT_TYPE_INDEX, ProgressionPointState};
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsState};
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -108,6 +110,10 @@ pub enum MemberState {
     BuildableGrid(BuildableGridState),
     /// The ownership state (type 3218).
     Ownership(OwnershipState),
+    /// `CategoricalProgressionReplicatedState`.
+    CategoricalProgression(CategoricalProgressionState),
+    /// `ProgressionPointReplicatedState`.
+    ProgressionPoints(ProgressionPointState),
     /// An empty state of a player component class without a reader of its own.
     Empty(EmptyState),
     /// A state of `class` sent as recorded body bytes (a retail state replayed as it was, of a
@@ -155,6 +161,8 @@ impl MemberState {
             Self::TerritoryInterface(_) => TERRITORY_INTERFACE_TYPE_INDEX,
             Self::BuildableGrid(_) => BUILDABLE_GRID_TYPE_INDEX,
             Self::Ownership(_) => OWNERSHIP_TYPE_INDEX,
+            Self::CategoricalProgression(_) => CATEGORICAL_PROGRESSION_TYPE_INDEX,
+            Self::ProgressionPoints(_) => PROGRESSION_POINT_TYPE_INDEX,
             Self::Empty(state) => state.class,
             Self::Recorded { class, .. } => *class,
         }
@@ -264,6 +272,12 @@ impl MemberState {
             TypeId::FileSlot(OWNERSHIP_TYPE_INDEX) => {
                 OwnershipState::read(reader).map(Self::Ownership)
             }
+            TypeId::FileSlot(CATEGORICAL_PROGRESSION_TYPE_INDEX) => {
+                CategoricalProgressionState::read(reader).map(Self::CategoricalProgression)
+            }
+            TypeId::FileSlot(PROGRESSION_POINT_TYPE_INDEX) => {
+                ProgressionPointState::read(reader).map(Self::ProgressionPoints)
+            }
             TypeId::FileSlot(index) if EmptyState::covers(index) => {
                 EmptyState::read(index, reader).map(Self::Empty)
             }
@@ -358,6 +372,8 @@ impl MemberState {
             }
             Self::BuildableGrid(state) => state.write(writer),
             Self::Ownership(state) => state.write(writer),
+            Self::CategoricalProgression(state) => state.write(writer),
+            Self::ProgressionPoints(state) => state.write(writer),
             Self::Empty(state) => {
                 state.write(writer);
                 Ok(())
