@@ -36,7 +36,7 @@ pub use character::{
     character_by_id, character_name_taken, characters_for_account, delete_character,
     insert_character, release_character_name, reserve_character_name,
 };
-pub use connect::{DatabaseConfig, connect, connect_options};
+pub use connect::{DatabaseConfig, connect, connect_lazy, connect_options};
 pub use entity::{MAX_ENTITY_NUMBER, next_entity_number};
 pub use error::DbError;
 pub use items::{SavedItem, SavedPlace, character_items, save_character_items};

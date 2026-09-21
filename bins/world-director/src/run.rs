@@ -65,6 +65,9 @@ pub enum RunError {
     Metrics(String),
 }
 
+/// Longest wait for a connection of the global database (the admin ranks).
+const RANK_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// Runs `world-director` until Ctrl-C.
 ///
 /// # Errors
@@ -114,10 +117,13 @@ async fn serve_async(
                 .ok()
                 .filter(|value| !value.is_empty())
                 .ok_or_else(|| RunError::MissingSecret(global.password_env.clone()))?;
-            let pool = nw_db::connect(&global.database, &password)
-                .await
+            // Lazy: the admin ranks are optional, so a global database that is down at start
+            // gives no GM rights instead of stopping the world.
+            let pool = nw_db::connect_lazy(&global.database, &password, RANK_ACQUIRE_TIMEOUT)
                 .map_err(RunError::Database)?;
-            check_schema(&pool, &GLOBAL_MIGRATOR).await?;
+            if let Err(error) = check_schema(&pool, &GLOBAL_MIGRATOR).await {
+                tracing::warn!(%error, "global database not ready; no GM rights until it is");
+            }
             Some(pool)
         }
         None => None,

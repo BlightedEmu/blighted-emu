@@ -11,8 +11,6 @@
 //! changed (child byte `04` for points, `06` for rank and points, `07` for a new entry), and a new
 //! entry goes at index = the old length on all three children.
 
-use nw_formats::objectstream::lowercase_crc32;
-
 use crate::list_delta::{ReplicatedList, child_changes, full_child, write_child};
 use crate::slots::{SLOT_0, children_mask, read_slot_0, write_children};
 use crate::wire::{MessageError, Reader, Writer};
@@ -27,12 +25,6 @@ const CHILDREN: u8 = 3;
 const IDS_CHILD: u8 = 0;
 const RANKS_CHILD: u8 = 1;
 const FIELD: &str = "categorical progression";
-
-/// The wire id of the categorical progression `name` (a `CategoricalProgressionId` of
-/// `javelindata_categoricalprogression`): the CRC-32 (IEEE) of the lowercase name.
-pub fn progression_id(name: &str) -> u32 {
-    lowercase_crc32(name)
-}
 
 /// One entry of the three lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,6 +188,7 @@ impl CategoricalProgressionState {
 mod tests {
     use super::*;
     use crate::items::FIRST_VERSION;
+    use nw_formats::objectstream::lowercase_crc32;
 
     /// Retail login (new character, 2026-09-18, t307): Cooking, Leatherworking, Fishing,
     /// SeasonPass and Camping, version 3.
@@ -235,7 +228,7 @@ mod tests {
 
     fn entry(name: &str, rank: u16, points: u64) -> MasteryEntry {
         MasteryEntry {
-            progression_id: progression_id(name),
+            progression_id: lowercase_crc32(name),
             rank,
             points,
         }
@@ -264,8 +257,8 @@ mod tests {
 
     #[test]
     fn the_progression_id_is_the_retail_crc_of_the_lowercase_name() {
-        assert_eq!(progression_id("GreatSwordAbilityTable"), 0x180b_9a9f);
-        assert_eq!(progression_id("BlunderbussAbilityTable"), 0x6020_b33f);
+        assert_eq!(lowercase_crc32("GreatSwordAbilityTable"), 0x180b_9a9f);
+        assert_eq!(lowercase_crc32("BlunderbussAbilityTable"), 0x6020_b33f);
     }
 
     #[test]

@@ -17,6 +17,8 @@ use nw_messages::{
 
 use super::{Player, SimWorld};
 
+/// The most coins a save keeps (the database column is a signed 64-bit number).
+const MAX_COINS: u64 = i64::MAX.unsigned_abs();
 /// The answer for a level or mastery command when the content has no level table.
 const NO_LEVELS: &str = "the content has no level table";
 
@@ -25,6 +27,9 @@ const NO_LEVELS: &str = "the content has no level table";
 pub(super) struct Masteries {
     /// Each mastery id and its total experience, in list order.
     entries: Vec<(String, u32)>,
+    /// Saved masteries the content does not know: kept as they are, so a content change never
+    /// deletes them at the next save.
+    kept: BTreeMap<String, u32>,
     /// The list positions that changed since the last bundle, and the fields that did.
     changed: BTreeMap<usize, MasteryFields>,
     /// The list positions whose rank changed since the last bundle.
@@ -36,31 +41,52 @@ pub(super) struct Masteries {
 }
 
 impl Masteries {
-    /// The masteries of `saved` (id to total experience) that `progression` knows; another id is
-    /// dropped with a log line.
-    pub(super) fn of(saved: &BTreeMap<String, u32>, progression: &Progression) -> Self {
-        let entries = saved
-            .iter()
-            .filter_map(|(id, experience)| match progression.mastery(id) {
-                Some(mastery) => Some((
-                    mastery.id.clone(),
-                    (*experience).min(mastery.max_experience()),
-                )),
-                None => {
-                    tracing::warn!(mastery = %id, "unknown weapon mastery dropped");
-                    None
+    /// The masteries of `saved` (id to total experience): the ones `progression` knows go to
+    /// the client; another id is kept unsent, with a log line. The client's lists go on above
+    /// `versions` (the 911 and 3681 versions it got from the sim before; 0 for none): retail's
+    /// list versions only rise.
+    pub(super) fn of(
+        saved: &BTreeMap<String, u32>,
+        progression: &Progression,
+        versions: (u64, u64),
+    ) -> Self {
+        let mut entries = Vec::new();
+        let mut kept = BTreeMap::new();
+        for (id, experience) in saved {
+            match progression.mastery(id) {
+                Some(mastery) => {
+                    entries.push((
+                        mastery.id.clone(),
+                        (*experience).min(mastery.max_experience()),
+                    ));
                 }
-            })
-            .collect();
+                None => {
+                    tracing::warn!(mastery = %id, "unknown weapon mastery kept unsent");
+                    kept.insert(id.clone(), *experience);
+                }
+            }
+        }
         Self {
             entries,
+            kept,
+            version: versions.0,
+            pools_version: versions.1,
             ..Self::default()
         }
     }
 
     /// Each mastery id and its total experience, as a save or a handoff carries them.
     pub(super) fn carried(&self) -> BTreeMap<String, u32> {
-        self.entries.iter().cloned().collect()
+        self.kept
+            .iter()
+            .map(|(id, experience)| (id.clone(), *experience))
+            .chain(self.entries.iter().cloned())
+            .collect()
+    }
+
+    /// The versions of the newest 911 and 3681 lists the client has, for the next sim.
+    pub(super) fn versions(&self) -> (u64, u64) {
+        (self.version, self.pools_version)
     }
 
     /// The total experience of `mastery`.
@@ -111,12 +137,12 @@ impl Masteries {
     ) -> (CategoricalProgressionState, ProgressionPointState) {
         self.changed.clear();
         self.ranked.clear();
-        self.version = FIRST_VERSION;
-        self.pools_version = FIRST_VERSION;
+        self.version = next_full_version(self.version);
+        self.pools_version = next_full_version(self.pools_version);
         let entries: Vec<MasteryEntry> = self.wire_entries(progression).collect();
         (
             CategoricalProgressionState::full(self.version, &entries),
-            ProgressionPointState::pools(self.pools_version, &self.pools(progression)),
+            ProgressionPointState::full(self.pools_version, &self.pools(progression), &[]),
         )
     }
 
@@ -185,6 +211,15 @@ impl Masteries {
                 category: PoolCategory::Weapon,
             })
             .collect()
+    }
+}
+
+/// The version of a full list after `last`: the first one, or the one above `last`.
+fn next_full_version(last: u64) -> u64 {
+    if last < FIRST_VERSION {
+        FIRST_VERSION
+    } else {
+        last.saturating_add(1)
     }
 }
 
@@ -267,10 +302,10 @@ impl SimWorld {
         })
     }
 
-    /// Sets the coins of the player `entity`.
+    /// Sets the coins of the player `entity`, at most what a save keeps.
     pub(super) fn set_coins(&mut self, entity: u64, coins: u64) -> AdminReply {
         self.with_player(entity, |player| {
-            player.coins = coins;
+            player.coins = coins.min(MAX_COINS);
             player.coins_changed = true;
             AdminReply::Done
         })
@@ -329,10 +364,10 @@ mod tests {
         let progression = progression();
         let sword = progression.mastery(SWORD).expect("sword").clone();
         let buss = progression.mastery(BUSS).expect("buss").clone();
-        let mut masteries = Masteries::of(&BTreeMap::new(), &progression);
+        let mut masteries = Masteries::of(&BTreeMap::new(), &progression, (0, 0));
         let (first, pools) = masteries.first_states(&progression);
         assert_eq!(first, CategoricalProgressionState::full(FIRST_VERSION, &[]));
-        assert_eq!(pools, ProgressionPointState::pools(FIRST_VERSION, &[]));
+        assert_eq!(pools, ProgressionPointState::full(FIRST_VERSION, &[], &[]));
         assert!(masteries.take_change(&progression).is_none());
         // Retail first kill: greatsword +20 (rank 1, 10 points), blunderbuss +4.
         masteries.set(&sword, 20);
@@ -388,15 +423,41 @@ mod tests {
     }
 
     #[test]
-    fn experience_stops_at_the_top_rank_and_unknown_ids_are_dropped() {
+    fn a_handed_off_player_gets_lists_above_the_versions_it_had() {
+        let progression = progression();
+        let sword = progression.mastery(SWORD).expect("sword").clone();
+        let carried = BTreeMap::from([(SWORD.to_owned(), 20)]);
+        let mut masteries = Masteries::of(&carried, &progression, (12, 7));
+        let (first, pools) = masteries.first_states(&progression);
+        let entry = MasteryEntry {
+            progression_id: sword.crc,
+            rank: 1,
+            points: 10,
+        };
+        assert_eq!(first, CategoricalProgressionState::full(13, &[entry]));
+        let pool = PointPool {
+            pool: sword.crc,
+            count: 1,
+            category: PoolCategory::Weapon,
+        };
+        assert_eq!(pools, ProgressionPointState::full(8, &[pool], &[]));
+        assert_eq!(masteries.versions(), (13, 8));
+    }
+
+    #[test]
+    fn experience_stops_at_the_top_rank_and_unknown_ids_are_kept() {
         let progression = progression();
         let sword = progression.mastery(SWORD).expect("sword").clone();
         let saved = BTreeMap::from([(SWORD.to_owned(), u32::MAX), ("Cooking".to_owned(), 7)]);
-        let mut masteries = Masteries::of(&saved, &progression);
+        let mut masteries = Masteries::of(&saved, &progression, (0, 0));
         assert_eq!(masteries.experience(&sword), sword.max_experience());
         assert_eq!(
             masteries.carried(),
-            BTreeMap::from([(SWORD.to_owned(), sword.max_experience())])
+            BTreeMap::from([
+                (SWORD.to_owned(), sword.max_experience()),
+                ("Cooking".to_owned(), 7),
+            ]),
+            "an id the content does not know is kept for the save"
         );
         masteries.set(&sword, u32::MAX);
         assert!(

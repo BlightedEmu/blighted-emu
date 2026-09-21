@@ -308,6 +308,10 @@ pub struct HandoffOffer {
     /// dropped every greatsword swing).
     #[serde(default)]
     pub drawn_weapon: Option<u32>,
+    /// The versions of the newest weapon mastery (911) and point pool (3681) lists the client
+    /// has; the taker's full lists go on above them (retail's list versions only rise).
+    #[serde(default)]
+    pub mastery_versions: (u64, u64),
     /// Whether the account has the game master rank, as in [`Admit::game_master`].
     #[serde(default)]
     pub game_master: bool,
@@ -843,6 +847,7 @@ mod tests {
             client_context: 1,
             enter_level: false,
             progression: progression(),
+            mastery_versions: (12, 7),
             game_master: true,
             achievement_version: 25,
             items: Some(vec![CarriedItem {

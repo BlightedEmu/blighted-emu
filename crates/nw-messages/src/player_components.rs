@@ -909,7 +909,7 @@ mod tests {
         let masteries = CategoricalProgressionState::full(
             crate::items::FIRST_VERSION,
             &[crate::categorical::MasteryEntry {
-                progression_id: crate::categorical::progression_id("GreatSwordAbilityTable"),
+                progression_id: nw_formats::objectstream::lowercase_crc32("GreatSwordAbilityTable"),
                 rank: 1,
                 points: 10,
             }],

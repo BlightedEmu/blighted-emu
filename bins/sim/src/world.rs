@@ -753,6 +753,8 @@ struct Arrival {
     /// Whether `progression` is what the database holds or a save of this sim waits with (a
     /// join); a handoff's may not be saved yet.
     progression_saved: bool,
+    /// The versions of the newest 911 and 3681 lists its client has (0 for none).
+    mastery_versions: (u64, u64),
     /// Whether its account has the game master rank.
     game_master: bool,
     /// Its saved or carried quests.
@@ -917,6 +919,7 @@ impl SimWorld {
             drawn_weapon: None,
             progression: admit.progression.clone(),
             progression_saved: true,
+            mastery_versions: (0, 0),
             game_master: admit.game_master,
             quests: admit.quests.clone(),
         };
@@ -1040,6 +1043,7 @@ impl SimWorld {
             drawn_weapon: offer.drawn_weapon,
             progression: offer.progression.clone(),
             progression_saved: false,
+            mastery_versions: offer.mastery_versions,
             game_master: offer.game_master,
             quests: offer.quests.clone(),
         };
@@ -3087,6 +3091,7 @@ impl SimWorld {
                     masteries: progression::Masteries::of(
                         &arrival.progression.masteries,
                         &self.content.progression,
+                        arrival.mastery_versions,
                     ),
                     level_sent: None,
                     game_master: arrival.game_master,
@@ -3546,11 +3551,12 @@ impl Neighbourhood<'_> {
                 // The experience and the level: whole with the first card, then after each
                 // change; a change of level sends the new level with the experience (retail
                 // 899 at each level up, progression-and-gm-mode note section 3).
-                let level = self.progression.level_of(player.experience);
                 let progression = if first {
+                    let level = self.progression.level_of(player.experience);
                     player.level_sent = Some(level);
                     Some(ProgressionState::login_at_level(level, player.experience))
                 } else if std::mem::take(&mut player.experience_changed) {
+                    let level = self.progression.level_of(player.experience);
                     let leveled = player.level_sent != Some(level);
                     player.level_sent = Some(level);
                     Some(if leveled {
@@ -3845,6 +3851,7 @@ fn handoff_offer(
         enter_level: enters,
         items: player.gear.as_ref().map(Gear::carried),
         drawn_weapon: player.gear.as_ref().and_then(Gear::drawn),
+        mastery_versions: player.masteries.versions(),
         game_master: player.game_master,
         quests,
         progression: player.progression(),

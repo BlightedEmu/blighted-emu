@@ -2902,6 +2902,7 @@ mod tests {
                 enter_level: false,
                 items: None,
                 drawn_weapon: None,
+                mastery_versions: (0, 0),
                 game_master: false,
                 quests: PlayerQuests::default(),
                 progression: PlayerProgression::default(),

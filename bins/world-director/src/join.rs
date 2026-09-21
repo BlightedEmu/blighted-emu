@@ -20,6 +20,9 @@ use uuid::Uuid;
 
 use crate::sims::Assignment;
 
+/// Longest wait for an account's admin rank; it stays far below the admit timeout.
+const RANK_READ_TIMEOUT: Duration = Duration::from_millis(300);
+
 /// The handoff count and the bundle sequence of a new player.
 const NEW_PLAYER_COUNT: u64 = 0;
 
@@ -240,16 +243,21 @@ pub async fn route_join(
     }
 }
 
-/// Whether `account` has the game master rank (or a higher one) in `ranks`. A failed read gives
-/// no GM rights, so a database fault never refuses a join.
+/// Whether `account` has the game master rank (or a higher one) in `ranks`. A failed or slow
+/// read (above [`RANK_READ_TIMEOUT`]) gives no GM rights, so a database fault never refuses or
+/// holds up a join.
 async fn is_game_master(ranks: Option<&PgPool>, account: Uuid) -> bool {
     let Some(ranks) = ranks else {
         return false;
     };
-    match admin_rank(ranks, account).await {
-        Ok(rank) => rank.is_some_and(|rank| rank >= AdminRank::GameMaster),
-        Err(error) => {
+    match tokio::time::timeout(RANK_READ_TIMEOUT, admin_rank(ranks, account)).await {
+        Ok(Ok(rank)) => rank.is_some_and(|rank| rank >= AdminRank::GameMaster),
+        Ok(Err(error)) => {
             tracing::warn!(%error, %account, "admin rank read failed; no GM rights");
+            false
+        }
+        Err(_) => {
+            tracing::warn!(%account, "admin rank read too slow; no GM rights");
             false
         }
     }

@@ -9,12 +9,12 @@ publish.workspace = true
 
 [dependencies]
 getrandom.workspace = true
-nw-formats.workspace = true
 nw-reflect.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
+nw-formats.workspace = true
 proptest.workspace = true
 
 [features]

@@ -579,7 +579,7 @@ async fn give_experience(
         &actor,
         "give_experience",
         player(request.entity),
-        &request,
+        request,
     );
     if let Some(refused) = gm.refused(GM_RANK).await {
         return refused;
@@ -599,13 +599,7 @@ async fn set_level(
     Extension(actor): Extension<Actor>,
     Json(request): Json<LevelRequest>,
 ) -> Response {
-    let gm = gm(
-        &state,
-        &actor,
-        "set_level",
-        player(request.entity),
-        &request,
-    );
+    let gm = gm(&state, &actor, "set_level", player(request.entity), request);
     if let Some(refused) = gm.refused(GM_RANK).await {
         return refused;
     }
@@ -676,13 +670,7 @@ async fn set_coins(
     Extension(actor): Extension<Actor>,
     Json(request): Json<CoinsRequest>,
 ) -> Response {
-    let gm = gm(
-        &state,
-        &actor,
-        "set_coins",
-        player(request.entity),
-        &request,
-    );
+    let gm = gm(&state, &actor, "set_coins", player(request.entity), request);
     if let Some(refused) = gm.refused(GM_RANK).await {
         return refused;
     }

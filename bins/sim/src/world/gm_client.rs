@@ -24,7 +24,8 @@ impl SimWorld {
         };
         let call_type = call.type_index();
         if !game_master {
-            tracing::warn!(
+            // Debug only: a changed client could send these without end.
+            tracing::debug!(
                 entity = number,
                 call_type,
                 "GM call refused: no game master rank"

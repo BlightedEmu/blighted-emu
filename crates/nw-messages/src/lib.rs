@@ -78,7 +78,7 @@ pub use bundle::{
 };
 pub use categorical::{
     CATEGORICAL_PROGRESSION_COMPONENT, CATEGORICAL_PROGRESSION_TYPE_INDEX,
-    CategoricalProgressionState, MasteryChange, MasteryEntry, MasteryFields, progression_id,
+    CategoricalProgressionState, MasteryChange, MasteryEntry, MasteryFields,
 };
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use client_input::{

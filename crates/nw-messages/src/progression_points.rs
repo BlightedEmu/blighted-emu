@@ -10,7 +10,9 @@
 //! as an appended entry of the three pool lists, and a count change of one pool after each
 //! weapon rank up (+1) and each spent point.
 
-use crate::list_delta::{ReplicatedList, child_changes, full_child, write_child};
+#[cfg(test)]
+use crate::list_delta::child_changes;
+use crate::list_delta::{ReplicatedList, full_child, write_child};
 use crate::slots::{SLOT_0, children_mask, read_slot_0, write_children};
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -119,7 +121,8 @@ impl ProgressionPointState {
     }
 
     /// A new pool at list index `index` (the old length) with `version`.
-    pub fn added_pool(version: u64, index: u32, pool: PointPool) -> Self {
+    #[cfg(test)]
+    pub(crate) fn added_pool(version: u64, index: u32, pool: PointPool) -> Self {
         Self {
             pool_ids: child_changes(version, [(index, pool.pool)]),
             pool_counts: child_changes(version, [(index, pool.count)]),
@@ -129,7 +132,8 @@ impl ProgressionPointState {
     }
 
     /// New unspent counts, as (pool list index, count) in send order, with the shared `version`.
-    pub fn pool_counts(version: u64, counts: &[(u32, u16)]) -> Self {
+    #[cfg(test)]
+    pub(crate) fn pool_counts(version: u64, counts: &[(u32, u16)]) -> Self {
         Self {
             pool_counts: child_changes(version, counts.iter().copied()),
             ..Self::default()
@@ -207,8 +211,8 @@ impl ProgressionPointState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::categorical::progression_id;
     use crate::items::FIRST_VERSION;
+    use nw_formats::objectstream::lowercase_crc32;
 
     /// Retail login of a new character (2026-09-18, t307): four empty lists, version 3.
     const RETAIL_LOGIN: [u8; 18] = [
@@ -240,7 +244,7 @@ mod tests {
 
     fn weapon_pool(name: &str) -> PointPool {
         PointPool {
-            pool: progression_id(name),
+            pool: lowercase_crc32(name),
             count: 1,
             category: PoolCategory::Weapon,
         }
@@ -300,7 +304,7 @@ mod tests {
         };
         assert_eq!(
             points[1].value.pool,
-            progression_id("BlunderbussAbilityTable")
+            lowercase_crc32("BlunderbussAbilityTable")
         );
         assert_eq!(points[1].value.tail, SPENT_TAIL);
         assert_eq!(state.pool_ids, None);
