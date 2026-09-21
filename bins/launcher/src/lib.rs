@@ -9,6 +9,7 @@ pub mod game;
 pub mod mirror;
 pub mod server;
 pub mod settings;
+pub mod theme;
 
 /// Installs the `ring` TLS crypto provider for this process. A second call has no effect.
 pub fn install_crypto_provider() {

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Saved launcher settings (M2 spec section 6): server address and launcher token.
+//! Saved launcher settings (M2 spec section 6): server address, launcher token and theme.
 //! The file is readable only by the user on Unix.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::theme::ThemeChoice;
 
 /// Folder under the user config folder.
 pub const SETTINGS_DIR: &str = "blighted-launcher";
@@ -24,6 +26,8 @@ pub struct Settings {
     pub server: String,
     /// Launcher session token, when logged in.
     pub launcher_token: Option<String>,
+    /// The window theme; files of older launchers have none and give night.
+    pub theme: ThemeChoice,
 }
 
 /// The settings file could not be read or written.
@@ -156,6 +160,7 @@ mod tests {
         Settings {
             server: "example.org".to_owned(),
             launcher_token: Some("token".to_owned()),
+            theme: ThemeChoice::Day,
         }
     }
 
@@ -241,7 +246,13 @@ mod tests {
             r#"{"server":"example.org","launcher_token":"token","steam_path":null}"#,
         )
         .expect("write");
-        assert_eq!(Settings::load(&path).expect("load"), sample());
+        assert_eq!(
+            Settings::load(&path).expect("load"),
+            Settings {
+                theme: ThemeChoice::Night,
+                ..sample()
+            }
+        );
     }
 
     #[test]
