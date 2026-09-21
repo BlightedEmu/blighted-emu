@@ -54,6 +54,18 @@ pub const BAN_ROUTE: &str = "/api/gm/ban";
 pub const RANKS_ROUTE: &str = "/api/gm/ranks";
 /// `GET`: the audit log.
 pub const AUDIT_ROUTE: &str = "/api/gm/audit";
+/// `POST`: adds experience points to a player.
+pub const GIVE_EXPERIENCE_ROUTE: &str = "/api/gm/give-experience";
+/// `POST`: sets a player's level.
+pub const SET_LEVEL_ROUTE: &str = "/api/gm/set-level";
+/// `POST`: adds experience to one weapon mastery of a player.
+pub const GIVE_MASTERY_ROUTE: &str = "/api/gm/give-mastery";
+/// `POST`: sets the rank of one weapon mastery of a player, or of every one.
+pub const SET_MASTERY_RANK_ROUTE: &str = "/api/gm/set-mastery-rank";
+/// `POST`: sets a player's coins.
+pub const SET_COINS_ROUTE: &str = "/api/gm/set-coins";
+/// `GET`: the weapon mastery ids, the top level and the top rank, for the page.
+pub const PROGRESSION_ROUTE: &str = "/api/gm/progression";
 
 /// Lowest rank of a kick.
 pub const KICK_RANK: AdminRank = AdminRank::Csr;
@@ -85,6 +97,12 @@ pub fn gm_routes() -> Router<AppState> {
         .route(BAN_ROUTE, post(ban))
         .route(RANKS_ROUTE, get(ranks).post(set_rank))
         .route(AUDIT_ROUTE, get(audit))
+        .route(GIVE_EXPERIENCE_ROUTE, post(give_experience))
+        .route(SET_LEVEL_ROUTE, post(set_level))
+        .route(GIVE_MASTERY_ROUTE, post(give_mastery))
+        .route(SET_MASTERY_RANK_ROUTE, post(set_mastery_rank))
+        .route(SET_COINS_ROUTE, post(set_coins))
+        .route(PROGRESSION_ROUTE, get(progression))
 }
 
 /// A player to move to a point.
@@ -171,6 +189,56 @@ pub struct ItemRequest {
     /// How many (give only; default 1).
     #[serde(default)]
     pub quantity: Option<u32>,
+}
+
+/// Experience points for a player.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ExperienceRequest {
+    /// The player.
+    pub entity: u64,
+    /// How many points.
+    pub amount: u32,
+}
+
+/// A level for a player.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct LevelRequest {
+    /// The player.
+    pub entity: u64,
+    /// The level as the client shows it (1 is the first).
+    pub level: u32,
+}
+
+/// Experience for one weapon mastery of a player.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MasteryRequest {
+    /// The player.
+    pub entity: u64,
+    /// The `CategoricalProgressionData` id, for example `GreatSwordAbilityTable`.
+    pub mastery: String,
+    /// How many points.
+    pub amount: u32,
+}
+
+/// A rank for one weapon mastery of a player, or for every one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MasteryRankRequest {
+    /// The player.
+    pub entity: u64,
+    /// The mastery id; `None` is every weapon mastery.
+    #[serde(default)]
+    pub mastery: Option<String>,
+    /// The rank as the client shows it (1 is the first).
+    pub rank: u16,
+}
+
+/// Coins for a player.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CoinsRequest {
+    /// The player.
+    pub entity: u64,
+    /// The coins.
+    pub coins: u64,
 }
 
 /// GM mobs to spawn.
@@ -499,6 +567,149 @@ async fn give_item(
         },
     )
     .await
+}
+
+async fn give_experience(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Actor>,
+    Json(request): Json<ExperienceRequest>,
+) -> Response {
+    let gm = gm(
+        &state,
+        &actor,
+        "give_experience",
+        player(request.entity),
+        &request,
+    );
+    if let Some(refused) = gm.refused(GM_RANK).await {
+        return refused;
+    }
+    gm.send(
+        Owner::Player(request.entity),
+        AdminAction::GiveExperience {
+            entity: request.entity,
+            amount: request.amount,
+        },
+    )
+    .await
+}
+
+async fn set_level(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Actor>,
+    Json(request): Json<LevelRequest>,
+) -> Response {
+    let gm = gm(&state, &actor, "set_level", player(request.entity), &request);
+    if let Some(refused) = gm.refused(GM_RANK).await {
+        return refused;
+    }
+    gm.send(
+        Owner::Player(request.entity),
+        AdminAction::SetLevel {
+            entity: request.entity,
+            level: request.level.saturating_sub(1),
+        },
+    )
+    .await
+}
+
+async fn give_mastery(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Actor>,
+    Json(request): Json<MasteryRequest>,
+) -> Response {
+    let gm = gm(
+        &state,
+        &actor,
+        "give_mastery",
+        player(request.entity),
+        &request,
+    );
+    if let Some(refused) = gm.refused(GM_RANK).await {
+        return refused;
+    }
+    gm.send(
+        Owner::Player(request.entity),
+        AdminAction::GiveMasteryExperience {
+            entity: request.entity,
+            mastery: request.mastery.clone(),
+            amount: request.amount,
+        },
+    )
+    .await
+}
+
+async fn set_mastery_rank(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Actor>,
+    Json(request): Json<MasteryRankRequest>,
+) -> Response {
+    let gm = gm(
+        &state,
+        &actor,
+        "set_mastery_rank",
+        player(request.entity),
+        &request,
+    );
+    if let Some(refused) = gm.refused(GM_RANK).await {
+        return refused;
+    }
+    gm.send(
+        Owner::Player(request.entity),
+        AdminAction::SetMasteryRank {
+            entity: request.entity,
+            mastery: request.mastery.clone(),
+            rank: request.rank.saturating_sub(1),
+        },
+    )
+    .await
+}
+
+async fn set_coins(
+    State(state): State<AppState>,
+    Extension(actor): Extension<Actor>,
+    Json(request): Json<CoinsRequest>,
+) -> Response {
+    let gm = gm(&state, &actor, "set_coins", player(request.entity), &request);
+    if let Some(refused) = gm.refused(GM_RANK).await {
+        return refused;
+    }
+    gm.send(
+        Owner::Player(request.entity),
+        AdminAction::SetCoins {
+            entity: request.entity,
+            coins: request.coins,
+        },
+    )
+    .await
+}
+
+/// The weapon masteries and the tops of the level and rank, as the page shows them.
+#[derive(Debug, Serialize)]
+struct ProgressionView {
+    masteries: Vec<String>,
+    max_level: u32,
+    max_rank: u16,
+}
+
+async fn progression(State(state): State<AppState>) -> Response {
+    let world = state.world.get();
+    let progression = world.progression();
+    Json(ProgressionView {
+        masteries: progression
+            .masteries()
+            .iter()
+            .map(|mastery| mastery.id.clone())
+            .collect(),
+        max_level: progression.max_level().saturating_add(1),
+        max_rank: progression
+            .masteries()
+            .iter()
+            .map(|mastery| mastery.max_rank)
+            .max()
+            .map_or(0, |rank| rank.saturating_add(1)),
+    })
+    .into_response()
 }
 
 async fn start_quest(
@@ -1049,6 +1260,65 @@ mod tests {
             &sent(&fixture)[..],
             [AdminAction::StartQuest { entity: PLAYER, objective }] if objective == "12_GetOffBeach"
         ));
+    }
+
+    #[tokio::test]
+    async fn progression_commands_reach_the_players_sim_with_zero_based_values() {
+        let fixture = fixture();
+        let bodies = [
+            (
+                GIVE_EXPERIENCE_ROUTE,
+                serde_json::json!({ "entity": PLAYER, "amount": 500 }),
+            ),
+            (
+                SET_LEVEL_ROUTE,
+                serde_json::json!({ "entity": PLAYER, "level": 60 }),
+            ),
+            (
+                GIVE_MASTERY_ROUTE,
+                serde_json::json!({ "entity": PLAYER, "mastery": "BowAbilityTable", "amount": 20 }),
+            ),
+            (
+                SET_MASTERY_RANK_ROUTE,
+                serde_json::json!({ "entity": PLAYER, "mastery": null, "rank": 20 }),
+            ),
+            (
+                SET_COINS_ROUTE,
+                serde_json::json!({ "entity": PLAYER, "coins": 1000 }),
+            ),
+        ];
+        for (route, body) in &bodies {
+            answer_next(&fixture, Some(AdminReply::Done));
+            assert_eq!(status(&fixture, post(route, body)).await, StatusCode::OK, "{route}");
+        }
+        assert_eq!(
+            sent(&fixture),
+            [
+                AdminAction::GiveExperience {
+                    entity: PLAYER,
+                    amount: 500
+                },
+                AdminAction::SetLevel {
+                    entity: PLAYER,
+                    level: 59
+                },
+                AdminAction::GiveMasteryExperience {
+                    entity: PLAYER,
+                    mastery: "BowAbilityTable".to_owned(),
+                    amount: 20
+                },
+                AdminAction::SetMasteryRank {
+                    entity: PLAYER,
+                    mastery: None,
+                    rank: 19
+                },
+                AdminAction::SetCoins {
+                    entity: PLAYER,
+                    coins: 1000
+                },
+            ]
+        );
+        assert_eq!(results(&fixture), ["done"; 5]);
     }
 
     #[tokio::test]

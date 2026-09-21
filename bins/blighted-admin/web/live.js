@@ -3,7 +3,10 @@
 // events) and the bot batch buttons.
 
 import { KINDS, mobEntity, playerEntity, selectionRows } from './entity.js';
-import { eventStartRequest, eventStopRequest, itemRequest, questRequest, sendGm, spawnRequest, teleportRequest } from './gm.js';
+import {
+  coinsRequest, eventStartRequest, eventStopRequest, experienceRequest, itemRequest, levelRequest, masteryName, masteryRankRequest,
+  masteryRequest, questRequest, sendGm, spawnRequest, teleportRequest,
+} from './gm.js';
 import { WorldMap } from './map.js';
 import { SERIES, SIGNAL } from './palette.js';
 import { STATUS_GROUPS, isMarked, nextStatuses, statusText } from './status.js';
@@ -392,6 +395,67 @@ document.getElementById('gm-item').addEventListener('submit', (event) => {
   sendItem('give-item');
 });
 document.getElementById('gm-take').addEventListener('click', () => sendItem('take-item'));
+const PROGRESSION_URL = '/api/gm/progression';
+/** The tops of the level and the mastery rank; read from the server at start. */
+const progressionTops = { maxLevel: 0, maxRank: 0 };
+const masterySelect = document.getElementById('gm-mastery-id');
+
+/** Runs the request that `build` makes from the selected player, or shows its error. */
+function sendBuilt(path, build) {
+  onSelected((entity) => {
+    const { request, error } = build(entity.entity);
+    if (error) {
+      gmStatus.textContent = error;
+    } else {
+      gm(path, request);
+    }
+  });
+}
+
+document.getElementById('gm-level').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const level = document.getElementById('gm-level-value').value;
+  sendBuilt('set-level', (entity) => levelRequest(entity, level, progressionTops.maxLevel));
+});
+document.getElementById('gm-give-xp').addEventListener('click', () => {
+  const amount = document.getElementById('gm-xp-amount').value;
+  sendBuilt('give-experience', (entity) => experienceRequest(entity, amount));
+});
+document.getElementById('gm-mastery').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const rank = document.getElementById('gm-mastery-rank').value;
+  sendBuilt('set-mastery-rank', (entity) => masteryRankRequest(entity, masterySelect.value, rank, progressionTops.maxRank));
+});
+document.getElementById('gm-give-mastery').addEventListener('click', () => {
+  const amount = document.getElementById('gm-mastery-xp').value;
+  sendBuilt('give-mastery', (entity) => masteryRequest(entity, masterySelect.value, amount));
+});
+document.getElementById('gm-coins').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const coins = document.getElementById('gm-coins-value').value;
+  sendBuilt('set-coins', (entity) => coinsRequest(entity, coins));
+});
+
+/** Reads the weapon masteries and the tops of the level and the rank. */
+async function loadProgression() {
+  const response = await fetch(PROGRESSION_URL);
+  if (!response.ok) {
+    throw new Error(`Progression: ${response.status} ${await response.text()}`);
+  }
+  const progression = await response.json();
+  progressionTops.maxLevel = progression.max_level;
+  progressionTops.maxRank = progression.max_rank;
+  masterySelect.append(...progression.masteries.map((id) => {
+    const option = document.createElement('option');
+    option.value = id;
+    option.textContent = masteryName(id);
+    return option;
+  }));
+}
+loadProgression().catch((error) => {
+  gmStatus.textContent = String(error.message ?? error);
+});
+
 document.getElementById('gm-quest').addEventListener('submit', (event) => {
   event.preventDefault();
   onSelected((entity) => {

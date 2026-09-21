@@ -16,6 +16,63 @@ function numbers(texts) {
   return bad ? null : values;
 }
 
+/** The suffix of every weapon mastery id (`GreatSwordAbilityTable`). */
+const MASTERY_SUFFIX = 'AbilityTable';
+/** The largest experience or rank amount the server takes (`u32`). */
+const MAX_AMOUNT = 4294967295;
+
+/** The whole number of `text` from `lowest` to `highest`, or null. */
+function wholeNumber(text, lowest, highest) {
+  const trimmed = String(text).trim();
+  const value = Number(trimmed);
+  return trimmed !== '' && Number.isSafeInteger(value) && value >= lowest && value <= highest ? value : null;
+}
+
+/** The name a page shows for a weapon mastery id: `GreatSword` for `GreatSwordAbilityTable`. */
+export function masteryName(id) {
+  return id.endsWith(MASTERY_SUFFIX) ? id.slice(0, -MASTERY_SUFFIX.length) : id;
+}
+
+/** The give-experience request for a player and an amount text, or an error text. */
+export function experienceRequest(entity, amountText) {
+  const amount = wholeNumber(amountText, 1, MAX_AMOUNT);
+  return amount === null ? { error: 'The experience must be a whole number of 1 or more.' } : { request: { entity, amount } };
+}
+
+/** The set-level request for a player and a level text (1 to `maxLevel`), or an error text. */
+export function levelRequest(entity, levelText, maxLevel) {
+  const level = wholeNumber(levelText, 1, maxLevel);
+  return level === null ? { error: `The level must be a whole number from 1 to ${maxLevel}.` } : { request: { entity, level } };
+}
+
+/** The give-mastery request for a player, a mastery id and an amount text, or an error text. */
+export function masteryRequest(entity, mastery, amountText) {
+  if (mastery === '') {
+    return { error: 'Pick one weapon to give mastery experience to.' };
+  }
+  const amount = wholeNumber(amountText, 1, MAX_AMOUNT);
+  return amount === null
+    ? { error: 'The mastery experience must be a whole number of 1 or more.' }
+    : { request: { entity, mastery, amount } };
+}
+
+/**
+ * The set-mastery-rank request for a player, a mastery id ('' for every weapon) and a rank text
+ * (1 to `maxRank`), or an error text.
+ */
+export function masteryRankRequest(entity, mastery, rankText, maxRank) {
+  const rank = wholeNumber(rankText, 1, maxRank);
+  return rank === null
+    ? { error: `The rank must be a whole number from 1 to ${maxRank}.` }
+    : { request: { entity, mastery: mastery === '' ? null : mastery, rank } };
+}
+
+/** The set-coins request for a player and a coins text, or an error text. */
+export function coinsRequest(entity, coinsText) {
+  const coins = wholeNumber(coinsText, 0, Number.MAX_SAFE_INTEGER);
+  return coins === null ? { error: 'The coins must be a whole number of 0 or more.' } : { request: { entity, coins } };
+}
+
 /** The teleport request for a player and the x, y and z field texts, or an error text. */
 export function teleportRequest(entity, xText, yText, zText) {
   const values = numbers([xText, yText, zText]);

@@ -11,6 +11,7 @@ use nw_common::config::ConfigError;
 use nw_content::bundle::bundle_path;
 use nw_content::client_build::load_client_build;
 use nw_content::ids::{gatherable_ids, vitals_ids};
+use nw_content::progression::Progression;
 use nw_content::{ContainerError, ContentBundle, Tables};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_world::WorldFile;
@@ -204,6 +205,8 @@ pub struct WorldLayer {
     max_spawns: usize,
     /// The merged design data file (scripts and events), when the layer came from files.
     design_data: Option<PathBuf>,
+    /// The level table and the weapon masteries, for the GM page.
+    progression: Progression,
 }
 
 impl WorldLayer {
@@ -252,6 +255,7 @@ impl WorldLayer {
             cells,
             max_spawns,
             design_data: None,
+            progression: Progression::default(),
         }
     }
 
@@ -267,9 +271,12 @@ impl WorldLayer {
             &world_file_path(&config.content_dir, &build, &config.level),
             &build,
         )?;
-        let names = {
+        let (names, progression) = {
             let bundle = ContentBundle::load(&bundle_path(&config.content_dir, &build), &build)?;
-            SpawnNames::from_tables(&bundle.tables)
+            (
+                SpawnNames::from_tables(&bundle.tables),
+                Progression::of_tables(&bundle.tables),
+            )
         };
         let path = map_dir(config).join(TILES_FILE);
         let tiles =
@@ -290,6 +297,7 @@ impl WorldLayer {
             };
         Ok(Self {
             design_data: Some(design_data_path(&config.content_dir, &build)),
+            progression,
             ..Self::new(world, names, tiles, config.max_spawns_per_request)
         })
     }
@@ -320,6 +328,11 @@ impl WorldLayer {
         tokio::task::spawn_blocking(move || level_event_ids(&path, &level))
             .await
             .unwrap_or_default()
+    }
+
+    /// The level table and the weapon masteries.
+    pub fn progression(&self) -> &Progression {
+        &self.progression
     }
 
     /// The tile grid.

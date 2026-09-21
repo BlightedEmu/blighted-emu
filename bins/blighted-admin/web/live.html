@@ -102,6 +102,26 @@
             <input type="text" id="gm-quest-id" aria-label="objective id" placeholder="objective id" class="wide">
             <button type="submit">Start quest</button>
           </form>
+          <form class="gm" id="gm-level">
+            <strong>Level</strong>
+            <input type="text" id="gm-level-value" inputmode="numeric" aria-label="level" placeholder="level">
+            <button type="submit">Set level</button>
+            <input type="text" id="gm-xp-amount" inputmode="numeric" aria-label="experience points" placeholder="xp">
+            <button type="button" id="gm-give-xp">Give XP</button>
+          </form>
+          <form class="gm" id="gm-mastery">
+            <strong>Weapon mastery</strong>
+            <select id="gm-mastery-id" aria-label="weapon mastery"><option value="">All weapons</option></select>
+            <input type="text" id="gm-mastery-rank" inputmode="numeric" aria-label="mastery rank" placeholder="rank">
+            <button type="submit">Set rank</button>
+            <input type="text" id="gm-mastery-xp" inputmode="numeric" aria-label="mastery points" placeholder="xp">
+            <button type="button" id="gm-give-mastery">Give XP</button>
+          </form>
+          <form class="gm" id="gm-coins">
+            <strong>Coins</strong>
+            <input type="text" id="gm-coins-value" inputmode="numeric" aria-label="coins" placeholder="coins">
+            <button type="submit">Set coins</button>
+          </form>
         </div>
         <div class="gm-panel" id="gm-mob" hidden>
           <h2>GM</h2>
