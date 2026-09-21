@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The progression of a character besides its items and quests (world migration 0006): its
-//! experience, coins, achievement bits and loot limit counts. `sim` saves it; the director
-//! loads it at a join.
+//! The progression of a character besides its items and quests (world migrations 0006 and
+//! 0007): its experience, coins, achievement bits, loot limit counts and weapon masteries. `sim`
+//! saves it; the director loads it at a join.
 //!
 //! Each save carries the time its state was taken; an older state never overwrites a newer one.
+
+use std::collections::BTreeMap;
 
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -40,10 +42,13 @@ pub struct SavedProgression {
     pub achievements: Vec<u32>,
     /// The loot limit counts, by limit id.
     pub loot_limits: Vec<SavedLootLimit>,
+    /// The total experience of each weapon mastery, by its `CategoricalProgressionID`.
+    pub masteries: BTreeMap<String, u32>,
 }
 
 type ProgressionRow = (bool, i64, i64, Vec<i32>);
 type LootLimitRow = (String, i64, i64, i64);
+type MasteryRow = (String, i64);
 
 /// A stored value as the program's type.
 fn from_column<T: TryFrom<i64>>(value: i64, field: &'static str) -> Result<T, DbError> {
@@ -83,6 +88,12 @@ pub async fn character_progression(
     .bind(character_id)
     .fetch_all(world)
     .await?;
+    let masteries: Vec<MasteryRow> = sqlx::query_as(
+        "SELECT category, experience FROM character_mastery WHERE character_id = $1",
+    )
+    .bind(character_id)
+    .fetch_all(world)
+    .await?;
     Ok(Some(SavedProgression {
         experience: from_column(experience, "experience")?,
         coins: from_column(coins, "coins")?,
@@ -100,6 +111,10 @@ pub async fn character_progression(
                     ends_ns: from_column(ends_ns, "ends_ns")?,
                 })
             })
+            .collect::<Result<_, DbError>>()?,
+        masteries: masteries
+            .into_iter()
+            .map(|(category, experience)| Ok((category, from_column(experience, "mastery")?)))
             .collect::<Result<_, DbError>>()?,
     }))
 }
@@ -182,6 +197,21 @@ pub async fn save_character_progression(
         .execute(&mut *transaction)
         .await?;
     }
+    sqlx::query("DELETE FROM character_mastery WHERE character_id = $1")
+        .bind(character_id)
+        .execute(&mut *transaction)
+        .await?;
+    for (category, experience) in &progression.masteries {
+        sqlx::query(
+            "INSERT INTO character_mastery (character_id, category, experience) \
+             VALUES ($1, $2, $3)",
+        )
+        .bind(character_id)
+        .bind(category)
+        .bind(i64::from(*experience))
+        .execute(&mut *transaction)
+        .await?;
+    }
     transaction.commit().await?;
     Ok(SaveOutcome::Saved)
 }
@@ -236,6 +266,10 @@ mod infra_tests {
                     ends_ns: 1_792_746_000_894_621_000,
                 },
             ],
+            masteries: BTreeMap::from([
+                ("GreatSwordAbilityTable".to_owned(), 20),
+                ("BlunderbussAbilityTable".to_owned(), 4),
+            ]),
         }
     }
 
