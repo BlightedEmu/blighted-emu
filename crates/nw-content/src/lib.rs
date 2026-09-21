@@ -24,6 +24,7 @@ pub mod loot_limits;
 pub mod mob_prefabs;
 pub mod player_attacks;
 pub mod poi_tags;
+pub mod progression;
 pub mod respawn_points;
 pub mod rewards;
 pub mod starter;
