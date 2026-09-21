@@ -48,11 +48,11 @@ max_connections = 5
 url = "redis://127.0.0.1:6379"
 
 # Our own remote config sets (docs/re/2026-09-18-remote-config-layers.md). The client reads them
-# from an S3 bucket; this server answers that bucket's host. A file's path under `directory` is
-# its S3 key. Every layer the client asks for must have a `versionless` file: ProductId
-# STEAM_APP_ID.1063730, RegionId blighted, CognitoId <cognito_pool_id>, WorldId <each world id>,
-# for the applications `public` and `publicGameplay`. The server fills
-# omni.leaderboards.client-endpoint of the publicGameplay RegionId layer with game.<domain>.
+# from an S3 bucket; this server answers that bucket's host. `directory` holds one JSON file per
+# layer: <application>-<dimension>.json (ProductId, RegionId, CognitoId) and
+# <application>-WorldId-<world id>.json for each world, for the applications `public` and
+# `publicGameplay`; no other file. The server fills omni.leaderboards.client-endpoint of
+# publicGameplay-RegionId.json with game.<domain>.
 [remote_config]
 directory = "config/remote-config"
 # The bucket the client asks for (its log line "Configuring remote config with bucket ...").

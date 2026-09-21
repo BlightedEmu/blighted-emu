@@ -190,7 +190,7 @@ values.
 | Config: `[remote_config]`, `[aws_mirror]`, `-CognitoPool` argument | `crates/nw-login/src/config.rs`, `config/edge.toml` |
 | SNI certificate choice, `aws-mirror-certificate` command | `bins/edge-http/src/tls.rs`, `run.rs`, `main.rs` |
 | Private network files, `bwrap` start, retail-prefix refusal | `bins/launcher/src/mirror.rs`, `game.rs`, `app.rs` |
-| Our config sets (8 files) | `config/remote-config/applications/...` |
+| Our config sets (8 files) | `config/remote-config/<application>-<dimension>.json` (worlds: `<application>-WorldId-<world id>.json`) |
 
 Server-side checks at start: every file is a JSON object; every layer the client asks for has a
 `versionless` file (both applications x `ProductId STEAM_APP_ID.1063730`, `RegionId blighted`,
@@ -291,4 +291,4 @@ A test (`tracked_sets_name_no_amazon_host_or_account`) fails if any served file 
 6. Whether the game starts in a fresh Proton prefix without extra runtime packages.
 7. Whether Wine copies system roots into the prefix registry.
 8. The exact layer precedence (section 5, Inferred).
-9. The Windows path: the launcher's direct launch needs Proton and `bwrap`, so it is Linux only.
+9. The Windows path: the launcher's direct launch needs Proton and `bwrap`, so it is Linux only. Options for Windows: `2026-09-20-windows-launcher-network.md`.

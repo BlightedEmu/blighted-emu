@@ -5,12 +5,13 @@
 //! The client asks for `GET /applications/<application>/configuration-sets/<dimension>/<id>/
 //! <version>` on `<bucket>.s3.amazonaws.com`, for two applications and four dimensions, each
 //! once `versionless` and once for its build. It polls each key again with `If-None-Match`. The
-//! files under `[remote_config] directory` are the objects: a file's path under the folder is
-//! its key. A key with no file gets the S3 `NoSuchKey` reply (retail answers every build key
-//! that way). This server checks no request signature.
+//! `[remote_config] directory` holds one file per `versionless` layer, named after its key:
+//! `<application>-<dimension>.json`, and `<application>-WorldId-<world id>.json` for each world
+//! ([`layer_file_name`]). A key with no layer gets the S3 `NoSuchKey` reply (retail answers
+//! every build key that way). This server checks no request signature.
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
@@ -48,6 +49,10 @@ const KEY_ROOT: &str = "applications";
 /// Second part of every key after the application.
 const CONFIGURATION_SETS: &str = "configuration-sets";
 const KEY_SEPARATOR: char = '/';
+/// Between the parts of a layer file name.
+const FILE_NAME_SEPARATOR: &str = "-";
+/// The extension of a layer file.
+const LAYER_FILE_EXTENSION: &str = "json";
 /// Content type of an object (retail reply).
 const OBJECT_CONTENT_TYPE: &str = "binary/octet-stream";
 /// Content type of an S3 error.
@@ -103,6 +108,18 @@ pub fn object_key(application: &str, dimension: Dimension, id: &str, version: &s
     .join(&KEY_SEPARATOR.to_string())
 }
 
+/// The file of the `versionless` layer `application` / `dimension` / `id`: one file per layer in
+/// one folder; only a world's file names its id, the other ids come from the configuration.
+pub fn layer_file_name(application: &str, dimension: Dimension, id: &str) -> String {
+    let stem = match dimension {
+        Dimension::WorldId => [application, dimension.name(), id].join(FILE_NAME_SEPARATOR),
+        Dimension::ProductId | Dimension::RegionId | Dimension::CognitoId => {
+            [application, dimension.name()].join(FILE_NAME_SEPARATOR)
+        }
+    };
+    format!("{stem}.{LAYER_FILE_EXTENSION}")
+}
+
 /// The layers our client asks for with this configuration: dimension and id.
 pub fn requested_layers(config: &EdgeConfig) -> Vec<(Dimension, String)> {
     let mut layers = vec![
@@ -134,20 +151,22 @@ pub enum RemoteConfigError {
         #[source]
         source: std::io::Error,
     },
-    /// A file path is not UTF-8 text.
-    #[error("remote config file name {} is not UTF-8", .0.display())]
-    NotUtf8(PathBuf),
+    /// The folder holds a file that is no layer of this configuration.
+    #[error("remote config file {} is no layer this server serves", .0.display())]
+    Unexpected(PathBuf),
     /// A file is not a JSON object.
     #[error("remote config {key} is not a JSON object")]
     NotObject {
         /// The key.
         key: String,
     },
-    /// A layer the client asks for has no `versionless` file.
-    #[error("remote config {key} is missing")]
+    /// A layer the client asks for has no file.
+    #[error("remote config {key} is missing: no file {}", .path.display())]
     Missing {
         /// The key.
         key: String,
+        /// The file it needs.
+        path: PathBuf,
     },
     /// The leaderboards layer has no `omni.leaderboards` object, or sets the key the server fills.
     #[error("remote config {key}: {reason}")]
@@ -181,14 +200,13 @@ pub struct RemoteConfigSets {
 }
 
 impl RemoteConfigSets {
-    /// Loads every file under `[remote_config] directory`. Each must be a JSON object. The
-    /// `versionless` file of every layer of [`requested_layers`] must exist. The stats service
-    /// endpoint of the [`LEADERBOARDS_APPLICATION`] `RegionId` layer is set to `game.<domain>`;
-    /// other files are served byte for byte.
+    /// Loads the `versionless` layer of every application and layer of [`requested_layers`]
+    /// from its file in `[remote_config] directory` ([`layer_file_name`]). Each must be a JSON
+    /// object, and the folder may hold no other file. The stats service endpoint of the
+    /// [`LEADERBOARDS_APPLICATION`] `RegionId` layer is set to `game.<domain>`; other layers are
+    /// served byte for byte.
     pub fn load(config: &EdgeConfig) -> Result<Self, RemoteConfigError> {
         let root = &config.remote_config.directory;
-        let mut files = Vec::new();
-        collect_files(root, &mut files)?;
         let leaderboards_key = object_key(
             LEADERBOARDS_APPLICATION,
             Dimension::RegionId,
@@ -196,28 +214,44 @@ impl RemoteConfigSets {
             VERSIONLESS,
         );
         let mut objects = HashMap::new();
-        for path in files {
-            let key = file_key(root, &path)?;
-            let bytes = std::fs::read(&path).map_err(|source| RemoteConfigError::Io {
-                path: path.clone(),
-                source,
-            })?;
-            let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(&bytes) else {
-                return Err(RemoteConfigError::NotObject { key });
-            };
-            let body = if key == leaderboards_key {
-                with_client_endpoint(object, &config.game_host(), &key)?
-            } else {
-                bytes
-            };
-            objects.insert(key, RemoteConfigObject::new(body));
-        }
+        let mut layer_files = HashSet::new();
         for application in APPLICATIONS {
             for (dimension, id) in requested_layers(config) {
                 let key = object_key(application, dimension, &id, VERSIONLESS);
-                if !objects.contains_key(&key) {
-                    return Err(RemoteConfigError::Missing { key });
-                }
+                let path = root.join(layer_file_name(application, dimension, &id));
+                let bytes = std::fs::read(&path).map_err(|source| {
+                    if source.kind() == std::io::ErrorKind::NotFound {
+                        RemoteConfigError::Missing {
+                            key: key.clone(),
+                            path: path.clone(),
+                        }
+                    } else {
+                        RemoteConfigError::Io {
+                            path: path.clone(),
+                            source,
+                        }
+                    }
+                })?;
+                let Ok(Value::Object(object)) = serde_json::from_slice::<Value>(&bytes) else {
+                    return Err(RemoteConfigError::NotObject { key });
+                };
+                let body = if key == leaderboards_key {
+                    with_client_endpoint(object, &config.game_host(), &key)?
+                } else {
+                    bytes
+                };
+                objects.insert(key, RemoteConfigObject::new(body));
+                layer_files.insert(path);
+            }
+        }
+        let io_error = |source| RemoteConfigError::Io {
+            path: root.clone(),
+            source,
+        };
+        for entry in std::fs::read_dir(root).map_err(io_error)? {
+            let path = entry.map_err(io_error)?.path();
+            if !layer_files.contains(&path) {
+                return Err(RemoteConfigError::Unexpected(path));
             }
         }
         Ok(Self {
@@ -236,36 +270,6 @@ impl RemoteConfigSets {
         keys.sort_unstable();
         keys
     }
-}
-
-fn collect_files(folder: &Path, files: &mut Vec<PathBuf>) -> Result<(), RemoteConfigError> {
-    let io_error = |source| RemoteConfigError::Io {
-        path: folder.to_path_buf(),
-        source,
-    };
-    for entry in std::fs::read_dir(folder).map_err(io_error)? {
-        let path = entry.map_err(io_error)?.path();
-        if path.is_dir() {
-            collect_files(&path, files)?;
-        } else {
-            files.push(path);
-        }
-    }
-    Ok(())
-}
-
-/// The key of a file: its path under `root`, parts joined with `/`.
-fn file_key(root: &Path, path: &Path) -> Result<String, RemoteConfigError> {
-    let relative = path.strip_prefix(root).unwrap_or(path);
-    relative
-        .components()
-        .map(|part| {
-            part.as_os_str()
-                .to_str()
-                .ok_or_else(|| RemoteConfigError::NotUtf8(path.to_path_buf()))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(|parts| parts.join(&KEY_SEPARATOR.to_string()))
 }
 
 /// `object` with [`CLIENT_ENDPOINT_KEY`] set to `game_host`, as JSON text.
@@ -632,20 +636,21 @@ pub(crate) mod tests {
     fn other_files_are_served_byte_for_byte() {
         let sets = sets();
         let key = object_key("public", Dimension::ProductId, PRODUCT_ID, VERSIONLESS);
-        let file = std::fs::read(committed_directory().join(&key)).expect("file");
+        let file = std::fs::read(committed_directory().join(layer_file_name(
+            "public",
+            Dimension::ProductId,
+            PRODUCT_ID,
+        )))
+        .expect("file");
         assert_eq!(sets.body(&key), Some(file.as_slice()));
     }
 
     /// A copy of the tracked sets in a temporary folder, and a config that reads it.
     fn copied_sets() -> (tempfile::TempDir, EdgeConfig) {
         let dir = tempfile::tempdir().expect("temp dir");
-        let mut files = Vec::new();
-        collect_files(&committed_directory(), &mut files).expect("files");
-        for file in files {
-            let relative = file.strip_prefix(committed_directory()).expect("relative");
-            let target = dir.path().join(relative);
-            std::fs::create_dir_all(target.parent().expect("parent")).expect("folder");
-            std::fs::copy(&file, &target).expect("copy");
+        for entry in std::fs::read_dir(committed_directory()).expect("folder") {
+            let file = entry.expect("entry").path();
+            std::fs::copy(&file, dir.path().join(file.file_name().expect("name"))).expect("copy");
         }
         let mut config = valid();
         config.remote_config.directory = dir.path().to_path_buf();
@@ -656,26 +661,47 @@ pub(crate) mod tests {
     fn a_missing_layer_is_an_error() {
         let (dir, mut config) = copied_sets();
         let missing = object_key("public", Dimension::WorldId, WORLD_ID, VERSIONLESS);
-        std::fs::remove_file(dir.path().join(&missing)).expect("remove");
+        std::fs::remove_file(dir.path().join(layer_file_name(
+            "public",
+            Dimension::WorldId,
+            WORLD_ID,
+        )))
+        .expect("remove");
         assert!(matches!(
             RemoteConfigSets::load(&config),
-            Err(RemoteConfigError::Missing { key }) if key == missing
+            Err(RemoteConfigError::Missing { key, .. }) if key == missing
         ));
         config.remote_config.directory = dir.path().join("absent");
         assert!(matches!(
             RemoteConfigSets::load(&config),
-            Err(RemoteConfigError::Io { .. })
+            Err(RemoteConfigError::Missing { .. })
         ));
     }
 
     #[test]
     fn a_file_must_be_a_json_object() {
         let (dir, config) = copied_sets();
-        let key = object_key("public", Dimension::ProductId, PRODUCT_ID, BUILD_VERSION);
-        std::fs::write(dir.path().join(&key), "[1]").expect("write");
+        let key = object_key("public", Dimension::ProductId, PRODUCT_ID, VERSIONLESS);
+        std::fs::write(
+            dir.path()
+                .join(layer_file_name("public", Dimension::ProductId, PRODUCT_ID)),
+            "[1]",
+        )
+        .expect("write");
         assert!(matches!(
             RemoteConfigSets::load(&config),
             Err(RemoteConfigError::NotObject { key: found }) if found == key
+        ));
+    }
+
+    #[test]
+    fn the_folder_holds_only_layer_files() {
+        let (dir, config) = copied_sets();
+        let stray = dir.path().join("publicGameplay-RegionId-old.json");
+        std::fs::write(&stray, "{}").expect("write");
+        assert!(matches!(
+            RemoteConfigSets::load(&config),
+            Err(RemoteConfigError::Unexpected(path)) if path == stray
         ));
     }
 
@@ -688,20 +714,24 @@ pub(crate) mod tests {
             CLUSTER_ID,
             VERSIONLESS,
         );
-        let path = dir.path().join(&key);
+        let path = dir.path().join(layer_file_name(
+            LEADERBOARDS_APPLICATION,
+            Dimension::RegionId,
+            CLUSTER_ID,
+        ));
         let mut value: Value =
             serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
         value["omni"]["leaderboards"][CLIENT_ENDPOINT_KEY] = Value::from("elsewhere.example.net");
         std::fs::write(&path, serde_json::to_vec(&value).expect("json")).expect("write");
         assert!(matches!(
             RemoteConfigSets::load(&config),
-            Err(RemoteConfigError::Leaderboards { .. })
+            Err(RemoteConfigError::Leaderboards { key: found, .. }) if found == key
         ));
         value["omni"] = Value::from("no object");
         std::fs::write(&path, serde_json::to_vec(&value).expect("json")).expect("write");
         assert!(matches!(
             RemoteConfigSets::load(&config),
-            Err(RemoteConfigError::Leaderboards { .. })
+            Err(RemoteConfigError::Leaderboards { key: found, .. }) if found == key
         ));
     }
 
@@ -735,7 +765,12 @@ pub(crate) mod tests {
         let key = object_key("public", Dimension::ProductId, PRODUCT_ID, VERSIONLESS);
         let (status, headers, body) = get(&format!("/{key}"), None).await;
         assert_eq!(status, StatusCode::OK);
-        let file = std::fs::read(committed_directory().join(&key)).expect("file");
+        let file = std::fs::read(committed_directory().join(layer_file_name(
+            "public",
+            Dimension::ProductId,
+            PRODUCT_ID,
+        )))
+        .expect("file");
         assert_eq!(body.as_ref(), file.as_slice());
         assert_eq!(header(&headers, "content-type"), OBJECT_CONTENT_TYPE);
         let etag = format!("\"{}\"", HEXLOWER.encode(&Md5::digest(&file)));

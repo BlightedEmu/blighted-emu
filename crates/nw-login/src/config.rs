@@ -133,8 +133,8 @@ pub struct ValkeyConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RemoteConfigConfig {
-    /// Folder of the config sets. The path of a file under it is its S3 key, for example
-    /// `applications/public/configuration-sets/ProductId/STEAM_APP_ID.1063730/versionless`.
+    /// Folder of the config sets: one file per layer, for example `public-ProductId.json`
+    /// ([`crate::remote_config::layer_file_name`]).
     pub directory: PathBuf,
     /// The bucket the client asks for; one of [`REMOTE_CONFIG_BUCKETS`].
     pub bucket: String,
