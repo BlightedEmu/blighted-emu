@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::config::GatewayLimits;
 use crate::events::EventReceiver;
 use crate::peer::{Peer, PeerError, PeerEvent, PeerSettings};
-use crate::registration::{Refusal, TicketClaims, check_ticket};
+use crate::registration::{Admission, Refusal, TicketClaims, check_ticket};
 use crate::workers::{ConnectionCount, first_connection};
 use crate::world::{World, WorldEvent};
 
@@ -92,7 +92,7 @@ pub struct Gateway<Q, W> {
 }
 
 /// A ticket check result for one connection: address, connection id, result.
-type TicketResult = (SocketAddr, u64, Result<EntryRecord, Refusal>);
+type TicketResult = (SocketAddr, u64, Result<(EntryRecord, Admission), Refusal>);
 
 struct Loop<Q, W> {
     gateway: Gateway<Q, W>,
@@ -281,13 +281,17 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
         let results = self.results.clone();
         tokio::spawn(async move {
             let result = match check_ticket(&store, &key, world_id, &claims, unix_seconds()).await {
-                Ok(record) => world.join(connection, &record).await.map(|()| record),
+                Ok(record) => world
+                    .join(connection, &record)
+                    .await
+                    .map(|admission| (record, admission)),
                 Err(refusal) => Err(refusal),
             };
             match &result {
-                Ok(record) => tracing::info!(
+                Ok((record, admission)) => tracing::info!(
                     account = %record.account_id,
                     character = %record.character_id,
+                    game_master = admission.game_master,
                     "registration accepted"
                 ),
                 Err(refusal) => tracing::warn!(
@@ -305,7 +309,7 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
         &mut self,
         address: SocketAddr,
         connection: u64,
-        result: Result<EntryRecord, Refusal>,
+        result: Result<(EntryRecord, Admission), Refusal>,
     ) {
         let label = result
             .as_ref()
@@ -320,7 +324,7 @@ impl<Q: QueueStore, W: World> Loop<Q, W> {
         };
         let completed = peer.complete_registration(
             SystemTime::now(),
-            result.as_ref().map_err(|refusal| *refusal),
+            result.map(|(_, admission)| admission),
             &self.gateway.server_version,
         );
         match completed {

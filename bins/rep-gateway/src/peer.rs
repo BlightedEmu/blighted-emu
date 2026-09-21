@@ -12,7 +12,6 @@ use nw_carrier::{
     CarrierError, Connection, ConnectionState, Event, MESSAGE_CHANNEL, Message, ReceiveLimits,
 };
 use nw_dtls::{DtlsError, DtlsSession};
-use nw_login::queue::EntryRecord;
 use nw_reflect::{
     Envelope, EnvelopeError, FramingError, PING_MSG_TYPE_INDEX,
     REGISTRATION_REQUEST_V3_MSG_TYPE_INDEX, REGISTRATION_RESPONSE_MSG_TYPE_INDEX,
@@ -21,7 +20,7 @@ use nw_reflect::{
 };
 use thiserror::Error;
 
-use crate::registration::{Refusal, TicketClaims, response};
+use crate::registration::{Admission, Refusal, TicketClaims, response};
 
 /// Length of the rate window.
 pub const RATE_WINDOW_MS: u64 = 1000;
@@ -242,7 +241,8 @@ impl Peer {
     }
 
     /// Sends the registration response for the checked ticket. A refused connection sends status
-    /// 1 and then a disconnect. A result for a peer that is not waiting for one is ignored.
+    /// 1 and then a disconnect; a game master's gets the GM flag. A result for a peer that is not
+    /// waiting for one is ignored.
     ///
     /// # Errors
     ///
@@ -250,7 +250,7 @@ impl Peer {
     pub fn complete_registration(
         &mut self,
         now: SystemTime,
-        result: Result<&EntryRecord, Refusal>,
+        result: Result<Admission, Refusal>,
         server_version: &str,
     ) -> Result<(), PeerError> {
         if self.phase != Phase::Checking {
@@ -261,7 +261,8 @@ impl Peer {
         } else {
             REGISTRATION_STATUS_REFUSED
         };
-        let body = response(status, now, server_version)
+        let game_master = result.is_ok_and(|admission| admission.game_master);
+        let body = response(status, now, server_version, game_master)
             .map_err(PeerError::Random)?
             .encode()?;
         self.send_message(REGISTRATION_RESPONSE_MSG_TYPE_INDEX, body)?;
@@ -375,7 +376,6 @@ mod tests {
     };
     use nw_reflect::LoginToken;
     use nw_testclient::rep::{RepClient, RepEvent};
-    use uuid::Uuid;
 
     use super::*;
 
@@ -409,14 +409,8 @@ mod tests {
     static IDENTITY: LazyLock<Identity> =
         LazyLock::new(|| self_signed_identity("test-gateway", VALID_DAYS).expect("identity"));
 
-    fn record() -> EntryRecord {
-        EntryRecord {
-            ticket_id: "ticket".to_owned(),
-            account_id: Uuid::new_v4(),
-            world_id: Uuid::new_v4(),
-            character_id: Uuid::new_v4(),
-            expires_at: 0,
-        }
+    fn record() -> Admission {
+        Admission::default()
     }
 
     fn token() -> LoginToken {
@@ -450,7 +444,7 @@ mod tests {
         client: &mut RepClient,
         peer: &mut Peer,
         start: u64,
-        answer: Result<&EntryRecord, Refusal>,
+        answer: Result<Admission, Refusal>,
         stop: impl Fn(&[RepEvent]) -> bool,
     ) -> (Vec<RepEvent>, Vec<PeerEvent>, u64) {
         run_with(client, peer, start, answer, |_| {}, stop)
@@ -462,7 +456,7 @@ mod tests {
         client: &mut RepClient,
         peer: &mut Peer,
         start: u64,
-        answer: Result<&EntryRecord, Refusal>,
+        answer: Result<Admission, Refusal>,
         before_answer: impl Fn(&mut Peer),
         stop: impl Fn(&[RepEvent]) -> bool,
     ) -> (Vec<RepEvent>, Vec<PeerEvent>, u64) {
@@ -502,10 +496,9 @@ mod tests {
     fn an_accepted_registration_gets_status_0_and_pings() {
         let (mut client, mut peer) = sides(SETTINGS);
         let entry = record();
-        let (events, peer_events, _) =
-            run(&mut client, &mut peer, START_MS, Ok(&entry), |events| {
-                events.contains(&RepEvent::Pinged)
-            });
+        let (events, peer_events, _) = run(&mut client, &mut peer, START_MS, Ok(entry), |events| {
+            events.contains(&RepEvent::Pinged)
+        });
         assert_eq!(
             peer_events,
             vec![PeerEvent::RegistrationRequested(TicketClaims::from_token(
@@ -554,7 +547,7 @@ mod tests {
     fn a_silent_registered_connection_is_dropped() {
         let (mut client, mut peer) = sides(SETTINGS);
         let entry = record();
-        let (_, _, now) = run(&mut client, &mut peer, START_MS, Ok(&entry), |events| {
+        let (_, _, now) = run(&mut client, &mut peer, START_MS, Ok(entry), |events| {
             status(events).is_some()
         });
         assert!(matches!(
@@ -588,7 +581,7 @@ mod tests {
     fn forged_datagrams_neither_close_nor_keep_alive_a_connection() {
         let (mut client, mut peer) = sides(SETTINGS);
         let entry = record();
-        let (_, _, now) = run(&mut client, &mut peer, START_MS, Ok(&entry), |events| {
+        let (_, _, now) = run(&mut client, &mut peer, START_MS, Ok(entry), |events| {
             status(events).is_some()
         });
         let later = now + SETTINGS.silence_timeout_ms / 2;
@@ -616,7 +609,7 @@ mod tests {
         );
         assert!(!peer.is_registered());
         let entry = record();
-        peer.complete_registration(SystemTime::now(), Ok(&entry), VERSION)
+        peer.complete_registration(SystemTime::now(), Ok(entry), VERSION)
             .expect("ignored");
         assert!(!peer.is_registered());
         let mut events = Vec::new();
@@ -649,14 +642,14 @@ mod tests {
     fn registered_client_messages_are_forwarded_but_pings_are_not() {
         let (mut client, mut peer) = sides(SETTINGS);
         let entry = record();
-        let (events, _, now) = run(&mut client, &mut peer, START_MS, Ok(&entry), |events| {
+        let (events, _, now) = run(&mut client, &mut peer, START_MS, Ok(entry), |events| {
             events.contains(&RepEvent::Pinged)
         });
         assert!(events.contains(&RepEvent::Pinged));
         client
             .send_message(INPUT_CHANNEL, false, INPUT_TYPE_INDEX, BODY.to_vec())
             .expect("send");
-        let (_, peer_events, _) = run(&mut client, &mut peer, now, Ok(&entry), |_| false);
+        let (_, peer_events, _) = run(&mut client, &mut peer, now, Ok(entry), |_| false);
         let forwarded: Vec<Option<u64>> = peer_events
             .iter()
             .map(|event| match event {
@@ -677,7 +670,7 @@ mod tests {
             &mut client,
             &mut peer,
             START_MS,
-            Ok(&entry),
+            Ok(entry),
             |peer| {
                 peer.send_envelopes(MESSAGE_CHANNEL, true, &[envelope(LOGIN_TYPE_INDEX)])
                     .expect("held");
@@ -694,7 +687,7 @@ mod tests {
         );
         peer.send_envelopes(INPUT_CHANNEL, false, &[envelope(BUNDLE_TYPE_INDEX)])
             .expect("sent");
-        let (events, _, _) = run(&mut client, &mut peer, now, Ok(&entry), |events| {
+        let (events, _, _) = run(&mut client, &mut peer, now, Ok(entry), |events| {
             !messages(events).is_empty()
         });
         assert_eq!(
@@ -729,11 +722,11 @@ mod tests {
     fn close_ends_a_registered_connection() {
         let (mut client, mut peer) = sides(SETTINGS);
         let entry = record();
-        let (_, _, now) = run(&mut client, &mut peer, START_MS, Ok(&entry), |events| {
+        let (_, _, now) = run(&mut client, &mut peer, START_MS, Ok(entry), |events| {
             status(events).is_some()
         });
         peer.close().expect("close");
-        let (events, _, _) = run(&mut client, &mut peer, now, Ok(&entry), |events| {
+        let (events, _, _) = run(&mut client, &mut peer, now, Ok(entry), |events| {
             events
                 .iter()
                 .any(|event| matches!(event, RepEvent::Closed { .. }))

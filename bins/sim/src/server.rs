@@ -1329,6 +1329,7 @@ fn saved_progression(progression: &PlayerProgression) -> SavedProgression {
                 ends_ns: limit.ends_ns,
             })
             .collect(),
+        masteries: progression.masteries.clone(),
     }
 }
 
@@ -1918,6 +1919,7 @@ mod tests {
             items: None,
             quests: PlayerQuests::default(),
             progression: PlayerProgression::default(),
+            game_master: false,
         }
     }
 
@@ -2302,6 +2304,7 @@ mod tests {
                 coins: 375,
                 achievements: vec![ACHIEVEMENT_BIT],
                 loot_limits: vec![limit.clone()],
+                masteries: BTreeMap::from([("BowAbilityTable".to_owned(), 30)]),
             };
             admit(&bus, world_id, sim.id(), &first).await;
             sim.stop().await;
@@ -2885,6 +2888,7 @@ mod tests {
                 enter_level: false,
                 items: None,
                 drawn_weapon: None,
+                game_master: false,
                 quests: PlayerQuests::default(),
                 progression: PlayerProgression::default(),
                 achievement_version: 0,

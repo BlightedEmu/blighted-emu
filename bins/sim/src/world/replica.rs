@@ -329,6 +329,8 @@ impl Replica {
                 achievements: None,
                 objectives: None,
                 progression: None,
+                categorical_progression: None,
+                progression_points: None,
                 currency: None,
                 health_change: None,
                 cooldowns: None,

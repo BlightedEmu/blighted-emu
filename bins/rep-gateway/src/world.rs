@@ -26,7 +26,7 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::events::{Delivery, EventReceiver, EventSender, event_queue};
-use crate::registration::Refusal;
+use crate::registration::{Admission, Refusal};
 use crate::routes::{Resume, Routes, Stray};
 use crate::workers::worker_of;
 
@@ -79,7 +79,8 @@ pub enum WorldEvent {
 
 /// The world as the server loop sees it.
 pub trait World: Clone + Send + Sync + 'static {
-    /// Asks the world to take the character of `record` on `connection`.
+    /// Asks the world to take the character of `record` on `connection`; what it said about the
+    /// account.
     ///
     /// # Errors
     ///
@@ -88,7 +89,7 @@ pub trait World: Clone + Send + Sync + 'static {
         &self,
         connection: u64,
         record: &EntryRecord,
-    ) -> impl Future<Output = Result<(), Refusal>> + Send;
+    ) -> impl Future<Output = Result<Admission, Refusal>> + Send;
 
     /// Forwards one client message envelope, unchanged, without waiting.
     fn client_message(&self, connection: u64, envelope: Vec<u8>);
@@ -423,7 +424,7 @@ impl BusWorld {
 }
 
 impl World for BusWorld {
-    async fn join(&self, connection: u64, record: &EntryRecord) -> Result<(), Refusal> {
+    async fn join(&self, connection: u64, record: &EntryRecord) -> Result<Admission, Refusal> {
         let reply = self
             .ask_director(connection, record.account_id, record.character_id, None)
             .await;
@@ -432,10 +433,11 @@ impl World for BusWorld {
                 sim,
                 generation,
                 entity,
+                game_master,
             }) => {
                 self.routes()
                     .joined(connection, record, sim, generation, entity);
-                Ok(())
+                Ok(Admission { game_master })
             }
             Ok(JoinReply::Refused { reason }) => {
                 tracing::warn!(%reason, "world refused the character");
@@ -552,7 +554,7 @@ pub(crate) mod tests {
     }
 
     impl World for TestWorld {
-        async fn join(&self, connection: u64, _: &EntryRecord) -> Result<(), Refusal> {
+        async fn join(&self, connection: u64, _: &EntryRecord) -> Result<Admission, Refusal> {
             self.joins.lock().expect("lock").push(connection);
             if self.refuse {
                 return Err(Refusal::WorldRefused);
@@ -564,7 +566,7 @@ pub(crate) mod tests {
                 reliable: true,
                 envelopes: self.login.clone(),
             });
-            Ok(())
+            Ok(Admission::default())
         }
 
         fn client_message(&self, connection: u64, envelope: Vec<u8>) {
@@ -635,6 +637,7 @@ mod bus_tests {
             sim: sim.clone(),
             generation: GENERATION,
             entity: ENTITY,
+            game_master: false,
         }
     }
 
@@ -845,7 +848,10 @@ mod bus_tests {
             reason: "no".to_owned(),
         };
         director(&bus, settings.world_id, joined(&sim), refused).await;
-        assert_eq!(world.join(CONNECTION, &record()).await, Ok(()));
+        assert_eq!(
+            world.join(CONNECTION, &record()).await,
+            Ok(Admission { game_master: false })
+        );
 
         let refusing = self::settings();
         let (world, _events) = start_one(&bus, refusing.clone()).await;

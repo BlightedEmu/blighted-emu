@@ -1,5 +1,6 @@
 # world-director configuration (M5 spec section 6). This file holds no secret.
-# Secret: the world database password, in the variable named by world_database_password_env.
+# Secrets: the world database password, in the variable named by world_database_password_env,
+# and the global database password, in the variable named by global_database.password_env.
 # Any key below can be overridden with NW_DIRECTOR_<KEY>, nested keys joined by "__".
 
 # The [[world]] id in config/edge.toml.
@@ -31,3 +32,13 @@ log_filter = "info"
 [world_database]
 url = "postgres://nw@127.0.0.1:5432/nw_world_1"
 max_connections = 5
+
+# The global database with the admin ranks: an account with the game_master rank (or higher)
+# gets the client GM flag at login, and its sim takes the client's GM messages. Leave this
+# section out to give no account GM rights.
+[global_database]
+password_env = "NW_SECRET_GLOBAL_DATABASE_PASSWORD"
+
+[global_database.database]
+url = "postgres://nw@127.0.0.1:5432/nw_global"
+max_connections = 2

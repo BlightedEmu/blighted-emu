@@ -74,6 +74,21 @@ impl SimWorld {
             AdminAction::ListEvents => AdminReply::Events {
                 running: self.running_events(),
             },
+            AdminAction::GiveExperience { entity, amount } => {
+                self.give_experience(*entity, *amount)
+            }
+            AdminAction::SetLevel { entity, level } => self.set_level(*entity, *level),
+            AdminAction::GiveMasteryExperience {
+                entity,
+                mastery,
+                amount,
+            } => self.give_mastery_experience(*entity, mastery, *amount),
+            AdminAction::SetMasteryRank {
+                entity,
+                mastery,
+                rank,
+            } => self.set_mastery_rank(*entity, mastery.as_deref(), *rank),
+            AdminAction::SetCoins { entity, coins } => self.set_coins(*entity, *coins),
             AdminAction::Kick { .. } => AdminReply::Failed {
                 reason: "a kick is the server loop's".to_owned(),
             },

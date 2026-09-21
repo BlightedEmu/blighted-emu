@@ -33,9 +33,16 @@ pub const REGISTRATION_STATUS_AUTHORIZED: u32 = 0;
 /// Status of a refused registration. Any value other than 0 refuses; the emulator sends 1.
 pub const REGISTRATION_STATUS_REFUSED: u32 = 1;
 
-/// The four bytes of all 43 captured responses (meanings Unknown).
+/// The four bytes of all 43 captured responses. Byte 0 is the target whitelist and byte 3 the
+/// EOS flag (the client handler `FUN_146b707d0`); byte 1 makes the client a GM client (below).
 pub const REGISTRATION_RESPONSE_OBSERVED_FLAGS: [u8; REGISTRATION_RESPONSE_FLAG_COUNT] =
     [1, 0, 0, 1];
+
+/// The four bytes for a game master: byte 1 set. The client copies it to the ClientSDK field
+/// that `IsGmClient` reads (`FUN_146b6f520`), which turns on the client's GM mode ("GM Client
+/// Enabled" in `r_DisplayInfo`, `RequestGmPermissions`). No retail capture has it (Observed in
+/// the client code, docs/re/2026-09-18-progression-and-gm-mode.md section 5).
+pub const REGISTRATION_RESPONSE_GM_FLAGS: [u8; REGISTRATION_RESPONSE_FLAG_COUNT] = [1, 1, 0, 1];
 
 const _: () = {
     assert!(

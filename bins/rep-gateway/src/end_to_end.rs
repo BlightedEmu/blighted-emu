@@ -263,6 +263,7 @@ impl Stack {
             director,
             test_bus().await,
             world_pool.clone(),
+            None,
             valkey().await,
             std::future::pending(),
         ));
@@ -363,6 +364,8 @@ async fn start_sim(world_id: Uuid, sim_id: BusId, world_pool: &PgPool) -> JoinHa
         combat: config.combat_settings(Arc::new(test_data()), Arc::from([])),
         content: Arc::default(),
         snapshot_interval: None,
+        mob_ai: Arc::from([]),
+        design: Arc::default(),
     };
     let db = world_pool.clone();
     let sim = tokio::spawn(async move {

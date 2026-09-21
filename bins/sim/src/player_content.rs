@@ -10,6 +10,7 @@ use nw_content::leaderboards::LeaderboardStats;
 use nw_content::loot::{LootTables, MobLoot, PlayerLootLevels};
 use nw_content::loot_limits::{LootLimitRules, LootLimits, ResetClock};
 use nw_content::poi_tags::PoiTags;
+use nw_content::progression::Progression;
 use nw_content::rewards::{KillExperience, Rewards};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_sim_core::Position;
@@ -428,6 +429,8 @@ pub struct PlayerContent {
     pub disabled_items: HashSet<String>,
     /// The loot limits and their resets; `None` applies no limit.
     pub loot_limits: Option<LootLimitRules>,
+    /// The level table and the weapon masteries.
+    pub progression: Progression,
 }
 
 /// A quest object of the level: a gatherable point whose gather is a game event that a quest's
@@ -576,6 +579,7 @@ impl PlayerContent {
                 clock: loot_reset,
             }),
             gameplay,
+            progression: Progression::of_tables(tables),
         }
     }
 

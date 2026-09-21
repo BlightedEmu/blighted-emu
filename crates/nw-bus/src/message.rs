@@ -2,6 +2,7 @@
 //! Bus message types (M4 spec section 6.1). Game messages travel as envelope bytes; the gateway
 //! does not read them.
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use nw_messages::{LOOK_CHOICES, RAW_ID_LEN};
@@ -60,6 +61,9 @@ pub enum JoinReply {
         generation: u64,
         /// The player's entity number.
         entity: u64,
+        /// Whether the account has the game master rank: its client gets the GM flag of the
+        /// registration response.
+        game_master: bool,
     },
     /// The character cannot join; the gateway sends registration status 1.
     Refused {
@@ -189,6 +193,9 @@ pub struct Admit {
     /// The character's saved progression; empty when it never saved any.
     #[serde(default)]
     pub progression: PlayerProgression,
+    /// Whether the account has the game master rank: the sim takes its client's GM messages.
+    #[serde(default)]
+    pub game_master: bool,
 }
 
 /// The answer to [`Admit`].
@@ -301,6 +308,9 @@ pub struct HandoffOffer {
     /// dropped every greatsword swing).
     #[serde(default)]
     pub drawn_weapon: Option<u32>,
+    /// Whether the account has the game master rank, as in [`Admit::game_master`].
+    #[serde(default)]
+    pub game_master: bool,
     /// The player's quests: the active one with its run, and the finished ones.
     #[serde(default)]
     pub quests: PlayerQuests,
@@ -344,6 +354,9 @@ pub struct PlayerProgression {
     pub achievements: Vec<u32>,
     /// Its loot limit counts, ended ones too, by limit id.
     pub loot_limits: Vec<LootLimitCount>,
+    /// The total experience of each weapon mastery, by its `CategoricalProgressionData` id
+    /// (world migration 0007).
+    pub masteries: BTreeMap<String, u32>,
 }
 
 /// One loot limit's count of a player (`nw_content::loot_limits`).
@@ -709,6 +722,7 @@ mod tests {
             sim: connection().gateway,
             generation: STARTED_AT_MS,
             entity: CONNECTION,
+            game_master: true,
         });
         round_trip(JoinReply::Refused {
             reason: "no position".to_owned(),
@@ -766,6 +780,7 @@ mod tests {
                 counted_ns: 1_792_696_951_894_621_000,
                 ends_ns: 1_793_091_600_894_621_000,
             }],
+            masteries: BTreeMap::from([("GreatSwordAbilityTable".to_owned(), 20)]),
         }
     }
 
@@ -790,6 +805,7 @@ mod tests {
             }]),
             quests: PlayerQuests::default(),
             progression: progression(),
+            game_master: false,
         });
         round_trip(AdmitReply::Admitted);
         round_trip(AdmitReply::Refused {
@@ -827,6 +843,7 @@ mod tests {
             client_context: 1,
             enter_level: false,
             progression: progression(),
+            game_master: true,
             achievement_version: 25,
             items: Some(vec![CarriedItem {
                 item_id: "PotionHealthT1".to_owned(),

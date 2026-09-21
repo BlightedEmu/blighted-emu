@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! One join (M5 spec section 3.1): check the account, load the position, the items, the quests
-//! and the progression, take an entity number, and ask the owner of the cell to take the player.
+//! and the progression, read the account's admin rank, take an entity number, and ask the owner
+//! of the cell to take the player.
 
 use std::time::Duration;
 
@@ -9,9 +10,9 @@ use nw_bus::{
     PlayerProgression, PlayerQuests, Point, QuestRun, SimSlot, subject,
 };
 use nw_db::{
-    PgPool, SavedItem, SavedPlace, SavedPosition, SavedProgression, SavedQuests, character_by_id,
-    character_items, character_position, character_progression, character_quests,
-    next_entity_number,
+    AdminRank, PgPool, SavedItem, SavedPlace, SavedPosition, SavedProgression, SavedQuests,
+    admin_rank, character_by_id, character_items, character_position, character_progression,
+    character_quests, next_entity_number,
 };
 use nw_login::look::{saved_backstory, saved_look};
 use nw_sim_core::{Position, TUTORIAL_FOLDER, TUTORIAL_START};
@@ -35,6 +36,8 @@ pub struct JoinContext {
     pub admit_timeout: Duration,
     /// The world database.
     pub db: PgPool,
+    /// The global database with the admin ranks; `None` gives no account the GM flag.
+    pub ranks: Option<PgPool>,
     /// NATS.
     pub bus: Bus,
 }
@@ -129,8 +132,8 @@ pub fn starts_in_tutorial(saved: Option<&SavedPosition>) -> bool {
 }
 
 /// Routes `join`: a new player to the tutorial sim `tutorial` (when one is live) at the tutorial
-/// start, every other player to the owner of its cell in `assignment`. Returns the sim and the
-/// entity number: a new one, or the resumed one.
+/// start, every other player to the owner of its cell in `assignment`. Returns the sim, the
+/// entity number (a new one, or the resumed one) and whether the account is a game master.
 ///
 /// # Errors
 ///
@@ -140,7 +143,7 @@ pub async fn route_join(
     assignment: &Assignment,
     tutorial: Option<&SimSlot>,
     join: &Join,
-) -> Result<(SimSlot, u64), JoinRefusal> {
+) -> Result<(SimSlot, u64, bool), JoinRefusal> {
     let database = |error: nw_db::DbError| JoinRefusal::Database(error.to_string());
     let character = character_by_id(&context.db, join.character)
         .await
@@ -186,6 +189,7 @@ pub async fn route_join(
                 .unwrap_or_default(),
         ),
     };
+    let game_master = is_game_master(context.ranks.as_ref(), join.account).await;
     let (sim, position) = match tutorial {
         Some(tutorial) => (tutorial.clone(), TUTORIAL_START),
         None => {
@@ -219,6 +223,7 @@ pub async fn route_join(
         items,
         quests,
         progression,
+        game_master,
     };
     let reply = context
         .bus
@@ -230,8 +235,23 @@ pub async fn route_join(
         .await
         .map_err(|error| JoinRefusal::SimSilent(error.to_string()))?;
     match reply {
-        AdmitReply::Admitted => Ok((sim, entity)),
+        AdmitReply::Admitted => Ok((sim, entity, game_master)),
         AdmitReply::Refused { reason } => Err(JoinRefusal::SimRefused(reason)),
+    }
+}
+
+/// Whether `account` has the game master rank (or a higher one) in `ranks`. A failed read gives
+/// no GM rights, so a database fault never refuses a join.
+async fn is_game_master(ranks: Option<&PgPool>, account: Uuid) -> bool {
+    let Some(ranks) = ranks else {
+        return false;
+    };
+    match admin_rank(ranks, account).await {
+        Ok(rank) => rank.is_some_and(|rank| rank >= AdminRank::GameMaster),
+        Err(error) => {
+            tracing::warn!(%error, %account, "admin rank read failed; no GM rights");
+            false
+        }
     }
 }
 
@@ -270,6 +290,7 @@ fn player_progression(saved: SavedProgression) -> PlayerProgression {
                 ends_ns: limit.ends_ns,
             })
             .collect(),
+        masteries: saved.masteries,
     }
 }
 
@@ -326,6 +347,7 @@ mod tests {
                 counted_ns: 1_793_091_600_894_621_000,
                 ends_ns: 1_793_091_600_894_621_000,
             }],
+            masteries: std::collections::BTreeMap::from([("BowAbilityTable".to_owned(), 30)]),
         };
         assert_eq!(
             player_progression(saved),
@@ -339,6 +361,7 @@ mod tests {
                     counted_ns: 1_793_091_600_894_621_000,
                     ends_ns: 1_793_091_600_894_621_000,
                 }],
+                masteries: std::collections::BTreeMap::from([("BowAbilityTable".to_owned(), 30)]),
             }
         );
     }

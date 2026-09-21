@@ -11,8 +11,8 @@ use nw_login::queue::{EntryRecord, QueueStore};
 use nw_login::secrets::SigningKey;
 use nw_login::signature::verify_entry;
 use nw_reflect::{
-    LoginToken, REGISTRATION_RESPONSE_OBSERVED_FLAGS, REGISTRATION_STATUS_AUTHORIZED,
-    RegistrationResponseMsg,
+    LoginToken, REGISTRATION_RESPONSE_GM_FLAGS, REGISTRATION_RESPONSE_OBSERVED_FLAGS,
+    REGISTRATION_STATUS_AUTHORIZED, RegistrationResponseMsg,
 };
 use uuid::Uuid;
 
@@ -122,9 +122,16 @@ pub async fn check_ticket<Q: QueueStore>(
     Ok(record)
 }
 
+/// What the world said about an accepted character.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Admission {
+    /// The account has the game master rank: its client gets the GM flag.
+    pub game_master: bool,
+}
+
 /// The response body: `status`, the server clock in nanoseconds since 2000-01-01, a new session
 /// token for an accepted registration (empty for a refused one), the server version text, and the
-/// observed four bytes.
+/// four flag bytes: the observed ones, or the GM ones for a game master.
 ///
 /// # Errors
 ///
@@ -133,6 +140,7 @@ pub fn response(
     status: u32,
     now: SystemTime,
     server_version: &str,
+    game_master: bool,
 ) -> Result<RegistrationResponseMsg, getrandom::Error> {
     let session_token = if status == REGISTRATION_STATUS_AUTHORIZED {
         let mut bytes = [0_u8; SESSION_TOKEN_BYTES];
@@ -146,7 +154,11 @@ pub fn response(
         uint64: clock_nanos(now),
         bytes_at_0x18: session_token,
         bytes_at_0x38: server_version.as_bytes().to_vec(),
-        bytes_at_0x58: REGISTRATION_RESPONSE_OBSERVED_FLAGS,
+        bytes_at_0x58: if game_master {
+            REGISTRATION_RESPONSE_GM_FLAGS
+        } else {
+            REGISTRATION_RESPONSE_OBSERVED_FLAGS
+        },
     })
 }
 
@@ -322,7 +334,8 @@ pub(crate) mod tests {
     #[test]
     fn an_accepted_response_has_the_captured_shape() {
         let now = UNIX_EPOCH + Duration::from_secs(NEW_YEAR_2026);
-        let accepted = response(REGISTRATION_STATUS_AUTHORIZED, now, VERSION).expect("response");
+        let accepted =
+            response(REGISTRATION_STATUS_AUTHORIZED, now, VERSION, false).expect("response");
         assert_eq!(accepted.uint32_at_0x8, REGISTRATION_STATUS_AUTHORIZED);
         assert_eq!(accepted.uint64, NEW_YEAR_2026_CLOCK);
         assert_eq!(accepted.bytes_at_0x18.len(), 2 * SESSION_TOKEN_BYTES);
@@ -334,8 +347,10 @@ pub(crate) mod tests {
         );
         assert_eq!(accepted.bytes_at_0x38, VERSION.as_bytes());
         assert_eq!(accepted.bytes_at_0x58, REGISTRATION_RESPONSE_OBSERVED_FLAGS);
-        let refused = response(REGISTRATION_STATUS_REFUSED, now, VERSION).expect("refused");
+        let refused = response(REGISTRATION_STATUS_REFUSED, now, VERSION, false).expect("refused");
         assert!(refused.bytes_at_0x18.is_empty());
+        let game_master = response(REGISTRATION_STATUS_AUTHORIZED, now, VERSION, true).expect("gm");
+        assert_eq!(game_master.bytes_at_0x58, REGISTRATION_RESPONSE_GM_FLAGS);
         assert_eq!(clock_nanos(UNIX_EPOCH), 0);
     }
 

@@ -104,6 +104,45 @@ pub enum AdminAction {
     },
     /// The events running on the sim.
     ListEvents,
+    /// Adds experience points to the player; its level follows them.
+    GiveExperience {
+        /// The player.
+        entity: u64,
+        /// How many points.
+        amount: u32,
+    },
+    /// Sets the player's level: its experience becomes the start of that level.
+    SetLevel {
+        /// The player.
+        entity: u64,
+        /// The level, zero-based (the client shows level + 1).
+        level: u32,
+    },
+    /// Adds experience to one weapon mastery of the player; its rank follows it.
+    GiveMasteryExperience {
+        /// The player.
+        entity: u64,
+        /// The `CategoricalProgressionData` id, for example `GreatSwordAbilityTable`.
+        mastery: String,
+        /// How many points.
+        amount: u32,
+    },
+    /// Sets the rank of one weapon mastery of the player, or of every one.
+    SetMasteryRank {
+        /// The player.
+        entity: u64,
+        /// The `CategoricalProgressionData` id; `None` is every weapon mastery.
+        mastery: Option<String>,
+        /// The rank, zero-based (the client shows rank + 1); above the top it is the top.
+        rank: u16,
+    },
+    /// Sets the player's coins.
+    SetCoins {
+        /// The player.
+        entity: u64,
+        /// The coins.
+        coins: u64,
+    },
 }
 
 /// One running event of a sim.
@@ -192,6 +231,39 @@ mod tests {
             decode::<AdminCommand>(&encode(&command).unwrap()).unwrap(),
             command
         );
+        for action in [
+            AdminAction::GiveExperience {
+                entity: 7,
+                amount: 500,
+            },
+            AdminAction::SetLevel {
+                entity: 7,
+                level: 59,
+            },
+            AdminAction::GiveMasteryExperience {
+                entity: 7,
+                mastery: "GreatSwordAbilityTable".to_owned(),
+                amount: 20,
+            },
+            AdminAction::SetMasteryRank {
+                entity: 7,
+                mastery: None,
+                rank: 19,
+            },
+            AdminAction::SetCoins {
+                entity: 7,
+                coins: 1_000_000,
+            },
+        ] {
+            let command = AdminCommand {
+                action,
+                ..command.clone()
+            };
+            assert_eq!(
+                decode::<AdminCommand>(&encode(&command).unwrap()).unwrap(),
+                command
+            );
+        }
         for reply in [
             AdminReply::Done,
             AdminReply::Spawned {

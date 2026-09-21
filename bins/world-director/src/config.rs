@@ -27,6 +27,10 @@ pub struct DirectorConfig {
     pub world_database: DatabaseConfig,
     /// The environment variable with the world database password; it starts with `NW_SECRET_`.
     pub world_database_password_env: String,
+    /// The global database, for the admin ranks: an account with the game master rank gets the
+    /// client GM flag. Without it no account gets GM rights.
+    #[serde(default)]
+    pub global_database: Option<GlobalDatabase>,
     /// The pinned client build file.
     pub client_build_config: PathBuf,
     /// Folder of the world files (`world-<build>-<level>.bin`).
@@ -47,6 +51,17 @@ pub struct DirectorConfig {
     pub metrics_listen: SocketAddr,
     /// `tracing` filter, for example `info`.
     pub log_filter: String,
+}
+
+/// The global database and the environment variable with its password (it starts with
+/// `NW_SECRET_`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GlobalDatabase {
+    /// Where it is.
+    pub database: DatabaseConfig,
+    /// The environment variable with its password.
+    pub password_env: String,
 }
 
 /// A start position, in metres. The height comes from the ground of the level.
@@ -95,6 +110,13 @@ impl DirectorConfig {
             .starts_with(SECRET_ENV_PREFIX)
         {
             return invalid("world_database_password_env", "must start with NW_SECRET_");
+        }
+        if self
+            .global_database
+            .as_ref()
+            .is_some_and(|global| !global.password_env.starts_with(SECRET_ENV_PREFIX))
+        {
+            return invalid("global_database.password_env", "must start with NW_SECRET_");
         }
         if self.level.is_empty() {
             return invalid("level", "must not be empty");
@@ -198,5 +220,12 @@ mod tests {
         let mut config = committed();
         config.level = String::new();
         assert!(config.validate().is_err());
+        let mut config = committed();
+        let global = config.global_database.as_mut().expect("global database");
+        global.password_env = "PASSWORD".to_owned();
+        assert!(config.validate().is_err());
+        let mut config = committed();
+        config.global_database = None;
+        assert!(config.validate().is_ok(), "the ranks are optional");
     }
 }

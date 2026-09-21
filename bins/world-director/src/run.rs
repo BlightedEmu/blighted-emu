@@ -11,7 +11,7 @@ use nw_common::config::ConfigError;
 use nw_common::logging::{LoggingError, init_logging};
 use nw_content::client_build::load_client_build;
 use nw_content::container::ContainerError;
-use nw_db::{DbError, WORLD_MIGRATOR, check_schema};
+use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 use nw_login::store::StoreError;
 use nw_login::valkey::Valkey;
 use nw_sim_core::{CellGrid, CellGridError};
@@ -108,6 +108,20 @@ async fn serve_async(
         .await
         .map_err(RunError::Database)?;
     check_schema(&db, &WORLD_MIGRATOR).await?;
+    let ranks = match &config.global_database {
+        Some(global) => {
+            let password = std::env::var(&global.password_env)
+                .ok()
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| RunError::MissingSecret(global.password_env.clone()))?;
+            let pool = nw_db::connect(&global.database, &password)
+                .await
+                .map_err(RunError::Database)?;
+            check_schema(&pool, &GLOBAL_MIGRATOR).await?;
+            Some(pool)
+        }
+        None => None,
+    };
     let store = Valkey::connect(&config.valkey_url)
         .await
         .map_err(RunError::Valkey)?;
@@ -121,5 +135,5 @@ async fn serve_async(
         // A failed signal handler means the director runs until killed.
         let _ = tokio::signal::ctrl_c().await;
     };
-    Ok(serve_loop(settings, bus, db, store, shutdown).await?)
+    Ok(serve_loop(settings, bus, db, ranks, store, shutdown).await?)
 }

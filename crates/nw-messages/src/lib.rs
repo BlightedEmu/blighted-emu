@@ -30,8 +30,8 @@ pub mod gear;
 pub mod interactor;
 pub mod items;
 pub mod level_info;
-pub mod loot;
 pub mod list_delta;
+pub mod loot;
 pub mod objectives;
 pub mod paperdoll;
 pub mod payload;
@@ -139,12 +139,12 @@ pub use level_info::{
     LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, LEVELS, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg,
     LevelSpec, OPEN_WORLD_LEVEL, PhasingEntry, TUTORIAL_LEVEL,
 };
+pub use list_delta::{ListChange, ReplicatedList};
 pub use loot::{
     GLOBAL_STORAGE_COMPONENT, GLOBAL_STORAGE_TYPE_INDEX, GlobalStorageState, LOOT_CREATURE,
     LOOT_ROLLED, LOOT_TAKEN, LOOT_TRACKER_COMPONENT, LOOT_TRACKER_TYPE_INDEX, LootTrackerState,
     StoredItems, TrackedLoot,
 };
-pub use list_delta::{ListChange, ReplicatedList};
 pub use objectives::{
     OBJECTIVES_COMPONENT, OBJECTIVES_TYPE_INDEX, ObjectiveRecord, ObjectivesState, TaskEntry,
     TaskWireState,

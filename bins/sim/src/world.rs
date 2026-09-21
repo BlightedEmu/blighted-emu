@@ -66,6 +66,7 @@ mod loot_bag;
 mod members;
 mod mob_timeline;
 mod mob_trail;
+mod progression;
 mod projectile;
 mod quest_objects;
 mod quest_tracker;
@@ -116,6 +117,7 @@ use crate::stats::StatEvent;
 use nw_content::creature_animations::CreatureAnimations;
 use nw_content::ftue_entities::{self, FACET_LEN, FtueLevel};
 use nw_content::mob_prefabs::ASSET_ID_LEN;
+use nw_content::progression::Progression;
 use nw_messages::FRAG_TAGS_LEN;
 use nw_messages::raw_id_of_entity;
 
@@ -484,6 +486,12 @@ struct Player {
     /// Its progression as last taken for a save, or as loaded at its join; `None` after a
     /// handoff (the sender may not have saved it), so the next save round saves it.
     progression_saved: Option<PlayerProgression>,
+    /// Its weapon masteries.
+    masteries: progression::Masteries,
+    /// The level its client was last sent; `None` before the first card.
+    level_sent: Option<u32>,
+    /// Whether its account has the game master rank: the sim takes its client's GM messages.
+    game_master: bool,
     /// The crafting station it uses, from its interaction with one until it closes it.
     station: Option<String>,
     /// The last open-world interaction its client asked for: the client repeats the request in
@@ -540,6 +548,7 @@ impl Player {
                 .achievement_bits()
                 .unwrap_or_else(|| self.arrived_achievements.clone()),
             loot_limits: self.loot.limit_counts(),
+            masteries: self.masteries.carried(),
         }
     }
 
@@ -743,6 +752,8 @@ struct Arrival {
     /// Whether `progression` is what the database holds or a save of this sim waits with (a
     /// join); a handoff's may not be saved yet.
     progression_saved: bool,
+    /// Whether its account has the game master rank.
+    game_master: bool,
     /// Its saved or carried quests.
     quests: PlayerQuests,
 }
@@ -905,6 +916,7 @@ impl SimWorld {
             drawn_weapon: None,
             progression: admit.progression.clone(),
             progression_saved: true,
+            game_master: admit.game_master,
             quests: admit.quests.clone(),
         };
         self.check(&arrival)?;
@@ -1027,6 +1039,7 @@ impl SimWorld {
             drawn_weapon: offer.drawn_weapon,
             progression: offer.progression.clone(),
             progression_saved: false,
+            game_master: offer.game_master,
             quests: offer.quests.clone(),
         };
         self.check(&arrival)?;
@@ -2934,6 +2947,7 @@ impl SimWorld {
             stations: (!self.is_tutorial()).then_some(&self.stations),
             view_radius_m: self.settings.interest_radius_m,
             bags: &self.bags,
+            progression: &content.progression,
             replicas,
             local_player_card: self.settings.local_player_card,
             now_ms,
@@ -3069,6 +3083,12 @@ impl SimWorld {
                         .progression_saved
                         .then(|| arrival.progression.clone()),
                     arrived_achievements: arrival.progression.achievements,
+                    masteries: progression::Masteries::of(
+                        &arrival.progression.masteries,
+                        &self.content.progression,
+                    ),
+                    level_sent: None,
+                    game_master: arrival.game_master,
                     station: None,
                     last_interaction: None,
                     territories: Vec::new(),
@@ -3368,6 +3388,8 @@ struct Neighbourhood<'a> {
     view_radius_m: f32,
     /// The loot bags.
     bags: &'a loot_bag::LootBags,
+    /// The level table and the weapon masteries.
+    progression: &'a Progression,
     /// Every player as the players who see it get it this tick.
     replicas: HashMap<u64, Replica>,
     local_player_card: bool,
@@ -3520,12 +3542,34 @@ impl Neighbourhood<'_> {
                         quest.take_change()
                     }
                 });
-                // The experience: whole with the first card, then after each change.
+                // The experience and the level: whole with the first card, then after each
+                // change; a change of level sends the new level with the experience (retail
+                // 899 at each level up, progression-and-gm-mode note section 3).
+                let level = self.progression.level_of(player.experience);
                 let progression = if first {
-                    Some(ProgressionState::login(player.experience))
+                    player.level_sent = Some(level);
+                    Some(ProgressionState::login_at_level(level, player.experience))
+                } else if std::mem::take(&mut player.experience_changed) {
+                    let leveled = player.level_sent != Some(level);
+                    player.level_sent = Some(level);
+                    Some(if leveled {
+                        ProgressionState::level_up(level, player.experience)
+                    } else {
+                        ProgressionState::experience(player.experience)
+                    })
                 } else {
-                    std::mem::take(&mut player.experience_changed)
-                        .then(|| ProgressionState::experience(player.experience))
+                    None
+                };
+                // The weapon masteries and their point pools: whole with the first card, then
+                // after each change.
+                let (categorical_progression, progression_points) = if first {
+                    let (masteries, pools) = player.masteries.first_states(self.progression);
+                    (Some(masteries), Some(pools))
+                } else {
+                    player
+                        .masteries
+                        .take_change(self.progression)
+                        .map_or((None, None), |(masteries, pools)| (Some(masteries), pools))
                 };
                 // The coins: whole with the first card, then after each change (retail own c60
                 // with each quest reward, beach-quests note).
@@ -3577,6 +3621,8 @@ impl Neighbourhood<'_> {
                     achievements: achievements.as_ref(),
                     objectives: objectives.as_ref(),
                     progression,
+                    categorical_progression: categorical_progression.as_ref(),
+                    progression_points: progression_points.as_ref(),
                     currency,
                     health_change,
                     cooldowns: cooldowns.as_ref(),
@@ -3798,6 +3844,7 @@ fn handoff_offer(
         enter_level: enters,
         items: player.gear.as_ref().map(Gear::carried),
         drawn_weapon: player.gear.as_ref().and_then(Gear::drawn),
+        game_master: player.game_master,
         quests,
         progression: player.progression(),
         achievement_version: player.flow.achievement_version(),
@@ -4016,6 +4063,7 @@ mod tests {
             items: None,
             quests: PlayerQuests::default(),
             progression: PlayerProgression::default(),
+            game_master: false,
         }
     }
 
@@ -7260,6 +7308,7 @@ mod tests {
                 counted_ns,
                 ends_ns: counted_ns + week_ns,
             }],
+            masteries: BTreeMap::new(),
         }
     }
 

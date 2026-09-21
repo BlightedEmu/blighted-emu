@@ -89,6 +89,7 @@ pub async fn serve<Q: QueueStore>(
     settings: DirectorSettings,
     bus: Bus,
     db: PgPool,
+    ranks: Option<PgPool>,
     store: Q,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), ServeError> {
@@ -108,6 +109,7 @@ pub async fn serve<Q: QueueStore>(
             starts: settings.starts.clone(),
             admit_timeout: settings.admit_timeout,
             db,
+            ranks,
             bus: bus.clone(),
         }),
         sims: SimRegistry::new(settings.heartbeat_interval, settings.heartbeat_misses),
@@ -157,7 +159,7 @@ impl<Q: QueueStore> Loop<Q> {
                 Some(assignment) => {
                     match route_join(&context, &assignment, tutorial.as_ref(), &join.message).await
                     {
-                        Ok((sim, entity)) => {
+                        Ok((sim, entity, game_master)) => {
                             metrics::counter!(METRIC_JOINS, RESULT_LABEL => JOINED).increment(1);
                             tracing::info!(character = %join.message.character, sim = %sim.id, "joined");
                             // The loop may have stopped; then the count no longer matters.
@@ -166,6 +168,7 @@ impl<Q: QueueStore> Loop<Q> {
                                 sim: sim.id,
                                 generation: sim.generation,
                                 entity,
+                                game_master,
                             }
                         }
                         Err(refusal) => {
@@ -404,6 +407,7 @@ mod tests {
             settings(world_id),
             bus.clone(),
             db.clone(),
+            None,
             valkey().await,
             async {
                 let _ = stopped.await;
