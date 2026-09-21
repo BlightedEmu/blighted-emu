@@ -1771,9 +1771,10 @@ impl SimWorld {
     }
 
     /// How the hit `intent` of a mob, of the move hit `move_hit` when it has one, lands on the
-    /// player `defender`, from its damage rows: the row's damage type and affix, its multiple,
-    /// and the stamina a block takes ([`AttackRow::block_stamina`], with the defender's weapon's
-    /// `BlockStability`). The row is the damage window's (its multiple is the row's coefficient,
+    /// player `defender`, from its damage rows: the row's damage type and affix, its multiple, and
+    /// the stamina a block takes ([`AttackRow::block_stamina`], with the weapon's `BlockStability`
+    /// of a defender of this sim, else of the config's weapon: a player of another sim blocks
+    /// there). The row is the damage window's (its multiple is the row's coefficient,
     /// [`crate::mobs::ROW_CARRIES_ATTACK`]), or a paced mob's move row over its attack row (which
     /// the pace's attack factor fits), times its second phase's multiple. A mob without rows the
     /// tables have hits with [`DEFAULT_HIT_TAG`] and takes [`DEFAULT_BLOCK_STAMINA`].
@@ -1781,7 +1782,7 @@ impl SimWorld {
         &self,
         intent: &MobAttackIntent,
         move_hit: Option<MoveHit>,
-        defender: Entity,
+        defender: Option<Entity>,
     ) -> MobHitStyle {
         let data = &self.combat.data;
         let plain = MobHitStyle {
@@ -1790,8 +1791,8 @@ impl SimWorld {
             damage_scale: 1.0,
             block_stamina: DEFAULT_BLOCK_STAMINA,
         };
-        let stability = self
-            .held_weapon(defender)
+        let stability = defender
+            .and_then(|defender| self.held_weapon(defender))
             .map_or(data.weapon().block_stability, |(weapon, _)| {
                 weapon.block_stability
             });
@@ -1857,13 +1858,11 @@ impl SimWorld {
                 let at = mob.position;
                 let mut hit = mob_hit(&mob.attack, armor_share);
                 let defender = self.player_by_number(intent.target);
-                let style =
-                    defender.map(|defender| self.mob_hit_style(&intent, move_hit, defender));
-                if let Some(style) = &style {
-                    let scaled = f64::from(hit.amount) * style.damage_scale;
-                    // A hit of a few hundred points.
-                    hit.amount = scaled.round() as u32;
-                }
+                // The same hit for a player of this sim and one of another (a ghost).
+                let style = self.mob_hit_style(&intent, move_hit, defender);
+                let scaled = f64::from(hit.amount) * style.damage_scale;
+                // A hit of a few hundred points.
+                hit.amount = scaled.round() as u32;
                 tracing::debug!(
                     mob = intent.mob,
                     target = intent.target,
@@ -1873,7 +1872,7 @@ impl SimWorld {
                     amount = hit.amount,
                     "mob attack"
                 );
-                if let (Some(entity), Some(style)) = (defender, style) {
+                if let Some(entity) = defender {
                     let vitals = *self.world.get::<Vitals>(entity)?;
                     // A swing at a player who moved away misses: retail sends no hit message.
                     let body = self.world.get::<Body>(entity)?.motion.position();
@@ -4129,8 +4128,17 @@ mod tests {
 
     #[test]
     fn a_mob_hits_a_ghost_player_through_its_sim() {
+        /// The coefficient of the test mob's damage row: a ghost player takes it too.
+        const ROW_FACTOR: f64 = 3.0;
         let mut world = world_with_spawns(vec![test_spawn(BORDER_X - 1.0)]);
         world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        let mut source = crate::combat::test_support::test_source();
+        for row in &mut source.attacks {
+            if row.damage_id == crate::mob_ai::test_support::TEST_MOB_ROW {
+                row.coefficient = ROW_FACTOR;
+            }
+        }
+        world.combat.data = Arc::new(test_data_of(source));
         let player = Ghost {
             entity: 9,
             position: Point {
@@ -4161,6 +4169,14 @@ mod tests {
         let remote = remote.expect("the mob hit the ghost player");
         assert_eq!(remote.owner, sim_b());
         assert_eq!((remote.hit.target, remote.hit.attacker), (9, mob()));
+        let unscaled = (crate::combat::test_support::TEST_LEVEL_DAMAGE
+            * (1.0 - world.combat.player_armor_share))
+            .round();
+        assert_eq!(
+            f64::from(remote.hit.amount),
+            (unscaled * ROW_FACTOR).round(),
+            "the same hit as on a player of this sim"
+        );
     }
 
     #[test]
