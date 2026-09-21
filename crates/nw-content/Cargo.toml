@@ -20,5 +20,9 @@ thiserror.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
+[features]
+# `leaderboards::test_rows`: table rows for other crates' tests.
+test-util = []
+
 [lints]
 workspace = true

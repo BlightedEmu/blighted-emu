@@ -4,6 +4,7 @@
 //! with 2570 `ActionListComponentClientFacet_OnServerSpreadshotProcessed` and one 2071 per pellet
 //! that hit. Counts are wide prefix integers; every other number is big-endian.
 
+use crate::entity_ids::entity_of_facet;
 use crate::facet::FacetHeader;
 use crate::wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};
 
@@ -25,16 +26,17 @@ const MAX_ENTRIES: u64 = 64;
 pub struct SpreadHit {
     /// The target's raw id.
     pub raw_id: [u8; RAW_ID_LEN],
-    /// The target's facet entity: its entity number with the bytes reversed.
+    /// The target's facet entity: the first 8 bytes of its raw id, little-endian.
     pub facet_entity: u64,
     /// A value per hit (Unknown; Inferred: the hit volume).
     pub extra: u64,
 }
 
 impl SpreadHit {
-    /// The entity number of the target.
-    pub const fn target(&self) -> u64 {
-        self.facet_entity.swap_bytes()
+    /// The entity number of the target; `None` for a facet entity of no id this process made or
+    /// adopted.
+    pub fn target(&self) -> Option<u64> {
+        entity_of_facet(self.facet_entity)
     }
 }
 
@@ -69,7 +71,7 @@ impl SpreadshotRequestMsg {
             .iter()
             .filter(|[index_byte, distance]| *distance < NO_HIT_DISTANCE && *index_byte != u8::MAX)
             .filter_map(|[index_byte, _]| self.hits.get(usize::from(index_byte & HIT_INDEX_MASK)))
-            .map(SpreadHit::target)
+            .filter_map(SpreadHit::target)
             .collect()
     }
 
@@ -226,7 +228,7 @@ impl BodyCodec for SpreadshotProcessedMsg {
 mod tests {
     use super::*;
 
-    /// Live 2026-09-16: a shot whose 6 pellets all hit mob 0x4_0000_0004.
+    /// Live 2026-09-16: a shot whose 6 pellets all hit one mob.
     const LIVE_ONE_TARGET: &str = "aa491b4ea3c2ad756df00100000000000dbc01bc4427dca143c2725741dc3623\
         baedb80026c80600960096009600960097009601000000040000000400000004000000040400000004000000\
         b7c7848bfd504d58010003015ee81f90df";
@@ -235,7 +237,6 @@ mod tests {
         bbc5b32d2d4806005a01580157015a005bfffe02000000040000000400000004000000040400000004000000\
         d8c2690b864b5b1e000000040000000400000004000000040400000004000000161008bc4579b03701000301\
         5ee83a27e3";
-    const MOB: u64 = 0x4_0000_0004;
 
     fn bytes(hex: &str) -> Vec<u8> {
         (0..hex.len())
@@ -261,11 +262,16 @@ mod tests {
     #[test]
     fn each_pellet_that_hit_names_its_target() {
         let one = SpreadshotRequestMsg::decode(&bytes(LIVE_ONE_TARGET)).expect("decode");
-        assert_eq!(one.pellet_targets(), [MOB; 6]);
+        // The live mob's id, known to this process as the server's would be.
+        let mob = crate::entity_ids::number_of_seen_raw_id(
+            crate::entity_ids::IdHolder::new(),
+            &one.hits[0].raw_id,
+        );
+        assert_eq!(one.pellet_targets(), [mob; 6]);
         let two = SpreadshotRequestMsg::decode(&bytes(LIVE_TWO_HITS)).expect("decode");
         assert_eq!(
             two.pellet_targets(),
-            [MOB; 5],
+            [mob; 5],
             "the 0xff 0xfe pellet missed"
         );
     }

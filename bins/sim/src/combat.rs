@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use nw_bus::{BusId, Hit};
 use nw_content::combat::CombatData;
-use nw_sim_core::BrainSettings;
 
+use crate::mob_ai::MobAi;
 use crate::mobs::VitalsSpawn;
 
 /// Why an attack did not happen.
@@ -133,14 +133,20 @@ pub struct CombatSettings {
     pub data: Arc<CombatData>,
     /// The vitals spawns of the level.
     pub spawns: Arc<[VitalsSpawn]>,
-    /// The numbers of the mob brain.
-    pub brain: BrainSettings,
+    /// The mob AI: the trees and slices of the game's own data.
+    pub ai: Arc<MobAi>,
+    /// A player this near wakes a mob.
+    pub wake_radius_m: f32,
+    /// An awake mob without a target and with no player near for this long falls asleep.
+    pub sleep_after_ms: u64,
+    /// A player's melee reach in an attack request without a swing (`SimWorld::attack`).
+    pub attack_reach_m: f32,
+    /// Time from a mob's death to its respawn.
+    pub mob_respawn_ms: u64,
     /// Share of a player's damage that mob armor takes off.
     pub armor_share: f64,
     /// Share of a mob's damage that player armor takes off.
     pub player_armor_share: f64,
-    /// Factor of a mob's attack.
-    pub mob_attack_factor: f64,
     /// Extra reach allowed for lag.
     pub reach_margin_m: f32,
     /// Shortest time between two attacks of a player.
@@ -157,8 +163,9 @@ pub struct CombatSettings {
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support {
     use nw_content::combat::{
-        AttackRow, CombatData, CombatRows, CombatSource, LevelRow, MobType, WeaponKind, WeaponRow,
+        AttackRow, CombatData, CombatRows, CombatSource, LevelRow, MobType, WeaponRow,
     };
+    use nw_content::player_attacks::{AttackKind, PlayerAttacks, stance_key};
 
     /// The vitals id of the test mob type.
     pub const TEST_MOB: &str = "Test_Boar";
@@ -172,11 +179,25 @@ pub mod test_support {
     pub const TEST_LEVEL_DAMAGE: f64 = 100.0;
     /// Base damage of the test sword.
     pub const TEST_SWORD_DAMAGE: f64 = 64.0;
+    /// The test sword's stance (its retail `MannequinTag`).
+    pub const TEST_SWORD_STANCE: &str = "1H_Melee,Sword";
+    /// The player attack table of the retail paks (`content-tool player-attacks`, build
+    /// 25810808).
+    pub const TEST_PLAYER_ATTACKS: &str =
+        include_str!("world/testdata/player-attacks-25810808.json");
 
-    /// Rows with the default config ids: one plain mob type, one level, the sword and its
-    /// attacks, the player.
+    /// The retail player attack table.
+    pub fn test_player_attacks() -> PlayerAttacks {
+        PlayerAttacks::parse(TEST_PLAYER_ATTACKS).expect("player attack table")
+    }
+
+    /// Rows with the default config ids: one plain mob type, one level, the sword, the player,
+    /// and a row of coefficient 1 in the player's table for every basic attack of the retail
+    /// stances ([`test_player_attacks`]).
     pub fn test_data() -> CombatData {
-        CombatData::build(test_source(), &CombatRows::default()).expect("test combat data")
+        CombatData::build(test_source(), &CombatRows::default())
+            .expect("test combat data")
+            .with_player_attacks(test_player_attacks())
     }
 
     /// The source of [`test_data`], for tests that add rows.
@@ -199,26 +220,64 @@ pub mod test_support {
                     crit_chance: 0.0,
                     crit_multiplier: 1.0,
                     spread_shot: false,
-                    kind: WeaponKind::Sword,
                     max_loaded_ammo: 0,
                     reload_ms: 0,
+                    stance: stance_key(TEST_SWORD_STANCE),
+                    block_stamina_damage: 0.0,
+                    block_stability: 0.0,
                 },
             )],
-            attacks: rows
-                .attack_damage_ids
-                .iter()
-                .chain([&rows.spreadshot_damage_id])
-                .map(|id| AttackRow {
-                    damage_id: id.clone(),
-                    coefficient: 1.0,
-                    can_crit: false,
-                    threat: 0,
-                    damage_type: None,
-                })
+            attacks: test_attack_rows(&rows.damage_table)
+                .into_iter()
+                .chain([test_mob_row()])
                 .collect(),
+
             player_health: vec![(rows.player_vitals_id.clone(), TEST_PLAYER_HEALTH)],
             ..CombatSource::default()
         }
+    }
+
+    /// The row of the test mob's damage window, of coefficient 1 (`mob_ai::test_support`).
+    fn test_mob_row() -> AttackRow {
+        AttackRow {
+            damage_id: crate::mob_ai::test_support::TEST_MOB_ROW.to_owned(),
+            coefficient: 1.0,
+            can_crit: false,
+            threat: 0,
+            damage_type: None,
+            table: crate::mob_ai::test_support::TEST_MOB_TABLE.to_owned(),
+            block_stamina_mod: 0.0,
+            affix: None,
+        }
+    }
+
+    /// A row of coefficient 1 in `table` for the damage row of every basic attack of the retail
+    /// stances.
+    fn test_attack_rows(table: &str) -> Vec<AttackRow> {
+        let stances: Vec<nw_content::player_attacks::Stance> =
+            serde_json::from_str(TEST_PLAYER_ATTACKS).expect("player attack table");
+        let mut ids: Vec<String> = stances
+            .iter()
+            .flat_map(|stance| {
+                [AttackKind::Light, AttackKind::Heavy, AttackKind::Charged]
+                    .into_iter()
+                    .filter_map(|kind| Some(stance.attack(kind)?.damage_row.clone()))
+            })
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids.into_iter()
+            .map(|damage_id| AttackRow {
+                damage_id,
+                coefficient: 1.0,
+                can_crit: false,
+                threat: 0,
+                damage_type: None,
+                table: table.to_owned(),
+                block_stamina_mod: 0.0,
+                affix: None,
+            })
+            .collect()
     }
 }
 
@@ -230,6 +289,134 @@ pub(crate) mod tests {
 
     /// The committed config's combat settings on the test rows.
     pub(crate) fn test_combat() -> CombatSettings {
-        committed().combat_settings(Arc::new(test_data()), Arc::from([]))
+        committed().combat_settings(Arc::new(test_data()), Arc::from([]), test_mob_ai())
+    }
+
+    /// The test AI: the test mob type runs the test tree (`mob_ai::test_support`).
+    pub(crate) fn test_mob_ai() -> Arc<crate::mob_ai::MobAi> {
+        Arc::new(crate::mob_ai::test_support::test_ai(&[
+            super::test_support::TEST_MOB,
+        ]))
+    }
+
+    use nw_content::player_attacks::{AttackHit, AttackKind, BasicAttack, Stance, stance_key};
+
+    fn stance(tags: &str) -> Stance {
+        super::test_support::test_player_attacks()
+            .stance(stance_key(tags))
+            .cloned()
+            .unwrap_or_else(|| panic!("stance {tags}"))
+    }
+
+    fn attack(tags: &str, kind: AttackKind) -> BasicAttack {
+        stance(tags)
+            .attack(kind)
+            .cloned()
+            .unwrap_or_else(|| panic!("{tags} {kind:?}"))
+    }
+
+    fn window(tags: &str, kind: AttackKind) -> [u64; 2] {
+        match attack(tags, kind).hit {
+            AttackHit::Melee { window_ms, .. } => window_ms,
+            hit => panic!("{tags} {kind:?}: {hit:?}"),
+        }
+    }
+
+    #[test]
+    fn the_retail_table_has_the_damage_windows_of_the_attach_databases() {
+        // `playermaleanims_{1h,2h}_meleeattach.adb`, `CAGE-Damage` clips (combat audit).
+        assert_eq!(window("1H_Melee,Sword", AttackKind::Light), [333, 433]);
+        assert_eq!(window("1H_Melee,Flail", AttackKind::Light), [167, 233]);
+        assert_eq!(window("2H_Melee,GreatAxe", AttackKind::Heavy), [433, 567]);
+        assert_eq!(window("2H_Melee,GreatSword", AttackKind::Heavy), [233, 333]);
+        assert_eq!(window("1H_Melee,Rapier", AttackKind::Charged), [200, 500]);
+        assert_eq!(window("2H_Melee,Warhammer", AttackKind::Light), [400, 533]);
+        assert_eq!(
+            attack("2H_Melee,GreatSword", AttackKind::Charged).damage_row,
+            "GreatSword_HeavyAttack1"
+        );
+        assert_eq!(
+            attack("1H_Melee,Sword", AttackKind::Charged).damage_row,
+            "1H_Sword_Attack2_Charged"
+        );
+        // The homing of the greatsword's light attack (`player_greatsword.adb`).
+        let AttackHit::Melee {
+            homing: Some(homing),
+            ..
+        } = attack("2H_Melee,GreatSword", AttackKind::Light).hit
+        else {
+            panic!("a homing melee attack");
+        };
+        assert_eq!(
+            (homing.radius_m, homing.max_angle_deg, homing.height_m),
+            (4.5, 60.0, 5.0)
+        );
+    }
+
+    #[test]
+    fn the_retail_table_has_the_holds_dodges_and_uses_of_the_player_databases() {
+        // `Attack_Start_Charge` of `player_<weapon>.adb`: heavy from 333 ms, charged at 667 ms;
+        // the flail charges at 500 ms.
+        let sword = stance("1H_Melee,Sword");
+        assert_eq!(
+            (sword.heavy_from_ms, sword.charged_at_ms),
+            (Some(333), Some(667))
+        );
+        assert_eq!(stance("1H_Melee,Flail").charged_at_ms, Some(500));
+        // `Dodge_Roll` `Invulnerability` 0-500 ms; `Use` `UsePaperdollItem`: a potion at 333 ms,
+        // a drink, food and a bandage at 1000 ms.
+        assert_eq!(sword.dodge_invulnerable_ms, Some([0, 500]));
+        assert_eq!(sword.use_effect_ms("Potion"), Some(333));
+        for tag in ["Drink", "Eat", "Bandage"] {
+            assert_eq!(sword.use_effect_ms(tag), Some(1_000), "{tag}");
+        }
+    }
+
+    #[test]
+    fn the_retail_table_has_the_ranged_attacks_of_the_database_and_slices() {
+        // `rangedattackdatabase.radb` and the projectile slices.
+        let AttackHit::Projectile {
+            fire_ms,
+            range_m,
+            radius_m,
+            flight,
+        } = attack("Bow,LongBow", AttackKind::Light).hit
+        else {
+            panic!("an arrow");
+        };
+        assert_eq!((fire_ms, range_m, radius_m), (400, 100.0, 0.15));
+        assert_eq!(
+            (
+                flight.base_speed_mps,
+                flight.gravity_mps2,
+                flight.lifetime_s
+            ),
+            (100.0, 9.8, 10.0)
+        );
+        let AttackHit::Projectile {
+            range_m, flight, ..
+        } = attack("2H_Ranged,Rifle", AttackKind::Light).hit
+        else {
+            panic!("a musket shot");
+        };
+        assert_eq!((range_m, flight.base_speed_mps), (125.0, 250.0));
+        assert_eq!(
+            attack("2H_Ranged,Blunderbuss", AttackKind::Light).hit,
+            AttackHit::HitScan {
+                fire_ms: 200,
+                range_m: 14.0
+            }
+        );
+        let AttackHit::Projectile {
+            range_m, radius_m, ..
+        } = attack("MagicGauntlet,Ice", AttackKind::Light).hit
+        else {
+            panic!("an ice bolt");
+        };
+        assert_eq!((range_m, radius_m), (50.0, 0.15));
+        assert_eq!(
+            attack("MagicStaff,Fire", AttackKind::Light).damage_row,
+            "Firestaff_PrimaryAttackC1"
+        );
     }
 }

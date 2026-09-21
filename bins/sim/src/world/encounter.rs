@@ -25,6 +25,14 @@
 //!
 //! Every mob of the tutorial is personal: only its player sees it. A dead mob's body stays for
 //! its kind's retail time, then it goes.
+//!
+//! How the mobs fight: a mob whose slice names a tree Server.pak has runs it (the risen
+//! `corruptionentity_base` and the swarmers `corruptionswarmer_base`; `crate::mob_ai`). Three
+//! have no tree in Server.pak (behavior-tree study, section 4.1, Observed: the club sailors'
+//! `drowned/ftue/drowned_qte_basebehavior`, the legionnaires' `legion/legion_ftue/
+//! legion_ftue_basebehavior`, Thorpe's `quest_npcs/ftue_thorpe_v2/ftue_thorpe_v2_basebehavior`;
+//! the trace replay showed that no tree in the pak plays what they played, trace finding b):
+//! they keep the paces measured from the retail tutorial below.
 
 use std::sync::Arc;
 
@@ -38,7 +46,8 @@ use nw_messages::{ClientFacetMsg, InteractionRequest};
 
 use super::asset_script::{AssetScript, SpellCast, Step, Trigger};
 use crate::mobs::{
-    Capsule, MobMove, MobReach, Mobs, MoveFragment, MoveHit, Pace, PhaseTwo, VitalsSpawn,
+    Capsule, MobMove, MobReach, Mobs, MoveFragment, MoveHit, Pace, PaceAttack, PhaseTwo,
+    VitalsSpawn,
 };
 use crate::objectives::{Effect, Event, KillTypes, ObjectiveRun, ObjectiveTree, TaskProgress};
 
@@ -151,8 +160,8 @@ struct SpawnPoint {
     /// Its `CharacterComponent` constant, for the collision call at its death (live-tutorial
     /// note, section 7).
     collision: u64,
-    /// How it fights.
-    pace: Pace,
+    /// How it fights without a tree: its measured pace; `None` for a mob that runs its tree.
+    pace: Option<Pace>,
     /// When it comes after its fight starts.
     delay_ms: u64,
     /// How long its body stays after its death.
@@ -166,12 +175,28 @@ struct SpawnPoint {
 /// length; the speed is its combat run speed; the hit delay is when retail's hit landed after the
 /// attack started.
 ///
-/// Stamina that a blocked swing takes per unit of its `BlockStaminaDmgMod`, with the warhammer of
-/// the capture: 14.6 / 0.2 for the signifier's `Legionnaire_LightStab` (Observed). Thorpe's
-/// attacks took 91.25 per unit; the cause of the difference is Unknown.
-const BLOCK_STAMINA_PER_MOD: f32 = 73.0;
-/// The body capsules of the tutorial creatures (collision note, section 2: their slices'
-/// `CharacterComponent`; the legionnaire, risen and swarmer share one).
+/// A pace's attack names the creature's damage table (its slice names it), the row of its plain
+/// swing and the weapon item of its slice's paperdoll: a blocked hit takes the weapon's
+/// `BlockStaminaDamage` x the row's `BlockStaminaDmgMod` x (1 - the blocker's `BlockStability` /
+/// 100), the hit's 3601 tag is the row's damage type (combat audit, 2026-09-18).
+const SAILOR_ATTACK: PaceAttack = PaceAttack {
+    table: "DamnedDamageTable_Damned_FTUE",
+    row: "Damned_1H_Club_Primary",
+    weapon: "1hClubT2FTUE",
+};
+const LEGION_ATTACK: PaceAttack = PaceAttack {
+    table: "LegionLegionnaireDamageTable",
+    row: "Legionnaire_LightStab",
+    weapon: "Legion_1HSpear",
+};
+/// Thorpe's: his attack factor fits his phase-one stab, `Attack_Stab_02_P1` (25.6 at 457997).
+const THORPE_ATTACK: PaceAttack = PaceAttack {
+    table: "DamnedCommanderFireDamageTable_FTUE",
+    row: "Attack_Stab_02_P1",
+    weapon: "1hSwordT2DamnedCommanderThorpeFire",
+};
+/// The body capsules of the paced tutorial creatures (collision note, section 2: their slices'
+/// `CharacterComponent`).
 const SAILOR_CAPSULE: Capsule = Capsule {
     radius_m: 0.4,
     height_m: 1.82,
@@ -199,16 +224,6 @@ const LEGION_REACH: MobReach = MobReach {
     lunge_turn_rad: std::f32::consts::FRAC_PI_4,
     reach_m: 2.0,
 };
-const RISEN_REACH: MobReach = MobReach {
-    lunge_max_m: 2.0,
-    lunge_turn_rad: std::f32::consts::FRAC_PI_2,
-    reach_m: 1.5,
-};
-const SWARMER_REACH: MobReach = MobReach {
-    lunge_max_m: 1.5,
-    lunge_turn_rad: std::f32::consts::PI,
-    reach_m: 1.0,
-};
 /// Thorpe's stab: its hit box reaches 1.5 m in front of his root (Observed). His behaviour tree
 /// keeps attacking while the target is nearer than 6 m (Observed, Server.pak
 /// `ftue_thorpe_combatbehavior`), so his moves step in up to 4 m (Inferred: 6 m less his reach
@@ -220,30 +235,27 @@ const THORPE_REACH: MobReach = MobReach {
 };
 /// The 3601 item scale of the sailors' hits (swing note: 0.6006 on every sailor hit).
 const SAILOR_HIT_SCALE: f32 = 0.6006;
-/// The 3601 item scale of the island foes' and Thorpe's hits (0.5612 on all of them).
+/// The 3601 item scale of the legionnaires' and Thorpe's hits (0.5612 on all of the island's).
 const ISLAND_HIT_SCALE: f32 = 0.5612;
 /// Ship sailors (damage mod 0.5): both landed hits did 12.97; cooldown 1-2 s + attack 1.5-2.0 s;
-/// run 5.5 m/s; hit at 456 ms. Block stamina: no blocked sailor hit took stamina in the capture,
-/// so it is [`BLOCK_STAMINA_PER_MOD`] x the club primary's `BlockStaminaDmgMod` 0.26 (Inferred).
+/// run 5.5 m/s; hit at 456 ms. Its swing: the club primary (Inferred: no blocked sailor hit is in
+/// the capture).
 ///
 /// Gait (ship-mobs note, section 2.1): swings started at 0.89-1.81 m; runs only closed gaps of
-/// 4-12 m; nearer it walked (`WalkToTarget` max 1.25 m/s); idle wander at the `Wander` nav max
-/// 0.6 m/s.
+/// 4-12 m; nearer it walked (`WalkToTarget` max 1.25 m/s).
 const SAILOR_PACE: Pace = Pace {
     attack_factor: 0.2968,
     swing_gap_ms: (2_500, 4_000),
     speed_mps: 5.5,
     hit_delay_ms: 456,
-    block_stamina: BLOCK_STAMINA_PER_MOD * 0.26,
+    attack: SAILOR_ATTACK,
     gait: Gait {
         swing_start_m: 1.8,
         run_beyond_m: 4.0,
         walk_speed_mps: 1.25,
-        wander_speed_mps: 0.6,
     },
     // Its sailor slice ambient vision 30 m (tutorial-ai-behavior note).
     sight_m: 30.0,
-    hit_tag: 6,
     hit_scale: SAILOR_HIT_SCALE,
     capsule: SAILOR_CAPSULE,
     reach: Some(SAILOR_REACH),
@@ -253,100 +265,34 @@ const SAILOR_PACE: Pace = Pace {
 /// Legionnaire and signifier (damage mod 0.7): 18.70 (262336); cooldown 1-1.5 s + stab about
 /// 0.9-1.2 s; run 5.5 m/s; hit at 627 ms. A blocked light stab took 14.6 stamina (266620).
 ///
-/// Gait (tutorial-ai-behavior note, section 3): its tree attacks at 1.5 m and stabs to 3 m
-/// (Inferred: runs beyond 3 m); strafe max 1.25 m/s; it walked 1.1 m/s before its fight.
+/// Gait (tutorial-ai-behavior note, section 3): it attacks at 1.5 m and stabs to 3 m (Inferred:
+/// runs beyond 3 m); strafe max 1.25 m/s. Without a target it stands at its spawn (retail; live
+/// 2026-09-18, a wander took it into the ruin wall).
 const LEGION_PACE: Pace = Pace {
     attack_factor: 0.3057,
     swing_gap_ms: (1_900, 2_700),
     speed_mps: 5.5,
     hit_delay_ms: 627,
-    block_stamina: 14.6,
+    attack: LEGION_ATTACK,
     gait: Gait {
         swing_start_m: 1.5,
         run_beyond_m: 3.0,
         walk_speed_mps: 1.25,
-        wander_speed_mps: 1.1,
     },
     // Its legion slice ambient vision 12 m (tutorial-ai-behavior note).
     sight_m: 12.0,
-    hit_tag: 5,
     hit_scale: ISLAND_HIT_SCALE,
     capsule: ISLAND_CAPSULE,
     reach: Some(LEGION_REACH),
     moves: &[],
     phase_two: None,
 };
-/// Risen corruption entity (damage mod 0.9): 18.24 (295343); cooldown 0.75-1 s + swipe about
-/// 0.8-0.9 s; run 4.5 m/s; hit at 555 ms. Block stamina: [`BLOCK_STAMINA_PER_MOD`] x the
-/// `Attack` row's 0.1 (Inferred).
-///
-/// Gait (tutorial-ai-behavior note, section 4): close attacks at 2.5 m, runs beyond 4.5 m; it
-/// moved 1.1-2 m/s in its fight.
-const RISEN_PACE: Pace = Pace {
-    attack_factor: 0.2319,
-    swing_gap_ms: (1_550, 1_900),
-    speed_mps: 4.5,
-    hit_delay_ms: 555,
-    block_stamina: BLOCK_STAMINA_PER_MOD * 0.1,
-    gait: Gait {
-        swing_start_m: 2.5,
-        run_beyond_m: 4.5,
-        walk_speed_mps: 2.0,
-        wander_speed_mps: 1.1,
-    },
-    // Its risen slice ambient vision 12 m (tutorial-ai-behavior note).
-    sight_m: 12.0,
-    hit_tag: 6,
-    hit_scale: ISLAND_HIT_SCALE,
-    capsule: ISLAND_CAPSULE,
-    reach: Some(RISEN_REACH),
-    moves: &[],
-    phase_two: None,
-};
-/// Corruption swarmers (damage mod 0.25): 7.07 (296477); rate limit 0.25 s + slash (length
-/// Unknown; our choice 1 s); run 1.5 m/s; hit at 533 ms. Block stamina: [`BLOCK_STAMINA_PER_MOD`]
-/// x the swipe's 0.1 (Inferred).
-///
-/// Gait (tutorial-ai-behavior note, section 5): slashes under 1 m, else moves to its target at
-/// 1.5 m/s; it drifted about 0.5 m/s before the fight.
-const SWARMER_PACE: Pace = Pace {
-    attack_factor: 0.3236,
-    swing_gap_ms: (1_250, 1_500),
-    speed_mps: 1.5,
-    hit_delay_ms: 533,
-    block_stamina: BLOCK_STAMINA_PER_MOD * 0.1,
-    gait: Gait {
-        swing_start_m: 1.0,
-        run_beyond_m: 1.0,
-        walk_speed_mps: 1.5,
-        wander_speed_mps: 0.5,
-    },
-    // Its swarmer slice ambient vision 12 m (tutorial-ai-behavior note).
-    sight_m: 12.0,
-    hit_tag: 4,
-    hit_scale: ISLAND_HIT_SCALE,
-    capsule: ISLAND_CAPSULE,
-    reach: Some(SWARMER_REACH),
-    moves: &[],
-    phase_two: None,
-};
-/// Thorpe's block stamina per unit of an attack's `BlockStaminaDmgMod` (stab 0.28: retail 25.55
-/// at 481395 and 489462).
-const THORPE_BLOCK_PER_MOD: f32 = 91.25;
-/// The damage coefficient of the row Thorpe's attack factor fits: `Attack_Stab_02` 0.28 (25.6 at
-/// 457997).
-const THORPE_REFERENCE_COEF: f64 = 0.28;
-
-/// One hit of a Thorpe move at `at_ms` after its start, of the damage row with coefficient
-/// `coef`, fire share `fire` (its `AI_FireDMG` affix) and `BlockStaminaDmgMod` `block`
-/// (`javelindata_damagetable_damned_commander_ftue`).
-const fn thorpe_hit(at_ms: u64, coef: f64, fire: f64, block: f32) -> MoveHit {
-    MoveHit {
-        at_ms,
-        damage_scale: coef / THORPE_REFERENCE_COEF,
-        fire_share: fire,
-        block_stamina: THORPE_BLOCK_PER_MOD * block,
-    }
+/// One hit of a Thorpe move at `at_ms` after its start, of the row `row` of his table
+/// (`javelindata_damagetable_damned_commander_ftue`): its coefficient over his attack's, its
+/// damage type, its `AI_FireDMG` affix and its `BlockStaminaDmgMod`. His first phase swings the
+/// `_P1` rows, which have no fire affix; his second phase the plain rows.
+const fn thorpe_hit(at_ms: u64, row: &'static str) -> MoveHit {
+    MoveHit { at_ms, row }
 }
 
 const fn fragment(fragment: u16, action: u16, tail: u8) -> MoveFragment {
@@ -357,54 +303,43 @@ const fn fragment(fragment: u16, action: u16, tail: u8) -> MoveFragment {
     }
 }
 
-/// The 3601 item tags of Thorpe's hits (Inferred: slash, thrust, fire).
-const SLASH_TAG: u8 = 4;
-const THRUST_TAG: u8 = 5;
-const FIRE_TAG: u8 = 9;
-
 /// Thorpe's attacks (boss note, from `commander_controllerdefs.xml` and the retail fight): the
 /// fragment, its length, and when each hit landed after it started.
 const THORPE_STAB_01: MobMove = MobMove {
     fragment: fragment(58, 28, 0xa5),
     length_ms: 1_434,
-    hits: &[thorpe_hit(595, 0.27, 0.25, 0.28)],
-    tag: THRUST_TAG,
+    hits: &[thorpe_hit(595, "Attack_Stab_01_P1")],
 };
 const THORPE_STAB_02: MobMove = MobMove {
     fragment: fragment(59, 29, 0x85),
     length_ms: 1_528,
-    hits: &[thorpe_hit(811, 0.28, 0.25, 0.28)],
-    tag: THRUST_TAG,
+    hits: &[thorpe_hit(811, "Attack_Stab_02_P1")],
 };
 const THORPE_SWIPE_L: MobMove = MobMove {
     fragment: fragment(48, 30, 0x6d),
     length_ms: 2_040,
-    hits: &[thorpe_hit(1_020, 0.27, 0.25, 0.23)],
-    tag: SLASH_TAG,
+    hits: &[thorpe_hit(1_020, "Attack_SwipeL_01_P1")],
 };
 const THORPE_SWIPE_R: MobMove = MobMove {
     fragment: fragment(50, 33, 0xd1),
     length_ms: 2_180,
-    hits: &[thorpe_hit(944, 0.27, 0.25, 0.29)],
-    tag: SLASH_TAG,
+    hits: &[thorpe_hit(944, "Attack_SwipeR_01_P1")],
 };
 /// Three hits: two `Attack_Flurry_Combo` and the `Attack_Flurry_Finisher`.
 const THORPE_FLURRY: MobMove = MobMove {
     fragment: fragment(53, 19, 0x8e),
     length_ms: 2_800,
     hits: &[
-        thorpe_hit(781, 0.14, 0.25, 0.2),
-        thorpe_hit(1_249, 0.14, 0.25, 0.2),
-        thorpe_hit(1_915, 0.23, 0.5, 0.35),
+        thorpe_hit(781, "Attack_Flurry_Combo"),
+        thorpe_hit(1_249, "Attack_Flurry_Combo"),
+        thorpe_hit(1_915, "Attack_Flurry_Finisher"),
     ],
-    tag: SLASH_TAG,
 };
 /// No retail overhead slash landed: its hit time is our choice, the middle of the fragment.
 const THORPE_OVERHEAD: MobMove = MobMove {
     fragment: fragment(54, 23, 0x2f),
     length_ms: 2_233,
-    hits: &[thorpe_hit(1_116, 0.42, 0.5, 0.6335)],
-    tag: SLASH_TAG,
+    hits: &[thorpe_hit(1_116, "Attack_Overhead_Slash")],
 };
 /// His first phase: the stabs and swipes of the retail fight.
 const THORPE_MOVES: [MobMove; 4] = [
@@ -413,10 +348,19 @@ const THORPE_MOVES: [MobMove; 4] = [
     THORPE_SWIPE_L,
     THORPE_SWIPE_R,
 ];
+/// His second-phase stab and right swipe: the rows with fire.
+const THORPE_STAB_02_FIRE: MobMove = MobMove {
+    hits: &[thorpe_hit(811, "Attack_Stab_02")],
+    ..THORPE_STAB_02
+};
+const THORPE_SWIPE_R_FIRE: MobMove = MobMove {
+    hits: &[thorpe_hit(944, "Attack_SwipeR_01")],
+    ..THORPE_SWIPE_R
+};
 /// His second phase: retail swung the flurry 4 times in 7 attacks, so it is in twice.
 const THORPE_PHASE_TWO_MOVES: [MobMove; 5] = [
-    THORPE_STAB_02,
-    THORPE_SWIPE_R,
+    THORPE_STAB_02_FIRE,
+    THORPE_SWIPE_R_FIRE,
     THORPE_FLURRY,
     THORPE_FLURRY,
     THORPE_OVERHEAD,
@@ -426,7 +370,6 @@ const THORPE_PHASE_TWO_MOVES: [MobMove; 5] = [
 const THORPE_PHASE_TWO: PhaseTwo = PhaseTwo {
     moves: &THORPE_PHASE_TWO_MOVES,
     damage_mult: 2.2,
-    fire_tag: FIRE_TAG,
 };
 
 /// His shoulder charge's outro: an `Attack_Upwards_Slash` (0.38, half fire) 117 ms in (retail
@@ -434,8 +377,7 @@ const THORPE_PHASE_TWO: PhaseTwo = PhaseTwo {
 const THORPE_CHARGE_OUTRO: MobMove = MobMove {
     fragment: fragment(68, 27, 0x77),
     length_ms: 1_504,
-    hits: &[thorpe_hit(117, 0.38, 0.5, 1.1)],
-    tag: SLASH_TAG,
+    hits: &[thorpe_hit(117, "Attack_Upwards_Slash")],
 };
 /// His phase transition, combat tell and charge (boss note, `commander_controllerdefs.xml`).
 const THORPE_PHASE_TRANSITION: MoveFragment = fragment(66, 47, 0x2d);
@@ -497,16 +439,14 @@ const THORPE_PACE: Pace = Pace {
     swing_gap_ms: (1_000, 1_350),
     speed_mps: 4.5,
     hit_delay_ms: 611,
-    block_stamina: THORPE_BLOCK_PER_MOD * 0.28,
+    attack: THORPE_ATTACK,
     gait: Gait {
         swing_start_m: 3.4,
         run_beyond_m: 9.0,
         walk_speed_mps: 1.4,
-        wander_speed_mps: 1.4,
     },
     // Its Thorpe slice ambient vision 20 m (tutorial-ai-behavior note).
     sight_m: 20.0,
-    hit_tag: SLASH_TAG,
     hit_scale: ISLAND_HIT_SCALE,
     capsule: THORPE_CAPSULE,
     reach: Some(THORPE_REACH),
@@ -518,10 +458,6 @@ const THORPE_PACE: Pace = Pace {
 /// have made the mob first (facets note: retail 955 came 629 to 634 ms after the sailors' cards;
 /// sent in the spawn tick live 2026-09-16, the client could not find the mob).
 const SPAWN_PICK_DELAY_MS: u64 = 600;
-
-/// Experience points per island foe killed (retail: 20 per legion or corrupted kill, 120 in all;
-/// xp-potion-exit note, section 1).
-const FOE_EXPERIENCE: u32 = 20;
 
 /// The `CharacterComponent` constants of the tutorial mobs' prefabs.
 const SAILOR_COLLISION: u64 = 0x2d2e_b7bf_87ae_c03f;
@@ -557,7 +493,7 @@ const FIRST_SAILOR: SpawnPoint = SpawnPoint {
     at: point(467.617, 846.008, SHIP_DECK_Z),
     role: Role::Sailor,
     collision: SAILOR_COLLISION,
-    pace: SAILOR_PACE,
+    pace: Some(SAILOR_PACE),
     delay_ms: 0,
     corpse_ms: SAILOR_CORPSE_MS,
 };
@@ -586,7 +522,7 @@ const SWARMER: SpawnPoint = SpawnPoint {
     at: point(580.06, 383.2, CORRUPTION_FLOOR_Z),
     role: Role::Foe,
     collision: SWARMER_COLLISION,
-    pace: SWARMER_PACE,
+    pace: None,
     delay_ms: 1_315,
     corpse_ms: SWARMER_CORPSE_MS,
 };
@@ -613,7 +549,7 @@ const FIGHTS_AFTER: [Fight; 4] = [
             at: point(668.27, 385.16, RUIN_TOP_Z),
             role: Role::Foe,
             collision: LEGION_COLLISION,
-            pace: LEGION_PACE,
+            pace: Some(LEGION_PACE),
             // Retail card 179393, 4200 ms after the door (175193).
             delay_ms: 4_200,
             corpse_ms: LEGION_CORPSE_MS,
@@ -628,7 +564,7 @@ const FIGHTS_AFTER: [Fight; 4] = [
             at: point(621.6, 419.5, COURTYARD_Z),
             role: Role::Foe,
             collision: LEGION_COLLISION,
-            pace: LEGION_PACE,
+            pace: Some(LEGION_PACE),
             // Retail card 202592, 5782 ms after the trigger (196810).
             delay_ms: 5_782,
             corpse_ms: LEGION_CORPSE_MS,
@@ -644,7 +580,7 @@ const FIGHTS_AFTER: [Fight; 4] = [
                 at: point(579.62, 381.91, CORRUPTION_FLOOR_Z),
                 role: Role::Foe,
                 collision: CORRUPTION_COLLISION,
-                pace: RISEN_PACE,
+                pace: None,
                 // Retail cards after the trigger (282975): risen +417 ms, swarmers +1315,
                 // +2316 and +3313 ms, each about 50 ms after a spawner timer ends.
                 delay_ms: 417,
@@ -673,7 +609,7 @@ const FIGHTS_AFTER: [Fight; 4] = [
             at: point(490.25, 209.89, THORPE_FLOOR_Z),
             role: Role::Captain,
             collision: LEGION_COLLISION,
-            pace: THORPE_PACE,
+            pace: Some(THORPE_PACE),
             delay_ms: 0,
             corpse_ms: THORPE_CORPSE_MS,
         }],
@@ -728,8 +664,10 @@ pub(super) enum Order {
     RefillPotions(String, u32),
     /// Move the player here, facing `facing` (yaw, radians).
     MoveTo(Position, f32),
-    /// The player gets these experience points.
-    Experience(u32),
+    /// The player gets the experience of a kill of a mob of this level (`RewardData`
+    /// `KillExperience`, times `javelin.xp-multipliers.character`; retail: 20 per legion or
+    /// corrupted kill, 120 in all, xp-potion-exit note, section 1).
+    KillExperience(u32),
     /// Clear this achievement.
     LockAchievement(String),
     /// Show the island's static entities.
@@ -985,14 +923,9 @@ impl Tutorial {
             .get(self.spawned)
             .filter(|(retail_vitals, _)| *retail_vitals == vitals_id)
             .map(|(_, asset)| *asset);
-        let Some(entity) = mobs.spawn_personal(
-            spawn,
-            self.owner,
-            held,
-            Some(point.pace),
-            asset,
-            self.now_ms,
-        ) else {
+        let Some(entity) =
+            mobs.spawn_personal(spawn, self.owner, held, point.pace, asset, self.now_ms)
+        else {
             tracing::warn!(vitals = point.vitals, "tutorial mob without combat rows");
             return;
         };
@@ -1016,11 +949,8 @@ impl Tutorial {
         });
         // Thorpe fights the player from his spawn (retail 2415 at 451137 with the player 26.5 m
         // away, beyond the brain's sight).
-        if point.role == Role::Captain
-            && !held
-            && let Some(mob) = mobs.get_mut(entity)
-        {
-            nw_sim_core::hurt(&mut mob.brain, self.owner, 0, self.now_ms);
+        if point.role == Role::Captain && !held {
+            mobs.provoke(entity, self.owner, self.now_ms);
         }
     }
 
@@ -1160,6 +1090,7 @@ impl Tutorial {
             | ClientFacetMsg::SwapItems { .. }
             | ClientFacetMsg::UnequipItem { .. }
             | ClientFacetMsg::CancelInteraction { .. }
+            | ClientFacetMsg::SetReplicateStorage { .. }
             | ClientFacetMsg::AcceptObjective { .. }
             | ClientFacetMsg::CompleteObjective { .. }
             | ClientFacetMsg::SetCraftingDetails { .. }
@@ -1282,7 +1213,7 @@ impl Tutorial {
             }
             // Retail gives experience for the island's foes only, not for the sailors.
             if fighter.role == Role::Foe {
-                orders.push(Order::Experience(FOE_EXPERIENCE));
+                orders.push(Order::KillExperience(TUTORIAL_MOB_LEVEL));
             }
             if let Some((vitals_id, categories)) = kill_types.of(fighter.vitals_id) {
                 let effects = self.run.event(
@@ -1371,7 +1302,7 @@ impl Tutorial {
                 CaptainPhase::Second if below(CAPTAIN_END_FRACTION) => {
                     mob.health.take(current);
                     // A scripted end: the body neither chases nor swings any more.
-                    nw_sim_core::died(&mut mob.brain, now_ms);
+                    mobs.died(captain, now_ms);
                     orders.push(Order::BossPhase {
                         mob: captain,
                         phase: CAPTAIN_END_PHASE,
@@ -1456,7 +1387,7 @@ impl Tutorial {
         let Some(at) = mobs
             .get_mut(captain)
             .filter(|mob| !mob.health.is_dead())
-            .map(|mob| mob.brain.position())
+            .map(|mob| mob.position)
         else {
             return;
         };
@@ -1621,7 +1552,11 @@ pub(crate) mod tests {
             },
         ));
         let data = CombatData::build(source, &CombatRows::default()).expect("rows");
-        committed().combat_settings(Arc::new(data), Arc::from([]))
+        committed().combat_settings(
+            Arc::new(data),
+            Arc::from([]),
+            crate::combat::tests::test_mob_ai(),
+        )
     }
 
     /// Every tutorial mob is corrupted.
@@ -1831,7 +1766,7 @@ pub(crate) mod tests {
             },
         };
         let ground = nw_sim_core::test_support::NoGround;
-        mobs.tick(&[at(15.0)], legion_at + 1, &ground);
+        mobs.tick(&[at(15.0)], legion_at + 1, &ground, 1);
         let unseen = tutorial.tick(&mut mobs, &kill_types(), SHIP, legion_at + 1);
         assert!(
             !unseen
@@ -1839,14 +1774,14 @@ pub(crate) mod tests {
                 .any(|order| matches!(order, Order::Targeted { .. })),
             "out of sight: {unseen:?}"
         );
-        mobs.tick(&[at(5.0)], legion_at + 2, &ground);
+        mobs.tick(&[at(5.0)], legion_at + 2, &ground, 1);
         let seen = tutorial.tick(&mut mobs, &kill_types(), SHIP, legion_at + 2);
         let picked = Order::Targeted {
             mob: legionnaire,
             tutorial_ai: false,
         };
         assert!(seen.contains(&picked), "in sight: {seen:?}");
-        mobs.tick(&[at(5.0)], legion_at + 3, &ground);
+        mobs.tick(&[at(5.0)], legion_at + 3, &ground, 1);
         assert!(
             !tutorial
                 .tick(&mut mobs, &kill_types(), SHIP, legion_at + 3)
@@ -1872,7 +1807,7 @@ pub(crate) mod tests {
             door_at + SAILOR_CORPSE_MS + 1,
         );
         assert!(
-            orders.contains(&Order::Experience(FOE_EXPERIENCE)),
+            orders.contains(&Order::KillExperience(TUTORIAL_MOB_LEVEL)),
             "an island foe gives experience: {orders:?}"
         );
         let orders = tutorial.event(
@@ -2054,7 +1989,7 @@ pub(crate) mod tests {
     fn thorpe_grabs_a_far_player_and_pulls_it_in_front_of_him() {
         let (mut tutorial, mut mobs, thorpe) = thorpe_fight();
         let kill_types = KillTypes::default();
-        let at = mobs.get_mut(thorpe).expect("Thorpe").brain.position();
+        let at = mobs.get_mut(thorpe).expect("Thorpe").position;
         let near = Position {
             x: at.x + 3.0,
             ..at
@@ -2103,7 +2038,7 @@ pub(crate) mod tests {
     fn thorpe_does_not_grab_a_dead_player_and_waits_again_after_its_respawn() {
         let (mut tutorial, mut mobs, thorpe) = thorpe_fight();
         let kill_types = KillTypes::default();
-        let at = mobs.get_mut(thorpe).expect("Thorpe").brain.position();
+        let at = mobs.get_mut(thorpe).expect("Thorpe").position;
         let far = Position {
             x: at.x + 10.0,
             ..at
@@ -2139,7 +2074,7 @@ pub(crate) mod tests {
     #[test]
     fn thorpe_transitions_knocks_the_player_away_then_charges() {
         let (mut tutorial, mut mobs, thorpe) = thorpe_fight();
-        let at = mobs.get_mut(thorpe).expect("Thorpe").brain.position();
+        let at = mobs.get_mut(thorpe).expect("Thorpe").position;
         let near = Position {
             x: at.x + 3.0,
             ..at
@@ -2174,7 +2109,7 @@ pub(crate) mod tests {
         let loop_ms = tell_ms + TELL_MS + CHARGE_START_MS;
         tutorial.tick(&mut mobs, &kill_types, far, loop_ms);
         let charged = tutorial.tick(&mut mobs, &kill_types, far, loop_ms + 100);
-        let ran = mobs.get_mut(thorpe).expect("Thorpe").brain.position();
+        let ran = mobs.get_mut(thorpe).expect("Thorpe").position;
         assert!(
             (ran.horizontal_distance(at) - CHARGE_SPEED_MPS * 0.1).abs() < 0.01,
             "he runs 2.57 m in 100 ms"
@@ -2233,7 +2168,7 @@ pub(crate) mod tests {
         );
         assert_eq!(mobs.health(thorpe), Some(0));
         assert_eq!(
-            mobs.brain_state(thorpe),
+            mobs.state(thorpe),
             Some(MobState::Dead),
             "his body stops at his scripted end"
         );
@@ -2252,6 +2187,47 @@ pub(crate) mod tests {
                 .fighters
                 .iter()
                 .all(|fighter| fighter.entity != thorpe)
+        );
+    }
+
+    /// Its spawn's point and a player `metres` east of it.
+    fn east_of(point: &SpawnPoint, metres: f32) -> nw_sim_core::Seen {
+        nw_sim_core::Seen {
+            entity: OWNER,
+            position: Position {
+                x: point.at.x + metres,
+                ..point.at
+            },
+        }
+    }
+
+    #[test]
+    fn the_legionnaire_stands_at_its_spawn_until_it_sees_the_player() {
+        // Retail: the legionnaire stood on its ruin top until it saw the player (25 s after its
+        // card); live 2026-09-18 a wander walked it into the ruin wall. Its tree is not in
+        // Server.pak: it fights with its measured pace, which has no wander.
+        const MINUTE_MS: u64 = 60_000;
+        let point = &FIGHTS_AFTER[0].spawns[0];
+        let mut mobs = Mobs::new(Vec::new().into(), &sailor_combat());
+        let legionnaire = mobs
+            .spawn_personal(spawn_of(point), OWNER, false, point.pace, None, NOW)
+            .expect("rows");
+        assert!(mobs.tree(legionnaire).is_none(), "no tree: its pace");
+        let ground = nw_sim_core::test_support::NoGround;
+        let unseen = east_of(point, LEGION_PACE.sight_m + 3.0);
+        for now in (NOW..NOW + MINUTE_MS).step_by(33) {
+            mobs.tick(&[unseen], now, &ground, 1);
+        }
+        let (at, spawn) = mobs.places(legionnaire).expect("alive");
+        assert_eq!(at, spawn, "it stood at its spawn");
+        let seen = east_of(point, LEGION_PACE.sight_m - 3.0);
+        for now in (NOW + MINUTE_MS..NOW + MINUTE_MS + 1_000).step_by(33) {
+            mobs.tick(&[seen], now, &ground, 1);
+        }
+        let (moved, _) = mobs.places(legionnaire).expect("alive");
+        assert!(
+            moved.x > spawn.x,
+            "it runs at the player it sees: {moved:?}"
         );
     }
 }

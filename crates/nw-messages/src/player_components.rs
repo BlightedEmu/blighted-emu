@@ -30,6 +30,9 @@ use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
 use crate::gathering::{GATHERING_TYPE_INDEX, GatheringState};
 use crate::gear::PlayerGear;
 use crate::interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
+use crate::loot::{
+    GLOBAL_STORAGE_TYPE_INDEX, GlobalStorageState, LOOT_TRACKER_TYPE_INDEX, LootTrackerState,
+};
 use crate::objectives::{OBJECTIVES_TYPE_INDEX, ObjectivesState};
 use crate::paperdoll::PAPERDOLL_TYPE_INDEX;
 use crate::payload::{BundleMember, MemberState};
@@ -98,7 +101,7 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 57] = [
     (29, 6234),
     (31, 1927),
     (32, 2895),
-    (33, 982),
+    (crate::loot::LOOT_TRACKER_COMPONENT, LOOT_TRACKER_TYPE_INDEX),
     (34, 4913),
     (35, 3765),
     (36, GATHERING_TYPE_INDEX),
@@ -131,7 +134,10 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 57] = [
     (73, 5606),
     (74, 5691),
     (76, 1755),
-    (77, 2938),
+    (
+        crate::loot::GLOBAL_STORAGE_COMPONENT,
+        GLOBAL_STORAGE_TYPE_INDEX,
+    ),
 ];
 
 /// Type index of `MB::PlayerNameTagComponentReplicatedState` (component 54).
@@ -375,6 +381,8 @@ pub fn empty_state(class: u64) -> MemberState {
         PROGRESSION_TYPE_INDEX => MemberState::Progression(ProgressionState::default()),
         CURRENCY_TYPE_INDEX => MemberState::Currency(CurrencyState::default()),
         COOLDOWNS_TYPE_INDEX => MemberState::Cooldowns(CooldownsState::default()),
+        LOOT_TRACKER_TYPE_INDEX => MemberState::LootTracker(LootTrackerState::default()),
+        GLOBAL_STORAGE_TYPE_INDEX => MemberState::GlobalStorage(GlobalStorageState::default()),
         GATHERING_TYPE_INDEX => MemberState::Gathering(GatheringState::default()),
         INTERACTOR_TYPE_INDEX => MemberState::Interactor(InteractorState::default()),
         _ => MemberState::Empty(EmptyState { class }),
@@ -597,6 +605,8 @@ fn has_own_reader(class: u64) -> bool {
             | GATHERING_TYPE_INDEX
             | INTERACTOR_TYPE_INDEX
             | CURRENCY_TYPE_INDEX
+            | LOOT_TRACKER_TYPE_INDEX
+            | GLOBAL_STORAGE_TYPE_INDEX
     )
 }
 

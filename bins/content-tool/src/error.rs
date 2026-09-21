@@ -7,6 +7,8 @@ use nw_content::combat::CombatDataError;
 use nw_content::fill::FillError;
 use nw_design::DesignRunError;
 
+use crate::ai_data::AiDataError;
+use crate::ai_trace::AiTraceError;
 use crate::codegen::CodegenError;
 use crate::combat::NwdbError;
 use crate::creature_animations::CreatureAnimationsError;
@@ -66,9 +68,18 @@ pub enum ToolError {
     /// The creature animation build failed.
     #[error(transparent)]
     CreatureAnimations(#[from] CreatureAnimationsError),
+    /// The player attack table cannot be written.
+    #[error(transparent)]
+    PlayerAttacks(#[from] nw_content::player_attacks::PlayerAttacksError),
     /// The tutorial static entity scan failed.
     #[error(transparent)]
     FtueEntities(#[from] FtueEntitiesError),
+    /// The AI data build failed.
+    #[error(transparent)]
+    AiData(#[from] AiDataError),
+    /// The mob AI trace cannot read its inputs or write its output.
+    #[error(transparent)]
+    AiTrace(#[from] AiTraceError),
     /// The design step cannot read or write a retail or merged file.
     #[error("design: {0}")]
     Design(#[from] DesignRunError),

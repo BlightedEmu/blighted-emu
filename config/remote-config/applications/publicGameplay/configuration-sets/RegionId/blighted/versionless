@@ -1,0 +1,23 @@
+{
+    "javelin": {
+        "use-omni-penalties": true,
+        "use-persona-penalties": false,
+        "leaderboard-rotation-startDate": "2023-02-07",
+        "weekly-leaderboard-reset-hour": 2,
+        "enable-leaderboards": true,
+        "enable-leaderboards-ui": true,
+        "enable-leaderboards-stat-queries": true,
+        "query-leaderboards-service-from-client": true,
+        "enable-leaderboard-rotations": true,
+        "use-season-end-time-config": true,
+        "leaderboard-season-rotation": 11
+    },
+    "omni": {
+        "leaderboards": {
+            "region": "us-east-1"
+        }
+    },
+    "javelin-server": {
+        "enable-twitch-system": false
+    }
+}

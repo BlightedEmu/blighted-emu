@@ -13,6 +13,8 @@ use reqwest::Url;
 use reqwest::blocking::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
 
+use crate::server::api_host;
+
 /// Time limit of one call.
 pub const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -73,6 +75,11 @@ impl LauncherApi {
             .build()
             .map_err(ApiError::Unreachable)?;
         Ok(Self { base, client })
+    }
+
+    /// The API host, for example `login.example.org`.
+    pub fn host(&self) -> &str {
+        api_host(&self.base)
     }
 
     /// Server name, login mode and launch arguments.
@@ -156,6 +163,7 @@ mod tests {
     use axum::response::Redirect;
     use axum::routing::{get, post};
     use axum::{Json, Router};
+    use nw_protocol::aws_mirror::AwsMirror;
     use nw_protocol::launcher_api::{AuthMode, DISCORD_AUTHORIZE_URL};
 
     use super::*;
@@ -179,6 +187,10 @@ mod tests {
             auth_mode: AuthMode::Password,
             allow_registration: true,
             launch_arguments: Vec::new(),
+            aws_mirror: AwsMirror {
+                hosts: Vec::new(),
+                certificate_pem: String::new(),
+            },
         })
     }
 

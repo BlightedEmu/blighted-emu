@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Routing by host name (M2 spec section 14, parent spec 4.2). `login.<domain>` serves the
-//! launcher API and the channel document; `game.<domain>` serves the game routes. A request for
+//! launcher API and the channel document; `game.<domain>` serves the game routes and the stats
+//! service. The Kinesis and STS host names of the client's analytics get our analytics stream
+//! when they lead here, and the remote-config bucket host gets our own config sets. A request for
 //! any other host gets `421`.
 
 use std::sync::Arc;
@@ -11,11 +13,17 @@ use axum::http::header::HOST;
 use axum::response::{IntoResponse, Response};
 use tower::ServiceExt;
 
+use nw_db::PgPool;
+use nw_protocol::aws_mirror::remote_config_host;
+
+use crate::analytics::{AnalyticsState, is_kinesis_host, is_sts_host, kinesis_router, sts_router};
 use crate::discord::DiscordApi;
 use crate::error::ApiError;
 use crate::game::{GameState, channel_router, game_router, unknown_route};
 use crate::launcher::{LauncherState, launcher_router};
+use crate::pg::PgStats;
 use crate::queue::QueueStore;
+use crate::stats::{StatsState, stats_router};
 use crate::store::{
     AccountStore, CharacterStore, DiscordStateStore, GameSessionStore, RateLimiter,
 };
@@ -30,6 +38,39 @@ struct HostRoutes {
     game_host: Arc<str>,
     login: Router,
     game: Router,
+    kinesis: Router,
+    sts: Router,
+    bucket_host: Arc<str>,
+    remote_config: Router,
+}
+
+/// The routes of the services outside the login logic.
+pub struct ServiceRouters {
+    /// The stats service ([`crate::stats::stats_router`]), on `game.<domain>`.
+    pub stats: Router,
+    /// The analytics stream ([`crate::analytics::kinesis_router`]).
+    pub kinesis: Router,
+    /// The credentials of the analytics stream ([`crate::analytics::sts_router`]).
+    pub sts: Router,
+    /// Our own remote config sets ([`crate::remote_config::remote_config_router`]), on the
+    /// bucket host.
+    pub remote_config: Router,
+}
+
+impl ServiceRouters {
+    /// The services over the migrated global database `global`, and the remote config route
+    /// ([`crate::remote_config::remote_config_router`]).
+    pub fn on_postgres(global: &PgPool, remote_config: Router) -> Self {
+        let store = PgStats::new(global.clone());
+        Self {
+            stats: stats_router(StatsState {
+                stats: store.clone(),
+            }),
+            kinesis: kinesis_router(AnalyticsState { analytics: store }),
+            sts: sts_router(),
+            remote_config,
+        }
+    }
 }
 
 /// The host a request names: the URI authority (HTTP/2) or the `Host` header (HTTP/1.1),
@@ -49,9 +90,13 @@ fn request_host(request: &Request) -> Option<&str> {
 }
 
 async fn by_host(State(routes): State<HostRoutes>, request: Request) -> Response {
-    let target = match request_host(&request) {
+    let host = request_host(&request).map(str::to_ascii_lowercase);
+    let target = match host.as_deref() {
         Some(host) if host.eq_ignore_ascii_case(&routes.login_host) => routes.login,
         Some(host) if host.eq_ignore_ascii_case(&routes.game_host) => routes.game,
+        Some(host) if is_kinesis_host(host) => routes.kinesis,
+        Some(host) if is_sts_host(host) => routes.sts,
+        Some(host) if host == &*routes.bucket_host => routes.remote_config,
         _ => return ApiError::UnknownHost.into_response(),
     };
     match target.oneshot(request).await {
@@ -64,6 +109,7 @@ async fn by_host(State(routes): State<HostRoutes>, request: Request) -> Response
 pub fn edge_router<A, G, R, D, X, C, Q>(
     launcher: LauncherState<A, G, R, D, X>,
     game: GameState<G, C, R, Q>,
+    services: ServiceRouters,
 ) -> Router
 where
     A: AccountStore,
@@ -75,13 +121,17 @@ where
     Q: QueueStore,
 {
     let routes = HostRoutes {
+        bucket_host: remote_config_host(&game.config.remote_config.bucket).into(),
         login_host: game.config.login_host().into(),
         game_host: game.config.game_host().into(),
         login: launcher_router(launcher)
             .merge(channel_router(game.clone()))
             .fallback(unknown_route)
             .method_not_allowed_fallback(unknown_route),
-        game: game_router(game),
+        game: game_router(game).merge(services.stats),
+        kinesis: services.kinesis,
+        sts: services.sts,
+        remote_config: services.remote_config,
     };
     Router::new().fallback(by_host).with_state(routes)
 }
@@ -97,6 +147,9 @@ mod tests {
     use crate::game::SESSION_PREFIX;
     use crate::game::tests::fixture;
     use crate::launcher::tests::state;
+    use crate::memory::{MemoryAnalytics, MemoryStats};
+    use crate::remote_config::remote_config_router;
+    use crate::remote_config::tests::committed_sets;
     use crate::test_http::{self, error_code};
 
     const LOGIN_HOST: &str = "login.example.org";
@@ -106,7 +159,16 @@ mod tests {
         let game = fixture().await;
         let mut launcher = state(AuthMode::Password);
         launcher.game_sessions = game.state.game_sessions.clone();
-        (edge_router(launcher, game.state), game.session)
+        let stats = MemoryStats::default();
+        let services = ServiceRouters {
+            stats: stats_router(StatsState { stats }),
+            kinesis: kinesis_router(AnalyticsState {
+                analytics: MemoryAnalytics::default(),
+            }),
+            sts: sts_router(),
+            remote_config: remote_config_router(committed_sets(&game.state.config)),
+        };
+        (edge_router(launcher, game.state, services), game.session)
     }
 
     async fn get(app: &Router, host: &str, path: &str) -> (StatusCode, Bytes) {
@@ -152,6 +214,50 @@ mod tests {
         let (status, _) = get(&app, GAME_HOST, INFO_PATH).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = get(&app, GAME_HOST, &format!("/{session}.json")).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let board = "/new-world/pc/leaderboards/top-x.w1?pageNumber=1&pageSize=100";
+        let (status, _) = get(&app, GAME_HOST, board).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = get(&app, LOGIN_HOST, board).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn aws_hosts_get_the_analytics_routes() {
+        let (app, _) = app_and_session().await;
+        for host in [
+            "KINESIS.us-east-1.amazonaws.com",
+            "sts.us-east-1.amazonaws.com",
+        ] {
+            let request = HttpRequest::builder()
+                .method("POST")
+                .uri("/")
+                .header(HOST, host)
+                .body(Body::empty())
+                .expect("request");
+            let (status, _) = test_http::send(&app, request).await;
+            assert!(
+                status != StatusCode::MISDIRECTED_REQUEST && status.is_client_error(),
+                "{host}: {status}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn the_bucket_host_gets_the_remote_config_sets() {
+        let (app, _) = app_and_session().await;
+        let key =
+            "/applications/public/configuration-sets/ProductId/STEAM_APP_ID.1063730/versionless";
+        let (status, _) = get(&app, "ags-javelin-remote-config.s3.amazonaws.com", key).await;
+        assert_eq!(status, StatusCode::OK);
+        for host in [
+            "ags-javelin-dev-remote-config.s3.amazonaws.com",
+            "s3.amazonaws.com",
+        ] {
+            let (status, _) = get(&app, host, key).await;
+            assert_eq!(status, StatusCode::MISDIRECTED_REQUEST, "{host}");
+        }
+        let (status, _) = get(&app, GAME_HOST, key).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 

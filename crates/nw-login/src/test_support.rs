@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::config::EdgeConfig;
 use crate::discord::DiscordHttp;
 use crate::game::GameState;
-use crate::host::edge_router;
+use crate::host::{ServiceRouters, edge_router};
 use crate::launcher::LauncherState;
 use crate::password::PasswordHasher;
 use crate::pg::{PgAccounts, PgCharacters};
@@ -27,6 +27,9 @@ pub const DEFAULT_TEST_VALKEY_URL: &str = "redis://127.0.0.1:6379";
 /// Entry ticket key of tests.
 pub const TEST_SIGNING_KEY_HEX: &str =
     "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+/// Stands for the `[aws_mirror]` certificate; the launcher API passes it on as text.
+pub const TEST_AWS_MIRROR_CERTIFICATE_PEM: &str =
+    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n";
 const ONE_HASH_AT_A_TIME: usize = 1;
 const PEER_PORT: u16 = 50_000;
 const PRIVATE_NETWORK: u8 = 10;
@@ -52,8 +55,9 @@ pub fn random_peer() -> SocketAddr {
 }
 
 /// Every `edge-http` route over the real stores, as `edge-http` builds them, for the first world
-/// of `config`. Discord is off, the key is [`test_signing_key`], and every request comes from one
-/// [`random_peer`].
+/// of `config`. Discord is off, the key is [`test_signing_key`], the mirror certificate is
+/// [`TEST_AWS_MIRROR_CERTIFICATE_PEM`], the bucket host has no objects, and every request comes
+/// from one [`random_peer`].
 ///
 /// # Panics
 ///
@@ -73,6 +77,7 @@ pub fn edge_app(
         discord_states: valkey.clone(),
         discord: None::<DiscordHttp>,
         hasher: PasswordHasher::new(ONE_HASH_AT_A_TIME).expect("hasher"),
+        aws_mirror_certificate_pem: TEST_AWS_MIRROR_CERTIFICATE_PEM.into(),
     };
     let game = GameState {
         config,
@@ -82,5 +87,10 @@ pub fn edge_app(
         queue: valkey,
         signing_key: test_signing_key(),
     };
-    edge_router(launcher, game).layer(MockConnectInfo(random_peer()))
+    edge_router(
+        launcher,
+        game,
+        ServiceRouters::on_postgres(global, Router::new()),
+    )
+    .layer(MockConnectInfo(random_peer()))
 }

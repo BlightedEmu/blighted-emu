@@ -20,9 +20,10 @@ use nw_messages::{
     CardPlace, DATA_BITS_ACTIVE, DYNAMIC_SLICE_SUB_ID, GATHERABLE_CONTROLLER_TYPE_INDEX,
     GDE_METADATA_COMPONENT, GatherableControllerState, GdeMetadataReplicatedState, InputPosition,
     LOCAL_PLAYER_INTEREST, LookDir, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState,
-    MessageError, PLAYER_SLICE_ASSET, PlayerStates, ReplicatedStateBundle, SPAWN_STATE_ID,
-    SPAWN_STATE_MS, SPAWN_TELEPORT, ServerMessage, SlayerState, StepPlace, TeleportStep,
-    VitalsData, VitalsState, boss_phase_change, change_members, player_members, raw_id_of_entity,
+    MessageError, PLAYER_SLICE_ASSET, POS3_LEN, PlayerStates, ReplicatedStateBundle,
+    SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, ServerMessage, SlayerState, StepPlace,
+    TeleportStep, VitalsData, VitalsState, boss_phase_change, change_members, offset_from,
+    player_members, raw_id_of_entity,
 };
 use nw_sim_core::Position;
 
@@ -524,12 +525,61 @@ impl OwnClock {
     }
 }
 
+/// The places of the client's own player that the client has: the own `pos10` and the last place
+/// it got. Retail own states (movement study 2026-09-20, clean walking and running captures):
+/// every state of a moving own player carries its place, an offset from the own `pos10` while it
+/// is within reach and a new `pos10` when it is not; the state after a new `pos10` carries it again
+/// with the offset from it; the states of a player that does not move carry no place.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(super) struct OwnPlaces {
+    /// The own `pos10` the client has.
+    anchor: Option<InputPosition>,
+    /// The offset from `anchor` of the last place the client got.
+    sent: Option<[u8; POS3_LEN]>,
+    /// The last place was a new `pos10`: the next one carries it again.
+    anchor_again: bool,
+}
+
+impl OwnPlaces {
+    /// The place `at` for the next own state; `None` when the client has that place already.
+    pub(super) fn next(&mut self, at: InputPosition) -> Option<StepPlace> {
+        match StepPlace::of(self.anchor, at) {
+            StepPlace::Offset(offset) if self.sent == Some(offset) => None,
+            StepPlace::Offset(offset) => {
+                self.sent = Some(offset);
+                Some(match self.anchor.filter(|_| self.anchor_again) {
+                    Some(anchor) => {
+                        self.anchor_again = false;
+                        StepPlace::AnchorAgain { anchor, offset }
+                    }
+                    None => StepPlace::Offset(offset),
+                })
+            }
+            place => {
+                if let StepPlace::Anchor(new) = place {
+                    self.placed(new);
+                    self.anchor_again = true;
+                }
+                Some(place)
+            }
+        }
+    }
+
+    /// The client took `pos10` as its place (a new anchor, a spawn, a server move).
+    pub(super) fn placed(&mut self, pos10: InputPosition) {
+        self.anchor = Some(pos10);
+        self.sent = offset_from(pos10, pos10);
+        self.anchor_again = false;
+    }
+}
+
 /// One state of the client's own player that neither spawns nor moves it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct OwnTick {
     /// The own clock.
     pub(super) clock: OwnClock,
-    /// Send the place: the body estimate is exact (the player stands still).
+    /// Send the place when the client does not have it yet (not while the server refuses the
+    /// player's moves: that place is behind the client).
     pub(super) with_position: bool,
     /// Send the movement flags without the throttle bit (the first state after the spawn).
     pub(super) clear_throttle: bool,
@@ -568,9 +618,9 @@ pub(super) enum OwnCard {
 /// The group of the client's own player with its `states`; `None` for a position that is not
 /// finite. When the server `moved` the player, the position is the full first state, which the
 /// client takes as its new place (retail: the move into the water, live-tutorial note section 4).
-/// Any other own state is `tick`: the own clock, and the place only when the tick says so, as
-/// an offset from `anchor`, the own `pos10` the client has; every state that sends a new `pos10`
-/// keeps it in `anchor`.
+/// Any other own state is `tick`: the own clock, and the place when the tick allows it and the
+/// client does not have it yet ([`OwnPlaces`]); every state that places the client keeps its
+/// `pos10` in `places`.
 ///
 /// # Errors
 ///
@@ -582,7 +632,7 @@ pub(super) fn own_group(
     card: OwnCard,
     teleport: Option<OwnTeleport>,
     tick: OwnTick,
-    anchor: &mut Option<InputPosition>,
+    places: &mut OwnPlaces,
 ) -> Result<Option<BundleGroup>, MessageError> {
     let Some(mut group) = entity_group(
         LOCAL_PLAYER_INTEREST,
@@ -611,7 +661,7 @@ pub(super) fn own_group(
     } else if let Some(alc) = group.members.last_mut() {
         let place = InputPosition::from_metres(position.x, position.y, position.z)
             .filter(|_| tick.with_position)
-            .map(|at| StepPlace::of(*anchor, at));
+            .and_then(|at| places.next(at));
         alc.state = MemberState::Alc(AlcState::own_step(
             tick.clock.stamp(),
             place,
@@ -622,9 +672,10 @@ pub(super) fn own_group(
         )?);
     }
     if let Some(MemberState::Alc(alc)) = group.members.last().map(|alc| &alc.state)
-        && alc.pos10.is_some()
+        && let Some(pos10) = alc.pos10
+        && (card == OwnCard::Spawn || teleport.is_some())
     {
-        *anchor = alc.pos10;
+        places.placed(pos10);
     }
     // Without the card, the changes (achievements, objectives, experience, gear, health) still
     // go out, before the position.
@@ -686,8 +737,8 @@ fn group_bytes(group: &BundleGroup) -> Result<usize, MessageError> {
 #[cfg(test)]
 mod tests {
     use nw_messages::{
-        EntitySlots, GDE_ID_LEN, LOGIN_CLIENT_CONTEXT, PLAYER_COMPONENT_TYPE_INDEX, PlayerLook,
-        SlotRead,
+        EntitySlots, GDE_ID_LEN, LOGIN_CLIENT_CONTEXT, PLAYER_COMPONENT_TYPE_INDEX, POS_REL_CHILD,
+        PlayerLook, SlotRead,
     };
     use nw_reflect::Envelope;
     use uuid::Uuid;
@@ -747,7 +798,7 @@ mod tests {
 
     #[test]
     fn the_own_player_is_the_player_prefab_in_slot_1() {
-        let mut anchor = None;
+        let mut places = OwnPlaces::default();
         let group = own_group(
             OWN,
             own_states(),
@@ -755,7 +806,7 @@ mod tests {
             OwnCard::Spawn,
             None,
             STILL,
-            &mut anchor,
+            &mut places,
         )
         .expect("encode")
         .expect("finite");
@@ -791,7 +842,10 @@ mod tests {
             panic!("then the ALC position: {group:?}");
         };
         assert_eq!(alc.pos10, InputPosition::from_metres(10.0, 20.0, 30.0));
-        assert_eq!(anchor, alc.pos10, "the spawn's pos10 is the own anchor");
+        assert_eq!(
+            places.anchor, alc.pos10,
+            "the spawn's pos10 is the own anchor"
+        );
         let later = own_group(
             OWN,
             own_states(),
@@ -799,24 +853,65 @@ mod tests {
             OwnCard::Without,
             None,
             STILL,
-            &mut anchor,
+            &mut places,
         )
         .expect("encode")
         .expect("finite");
-        assert_eq!(later.members.len(), 1, "later only the ALC position");
+        assert_eq!(later.members.len(), 1, "later only the ALC state");
         let MemberState::Alc(still) = &later.members[0].state else {
-            panic!("the ALC position: {later:?}");
+            panic!("the ALC state: {later:?}");
         };
-        assert_eq!(
-            still.pos10, None,
-            "a later place is an offset from the own anchor"
+        assert_eq!(still.pos10, None);
+        assert!(
+            !still
+                .slot0_children()
+                .expect("walk")
+                .iter()
+                .any(|(child, _)| *child == POS_REL_CHILD),
+            "the client has the place already: none goes"
         );
-        assert_eq!(anchor, alc.pos10);
+        assert_eq!(places.anchor, alc.pos10);
         let payload = BundlePayload {
             groups: vec![group.clone()],
         };
         let read = BundlePayload::decode(&payload.encode().expect("payload")).expect("read");
         assert_eq!(read.groups[0].members, group.members);
+    }
+
+    #[test]
+    fn a_moving_own_player_gets_its_place_in_every_state_as_retail() {
+        // Retail clean walking capture: a new place in every state of the walk, offsets from the
+        // own pos10 while within its 1.99 m reach; a new pos10 at zero offset when out of it
+        // (state 61), the same pos10 again with the next offset (state 62), then offsets.
+        let start = InputPosition::from_metres(4232.0, 9452.5, 342.6).expect("finite");
+        let east = |metres: f32| {
+            InputPosition::from_metres(start.x + metres, start.y, start.z()).expect("finite")
+        };
+        let mut places = OwnPlaces::default();
+        places.placed(start);
+        assert_eq!(
+            places.next(start),
+            None,
+            "standing: the client has its place"
+        );
+        /// A run's step per state: 5.5 m/s over 33 ms.
+        const STEP_M: f32 = 0.183;
+        let mut kinds = Vec::new();
+        for state in 1..=14_u8 {
+            let place = places.next(east(f32::from(state) * STEP_M)).expect("moved");
+            kinds.push(match place {
+                StepPlace::Offset(_) => 'o',
+                StepPlace::Anchor(_) => 'A',
+                StepPlace::AnchorAgain { anchor, .. } => {
+                    assert_eq!(Some(anchor), places.anchor, "the same pos10 again");
+                    'a'
+                }
+            });
+        }
+        // 1.99 m reach / 0.183 m: the 11th state is out of reach of the spawn's pos10.
+        assert_eq!(kinds.iter().collect::<String>(), "ooooooooooAaoo");
+        let last = east(14.0 * STEP_M);
+        assert_eq!(places.next(last), None, "stopped: no place");
     }
 
     /// The server time of the first own state (retail 845730262408 ms since 2000-01-01).
@@ -827,7 +922,7 @@ mod tests {
         spawn_ms: SPAWN_MS,
     };
 
-    /// A tick of a player who stands still, and of one who moves.
+    /// A tick whose place may go, and one of a player whose moves are refused.
     const STILL: OwnTick = OwnTick {
         clock: SPAWN_CLOCK,
         with_position: true,
@@ -835,7 +930,7 @@ mod tests {
         slayer: None,
         view: None,
     };
-    const MOVING: OwnTick = OwnTick {
+    const REFUSED: OwnTick = OwnTick {
         with_position: false,
         ..STILL
     };
@@ -892,8 +987,8 @@ mod tests {
             at(),
             OwnCard::Without,
             Some(teleport),
-            MOVING,
-            &mut None,
+            REFUSED,
+            &mut OwnPlaces::default(),
         )
         .expect("encode")
         .expect("finite");
@@ -910,23 +1005,31 @@ mod tests {
     }
 
     #[test]
-    fn a_moving_player_gets_the_clock_without_a_position_but_its_spawn_does() {
+    fn a_refused_player_gets_the_clock_without_a_position_but_its_spawn_does() {
         let alc_of = |card, tick| {
-            let group = own_group(OWN, own_states(), at(), card, None, tick, &mut None)
-                .expect("encode")
-                .expect("finite");
+            let group = own_group(
+                OWN,
+                own_states(),
+                at(),
+                card,
+                None,
+                tick,
+                &mut OwnPlaces::default(),
+            )
+            .expect("encode")
+            .expect("finite");
             let last = group.members.last().expect("alc");
             assert_eq!(last.component, PLAYER_ALC_COMPONENT);
             last.state.clone()
         };
-        let MemberState::Alc(moving) = alc_of(OwnCard::Without, MOVING) else {
+        let MemberState::Alc(refused) = alc_of(OwnCard::Without, REFUSED) else {
             panic!("an ALC");
         };
         assert_eq!(
-            moving,
+            refused,
             AlcState::own_step(SPAWN_CLOCK.stamp(), None, None, true, None, None).expect("step")
         );
-        let MemberState::Alc(spawn) = alc_of(OwnCard::Spawn, MOVING) else {
+        let MemberState::Alc(spawn) = alc_of(OwnCard::Spawn, REFUSED) else {
             panic!("an ALC");
         };
         assert!(
@@ -935,7 +1038,7 @@ mod tests {
         );
         let first = OwnTick {
             clear_throttle: true,
-            ..MOVING
+            ..REFUSED
         };
         assert_eq!(
             alc_of(OwnCard::Without, first),
@@ -958,9 +1061,17 @@ mod tests {
     fn only_the_spawn_card_carries_the_full_first_state() {
         let pos = InputPosition::from_metres(10.0, 20.0, 30.0).expect("finite");
         let alc_of = |card: OwnCard| {
-            let group = own_group(OWN, own_states(), at(), card, None, STILL, &mut None)
-                .expect("encode")
-                .expect("finite");
+            let group = own_group(
+                OWN,
+                own_states(),
+                at(),
+                card,
+                None,
+                STILL,
+                &mut OwnPlaces::default(),
+            )
+            .expect("encode")
+            .expect("finite");
             group.members.last().expect("alc").state.clone()
         };
         assert_eq!(
@@ -1016,6 +1127,76 @@ mod tests {
         assert_ne!(asset.id, [0; GDE_ID_LEN]);
         assert_eq!(card.entity_number(), Some(ENTITY));
         assert_eq!(group.members[1].component, MOB_ALC_COMPONENT);
+    }
+
+    #[test]
+    fn a_mob_card_has_the_retail_bytes_with_a_dynamic_id() {
+        // Retail 2026-09-18, the first legionnaire's card (component 0, class 10): `01 03`, its
+        // slice asset `c05fc957…fb64` with sub id 2, then a random 16-byte `GdeRef`.
+        const LEGIONNAIRE: [u8; GDE_ID_LEN] = [
+            0xc0, 0x5f, 0xc9, 0x57, 0x84, 0x87, 0x55, 0x59, 0xaf, 0xe8, 0x74, 0xa7, 0x8f, 0x95,
+            0xfb, 0x64,
+        ];
+        const RETAIL_HEAD: [u8; 22] = [
+            0x01, 0x03, 0xc0, 0x5f, 0xc9, 0x57, 0x84, 0x87, 0x55, 0x59, 0xaf, 0xe8, 0x74, 0xa7,
+            0x8f, 0x95, 0xfb, 0x64, 0x00, 0x00, 0x00, 0x02,
+        ];
+        /// A mob number of this test only.
+        const MOB: u64 = (1 << 34) + 0x7c01;
+        let look = MobLook {
+            asset: AssetId {
+                id: LEGIONNAIRE,
+                sub_id: DYNAMIC_SLICE_SUB_ID,
+            },
+            alc_component: MOB_ALC_COMPONENT,
+            vitals_component: 10,
+            alc: None,
+            vitals: None,
+            first: Vec::new(),
+            death: Vec::new(),
+        };
+        let state = MobGhost {
+            health: 370,
+            max_health: 370,
+            returning: false,
+            vitals_id: 1,
+            category_id: 2,
+            level: 1,
+        };
+        let group = mob_group(
+            FIRST_REMOTE_INTEREST,
+            &card_of(MOB, at(), state, None),
+            Some(&look),
+            true,
+        )
+        .expect("encode")
+        .expect("group");
+        let card = group
+            .members
+            .iter()
+            .find(|member| member.component == GDE_METADATA_COMPONENT)
+            .and_then(|member| match &member.state {
+                MemberState::GdeMetadata(card) => Some(*card),
+                _ => None,
+            })
+            .expect("card");
+        let mut writer = nw_messages::Writer::new();
+        card.write(&mut writer);
+        let body = writer.finish();
+        assert_eq!(body[..RETAIL_HEAD.len()], RETAIL_HEAD);
+        let mut gde_ref = [0; GDE_ID_LEN];
+        gde_ref.copy_from_slice(&body[RETAIL_HEAD.len()..]);
+        assert_eq!(gde_ref, raw_id_of_entity(MOB));
+        assert!(
+            nw_messages::is_dynamic_raw_id(&gde_ref),
+            "bit 0 clear, no zero half"
+        );
+        assert_ne!(
+            gde_ref[..GDE_ID_LEN / 2],
+            gde_ref[GDE_ID_LEN / 2..],
+            "independent halves"
+        );
+        assert_eq!(card.entity_number(), Some(MOB));
     }
 
     #[test]

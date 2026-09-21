@@ -26,6 +26,13 @@ pub enum DbError {
     /// A migration failed.
     #[error("migration failed")]
     Migrate(#[source] Box<sqlx::migrate::MigrateError>),
+    /// A value does not fit its column (coins above the BIGINT range, an achievement bit above
+    /// the INTEGER range), or a stored value does not fit the program's type.
+    #[error("{field} is out of range")]
+    OutOfRange {
+        /// The column.
+        field: &'static str,
+    },
     /// PostgreSQL returned an error.
     #[error("database error")]
     Database(#[source] Box<sqlx::Error>),

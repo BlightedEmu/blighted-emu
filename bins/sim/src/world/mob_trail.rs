@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Where each mob stood in the last moments (lag compensation): a client shows a mob where the
 //! server had it a little earlier (its interpolation and the network), and a mob's lunge moves it
-//! metres in a few ticks. A swing tests the mob at each of these places, so a swing at the mob
-//! the player sees lands (live 2026-09-18: on 37 of 41 swings at a mob next to the player on
-//! screen, the server had it 120 to 180 degrees behind, and 1 to 4 m apart within 0.8 s).
+//! metres in a few ticks. Retail confirms a melee hit on a target up to 0.2 s back
+//! (`javelin.server-melee-hit-confirmation-max-lookback-time-sec`), so a swing tests the mob at
+//! each of its places of that time.
 
 use std::collections::{HashMap, VecDeque};
 
 use nw_sim_core::Position;
 
-/// How far back a swing looks (Inferred: the client's interpolation delay plus a round trip, and
-/// the 0.2 s a mob lunge takes).
-const TRAIL_MS: u64 = 400;
+/// How far back a swing looks: the default of
+/// `javelin.server-melee-hit-confirmation-max-lookback-time-sec`, 0.2 s (Observed: the client
+/// registers it with the `f32` at .rdata 0x147fbe048, `cdcc4c3e`, in `FUN_141082780`).
+const TRAIL_MS: u64 = 200;
 
 /// The recent places of the mobs.
 #[derive(Debug, Default)]

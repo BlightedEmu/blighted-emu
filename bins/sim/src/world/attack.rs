@@ -13,16 +13,22 @@
 //! (live-tutorial note, section 7). They wait in the world until
 //! [`SimWorld::take_messages`] or the tick takes them.
 //!
-//! [`SimWorld::attack_input`] turns the attack bits of a client's input records into attacks on
-//! the nearest mob (M6-B spec section 6).
+//! [`SimWorld::attack_input`] turns the attack bits of a client's input records into the basic
+//! attacks of the weapon's stance ([`nw_content::player_attacks`]): a press during an attack's
+//! combo link starts the link's step, else the stance's first; the hold picks the step's light,
+//! heavy or charged attack. A melee attack sweeps its `CAGE-Damage` shapes through their windows
+//! against every target ([`SimWorld::sweep`]); a projectile or a hit scan fires
+//! ([`SimWorld::player_swings_due`]). The stance's variants of status effects
+//! ([`nw_content::player_attacks::Stance::variants`]) do not apply: the sim keeps no player status
+//! effects.
 
 use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use nw_bus::{BusId, ConnectionRef, Hit};
 use std::sync::Arc;
 
-use nw_content::combat::{AttackRow, WeaponKind, WeaponRow};
-use nw_content::loot::{FULL_CHANCE_PERCENT, LootContext};
+use nw_content::combat::{AffixDamage, AttackRow, WeaponRow};
+use nw_content::player_attacks::{AttackHit, AttackKind, BasicAttack, Homing, MeleeShape, Stance};
 use nw_content::respawn_points::{nearest_respawn_point, respawn_point};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::paperdoll::slot;
@@ -31,35 +37,35 @@ use nw_messages::{
     InputRecord, MeleeDamage, MeleeHitMsg, OnDamageMsg, ServerMessage, SpreadshotProcessedMsg,
     SpreadshotRequestMsg,
 };
-use nw_sim_core::{
-    Damage, Health, MobState, PlayerAttack, TUTORIAL_START, died, hurt, mob_hit, player_hit,
-};
+use nw_sim_core::{Damage, Health, PlayerAttack, TUTORIAL_START, mob_hit, player_hit};
 
 use super::encounter::Tutorial;
-use super::gathering::{MOB_LEVEL, PLAYER_LOOT_LEVEL};
 use super::gear::{Gear, unix_ns};
 use super::hit_shape::{
-    MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, Wedge, homing, stepped_in, swing_shape, turn,
+    MOB_SWING_HALF_ARC_RAD, PLAYER_CAPSULE, SweptShape, Wedge, body_frame, homing_score, turn,
 };
 use super::mob_timeline::yaw_toward;
-use super::projectile::Cast;
+use super::projectile::{AimLine, Shot};
 use super::stamina::Dodge;
 use super::{Body, MESSAGE_CHANNEL, Outgoing, Player, Position, SimWorld};
 use crate::combat::{AttackOutcome, AttackRefusal, RemoteHit, RespawnRefusal};
-use crate::mobs::{Capsule, MobAttackIntent, MoveHit, MoveStrike, spawn_index};
+use crate::mobs::{
+    Capsule, DEFAULT_BLOCK_STAMINA, DEFAULT_HIT_TAG, MobAttackIntent, MobReach, MoveHit,
+    spawn_index,
+};
 use crate::objectives::Event;
 
 /// How high above the sea a player still swims (Inferred: retail swam at 0.0 to 1.55 m above the
 /// tutorial's sea and walked onto the beach at 3.5 m).
 const SWIM_HEIGHT_M: f32 = 1.6;
-/// How long a dodge roll keeps mob hits off (Inferred: no retail hit message fell inside a roll;
-/// the roll length is Unknown; xp-potion-exit note, section 5.4).
-const DODGE_MS: u64 = 500;
 
 /// The fit of the damage share that a mob's armor takes off a player's hit (xp-potion-exit note,
 /// section 4.2, Inferred from two points: retail tutorial hits kept 0.7011 with a gear score 60
 /// weapon and 0.7541 with gear score 75, on level 1 mobs of armor rating 109.336):
-/// `armor / (armor + SCALE × gear score ^ POWER)`.
+/// `armor / (armor + SCALE × gear score ^ POWER)`. The client's player attributes
+/// (`playerbaseattributes.pbadb`) hold `Physical Armor Scale Factor` 1850, `Armor Mitigation
+/// Exponent` 1.2 and `Diminishing Gear Score Threshold` 500; the formula that uses them is
+/// Unknown (no function of the client sweep reads them by name), so the fit stays.
 const ARMOR_FIT_SCALE: f64 = 1.8748;
 const ARMOR_FIT_POWER: f64 = 1.2013;
 
@@ -68,9 +74,6 @@ fn armor_share(armor: f64, gear_score: u32) -> f64 {
     armor / (armor + ARMOR_FIT_SCALE * f64::from(gear_score).powf(ARMOR_FIT_POWER))
 }
 
-/// How long after the press a potion works (retail: the answer came 326 ms after the press;
-/// Inferred: the drink animation).
-const DRINK_MS: u64 = 326;
 /// The visual script of a heal: crc32 of `potionheal` (retail 608 after the potion).
 const HEAL_SCRIPT: u32 = 0xf7e1_e0d6;
 /// Microseconds per millisecond.
@@ -90,11 +93,10 @@ pub(super) struct Vitals {
     /// `true`.
     pub(super) spawned: bool,
     last_attack_ms: Option<u64>,
-    /// The counter of the record whose attack key press still waits for its release.
-    attack_pressed_at: Option<u16>,
-    /// The held attack key passed the heavy hold: its heavy attack started, and its release
-    /// starts nothing more.
-    heavy_started: bool,
+    /// The combo step whose charge waits for the attack key's release.
+    charge: Option<Charge>,
+    /// The last basic attack, for the press that continues its combo.
+    combo: Option<ComboState>,
     /// The counter (`u16` after the mask) of the newest input record read.
     input_counter: Option<u16>,
     /// The mob the player locked on in its newest input.
@@ -111,8 +113,8 @@ pub(super) struct Vitals {
     dodge_held: bool,
     /// The player pressed quick slot 1 in the newest input record.
     quick_slot_held: bool,
-    /// A dodge roll runs until this time: mob hits miss.
-    dodging_until_ms: u64,
+    /// The invulnerability of its dodge roll, from and until: mob hits miss.
+    invulnerable_ms: Option<(u64, u64)>,
 }
 
 impl Vitals {
@@ -132,8 +134,8 @@ impl Vitals {
             dead_since_ms: None,
             spawned,
             last_attack_ms: None,
-            attack_pressed_at: None,
-            heavy_started: false,
+            charge: None,
+            combo: None,
             input_counter: None,
             lock_target: None,
             last_shot_ms: None,
@@ -141,9 +143,77 @@ impl Vitals {
             blocking: false,
             dodge_held: false,
             quick_slot_held: false,
-            dodging_until_ms: 0,
+            invulnerable_ms: None,
         }
     }
+}
+
+/// A combo step whose charge runs ([`nw_content::player_attacks::Schedule`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Charge {
+    /// The step: 0 for the stance's own.
+    step: usize,
+    /// The counter of the record that pressed the attack key.
+    pressed_at: u16,
+    /// How long after the press the step's charge starts: 0, or until the instant clip after a
+    /// buffered press.
+    from_ms: u64,
+    /// The key held to the charge started the charged attack; the release starts nothing more.
+    charged: bool,
+}
+
+/// The last basic attack of a player: its step, kind and start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ComboState {
+    step: usize,
+    kind: AttackKind,
+    started_ms: u64,
+}
+
+/// The charge a press of the attack key in the record `pressed_at`, at `pressed_ms`, starts in
+/// `stance` after the attack `combo`: while that attack plays, a press in one of its links starts
+/// the link's step (at the press, or at the link's instant clip when buffered), and a press
+/// before its links starts nothing (retail newchar capture, 2026-09-18: every light attack of a
+/// greatsword chain started at least 706 ms after the one before, the instant clip of
+/// `Attack_Primary` at 700 ms, though the player pressed every 170 ms); after it, or without
+/// one, the stance's first step starts at the press.
+fn next_charge(
+    stance: &Stance,
+    combo: Option<ComboState>,
+    pressed_at: u16,
+    pressed_ms: u64,
+) -> Option<Charge> {
+    let first = Charge {
+        step: 0,
+        pressed_at,
+        from_ms: 0,
+        charged: false,
+    };
+    let Some(last) = combo else {
+        return Some(first);
+    };
+    let Some(attack) = stance
+        .schedule(last.step)
+        .and_then(|schedule| schedule.attack(last.kind))
+    else {
+        return Some(first);
+    };
+    let since_ms = pressed_ms.saturating_sub(last.started_ms);
+    if since_ms >= attack.length_ms {
+        return Some(first);
+    }
+    attack
+        .links
+        .iter()
+        .find(|link| link.from_ms <= since_ms && since_ms < link.until_ms)
+        .map(|link| Charge {
+            step: link.step,
+            pressed_at,
+            from_ms: link
+                .starts_at_ms
+                .map_or(0, |at| at.saturating_sub(since_ms)),
+            charged: false,
+        })
 }
 
 /// A health amount as the `f32` of the wire (hit messages, the vitals block).
@@ -158,10 +228,6 @@ pub(super) const fn amount_of(amount: u32) -> f32 {
 /// 1.5 m, inside every creature's reach).
 const LUNGE_GAP_M: f32 = 0.4;
 
-/// The most mobs one swing hits (our choice; retail's limit is Unknown, one retail swing hit
-/// two).
-const MAX_SWING_TARGETS: usize = 5;
-
 /// The shortest time between two spread shots (our choice: retail's shortest gap was 266 ms, and
 /// the 33 ms tick and network jitter shorten the gap the sim sees; at 250 ms the live tutorial
 /// refused shots the client showed, 2026-09-18). The ammo (two loads, then a reload) limits the
@@ -172,9 +238,6 @@ const SPREADSHOT_MIN_INTERVAL_MS: u64 = 200;
 /// 2026-09-18: the release came 0.2 to 0.5 s after the shot); the network adds a few ticks
 /// (Inferred).
 const SHOT_PAIR_MS: u64 = 300;
-/// How far a pellet reaches (our choice; the blunderbuss range is Unknown, and the client names
-/// the targets it hit).
-const SPREADSHOT_RANGE_M: f32 = 30.0;
 /// The pellets of a shot that uses the eight-pellet config.
 const EIGHT_PELLETS: usize = 8;
 /// The pellet config id of the answer on six-pellet shots (ranged note).
@@ -182,8 +245,21 @@ const SIX_PELLET_CONFIG: u64 = 230;
 /// The pellet config id of the answer on eight-pellet shots (ranged note).
 const EIGHT_PELLET_CONFIG: u64 = 231;
 
-/// A mob swing that has not hit yet.
+/// How a mob's hit on a player lands ([`SimWorld::mob_hit_style`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
+struct MobHitStyle {
+    /// The 3601 item tag: its row's damage type.
+    tag: u8,
+    /// Its row's affix: the share of the hit of another type.
+    affix: Option<AffixDamage>,
+    /// The multiple of the pace's hit.
+    damage_scale: f64,
+    /// The stamina a block takes.
+    block_stamina: f32,
+}
+
+/// A mob swing that has not hit yet.
+#[derive(Debug, Clone, PartialEq)]
 pub(super) struct PendingMobSwing {
     /// When it hits.
     lands_ms: u64,
@@ -194,56 +270,75 @@ pub(super) struct PendingMobSwing {
     hit: Option<MoveHit>,
 }
 
-/// Where a player aims a swing.
+/// Where a player aims an attack.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Aim {
-    /// The camera yaw of the input that swung.
+    /// The camera yaw of the input that attacked.
     pub facing: Option<f32>,
+    /// The camera pitch of that input (positive looks down).
+    pub pitch: Option<f32>,
     /// The mob the player locked on (the input's target row).
     pub lock_target: Option<u64>,
 }
 
-/// A player swing that has not hit yet.
+/// A player's basic attack that has not landed yet.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct PlayerSwing {
     attacker: ConnectionRef,
     aim: Aim,
     kind: AttackKind,
-    /// When it hits.
-    due_ms: u64,
+    attack: BasicAttack,
+    /// When the attack started.
+    started_ms: u64,
     /// When its attack key was pressed.
     pressed_ms: u64,
     /// The melee option slot to take in hand when it lands, while the server holds a spread-shot
     /// weapon: unless a shot request came within [`SHOT_PAIR_MS`] of [`PlayerSwing::pressed_ms`],
-    /// the attack was a swing of the weapon the client holds.
+    /// the attack was a swing of the weapon the client holds. It lands no earlier than
+    /// [`SHOT_PAIR_MS`] after it was read, so that a shot request can come.
     hand: Option<u32>,
+    /// The earliest time it lands.
+    not_before_ms: u64,
+    /// The targets its shapes hit.
+    hits: Vec<u64>,
+    /// When its shapes were last swept.
+    swept_ms: Option<u64>,
+}
+
+impl PlayerSwing {
+    /// When it lands first: its damage window opens, its projectile or hit scan fires.
+    fn due_ms(&self) -> u64 {
+        let after_ms = match self.attack.hit {
+            AttackHit::Melee { window_ms, .. } => window_ms[0],
+            AttackHit::Projectile { fire_ms, .. } | AttackHit::HitScan { fire_ms, .. } => fire_ms,
+        };
+        self.started_ms
+            .saturating_add(after_ms)
+            .max(self.not_before_ms)
+    }
+
+    /// When its damage window closes (its fire time for a shot).
+    fn closes_ms(&self) -> u64 {
+        match self.attack.hit {
+            AttackHit::Melee { window_ms, .. } => self
+                .started_ms
+                .saturating_add(window_ms[1])
+                .max(self.not_before_ms),
+            AttackHit::Projectile { .. } | AttackHit::HitScan { .. } => self.due_ms(),
+        }
+    }
+}
+
+/// What a due swing did.
+enum Landing {
+    /// It landed or missed: its results.
+    Done(Vec<Result<AttackOutcome, AttackRefusal>>),
+    /// Its damage window is still open: the hits of this tick.
+    Waiting(Vec<Result<AttackOutcome, AttackRefusal>>),
 }
 
 /// Milliseconds per client input record (retail: 34 ms apart, median; input note).
 pub(super) const INPUT_RECORD_MS: u16 = 33;
-/// The shortest hold of the attack key that is a heavy attack (input note: retail light holds
-/// 35 to 314 ms, heavy holds from 432 ms; the limit between them is our choice).
-const HEAVY_HOLD_MS: u16 = 400;
-
-/// A player's weapon attack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttackKind {
-    /// A tap of the attack key.
-    Light,
-    /// A long hold of the attack key.
-    Heavy,
-}
-
-impl AttackKind {
-    /// The attack of a key held for `records` input records.
-    const fn of_hold(records: u16) -> Self {
-        if records.saturating_mul(INPUT_RECORD_MS) >= HEAVY_HOLD_MS {
-            Self::Heavy
-        } else {
-            Self::Light
-        }
-    }
-}
 
 /// How far behind the last record a record may come and still be an older copy; a record
 /// further behind is the client's new count. The client starts its record counter again at 1
@@ -296,20 +391,33 @@ impl SimWorld {
         damage_id: &str,
         now_ms: u64,
     ) -> Result<AttackOutcome, AttackRefusal> {
-        let reach_m = self.combat.brain.attack_reach_m + self.combat.reach_margin_m;
-        self.hit(attacker, target, damage_id, Some(reach_m), false, now_ms)
+        let reach_m = self.combat.attack_reach_m + self.combat.reach_margin_m;
+        self.hit(attacker, target, damage_id, Some(reach_m), now_ms)
     }
 
     /// The player of `attacker` hits `target` with its weapon's attack `damage_id`: `reach_m`
-    /// caps the distance (`None`: a hit shape checked it); the attack interval since its last
-    /// hit applies unless the hit is a later target of the same swing (`same_swing`).
+    /// caps the distance (`None`: the attack's homing or shot checked it); the attack interval
+    /// since its last hit applies.
     pub(super) fn hit(
         &mut self,
         attacker: &ConnectionRef,
         target: u64,
         damage_id: &str,
         reach_m: Option<f32>,
-        same_swing: bool,
+        now_ms: u64,
+    ) -> Result<AttackOutcome, AttackRefusal> {
+        self.hit_paced(attacker, target, damage_id, reach_m, true, now_ms)
+    }
+
+    /// As [`SimWorld::hit`]; the attack interval applies only when `paced` (a second target of
+    /// one swing is not a second attack).
+    fn hit_paced(
+        &mut self,
+        attacker: &ConnectionRef,
+        target: u64,
+        damage_id: &str,
+        reach_m: Option<f32>,
+        paced: bool,
         now_ms: u64,
     ) -> Result<AttackOutcome, AttackRefusal> {
         let entity = *self
@@ -354,7 +462,7 @@ impl SimWorld {
         if reach_m.is_some_and(|reach_m| view.position.horizontal_distance(position) > reach_m) {
             return Err(AttackRefusal::OutOfReach);
         }
-        let too_fast = !same_swing
+        let too_fast = paced
             && vitals.last_attack_ms.is_some_and(|last| {
                 now_ms.saturating_sub(last) < self.combat.min_attack_interval_ms
             });
@@ -515,6 +623,20 @@ impl SimWorld {
         let Some(held) = held else {
             return refused(AttackRefusal::NotWeaponAttack);
         };
+        // The stance's light attack is the shot: its hit scan's range and its damage row
+        // (`BlunderbussPrimaryFire_Spread`, 14 m; `Blunderbuss_Primary_Attack`).
+        let shot = data
+            .stance(held.0.stance)
+            .and_then(|stance| stance.attack(AttackKind::Light))
+            .and_then(|attack| match attack.hit {
+                AttackHit::HitScan { range_m, .. } => {
+                    Some((data.attack(&attack.damage_row)?, range_m))
+                }
+                AttackHit::Melee { .. } | AttackHit::Projectile { .. } => None,
+            });
+        let Some((row, range_m)) = shot else {
+            return refused(AttackRefusal::NotWeaponAttack);
+        };
         let fired = self
             .world
             .get_mut::<Player>(entity)
@@ -526,7 +648,6 @@ impl SimWorld {
         if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
             vitals.last_shot_ms = Some(now_ms);
         }
-        let row = data.spreadshot_attack();
         let config = if request.pellets.len() == EIGHT_PELLETS {
             EIGHT_PELLET_CONFIG
         } else {
@@ -556,7 +677,7 @@ impl SimWorld {
                 if view.returning {
                     return Err(AttackRefusal::Returning);
                 }
-                if view.position.horizontal_distance(position) > SPREADSHOT_RANGE_M {
+                if view.position.horizontal_distance(position) > range_m {
                     return Err(AttackRefusal::OutOfReach);
                 }
                 self.strike(
@@ -609,7 +730,8 @@ impl SimWorld {
     }
 
     /// The player `number` drinks the potion of its quick slot 1, unless the slot is empty, holds
-    /// no healing item, or the item's cooldown runs (xp-potion-exit note, section 2.5): one less
+    /// a disabled item (`javelin.disabled-item-classes`) or no healing item, or the item's
+    /// cooldown runs (xp-potion-exit note, section 2.5): one less
     /// in the slot, the cooldown, the heal (`health` + `health share` x max, at most to the max)
     /// and the heal's visual script.
     fn drink(&mut self, number: u64, server_ms: u64) {
@@ -629,6 +751,10 @@ impl SimWorld {
             tracing::debug!(player = number, "drink: quick slot 1 is empty");
             return;
         };
+        if self.content.is_item_disabled(&item) {
+            tracing::debug!(player = number, item, "drink: the item's class is disabled");
+            return;
+        }
         let Some(heal) = data.heal_of_item(&item) else {
             tracing::debug!(player = number, item, "drink: the item does not heal");
             return;
@@ -734,10 +860,12 @@ impl SimWorld {
     /// Keeps whether the player holds block, starts a dodge roll on a new press of the dodge key
     /// and a drink on a new press of quick slot 1 (the first, newest record), then reads the
     /// attacks (a press and its release) in the records of `records` not read before, oldest
-    /// first. The first attack swings: it hits in the middle of its weapon's damage window
-    /// after its start, at the latest at `now_ms` ([`SimWorld::player_swings_due`]). The others of the same message are
-    /// [`AttackRefusal::TooFast`], which this returns. The counter of the newest record carries
-    /// over to the next message. Nothing for a connection without a player.
+    /// first, with the stance of the weapon the attack key uses: a release picks the light or
+    /// heavy attack by the hold, a hold to the charge starts the charged attack
+    /// ([`Stance::released`]). The first attack starts ([`SimWorld::player_swings_due`] lands
+    /// it); the others of the same message are [`AttackRefusal::TooFast`], which this returns.
+    /// The counter of the newest record carries over to the next message. Nothing for a
+    /// connection without a player.
     pub fn attack_input(
         &mut self,
         connection: &ConnectionRef,
@@ -757,14 +885,40 @@ impl SimWorld {
             self.stamina_input(entity, number, newest, swimming, now_ms);
             self.note_movement_mode(entity, newest);
         }
+        // The weapon the attack key uses: the one in the hand, else, while the hand holds a
+        // spread-shot weapon (which fires through its own request), the melee option.
+        let data = Arc::clone(&self.combat.data);
+        let held = self.held_weapon(entity).map(|(weapon, _)| weapon);
+        let spread = held.is_some_and(|weapon| weapon.spread_shot);
+        let (stance, hand) = if spread {
+            let melee = self.world.get::<Player>(entity).and_then(|player| {
+                let gear = player.gear.as_ref()?;
+                let slot_id = gear.option_with(|item| {
+                    data.weapon_of_item(item)
+                        .and_then(|weapon| data.stance(weapon.stance))
+                        .is_some_and(Self::swings)
+                })?;
+                let weapon = data.weapon_of_item(gear.worn_item(slot_id)?)?;
+                Some((data.stance(weapon.stance)?, slot_id))
+            });
+            match melee {
+                Some((stance, slot_id)) => (Some(stance), Some(slot_id)),
+                None => (None, None),
+            }
+        } else {
+            let weapon = held.unwrap_or(*data.weapon());
+            (data.stance(weapon.stance), None)
+        };
         let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) else {
             return Vec::new();
         };
         // The client sends the newest record first, then older copies with fewer fields (swing
-        // note: counters 7290, 7289, 7288); each record counts once, oldest first. An attack is a
-        // press and its release: a short hold is the light attack, a long one the heavy attack.
-        let mut attacks = Vec::new();
+        // note: counters 7290, 7289, 7288); each record counts once, oldest first, at its own
+        // time: one record time before the newer one. An attack is a press and its release, or a
+        // hold to the charge, of a combo step.
+        let mut attacks: Vec<(usize, AttackKind, u64, u64)> = Vec::new();
         let mut weapon_key = None;
+        let newest_counter = records.first().map(|record| record.u16_after_mask);
         for record in records.iter().rev() {
             let counter = record.u16_after_mask;
             if vitals
@@ -775,29 +929,67 @@ impl SimWorld {
             }
             vitals.input_counter = Some(counter);
             weapon_key = record.weapon_key_pressed().or(weapon_key);
-            if record.attack_pressed() {
-                vitals.attack_pressed_at = Some(counter);
-                vitals.heavy_started = false;
-            }
-            let held_records = vitals
-                .attack_pressed_at
-                .map(|pressed| counter.wrapping_sub(pressed));
-            let held_ms = |records: u16| u64::from(records.saturating_mul(INPUT_RECORD_MS));
-            if record.attack_released() {
-                vitals.attack_pressed_at = None;
-                if !std::mem::take(&mut vitals.heavy_started) {
-                    let records = held_records.unwrap_or(0);
-                    attacks.push((AttackKind::of_hold(records), held_ms(records)));
+            let behind = newest_counter.map_or(0, |newest| newest.wrapping_sub(counter));
+            let record_ms =
+                now_ms.saturating_sub(u64::from(behind.saturating_mul(INPUT_RECORD_MS)));
+            let Some(stance) = stance else {
+                if record.attack_released() {
+                    vitals.charge = None;
                 }
-            } else if let Some(records) = held_records
-                && !vitals.heavy_started
-                && AttackKind::of_hold(records) == AttackKind::Heavy
+                continue;
+            };
+            if record.attack_pressed() {
+                vitals.charge = next_charge(stance, vitals.combo, counter, record_ms);
+            }
+            let Some(charge) = vitals.charge else {
+                continue;
+            };
+            let Some(schedule) = stance.schedule(charge.step) else {
+                vitals.charge = None;
+                continue;
+            };
+            // The hold counts from the step's start, in records since the press.
+            let since_press_ms = u64::from(
+                counter
+                    .wrapping_sub(charge.pressed_at)
+                    .saturating_mul(INPUT_RECORD_MS),
+            );
+            let held_ms = since_press_ms.saturating_sub(charge.from_ms);
+            let pressed_ms = record_ms.saturating_sub(since_press_ms);
+            // A buffered step starts after the press, maybe after this record.
+            let step_ms = pressed_ms.saturating_add(charge.from_ms);
+            let mut start = |vitals: &mut Vitals, kind: AttackKind, after_ms: u64| {
+                let started_ms = step_ms.saturating_add(after_ms);
+                if attacks.is_empty() {
+                    vitals.combo = Some(ComboState {
+                        step: charge.step,
+                        kind,
+                        started_ms,
+                    });
+                }
+                attacks.push((charge.step, kind, started_ms, pressed_ms));
+            };
+            if record.attack_released() {
+                vitals.charge = None;
+                if !charge.charged
+                    && let Some((kind, after_ms)) = schedule.released(held_ms)
+                {
+                    start(&mut vitals, kind, after_ms);
+                }
+            } else if let Some(charged_at_ms) = schedule.charged_at_ms
+                && !charge.charged
+                && since_press_ms >= charge.from_ms
+                && held_ms >= charged_at_ms
+                && schedule.charged.is_some()
             {
-                // A heavy attack starts while the key is held, once the hold passes the heavy
-                // hold (retail newchar capture: the greatsword's 2071 came 998 and 1110 ms after
-                // the press, before the releases at 1181 and 1633 ms).
-                vitals.heavy_started = true;
-                attacks.push((AttackKind::Heavy, held_ms(records)));
+                // The charged attack starts while the key is held (retail newchar capture: the
+                // greatsword's 2071 came 998 and 1110 ms after the press, before the releases at
+                // 1181 and 1633 ms).
+                vitals.charge = Some(Charge {
+                    charged: true,
+                    ..charge
+                });
+                start(&mut vitals, AttackKind::Charged, charged_at_ms);
             }
         }
         let lock_target = records.first().and_then(InputRecord::lock_target);
@@ -813,14 +1005,10 @@ impl SimWorld {
         }
         // Every attack of one message has the same receive time, so only the first can hit: the
         // others are too fast, and a client cannot make the loop search for targets per record.
-        let Some(&(kind, held_ms)) = attacks.first() else {
+        let Some(&(step, kind, started_ms, pressed_ms)) = attacks.first() else {
             return Vec::new();
         };
-        let held = self.held_weapon(entity).map(|(weapon, _)| weapon);
-        // A spread-shot weapon fires through its own request (2719), not the attack key. The
-        // server's hand can be behind the client's, so the attack lands as a swing of the melee
-        // option unless a shot request comes with it ([`SimWorld::player_swings_due`]).
-        let (weapon, hand) = if held.is_some_and(|weapon| weapon.spread_shot) {
+        if spread {
             // An attack with the spread-shot weapon empty is the client's reload, not a swing:
             // the client sends no shot then, and taking the melee option in hand made the client
             // swap weapons when the reload ended (live 2026-09-18: after every second shot).
@@ -833,66 +1021,51 @@ impl SimWorld {
                 tracing::debug!(player = number, "attack with an empty spread-shot weapon");
                 return Vec::new();
             }
-            let data = Arc::clone(&self.combat.data);
-            let melee = self.world.get::<Player>(entity).and_then(|player| {
-                player.gear.as_ref()?.option_with(|item| {
-                    data.weapon_of_item(item)
-                        .is_some_and(|weapon| weapon.kind.swings())
-                })
-            });
-            let Some(slot_id) = melee else {
+            if hand.is_none() {
                 return Vec::new();
-            };
-            let kind = self
-                .world
-                .get::<Player>(entity)
-                .and_then(|player| player.gear.as_ref()?.worn_item(slot_id))
-                .and_then(|item| data.weapon_of_item(item))
-                .map_or(WeaponKind::Other, |weapon| weapon.kind);
-            (kind, Some(slot_id))
-        } else {
-            (held.map_or(WeaponKind::Other, |weapon| weapon.kind), None)
-        };
-        // A swing hits in its damage window, a projectile leaves the weapon at its cast time.
-        let hit_ms = match (swing_shape(weapon, kind), weapon.projectile()) {
-            (Some(shape), _) => shape.hit_ms(),
-            (None, Some(projectile)) => projectile.cast_ms,
-            (None, None) => {
-                tracing::debug!(
-                    player = number,
-                    ?weapon,
-                    "attack with a weapon that neither swings nor casts"
-                );
-                return vec![Err(AttackRefusal::NotWeaponAttack)];
             }
+        }
+        let Some(attack) = stance
+            .and_then(|stance| stance.schedule(step))
+            .and_then(|schedule| schedule.attack(kind))
+            .cloned()
+        else {
+            tracing::debug!(
+                player = number,
+                step,
+                ?kind,
+                "attack of a stance without it"
+            );
+            return vec![Err(AttackRefusal::NotWeaponAttack)];
         };
-        let facing = records
-            .first()
-            .and_then(|newest| newest.bit_6)
-            .map(|[yaw, _]| yaw);
-        // A light attack starts at its press (retail: the hit came 0.44 s after a light attack's
-        // press), a heavy one when the hold passed the heavy hold.
-        let started_ms = match kind {
-            AttackKind::Light => now_ms.saturating_sub(held_ms),
-            AttackKind::Heavy => {
-                now_ms.saturating_sub(held_ms.saturating_sub(u64::from(HEAVY_HOLD_MS)))
-            }
-        };
-        let due_ms = started_ms.saturating_add(hit_ms).max(now_ms);
+        let view = self
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.view);
+        let newest_view = records.first().and_then(|newest| newest.bit_6);
         self.player_swings.push(PlayerSwing {
             attacker: connection.clone(),
             aim: Aim {
-                facing,
+                facing: newest_view
+                    .map(|[yaw, _]| yaw)
+                    .or(view.map(|view| view.yaw)),
+                pitch: newest_view
+                    .map(|[_, pitch]| pitch)
+                    .or(view.map(|view| view.pitch)),
                 lock_target,
             },
             kind,
-            due_ms: if hand.is_some() {
-                due_ms.max(now_ms.saturating_add(SHOT_PAIR_MS))
-            } else {
-                due_ms
-            },
-            pressed_ms: now_ms.saturating_sub(held_ms),
+            attack,
+            started_ms,
+            pressed_ms,
             hand,
+            not_before_ms: if hand.is_some() {
+                now_ms.saturating_add(SHOT_PAIR_MS)
+            } else {
+                now_ms
+            },
+            hits: Vec::new(),
+            swept_ms: None,
         });
         attacks[1..]
             .iter()
@@ -900,27 +1073,42 @@ impl SimWorld {
             .collect()
     }
 
-    /// Lands the player swings and casts due at `now_ms` ([`SimWorld::swing`]), then the
-    /// projectiles that got to their mob ([`SimWorld::projectile_flights_due`]).
+    /// Whether `stance` has a melee basic attack.
+    fn swings(stance: &Stance) -> bool {
+        [AttackKind::Light, AttackKind::Heavy, AttackKind::Charged]
+            .into_iter()
+            .filter_map(|kind| stance.attack(kind))
+            .any(|attack| matches!(attack.hit, AttackHit::Melee { .. }))
+    }
+
+    /// Lands the player attacks due at `now_ms` ([`SimWorld::land`]), then the projectiles that
+    /// got to their mob ([`SimWorld::projectile_flights_due`]). A melee attack waits through its
+    /// damage window for a target.
     pub(super) fn player_swings_due(
         &mut self,
         now_ms: u64,
     ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
-        let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.player_swings)
-            .into_iter()
-            .partition(|swing| now_ms >= swing.due_ms);
-        self.player_swings = later;
-        let mut results: Vec<_> = due
-            .into_iter()
-            .flat_map(|swing| {
-                if let Some(slot_id) = swing.hand
-                    && !self.melee_hand(&swing, slot_id)
-                {
-                    return Vec::new();
+        let mut results = Vec::new();
+        let mut later = Vec::new();
+        for mut swing in std::mem::take(&mut self.player_swings) {
+            if now_ms < swing.due_ms() {
+                later.push(swing);
+                continue;
+            }
+            if let Some(slot_id) = swing.hand.take()
+                && !self.melee_hand(&swing, slot_id)
+            {
+                continue;
+            }
+            match self.land(&mut swing, now_ms) {
+                Landing::Done(landed) => results.extend(landed),
+                Landing::Waiting(landed) => {
+                    results.extend(landed);
+                    later.push(swing);
                 }
-                self.swing(&swing.attacker, swing.aim, swing.kind, now_ms)
-            })
-            .collect();
+            }
+        }
+        self.player_swings = later;
         results.extend(self.projectile_flights_due(now_ms));
         results
     }
@@ -980,10 +1168,20 @@ impl SimWorld {
         tracing::debug!(player = number, slot_id, "hand follows the client");
     }
 
+    /// The stance of the weapon in the hand of player `entity`, else of the config's weapon.
+    fn hand_stance(&self, entity: Entity) -> Option<&Stance> {
+        let data = &self.combat.data;
+        let weapon = self
+            .held_weapon(entity)
+            .map_or(*data.weapon(), |(weapon, _)| weapon);
+        data.stance(weapon.stance)
+    }
+
     /// The block, dodge and quick slot keys of the newest input record `newest` of player
     /// `number`: a release of block starts its stamina's regen delay again; a new press of dodge
-    /// starts a roll, or a dash when `swimming`, if its stamina pays for it; a new press of quick
-    /// slot 1 drinks.
+    /// starts a roll, or a dash when `swimming`, if its stamina allows it, and a roll keeps mob
+    /// hits off in its stance's invulnerability window; a new press of quick slot 1 drinks when
+    /// the stance's item use of the slot's item takes effect.
     fn stamina_input(
         &mut self,
         entity: Entity,
@@ -992,6 +1190,14 @@ impl SimWorld {
         swimming: bool,
         now_ms: u64,
     ) {
+        let data = Arc::clone(&self.combat.data);
+        let stance = self.hand_stance(entity).cloned();
+        let drink_ms = self
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref()?.worn_item(slot::QUICK_SLOT_1))
+            .and_then(|item| data.heal_of_item(item))
+            .and_then(|heal| stance.as_ref()?.use_effect_ms(&heal.use_tag));
         let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) else {
             return;
         };
@@ -1002,8 +1208,11 @@ impl SimWorld {
         let dodge_pressed = dodge && !vitals.dodge_held;
         vitals.dodge_held = dodge;
         let quick = newest.using_quick_slot_1();
-        if quick && !vitals.quick_slot_held {
-            self.drinks.push((number, now_ms.saturating_add(DRINK_MS)));
+        if quick
+            && !vitals.quick_slot_held
+            && let Some(drink_ms) = drink_ms
+        {
+            self.drinks.push((number, now_ms.saturating_add(drink_ms)));
         }
         vitals.quick_slot_held = quick;
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
@@ -1019,9 +1228,15 @@ impl SimWorld {
         };
         if dodge_pressed
             && player.stamina.dodge(kind, now_ms)
+            && kind == Dodge::Roll
+            && let Some([from_ms, until_ms]) =
+                stance.and_then(|stance| stance.dodge_invulnerable_ms)
             && let Some(mut vitals) = self.world.get_mut::<Vitals>(entity)
         {
-            vitals.dodging_until_ms = now_ms.saturating_add(DODGE_MS);
+            vitals.invulnerable_ms = Some((
+                now_ms.saturating_add(from_ms),
+                now_ms.saturating_add(until_ms),
+            ));
         }
     }
 
@@ -1061,156 +1276,217 @@ impl SimWorld {
         Some((*self.combat.data.weapon_of_item(item)?, gear_score))
     }
 
-    /// The swing `kind` of the player of `attacker` with the aim `aim` lands at `now_ms`. Its
-    /// homing turns it to the locked target, else to the best mob in its homing reach, else to
-    /// the nearest mob when the input had no camera yaw. It hits every living, not returning
-    /// mob, here or a ghost, whose body reaches into the wedge of its weapon's swing, nearest to
-    /// the middle first, at most [`MAX_SWING_TARGETS`] (collision note).
-    pub fn swing(
-        &mut self,
-        attacker: &ConnectionRef,
-        aim: Aim,
-        kind: AttackKind,
-        now_ms: u64,
-    ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
-        let refused = |refusal| vec![Err(refusal)];
-        let Some(entity) = self.by_connection.get(attacker).copied() else {
-            return refused(AttackRefusal::NotInWorld);
-        };
-        if self
-            .world
-            .get::<Vitals>(entity)
-            .is_some_and(|vitals| vitals.health.is_dead())
-        {
-            return refused(AttackRefusal::Dead);
-        }
-        let Some(position) = self
-            .world
-            .get::<Body>(entity)
-            .map(|body| body.motion.position())
-        else {
-            return refused(AttackRefusal::NotInWorld);
-        };
-        let weapon = self
-            .held_weapon(entity)
-            .map_or(WeaponKind::Other, |(weapon, _)| weapon.kind);
+    /// Every living, not returning mob, here or a ghost, with its body, at each place where it
+    /// stood in the look-back ([`super::mob_trail`]): the client shows it a little behind the
+    /// server.
+    fn target_places(&mut self) -> Vec<(u64, Position, Capsule)> {
         let candidates: Vec<(u64, Position, Capsule)> = self
             .mob_states()
             .filter(|(_, _, state)| state.health > 0 && !state.returning)
             .map(|(mob, at, _)| (mob, at, self.mobs.capsule(mob)))
             .collect();
-        // Each mob where it is and where it stood in the last moments: the client shows it a
-        // little behind the server (lag compensation).
-        let places: Vec<(u64, Position, Capsule)> = candidates
+        candidates
             .iter()
             .flat_map(|(mob, at, body)| {
                 std::iter::once(*at)
                     .chain(self.mob_trails.recent(*mob))
                     .map(move |place| (*mob, place, *body))
             })
-            .collect();
-        // A ranged or magic weapon casts its projectile.
-        if let Some(projectile) = weapon.projectile() {
-            let cast = Cast {
-                weapon,
-                projectile,
-                kind,
-            };
-            return self.cast((attacker, aim), cast, position, &places, now_ms);
-        }
-        let Some(shape) = swing_shape(weapon, kind) else {
-            return refused(AttackRefusal::NotWeaponAttack);
-        };
-        // The homing target: the one the client named, else the best one in the attack's
-        // homing reach; with no camera yaw, the nearest mob.
-        let locked = aim
-            .lock_target
-            .and_then(|target| places.iter().position(|(mob, _, _)| *mob == target));
-        let nearest = || {
+            .collect()
+    }
+
+    /// The target of the homing `homing` of a player at `from` with the aim `aim` among `places`:
+    /// the locked target when it is in reach, else the best one in reach at the aim's yaw
+    /// ([`homing_score`]); `None` when none is.
+    fn homing_target(
+        homing: &Homing,
+        from: Position,
+        aim: Aim,
+        places: &[(u64, Position, Capsule)],
+    ) -> Option<u64> {
+        let best = |facing: Option<f32>, wanted: Option<u64>| {
             places
                 .iter()
-                .enumerate()
-                .min_by(|a, b| {
-                    a.1.1
-                        .horizontal_distance(position)
-                        .total_cmp(&b.1.1.horizontal_distance(position))
+                .filter(|(mob, _, _)| wanted.is_none_or(|wanted| wanted == *mob))
+                .filter_map(|(mob, at, body)| {
+                    Some((
+                        homing_score(homing, from, facing, *at, body.radius_m)?,
+                        *mob,
+                    ))
                 })
-                .map(|(index, _)| index)
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, mob)| mob)
         };
-        let target = locked.or_else(|| match aim.facing {
-            Some(facing) => homing(
-                &shape,
-                position,
-                facing,
-                places.iter().map(|(_, at, body)| (*at, body.radius_m)),
-            ),
-            None => nearest(),
-        });
-        // The homing turns the attacker to its target and steps it in before the blade swings.
-        let (from, facing) = match target.map(|index| places[index].1) {
-            Some(at) => {
-                let from = stepped_in(&shape, position, at);
-                (from, yaw_toward(from, at))
+        aim.lock_target
+            .and_then(|lock| best(None, Some(lock)))
+            .or_else(|| best(Some(aim.facing?), None))
+    }
+
+    /// Lands `swing` at `now_ms`, when it is due. A melee attack sweeps its shapes from their
+    /// poses of its last sweep to their poses now ([`SimWorld::sweep`]); it misses when its window
+    /// closes without a hit. A shot flies, or hits at once, along the aim ([`SimWorld::cast`]).
+    fn land(&mut self, swing: &mut PlayerSwing, now_ms: u64) -> Landing {
+        let done = |refusal| Landing::Done(vec![Err(refusal)]);
+        let Some(entity) = self.by_connection.get(&swing.attacker).copied() else {
+            return done(AttackRefusal::NotInWorld);
+        };
+        if self
+            .world
+            .get::<Vitals>(entity)
+            .is_some_and(|vitals| vitals.health.is_dead())
+        {
+            return done(AttackRefusal::Dead);
+        }
+        let Some(position) = self
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position())
+        else {
+            return done(AttackRefusal::NotInWorld);
+        };
+        let places = self.target_places();
+        match swing.attack.hit.clone() {
+            AttackHit::Melee { homing, shapes, .. } => {
+                let landed = self.sweep(swing, homing.as_ref(), &shapes, position, &places, now_ms);
+                if now_ms < swing.closes_ms() {
+                    Landing::Waiting(landed)
+                } else if swing.hits.is_empty() {
+                    done(AttackRefusal::NoTarget)
+                } else {
+                    Landing::Done(landed)
+                }
             }
-            None => match aim.facing {
-                Some(facing) => (position, facing),
-                None => return refused(AttackRefusal::NoTarget),
-            },
-        };
-        let wedge = Wedge::of_swing(&shape, from, facing);
-        // A mob is hit at the place where it is nearest the middle of the blade.
-        let mut hits: Vec<(f32, u64)> = Vec::new();
-        for (mob, at, body) in &places {
-            let Some(off) = wedge.touches(*at, *body) else {
-                continue;
-            };
-            match hits.iter_mut().find(|(_, hit)| hit == mob) {
-                Some(hit) => hit.0 = hit.0.min(off),
-                None => hits.push((off, *mob)),
+            AttackHit::Projectile {
+                range_m,
+                radius_m,
+                flight,
+                ..
+            } => self.fire(
+                swing,
+                Shot::projectile(range_m, radius_m, flight),
+                position,
+                &places,
+                now_ms,
+            ),
+            AttackHit::HitScan { range_m, .. } => {
+                self.fire(swing, Shot::hit_scan(range_m), position, &places, now_ms)
             }
         }
-        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
-        hits.truncate(MAX_SWING_TARGETS);
-        // The nearest mob, its distance and its height above the player: why a swing missed.
-        let nearest_mob = candidates
-            .iter()
-            .map(|(mob, at, _)| (*mob, at.horizontal_distance(position), at.z - position.z))
-            .min_by(|a, b| a.1.total_cmp(&b.1));
+    }
+
+    /// The yaw a player at `from` faces in a melee attack with `aim`: toward the target of the
+    /// attack's homing when one is in its reach (the clip turns the attacker,
+    /// `ApplyRotationDuringCameraLock` toward a locked one), else the aim's.
+    fn melee_facing(
+        homing: Option<&Homing>,
+        from: Position,
+        aim: Aim,
+        places: &[(u64, Position, Capsule)],
+    ) -> Option<f32> {
+        homing
+            .and_then(|homing| Self::homing_target(homing, from, aim, places))
+            .and_then(|target| places.iter().find(|(mob, _, _)| *mob == target))
+            .map(|(_, at, _)| yaw_toward(from, *at))
+            .or(aim.facing)
+    }
+
+    /// Sweeps the shapes of `swing` (a melee attack of homing `homing`) at `now_ms`: each shape
+    /// whose window meets the time since the last sweep goes from its pose then to its pose now,
+    /// on the body at `position` facing [`SimWorld::melee_facing`], and hits every target of
+    /// `places` it touches that it has not hit yet. The first hit of a swing keeps the attack
+    /// interval; the others of the same swing do not.
+    fn sweep(
+        &mut self,
+        swing: &mut PlayerSwing,
+        homing: Option<&Homing>,
+        shapes: &[MeleeShape],
+        position: Position,
+        places: &[(u64, Position, Capsule)],
+        now_ms: u64,
+    ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
+        let to_ms = now_ms.saturating_sub(swing.started_ms);
+        let from_ms = swing
+            .swept_ms
+            .map_or(0, |swept| swept.saturating_sub(swing.started_ms));
+        swing.swept_ms = Some(now_ms);
+        let Some(facing) = Self::melee_facing(homing, position, swing.aim, places) else {
+            return Vec::new();
+        };
+        let frame = body_frame(position, facing);
+        let mut touched: Vec<u64> = Vec::new();
+        for shape in shapes {
+            let [open_ms, close_ms] = shape.window_ms;
+            if to_ms < open_ms || from_ms > close_ms {
+                continue;
+            }
+            let (Some(from), Some(to)) = (
+                shape.pose_at(from_ms.max(open_ms)),
+                shape.pose_at(to_ms.min(close_ms)),
+            ) else {
+                continue;
+            };
+            let swept = SweptShape {
+                shape: shape.shape,
+                from: frame.then_local(&from),
+                to: frame.then_local(&to),
+            };
+            for (mob, at, body) in places {
+                if !swing.hits.contains(mob) && !touched.contains(mob) && swept.touches(*at, *body)
+                {
+                    touched.push(*mob);
+                }
+            }
+        }
         tracing::debug!(
-            attacker = ?attacker,
+            attacker = ?swing.attacker,
             x = position.x,
             y = position.y,
             facing,
-            ?weapon,
-            ?kind,
-            ?nearest_mob,
-            stepped_m = from.horizontal_distance(position),
-            hits = ?hits,
+            kind = ?swing.kind,
+            action = swing.attack.action,
+            ?touched,
             "player swing"
         );
-        if hits.is_empty() {
-            return refused(AttackRefusal::NoTarget);
-        }
-        let row = self
-            .combat
-            .data
-            .weapon_attack(weapon, kind == AttackKind::Heavy);
-        let Some(damage_id) = row.map(|row| row.damage_id.clone()) else {
-            return refused(AttackRefusal::NotWeaponAttack);
-        };
-        hits.iter()
-            .enumerate()
-            .map(|(index, (_, mob))| self.hit(attacker, *mob, &damage_id, None, index > 0, now_ms))
+        let damage_id = swing.attack.damage_row.clone();
+        touched
+            .into_iter()
+            .map(|target| {
+                let paced = swing.hits.is_empty();
+                swing.hits.push(target);
+                self.hit_paced(&swing.attacker, target, &damage_id, None, paced, now_ms)
+            })
             .collect()
+    }
+
+    /// Fires `shot` of `swing` from `position` along its aim at `now_ms`.
+    fn fire(
+        &mut self,
+        swing: &PlayerSwing,
+        shot: Shot,
+        position: Position,
+        places: &[(u64, Position, Capsule)],
+        now_ms: u64,
+    ) -> Landing {
+        let yaw = Self::aim_yaw(swing.aim.lock_target, swing.aim.facing, position, places);
+        let (Some(yaw), Some(pitch)) = (yaw, swing.aim.pitch) else {
+            return Landing::Done(vec![Err(AttackRefusal::NoTarget)]);
+        };
+        Landing::Done(self.cast(
+            &swing.attacker,
+            (shot, swing.attack.damage_row.as_str()),
+            (position, AimLine { yaw, pitch }),
+            places,
+            now_ms,
+        ))
     }
 
     /// What an attack sees of the mob `target`: here, or a ghost of its owner.
     fn target_view(&mut self, target: u64) -> Option<TargetView> {
-        if let Some(mob) = self.mobs.get_mut(target) {
+        if let Some(mob) = self.mobs.get(target) {
             let view = TargetView {
-                position: mob.brain.position(),
+                position: mob.position,
                 dead: mob.health.is_dead(),
-                returning: mob.brain.state() == MobState::Return,
+                returning: mob.returning(self.mobs.ai()),
                 level: 0,
                 owner: None,
             };
@@ -1265,36 +1541,6 @@ impl SimWorld {
         self.apply_hit_with(target, attacker, amount, threat, now_ms, None)
     }
 
-    /// Rolls the loot of mob `mob`, killed by `killer`, into the killer's bag (admin studio spec
-    /// section 6.2; a dropped loot bag at the mob is Unknown). A killer on another sim, a mob type
-    /// with no loot table and the tutorial give nothing.
-    pub(super) fn drop_loot(&mut self, mob: u64, killer: u64, now_ms: u64) {
-        if self.is_tutorial() || self.player_by_number(killer).is_none() {
-            return;
-        }
-        let content = Arc::clone(&self.content);
-        let Some(drop) = self
-            .mobs
-            .vitals_of(mob)
-            .and_then(|vitals| content.mob_loot.of(vitals))
-        else {
-            return;
-        };
-        if self.dice.below(FULL_CHANCE_PERCENT) >= drop.chance_percent {
-            return;
-        }
-        let context = LootContext {
-            enemy: self.mobs.level(mob).unwrap_or(MOB_LEVEL),
-            content: PLAYER_LOOT_LEVEL,
-            tags: &drop.tags,
-        };
-        let dice = &mut self.dice;
-        let loot = content
-            .loot
-            .roll(&drop.table, context, &mut |below| dice.below(below));
-        self.give_loot(killer, loot, now_ms);
-    }
-
     /// Mob `mob`, killed by player `killer`, counts for the kill tasks of the killer's quest
     /// (`TaskKillContribution`; the tutorial counts its kills in its encounter).
     fn quest_kill(&mut self, mob: u64, killer: u64, now_ms: u64) {
@@ -1316,8 +1562,8 @@ impl SimWorld {
         );
     }
 
-    /// [`SimWorld::apply_hit`] of a hit of a mob move `strike`: a player's 3601 carries the
-    /// move's item tag and, in a second phase, the fire part as a second item.
+    /// [`SimWorld::apply_hit`] of a mob hit of `style`: a player's 3601 carries its damage type
+    /// and its affix's part as a second item (else [`DEFAULT_HIT_TAG`]).
     fn apply_hit_with(
         &mut self,
         target: u64,
@@ -1325,21 +1571,24 @@ impl SimWorld {
         amount: u32,
         threat: u64,
         now_ms: u64,
-        strike: Option<&MoveStrike>,
+        style: Option<&MobHitStyle>,
     ) -> Option<AttackOutcome> {
         if spawn_index(target).is_some() {
-            let mob = self.mobs.get_mut(target)?;
-            if mob.health.is_dead() || !hurt(&mut mob.brain, attacker, threat, now_ms) {
+            let [x, y, z] = self.attacker_position(attacker);
+            if !self
+                .mobs
+                .hurt(target, attacker, Position { x, y, z }, threat, now_ms)
+            {
                 return None;
             }
-            let outcome = match mob.health.take(amount) {
+            let damage = self.mobs.get_mut(target)?.health.take(amount);
+            let outcome = match damage {
                 Damage::Killed => {
-                    died(&mut mob.brain, now_ms);
+                    self.mobs.died(target, now_ms);
                     AttackOutcome::Killed { target }
                 }
                 Damage::Hurt | Damage::AlreadyDead => AttackOutcome::Hit { target, amount },
             };
-            self.mobs.wake(target);
             if matches!(outcome, AttackOutcome::Killed { .. }) {
                 self.drop_loot(target, attacker, now_ms);
                 self.quest_kill(target, attacker, now_ms);
@@ -1354,9 +1603,9 @@ impl SimWorld {
         }
         let connection = player.connection.clone();
         let attacker_at = self.attacker_position(attacker);
-        let (tag, scale) = self
+        let scale = self
             .mobs
-            .hit_style(attacker, (1.0 - self.combat.player_armor_share) as f32);
+            .hit_scale(attacker, (1.0 - self.combat.player_armor_share) as f32);
         let mut vitals = self.world.get_mut::<Vitals>(entity)?;
         let max_health = amount_of(vitals.health.max());
         let damage = vitals.health.take(amount);
@@ -1367,20 +1616,17 @@ impl SimWorld {
             return None;
         }
         let total = amount_of(amount);
-        let fire_share = strike
-            .filter(|strike| strike.phase_two.is_some())
-            .map_or(0.0, |strike| strike.hit.fire_share as f32);
+        let affix = style.and_then(|style| style.affix);
+        // A share of a hit: f32 holds it.
+        let affix_share = affix.map_or(0.0, |affix| affix.share as f32);
         let melee = MeleeDamage {
             attacker,
-            amount: total * (1.0 - fire_share),
+            amount: total * (1.0 - affix_share),
             max_health,
             attacker_at,
-            tag: strike.map_or(tag, |strike| strike.tag),
+            tag: style.map_or(DEFAULT_HIT_TAG, |style| style.tag),
             scale,
-            fire: strike
-                .and_then(|strike| strike.phase_two)
-                .filter(|_| fire_share > 0.0)
-                .map(|(_, fire_tag)| (fire_tag, total * fire_share)),
+            fire: affix.map(|affix| (affix.damage_type, total * affix_share)),
         };
         self.send_reliable(
             connection.clone(),
@@ -1400,12 +1646,16 @@ impl SimWorld {
         Some(AttackOutcome::Killed { target })
     }
 
-    /// Where mob `attacker` stands, here or as a ghost; the origin when it is neither (retail
-    /// always names the creature's position in a hit on a player).
+    /// Where `attacker` stands: a mob or a player, here or as a ghost; the origin when it is
+    /// none of them (retail always names the creature's position in a hit on a player).
     fn attacker_position(&mut self, attacker: u64) -> [f32; 3] {
-        let at = match self.mobs.get_mut(attacker) {
-            Some(mob) => Some(mob.brain.position()),
-            None => self.ghost(attacker).map(|(_, ghost)| ghost.position),
+        let at = match self.mobs.get(attacker) {
+            Some(mob) => Some(mob.position),
+            None => self
+                .player_by_number(attacker)
+                .and_then(|entity| self.world.get::<Body>(entity))
+                .map(|body| body.motion.position())
+                .or_else(|| self.ghost(attacker).map(|(_, ghost)| ghost.position)),
         };
         at.map_or([0.0; 3], |at| [at.x, at.y, at.z])
     }
@@ -1433,18 +1683,20 @@ impl SimWorld {
             let pending = |lands_after_ms: u64, hit| PendingMobSwing {
                 lands_ms: now_ms.saturating_add(lands_after_ms),
                 started_ms: server_ms,
-                swing,
+                swing: swing.clone(),
                 hit,
             };
-            match swing.mob_move {
-                Some(mob_move) => {
+            match (swing.mob_move, &swing.strike) {
+                (Some(mob_move), _) => {
                     self.mob_timelines
                         .play(swing.mob, mob_move.fragment, mob_move.length_ms);
                     for hit in mob_move.hits {
                         self.swings.push(pending(hit.at_ms, Some(*hit)));
                     }
                 }
-                None => {
+                // A damage window hits when it comes; its tree plays the attack.
+                (None, Some(_)) => self.swings.push(pending(0, None)),
+                (None, None) => {
                     self.mob_timelines.attacked(swing.mob);
                     self.swings
                         .push(pending(self.mobs.hit_delay_ms(swing.mob), None));
@@ -1471,21 +1723,34 @@ impl SimWorld {
     }
 
     /// Whether the swing `intent` of a mob at `at` reaches its target's body at `body`. A mob
-    /// with a reach lunges first, when the target is within its lunge turn of where it aimed:
-    /// toward the body, up to its longest lunge, to where it stops or the bodies touch; then
-    /// its wedge must touch the body (collision note: every retail mob hit landed 0.79 to
-    /// 1.65 m from the player). A mob without one hits within its gait's swing start plus
-    /// [`crate::mobs::SWING_HIT_MARGIN_M`].
+    /// with a reach (its damage window's, or its pace's) lunges first, when the target is within
+    /// its lunge turn of where it aimed: toward the body, up to its longest lunge, to where it
+    /// stops or the bodies touch; then its wedge must touch the body (collision note: every
+    /// retail mob hit landed 0.79 to 1.65 m from the player). A paced mob without one hits
+    /// within its gait's swing start plus [`crate::mobs::SWING_HIT_MARGIN_M`].
     fn mob_swing_reaches(
         &mut self,
         intent: &MobAttackIntent,
         at: Position,
         body: Position,
     ) -> bool {
-        let Some(reach) = self.mobs.reach(intent.mob) else {
-            return body.horizontal_distance(at) <= self.mobs.hit_reach_m(intent.mob);
-        };
         let capsule = self.mobs.capsule(intent.mob);
+        // A damage window's shape reaches from the front of the body (`mob_ai::window_reach`);
+        // the wedge's reach starts at the body's middle.
+        let reach = intent
+            .strike
+            .as_ref()
+            .map(|strike| MobReach {
+                reach_m: strike.reach.reach_m + capsule.radius_m,
+                ..strike.reach
+            })
+            .or_else(|| self.mobs.reach(intent.mob));
+        let Some(reach) = reach else {
+            return self
+                .mobs
+                .hit_reach_m(intent.mob)
+                .is_some_and(|reach_m| body.horizontal_distance(at) <= reach_m);
+        };
         let aim = yaw_toward(at, intent.target_at);
         let toward = yaw_toward(at, body);
         let (from, facing) = if turn(aim, toward).abs() <= reach.lunge_turn_rad {
@@ -1504,7 +1769,78 @@ impl SimWorld {
             half_arc_rad: MOB_SWING_HALF_ARC_RAD,
         }
         .touches(body, PLAYER_CAPSULE)
-        .is_some()
+    }
+
+    /// How the hit `intent` of a mob, of the move hit `move_hit` when it has one, lands on the
+    /// player `defender`, from its damage rows: the row's damage type and affix, its multiple,
+    /// and the stamina a block takes ([`AttackRow::block_stamina`], with the defender's weapon's
+    /// `BlockStability`). The row is the damage window's (its multiple is the row's coefficient,
+    /// [`crate::mobs::ROW_CARRIES_ATTACK`]), or a paced mob's move row over its attack row (which
+    /// the pace's attack factor fits), times its second phase's multiple. A mob without rows the
+    /// tables have hits with [`DEFAULT_HIT_TAG`] and takes [`DEFAULT_BLOCK_STAMINA`].
+    fn mob_hit_style(
+        &self,
+        intent: &MobAttackIntent,
+        move_hit: Option<MoveHit>,
+        defender: Entity,
+    ) -> MobHitStyle {
+        let data = &self.combat.data;
+        let plain = MobHitStyle {
+            tag: DEFAULT_HIT_TAG,
+            affix: None,
+            damage_scale: 1.0,
+            block_stamina: DEFAULT_BLOCK_STAMINA,
+        };
+        let stability = self
+            .held_weapon(defender)
+            .map_or(data.weapon().block_stability, |(weapon, _)| {
+                weapon.block_stability
+            });
+        if let Some(strike) = &intent.strike {
+            let Some(row) = data.table_attack(&strike.table, &strike.row) else {
+                tracing::warn!(mob = intent.mob, ?strike, "mob damage row missing");
+                return plain;
+            };
+            let block_stamina = strike
+                .weapon
+                .as_deref()
+                .and_then(|weapon| data.weapon_of_item(weapon))
+                // A few dozen stamina points.
+                .map_or(DEFAULT_BLOCK_STAMINA, |weapon| {
+                    row.block_stamina(weapon, stability) as f32
+                });
+            return MobHitStyle {
+                tag: row.damage_type.unwrap_or(DEFAULT_HIT_TAG),
+                affix: row.affix,
+                damage_scale: row.coefficient,
+                block_stamina,
+            };
+        }
+        let mob = intent.mob;
+        let Some(attack) = self.mobs.attack(mob) else {
+            return plain;
+        };
+        let attack_row = data.table_attack(attack.table, attack.row);
+        let row = match move_hit {
+            Some(hit) => data.table_attack(attack.table, hit.row),
+            None => attack_row,
+        };
+        let weapon = data.weapon_of_item(attack.weapon);
+        let (Some(row), Some(attack_row), Some(weapon)) = (row, attack_row, weapon) else {
+            tracing::warn!(mob, ?attack, "mob attack rows missing");
+            return plain;
+        };
+        let phase_mult = self
+            .mobs
+            .phase_two(mob)
+            .map_or(1.0, |phase| phase.damage_mult);
+        MobHitStyle {
+            tag: row.damage_type.unwrap_or(DEFAULT_HIT_TAG),
+            affix: row.affix,
+            damage_scale: row.coefficient / attack_row.coefficient * phase_mult,
+            // A few dozen stamina points.
+            block_stamina: row.block_stamina(weapon, stability) as f32,
+        }
     }
 
     /// Applies the mobs' hits on the players of this sim; a hit on a player ghost goes to its
@@ -1518,22 +1854,14 @@ impl SimWorld {
         intents
             .into_iter()
             .filter_map(|(intent, move_hit)| {
-                let mob = self.mobs.get_mut(intent.mob)?;
-                let at = mob.brain.position();
+                let mob = self.mobs.get(intent.mob)?;
+                let at = mob.position;
                 let mut hit = mob_hit(&mob.attack, armor_share);
-                let strike = move_hit
-                    .zip(intent.mob_move)
-                    .map(|(hit, mob_move)| MoveStrike {
-                        hit,
-                        tag: mob_move.tag,
-                        phase_two: self
-                            .mobs
-                            .phase_two(intent.mob)
-                            .map(|phase| (phase.damage_mult, phase.fire_tag)),
-                    });
-                if let Some(strike) = &strike {
-                    let mult = strike.phase_two.map_or(1.0, |(mult, _)| mult);
-                    let scaled = f64::from(hit.amount) * strike.hit.damage_scale * mult;
+                let defender = self.player_by_number(intent.target);
+                let style =
+                    defender.map(|defender| self.mob_hit_style(&intent, move_hit, defender));
+                if let Some(style) = &style {
+                    let scaled = f64::from(hit.amount) * style.damage_scale;
                     // A hit of a few hundred points.
                     hit.amount = scaled.round() as u32;
                 }
@@ -1546,7 +1874,7 @@ impl SimWorld {
                     amount = hit.amount,
                     "mob attack"
                 );
-                if let Some(entity) = self.player_by_number(intent.target) {
+                if let (Some(entity), Some(style)) = (defender, style) {
                     let vitals = *self.world.get::<Vitals>(entity)?;
                     // A swing at a player who moved away misses: retail sends no hit message.
                     let body = self.world.get::<Body>(entity)?.motion.position();
@@ -1565,20 +1893,19 @@ impl SimWorld {
                         return None;
                     }
                     // A swing into a dodge roll misses: retail sends no hit message then.
-                    if now_ms < vitals.dodging_until_ms {
+                    if vitals
+                        .invulnerable_ms
+                        .is_some_and(|(from, until)| from <= now_ms && now_ms < until)
+                    {
                         tracing::debug!(mob = intent.mob, "mob swing missed: dodge");
                         return None;
                     }
-                    let block_stamina = strike.map_or_else(
-                        || self.mobs.block_stamina(intent.mob),
-                        |strike| strike.hit.block_stamina,
-                    );
                     let mut player = self.world.get_mut::<Player>(entity)?;
                     // A block holds while the player has stamina; the hit takes some of it (Inferred:
                     // retail never let a blocked hit find the stamina at 0).
                     let blocked = vitals.blocking && player.stamina.current() > 0.0;
                     if blocked {
-                        player.stamina.blocked_hit(block_stamina);
+                        player.stamina.blocked_hit(style.block_stamina);
                     }
                     let connection = player.connection.clone();
                     self.send_reliable(
@@ -1594,7 +1921,7 @@ impl SimWorld {
                         hit.amount,
                         0,
                         now_ms,
-                        strike.as_ref(),
+                        Some(&style),
                     );
                 }
                 let (owner, ghost) = self.ghost(intent.target)?;
@@ -1615,14 +1942,14 @@ impl SimWorld {
 
 #[cfg(test)]
 mod tests {
-    use nw_sim_core::{Dice, MobState, brain_step, hurt};
+    use nw_sim_core::MobState;
 
     use super::*;
     use crate::combat::RespawnRefusal;
     use crate::combat::test_support::TEST_PLAYER_HEALTH;
     use crate::combat::tests::test_combat;
     use crate::config::tests::committed;
-    use crate::mobs::mob_entity;
+    use crate::mobs::{VitalsSpawn, mob_entity};
     use crate::world::gear::{self, Gear};
     use crate::world::tests::{
         BORDER_X, CELL_M, NOW, SERVER_TIME, admit_at, connection, join, messages_to, slot, table,
@@ -1630,12 +1957,16 @@ mod tests {
     };
     use crate::world::{MoveError, WorldSettings};
     use nw_bus::{Ghost, MobGhost, Point};
-    use nw_content::combat::{CombatData, CombatRows, DEFAULT_SPREADSHOT_DAMAGE_ID};
+    use nw_content::combat::{CombatData, CombatRows};
+    use nw_content::player_attacks::stance_key;
     use nw_messages::{
         BodyCodec, DamageDealtMsg, DeathRecapMsg, FacetHeader, RAW_ID_LEN, ServerMessage, SpreadHit,
     };
 
     const LIGHT: &str = "1H_Sword_Attack1";
+    /// Yaw toward -x: player 1 of [`fight`] stands east of the mob and faces it.
+    const FACING_WEST: f32 = std::f32::consts::FRAC_PI_2;
+    const FACING_EAST: f32 = -std::f32::consts::FRAC_PI_2;
     const MOB_X: f32 = CELL_M / 2.0;
     /// 64 x 1.0 x (1 - 0.35), rounded.
     const SWORD_HIT: u32 = 42;
@@ -1648,6 +1979,10 @@ mod tests {
     /// Far beyond any wait.
     const LONG_AFTER_MS: u64 = 60_000;
     const LETHAL: u32 = 100_000;
+    /// A distance from the mob's middle that the sword's light swing reaches: its capsule's
+    /// middle passes 1.06 m ahead of the root, 0.3 m long each way and 0.3 m round, and the test
+    /// mob is 0.5 m round (`player-attacks-25810808.json`).
+    const SWORD_REACH_M: f32 = 1.2;
 
     fn mob() -> u64 {
         mob_entity(0)
@@ -1705,6 +2040,7 @@ mod tests {
                         values,
                         bytes: [128; 4],
                     },
+                    bit_6: Some([FACING_WEST, 0.0]),
                     ..InputRecord::default()
                 }
             })
@@ -1713,11 +2049,94 @@ mod tests {
         records
     }
 
-    /// When a sword light attack hits after its press.
+    /// The test sword's stance ([`crate::combat::test_support::TEST_SWORD_STANCE`]).
+    fn sword() -> Stance {
+        crate::combat::test_support::test_player_attacks()
+            .stance(nw_content::player_attacks::stance_key(
+                crate::combat::test_support::TEST_SWORD_STANCE,
+            ))
+            .cloned()
+            .expect("sword stance")
+    }
+
+    /// The damage window of the sword's attack `kind`.
+    fn window(kind: AttackKind) -> [u64; 2] {
+        match sword().attack(kind).expect("attack").hit {
+            AttackHit::Melee { window_ms, .. } => window_ms,
+            AttackHit::Projectile { .. } | AttackHit::HitScan { .. } => panic!("a melee attack"),
+        }
+    }
+
+    /// When a sword light attack's damage window opens after its start.
     fn light_hit_ms() -> u64 {
-        swing_shape(WeaponKind::Other, AttackKind::Light)
-            .expect("swings")
-            .hit_ms()
+        window(AttackKind::Light)[0]
+    }
+
+    /// The results of the player attacks due at each tick from `from` to `to`.
+    fn through(
+        world: &mut SimWorld,
+        from: u64,
+        to: u64,
+    ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
+        let mut results = Vec::new();
+        let mut now = from;
+        loop {
+            results.extend(world.player_swings_due(now));
+            if now >= to {
+                return results;
+            }
+            now = (now + TICK_MS).min(to);
+        }
+    }
+
+    /// The results of the sword's light attack started at `start`, through its window.
+    fn light_through(
+        world: &mut SimWorld,
+        start: u64,
+    ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
+        let [open, close] = window(AttackKind::Light);
+        through(world, start + open, start + close)
+    }
+
+    /// A fight after one tick with player 1 [`SWORD_REACH_M`] east of the mob.
+    fn close_fight() -> SimWorld {
+        let mut world = fight_at(MOB_X + SWORD_REACH_M);
+        tick(&mut world, NOW);
+        world
+    }
+
+    /// The sword attack `kind` of player `number` with `aim`, started at `now`: its results
+    /// through its window.
+    fn swing(
+        world: &mut SimWorld,
+        number: u64,
+        aim: Aim,
+        kind: AttackKind,
+        now: u64,
+    ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
+        let attack = sword().attack(kind).cloned().expect("attack");
+        world.player_swings.push(PlayerSwing {
+            attacker: connection(number),
+            aim,
+            kind,
+            attack,
+            started_ms: now,
+            pressed_ms: now,
+            hand: None,
+            not_before_ms: now,
+            hits: Vec::new(),
+            swept_ms: None,
+        });
+        let [open, close] = window(kind);
+        through(world, now + open, now + close)
+    }
+
+    fn facing(yaw: f32) -> Aim {
+        Aim {
+            facing: Some(yaw),
+            pitch: Some(0.0),
+            lock_target: None,
+        }
     }
 
     /// A fight after one tick, which wakes the mob.
@@ -1728,51 +2147,58 @@ mod tests {
     }
 
     #[test]
-    fn a_tap_is_one_light_attack_that_hits_after_the_swing_time() {
-        // The tap's press came one record before its release.
-        const HELD_MS: u64 = INPUT_RECORD_MS as u64;
-        let mut world = awake_fight();
+    fn a_tap_is_one_light_attack_that_hits_in_its_damage_window() {
+        let mut world = close_fight();
         let refused = world.attack_input(
             &connection(1),
             &message(1, &[Key::Press, Key::Release]),
             NOW,
         );
         assert!(refused.is_empty());
-        let due = NOW - HELD_MS + light_hit_ms();
+        // The light attack starts at the release (`Attack_Heavy_NotHeld` of the sword's
+        // `Attack_Start_Charge`), which is the newest record of the message.
         assert!(
-            world.player_swings_due(due - 1).is_empty(),
+            world.player_swings_due(NOW + light_hit_ms() - 1).is_empty(),
             "still swinging"
         );
         assert_eq!(
-            world.player_swings_due(due),
+            light_through(&mut world, NOW),
             vec![Ok(AttackOutcome::Hit {
                 target: mob(),
                 amount: SWORD_HIT
             })]
         );
-        assert!(world.player_swings_due(due).is_empty(), "it hits once");
+        assert!(
+            through(&mut world, NOW, NOW + LONG_AFTER_MS).is_empty(),
+            "it hits once"
+        );
     }
 
     #[test]
-    fn a_long_hold_hits_while_the_key_is_held() {
-        // Retail newchar capture: the greatsword's heavy hit (2071) came 998 ms after the press,
-        // before the release at 1181 ms.
-        const HOLD_RECORDS: u16 = 14;
+    fn a_hold_to_the_charge_starts_the_charged_attack_while_the_key_is_held() {
+        // Retail newchar capture: the greatsword's charged hit (2071) came 998 ms after the
+        // press, before the release at 1181 ms.
+        let charged_at = sword().charged_at_ms.expect("charge");
+        let hold_records = charged_at.div_ceil(u64::from(INPUT_RECORD_MS));
         let mut world = awake_fight();
         let mut keys = vec![Key::Press];
-        keys.extend(std::iter::repeat_n(Key::Hold, usize::from(HOLD_RECORDS)));
+        keys.extend(std::iter::repeat_n(
+            Key::Hold,
+            usize::try_from(hold_records).expect("records"),
+        ));
         world.attack_input(&connection(1), &message(1, &keys), NOW);
-        let heavy_ms = swing_shape(WeaponKind::Other, AttackKind::Heavy)
-            .expect("swings")
-            .hit_ms();
-        // The heavy attack starts at the first record whose hold reaches the heavy hold.
-        let crossing_records = HEAVY_HOLD_MS.div_ceil(INPUT_RECORD_MS);
-        let passed_ms = u64::from(crossing_records * INPUT_RECORD_MS - HEAVY_HOLD_MS);
-        let due = NOW - passed_ms + heavy_ms;
+        assert_eq!(world.player_swings[0].kind, AttackKind::Charged);
+        // It starts at the charge, after the press of the oldest record.
+        let held = hold_records * u64::from(INPUT_RECORD_MS);
+        let due = NOW - held + charged_at + window(AttackKind::Charged)[0];
         assert!(world.player_swings_due(due - 1).is_empty());
         assert_eq!(world.player_swings_due(due).len(), 1, "before the release");
-        let released = message(1 + HOLD_RECORDS + 1, &[Key::Release]);
-        world.attack_input(&connection(1), &released, NOW + INTERVAL_MS);
+        let next = u16::try_from(hold_records).expect("counter") + 2;
+        world.attack_input(
+            &connection(1),
+            &message(next, &[Key::Release]),
+            NOW + INTERVAL_MS,
+        );
         assert!(
             world.player_swings_due(NOW + LONG_AFTER_MS).is_empty(),
             "the release starts nothing more"
@@ -1781,25 +2207,34 @@ mod tests {
 
     #[test]
     fn the_hold_picks_the_light_or_the_heavy_attack() {
-        // Retail light holds 35 to 314 ms, heavy holds from 432 ms.
-        assert_eq!(AttackKind::of_hold(9), AttackKind::Light, "297 ms");
-        assert_eq!(AttackKind::of_hold(13), AttackKind::Heavy, "429 ms");
+        // The sword's `Attack_Start_Charge`: a release before 333 ms is the light attack, from
+        // 333 ms the heavy one.
+        let heavy_from = sword().heavy_from_ms.expect("heavy");
+        let records = |hold_ms: u64| hold_ms.div_ceil(u64::from(INPUT_RECORD_MS));
+        let kind_of = |hold_records: u64| {
+            let mut world = awake_fight();
+            let mut keys = vec![Key::Press];
+            keys.extend(std::iter::repeat_n(
+                Key::Hold,
+                usize::try_from(hold_records).expect("records") - 1,
+            ));
+            keys.push(Key::Release);
+            world.attack_input(&connection(1), &message(1, &keys), NOW);
+            world.player_swings[0].kind
+        };
+        assert_eq!(kind_of(records(heavy_from) - 1), AttackKind::Light);
+        assert_eq!(kind_of(records(heavy_from)), AttackKind::Heavy);
     }
 
     #[test]
     fn a_press_attacks_at_its_release_in_a_later_message() {
-        let mut world = awake_fight();
+        let mut world = close_fight();
         let pressed = message(1, &[Key::Press, Key::Hold]);
         world.attack_input(&connection(1), &pressed, NOW);
-        assert!(world.player_swings_due(NOW + light_hit_ms()).is_empty());
+        assert!(light_through(&mut world, NOW).is_empty());
         let released = message(3, &[Key::Release]);
         world.attack_input(&connection(1), &released, NOW + INTERVAL_MS);
-        assert_eq!(
-            world
-                .player_swings_due(NOW + INTERVAL_MS + light_hit_ms())
-                .len(),
-            1
-        );
+        assert_eq!(light_through(&mut world, NOW + INTERVAL_MS).len(), 1);
     }
 
     #[test]
@@ -1812,14 +2247,12 @@ mod tests {
             "an older copy"
         );
         assert!(counter_is_newer(0, u16::MAX), "the count wraps");
-        let mut world = awake_fight();
+        let mut world = close_fight();
         world.attack_input(&connection(1), &message(BEFORE_LOAD, &[Key::Hold]), NOW);
         let restarted = message(1, &[Key::Press, Key::Release]);
         world.attack_input(&connection(1), &restarted, NOW + INTERVAL_MS);
         assert_eq!(
-            world
-                .player_swings_due(NOW + INTERVAL_MS + light_hit_ms())
-                .len(),
+            light_through(&mut world, NOW + INTERVAL_MS).len(),
             1,
             "the attack after the load swings"
         );
@@ -1827,23 +2260,19 @@ mod tests {
 
     #[test]
     fn an_older_copy_is_not_read_again() {
-        let mut world = awake_fight();
+        let mut world = close_fight();
         let tap = message(5, &[Key::Press, Key::Release]);
         world.attack_input(&connection(1), &tap, NOW);
-        assert_eq!(world.player_swings_due(NOW + light_hit_ms()).len(), 1);
+        assert_eq!(light_through(&mut world, NOW).len(), 1);
         // The next message repeats records 5 and 6 after the new record 7.
         let mut next = message(7, &[Key::Hold]);
         next.extend(tap);
         world.attack_input(&connection(1), &next, NOW + INTERVAL_MS);
-        assert!(
-            world
-                .player_swings_due(NOW + INTERVAL_MS + light_hit_ms())
-                .is_empty()
-        );
+        assert!(light_through(&mut world, NOW + INTERVAL_MS).is_empty());
     }
 
     #[test]
-    fn extra_attacks_in_one_message_are_too_fast_without_a_search() {
+    fn presses_before_the_attacks_links_start_nothing_and_a_swing_out_of_reach_misses() {
         let mut world = awake_fight();
         join(&mut world, 2, MOB_X + 10.0);
         let records = message(
@@ -1857,14 +2286,94 @@ mod tests {
                 Key::Release,
             ],
         );
+        assert!(world.attack_input(&connection(2), &records, NOW).is_empty());
         assert_eq!(
-            world.attack_input(&connection(2), &records, NOW),
-            vec![Err(AttackRefusal::TooFast), Err(AttackRefusal::TooFast)]
+            world.player_swings.len(),
+            1,
+            "one attack: the others came too soon"
         );
+        // The first release, four records before the newest, starts it.
+        let start = NOW - 4 * u64::from(INPUT_RECORD_MS);
+        assert_eq!(world.player_swings[0].started_ms, start);
+        let opened = world.player_swings_due(start + light_hit_ms());
+        assert!(opened.is_empty(), "it waits through its window: {opened:?}");
         assert_eq!(
-            world.player_swings_due(NOW + light_hit_ms()),
-            vec![Err(AttackRefusal::NoTarget)]
+            world.player_swings_due(start + window(AttackKind::Light)[1]),
+            vec![Err(AttackRefusal::NoTarget)],
+            "and misses when it closes"
         );
+    }
+
+    /// The records of one message: a tap, holds up to `link_ms` after its release, and another
+    /// tap.
+    fn tap_then_tap(link_ms: u64) -> Vec<InputRecord> {
+        let holds = usize::try_from(link_ms.div_ceil(u64::from(INPUT_RECORD_MS))).expect("records");
+        let mut keys = vec![Key::Press, Key::Release];
+        keys.extend(std::iter::repeat_n(Key::Hold, holds));
+        keys.extend([Key::Press, Key::Release]);
+        message(1, &keys)
+    }
+
+    #[test]
+    fn a_second_attack_in_one_message_is_too_fast() {
+        let link = sword().light.expect("light").links[1];
+        let mut world = awake_fight();
+        let records = tap_then_tap(link.from_ms);
+        assert_eq!(
+            world.attack_input(&connection(1), &records, NOW),
+            vec![Err(AttackRefusal::TooFast)],
+            "the second light attack of the combo came in the same message"
+        );
+        assert_eq!(world.player_swings.len(), 1);
+    }
+
+    #[test]
+    fn a_press_in_a_link_starts_the_next_combo_step_and_after_the_attack_the_first() {
+        let sword = sword();
+        let light = sword.light.clone().expect("light");
+        let buffered = light.links[0];
+        let second = sword.combo[buffered.step - 1]
+            .light
+            .clone()
+            .expect("second light");
+        let mut world = awake_fight();
+        world.attack_input(
+            &connection(1),
+            &message(1, &[Key::Press, Key::Release]),
+            NOW,
+        );
+        // A press 2 records into the buffered window, released at once: the second step starts
+        // at the window's instant clip and attacks at once (the key is no longer held).
+        let pressed_ms = NOW + buffered.from_ms + 2 * u64::from(INPUT_RECORD_MS);
+        world.attack_input(
+            &connection(1),
+            &message(3, &[Key::Press, Key::Release]),
+            pressed_ms + u64::from(INPUT_RECORD_MS),
+        );
+        let swing = world.player_swings.last().expect("second swing");
+        assert_eq!(swing.attack.action, second.action);
+        assert_eq!(
+            swing.started_ms,
+            NOW + buffered.starts_at_ms.expect("buffered")
+        );
+        // A press before the second attack's links starts nothing...
+        let second_start = swing.started_ms;
+        world.attack_input(
+            &connection(1),
+            &message(5, &[Key::Press, Key::Release]),
+            second_start + u64::from(INPUT_RECORD_MS),
+        );
+        assert_eq!(world.player_swings.len(), 2);
+        // ...and one after it starts the stance's first step at the press.
+        let after = second_start + second.length_ms + u64::from(INPUT_RECORD_MS);
+        world.attack_input(
+            &connection(1),
+            &message(7, &[Key::Press, Key::Release]),
+            after,
+        );
+        let third = world.player_swings.last().expect("third swing");
+        assert_eq!(third.attack.action, light.action);
+        assert_eq!(third.started_ms, after);
     }
 
     #[test]
@@ -1872,55 +2381,48 @@ mod tests {
         let mut world = awake_fight();
         join(&mut world, 2, MOB_X + 10.0);
         assert_eq!(
-            world.swing(&connection(2), Aim::default(), AttackKind::Light, NOW),
+            swing(&mut world, 2, facing(FACING_WEST), AttackKind::Light, NOW),
             vec![Err(AttackRefusal::NoTarget)]
         );
         assert_eq!(
-            world.swing(&connection(7), Aim::default(), AttackKind::Light, NOW),
+            swing(&mut world, 7, facing(FACING_WEST), AttackKind::Light, NOW),
             vec![Err(AttackRefusal::NotInWorld)]
         );
     }
 
     #[test]
-    fn a_swing_steps_in_to_a_mob_in_its_homing_reach() {
-        /// Out of the sword's wedge where the player stands, inside its 3.75 m homing radius.
-        const AWAY_M: f32 = 3.5;
-        let mut world = fight_at(MOB_X + AWAY_M);
-        tick(&mut world, NOW);
-        let entity = world.by_connection[&connection(1)];
-        let from = world
-            .world
-            .get::<Body>(entity)
-            .expect("body")
-            .motion
-            .position();
-        let mob_at = Position { x: MOB_X, ..from };
-        let aim = Aim {
-            facing: Some(yaw_toward(from, mob_at)),
-            lock_target: None,
-        };
+    fn a_swing_turns_to_its_homing_target_and_misses_what_its_shape_does_not_reach() {
+        /// 50 degrees off the facing: inside the sword homing's 60 degrees.
+        const OFF_DEG: f32 = 50.0;
+        let mut world = close_fight();
         assert!(matches!(
-            world.swing(&connection(1), aim, AttackKind::Light, NOW).as_slice(),
+            swing(&mut world, 1, facing(FACING_WEST - OFF_DEG.to_radians()), AttackKind::Light, NOW).as_slice(),
             [Ok(AttackOutcome::Hit { target, .. })] if *target == mob()
         ));
-        let behind = Aim {
-            facing: Some(yaw_toward(mob_at, from)),
-            lock_target: None,
-        };
         assert_eq!(
-            world.swing(
-                &connection(1),
-                behind,
+            swing(
+                &mut world,
+                1,
+                facing(FACING_EAST),
                 AttackKind::Light,
                 NOW + LONG_AFTER_MS
             ),
             vec![Err(AttackRefusal::NoTarget)],
-            "no homing to a mob behind"
+            "no homing to a mob behind, and the swing is in front"
+        );
+        // Inside the homing's 3.75 m radius, beyond the blade.
+        let mut far = fight_at(MOB_X + 3.0);
+        tick(&mut far, NOW);
+        assert_eq!(
+            swing(&mut far, 1, facing(FACING_WEST), AttackKind::Light, NOW),
+            vec![Err(AttackRefusal::NoTarget)],
+            "the homing turns, the client moves the body: the shape does not reach"
         );
     }
 
-    #[test]
-    fn a_swing_finds_a_mob_where_it_stood_a_moment_ago() {
+    /// A world after a tick at `NOW` with the mob, at first 1 m west of player 1, lunged 4 m away
+    /// behind it on the server, and where it stands now; the client still shows it in front.
+    fn lunged_away() -> (SimWorld, Position) {
         const LUNGE_M: f32 = 4.0;
         let mut world = fight_at(MOB_X + 1.0);
         tick(&mut world, NOW);
@@ -1931,47 +2433,46 @@ mod tests {
             .expect("body")
             .motion
             .position();
-        let shown = Position { x: MOB_X, ..from };
-        // The mob lunges away behind it on the server; the client still shows it in front.
         let away = Position {
             x: MOB_X - LUNGE_M,
             ..from
         };
-        world.mobs.lunge(mob(), away, LUNGE_M).expect("lunged");
-        let aim = Aim {
-            facing: Some(yaw_toward(from, shown)),
-            lock_target: None,
-        };
-        assert!(matches!(
-            world.swing(&connection(1), aim, AttackKind::Light, NOW).as_slice(),
-            [Ok(AttackOutcome::Hit { target, .. })] if *target == mob()
-        ));
+        let away = world.mobs.lunge(mob(), away, LUNGE_M).expect("lunged");
+        (world, away)
     }
 
     #[test]
-    fn the_nearest_mob_is_the_target() {
-        let mut world = world_with_spawns(vec![test_spawn(MOB_X), test_spawn(MOB_X + 3.0)]);
-        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
-        join(&mut world, 1, MOB_X + 2.0);
-        tick(&mut world, NOW);
+    fn a_swing_finds_a_mob_where_it_stood_in_the_look_back() {
+        // Retail confirms a melee hit up to 0.2 s back
+        // (`javelin.server-melee-hit-confirmation-max-lookback-time-sec`).
+        let (mut world, _) = lunged_away();
+        let window = window(AttackKind::Light);
+        let start = NOW - window[0];
         assert!(matches!(
-            world.swing(&connection(1), Aim::default(), AttackKind::Light, NOW).as_slice(),
-            [Ok(AttackOutcome::Hit { target, .. })] if *target == mob_entity(1)
+            swing(&mut world, 1, facing(FACING_WEST), AttackKind::Light, start).as_slice(),
+            [Ok(AttackOutcome::Hit { target, .. })] if *target == mob()
         ));
+        // Past the look-back the old place is gone.
+        let (mut world, away) = lunged_away();
+        let late_ms = NOW + 7 * TICK_MS;
+        world
+            .mob_trails
+            .record(late_ms, [(mob(), away)].into_iter());
+        let late = late_ms - window[0];
+        assert_eq!(
+            swing(&mut world, 1, facing(FACING_WEST), AttackKind::Light, late),
+            vec![Err(AttackRefusal::NoTarget)]
+        );
     }
 
-    /// Two mobs one metre to each side of player 1, with yaw `facing` and the lock `lock`.
-    fn two_mobs_aside(facing: Option<f32>, lock: Option<u64>) -> Vec<u64> {
+    /// Two mobs, at `MOB_X` and 2 m east, and player 1 between them; the targets of a light swing
+    /// with the aim `aim`.
+    fn two_mobs_aside(aim: Aim) -> Vec<u64> {
         let mut world = world_with_spawns(vec![test_spawn(MOB_X), test_spawn(MOB_X + 2.0)]);
         world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
         join(&mut world, 1, MOB_X + 1.0);
         tick(&mut world, NOW);
-        let aim = Aim {
-            facing,
-            lock_target: lock,
-        };
-        world
-            .swing(&connection(1), aim, AttackKind::Light, NOW)
+        swing(&mut world, 1, aim, AttackKind::Light, NOW)
             .into_iter()
             .filter_map(|result| match result {
                 Ok(AttackOutcome::Hit { target, .. }) => Some(target),
@@ -1981,93 +2482,80 @@ mod tests {
     }
 
     #[test]
-    fn a_swing_hits_every_body_in_its_wedge() {
-        // Facing east, mobs 1.0 and 1.8 m ahead: both bodies reach into the 1.6 m wedge.
-        const FACING_EAST: f32 = -std::f32::consts::FRAC_PI_2;
-        let mut world = world_with_spawns(vec![test_spawn(MOB_X), test_spawn(MOB_X + 0.8)]);
-        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
-        join(&mut world, 1, MOB_X - 1.0);
-        tick(&mut world, NOW);
-        let aim = Aim {
-            facing: Some(FACING_EAST),
-            lock_target: None,
+    fn one_swing_hits_every_mob_its_shape_passes() {
+        // Two mobs side by side, 0.9 m apart, in front of player 1 (retail: 4 of the 84 melee
+        // hits of 2026-09-18 were second targets of one swing).
+        let beside = |dy: f32| VitalsSpawn {
+            position: [MOB_X, 10.0 + dy, 50.0],
+            ..test_spawn(MOB_X)
         };
-        let results = world.swing(&connection(1), aim, AttackKind::Light, NOW);
-        assert!(
-            matches!(
-                results.as_slice(),
-                [Ok(AttackOutcome::Hit { target: first, .. }), Ok(AttackOutcome::Hit { target: second, .. })]
-                    if *first == mob_entity(0) && *second == mob_entity(1)
-            ),
-            "{results:?}"
-        );
-    }
-
-    #[test]
-    fn a_locked_target_turns_the_swing_to_it() {
-        // Facing east would hit the east mob; the lock on the west mob turns the swing there.
-        const FACING_EAST: f32 = -std::f32::consts::FRAC_PI_2;
-        assert_eq!(two_mobs_aside(Some(FACING_EAST), None), vec![mob_entity(1)]);
+        let mut world = world_with_spawns(vec![beside(-0.45), beside(0.45)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, MOB_X + SWORD_REACH_M);
+        tick(&mut world, NOW);
+        let mut hit: Vec<u64> = swing(&mut world, 1, facing(FACING_WEST), AttackKind::Light, NOW)
+            .into_iter()
+            .filter_map(|result| match result {
+                Ok(AttackOutcome::Hit { target, .. }) => Some(target),
+                _ => None,
+            })
+            .collect();
+        hit.sort_unstable();
         assert_eq!(
-            two_mobs_aside(Some(FACING_EAST), Some(mob_entity(0))),
-            vec![mob_entity(0)]
+            hit,
+            vec![mob_entity(0), mob_entity(1)],
+            "the second is no second attack"
         );
     }
 
     #[test]
-    fn only_a_mob_in_front_is_the_target() {
-        // Yaw -90 degrees faces +x (forward = (-sin a, cos a)).
-        const FACING_EAST: f32 = -std::f32::consts::FRAC_PI_2;
-        let mut world = world_with_spawns(vec![test_spawn(MOB_X), test_spawn(MOB_X + 3.0)]);
-        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
-        join(&mut world, 1, MOB_X + 2.0);
-        tick(&mut world, NOW);
-        let aim = |facing| Aim {
-            facing: Some(facing),
-            lock_target: None,
+    fn the_client_names_a_target_only_by_its_lock_and_the_server_checks_it() {
+        // Retail 2026-09-18: around 84 melee hits the client sent nothing but inputs and time
+        // syncs; row 3 of the input named the hit's target on the 49 hits during a lock, from
+        // 734 to 799 ms before them. A lock turns the swing to its target at any angle...
+        let locked = |target: u64| Aim {
+            lock_target: Some(target),
+            ..facing(FACING_EAST)
         };
-        assert!(matches!(
-            world.swing(&connection(1), aim(FACING_EAST), AttackKind::Light, NOW).as_slice(),
-            [Ok(AttackOutcome::Hit { target, .. })] if *target == mob_entity(1)
-        ));
+        assert_eq!(two_mobs_aside(locked(mob_entity(0))), vec![mob_entity(0)]);
+        // ...but its target must be in the homing reach.
+        let mut world = world_with_spawns(vec![test_spawn(MOB_X), test_spawn(MOB_X - 6.0)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, MOB_X + 1.0);
+        tick(&mut world, NOW);
+        let far_locked = Aim {
+            lock_target: Some(mob_entity(1)),
+            ..facing(FACING_WEST)
+        };
         assert!(
             matches!(
-                world.swing(&connection(1), aim(-FACING_EAST), AttackKind::Light, NOW + INTERVAL_MS).as_slice(),
+                swing(&mut world, 1, far_locked, AttackKind::Light, NOW).as_slice(),
                 [Ok(AttackOutcome::Hit { target, .. })] if *target == mob_entity(0)
             ),
-            "facing west, the mob behind before is in front"
+            "the far locked mob is out of reach: the homing takes the near one"
         );
-        assert_eq!(
-            world.swing(
-                &connection(1),
-                aim(0.0),
-                AttackKind::Light,
-                NOW + 2 * INTERVAL_MS
-            ),
-            vec![Err(AttackRefusal::NoTarget)],
-            "facing north, both mobs are to the side and beyond the homing angle"
-        );
+        // Without a yaw, only the lock aims.
+        let no_yaw = Aim {
+            facing: None,
+            pitch: None,
+            lock_target: None,
+        };
+        assert_eq!(two_mobs_aside(no_yaw), Vec::<u64>::new());
     }
 
     #[test]
     fn a_ghost_mob_in_reach_is_a_target() {
+        /// In the sword's reach east of player 1 of [`border`].
+        const GHOST_X: f32 = BORDER_X - 1.5 + SWORD_REACH_M;
         let mut world = border();
-        world.set_ghosts(
-            &sim_b(),
-            vec![mob_ghost(BORDER_X + 0.5, MOB_HEALTH, true)],
-            NOW,
-        );
+        world.set_ghosts(&sim_b(), vec![mob_ghost(GHOST_X, MOB_HEALTH, true)], NOW);
         assert_eq!(
-            world.swing(&connection(1), Aim::default(), AttackKind::Light, NOW),
+            swing(&mut world, 1, facing(FACING_EAST), AttackKind::Light, NOW),
             vec![Err(AttackRefusal::NoTarget)],
             "a returning mob is no target"
         );
-        world.set_ghosts(
-            &sim_b(),
-            vec![mob_ghost(BORDER_X + 0.5, MOB_HEALTH, false)],
-            NOW,
-        );
-        let results = world.swing(&connection(1), Aim::default(), AttackKind::Light, NOW);
+        world.set_ghosts(&sim_b(), vec![mob_ghost(GHOST_X, MOB_HEALTH, false)], NOW);
+        let results = swing(&mut world, 1, facing(FACING_EAST), AttackKind::Light, NOW);
         let [Ok(AttackOutcome::Remote(remote))] = results.as_slice() else {
             panic!("a remote hit");
         };
@@ -2109,6 +2597,15 @@ mod tests {
     /// The shots and reload time of the test blunderbuss (retail `BlunderbussT2`: 2, 1.46 s).
     const BLUNDERBUSS_SHOTS: u8 = 2;
     const BLUNDERBUSS_RELOAD_MS: u64 = 1_460;
+    /// The blunderbuss's `MannequinTag`.
+    const BLUNDERBUSS_STANCE: &str = "2H_Ranged,Blunderbuss";
+
+    /// The combat data of `source` with the retail stances.
+    fn test_data_of(source: nw_content::combat::CombatSource) -> CombatData {
+        CombatData::build(source, &CombatRows::default())
+            .expect("data")
+            .with_player_attacks(crate::combat::test_support::test_player_attacks())
+    }
 
     /// [`fight_at`] `x` with player 1 wearing the kit sword, whose stats are a spread-shot weapon.
     fn shooter_at(x: f32) -> SimWorld {
@@ -2121,15 +2618,20 @@ mod tests {
                 spread_shot: true,
                 max_loaded_ammo: BLUNDERBUSS_SHOTS,
                 reload_ms: BLUNDERBUSS_RELOAD_MS,
+                stance: stance_key(BLUNDERBUSS_STANCE),
                 ..sword
             },
         ));
         source
             .item_stats
             .push((gear::tests::SWORD.to_owned(), BLUNDERBUSS.to_owned()));
-        let data = CombatData::build(source, &CombatRows::default()).expect("data");
+        let data = test_data_of(source);
         let mut world = fight_at(x);
-        world.combat = committed().combat_settings(Arc::new(data), Arc::from([]));
+        world.combat = committed().combat_settings(
+            Arc::new(data),
+            Arc::from([]),
+            crate::combat::tests::test_mob_ai(),
+        );
         let entity = world.by_connection[&connection(1)];
         world.world.get_mut::<Player>(entity).expect("player").gear = Gear::starter(
             &gear::tests::kits(),
@@ -2151,9 +2653,9 @@ mod tests {
             BLUNDERBUSS.to_owned(),
             WeaponRow {
                 spread_shot: true,
-                kind: WeaponKind::Blunderbuss,
                 max_loaded_ammo: BLUNDERBUSS_SHOTS,
                 reload_ms: BLUNDERBUSS_RELOAD_MS,
+                stance: stance_key(BLUNDERBUSS_STANCE),
                 ..sword
             },
         ));
@@ -2163,9 +2665,13 @@ mod tests {
         source
             .item_stats
             .push((gear::tests::STAFF.to_owned(), blade));
-        let data = CombatData::build(source, &CombatRows::default()).expect("data");
+        let data = test_data_of(source);
         let mut world = fight_at(x);
-        world.combat = committed().combat_settings(Arc::new(data), Arc::from([]));
+        world.combat = committed().combat_settings(
+            Arc::new(data),
+            Arc::from([]),
+            crate::combat::tests::test_mob_ai(),
+        );
         let entity = world.by_connection[&connection(1)];
         let mut gear = Gear::starter(
             &gear::tests::kits(),
@@ -2177,7 +2683,13 @@ mod tests {
         assert!(gear.add(kits.item(gear::tests::STAFF).expect("staff"), 1));
         let staff = gear::instance_id(gear::tests::CHARACTER, gear::tests::STAFF);
         assert_eq!(
-            gear.equip(0, slot::MAIN_HAND_OPTION_2, 1, staff),
+            gear.equip(
+                0,
+                slot::MAIN_HAND_OPTION_2,
+                1,
+                staff,
+                gear::tests::none_disabled
+            ),
             Ok(gear::tests::STAFF.to_owned())
         );
         world.world.get_mut::<Player>(entity).expect("player").gear = Some(gear);
@@ -2199,7 +2711,7 @@ mod tests {
 
     #[test]
     fn a_melee_attack_with_no_shot_takes_the_melee_weapon_in_hand() {
-        let mut world = gun_and_blade_at(MOB_X + 2.0);
+        let mut world = gun_and_blade_at(MOB_X + SWORD_REACH_M);
         world.attack_input(
             &connection(1),
             &message(1, &[Key::Press, Key::Release]),
@@ -2207,7 +2719,7 @@ mod tests {
         );
         let early = world.player_swings_due(NOW + SHOT_PAIR_MS - 1);
         assert!(early.is_empty(), "it waits for a shot request: {early:?}");
-        let landed = world.player_swings_due(lands_at());
+        let landed = through(&mut world, lands_at(), NOW + window(AttackKind::Light)[1]);
         assert!(
             matches!(landed.as_slice(), [Ok(AttackOutcome::Hit { target, .. })] if *target == mob()),
             "{landed:?}"
@@ -2315,31 +2827,29 @@ mod tests {
         assert_eq!(drawn(&world), Some(slot::MAIN_HAND_OPTION_1));
     }
 
-    /// [`fight_at`] `x` with player 1 holding a weapon of `kind` (the kit sword with that kind's
-    /// stats and damage rows).
-    fn caster_at(x: f32, kind: WeaponKind) -> SimWorld {
+    /// [`fight_at`] `x` with player 1 holding a weapon of the stance `tags` (the kit sword with
+    /// that stance).
+    fn caster_at(x: f32, tags: &str) -> SimWorld {
         const CASTER: &str = "CasterT2";
         let mut source = crate::combat::test_support::test_source();
         let sword = source.weapons[0].1;
-        source
-            .weapons
-            .push((CASTER.to_owned(), WeaponRow { kind, ..sword }));
+        source.weapons.push((
+            CASTER.to_owned(),
+            WeaponRow {
+                stance: stance_key(tags),
+                ..sword
+            },
+        ));
         source
             .item_stats
             .push((gear::tests::SWORD.to_owned(), CASTER.to_owned()));
-        let (light, heavy) = kind.attack_ids().expect("its damage rows");
-        for damage_id in [light, heavy] {
-            source.attacks.push(nw_content::combat::AttackRow {
-                damage_id: damage_id.to_owned(),
-                coefficient: 1.0,
-                can_crit: false,
-                threat: 0,
-                damage_type: None,
-            });
-        }
-        let data = CombatData::build(source, &CombatRows::default()).expect("data");
+        let data = test_data_of(source);
         let mut world = fight_at(x);
-        world.combat = committed().combat_settings(Arc::new(data), Arc::from([]));
+        world.combat = committed().combat_settings(
+            Arc::new(data),
+            Arc::from([]),
+            crate::combat::tests::test_mob_ai(),
+        );
         let entity = world.by_connection[&connection(1)];
         world.world.get_mut::<Player>(entity).expect("player").gear = Gear::starter(
             &gear::tests::kits(),
@@ -2352,59 +2862,76 @@ mod tests {
 
     #[test]
     fn ranged_and_magic_attacks_fly_to_a_mob_far_away() {
-        /// Out of every melee reach, inside every projectile's range.
+        /// Out of every melee reach, inside every projectile's flight.
         const AWAY_M: f32 = 15.0;
-        for kind in [
-            WeaponKind::FireStaff,
-            WeaponKind::VoidGauntlet,
-            WeaponKind::IceGauntlet,
-            WeaponKind::LifeStaff,
-            WeaponKind::Bow,
-            WeaponKind::Musket,
+        // The retail stances whose light attack is a projectile (the life staff's is Unknown).
+        for tags in [
+            "MagicStaff,Fire",
+            "MagicGauntlet,VoidGauntlet",
+            "MagicGauntlet,Ice",
+            "Bow,LongBow",
+            "2H_Ranged,Rifle",
         ] {
-            let mut world = caster_at(MOB_X + AWAY_M, kind);
-            let entity = world.by_connection[&connection(1)];
-            let from = world
-                .world
-                .get::<Body>(entity)
-                .expect("body")
-                .motion
-                .position();
-            let aim = Aim {
-                facing: Some(yaw_toward(from, Position { x: MOB_X, ..from })),
-                lock_target: None,
+            let mut world = caster_at(MOB_X + AWAY_M, tags);
+            let attack = world
+                .combat
+                .data
+                .stance(stance_key(tags))
+                .and_then(|stance| stance.attack(AttackKind::Light))
+                .cloned()
+                .expect("a light attack");
+            let AttackHit::Projectile {
+                fire_ms, flight, ..
+            } = attack.hit
+            else {
+                panic!("{tags}: a projectile");
             };
-            assert!(
-                world
-                    .swing(&connection(1), aim, AttackKind::Light, NOW)
-                    .is_empty(),
-                "{kind:?}: the projectile is on its way"
+            world.attack_input(
+                &connection(1),
+                &message(1, &[Key::Press, Key::Release]),
+                NOW,
             );
-            let projectile = kind.projectile().expect("it flies");
+            let fired = NOW + fire_ms.max(window_start(&attack));
+            assert!(
+                world.player_swings_due(fired).is_empty(),
+                "{tags}: the projectile is on its way"
+            );
+            // The cast flies to the mob's middle on its line.
+            let flight_s = flight.time_to(AWAY_M).expect("in flight");
             #[allow(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
                 reason = "a flight of a few hundred ms"
             )]
-            let flight_ms = (AWAY_M / projectile.speed_mps * 1_000.0) as u64;
+            let flight_ms = (flight_s * 1_000.0) as u64;
             assert!(
-                world.player_swings_due(NOW + flight_ms / 2).is_empty(),
-                "{kind:?}: still flying"
+                world.player_swings_due(fired + flight_ms / 2).is_empty(),
+                "{tags}: still flying"
             );
-            let landed = world.player_swings_due(NOW + flight_ms + 1);
+            let landed = world.player_swings_due(fired + flight_ms + 1);
             assert!(
                 matches!(landed.as_slice(), [Ok(AttackOutcome::Hit { target, .. })] if *target == mob()),
-                "{kind:?}: {landed:?}"
+                "{tags}: {landed:?}"
             );
-            let away = Aim {
-                facing: Some(yaw_toward(Position { x: MOB_X, ..from }, from)),
-                lock_target: None,
-            };
-            assert_eq!(
-                world.swing(&connection(1), away, AttackKind::Light, NOW + LONG_AFTER_MS),
-                vec![Err(AttackRefusal::NoTarget)],
-                "{kind:?}: a cast away from the mob meets nothing"
-            );
+        }
+        let mut world = caster_at(MOB_X + AWAY_M, "MagicGauntlet,Ice");
+        let mut away = message(1, &[Key::Press, Key::Release]);
+        for record in &mut away {
+            record.bit_6 = Some([FACING_EAST, 0.0]);
+        }
+        world.attack_input(&connection(1), &away, NOW + LONG_AFTER_MS);
+        assert_eq!(
+            world.player_swings_due(NOW + 2 * LONG_AFTER_MS),
+            vec![Err(AttackRefusal::NoTarget)],
+            "a cast away from the mob meets nothing"
+        );
+    }
+
+    /// When `attack` lands at the earliest, after it starts.
+    fn window_start(attack: &BasicAttack) -> u64 {
+        match attack.hit {
+            AttackHit::Melee { window_ms, .. } => window_ms[0],
+            AttackHit::Projectile { fire_ms, .. } | AttackHit::HitScan { fire_ms, .. } => fire_ms,
         }
     }
 
@@ -2426,7 +2953,7 @@ mod tests {
             pellets,
             hits: vec![SpreadHit {
                 raw_id: [0; RAW_ID_LEN],
-                facet_entity: mob().swap_bytes(),
+                facet_entity: nw_messages::facet_entity(mob()),
                 extra: 0,
             }],
             times: vec![0],
@@ -2446,9 +2973,10 @@ mod tests {
             Ok(AttackOutcome::Hit { target, .. }) if *target == mob()
         )));
         let messages = messages_to(&world.take_messages(), 1);
+        // The blunderbuss stance's light attack row (`Blunderbuss_Primary_Attack`).
         let expected = SpreadshotProcessedMsg {
             request,
-            damage: lowercase_crc32(DEFAULT_SPREADSHOT_DAMAGE_ID),
+            damage: lowercase_crc32("Blunderbuss_Primary_Attack"),
             config: SIX_PELLET_CONFIG,
         };
         let ServerMessage::SpreadshotProcessed(answer) = &messages[0] else {
@@ -2498,7 +3026,14 @@ mod tests {
 
     #[test]
     fn a_pellet_out_of_range_is_refused() {
-        let mut world = shooter_at(MOB_X + SPREADSHOT_RANGE_M + 1.0);
+        // `BlunderbussPrimaryFire_Spread`: a hit scan of 14 m.
+        const SPREAD_RANGE_M: f32 = 14.0;
+        let mut world = shooter_at(MOB_X + SPREAD_RANGE_M - 1.0);
+        assert!(matches!(
+            world.spreadshot(&connection(1), &shot(2), NOW).as_slice(),
+            [Ok(AttackOutcome::Hit { .. })]
+        ));
+        let mut world = shooter_at(MOB_X + SPREAD_RANGE_M + 1.0);
         assert_eq!(
             world.spreadshot(&connection(1), &shot(2), NOW).as_slice(),
             [Err(AttackRefusal::OutOfReach)]
@@ -2618,10 +3153,13 @@ mod tests {
             swing_gap_ms: (2_500, 4_000),
             speed_mps: 5.5,
             hit_delay_ms: DELAY_MS,
-            block_stamina: crate::mobs::DEFAULT_BLOCK_STAMINA,
-            gait: nw_sim_core::Gait::uniform(3.0, 5.5),
+            attack: BOSS_ATTACK,
+            gait: nw_sim_core::Gait {
+                swing_start_m: 3.0,
+                run_beyond_m: 3.0,
+                walk_speed_mps: 5.5,
+            },
             sight_m: 20.0,
-            hit_tag: crate::mobs::DEFAULT_HIT_TAG,
             hit_scale: 1.0,
             capsule: crate::mobs::DEFAULT_MOB_CAPSULE,
             reach: None,
@@ -2641,10 +3179,11 @@ mod tests {
                 z: 50.0,
             },
             mob_move: None,
+            strike: None,
         };
         assert!(
             world
-                .swings_landing(vec![swing], NOW, SERVER_TIME)
+                .swings_landing(vec![swing.clone()], NOW, SERVER_TIME)
                 .is_empty()
         );
         assert!(
@@ -2664,6 +3203,23 @@ mod tests {
         );
     }
 
+    /// The strike of the test tree's damage window (`mob_ai::test_support`): it lunges up to
+    /// its homing radius and its shape reaches 0.8 m in front of the body.
+    fn test_strike() -> crate::mob_ai::Strike {
+        use crate::mob_ai::test_support::{TEST_HOMING_RADIUS_M, TEST_MOB_ROW, TEST_MOB_TABLE};
+        const SHAPE_REACH_M: f32 = 0.8;
+        crate::mob_ai::Strike {
+            table: TEST_MOB_TABLE.to_owned(),
+            row: TEST_MOB_ROW.to_owned(),
+            weapon: None,
+            reach: MobReach {
+                lunge_max_m: TEST_HOMING_RADIUS_M.parse().expect("radius"),
+                lunge_turn_rad: std::f32::consts::PI,
+                reach_m: SHAPE_REACH_M,
+            },
+        }
+    }
+
     #[test]
     fn a_swing_at_a_player_out_of_reach_misses() {
         let mut world = fight();
@@ -2677,6 +3233,7 @@ mod tests {
                 z: 50.0,
             },
             mob_move: None,
+            strike: Some(test_strike()),
         };
         assert!(
             world
@@ -2706,10 +3263,13 @@ mod tests {
             swing_gap_ms: (2_500, 4_000),
             speed_mps: 5.5,
             hit_delay_ms: 0,
-            block_stamina: crate::mobs::DEFAULT_BLOCK_STAMINA,
-            gait: nw_sim_core::Gait::uniform(3.0, 5.5),
+            attack: BOSS_ATTACK,
+            gait: nw_sim_core::Gait {
+                swing_start_m: 3.0,
+                run_beyond_m: 3.0,
+                walk_speed_mps: 5.5,
+            },
             sight_m: 20.0,
-            hit_tag: crate::mobs::DEFAULT_HIT_TAG,
             hit_scale: 1.0,
             capsule: crate::mobs::DEFAULT_MOB_CAPSULE,
             reach: Some(REACH),
@@ -2732,6 +3292,7 @@ mod tests {
             target: 1,
             target_at: at(aimed_x),
             mob_move: None,
+            strike: None,
         };
         assert_eq!(
             world.mob_hits(vec![(swing(MOB_X + 3.0), None)], NOW).len(),
@@ -2741,14 +3302,14 @@ mod tests {
         let stop_m = crate::mobs::DEFAULT_MOB_CAPSULE.radius_m
             + crate::world::hit_shape::PLAYER_CAPSULE.radius_m
             + LUNGE_GAP_M;
-        let lunged = world.mobs.get_mut(mob).expect("mob").brain.position();
+        let lunged = world.mobs.get_mut(mob).expect("mob").position;
         assert!((at(MOB_X + 3.0).horizontal_distance(lunged) - stop_m).abs() < 1e-3);
         // Already there, it stays: it never steps into the player.
         assert_eq!(
             world.mob_hits(vec![(swing(MOB_X + 3.0), None)], NOW).len(),
             1
         );
-        let again = world.mobs.get_mut(mob).expect("mob").brain.position();
+        let again = world.mobs.get_mut(mob).expect("mob").position;
         assert!((at(MOB_X + 3.0).horizontal_distance(again) - stop_m).abs() < 1e-3);
         // Aimed west of itself, the player east is beyond its lunge turn and behind its wedge.
         assert!(
@@ -2775,7 +3336,8 @@ mod tests {
                 .attack_input(&connection(1), std::slice::from_ref(&dodge), now)
                 .is_empty()
         );
-        while now < NOW + DODGE_MS {
+        let [_, invulnerable_until] = sword().dodge_invulnerable_ms.expect("a roll");
+        while now < NOW + invulnerable_until {
             let output = tick(&mut world, now);
             assert!(output.mob_hits.is_empty(), "a hit landed in the roll");
             assert!(
@@ -2814,7 +3376,7 @@ mod tests {
                         message,
                         ServerMessage::OnDamage(damage)
                             if damage.items[0].amount == amount(*hit)
-                                && damage.u64_c == mob().swap_bytes()
+                                && damage.u64_c == nw_messages::facet_entity(mob())
                     )),
                     "{messages:?}"
                 );
@@ -2829,21 +3391,81 @@ mod tests {
         }
     }
 
-    /// A fight with a boss beside player 1: one move of two hits, and a second phase with
-    /// double damage and a fire half.
+    /// The damage table, rows and weapon of the test paces: the plain swing (slash, block mod
+    /// 0.2), a hit of half its coefficient, and a hit with a half fire affix.
+    const BOSS_TABLE: &str = "BossDamageTable";
+    const BOSS_WEAPON: &str = "BossSword";
+    const BOSS_ATTACK: crate::mobs::PaceAttack = crate::mobs::PaceAttack {
+        table: BOSS_TABLE,
+        row: "Boss_Swing",
+        weapon: BOSS_WEAPON,
+    };
+    /// `DamageTypeData`: Slash 4, Fire 9.
+    const SLASH: u8 = 4;
+    const FIRE: u8 = 9;
+
+    /// [`fight`] with the rows of [`BOSS_ATTACK`]: its weapon's `BlockStaminaDamage`
+    /// `block_damage` and the player's sword's `BlockStability` `stability`.
+    fn boss_rows_fight(block_damage: f64, stability: f64) -> SimWorld {
+        let mut source = crate::combat::test_support::test_source();
+        let sword = source.weapons[0].1;
+        source.weapons[0].1 = WeaponRow {
+            block_stability: stability,
+            ..sword
+        };
+        source.weapons.push((
+            BOSS_WEAPON.to_owned(),
+            WeaponRow {
+                block_stamina_damage: block_damage,
+                ..sword
+            },
+        ));
+        source
+            .item_stats
+            .push((BOSS_WEAPON.to_owned(), BOSS_WEAPON.to_owned()));
+        for (row, coefficient, affix) in [
+            ("Boss_Swing", 1.0, None),
+            ("Boss_Half", 0.5, None),
+            (
+                "Boss_Fire",
+                1.0,
+                Some(nw_content::combat::AffixDamage {
+                    share: 0.5,
+                    damage_type: FIRE,
+                }),
+            ),
+        ] {
+            source.attacks.push(nw_content::combat::AttackRow {
+                damage_id: row.to_owned(),
+                coefficient,
+                can_crit: false,
+                threat: 0,
+                damage_type: Some(SLASH),
+                table: BOSS_TABLE.to_owned(),
+                block_stamina_mod: 0.2,
+                affix,
+            });
+        }
+        let mut world = fight();
+        world.combat = committed().combat_settings(
+            Arc::new(test_data_of(source)),
+            Arc::from([]),
+            crate::combat::tests::test_mob_ai(),
+        );
+        world
+    }
+
+    /// A fight with a boss beside player 1: one move of two hits, the second of half the
+    /// coefficient, and a second phase with double damage whose move's row has a fire half.
     fn boss_fight() -> (SimWorld, u64, MobAttackIntent) {
         const HITS: [MoveHit; 2] = [
             MoveHit {
                 at_ms: 300,
-                damage_scale: 1.0,
-                fire_share: 0.5,
-                block_stamina: 10.0,
+                row: "Boss_Swing",
             },
             MoveHit {
                 at_ms: 900,
-                damage_scale: 0.5,
-                fire_share: 0.5,
-                block_stamina: 10.0,
+                row: "Boss_Half",
             },
         ];
         const MOVE: crate::mobs::MobMove = crate::mobs::MobMove {
@@ -2854,29 +3476,39 @@ mod tests {
             },
             length_ms: 2_800,
             hits: &HITS,
-            tag: 4,
+        };
+        const FIRE_HITS: [MoveHit; 1] = [MoveHit {
+            at_ms: 300,
+            row: "Boss_Fire",
+        }];
+        const FIRE_MOVE: crate::mobs::MobMove = crate::mobs::MobMove {
+            hits: &FIRE_HITS,
+            ..MOVE
         };
         const MOVES: [crate::mobs::MobMove; 1] = [MOVE];
+        const FIRE_MOVES: [crate::mobs::MobMove; 1] = [FIRE_MOVE];
         let pace = crate::mobs::Pace {
             attack_factor: 1.0,
             swing_gap_ms: (1_000, 1_000),
             speed_mps: 5.5,
             hit_delay_ms: 0,
-            block_stamina: crate::mobs::DEFAULT_BLOCK_STAMINA,
-            gait: nw_sim_core::Gait::uniform(3.0, 5.5),
+            attack: BOSS_ATTACK,
+            gait: nw_sim_core::Gait {
+                swing_start_m: 3.0,
+                run_beyond_m: 3.0,
+                walk_speed_mps: 5.5,
+            },
             sight_m: 20.0,
-            hit_tag: crate::mobs::DEFAULT_HIT_TAG,
             hit_scale: 1.0,
             capsule: crate::mobs::DEFAULT_MOB_CAPSULE,
             reach: None,
             moves: &MOVES,
             phase_two: Some(crate::mobs::PhaseTwo {
-                moves: &MOVES,
+                moves: &FIRE_MOVES,
                 damage_mult: 2.0,
-                fire_tag: 9,
             }),
         };
-        let mut world = fight();
+        let mut world = boss_rows_fight(0.0, 0.0);
         let boss = world
             .mobs
             .spawn_personal(test_spawn(MOB_X), 1, false, Some(pace), None, NOW)
@@ -2890,6 +3522,7 @@ mod tests {
                 z: 50.0,
             },
             mob_move: Some(MOVE),
+            strike: None,
         };
         (world, boss, swing)
     }
@@ -2918,7 +3551,10 @@ mod tests {
     fn a_second_phase_hit_is_larger_and_half_fire() {
         let (mut world, boss, swing) = boss_fight();
         let hit = swing.mob_move.expect("move").hits[0];
-        let first_phase = world.mob_hits(vec![(swing, Some(hit))], NOW);
+        let half_hit = swing.mob_move.expect("move").hits[1];
+        let halved = world.mob_hits(vec![(swing.clone(), Some(half_hit))], NOW);
+        world.take_messages();
+        let first_phase = world.mob_hits(vec![(swing.clone(), Some(hit))], NOW);
         let [AttackOutcome::Hit { amount: base, .. }] = first_phase.as_slice() else {
             panic!("a hit: {first_phase:?}");
         };
@@ -2937,9 +3573,17 @@ mod tests {
                 })
                 .expect("a 3601")
         };
-        assert_eq!(damage_items(&mut world), vec![(4, amount(*base))]);
+        assert_eq!(damage_items(&mut world), vec![(SLASH, amount(*base))]);
+        assert!(
+            matches!(halved.as_slice(), [AttackOutcome::Hit { amount, .. }] if 2 * amount == *base),
+            "the coefficient over the attack row's: {halved:?}"
+        );
         world.mobs.enter_phase_two(boss);
-        let second_phase = world.mob_hits(vec![(swing, Some(hit))], NOW);
+        let fire_hit = MoveHit {
+            at_ms: 300,
+            row: "Boss_Fire",
+        };
+        let second_phase = world.mob_hits(vec![(swing, Some(fire_hit))], NOW);
         let [
             AttackOutcome::Hit {
                 amount: doubled, ..
@@ -2950,7 +3594,64 @@ mod tests {
         };
         assert_eq!(*doubled, 2 * base);
         let half = amount(*doubled) / 2.0;
-        assert_eq!(damage_items(&mut world), vec![(4, half), (9, half)]);
+        assert_eq!(damage_items(&mut world), vec![(SLASH, half), (FIRE, half)]);
+    }
+
+    #[test]
+    fn a_blocked_hit_takes_the_attackers_weapon_and_row_stamina() {
+        // Retail tutorial: the legionnaire's `Legionnaire_LightStab` (block mod 0.2) with
+        // `Legion_1HSpear` (`BlockStaminaDamage` 100) on a warhammer of `BlockStability` 27 took
+        // 14.6 stamina.
+        const RETAIL_LOSS: f32 = 14.6;
+        let mut world = boss_rows_fight(100.0, 27.0);
+        let pace = crate::mobs::Pace {
+            attack_factor: 1.0,
+            swing_gap_ms: (1_000, 1_000),
+            speed_mps: 5.5,
+            hit_delay_ms: 0,
+            attack: BOSS_ATTACK,
+            gait: nw_sim_core::Gait {
+                swing_start_m: 3.0,
+                run_beyond_m: 3.0,
+                walk_speed_mps: 5.5,
+            },
+            sight_m: 20.0,
+            hit_scale: 1.0,
+            capsule: crate::mobs::DEFAULT_MOB_CAPSULE,
+            reach: None,
+            moves: &[],
+            phase_two: None,
+        };
+        let mob = world
+            .mobs
+            .spawn_personal(test_spawn(MOB_X), 1, false, Some(pace), None, NOW)
+            .expect("rows");
+        let blocking = InputRecord {
+            slots: nw_messages::InputSlots {
+                count: 19,
+                values: vec![0, 1 << 62],
+                bytes: [0; 4],
+            },
+            ..InputRecord::default()
+        };
+        world.attack_input(&connection(1), &[blocking], NOW);
+        let swing = MobAttackIntent {
+            mob,
+            target: 1,
+            target_at: Position {
+                x: MOB_X + 2.0,
+                y: 10.0,
+                z: 50.0,
+            },
+            mob_move: None,
+            strike: None,
+        };
+        assert!(
+            world.mob_hits(vec![(swing, None)], NOW).is_empty(),
+            "blocked"
+        );
+        let loss = 100.0 - player_stamina(&mut world, 1);
+        assert!((loss - RETAIL_LOSS).abs() < 1e-3, "{loss}");
     }
 
     #[test]
@@ -3010,7 +3711,7 @@ mod tests {
         assert_eq!(damage.items[0].amount, amount(SWORD_HIT));
         assert_eq!(
             damage.u64_c,
-            mob().swap_bytes(),
+            nw_messages::facet_entity(mob()),
             "the attacker's facet entity"
         );
         assert_eq!(damage.raw_2, [0x02, 0x00], "a direct hit");
@@ -3133,14 +3834,15 @@ mod tests {
 
     #[test]
     fn a_returning_mob_is_refused() {
+        // Past its leash the test tree walks home under `ResetAI` (as DistanceLeash).
+        const PAST_LEASH_M: f32 = crate::mob_ai::test_support::TEST_LEASH_M + 5.0;
         let mut world = fight();
-        let settings = test_combat().brain;
-        let brain = &mut world.mobs.get_mut(mob()).expect("mob").brain;
-        hurt(brain, 99, 1, NOW);
-        brain_step(brain, &[], NOW + TICK_MS, &settings, &mut Dice::new(1));
-        assert_eq!(brain.state(), MobState::Return);
+        world.mobs.get_mut(mob()).expect("mob").position.x += PAST_LEASH_M;
+        join(&mut world, 2, MOB_X + PAST_LEASH_M + 1.0);
+        tick(&mut world, NOW + TICK_MS);
+        assert_eq!(world.mobs.state(mob()), Some(MobState::Return));
         assert_eq!(
-            world.attack(&connection(1), mob(), LIGHT, NOW + TICK_MS),
+            world.attack(&connection(2), mob(), LIGHT, NOW + TICK_MS),
             Err(AttackRefusal::Returning)
         );
     }
@@ -3324,15 +4026,12 @@ mod tests {
         world
             .attack(&connection(1), mob(), LIGHT, NOW)
             .expect("hit");
-        assert_eq!(
-            world.mobs.get_mut(mob()).expect("mob").brain.target(),
-            Some(1)
-        );
-        world.apply_hit(1, mob(), LETHAL, 0, NOW);
         tick(&mut world, NOW + TICK_MS);
-        let mob = world.mobs.get_mut(mob()).expect("mob");
-        assert_eq!(mob.brain.target(), None);
-        assert_eq!(mob.brain.state(), MobState::Return);
+        assert_eq!(world.mobs.target(mob()), Some(1), "its attacker");
+        world.apply_hit(1, mob(), LETHAL, 0, NOW + TICK_MS);
+        tick(&mut world, NOW + 2 * TICK_MS);
+        assert_eq!(world.mobs.target(mob()), None);
+        assert_eq!(world.mobs.state(mob()), Some(MobState::Idle));
     }
 
     #[test]
@@ -3443,8 +4142,10 @@ mod tests {
             mob: None,
             player: None,
         };
+        // The test tree's damage window comes this long into its attack.
+        let window_ticks = (crate::mob_ai::test_support::TEST_HIT_S * 1000.0) as u64 / TICK_MS + 2;
         let mut remote = None;
-        for tick_number in 0..10 {
+        for tick_number in 0..window_ticks {
             let now = NOW + tick_number * TICK_MS;
             world.set_ghosts(&sim_b(), vec![player], now);
             remote = tick(&mut world, now)
@@ -3504,7 +4205,7 @@ mod tests {
     #[ignore = "release-mode stress test of the M6-A exit"]
     fn fight_stress_keeps_ticks_under_one_tick() {
         let mut combat = test_combat();
-        combat.brain.mob_respawn_ms = STRESS_MOB_RESPAWN_MS;
+        combat.mob_respawn_ms = STRESS_MOB_RESPAWN_MS;
         let x_of = |fight: u32| STRESS_SPACING_M * (1.0 + fight as f32);
         combat.spawns = (0..STRESS_FIGHTS)
             .map(|fight| test_spawn(x_of(fight)))
@@ -3617,5 +4318,56 @@ mod tests {
             health_of(&mut next, 1).current(),
             TEST_PLAYER_HEALTH - SWORD_HIT
         );
+    }
+
+    #[test]
+    fn a_potion_of_a_disabled_class_is_not_drunk() {
+        const HEAL_EFFECT: &str = "TestHeal";
+        const POTIONS: u32 = 2;
+        for (disabled, left) in [(false, POTIONS - 1), (true, POTIONS)] {
+            let mut source = crate::combat::test_support::test_source();
+            source.consumables.push(nw_content::combat::ConsumableRow {
+                id: gear::tests::POTION.to_owned(),
+                cooldown_s: 1,
+                cooldown_id: gear::tests::POTION.to_owned(),
+                status_effects: HEAL_EFFECT.to_owned(),
+                use_tag: String::new(),
+            });
+            source.heals.push((HEAL_EFFECT.to_owned(), 1.0, 0.0));
+            let mut world = fight_at(MOB_X);
+            world.combat = committed().combat_settings(
+                Arc::new(test_data_of(source)),
+                Arc::from([]),
+                crate::combat::tests::test_mob_ai(),
+            );
+            if disabled {
+                Arc::make_mut(&mut world.content)
+                    .disabled_items
+                    .insert(gear::tests::POTION.to_lowercase());
+            }
+            let kits = gear::tests::kits();
+            let mut gear =
+                Gear::starter(&kits, gear::tests::CHARACTER, Some(gear::tests::BACKSTORY))
+                    .expect("gear");
+            gear.renew(
+                kits.item(gear::tests::POTION).expect("potion"),
+                POTIONS,
+                slot::QUICK_SLOT_1,
+            );
+            let entity = world.by_connection[&connection(1)];
+            world.world.get_mut::<Player>(entity).expect("player").gear = Some(gear);
+            world.drink(1, SERVER_TIME);
+            let potions: u32 = world
+                .world
+                .get::<Player>(entity)
+                .and_then(|player| player.gear.as_ref())
+                .map(Gear::carried)
+                .unwrap_or_default()
+                .iter()
+                .filter(|stack| stack.item_id == gear::tests::POTION)
+                .map(|stack| stack.quantity)
+                .sum();
+            assert_eq!(potions, left, "disabled: {disabled}");
+        }
     }
 }

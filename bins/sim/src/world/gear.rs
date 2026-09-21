@@ -105,6 +105,8 @@ pub(super) enum EquipRefusal {
     BagFull,
     /// A slot's item is not the one the request names.
     NotWorn,
+    /// The item's class is disabled (`javelin.disabled-item-classes`).
+    Disabled,
 }
 
 /// What a player wears and carries.
@@ -673,13 +675,15 @@ impl Gear {
     }
 
     /// Equips `quantity` of the item of instance `instance` in bag slot `bag_slot` into paperdoll
-    /// slot `slot_id`; an item worn there goes back to the bag. The id of the equipped item.
+    /// slot `slot_id`; an item worn there goes back to the bag. An item that `disabled` names
+    /// (by item id) stays in the bag. The id of the equipped item.
     pub(super) fn equip(
         &mut self,
         bag_slot: u32,
         slot_id: u32,
         quantity: u32,
         instance: [u8; RAW_ID_LEN],
+        disabled: impl Fn(&str) -> bool,
     ) -> Result<String, EquipRefusal> {
         let bag_index = usize::try_from(bag_slot).map_err(|_| EquipRefusal::NoSuchItem)?;
         let stack = self
@@ -688,6 +692,9 @@ impl Gear {
             .and_then(Option::as_ref)
             .filter(|stack| stack.item.instance == instance)
             .ok_or(EquipRefusal::NoSuchItem)?;
+        if disabled(&stack.item_id) {
+            return Err(EquipRefusal::Disabled);
+        }
         if !fits(stack.kind, slot_id) {
             return Err(EquipRefusal::WrongSlot);
         }
@@ -767,6 +774,11 @@ pub(crate) mod tests {
     pub(crate) const FLINT: &str = "FlintT1";
     const POTION_SLOT: u32 = 14;
     const POTIONS: u32 = 2;
+
+    /// No item is disabled.
+    pub(crate) fn none_disabled(_item_id: &str) -> bool {
+        false
+    }
 
     /// A kit of [`BACKSTORY`]: a chest and the sword at login, the staff in the bag.
     pub(crate) fn kits() -> StarterKits {
@@ -874,19 +886,31 @@ pub(crate) mod tests {
         assert!(gear.add(potion, 1));
         assert!(gear.add(potion, 1), "onto the same stack");
         assert_eq!(
-            gear.equip(0, slot::CHEST, 1, instance(STAFF)),
+            gear.equip(0, slot::CHEST, 1, instance(STAFF), none_disabled),
             Err(EquipRefusal::WrongSlot)
         );
         assert_eq!(
-            gear.equip(0, slot::MAIN_HAND_OPTION_1, 1, instance(POTION)),
+            gear.equip(
+                0,
+                slot::MAIN_HAND_OPTION_1,
+                1,
+                instance(POTION),
+                none_disabled
+            ),
             Err(EquipRefusal::NoSuchItem)
         );
         assert_eq!(
-            gear.equip(0, slot::MAIN_HAND_OPTION_1, 1, instance(STAFF)),
+            gear.equip(
+                0,
+                slot::MAIN_HAND_OPTION_1,
+                1,
+                instance(STAFF),
+                none_disabled
+            ),
             Ok(STAFF.to_owned())
         );
         assert_eq!(
-            gear.equip(1, POTION_SLOT, POTIONS, instance(POTION)),
+            gear.equip(1, POTION_SLOT, POTIONS, instance(POTION), none_disabled),
             Ok(POTION.to_owned())
         );
         let states = gear.take_change().expect("change");
@@ -965,7 +989,13 @@ pub(crate) mod tests {
             assert!(gear.add(item, 1));
         }
         assert_eq!(
-            gear.equip(0, slot::MAIN_HAND_OPTION_1, 1, instance(STAFF)),
+            gear.equip(
+                0,
+                slot::MAIN_HAND_OPTION_1,
+                1,
+                instance(STAFF),
+                none_disabled
+            ),
             Ok(STAFF.to_owned())
         );
         let states = gear.take_change().expect("change");
@@ -1070,7 +1100,13 @@ pub(crate) mod tests {
             gear.add(item, 1);
         }
         assert_eq!(
-            gear.equip(0, slot::MAIN_HAND_OPTION_1, 1, instance(STAFF)),
+            gear.equip(
+                0,
+                slot::MAIN_HAND_OPTION_1,
+                1,
+                instance(STAFF),
+                none_disabled
+            ),
             Ok(STAFF.to_owned())
         );
         let back = gear.bag[0].as_ref().expect("the sword is in the bag");
@@ -1194,6 +1230,31 @@ pub(crate) mod tests {
         assert_eq!(
             gear.bag[0].as_ref().map(|stack| stack.item_id.as_str()),
             Some(SWORD)
+        );
+    }
+
+    #[test]
+    fn an_item_of_a_disabled_class_stays_in_the_bag() {
+        let kits = kits();
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
+        assert!(gear.add(kits.item(STAFF).expect("staff"), 1));
+        let staff = |item_id: &str| item_id == STAFF;
+        assert_eq!(
+            gear.equip(0, slot::MAIN_HAND_OPTION_1, 1, instance(STAFF), staff),
+            Err(EquipRefusal::Disabled)
+        );
+        assert_eq!(gear.bag_count(STAFF), 1, "it stays in the bag");
+        assert_ne!(gear.worn_item(slot::MAIN_HAND_OPTION_1), Some(STAFF));
+        assert_eq!(
+            gear.equip(
+                0,
+                slot::MAIN_HAND_OPTION_1,
+                1,
+                instance(STAFF),
+                none_disabled
+            ),
+            Ok(STAFF.to_owned()),
+            "another item class equips"
         );
     }
 }

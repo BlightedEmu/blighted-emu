@@ -6,34 +6,8 @@
 use nw_reflect::{TypeIndexError, decode_type_index_prefix, encode_type_index_prefix};
 use thiserror::Error;
 
-/// Bytes of a raw id field.
-pub const RAW_ID_LEN: usize = 16;
-/// Bytes of an entity number in one half of a raw id that [`raw_id_of_entity`] made.
-const ENTITY_NUMBER_LEN: usize = 8;
+pub use crate::entity_ids::{RAW_ID_LEN, entity_of_raw_id, raw_id_of_entity};
 
-/// The raw id this server gives entity `number`: the number as a big-endian `u64` in the first
-/// 8 bytes and again in the last 8 bytes.
-///
-/// The retail layout of these 16 bytes is Unknown. The client hashes only the first 8 bytes as
-/// the offline-cache key (`FUN_140870df0` copies that qword; local-player-check note). Retail
-/// player `GdeRef` values never have an all-zero first half, so a leading 8 zero bytes would
-/// put every entity in one cache bag. Both halves hold the number so [`entity_of_raw_id`] can
-/// still recover it. The same id goes in `ClientAddEntryMsg` and in the entity's spawn card.
-pub fn raw_id_of_entity(number: u64) -> [u8; RAW_ID_LEN] {
-    let bytes = number.to_be_bytes();
-    let mut id = [0; RAW_ID_LEN];
-    id[..ENTITY_NUMBER_LEN].copy_from_slice(&bytes);
-    id[ENTITY_NUMBER_LEN..].copy_from_slice(&bytes);
-    id
-}
-
-/// The entity number of a raw id that [`raw_id_of_entity`] made; `None` for another id.
-pub fn entity_of_raw_id(id: &[u8; RAW_ID_LEN]) -> Option<u64> {
-    let (first, last) = id.split_at(ENTITY_NUMBER_LEN);
-    let first: [u8; ENTITY_NUMBER_LEN] = first.try_into().ok()?;
-    let last: [u8; ENTITY_NUMBER_LEN] = last.try_into().ok()?;
-    (first == last).then_some(u64::from_be_bytes(last))
-}
 /// Bits in one byte.
 const BYTE_BITS: u32 = 8;
 /// Value bits of a wide prefix-coded integer with `n` extra bytes, for `n` from 0 to 8.
@@ -418,25 +392,6 @@ mod tests {
     use super::*;
 
     const PREFIXED_VALUES: [u64; 4] = [0, 127, 128, 12_702];
-    const ENTITY: u64 = (1 << 34) + 7;
-
-    #[test]
-    fn a_raw_id_puts_the_number_in_both_halves_and_gives_it_back() {
-        let id = raw_id_of_entity(ENTITY);
-        assert_eq!(&id[..ENTITY_NUMBER_LEN], &ENTITY.to_be_bytes());
-        assert_eq!(&id[ENTITY_NUMBER_LEN..], &ENTITY.to_be_bytes());
-        assert_ne!(&id[..ENTITY_NUMBER_LEN], &[0; ENTITY_NUMBER_LEN]);
-        assert_eq!(entity_of_raw_id(&id), Some(ENTITY));
-        let other = raw_id_of_entity(ENTITY + 1);
-        assert_ne!(
-            &id[..ENTITY_NUMBER_LEN],
-            &other[..ENTITY_NUMBER_LEN],
-            "the cache key is the first 8 bytes"
-        );
-        let mut mismatched = id;
-        mismatched[0] ^= 1;
-        assert_eq!(entity_of_raw_id(&mismatched), None);
-    }
 
     /// The first value of each wide form: 1, 2, 3, 4, 5, 6, 7 and 8 extra bytes.
     const WIDE_FORM_STARTS: [u64; 8] = [

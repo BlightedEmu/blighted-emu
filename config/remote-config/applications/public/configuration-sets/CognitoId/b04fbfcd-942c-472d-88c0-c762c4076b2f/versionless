@@ -1,0 +1,18 @@
+{
+    "javelin": {
+        "dynamic-datatable-config": [
+            "JavelinData_LootLimits,LootLimitData,GypsumGreen,CountLimit:30",
+            "JavelinData_LootLimits,LootLimitData,GypsumRed,CountLimit:30",
+            "JavelinData_LootLimits,LootLimitData,GypsumGarnet,CountLimit:20",
+            "JavelinData_LootLimits,LootLimitData,GypsumBlue,CountLimit:20",
+            "JavelinData_LootLimits,LootLimitData,GypsumBlack,CountLimit:30",
+            "JavelinData_LootLimits,LootLimitData,GypsumYellow,CountLimit:150",
+            "JavelinData_LootLimits,LootLimitData,GypsumOrange,CountLimit:20",
+            "JavelinData_LootLimits,LootLimitData,GypsumPurple,CountLimit:100",
+            "JavelinData_LootLimits,LootLimitData,GypsumWhite,CountLimit:60",
+            "JavelinData_LootLimits, LootLimitData, UmbralCurrency, CountLimit:100000",
+            "JavelinData_UmbralCurrency, CategoricalProgressionRankData, 0, MaximumInfluence:100000",
+            "JavelinData_AfkModes, AfkModeData, Default, WarnSeconds:82800, DisconnectSeconds:86400"
+        ]
+    }
+}

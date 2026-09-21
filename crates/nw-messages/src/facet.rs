@@ -9,8 +9,9 @@
 //! (vitals-facet note). The client looks the target id up and drops a call whose target it does
 //! not know.
 
+use crate::entity_ids::{entity_of_facet, facet_of_raw_id};
 use crate::level_info::PhasingEntry;
-use crate::wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};
+use crate::wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer, raw_id_of_entity};
 
 /// The target-id constant of each component of the player entity (Soul Survivor session).
 pub mod component {
@@ -76,6 +77,8 @@ pub const QTE_COMPLETED_TYPE_INDEX: u64 = 6638;
 pub const TRIGGER_AREA_PASSTHROUGH_TYPE_INDEX: u64 = 560;
 /// Type index of `ObjectivesComponentServerFacet_NotifyOpenUiScreen`.
 pub const UI_SCREEN_OPENED_TYPE_INDEX: u64 = 2617;
+/// Type index of `GlobalStorageComponentServerFacet_SetReplicateStorage` (Azoth catalog 387).
+pub const SET_REPLICATE_STORAGE_TYPE_INDEX: u64 = 387;
 /// Type index of `PlayerTradeComponentServerFacet_TakeAllItems`.
 pub const TAKE_ALL_ITEMS_TYPE_INDEX: u64 = 2939;
 /// Type index of `PaperdollComponentServerFacet_ServerEquipItem`.
@@ -129,11 +132,10 @@ pub const LOOKING_THROUGH_LOADOUT_TYPE_INDEX: u64 = 3970;
 /// The ingredient kind of an item named by its id (beach-quests note: every captured ingredient).
 pub const INGREDIENT_ITEM: u8 = 1;
 
-/// The facet entity of the entity whose entry id names entity number `entity_number`
-/// (`ClientAddEntryMsg::for_entity`): the entry id starts with the big-endian entity number, and
-/// the facet entity is those bytes in reverse order.
-pub const fn facet_entity(entity_number: u64) -> u64 {
-    entity_number.swap_bytes()
+/// The facet entity of entity number `entity_number`: the first 8 bytes of its raw id
+/// ([`raw_id_of_entity`]) as a little-endian `u64`, the client's entity id.
+pub fn facet_entity(entity_number: u64) -> u64 {
+    facet_of_raw_id(&raw_id_of_entity(entity_number))
 }
 
 /// The two ids that start a facet body.
@@ -148,7 +150,7 @@ pub struct FacetHeader {
 impl FacetHeader {
     /// The header of a call to `component` of the player whose entry id names entity number
     /// `entity_number` (`ClientAddEntryMsg::for_entity`).
-    pub const fn of(component: u64, entity_number: u64) -> Self {
+    pub fn of(component: u64, entity_number: u64) -> Self {
         let entity = facet_entity(entity_number);
         Self {
             target: entity.wrapping_add(component),
@@ -158,17 +160,18 @@ impl FacetHeader {
 
     /// The header of a call to `component` on the child entity `child` (the XOR of its `Id` with
     /// the main entity's) of the player of entity number `entity_number`.
-    pub const fn of_child(component: u64, child: u64, entity_number: u64) -> Self {
-        let entity = entity_number.swap_bytes();
+    pub fn of_child(component: u64, child: u64, entity_number: u64) -> Self {
+        let entity = facet_entity(entity_number);
         Self {
             target: (entity ^ child).wrapping_add(component),
             entity,
         }
     }
 
-    /// The entity number of the header's entity (the inverse of [`FacetHeader::of`]).
-    pub const fn entity_number(&self) -> u64 {
-        self.entity.swap_bytes()
+    /// The entity number of the header's entity (the inverse of [`FacetHeader::of`]); `None`
+    /// for an entity whose raw id this process neither made nor adopted.
+    pub fn entity_number(&self) -> Option<u64> {
+        entity_of_facet(self.entity)
     }
 
     /// Reads the header.
@@ -326,6 +329,14 @@ pub enum ClientFacetMsg {
         quantity: u32,
         /// A byte of unknown meaning (1 in the captures).
         flag: u8,
+    },
+    /// 387: the client asks for the items of a storage: a loot bag of its loot tracker, about
+    /// 1.2 s after the kill (loot note, retail 1792696953189).
+    SetReplicateStorage {
+        /// The header (the player's `GlobalStorageComponent`).
+        header: FacetHeader,
+        /// The storage id: the bag's entity id.
+        storage: [u8; RAW_ID_LEN],
     },
     /// 2473: the client ends its interaction: its acknowledgement of the server's end (15 to 25
     /// ms after each 3746), or its cancel when it gives up or walks away (gather note).
@@ -493,6 +504,12 @@ impl ClientFacetMsg {
                     bag_slot: reader.u32()?,
                     quantity: reader.u32()?,
                     flag: reader.u8()?,
+                })
+            }),
+            SET_REPLICATE_STORAGE_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::SetReplicateStorage {
+                    header,
+                    storage: reader.raw_id()?,
                 })
             }),
             CANCEL_INTERACTION_TYPE_INDEX => read(|header, reader| {
@@ -828,7 +845,7 @@ impl CraftProgressMsg {
     }
 
     /// Player `player`'s station is idle.
-    pub const fn idle(player: u64) -> Self {
+    pub fn idle(player: u64) -> Self {
         Self {
             header: FacetHeader::of(component::CRAFTING, player),
             recipe: Vec::new(),
@@ -926,7 +943,7 @@ pub struct AdjustFxScriptsMsg {
 
 impl AdjustFxScriptsMsg {
     /// The script of CRC `script` turns on for player `player`.
-    pub const fn on(player: u64, script: u32) -> Self {
+    pub fn on(player: u64, script: u32) -> Self {
         Self {
             header: FacetHeader::of_child(
                 component::STATUS_EFFECTS,
@@ -1029,7 +1046,7 @@ header_only_message!(
 
 impl GameModeSchedulerRefreshedMsg {
     /// The call to player `player`.
-    pub const fn to(player: u64) -> Self {
+    pub fn to(player: u64) -> Self {
         Self {
             header: FacetHeader::of(component::GAME_MODE_PARTICIPANT, player),
         }
@@ -1048,7 +1065,7 @@ pub struct StartWhisperMsg {
 
 impl StartWhisperMsg {
     /// Player `player` hears the whisper of CRC `whisper`.
-    pub const fn to(player: u64, whisper: u32) -> Self {
+    pub fn to(player: u64, whisper: u32) -> Self {
         Self {
             header: FacetHeader::of(component::WHISPER_PLAYER, player),
             whisper,
@@ -1118,7 +1135,7 @@ mod tests {
 
     fn soul(component: u64) -> FacetHeader {
         // The entity number whose entry id reverses to the Soul entity.
-        FacetHeader::of(component, SOUL_ENTITY.swap_bytes())
+        FacetHeader::of(component, crate::entity_ids::number_of_facet(SOUL_ENTITY))
     }
 
     #[test]
@@ -1142,6 +1159,24 @@ mod tests {
             Some(Ok(ClientFacetMsg::CompleteObjective {
                 header,
                 objective: SKINNING_KNIFE
+            }))
+        );
+    }
+
+    #[test]
+    fn the_storage_call_reads_the_retail_body() {
+        // Retail 387 of the loot bag of the kill at 1792696951908 (loot note).
+        const ASK: &str = "7af4d38ff285bbe22715f9bca18fdeceb88319b3219d456295f52fb304838f5c";
+        let body = hex(ASK);
+        let storage: [u8; RAW_ID_LEN] = body[16..].try_into().expect("bag id");
+        assert_eq!(
+            ClientFacetMsg::decode(SET_REPLICATE_STORAGE_TYPE_INDEX, &body),
+            Some(Ok(ClientFacetMsg::SetReplicateStorage {
+                header: FacetHeader {
+                    target: 0x7af4_d38f_f285_bbe2,
+                    entity: 0x2715_f9bc_a18f_dece,
+                },
+                storage,
             }))
         );
     }
@@ -1218,7 +1253,7 @@ mod tests {
         // turn-in.
         const WHISPER: &str = "7b5857d7549305052715f9bca18fdece52f36e05";
         const REFRESHED: &str = "b4fc2d15ad1f9dae2715f9bca18fdece";
-        let player = RETAIL_ENTITY.swap_bytes();
+        let player = crate::entity_ids::number_of_facet(RETAIL_ENTITY);
         let whisper = StartWhisperMsg::to(player, 0x52f3_6e05);
         assert_eq!(whisper.encode().expect("encode"), hex(WHISPER));
         assert_eq!(StartWhisperMsg::decode(&hex(WHISPER)), Ok(whisper));
@@ -1276,7 +1311,7 @@ mod tests {
             ClientFacetMsg::decode(CANCEL_CRAFTING_TYPE_INDEX, &hex(&IDLE[..32])),
             Some(Ok(ClientFacetMsg::CancelCrafting { header }))
         );
-        let player = SOUL_ENTITY.swap_bytes();
+        let player = crate::entity_ids::number_of_facet(SOUL_ENTITY);
         let crafted = CraftProgressMsg::crafted(player, "1hSkinningKnifeT1", 1);
         assert_eq!(crafted.encode().expect("encode"), hex(CRAFTED));
         assert_eq!(
@@ -1308,7 +1343,7 @@ mod tests {
             let header = FacetHeader::of_child(
                 component::VITALS,
                 component::STATS_CHILD,
-                player.swap_bytes(),
+                crate::entity_ids::number_of_facet(player),
             );
             assert_eq!((header.target, header.entity), (target, player));
         }
@@ -1346,7 +1381,10 @@ mod tests {
         const SELECTED: &str = "11b141485d60e832bfa96f3ea2e36a5ae5bedb8e4d1510aa";
         const SEEN: &str = "b6e6f36b14aaa94fe5bedb8e4d1510aa";
         let selected = SelectedAsTargetMsg(TargetMsg {
-            header: FacetHeader::of(component::AI_TARGETABLE, PLAYER.swap_bytes()),
+            header: FacetHeader::of(
+                component::AI_TARGETABLE,
+                crate::entity_ids::number_of_facet(PLAYER),
+            ),
             creature: SAILOR,
         });
         assert_eq!(selected.encode().expect("encode"), hex(SELECTED));
@@ -1355,7 +1393,7 @@ mod tests {
             header: FacetHeader::of_child(
                 component::TUTORIAL_AI,
                 component::TUTORIAL_AI_CHILD,
-                SAILOR.swap_bytes(),
+                crate::entity_ids::number_of_facet(SAILOR),
             ),
         };
         assert_eq!(seen.encode().expect("encode"), hex(SEEN));

@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 
 use bevy_ecs::entity::Entity;
+use nw_content::gameplay_config::{GameplayConfig, XpMultipliers};
 use nw_content::poi_tags::PoiTags;
 use nw_content::rewards::Reward;
 use nw_formats::objectstream::lowercase_crc32;
@@ -16,6 +17,7 @@ use nw_messages::{InteractionRequest, ServerMessage, StartWhisperMsg};
 
 use super::{Body, Player, SimWorld, gather_answer, send_now};
 use crate::objectives::Event;
+use crate::stats::{GAME_EVENT_STAT, ONE_COMPLETION, StatEvent};
 use nw_bus::ConnectionRef;
 
 /// The status of an accepted lore read (retail: 1, with the note's title as its name and no
@@ -84,14 +86,30 @@ pub(super) fn places<'a>(poi_tags: &'a PoiTags, territories: &[u16]) -> Vec<&'a 
         .collect()
 }
 
-/// Gives `reward`'s coins and experience to `player`.
-pub(super) fn grant(player: &mut Player, reward: &Reward) {
+/// Gives `reward`'s coins and experience to `player`, under the remote config's wallet cap
+/// and character experience multiplier (`gameplay`).
+pub(super) fn grant(player: &mut Player, reward: &Reward, gameplay: &GameplayConfig) {
     if reward.coins > 0 {
-        player.coins = player.coins.saturating_add(reward.coins);
+        player.coins = with_coins(player.coins, reward.coins, gameplay.wallet_cap);
         player.coins_changed = true;
     }
-    if reward.experience > 0 {
-        player.experience = player.experience.saturating_add(reward.experience);
+    gain_experience(player, reward.experience, &gameplay.xp);
+}
+
+/// The coins of a wallet of `coins` that gets `gained`: at most `cap`
+/// (`javelin.wallet-cap-player`, Inferred from its name: no client code reads it, so the
+/// server applies it), and a wallet already above the cap keeps what it has.
+fn with_coins(coins: u64, gained: u64, cap: Option<u64>) -> u64 {
+    let total = coins.saturating_add(gained);
+    cap.map_or(total, |cap| total.min(cap).max(coins))
+}
+
+/// Gives `points` of character experience to `player`, times the remote config's character
+/// multiplier (`javelin.xp-multipliers.character`).
+pub(super) fn gain_experience(player: &mut Player, points: u32, xp: &XpMultipliers) {
+    let gained = xp.character_gain(points);
+    if gained > 0 {
+        player.experience = player.experience.saturating_add(gained);
         player.experience_changed = true;
     }
 }
@@ -140,12 +158,19 @@ impl SimWorld {
     }
 
     /// Fires game event `event` for player `number`: its whisper plays on the client (5070),
-    /// its coins, experience and item go to the player, and it is an event of the quest.
+    /// its coins, experience and item go to the player, it counts on the leaderboards it feeds,
+    /// and it is an event of the quest.
     pub(super) fn fire_game_event(&mut self, number: u64, event: &str, now_ms: u64) {
         let reward = self.content.rewards.get(event).cloned().unwrap_or_default();
         if let Some(entity) = self.player_by_number(number)
             && let Some(mut player) = self.world.get_mut::<Player>(entity)
         {
+            self.stat_events.push(StatEvent {
+                character: player.character,
+                stat_type: GAME_EVENT_STAT,
+                game_mode: event.to_owned(),
+                value: ONE_COMPLETION,
+            });
             if let Some(whisper) = &reward.whisper {
                 let start = ServerMessage::StartWhisper(StartWhisperMsg::to(
                     number,
@@ -153,7 +178,7 @@ impl SimWorld {
                 ));
                 send_now(&mut self.combat_messages, &player.connection, &[start]);
             }
-            grant(&mut player, &reward);
+            grant(&mut player, &reward, &self.content.gameplay);
         }
         tracing::info!(player = number, event, whisper = ?reward.whisper, "game event");
         self.give_loot(number, reward.item.into_iter().collect(), now_ms);

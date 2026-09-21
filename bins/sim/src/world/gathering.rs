@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use bevy_ecs::entity::Entity;
 use nw_content::gathering::Gatherable;
-use nw_content::loot::LootContext;
+use nw_content::loot::{LootContext, loot_level};
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     BundleGroup, BundleMember, GatherableControllerState, GdeMetadataReplicatedState,
@@ -19,18 +19,16 @@ use nw_messages::{
 };
 use nw_sim_core::Position;
 
+use super::loot_bag::LimitsSent;
 use super::slots::Slot;
-use super::statics::{GatherRun, chest_gather_ended, gather_started, gather_stopped};
-use super::{Body, Player, SimWorld, gather_answer, send_now};
+use super::statics::{GatherRun, chest_gather_ended, gather_started};
+use super::{Body, Player, SimWorld, gather_answer, gather_interrupted, send_now};
 use crate::mobs::spawn_index;
 use crate::objectives::Event;
 
 /// First slot key of a gather node: its index is added. Keys are never sent; they stay above
 /// every player and mob number and below the tutorial's static entities.
 pub(super) const GATHERABLE_ENTITY_BASE: u64 = 1 << 39;
-/// How near a player a node that left its default state is shown (our choice: retail cards every
-/// nearby such node on a new connection; its radius is Unknown).
-const NODE_VIEW_M: f32 = 100.0;
 /// The components of a node's group: its card, its gatherable controller (class 12) and its
 /// interact state (class 2930).
 const CARD_COMPONENT: u64 = 0;
@@ -42,9 +40,9 @@ const DEPLETED: u8 = 8;
 
 /// The status of a refused gather request (gather note: retail 2 for a node another player
 /// gathers; Inferred the same for a depleted node).
-const GATHER_BUSY: u8 = 2;
+pub(super) const GATHER_BUSY: u8 = 2;
 /// The status of an accepted gather request.
-const GATHER_ACCEPTED: u8 = 1;
+pub(super) const GATHER_ACCEPTED: u8 = 1;
 /// The name an open-world gather's accept carries (retail: empty).
 const NO_NAME: &[u8] = &[];
 /// The server tick a hand gather ends on (retail flint 0.25 s ended 300 to 307 ms after the
@@ -55,10 +53,6 @@ const SKINNING_EFFICIENCY: f32 = 2.0;
 const HAND_EFFICIENCY: f32 = 1.0;
 /// The gatherers of an open-world node (retail 1).
 const ONE_GATHERER: u8 = 1;
-/// The level loot tables read for the player (`MinContLevel`; our choice: the server keeps no
-/// player level yet) and for a mob without one.
-pub(super) const PLAYER_LOOT_LEVEL: u32 = 1;
-pub(super) const MOB_LEVEL: u32 = 1;
 /// Milliseconds per second.
 const MS_PER_SECOND: f32 = 1_000.0;
 /// The paperdoll slot of each tradeskill's tool (beach-quests note: retail equips of the
@@ -74,6 +68,8 @@ pub(super) struct OpenGather {
     number: u64,
     request: InteractionRequest,
     gatherable: Gatherable,
+    /// The loot table it rolls: its crate variant's, else its `FinalLootTable`.
+    table: Option<String>,
     /// The mob skinned, for a corpse.
     mob: Option<u64>,
     end_ms: u64,
@@ -81,15 +77,17 @@ pub(super) struct OpenGather {
 
 impl SimWorld {
     /// Player `number` (`entity`) asks at `now_ms` to gather `request` in the open world: a node
-    /// of the level (flint, a bush) or a dead mob to skin, named by its gatherable. A known
-    /// gatherable that nobody else gathers is accepted (3743, the running gather in the own
-    /// states) and ends after its gather time ([`SimWorld::gathers_due`]); a busy one is refused
-    /// (3743 status 2). [`SimWorld::interact`] passes each interaction once.
+    /// of the level (flint, a bush), a loot crate or a dead mob to skin, named by its gatherable
+    /// and `name` (a crate's variant name, empty for a node). A known gatherable that nobody
+    /// else gathers is accepted (3743, the running gather in the own states) and ends after its
+    /// gather time ([`SimWorld::gathers_due`]); a busy one is refused (3743 status 2).
+    /// [`SimWorld::interact`] passes each interaction once.
     pub(super) fn gather_open_world(
         &mut self,
         entity: Entity,
         number: u64,
         request: InteractionRequest,
+        name: &[u8],
         now_ms: u64,
     ) {
         let Some(gatherable) = request
@@ -108,6 +106,7 @@ impl SimWorld {
             return;
         };
         let mob = entity_of_raw_id(&request.target).filter(|mob| spawn_index(*mob).is_some());
+        let table = self.gather_table(&gatherable, request, name);
         if !self.holds_tool(entity, &gatherable) {
             tracing::debug!(player = number, gatherable = %gatherable.id, "gather without its tool");
             if let Some(player) = self.world.get::<Player>(entity) {
@@ -163,9 +162,68 @@ impl SimWorld {
             number,
             request,
             gatherable,
+            table,
             mob,
             end_ms: now_ms.saturating_add(duration_ms),
         });
+    }
+
+    /// The loot table of a gather of `gatherable` that `request` names `name`: a loot crate's
+    /// is its variant's ([`nw_content::gathering::CrateLoot`]), any other gatherable's its
+    /// `FinalLootTable`. A crate whose variant is Unknown rolls its `FinalLootTable` (`Empty`).
+    fn gather_table(
+        &self,
+        gatherable: &Gatherable,
+        request: InteractionRequest,
+        name: &[u8],
+    ) -> Option<String> {
+        let variant = gatherable
+            .loot_container
+            .then(|| {
+                let name = std::str::from_utf8(name).ok()?;
+                let crc = request.gatherable?;
+                self.content.crates.table(request.target_entity, crc, name)
+            })
+            .flatten();
+        if gatherable.loot_container && variant.is_none() {
+            tracing::info!(gatherable = %gatherable.id, ?request, "crate of an unknown variant");
+        }
+        variant
+            .map(str::to_owned)
+            .or_else(|| gatherable.loot_table.clone())
+    }
+
+    /// What player `number` rolls loot with: its level, and for a mob `mob` (killed or skinned)
+    /// the mob's level as the enemy and content level (Inferred: the content of a kill is the
+    /// creature; nwdb.info lists creature loot by `{!clvl}` ranges around the creature's level)
+    /// and its loot tags. A gather has no enemy, and its content and POI levels are Unknown.
+    /// `reached_limits` are the player's loot limits at their limit
+    /// ([`SimWorld::reached_loot_limits`]).
+    pub(super) fn loot_context<'a>(
+        &mut self,
+        number: u64,
+        mob: Option<(u64, &'a [String])>,
+        reached_limits: &'a [String],
+    ) -> LootContext<'a> {
+        let player = self
+            .player_by_number(number)
+            .and_then(|entity| self.world.get::<Player>(entity))
+            .and_then(|player| {
+                self.content
+                    .player_loot_levels
+                    .of(u64::from(player.experience))
+            });
+        let enemy = mob
+            .and_then(|(mob, _)| self.mobs.level(mob))
+            .map(loot_level);
+        LootContext {
+            enemy,
+            content: enemy,
+            player,
+            poi: None,
+            tags: mob.map_or(&[], |(_, tags)| tags),
+            reached_limits,
+        }
     }
 
     /// Whether player `entity` may gather `gatherable`: one that needs its tradeskill's tool
@@ -204,7 +262,8 @@ impl SimWorld {
     }
 
     /// The gathers whose time came at `now_ms` end: the interaction ends (3746), the own gather
-    /// state is done, the loot of the gatherable and its quest drops go into the bag and to the
+    /// state is done, the loot of the gatherable (less what the player's loot limits hold back)
+    /// and its quest drops go into the bag and to the
     /// open-world quest, its game event goes to the quest (a quest object), and the node is
     /// depleted until its respawn (a corpse is skinned). The depleted nodes whose time came grow
     /// back.
@@ -220,25 +279,26 @@ impl SimWorld {
     }
 
     fn end_gather(&mut self, gather: &OpenGather, now_ms: u64) {
-        let levels = LootContext {
-            enemy: gather
-                .mob
-                .and_then(|mob| self.mobs.level(mob))
-                .unwrap_or(MOB_LEVEL),
-            content: PLAYER_LOOT_LEVEL,
-            tags: &[],
-        };
+        let content = std::sync::Arc::clone(&self.content);
+        let tags = gather
+            .mob
+            .and_then(|mob| self.mobs.vitals_of(mob))
+            .and_then(|vitals| content.mob_loot.of(vitals))
+            .map_or(&[][..], |drop| drop.tags.as_slice());
+        let reached = self.reached_loot_limits(gather.number);
+        let levels = self.loot_context(gather.number, gather.mob.map(|mob| (mob, tags)), &reached);
         let dice = &mut self.dice;
-        let mut loot = gather
-            .gatherable
-            .loot_table
+        let rolled = gather
+            .table
             .as_deref()
             .map(|table| {
-                self.content
+                content
                     .loot
                     .roll(table, levels, &mut |below| dice.below(below))
             })
             .unwrap_or_default();
+        let mut loot = self.limit_loot(gather.number, rolled);
+        self.send_loot_limits(gather.number, LimitsSent::Changed);
         loot.extend(self.quest_drops(gather.number, gather.mob, &gather.gatherable.id));
         match gather.mob {
             Some(mob) => {
@@ -269,6 +329,7 @@ impl SimWorld {
         let ended = chest_gather_ended(gather.request.target_entity, player.gathers);
         player.extra_members.push(ended);
         player.gathers = player.gathers.saturating_add(1);
+        player.ended_gather = Some(gather.request);
         self.give_loot(gather.number, loot, now_ms);
         if let Some(event) = &gather.gatherable.game_event {
             self.quest_event(gather.number, Event::GameEvent(event), now_ms);
@@ -345,25 +406,51 @@ impl SimWorld {
     }
 
     /// The client of player `entity` ends interaction `interaction`: a gather that still runs
-    /// stops without a harvest; the client's acknowledgement of a gather that ended changes
-    /// nothing.
+    /// stops without a harvest (the own gather state done, as retail sends it after a cancel);
+    /// after a gather's own end the client's cancel is its acknowledgement and changes nothing.
+    /// Both get the gatherable's 2724, as retail sends it (loot note: after 98 of 126 retail
+    /// cancels of a running gather and 1,561 of 3,042 after the end; why not after the others
+    /// is Unknown).
     pub(super) fn cancel_gather(&mut self, entity: Entity, interaction: u64) {
         let Some(number) = self.world.get::<Player>(entity).map(|player| player.number) else {
             return;
         };
-        let Some(at) = self.open_gathers.iter().position(|gather| {
+        let running = self.open_gathers.iter().position(|gather| {
             gather.number == number && gather.request.interaction == interaction
-        }) else {
-            return;
+        });
+        let request = match running {
+            Some(at) => {
+                let gather = self.open_gathers.remove(at);
+                if gather.mob.is_none() {
+                    self.nodes.release(&gather.request.target);
+                }
+                if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                    let stopped = chest_gather_ended(gather.request.target_entity, player.gathers);
+                    player.extra_members.push(stopped);
+                    player.gathers = player.gathers.saturating_add(1);
+                }
+                gather.request
+            }
+            None => {
+                let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+                    return;
+                };
+                match player.ended_gather {
+                    Some(ended) if ended.interaction == interaction => {
+                        player.ended_gather = None;
+                        ended
+                    }
+                    _ => return,
+                }
+            }
         };
-        let gather = self.open_gathers.remove(at);
-        if gather.mob.is_none() {
-            self.nodes.release(&gather.request.target);
-        }
-        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            let stopped = gather_stopped(player.gathers);
-            player.extra_members.push(stopped);
-            player.gathers = player.gathers.saturating_add(1);
+        if let Some(player) = self.world.get::<Player>(entity) {
+            let interrupted = gather_interrupted(request);
+            send_now(
+                &mut self.combat_messages,
+                &player.connection,
+                &[interrupted],
+            );
         }
     }
 }
@@ -413,6 +500,7 @@ impl Node {
                     component: INTERACT_COMPONENT,
                     state: MemberState::Interact(InteractState {
                         enabled: Some(enabled),
+                        has_interactors: None,
                     }),
                 },
             ])
@@ -501,12 +589,16 @@ impl Nodes {
     }
 
     /// The slot keys of the nodes shown to a player at `position`: those that left their default
-    /// state, within [`NODE_VIEW_M`].
-    pub(super) fn numbers_near(&self, position: Position) -> impl Iterator<Item = u64> + '_ {
+    /// state, within `radius_m` (the interest radius).
+    pub(super) fn numbers_near(
+        &self,
+        position: Position,
+        radius_m: f32,
+    ) -> impl Iterator<Item = u64> + '_ {
         (0_u64..)
             .zip(&self.nodes)
             .filter(move |(_, node)| {
-                node.version > 0 && node.position.horizontal_distance(position) <= NODE_VIEW_M
+                node.version > 0 && node.position.horizontal_distance(position) <= radius_m
             })
             .map(|(index, _)| GATHERABLE_ENTITY_BASE + index)
     }
@@ -538,6 +630,8 @@ mod tests {
     use super::*;
 
     const FLINT: [u8; RAW_ID_LEN] = [0x5b; RAW_ID_LEN];
+    /// The interest radius of the test views.
+    const RADIUS_M: f32 = 100.0;
     const AT: Position = Position {
         x: 7305.0,
         y: 3093.0,
@@ -559,14 +653,17 @@ mod tests {
         assert_eq!(nodes.start(FLINT, AT, PLAYER), Ok(()));
         assert_eq!(nodes.start(FLINT, AT, PLAYER + 1), Err(NodeBusy::Gathered));
         assert_eq!(
-            nodes.numbers_near(AT).count(),
+            nodes.numbers_near(AT, RADIUS_M).count(),
             0,
             "a node in its default state is not shown"
         );
         nodes.deplete(&FLINT, RESPAWN_AT_MS);
         assert_eq!(nodes.start(FLINT, AT, PLAYER), Err(NodeBusy::Depleted));
         let number = GATHERABLE_ENTITY_BASE;
-        assert_eq!(nodes.numbers_near(AT).collect::<Vec<_>>(), [number]);
+        assert_eq!(
+            nodes.numbers_near(AT, RADIUS_M).collect::<Vec<_>>(),
+            [number]
+        );
         let mut sent = HashMap::new();
         let new = Slot {
             interest: 9,
@@ -587,9 +684,9 @@ mod tests {
         nodes.release(&FLINT);
         assert_eq!(nodes.start(FLINT, AT, PLAYER), Ok(()), "a cancel frees it");
         let far = Position {
-            x: AT.x + NODE_VIEW_M + 1.0,
+            x: AT.x + RADIUS_M + 1.0,
             ..AT
         };
-        assert_eq!(nodes.numbers_near(far).count(), 0);
+        assert_eq!(nodes.numbers_near(far, RADIUS_M).count(), 0);
     }
 }

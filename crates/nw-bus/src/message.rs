@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use nw_messages::LOOK_CHOICES;
+use nw_messages::{LOOK_CHOICES, RAW_ID_LEN};
 use nw_sim_core::Position;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -186,6 +186,9 @@ pub struct Admit {
     pub items: Option<Vec<CarriedItem>>,
     /// The character's saved quests; empty when it never saved any.
     pub quests: PlayerQuests,
+    /// The character's saved progression; empty when it never saved any.
+    #[serde(default)]
+    pub progression: PlayerProgression,
 }
 
 /// The answer to [`Admit`].
@@ -257,6 +260,8 @@ pub struct HandoffOffer {
     pub name: String,
     /// The entity number; it stays the same.
     pub entity: u64,
+    /// The entity's raw id (`GdeRef`), which the client knows it by; it stays the same.
+    pub gde_ref: [u8; RAW_ID_LEN],
     /// The last good position.
     pub position: Point,
     /// Milliseconds since the last good move.
@@ -296,20 +301,14 @@ pub struct HandoffOffer {
     /// dropped every greatsword swing).
     #[serde(default)]
     pub drawn_weapon: Option<u32>,
-    /// The player's experience points (the tutorial's kills give some).
-    #[serde(default)]
-    pub experience: u32,
-    /// The player's coins (quest rewards give some).
-    #[serde(default)]
-    pub coins: u64,
     /// The player's quests: the active one with its run, and the finished ones.
     #[serde(default)]
     pub quests: PlayerQuests,
-    /// The set achievement bits of the level the player leaves; a taker that changes the level
-    /// keeps them (retail: the open world's first full achievement state held the tutorial's 54
-    /// bits).
+    /// The player's experience, coins, achievements and loot limit counts. A taker that changes
+    /// the level keeps the achievements (retail: the open world's first full achievement state
+    /// held the tutorial's 54 bits).
     #[serde(default)]
-    pub achievements: Vec<u32>,
+    pub progression: PlayerProgression,
     /// The version of the newest achievement state the client has; the taker's first full state
     /// goes on above it (Inferred, as for the quest tracker: the tutorial's changes ended at
     /// version 25 and the beach sim sent its first full state at 3; retail's versions only rise,
@@ -331,6 +330,33 @@ pub struct PlayerQuests {
     /// never tracked the accepted quest and never offered its campfire).
     #[serde(default)]
     pub tracker_version: u64,
+}
+
+/// A player's progression besides its items and quests (world migration 0006), as a join or a
+/// handoff carries it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerProgression {
+    /// Its experience points (kills and quest rewards give some).
+    pub experience: u32,
+    /// Its coins (quest rewards give some).
+    pub coins: u64,
+    /// Its set achievement bits, ascending.
+    pub achievements: Vec<u32>,
+    /// Its loot limit counts, ended ones too, by limit id.
+    pub loot_limits: Vec<LootLimitCount>,
+}
+
+/// One loot limit's count of a player (`nw_content::loot_limits`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LootLimitCount {
+    /// The lowercase `LootLimitID`.
+    pub limit_id: String,
+    /// The count.
+    pub count: u64,
+    /// Unix nanoseconds of its last count.
+    pub counted_ns: u64,
+    /// Unix nanoseconds when it goes back to 0.
+    pub ends_ns: u64,
 }
 
 /// A player's run of a quest, as a handoff carries it to the next sim.
@@ -520,6 +546,9 @@ pub struct Ghosts {
     pub from: BusId,
     /// Its players near the receiver's cells; an empty list clears the last one.
     pub entities: Vec<Ghost>,
+    /// The raw id (`GdeRef`) of each entity in [`Ghosts::entities`], by entity number: the
+    /// receiver's clients see the entity by the same id as the owner's.
+    pub gde_refs: Vec<(u64, [u8; RAW_ID_LEN])>,
 }
 
 /// A sim is alive, with its load for the director.
@@ -645,6 +674,11 @@ mod tests {
     use super::*;
 
     const CONNECTION: u64 = 7;
+    /// A raw id of the dynamic form (bit 0 of the first byte clear).
+    const GDE_REF: [u8; RAW_ID_LEN] = [
+        0x42, 0x9c, 0x17, 0xe3, 0x05, 0xb8, 0x6a, 0xd1, 0x3f, 0x80, 0x2e, 0xc4, 0x91, 0x0b, 0x7d,
+        0x56,
+    ];
     const STARTED_AT_MS: u64 = 1_800_000_000_000;
     const MISSES: u32 = 3;
 
@@ -720,6 +754,22 @@ mod tests {
         z: 300.25,
     };
 
+    /// A progression with every field set: the tutorial's experience and achievements, and the
+    /// retail newchar loot limit count.
+    fn progression() -> PlayerProgression {
+        PlayerProgression {
+            experience: 1_250,
+            coins: 375,
+            achievements: vec![14_809, 15_317],
+            loot_limits: vec![LootLimitCount {
+                limit_id: "2hwarhammer_ftue_corruptedsailer_v2".to_owned(),
+                count: 1,
+                counted_ns: 1_792_696_951_894_621_000,
+                ends_ns: 1_793_091_600_894_621_000,
+            }],
+        }
+    }
+
     #[test]
     fn every_m5_message_round_trips() {
         round_trip(Admit {
@@ -740,6 +790,7 @@ mod tests {
                 place: ItemPlace::Bag(0),
             }]),
             quests: PlayerQuests::default(),
+            progression: progression(),
         });
         round_trip(AdmitReply::Admitted);
         round_trip(AdmitReply::Refused {
@@ -761,6 +812,7 @@ mod tests {
             character: Uuid::new_v4(),
             name: "Ada".to_owned(),
             entity: CONNECTION,
+            gde_ref: GDE_REF,
             position: POINT,
             move_age_ms: 40,
             budget_m: 3.5,
@@ -775,9 +827,7 @@ mod tests {
             phasing_sequence: 2,
             client_context: 1,
             enter_level: false,
-            experience: 0,
-            coins: 0,
-            achievements: vec![14809, 15317],
+            progression: progression(),
             achievement_version: 25,
             items: Some(vec![CarriedItem {
                 item_id: "PotionHealthT1".to_owned(),
@@ -821,6 +871,7 @@ mod tests {
                 mob: None,
                 player: None,
             }],
+            gde_refs: vec![(CONNECTION, GDE_REF)],
         });
         round_trip(SimHeartbeat {
             id: sim(),

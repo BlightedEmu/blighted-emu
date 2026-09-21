@@ -10,7 +10,11 @@ use eframe::egui;
 use nw_protocol::launcher_api::{AuthMode, DiscordPollReply, LauncherInfo, PasswordCredentials};
 
 use crate::api::{ApiError, LauncherApi, discord_login_page};
-use crate::game::{DEFAULT_STEAM, append_override_config, game_arguments, start_game};
+use crate::game::{
+    append_override_config, checked_direct_launch, direct_launch_from_env, game_arguments,
+    start_game,
+};
+use crate::mirror::{NETWORK_DIR, write_network_files};
 use crate::server::api_base_url;
 use crate::settings::Settings;
 
@@ -154,21 +158,27 @@ impl LauncherApp {
         }));
     }
 
+    /// Checks the direct launch and the server's mirror, writes the private network files next to
+    /// the settings, then asks for a game session key and starts the game.
     fn play(&mut self, api: LauncherApi, info: LauncherInfo, token: String) {
-        let steam = self
-            .settings
-            .steam_path
-            .clone()
-            .unwrap_or_else(|| PathBuf::from(DEFAULT_STEAM));
+        let network_dir = self.settings_path.with_file_name(NETWORK_DIR);
         self.status = "Starting the game ...".to_owned();
         self.job = Some(run_job(move || {
+            let launch = match checked_direct_launch(direct_launch_from_env()) {
+                Ok(launch) => launch,
+                Err(error) => return Event::Failed(error.to_string()),
+            };
+            let files = match write_network_files(&network_dir, &info.aws_mirror, api.host()) {
+                Ok(files) => files,
+                Err(error) => return Event::Failed(error.to_string()),
+            };
             let key = match api.play(&token) {
                 Ok(reply) => reply.game_session_key,
                 Err(error) => return failure(&error),
             };
-            match game_arguments(&info.launch_arguments, &key)
-                .and_then(|arguments| start_game(&steam, &append_override_config(arguments)))
-            {
+            match game_arguments(&info.launch_arguments, &key).and_then(|arguments| {
+                start_game(&launch, &files, &append_override_config(arguments))
+            }) {
                 Ok(()) => Event::GameStarted,
                 Err(error) => Event::Failed(error.to_string()),
             }
@@ -195,7 +205,7 @@ impl LauncherApp {
                 self.settings.launcher_token = Some(token);
                 self.save();
             }
-            Event::GameStarted => self.status = "Game started through Steam".to_owned(),
+            Event::GameStarted => self.status = "Game started".to_owned(),
             Event::LoggedOut => {
                 self.status = "Logged out".to_owned();
                 self.settings.launcher_token = None;

@@ -67,7 +67,9 @@ const GATHERABLE_CONTROLLER_CHILDREN: u8 = 1;
 /// The sized child of the interact state: child 0, the interaction's `Enabled` flag (a byte;
 /// retail `01 01 00` on a taken bag and a depleted node, `01 01 01` on a node that grew back). The
 /// other children are Unknown, so a body that sets one is not read.
-const INTERACT_CHILDREN: u8 = 1;
+/// Children of the interact state sized here: `Enabled` (a byte) and `HasInteractors` (a `u32`;
+/// retail loot bag `01 02 00000001` while it is opened). `CooldownUpdates` is not sized.
+const INTERACT_CHILDREN: u8 = 2;
 /// The sized child of the currency: child 0, the coins (a `u64`; beach-quests note: retail
 /// `01 01 0000000000000177`, 375 coins after two quest rewards). The other children are Unknown.
 const CURRENCY_CHILDREN: u8 = 1;
@@ -405,6 +407,8 @@ impl GatherableControllerState {
 pub struct InteractState {
     /// Child 0, `Enabled`.
     pub enabled: Option<bool>,
+    /// Child 1, `HasInteractors`.
+    pub has_interactors: Option<u32>,
 }
 
 impl InteractState {
@@ -415,8 +419,12 @@ impl InteractState {
     /// Returns [`MessageError`] when the body ends early or sets an unsized child.
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         let mut state = Self::default();
-        read_slot_0(reader, "interact", INTERACT_CHILDREN, |reader, _| {
-            state.enabled = Some(reader.u8()? != 0);
+        read_slot_0(reader, "interact", INTERACT_CHILDREN, |reader, child| {
+            if child == 0 {
+                state.enabled = Some(reader.u8()? != 0);
+            } else {
+                state.has_interactors = Some(reader.u32()?);
+            }
             Ok(())
         })?;
         Ok(state)
@@ -426,10 +434,14 @@ impl InteractState {
     pub fn write(&self, writer: &mut Writer) {
         write_known(
             writer,
-            children_mask(&[self.enabled.is_some()]),
+            children_mask(&[self.enabled.is_some(), self.has_interactors.is_some()]),
             INTERACT_CHILDREN,
-            |writer, _| {
-                self.enabled.map(|enabled| writer.u8(u8::from(enabled)));
+            |writer, child| {
+                if child == 0 {
+                    self.enabled.map(|enabled| writer.u8(u8::from(enabled)));
+                } else {
+                    self.has_interactors.map(|count| writer.u32(count));
+                }
             },
         );
     }
@@ -714,6 +726,29 @@ mod tests {
             state.write(&mut writer);
             assert_eq!(writer.finish(), body);
         }
+    }
+
+    #[test]
+    fn the_interact_state_counts_its_interactors() {
+        // Retail loot bag of the kill at 1792696951908: opened (+4291 ms), then left (+4357 ms).
+        for (body, count) in [
+            ([0x01, 0x02, 0x00, 0x00, 0x00, 0x01], 1),
+            ([0x01, 0x02, 0x00, 0x00, 0x00, 0x00], 0),
+        ] {
+            let state = InteractState::read(&mut Reader::new(&body)).expect("read");
+            assert_eq!(
+                state,
+                InteractState {
+                    enabled: None,
+                    has_interactors: Some(count),
+                }
+            );
+            let mut writer = Writer::new();
+            state.write(&mut writer);
+            assert_eq!(writer.finish(), body);
+        }
+        let cooldowns = [0x01, 0x04, 0x00];
+        assert!(InteractState::read(&mut Reader::new(&cooldowns)).is_err());
     }
 
     #[test]

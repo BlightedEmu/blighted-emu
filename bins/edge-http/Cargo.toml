@@ -16,6 +16,8 @@ metrics-exporter-prometheus.workspace = true
 nw-common.workspace = true
 nw-db.workspace = true
 nw-login.workspace = true
+openssl.workspace = true
+rustls.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
@@ -24,6 +26,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
+reqwest.workspace = true
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 
 [lints]

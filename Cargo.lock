@@ -910,6 +910,7 @@ dependencies = [
  "clap",
  "crc32fast",
  "hex",
+ "nw-ai",
  "nw-capture",
  "nw-carrier",
  "nw-common",
@@ -927,6 +928,7 @@ dependencies = [
  "quote",
  "serde",
  "serde_json",
+ "sim",
  "syn 3.0.9",
  "tempfile",
  "thiserror 2.0.21",
@@ -1258,7 +1260,11 @@ dependencies = [
  "nw-common",
  "nw-db",
  "nw-login",
+ "openssl",
+ "reqwest",
+ "rustls",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tower",
@@ -2947,6 +2953,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "nw-ai"
+version = "0.1.0"
+dependencies = [
+ "nw-content",
+ "nw-formats",
+ "nw-oodle",
+ "postcard",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "nw-bus"
 version = "0.1.0"
 dependencies = [
@@ -3077,6 +3096,8 @@ dependencies = [
  "hmac",
  "http-body-util",
  "httpdate",
+ "md-5",
+ "metrics",
  "nw-common",
  "nw-db",
  "nw-formats",
@@ -3102,6 +3123,8 @@ dependencies = [
 name = "nw-messages"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.3.4",
+ "hex",
  "nw-reflect",
  "proptest",
  "thiserror 2.0.21",
@@ -4568,14 +4591,17 @@ dependencies = [
  "bevy_ecs",
  "clap",
  "getrandom 0.3.4",
+ "hex",
  "metrics",
  "metrics-exporter-prometheus",
+ "nw-ai",
  "nw-bus",
  "nw-carrier",
  "nw-common",
  "nw-content",
  "nw-db",
  "nw-formats",
+ "nw-login",
  "nw-messages",
  "nw-reflect",
  "nw-sim-core",

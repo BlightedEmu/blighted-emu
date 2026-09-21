@@ -5,6 +5,9 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
+use crate::slice_data::SpawnedSlice;
+use crate::stations::CraftingStation;
+
 /// A world position in metres: x, y, z (z up).
 pub type Position = [f32; 3];
 
@@ -29,6 +32,10 @@ pub struct WorldFile {
     pub encounters: Vec<EncounterPoint>,
     /// Placement records from `*.capitals.json`.
     pub capitals: Vec<Capital>,
+    /// The slices the capitals spawn (`region.slicedata`).
+    pub spawned: Vec<SpawnedSlice>,
+    /// The crafting stations among the spawned slices.
+    pub stations: Vec<CraftingStation>,
     /// Stable design key of each NPC point, in the order of `npcs` (see [`point_keys`]).
     pub npc_keys: Vec<String>,
     /// Stable design key of each vitals spawn, in the order of `vitals` (see [`point_keys`]).
@@ -270,6 +277,10 @@ pub struct RecordCounts {
     pub encounters: usize,
     /// Capitals.
     pub capitals: usize,
+    /// Spawned slices.
+    pub spawned: usize,
+    /// Crafting stations.
+    pub stations: usize,
 }
 
 /// Metres of one step of a point key coordinate (0.1 m).
@@ -334,6 +345,8 @@ impl WorldFile {
             landmarks: self.landmarks.len(),
             encounters: self.encounters.len(),
             capitals: self.capitals.len(),
+            spawned: self.spawned.len(),
+            stations: self.stations.len(),
         }
     }
 }
@@ -349,6 +362,8 @@ impl std::ops::AddAssign for RecordCounts {
         self.landmarks += other.landmarks;
         self.encounters += other.encounters;
         self.capitals += other.capitals;
+        self.spawned += other.spawned;
+        self.stations += other.stations;
     }
 }
 
@@ -468,6 +483,8 @@ mod tests {
             landmarks: 8,
             encounters: 9,
             capitals: 10,
+            spawned: 11,
+            stations: 12,
         };
         assert_eq!(
             total,
@@ -481,6 +498,8 @@ mod tests {
                 landmarks: 8,
                 encounters: 9,
                 capitals: 10,
+                spawned: 11,
+                stations: 12,
             }
         );
     }
@@ -497,6 +516,7 @@ mod tests {
             ],
             vitals: vec![VitalsSpawn::default(); 3],
             capitals: vec![Capital::default()],
+            spawned: vec![SpawnedSlice::default(); 2],
             ..WorldFile::default()
         };
         assert_eq!(
@@ -506,6 +526,7 @@ mod tests {
                 terrain_regions: 1,
                 vitals: 3,
                 capitals: 1,
+                spawned: 2,
                 ..RecordCounts::default()
             }
         );

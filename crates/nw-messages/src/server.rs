@@ -329,9 +329,9 @@ mod tests {
     #[test]
     fn the_retail_potion_script_message_has_the_retail_bytes() {
         // Retail 608 (xp-potion-exit note, section 2.2): `d934888ec32a8b14 bfa96f3ea2e36a5a
-        // f7e1e0d6 01`; the facet entity is the reversed player number.
-        const PLAYER: u64 = 0x5a6a_e3a2_3e6f_a9bf;
-        let body = AdjustFxScriptsMsg::on(PLAYER, POTION_HEAL_SCRIPT)
+        // f7e1e0d6 01`.
+        let player = crate::entity_ids::number_of_facet(0xbfa9_6f3e_a2e3_6a5a);
+        let body = AdjustFxScriptsMsg::on(player, POTION_HEAL_SCRIPT)
             .encode()
             .expect("encode");
         assert_eq!(
@@ -342,8 +342,10 @@ mod tests {
             ]
         );
         // Another retail player (facets note): header `33e9e69df0f79674 e113c90dd7307efa`.
-        const OTHER: u64 = 0xfa7e_30d7_0dc9_13e1;
-        let other = AdjustFxScriptsMsg::on(OTHER, POTION_HEAL_SCRIPT);
+        let other = AdjustFxScriptsMsg::on(
+            crate::entity_ids::number_of_facet(0xe113_c90d_d730_7efa),
+            POTION_HEAL_SCRIPT,
+        );
         assert_eq!(other.header.target, 0x33e9_e69d_f0f7_9674);
         assert_eq!(other.header.entity, 0xe113_c90d_d730_7efa);
     }

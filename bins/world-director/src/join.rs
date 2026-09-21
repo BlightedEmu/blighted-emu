@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! One join (M5 spec section 3.1): check the account, load the position, the items and the
-//! quests, take an entity number, and ask the owner of the cell to take the player.
+//! One join (M5 spec section 3.1): check the account, load the position, the items, the quests
+//! and the progression, take an entity number, and ask the owner of the cell to take the player.
 
 use std::time::Duration;
 
 use nw_bus::{
-    Admit, AdmitReply, Bus, CarriedItem, ItemPlace, Join, MOB_ENTITY_BASE, PlayerQuests, Point,
-    QuestRun, SimSlot, subject,
+    Admit, AdmitReply, Bus, CarriedItem, ItemPlace, Join, LootLimitCount, MOB_ENTITY_BASE,
+    PlayerProgression, PlayerQuests, Point, QuestRun, SimSlot, subject,
 };
 use nw_db::{
-    PgPool, SavedItem, SavedPlace, SavedPosition, SavedQuests, character_by_id, character_items,
-    character_position, character_quests, next_entity_number,
+    PgPool, SavedItem, SavedPlace, SavedPosition, SavedProgression, SavedQuests, character_by_id,
+    character_items, character_position, character_progression, character_quests,
+    next_entity_number,
 };
 use nw_login::look::{saved_backstory, saved_look};
 use nw_sim_core::{Position, TUTORIAL_FOLDER, TUTORIAL_START};
@@ -164,9 +165,10 @@ pub async fn route_join(
         ),
     };
     let tutorial = tutorial.filter(|_| starts_in_tutorial(saved.as_ref()));
-    // The tutorial always starts from the starter kit and no quest (admin studio S5, S7).
-    let (items, quests) = match tutorial {
-        Some(_) => (None, PlayerQuests::default()),
+    // The tutorial always starts from the starter kit, no quest and no progression (admin
+    // studio S5, S7; the tutorial sim saves none of them).
+    let (items, quests, progression) = match tutorial {
+        Some(_) => (None, PlayerQuests::default(), PlayerProgression::default()),
         None => (
             character_items(&context.db, join.character)
                 .await
@@ -176,6 +178,11 @@ pub async fn route_join(
                 .await
                 .map_err(database)?
                 .map(player_quests)
+                .unwrap_or_default(),
+            character_progression(&context.db, join.character)
+                .await
+                .map_err(database)?
+                .map(player_progression)
                 .unwrap_or_default(),
         ),
     };
@@ -211,6 +218,7 @@ pub async fn route_join(
         backstory: saved_backstory(&character.appearance),
         items,
         quests,
+        progression,
     };
     let reply = context
         .bus
@@ -243,6 +251,25 @@ fn player_quests(saved: SavedQuests) -> PlayerQuests {
         active,
         done: saved.done,
         ..PlayerQuests::default()
+    }
+}
+
+/// The saved progression as a sim keeps it.
+fn player_progression(saved: SavedProgression) -> PlayerProgression {
+    PlayerProgression {
+        experience: saved.experience,
+        coins: saved.coins,
+        achievements: saved.achievements,
+        loot_limits: saved
+            .loot_limits
+            .into_iter()
+            .map(|limit| LootLimitCount {
+                limit_id: limit.limit_id,
+                count: limit.count,
+                counted_ns: limit.counted_ns,
+                ends_ns: limit.ends_ns,
+            })
+            .collect(),
     }
 }
 
@@ -285,6 +312,35 @@ mod tests {
             done: Vec::new(),
         });
         assert_eq!(bad.active, None);
+    }
+
+    #[test]
+    fn saved_progression_keeps_every_value() {
+        let saved = SavedProgression {
+            experience: 1_250,
+            coins: 375,
+            achievements: vec![14_809, 15_317],
+            loot_limits: vec![nw_db::SavedLootLimit {
+                limit_id: "2hwarhammer_ftue_corruptedsailer_v2".to_owned(),
+                count: 1,
+                counted_ns: 1_793_091_600_894_621_000,
+                ends_ns: 1_793_091_600_894_621_000,
+            }],
+        };
+        assert_eq!(
+            player_progression(saved),
+            PlayerProgression {
+                experience: 1_250,
+                coins: 375,
+                achievements: vec![14_809, 15_317],
+                loot_limits: vec![LootLimitCount {
+                    limit_id: "2hwarhammer_ftue_corruptedsailer_v2".to_owned(),
+                    count: 1,
+                    counted_ns: 1_793_091_600_894_621_000,
+                    ends_ns: 1_793_091_600_894_621_000,
+                }],
+            }
+        );
     }
 
     #[test]

@@ -18,6 +18,12 @@ pub enum ServerAddressError {
     Forbidden,
 }
 
+/// The host of a base URL from [`api_base_url`]: `https://login.example.org` gives
+/// `login.example.org`.
+pub fn api_host(base_url: &str) -> &str {
+    base_url.trim_start_matches(HTTPS_PREFIX)
+}
+
 /// The launcher API base URL for a typed address: `example.org`, `login.example.org` and
 /// `https://login.example.org` all give `https://login.example.org`.
 pub fn api_base_url(input: &str) -> Result<String, ServerAddressError> {
@@ -63,6 +69,12 @@ mod tests {
                 "{input}"
             );
         }
+    }
+
+    #[test]
+    fn the_host_is_the_base_url_without_the_scheme() {
+        let base = api_base_url("example.org").expect("base");
+        assert_eq!(api_host(&base), "login.example.org");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 # sim configuration (M4 spec section 7, M5 spec section 7.1). This file holds no secret.
-# Secret: the world database password, in the variable named by world_database_password_env.
+# Secrets: the world and global database passwords, in the variables named by
+# world_database_password_env and global_database_password_env.
 # Any key below can be overridden with NW_SIM_<KEY>, nested keys joined by "__".
 
 # This sim's id; unique in the world. world-director gives it cells.
@@ -9,7 +10,12 @@ world_id = "8d0f4c2e-0000-4000-8000-000000000001"
 # NATS. Keep it on an internal address.
 nats_url = "nats://127.0.0.1:4222"
 world_database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
+global_database_password_env = "NW_SECRET_GLOBAL_DATABASE_PASSWORD"
 client_build_config = "config/client-build.toml"
+# The edge-http config. The sim reads the gameplay values (XP multipliers, disabled item
+# classes, datasheet overrides, ...) from the same remote config sets edge-http gives the client
+# ([remote_config] there), so the server and the client use one source.
+edge_config = "config/edge.toml"
 # World files from `just world`.
 content_dir = "local-data/content"
 # The open map level; the same as in config/world-director.toml.
@@ -59,36 +65,49 @@ log_filter = "info"
 url = "postgres://nw@127.0.0.1:5432/nw_world_1"
 max_connections = 5
 
+# The leaderboard stats (docs/re/2026-09-18-leaderboards-and-analytics.md); the same database as
+# [global_database] in config/edge.toml.
+[global_database]
+url = "postgres://nw@127.0.0.1:5432/nw_global"
+max_connections = 2
+
+# The leaderboard rotations. They must equal the keys the config layers give the client
+# (javelin.leaderboard-rotation-startDate, javelin.weekly-leaderboard-reset-hour,
+# javelin.leaderboard-season-rotation), or the sim writes boards the client never asks for.
+# Retail values: start date and season from the 2026-06-30 capture (w178, m41, s11), reset hour
+# from the iad-prod RegionId layer of 2026-09-18.
+[leaderboards]
+rotation_start_date = "2023-02-07"
+weekly_reset_hour = 2
+season = 11
+
+# The resets of the loot limits (LootLimitData): a daily limit (LimitExpireSeconds 64800 or
+# 86400) resets each day at hour_utc, a weekly one (604800) on weekly_day at that hour. Retail
+# (loot tracker entries of 707 capture ledgers): weekly ones always end on a Tuesday; the hour
+# is 09:00 UTC on the US East server of our config sets (newchar ledger 2026-09-18, 31 ledgers)
+# and 03:00 UTC on 417 ledgers of another server. Whether the hour follows daylight saving time
+# is Unknown.
+[loot_limits]
+hour_utc = 9
+weekly_day = "tuesday"
+
 # Mobs and combat (M6-A spec section 9). Values marked Unknown are not in the game files yet;
 # the study notes of M6-B replace them with numbers from the captures.
 [combat]
 player_vitals_id = "Player"
 weapon_id = "SwordT1"
-attack_damage_ids = ["1H_Sword_Attack1", "1H_Sword_Attack2"]
-# One blunderbuss pellet (0.19 of the weapon's base damage).
-spreadshot_damage_id = "Blunderbuss_Primary_Attack"
+# The player's damage table (the player slice names javelindata_damagetable, unique id DamageTable).
+damage_table = "DamageTable"
 armor_share = 0.35
 # Retail 3601 hits on a new character in starter armor keep 0.6006 of the damage.
 player_armor_share = 0.3994
-mob_attack_factor = 1.0
 # wake_radius_m: absent means interest_radius_m.
 sleep_after_ms = 30000
-# Unknown.
-base_sight_m = 20.0
-# Unknown.
-wander_radius_m = 10.0
-# Unknown.
-wander_pause_ms = 5000
-# Unknown.
-leash_radius_m = 50.0
-# Unknown.
+# The reach of a player's attack request without a swing: Unknown.
 attack_reach_m = 3.0
 reach_margin_m = 1.0
 # The retail sword's hit spacing, the fastest tutorial weapon (sword 400, axe 700, hammer 830 ms).
 min_attack_interval_ms = 400
-# Unknown.
-mob_attack_interval_ms = 2000
-mob_speed_mps = 3.25
 mob_respawn_ms = 360000
 # Shortest time from a death to a respawn request (the client asks, type 1938): below the
 # lowest captured gap.
@@ -96,6 +115,16 @@ min_respawn_ms = 2000
 seed = 1
 # The u32 of a mob spawn card AssetId (Azoth catalog field note: always 2).
 asset_sub_id = 2
+
+# How often a mob's behavior tree runs (retail ALC state rates of the newchar capture
+# 2026-09-18, trace finding c; the rate of the states is Inferred equal to the AI tick rate):
+# with a target 33 ms at every distance; moving without one 98 ms within 20 m, 218 ms to
+# 40 m and 333 ms beyond; standing without one 333 ms.
+[mob_ai]
+combat_interval_ms = 33
+moving_interval_ms = [98, 218, 333]
+moving_range_m = [20.0, 40.0]
+idle_interval_ms = 333
 
 # The admin tool's live panel (admin tools spec, section 5). The
 # snapshot of players and awake mobs on the bus is off at 0; at least 100 ms when on.

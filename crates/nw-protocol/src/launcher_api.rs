@@ -4,6 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::aws_mirror::AwsMirror;
+
 /// `GET` server name, login mode and launch arguments.
 pub const INFO_PATH: &str = "/launcher/info";
 /// `POST` password sign-up.
@@ -67,6 +69,8 @@ pub struct LauncherInfo {
     pub allow_registration: bool,
     /// Game launch arguments; [`SESSION_PLACEHOLDER`] stands for the game session key.
     pub launch_arguments: Vec<String>,
+    /// The Amazon names this server answers for the game process, with its certificate.
+    pub aws_mirror: AwsMirror,
 }
 
 /// Body of `POST /launcher/register` and `POST /launcher/login`.
@@ -176,6 +180,10 @@ mod tests {
                 "-LoginChannelOverride".to_owned(),
                 SESSION_PLACEHOLDER.to_owned(),
             ],
+            aws_mirror: AwsMirror {
+                hosts: vec!["ags-javelin-remote-config.s3.amazonaws.com".to_owned()],
+                certificate_pem: "-----BEGIN CERTIFICATE-----".to_owned(),
+            },
         };
         let value = json(&info);
         assert_eq!(
@@ -183,10 +191,12 @@ mod tests {
             [
                 "allow_registration",
                 "auth_mode",
+                "aws_mirror",
                 "launch_arguments",
                 "server_name"
             ]
         );
+        assert_eq!(keys(&value["aws_mirror"]), ["certificate_pem", "hosts"]);
         assert_eq!(value["auth_mode"], "discord");
         assert_eq!(
             serde_json::from_value::<LauncherInfo>(value).expect("parse"),

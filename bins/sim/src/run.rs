@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder};
+use nw_ai::AiData;
 use nw_bus::{Bus, BusError};
 use nw_common::config::ConfigError;
 use nw_common::logging::{LoggingError, init_logging};
@@ -15,21 +16,26 @@ use nw_content::client_build::load_client_build;
 use nw_content::combat::{CombatData, CombatDataError};
 use nw_content::container::ContainerError;
 use nw_content::creature_animations::CreatureAnimations;
+use nw_content::datatable_overrides::{self, DatatableOverrideError};
 use nw_content::ftue_entities::FtueLevel;
+use nw_content::gameplay_config::GameplayConfig;
 use nw_content::mob_prefabs::MobPrefabs;
-use nw_db::{DbError, WORLD_MIGRATOR, check_schema};
+use nw_content::player_attacks::PlayerAttacks;
+use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 use nw_sim_core::level_bounds;
 use nw_world::WorldFile;
 use nw_world::script::{DesignData, LevelDesign, design_data_path};
 use nw_world::world_file::world_file_path;
 
 use crate::config::{SimConfig, SimConfigError, load_sim_config};
-use crate::mob_ai::resolve_ai;
+use crate::gameplay::{GameplayError, load_gameplay};
+use crate::mob_ai::{LookAssets, MobAi, resolve_ai};
 use crate::mobs::spawns_of_level;
 use crate::player_content::{MobLooks, PlayerContent};
 use crate::server::{
-    LATENCY_BUCKETS_SECONDS, LoopSettings, METRIC_HANDOFF_SECONDS, METRIC_MOB_TICK_SECONDS,
-    METRIC_SNAPSHOT_SECONDS, METRIC_TICK_SECONDS, ServeError, serve as serve_loop,
+    Databases, LATENCY_BUCKETS_SECONDS, LoopSettings, METRIC_HANDOFF_SECONDS,
+    METRIC_MOB_TICK_SECONDS, METRIC_SNAPSHOT_SECONDS, METRIC_TICK_SECONDS, ServeError,
+    serve as serve_loop,
 };
 
 /// Failure while starting or running `sim`.
@@ -44,6 +50,12 @@ pub enum RunError {
     /// The world file cannot be read.
     #[error("world file: {0}")]
     WorldFile(#[from] ContainerError),
+    /// The gameplay values of the remote config sets cannot be loaded.
+    #[error(transparent)]
+    Gameplay(#[from] GameplayError),
+    /// A datasheet override of the remote config sets cannot be applied.
+    #[error(transparent)]
+    DatatableOverride(#[from] DatatableOverrideError),
     /// The content bundle cannot be read.
     #[error("content bundle: {0}")]
     Bundle(#[source] ContainerError),
@@ -84,30 +96,64 @@ pub enum RunError {
 /// the loop fails.
 pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let config = load_sim_config(config_path)?;
-    let password = std::env::var(&config.world_database_password_env)
-        .ok()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| RunError::MissingSecret(config.world_database_password_env.clone()))?;
+    let passwords = DatabasePasswords {
+        world: secret(&config.world_database_password_env)?,
+        global: secret(&config.global_database_password_env)?,
+    };
     init_logging(&config.log_filter)?;
     let build = load_client_build(&config.client_build_config).map_err(RunError::ClientBuild)?;
     let path = world_file_path(&config.content_dir, &build, &config.level);
     let world_file = Arc::new(WorldFile::load(&path, &build)?);
-    let bundle = ContentBundle::load(&bundle_path(&config.content_dir, &build), &build)
+    let gameplay = load_gameplay(&config.edge_config, config.world_id)?;
+    let mut bundle = ContentBundle::load(&bundle_path(&config.content_dir, &build), &build)
         .map_err(RunError::Bundle)?;
+    datatable_overrides::apply(&mut bundle.tables, &gameplay.datatable_overrides)?;
+    log_gameplay(&gameplay);
+    let player_attacks = match PlayerAttacks::load(&config.content_dir, &build) {
+        Ok(table) => {
+            tracing::info!(stances = table.len(), "player attack table");
+            table
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no player attack table: players cannot attack");
+            PlayerAttacks::default()
+        }
+    };
     // Only the combat rows and the player content stay; the rest of the bundle is dropped here.
-    let combat = Arc::new(CombatData::from_tables(
-        &bundle.tables,
-        &config.combat.rows(),
-    )?);
-    let mob_looks = match MobPrefabs::load(&config.content_dir, &build) {
+    let combat = Arc::new(
+        CombatData::from_tables(&bundle.tables, &config.combat.rows())?
+            .with_player_attacks(player_attacks),
+    );
+    let (mob_looks, look_assets) = match MobPrefabs::load(&config.content_dir, &build) {
         Ok(prefabs) => {
             let (looks, skipped) = MobLooks::of(&prefabs);
             tracing::info!(prefabs = looks.len(), skipped, "mob prefab table");
-            looks
+            (looks, prefabs.default_assets().collect::<LookAssets>())
         }
         Err(error) => {
             tracing::warn!(%error, "no mob prefab table: mobs are not shown to clients");
-            MobLooks::default()
+            (MobLooks::default(), LookAssets::new())
+        }
+    };
+    let mob_ai = match MobAi::load(
+        &config.content_dir,
+        &build,
+        config.mob_ai,
+        look_assets.clone(),
+    ) {
+        Ok(ai) => {
+            let data = ai.data();
+            tracing::info!(
+                trees = data.trees.len(),
+                archetypes = data.archetypes.len(),
+                creatures = data.creatures.len(),
+                "AI data"
+            );
+            ai
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no AI data: every mob stands at its spawn");
+            MobAi::new(AiData::default(), config.mob_ai, look_assets)
         }
     };
     let creature_animations = match CreatureAnimations::load(&config.content_dir, &build) {
@@ -139,8 +185,21 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         mob_looks,
         creature_animations,
         tutorial_level,
-        &world_file.gatherables,
+        &world_file,
+        gameplay,
+        config.loot_limits,
     ));
+    tracing::info!(
+        disabled_items = content.disabled_items.len(),
+        "items of the disabled item classes"
+    );
+    if let Some(rules) = &content.loot_limits {
+        tracing::info!(
+            applied = rules.limits.len(),
+            unknown_reset = ?rules.limits.unknown_reset(),
+            "loot limits; those of an unknown reset are not applied"
+        );
+    }
     tracing::info!(objects = content.quest_objects.len(), "level quest objects");
     match &content.tutorial_quest {
         Some(quest) => tracing::info!(tasks = quest.len(), "tutorial quest"),
@@ -164,22 +223,75 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         .build()
         .map_err(RunError::Runtime)?
         .block_on(serve_async(
-            config, password, world_file, combat, content, design,
+            config,
+            passwords,
+            world_file,
+            combat,
+            content,
+            design,
+            Arc::new(mob_ai),
         ))
+}
+
+/// Logs the gameplay values: those the sim applies, and those kept for systems it does not
+/// have yet.
+fn log_gameplay(gameplay: &GameplayConfig) {
+    tracing::info!(
+        character_xp = gameplay.xp.character,
+        progression_xp = gameplay.xp.progression.len(),
+        disabled_item_classes = ?gameplay.disabled_item_classes,
+        wallet_cap = ?gameplay.wallet_cap,
+        datatable_overrides = gameplay.datatable_overrides.len(),
+        "remote config gameplay values applied"
+    );
+    tracing::info!(
+        progression_xp = ?gameplay.xp.progression,
+        paid_loadouts = ?gameplay.paid_loadouts,
+        territory_entry_requirement = ?gameplay.territory_entry_requirement,
+        storage_search = ?gameplay.storage_search,
+        house_level_reqs = ?gameplay.house_level_reqs,
+        transmog_own_all = ?gameplay.transmog_own_all,
+        red_button = ?gameplay.red_button,
+        schedule_overrides = ?gameplay.schedule_overrides,
+        seasons = ?gameplay.seasons,
+        game_modes = ?gameplay.game_modes,
+        company_only_war_slots = ?gameplay.company_only_war_slots,
+        twitch_system = ?gameplay.twitch_system,
+        "remote config gameplay values loaded for systems not built yet"
+    );
+}
+
+/// The database passwords from the environment.
+struct DatabasePasswords {
+    world: String,
+    global: String,
+}
+
+/// The value of secret variable `name`; a missing or empty one is an error.
+fn secret(name: &str) -> Result<String, RunError> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| RunError::MissingSecret(name.to_owned()))
 }
 
 async fn serve_async(
     config: SimConfig,
-    password: String,
+    passwords: DatabasePasswords,
     ground: Arc<WorldFile>,
     combat: Arc<CombatData>,
     content: Arc<PlayerContent>,
     design: LevelDesign,
+    mob_ai: Arc<MobAi>,
 ) -> Result<(), RunError> {
-    let db = nw_db::connect(&config.world_database, &password)
+    let db = nw_db::connect(&config.world_database, &passwords.world)
         .await
         .map_err(RunError::Database)?;
     check_schema(&db, &WORLD_MIGRATOR).await?;
+    let global = nw_db::connect(&config.global_database, &passwords.global)
+        .await
+        .map_err(RunError::Database)?;
+    check_schema(&global, &GLOBAL_MIGRATOR).await?;
     let bus = Bus::connect(&config.nats_url).await?;
     PrometheusBuilder::new()
         .with_http_listener(config.metrics_listen)
@@ -218,9 +330,14 @@ async fn serve_async(
         save_interval: std::time::Duration::from_millis(config.save_interval_ms),
         heartbeat_interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
         heartbeat_misses: config.heartbeat_misses,
-        combat: config.combat_settings(combat, spawns_of_level(&config.level, &ground.vitals)),
-        mob_ai: resolve_ai(&ground, &config.brain_settings()),
+        mob_ai: resolve_ai(&ground, &mob_ai),
+        combat: config.combat_settings(
+            combat,
+            spawns_of_level(&config.level, &ground.vitals),
+            mob_ai,
+        ),
         design: Arc::new(design),
+        leaderboard_calendar: config.leaderboard_calendar()?,
         content,
         snapshot_interval: (config.admin.snapshot_interval_ms != 0)
             .then(|| std::time::Duration::from_millis(config.admin.snapshot_interval_ms)),
@@ -229,5 +346,6 @@ async fn serve_async(
         // A failed signal handler means sim runs until killed.
         let _ = tokio::signal::ctrl_c().await;
     };
-    Ok(serve_loop(settings, ground, bus, db, shutdown).await?)
+    let databases = Databases { world: db, global };
+    Ok(serve_loop(settings, ground, bus, databases, shutdown).await?)
 }

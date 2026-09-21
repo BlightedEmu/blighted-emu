@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! [`AccountStore`] and [`CharacterStore`] on PostgreSQL.
+//! [`AccountStore`], [`CharacterStore`], [`StatsStore`] and [`AnalyticsStore`] on PostgreSQL.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use nw_db::{Account, Character, DbError, NewCharacter, PgPool};
+use nw_db::{
+    Account, AnalyticsRecord, BoardEntry, BoardOrder, BoardPage, Character, DbError, NewCharacter,
+    PgPool, StatValues,
+};
 use uuid::Uuid;
 
-use crate::store::{AccountStore, CharacterStore, StoreError};
+use crate::store::{AccountStore, AnalyticsStore, CharacterStore, StatsStore, StoreError};
 
 /// Accounts and launcher sessions in PostgreSQL.
 #[derive(Debug, Clone)]
@@ -318,5 +321,76 @@ mod tests {
             .await;
         })
         .await;
+    }
+}
+
+/// Stats, leaderboards and the analytics stream in the global database.
+#[derive(Debug, Clone)]
+pub struct PgStats {
+    pool: PgPool,
+}
+
+impl PgStats {
+    /// Uses a pool of the migrated global database.
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+impl StatsStore for PgStats {
+    async fn leaderboard_page(
+        &self,
+        namespace: &str,
+        board_id: &str,
+        order: BoardOrder,
+        page_number: u32,
+        page_size: u32,
+    ) -> Result<BoardPage, StoreError> {
+        nw_db::leaderboard_page(
+            &self.pool,
+            namespace,
+            board_id,
+            order,
+            page_number,
+            page_size,
+        )
+        .await
+        .map_err(store_error)
+    }
+
+    async fn leaderboard_entries(
+        &self,
+        namespace: &str,
+        board_id: &str,
+        order: BoardOrder,
+        entity_ids: &[String],
+    ) -> Result<Vec<BoardEntry>, StoreError> {
+        nw_db::leaderboard_entries(&self.pool, namespace, board_id, order, entity_ids)
+            .await
+            .map_err(store_error)
+    }
+
+    async fn stat_values(
+        &self,
+        namespace: &str,
+        scope: &str,
+        stat_ids: &[String],
+        entity_ids: &[String],
+    ) -> Result<StatValues, StoreError> {
+        nw_db::stat_values(&self.pool, namespace, scope, stat_ids, entity_ids)
+            .await
+            .map_err(store_error)
+    }
+}
+
+impl AnalyticsStore for PgStats {
+    async fn put_records(
+        &self,
+        stream_name: &str,
+        records: &[AnalyticsRecord],
+    ) -> Result<Vec<i64>, StoreError> {
+        nw_db::insert_analytics_events(&self.pool, stream_name, records)
+            .await
+            .map_err(store_error)
     }
 }

@@ -156,6 +156,13 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::Objectives(_)
         | MemberState::Progression(_)
         | MemberState::Cooldowns(_)
+        | MemberState::LootTracker(_)
+        | MemberState::GlobalStorage(_)
+        | MemberState::BuildableController(_)
+        | MemberState::PlacementObstruction(_)
+        | MemberState::TerritoryInterface(_)
+        | MemberState::BuildableGrid(_)
+        | MemberState::Ownership(_)
         | MemberState::Empty(_)
         | MemberState::Recorded { .. } => None,
     }

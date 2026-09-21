@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Storage interfaces of the login logic. PostgreSQL ([`crate::pg`]) and Valkey
+//! Storage interfaces of the login logic and the stats and analytics services. PostgreSQL ([`crate::pg`]) and Valkey
 //! ([`crate::valkey`]) implement them for `edge-http`; the tests use in-memory versions.
 
 use std::future::Future;
 
-use nw_db::{Account, Character, NewCharacter};
+use nw_db::{
+    Account, AnalyticsRecord, BoardEntry, BoardOrder, BoardPage, Character, NewCharacter,
+    StatValues,
+};
 use nw_protocol::launcher_api::LauncherSession;
 use uuid::Uuid;
 
@@ -181,4 +184,45 @@ pub trait DiscordStateStore: Clone + Send + Sync + 'static {
 
     /// The attempt state; `Ready` is removed when it is returned.
     fn poll(&self, state: &str) -> impl Future<Output = Result<DiscordAttempt, StoreError>> + Send;
+}
+
+/// Stats and leaderboards (global database).
+pub trait StatsStore: Clone + Send + Sync + 'static {
+    /// Page `page_number` (from 1) of `page_size` rows of a leaderboard.
+    fn leaderboard_page(
+        &self,
+        namespace: &str,
+        board_id: &str,
+        order: BoardOrder,
+        page_number: u32,
+        page_size: u32,
+    ) -> impl Future<Output = Result<BoardPage, StoreError>> + Send;
+
+    /// The rows of `entity_ids` on a leaderboard; an entity with no value has no row.
+    fn leaderboard_entries(
+        &self,
+        namespace: &str,
+        board_id: &str,
+        order: BoardOrder,
+        entity_ids: &[String],
+    ) -> impl Future<Output = Result<Vec<BoardEntry>, StoreError>> + Send;
+
+    /// The values of `stat_ids` in `scope` for `entity_ids`.
+    fn stat_values(
+        &self,
+        namespace: &str,
+        scope: &str,
+        stat_ids: &[String],
+        entity_ids: &[String],
+    ) -> impl Future<Output = Result<StatValues, StoreError>> + Send;
+}
+
+/// The analytics stream (global database).
+pub trait AnalyticsStore: Clone + Send + Sync + 'static {
+    /// Stores `records` of `stream_name`; returns their ids in order.
+    fn put_records(
+        &self,
+        stream_name: &str,
+        records: &[AnalyticsRecord],
+    ) -> impl Future<Output = Result<Vec<i64>, StoreError>> + Send;
 }

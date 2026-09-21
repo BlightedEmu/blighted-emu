@@ -23,25 +23,28 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use nw_bus::{
     Admit, BusId, CarriedItem, CellTable, ConnectionRef, Ghost, HandoffOffer, ItemPlace,
-    MOB_STATES, MobGhost, PlayerGhost, PlayerQuests, Point, QuestRun, ScriptLogLine, SimSlot,
-    SnapMob, SnapPlayer,
+    MOB_STATES, MobGhost, PlayerGhost, PlayerProgression, PlayerQuests, Point, QuestRun,
+    ScriptLogLine, SimSlot, SnapMob, SnapPlayer,
 };
-use nw_messages::client_input::{CRAFTING_STATION_KIND, LORE_KIND, TALK_KIND};
+use nw_messages::client_input::{
+    CRAFTING_STATION_KIND, GATHER_KIND, LOOT_KIND, LORE_KIND, TALK_KIND,
+};
+use nw_messages::entity_ids::IdHolder;
 use nw_messages::items::{FIRST_VERSION, FullList};
 use nw_messages::paperdoll::slot::QUICK_SLOT_1;
 use nw_messages::{
-    BundleGroup, BundleMember, ClientFacetMsg, ConsumableCooldown, CooldownsState, CurrencyState,
-    DisableCollisionMsg, GatheringInterruptedMsg, Hands, HealthChange, InputPosition, InputRecord,
+    Adopted, BundleGroup, BundleMember, ClientFacetMsg, ConsumableCooldown, CooldownsState,
+    CurrencyState, DisableCollisionMsg, GatheringInterruptedMsg, Hands, HealthChange, InputRecord,
     InteractionEndedMsg, InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT,
     LevelInfoChangedMsg, LevelSpec, LookDir, MeleeHitMsg, MessageError, PlayerLook,
     PlayerSeenByAiMsg, PlayerStates, ProgressionState, SPAWN_STATE_ID, SelectedAsTargetMsg,
-    ServerMessage, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg, UnselectedAsTargetMsg,
-    VitalsData, WorldPosition, facet_entity,
+    ServerMessage, ShownItem, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg,
+    UnselectedAsTargetMsg, VitalsData, WorldPosition, facet_entity,
 };
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
     Motion, MotionState, MoveLimits, MoveRefusal, OPEN_WORLD_START, Position, Seen, SpatialGrid,
-    at_tutorial_exit,
+    TrackedBody, at_tutorial_exit,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -59,6 +62,7 @@ mod gear;
 mod hit_shape;
 mod level_assets;
 mod level_flow;
+mod loot_bag;
 mod members;
 mod mob_timeline;
 mod mob_trail;
@@ -81,10 +85,10 @@ use gear::Gear;
 use level_assets::{ASSET_ENTITY_BASE, AssetViews, asset_gde_ref, spell_gde_ref};
 use level_flow::{AchievementRules, LevelFlow};
 use members::{
-    CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, OwnClock, OwnTeleport, OwnTick, bundles,
-    card_of, log_mob_group, mob_group, own_group, remote_group,
+    CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, OwnClock, OwnPlaces, OwnTeleport, OwnTick,
+    bundles, card_of, log_mob_group, mob_group, own_group, remote_group,
 };
-use mob_timeline::{Animations, MobPose, MobTimelines, animations_of};
+use mob_timeline::{Animations, MobPose, MobTimelines, TreeEntry, TreePose, animations_of};
 pub use quest_objects::Strike;
 use quest_tracker::QuestTracker;
 use replica::{RemoteCandidate, Replica, ReplicaSource};
@@ -102,14 +106,17 @@ use crate::login::{
     SessionIds, WorldIds, level_change_messages, login_level_info, login_messages, phase_id,
     time_answers,
 };
-use crate::mob_ai::MobAi;
+use crate::mob_ai::SpawnAi;
 use crate::mobs::{MobAttackIntent, MobChanges, Mobs};
 use crate::objectives::{Effect, Event, Facts, ObjectiveRun};
 use crate::player_content::{
     MobLooks, OPEN_WORLD_OBJECTIVE, PlayerContent, QuestDef, TUTORIAL_OBJECTIVE,
 };
+use crate::stats::StatEvent;
+use nw_content::creature_animations::CreatureAnimations;
 use nw_content::ftue_entities::{self, FACET_LEN, FtueLevel};
 use nw_content::mob_prefabs::ASSET_ID_LEN;
+use nw_messages::FRAG_TAGS_LEN;
 use nw_messages::raw_id_of_entity;
 
 /// Carrier channel of the login messages and the time messages.
@@ -129,8 +136,6 @@ const FIRST_LOGIN_BUNDLE_SEQUENCE: u64 = 2;
 /// client before it has applied `LevelInfoChanged` (channel 0), so the client drops it as a
 /// bundle "for a previous ClientContext", never loads the level, and never moves to spawn.
 const OWN_CARD_DELAY_MS: u64 = 1_000;
-/// Milliseconds per second, for speeds.
-const MS_PER_SECOND_F32: f32 = 1_000.0;
 /// How long a mob stands from the start of its alert before it moves (retail sailors: 2.0 s from
 /// sailor 1's `Alert_Turn` at 73978 to its run at 76014; 2.8-3.1 s for sailors 2 and 3).
 const ALERT_STAND_MS: u64 = 2_000;
@@ -289,6 +294,9 @@ pub struct Departure {
     /// The items to save; `None` when there is nothing to save (no change since the last save,
     /// or the tutorial, which always starts from the starter kit).
     pub items: Option<Vec<CarriedItem>>,
+    /// The progression to save; `None` when there is nothing to save (no change since the last
+    /// save, or the tutorial).
+    pub progression: Option<PlayerProgression>,
 }
 
 /// A handoff that a tick started: the player is frozen until [`SimWorld::handoff_done`].
@@ -403,8 +411,11 @@ struct Player {
     phasing_left_ms: Option<u64>,
     /// Whether the server moved the player: its next own state moves it ([`OwnTeleport`]).
     moved: bool,
-    /// The client's last camera sample, when it came, and the player's speed then.
-    last_camera: Option<CameraSeen>,
+    /// Its body as the server moves it from its client's keys, held to the client's camera
+    /// ([`Self::move_from_input`]).
+    tracked: TrackedBody,
+    /// The counter of the newest input record its body moved by.
+    input_counter: Option<u16>,
     /// The view angles of its newest input: where other players see it face and look.
     view: Option<LookDir>,
     /// The view angles the newest own state carried back to its client.
@@ -418,13 +429,10 @@ struct Player {
     slayer: slayer::SlayerTrack,
     /// Which other players it got in which bundle step ([`replica::RemotePlan`]).
     remote_plan: replica::RemotePlan,
-    /// The camera moved at [`crate::camera::STILL_SPEED_MPS`] or faster at its last point: the
-    /// body estimate is not exact, so the own state sends no position.
-    moving: bool,
     /// An own state after the spawn cleared the input throttle that the spawn state sets.
     throttle_cleared: bool,
-    /// The own `pos10` its client has: the own places go as offsets from it ([`own_group`]).
-    own_anchor: Option<InputPosition>,
+    /// The own places its client has ([`own_group`]).
+    own_places: OwnPlaces,
     /// Where the player faces after the server's move, when the move says so.
     move_facing: Option<f32>,
     /// The server moves the player now: its own states carry the place.
@@ -461,8 +469,14 @@ struct Player {
     /// Its coins, and whether they changed since the last bundle.
     coins: u64,
     coins_changed: bool,
+    /// The achievement bits it arrived with: its bits while its flow holds none (a player taken
+    /// without a level change).
+    arrived_achievements: Vec<u32>,
+    /// Its progression as last taken for a save, or as loaded at its join; `None` after a
+    /// handoff (the sender may not have saved it), so the next save round saves it.
+    progression_saved: Option<PlayerProgression>,
     /// The crafting station it uses, from its interaction with one until it closes it.
-    station: Option<&'static crafting::Station>,
+    station: Option<String>,
     /// The last open-world interaction its client asked for: the client repeats the request in
     /// each input until it ends the interaction, and retail answers each one once (retail
     /// 2026-09-18: one 3743 for a talk the client held 20 s; ours answered all 667 inputs).
@@ -491,6 +505,12 @@ struct Player {
     gathers: u32,
     /// The version of each gather node its client has, by slot key.
     node_versions: HashMap<u64, u32>,
+    /// The version of each loot bag its client has, by slot key.
+    bag_versions: HashMap<u64, u32>,
+    /// Its loot tracker's bags.
+    loot: loot_bag::PlayerLoot,
+    /// Its last open-world gather that ended: its client's cancel of it comes after the end.
+    ended_gather: Option<InteractionRequest>,
     /// The tutorial's static level entities it sees.
     statics: StaticViews,
     /// The tutorial's asset entities it sees.
@@ -501,6 +521,30 @@ struct Player {
 }
 
 impl Player {
+    /// Its experience, coins, achievement bits and loot limit counts.
+    fn progression(&self) -> PlayerProgression {
+        PlayerProgression {
+            experience: self.experience,
+            coins: self.coins,
+            achievements: self
+                .flow
+                .achievement_bits()
+                .unwrap_or_else(|| self.arrived_achievements.clone()),
+            loot_limits: self.loot.limit_counts(),
+        }
+    }
+
+    /// Its progression when it changed since it was last taken for a save or loaded; `None`
+    /// when it did not.
+    fn take_unsaved_progression(&mut self) -> Option<PlayerProgression> {
+        let progression = self.progression();
+        if self.progression_saved.as_ref() == Some(&progression) {
+            return None;
+        }
+        self.progression_saved = Some(progression.clone());
+        Some(progression)
+    }
+
     /// The version of the newest quest tracker lists its client has: its tracker's, or what the
     /// sim before sent.
     fn tracker_shown(&self) -> u64 {
@@ -545,27 +589,6 @@ struct ReceivedGhost {
     player: Option<PlayerGhost>,
 }
 
-/// One client camera point of an input: where the camera is, the view angles of its record, and
-/// the counter of its newest record.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CameraSample {
-    /// The camera position.
-    pub camera: Position,
-    /// The view angles, when the record has them.
-    pub view: Option<LookDir>,
-    /// The client's record counter, when the input has records.
-    pub counter: Option<u16>,
-}
-
-/// The last camera sample of a player, when it came, and the speed it gave.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct CameraSeen {
-    camera: Position,
-    now_ms: u64,
-    counter: Option<u16>,
-    speed_mps: f32,
-}
-
 /// The players of one sim.
 pub struct SimWorld {
     world: World,
@@ -586,6 +609,11 @@ pub struct SimWorld {
     exit_target: Option<SimSlot>,
     ghosts: HashMap<BusId, ReceivedGhosts>,
     ghost_targets: BTreeSet<BusId>,
+    /// This world's hold on the raw ids of its players, its shown mobs and the ghosts it adopted
+    /// (GDE id note, "Dynamic entities").
+    raw_ids: IdHolder,
+    /// The ghosts whose owner's ids this world holds.
+    ghost_ids: HashSet<u64>,
     mobs: Mobs,
     mob_changes: MobChanges,
     combat: CombatSettings,
@@ -617,6 +645,10 @@ pub struct SimWorld {
     look_targets: HashMap<u64, u64>,
     /// The open world's gather nodes that left their default state.
     nodes: Nodes,
+    /// The level's crafting stations.
+    stations: crafting::Stations,
+    /// The loot bags of killed mobs.
+    bags: loot_bag::LootBags,
     /// The gathers that run.
     open_gathers: Vec<OpenGather>,
     /// The crafts that run.
@@ -639,6 +671,9 @@ pub struct SimWorld {
     projectile_flights: Vec<projectile::ProjectileFlight>,
     /// Swings that a tutorial script started, for the next tick.
     scripted_swings: Vec<MobAttackIntent>,
+    /// What the players did that leaderboard stats count, since the last
+    /// [`SimWorld::take_stat_events`].
+    stat_events: Vec<StatEvent>,
     /// The server time of the last tick (ms since 2000-01-01).
     server_ms: u64,
 }
@@ -690,10 +725,11 @@ struct Arrival {
     items: Option<Vec<CarriedItem>>,
     /// The main-hand option slot it held drawn on the other sim.
     drawn_weapon: Option<u32>,
-    /// Its experience points.
-    experience: u32,
-    /// Its coins.
-    coins: u64,
+    /// Its saved or carried progression.
+    progression: PlayerProgression,
+    /// Whether `progression` is what the database holds or a save of this sim waits with (a
+    /// join); a handoff's may not be saved yet.
+    progression_saved: bool,
     /// Its saved or carried quests.
     quests: PlayerQuests,
 }
@@ -725,12 +761,16 @@ impl SimWorld {
             boss_phases_shown: HashMap::new(),
             look_targets: HashMap::new(),
             nodes: Nodes::default(),
+            stations: crafting::Stations::build(&content.stations, &content.structure_costs),
+            bags: loot_bag::LootBags::default(),
             open_gathers: Vec::new(),
             crafts: Vec::new(),
             skinned: HashSet::new(),
             skinned_shown: HashSet::new(),
             content,
             mobs: Mobs::new(Arc::clone(&combat.spawns), &combat),
+            raw_ids: IdHolder::new(),
+            ghost_ids: HashSet::new(),
             mob_changes: MobChanges::default(),
             dice: Dice::new(combat.seed),
             deaths: Vec::new(),
@@ -743,6 +783,7 @@ impl SimWorld {
             player_swings: Vec::new(),
             projectile_flights: Vec::new(),
             scripted_swings: Vec::new(),
+            stat_events: Vec::new(),
             server_ms: 0,
             combat,
             world: World::new(),
@@ -763,8 +804,9 @@ impl SimWorld {
         self.by_connection.contains_key(connection)
     }
 
-    /// The design AI of the level's spawns (`mob_ai::resolve_ai`); set before the first cells.
-    pub fn set_mob_ai(&mut self, ai: Arc<[Option<MobAi>]>) {
+    /// The design overrides of the level's spawns (`mob_ai::resolve_ai`); set before the first
+    /// cells.
+    pub fn set_mob_ai(&mut self, ai: Arc<[Option<SpawnAi>]>) {
         self.mobs.set_ai(ai);
     }
 
@@ -811,7 +853,7 @@ impl SimWorld {
                 &self.achievement_rules,
                 self.is_tutorial(),
                 admit.backstory.as_deref(),
-                &[],
+                &admit.progression.achievements,
                 0,
             ),
             None => LevelFlow::resumed(admit.entity, 0),
@@ -842,8 +884,8 @@ impl SimWorld {
             flow,
             items: admit.items.clone(),
             drawn_weapon: None,
-            experience: 0,
-            coins: 0,
+            progression: admit.progression.clone(),
+            progression_saved: true,
             quests: admit.quests.clone(),
         };
         self.check(&arrival)?;
@@ -877,6 +919,10 @@ impl SimWorld {
             slots: Slots::new(),
         };
         self.spawn(arrival, motion, replication, now_ms, admit.handoffs, now_ms);
+        if admit.login {
+            // Retail's login state lists the loot limit counts.
+            self.send_loot_limits(admit.entity, loot_bag::LimitsSent::Spawn);
+        }
         if admit.login && self.is_tutorial() {
             self.start_tutorial(admit.entity, now_ms);
         } else if let Some((objective, run)) = &admit.quests.active {
@@ -899,6 +945,10 @@ impl SimWorld {
         now_ms: u64,
         server_time: u64,
     ) -> Result<Option<Outgoing>, WorldError> {
+        // The player keeps the id the giver's client knows it by.
+        if let Err(refusal) = nw_messages::adopt_raw_id(self.raw_ids, offer.entity, offer.gde_ref) {
+            tracing::warn!(player = offer.entity, %refusal, "handoff id not adopted");
+        }
         let enters = offer.enter_level;
         let position = Position::from(offer.position);
         let client_context = if enters {
@@ -926,7 +976,7 @@ impl SimWorld {
                 &self.achievement_rules,
                 self.is_tutorial(),
                 offer.backstory.as_deref(),
-                &offer.achievements,
+                &offer.progression.achievements,
                 offer.achievement_version,
             ),
             None => LevelFlow::resumed(offer.entity, offer.phasing_sequence),
@@ -956,8 +1006,8 @@ impl SimWorld {
             flow,
             items: offer.items.clone(),
             drawn_weapon: offer.drawn_weapon,
-            experience: offer.experience,
-            coins: offer.coins,
+            progression: offer.progression.clone(),
+            progression_saved: false,
             quests: offer.quests.clone(),
         };
         self.check(&arrival)?;
@@ -1000,6 +1050,10 @@ impl SimWorld {
             offer.handoffs,
             retry_at,
         );
+        if enters {
+            // A new level's spawn state lists them as a login's does (Inferred).
+            self.send_loot_limits(offer.entity, loot_bag::LimitsSent::Spawn);
+        }
         if enters && !self.is_tutorial() {
             // Retail: the first open-world state lists the tutorial as completed.
             if let Some(entity) = self.player_by_number(offer.entity)
@@ -1129,86 +1183,88 @@ impl SimWorld {
                 player.refused_since_ms = None;
                 if grounded {
                     player.last_grounded = Some(next);
-                    self.walked_floor.walked(next);
                 }
                 Ok(check)
             }
         }
     }
 
-    /// Moves the player of `connection` to the body under the client camera of `sample`, received
-    /// at `now_ms` ([`crate::camera::body_of`]; without a yaw the camera point is taken as the
-    /// body). The speed that sets the camera boom is timed by the client's record counter, one
-    /// record per [`attack::INPUT_RECORD_MS`]: inputs often arrive in pairs a few microseconds
-    /// apart, and timed by their arrival the speed flipped between 0 and far too fast, so the body
-    /// jumped by the boom's change (0.3 to 1.9 m) and the moves were refused as too fast (live
-    /// 2026-09-18: 353 refusals). An input whose newest record is not newer than the last one is
-    /// an old copy and moves nothing. Gives the result and the body position it checked.
-    pub fn move_from_camera(
+    /// Moves the player of `connection` by the new records of its input `records` (newest first,
+    /// as the client sends them), received at `now_ms`: the server moves the body by each
+    /// record's keys and holds it to the record's camera ([`nw_sim_core::TrackedBody`],
+    /// [`crate::camera`]), then checks the place ([`Self::move_to`]). A record not newer than the
+    /// last one read is an old copy. While the inventory camera holds the client's camera, the
+    /// records move nothing (retail held the player still). A client that sends no view angles
+    /// (the test client, the load-test bots, which number no records) moves the body to each of
+    /// its camera points. The floors under
+    /// the bodies the camera confirms are walked floors. Gives the result and the place checked;
+    /// `None` when no record was new or there is no such player.
+    pub fn move_from_input(
         &mut self,
         connection: &ConnectionRef,
-        sample: CameraSample,
+        records: &[InputRecord],
         now_ms: u64,
-    ) -> (Result<GroundCheck, MoveError>, Position) {
-        let CameraSample {
-            camera,
-            view,
-            counter,
-        } = sample;
-        let entity = self.by_connection.get(connection).copied();
-        let last = entity
-            .and_then(|entity| self.world.get::<Player>(entity))
-            .and_then(|player| player.last_camera);
-        let stale = last.is_some_and(|last| match (last.counter, counter) {
-            (Some(last), Some(newest)) => !attack::counter_is_newer(newest, last),
-            _ => false,
-        });
-        if stale {
-            let at = entity
-                .and_then(|entity| self.world.get::<Body>(entity))
-                .map_or(camera, |body| body.motion.position());
-            return (Ok(GroundCheck::Checked), at);
+    ) -> Option<(Result<GroundCheck, MoveError>, Position)> {
+        let entity = *self.by_connection.get(connection)?;
+        let server_at = self.world.get::<Body>(entity)?.motion.position();
+        let views = crate::camera::record_views(records);
+        let ground = walked_floor::WalkedGround {
+            ground: &*self.ground,
+            walked: &self.walked_floor,
+        };
+        let mut player = self.world.get_mut::<Player>(entity)?;
+        let held = player
+            .camera_held_until_ms
+            .is_some_and(|until| now_ms < until);
+        if player.tracked.position() != server_at {
+            // The server moved the player, or kept it at its last good place.
+            player.tracked.stand_at(server_at);
         }
-        let speed_mps = last.map_or(0.0, |last| {
-            let elapsed_ms = match (last.counter, counter) {
-                (Some(last), Some(newest)) => {
-                    u64::from(newest.wrapping_sub(last)) * u64::from(attack::INPUT_RECORD_MS)
+        let mut next = None;
+        let mut walked = Vec::new();
+        let mut read_any = false;
+        for (record, seen) in records.iter().zip(views).rev() {
+            let Some(input) = crate::camera::track_input(record, seen) else {
+                // No view angles: the test client's point, with no counter (0 in every record).
+                if let Some(camera) = seen.camera {
+                    read_any = true;
+                    if !held {
+                        player.tracked.stand_at(camera);
+                        walked.push(camera);
+                        next = Some(camera);
+                    }
                 }
-                _ => now_ms.saturating_sub(last.now_ms),
+                continue;
             };
-            if elapsed_ms == 0 {
-                return last.speed_mps;
+            let counter = record.u16_after_mask;
+            if player
+                .input_counter
+                .is_some_and(|last| !attack::counter_is_newer(counter, last))
+            {
+                continue;
             }
-            #[allow(clippy::cast_precision_loss, reason = "a gap of a few seconds")]
-            let seconds = elapsed_ms as f32 / MS_PER_SECOND_F32;
-            last.camera.horizontal_distance(camera) / seconds
-        });
-        let mut held = false;
-        if let Some(mut player) = entity.and_then(|entity| self.world.get_mut::<Player>(entity)) {
-            player.last_camera = Some(CameraSeen {
-                camera,
-                now_ms,
-                counter,
-                speed_mps,
-            });
-            held = player
-                .camera_held_until_ms
-                .is_some_and(|until| now_ms < until);
-            player.moving = !held && speed_mps >= crate::camera::STILL_SPEED_MPS;
-            if view.is_some() && !held {
-                player.view = view;
+            player.input_counter = Some(counter);
+            read_any = true;
+            if held {
+                continue;
             }
+            player.view = seen.view;
+            let tracked = player
+                .tracked
+                .record(input, &ground, self.settings.ocean_level_m);
+            if tracked.consistent && tracked.on_floor {
+                walked.push(tracked.position);
+            }
+            next = Some(tracked.position);
         }
-        if held {
-            let at = entity
-                .and_then(|entity| self.world.get::<Body>(entity))
-                .map_or(camera, |body| body.motion.position());
-            return (Ok(GroundCheck::Checked), at);
+        if held && read_any {
+            return Some((Ok(GroundCheck::Checked), server_at));
         }
-        let next = view.map_or(camera, |view| {
-            crate::camera::body_of(camera, view, speed_mps)
-        });
-        (self.move_to(connection, next, now_ms), next)
+        let next = next?;
+        for at in walked {
+            self.walked_floor.walked(at);
+        }
+        Some((self.move_to(connection, next, now_ms), next))
     }
 
     /// The server puts player `entity` at `to` at `now_ms`, facing `facing` when given: its
@@ -1236,6 +1292,7 @@ impl SimWorld {
     fn remove_player(&mut self, connection: &ConnectionRef, entity: Entity) {
         self.by_connection.remove(connection);
         if let Some(number) = self.world.get::<Player>(entity).map(|player| player.number) {
+            nw_messages::release_raw_id(self.raw_ids, number);
             self.quests.remove(&number);
             if let Some(tutorial) = self.tutorials.remove(&number) {
                 tutorial.end(&mut self.mobs);
@@ -1365,6 +1422,80 @@ impl SimWorld {
         );
     }
 
+    /// Holds the owner's raw id of each ghost in `gde_refs` (another sim's
+    /// [`nw_bus::Ghosts::gde_refs`]),
+    /// so this sim's clients see the entity by the same id. A ghost whose owner gave it a new id
+    /// (a respawn) gets a new card in every view.
+    pub fn adopt_ghost_ids(&mut self, gde_refs: &[(u64, [u8; nw_messages::RAW_ID_LEN])]) {
+        for &(entity, gde_ref) in gde_refs {
+            match nw_messages::adopt_raw_id(self.raw_ids, entity, gde_ref) {
+                Ok(adopted) => {
+                    self.ghost_ids.insert(entity);
+                    if adopted == Adopted::Renewed {
+                        self.recard(entity);
+                    }
+                }
+                Err(refusal) => tracing::warn!(entity, %refusal, "ghost id not adopted"),
+            }
+        }
+    }
+
+    /// Releases the ids of the ghosts that no other sim sends any more, unless the entity is this
+    /// sim's own now (a player it took).
+    fn release_ghost_ids(&mut self) {
+        let sent: HashSet<u64> = self
+            .ghosts
+            .values()
+            .flat_map(|ghosts| &ghosts.entities)
+            .map(|ghost| ghost.entity)
+            .collect();
+        let gone: Vec<u64> = self
+            .ghost_ids
+            .iter()
+            .copied()
+            .filter(|entity| !sent.contains(entity))
+            .collect();
+        for entity in gone {
+            self.ghost_ids.remove(&entity);
+            let own = self.mobs.health(entity).is_some()
+                || self
+                    .world
+                    .query::<&Player>()
+                    .iter(&self.world)
+                    .any(|player| player.number == entity);
+            if !own {
+                nw_messages::release_raw_id(self.raw_ids, entity);
+            }
+        }
+    }
+
+    /// The ids of the mobs that left end with them; a respawned mob is a new spawn with a new
+    /// id, and every client that had its old card stops that slot and gets a new card (GDE id
+    /// note, "Dynamic entities": retail gave 654 respawns a new `GdeRef` and card, and never
+    /// showed a dead mob's id alive again).
+    fn end_mob_ids(&mut self) {
+        for entity in self.mobs.take_left() {
+            nw_messages::release_raw_id(self.raw_ids, entity);
+        }
+        for entity in self.mobs.take_respawned() {
+            nw_messages::renew_raw_id(entity);
+            self.recard(entity);
+        }
+    }
+
+    /// Every client that has a card of `entity` stops its slot and gets a new card in a new slot,
+    /// with the entity's views shown afresh.
+    fn recard(&mut self, entity: u64) {
+        let mut query = self.world.query::<&mut Player>();
+        for mut player in query.iter_mut(&mut self.world) {
+            player.slots.restart(entity);
+        }
+        self.mob_timelines.forget(entity);
+        self.mob_health_shown.remove(&entity);
+        self.look_targets.remove(&entity);
+        self.boss_phases_shown.remove(&entity);
+    }
+
     /// The ghost `entity` and the sim it belongs to.
     fn ghost(&self, entity: u64) -> Option<(&BusId, ReceivedGhost)> {
         self.ghosts.iter().find_map(|(owner, ghosts)| {
@@ -1414,6 +1545,11 @@ impl SimWorld {
         std::mem::take(&mut self.mob_changes)
     }
 
+    /// What the players did that leaderboard stats count, since the last call.
+    pub fn take_stat_events(&mut self) -> Vec<StatEvent> {
+        std::mem::take(&mut self.stat_events)
+    }
+
     /// Brain steps and player wake scans of the mobs since the start.
     pub const fn mob_work(&self) -> (u64, u64) {
         (self.mobs.brain_runs(), self.mobs.wake_scans())
@@ -1449,7 +1585,8 @@ impl SimWorld {
                     .and_then(Gear::take_unsaved);
                 let changed = saves && std::mem::take(&mut player.quests_unsaved);
                 let saved_quests = changed.then(|| quests_of(quests, now_ms, &player));
-                departure_of(&player, body, items, saved_quests)
+                let progression = saves.then(|| player.take_unsaved_progression()).flatten();
+                departure_of(&player, body, items, saved_quests, progression)
             })
             .collect()
     }
@@ -1473,10 +1610,12 @@ impl SimWorld {
         let ttl = self.settings.ghost_ttl_ms;
         self.ghosts
             .retain(|_, ghosts| now_ms.saturating_sub(ghosts.received_ms) <= ttl);
+        self.release_ghost_ids();
         let handoffs = self.start_handoffs(now_ms);
         let ghosts = self.ghosts_out();
         let mobs_started = Instant::now();
         let mut swings = self.tick_mobs(now_ms);
+        self.end_mob_ids();
         swings.append(&mut self.scripted_swings);
         let intents = self.swings_landing(swings, now_ms, server_time);
         let mob_hits = self.mob_hits(intents, now_ms);
@@ -1495,6 +1634,8 @@ impl SimWorld {
         self.tick_hands(now_ms, server_time);
         self.tick_pushes(now_ms);
         self.gathers_due(now_ms);
+        self.bags.tick(now_ms);
+        self.loot_rights_due(server_time);
         self.crafts_due(now_ms);
         self.tick_phasing();
         let mut messages = self.take_messages();
@@ -1536,11 +1677,12 @@ impl SimWorld {
                 position: ghost.position,
             });
         }
-        let ground = walked_floor::WalkedGround {
-            ground: &*self.ground,
+        let ground = MobGround {
+            terrain: &*self.ground,
             walked: &self.walked_floor,
         };
-        self.mobs.tick(&seen, now_ms, &ground)
+        self.mobs
+            .tick(&seen, now_ms, &ground, self.settings.tick_threads)
     }
 
     /// Starts the tutorial of player `number` at `now_ms`; without the quest in the content
@@ -1764,7 +1906,7 @@ impl SimWorld {
                     .flow
                     .set_achievement(&self.achievement_rules, achievement);
             }
-            quest_objects::grant(&mut player, &reward);
+            quest_objects::grant(&mut player, &reward, &self.content.gameplay);
             // The turn-in takes back the items the quest had the player bring.
             if let Some(gear) = player.gear.as_mut() {
                 for (item, _) in quest.def.tree.returned_items() {
@@ -1905,6 +2047,7 @@ impl SimWorld {
                         target: number,
                         target_at,
                         mob_move: Some(mob_move),
+                        strike: None,
                     });
                 }
             }
@@ -1913,7 +2056,7 @@ impl SimWorld {
                 shove,
                 length_ms,
             } => {
-                let mob_at = self.mobs.get_mut(mob).map(|mob| mob.brain.position());
+                let mob_at = self.mobs.get(mob).map(|mob| mob.position);
                 if let (Some(from), Some(mob_at)) = (body_at, mob_at)
                     && let Some(to) = shoved_to(from, mob_at, shove)
                     && let to = self.walked_floor.reach(from, to)
@@ -2102,9 +2245,13 @@ impl SimWorld {
                     Order::LockAchievement(id) => {
                         player.flow.clear_achievement(&self.achievement_rules, &id);
                     }
-                    Order::Experience(points) => {
-                        player.experience = player.experience.saturating_add(points);
-                        player.experience_changed = true;
+                    Order::KillExperience(level) => {
+                        let base = self.content.kill_experience.of(level).unwrap_or_default();
+                        quest_objects::gain_experience(
+                            &mut player,
+                            base,
+                            &self.content.gameplay.xp,
+                        );
                     }
                     Order::Blow => {
                         let blow = ServerMessage::MeleeHit(MeleeHitMsg::on(number, false));
@@ -2173,7 +2320,9 @@ impl SimWorld {
                 TALK_KIND => self.talk(entity, number, request),
                 CRAFTING_STATION_KIND => self.open_station(entity, number, request),
                 LORE_KIND => self.read_lore(entity, number, request, name, now_ms),
-                _ => self.gather_open_world(entity, number, request, now_ms),
+                GATHER_KIND => self.gather_open_world(entity, number, request, name, now_ms),
+                LOOT_KIND => self.take_loot_bag(entity, number, request, now_ms),
+                kind => tracing::debug!(player = number, kind, "interaction of an unknown kind"),
             }
             return;
         };
@@ -2205,6 +2354,10 @@ impl SimWorld {
         match &message {
             ClientFacetMsg::CancelInteraction { interaction, .. } => {
                 self.cancel_gather(entity, *interaction);
+                return Ok(());
+            }
+            ClientFacetMsg::SetReplicateStorage { storage, .. } => {
+                self.show_bag_items(entity, storage);
                 return Ok(());
             }
             ClientFacetMsg::AcceptObjective { objective, .. } => {
@@ -2261,11 +2414,13 @@ impl SimWorld {
                 instance,
                 ..
             } => player.gear.as_mut().and_then(|gear| {
-                gear.equip(bag_slot, equip_slot, quantity, instance)
-                    .inspect_err(|refusal| {
-                        tracing::debug!(?refusal, bag_slot, equip_slot, "equip refused");
-                    })
-                    .ok()
+                gear.equip(bag_slot, equip_slot, quantity, instance, |item_id| {
+                    self.content.is_item_disabled(item_id)
+                })
+                .inspect_err(|refusal| {
+                    tracing::debug!(?refusal, bag_slot, equip_slot, "equip refused");
+                })
+                .ok()
             }),
             ClientFacetMsg::SwapItems {
                 slot_a,
@@ -2458,7 +2613,12 @@ impl SimWorld {
                     vitals,
                     now_ms,
                     Some(OPEN_WORLD_START),
-                    PlayerQuests::default(),
+                    // The quest lists the beach sends go above the tutorial's: the client drops
+                    // lower versions (live run 12: beach lists at 2 after the tutorial's 0x26).
+                    PlayerQuests {
+                        tracker_version: player.tracker_shown(),
+                        ..PlayerQuests::default()
+                    },
                 ),
             });
         }
@@ -2506,7 +2666,10 @@ impl SimWorld {
         let clock = Self::alc_clock(player, server_ms);
         let (items, hands, gear_version) = player.gear.as_ref().map_or_else(
             || (Vec::new(), Hands::default(), 0),
-            |gear| (gear.visible_items(), gear.hands(), gear.shown_version()),
+            |gear| {
+                let shown = gear.visible_items().iter().map(ShownItem::of).collect();
+                (shown, gear.hands(), gear.shown_version())
+            },
         );
         ReplicaSource {
             character: *player.character.as_bytes(),
@@ -2645,6 +2808,9 @@ impl SimWorld {
         let positions: HashMap<u64, Position> = everyone.iter().copied().collect();
         for (entity, position, state) in mobs {
             everyone.push((entity, position));
+            if self.mobs.health(entity).is_some() {
+                nw_messages::hold_raw_id(self.raw_ids, entity);
+            }
             let owner = self.mobs.owner(entity);
             let mut card = card_of(entity, position, state, owner);
             card.asset = self.mobs.asset(entity);
@@ -2679,10 +2845,16 @@ impl SimWorld {
                     .and_then(|target| positions.get(&target).copied());
                 let pose = MobPose {
                     position,
-                    brain: self.mobs.brain_state(entity),
+                    fighting: self.mobs.fighting(entity).unwrap_or(false),
                     dead: state.health == 0,
                     target,
                     phase_two: self.mobs.phase_two(entity).is_some(),
+                    tree: tree_pose(
+                        &self.mobs,
+                        &content.creature_animations,
+                        entity,
+                        look.asset.id,
+                    ),
                 };
                 let frame = self.mob_timelines.advance(
                     entity,
@@ -2692,6 +2864,9 @@ impl SimWorld {
                 );
                 if frame.alert_started {
                     self.mobs.freeze(entity, now_ms + ALERT_STAND_MS);
+                }
+                if let Some(length_ms) = self.mob_timelines.take_reaction(entity) {
+                    self.mobs.react(entity, now_ms, length_ms);
                 }
                 card.alc = Some(frame);
             }
@@ -2726,6 +2901,9 @@ impl SimWorld {
             mob_looks: &content.mob_looks,
             level: &content.tutorial_level,
             nodes: &self.nodes,
+            stations: (!self.is_tutorial()).then_some(&self.stations),
+            view_radius_m: self.settings.interest_radius_m,
+            bags: &self.bags,
             replicas,
             local_player_card: self.settings.local_player_card,
             now_ms,
@@ -2793,6 +2971,7 @@ impl SimWorld {
         handoffs: u64,
         no_handoff_before_ms: u64,
     ) {
+        nw_messages::hold_raw_id(self.raw_ids, arrival.number);
         let entity = self
             .world
             .spawn((
@@ -2832,16 +3011,16 @@ impl SimWorld {
                     moved: false,
                     move_facing: None,
                     push: None,
-                    last_camera: None,
+                    tracked: TrackedBody::new(motion.position()),
+                    input_counter: None,
                     view: None,
                     view_sent: None,
                     run_mode: None,
                     mode_started: SPAWN_STATE_ID,
                     slayer: slayer::SlayerTrack::default(),
                     remote_plan: replica::RemotePlan::default(),
-                    moving: false,
                     throttle_cleared: false,
-                    own_anchor: None,
+                    own_places: OwnPlaces::default(),
                     teleport_step: None,
                     refused_since_ms: None,
                     last_grounded: Some(motion.position()),
@@ -2852,10 +3031,15 @@ impl SimWorld {
                     done_quests: arrival.quests.done.clone(),
                     quests_unsaved: false,
                     tracker_floor: arrival.quests.tracker_version,
-                    experience: arrival.experience,
+                    experience: arrival.progression.experience,
                     experience_changed: false,
-                    coins: arrival.coins,
+                    coins: arrival.progression.coins,
                     coins_changed: false,
+                    loot: loot_bag::PlayerLoot::with_limits(&arrival.progression.loot_limits),
+                    progression_saved: arrival
+                        .progression_saved
+                        .then(|| arrival.progression.clone()),
+                    arrived_achievements: arrival.progression.achievements,
                     station: None,
                     last_interaction: None,
                     territories: Vec::new(),
@@ -2870,6 +3054,8 @@ impl SimWorld {
                     extra_members: Vec::new(),
                     gathers: 0,
                     node_versions: HashMap::new(),
+                    bag_versions: HashMap::new(),
+                    ended_gather: None,
                     statics: StaticViews::default(),
                     assets: AssetViews::default(),
                     frozen: false,
@@ -2905,7 +3091,8 @@ impl SimWorld {
         let saves = !self.is_tutorial();
         let items = player.gear.as_ref().filter(|_| saves).map(Gear::carried);
         let saved_quests = saves.then(|| quests_of(&self.quests, self.last_now_ms, player));
-        Some(departure_of(player, body, items, saved_quests))
+        let progression = saves.then(|| player.progression());
+        Some(departure_of(player, body, items, saved_quests, progression))
     }
 }
 
@@ -3038,13 +3225,18 @@ fn gather_end(number: u64, request: InteractionRequest) -> [ServerMessage; 2] {
         ServerMessage::InteractionEnded(InteractionEndedMsg {
             header: nw_messages::FacetHeader::of(nw_messages::facet::component::INTERACTOR, number),
         }),
-        ServerMessage::GatheringInterrupted(GatheringInterruptedMsg {
-            header: nw_messages::FacetHeader::of(
-                nw_messages::facet::component::CHEST_GATHERABLE_CONTROLLER,
-                facet_number(&request.target),
-            ),
-        }),
+        gather_interrupted(request),
     ]
+}
+
+/// The gathering of the object of `request` stops (2724, to its gatherable controller).
+fn gather_interrupted(request: InteractionRequest) -> ServerMessage {
+    ServerMessage::GatheringInterrupted(GatheringInterruptedMsg {
+        header: nw_messages::FacetHeader::of(
+            nw_messages::facet::component::CHEST_GATHERABLE_CONTROLLER,
+            facet_number(&request.target),
+        ),
+    })
 }
 
 fn departure_of(
@@ -3052,6 +3244,7 @@ fn departure_of(
     body: &Body,
     items: Option<Vec<CarriedItem>>,
     quests: Option<PlayerQuests>,
+    progression: Option<PlayerProgression>,
 ) -> Departure {
     Departure {
         connection: player.connection.clone(),
@@ -3060,6 +3253,7 @@ fn departure_of(
         moved_at_ms: body.motion.moved_ms(),
         quests,
         items,
+        progression,
     }
 }
 
@@ -3075,6 +3269,59 @@ fn quests_of(quests: &HashMap<u64, ActiveQuest>, now_ms: u64, player: &Player) -
     }
 }
 
+/// The ground the mobs stand on: the terrain and the floors the players walked
+/// ([`walked_floor::WalkedGround`], made for each lookup so that the minds read it on the tick
+/// threads).
+struct MobGround<'a> {
+    terrain: &'a (dyn Ground + Send + Sync),
+    walked: &'a walked_floor::WalkedFloor,
+}
+
+impl Ground for MobGround<'_> {
+    fn height_at(&self, x: f32, y: f32) -> Option<f32> {
+        self.terrain.height_at(x, y)
+    }
+
+    fn floor_at(&self, x: f32, y: f32, z: f32) -> Option<f32> {
+        walked_floor::WalkedGround {
+            ground: self.terrain,
+            walked: self.walked,
+        }
+        .floor_at(x, y, z)
+    }
+}
+
+/// What mob `entity` of the creature slice `asset` shows from its tree, when it runs one: the
+/// numbers of the action it plays in the creature's files (`table`), its tag state, and its
+/// facing once it turned.
+fn tree_pose(
+    mobs: &Mobs,
+    table: &CreatureAnimations,
+    entity: u64,
+    asset: [u8; ASSET_ID_LEN],
+) -> Option<TreePose> {
+    let mind = mobs.tree(entity)?;
+    let creature = table.get(&asset);
+    let entry =
+        mobs.shown(entity)
+            .zip(creature)
+            .and_then(|((shown, action, fragment), creature)| {
+                Some(TreeEntry {
+                    fragment: creature.fragment(fragment)?,
+                    action: creature.action(action)?,
+                    serial: shown.serial,
+                })
+            });
+    let tag_names: Vec<&str> = mind.tags().iter().map(|tag| mobs.ai().name(*tag)).collect();
+    Some(TreePose {
+        entry,
+        tags: creature.map_or([0; FRAG_TAGS_LEN], |creature| {
+            creature.tag_state(&[], &tag_names)
+        }),
+        facing: mind.turned().then_some(mind.yaw()),
+    })
+}
+
 /// What the bundle step of one tick reads: everyone's position, in a grid, and the cards of the
 /// living mobs.
 struct Neighbourhood<'a> {
@@ -3086,6 +3333,12 @@ struct Neighbourhood<'a> {
     level: &'a FtueLevel,
     /// The open world's gather nodes.
     nodes: &'a Nodes,
+    /// The level's crafting stations; none in the tutorial.
+    stations: Option<&'a crafting::Stations>,
+    /// How near a player a node, station or loot bag is shown: the interest radius.
+    view_radius_m: f32,
+    /// The loot bags.
+    bags: &'a loot_bag::LootBags,
     /// Every player as the players who see it get it this tick.
     replicas: HashMap<u64, Replica>,
     local_player_card: bool,
@@ -3135,7 +3388,11 @@ impl Neighbourhood<'_> {
             if !(positions_only() || hold_others) {
                 numbers.extend(player.statics.numbers());
                 numbers.extend(player.assets.numbers());
-                numbers.extend(self.nodes.numbers_near(own_position));
+                numbers.extend(self.nodes.numbers_near(own_position, self.view_radius_m));
+                if let Some(stations) = self.stations {
+                    numbers.extend(stations.numbers_near(own_position, self.view_radius_m));
+                }
+                numbers.extend(self.bags.numbers_near(own_position, self.view_radius_m));
             }
             numbers.sort_unstable();
             player.slots.keep_only(&numbers);
@@ -3300,16 +3557,14 @@ impl Neighbourhood<'_> {
                     stamina,
                     combat_status,
                 };
-                // Every own state carries the own clock. A moving player's body is an estimate that
-                // errs by about 1 m: sent, it pulled the client back and forth (live 2026-09-16,
-                // 1.0 to 1.6 m jumps at the beach bag), so it goes only while the player stands,
-                // and not while its moves are refused: that body is the last good one, behind
-                // the client (live 2026-09-18: 529 refused moves while running and dodging).
+                // Every own state carries the own clock, and the place whenever it changed, moving
+                // or not, as retail's ([`OwnPlaces`]); not
+                // while its moves are refused: that body is the last good one, behind the client
+                // (live 2026-09-18: 529 refused moves while running and dodging).
                 let plain_tick = own_card != OwnCard::Spawn && teleport.is_none();
                 let tick = OwnTick {
                     clock,
-                    with_position: (!player.moving && player.refused_since_ms.is_none())
-                        || player.push.is_some(),
+                    with_position: player.refused_since_ms.is_none() || player.push.is_some(),
                     clear_throttle: plain_tick && !player.throttle_cleared,
                     slayer: player.slayer.take_due(),
                     view: player.view.filter(|view| Some(*view) != player.view_sent),
@@ -3327,7 +3582,7 @@ impl Neighbourhood<'_> {
                     own_card,
                     teleport,
                     tick,
-                    &mut player.own_anchor,
+                    &mut player.own_places,
                 )? {
                     group.members.append(&mut player.extra_members);
                     groups.push(group);
@@ -3353,6 +3608,21 @@ impl Neighbourhood<'_> {
                 }
             });
             for number in numbers {
+                if (crafting::STATION_ENTITY_BASE..loot_bag::BAG_ENTITY_BASE).contains(&number) {
+                    let group = self
+                        .stations
+                        .zip(player.slots.slot(number))
+                        .and_then(|(stations, slot)| stations.group(number, slot));
+                    groups.extend(group);
+                    continue;
+                }
+                if (loot_bag::BAG_ENTITY_BASE..GATHERABLE_ENTITY_BASE).contains(&number) {
+                    if let Some(slot) = player.slots.slot(number) {
+                        let player = &mut **player;
+                        groups.extend(self.bags.group(number, slot, &mut player.bag_versions));
+                    }
+                    continue;
+                }
                 if (GATHERABLE_ENTITY_BASE..STATIC_ENTITY_BASE).contains(&number) {
                     if let Some(slot) = player.slots.slot(number) {
                         let player = &mut **player;
@@ -3472,6 +3742,7 @@ fn handoff_offer(
         character: player.character,
         name: player.name.clone(),
         entity: player.number,
+        gde_ref: raw_id_of_entity(player.number),
         position: Point::from(enter_at.unwrap_or(state.position)),
         move_age_ms: state.move_age_ms,
         budget_m: state.budget_m,
@@ -3501,10 +3772,8 @@ fn handoff_offer(
         enter_level: enters,
         items: player.gear.as_ref().map(Gear::carried),
         drawn_weapon: player.gear.as_ref().and_then(Gear::drawn),
-        experience: player.experience,
-        coins: player.coins,
         quests,
-        achievements: player.flow.achievement_bits(),
+        progression: player.progression(),
         achievement_version: player.flow.achievement_version(),
     }
 }
@@ -3542,8 +3811,8 @@ mod tests {
     use nw_content::gathering::{Gatherable, Gatherables};
     use nw_content::loot::{LootContext, LootRow, LootSource, LootTables, MobLoot, MobLootRow};
     use nw_messages::{
-        ALC_TYPE_INDEX, GDE_METADATA_TYPE_INDEX, LOCAL_PLAYER_INTEREST, LOGIN_MESSAGE_TYPES,
-        LOOK_CHOICES, MemberState, OPEN_WORLD_LEVEL, PAPERDOLL_TYPE_INDEX,
+        ALC_TYPE_INDEX, GDE_METADATA_TYPE_INDEX, InputPosition, LOCAL_PLAYER_INTEREST,
+        LOGIN_MESSAGE_TYPES, LOOK_CHOICES, MemberState, OPEN_WORLD_LEVEL, PAPERDOLL_TYPE_INDEX,
         PLAYER_APPEARANCE_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS, POS_REL_CHILD,
         PlayerAppearanceState, ReplicatedStateBundle, SlotRead, SlotUpdate, VITALS_TYPE_INDEX,
         VitalsState,
@@ -3720,6 +3989,7 @@ mod tests {
             backstory: None,
             items: None,
             quests: PlayerQuests::default(),
+            progression: PlayerProgression::default(),
         }
     }
 
@@ -3980,6 +4250,164 @@ mod tests {
 
     pub(super) fn tick(world: &mut SimWorld, now: u64) -> TickOutput {
         world.tick(now, SERVER_TIME).expect("tick")
+    }
+
+    /// The mob's spawn card in the bundle of `who`: its slot and `GdeRef`.
+    fn mob_card(
+        world: &SimWorld,
+        outgoing: &[Outgoing],
+        who: &ConnectionRef,
+        mob: u64,
+    ) -> Option<(u16, [u8; nw_messages::RAW_ID_LEN])> {
+        let bundle = bundle_of(outgoing, who)?;
+        groups_in(world, who, &bundle)
+            .into_iter()
+            .find(|(entity, update)| *entity == mob && update.card.is_some())
+            .and_then(|(_, update)| Some((update.interest, update.card?.gde_ref?)))
+    }
+
+    /// The slots that the bundle of `who` stops.
+    fn stops_of(outgoing: &[Outgoing], who: &ConnectionRef) -> Vec<u16> {
+        bundle_of(outgoing, who)
+            .and_then(|bundle| bundle.index_block)
+            .map(|block| {
+                let stops = usize::try_from(block.stop_count).expect("count");
+                block.indexes.into_iter().take(stops).collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A world whose one mob, of spawn `index`, respawns `respawn_ms` after its death, with
+    /// player 1 beside it. The spawns before it lie in the other sim's cells; each test takes its
+    /// own index, so no other test's world gives its mob number another id.
+    fn respawn_world(index: u32, respawn_ms: u64) -> SimWorld {
+        let mut combat = test_combat();
+        combat.mob_respawn_ms = respawn_ms;
+        let elsewhere = LEVEL_M - CELL_M / 2.0;
+        let mut spawns: Vec<VitalsSpawn> = (0..index).map(|_| test_spawn(elsewhere)).collect();
+        spawns.push(test_spawn(CELL_M / 2.0));
+        combat.spawns = spawns.into();
+        let mut world = SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            combat,
+            Arc::default(),
+        );
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, CELL_M / 2.0 + 2.0);
+        world
+    }
+
+    #[test]
+    fn a_respawned_mob_is_a_new_spawn_with_a_new_id_and_card() {
+        const RESPAWN_MS: u64 = 1_000;
+        const TICK_MS: u64 = 33;
+        const LETHAL: u32 = 100_000;
+        const INDEX: u32 = 301;
+        let mob = crate::mobs::mob_entity(INDEX);
+        let who = connection(1);
+        let mut world = respawn_world(INDEX, RESPAWN_MS);
+        let first = tick(&mut world, NOW);
+        let (slot_before, id_before) = mob_card(&world, &first.messages, &who, mob).expect("card");
+        assert!(nw_messages::is_dynamic_raw_id(&id_before));
+        world.apply_hit(mob, 1, LETHAL, 0, NOW);
+        let mut now = NOW;
+        let mut stops = Vec::new();
+        let card = loop {
+            now += TICK_MS;
+            let output = tick(&mut world, now);
+            stops.extend(stops_of(&output.messages, &who));
+            if let Some(card) = mob_card(&world, &output.messages, &who, mob) {
+                break card;
+            }
+            assert!(now < NOW + 2 * RESPAWN_MS, "the mob respawns with a card");
+        };
+        assert!(world.mobs.health(mob).is_some_and(|health| health > 0));
+        let id_after = nw_messages::raw_id_of_entity(mob);
+        assert_ne!(id_after, id_before, "a new id per spawn");
+        assert_eq!(nw_messages::entity_of_raw_id(&id_before), None);
+        assert!(stops.contains(&slot_before), "the old card's slot stops");
+        // A stopped slot may serve the new spawn once its stop has gone out.
+        let (_, card_id) = card;
+        assert_eq!(card_id, id_after, "the new card names the new id");
+    }
+
+    #[test]
+    fn players_and_mobs_that_leave_take_their_ids_along() {
+        const CYCLES: u64 = 20;
+        const INDEX: u32 = 302;
+        /// Player numbers of this test only.
+        const FIRST_PLAYER: u64 = 0x3f00_0000_0100;
+        let mob = crate::mobs::mob_entity(INDEX);
+        let mut world = respawn_world(INDEX, crate::config::DEFAULT_MOB_RESPAWN_MS);
+        tick(&mut world, NOW);
+        let mob_id = nw_messages::raw_id_of_entity(mob);
+        let mut player_ids = Vec::new();
+        for cycle in 0..CYCLES {
+            let number = FIRST_PLAYER + cycle;
+            join(&mut world, number, CELL_M / 2.0 + 3.0);
+            tick(&mut world, NOW + cycle);
+            player_ids.push(nw_messages::raw_id_of_entity(number));
+            world.leave(&connection(number));
+        }
+        for id in &player_ids {
+            assert_eq!(
+                nw_messages::entity_of_raw_id(id),
+                None,
+                "a player's id goes with it"
+            );
+        }
+        assert_eq!(nw_messages::entity_of_raw_id(&mob_id), Some(mob));
+        // The mob's cell goes to another sim: the mob leaves with its id.
+        world.set_table(&table(&["sim-b", "sim-a"])).expect("table");
+        tick(&mut world, NOW + CYCLES);
+        assert_eq!(
+            nw_messages::entity_of_raw_id(&mob_id),
+            None,
+            "a mob's id goes with it"
+        );
+    }
+
+    #[test]
+    fn a_ghosts_id_is_held_while_it_is_sent_and_a_new_one_recards_it() {
+        /// A player number of this test only.
+        const GHOST: u64 = 0x3_f000_0001;
+        let who = connection(1);
+        let mut world = world();
+        join(&mut world, 1, 0.0);
+        let id = nw_messages::as_dynamic_raw_id([0x5c; nw_messages::RAW_ID_LEN]);
+        let ghost = Ghost {
+            entity: GHOST,
+            position: Point {
+                x: 10.0,
+                y: 10.0,
+                z: 50.0,
+            },
+            mob: None,
+            player: None,
+        };
+        world.adopt_ghost_ids(&[(GHOST, id)]);
+        world.set_ghosts(&slot("sim-b").id, vec![ghost], NOW);
+        let first = tick(&mut world, NOW);
+        assert_eq!(nw_messages::entity_of_raw_id(&id), Some(GHOST));
+        let seen = seen_by(&world, &first.messages, &who);
+        assert!(seen.contains(&GHOST), "{seen:?}");
+        // Its owner respawned it: a new id, and a new card here.
+        let renewed = nw_messages::as_dynamic_raw_id([0x6e; nw_messages::RAW_ID_LEN]);
+        world.adopt_ghost_ids(&[(GHOST, renewed)]);
+        world.set_ghosts(&slot("sim-b").id, vec![ghost], NOW + 33);
+        let again = tick(&mut world, NOW + 33);
+        assert_eq!(nw_messages::entity_of_raw_id(&id), None);
+        assert!(
+            !stops_of(&again.messages, &who).is_empty(),
+            "the old slot stops"
+        );
+        // The other sim stops sending it: the id goes.
+        world.set_ghosts(&slot("sim-b").id, Vec::new(), NOW + 66);
+        tick(&mut world, NOW + 66);
+        assert_eq!(nw_messages::entity_of_raw_id(&renewed), None);
     }
 
     #[test]
@@ -4462,6 +4890,87 @@ mod tests {
             .expect("a level message")
     }
 
+    /// A world of `settings` whose level has one crafting station at `at`, with players 1 (beside
+    /// it) and 2 (beyond the interest radius) admitted at `x`s near it.
+    fn station_world(settings: WorldSettings, at: [f32; 3]) -> SimWorld {
+        let station = nw_world::stations::CraftingStation {
+            id: STATION_ID,
+            position: at,
+            components: nw_world::stations::StationSlice {
+                station_type: "Camp1".to_owned(),
+                buildable: Some((1, 5)),
+                ..nw_world::stations::StationSlice::default()
+            },
+            ..nw_world::stations::CraftingStation::default()
+        };
+        let mut world = SimWorld::new(
+            settings,
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            test_combat(),
+            Arc::new(PlayerContent {
+                stations: vec![station],
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a"])).expect("table");
+        join(&mut world, 1, at[0] + 2.0);
+        join(&mut world, 2, at[0] + RADIUS + 10.0);
+        world
+    }
+
+    /// The MB campfire's GDE id.
+    const STATION_ID: u64 = 0x4d80_5a8c_13e7_21ff;
+
+    /// The station groups in the bundle of `who`: their card `GdeRef`s.
+    fn station_cards(
+        world: &SimWorld,
+        outgoing: &[Outgoing],
+        who: &ConnectionRef,
+    ) -> Vec<Option<[u8; nw_messages::RAW_ID_LEN]>> {
+        outgoing
+            .iter()
+            .filter(|out| out.connection == *who && out.channel == REPLICATION_CHANNEL)
+            .flat_map(|out| &out.envelopes)
+            .flat_map(|bytes| groups_in(world, who, &bundle_in(bytes)))
+            .filter(|(number, _)| *number == crafting::STATION_ENTITY_BASE)
+            .map(|(_, update)| update.card.and_then(|card| card.gde_ref))
+            .collect()
+    }
+
+    #[test]
+    fn a_station_group_goes_out_once_to_the_players_that_see_it() {
+        let mut station_ref = [0; nw_messages::RAW_ID_LEN];
+        station_ref[..8].copy_from_slice(&STATION_ID.to_le_bytes());
+        let mut world = station_world(settings(MANY, MAX_PLAYERS), [CELL_M / 2.0, 10.0, 50.0]);
+        let first = tick(&mut world, NOW + OWN_CARD_DELAY_MS);
+        assert_eq!(
+            station_cards(&world, &first.messages, &connection(1)),
+            [Some(station_ref)],
+            "a player beside the station gets its card"
+        );
+        assert!(
+            station_cards(&world, &first.messages, &connection(2)).is_empty(),
+            "a player beyond the interest radius gets none"
+        );
+        let second = tick(&mut world, NOW + OWN_CARD_DELAY_MS + 33);
+        assert!(
+            station_cards(&world, &second.messages, &connection(1)).is_empty(),
+            "the group goes out once while the station stays in view"
+        );
+    }
+
+    #[test]
+    fn the_tutorial_sends_no_station() {
+        let mut tutorial = settings(MANY, MAX_PLAYERS);
+        tutorial.level = TUTORIAL_LEVEL;
+        let start = nw_sim_core::TUTORIAL_START;
+        let mut world = station_world(tutorial, [start.x, start.y, start.z]);
+        let output = tick(&mut world, NOW + OWN_CARD_DELAY_MS);
+        assert!(station_cards(&world, &output.messages, &connection(1)).is_empty());
+    }
+
     #[test]
     fn a_tutorial_sim_logs_players_into_the_tutorial_level() {
         let mut world = tutorial_world();
@@ -4715,6 +5224,7 @@ mod tests {
             and_or: and_or.map(str::to_owned),
             conditions: None,
             max_roll,
+            trigger_limit_on_visit: false,
             cells: cells
                 .iter()
                 .map(|(index, cell)| (*index, (*cell).to_owned()))
@@ -4725,6 +5235,7 @@ mod tests {
             gather_ms: FLINT_GATHER_MS,
             respawn_ms: FLINT_RESPAWN_MS,
             loot_table: Some(FLINT.to_owned()),
+            loot_container: false,
             tradeskill: None,
             tool_required: false,
             game_event: None,
@@ -4859,6 +5370,137 @@ mod tests {
         assert_eq!(node_states(&world, &grown), [HEALTHY], "it grows back");
     }
 
+    #[test]
+    fn a_crate_gives_its_variants_loot_and_a_cancel_after_the_end_keeps_it() {
+        use nw_content::gathering::{CrateLoot, CrateVariant};
+        /// The retail start-beach armour chest (loot note): gatherable `LootLargeT1` (5 s,
+        /// `FinalLootTable` `Empty`), its capital, the facet entity and name of the retail
+        /// request, and its variant's table.
+        const CHEST: &str = "LootLargeT1";
+        const CHEST_GATHER_MS: u64 = 5_000;
+        const CHEST_GUID: &str = "aabcf082-9526-2edf-760b-043d3db212c4";
+        const CHEST_FACET: u64 = 0xdcb7_f4bf_a894_3c1b;
+        const CHEST_TARGET: [u8; nw_messages::wire::RAW_ID_LEN] = [
+            0x1b, 0x3c, 0x94, 0xa8, 0xbf, 0xf4, 0xb7, 0xdc, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        const CHEST_NAME: &[u8] = b"@LootContainer_ArmorChestBeach_DisplayName";
+        const VARIANT: &str = "WeaponsChest_StarterBeach_1";
+        const VARIANT_TABLE: &str = "BeachChestMB1";
+        const EMPTY: &str = "Empty";
+        /// The 5 s gather rounded up to the 33 ms tick, plus one tick.
+        const GATHER_END_MS: u64 = 5_049;
+        const INTERACTION: u64 = 11;
+        const TICK_MS: u64 = 33;
+        let gatherables = Gatherables::build([Gatherable {
+            id: CHEST.to_owned(),
+            gather_ms: CHEST_GATHER_MS,
+            respawn_ms: (0, 0),
+            loot_table: Some(EMPTY.to_owned()),
+            loot_container: true,
+            tradeskill: None,
+            tool_required: false,
+            game_event: None,
+        }]);
+        let mut rows = loot_rows(VARIANT_TABLE, &[(gear::tests::POTION, "0")]);
+        rows.extend(loot_rows(EMPTY, &[]));
+        let crates = CrateLoot::build(
+            vec![CrateVariant {
+                variant_id: VARIANT.to_owned(),
+                gatherable: CHEST.to_owned(),
+                name: String::from_utf8(CHEST_NAME.to_vec()).expect("name"),
+                table: VARIANT_TABLE.to_owned(),
+            }],
+            [(CHEST_GUID, VARIANT)],
+            [],
+        );
+        let mut combat = test_combat();
+        combat.spawns = Vec::new().into();
+        let mut world = SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            combat,
+            Arc::new(PlayerContent {
+                kits: gear::tests::kits(),
+                gatherables,
+                loot: LootTables::build(LootSource {
+                    rows,
+                    bucket_items: Vec::new(),
+                }),
+                crates,
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a"])).expect("table");
+        let who = connection(1);
+        let mut admit = admit_at(1, CELL_M / 2.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let spawn_at = NOW + OWN_CARD_DELAY_MS;
+        tick(&mut world, spawn_at);
+        world.heard_from(&who);
+        let potions = |world: &SimWorld| -> u32 {
+            world
+                .world
+                .get::<Player>(world.by_connection[&who])
+                .and_then(|player| player.gear.as_ref())
+                .map(Gear::carried)
+                .unwrap_or_default()
+                .iter()
+                .filter(|item| item.item_id == gear::tests::POTION)
+                .map(|item| item.quantity)
+                .sum()
+        };
+        let request = InteractionRequest {
+            target: CHEST_TARGET,
+            target_entity: CHEST_FACET,
+            interaction: INTERACTION,
+            kind: GATHER_KIND,
+            gatherable: Some(nw_formats::objectstream::lowercase_crc32(CHEST)),
+        };
+        let pressed_at = spawn_at + TICK_MS;
+        world.interact(&who, request, CHEST_NAME, pressed_at);
+        tick(&mut world, pressed_at);
+        let before = potions(&world);
+        tick(&mut world, pressed_at + GATHER_END_MS);
+        assert_eq!(
+            potions(&world),
+            before + 1,
+            "the variant's table, not Empty"
+        );
+        let cancel = ClientFacetMsg::CancelInteraction {
+            header: nw_messages::FacetHeader::of(0, 1),
+            target: CHEST_TARGET,
+            target_entity: CHEST_FACET,
+            interaction: INTERACTION,
+        };
+        let cancelled_at = pressed_at + GATHER_END_MS + TICK_MS;
+        world
+            .facet_message(&who, cancel.clone(), cancelled_at)
+            .expect("cancel");
+        let interrupted = tick(&mut world, cancelled_at).messages;
+        assert_eq!(
+            messages_to(&interrupted, 1)
+                .iter()
+                .filter(|message| matches!(message, ServerMessage::GatheringInterrupted(_)))
+                .count(),
+            1,
+            "retail answers the cancel after the end with 2724"
+        );
+        assert_eq!(potions(&world), before + 1, "the cancel keeps the loot");
+        world
+            .facet_message(&who, cancel, cancelled_at + TICK_MS)
+            .expect("cancel again");
+        let again = tick(&mut world, cancelled_at + TICK_MS).messages;
+        assert!(
+            !messages_to(&again, 1)
+                .iter()
+                .any(|message| matches!(message, ServerMessage::GatheringInterrupted(_))),
+            "once"
+        );
+    }
+
     /// The beach quests' items (item id, class), recipes, rewards and gatherables.
     const KNIFE: &str = "1hSkinningKnifeT1";
     const WOOD: &str = "WoodT1";
@@ -4972,6 +5614,7 @@ mod tests {
                     gather_ms: 15_000,
                     respawn_ms: (1_260_000, 1_800_000),
                     loot_table: None,
+                    loot_container: false,
                     tradeskill: Some("Skinning".to_owned()),
                     tool_required: true,
                     game_event: None,
@@ -5008,6 +5651,16 @@ mod tests {
                         reward(250, 350, MYSTIC_FEET),
                     ),
                 ]),
+                // Urda's Campfire (its retail GDE id, the beach-quests note's `GdeRef`).
+                stations: vec![nw_world::stations::CraftingStation {
+                    id: 0x4d80_5a8c_13e7_21ff,
+                    components: nw_world::stations::StationSlice {
+                        station_type: "Camp1".to_owned(),
+                        name: "@ui_watcherscampfire".to_owned(),
+                        ..nw_world::stations::StationSlice::default()
+                    },
+                    ..nw_world::stations::CraftingStation::default()
+                }],
                 ..PlayerContent::default()
             }),
         );
@@ -5317,6 +5970,7 @@ mod tests {
             gather_ms,
             respawn_ms: (respawn_ms, respawn_ms),
             loot_table: None,
+            loot_container: false,
             tradeskill: None,
             tool_required: false,
             game_event: Some(event.to_owned()),
@@ -5537,7 +6191,7 @@ mod tests {
         let body = world.world.get::<Body>(entity).expect("body");
         let vitals = world.world.get::<Vitals>(entity).expect("vitals");
         let offer = handoff_offer(player, body, vitals, later, None, PlayerQuests::default());
-        assert_eq!(offer.coins, 375, "a handoff carries them");
+        assert_eq!(offer.progression.coins, 375, "a handoff carries them");
     }
 
     #[test]
@@ -5645,8 +6299,14 @@ mod tests {
                 .is_empty(),
             "a tutorial sim keeps its players whatever the open-world table says"
         );
+        /// The tracker version the tutorial left (live run 12: 0x26).
+        const TUTORIAL_TRACKER_VERSION: u64 = 0x26;
         let mut at_exit = admit_at(1, TUTORIAL_EXIT.x, true);
         at_exit.position = Point::from(TUTORIAL_EXIT);
+        at_exit.quests = PlayerQuests {
+            tracker_version: TUTORIAL_TRACKER_VERSION,
+            ..PlayerQuests::default()
+        };
         tutorial.admit(&at_exit, NOW, SERVER_TIME).expect("admit");
         let card_at = NOW + OWN_CARD_DELAY_MS;
         assert!(
@@ -5663,6 +6323,10 @@ mod tests {
         assert_eq!(offer.position, Point::from(OPEN_WORLD_START));
         assert_eq!(offer.client_context, LOGIN_CLIENT_CONTEXT);
         assert!(offer.slots.is_empty());
+        assert_eq!(
+            offer.quests.tracker_version, TUTORIAL_TRACKER_VERSION,
+            "the beach lists go above the tutorial's"
+        );
 
         let mut open = world_of("sim-b", settings(MANY, MAX_PLAYERS));
         open.set_table(&table(&["sim-a", "sim-b"])).expect("table");
@@ -5892,13 +6556,9 @@ mod tests {
             .expect("body")
             .motion
             .position();
-        let _ = world.move_from_camera(
+        let _ = world.move_from_input(
             &a,
-            CameraSample {
-                camera: at,
-                view: Some(VIEW),
-                counter: None,
-            },
+            &[camera_record(1, at, VIEW, [0.0; 2], STANDING_SLOTS)],
             input_at,
         );
         world.attack_input(&a, &[stance_record(1)], input_at);
@@ -6240,45 +6900,40 @@ mod tests {
         assert_eq!(world.leave(&connection(1)).expect("left").items, None);
     }
 
-    #[test]
-    fn ten_thousand_kills_drop_loot_at_the_simulated_chances() {
-        const KILLS: u32 = 10_000;
-        const TABLE: &str = "WolfLoot";
+    /// A loot table `id` whose entries `cells` (item, threshold of 100,000) drop alone.
+    fn loot_rows(id: &str, cells: &[(&str, &str)]) -> Vec<LootRow> {
         const MAX_ROLL: i64 = 100_000;
-        /// An AND entry drops when the roll reaches it: 30 % of the rolls.
-        const POTION_THRESHOLD: &str = "70000";
-        const POTION_CHANCE: f64 = 0.3;
-        /// One percentage point.
-        const MAX_GAP: f64 = 0.01;
-        const SIMULATOR_SEED: u64 = 0x5eed;
-        let row = |id: &str, cells: &[(u32, &str)], and_or: Option<&str>, max_roll| LootRow {
-            id: id.to_owned(),
+        let row = |id: String, cells: Vec<(u32, String)>, and_or: Option<&str>, max_roll| LootRow {
+            id,
             and_or: and_or.map(str::to_owned),
             conditions: None,
             max_roll,
-            cells: cells
-                .iter()
-                .map(|(index, cell)| (*index, (*cell).to_owned()))
-                .collect(),
+            trigger_limit_on_visit: false,
+            cells: cells.into_iter().collect(),
         };
-        let tables = LootTables::build(LootSource {
-            rows: vec![
-                row(
-                    TABLE,
-                    &[(1, gear::tests::FLINT), (2, gear::tests::POTION)],
-                    Some("AND"),
-                    None,
-                ),
-                row(&format!("{TABLE}_Qty"), &[(1, "1"), (2, "1")], None, None),
-                row(
-                    &format!("{TABLE}_Probs"),
-                    &[(1, "0"), (2, POTION_THRESHOLD)],
-                    None,
-                    Some(MAX_ROLL),
-                ),
-            ],
-            bucket_items: Vec::new(),
-        });
+        let column = |value: &dyn Fn(&(&str, &str)) -> String| -> Vec<(u32, String)> {
+            (1..).zip(cells.iter().map(value)).collect()
+        };
+        vec![
+            row(
+                id.to_owned(),
+                column(&|(item, _)| (*item).to_owned()),
+                Some("AND"),
+                None,
+            ),
+            row(format!("{id}_Qty"), column(&|_| "1".to_owned()), None, None),
+            row(
+                format!("{id}_Probs"),
+                column(&|(_, threshold)| (*threshold).to_owned()),
+                None,
+                Some(MAX_ROLL),
+            ),
+        ]
+    }
+
+    /// A world whose test mob type drops loot table `loot_table` of `tables`, with player 1 (the
+    /// test kits) at the mob.
+    fn loot_world(loot_table: &str, tables: LootTables) -> SimWorld {
         let mut combat = test_combat();
         combat.spawns = vec![test_spawn(CELL_M / 2.0)].into();
         let mut world = SimWorld::new(
@@ -6289,12 +6944,10 @@ mod tests {
             combat,
             Arc::new(PlayerContent {
                 kits: gear::tests::kits(),
-                loot: tables.clone(),
+                loot: tables,
                 mob_loot: MobLoot::build([MobLootRow {
                     vitals_id: TEST_MOB.to_owned(),
-                    can_drop_loot: true,
-                    table: Some(TABLE.to_owned()),
-                    chance: None,
+                    table: Some(loot_table.to_owned()),
                     tags: None,
                 }]),
                 ..PlayerContent::default()
@@ -6304,49 +6957,436 @@ mod tests {
         let mut admit = admit_at(1, CELL_M / 2.0, true);
         admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
         world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        world
+    }
+
+    /// The loot table of [`limited_flint_world`].
+    const FLINT_TABLE: &str = "BoarLoot";
+    /// A weekly reset, `LimitExpireSeconds` and `MaxLimitMult` of the flint's limit.
+    const WEEKLY_EXPIRE_S: i64 = 604_800;
+
+    /// A [`loot_world`] whose table always drops the flint, which a weekly loot limit of 1
+    /// holds (retail clock: Tuesday 09:00 UTC).
+    fn limited_flint_world() -> SimWorld {
+        use nw_content::loot_limits::{LimitRow, LootLimitRules, LootLimits, ResetClock, Weekday};
+        let tables = LootTables::build(LootSource {
+            rows: loot_rows(FLINT_TABLE, &[(gear::tests::FLINT, "0")]),
+            bucket_items: Vec::new(),
+        });
+        let mut world = loot_world(FLINT_TABLE, tables);
+        Arc::make_mut(&mut world.content).loot_limits = Some(LootLimitRules {
+            limits: LootLimits::build([LimitRow {
+                id: gear::tests::FLINT,
+                count_limit: 1,
+                expire_seconds: WEEKLY_EXPIRE_S,
+                max_limit_mult: WEEKLY_EXPIRE_S,
+                replicated: true,
+            }]),
+            clock: ResetClock {
+                hour_utc: 9,
+                weekly_day: Weekday::Tuesday,
+            },
+        });
+        world
+    }
+
+    /// The loot limit counts of the loot tracker members waiting for player `number`.
+    fn limit_members(
+        world: &mut SimWorld,
+        number: u64,
+    ) -> Vec<Vec<nw_messages::loot::LootLimitEntry>> {
+        let entity = world.player_by_number(number).expect("player");
+        world
+            .world
+            .get::<Player>(entity)
+            .expect("player")
+            .extra_members
+            .iter()
+            .filter_map(|member| match &member.state {
+                MemberState::LootTracker(state) => {
+                    state.limits.as_ref().map(|limits| limits.elements.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_loot_limit_holds_back_an_item_after_its_count() {
+        let mut world = limited_flint_world();
+        let mob = crate::mobs::mob_entity(0);
+        world.drop_loot(mob, 1, NOW);
+        assert_eq!(
+            world.bags.counts(),
+            (1, 1),
+            "the first kill drops the flint"
+        );
+        let shown = limit_members(&mut world, 1);
+        assert_eq!(shown.len(), 1, "the bag and the count go in one member");
+        assert_eq!(
+            (shown[0][0].key, shown[0][0].count),
+            (
+                nw_formats::objectstream::lowercase_crc32(gear::tests::FLINT),
+                1
+            )
+        );
+        assert_eq!(
+            shown[0][0].first_ns, shown[0][0].ends_ns,
+            "at its limit the count shows its end (retail newchar entry)"
+        );
+        world.drop_loot(mob, 1, NOW);
+        assert_eq!(
+            world.bags.counts(),
+            (2, 1),
+            "the limit of 1 is reached: the second roll gives nothing to loot"
+        );
+        assert_eq!(
+            limit_members(&mut world, 1).len(),
+            1,
+            "a roll that counted nothing sends no new count"
+        );
+    }
+
+    /// The progression of a character that saved one: experience, coins, an achievement bit
+    /// and the flint's count, which ends a week after the test's server time.
+    fn saved_progression() -> PlayerProgression {
+        const ACHIEVEMENT_BIT: u32 = 15_317;
+        let counted_ns = loot_bag::unix_ns(SERVER_TIME);
+        let week_ns = u64::try_from(WEEKLY_EXPIRE_S).expect("week") * NS_PER_SECOND;
+        PlayerProgression {
+            experience: 1_250,
+            coins: 375,
+            achievements: vec![ACHIEVEMENT_BIT],
+            loot_limits: vec![nw_bus::LootLimitCount {
+                limit_id: gear::tests::FLINT.to_lowercase(),
+                count: 1,
+                counted_ns,
+                ends_ns: counted_ns + week_ns,
+            }],
+        }
+    }
+
+    /// Nanoseconds in one second.
+    const NS_PER_SECOND: u64 = 1_000_000_000;
+
+    #[test]
+    fn a_login_keeps_the_saved_progression_and_a_save_round_takes_its_changes() {
+        const JOINER: u64 = 2;
+        const MORE_COINS: u64 = 25;
+        let mut world = limited_flint_world();
+        world.server_ms = SERVER_TIME;
+        let mut admit = admit_at(JOINER, CELL_M / 2.0, true);
+        admit.progression = saved_progression();
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let entity = world.player_by_number(JOINER).expect("player");
+        let player = world.world.get::<Player>(entity).expect("player");
+        assert_eq!((player.experience, player.coins), (1_250, 375));
+        assert_eq!(player.progression(), saved_progression());
+        assert_eq!(
+            limit_members(&mut world, JOINER).len(),
+            1,
+            "the login state lists the counts"
+        );
+        let unsaved = |world: &mut SimWorld| {
+            world
+                .positions()
+                .into_iter()
+                .find(|departure| departure.character == admit.character)
+                .expect("departure")
+                .progression
+        };
+        assert_eq!(unsaved(&mut world), None, "the database has it");
+        world.drop_loot(crate::mobs::mob_entity(0), JOINER, NOW);
+        assert_eq!(
+            world.bags.counts(),
+            (1, 0),
+            "the saved count holds the flint back after the login"
+        );
+        world.world.get_mut::<Player>(entity).expect("player").coins += MORE_COINS;
+        let changed = unsaved(&mut world).expect("a change");
+        assert_eq!(changed.coins, 375 + MORE_COINS);
+        assert_eq!(unsaved(&mut world), None, "taken once");
+        let departure = world.leave(&admit.connection).expect("left");
+        assert_eq!(
+            departure.progression,
+            Some(changed),
+            "a logout saves the whole progression"
+        );
+    }
+
+    #[test]
+    fn a_handoff_carries_the_progression_and_the_taker_saves_it() {
+        let mut old = world();
+        old.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        let mut admit = admit_at(1, BORDER_X + 50.0, true);
+        admit.progression = saved_progression();
+        old.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        tick(&mut old, NOW);
+        let offer = tick_offer(&mut old);
+        assert_eq!(
+            offer.progression,
+            saved_progression(),
+            "the offer carries it"
+        );
+        let mut new = world_of("sim-b", settings(MANY, MAX_PLAYERS));
+        new.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        new.take(&offer, NOW, SERVER_TIME).expect("take");
+        let taken = new.player_by_number(1).expect("player");
+        assert_eq!(
+            new.world
+                .get::<Player>(taken)
+                .expect("player")
+                .progression(),
+            saved_progression(),
+            "without a level change the taker keeps the carried achievements"
+        );
+        assert_eq!(
+            new.positions()[0].progression,
+            Some(saved_progression()),
+            "the sender may not have saved it: the taker's first round does"
+        );
+        assert_eq!(new.positions()[0].progression, None);
+    }
+
+    #[test]
+    fn the_remote_config_multiplies_experience_and_caps_the_wallet() {
+        use super::encounter::Order;
+        use nw_content::gameplay_config::{GameplayConfig, XpMultipliers};
+        use nw_content::rewards::KillExperience;
+        /// `RewardData` level 1 `KillExperience` (content bundle 25810808).
+        const LEVEL_ONE_KILL: u32 = 10;
+        /// Retail: 20 per tutorial kill (tutorial note, section 8).
+        const RETAIL_KILL: u32 = 20;
+        /// Below two quest rewards of 225 coins.
+        const CAP: u64 = 300;
+        let mut world = beach_world();
+        let content = Arc::make_mut(&mut world.content);
+        content.gameplay = GameplayConfig {
+            xp: XpMultipliers {
+                character: 2.0,
+                progression: HashMap::new(),
+            },
+            wallet_cap: Some(CAP),
+            ..GameplayConfig::default()
+        };
+        content.kill_experience = KillExperience::build([(1, i64::from(LEVEL_ONE_KILL))]);
+        let wallet = |world: &SimWorld| {
+            let entity = world.by_connection[&connection(1)];
+            let player = world.world.get::<Player>(entity).expect("player");
+            (player.coins, player.experience)
+        };
+        let (coins, experience) = wallet(&world);
+        world.carry_out(1, vec![Order::KillExperience(1)], NOW);
+        assert_eq!(wallet(&world), (coins, experience + RETAIL_KILL));
+        world.fire_game_event(1, "01_skinningknife_success", NOW);
+        assert_eq!(
+            wallet(&world),
+            ((coins + 225).min(CAP), experience + RETAIL_KILL + 2 * 275),
+            "a quest reward's experience is doubled too"
+        );
+        world.fire_game_event(1, "01_skinningknife_success", NOW);
+        assert_eq!(wallet(&world).0, CAP, "the wallet stops at its cap");
+    }
+
+    #[test]
+    fn ten_thousand_kills_drop_a_bag_each_with_the_simulated_loot() {
+        const KILLS: u32 = 10_000;
+        const TABLE: &str = "WolfLoot";
+        /// An AND entry drops when the roll reaches it: 30 % of the rolls.
+        const POTION_CHANCE: f64 = 0.3;
+        /// One percentage point.
+        const MAX_GAP: f64 = 0.01;
+        let tables = LootTables::build(LootSource {
+            rows: loot_rows(TABLE, &[(gear::tests::POTION, "70000")]),
+            bucket_items: Vec::new(),
+        });
+        let mut world = loot_world(TABLE, tables.clone());
+        let entity = world.by_connection[&connection(1)];
         for _ in 0..KILLS {
             world.drop_loot(crate::mobs::mob_entity(0), 1, NOW);
+            if let Some(mut player) = world.world.get_mut::<Player>(entity) {
+                player.extra_members.clear();
+            }
         }
-        let carried = world
-            .departures()
-            .pop()
-            .and_then(|departure| departure.items)
-            .expect("items");
-        let count = |item: &str| -> u32 {
-            carried
+        let (bags, owned) = world.bags.counts();
+        assert_eq!(bags, KILLS as usize, "every kill drops a bag");
+        let kill_rate = owned as f64 / f64::from(KILLS);
+        // The simulator with the sim's own dice: the kills roll the same numbers.
+        let mut dice = Dice::new(test_combat().seed);
+        let levels = LootContext {
+            enemy: Some(nw_content::loot::loot_level(TEST_LEVEL)),
+            content: Some(nw_content::loot::loot_level(TEST_LEVEL)),
+            player: None,
+            poi: None,
+            tags: &[],
+            reached_limits: &[],
+        };
+        let simulated = (0..KILLS)
+            .filter(|_| {
+                !tables
+                    .roll(TABLE, levels, &mut |below| dice.below(below))
+                    .items
+                    .is_empty()
+            })
+            .count();
+        assert_eq!(owned, simulated, "the kills roll as the simulator does");
+        assert!((kill_rate - POTION_CHANCE).abs() <= MAX_GAP, "{kill_rate}");
+    }
+
+    #[test]
+    fn a_killed_mobs_bag_lists_shows_and_gives_its_items() {
+        const TABLE: &str = "BoarLoot";
+        const INTERACTION: u64 = 9;
+        const ACCEPTED: u8 = 1;
+        const REFUSED: u8 = 2;
+        const TICK_MS: u64 = 33;
+        let tables = LootTables::build(LootSource {
+            rows: loot_rows(TABLE, &[(gear::tests::FLINT, "0")]),
+            bucket_items: Vec::new(),
+        });
+        let mut world = loot_world(TABLE, tables);
+        let who = connection(1);
+        let spawn_at = NOW + OWN_CARD_DELAY_MS;
+        tick(&mut world, spawn_at);
+        world.heard_from(&who);
+        let own_states = |world: &SimWorld, messages: &[Outgoing]| -> Vec<MemberState> {
+            bundle_of(messages, &who)
+                .map(|bundle| groups_in(world, &who, &bundle))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(number, _)| *number == 1)
+                .flat_map(|(_, update)| update.members)
+                .map(|member| member.state)
+                .collect()
+        };
+        let tracked = |states: &[MemberState]| -> Vec<nw_messages::TrackedLoot> {
+            states
                 .iter()
-                .filter(|stack| stack.item_id == item)
-                .map(|stack| stack.quantity)
+                .filter_map(|state| match state {
+                    MemberState::LootTracker(tracker) => tracker.loot.clone(),
+                    _ => None,
+                })
+                .flat_map(|list| list.elements)
+                .collect()
+        };
+        let flint_in_bag = |world: &SimWorld| -> u32 {
+            world
+                .world
+                .get::<Player>(world.by_connection[&who])
+                .and_then(|player| player.gear.as_ref())
+                .map(Gear::carried)
+                .unwrap_or_default()
+                .iter()
+                .filter(|item| item.item_id == gear::tests::FLINT)
+                .map(|item| item.quantity)
                 .sum()
         };
-        assert_eq!(
-            count(gear::tests::FLINT),
-            KILLS,
-            "the 0 threshold always drops"
-        );
-        let kill_rate = f64::from(count(gear::tests::POTION)) / f64::from(KILLS);
-        let mut dice = Dice::new(SIMULATOR_SEED);
-        let levels = LootContext {
-            enemy: TEST_LEVEL,
-            content: 1,
-            tags: &[],
-        };
-        let simulated: u32 = (0..KILLS)
-            .map(|_| {
-                tables
-                    .roll(TABLE, levels, &mut |below| dice.below(below))
-                    .iter()
-                    .filter(|(item, _)| item == gear::tests::POTION)
-                    .map(|(_, quantity)| *quantity)
-                    .sum::<u32>()
+
+        let killed_at = spawn_at + TICK_MS;
+        world.drop_loot(crate::mobs::mob_entity(0), 1, killed_at);
+        let dropped = tick(&mut world, killed_at).messages;
+        let entries = tracked(&own_states(&world, &dropped));
+        assert_eq!(entries.len(), 1, "the tracker lists the bag");
+        assert_eq!(entries[0].state, nw_messages::LOOT_ROLLED);
+        let bag = entries[0].bag;
+        let cards: Vec<nw_messages::GdeMetadataReplicatedState> = bundle_of(&dropped, &who)
+            .map(|bundle| groups_in(&world, &who, &bundle))
+            .unwrap_or_default()
+            .into_iter()
+            .flat_map(|(_, update)| update.members)
+            .filter_map(|member| match member.state {
+                MemberState::GdeMetadata(card) => Some(card),
+                _ => None,
             })
-            .sum();
-        let simulated_rate = f64::from(simulated) / f64::from(KILLS);
-        assert!(
-            (kill_rate - simulated_rate).abs() <= MAX_GAP,
-            "kills {kill_rate}, simulator {simulated_rate}"
+            .filter(|card| card.gde_ref == Some(bag))
+            .collect();
+        assert_eq!(cards.len(), 1, "the bag's card goes with the kill");
+
+        world
+            .facet_message(
+                &who,
+                ClientFacetMsg::SetReplicateStorage {
+                    header: nw_messages::FacetHeader::of(0, 1),
+                    storage: bag,
+                },
+                killed_at + TICK_MS,
+            )
+            .expect("storage");
+        let shown = tick(&mut world, killed_at + TICK_MS).messages;
+        let storages: Vec<nw_messages::StoredItems> = own_states(&world, &shown)
+            .into_iter()
+            .filter_map(|state| match state {
+                MemberState::GlobalStorage(storage) => storage.storages,
+                _ => None,
+            })
+            .flat_map(|list| list.elements)
+            .collect();
+        assert_eq!(storages.len(), 1);
+        assert_eq!(storages[0].storage, bag);
+        let flint_index = gear::tests::kits()
+            .item(gear::tests::FLINT)
+            .expect("flint")
+            .item_index;
+        assert_eq!(
+            storages[0]
+                .items
+                .iter()
+                .map(|item| (item.item_index, item.quantity))
+                .collect::<Vec<_>>(),
+            [(flint_index, 1)]
         );
-        assert!((kill_rate - POTION_CHANCE).abs() <= MAX_GAP, "{kill_rate}");
+
+        let request = InteractionRequest {
+            target: bag,
+            target_entity: statics::facet_of(&bag[..8].try_into().expect("prefix")),
+            interaction: INTERACTION,
+            kind: LOOT_KIND,
+            gatherable: None,
+        };
+        let opened_at = killed_at + 2 * TICK_MS;
+        world.interact(&who, request, b"@ui_loot", opened_at);
+        let taken = tick(&mut world, opened_at).messages;
+        let answers: Vec<(u8, Vec<u8>)> = messages_to(&taken, 1)
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::InteractionValidated(answer) => Some((answer.status, answer.name)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers, [(ACCEPTED, b"@inv_DroppedItems".to_vec())]);
+        assert_eq!(flint_in_bag(&world), 1, "the item went into the bag");
+        let states = own_states(&world, &taken);
+        assert_eq!(
+            tracked(&states)
+                .iter()
+                .map(|loot| loot.state)
+                .collect::<Vec<_>>(),
+            [nw_messages::LOOT_TAKEN]
+        );
+        assert!(states.iter().any(|state| matches!(
+            state,
+            MemberState::GlobalStorage(storage)
+                if storage.storages.as_ref().is_some_and(|list| list.elements.is_empty())
+        )));
+
+        world.interact(
+            &who,
+            InteractionRequest {
+                interaction: INTERACTION + 1,
+                ..request
+            },
+            &[],
+            opened_at + TICK_MS,
+        );
+        let again = tick(&mut world, opened_at + TICK_MS).messages;
+        assert!(
+            messages_to(&again, 1).iter().any(|message| matches!(
+                message,
+                ServerMessage::InteractionValidated(answer) if answer.status == REFUSED
+            )),
+            "a taken bag is refused"
+        );
+        assert_eq!(flint_in_bag(&world), 1, "taken once");
     }
 
     const QUEST: &str = "Q_FetchFlint";
@@ -6708,12 +7748,76 @@ mod tests {
         assert_eq!(world.mob_counts()[0], (MobState::Asleep, 0));
     }
 
+    /// The slot values of a retail record that holds no key, and of one that holds forward
+    /// (clean running capture).
+    const STANDING_SLOTS: [u64; 10] = [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0x0402_0000_0800_0000,
+        0x0200_0000_0000_0000,
+        0,
+    ];
+    const FORWARD_SLOTS: [u64; 10] = [
+        0x0800_0000_4000,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0x1_0000_0000,
+        0x0402_0000_0800_0000,
+        0x0200_0000_4000_0000,
+        0,
+    ];
+    /// The boom of the test clients' camera.
+    const TEST_BOOM_M: f32 = 4.0;
+
+    /// Input record `counter` holding `slots`, of a client whose camera looks along `view` from
+    /// [`TEST_BOOM_M`] behind its body at `body`, which moves at `velocity`.
+    fn camera_record(
+        counter: u16,
+        body: Position,
+        view: LookDir,
+        velocity: [f32; 2],
+        slots: [u64; 10],
+    ) -> InputRecord {
+        use nw_sim_core::camera_check::{CAMERA_LAG_S, CAMERA_RISE_M, SHOULDER_RIGHT_M};
+        let (sin, cos) = view.yaw.sin_cos();
+        let level = TEST_BOOM_M * view.pitch.cos();
+        let camera = InputPosition::from_metres(
+            body.x + level * sin + SHOULDER_RIGHT_M * cos - CAMERA_LAG_S * velocity[0],
+            body.y - level * cos + SHOULDER_RIGHT_M * sin - CAMERA_LAG_S * velocity[1],
+            body.z + CAMERA_RISE_M + TEST_BOOM_M * view.pitch.sin(),
+        )
+        .expect("finite");
+        InputRecord {
+            u16_after_mask: counter,
+            bit_5: Some(f32::from(attack::INPUT_RECORD_MS) / 1_000.0),
+            bit_6: Some([view.yaw, view.pitch]),
+            bit_7: Some(camera),
+            slots: nw_messages::client_input::InputSlots {
+                count: 19,
+                values: slots.to_vec(),
+                bytes: [128; 4],
+            },
+            ..InputRecord::default()
+        }
+    }
+
     #[test]
-    fn inputs_that_arrive_together_keep_the_body_steady() {
-        /// A run: 4 m/s along x, one record per 33 ms (live 2026-09-18: inputs came in pairs a
-        /// few microseconds apart, and the body flipped by the boom's change).
-        const RUN_MPS: f32 = 4.0;
-        const YAW: f32 = -std::f32::consts::FRAC_PI_2;
+    fn records_that_arrive_together_each_move_the_body_by_their_keys() {
+        // A client runs east (yaw -90°), two records per input, newest first, as live: the
+        // server's body follows the client's own run record by record.
+        const EAST: LookDir = LookDir {
+            yaw: -std::f32::consts::FRAC_PI_2,
+            pitch: 0.2,
+        };
+        const RECORDS: u16 = 16;
         let mut world = world();
         let a = connection(1);
         join(&mut world, 1, CELL_M / 2.0);
@@ -6724,54 +7828,111 @@ mod tests {
             .expect("body")
             .motion
             .position();
-        let step_m = RUN_MPS * f32::from(attack::INPUT_RECORD_MS) / 1_000.0;
-        // The camera of a standing body at `start`.
-        let offset = crate::camera::body_of(
-            start,
-            LookDir {
-                yaw: YAW,
-                pitch: 0.0,
-            },
-            0.0,
-        );
-        let camera = Position {
-            x: 2.0 * start.x - offset.x,
-            y: 2.0 * start.y - offset.y,
-            z: 2.0 * start.z - offset.z,
-        };
-        let sample = |record: u16| CameraSample {
-            camera: Position {
-                x: camera.x + step_m * f32::from(record),
-                ..camera
-            },
-            view: Some(LookDir {
-                yaw: YAW,
-                pitch: 0.0,
-            }),
-            counter: Some(record),
-        };
-        let mut bodies = Vec::new();
-        for record in 1..=8_u16 {
-            // Two inputs per arrival time, as live.
-            let arrived = NOW
-                + ONE_SECOND_MS
-                + u64::from(record / 2) * u64::from(2 * attack::INPUT_RECORD_MS);
-            let (result, body) = world.move_from_camera(&a, sample(record), arrived);
-            assert!(result.is_ok(), "record {record}: {result:?}");
-            bodies.push(body.x);
+        let mut client = nw_sim_core::Character::new(start);
+        let mut sent = Vec::new();
+        let mut last = start;
+        for counter in 1..=RECORDS {
+            client.step(
+                nw_sim_core::CharacterInput {
+                    intent: nw_sim_core::Intent::of_keys(true, false, false, false),
+                    yaw: EAST.yaw,
+                    dt_s: f32::from(attack::INPUT_RECORD_MS) / 1_000.0,
+                },
+                &NoGround,
+                OCEAN_LEVEL_M,
+            );
+            sent.insert(
+                0,
+                camera_record(
+                    counter,
+                    client.position(),
+                    EAST,
+                    client.velocity(),
+                    FORWARD_SLOTS,
+                ),
+            );
+            if counter % 2 == 1 {
+                continue;
+            }
+            let arrived =
+                NOW + ONE_SECOND_MS + u64::from(counter) * u64::from(attack::INPUT_RECORD_MS);
+            let (result, body) = world
+                .move_from_input(&a, &sent[..2], arrived)
+                .expect("new records");
+            assert!(result.is_ok(), "record {counter}: {result:?}");
+            assert!(
+                body.horizontal_distance(client.position()) < 0.05,
+                "record {counter}: {body:?} vs {:?}",
+                client.position()
+            );
+            last = body;
         }
-        // The first record stands; from the second the boom is the running one.
-        let steps: Vec<f32> = bodies[1..]
-            .windows(2)
-            .map(|pair| pair[1] - pair[0])
-            .collect();
-        assert!(
-            steps.iter().all(|step| (step - step_m).abs() < 0.01),
-            "the body moves one record's run each record, also within a pair: {steps:?}"
-        );
+        assert!(last.x > start.x + 1.0, "it ran east: {last:?}");
         // An old copy moves nothing.
-        let (_, held) = world.move_from_camera(&a, sample(3), NOW + 2 * ONE_SECOND_MS);
-        assert!((held.x - bodies[7]).abs() < f32::EPSILON, "{held:?}");
+        assert_eq!(
+            world.move_from_input(&a, &sent[2..4], NOW + 2 * ONE_SECOND_MS),
+            None
+        );
+    }
+
+    #[test]
+    fn a_running_player_gets_its_place_in_every_own_state_and_a_still_one_none() {
+        // Live 2026-09-18: with no own place while running, Thorpe's intro never started (no
+        // 6703); retail sends the place in every state of a run (clean running capture).
+        const NORTH: LookDir = LookDir {
+            yaw: 0.0,
+            pitch: 0.2,
+        };
+        const RUN_STATES: u16 = 20;
+        const STILL_STATES: u16 = 30;
+        let mut world = world();
+        let a = connection(1);
+        join(&mut world, 1, CELL_M / 2.0);
+        let card_at = NOW + OWN_CARD_DELAY_MS;
+        tick(&mut world, card_at);
+        world.heard_from(&a);
+        let entity = world.by_connection[&a];
+        let start = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let mut client = nw_sim_core::Character::new(start);
+        let has_place = |states: &[MemberState]| {
+            alc_children(states)
+                .iter()
+                .any(|(child, _)| *child == POS_REL_CHILD)
+        };
+        let mut placed = Vec::new();
+        for counter in 1..=RUN_STATES + STILL_STATES {
+            let run = counter <= RUN_STATES;
+            client.step(
+                nw_sim_core::CharacterInput {
+                    intent: nw_sim_core::Intent::of_keys(run, false, false, false),
+                    yaw: NORTH.yaw,
+                    dt_s: f32::from(attack::INPUT_RECORD_MS) / 1_000.0,
+                },
+                &NoGround,
+                OCEAN_LEVEL_M,
+            );
+            let slots = if run { FORWARD_SLOTS } else { STANDING_SLOTS };
+            let now = card_at + u64::from(counter) * u64::from(attack::INPUT_RECORD_MS);
+            let record = camera_record(counter, client.position(), NORTH, client.velocity(), slots);
+            let _ = world.move_from_input(&a, &[record], now);
+            let outgoing = tick(&mut world, now);
+            placed.push(has_place(&states_of(&world, &outgoing.messages, &a, 1)));
+        }
+        assert!(
+            placed[..usize::from(RUN_STATES)]
+                .iter()
+                .all(|placed| *placed),
+            "every state of the run: {placed:?}"
+        );
+        assert!(
+            placed[placed.len() - 10..].iter().all(|placed| !placed),
+            "none once it stands: {placed:?}"
+        );
     }
 
     #[test]
@@ -6875,6 +8036,27 @@ mod tests {
     }
 
     #[test]
+    fn a_client_without_view_angles_moves_to_each_of_its_points() {
+        // The test client and the load-test bots send one point per input and number no
+        // records (counter 0 in each).
+        let mut world = world();
+        let a = connection(1);
+        join(&mut world, 1, 0.0);
+        for (step, x) in [1.0, 2.0, 3.0_f32].into_iter().enumerate() {
+            let target = at(x);
+            let input = nw_messages::ClientInputMsg::position(
+                InputPosition::from_metres(target.x, target.y, target.z).expect("finite"),
+            );
+            let arrived = NOW + ONE_SECOND_MS * (1 + u64::try_from(step).expect("small"));
+            let (result, body) = world
+                .move_from_input(&a, &input.records, arrived)
+                .expect("a point");
+            assert!(result.is_ok(), "{result:?}");
+            assert!(body.horizontal_distance(target) < CLOSE_M, "{body:?}");
+        }
+    }
+
+    #[test]
     fn the_inventory_camera_moves_no_body_until_it_glided_back() {
         let mut world = world();
         let a = connection(1);
@@ -6884,17 +8066,22 @@ mod tests {
             looking,
         };
         // The camera alone, one record per input: the body is the camera point.
-        let sample = |record: u16, x: f32| CameraSample {
-            camera: at(x),
-            view: None,
-            counter: Some(record),
+        let sample = |record: u16, x: f32| {
+            let camera = at(x);
+            [InputRecord {
+                u16_after_mask: record,
+                bit_7: InputPosition::from_metres(camera.x, camera.y, camera.z),
+                ..InputRecord::default()
+            }]
         };
         let opened = NOW + ONE_SECOND_MS;
         world
             .facet_message(&a, loadout(true), opened)
             .expect("opened");
         // Live 2026-09-18: the inventory camera glided 3.6 m down toward the body.
-        let (result, body) = world.move_from_camera(&a, sample(1, 1.0), opened + 1);
+        let (result, body) = world
+            .move_from_input(&a, &sample(1, 1.0), opened + 1)
+            .expect("a new record");
         assert_eq!(result, Ok(GroundCheck::Checked));
         assert_eq!(body, at(0.0), "the body stays while the inventory is open");
         assert_eq!(world.positions()[0].position, at(0.0));
@@ -6903,16 +8090,22 @@ mod tests {
             .facet_message(&a, loadout(false), closed)
             .expect("closed");
         let gliding = closed + LOADOUT_CAMERA_SETTLE_MS - 1;
-        let _ = world.move_from_camera(&a, sample(2, 1.0), gliding);
+        let _ = world.move_from_input(&a, &sample(2, 1.0), gliding);
         assert_eq!(
             world.positions()[0].position,
             at(0.0),
             "the camera still glides back"
         );
         let settled = closed + LOADOUT_CAMERA_SETTLE_MS;
-        let (result, _) = world.move_from_camera(&a, sample(3, 1.0), settled);
+        let (result, _) = world
+            .move_from_input(&a, &sample(3, 1.0), settled)
+            .expect("a new record");
         assert!(result.is_ok(), "{result:?}");
-        assert_eq!(world.positions()[0].position, at(1.0), "moves count again");
+        let moved = world.positions()[0].position;
+        assert!(
+            moved.horizontal_distance(at(1.0)) < CLOSE_M && (moved.z - at(1.0).z).abs() < CLOSE_M,
+            "moves count again: {moved:?}"
+        );
     }
 
     #[test]
@@ -7441,6 +8634,44 @@ mod tests {
         assert!(new.cancel(&mover, offer.handoffs));
         assert_eq!(new.players(), 0);
         assert!(!new.cancel(&mover, offer.handoffs));
+    }
+
+    #[test]
+    fn a_taken_player_keeps_its_raw_id() {
+        /// A number no other test of this process gives a raw id: the taker stands for another
+        /// process, where the player has no id yet.
+        const TAKEN: u64 = 0x3d00_0000_0001;
+        let (mut old, mover, _) = border_world();
+        tick(&mut old, NOW);
+        let mut offer = tick_offer(&mut old);
+        assert_eq!(
+            offer.gde_ref,
+            raw_id_of_entity(offer.entity),
+            "the giver's id crosses"
+        );
+        // An id the taker's process never made, of the dynamic form.
+        let mut carried = offer.gde_ref;
+        carried[0] ^= 0x02;
+        carried[nw_messages::RAW_ID_LEN - 1] ^= 0xff;
+        offer.entity = TAKEN;
+        offer.gde_ref = carried;
+        let mut new = world_of("sim-b", settings(MANY, MAX_PLAYERS));
+        new.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        new.take(&offer, NOW, SERVER_TIME).expect("take");
+        assert_eq!(raw_id_of_entity(TAKEN), carried);
+        let output = tick(&mut new, NOW);
+        let bundle = bundle_of(&output.messages, &mover).expect("bundle");
+        let own_card = SlotRead::of(&bundle)
+            .expect("read")
+            .updates
+            .into_iter()
+            .find_map(|update| update.card.filter(|_| update.is_local_player()))
+            .expect("the own card");
+        assert_eq!(
+            own_card.gde_ref,
+            Some(carried),
+            "the client keeps knowing it by that id"
+        );
     }
 
     /// The offer of the frozen player of a border world.

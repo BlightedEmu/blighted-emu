@@ -2,7 +2,9 @@
 //! Shared protocol types for the Blighted New World emulator.
 //!
 //! `launcher_api` is the JSON between our launcher and `edge-http`. `game_api` is the JSON the
-//! game client reads and writes before character select.
+//! game client reads and writes before character select. `stats_api` is the stats service the
+//! client reads leaderboards from, and `analytics_api` the analytics stream it writes.
+//! `aws_mirror` names the Amazon hosts a server answers for its own game clients.
 //!
 //! The login-queue body is the JSON object `LoginQueueResponse`.
 //! `RepAddress` and `Signature` are strings on the nested `Token` object.
@@ -10,9 +12,12 @@
 //!
 //! Messages inside the carrier (type index, registration) are in `nw-reflect`.
 
+pub mod analytics_api;
+pub mod aws_mirror;
 pub mod game_api;
 pub mod launcher_api;
 pub mod login_queue;
+pub mod stats_api;
 
 pub use login_queue::{
     LoginQueueReply, LoginQueueRequest, LoginQueueRequestBody, LoginQueueResponse, LoginQueueToken,

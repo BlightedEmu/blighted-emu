@@ -3,7 +3,7 @@
 //! each file, and counts spawn IDs that no datasheet row has.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
@@ -11,11 +11,13 @@ use nw_content::ids::{gatherable_ids, lore_ids, npc_ids, vitals_ids};
 use nw_content::{ContainerError, ContentBundle};
 use nw_formats::azcs::{AzcsError, decode_azcs, is_azcs};
 use nw_formats::heightmap::{HeightmapError, parse_heightmap};
-use nw_formats::objectstream::{ObjectStreamError, lowercase_crc32, parse_object_stream};
+use nw_formats::objectstream::{Element, ObjectStreamError, lowercase_crc32, parse_object_stream};
 use nw_world::capitals::parse_capitals;
 use nw_world::height::{VERIFIED_MOUNTAIN_HEIGHTS, rescaled_sample};
 use nw_world::metadata::{MetadataError, MetadataRecords, SkipCounts, read_metadata};
 use nw_world::records::{HeightGrid, LevelInfo, RecordCounts, Region, WorldFile};
+use nw_world::slice_data::{SliceDataError, SliceSpawners, SpawnedSlice};
+use nw_world::stations::{CraftingStation, StationSlice};
 use nw_world::world_file::world_file_path;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -32,6 +34,10 @@ const HEIGHTMAP_FILE: &str = "region.heightmap";
 const REGION_METADATA_FILE: &str = "region.metadata";
 const METADATA_EXTENSION: &str = ".metadata";
 const CAPITALS_EXTENSION: &str = ".capitals.json";
+/// Each region's list of the slices that slices spawn (GDE id note).
+const SLICE_DATA_FILE: &str = "region.slicedata";
+/// The file extension of a slice that a spawner spawns.
+const DYNAMIC_SLICE_EXTENSION: &str = ".dynamicslice";
 const REGION_FOLDER_PREFIX: &str = "r_+";
 const REGION_FOLDER_SEPARATOR: &str = "_+";
 const PATH_SEPARATOR: char = '/';
@@ -121,6 +127,15 @@ pub enum WorldBuildError {
         /// Reader error.
         #[source]
         source: MetadataError,
+    },
+    /// A `region.slicedata` does not fit its reader.
+    #[error("{path}: {source}")]
+    SliceData {
+        /// Entry path.
+        path: String,
+        /// Reader error.
+        #[source]
+        source: SliceDataError,
     },
     /// The world file cannot be written or read back.
     #[error("world file: {0}")]
@@ -269,7 +284,8 @@ pub fn is_world_input(path: &str) -> bool {
             || path.ends_with(TERRAIN_FILE)
             || path.ends_with(HEIGHTMAP_FILE)
             || path.ends_with(METADATA_EXTENSION)
-            || path.ends_with(CAPITALS_EXTENSION))
+            || path.ends_with(CAPITALS_EXTENSION)
+            || path.ends_with(SLICE_DATA_FILE))
 }
 
 /// Groups entries by level folder. Only folders with a `tracts.json` are levels.
@@ -360,6 +376,20 @@ pub fn build_level(
             })?,
         );
     }
+    let mut spawners = SliceSpawners::default();
+    for (path, bytes) in files
+        .iter()
+        .filter(|(path, _)| path.ends_with(SLICE_DATA_FILE))
+    {
+        let root = object_stream(level, path, bytes)?;
+        spawners
+            .add_region(&root)
+            .map_err(|source| WorldBuildError::SliceData {
+                path: entry_path(level, path),
+                source,
+            })?;
+    }
+    let spawned = spawners.spawned_by(&capitals);
     let mut world = WorldFile {
         level: LevelInfo {
             name: level.to_owned(),
@@ -377,6 +407,7 @@ pub fn build_level(
         landmarks: records.landmarks,
         encounters: records.encounters,
         capitals,
+        spawned,
         ..WorldFile::default()
     };
     world.fill_point_keys();
@@ -384,7 +415,8 @@ pub fn build_level(
 }
 
 /// Builds, writes and reloads the world file of every level in `source`, and checks the spawn
-/// IDs against the content bundle at `bundle_path`.
+/// IDs against the content bundle at `bundle_path`. The crafting stations among each level's
+/// spawned slices come from the slices' `.dynamicslice` files.
 pub fn run_world(
     source: &GameSource,
     client_build: &str,
@@ -398,22 +430,66 @@ pub fn run_world(
         Ok::<(), ToolError>(())
     })?;
     let levels: Vec<(String, LevelFiles)> = group_levels(entries).into_iter().collect();
-    let workers = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
-    let chunk_size = levels.len().div_ceil(workers).max(1);
+    let mut built = in_parallel(&levels, |(level, files)| build_level(level, files))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    let slice_files: HashSet<String> = built
+        .iter()
+        .flat_map(|(world, _)| &world.spawned)
+        .map(|spawned| slice_file(&spawned.slice))
+        .collect();
+    let mut stations = HashMap::new();
+    source.for_each_entry(
+        |path| slice_files.contains(path),
+        |path, bytes| {
+            if let Some(station) = StationSlice::of(&stream_of(path, &bytes)?) {
+                stations.insert(path.to_owned(), station);
+            }
+            Ok::<(), ToolError>(())
+        },
+    )?;
+    for (world, _) in &mut built {
+        world.stations = stations_of(&world.spawned, &stations);
+    }
     let known = &known;
-    let reports = std::thread::scope(|scope| {
-        let handles: Vec<_> = levels
-            .chunks(chunk_size)
-            .map(|chunk| {
-                scope.spawn(move || {
-                    chunk
-                        .iter()
-                        .map(|(level, files)| {
-                            write_level(level, files, client_build, out_dir, known)
-                        })
-                        .collect::<Vec<_>>()
-                })
+    let reports = in_parallel(&built, |(world, skipped)| {
+        write_level(world, skipped, client_build, out_dir, known)
+    });
+    Ok(reports.into_iter().collect::<Result<Vec<_>, _>>()?)
+}
+
+/// The pak path of the `.dynamicslice` of spawned slice `slice`.
+fn slice_file(slice: &str) -> String {
+    format!("{slice}{DYNAMIC_SLICE_EXTENSION}")
+}
+
+/// The spawned slices whose `.dynamicslice` is a station of `stations` (by pak path).
+fn stations_of(
+    spawned: &[SpawnedSlice],
+    stations: &HashMap<String, StationSlice>,
+) -> Vec<CraftingStation> {
+    spawned
+        .iter()
+        .filter_map(|slice| {
+            Some(CraftingStation {
+                id: slice.id,
+                slice: slice.slice.clone(),
+                position: slice.position,
+                components: stations.get(&slice_file(&slice.slice))?.clone(),
             })
+        })
+        .collect()
+}
+
+/// `work` over `items` on every core, in order.
+fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let workers = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
+    let chunk_size = items.len().div_ceil(workers).max(1);
+    let work = &work;
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = items
+            .chunks(chunk_size)
+            .map(|chunk| scope.spawn(move || chunk.iter().map(work).collect::<Vec<_>>()))
             .collect();
         handles
             .into_iter()
@@ -422,26 +498,25 @@ pub fn run_world(
                     .join()
                     .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
             })
-            .collect::<Result<Vec<_>, _>>()
-    })?;
-    Ok(reports)
+            .collect()
+    })
 }
 
 fn write_level(
-    level: &str,
-    files: &LevelFiles,
+    world: &WorldFile,
+    skipped: &SkipCounts,
     client_build: &str,
     out_dir: &Path,
     known: &KnownIds,
 ) -> Result<LevelReport, WorldBuildError> {
-    let (world, skipped) = build_level(level, files)?;
+    let level = &world.level.name;
     let path = world_file_path(out_dir, client_build, level);
     world.save(&path, client_build)?;
     let expected = world.counts();
     let found = WorldFile::load(&path, client_build)?.counts();
     if found != expected {
         return Err(WorldBuildError::CountMismatch {
-            level: level.to_owned(),
+            level: level.clone(),
             expected: Box::new(expected),
             found: Box::new(found),
         });
@@ -453,12 +528,12 @@ fn write_level(
         })?
         .len();
     Ok(LevelReport {
-        level: level.to_owned(),
+        level: level.clone(),
         path,
         file_bytes,
         counts: found,
-        skipped,
-        unmatched: known.unmatched(&world),
+        skipped: skipped.clone(),
+        unmatched: known.unmatched(world),
     })
 }
 
@@ -495,20 +570,30 @@ fn read_metadata_file(
     records: &mut MetadataRecords,
     skipped: &mut SkipCounts,
 ) -> Result<(), WorldBuildError> {
+    let root = object_stream(level, path, bytes)?;
+    read_metadata(&root, records, skipped).map_err(|source| WorldBuildError::Metadata {
+        path: entry_path(level, path),
+        source,
+    })
+}
+
+/// The root element of the ObjectStream `bytes` (AZCS-wrapped or not) of level file `path`.
+fn object_stream(level: &str, path: &str, bytes: &[u8]) -> Result<Element, WorldBuildError> {
+    stream_of(&entry_path(level, path), bytes)
+}
+
+/// The root element of the ObjectStream `bytes` (AZCS-wrapped or not) of pak entry `path`.
+fn stream_of(path: &str, bytes: &[u8]) -> Result<Element, WorldBuildError> {
     let stream = if is_azcs(bytes) {
         Cow::Owned(decode_azcs(bytes).map_err(|source| WorldBuildError::Azcs {
-            path: entry_path(level, path),
+            path: path.to_owned(),
             source,
         })?)
     } else {
         Cow::Borrowed(bytes)
     };
-    let root = parse_object_stream(&stream).map_err(|source| WorldBuildError::ObjectStream {
-        path: entry_path(level, path),
-        source,
-    })?;
-    read_metadata(&root, records, skipped).map_err(|source| WorldBuildError::Metadata {
-        path: entry_path(level, path),
+    parse_object_stream(&stream).map_err(|source| WorldBuildError::ObjectStream {
+        path: path.to_owned(),
         source,
     })
 }
@@ -561,6 +646,9 @@ mod tests {
     const CAPITAL_METADATA: &str = "regions/r_+01_+00/capitals/ai/ai.metadata";
     const OTHER_CAPITAL_METADATA: &str = "regions/r_+01_+00/capitals/lore/lore.metadata";
     const CAPITALS_FILE: &str = "regions/r_+01_+00/capitals/ai/ai.capitals.json";
+    const REGION_SLICE_DATA: &str = "regions/r_+01_+00/region.slicedata";
+    /// The slice the capital of `CAPITALS` spawns, one metre east of it.
+    const SPAWNED_SLICE: &str = "slices/child";
     const VITALS_ID: u32 = 0xae65_fdc7;
     const RAW_HEIGHT: u16 = 64;
     /// `regionSize` in `SMALL_TRACTS`.
@@ -640,10 +728,66 @@ mod tests {
         assert!(is_world_input(&path(REGION_HEIGHTMAP)));
         assert!(is_world_input(&path(CAPITAL_METADATA)));
         assert!(is_world_input(&path(CAPITALS_FILE)));
+        assert!(is_world_input(&path(REGION_SLICE_DATA)));
         assert!(!is_world_input(&path(
             "regions/r_+01_+00/region.vegetation"
         )));
         assert!(!is_world_input("slices/x/terrain.json"));
+    }
+
+    /// A `region.slicedata` in which the capital's `<PLOT>` slice spawns [`SPAWNED_SLICE`] one
+    /// metre east of it, or (`broken`) with a transform cut short.
+    fn slice_data(broken: bool) -> Vec<u8> {
+        let named = |name: &str, children: Vec<Element>| {
+            Element::with_children(lowercase_crc32(name), children)
+        };
+        let value = |name: &str, bytes: Vec<u8>| Element::with_value(lowercase_crc32(name), bytes);
+        let mut floats = vec![
+            1.0_f32, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0,
+        ];
+        if broken {
+            floats.pop();
+        }
+        let transform = floats
+            .iter()
+            .flat_map(|float| float.to_be_bytes())
+            .collect();
+        let spawner = named(
+            "element",
+            vec![
+                value("worldTM", transform),
+                value("sliceName", SPAWNED_SLICE.as_bytes().to_vec()),
+            ],
+        );
+        let pair = named(
+            "element",
+            vec![
+                named("value1", vec![value("SliceName", b"<PLOT>".to_vec())]),
+                named("value2", vec![named("spawners", vec![spawner])]),
+            ],
+        );
+        write_object_stream(&Element {
+            children: vec![named("sliceMetaDataMap", vec![pair])],
+            ..Element::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn the_capitals_spawned_slices_are_read() {
+        let mut files = terrain_level();
+        files.insert(REGION_SLICE_DATA.to_owned(), slice_data(false));
+        let (world, _) = build_level(LEVEL, &files).unwrap();
+        assert_eq!(world.spawned.len(), 1);
+        assert_eq!(world.spawned[0].slice, SPAWNED_SLICE);
+        assert_eq!(world.spawned[0].position, [2051.0, 10.0, 3.0]);
+        assert_eq!(world.counts().spawned, 1);
+        files.insert(REGION_SLICE_DATA.to_owned(), slice_data(true));
+        assert!(matches!(
+            build_level(LEVEL, &files),
+            Err(WorldBuildError::SliceData { path, .. })
+                if path == format!("{LEVELS_PREFIX}{LEVEL}/{REGION_SLICE_DATA}")
+        ));
     }
 
     #[test]

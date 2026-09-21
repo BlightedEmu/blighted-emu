@@ -197,9 +197,7 @@ pub fn check(data: &CombatData, spawns: &[VitalsSpawn], nwdb: &[NwdbCreature]) -
 
 #[cfg(test)]
 mod tests {
-    use nw_content::combat::{
-        AttackRow, CombatRows, CombatSource, LevelRow, MobType, WeaponKind, WeaponRow,
-    };
+    use nw_content::combat::{CombatRows, CombatSource, LevelRow, MobType, WeaponRow};
     use nw_formats::objectstream::lowercase_crc32;
 
     use super::*;
@@ -238,23 +236,13 @@ mod tests {
                     crit_chance: 0.0,
                     crit_multiplier: 1.0,
                     spread_shot: false,
-                    kind: WeaponKind::Sword,
                     max_loaded_ammo: 0,
                     reload_ms: 0,
+                    stance: 0,
+                    block_stamina_damage: 0.0,
+                    block_stability: 0.0,
                 },
             )],
-            attacks: rows
-                .attack_damage_ids
-                .iter()
-                .chain([&rows.spreadshot_damage_id])
-                .map(|id| AttackRow {
-                    damage_id: id.clone(),
-                    coefficient: 1.0,
-                    can_crit: false,
-                    threat: 0,
-                    damage_type: None,
-                })
-                .collect(),
             player_health: vec![(rows.player_vitals_id.clone(), 1)],
             ..CombatSource::default()
         }

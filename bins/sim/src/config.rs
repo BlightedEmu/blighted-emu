@@ -11,13 +11,17 @@ use nw_common::config::{ConfigError, SECRET_ENV_PREFIX, load_config};
 use nw_db::DatabaseConfig;
 use std::sync::Arc;
 
+use nw_common::time::CivilDate;
 use nw_content::combat::{CombatData, CombatRows};
+use nw_content::leaderboards::RotationCalendar;
+use nw_content::loot_limits::{HOURS_PER_DAY, ResetClock};
 use nw_messages::LevelSpec;
-use nw_sim_core::{BrainSettings, CellBounds, Gait, MoveLimits, MoveLimitsError, TICKS_PER_SECOND};
+use nw_sim_core::{CellBounds, MoveLimits, MoveLimitsError, TICKS_PER_SECOND};
 use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::combat::CombatSettings;
+use crate::mob_ai::{AiRates, MobAi};
 use crate::mobs::VitalsSpawn;
 use crate::world::WorldSettings;
 
@@ -42,29 +46,16 @@ pub const DEFAULT_ARMOR_SHARE: f64 = 0.35;
 /// character in the tutorial's starter armor keep 0.6006 of the damage (live capture
 /// 2026-09-12, all 2 ship hits and the first island hits).
 pub const DEFAULT_PLAYER_ARMOR_SHARE: f64 = 0.3994;
-/// Default factor of a mob's attack row.
-pub const DEFAULT_MOB_ATTACK_FACTOR: f64 = 1.0;
-/// Default quiet time before an idle mob sleeps.
+/// Default quiet time before an awake mob without a target sleeps (our engineering choice: a
+/// sleeping mob costs nothing).
 pub const DEFAULT_SLEEP_AFTER_MS: u64 = 30_000;
-/// Default sight before the creature type's offset.
-pub const DEFAULT_BASE_SIGHT_M: f32 = 20.0;
-/// Default wander radius.
-pub const DEFAULT_WANDER_RADIUS_M: f32 = 10.0;
-/// Default pause between two wander walks.
-pub const DEFAULT_WANDER_PAUSE_MS: u64 = 5_000;
-/// Default leash radius.
-pub const DEFAULT_LEASH_RADIUS_M: f32 = 50.0;
-/// Default melee reach.
+/// Default melee reach of a player's attack request without a swing.
 pub const DEFAULT_ATTACK_REACH_M: f32 = 3.0;
 /// Default reach margin for the lag between client and server.
 pub const DEFAULT_REACH_MARGIN_M: f32 = 1.0;
 /// Default shortest time between two attacks of a player: the retail sword's hit spacing, the
 /// fastest of the tutorial weapons (swing note: sword 400, axe 700, hammer 830 ms).
 pub const DEFAULT_MIN_ATTACK_INTERVAL_MS: u64 = 400;
-/// Default time between two hits of a mob.
-pub const DEFAULT_MOB_ATTACK_INTERVAL_MS: u64 = 2_000;
-/// Default mob speed: the player combat run (M6-A spec F8).
-pub const DEFAULT_MOB_SPEED_MPS: f32 = 3.25;
 /// Default mob respawn: the one decoded spawner (M6-A spec F6).
 pub const DEFAULT_MOB_RESPAWN_MS: u64 = 360_000;
 /// Default shortest time from a death to a respawn request: below the lowest captured gap
@@ -83,38 +74,22 @@ pub struct CombatConfig {
     pub player_vitals_id: String,
     /// The player weapon row of `WeaponItemDefinitions`.
     pub weapon_id: String,
-    /// The `DamageData` rows of the weapon's attacks.
-    pub attack_damage_ids: Vec<String>,
-    /// The `DamageData` row of one pellet of a spread shot.
-    pub spreadshot_damage_id: String,
+    /// The unique id of the player's damage table, where its attack rows are.
+    pub damage_table: String,
     /// Share of a player's damage that mob armor takes off, 0 to below 1.
     pub armor_share: f64,
     /// Share of a mob's damage that player armor takes off, 0 to below 1.
     pub player_armor_share: f64,
-    /// Factor of a mob's attack.
-    pub mob_attack_factor: f64,
     /// A player this near wakes a mob; absent means `interest_radius_m`.
     pub wake_radius_m: Option<f32>,
-    /// Quiet time before an idle mob sleeps.
+    /// Quiet time before an awake mob without a target sleeps.
     pub sleep_after_ms: u64,
-    /// Sight before the creature type's offset.
-    pub base_sight_m: f32,
-    /// Wander radius around the spawn.
-    pub wander_radius_m: f32,
-    /// Pause between two wander walks.
-    pub wander_pause_ms: u64,
-    /// Leash radius around the spawn.
-    pub leash_radius_m: f32,
-    /// Melee reach.
+    /// Melee reach of a player's attack request without a swing.
     pub attack_reach_m: f32,
     /// Extra reach allowed for lag.
     pub reach_margin_m: f32,
     /// Shortest time between two attacks of a player.
     pub min_attack_interval_ms: u64,
-    /// Time between two hits of a mob.
-    pub mob_attack_interval_ms: u64,
-    /// Mob speed.
-    pub mob_speed_mps: f32,
     /// Time from a mob's death to its respawn.
     pub mob_respawn_ms: u64,
     /// Shortest time from a player's death to a respawn on its request.
@@ -131,22 +106,14 @@ impl Default for CombatConfig {
         Self {
             player_vitals_id: rows.player_vitals_id,
             weapon_id: rows.weapon_id,
-            attack_damage_ids: rows.attack_damage_ids,
-            spreadshot_damage_id: rows.spreadshot_damage_id,
+            damage_table: rows.damage_table,
             armor_share: DEFAULT_ARMOR_SHARE,
             player_armor_share: DEFAULT_PLAYER_ARMOR_SHARE,
-            mob_attack_factor: DEFAULT_MOB_ATTACK_FACTOR,
             wake_radius_m: None,
             sleep_after_ms: DEFAULT_SLEEP_AFTER_MS,
-            base_sight_m: DEFAULT_BASE_SIGHT_M,
-            wander_radius_m: DEFAULT_WANDER_RADIUS_M,
-            wander_pause_ms: DEFAULT_WANDER_PAUSE_MS,
-            leash_radius_m: DEFAULT_LEASH_RADIUS_M,
             attack_reach_m: DEFAULT_ATTACK_REACH_M,
             reach_margin_m: DEFAULT_REACH_MARGIN_M,
             min_attack_interval_ms: DEFAULT_MIN_ATTACK_INTERVAL_MS,
-            mob_attack_interval_ms: DEFAULT_MOB_ATTACK_INTERVAL_MS,
-            mob_speed_mps: DEFAULT_MOB_SPEED_MPS,
             mob_respawn_ms: DEFAULT_MOB_RESPAWN_MS,
             min_respawn_ms: DEFAULT_MIN_RESPAWN_MS,
             seed: DEFAULT_COMBAT_SEED,
@@ -161,23 +128,15 @@ impl CombatConfig {
         CombatRows {
             player_vitals_id: self.player_vitals_id.clone(),
             weapon_id: self.weapon_id.clone(),
-            attack_damage_ids: self.attack_damage_ids.clone(),
-            spreadshot_damage_id: self.spreadshot_damage_id.clone(),
+            damage_table: self.damage_table.clone(),
         }
     }
 
     fn validate(&self, interest_radius_m: f32) -> Result<(), SimConfigError> {
         let invalid = |key, reason| Err(SimConfigError::Invalid { key, reason });
         let positive = |value: f32| value.is_finite() && value > 0.0;
-        let distances = [
-            ("combat.base_sight_m", self.base_sight_m),
-            ("combat.wander_radius_m", self.wander_radius_m),
-            ("combat.leash_radius_m", self.leash_radius_m),
-            ("combat.attack_reach_m", self.attack_reach_m),
-            ("combat.mob_speed_mps", self.mob_speed_mps),
-        ];
-        if let Some((key, _)) = distances.iter().find(|(_, value)| !positive(*value)) {
-            return invalid(key, "must be a finite number above 0");
+        if !positive(self.attack_reach_m) {
+            return invalid("combat.attack_reach_m", "must be a finite number above 0");
         }
         if !(self.reach_margin_m.is_finite() && self.reach_margin_m >= 0.0) {
             return invalid(
@@ -187,9 +146,7 @@ impl CombatConfig {
         }
         let times = [
             self.sleep_after_ms,
-            self.wander_pause_ms,
             self.min_attack_interval_ms,
-            self.mob_attack_interval_ms,
             self.mob_respawn_ms,
             self.min_respawn_ms,
         ];
@@ -206,21 +163,8 @@ impl CombatConfig {
                 "must be at least 0 and below 1",
             );
         }
-        if !(self.mob_attack_factor.is_finite() && self.mob_attack_factor >= 0.0) {
-            return invalid(
-                "combat.mob_attack_factor",
-                "must be a finite number of at least 0",
-            );
-        }
-        let wake = self.wake_radius_m.unwrap_or(interest_radius_m);
-        if !(wake.is_finite() && wake >= self.base_sight_m) {
-            return invalid("combat.wake_radius_m", "must be at least base_sight_m");
-        }
-        if self.wander_radius_m > self.leash_radius_m {
-            return invalid("combat.wander_radius_m", "must be at most leash_radius_m");
-        }
-        if self.attack_damage_ids.is_empty() {
-            return invalid("combat.attack_damage_ids", "must name at least one attack");
+        if !positive(self.wake_radius_m.unwrap_or(interest_radius_m)) {
+            return invalid("combat.wake_radius_m", "must be a finite number above 0");
         }
         Ok(())
     }
@@ -240,8 +184,19 @@ pub struct SimConfig {
     pub world_database: DatabaseConfig,
     /// The environment variable with the world database password; it starts with `NW_SECRET_`.
     pub world_database_password_env: String,
+    /// The global database: the sim adds the leaderboard stats there.
+    pub global_database: DatabaseConfig,
+    /// The environment variable with the global database password; it starts with `NW_SECRET_`.
+    pub global_database_password_env: String,
+    /// The leaderboard rotations.
+    pub leaderboards: LeaderboardSection,
     /// The pinned client build file.
     pub client_build_config: PathBuf,
+    /// The `edge-http` config whose `[remote_config]` sets the sim reads its gameplay values
+    /// from: the same layers the client gets (`crate::gameplay`).
+    pub edge_config: PathBuf,
+    /// The server's daily and weekly resets of the loot limits.
+    pub loot_limits: ResetClock,
     /// Folder of the world files (`world-<build>-<level>.bin`).
     pub content_dir: PathBuf,
     /// The open map level; the same as the director's.
@@ -288,6 +243,9 @@ pub struct SimConfig {
     /// Mobs and combat.
     #[serde(default)]
     pub combat: CombatConfig,
+    /// How often the mobs' trees run.
+    #[serde(default)]
+    pub mob_ai: AiRates,
     /// The admin tool.
     #[serde(default)]
     pub admin: AdminSection,
@@ -300,6 +258,19 @@ pub struct AdminSection {
     /// Time between two admin snapshots on the bus; 0 is off, and then the sim does no snapshot
     /// work.
     pub snapshot_interval_ms: u64,
+}
+
+/// `[leaderboards]`: the rotation keys the config layers give the client, so the sim names the
+/// same boards (study note `docs/re/2026-09-18-leaderboards-and-analytics.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LeaderboardSection {
+    /// `javelin.leaderboard-rotation-startDate`, `year-month-day`.
+    pub rotation_start_date: String,
+    /// `javelin.weekly-leaderboard-reset-hour`, UTC.
+    pub weekly_reset_hour: u32,
+    /// `javelin.leaderboard-season-rotation`.
+    pub season: u32,
 }
 
 /// Shortest snapshot interval that is not off.
@@ -341,6 +312,16 @@ impl SimConfig {
             .starts_with(SECRET_ENV_PREFIX)
         {
             return invalid("world_database_password_env", "must start with NW_SECRET_");
+        }
+        if !self
+            .global_database_password_env
+            .starts_with(SECRET_ENV_PREFIX)
+        {
+            return invalid("global_database_password_env", "must start with NW_SECRET_");
+        }
+        self.leaderboard_calendar()?;
+        if self.loot_limits.hour_utc >= HOURS_PER_DAY {
+            return invalid("loot_limits.hour_utc", "must be below 24");
         }
         if self.level.is_empty() {
             return invalid("level", "must not be empty");
@@ -386,6 +367,12 @@ impl SimConfig {
             return invalid("forward_ttl_ms", "must be longer than handoff_timeout_ms");
         }
         self.combat.validate(self.interest_radius_m)?;
+        if !self.mob_ai.is_valid() {
+            return Err(SimConfigError::Invalid {
+                key: "mob_ai",
+                reason: "intervals must be above 0 and the bands must rise",
+            });
+        }
         if !(self.interest_radius_m.is_finite() && self.interest_radius_m > 0.0) {
             return invalid("interest_radius_m", "must be a finite number above 0");
         }
@@ -408,6 +395,32 @@ impl SimConfig {
                 reason: error.rule,
             })?;
         Ok(())
+    }
+
+    /// The leaderboard rotation calendar of `[leaderboards]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimConfigError::Invalid`] for a start date the calendar does not have or a
+    /// reset hour past the day.
+    pub fn leaderboard_calendar(&self) -> Result<RotationCalendar, SimConfigError> {
+        let section = &self.leaderboards;
+        let start =
+            CivilDate::parse(&section.rotation_start_date).ok_or(SimConfigError::Invalid {
+                key: "leaderboards.rotation_start_date",
+                reason: "must be a year-month-day date",
+            })?;
+        if section.weekly_reset_hour >= HOURS_PER_DAY {
+            return Err(SimConfigError::Invalid {
+                key: "leaderboards.weekly_reset_hour",
+                reason: "must be below 24",
+            });
+        }
+        Ok(RotationCalendar {
+            start,
+            reset_hour: section.weekly_reset_hour,
+            season: section.season,
+        })
     }
 
     /// The settings of the world state on a level with the edges `bounds` and its sea at
@@ -446,38 +459,25 @@ impl SimConfig {
         })
     }
 
-    /// The numbers of the mob brain.
-    pub fn brain_settings(&self) -> BrainSettings {
-        let combat = &self.combat;
-        BrainSettings {
-            wake_radius_m: combat.wake_radius_m.unwrap_or(self.interest_radius_m),
-            sleep_after_ms: combat.sleep_after_ms,
-            base_sight_m: combat.base_sight_m,
-            wander_radius_m: combat.wander_radius_m,
-            wander_pause_ms: combat.wander_pause_ms,
-            leash_radius_m: combat.leash_radius_m,
-            attack_reach_m: combat.attack_reach_m,
-            mob_attack_interval_ms: combat.mob_attack_interval_ms,
-            mob_speed_mps: combat.mob_speed_mps,
-            gait: Gait::uniform(combat.attack_reach_m, combat.mob_speed_mps),
-            mob_respawn_ms: combat.mob_respawn_ms,
-        }
-    }
-
-    /// The combat settings on the rows of `data` with the vitals `spawns` of the level.
+    /// The combat settings on the rows of `data` with the vitals `spawns` of the level and the
+    /// mob AI `ai`.
     pub fn combat_settings(
         &self,
         data: Arc<CombatData>,
         spawns: Arc<[VitalsSpawn]>,
+        ai: Arc<MobAi>,
     ) -> CombatSettings {
         let combat = &self.combat;
         CombatSettings {
             data,
             spawns,
-            brain: self.brain_settings(),
+            ai,
+            wake_radius_m: combat.wake_radius_m.unwrap_or(self.interest_radius_m),
+            sleep_after_ms: combat.sleep_after_ms,
+            attack_reach_m: combat.attack_reach_m,
+            mob_respawn_ms: combat.mob_respawn_ms,
             armor_share: combat.armor_share,
             player_armor_share: combat.player_armor_share,
-            mob_attack_factor: combat.mob_attack_factor,
             reach_margin_m: combat.reach_margin_m,
             min_attack_interval_ms: combat.min_attack_interval_ms,
             min_respawn_ms: combat.min_respawn_ms,
@@ -540,6 +540,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_loot_limits_reset_at_a_valid_hour() {
+        use nw_content::loot_limits::Weekday;
+
+        let config = committed();
+        assert_eq!(
+            config.loot_limits,
+            ResetClock {
+                hour_utc: 9,
+                weekly_day: Weekday::Tuesday,
+            },
+            "the captured resets of the US East server"
+        );
+        for (hour, ok) in [(0, true), (23, true), (HOURS_PER_DAY, false)] {
+            let mut config = committed();
+            config.loot_limits.hour_utc = hour;
+            assert_eq!(config.validate().is_ok(), ok, "hour {hour}");
+        }
+    }
+
+    #[test]
     fn the_committed_config_has_no_snapshot() {
         assert_eq!(committed().admin.snapshot_interval_ms, 0);
     }
@@ -597,6 +617,31 @@ pub(crate) mod tests {
         let mut config = committed();
         config.forward_ttl_ms = config.handoff_timeout_ms;
         assert!(config.validate().is_err(), "forwards outlive a handoff");
+        let mut config = committed();
+        config.global_database_password_env = "GLOBAL_PASSWORD".to_owned();
+        assert!(config.validate().is_err());
+        let mut config = committed();
+        config.leaderboards.rotation_start_date = "2023-02-30".to_owned();
+        assert!(config.validate().is_err(), "no such day");
+        let mut config = committed();
+        config.leaderboards.weekly_reset_hour = 24;
+        assert!(config.validate().is_err(), "past the day");
+    }
+
+    #[test]
+    fn the_committed_rotations_are_the_retail_keys() {
+        assert_eq!(
+            committed().leaderboard_calendar().ok(),
+            Some(RotationCalendar {
+                start: CivilDate {
+                    year: 2023,
+                    month: 2,
+                    day: 7
+                },
+                reset_hour: 2,
+                season: 11
+            })
+        );
     }
 
     #[test]
@@ -607,17 +652,24 @@ pub(crate) mod tests {
             config.combat.rows(),
             nw_content::combat::CombatRows::default()
         );
-        let brain = config.brain_settings();
+        let ai = || Arc::new(MobAi::empty());
+        let data = || Arc::new(crate::combat::test_support::test_data());
+        let combat = config.combat_settings(data(), Arc::from([]), ai());
         assert_eq!(
-            brain.wake_radius_m, config.interest_radius_m,
+            combat.wake_radius_m, config.interest_radius_m,
             "wake defaults to interest"
         );
-        assert_eq!(brain.leash_radius_m, DEFAULT_LEASH_RADIUS_M);
         let mut set = committed();
-        set.combat.wake_radius_m = Some(DEFAULT_BASE_SIGHT_M * 2.0);
+        set.combat.wake_radius_m = Some(config.interest_radius_m * 2.0);
         assert_eq!(
-            set.brain_settings().wake_radius_m,
-            DEFAULT_BASE_SIGHT_M * 2.0
+            set.combat_settings(data(), Arc::from([]), ai())
+                .wake_radius_m,
+            config.interest_radius_m * 2.0
+        );
+        assert_eq!(
+            config.mob_ai,
+            crate::mob_ai::RETAIL_AI_RATES,
+            "the retail rates"
         );
     }
 
@@ -626,19 +678,12 @@ pub(crate) mod tests {
 
     #[test]
     fn bad_combat_values_are_refused() {
-        let cases: [CombatFault; 8] = [
-            ("combat.leash_radius_m", |c| c.leash_radius_m = -1.0),
+        let cases: [CombatFault; 5] = [
             ("combat.attack_reach_m", |c| c.attack_reach_m = 0.0),
-            ("combat.mob_speed_mps", |c| c.mob_speed_mps = f32::NAN),
             ("combat.times", |c| c.mob_respawn_ms = 0),
             ("combat.armor_share", |c| c.armor_share = 1.5),
             ("combat.player_armor_share", |c| c.player_armor_share = -0.1),
-            ("combat.wake_radius_m", |c| {
-                c.wake_radius_m = Some(DEFAULT_BASE_SIGHT_M - 1.0)
-            }),
-            ("combat.wander_radius_m", |c| {
-                c.wander_radius_m = DEFAULT_LEASH_RADIUS_M + 1.0
-            }),
+            ("combat.wake_radius_m", |c| c.wake_radius_m = Some(f32::NAN)),
         ];
         for (key, fault) in cases {
             let mut config = committed();

@@ -17,17 +17,19 @@ use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 use nw_login::config::{EdgeConfig, EdgeConfigError, load_edge_config};
 use nw_login::discord::{DiscordError, DiscordHttp};
 use nw_login::game::GameState;
-use nw_login::host::edge_router;
+use nw_login::host::{ServiceRouters, edge_router};
 use nw_login::install_crypto_provider;
 use nw_login::launcher::LauncherState;
 use nw_login::password::{PasswordError, PasswordHasher};
 use nw_login::pg::{PgAccounts, PgCharacters};
+use nw_login::remote_config::{RemoteConfigError, RemoteConfigSets, remote_config_router};
 use nw_login::secrets::{SecretError, Secrets, load_database_passwords, load_secrets};
 use nw_login::store::StoreError;
 use nw_login::valkey::Valkey;
 
 use crate::database::{EnsureDatabaseError, connect_all, ensure_database};
 use crate::layers::with_limits;
+use crate::tls::{TlsError, mirror_certificate_pem, server_config, write_mirror_certificate};
 
 /// Seconds to finish open requests after Ctrl-C.
 const SHUTDOWN_GRACE_SECONDS: u64 = 10;
@@ -64,9 +66,12 @@ pub enum RunError {
     /// The Discord client could not start.
     #[error(transparent)]
     Discord(#[from] DiscordError),
-    /// The certificate files cannot be read.
-    #[error("TLS certificate files failed")]
-    Tls(#[source] std::io::Error),
+    /// A certificate file cannot be read, used or written.
+    #[error(transparent)]
+    Tls(#[from] TlsError),
+    /// The remote config sets cannot be loaded.
+    #[error(transparent)]
+    RemoteConfig(#[from] RemoteConfigError),
     /// A listener failed.
     #[error("listener failed")]
     Listen(#[source] std::io::Error),
@@ -112,6 +117,13 @@ pub fn migrate(config_path: &Path) -> Result<(), RunError> {
     })
 }
 
+/// Makes the self-signed certificate of the `[aws_mirror]` hosts (`aws-mirror-certificate`).
+pub fn make_mirror_certificate(config_path: &Path) -> Result<(), RunError> {
+    let config = load_edge_config(config_path)?;
+    write_mirror_certificate(&config.aws_mirror)?;
+    Ok(())
+}
+
 /// Serves HTTPS until Ctrl-C.
 pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let config = load_edge_config(config_path)?;
@@ -122,6 +134,9 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
 }
 
 async fn serve_async(config: EdgeConfig, secrets: Secrets) -> Result<(), RunError> {
+    let remote_config = RemoteConfigSets::load(&config)?;
+    let tls = RustlsConfig::from_config(Arc::new(server_config(&config)?));
+    let aws_mirror_certificate_pem = mirror_certificate_pem(&config.aws_mirror)?.into();
     let (global, worlds) = connect_all(&config, &secrets.database_passwords)
         .await
         .map_err(RunError::Database)?;
@@ -154,7 +169,9 @@ async fn serve_async(config: EdgeConfig, secrets: Secrets) -> Result<(), RunErro
         discord_states: valkey.clone(),
         discord,
         hasher: PasswordHasher::new(config.auth.argon2_parallel)?,
+        aws_mirror_certificate_pem,
     };
+    let services = ServiceRouters::on_postgres(&global, remote_config_router(remote_config));
     let game = GameState {
         config: shared_config,
         game_sessions: valkey.clone(),
@@ -164,17 +181,11 @@ async fn serve_async(config: EdgeConfig, secrets: Secrets) -> Result<(), RunErro
         signing_key: secrets.signing_key,
     };
     let app = with_limits(
-        edge_router(launcher, game),
+        edge_router(launcher, game, services),
         Duration::from_secs(config.request_timeout_seconds),
         config.max_connections,
     );
     spawn_metrics(config.metrics_listen).await?;
-    let tls = RustlsConfig::from_pem_file(
-        &config.tls.certificate_pem_path,
-        &config.tls.private_key_pem_path,
-    )
-    .await
-    .map_err(RunError::Tls)?;
     let handle = Handle::new();
     let shutdown = handle.clone();
     tokio::spawn(async move {
@@ -226,6 +237,16 @@ mod tests {
         let config = load_edge_config(&committed_config()).expect("config/edge.toml");
         assert!(config.metrics_listen.ip().is_loopback());
         assert!(!config.worlds.is_empty());
+    }
+
+    #[test]
+    fn committed_remote_config_sets_load() {
+        let mut config = load_edge_config(&committed_config()).expect("config/edge.toml");
+        config.remote_config.directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(&config.remote_config.directory);
+        let sets = RemoteConfigSets::load(&config).expect("config/remote-config");
+        assert!(!sets.keys().is_empty());
     }
 
     #[test]

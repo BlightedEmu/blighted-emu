@@ -1,0 +1,133 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+//! The Amazon host names the game client calls with no endpoint setting: the remote-config
+//! bucket (S3), the analytics stream (Kinesis) and its credentials (STS). A Blighted server
+//! answers these names itself. Our launcher maps only these names to the server, and only for the
+//! game process (study note `docs/re/2026-09-18-remote-config-layers.md`).
+
+use serde::{Deserialize, Serialize};
+
+/// The remote-config buckets of the client. The client picks one by its environment
+/// (`FUN_1410376e0`: 3 staging, 4 prod, else dev; character-select note). Our client logs
+/// `ags-javelin-remote-config`.
+pub const REMOTE_CONFIG_BUCKETS: [&str; 3] = [
+    "ags-javelin-remote-config",
+    "ags-javelin-staging-remote-config",
+    "ags-javelin-dev-remote-config",
+];
+/// The S3 host of region `us-east-1`; the client puts the bucket in front of it (virtual-host
+/// style, `FUN_140853a80`).
+pub const S3_GLOBAL_HOST: &str = "s3.amazonaws.com";
+/// The parent domain of every AWS service host.
+pub const AWS_DOMAIN: &str = "amazonaws.com";
+const HOST_SEPARATOR: char = '.';
+const KINESIS_SERVICE: &str = "kinesis";
+const STS_SERVICE: &str = "sts";
+
+/// `<bucket>.s3.amazonaws.com`.
+pub fn remote_config_host(bucket: &str) -> String {
+    format!("{bucket}{HOST_SEPARATOR}{S3_GLOBAL_HOST}")
+}
+
+/// Whether `host` (lower case) is the S3 host of one of the [`REMOTE_CONFIG_BUCKETS`].
+pub fn is_remote_config_host(host: &str) -> bool {
+    REMOTE_CONFIG_BUCKETS
+        .iter()
+        .any(|bucket| host == remote_config_host(bucket))
+}
+
+/// Whether `host` is `<service>.amazonaws.com` or `<service>.<region>.amazonaws.com`.
+fn is_service_host(host: &str, service: &str) -> bool {
+    let Some(rest) = host
+        .strip_prefix(service)
+        .and_then(|rest| rest.strip_prefix(HOST_SEPARATOR))
+    else {
+        return false;
+    };
+    rest.eq_ignore_ascii_case(AWS_DOMAIN)
+        || rest
+            .split_once(HOST_SEPARATOR)
+            .is_some_and(|(region, domain)| {
+                !region.is_empty() && domain.eq_ignore_ascii_case(AWS_DOMAIN)
+            })
+}
+
+/// Whether `host` (lower case) is a Kinesis host, `kinesis.<region>.amazonaws.com`.
+pub fn is_kinesis_host(host: &str) -> bool {
+    is_service_host(host, KINESIS_SERVICE)
+}
+
+/// Whether `host` (lower case) is an STS host, `sts.amazonaws.com` or
+/// `sts.<region>.amazonaws.com`.
+pub fn is_sts_host(host: &str) -> bool {
+    is_service_host(host, STS_SERVICE)
+}
+
+/// Whether a server may ask the launcher to map `host` to it: the remote-config bucket host, a
+/// Kinesis host or an STS host. No other Amazon name is ever mapped.
+pub fn is_aws_mirror_host(host: &str) -> bool {
+    is_remote_config_host(host) || is_kinesis_host(host) || is_sts_host(host)
+}
+
+/// Part of the launcher info: the Amazon names this server answers, and the certificate it
+/// shows for them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AwsMirror {
+    /// Host names, each passing [`is_aws_mirror_host`].
+    pub hosts: Vec<String>,
+    /// The server's self-signed certificate for exactly these names, as PEM. It is not a CA.
+    pub certificate_pem: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bucket_hosts_are_virtual_host_style() {
+        assert_eq!(
+            remote_config_host("ags-javelin-remote-config"),
+            "ags-javelin-remote-config.s3.amazonaws.com"
+        );
+        for bucket in REMOTE_CONFIG_BUCKETS {
+            assert!(is_remote_config_host(&remote_config_host(bucket)));
+        }
+        assert!(!is_remote_config_host("other-bucket.s3.amazonaws.com"));
+        assert!(!is_remote_config_host(S3_GLOBAL_HOST));
+    }
+
+    #[test]
+    fn service_hosts_are_recognized() {
+        assert!(is_kinesis_host("kinesis.us-east-1.amazonaws.com"));
+        assert!(is_sts_host("sts.us-east-1.amazonaws.com"));
+        assert!(is_sts_host("sts.amazonaws.com"));
+        for other in [
+            "kinesis.amazonaws.com.evil.net",
+            "kinesis..amazonaws.com",
+            "kinesisx.us-east-1.amazonaws.com",
+            "s3.amazonaws.com",
+            "game.example.org",
+        ] {
+            assert!(!is_kinesis_host(other) && !is_sts_host(other), "{other}");
+        }
+    }
+
+    #[test]
+    fn only_the_three_services_may_be_mirrored() {
+        for host in [
+            "ags-javelin-remote-config.s3.amazonaws.com",
+            "kinesis.us-east-1.amazonaws.com",
+            "sts.us-east-1.amazonaws.com",
+        ] {
+            assert!(is_aws_mirror_host(host), "{host}");
+        }
+        for host in [
+            "s3.amazonaws.com",
+            "2mfrik7h83.execute-api.us-east-1.amazonaws.com",
+            "us-east-1.client.stats-service.amazongames.com",
+            "login.example.org",
+        ] {
+            assert!(!is_aws_mirror_host(host), "{host}");
+        }
+    }
+}

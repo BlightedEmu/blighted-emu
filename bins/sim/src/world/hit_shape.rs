@@ -1,17 +1,30 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The shapes of melee swings (collision note, 2026-09-16): each retail weapon attack has a
-//! `CAGE-Damage` clip in its animation database (a capsule or box on the weapon, live for about
-//! 0.1 s) and a `Homing` clip that turns the attacker to a target in a radius and angle. The
-//! server has no skeletons, so a swing here is a wedge in front of the body: it hits a body whose
-//! capsule reaches into it. Scored on the retail tutorial swings, a 1.6 m wedge of ±45 degrees
-//! kept all 67 retail hits and hit 1 of 20 mobs that retail did not.
+//! The reach of swings.
+//!
+//! A player's melee attack (combat audit, 2026-09-18): retail runs the attack's `CAGE-Damage`
+//! shape cast on the server's own copy of the character's animation and checks the targets up to
+//! 0.2 s back (`javelin.server-melee-hit-confirmation-max-lookback-time-sec`). The client names no
+//! target of a swing (Observed: around the 84 melee hits of the 2026-09-18 retail capture the
+//! client sent only its inputs and time syncs; the input's row 3 names the camera-lock target, on
+//! 49 of them). Each tick the server casts the shape from its pose of the tick before to its pose
+//! of this tick (`FUN_144837220` builds both transforms; `FUN_144860cd0` casts): here the convex
+//! hull of the shape at the two poses ([`SweptShape`]; the server's sweep between two turned
+//! poses is Unknown, the hull holds both and the straight path between them), against every
+//! target's body, so one swing hits every target it passes (retail: 4 of the 84 hits were second
+//! targets of one swing). The `Homing` clip turns the attacker to the best target in its reach
+//! ([`homing_score`]); the client moves the body.
+//!
+//! A mob's swing is a wedge in front of its body ([`Wedge`]): mob-side values that its behavior
+//! tree will own.
 
 use std::f32::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 
-use nw_content::combat::WeaponKind;
+use nw_content::player_attacks::{Homing, ShapeKind};
+use nw_formats::rigid::{
+    Rigid, Vec3, ZERO, add, cross, dot, quat_about_z, quat_conjugate, rotate, scale, sub,
+};
 use nw_sim_core::Position;
 
-use super::attack::AttackKind;
 use super::mob_timeline::yaw_toward;
 use crate::mobs::Capsule;
 
@@ -21,223 +34,273 @@ pub(super) const PLAYER_CAPSULE: Capsule = Capsule {
     height_m: 2.0,
 };
 
-/// How far apart in height two bodies may stand and still touch (Inferred): the server's height
-/// of a body on a ledge, a pool rim or a slope the height map does not hold can be off by a
-/// metre (live 2026-09-18: the player on the rim of Thorpe's pool stood above his capsule on
-/// 37% of the swings the client showed landing).
+/// How far apart in height two bodies may stand and still touch in a mob's swing (Inferred): the
+/// server's height of a body on a ledge, a pool rim or a slope the height map does not hold can
+/// be off by a metre.
 const STEP_SLACK_M: f32 = 1.0;
 
 /// Half the arc of a mob swing in front of its body (our choice: retail mob hits found the player
 /// within 18 degrees of the mob's facing on 16 of 17 hits).
 pub(super) const MOB_SWING_HALF_ARC_RAD: f32 = FRAC_PI_4;
 
-/// How a weapon attack of the player reaches.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct SwingShape {
-    /// When its damage clip is live, after the attack starts (Observed).
-    window_ms: (u64, u64),
-    /// How far in front of the body it reaches, after the step-in.
-    reach_m: f32,
-    /// Half its arc (radians).
-    half_arc_rad: f32,
-    /// Its homing turns the attacker to a target this near (`Radius`, Observed)...
-    homing_radius_m: f32,
-    /// ...and within this angle of the facing (`MaxAngle`, radians, Observed)...
-    homing_angle_rad: f32,
-    /// ...and steps the attacker in to this distance from it (`MoveToDistance`, Observed)...
-    step_to_m: f32,
-    /// ...by at most this much (`MaxMoveDistance`, Observed).
-    step_max_m: f32,
-}
-
-impl SwingShape {
-    /// When it hits, after the attack starts: the middle of its damage window.
-    pub(super) const fn hit_ms(&self) -> u64 {
-        self.window_ms.0.midpoint(self.window_ms.1)
-    }
-}
-
-const fn degrees(value: f32) -> f32 {
-    value * PI / 180.0
-}
-
-// The homing of every basic attack is its `Homing` clip with `MoveToTarget` true (melee-truth
-// note, 2026-09-18: `Attack_Primary` and `Attack_Heavy` fragments of `player_<weapon>.adb`): the
-// attacker turns to a target within `Radius` and `MaxAngle` and moves in to `MoveToDistance` from
-// it, by at most `MaxMoveDistance`, before the damage window. So a swing lands on a mob in that
-// reach, not only on one the player touches.
-
-/// Sword light attack: window 333-433 ms; reach our choice in retail's 1.5-1.7 m band; homing
-/// 3.75 m, 60 degrees, to 1.0 m, at most 4.25 m.
-const SWORD_LIGHT: SwingShape = SwingShape {
-    window_ms: (333, 433),
-    reach_m: 1.6,
-    half_arc_rad: FRAC_PI_4,
-    homing_radius_m: 3.75,
-    homing_angle_rad: degrees(60.0),
-    step_to_m: 1.0,
-    step_max_m: 4.25,
-};
-/// Sword heavy attack: window 200-333 ms; a second capsule 1.9 m in front gives a reach of about
-/// 2.6 m (Inferred); arc our choice; homing 3.75 m, 45 degrees.
-const SWORD_HEAVY: SwingShape = SwingShape {
-    window_ms: (200, 333),
-    reach_m: 2.6,
-    half_arc_rad: degrees(30.0),
-    homing_angle_rad: degrees(45.0),
-    ..SWORD_LIGHT
-};
-/// Hatchet: light window 200-300 ms, heavy 300-400 ms; reach Inferred from its capsule; homing
-/// 3.75 m, 60 degrees (heavy 45), to 0.5 m, at most 3.75 m (heavy 4.25).
-const HATCHET_LIGHT: SwingShape = SwingShape {
-    window_ms: (200, 300),
-    reach_m: 1.7,
-    half_arc_rad: FRAC_PI_4,
-    homing_radius_m: 3.75,
-    homing_angle_rad: degrees(60.0),
-    step_to_m: 0.5,
-    step_max_m: 3.75,
-};
-const HATCHET_HEAVY: SwingShape = SwingShape {
-    window_ms: (300, 400),
-    homing_angle_rad: degrees(45.0),
-    step_max_m: 4.25,
-    ..HATCHET_LIGHT
-};
-/// Rapier: window 333-433 ms; reach Inferred; homing 3.75 m, 45 degrees, to 1.0 m, at most
-/// 4.25 m.
-const RAPIER: SwingShape = SwingShape {
-    window_ms: (333, 433),
-    reach_m: 1.75,
-    half_arc_rad: degrees(30.0),
-    homing_radius_m: 3.75,
-    homing_angle_rad: FRAC_PI_4,
-    step_to_m: 1.0,
-    step_max_m: 4.25,
-};
-/// Flail: window our choice (its clip timing was not extracted); its head's capsule (0.5 m) and
-/// sphere (0.5 m) swing on a chain, reach Inferred 2.5 m; homing 4.5 m, 60 degrees (heavy 45),
-/// to 2.0 m, at most 3.75 m.
-const FLAIL_LIGHT: SwingShape = SwingShape {
-    window_ms: (300, 400),
-    reach_m: 2.5,
-    half_arc_rad: FRAC_PI_4,
-    homing_radius_m: 4.5,
-    homing_angle_rad: degrees(60.0),
-    step_to_m: 2.0,
-    step_max_m: 3.75,
-};
-const FLAIL_HEAVY: SwingShape = SwingShape {
-    homing_angle_rad: degrees(45.0),
-    ..FLAIL_LIGHT
-};
-/// Spear: light window 400-500 ms, heavy 500-600 ms; reach our choice; homing 4.5 m (heavy 6),
-/// 45 degrees, to 2.0 m, at most 4.25 m (heavy 5).
-const SPEAR_LIGHT: SwingShape = SwingShape {
-    window_ms: (400, 500),
-    reach_m: 2.5,
-    half_arc_rad: degrees(30.0),
-    homing_radius_m: 4.5,
-    homing_angle_rad: FRAC_PI_4,
-    step_to_m: 2.0,
-    step_max_m: 4.25,
-};
-const SPEAR_HEAVY: SwingShape = SwingShape {
-    window_ms: (500, 600),
-    homing_radius_m: 6.0,
-    step_max_m: 5.0,
-    ..SPEAR_LIGHT
-};
-/// Great axe: window 300-400 ms; reach our choice; homing 4.5 m, 60 degrees (heavy 3.5 m, 45),
-/// to 1.2 m, at most 4.25 m.
-const GREAT_AXE_LIGHT: SwingShape = SwingShape {
-    window_ms: (300, 400),
-    reach_m: 1.9,
-    half_arc_rad: degrees(60.0),
-    homing_radius_m: 4.5,
-    homing_angle_rad: degrees(60.0),
-    step_to_m: 1.2,
-    step_max_m: 4.25,
-};
-const GREAT_AXE_HEAVY: SwingShape = SwingShape {
-    homing_radius_m: 3.5,
-    homing_angle_rad: degrees(45.0),
-    ..GREAT_AXE_LIGHT
-};
-/// War hammer: light window 400-533 ms, heavy 467-567 ms; reach our choice; homing 4.5 m, 45
-/// degrees, to 1.2 m, at most 5 m (heavy 4.5).
-const WAR_HAMMER_LIGHT: SwingShape = SwingShape {
-    window_ms: (400, 533),
-    reach_m: 1.8,
-    half_arc_rad: FRAC_PI_4,
-    homing_radius_m: 4.5,
-    homing_angle_rad: FRAC_PI_4,
-    step_to_m: 1.2,
-    step_max_m: 5.0,
-};
-const WAR_HAMMER_HEAVY: SwingShape = SwingShape {
-    window_ms: (467, 567),
-    step_max_m: 4.5,
-    ..WAR_HAMMER_LIGHT
-};
-/// Greatsword: window 433-533 ms; homing 4.5 m, 60 degrees, to 1.2 m (heavy 1.5), at most
-/// 4.25 m. Reach Inferred: the live greatsword landed on Thorpe at 3 to 4 m between the two
-/// bodies' middles (2026-09-18).
-const GREAT_SWORD_LIGHT: SwingShape = SwingShape {
-    window_ms: (433, 533),
-    reach_m: 3.0,
-    half_arc_rad: degrees(60.0),
-    homing_radius_m: 4.5,
-    homing_angle_rad: degrees(60.0),
-    step_to_m: 1.2,
-    step_max_m: 4.25,
-};
-const GREAT_SWORD_HEAVY: SwingShape = SwingShape {
-    reach_m: 3.3,
-    step_to_m: 1.5,
-    ..GREAT_SWORD_LIGHT
-};
-
-/// The shape of attack `attack` with a weapon of `kind`; an item of another kind swings as a
-/// sword (our choice); `None` for a ranged or magic weapon, which does not swing. The rapier's
-/// heavy attack was not extracted: it swings as its light attack.
-pub(super) const fn swing_shape(kind: WeaponKind, attack: AttackKind) -> Option<SwingShape> {
-    Some(match (kind, attack) {
-        (WeaponKind::Sword | WeaponKind::Other, AttackKind::Light) => SWORD_LIGHT,
-        (WeaponKind::Sword | WeaponKind::Other, AttackKind::Heavy) => SWORD_HEAVY,
-        (WeaponKind::Hatchet, AttackKind::Light) => HATCHET_LIGHT,
-        (WeaponKind::Hatchet, AttackKind::Heavy) => HATCHET_HEAVY,
-        (WeaponKind::Rapier, _) => RAPIER,
-        (WeaponKind::Flail, AttackKind::Light) => FLAIL_LIGHT,
-        (WeaponKind::Flail, AttackKind::Heavy) => FLAIL_HEAVY,
-        (WeaponKind::Spear, AttackKind::Light) => SPEAR_LIGHT,
-        (WeaponKind::Spear, AttackKind::Heavy) => SPEAR_HEAVY,
-        (WeaponKind::GreatAxe, AttackKind::Light) => GREAT_AXE_LIGHT,
-        (WeaponKind::GreatAxe, AttackKind::Heavy) => GREAT_AXE_HEAVY,
-        (WeaponKind::WarHammer, AttackKind::Light) => WAR_HAMMER_LIGHT,
-        (WeaponKind::WarHammer, AttackKind::Heavy) => WAR_HAMMER_HEAVY,
-        (WeaponKind::GreatSword, AttackKind::Light) => GREAT_SWORD_LIGHT,
-        (WeaponKind::GreatSword, AttackKind::Heavy) => GREAT_SWORD_HEAVY,
-        (
-            WeaponKind::Bow
-            | WeaponKind::Musket
-            | WeaponKind::Blunderbuss
-            | WeaponKind::FireStaff
-            | WeaponKind::LifeStaff
-            | WeaponKind::IceGauntlet
-            | WeaponKind::VoidGauntlet,
-            _,
-        ) => return None,
-    })
-}
+/// Degrees in half a turn.
+const HALF_TURN_DEG: f32 = 180.0;
 
 /// The turn from yaw `facing` to yaw `toward`, -π to π.
 pub(super) fn turn(facing: f32, toward: f32) -> f32 {
     (toward - facing + PI).rem_euclid(TAU) - PI
 }
 
-/// A wedge in front of a body at `from` (of capsule `own`), facing yaw `facing`, `reach_m` deep
-/// in front of the body and `half_arc_rad` to each side.
+/// The score of a target of body radius `radius_m` at `at` for the homing `homing` of an attacker
+/// at `from`, lower is better: `RadiusWeight` x its share of `Radius` plus `AngleWeight` x its
+/// share of `MaxAngle`. `None` when it is out of the homing's reach: farther than `Radius` (to its
+/// body's edge for an AI target, `UseRadiusforAITarget`), further off `facing` than `MaxAngle`, or
+/// more than `Height` above or below. `facing` `None`: a locked target, which the lock turns the
+/// attacker to (`ApplyRotationDuringCameraLock`), so its angle counts nothing.
+pub(super) fn homing_score(
+    homing: &Homing,
+    from: Position,
+    facing: Option<f32>,
+    at: Position,
+    radius_m: f32,
+) -> Option<f32> {
+    let edge_m = if homing.use_radius_for_ai_target {
+        radius_m
+    } else {
+        0.0
+    };
+    let distance = (at.horizontal_distance(from) - edge_m).max(0.0);
+    let max_angle = homing.max_angle_deg * PI / HALF_TURN_DEG;
+    let off = facing.map_or(0.0, |facing| turn(facing, yaw_toward(from, at)).abs());
+    let in_reach =
+        distance <= homing.radius_m && off <= max_angle && (at.z - from.z).abs() <= homing.height_m;
+    in_reach.then(|| {
+        homing.radius_weight * distance / homing.radius_m + homing.angle_weight * off / max_angle
+    })
+}
+
+/// The world pose of a body at `at` facing yaw `facing` (0 north, positive to the west): the
+/// frame of a pose in the body's root space.
+pub(super) fn body_frame(at: Position, facing: f32) -> Rigid {
+    Rigid {
+        rotation: quat_about_z(facing),
+        translation: [at.x, at.y, at.z],
+    }
+}
+
+/// A melee shape at two poses (world space) and the space between them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct SweptShape {
+    pub(super) shape: ShapeKind,
+    pub(super) from: Rigid,
+    pub(super) to: Rigid,
+}
+
+/// The farthest point along `direction` of the core of `shape` (the shape without its round
+/// radius) at `pose`.
+fn core_support(shape: ShapeKind, pose: &Rigid, direction: Vec3) -> Vec3 {
+    let local = rotate(quat_conjugate(pose.rotation), direction);
+    let signed = |half: f32, along: f32| if along < 0.0 { -half } else { half };
+    let point = match shape {
+        ShapeKind::Sphere { .. } => ZERO,
+        ShapeKind::Capsule { half_height_m, .. } => [0.0, 0.0, signed(half_height_m, local[2])],
+        ShapeKind::Box { half_extents_m } => {
+            std::array::from_fn(|axis| signed(half_extents_m[axis], local[axis]))
+        }
+        ShapeKind::Cylinder {
+            radius_m,
+            half_height_m,
+        } => {
+            let across = (local[0] * local[0] + local[1] * local[1]).sqrt();
+            let (x, y) = if across > 0.0 {
+                (local[0] / across * radius_m, local[1] / across * radius_m)
+            } else {
+                (0.0, 0.0)
+            };
+            [x, y, signed(half_height_m, local[2])]
+        }
+    };
+    pose.apply(point)
+}
+
+/// The round radius of `shape` around its core.
+const fn round_radius(shape: ShapeKind) -> f32 {
+    match shape {
+        ShapeKind::Sphere { radius_m } | ShapeKind::Capsule { radius_m, .. } => radius_m,
+        ShapeKind::Box { .. } | ShapeKind::Cylinder { .. } => 0.0,
+    }
+}
+
+impl SweptShape {
+    fn support(&self, direction: Vec3) -> Vec3 {
+        let from = core_support(self.shape, &self.from, direction);
+        let to = core_support(self.shape, &self.to, direction);
+        if dot(from, direction) >= dot(to, direction) {
+            from
+        } else {
+            to
+        }
+    }
+
+    /// Whether a body of capsule `body` standing at `at` touches the shape anywhere between its
+    /// two poses.
+    pub(super) fn touches(&self, at: Position, body: Capsule) -> bool {
+        let low = [at.x, at.y, at.z + body.radius_m];
+        let high = [
+            at.x,
+            at.y,
+            at.z + (body.height_m - body.radius_m).max(body.radius_m),
+        ];
+        let segment = |direction: Vec3| {
+            if dot(sub(high, low), direction) > 0.0 {
+                high
+            } else {
+                low
+            }
+        };
+        let distance =
+            gjk_distance(|direction| sub(self.support(direction), segment(scale(direction, -1.0))));
+        distance <= round_radius(self.shape) + body.radius_m
+    }
+}
+
+/// Iterations of the distance search: far more than the few a hull of a few points needs.
+const GJK_ITERATIONS: usize = 64;
+/// The relative progress below which the distance search stops (f32 sums of points metres from
+/// the origin round at about 1e-7 of their size).
+const GJK_TOLERANCE: f32 = 1e-5;
+/// Six times the volume below which a tetrahedron of the search is flat, m³.
+const GJK_FLAT_VOLUME: f32 = 1e-9;
+/// A support point this near a point of the simplex brings no progress, m.
+const GJK_SAME_POINT_M: f32 = 1e-6;
+
+/// The point of segment `a`-`b` nearest the origin, and the part of the segment it lies on.
+fn nearest_on_segment(a: Vec3, b: Vec3) -> (Vec3, Vec<Vec3>) {
+    let ab = sub(b, a);
+    let length = dot(ab, ab);
+    if length <= 0.0 {
+        return (a, vec![a]);
+    }
+    let share = -dot(a, ab) / length;
+    if share <= 0.0 {
+        (a, vec![a])
+    } else if share >= 1.0 {
+        (b, vec![b])
+    } else {
+        (add(a, scale(ab, share)), vec![a, b])
+    }
+}
+
+/// The point of triangle `a`, `b`, `c` nearest the origin and the corners of the part it lies
+/// on (Ericson, Real-Time Collision Detection, 5.1.5).
+fn nearest_on_triangle(a: Vec3, b: Vec3, c: Vec3) -> (Vec3, Vec<Vec3>) {
+    let p = ZERO;
+    let ab = sub(b, a);
+    let ac = sub(c, a);
+    let ap = sub(p, a);
+    let d1 = dot(ab, ap);
+    let d2 = dot(ac, ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return (a, vec![a]);
+    }
+    let bp = sub(p, b);
+    let d3 = dot(ab, bp);
+    let d4 = dot(ac, bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return (b, vec![b]);
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        let share = d1 / (d1 - d3);
+        return (add(a, scale(ab, share)), vec![a, b]);
+    }
+    let cp = sub(p, c);
+    let d5 = dot(ab, cp);
+    let d6 = dot(ac, cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return (c, vec![c]);
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        let share = d2 / (d2 - d6);
+        return (add(a, scale(ac, share)), vec![a, c]);
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let share = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return (add(b, scale(sub(c, b), share)), vec![b, c]);
+    }
+    let sum = va + vb + vc;
+    let (v, w) = (vb / sum, vc / sum);
+    (add(a, add(scale(ab, v), scale(ac, w))), vec![a, b, c])
+}
+
+/// Whether the origin lies on the far side of face `a`, `b`, `c` from `other`.
+fn outside_face(a: Vec3, b: Vec3, c: Vec3, other: Vec3) -> bool {
+    let normal = cross(sub(b, a), sub(c, a));
+    let origin_side = dot(normal, scale(a, -1.0));
+    let other_side = dot(normal, sub(other, a));
+    origin_side * other_side < 0.0
+}
+
+/// The point of the simplex `points` (1 to 4 points) nearest the origin and the smallest part of
+/// it that holds that point; `None` when the origin lies inside a tetrahedron.
+fn nearest_on_simplex(points: &[Vec3]) -> Option<(Vec3, Vec<Vec3>)> {
+    match *points {
+        [a] => Some((a, vec![a])),
+        [a, b] => Some(nearest_on_segment(a, b)),
+        [a, b, c] => Some(nearest_on_triangle(a, b, c)),
+        [a, b, c, d] => {
+            let faces = [(a, b, c, d), (a, c, d, b), (a, d, b, c), (b, d, c, a)];
+            // A flat tetrahedron holds nothing inside: every face counts.
+            let flat = dot(cross(sub(b, a), sub(c, a)), sub(d, a)).abs() <= GJK_FLAT_VOLUME;
+            let mut best: Option<(Vec3, Vec<Vec3>)> = None;
+            for (p, q, r, other) in faces {
+                if flat || outside_face(p, q, r, other) {
+                    let found = nearest_on_triangle(p, q, r);
+                    if best
+                        .as_ref()
+                        .is_none_or(|(point, _)| dot(found.0, found.0) < dot(*point, *point))
+                    {
+                        best = Some(found);
+                    }
+                }
+            }
+            best
+        }
+        _ => None,
+    }
+}
+
+/// The distance from the origin to the convex set of support function `support` (Gilbert,
+/// Johnson and Keerthi): 0 when the origin is inside.
+fn gjk_distance(support: impl Fn(Vec3) -> Vec3) -> f32 {
+    let mut nearest = support([1.0, 0.0, 0.0]);
+    let mut simplex = vec![nearest];
+    for _ in 0..GJK_ITERATIONS {
+        let length = dot(nearest, nearest);
+        if length <= 0.0 {
+            return 0.0;
+        }
+        let far = support(scale(nearest, -1.0));
+        let repeated = simplex.iter().any(|point| {
+            dot(sub(*point, far), sub(*point, far)) <= GJK_SAME_POINT_M * GJK_SAME_POINT_M
+        });
+        if repeated || length - dot(nearest, far) <= GJK_TOLERANCE * length {
+            break;
+        }
+        simplex.push(far);
+        let Some((point, part)) = nearest_on_simplex(&simplex) else {
+            return 0.0;
+        };
+        nearest = point;
+        simplex = part;
+    }
+    dot(nearest, nearest).sqrt()
+}
+
+/// A wedge in front of a mob's body at `from` (of capsule `own`), facing yaw `facing`, `reach_m`
+/// deep in front of the body and `half_arc_rad` to each side.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Wedge {
     pub(super) from: Position,
@@ -248,91 +311,30 @@ pub(super) struct Wedge {
 }
 
 impl Wedge {
-    /// The wedge of the swing `shape` of a player at `from` facing `facing`.
-    pub(super) const fn of_swing(shape: &SwingShape, from: Position, facing: f32) -> Self {
-        Self {
-            from,
-            own: PLAYER_CAPSULE,
-            facing,
-            reach_m: shape.reach_m,
-            half_arc_rad: shape.half_arc_rad,
-        }
-    }
-
-    /// How far off its middle a body of capsule `body` at `at` is (radians), when the body
-    /// reaches into it: the body's edge is within the reach, the arc widens by the angle the
-    /// body's radius takes at its distance, and the two capsules overlap in height.
-    pub(super) fn touches(&self, at: Position, body: Capsule) -> Option<f32> {
+    /// Whether a body of capsule `body` at `at` reaches into it: the body's edge is within the
+    /// reach, the arc widens by the angle the body's radius takes at its distance, and the two
+    /// capsules overlap in height.
+    pub(super) fn touches(&self, at: Position, body: Capsule) -> bool {
         let distance = at.horizontal_distance(self.from);
         if distance > self.reach_m + body.radius_m {
-            return None;
+            return false;
         }
         let overlaps = at.z < self.from.z + self.own.height_m + STEP_SLACK_M
             && self.from.z < at.z + body.height_m + STEP_SLACK_M;
         if !overlaps {
-            return None;
+            return false;
         }
         // Bodies that overlap touch whatever the facing: so near, the yaw toward the other body
-        // says nothing (live 2026-09-18: a heavy swing at Thorpe 0.1 m away missed).
+        // says nothing.
         if distance <= self.own.radius_m + body.radius_m {
-            return Some(0.0);
+            return true;
         }
         let widen = if distance > 0.0 {
             (body.radius_m / distance).min(1.0).asin()
         } else {
             FRAC_PI_2
         };
-        let off = turn(self.facing, yaw_toward(self.from, at)).abs();
-        (off <= self.half_arc_rad + widen).then_some(off)
-    }
-}
-
-/// How far apart in height a homing target may be (the `Homing` clips' `Height` 5, Observed).
-const HOMING_HEIGHT_M: f32 = 5.0;
-
-/// The target of `targets` (positions and body radii) that a swing of `shape` from `from` facing
-/// `facing` homes to: the one with the lowest share of the homing radius plus share of the homing
-/// angle; `None` when none is in the homing's reach. The radius counts to the body's edge
-/// (Inferred: the live greatsword missed Thorpe, a 0.7 m body, at 5 to 7 m to his middle while
-/// the client showed it landing, 2026-09-18).
-pub(super) fn homing(
-    shape: &SwingShape,
-    from: Position,
-    facing: f32,
-    targets: impl Iterator<Item = (Position, f32)>,
-) -> Option<usize> {
-    targets
-        .enumerate()
-        .filter_map(|(index, (at, radius_m))| {
-            let distance = (at.horizontal_distance(from) - radius_m).max(0.0);
-            let off = turn(facing, yaw_toward(from, at)).abs();
-            // A body touching the attacker is in reach at any angle (see [`Wedge::touches`]).
-            let touching = distance <= PLAYER_CAPSULE.radius_m;
-            let in_reach = distance <= shape.homing_radius_m
-                && (touching || off <= shape.homing_angle_rad)
-                && (at.z - from.z).abs() <= HOMING_HEIGHT_M;
-            in_reach.then(|| {
-                let score = distance / shape.homing_radius_m + off / shape.homing_angle_rad;
-                (score, index)
-            })
-        })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, index)| index)
-}
-
-/// Where a swing of `shape` from `from` stands once its homing stepped it in toward `target`: to
-/// [`SwingShape::step_to_m`] from it, by at most [`SwingShape::step_max_m`]; never away from it.
-pub(super) fn stepped_in(shape: &SwingShape, from: Position, target: Position) -> Position {
-    let distance = target.horizontal_distance(from);
-    let step = (distance - shape.step_to_m).clamp(0.0, shape.step_max_m);
-    if distance <= 0.0 || step <= 0.0 {
-        return from;
-    }
-    let share = step / distance;
-    Position {
-        x: from.x + (target.x - from.x) * share,
-        y: from.y + (target.y - from.y) * share,
-        z: from.z,
+        turn(self.facing, yaw_toward(self.from, at)).abs() <= self.half_arc_rad + widen
     }
 }
 
@@ -351,6 +353,15 @@ mod tests {
     };
     /// Yaw 0 faces north (+y).
     const NORTH: f32 = 0.0;
+    /// The greatsword light attack's homing (`player_greatsword.adb`, build 25810808).
+    const GREATSWORD: Homing = Homing {
+        radius_m: 4.5,
+        max_angle_deg: 60.0,
+        height_m: 5.0,
+        radius_weight: 1.0,
+        angle_weight: 1.0,
+        use_radius_for_ai_target: true,
+    };
 
     fn at(dx: f32, dy: f32) -> Position {
         Position {
@@ -360,188 +371,189 @@ mod tests {
         }
     }
 
-    fn sword() -> Wedge {
-        Wedge::of_swing(&SWORD_LIGHT, ORIGIN, NORTH)
+    fn score(facing: Option<f32>, target: Position) -> Option<f32> {
+        homing_score(&GREATSWORD, ORIGIN, facing, target, BODY.radius_m)
     }
 
     #[test]
-    fn a_body_whose_edge_is_in_reach_is_hit() {
-        assert_eq!(sword().touches(at(0.0, 2.1), BODY), Some(0.0));
+    fn a_target_in_the_homing_radius_angle_and_height_is_in_reach() {
+        assert_eq!(score(Some(NORTH), at(0.0, 0.0)), Some(0.0));
+        // 4.9 m to the middle, 4.4 m to the edge of a 0.5 m body.
+        assert!(score(Some(NORTH), at(0.0, 4.9)).is_some());
+        assert_eq!(score(Some(NORTH), at(0.0, 5.1)), None, "beyond the radius");
+        let without_edge = Homing {
+            use_radius_for_ai_target: false,
+            ..GREATSWORD
+        };
         assert_eq!(
-            sword().touches(at(0.0, 2.2), BODY),
+            homing_score(&without_edge, ORIGIN, Some(NORTH), at(0.0, 4.9), 0.5),
             None,
-            "edge past the reach"
-        );
-    }
-
-    #[test]
-    fn the_arc_widens_by_the_body_radius() {
-        // 50 degrees off at 1 m: outside ±45, but the radius takes 30 degrees there.
-        let off = degrees(50.0);
-        let near = at(-off.sin(), off.cos());
-        assert!(sword().touches(near, BODY).is_some());
-        let behind = at(0.0, -1.0);
-        assert_eq!(sword().touches(behind, BODY), None);
-    }
-
-    #[test]
-    fn a_body_above_or_below_is_not_hit() {
-        let above = Position {
-            z: ORIGIN.z + PLAYER_CAPSULE.height_m + STEP_SLACK_M + 0.1,
-            ..at(0.0, 1.0)
-        };
-        assert_eq!(sword().touches(above, BODY), None);
-        let below = Position {
-            z: ORIGIN.z - BODY.height_m - STEP_SLACK_M - 0.1,
-            ..at(0.0, 1.0)
-        };
-        assert_eq!(sword().touches(below, BODY), None);
-        let on_a_ledge = Position {
-            z: ORIGIN.z - BODY.height_m - STEP_SLACK_M + 0.1,
-            ..at(0.0, 1.0)
-        };
-        assert!(
-            sword().touches(on_a_ledge, BODY).is_some(),
-            "a body a step below still touches"
-        );
-    }
-
-    #[test]
-    fn a_body_overlapping_the_attacker_is_hit_at_any_angle() {
-        /// Thorpe's body radius, 0.1 m behind the attacker's middle (live 2026-09-18).
-        const BIG: Capsule = Capsule {
-            radius_m: 0.7,
-            height_m: 2.8,
-        };
-        let behind = at(0.0, -0.1);
-        assert_eq!(sword().touches(behind, BIG), Some(0.0));
-        assert_eq!(
-            homing(
-                &SWORD_LIGHT,
-                ORIGIN,
-                NORTH,
-                [(behind, BIG.radius_m)].into_iter()
-            ),
-            Some(0),
-            "the homing finds it too"
-        );
-        let far_behind = at(0.0, -3.0);
-        assert_eq!(
-            sword().touches(far_behind, BIG),
-            None,
-            "a body away behind is not"
-        );
-    }
-
-    #[test]
-    fn homing_turns_to_the_best_target_in_its_reach() {
-        let east = at(3.0, 0.0);
-        let north_east = at(1.0, 1.0);
-        let body = |at: Position| (at, BODY.radius_m);
-        assert_eq!(
-            homing(
-                &SWORD_LIGHT,
-                ORIGIN,
-                NORTH,
-                [body(east), body(north_east)].into_iter()
-            ),
-            Some(1)
-        );
-        let far = at(0.0, 5.0);
-        assert_eq!(
-            homing(&SWORD_LIGHT, ORIGIN, NORTH, [body(far)].into_iter()),
-            None
-        );
-        // A big body whose middle is beyond the radius but whose edge is within it.
-        const BIG_RADIUS_M: f32 = 0.7;
-        let big = at(0.0, SWORD_LIGHT.homing_radius_m + BIG_RADIUS_M - 0.1);
-        assert_eq!(
-            homing(
-                &SWORD_LIGHT,
-                ORIGIN,
-                NORTH,
-                [(big, BIG_RADIUS_M)].into_iter()
-            ),
-            Some(0)
+            "the middle counts without UseRadiusforAITarget"
         );
         let high = Position {
-            z: ORIGIN.z + HOMING_HEIGHT_M + 1.0,
+            z: ORIGIN.z + GREATSWORD.height_m + 0.1,
             ..at(0.0, 2.0)
         };
-        assert_eq!(
-            homing(&SWORD_LIGHT, ORIGIN, NORTH, [body(high)].into_iter()),
-            None
-        );
+        assert_eq!(score(Some(NORTH), high), None, "above the height");
     }
 
     #[test]
-    fn the_step_in_brings_a_target_in_the_homing_reach_into_the_blade() {
-        // A mob 3.5 m ahead: out of the sword's 1.6 m wedge where the player stands.
-        let mob = at(0.0, 3.5);
-        assert_eq!(sword().touches(mob, BODY), None);
-        assert_eq!(
-            homing(
-                &SWORD_LIGHT,
-                ORIGIN,
-                NORTH,
-                [(mob, BODY.radius_m)].into_iter()
-            ),
-            Some(0)
-        );
-        let stepped = stepped_in(&SWORD_LIGHT, ORIGIN, mob);
-        assert!((mob.horizontal_distance(stepped) - SWORD_LIGHT.step_to_m).abs() < 1e-4);
-        let wedge = Wedge::of_swing(&SWORD_LIGHT, stepped, NORTH);
-        assert!(wedge.touches(mob, BODY).is_some(), "the blade lands");
-        // A mob nearer than the stop distance: no step back.
-        let close = at(0.0, 0.5);
-        assert_eq!(stepped_in(&SWORD_LIGHT, ORIGIN, close), ORIGIN);
-        // The step is at most its maximum.
-        let far = at(0.0, 10.0);
-        let capped = stepped_in(&SWORD_LIGHT, ORIGIN, far);
-        assert!((capped.horizontal_distance(ORIGIN) - SWORD_LIGHT.step_max_m).abs() < 1e-4);
+    fn the_angle_counts_unless_the_target_is_locked() {
+        // 61 degrees off the facing at 2 m.
+        let off = 61.0_f32.to_radians();
+        let aside = at(-2.0 * off.sin(), 2.0 * off.cos());
+        assert_eq!(score(Some(NORTH), aside), None);
+        assert!(score(None, aside).is_some(), "the lock turns the attacker");
+        let behind = at(0.0, -2.0);
+        assert_eq!(score(Some(NORTH), behind), None);
     }
 
     #[test]
-    fn each_weapon_hits_inside_its_damage_window() {
-        let hit_ms = |kind| swing_shape(kind, AttackKind::Light).map(|shape| shape.hit_ms());
-        assert_eq!(hit_ms(WeaponKind::Sword), Some(383));
-        assert_eq!(hit_ms(WeaponKind::WarHammer), Some(466));
-        assert_eq!(
-            swing_shape(WeaponKind::Other, AttackKind::Heavy),
-            Some(SWORD_HEAVY)
-        );
+    fn the_weights_rank_nearer_and_straighter_targets_first() {
+        let ahead_far = score(Some(NORTH), at(0.0, 4.0)).expect("in reach");
+        let ahead_near = score(Some(NORTH), at(0.0, 1.5)).expect("in reach");
+        assert!(ahead_near < ahead_far);
+        let near_aside = score(Some(NORTH), at(1.0, 1.0)).expect("in reach");
+        // 1 m to the edge and 45 of 60 degrees against 3.5 m and 0 degrees.
+        assert!((near_aside - ((2.0_f32.sqrt() - 0.5) / 4.5 + 0.75)).abs() < 1e-4);
+        assert!((ahead_far - 3.5 / 4.5).abs() < 1e-4);
     }
 
-    #[test]
-    fn every_melee_kind_swings_and_no_ranged_or_magic_kind_does() {
-        let kinds = [
-            WeaponKind::Sword,
-            WeaponKind::Hatchet,
-            WeaponKind::Rapier,
-            WeaponKind::Flail,
-            WeaponKind::Spear,
-            WeaponKind::GreatAxe,
-            WeaponKind::WarHammer,
-            WeaponKind::GreatSword,
-            WeaponKind::Bow,
-            WeaponKind::Musket,
-            WeaponKind::Blunderbuss,
-            WeaponKind::FireStaff,
-            WeaponKind::LifeStaff,
-            WeaponKind::IceGauntlet,
-            WeaponKind::VoidGauntlet,
-            WeaponKind::Other,
-        ];
-        for kind in kinds {
-            for attack in [AttackKind::Light, AttackKind::Heavy] {
-                assert_eq!(
-                    swing_shape(kind, attack).is_some(),
-                    kind.swings(),
-                    "{kind:?} {attack:?}"
-                );
-            }
+    /// The greatsword's light attack box (`playermaleanims_2h_meleeattach.adb`): 1.2 x 0.5 x 2 m.
+    const BLADE: ShapeKind = ShapeKind::Box {
+        half_extents_m: [0.6, 0.25, 1.0],
+    };
+
+    fn still(shape: ShapeKind, pose: Rigid) -> SweptShape {
+        SweptShape {
+            shape,
+            from: pose,
+            to: pose,
         }
-        let reach = |attack| swing_shape(WeaponKind::GreatSword, attack).map(|shape| shape.reach_m);
-        assert!(reach(AttackKind::Heavy) > reach(AttackKind::Light));
+    }
+
+    #[test]
+    fn the_distance_search_finds_points_segments_and_overlaps() {
+        // A unit cube around (3, 0, 0): 2.5 m from the origin.
+        let cube = |direction: Vec3| {
+            let corner = |axis: usize| if direction[axis] < 0.0 { -0.5 } else { 0.5 };
+            [3.0 + corner(0), corner(1), corner(2)]
+        };
+        assert!((gjk_distance(cube) - 2.5).abs() < 1e-4);
+        let around = |direction: Vec3| {
+            let corner = |axis: usize| if direction[axis] < 0.0 { -1.0 } else { 1.0 };
+            [corner(0), corner(1), corner(2)]
+        };
+        assert_eq!(gjk_distance(around), 0.0, "the origin inside");
+        // A segment from (-1, 2, 0) to (1, 2, 0): 2 m away at its middle.
+        let segment = |direction: Vec3| {
+            if direction[0] < 0.0 {
+                [-1.0, 2.0, 0.0]
+            } else {
+                [1.0, 2.0, 0.0]
+            }
+        };
+        assert!((gjk_distance(segment) - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_flat_simplex_away_from_the_origin_has_a_nearest_point() {
+        let square = [
+            [1.0, 1.0, 2.0],
+            [-1.0, 1.0, 2.0],
+            [-1.0, -1.0, 2.0],
+            [1.0, -1.0, 2.0],
+        ];
+        let (point, _) = nearest_on_simplex(&square).expect("flat: a face is nearest");
+        assert!((point[2] - 2.0).abs() < 1e-6 && point[0].abs() < 1e-6 && point[1].abs() < 1e-6);
+        let around = [
+            [1.0, 0.0, -1.0],
+            [-1.0, 1.0, -1.0],
+            [-1.0, -1.0, -1.0],
+            [0.0, 0.0, 1.0],
+        ];
+        assert_eq!(nearest_on_simplex(&around), None, "the origin inside");
+    }
+
+    #[test]
+    fn a_shape_touches_a_body_it_overlaps_and_not_one_beyond() {
+        let blade = Rigid::translation([ORIGIN.x, ORIGIN.y + 1.5, ORIGIN.z + 1.0]);
+        let shape = still(BLADE, blade);
+        // The box reaches 0.25 m past y + 1.5; a 0.5 m body touches from 2.25 m.
+        assert!(shape.touches(at(0.0, 2.2), BODY));
+        assert!(!shape.touches(at(0.0, 2.3), BODY));
+        assert!(shape.touches(at(1.05, 1.5), BODY), "its side: 0.6 + 0.5");
+        assert!(!shape.touches(at(1.15, 1.5), BODY));
+        let sphere = still(ShapeKind::Sphere { radius_m: 0.5 }, blade);
+        assert!(sphere.touches(at(0.0, 2.45), BODY));
+        assert!(!sphere.touches(at(0.0, 2.55), BODY));
+        let high = Position {
+            z: ORIGIN.z + 2.6,
+            ..at(0.0, 1.5)
+        };
+        assert!(
+            !shape.touches(high, BODY),
+            "above the box: its top is 2 m up"
+        );
+    }
+
+    #[test]
+    fn a_swept_shape_hits_what_it_passes_between_two_poses() {
+        // A capsule along z swinging from the east side to the west side in one tick.
+        let capsule = ShapeKind::Capsule {
+            radius_m: 0.3,
+            half_height_m: 0.6,
+        };
+        let pose = |dx: f32| Rigid::translation([ORIGIN.x + dx, ORIGIN.y + 2.0, ORIGIN.z + 1.0]);
+        let swing = SweptShape {
+            shape: capsule,
+            from: pose(2.0),
+            to: pose(-2.0),
+        };
+        assert!(
+            swing.touches(at(0.0, 2.0), BODY),
+            "passed through in the tick"
+        );
+        assert!(!still(capsule, pose(2.0)).touches(at(0.0, 2.0), BODY));
+        assert!(!still(capsule, pose(-2.0)).touches(at(0.0, 2.0), BODY));
+        assert!(!swing.touches(at(0.0, 3.0), BODY), "0.2 m beyond its path");
+        // A cylinder ends flat: its rim is the nearest point of a body beside and above it.
+        let cylinder = still(
+            ShapeKind::Cylinder {
+                radius_m: 0.5,
+                half_height_m: 0.2,
+            },
+            Rigid::translation([ORIGIN.x, ORIGIN.y, ORIGIN.z + 0.2]),
+        );
+        assert!(cylinder.touches(at(0.9, 0.0), BODY));
+        assert!(!cylinder.touches(at(1.1, 0.0), BODY));
+    }
+
+    #[test]
+    fn a_body_frame_turns_the_root_space_to_the_facing() {
+        // Facing west (a quarter turn): the root's forward (+y) points to -x.
+        let frame = body_frame(ORIGIN, std::f32::consts::FRAC_PI_2);
+        let ahead = frame.apply([0.0, 1.0, 0.0]);
+        assert!((ahead[0] - (ORIGIN.x - 1.0)).abs() < 1e-5 && (ahead[1] - ORIGIN.y).abs() < 1e-5);
+    }
+
+    #[test]
+    fn a_mob_wedge_reaches_a_body_in_front_and_not_behind() {
+        let wedge = Wedge {
+            from: ORIGIN,
+            own: BODY,
+            facing: NORTH,
+            reach_m: 1.6,
+            half_arc_rad: MOB_SWING_HALF_ARC_RAD,
+        };
+        assert!(wedge.touches(at(0.0, 2.1), BODY));
+        assert!(!wedge.touches(at(0.0, 2.2), BODY), "edge past the reach");
+        assert!(!wedge.touches(at(0.0, -1.5), BODY), "behind");
+        assert!(wedge.touches(at(0.0, -0.5), BODY), "overlapping bodies");
+        let above = Position {
+            z: ORIGIN.z + BODY.height_m + STEP_SLACK_M + 0.1,
+            ..at(0.0, 1.0)
+        };
+        assert!(!wedge.touches(above, BODY));
     }
 }

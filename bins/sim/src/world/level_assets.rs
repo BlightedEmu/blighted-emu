@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use nw_content::ftue_entities::{AssetGroup, FtueLevel, GDE_REF_LEN, RefTarget, SessionIds};
-use nw_messages::{BundleGroup, BundleMember, MemberState, raw_id_of_entity};
+use nw_messages::{BundleGroup, BundleMember, MemberState, as_dynamic_raw_id, raw_id_of_entity};
 use uuid::Uuid;
 
 use super::asset_script::SpellCast;
@@ -26,7 +26,7 @@ const ASSET_GDE_REF_NAMESPACE: u64 = 0x6173_7365_7473;
 /// every player and entity.
 pub(super) fn asset_gde_ref(player: u64, index: usize) -> [u8; GDE_REF_LEN] {
     let namespace = Uuid::from_u64_pair(ASSET_GDE_REF_NAMESPACE, player);
-    *Uuid::new_v5(&namespace, &(index as u64).to_be_bytes()).as_bytes()
+    as_dynamic_raw_id(*Uuid::new_v5(&namespace, &(index as u64).to_be_bytes()).as_bytes())
 }
 
 /// The `GdeRef` of cast `number` of spell slice `index` for player `player`: new per cast
@@ -35,7 +35,7 @@ pub(super) fn spell_gde_ref(player: u64, index: usize, number: u32) -> [u8; GDE_
     let namespace = Uuid::from_u64_pair(ASSET_GDE_REF_NAMESPACE, player);
     let mut name = (index as u64).to_be_bytes().to_vec();
     name.extend(number.to_be_bytes());
-    *Uuid::new_v5(&namespace, &name).as_bytes()
+    as_dynamic_raw_id(*Uuid::new_v5(&namespace, &name).as_bytes())
 }
 
 /// The class of a spell slice's spell state (2912), whose body holds where the spell aims: the
@@ -280,6 +280,22 @@ mod tests {
             player_gde_ref: [1; GDE_REF_LEN],
             player_facet: [2; 8],
             phase_id: 3,
+        }
+    }
+
+    #[test]
+    fn asset_and_spell_ids_are_dynamic_like_retail() {
+        // Retail's 26 tutorial asset entities and every dynamic card keep bit 0 of the first
+        // byte clear; with it set the client takes the id as a level object.
+        const INDEXES: usize = 64;
+        for index in 0..INDEXES {
+            assert!(nw_messages::is_dynamic_raw_id(&asset_gde_ref(
+                PLAYER, index
+            )));
+            let cast = u32::try_from(index).expect("cast");
+            assert!(nw_messages::is_dynamic_raw_id(&spell_gde_ref(
+                PLAYER, 0, cast
+            )));
         }
     }
 

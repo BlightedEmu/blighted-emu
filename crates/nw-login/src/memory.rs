@@ -6,7 +6,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use nw_db::{Account, Character, NewCharacter};
+use nw_db::{
+    Account, AnalyticsRecord, BoardEntry, BoardOrder, BoardPage, Character, NewCharacter,
+    StatValues,
+};
 use nw_protocol::launcher_api::LauncherSession;
 use uuid::Uuid;
 
@@ -15,8 +18,8 @@ use crate::queue::{
     QueueTime,
 };
 use crate::store::{
-    AccountStore, CharacterStore, DiscordAttempt, DiscordStateStore, GameSessionStore, RateLimiter,
-    StoreError,
+    AccountStore, AnalyticsStore, CharacterStore, DiscordAttempt, DiscordStateStore,
+    GameSessionStore, RateLimiter, StatsStore, StoreError,
 };
 use crate::time::MILLIS_PER_SECOND;
 use nw_common::time::{unix_ms, unix_seconds};
@@ -555,6 +558,129 @@ impl QueueStore for MemoryQueue {
             }
         }
         Ok(None)
+    }
+}
+
+/// A page request: namespace, board, order, page number, page size.
+pub(crate) type PageRequest = (String, String, BoardOrder, u32, u32);
+/// A stat values request: scope, stat ids, entity ids.
+pub(crate) type ValuesRequest = (String, Vec<String>, Vec<String>);
+
+#[derive(Default)]
+struct Stats {
+    boards: HashMap<String, BoardPage>,
+    values: StatValues,
+    last_page: Option<PageRequest>,
+    last_values: Option<ValuesRequest>,
+}
+
+/// Stats in memory: set boards and values answer every request, and the last requests are kept.
+#[derive(Clone, Default)]
+pub(crate) struct MemoryStats(Arc<Mutex<Stats>>);
+
+impl MemoryStats {
+    /// Board `board_id` answers every page request with `page`.
+    pub(crate) fn set_board(&self, board_id: &str, page: BoardPage) {
+        lock(&self.0).boards.insert(board_id.to_owned(), page);
+    }
+
+    /// Every stat values request gets `values`.
+    pub(crate) fn set_values(&self, values: StatValues) {
+        lock(&self.0).values = values;
+    }
+
+    /// The last page request.
+    pub(crate) fn last_page(&self) -> Option<PageRequest> {
+        lock(&self.0).last_page.clone()
+    }
+
+    /// The last stat values request.
+    pub(crate) fn last_values_query(&self) -> Option<ValuesRequest> {
+        lock(&self.0).last_values.clone()
+    }
+}
+
+impl StatsStore for MemoryStats {
+    async fn leaderboard_page(
+        &self,
+        namespace: &str,
+        board_id: &str,
+        order: BoardOrder,
+        page_number: u32,
+        page_size: u32,
+    ) -> Result<BoardPage, StoreError> {
+        let mut stats = lock(&self.0);
+        stats.last_page = Some((
+            namespace.to_owned(),
+            board_id.to_owned(),
+            order,
+            page_number,
+            page_size,
+        ));
+        Ok(stats.boards.get(board_id).cloned().unwrap_or(BoardPage {
+            entries: Vec::new(),
+            size: 0,
+        }))
+    }
+
+    async fn leaderboard_entries(
+        &self,
+        _namespace: &str,
+        board_id: &str,
+        _order: BoardOrder,
+        entity_ids: &[String],
+    ) -> Result<Vec<BoardEntry>, StoreError> {
+        Ok(lock(&self.0)
+            .boards
+            .get(board_id)
+            .map(|page| {
+                page.entries
+                    .iter()
+                    .filter(|entry| entity_ids.contains(&entry.entity_id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    async fn stat_values(
+        &self,
+        _namespace: &str,
+        scope: &str,
+        stat_ids: &[String],
+        entity_ids: &[String],
+    ) -> Result<StatValues, StoreError> {
+        let mut stats = lock(&self.0);
+        stats.last_values = Some((scope.to_owned(), stat_ids.to_vec(), entity_ids.to_vec()));
+        Ok(stats.values.clone())
+    }
+}
+
+/// The analytics stream in memory.
+#[derive(Clone, Default)]
+pub(crate) struct MemoryAnalytics(Arc<Mutex<Vec<(String, AnalyticsRecord)>>>);
+
+impl MemoryAnalytics {
+    /// Every stored record with its stream.
+    pub(crate) fn records(&self) -> Vec<(String, AnalyticsRecord)> {
+        lock(&self.0).clone()
+    }
+}
+
+impl AnalyticsStore for MemoryAnalytics {
+    async fn put_records(
+        &self,
+        stream_name: &str,
+        records: &[AnalyticsRecord],
+    ) -> Result<Vec<i64>, StoreError> {
+        let mut stored = lock(&self.0);
+        let first = i64::try_from(stored.len()).unwrap_or(i64::MAX);
+        stored.extend(
+            records
+                .iter()
+                .map(|record| (stream_name.to_owned(), record.clone())),
+        );
+        Ok((first..).take(records.len()).collect())
     }
 }
 

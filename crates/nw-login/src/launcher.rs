@@ -11,6 +11,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use nw_db::Account;
+use nw_protocol::aws_mirror::AwsMirror;
 use nw_protocol::launcher_api::{
     AuthMode, DISCORD_POLL_PATH, DISCORD_START_PATH, DiscordPoll, DiscordPollReply, DiscordStart,
     INFO_PATH, LOGIN_PATH, LOGOUT_PATH, LauncherInfo, LauncherSession, PLAY_PATH,
@@ -63,6 +64,8 @@ pub struct LauncherState<A, G, R, D, X> {
     pub discord: Option<X>,
     /// Argon2id worker pool.
     pub hasher: PasswordHasher,
+    /// The certificate this server shows for the `[aws_mirror]` hosts, as PEM.
+    pub aws_mirror_certificate_pem: Arc<str>,
 }
 
 /// The launcher routes.
@@ -177,6 +180,10 @@ async fn info<A, G, R, D, X>(
         auth_mode: config.auth.mode,
         allow_registration: config.auth.allow_registration,
         launch_arguments: config.launch_arguments(),
+        aws_mirror: AwsMirror {
+            hosts: config.aws_mirror.hosts.clone(),
+            certificate_pem: state.aws_mirror_certificate_pem.to_string(),
+        },
     })
 }
 
@@ -446,6 +453,7 @@ pub(crate) mod tests {
         MemoryAccounts, MemoryDiscordStates, MemoryGameSessions, MemoryRateLimiter,
     };
     use crate::test_http::{self, error_code};
+    use crate::test_support::TEST_AWS_MIRROR_CERTIFICATE_PEM;
 
     const PEER: ([u8; 4], u16) = ([192, 0, 2, 7], 50_000);
     const USERNAME: &str = "Ada";
@@ -474,6 +482,7 @@ pub(crate) mod tests {
             discord_states: MemoryDiscordStates::default(),
             discord: (mode == AuthMode::Discord).then_some(FakeDiscord),
             hasher: PasswordHasher::new(ONE_HASH_AT_A_TIME).expect("hasher"),
+            aws_mirror_certificate_pem: TEST_AWS_MIRROR_CERTIFICATE_PEM.into(),
         }
     }
 
@@ -542,6 +551,11 @@ pub(crate) mod tests {
         assert_eq!(info.auth_mode, AuthMode::Password);
         assert!(info.allow_registration);
         assert_eq!(info.launch_arguments, valid().launch_arguments());
+        assert_eq!(info.aws_mirror.hosts, valid().aws_mirror.hosts);
+        assert_eq!(
+            info.aws_mirror.certificate_pem,
+            TEST_AWS_MIRROR_CERTIFICATE_PEM
+        );
     }
 
     #[tokio::test]

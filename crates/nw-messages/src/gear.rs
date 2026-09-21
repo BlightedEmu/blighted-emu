@@ -52,6 +52,31 @@ pub struct EquippedItem {
     pub item: Option<GearItem>,
 }
 
+/// One worn item as other players see it (the public paperdoll): its slot and its client item
+/// index, 0 for a visible slot whose item was removed. Its stack, gear score, durability, bind
+/// flag and instance stay its owner's (Observed: every retail remote paperdoll of the duel and
+/// the 3v3 arena sets slot 2 alone).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShownItem {
+    /// The paperdoll slot id ([`slot`]).
+    pub slot: u32,
+    /// The client item index; 0: the slot's item was removed.
+    pub item_index: u32,
+}
+
+impl ShownItem {
+    /// How `worn` shows to other players.
+    pub const fn of(worn: &EquippedItem) -> Self {
+        Self {
+            slot: worn.slot,
+            item_index: match worn.item {
+                Some(item) => item.item_index,
+                None => 0,
+            },
+        }
+    }
+}
+
 /// Whether paperdoll slot `slot_id` shows on the character: the armor and the weapon options.
 /// Other slots (amulet, ring, quick slots, ...) are the paperdoll's hidden items (retail: the
 /// amulet in slot 5 and potions in slot 14).
@@ -139,6 +164,35 @@ impl Hands {
     }
 }
 
+impl PaperdollPublic {
+    /// The public paperdoll of a player whose worn items show as `shown` (in that order) and who
+    /// holds its weapons as `hands`, with lists of `version`: the hands' maps, then the slots and
+    /// looks of the items in visible slots.
+    pub fn of(shown: &[ShownItem], version: u64, hands: Hands) -> Self {
+        let visible: Vec<&ShownItem> = shown
+            .iter()
+            .filter(|item| is_visible_slot(item.slot))
+            .collect();
+        Self {
+            sheathed: Some(hands.sheathed()),
+            attached: Some(hands.attached()),
+            active: Some(hands.active()),
+            visible_slots: Some(list(
+                version,
+                visible.iter().map(|item| item.slot).collect(),
+            )),
+            visuals: Some(list(
+                version,
+                visible
+                    .iter()
+                    .map(|item| ItemVisual::of(item.item_index))
+                    .collect(),
+            )),
+            loadout_swaps: None,
+        }
+    }
+}
+
 impl PlayerGear {
     /// The first states of a player who wears `equipped` (in that order) and has an empty bag.
     pub fn first(equipped: &[EquippedItem]) -> Self {
@@ -219,22 +273,11 @@ impl PlayerGear {
                 )),
                 ..PaperdollOwner::default()
             }),
-            public: Some(PaperdollPublic {
-                sheathed: Some(hands.sheathed()),
-                attached: Some(hands.attached()),
-                active: Some(hands.active()),
-                visible_slots: Some(list(version, slots(&visible))),
-                visuals: Some(list(
-                    version,
-                    visible
-                        .iter()
-                        .map(|(_, worn)| {
-                            ItemVisual::of(worn.item.map_or(0, |item| item.item_index))
-                        })
-                        .collect(),
-                )),
-                loadout_swaps: None,
-            }),
+            public: Some(PaperdollPublic::of(
+                &equipped.iter().map(ShownItem::of).collect::<Vec<_>>(),
+                version,
+                hands,
+            )),
         };
         let owned = keys
             .zip(&worn)
@@ -275,7 +318,7 @@ impl PlayerGear {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -370,7 +413,8 @@ mod tests {
         ]
     }
 
-    fn hex(text: &str) -> Vec<u8> {
+    /// The bytes of hex text.
+    pub(crate) fn hex(text: &str) -> Vec<u8> {
         (0..text.len())
             .step_by(2)
             .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hex"))

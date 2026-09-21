@@ -2,36 +2,55 @@
 //! The attacks of ranged and magic weapons (staffs, gauntlets, bows, muskets): the server casts
 //! their projectile. A retail client sends no hit request for them, only its inputs (Observed:
 //! the fire staff and bow capture holds 293 hits and no client message but inputs around them),
-//! and the projectile spells are server data (`SpellData`: `CastingTypes` Projectile, the
-//! `DamageTableRow` each hit deals). So an attack flies along the player's aim: the first mob on
+//! and the projectiles are server data: the attack's `CAGE-RangedAttack` clip or its spell
+//! (`SpellData`), the ranged attack database's range and radius, the projectile slice's flight
+//! ([`nw_content::player_attacks`]). So an attack flies along the player's aim: the first mob on
 //! its line, where the client shows it ([`super::mob_trail`]), is hit once the projectile got
 //! there.
 
 use nw_bus::ConnectionRef;
-use nw_content::combat::{Projectile, WeaponKind};
+use nw_content::player_attacks::Flight;
 use nw_sim_core::Position;
 
 use super::SimWorld;
-use super::attack::{Aim, AttackKind};
+use super::hit_shape::PLAYER_CAPSULE;
 use super::mob_timeline::yaw_toward;
 use crate::combat::{AttackOutcome, AttackRefusal};
 use crate::mobs::Capsule;
 
-/// How far apart in height a projectile and a body may be and still meet (our choice: the
-/// projectile flies at the camera's aim, which the server reads as a yaw only).
-const PROJECTILE_HEIGHT_M: f32 = 3.0;
 /// Milliseconds per second.
 const MS_PER_SECOND: f32 = 1_000.0;
 
-/// One attack of a ranged or magic weapon.
+/// How a projectile or hit scan of one attack meets bodies.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(super) struct Cast {
-    /// The weapon's kind.
-    pub(super) weapon: WeaponKind,
-    /// How its projectile flies.
-    pub(super) projectile: Projectile,
-    /// Its light or heavy attack.
-    pub(super) kind: AttackKind,
+pub(super) struct Shot {
+    /// `m_maxRange`.
+    range_m: f32,
+    /// `m_projectileRadius`; 0 for a hit scan.
+    radius_m: f32,
+    /// How it flies; `None` for a hit scan, which is there at once.
+    flight: Option<Flight>,
+}
+
+impl Shot {
+    /// A projectile of `range_m` and `radius_m` that flies as `flight`
+    /// ([`AttackHit::Projectile`]).
+    pub(super) const fn projectile(range_m: f32, radius_m: f32, flight: Flight) -> Self {
+        Self {
+            range_m,
+            radius_m,
+            flight: Some(flight),
+        }
+    }
+
+    /// A hit scan of `range_m` ([`AttackHit::HitScan`]).
+    pub(super) const fn hit_scan(range_m: f32) -> Self {
+        Self {
+            range_m,
+            radius_m: 0.0,
+            flight: None,
+        }
+    }
 }
 
 /// A projectile on its way to the mob it hits.
@@ -44,14 +63,26 @@ pub(super) struct ProjectileFlight {
     land_ms: u64,
 }
 
-/// The first body of `bodies` (mob, place, capsule) that a projectile of `projectile` from
-/// `from` along yaw `yaw` meets, with how far it flies to it; `None` when it meets none.
+/// Where an attack is aimed: the camera's yaw and pitch (the input's view angles; a positive
+/// pitch looks down, Observed: the retail `lookDir` z is `-sin(pitch)`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct AimLine {
+    pub(super) yaw: f32,
+    pub(super) pitch: f32,
+}
+
+/// The first body of `bodies` (mob, place, capsule) that `shot` from a shooter standing at `from`
+/// along `aim` meets, with how long it flies to it (seconds); `None` when it meets none. It meets
+/// a body whose edge is within its range and its radius of its line, before its flight ends,
+/// while it is level with the body: it leaves within the shooter's body height, climbs or sinks
+/// with the aim's pitch and falls by its gravity on the way.
 pub(super) fn first_on_line(
-    projectile: &Projectile,
+    shot: &Shot,
     from: Position,
-    yaw: f32,
+    aim: AimLine,
     bodies: &[(u64, Position, Capsule)],
 ) -> Option<(u64, f32)> {
+    let yaw = aim.yaw;
     // Yaw 0 faces +y; yaw grows toward -x (see `yaw_toward`).
     let (east, north) = (-yaw.sin(), yaw.cos());
     bodies
@@ -60,90 +91,78 @@ pub(super) fn first_on_line(
             let (dx, dy) = (at.x - from.x, at.y - from.y);
             let along = dx * east + dy * north;
             let aside = (dx * north - dy * east).abs();
-            let meets = along >= 0.0
-                && along <= projectile.range_m + body.radius_m
-                && aside <= projectile.radius_m + body.radius_m
-                && (at.z - from.z).abs() <= PROJECTILE_HEIGHT_M;
-            meets.then_some((*mob, along))
+            if along < 0.0
+                || along > shot.range_m + body.radius_m
+                || aside > shot.radius_m + body.radius_m
+            {
+                return None;
+            }
+            let (time_s, drop_m) = match &shot.flight {
+                Some(flight) => {
+                    let time_s = flight.time_to(along)?;
+                    (time_s, flight.drop_at(time_s))
+                }
+                None => (0.0, 0.0),
+            };
+            let rise_m = along * (-aim.pitch).tan() - drop_m;
+            let low = from.z + rise_m - shot.radius_m;
+            let high = from.z + PLAYER_CAPSULE.height_m + rise_m + shot.radius_m;
+            let level = low < at.z + body.height_m && at.z < high;
+            level.then_some((*mob, along, time_s))
         })
         .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(mob, _, time_s)| (mob, time_s))
 }
 
 impl SimWorld {
-    /// The player of `attacker` at `position` casts the projectile of its weapon's attack
-    /// (`cast`) at `now_ms`, along its aim: toward the mob it locked on, else along its camera
-    /// yaw, else toward the nearest mob of `places`. The mob it meets is hit when the projectile
+    /// The player of `attacker` at `position` fires `shot` of the attack whose hit is the row
+    /// `damage_id` at `now_ms`, along `aim`. The mob it meets of `places` is hit when the shot
     /// gets there ([`SimWorld::projectile_flights_due`]).
     pub(super) fn cast(
         &mut self,
-        (attacker, aim): (&ConnectionRef, Aim),
-        cast: Cast,
-        position: Position,
+        attacker: &ConnectionRef,
+        (shot, damage_id): (Shot, &str),
+        (position, aim): (Position, AimLine),
         places: &[(u64, Position, Capsule)],
         now_ms: u64,
     ) -> Vec<Result<AttackOutcome, AttackRefusal>> {
-        let Cast {
-            weapon,
-            projectile,
-            kind,
-        } = cast;
-        let toward = |mob: u64| {
-            places
-                .iter()
-                .find(|(place_mob, _, _)| *place_mob == mob)
-                .map(|(_, at, _)| yaw_toward(position, *at))
-        };
-        let nearest = || {
-            places
-                .iter()
-                .min_by(|a, b| {
-                    a.1.horizontal_distance(position)
-                        .total_cmp(&b.1.horizontal_distance(position))
-                })
-                .map(|(_, at, _)| yaw_toward(position, *at))
-        };
-        let yaw = aim
-            .lock_target
-            .and_then(toward)
-            .or(aim.facing)
-            .or_else(nearest);
-        let Some(yaw) = yaw else {
+        let met = first_on_line(&shot, position, aim, places);
+        tracing::debug!(attacker = ?attacker, damage_id, ?aim, met = ?met, "player cast");
+        let Some((target, flight_s)) = met else {
             return vec![Err(AttackRefusal::NoTarget)];
         };
-        let Some(damage_id) = self
-            .combat
-            .data
-            .weapon_attack(weapon, kind == AttackKind::Heavy)
-            .map(|row| row.damage_id.clone())
-        else {
-            return vec![Err(AttackRefusal::NotWeaponAttack)];
-        };
-        let met = first_on_line(&projectile, position, yaw, places);
-        tracing::debug!(
-            attacker = ?attacker,
-            ?weapon,
-            ?kind,
-            yaw,
-            met = ?met,
-            "player cast"
-        );
-        let Some((target, along)) = met else {
-            return vec![Err(AttackRefusal::NoTarget)];
-        };
-        // A flight of a few hundred ms.
+        // A flight of at most its lifetime, a few seconds.
         #[allow(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "a flight of at most a few seconds"
         )]
-        let flight_ms = (along / projectile.speed_mps * MS_PER_SECOND) as u64;
+        let flight_ms = (flight_s * MS_PER_SECOND) as u64;
         self.projectile_flights.push(ProjectileFlight {
             attacker: attacker.clone(),
             target,
-            damage_id,
+            damage_id: damage_id.to_owned(),
             land_ms: now_ms.saturating_add(flight_ms),
         });
         Vec::new()
+    }
+
+    /// The yaw of an attack from `from` with the aim of a lock on `lock_target` (toward it when it
+    /// is among `places`) or the camera yaw `facing`.
+    pub(super) fn aim_yaw(
+        lock_target: Option<u64>,
+        facing: Option<f32>,
+        from: Position,
+        places: &[(u64, Position, Capsule)],
+    ) -> Option<f32> {
+        lock_target
+            .and_then(|target| {
+                places
+                    .iter()
+                    .find(|(mob, _, _)| *mob == target)
+                    .map(|(_, at, _)| yaw_toward(from, *at))
+            })
+            .or(facing)
     }
 
     /// Lands the projectiles that got to their mob at `now_ms`.
@@ -162,7 +181,6 @@ impl SimWorld {
                     flight.target,
                     &flight.damage_id,
                     None,
-                    false,
                     now_ms,
                 )
             })
@@ -183,13 +201,35 @@ mod tests {
         radius_m: 0.5,
         height_m: 1.8,
     };
-    const NORTH: f32 = 0.0;
-    const BOLT: Projectile = Projectile {
-        cast_ms: 250,
-        range_m: 25.0,
-        speed_mps: 40.0,
-        radius_m: 0.4,
+    const NORTH: AimLine = AimLine {
+        yaw: 0.0,
+        pitch: 0.0,
     };
+    /// The ice gauntlet's light bolt (`IceMagic` / `Primary`: 50 m, radius 0.15;
+    /// `icemagic_primary_proj`: 100 m/s, 25 more over 1 s, no gravity, 0.5 s).
+    const BOLT: Shot = Shot::projectile(
+        50.0,
+        0.15,
+        Flight {
+            base_speed_mps: 100.0,
+            extra_speed_mps: 25.0,
+            time_for_max_speed_s: 1.0,
+            gravity_mps2: 0.0,
+            lifetime_s: 0.5,
+        },
+    );
+    /// The bow's hip shot (`Bow` / `Basic`: 100 m, radius 0.15; `basic_arrow`: gravity 9.8, 10 s).
+    const ARROW: Shot = Shot::projectile(
+        100.0,
+        0.15,
+        Flight {
+            base_speed_mps: 100.0,
+            extra_speed_mps: 25.0,
+            time_for_max_speed_s: 1.0,
+            gravity_mps2: 9.8,
+            lifetime_s: 10.0,
+        },
+    );
 
     fn at(dx: f32, dy: f32) -> Position {
         Position {
@@ -212,27 +252,90 @@ mod tests {
             Some(2),
             "the nearer one on the line; not the one aside nor behind"
         );
-        let far = [(5, at(0.0, BOLT.range_m + BODY.radius_m + 1.0), BODY)];
-        assert_eq!(
-            first_on_line(&BOLT, FROM, NORTH, &far),
-            None,
-            "out of range"
-        );
-        let high = [(
-            6,
-            Position {
-                z: FROM.z + PROJECTILE_HEIGHT_M + 1.0,
-                ..at(0.0, 5.0)
-            },
-            BODY,
-        )];
-        assert_eq!(first_on_line(&BOLT, FROM, NORTH, &high), None, "far above");
         let east = [(7, at(10.0, 0.0), BODY)];
-        let yaw_east = yaw_toward(FROM, at(10.0, 0.0));
+        let yaw_east = AimLine {
+            yaw: yaw_toward(FROM, at(10.0, 0.0)),
+            pitch: 0.0,
+        };
         assert_eq!(
             first_on_line(&BOLT, FROM, yaw_east, &east).map(|(mob, _)| mob),
             Some(7),
             "the yaw convention of yaw_toward"
+        );
+    }
+
+    #[test]
+    fn a_projectile_flies_until_its_lifetime_ends() {
+        // 0.5 s of the bolt: 50 m plus 3.125 m of its gained speed.
+        let (_, time_s) =
+            first_on_line(&BOLT, FROM, NORTH, &[(1, at(0.0, 40.0), BODY)]).expect("in reach");
+        // 100 t + 12.5 t^2 = 40: t = 0.382 s.
+        assert!((time_s - 0.382).abs() < 0.002, "{time_s}");
+        assert_eq!(
+            first_on_line(&BOLT, FROM, NORTH, &[(1, at(0.0, 54.0), BODY)]),
+            None,
+            "beyond its flight"
+        );
+    }
+
+    #[test]
+    fn a_falling_projectile_passes_under_a_high_body() {
+        // An arrow at 80 m flies about 0.73 s and falls about 2.6 m: aimed level it passes under
+        // a level body, aimed up by 2.6 m over 80 m it meets it.
+        let up = AimLine {
+            yaw: 0.0,
+            pitch: -(2.6_f32 / 80.0).atan(),
+        };
+        let level = [(1, at(0.0, 80.0), BODY)];
+        assert_eq!(first_on_line(&ARROW, FROM, NORTH, &level), None);
+        assert!(first_on_line(&ARROW, FROM, up, &level).is_some());
+        let high = [(
+            1,
+            Position {
+                z: FROM.z + PLAYER_CAPSULE.height_m + BODY.radius_m,
+                ..at(0.0, 80.0)
+            },
+            BODY,
+        )];
+        let below = [(
+            1,
+            Position {
+                z: FROM.z - 3.0,
+                ..at(0.0, 80.0)
+            },
+            BODY,
+        )];
+        assert_eq!(first_on_line(&ARROW, FROM, up, &high), None);
+        assert!(
+            first_on_line(&ARROW, FROM, NORTH, &below).is_some(),
+            "it fell to the body"
+        );
+        let bolt_below = [(
+            1,
+            Position {
+                z: FROM.z - 3.0,
+                ..at(0.0, 40.0)
+            },
+            BODY,
+        )];
+        assert_eq!(
+            first_on_line(&BOLT, FROM, NORTH, &bolt_below),
+            None,
+            "a bolt does not fall"
+        );
+    }
+
+    #[test]
+    fn a_hit_scan_is_there_at_once_within_its_range() {
+        // The blunderbuss's spread (`BlunderbussPrimaryFire_Spread`: hit scan, 14 m).
+        let spread = Shot::hit_scan(14.0);
+        assert_eq!(
+            first_on_line(&spread, FROM, NORTH, &[(1, at(0.0, 10.0), BODY)]),
+            Some((1, 0.0))
+        );
+        assert_eq!(
+            first_on_line(&spread, FROM, NORTH, &[(1, at(0.0, 15.0), BODY)]),
+            None
         );
     }
 }

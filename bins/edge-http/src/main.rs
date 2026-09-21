@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use edge_http::{migrate, serve};
+use edge_http::{make_mirror_certificate, migrate, serve};
 
 /// The committed example configuration.
 const DEFAULT_CONFIG: &str = "config/edge.toml";
@@ -29,6 +29,8 @@ enum Command {
     Serve,
     /// Applies the database migrations of the global and every world database.
     Migrate,
+    /// Makes the self-signed certificate of the `[aws_mirror]` hosts. Never replaces a file.
+    AwsMirrorCertificate,
 }
 
 fn main() -> ExitCode {
@@ -36,6 +38,7 @@ fn main() -> ExitCode {
     let result = match cli.command {
         Command::Serve => serve(&cli.config),
         Command::Migrate => migrate(&cli.config),
+        Command::AwsMirrorCertificate => make_mirror_certificate(&cli.config),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

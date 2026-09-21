@@ -11,6 +11,7 @@ publish.workspace = true
 clap.workspace = true
 crc32fast.workspace = true
 hex.workspace = true
+nw-ai.workspace = true
 nw-capture.workspace = true
 nw-carrier.workspace = true
 nw-messages.workspace = true
@@ -35,11 +36,17 @@ zip = { workspace = true, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 nw-capture = { workspace = true, features = ["test-util"] }
+# The in-sim replay of the retail mob fights (`ai_replay`).
+sim = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 
 [features]
 # Tests that read the user's own New World install (set NW_GAME_DIR).
-local-data = ["nw-formats/local-data", "nw-oodle/local-data"]
+local-data = ["nw-formats/local-data", "nw-oodle/local-data", "ai-replay"]
+# Replays of the retail capture through the AI runtime: they read
+# local-data/captures/own/newchar-retail-2026-09-18/ledger.bin and the built
+# local-data/content/ai-data-<build>.bin (run `content-tool ai-data` first).
+ai-replay = []
 
 [lints]
 workspace = true

@@ -13,6 +13,11 @@ use nw_reflect::{TypeId, decode_type_id, encode_type_id};
 use crate::achievements::{ACHIEVEMENT_TYPE_INDEX, AchievementState};
 use crate::alc::{ALC_TYPE_INDEX, AlcState};
 use crate::appearance::{PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState};
+use crate::buildables::{
+    BUILDABLE_CONTROLLER_TYPE_INDEX, BUILDABLE_GRID_TYPE_INDEX, BuildableControllerState,
+    BuildableGridState, OWNERSHIP_TYPE_INDEX, OwnershipState, PLACEMENT_OBSTRUCTION_TYPE_INDEX,
+    PlacementObstructionState, TERRITORY_INTERFACE_TYPE_INDEX, TerritoryInterfaceState,
+};
 use crate::components::{
     COMBAT_STATUS_TYPE_INDEX, CURRENCY_TYPE_INDEX, CombatStatusState, CurrencyState,
     DAMAGE_RECEIVER_TYPE_INDEX, DELAYED_EVENT_TYPE_INDEX, DamageReceiverState, DelayedEventState,
@@ -27,6 +32,9 @@ use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
 use crate::gathering::{GATHERING_TYPE_INDEX, GatheringState};
 use crate::gde::{GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
 use crate::interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
+use crate::loot::{
+    GLOBAL_STORAGE_TYPE_INDEX, GlobalStorageState, LOOT_TRACKER_TYPE_INDEX, LootTrackerState,
+};
 use crate::objectives::{OBJECTIVES_TYPE_INDEX, ObjectivesState};
 use crate::paperdoll::{PAPERDOLL_TYPE_INDEX, PaperdollState};
 use crate::player_components::{EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PlayerComponentState};
@@ -86,6 +94,20 @@ pub enum MemberState {
     Progression(ProgressionState),
     /// `CooldownTimersComponentReplicatedState`.
     Cooldowns(CooldownsState),
+    /// `MB::LootTrackerComponentReplicatedState`.
+    LootTracker(LootTrackerState),
+    /// `MB::GlobalStorageComponentReplicatedState`.
+    GlobalStorage(GlobalStorageState),
+    /// `MB::BuildableControllerReplicatedState`.
+    BuildableController(BuildableControllerState),
+    /// `MB::PlacementObstructionComponentReplicatedState`.
+    PlacementObstruction(PlacementObstructionState),
+    /// `MB::TerritoryInterfaceComponentReplicatedState`.
+    TerritoryInterface(TerritoryInterfaceState),
+    /// `MB::BuildableGridComponentReplicatedState`.
+    BuildableGrid(BuildableGridState),
+    /// The ownership state (type 3218).
+    Ownership(OwnershipState),
     /// An empty state of a player component class without a reader of its own.
     Empty(EmptyState),
     /// A state of `class` sent as recorded body bytes (a retail state replayed as it was, of a
@@ -126,6 +148,13 @@ impl MemberState {
             Self::Objectives(_) => OBJECTIVES_TYPE_INDEX,
             Self::Progression(_) => PROGRESSION_TYPE_INDEX,
             Self::Cooldowns(_) => COOLDOWNS_TYPE_INDEX,
+            Self::LootTracker(_) => LOOT_TRACKER_TYPE_INDEX,
+            Self::GlobalStorage(_) => GLOBAL_STORAGE_TYPE_INDEX,
+            Self::BuildableController(_) => BUILDABLE_CONTROLLER_TYPE_INDEX,
+            Self::PlacementObstruction(_) => PLACEMENT_OBSTRUCTION_TYPE_INDEX,
+            Self::TerritoryInterface(_) => TERRITORY_INTERFACE_TYPE_INDEX,
+            Self::BuildableGrid(_) => BUILDABLE_GRID_TYPE_INDEX,
+            Self::Ownership(_) => OWNERSHIP_TYPE_INDEX,
             Self::Empty(state) => state.class,
             Self::Recorded { class, .. } => *class,
         }
@@ -214,6 +243,27 @@ impl MemberState {
             TypeId::FileSlot(COOLDOWNS_TYPE_INDEX) => {
                 CooldownsState::read(reader).map(Self::Cooldowns)
             }
+            TypeId::FileSlot(LOOT_TRACKER_TYPE_INDEX) => {
+                LootTrackerState::read(reader).map(Self::LootTracker)
+            }
+            TypeId::FileSlot(GLOBAL_STORAGE_TYPE_INDEX) => {
+                GlobalStorageState::read(reader).map(Self::GlobalStorage)
+            }
+            TypeId::FileSlot(BUILDABLE_CONTROLLER_TYPE_INDEX) => {
+                BuildableControllerState::read(reader).map(Self::BuildableController)
+            }
+            TypeId::FileSlot(PLACEMENT_OBSTRUCTION_TYPE_INDEX) => {
+                PlacementObstructionState::read(reader).map(Self::PlacementObstruction)
+            }
+            TypeId::FileSlot(TERRITORY_INTERFACE_TYPE_INDEX) => {
+                TerritoryInterfaceState::read(reader).map(Self::TerritoryInterface)
+            }
+            TypeId::FileSlot(BUILDABLE_GRID_TYPE_INDEX) => {
+                BuildableGridState::read(reader).map(Self::BuildableGrid)
+            }
+            TypeId::FileSlot(OWNERSHIP_TYPE_INDEX) => {
+                OwnershipState::read(reader).map(Self::Ownership)
+            }
             TypeId::FileSlot(index) if EmptyState::covers(index) => {
                 EmptyState::read(index, reader).map(Self::Empty)
             }
@@ -295,6 +345,19 @@ impl MemberState {
                 Ok(())
             }
             Self::Cooldowns(state) => state.write(writer),
+            Self::LootTracker(state) => state.write(writer),
+            Self::GlobalStorage(state) => state.write(writer),
+            Self::BuildableController(state) => state.write(writer),
+            Self::PlacementObstruction(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::TerritoryInterface(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::BuildableGrid(state) => state.write(writer),
+            Self::Ownership(state) => state.write(writer),
             Self::Empty(state) => {
                 state.write(writer);
                 Ok(())

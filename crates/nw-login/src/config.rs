@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use nw_common::config::{ConfigError, load_config};
 pub use nw_db::DatabaseConfig;
+use nw_protocol::aws_mirror::{REMOTE_CONFIG_BUCKETS, is_aws_mirror_host, remote_config_host};
 use nw_protocol::launcher_api::{AuthMode, SESSION_PLACEHOLDER, is_forbidden_host};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -36,6 +37,10 @@ pub const AUTH_BACKEND_ARGUMENT: &str = "-AuthBackend";
 /// The client compares the name with exact case; its built-in default is `omni`, which skips
 /// `/steam` (unknowns note, fifth pass).
 pub const AUTH_BACKEND_NW: &str = "nw";
+/// Launch argument that sets `client-connection.authorization.cognito-pool-id`
+/// (`FUN_146467680`). The client names its two `CognitoId` remote-config layers after it and
+/// skips them when it is empty (character-select note); it also sends it in `ListWorlds`.
+pub const COGNITO_POOL_ARGUMENT: &str = "-CognitoPool";
 
 /// The whole `edge-http` configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -70,6 +75,10 @@ pub struct EdgeConfig {
     pub global_database: DatabaseConfig,
     /// Valkey.
     pub valkey: ValkeyConfig,
+    /// Our own remote config sets.
+    pub remote_config: RemoteConfigConfig,
+    /// The Amazon names this server answers for its game clients.
+    pub aws_mirror: AwsMirrorConfig,
     /// Worlds, one `[[world]]` block each.
     #[serde(rename = "world")]
     pub worlds: Vec<WorldConfig>,
@@ -117,6 +126,35 @@ pub struct DiscordConfig {
 pub struct ValkeyConfig {
     /// For example `redis://127.0.0.1:6379`.
     pub url: String,
+}
+
+/// `[remote_config]`: our own remote config sets (study note
+/// `docs/re/2026-09-18-remote-config-layers.md`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteConfigConfig {
+    /// Folder of the config sets. The path of a file under it is its S3 key, for example
+    /// `applications/public/configuration-sets/ProductId/STEAM_APP_ID.1063730/versionless`.
+    pub directory: PathBuf,
+    /// The bucket the client asks for; one of [`REMOTE_CONFIG_BUCKETS`].
+    pub bucket: String,
+    /// Our Cognito pool id: the client's [`COGNITO_POOL_ARGUMENT`] and the id of the
+    /// `CognitoId` layers. It names no Amazon pool.
+    pub cognito_pool_id: Uuid,
+}
+
+/// `[aws_mirror]`: the Amazon names our launcher maps to this server for the game process, and
+/// the self-signed certificate this server shows for them (`edge-http aws-mirror-certificate`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AwsMirrorConfig {
+    /// Host names in lower case; each passes [`is_aws_mirror_host`], and the bucket host is one
+    /// of them.
+    pub hosts: Vec<String>,
+    /// Certificate for exactly these names.
+    pub certificate_pem_path: PathBuf,
+    /// Its private key.
+    pub private_key_pem_path: PathBuf,
 }
 
 /// One `[[world]]` block.
@@ -186,6 +224,8 @@ impl EdgeConfig {
             SESSION_PLACEHOLDER.to_owned(),
             AUTH_BACKEND_ARGUMENT.to_owned(),
             AUTH_BACKEND_NW.to_owned(),
+            COGNITO_POOL_ARGUMENT.to_owned(),
+            self.remote_config.cognito_pool_id.to_string(),
         ]
     }
 
@@ -210,6 +250,31 @@ impl EdgeConfig {
     /// The world with this id.
     pub fn world(&self, id: Uuid) -> Option<&WorldConfig> {
         self.worlds.iter().find(|world| world.id == id)
+    }
+
+    fn validate_aws_mirror(&self) -> Result<(), EdgeConfigError> {
+        let invalid = |reason: &str| {
+            Err(EdgeConfigError::Invalid {
+                key: "aws_mirror.hosts",
+                reason: reason.to_owned(),
+            })
+        };
+        let mut hosts = HashSet::new();
+        for host in &self.aws_mirror.hosts {
+            if host.to_ascii_lowercase() != *host || !is_aws_mirror_host(host) {
+                return invalid(&format!(
+                    "{host} is not a lower-case remote-config, Kinesis or STS host"
+                ));
+            }
+            if !hosts.insert(host.as_str()) {
+                return invalid(&format!("{host} is listed twice"));
+            }
+        }
+        let bucket_host = remote_config_host(&self.remote_config.bucket);
+        if !hosts.contains(bucket_host.as_str()) {
+            return invalid(&format!("must contain the bucket host {bucket_host}"));
+        }
+        Ok(())
     }
 
     fn validate(&self) -> Result<(), EdgeConfigError> {
@@ -241,6 +306,13 @@ impl EdgeConfig {
         if self.auth.mode == AuthMode::Discord && self.discord.client_id.is_empty() {
             return invalid("discord.client_id", "is required in Discord mode");
         }
+        if !REMOTE_CONFIG_BUCKETS.contains(&self.remote_config.bucket.as_str()) {
+            return invalid(
+                "remote_config.bucket",
+                "must be a bucket the client asks for",
+            );
+        }
+        self.validate_aws_mirror()?;
         if self.worlds.is_empty() {
             return invalid("world", "at least one [[world]] is required");
         }
@@ -315,6 +387,20 @@ max_connections = 5
 [valkey]
 url = "redis://127.0.0.1:6379"
 
+[remote_config]
+directory = "config/remote-config"
+bucket = "ags-javelin-remote-config"
+cognito_pool_id = "b04fbfcd-942c-472d-88c0-c762c4076b2f"
+
+[aws_mirror]
+hosts = [
+    "ags-javelin-remote-config.s3.amazonaws.com",
+    "kinesis.us-east-1.amazonaws.com",
+    "sts.us-east-1.amazonaws.com",
+]
+certificate_pem_path = "local-data/edge-http/aws-mirror.pem"
+private_key_pem_path = "local-data/edge-http/aws-mirror-key.pem"
+
 [[world]]
 id = "8d0f4c2e-0000-4000-8000-000000000001"
 name = "Aeternum"
@@ -364,7 +450,9 @@ max_connections = 5
                 "-LoginChannelOverride",
                 SESSION_PLACEHOLDER,
                 "-AuthBackend",
-                "nw"
+                "nw",
+                "-CognitoPool",
+                "b04fbfcd-942c-472d-88c0-c762c4076b2f"
             ]
         );
     }
@@ -397,6 +485,45 @@ max_connections = 5
                 "max_characters_per_account = 0",
             ),
             "world.max_characters_per_account",
+        );
+    }
+
+    #[test]
+    fn remote_config_and_mirror_values_are_checked() {
+        refused(
+            &VALID.replace(
+                "bucket = \"ags-javelin-remote-config\"",
+                "bucket = \"my-bucket\"",
+            ),
+            "remote_config.bucket",
+        );
+        refused(
+            &VALID.replace(
+                "\"sts.us-east-1.amazonaws.com\",",
+                "\"cognito-identity.us-east-1.amazonaws.com\",",
+            ),
+            "aws_mirror.hosts",
+        );
+        refused(
+            &VALID.replace(
+                "\"sts.us-east-1.amazonaws.com\",",
+                "\"STS.us-east-1.amazonaws.com\",",
+            ),
+            "aws_mirror.hosts",
+        );
+        refused(
+            &VALID.replace(
+                "\"sts.us-east-1.amazonaws.com\",",
+                "\"kinesis.us-east-1.amazonaws.com\",",
+            ),
+            "aws_mirror.hosts",
+        );
+        refused(
+            &VALID.replace(
+                "\"ags-javelin-remote-config.s3.amazonaws.com\",",
+                "\"ags-javelin-dev-remote-config.s3.amazonaws.com\",",
+            ),
+            "aws_mirror.hosts",
         );
     }
 

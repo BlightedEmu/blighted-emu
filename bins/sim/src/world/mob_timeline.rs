@@ -10,9 +10,13 @@
 //! the anchor moves on after about 60 s, so the 16-bit offset never wraps. For a creature in the
 //! creature animation table ([`animations_of`]), the states also name the fragment it plays and
 //! the time in it.
+//!
+//! A mob that runs its behavior tree shows the CAGE action its tree plays (the grid action's
+//! fragment and action numbers in its creature's files) and its tree's Mannequin tags; its hit
+//! reactions and its death come from the timeline as for every creature, and a reaction's start
+//! goes back to its tree ([`MobFrame::reaction_ms`]).
 
 use std::collections::{HashMap, HashSet};
-use std::f32::consts::{PI, TAU};
 
 use nw_content::creature_animations::{CreatureAnimation, CreatureAnimations};
 use nw_content::mob_prefabs::ASSET_ID_LEN;
@@ -20,7 +24,8 @@ use nw_messages::{
     AlcStamp, FRAG_TAGS_LEN, InputPosition, LayerEntry, MobAnimation, MobStep, ScopeEntry,
     StepPlace, StepScope,
 };
-use nw_sim_core::{MobState, Position};
+pub(super) use nw_sim_core::yaw_toward;
+use nw_sim_core::{Position, yaw_gap};
 
 use crate::mobs::MoveFragment;
 
@@ -95,6 +100,31 @@ pub(super) enum Fragment {
     Death,
     /// It plays a move of its pace (an attack of a boss).
     Play(MoveFragment),
+    /// It plays the CAGE action of its tree.
+    Tree(TreeEntry),
+}
+
+/// The CAGE action a mob's tree plays: its fragment and action numbers, and the count of its
+/// tree's starts (a new start of the same action is a new entry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct TreeEntry {
+    /// The fragment number.
+    pub(super) fragment: u16,
+    /// The action number.
+    pub(super) action: u16,
+    /// The start's count.
+    pub(super) serial: u32,
+}
+
+/// What a mob that runs its tree shows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct TreePose {
+    /// The action it plays, when its creature's files name it.
+    pub(super) entry: Option<TreeEntry>,
+    /// Its tag state: its creature's tags with its tree's.
+    pub(super) tags: [u8; FRAG_TAGS_LEN],
+    /// Where it faces, once it turned or moved.
+    pub(super) facing: Option<f32>,
 }
 
 /// One fragment of a creature: its fragment and action numbers and the last byte of its entry.
@@ -150,29 +180,44 @@ pub(super) struct Animations {
 }
 
 impl Animations {
-    const fn entry(&self, fragment: Fragment) -> Option<FragmentEntry> {
+    fn entry(&self, fragment: Fragment) -> Option<FragmentEntry> {
         Some(match fragment {
             Fragment::Spawn => self.spawn,
             Fragment::Idle => self.idle,
             Fragment::CombatIdle => self.combat_idle,
             Fragment::Move => self.walk,
             Fragment::Chase => self.chase,
-            Fragment::Alert => match self.alert {
-                Some(alert) => alert,
-                None => return None,
-            },
+            Fragment::Alert => self.alert?,
             Fragment::Attack => self.attack,
             Fragment::Death => self.death,
-            Fragment::ReactLight => match self.reactions {
-                Some((light, _)) => light,
-                None => return None,
-            },
-            Fragment::ReactHeavy => match self.reactions {
-                Some((_, heavy)) => heavy,
-                None => return None,
-            },
+            Fragment::ReactLight => self.reactions?.0,
+            Fragment::ReactHeavy => self.reactions?.1,
             Fragment::Play(played) => entry(played.fragment, played.action, played.tail),
+            Fragment::Tree(played) => entry(
+                played.fragment,
+                played.action,
+                self.tail_of(played.fragment),
+            ),
         })
+    }
+
+    /// The last byte of a retail entry of fragment `fragment`, when retail showed one; else
+    /// [`DEFAULT_ENTRY_TAIL`].
+    fn tail_of(&self, fragment: u16) -> u8 {
+        [
+            Some(self.spawn),
+            Some(self.idle),
+            Some(self.combat_idle),
+            Some(self.walk),
+            Some(self.chase),
+            Some(self.attack),
+            Some(self.death),
+            self.alert,
+        ]
+        .into_iter()
+        .flatten()
+        .find(|known| known.fragment == fragment)
+        .map_or(DEFAULT_ENTRY_TAIL, |known| known.tail)
     }
 
     /// The animations of `creature` (its row of the creature animation table), with the retail
@@ -344,7 +389,7 @@ const FTUE_SAILOR: RetailCreature = RetailCreature {
     choices: &[
         (Role::Death, "r_Death_F", "Death"),
         (Role::ReactHeavy, "r_R1_F", "Reaction"),
-        (Role::Alert, "Alert", "Alert_Turn"),
+        (Role::Alert, "Alert", "Alert"),
     ],
     tails: &[
         (Role::Spawn, 0xc7),
@@ -364,9 +409,8 @@ const FTUE_SAILOR: RetailCreature = RetailCreature {
     fights_quietly: false,
 };
 /// The legionnaire and the signifier (`Legion_Legionnaire_FTUE`; creature-animation note,
-/// section 1): retail's chase uses the `Move_Wander` action with the `Move_Combat` fragment.
+/// section 1).
 const LEGION_CHOICES: &[(Role, &str, &str)] = &[
-    (Role::Chase, "Move_Combat", "Move_Wander"),
     (
         Role::Attack,
         "Legionnaire_LightStab",
@@ -414,7 +458,11 @@ const FTUE_SWARMER: RetailCreature = RetailCreature {
         0xdf,
     ],
     choices: &[
-        (Role::Attack, "Attack_Crawler_Slash_R", "Attack_Throw"),
+        (
+            Role::Attack,
+            "Attack_Crawler_Slash_R",
+            "Attack_Crawler_Slash_R",
+        ),
         (Role::Death, "r_Death_R4_F", "Death"),
         (Role::Alert, "Alert", "Alert"),
     ],
@@ -465,17 +513,16 @@ const FTUE_RISEN: RetailCreature = RetailCreature {
     fights_quietly: false,
 };
 /// Thorpe (`Damned_Commander_FTUE`; creature-animation note, section 4). He never stands idle:
-/// he strafes between attacks; his spawn plays with the `Victory` action.
+/// he strafes between attacks.
 const FTUE_THORPE: RetailCreature = RetailCreature {
     asset: [
         0x92, 0x98, 0x31, 0xa9, 0x8d, 0xd2, 0x5e, 0x3e, 0x8b, 0xd8, 0xd4, 0x5d, 0x4e, 0x08, 0x68,
         0xac,
     ],
     choices: &[
-        (Role::Spawn, "Spawn", "Victory"),
         (Role::Idle, "Strafe", "Strafe"),
         (Role::CombatIdle, "Strafe", "Strafe"),
-        (Role::Attack, "Attack_Stab_01", "Attack_Stab_02"),
+        (Role::Attack, "Attack_Stab_01", "Attack_Stab_01"),
     ],
     tails: &[
         (Role::Spawn, 0xb0),
@@ -546,19 +593,21 @@ pub(super) fn animations_of(table: &CreatureAnimations) -> HashMap<[u8; ASSET_ID
 pub(super) struct MobPose {
     /// Where it is.
     pub(super) position: Position,
-    /// Its brain state; `None` for a mob of another sim.
-    pub(super) brain: Option<MobState>,
+    /// It fights a target (`false` for a mob of another sim).
+    pub(super) fighting: bool,
     /// It has no health left.
     pub(super) dead: bool,
     /// Where its target is, while it fights.
     pub(super) target: Option<Position>,
     /// It fights in a boss's second phase.
     pub(super) phase_two: bool,
+    /// What it shows, when it runs its tree.
+    pub(super) tree: Option<TreePose>,
 }
 
 impl MobPose {
     fn fighting(&self) -> bool {
-        matches!(self.brain, Some(MobState::Chase | MobState::Attack))
+        self.fighting
     }
 }
 
@@ -625,6 +674,8 @@ struct MobTimeline {
     look_pose_start: Option<(u16, u64)>,
     /// Its last fragment change sent an angle to turn: the next one sends 0 (retail).
     facing_gap_sent: bool,
+    /// The tag state of its tree, when it runs one.
+    tree_tags: Option<[u8; FRAG_TAGS_LEN]>,
 }
 
 impl MobTimeline {
@@ -657,6 +708,7 @@ impl MobTimeline {
             alert_until_ms: now_ms,
             look_pose_start: None,
             facing_gap_sent: false,
+            tree_tags: None,
         }
     }
 
@@ -714,16 +766,28 @@ impl MobTimeline {
                 tail: entry.tail,
             },
             ticks: self.ticks_at(now_ms),
-            tags: match (self.alert, self.phase_two) {
-                (false, _) => animations.calm_tags,
-                (true, true) => animations.phase_two_tags.unwrap_or(animations.alert_tags),
-                (true, false) => animations.alert_tags,
+            tags: match (self.tree_tags, self.alert, self.phase_two) {
+                (Some(tags), _, _) => tags,
+                (None, false, _) => animations.calm_tags,
+                (None, true, true) => animations.phase_two_tags.unwrap_or(animations.alert_tags),
+                (None, true, false) => animations.alert_tags,
             },
         }
     }
 
     /// The fragment of a mob in `pose` at `now_ms`.
     fn fragment_at(&self, pose: &MobPose, now_ms: u64) -> Fragment {
+        if let Some(tree) = pose.tree {
+            return if pose.dead {
+                Fragment::Death
+            } else if let Some((reaction, _)) = self.reaction.filter(|(_, until)| now_ms < *until) {
+                reaction
+            } else if now_ms.saturating_sub(self.born_ms) < SPAWN_MS {
+                Fragment::Spawn
+            } else {
+                tree.entry.map_or(Fragment::Idle, Fragment::Tree)
+            };
+        }
         if pose.dead {
             Fragment::Death
         } else if let Some((played, _)) = self.play.filter(|(_, until)| now_ms < *until) {
@@ -754,27 +818,28 @@ impl MobTimeline {
 
     /// A hit at `now_ms` on a creature that can reel: the first hit of a chain plays the light
     /// reaction, the second the heavy one and starts the limit; while the limit runs, a hit only
-    /// makes it longer (retail plays an additive reaction then; not sent here). Whether a
-    /// reaction plays.
-    fn hurt(&mut self, now_ms: u64, (light_ms, heavy_ms): (u64, u64)) -> bool {
+    /// makes it longer (retail plays an additive reaction then; not sent here). How long the
+    /// reaction plays, when one plays.
+    fn hurt(&mut self, now_ms: u64, (light_ms, heavy_ms): (u64, u64)) -> Option<u64> {
         if now_ms.saturating_sub(self.last_hurt_ms) >= REACTION_LIMIT_MS {
             self.reactions_in_chain = 0;
         }
         self.last_hurt_ms = now_ms;
         if now_ms < self.reaction_limit_until_ms {
             self.reaction_limit_until_ms = now_ms + REACTION_LIMIT_MS;
-            return false;
+            return None;
         }
         self.reactions_in_chain += 1;
         self.reacted = true;
-        self.reaction = Some(if self.reactions_in_chain == 1 {
-            (Fragment::ReactLight, now_ms + light_ms)
+        let (fragment, length_ms) = if self.reactions_in_chain == 1 {
+            (Fragment::ReactLight, light_ms)
         } else {
             self.reactions_in_chain = 0;
             self.reaction_limit_until_ms = now_ms + REACTION_LIMIT_MS;
-            (Fragment::ReactHeavy, now_ms + heavy_ms)
-        });
-        true
+            (Fragment::ReactHeavy, heavy_ms)
+        };
+        self.reaction = Some((fragment, now_ms + length_ms));
+        Some(length_ms)
     }
 
     /// The frame of `now_ms` (a server clock that may step back a little: differences saturate
@@ -791,8 +856,10 @@ impl MobTimeline {
             self.last_moved_ms = Some(now_ms);
         }
         self.phase_two = pose.phase_two;
-        // The first time it fights, it turns to its target in its alert.
-        let alert_started = pose.fighting()
+        self.tree_tags = pose.tree.map(|tree| tree.tags);
+        // The first time it fights, it turns to its target in its alert (a tree plays its own).
+        let alert_started = pose.tree.is_none()
+            && pose.fighting()
             && !pose.dead
             && !std::mem::replace(&mut self.alerted, true)
             && animations.is_some_and(|animations| animations.alert.is_some());
@@ -829,6 +896,14 @@ impl MobTimeline {
         if pose.dead {
             return None;
         }
+        if let Some(tree) = pose.tree {
+            // A tree turns its mob at its own rates: the state carries its facing.
+            let facing = tree.facing?;
+            return self
+                .yaw
+                .is_none_or(|now| yaw_gap(now, facing).abs() > TURN_EPSILON_RAD)
+                .then_some(facing);
+        }
         let toward = |to: Position| yaw_toward(pose.position, to);
         let wanted = if moved {
             Some(yaw_toward(self.position, pose.position))
@@ -838,7 +913,7 @@ impl MobTimeline {
         let Some(now) = self.yaw else {
             return Some(wanted);
         };
-        let gap = (wanted - now + PI).rem_euclid(TAU) - PI;
+        let gap = yaw_gap(now, wanted);
         (gap.abs() > TURN_EPSILON_RAD)
             .then(|| now + gap.clamp(-TURN_PER_STATE_RAD, TURN_PER_STATE_RAD))
     }
@@ -847,7 +922,7 @@ impl MobTimeline {
     fn facing_gap_to(&self, pose: &MobPose) -> Option<f32> {
         let now = self.yaw?;
         let wanted = yaw_toward(pose.position, pose.target?);
-        Some((wanted - now + PI).rem_euclid(TAU) - PI)
+        Some(yaw_gap(now, wanted))
     }
 
     fn next_state(
@@ -933,11 +1008,6 @@ impl MobTimeline {
     }
 }
 
-/// The yaw that faces from `from` to `to` (0 faces north, +y; a positive yaw turns west).
-pub(super) fn yaw_toward(from: Position, to: Position) -> f32 {
-    (-(to.x - from.x)).atan2(to.y - from.y)
-}
-
 fn distance(a: Position, b: Position) -> f32 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
 }
@@ -954,6 +1024,8 @@ pub(super) struct MobTimelines {
     played: HashMap<u64, (MoveFragment, u64)>,
     /// When each mob last started a reaction (server ms).
     reeled_ms: HashMap<u64, u64>,
+    /// The reactions that started in the last frames and their lengths, until taken.
+    reactions: HashMap<u64, u64>,
 }
 
 impl MobTimelines {
@@ -997,11 +1069,18 @@ impl MobTimelines {
         if self.hurt.remove(&mob)
             && let Some(reaction_ms) = reaction_ms
             && !pose.dead
-            && timeline.hurt(now_ms, reaction_ms)
+            && let Some(length_ms) = timeline.hurt(now_ms, reaction_ms)
         {
             self.reeled_ms.insert(mob, now_ms);
+            self.reactions.insert(mob, length_ms);
         }
         timeline.advance(now_ms, pose, animations)
+    }
+
+    /// The length of the hit reaction mob `mob` started in its last frame, when one started (a
+    /// tree mob's tree learns of it).
+    pub(super) fn take_reaction(&mut self, mob: u64) -> Option<u64> {
+        self.reactions.remove(&mob)
     }
 
     /// Whether mob `mob` started a reaction at or after `since_ms` (server ms): retail dropped a
@@ -1020,6 +1099,17 @@ impl MobTimelines {
         self.hurt.retain(|mob| shown.contains(mob));
         self.played.retain(|mob, _| shown.contains(mob));
         self.reeled_ms.retain(|mob, _| shown.contains(mob));
+        self.reactions.retain(|mob, _| shown.contains(mob));
+    }
+
+    /// Forgets `mob`: its next state starts a new timeline, as a new spawn's does.
+    pub(super) fn forget(&mut self, mob: u64) {
+        self.by_mob.remove(&mob);
+        self.attacked.remove(&mob);
+        self.hurt.remove(&mob);
+        self.played.remove(&mob);
+        self.reeled_ms.remove(&mob);
+        self.reactions.remove(&mob);
     }
 }
 
@@ -1042,13 +1132,14 @@ mod tests {
         }
     }
 
-    fn pose(x: f32, brain: MobState) -> MobPose {
+    fn pose(x: f32, fighting: bool) -> MobPose {
         MobPose {
             position: at(x),
-            brain: Some(brain),
+            fighting,
             dead: false,
             target: None,
             phase_two: false,
+            tree: None,
         }
     }
 
@@ -1232,18 +1323,13 @@ mod tests {
         assert_eq!(boar.attack, entry(23, 9, DEFAULT_ENTRY_TAIL), "Attack_Gore");
         let mut timelines = MobTimelines::default();
         let card = timelines
-            .advance(MOB, START, &pose(1.0, MobState::Idle), Some(&boar))
+            .advance(MOB, START, &pose(1.0, false), Some(&boar))
             .animation
             .expect("a known creature");
         assert_eq!((card.entry.fragment, card.entry.action), (34, 1));
         assert_eq!(card.tags, boar.calm_tags);
         let wanders = timelines
-            .advance(
-                MOB,
-                START + SPAWN_MS,
-                &pose(1.2, MobState::Idle),
-                Some(&boar),
-            )
+            .advance(MOB, START + SPAWN_MS, &pose(1.2, false), Some(&boar))
             .step
             .expect("moved");
         assert_eq!(
@@ -1273,7 +1359,7 @@ mod tests {
         };
         const STAB_MS: u64 = 1_434;
         let mut timelines = MobTimelines::default();
-        let fighting = pose(1.0, MobState::Attack);
+        let fighting = pose(1.0, true);
         timelines.advance(MOB, START, &fighting, Some(&thorpe));
         let changed = |timelines: &mut MobTimelines, now, pose: &MobPose| {
             let frame = timelines.advance(MOB, now, pose, Some(&thorpe));
@@ -1306,18 +1392,18 @@ mod tests {
         let legion = legionnaire();
         let mut timelines = MobTimelines::default();
         // Idle first, facing north after a step north.
-        timelines.advance(MOB, START, &pose(1.0, MobState::Idle), Some(&legion));
+        timelines.advance(MOB, START, &pose(1.0, false), Some(&legion));
         let north = MobPose {
             position: Position {
                 y: 847.0,
                 ..at(1.0)
             },
-            ..pose(1.0, MobState::Idle)
+            ..pose(1.0, false)
         };
         timelines.advance(MOB, START + SPAWN_MS, &north, Some(&legion));
         let seen = START + SPAWN_MS + MOVE_HOLD_MS;
         let fighting = MobPose {
-            brain: Some(MobState::Chase),
+            fighting: true,
             target: Some(Position {
                 x: -10.0,
                 ..north.position
@@ -1377,7 +1463,7 @@ mod tests {
     fn thorpe_has_no_alert_and_no_look_pose() {
         let thorpe = thorpe();
         let mut timelines = MobTimelines::default();
-        let frame = timelines.advance(MOB, START, &pose(1.0, MobState::Chase), Some(&thorpe));
+        let frame = timelines.advance(MOB, START, &pose(1.0, true), Some(&thorpe));
         assert!(!frame.alert_started);
         assert_eq!(
             frame.animation.and_then(|animation| animation.look_pose),
@@ -1389,7 +1475,7 @@ mod tests {
     fn the_first_frame_is_state_2_at_its_own_anchor() {
         let sailor = sailor();
         let mut timelines = MobTimelines::default();
-        let frame = timelines.advance(MOB, START, &pose(1.0, MobState::Idle), Some(&sailor));
+        let frame = timelines.advance(MOB, START, &pose(1.0, false), Some(&sailor));
         assert_eq!(
             frame.stamp,
             AlcStamp {
@@ -1409,7 +1495,7 @@ mod tests {
     fn an_idle_mob_sends_a_state_per_period_and_then_its_idle_fragment() {
         let sailor = sailor();
         let mut timelines = MobTimelines::default();
-        let idle = pose(1.0, MobState::Idle);
+        let idle = pose(1.0, false);
         timelines.advance(MOB, START, &idle, Some(&sailor));
         let mut steps = Vec::new();
         for tick in 1..=60 {
@@ -1449,16 +1535,11 @@ mod tests {
         let sailor = sailor();
         let mut timelines = MobTimelines::default();
         // Its alert plays first, while it stands.
-        timelines.advance(MOB, START, &pose(1.0, MobState::Chase), Some(&sailor));
+        timelines.advance(MOB, START, &pose(1.0, true), Some(&sailor));
         let start = START + ALERT_MS;
-        timelines.advance(MOB, start, &pose(1.0, MobState::Chase), Some(&sailor));
+        timelines.advance(MOB, start, &pose(1.0, true), Some(&sailor));
         let first = timelines
-            .advance(
-                MOB,
-                start + TICK_MS,
-                &pose(1.2, MobState::Chase),
-                Some(&sailor),
-            )
+            .advance(MOB, start + TICK_MS, &pose(1.2, true), Some(&sailor))
             .step
             .expect("moved");
         assert_eq!(
@@ -1466,12 +1547,7 @@ mod tests {
             Some(sailor.chase.fragment)
         );
         let second = timelines
-            .advance(
-                MOB,
-                start + 2 * TICK_MS,
-                &pose(1.4, MobState::Chase),
-                Some(&sailor),
-            )
+            .advance(MOB, start + 2 * TICK_MS, &pose(1.4, true), Some(&sailor))
             .step
             .expect("moved");
         assert_eq!(second.stamp.id, first.stamp.id + 1);
@@ -1492,13 +1568,13 @@ mod tests {
         const STEP_M: f32 = 0.5;
         const STATES: u64 = 10;
         let mut timelines = MobTimelines::default();
-        timelines.advance(MOB, START, &pose(0.0, MobState::Chase), None);
+        timelines.advance(MOB, START, &pose(0.0, true), None);
         let places: Vec<StepPlace> = (1..=STATES)
             .filter_map(|n| {
                 #[allow(clippy::cast_precision_loss, reason = "a few states")]
                 let x = n as f32 * STEP_M;
                 timelines
-                    .advance(MOB, START + n * TICK_MS, &pose(x, MobState::Chase), None)
+                    .advance(MOB, START + n * TICK_MS, &pose(x, true), None)
                     .step?
                     .position
             })
@@ -1518,14 +1594,9 @@ mod tests {
     fn a_mob_faces_where_it_walks_then_turns_to_its_target_step_by_step() {
         let sailor = sailor();
         let mut timelines = MobTimelines::default();
-        timelines.advance(MOB, START, &pose(1.0, MobState::Chase), Some(&sailor));
+        timelines.advance(MOB, START, &pose(1.0, true), Some(&sailor));
         let east = timelines
-            .advance(
-                MOB,
-                START + TICK_MS,
-                &pose(1.2, MobState::Chase),
-                Some(&sailor),
-            )
+            .advance(MOB, START + TICK_MS, &pose(1.2, true), Some(&sailor))
             .step
             .expect("moved");
         assert_eq!(east.facing, Some(-FRAC_PI_2), "walking east");
@@ -1540,7 +1611,7 @@ mod tests {
             now += TICK_MS;
             let standing = MobPose {
                 target: Some(north),
-                ..pose(1.2, MobState::Attack)
+                ..pose(1.2, true)
             };
             let frame = timelines.advance(MOB, now, &standing, Some(&sailor));
             if let Some(next) = frame.step.and_then(|step| step.facing) {
@@ -1549,7 +1620,7 @@ mod tests {
             }
         }
         assert!(facing.abs() < TURN_EPSILON_RAD, "it faces north: {facing}");
-        let frame = timelines.advance(MOB, now + TICK_MS, &pose(1.2, MobState::Attack), None);
+        let frame = timelines.advance(MOB, now + TICK_MS, &pose(1.2, true), None);
         assert_eq!(frame.facing, Some(facing), "the card faces the same way");
     }
 
@@ -1557,7 +1628,7 @@ mod tests {
     fn a_reaction_is_kept_for_the_swings_that_started_before_it() {
         let sailor = sailor();
         let mut timelines = MobTimelines::default();
-        let fighting = pose(1.0, MobState::Attack);
+        let fighting = pose(1.0, true);
         timelines.advance(MOB, START, &fighting, Some(&sailor));
         let swing_started = START + SPAWN_MS;
         assert!(!timelines.reeled_since(MOB, swing_started));
@@ -1575,7 +1646,7 @@ mod tests {
     fn hits_play_a_light_then_a_heavy_reaction_then_the_limit_holds() {
         let sailor = sailor();
         let mut timelines = MobTimelines::default();
-        let fighting = pose(1.0, MobState::Attack);
+        let fighting = pose(1.0, true);
         timelines.advance(MOB, START, &fighting, Some(&sailor));
         let fragment_of = |step: Option<MobStep>| match step.and_then(|step| step.scope) {
             Some(StepScope::Changed(animation)) => Some(animation.entry.fragment),
@@ -1620,7 +1691,7 @@ mod tests {
     fn a_swing_plays_the_attack_and_a_creature_without_fragments_sends_no_scope() {
         let sailor = sailor();
         let mut timelines = MobTimelines::default();
-        let fighting = pose(1.0, MobState::Attack);
+        let fighting = pose(1.0, true);
         timelines.advance(MOB, START, &fighting, None);
         timelines.attacked(MOB);
         let step = timelines
@@ -1646,7 +1717,7 @@ mod tests {
     fn the_anchor_moves_on_after_a_minute_and_a_dead_mob_plays_out_its_death() {
         let sailor = sailor();
         let mut timelines = MobTimelines::default();
-        let idle = pose(1.0, MobState::Idle);
+        let idle = pose(1.0, false);
         timelines.advance(MOB, START, &idle, Some(&sailor));
         let later = START + ANCHOR_PERIOD_MS;
         let step = timelines
@@ -1690,5 +1761,129 @@ mod tests {
             again.stamp.id, FIRST_STATE_ID,
             "a forgotten mob starts over"
         );
+    }
+
+    /// A boar that runs its tree, playing `entry` with the tags `tags`.
+    fn tree_pose(
+        entry: Option<TreeEntry>,
+        tags: [u8; FRAG_TAGS_LEN],
+        facing: Option<f32>,
+    ) -> MobPose {
+        MobPose {
+            tree: Some(TreePose {
+                entry,
+                tags,
+                facing,
+            }),
+            ..pose(1.0, true)
+        }
+    }
+
+    #[test]
+    fn a_tree_mob_shows_its_trees_action_tags_and_facing() {
+        // The boar's `Attack_Gore` (fragment 23, action 9) and its alerted tags `22`.
+        const GORE: TreeEntry = TreeEntry {
+            fragment: 23,
+            action: 9,
+            serial: 1,
+        };
+        const FACING: f32 = 1.0;
+        let boar = creature(&BOAR);
+        let alerted = tags(&[0x22]);
+        let mut timelines = MobTimelines::default();
+        let card = timelines
+            .advance(
+                MOB,
+                START,
+                &tree_pose(Some(GORE), alerted, None),
+                Some(&boar),
+            )
+            .animation
+            .expect("a known creature");
+        assert_eq!(
+            (card.entry.fragment, card.entry.action),
+            (34, 1),
+            "it spawns first"
+        );
+        let after_spawn = START + SPAWN_MS;
+        let frame = timelines.advance(
+            MOB,
+            after_spawn,
+            &tree_pose(Some(GORE), alerted, Some(FACING)),
+            Some(&boar),
+        );
+        let step = frame.step.expect("a new state");
+        let entry = scope_entry(&step).expect("the gore starts");
+        assert_eq!((entry.fragment, entry.action), (23, 9));
+        assert_eq!(
+            entry.tail, DEFAULT_ENTRY_TAIL,
+            "retail sent no gore of the boar"
+        );
+        assert_eq!(
+            animation_of(&step).map(|animation| animation.tags),
+            Some(alerted)
+        );
+        assert_eq!(step.facing, Some(FACING), "the tree's facing");
+        assert!(!frame.alert_started, "a tree plays its own alert");
+        let again = timelines.advance(
+            MOB,
+            after_spawn + TICK_MS,
+            &tree_pose(Some(TreeEntry { serial: 2, ..GORE }), alerted, Some(FACING)),
+            Some(&boar),
+        );
+        let entry = again
+            .step
+            .as_ref()
+            .and_then(scope_entry)
+            .expect("a new start is a new entry");
+        assert_eq!(entry.start_id, again.stamp.id);
+        let idle = timelines.advance(
+            MOB,
+            after_spawn + 2 * TICK_MS,
+            &tree_pose(None, alerted, Some(FACING)),
+            Some(&boar),
+        );
+        let entry = idle.step.as_ref().and_then(scope_entry).expect("idle");
+        assert_eq!(
+            (entry.fragment, entry.tail),
+            (boar.idle.fragment, boar.idle.tail)
+        );
+    }
+
+    #[test]
+    fn a_tree_mobs_reaction_and_death_come_from_the_timeline() {
+        let risen = creature(&FTUE_RISEN);
+        let calm = risen.calm_tags;
+        let mut timelines = MobTimelines::default();
+        timelines.advance(MOB, START, &tree_pose(None, calm, None), Some(&risen));
+        let now = START + SPAWN_MS;
+        timelines.hurt(MOB);
+        let frame = timelines.advance(MOB, now, &tree_pose(None, calm, None), Some(&risen));
+        let entry = frame
+            .step
+            .as_ref()
+            .and_then(scope_entry)
+            .expect("a reaction");
+        assert_eq!(
+            entry.fragment,
+            risen.reactions.expect("reactions").0.fragment
+        );
+        assert_eq!(
+            timelines.take_reaction(MOB),
+            Some(CREATURE_REACTION_MS.0),
+            "its tree learns of the light reaction"
+        );
+        assert_eq!(timelines.take_reaction(MOB), None, "once");
+        let dead = MobPose {
+            dead: true,
+            ..tree_pose(None, calm, None)
+        };
+        let frame = timelines.advance(MOB, now + TICK_MS, &dead, Some(&risen));
+        let entry = frame
+            .step
+            .as_ref()
+            .and_then(scope_entry)
+            .expect("its death");
+        assert_eq!(entry.fragment, risen.death.fragment);
     }
 }

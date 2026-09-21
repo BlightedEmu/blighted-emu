@@ -16,7 +16,7 @@ pub const WORLD_MAGIC: [u8; 4] = *b"NWWF";
 pub const WORLD_FORMAT_VERSION: u16 = 1;
 /// Version of the record types. Raise it when any type in `records` changes; the golden test
 /// in this module fails until it is raised.
-pub const WORLD_SCHEMA_VERSION: u32 = 3;
+pub const WORLD_SCHEMA_VERSION: u32 = 4;
 /// Header fields of the world file.
 pub const WORLD_CONTAINER: ContainerSpec = ContainerSpec {
     magic: WORLD_MAGIC,
@@ -59,8 +59,12 @@ mod tests {
 
     use super::*;
     use crate::records::*;
+    use crate::slice_data::SpawnedSlice;
+    use crate::stations::{CraftingStation, StationGridSide, StationSlice};
 
     const BUILD: &str = "22469132";
+    /// A spawned slice id with every byte set.
+    const SPAWNED_ID: u64 = 0x8181_8181_8181_8187;
     const OTHER_BUILD: &str = "1";
     /// postcard body of [`sample`]. If this test fails, the record types changed: raise
     /// `WORLD_SCHEMA_VERSION` and replace these bytes with the new body.
@@ -73,9 +77,12 @@ mod tests {
         2, 1, 201, 1, 100, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 0, 0, 192, 63, 1, 172, 2, 1,
         1, 101, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 172, 2, 1, 1, 99, 0, 0, 128, 63, 0, 0,
         0, 64, 0, 0, 64, 64, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 1, 0, 0, 0, 63, 1,
-        115, 1, 1, 118, 1, 97, 1, 1, 110, 1, 1, 107, 1, 1, 112, 1, 0, 1, 0, 0, 0, 64, 0, 0, 0, 0,
-        0, 0, 0, 1, 1, 114, 1, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 5, 1, 1, 1, 1, 112, 1,
-        1, 114,
+        115, 1, 1, 118, 1, 97, 1, 135, 131, 134, 140, 152, 176, 224, 192, 129, 1, 1, 120, 1, 119,
+        0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 135, 131, 134, 140, 152, 176, 224, 192, 129,
+        1, 1, 120, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 116, 1, 110, 1, 1, 5, 1, 115, 1, 9,
+        1, 1, 109, 1, 8, 1, 1, 3, 1, 7, 1, 1, 1, 1, 1, 6, 1, 1, 110, 1, 1, 107, 1, 1, 112, 1, 0, 1,
+        0, 0, 0, 64, 0, 0, 0, 0, 0, 0, 0, 1, 1, 114, 1, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64,
+        1, 5, 1, 1, 1, 1, 112, 1, 1, 114,
     ];
 
     /// One record of every kind. Every integer is 128 or more and every optional field is set,
@@ -144,6 +151,36 @@ mod tests {
                 slice_name: "s".to_owned(),
                 variant_name: Some("v".to_owned()),
                 slice_asset_id: "a".to_owned(),
+            }],
+            spawned: vec![SpawnedSlice {
+                id: SPAWNED_ID,
+                slice: "x".to_owned(),
+                variant: "w".to_owned(),
+                position,
+            }],
+            stations: vec![CraftingStation {
+                id: SPAWNED_ID,
+                slice: "x".to_owned(),
+                position,
+                components: StationSlice {
+                    station_type: "t".to_owned(),
+                    name: "n".to_owned(),
+                    buildable: Some((1, 5)),
+                    structure: "s".to_owned(),
+                    ownership: Some((9, 1)),
+                    structure_name: "m".to_owned(),
+                    obstruction: Some((8, true)),
+                    territory: Some(3),
+                    grid: Some((
+                        7,
+                        vec![StationGridSide {
+                            side: 1,
+                            points: 1,
+                            active: true,
+                        }],
+                    )),
+                    delayed_event: Some(6),
+                },
             }],
             npc_keys: vec!["n".to_owned()],
             vitals_keys: vec!["k".to_owned()],

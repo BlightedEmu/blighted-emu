@@ -20,10 +20,10 @@ use std::collections::HashMap;
 use nw_bus::{GHOST_VISIBLE_ITEMS, GhostItem, GhostSlayer, PlayerGhost};
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    AlcStamp, AlcState, BundleGroup, BundleMember, CardPlace, DamageReceiverState, EquippedItem,
-    GearItem, Hands, HealthChange, InputPosition, LookDir, MemberState, MessageError, PlayerGear,
-    PlayerLook, PlayerStates, RemoteStep, SecondSlayerState, SlayerState, StepPlace, VitalsData,
-    VitalsState,
+    AlcStamp, AlcState, BundleGroup, BundleMember, CardPlace, DamageReceiverState, Hands,
+    HealthChange, InputPosition, LookDir, MemberState, MessageError, PaperdollPublic,
+    PaperdollState, PlayerGear, PlayerLook, PlayerStates, RemoteStep, SecondSlayerState, ShownItem,
+    SlayerState, StepPlace, VitalsData, VitalsState,
 };
 use nw_sim_core::Position;
 
@@ -55,11 +55,6 @@ const FAR_PERIOD_TICKS: u64 = 4;
 /// Most remote players one viewer gets in one tick besides cards and changes (our choice: about
 /// 1 KB of 40-byte remote states, retail's p99 datagram of 1,028 bytes).
 pub(super) const REMOTE_GROUPS_PER_TICK: usize = 24;
-/// The ghost item of a worn item: one of a full stack, as other players see it. Its gear score,
-/// durability, bind flag and instance are not sent: other players get the public paperdoll only
-/// (Observed: every retail remote paperdoll of the duel and the 3v3 arena sets slot 2 alone).
-const SHOWN_QUANTITY: u32 = 1;
-const SHOWN_GEAR_SCORE: u32 = 0;
 
 /// What a player is now, for the players who see it: from its own sim, or from a ghost.
 #[derive(Debug, Clone, PartialEq)]
@@ -76,7 +71,7 @@ pub(super) struct ReplicaSource {
     pub(super) blocking: bool,
     pub(super) spawned_ms: u64,
     pub(super) gear_version: u64,
-    pub(super) items: Vec<EquippedItem>,
+    pub(super) items: Vec<ShownItem>,
     pub(super) hands: Hands,
     pub(super) in_combat: bool,
     /// The entity it locks on or homes to.
@@ -90,7 +85,7 @@ impl ReplicaSource {
         for (shown, worn) in items.iter_mut().zip(&self.items) {
             *shown = u8::try_from(worn.slot).ok().map(|slot| GhostItem {
                 slot,
-                item_index: worn.item.map_or(0, |item| item.item_index),
+                item_index: worn.item_index,
             });
         }
         PlayerGhost {
@@ -148,17 +143,9 @@ impl ReplicaSource {
                 .items
                 .iter()
                 .flatten()
-                .map(|item| EquippedItem {
+                .map(|item| ShownItem {
                     slot: u32::from(item.slot),
-                    // Item index 0: the slot's item was removed.
-                    item: (item.item_index != 0).then_some(GearItem {
-                        item_index: item.item_index,
-                        quantity: SHOWN_QUANTITY,
-                        gear_score: SHOWN_GEAR_SCORE,
-                        durability: 0,
-                        bound: false,
-                        instance: [0; RAW_ID_LEN],
-                    }),
+                    item_index: item.item_index,
                 })
                 .collect(),
             hands: Hands {
@@ -198,11 +185,15 @@ impl ReplicaSource {
     /// loadouts), its bag and other containers stay its own (Observed: retail sends other
     /// players paperdoll slot 2 alone).
     fn gear(&self) -> PlayerGear {
-        let mut paperdoll =
-            PlayerGear::of(&self.items, &[], self.gear_version, self.hands).paperdoll;
-        paperdoll.owner = None;
         PlayerGear {
-            paperdoll,
+            paperdoll: PaperdollState {
+                owner: None,
+                public: Some(PaperdollPublic::of(
+                    &self.items,
+                    self.gear_version,
+                    self.hands,
+                )),
+            },
             ..PlayerGear::default()
         }
     }
@@ -549,16 +540,9 @@ pub(super) mod tests {
             blocking: false,
             spawned_ms: SPAWNED_MS,
             gear_version: 3,
-            items: vec![EquippedItem {
+            items: vec![ShownItem {
                 slot: nw_messages::paperdoll::slot::MAIN_HAND_OPTION_1,
-                item: Some(GearItem {
-                    item_index: 42,
-                    quantity: SHOWN_QUANTITY,
-                    gear_score: SHOWN_GEAR_SCORE,
-                    durability: 0,
-                    bound: false,
-                    instance: [0; RAW_ID_LEN],
-                }),
+                item_index: 42,
             }],
             hands: Hands::default(),
             in_combat: false,

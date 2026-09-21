@@ -4,7 +4,7 @@
 //! encodes back to the same bytes. Counts use the wide prefix (`FUN_14087b5c0`); strings use the
 //! prefix-coded length of `FUN_14087a3d0`, as in the client input.
 
-use crate::facet::{FacetHeader, component};
+use crate::facet::{FacetHeader, component, facet_entity};
 use crate::wire::{BodyCodec, MessageError, Reader, Writer, raw_id_of_entity};
 
 /// `DamageReceiverComponentClientFacet_OnDamageDealt`.
@@ -27,8 +27,8 @@ pub const MAX_RESPAWN_PAYLOAD: usize = 32;
 /// Longest string (`FUN_14087a3d0`: a length below `0x30000`).
 const MAX_STRING: u64 = 0x2_FFFF;
 /// Lists of the recap: counts below 6, then below 4 (`FUN_142db7920`).
-const RECAP_LIST_LIMIT: usize = 6;
-const RECAP_LAST_LIST_LIMIT: usize = 4;
+pub(crate) const RECAP_LIST_LIMIT: usize = 6;
+pub(crate) const RECAP_LAST_LIST_LIMIT: usize = 4;
 /// The 16-byte blocks of the recap (`FUN_1415bc800`).
 const BLOCK_LEN: usize = 16;
 /// The 7 raw bytes before the third `u16` of the recap.
@@ -183,8 +183,7 @@ impl DamageDealtMsg {
             head_a: header.target,
             head_b: header.entity,
             raw_16: raw_id_of_entity(target),
-            // The facet entity of the target.
-            u64_c: target.swap_bytes(),
+            u64_c: facet_entity(target),
             u32_d: HIT_VOLUME_TORSO,
             u32_e: CAMERA_SHAKE_SMALL,
             raw_2: hit_flags(HIT_FLAG_CAN_CRIT, false, killed).to_le_bytes(),
@@ -349,7 +348,7 @@ impl OnDamageMsg {
         Self {
             head_a: header.target,
             head_b: header.entity,
-            u64_c: damage.attacker.swap_bytes(),
+            u64_c: facet_entity(damage.attacker),
             raw_2: MELEE_HIT_FLAGS.to_le_bytes(),
             u32_d: (total / damage.max_health).to_bits(),
             triple: damage.attacker_at.map(f32::to_bits),
@@ -578,7 +577,7 @@ impl DeathRecapMsg {
     }
 }
 
-fn write_string(writer: &mut Writer, string: &[u8]) -> Result<(), MessageError> {
+pub(crate) fn write_string(writer: &mut Writer, string: &[u8]) -> Result<(), MessageError> {
     if string.len() as u64 > MAX_STRING {
         return Err(MessageError::CountTooLarge {
             count: string.len() as u64,
@@ -589,7 +588,7 @@ fn write_string(writer: &mut Writer, string: &[u8]) -> Result<(), MessageError> 
     Ok(())
 }
 
-fn read_string(reader: &mut Reader<'_>) -> Result<Vec<u8>, MessageError> {
+pub(crate) fn read_string(reader: &mut Reader<'_>) -> Result<Vec<u8>, MessageError> {
     let len = reader.prefixed()?;
     if len > MAX_STRING {
         return Err(MessageError::CountTooLarge {
@@ -601,7 +600,11 @@ fn read_string(reader: &mut Reader<'_>) -> Result<Vec<u8>, MessageError> {
     Ok(reader.bytes(len as usize)?.to_vec())
 }
 
-fn write_list(writer: &mut Writer, values: &[u32], limit: usize) -> Result<(), MessageError> {
+pub(crate) fn write_list(
+    writer: &mut Writer,
+    values: &[u32],
+    limit: usize,
+) -> Result<(), MessageError> {
     if values.len() >= limit {
         return Err(MessageError::CountTooLarge {
             count: values.len() as u64,
@@ -615,7 +618,7 @@ fn write_list(writer: &mut Writer, values: &[u32], limit: usize) -> Result<(), M
     Ok(())
 }
 
-fn read_list(reader: &mut Reader<'_>, limit: usize) -> Result<Vec<u32>, MessageError> {
+pub(crate) fn read_list(reader: &mut Reader<'_>, limit: usize) -> Result<Vec<u32>, MessageError> {
     let count = reader.wide_prefixed()?;
     if count >= limit as u64 {
         return Err(MessageError::CountTooLarge {
@@ -735,16 +738,16 @@ mod tests {
     #[test]
     fn a_blocked_melee_hit_has_the_retail_bytes() {
         // Retail 2218 of a blocked hit (live-tutorial note, section 7): the player's damage
-        // receiver, then 1. The facet entity is the reversed player number.
+        // receiver, then 1.
         const RETAIL: [u8; 17] = [
             0x8c, 0x6d, 0xee, 0xd1, 0x7d, 0xda, 0x2a, 0x1b, 0xbf, 0xa9, 0x6f, 0x3e, 0xa2, 0xe3,
             0x6a, 0x5a, 0x01,
         ];
-        const PLAYER: u64 = 0x5a6a_e3a2_3e6f_a9bf;
-        let blocked = MeleeHitMsg::on(PLAYER, true);
+        let player = crate::entity_ids::number_of_facet(0xbfa9_6f3e_a2e3_6a5a);
+        let blocked = MeleeHitMsg::on(player, true);
         assert_eq!(blocked.encode().expect("encode"), RETAIL);
         assert_eq!(MeleeHitMsg::decode(&RETAIL), Ok(blocked));
-        let landed = MeleeHitMsg::on(PLAYER, false).encode().expect("encode");
+        let landed = MeleeHitMsg::on(player, false).encode().expect("encode");
         assert_eq!(landed[..16], RETAIL[..16]);
         assert_eq!(landed[16], 0);
     }
@@ -846,8 +849,8 @@ mod tests {
         const SOUL_SAILOR: u64 = 0xa0d5_6dec_a068_8d10;
         const RETAIL_TARGET: u64 = 0x31d3_f99c_aa47_7511;
         let hit = DamageDealtMsg::hit(
-            SOUL_PLAYER.swap_bytes(),
-            SOUL_SAILOR.swap_bytes(),
+            crate::entity_ids::number_of_facet(SOUL_PLAYER),
+            crate::entity_ids::number_of_facet(SOUL_SAILOR),
             AMOUNT,
             false,
         );
@@ -913,7 +916,7 @@ mod tests {
             0x41, 0x95, 0xa1, 0x5e, 0x3f, 0x0f,
         ];
         let damage = MeleeDamage {
-            attacker: SIGNIFIER_FACET.swap_bytes(),
+            attacker: crate::entity_ids::number_of_facet(SIGNIFIER_FACET),
             amount: f32::from_bits(0x4195_a15e),
             // The retail player's max health, 865.587.
             max_health: f32::from_bits(0x4458_6593),
@@ -938,7 +941,7 @@ mod tests {
             0x09, 0x40, 0xe1, 0x62, 0x3f, 0x3f, 0x0f, 0xa8, 0xd4,
         ];
         let damage = MeleeDamage {
-            attacker: 0x096a_42da_e6b1_8c60_u64.swap_bytes(),
+            attacker: crate::entity_ids::number_of_facet(0x096a_42da_e6b1_8c60_u64),
             amount: f32::from_bits(0x41a9_09af),
             max_health: f32::from_bits(0x4458_6593),
             attacker_at: [0x43f0_1c25, 0x436a_2e5c, 0x41ba_1401].map(f32::from_bits),
@@ -956,7 +959,7 @@ mod tests {
     fn a_minimal_death_recap_round_trips() {
         let recap = DeathRecapMsg::of(TARGET);
         assert_eq!(round(&recap), recap);
-        assert_eq!(recap.head_b, TARGET.swap_bytes());
+        assert_eq!(recap.head_b, facet_entity(TARGET));
     }
 
     #[test]

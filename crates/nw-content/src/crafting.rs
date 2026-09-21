@@ -178,9 +178,81 @@ impl Recipes {
     }
 }
 
+/// The resources a structure's blueprint costs (`BlueprintItemDefinitions`
+/// `StructureCost_Ingredient1..4` and `StructureCost_Qty1..4`; Observed: `CampT1` costs 5
+/// `WoodT1` and 1 `FlintT1`, the resources the retail campfire group lists as committed).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StructureCosts {
+    by_blueprint: HashMap<String, Vec<(String, u32)>>,
+}
+
+impl StructureCosts {
+    /// The costs of every blueprint of `tables`.
+    pub fn from_tables(tables: &Tables) -> Self {
+        Self::build(
+            tables
+                .blueprint_item_definitions
+                .iter()
+                .flat_map(|table| &table.rows)
+                .map(|row| {
+                    let cells = [
+                        (&row.structure_cost_ingredient1, row.structure_cost_qty1),
+                        (&row.structure_cost_ingredient2, row.structure_cost_qty2),
+                        (&row.structure_cost_ingredient3, row.structure_cost_qty3),
+                        // The table types `StructureCost_Qty4` as text.
+                        (
+                            &row.structure_cost_ingredient4,
+                            row.structure_cost_qty4
+                                .as_deref()
+                                .and_then(|quantity| quantity.parse().ok()),
+                        ),
+                    ];
+                    let costs = cells
+                        .into_iter()
+                        .filter_map(|(item, quantity)| {
+                            let item = item.clone().filter(|item| !item.is_empty())?;
+                            Some((item, count_of(quantity)))
+                        })
+                        .collect();
+                    (row.blueprint_id.clone(), costs)
+                }),
+        )
+    }
+
+    /// The costs of `blueprints`: (blueprint id, (item id, quantity) in column order).
+    pub fn build(blueprints: impl IntoIterator<Item = (String, Vec<(String, u32)>)>) -> Self {
+        Self {
+            by_blueprint: blueprints
+                .into_iter()
+                .map(|(id, costs)| (id.to_lowercase(), costs))
+                .collect(),
+        }
+    }
+
+    /// The costs of blueprint `id` (any case); none for an unknown one.
+    pub fn of(&self, id: &str) -> &[(String, u32)] {
+        self.by_blueprint
+            .get(&id.to_lowercase())
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_blueprints_costs_are_found_in_any_case() {
+        let costs = StructureCosts::build([(
+            "CampT1".to_owned(),
+            vec![("WoodT1".to_owned(), 5), ("FlintT1".to_owned(), 1)],
+        )]);
+        assert_eq!(
+            costs.of("campt1"),
+            [("WoodT1".to_owned(), 5), ("FlintT1".to_owned(), 1)]
+        );
+        assert!(costs.of("").is_empty());
+    }
 
     /// The retail rows of the skinning knife and the Light Ration (build 25810808), with the
     /// categories of pork and wood.

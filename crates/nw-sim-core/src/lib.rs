@@ -3,23 +3,26 @@
 //! passes positions and times in. `sim` runs them.
 
 pub mod brain;
+pub mod camera_check;
 pub mod cells;
+pub mod character;
 pub mod combat;
 pub mod grid;
 pub mod interest;
 pub mod movement;
 pub mod new_player;
+pub mod steering;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
 pub mod tick;
+pub mod tracking;
 
-pub use brain::{
-    Behaviour, Brain, BrainAction, BrainSettings, Gait, MobState, Route, RouteMode, Seen, died,
-    forget, hurt, step as brain_step,
-};
+pub use brain::{BrainAction, ChaseBrain, ChaseSettings, Gait, MobState, Seen, walk_within};
+pub use camera_check::{CameraBody, CameraCheck, CameraView};
 pub use cells::{
     CellGrid, CellGridError, CellId, CellOwners, MAX_CELLS, assign_columns, level_bounds,
 };
+pub use character::{Character, CharacterInput, Intent};
 pub use combat::{
     Damage, Dice, Health, Hit, MIN_HIT, MobAttack, PlayerAttack, Threat, mob_hit, mob_max_health,
     player_hit,
@@ -34,4 +37,6 @@ pub use new_player::{
     OPEN_WORLD_START, TUTORIAL_EXIT, TUTORIAL_EXIT_RADIUS_M, TUTORIAL_FOLDER, TUTORIAL_START,
     at_tutorial_exit,
 };
+pub use steering::{Mover, Steering, turn_toward, yaw_gap, yaw_toward};
 pub use tick::{DueTicks, TICKS_PER_SECOND, TickClock};
+pub use tracking::{TrackInput, Tracked, TrackedBody};

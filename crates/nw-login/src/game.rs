@@ -52,13 +52,14 @@ const CHANNEL_KEY_SEPARATOR: char = '.';
 const CHANNEL_KEY_EXTRA_BYTES: [u8; 2] = [b'_', b'-'];
 /// The channel document route: one path segment, `<channel key>.json`.
 const CHANNEL_ROUTE: &str = "/{file}";
-/// Id of the one cluster in the channel document.
-const CLUSTER_ID: &str = "blighted";
+/// Id of the one cluster in the channel document. The client also names its `RegionId`
+/// remote-config layers after it (`client-connection.authorization.cluster`).
+pub(crate) const CLUSTER_ID: &str = "blighted";
 /// Region text in every `publicApis` element; the client only signs requests with it.
 const API_REGION: &str = "us-east-1";
 /// Value of the three `/steam` credentials; the client signs requests with them and the server
 /// ignores the signatures (JSON note section 7).
-const AUTH_STACK_CREDENTIAL: &str = "blighted";
+pub(crate) const AUTH_STACK_CREDENTIAL: &str = "blighted";
 /// Text shown in logs in place of a game session key.
 const SESSION_MASK: &str = "<session>";
 const PATH_SEPARATOR: char = '/';

@@ -11,7 +11,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use nw_common::time::unix_ms;
-use nw_content::loot::{LootContext, LootTables};
+use nw_content::loot::{LootContext, LootTables, loot_level};
 use nw_design::{Kind, merged_bundle};
 use nw_sim_core::Dice;
 use serde::{Deserialize, Serialize};
@@ -43,10 +43,14 @@ pub struct SimulateRequest {
     pub table: String,
     /// How many rolls.
     pub rolls: u32,
-    /// `EnemyLevel`.
+    /// The killed mob's level, as shown (1 and up): `EnemyLevel`.
     pub enemy_level: u32,
-    /// `MinContLevel`.
+    /// The content level, as shown: `MinContLevel`.
     pub content_level: u32,
+    /// The player's level, as shown: `Level`; without it, the tables and items gated by the
+    /// player's level do not drop.
+    #[serde(default)]
+    pub player_level: Option<u32>,
     /// The mob's loot tags, for tables with a tag condition.
     #[serde(default)]
     pub tags: Vec<String>,
@@ -87,13 +91,19 @@ pub fn simulate_rolls(
         return None;
     }
     let levels = LootContext {
-        enemy: request.enemy_level,
-        content: request.content_level,
+        enemy: Some(loot_level(request.enemy_level)),
+        content: Some(loot_level(request.content_level)),
+        player: request.player_level.map(loot_level),
+        poi: None,
         tags: &request.tags,
+        // The simulator rolls for no player: no loot limit is at its limit.
+        reached_limits: &[],
     };
     let mut totals: BTreeMap<String, (u32, u64)> = BTreeMap::new();
     for _ in 0..request.rolls {
-        for (item, quantity) in tables.roll(&request.table, levels, &mut |below| dice.below(below))
+        for (item, quantity) in tables
+            .roll(&request.table, levels, &mut |below| dice.below(below))
+            .items
         {
             let entry = totals.entry(item).or_default();
             entry.0 += 1;
@@ -196,6 +206,7 @@ mod tests {
             and_or: and_or.map(str::to_owned),
             conditions: None,
             max_roll,
+            trigger_limit_on_visit: false,
             cells: cells
                 .iter()
                 .map(|(index, cell)| (*index, (*cell).to_owned()))
@@ -219,6 +230,7 @@ mod tests {
             rolls: ROLLS,
             enemy_level: 1,
             content_level: 1,
+            player_level: None,
             tags: Vec::new(),
         };
         let simulation = simulate_rolls(&tables, &request, &mut Dice::new(1)).expect("table");

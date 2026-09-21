@@ -1,0 +1,14 @@
+{
+    "analytics": {
+        "enable": true,
+        "region-name": "us-east-1",
+        "overflow-kinesis-stream-name": "",
+        "overflow-kinesis-put-role": "arn:aws:iam::000000000000:role/blighted-analytics-put",
+        "kinesis-put-role": "arn:aws:iam::000000000000:role/blighted-analytics-put",
+        "kinesis-stream-name": "blighted-analytics",
+        "kinesis-region-name": "us-east-1",
+        "event-types-to-disable": [
+            "set_seasons_tracked_stats_for_persona"
+        ]
+    }
+}

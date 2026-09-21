@@ -3,12 +3,20 @@
 //! that lie in its cells; a mob belongs to the sim of its spawn and never hands off, because its
 //! leash keeps it near the spawn.
 //!
-//! Only awake mobs run their brain. Each tick, the mobs within the wake radius of a player wake;
-//! an idle mob without a player near falls asleep again (its brain decides when). A grid of the
-//! spawn points, in buckets of the wake radius plus the leash radius, finds the mobs near a
-//! player, because a mob is never farther than the leash from its spawn. A player scans again
-//! only after it moved [`WAKE_RESCAN_M`] since its last scan, or when the cells change: a player
-//! who stands still keeps its awake mobs awake without a scan.
+//! Each mob's mind is the game's own (behavior-tree study 2026-09-18):
+//! - a mob whose creature slice names a tree Server.pak has runs that tree
+//!   ([`crate::mob_ai::TreeMind`]);
+//! - the three tutorial mobs whose trees Server.pak lacks (FTUE club sailor, FTUE legionnaire,
+//!   tutorial Thorpe; study section 4.1) fight with the paces measured from the retail tutorial
+//!   (`nw_sim_core::ChaseBrain`, set by the tutorial's encounter script);
+//! - any other mob has no tree and no measured script: it stands at its spawn (for example the
+//!   beach first mate, whose `damned_firstmate_2h_anchor_basebehavior` is not in Server.pak).
+//!
+//! Only awake mobs think. Each tick, the mobs within the wake radius of a player wake; an awake
+//! mob without a target and with no player within the wake radius for the sleep time falls
+//! asleep. A grid of the spawn points, in buckets of the wake radius plus the largest leash,
+//! finds the mobs near a player. A player scans again only after it moved [`WAKE_RESCAN_M`] since
+//! its last scan, or when the cells change. Awake tree mobs think on the sim's tick threads.
 //!
 //! A personal mob (a tutorial encounter's) belongs to one player: only that player sees it and is
 //! its target, it may be held idle until its fight starts, it stays awake, and it does not
@@ -24,37 +32,41 @@ use nw_bus::{MOB_ENTITY_BASE, MOB_STATES, MobGhost, SnapMob};
 use nw_content::combat::CombatData;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_sim_core::{
-    Behaviour, Brain, BrainAction, BrainSettings, Dice, Gait, Ground, Health, MobAttack, MobState,
-    Position, Seen, SpatialGrid, TUTORIAL_FOLDER, brain_step, forget, mob_max_health,
+    BrainAction, ChaseBrain, ChaseSettings, Dice, Gait, Ground, Health, MobAttack, MobState,
+    Position, Seen, SpatialGrid, TUTORIAL_FOLDER, mob_max_health, walk_within,
 };
 pub use nw_world::records::VitalsSpawn;
 
 use crate::combat::CombatSettings;
-use crate::mob_ai::MobAi;
+use crate::mob_ai::{COMBAT_LEASH_KEY, MobAi, Shown, SpawnAi, Strike, Surroundings, TreeMind};
 
 /// A player scans for mobs to wake again after moving this far (about 2 s of running); far less
 /// than the wake radius, so a mob wakes before the player can reach it.
 pub const WAKE_RESCAN_M: f32 = 10.0;
-
-/// A moving mob keeps its own height when the level's ground lies more than this far below it
-/// (our choice): it stands on a floor the height map does not hold, such as the tutorial ship's
-/// deck high above the sea bed (live 2026-09-12: the sailor dropped under the ship and vanished).
-pub const MAX_STEP_DOWN_M: f32 = 3.0;
-
-/// The height of a mob that moves to `to` on `ground`: the floor's under it, unless that lies
-/// more than [`MAX_STEP_DOWN_M`] below the mob.
-fn height_after_move(ground: &dyn Ground, to: Position) -> f32 {
-    match ground.floor_at(to.x, to.y, to.z) {
-        Some(height) if to.z - height <= MAX_STEP_DOWN_M => height,
-        _ => to.z,
-    }
-}
 
 /// The first mob's number after [`MOB_ENTITY_BASE`]. A number whose low 32 bits are all zero
 /// gives a `GdeRef` that the client takes but never shows: in every live run the first spawned
 /// mob (`MOB_ENTITY_BASE` itself, the tutorial's sailor 1) stayed invisible while it fought,
 /// and the mobs after it, with the same card bytes, showed (2026-09-14).
 const FIRST_MOB_OFFSET: u64 = 1;
+
+/// Mobs per thread below which the minds run on fewer threads (our engineering limit: a thread
+/// costs about as much to start as a few hundred mind steps).
+pub const MIN_MOBS_PER_THREAD: usize = 512;
+
+/// How long the grid of the awake mobs for the group aggro serves before it is made again (our
+/// engineering limit), and how far a mob may have moved since (a run of 7 m/s for a second,
+/// with room).
+const AGGRO_GRID_MS: u64 = 1_000;
+const AGGRO_GRID_DRIFT_M: f32 = 10.0;
+
+/// The attack factor of a mob that hits with its damage windows: the window's damage table row
+/// carries the attack (Observed: the measured tutorial paces fit `DmgCoef` of their rows within
+/// 1 %: sailor 0.2968 against `Damned_1H_Club_Light` 0.3; with the island's armor share 0.5612
+/// against the config's 0.6006, legionnaire 0.3057 against `Legionnaire_LightStab` 0.33, risen
+/// 0.2319 against `Attack` 0.25, swarmer 0.3236 against `Attack_Crawler_Swipe` 0.35, Thorpe
+/// 0.2604 against `Attack_Stab_02_P1` 0.28).
+pub const ROW_CARRIES_ATTACK: f64 = 1.0;
 
 /// The entity number of the mob of spawn `index`.
 pub const fn mob_entity(index: u32) -> u64 {
@@ -68,19 +80,89 @@ pub fn spawn_index(entity: u64) -> Option<u32> {
         .and_then(|index| u32::try_from(index).ok())
 }
 
+/// What a mob thinks with.
+#[derive(Debug, Clone)]
+enum Mind {
+    /// Its slice's behavior tree.
+    Tree(Box<TreeMind>),
+    /// The measured pace of a tutorial mob without a tree.
+    Chase(Box<ChaseBrain>),
+    /// No tree and no measured script: it stands.
+    Still,
+}
+
 /// One mob.
 #[derive(Debug, Clone)]
 pub struct Mob {
-    /// Its mind and position.
-    pub brain: Brain,
+    /// Where it is.
+    pub position: Position,
     /// Its health.
     pub health: Health,
     /// Its attack.
     pub attack: MobAttack,
+    mind: Mind,
+    /// When it died, while it waits for its respawn.
+    dead_since_ms: Option<u64>,
+    /// It thinks: it is in the awake set (a flag beside the ordered set, so that the tick finds
+    /// the awake mobs in one walk over the live ones).
+    awake: bool,
+    /// When a player was last near it.
+    near_ms: u64,
+}
+
+impl Mob {
+    /// Its state for the snapshot.
+    pub fn state(&self, ai: &MobAi) -> MobState {
+        if self.dead_since_ms.is_some() || self.health.is_dead() {
+            return MobState::Dead;
+        }
+        match &self.mind {
+            Mind::Tree(mind) if mind.returning(ai) => MobState::Return,
+            Mind::Tree(mind) if mind.attacking() => MobState::Attack,
+            Mind::Tree(mind) if mind.target().is_some() => MobState::Chase,
+            Mind::Tree(_) | Mind::Still => MobState::Idle,
+            Mind::Chase(brain) => brain.state(),
+        }
+    }
+
+    /// The entity it fights.
+    pub fn target(&self) -> Option<u64> {
+        match &self.mind {
+            Mind::Tree(mind) => mind.target(),
+            Mind::Chase(brain) => brain.target(),
+            Mind::Still => None,
+        }
+    }
+
+    /// Whether it walks back to its spawn and takes no damage.
+    pub fn returning(&self, ai: &MobAi) -> bool {
+        match &self.mind {
+            Mind::Tree(mind) => mind.returning(ai),
+            Mind::Chase(brain) => brain.returning(),
+            Mind::Still => false,
+        }
+    }
+
+    /// Whether it fights: it has a target.
+    pub fn fighting(&self) -> bool {
+        match &self.mind {
+            Mind::Tree(mind) => mind.target().is_some(),
+            Mind::Chase(brain) => brain.fighting(),
+            Mind::Still => false,
+        }
+    }
+
+    /// The tree mind, for a mob that runs a tree.
+    pub fn tree(&self) -> Option<&TreeMind> {
+        match &self.mind {
+            Mind::Tree(mind) => Some(mind),
+            Mind::Chase(_) | Mind::Still => None,
+        }
+    }
 }
 
 /// A mob that hits a target this tick.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MobAttackIntent {
     /// The mob's entity number.
     pub mob: u64,
@@ -90,6 +172,8 @@ pub struct MobAttackIntent {
     pub target_at: Position,
     /// The move it swings, when its pace has moves.
     pub mob_move: Option<MobMove>,
+    /// The damage window it hits with, for a mob that runs a tree.
+    pub strike: Option<Strike>,
 }
 
 /// One of `moves` at random; `None` when there are none.
@@ -109,16 +193,16 @@ pub struct MobChanges {
     pub unspawned: usize,
 }
 
-/// How far past the distance where a mob starts its swing the swing still lands (our choice:
-/// retail hits landed 0.77 to 2.19 m from the player's body; sailors start at 1.8 m).
+/// How far past the distance where a paced mob starts its swing the swing still lands (retail
+/// hits landed 0.77 to 2.19 m from the player's body; sailors start at 1.8 m).
 pub const SWING_HIT_MARGIN_M: f32 = 1.0;
 
-/// The item tag of the hits of a mob without a pace (our choice: the retail sailors' and risen's
-/// tag; the open world's are Unknown).
+/// The item tag of the hits of a mob whose rows the tables lack (retail: the sailors' and risen's
+/// tag).
 pub const DEFAULT_HIT_TAG: u8 = 6;
 
-/// The stamina a blocked swing of a mob without a pace takes (Inferred: the retail signifier's
-/// light stab, a level 1 mob, took 14.6; the swings of other mobs are Unknown).
+/// The stamina a blocked swing takes when the mob's weapon row is missing (Inferred: the retail
+/// signifier's light stab, a level 1 mob, took 14.6).
 pub const DEFAULT_BLOCK_STAMINA: f32 = 14.6;
 
 /// The upright capsule of a body: its radius and height (collision note: the `CharacterComponent`
@@ -131,8 +215,9 @@ pub struct Capsule {
     pub height_m: f32,
 }
 
-/// The body of a mob without a pace (our choice: the legionnaire's, risen's and swarmer's
-/// capsule).
+/// The body of a mob without a measured capsule: the legionnaire's, risen's and swarmer's
+/// `CharacterComponent` capsule (collision note, section 2). The capsules of other slices are not
+/// in the AI data (their `CharacterComponent` is not read): Unknown.
 pub const DEFAULT_MOB_CAPSULE: Capsule = Capsule {
     radius_m: 0.5,
     height_m: 1.8,
@@ -147,7 +232,8 @@ pub struct MobReach {
     /// It lunges only at a target within this angle of where it aimed at the swing start
     /// (radians).
     pub lunge_turn_rad: f32,
-    /// How far in front of its body the hit shape reaches.
+    /// How far the hit shape reaches: from the body's middle for a pace, from the front of the
+    /// body for a damage window.
     pub reach_m: f32,
 }
 
@@ -164,17 +250,25 @@ pub struct MoveFragment {
 }
 
 /// One hit of a mob move.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoveHit {
     /// When it lands, after the move starts.
     pub at_ms: u64,
-    /// Its share of the pace's hit: its damage row's coefficient over the coefficient of the row
-    /// the pace's attack factor was fitted to.
-    pub damage_scale: f64,
-    /// The share of its damage that is fire in a second phase (its row's `AI_FireDMG` affix).
-    pub fire_share: f64,
-    /// The stamina it takes from a player who blocks it.
-    pub block_stamina: f32,
+    /// Its `DamageData` row, in the table of its pace's attack ([`PaceAttack::table`]): its
+    /// coefficient, damage type, affix and `BlockStaminaDmgMod`.
+    pub row: &'static str,
+}
+
+/// The attack of a paced mob: its damage row, of the damage table its slice names, and the
+/// weapon item its slice's paperdoll holds, whose `BlockStaminaDamage` a blocked hit takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaceAttack {
+    /// The unique id of the damage table.
+    pub table: &'static str,
+    /// The row of its plain swing, and the row its pace's attack factor was fitted to.
+    pub row: &'static str,
+    /// The weapon item.
+    pub weapon: &'static str,
 }
 
 /// An attack that a mob picks from its pace.
@@ -186,8 +280,6 @@ pub struct MobMove {
     pub length_ms: u64,
     /// Its hits.
     pub hits: &'static [MoveHit],
-    /// The 3601 item tag of its hits.
-    pub tag: u8,
 }
 
 /// The second phase of a boss.
@@ -197,43 +289,27 @@ pub struct PhaseTwo {
     pub moves: &'static [MobMove],
     /// Its damage then, as a multiple of the first phase's.
     pub damage_mult: f64,
-    /// The 3601 item tag of the fire part of its hits.
-    pub fire_tag: u8,
 }
 
-/// How a mob hits with one hit of a move: its damage multiple, its item tags and the stamina
-/// a block costs.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct MoveStrike {
-    /// The hit.
-    pub hit: MoveHit,
-    /// The item tag of the hit.
-    pub tag: u8,
-    /// In a second phase: its damage multiple and the item tag of the fire part.
-    pub phase_two: Option<(f64, u8)>,
-}
-
-/// How a personal mob fights when not as its rows and the config say. A paced mob stands on the
-/// floor height of its spawn point; the height map does not move it.
+/// How a tutorial mob without a tree fights: its pace, measured from the retail tutorial. A
+/// paced mob stands on the floor height of its spawn point; the height map does not move it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Pace {
-    /// Its attack factor, in place of the config's `mob_attack_factor`.
+    /// Its attack factor.
     pub attack_factor: f64,
     /// Time between two swings: a random time in this range, rolled after each swing. Its first
     /// swing also waits the shortest gap after its fight starts.
     pub swing_gap_ms: (u64, u64),
-    /// Its chase speed, in place of the config's `mob_speed_mps`.
+    /// Its chase speed.
     pub speed_mps: f32,
     /// When a swing hits, after it starts.
     pub hit_delay_ms: u64,
-    /// The stamina a swing takes from a player who blocks it.
-    pub block_stamina: f32,
+    /// Its attack: the damage row of its swings and the weapon a block's stamina comes from.
+    pub attack: PaceAttack,
     /// How it moves and when it swings.
     pub gait: Gait,
-    /// How far it sees, in place of the config's sight.
+    /// How far it sees.
     pub sight_m: f32,
-    /// The damage type of its hits on a player (3601; `DamageTypeData` `IntID`).
-    pub hit_tag: u8,
     /// The item scale of its hits on a player: the share of the raw damage that the player's
     /// armor let through.
     pub hit_scale: f32,
@@ -267,6 +343,8 @@ struct Personal {
     in_phase_two: bool,
     /// The slice asset of its retail card, when its vitals id has more than one look.
     asset: Option<[u8; ASSET_ID_LEN]>,
+    /// The leash of its chase: its slice's `CombatLeashDistance`.
+    leash_m: f32,
 }
 
 /// The mobs of one sim.
@@ -276,21 +354,29 @@ pub struct Mobs {
     personal: HashMap<u32, Personal>,
     /// GM mobs by index, with their spawns; their indexes follow the spawn list too.
     gm: BTreeMap<u32, VitalsSpawn>,
-    /// The design AI of each spawn of the spawn list (empty: none).
-    ai: Arc<[Option<MobAi>]>,
+    /// The design overrides of each spawn of the spawn list (empty: none).
+    overrides: Arc<[Option<SpawnAi>]>,
     next_personal: u32,
     data: Arc<CombatData>,
-    settings: BrainSettings,
-    mob_attack_factor: f64,
+    ai: Arc<MobAi>,
+    wake_radius_m: f32,
+    sleep_after_ms: u64,
+    respawn_ms: u64,
     live: HashMap<u32, Mob>,
     owned: HashSet<u32>,
     awake: BTreeSet<u32>,
     spawn_grid: Option<SpatialGrid<u32>>,
+    /// The awake mobs by place for the group aggro, and when it was made.
+    aggro_grid: Option<(u64, SpatialGrid<u32>)>,
     dice: Dice,
     brain_runs: u64,
     /// Where each player last scanned for mobs to wake.
     scanned: HashMap<u64, Position>,
     wake_scans: u64,
+    /// Mobs that left since the last [`Mobs::take_left`]: removed, or gone with their cell.
+    left: Vec<u64>,
+    /// Mobs that respawned since the last [`Mobs::take_respawned`].
+    respawned: Vec<u64>,
 }
 
 /// The spawns that a sim of `level` spawns. Every mob of the tutorial is a fight of its quest,
@@ -317,6 +403,94 @@ impl MobChanges {
     }
 }
 
+/// What one mob did in a tick.
+struct Step {
+    index: u32,
+    hits: Vec<MobAttackIntent>,
+    acquired: Option<u64>,
+    sleeps: bool,
+    /// Its tree ran.
+    ticked: bool,
+}
+
+/// What every mind reads in a tick.
+struct TickView<'a> {
+    ai: &'a MobAi,
+    players: &'a SpatialGrid<u64>,
+    personal: &'a HashMap<u32, Personal>,
+    ground: &'a (dyn Ground + Sync),
+    wake_m: f32,
+    now_ms: u64,
+}
+
+impl TickView<'_> {
+    /// The players mob `index` at `at` may take as targets: those within the wake radius; a
+    /// personal mob's owner only, once it is not held.
+    fn seen(&self, index: u32, at: Position) -> Vec<Seen> {
+        let personal = self.personal.get(&index);
+        self.players
+            .near(at)
+            .filter(|(_, position)| position.horizontal_distance(at) <= self.wake_m)
+            .filter(|(entity, _)| personal.is_none_or(|mob| !mob.held && mob.owner == *entity))
+            .map(|(entity, position)| Seen { entity, position })
+            .collect()
+    }
+
+    /// One step of the tree mob `index`.
+    fn think(&self, index: u32, mob: &mut Mob) -> Step {
+        let mut step = Step {
+            index,
+            hits: Vec::new(),
+            acquired: None,
+            sleeps: false,
+            ticked: false,
+        };
+        if let Mind::Tree(mind) = &mob.mind
+            && !mind.due(self.now_ms)
+        {
+            return step;
+        }
+        let seen = self.seen(index, mob.position);
+        step.sleeps = seen.is_empty();
+        if !step.sleeps {
+            mob.near_ms = self.now_ms;
+        }
+        let Mind::Tree(mind) = &mut mob.mind else {
+            return step;
+        };
+        if mind.target().is_some() {
+            mob.near_ms = self.now_ms;
+        }
+        let around = Surroundings {
+            now_ms: self.now_ms,
+            seen: &seen,
+            ground: self.ground,
+            // A share of a health bar.
+            #[allow(clippy::cast_precision_loss, reason = "a share of a health bar")]
+            health_share: mob.health.current() as f32 / mob.health.max().max(1) as f32,
+        };
+        let thought = mind.step(self.ai, &mut mob.position, &around);
+        step.sleeps &= mind.target().is_none();
+        if thought.healed {
+            mob.health.refill();
+        }
+        step.acquired = thought.acquired;
+        step.ticked = thought.ticked;
+        step.hits = thought
+            .hits
+            .into_iter()
+            .map(|hit| MobAttackIntent {
+                mob: mob_entity(index),
+                target: hit.target,
+                target_at: hit.target_at,
+                mob_move: None,
+                strike: Some(hit.strike),
+            })
+            .collect();
+        step
+    }
+}
+
 impl Mobs {
     /// No mob yet; the spawns of the cells come with [`Mobs::set_cells`].
     pub fn new(spawns: Arc<[VitalsSpawn]>, combat: &CombatSettings) -> Self {
@@ -325,43 +499,87 @@ impl Mobs {
             spawns,
             personal: HashMap::new(),
             gm: BTreeMap::new(),
-            ai: Arc::from([]),
+            overrides: Arc::from([]),
             next_personal,
             data: Arc::clone(&combat.data),
-            settings: combat.brain,
-            mob_attack_factor: combat.mob_attack_factor,
+            ai: Arc::clone(&combat.ai),
+            wake_radius_m: combat.wake_radius_m,
+            sleep_after_ms: combat.sleep_after_ms,
+            respawn_ms: combat.mob_respawn_ms,
             live: HashMap::new(),
             owned: HashSet::new(),
             awake: BTreeSet::new(),
             spawn_grid: None,
+            aggro_grid: None,
             dice: Dice::new(combat.seed),
             brain_runs: 0,
             scanned: HashMap::new(),
             wake_scans: 0,
+            left: Vec::new(),
+            respawned: Vec::new(),
         }
     }
 
-    /// The mob of spawn `index`, or `None` without its rows.
-    fn make(&self, spawn: &VitalsSpawn) -> Option<Mob> {
+    /// The shared AI.
+    pub fn ai(&self) -> &MobAi {
+        &self.ai
+    }
+
+    /// The mobs that left since the last call (removed, or gone with their cell), by entity
+    /// number; their ids end with them.
+    pub fn take_left(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.left)
+    }
+
+    /// The mobs that respawned since the last call, by entity number: each is a new spawn with a
+    /// new id and card, as on retail (GDE id note).
+    pub fn take_respawned(&mut self) -> Vec<u64> {
+        std::mem::take(&mut self.respawned)
+    }
+
+    /// The archetype of a mob of `spawn` shown with slice asset `asset` (else its vitals id's
+    /// most seen look).
+    fn archetype(&self, spawn: &VitalsSpawn, asset: Option<[u8; ASSET_ID_LEN]>) -> Option<u32> {
+        self.ai.archetype_for(spawn.vitals_id, asset)
+    }
+
+    /// The mob of spawn `index` (`spawn`, shown with `asset`), or `None` without its rows.
+    fn make(
+        &self,
+        index: u32,
+        spawn: &VitalsSpawn,
+        asset: Option<[u8; ASSET_ID_LEN]>,
+    ) -> Option<Mob> {
         let kind = self.data.mob_type(spawn.vitals_id)?;
         let level = self.data.level(spawn.level)?;
-        let sight_m =
-            self.settings.base_sight_m + self.data.vision_offset(kind.creature_type.as_deref());
+        let at = position_of(spawn);
+        let overrides = self.overrides.get(index as usize).and_then(Option::as_ref);
+        let mind = self
+            .archetype(spawn, asset)
+            .and_then(|archetype| {
+                // Spawn facing: the world file keeps no spawn rotation (Unknown): north.
+                TreeMind::new(&self.ai, archetype, at, 0.0, u64::from(index), overrides)
+            })
+            .map_or(Mind::Still, |mind| Mind::Tree(Box::new(mind)));
         Some(Mob {
-            brain: Brain::new(position_of(spawn), sight_m),
+            position: at,
             health: Health::full(mob_max_health(level.base_max_health, kind.health_mod)),
             attack: MobAttack {
                 base_damage: level.base_damage,
                 damage_mod: kind.damage_mod,
-                factor: self.mob_attack_factor,
+                factor: ROW_CARRIES_ATTACK,
             },
+            mind,
+            dead_since_ms: None,
+            awake: false,
+            near_ms: 0,
         })
     }
 
     /// Spawns a personal mob of `spawn` for player `owner` at `now_ms`, held idle when `held`,
-    /// hitting at `pace` when given, shown with slice asset `asset` when given; its entity
-    /// number, or `None` without its rows. A paced mob that fights at once waits one interval
-    /// before its first hit.
+    /// shown with slice asset `asset` when given; its entity number, or `None` without its rows.
+    /// A mob whose slice has a tree runs it; `pace` is the measured script of a tutorial mob
+    /// without one (a paced mob that fights at once waits one interval before its first hit).
     pub fn spawn_personal(
         &mut self,
         spawn: VitalsSpawn,
@@ -371,19 +589,25 @@ impl Mobs {
         asset: Option<[u8; ASSET_ID_LEN]>,
         now_ms: u64,
     ) -> Option<u64> {
-        let mut mob = self.make(&spawn)?;
+        let index = self.next_personal;
+        let mut mob = self.make(index, &spawn, asset)?;
+        let archetype = self.archetype(&spawn, asset);
+        let leash_m = archetype
+            .and_then(|archetype| self.ai.config_number(archetype, COMBAT_LEASH_KEY))
+            // A leash of tens of metres.
+            .map_or(f32::MAX, |leash| leash as f32);
         if let Some(pace) = pace {
             mob.attack.factor = pace.attack_factor;
-            mob.brain.set_sight(pace.sight_m);
+            let mut brain = ChaseBrain::new(position_of(&spawn), pace.sight_m);
             if !held {
-                mob.brain.wait_to_attack(now_ms);
+                brain.wait_to_attack(now_ms);
             }
+            mob.mind = Mind::Chase(Box::new(brain));
         }
         let swing_gap_ms = pace.map_or(0, |pace| pace.swing_gap_ms.0);
-        let index = self.next_personal;
         self.next_personal = index.checked_add(1)?;
         self.live.insert(index, mob);
-        self.awake.insert(index);
+        self.wake_index(index);
         self.personal.insert(
             index,
             Personal {
@@ -396,28 +620,24 @@ impl Mobs {
                 absorb_until_ms: 0,
                 in_phase_two: false,
                 asset,
+                leash_m,
             },
         );
         Some(mob_entity(index))
     }
 
-    /// The design AI of the spawn list, in spawn order; set before the first cells.
-    pub fn set_ai(&mut self, ai: Arc<[Option<MobAi>]>) {
-        self.ai = ai;
-    }
-
-    /// The design AI of spawn `index`, when a design file gave it one.
-    fn ai_of(&self, index: u32) -> Option<&MobAi> {
-        self.ai.get(index as usize)?.as_ref()
+    /// The design overrides of the spawn list, in spawn order; set before the first cells.
+    pub fn set_ai(&mut self, overrides: Arc<[Option<SpawnAi>]>) {
+        self.overrides = overrides;
     }
 
     /// Spawns a GM mob of `spawn`; its entity number, or `None` without its rows.
     pub fn spawn_gm(&mut self, spawn: VitalsSpawn) -> Option<u64> {
-        let mob = self.make(&spawn)?;
         let index = self.next_personal;
+        let mob = self.make(index, &spawn, None)?;
         self.next_personal = index.checked_add(1)?;
         self.live.insert(index, mob);
-        self.awake.insert(index);
+        self.wake_index(index);
         self.gm.insert(index, spawn);
         Some(mob_entity(index))
     }
@@ -430,6 +650,7 @@ impl Mobs {
         };
         self.live.remove(&index);
         self.awake.remove(&index);
+        self.left.push(entity);
         true
     }
 
@@ -456,10 +677,12 @@ impl Mobs {
             .filter(|(_, mob)| mob.owner == owner && mob.held)
         {
             personal.held = false;
-            if personal.pace.is_some()
-                && let Some(mob) = self.live.get_mut(index)
+            if let Some(Mob {
+                mind: Mind::Chase(brain),
+                ..
+            }) = self.live.get_mut(index)
             {
-                mob.brain.wait_to_attack(now_ms);
+                brain.wait_to_attack(now_ms);
             }
         }
     }
@@ -471,6 +694,7 @@ impl Mobs {
         {
             self.live.remove(&index);
             self.awake.remove(&index);
+            self.left.push(entity);
         }
     }
 
@@ -486,11 +710,38 @@ impl Mobs {
         self.personal.get(&spawn_index(entity)?)?.asset
     }
 
-    /// The brain state of mob `entity`, when it lives here.
-    pub fn brain_state(&self, entity: u64) -> Option<MobState> {
-        self.live
-            .get(&spawn_index(entity)?)
-            .map(|mob| mob.brain.state())
+    /// The state of mob `entity`, when it lives here.
+    pub fn state(&self, entity: u64) -> Option<MobState> {
+        let index = spawn_index(entity)?;
+        let mob = self.live.get(&index)?;
+        let state = mob.state(&self.ai);
+        Some(if state == MobState::Dead || self.awake.contains(&index) {
+            state
+        } else {
+            MobState::Asleep
+        })
+    }
+
+    /// Whether mob `entity` fights a target, when it lives here.
+    pub fn fighting(&self, entity: u64) -> Option<bool> {
+        Some(self.live.get(&spawn_index(entity)?)?.fighting())
+    }
+
+    /// The tree mind of mob `entity`, when it runs a tree.
+    pub fn tree(&self, entity: u64) -> Option<&TreeMind> {
+        self.live.get(&spawn_index(entity)?)?.tree()
+    }
+
+    /// What mob `entity` plays, with the names of its action and fragment, when it runs a tree
+    /// and plays an action.
+    pub fn shown(&self, entity: u64) -> Option<(Shown, &str, &str)> {
+        let shown = self.tree(entity)?.shown()?;
+        let action = self.ai.cage_action(shown.action)?;
+        Some((
+            shown,
+            self.ai.name(action.action),
+            self.ai.name(action.fragment),
+        ))
     }
 
     /// Hits on personal mob `entity` do no damage until `until_ms`.
@@ -516,19 +767,19 @@ impl Mobs {
         }
     }
 
-    /// When a swing of mob `entity` hits, after the swing starts: its pace's delay, else 0.
+    /// When a swing of mob `entity` hits, after the swing starts: its pace's delay, else 0 (a
+    /// damage window hits when it comes).
     pub fn hit_delay_ms(&self, entity: u64) -> u64 {
         spawn_index(entity)
             .and_then(|index| self.personal.get(&index)?.pace)
             .map_or(0, |pace| pace.hit_delay_ms)
     }
 
-    /// The stamina a swing of mob `entity` takes from a player who blocks it: its pace's, or
-    /// [`DEFAULT_BLOCK_STAMINA`].
-    pub fn block_stamina(&self, entity: u64) -> f32 {
+    /// The attack of mob `entity`, when it has a pace.
+    pub fn attack(&self, entity: u64) -> Option<PaceAttack> {
         spawn_index(entity)
             .and_then(|index| self.personal.get(&index)?.pace)
-            .map_or(DEFAULT_BLOCK_STAMINA, |pace| pace.block_stamina)
+            .map(|pace| pace.attack)
     }
 
     /// Personal mob `entity` fights in its pace's second phase from now on.
@@ -562,28 +813,40 @@ impl Mobs {
     /// Mob `entity` lunges up to `max_m` toward `to` in its swing, inside its leash; where it is
     /// then.
     pub fn lunge(&mut self, entity: u64, to: Position, max_m: f32) -> Option<Position> {
-        let leash_m = self.settings.leash_radius_m;
-        let mob = self.get_mut(entity)?;
-        Some(mob.brain.lunge(to, max_m, leash_m))
+        let index = spawn_index(entity)?;
+        let (spawn, leash_m) = match self.personal.get(&index) {
+            Some(personal) => (position_of(&personal.spawn), personal.leash_m),
+            None => {
+                let spawn = self.spawn_of(index)?;
+                let leash = self.leash_of(spawn);
+                (position_of(spawn), leash)
+            }
+        };
+        let mob = self.live.get_mut(&index)?;
+        mob.position = walk_within(mob.position, to, max_m, spawn, leash_m);
+        Some(mob.position)
     }
 
-    /// How far from mob `entity` its swing lands on a player: where its gait starts a swing, plus
-    /// [`SWING_HIT_MARGIN_M`].
-    pub fn hit_reach_m(&self, entity: u64) -> f32 {
-        let gait = spawn_index(entity)
-            .and_then(|index| self.personal.get(&index)?.pace)
-            .map_or(self.settings.gait, |pace| pace.gait);
-        gait.swing_start_m + SWING_HIT_MARGIN_M
+    /// The combat leash of the slice of `spawn`; no limit without one.
+    fn leash_of(&self, spawn: &VitalsSpawn) -> f32 {
+        self.archetype(spawn, None)
+            .and_then(|archetype| self.ai.config_number(archetype, COMBAT_LEASH_KEY))
+            // A leash of tens of metres.
+            .map_or(f32::MAX, |leash| leash as f32)
     }
 
-    /// The item tag and scale of the hits of mob `entity`: its pace's, else [`DEFAULT_HIT_TAG`]
-    /// and `default_scale`.
-    pub fn hit_style(&self, entity: u64, default_scale: f32) -> (u8, f32) {
+    /// How far from paced mob `entity` its swing lands on a player: where its gait starts a
+    /// swing, plus [`SWING_HIT_MARGIN_M`]; `None` for a mob without a pace.
+    pub fn hit_reach_m(&self, entity: u64) -> Option<f32> {
+        let pace = self.personal.get(&spawn_index(entity)?)?.pace?;
+        Some(pace.gait.swing_start_m + SWING_HIT_MARGIN_M)
+    }
+
+    /// The item scale of the hits of mob `entity`: its pace's, else `default_scale`.
+    pub fn hit_scale(&self, entity: u64, default_scale: f32) -> f32 {
         spawn_index(entity)
             .and_then(|index| self.personal.get(&index)?.pace)
-            .map_or((DEFAULT_HIT_TAG, default_scale), |pace| {
-                (pace.hit_tag, pace.hit_scale)
-            })
+            .map_or(default_scale, |pace| pace.hit_scale)
     }
 
     /// The level of mob `entity`, when it lives here.
@@ -599,7 +862,7 @@ impl Mobs {
 
     /// The entity mob `entity` chases or hits, when it lives here.
     pub fn target(&self, entity: u64) -> Option<u64> {
-        self.live.get(&spawn_index(entity)?)?.brain.target()
+        self.live.get(&spawn_index(entity)?)?.target()
     }
 
     /// The health of mob `entity`, when it lives here.
@@ -607,6 +870,13 @@ impl Mobs {
         self.live
             .get(&spawn_index(entity)?)
             .map(|mob| mob.health.current())
+    }
+
+    /// Where mob `entity` stands and the point of its spawn, when it lives here.
+    pub fn places(&self, entity: u64) -> Option<(Position, Position)> {
+        let index = spawn_index(entity)?;
+        let at = self.live.get(&index)?.position;
+        Some((at, position_of(self.spawn_of(index)?)))
     }
 
     /// The spawn of mob `index`: a world spawn or a personal one.
@@ -627,21 +897,14 @@ impl Mobs {
                 if !self.owned.insert(index) {
                     continue;
                 }
-                match self.make(spawn) {
-                    Some(mut mob) => {
-                        if let Some(ai) = self.ai_of(index) {
-                            mob.brain.set_behaviour(ai.behaviour);
-                            if let Some(sight_m) = ai.sight_m {
-                                mob.brain.set_sight(sight_m);
-                            }
-                            if let Some(route) = &ai.route {
-                                mob.brain.set_route(route.clone());
-                            }
-                            if ai.behaviour == Behaviour::Patrol {
-                                self.awake.insert(index);
-                            }
-                        }
+                match self.make(index, spawn, None) {
+                    Some(mob) => {
+                        // A patrolling mob walks away from its spawn, where the wake scan looks:
+                        // it stays awake.
                         self.live.insert(index, mob);
+                        if self.patrols(index) {
+                            self.wake_index(index);
+                        }
                         changes.spawned += 1;
                     }
                     None => changes.unspawned += 1,
@@ -650,37 +913,176 @@ impl Mobs {
                 self.awake.remove(&index);
                 if self.live.remove(&index).is_some() {
                     changes.removed += 1;
+                    self.left.push(mob_entity(index));
                 }
             }
         }
-        self.spawn_grid = SpatialGrid::new(
-            self.settings.wake_radius_m + self.settings.leash_radius_m,
-        )
-        .map(|mut grid| {
-            for (index, mob) in &self.live {
-                grid.insert(*index, mob.brain.spawn());
+        // The buckets hold every mob a player's wake radius can reach: a mob stays within its
+        // slice's leash of its spawn.
+        let leash_m = self
+            .live
+            .keys()
+            .filter_map(|index| self.spawn_of(*index))
+            .map(|spawn| self.leash_of(spawn))
+            .filter(|leash| leash.is_finite())
+            .fold(0.0_f32, f32::max);
+        self.spawn_grid = SpatialGrid::new(self.wake_radius_m + leash_m).map(|mut grid| {
+            for index in self.live.keys() {
+                if let Some(spawn) = self.spawn_of(*index) {
+                    grid.insert(*index, position_of(spawn));
+                }
             }
             grid
         });
         changes
     }
 
-    /// One tick at `now_ms` with the living players and player ghosts near this sim's mobs.
-    /// Returns the hits the mobs make.
+    /// Whether the spawn `index` has a patrol route.
+    fn patrols(&self, index: u32) -> bool {
+        self.overrides
+            .get(index as usize)
+            .and_then(Option::as_ref)
+            .is_some_and(|overrides| overrides.route.is_some())
+    }
+
+    /// One tick at `now_ms` with the living players and player ghosts near this sim's mobs, on
+    /// up to `threads` threads. Returns the hits the mobs make.
     pub fn tick(
         &mut self,
         players: &[Seen],
         now_ms: u64,
-        ground: &dyn Ground,
+        ground: &(dyn Ground + Sync),
+        threads: usize,
     ) -> Vec<MobAttackIntent> {
-        let wake_m = self.settings.wake_radius_m;
+        let wake_m = self.wake_radius_m;
         let Some(mut player_grid) = SpatialGrid::new(wake_m) else {
             return Vec::new();
         };
         for player in players {
             player_grid.insert(player.entity, player.position);
         }
-        let mut run: BTreeSet<u32> = self.awake.clone();
+        self.respawn_due(now_ms);
+        self.wake_near(players);
+        let mut chasers: Vec<u32> = Vec::new();
+        let steps: Vec<Step> = {
+            let mut trees: Vec<(u32, &mut Mob)> = Vec::new();
+            for (index, mob) in &mut self.live {
+                if !mob.awake || mob.dead_since_ms.is_some() || mob.health.is_dead() {
+                    continue;
+                }
+                if self
+                    .personal
+                    .get(index)
+                    .is_some_and(|personal| now_ms < personal.frozen_until_ms)
+                {
+                    if let Mind::Chase(brain) = &mut mob.mind {
+                        // A frozen mob's step clock waits with it (live 2026-09-14: each sailor
+                        // jumped 5.5 m in one state after its alert, a second of run at once).
+                        brain.stood_until(now_ms);
+                    }
+                    continue;
+                }
+                match mob.mind {
+                    Mind::Tree(_) | Mind::Still => trees.push((*index, mob)),
+                    Mind::Chase(_) => chasers.push(*index),
+                }
+            }
+            self.brain_runs += u64::try_from(chasers.len()).unwrap_or(u64::MAX);
+            let view = TickView {
+                ai: &self.ai,
+                players: &player_grid,
+                personal: &self.personal,
+                ground,
+                wake_m,
+                now_ms,
+            };
+            let threads = threads.min(trees.len() / MIN_MOBS_PER_THREAD).max(1);
+            if threads == 1 {
+                trees
+                    .into_iter()
+                    .map(|(index, mob)| view.think(index, mob))
+                    .collect()
+            } else {
+                let chunk = trees.len().div_ceil(threads);
+                std::thread::scope(|scope| {
+                    let handles: Vec<_> = trees
+                        .chunks_mut(chunk)
+                        .map(|part| {
+                            let view = &view;
+                            scope.spawn(move || {
+                                part.iter_mut()
+                                    .map(|(index, mob)| view.think(*index, mob))
+                                    .collect::<Vec<Step>>()
+                            })
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .flat_map(|handle| {
+                            handle
+                                .join()
+                                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                        })
+                        .collect()
+                })
+            }
+        };
+        let mut intents = Vec::new();
+        let mut acquired = Vec::new();
+        for step in steps {
+            self.brain_runs += u64::from(step.ticked);
+            intents.extend(step.hits);
+            if let Some(target) = step.acquired {
+                acquired.push((step.index, target));
+            }
+            if step.sleeps {
+                self.sleep_if_alone(step.index, now_ms);
+            }
+        }
+        self.share_aggro(&acquired, now_ms);
+        for index in chasers {
+            intents.extend(self.chase(index, &player_grid, wake_m, now_ms));
+        }
+        intents
+    }
+
+    /// Respawns the dead world and GM mobs whose respawn time came.
+    fn respawn_due(&mut self, now_ms: u64) {
+        let due: Vec<u32> = self
+            .live
+            .iter()
+            .filter(|(index, mob)| {
+                !self.personal.contains_key(index)
+                    && mob.dead_since_ms.is_some_and(|since| {
+                        now_ms.saturating_sub(since) >= self.respawn_ms_of(**index)
+                    })
+            })
+            .map(|(index, _)| *index)
+            .collect();
+        for index in due {
+            let Some(spawn) = self.spawn_of(index).cloned() else {
+                continue;
+            };
+            if let Some(mut mob) = self.make(index, &spawn, None) {
+                mob.awake = self.awake.contains(&index);
+                self.live.insert(index, mob);
+                self.respawned.push(mob_entity(index));
+            }
+        }
+    }
+
+    /// The respawn time of spawn `index`: its design override's, else the sim's.
+    fn respawn_ms_of(&self, index: u32) -> u64 {
+        self.overrides
+            .get(index as usize)
+            .and_then(Option::as_ref)
+            .and_then(|overrides| overrides.respawn_ms)
+            .unwrap_or(self.respawn_ms)
+    }
+
+    /// Wakes the mobs near the players that moved far enough since their last scan.
+    fn wake_near(&mut self, players: &[Seen]) {
+        let wake_m = self.wake_radius_m;
         let mut scanned = HashMap::with_capacity(players.len());
         if let Some(spawn_grid) = &self.spawn_grid {
             for player in players {
@@ -696,110 +1098,263 @@ impl Mobs {
                 self.wake_scans += 1;
                 for (index, _) in spawn_grid.near(player.position) {
                     let near = self.live.get(&index).is_some_and(|mob| {
-                        mob.brain.position().horizontal_distance(player.position) <= wake_m
+                        mob.position.horizontal_distance(player.position) <= wake_m
                     });
-                    if near {
-                        run.insert(index);
+                    if near && let Some(mob) = self.live.get_mut(&index) {
+                        mob.awake = true;
+                        self.awake.insert(index);
                     }
                 }
             }
         }
         self.scanned = scanned;
-        let mut intents = Vec::new();
-        for index in run {
-            let Some(mob) = self.live.get_mut(&index) else {
+    }
+
+    /// Mob `index`, alone this tick (no player near, no target), falls asleep after the sleep
+    /// time since a player was last near it; personal, GM and patrolling mobs never sleep.
+    fn sleep_if_alone(&mut self, index: u32, now_ms: u64) {
+        let stays = self.personal.contains_key(&index)
+            || self.gm.contains_key(&index)
+            || self.patrols(index);
+        if stays {
+            return;
+        }
+        if let Some(mob) = self.live.get_mut(&index)
+            && now_ms.saturating_sub(mob.near_ms) >= self.sleep_after_ms
+        {
+            mob.awake = false;
+            self.awake.remove(&index);
+        }
+    }
+
+    /// The mobs that took a target this tick share it with the mobs of their slice's group aggro
+    /// (the slice's `m_groupAggroDistance` and `m_groupAggroShareCap`: the boar's 20 m and 5;
+    /// Inferred: awake tree mobs without a target within that distance take the same target, up
+    /// to the cap).
+    fn share_aggro(&mut self, acquired: &[(u32, u64)], now_ms: u64) {
+        if acquired.is_empty() {
+            return;
+        }
+        let stale = self
+            .aggro_grid
+            .as_ref()
+            .is_none_or(|(made_ms, _)| now_ms.saturating_sub(*made_ms) >= AGGRO_GRID_MS);
+        if stale {
+            let reach_m = self
+                .ai
+                .data()
+                .archetypes
+                .iter()
+                .filter_map(|arch| arch.group_aggro_distance)
+                .fold(0.0_f32, f32::max)
+                + AGGRO_GRID_DRIFT_M;
+            self.aggro_grid = SpatialGrid::new(reach_m).map(|mut grid| {
+                for index in &self.awake {
+                    if let Some(mob) = self.live.get(index) {
+                        grid.insert(*index, mob.position);
+                    }
+                }
+                (now_ms, grid)
+            });
+        }
+        let Some((_, grid)) = &self.aggro_grid else {
+            return;
+        };
+        for &(index, target) in acquired {
+            let Some((at, distance_m, cap)) = self.live.get(&index).and_then(|mob| {
+                let arch = self.ai.arch(mob.tree()?.archetype())?;
+                Some((
+                    mob.position,
+                    arch.group_aggro_distance?,
+                    arch.group_aggro_cap?,
+                ))
+            }) else {
                 continue;
             };
-            if self
-                .personal
-                .get(&index)
-                .is_some_and(|personal| now_ms < personal.frozen_until_ms)
-            {
-                // A frozen mob's step clock waits with it (live 2026-09-14: each sailor jumped
-                // 5.5 m in one state after its alert, a second of run at once).
-                mob.brain.stood_until(now_ms);
-                continue;
-            }
-            let at = mob.brain.position();
-            let personal = self.personal.get(&index);
-            let seen: Vec<Seen> = player_grid
+            let mut near: Vec<(u32, f32)> = grid
                 .near(at)
-                .filter(|(_, position)| position.horizontal_distance(at) <= wake_m)
-                .filter(|(entity, _)| personal.is_none_or(|mob| !mob.held && mob.owner == *entity))
-                .map(|(entity, position)| Seen { entity, position })
+                .filter(|(other, _)| *other != index)
+                .filter_map(|(other, _)| {
+                    let mob = self.live.get(&other).filter(|mob| mob.awake)?;
+                    let distance = mob.position.horizontal_distance(at);
+                    (distance <= distance_m).then_some((other, distance))
+                })
                 .collect();
-            self.brain_runs += 1;
-            let designed = self.ai.get(index as usize).and_then(Option::as_ref);
-            let base = designed.map_or(self.settings, |ai| ai.settings);
-            let settings = personal
-                .and_then(|personal| Some((personal.swing_gap_ms, personal.pace?)))
-                .map_or(base, |(swing_gap_ms, pace)| BrainSettings {
-                    mob_attack_interval_ms: swing_gap_ms,
-                    mob_speed_mps: pace.speed_mps,
-                    gait: pace.gait,
-                    ..self.settings
-                });
-            // A patrolling mob walks away from its spawn, where the wake scan looks: it stays
-            // awake.
-            let patrols = designed.is_some_and(|ai| ai.behaviour == Behaviour::Patrol);
-            let is_personal = personal.is_some();
-            let paced = personal.is_some_and(|personal| personal.pace.is_some());
-            let action = brain_step(&mut mob.brain, &seen, now_ms, &settings, &mut self.dice);
-            match action {
-                // A paced mob keeps the floor height of its spawn: the retail tutorial creatures
-                // stayed on one floor per fight, a ruin or a deck that the height map does not
-                // hold (height note: 0.3 to 6 m above it, Thorpe's arena with no terrain).
-                BrainAction::MoveTo(to) if !paced => {
-                    mob.brain.set_height(height_after_move(ground, to));
+            // The nearest first.
+            near.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+            let mut shared = 0;
+            for (other, _) in near {
+                if shared >= cap {
+                    break;
                 }
-                BrainAction::MoveTo(_) => {}
-                BrainAction::Attack(target) => {
-                    let target_at = seen
-                        .iter()
-                        .find(|player| player.entity == target)
-                        .map_or(at, |player| player.position);
-                    let mut mob_move = None;
-                    if let Some(personal) = self.personal.get_mut(&index)
-                        && let Some(pace) = personal.pace
-                    {
-                        let moves = pace
-                            .phase_two
-                            .filter(|_| personal.in_phase_two)
-                            .map_or(pace.moves, |phase| phase.moves);
-                        mob_move = pick(moves, &mut self.dice);
-                        let (shortest, longest) = pace.swing_gap_ms;
-                        let spread =
-                            u32::try_from(longest.saturating_sub(shortest)).unwrap_or(u32::MAX);
-                        let length_ms = mob_move.map_or(0, |picked: MobMove| picked.length_ms);
-                        personal.swing_gap_ms = length_ms
-                            + shortest
-                            + u64::from(self.dice.below(spread.saturating_add(1)));
-                    }
-                    intents.push(MobAttackIntent {
-                        mob: mob_entity(index),
-                        target,
-                        target_at,
-                        mob_move,
-                    });
+                if let Some(Mob {
+                    mind: Mind::Tree(mind),
+                    ..
+                }) = self.live.get_mut(&other)
+                    && mind.target().is_none()
+                {
+                    mind.share_target(target);
+                    shared += 1;
                 }
-                BrainAction::Respawned | BrainAction::Home => mob.health.refill(),
-                BrainAction::None => {}
-            }
-            let stays_awake = is_personal || patrols || self.gm.contains_key(&index);
-            if mob.brain.state() == MobState::Asleep && !stays_awake {
-                self.awake.remove(&index);
-            } else {
-                self.awake.insert(index);
             }
         }
-        intents
+    }
+
+    /// One step of the paced mob `index`: its swings.
+    fn chase(
+        &mut self,
+        index: u32,
+        players: &SpatialGrid<u64>,
+        wake_m: f32,
+        now_ms: u64,
+    ) -> Option<MobAttackIntent> {
+        let personal = self.personal.get(&index)?;
+        let pace = personal.pace?;
+        let settings = ChaseSettings {
+            leash_radius_m: personal.leash_m,
+            attack_interval_ms: personal.swing_gap_ms,
+            run_speed_mps: pace.speed_mps,
+            gait: pace.gait,
+        };
+        let mob = self.live.get_mut(&index)?;
+        let at = mob.position;
+        let seen: Vec<Seen> = players
+            .near(at)
+            .filter(|(_, position)| position.horizontal_distance(at) <= wake_m)
+            .filter(|(entity, _)| !personal.held && personal.owner == *entity)
+            .map(|(entity, position)| Seen { entity, position })
+            .collect();
+        let Mind::Chase(brain) = &mut mob.mind else {
+            return None;
+        };
+        match brain.step(at, &seen, now_ms, &settings) {
+            // A paced mob keeps the floor height of its spawn: the retail tutorial creatures
+            // stayed on one floor per fight, a ruin or a deck that the height map does not
+            // hold (height note: 0.3 to 6 m above it, Thorpe's arena with no terrain).
+            BrainAction::MoveTo(to) => mob.position = Position { z: at.z, ..to },
+            BrainAction::Home => {
+                mob.position = position_of(&personal.spawn);
+                mob.health.refill();
+            }
+            BrainAction::None => {}
+            BrainAction::Attack(target) => {
+                let target_at = seen
+                    .iter()
+                    .find(|player| player.entity == target)
+                    .map_or(at, |player| player.position);
+                let in_phase_two = personal.in_phase_two;
+                let moves = pace
+                    .phase_two
+                    .filter(|_| in_phase_two)
+                    .map_or(pace.moves, |phase| phase.moves);
+                let mob_move = pick(moves, &mut self.dice);
+                let (shortest, longest) = pace.swing_gap_ms;
+                let spread = u32::try_from(longest.saturating_sub(shortest)).unwrap_or(u32::MAX);
+                let length_ms = mob_move.map_or(0, |picked: MobMove| picked.length_ms);
+                let gap =
+                    length_ms + shortest + u64::from(self.dice.below(spread.saturating_add(1)));
+                if let Some(personal) = self.personal.get_mut(&index) {
+                    personal.swing_gap_ms = gap;
+                }
+                return Some(MobAttackIntent {
+                    mob: mob_entity(index),
+                    target,
+                    target_at,
+                    mob_move,
+                    strike: None,
+                });
+            }
+        }
+        None
+    }
+
+    /// `attacker` at `from` hit mob `entity` with `threat` at `now_ms`: whether the hit counts
+    /// (a mob in a leash reset or dead takes none). It wakes.
+    pub fn hurt(
+        &mut self,
+        entity: u64,
+        attacker: u64,
+        from: Position,
+        threat: u64,
+        now_ms: u64,
+    ) -> bool {
+        let Some(index) = spawn_index(entity) else {
+            return false;
+        };
+        let ai = Arc::clone(&self.ai);
+        let Some(mob) = self.live.get_mut(&index) else {
+            return false;
+        };
+        if mob.dead_since_ms.is_some() || mob.health.is_dead() {
+            return false;
+        }
+        let counts = match &mut mob.mind {
+            Mind::Tree(mind) => mind.hurt(&ai, attacker, from, threat),
+            Mind::Chase(brain) => brain.hurt(attacker, threat, now_ms),
+            Mind::Still => true,
+        };
+        if counts {
+            mob.awake = true;
+            self.awake.insert(index);
+        }
+        counts
+    }
+
+    /// Mob `entity` died at `now_ms`: it waits for its respawn (a personal mob waits for its
+    /// encounter to remove it).
+    pub fn died(&mut self, entity: u64, now_ms: u64) {
+        let Some(index) = spawn_index(entity) else {
+            return;
+        };
+        let ai = Arc::clone(&self.ai);
+        if let Some(mob) = self.live.get_mut(&index) {
+            mob.dead_since_ms = Some(now_ms);
+            let at = mob.position;
+            match &mut mob.mind {
+                Mind::Tree(mind) => mind.died(&ai, at, now_ms),
+                Mind::Chase(brain) => brain.died(),
+                Mind::Still => {}
+            }
+        }
+    }
+
+    /// A hit reaction of `length_ms` of mob `entity` starts at `now_ms`.
+    pub fn react(&mut self, entity: u64, now_ms: u64, length_ms: u64) {
+        let ai = Arc::clone(&self.ai);
+        if let Some(mob) = spawn_index(entity).and_then(|index| self.live.get_mut(&index))
+            && let Mind::Tree(mind) = &mut mob.mind
+        {
+            mind.react(&ai, mob.position, now_ms, length_ms);
+        }
+    }
+
+    /// Mob `entity` takes `target` as its target when it has none (the tutorial's scripted
+    /// pick: retail Thorpe fought the player from his spawn, 26.5 m away).
+    pub fn provoke(&mut self, entity: u64, target: u64, now_ms: u64) {
+        let ai = Arc::clone(&self.ai);
+        if let Some(mob) = spawn_index(entity).and_then(|index| self.live.get_mut(&index)) {
+            let at = mob.position;
+            match &mut mob.mind {
+                Mind::Tree(mind) => {
+                    mind.hurt(&ai, target, at, 0);
+                }
+                Mind::Chase(brain) => {
+                    brain.hurt(target, 0, now_ms);
+                }
+                Mind::Still => {}
+            }
+        }
     }
 
     /// Every mob forgets `player` (it left, died or handed off).
     pub fn forget(&mut self, player: u64) {
         for index in &self.awake {
             if let Some(mob) = self.live.get_mut(index) {
-                forget(&mut mob.brain, player);
+                match &mut mob.mind {
+                    Mind::Tree(mind) => mind.forget(player),
+                    Mind::Chase(brain) => brain.forget(player),
+                    Mind::Still => {}
+                }
             }
         }
     }
@@ -812,11 +1367,11 @@ impl Mobs {
             let spawn = self.spawn_of(*index)?;
             Some((
                 mob_entity(*index),
-                mob.brain.position(),
+                mob.position,
                 MobGhost {
                     health: mob.health.current(),
                     max_health: mob.health.max(),
-                    returning: mob.brain.state() == MobState::Return,
+                    returning: mob.returning(&self.ai),
                     vitals_id: spawn.vitals_id,
                     category_id: spawn.category_id,
                     level: spawn.level,
@@ -830,9 +1385,22 @@ impl Mobs {
         self.live.get_mut(&spawn_index(entity)?)
     }
 
+    /// The mob with entity number `entity`.
+    pub fn get(&self, entity: u64) -> Option<&Mob> {
+        self.live.get(&spawn_index(entity)?)
+    }
+
     /// Marks the mob `entity` awake (a hit woke it).
     pub fn wake(&mut self, entity: u64) {
-        if let Some(index) = spawn_index(entity).filter(|index| self.live.contains_key(index)) {
+        if let Some(index) = spawn_index(entity) {
+            self.wake_index(index);
+        }
+    }
+
+    /// Mob `index` thinks from now on, when it lives.
+    fn wake_index(&mut self, index: u32) {
+        if let Some(mob) = self.live.get_mut(&index) {
+            mob.awake = true;
             self.awake.insert(index);
         }
     }
@@ -854,13 +1422,13 @@ impl Mobs {
         let mobs = self
             .awake_mobs()
             .map(|(index, mob)| {
-                tally(&mut counts, mob.brain.state());
-                let at = mob.brain.position();
+                let state = mob.state(&self.ai);
+                tally(&mut counts, state);
                 SnapMob {
                     entity: mob_entity(index),
-                    x: at.x,
-                    y: at.y,
-                    state: state_index(mob.brain.state()),
+                    x: mob.position.x,
+                    y: mob.position.y,
+                    state: state_index(state),
                     health: mob.health.current(),
                     max_health: mob.health.max(),
                 }
@@ -874,7 +1442,7 @@ impl Mobs {
     pub fn counts(&self) -> [(MobState, usize); MobState::ALL.len()] {
         let mut counts = self.asleep_counts();
         for (_, mob) in self.awake_mobs() {
-            tally(&mut counts, mob.brain.state());
+            tally(&mut counts, mob.state(&self.ai));
         }
         counts
     }
@@ -891,7 +1459,7 @@ impl Mobs {
             .filter_map(|index| self.live.get(index).map(|mob| (*index, mob)))
     }
 
-    /// Brain steps run since the start.
+    /// Tree runs and paced steps since the start.
     pub const fn brain_runs(&self) -> u64 {
         self.brain_runs
     }
@@ -902,7 +1470,6 @@ impl Mobs {
     }
 }
 
-/// The position of `state` in [`MobState::ALL`].
 /// Counts one awake mob in `state`; asleep mobs are counted as the mobs that are not awake.
 fn tally(counts: &mut [(MobState, usize); MobState::ALL.len()], state: MobState) {
     if state == MobState::Asleep {
@@ -913,6 +1480,7 @@ fn tally(counts: &mut [(MobState, usize); MobState::ALL.len()], state: MobState)
     }
 }
 
+/// The position of `state` in [`MobState::ALL`].
 fn state_index(state: MobState) -> u8 {
     MobState::ALL
         .iter()
@@ -923,22 +1491,35 @@ fn state_index(state: MobState) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::collections::BTreeMap;
     use std::time::{Duration, Instant};
 
     use nw_formats::objectstream::lowercase_crc32;
-    use nw_sim_core::{Ground, MobState, hurt};
+    use nw_sim_core::{Ground, MobState};
+    use nw_world::WorldFile;
+    use nw_world::records::{AiBehaviour, AiProfile, SpawnAi as DesignSpawn};
 
     use super::*;
     use crate::combat::test_support::{TEST_LEVEL, TEST_MOB};
     use crate::combat::tests::test_combat;
+    use crate::mob_ai::resolve_ai;
+    use crate::mob_ai::test_support::{
+        TEST_ATTACK_S, TEST_COOLDOWN_S, TEST_GROUP_AGGRO_M, TEST_HIT_S, TEST_LEASH_M, TEST_MOB_ROW,
+        TEST_MOB_TABLE, TEST_REACH_M, TEST_SIGHT_M,
+    };
 
-    const HEIGHT: f32 = 37.5;
-    const PLAYER: u64 = 3;
-    const TICK_MS: u64 = 33;
+    pub(super) const HEIGHT: f32 = 37.5;
+    pub(super) const PLAYER: u64 = 3;
+    pub(super) const TICK_MS: u64 = 33;
     const FAR_M: f32 = 5000.0;
+    const MS_PER_S: f32 = 1000.0;
+    pub(super) const SPAWN_X: f32 = 100.0;
+    pub(super) const ROW_Y: f32 = 1000.0;
+    /// The test archetype's run: `RunToTarget` at most 7 m/s (the boar's numbers).
+    const RUN_MAX_MPS: f32 = 7.0;
+    const NEAR_ZERO_M: f32 = 0.05;
 
-    struct Flat;
+    pub(super) struct Flat;
 
     impl Ground for Flat {
         fn height_at(&self, _: f32, _: f32) -> Option<f32> {
@@ -946,13 +1527,77 @@ mod tests {
         }
     }
 
-    fn spawn_at(x: f32, id: &str, level: u32) -> VitalsSpawn {
+    pub(super) fn spawn_at(x: f32, id: &str, level: u32) -> VitalsSpawn {
         VitalsSpawn {
             vitals_id: lowercase_crc32(id),
             level,
-            position: [x, 1000.0, HEIGHT],
+            position: [x, ROW_Y, HEIGHT],
             ..VitalsSpawn::default()
         }
+    }
+
+    fn mobs(spawns: Vec<VitalsSpawn>) -> Mobs {
+        Mobs::new(spawns.into(), &test_combat())
+    }
+
+    pub(super) fn player_at(x: f32) -> Seen {
+        Seen {
+            entity: PLAYER,
+            position: Position {
+                x,
+                y: ROW_Y,
+                z: HEIGHT,
+            },
+        }
+    }
+
+    pub(super) fn every(_: Position) -> bool {
+        true
+    }
+
+    fn tick(mobs: &mut Mobs, players: &[Seen], now: u64) -> Vec<MobAttackIntent> {
+        mobs.tick(players, now, &Flat, 1)
+    }
+
+    fn ms(seconds: f32) -> u64 {
+        (seconds * MS_PER_S).round() as u64
+    }
+
+    pub(super) fn at(mobs: &Mobs, index: u32) -> Position {
+        mobs.get(mob_entity(index)).expect("mob").position
+    }
+
+    /// Ticks from `from` to `to` with `players`; the hits.
+    fn run(mobs: &mut Mobs, players: &[Seen], from: u64, to: u64) -> Vec<(u64, MobAttackIntent)> {
+        let mut hits = Vec::new();
+        for now in (from..=to).step_by(TICK_MS as usize) {
+            hits.extend(tick(mobs, players, now).into_iter().map(|hit| (now, hit)));
+        }
+        hits
+    }
+
+    /// Mobs of `spawns` whose spawns have the design profiles `profiles` (by spawn, in order).
+    fn designed(spawns: Vec<VitalsSpawn>, profiles: Vec<Option<AiProfile>>) -> Mobs {
+        let world = WorldFile {
+            ai_profiles: profiles
+                .iter()
+                .enumerate()
+                .filter_map(|(index, profile)| Some((index.to_string(), profile.clone()?)))
+                .collect::<BTreeMap<_, _>>(),
+            vitals_ai: profiles
+                .iter()
+                .enumerate()
+                .map(|(index, profile)| DesignSpawn {
+                    profile: profile.as_ref().map(|_| index.to_string()),
+                    path: None,
+                })
+                .collect(),
+            ..WorldFile::default()
+        };
+        let mut mobs = mobs(spawns);
+        mobs.set_ai(resolve_ai(&world, mobs.ai()));
+        mobs.set_cells(every);
+        mobs
     }
 
     #[test]
@@ -970,23 +1615,338 @@ mod tests {
         );
     }
 
-    fn mobs(spawns: Vec<VitalsSpawn>) -> Mobs {
-        Mobs::new(spawns.into(), &test_combat())
+    #[test]
+    fn a_tree_mob_strikes_a_player_in_reach_with_its_window_and_cooldown() {
+        let mut mobs = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
+        mobs.set_cells(every);
+        let player = player_at(SPAWN_X + TEST_REACH_M - 1.0);
+        let strikes = run(&mut mobs, &[player], 0, 6_000);
+        assert!(strikes.len() >= 2, "{strikes:?}");
+        let (first_ms, first) = &strikes[0];
+        assert_eq!(first.target, PLAYER);
+        assert_eq!(first.mob_move, None);
+        let strike = first.strike.as_ref().expect("a damage window");
+        assert_eq!(
+            (strike.table.as_str(), strike.row.as_str()),
+            (TEST_MOB_TABLE, TEST_MOB_ROW)
+        );
+        assert!(*first_ms >= ms(TEST_HIT_S) && *first_ms <= ms(TEST_HIT_S) + TICK_MS);
+        let gap = strikes[1].0 - first_ms;
+        let expected = ms(TEST_ATTACK_S + TEST_COOLDOWN_S);
+        assert!(
+            gap >= expected && gap <= expected + 2 * TICK_MS,
+            "its attack, then its cooldown: {gap} ms"
+        );
+        assert_eq!(
+            mobs.state(mob_entity(0)),
+            Some(MobState::Chase),
+            "between swings"
+        );
     }
 
-    fn player_at(x: f32) -> Seen {
-        Seen {
-            entity: PLAYER,
-            position: Position {
-                x,
-                y: 1000.0,
-                z: HEIGHT,
-            },
+    #[test]
+    fn a_tree_mob_runs_on_the_ground_to_its_target_at_its_config_speed() {
+        const START_M: f32 = 15.0;
+        let mut spawn = spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL);
+        spawn.position[2] = 0.0;
+        let mut mobs = mobs(vec![spawn]);
+        mobs.set_cells(every);
+        let player = player_at(SPAWN_X + START_M);
+        let mut last = at(&mobs, 0);
+        let mut top_mps: f32 = 0.0;
+        let mut struck = None;
+        for now in (0..10_000).step_by(TICK_MS as usize) {
+            if !tick(&mut mobs, &[player], now).is_empty() {
+                struck = Some(now);
+                break;
+            }
+            let here = at(&mobs, 0);
+            top_mps = top_mps.max(here.horizontal_distance(last) * MS_PER_S / TICK_MS as f32);
+            last = here;
         }
+        assert!(struck.is_some(), "it reached and struck");
+        assert!(
+            top_mps <= RUN_MAX_MPS + NEAR_ZERO_M && top_mps > RUN_MAX_MPS / 2.0,
+            "{top_mps}"
+        );
+        assert_eq!(at(&mobs, 0).z, HEIGHT, "it stands on the ground");
+        assert!(at(&mobs, 0).horizontal_distance(player.position) <= TEST_REACH_M);
     }
 
-    fn every(_: Position) -> bool {
-        true
+    #[test]
+    fn a_mob_on_a_deck_keeps_its_height() {
+        const DECK: f32 = 90.0;
+        let mut spawn = spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL);
+        spawn.position[2] = DECK;
+        let mut mobs = mobs(vec![spawn]);
+        mobs.set_cells(every);
+        let mut player = player_at(SPAWN_X + 10.0);
+        player.position.z = DECK;
+        run(&mut mobs, &[player], 0, 1_000);
+        assert!(at(&mobs, 0).x > SPAWN_X, "it ran");
+        assert_eq!(at(&mobs, 0).z, DECK, "the ground is far below the deck");
+    }
+
+    #[test]
+    fn a_tree_mob_past_its_leash_walks_home_untouchable_and_heals() {
+        let mut mobs = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
+        mobs.set_cells(every);
+        let entity = mob_entity(0);
+        let mob = mobs.get_mut(entity).expect("mob");
+        mob.health.take(mob.health.max() / 2);
+        mob.position.x += TEST_LEASH_M + 5.0;
+        let far = player_at(SPAWN_X + 2.0 * TEST_LEASH_M);
+        tick(&mut mobs, &[far], 0);
+        assert_eq!(mobs.state(entity), Some(MobState::Return));
+        let from = Position {
+            x: SPAWN_X,
+            y: ROW_Y,
+            z: HEIGHT,
+        };
+        assert!(
+            !mobs.hurt(entity, PLAYER, from, 1, TICK_MS),
+            "a reset takes no hit"
+        );
+        let mut now = TICK_MS;
+        while mobs.state(entity) == Some(MobState::Return) && now < 20_000 {
+            tick(&mut mobs, &[far], now);
+            now += TICK_MS;
+        }
+        assert!(
+            at(&mobs, 0).horizontal_distance(from) < 1.0,
+            "home: {:?}",
+            at(&mobs, 0)
+        );
+        let mob = mobs.get(entity).expect("mob");
+        assert_eq!(
+            mob.health.current(),
+            mob.health.max(),
+            "the reset healed it"
+        );
+        assert_eq!(mobs.state(entity), Some(MobState::Idle));
+    }
+
+    #[test]
+    fn a_tree_mob_without_a_target_stands_at_its_spawn() {
+        let mut mobs = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
+        mobs.set_cells(every);
+        let unseen = player_at(SPAWN_X + TEST_SIGHT_M + 5.0);
+        run(&mut mobs, &[unseen], 0, 30_000);
+        assert_eq!(at(&mobs, 0).x, SPAWN_X, "its tree does not wander");
+        assert_eq!(mobs.state(mob_entity(0)), Some(MobState::Idle));
+    }
+
+    #[test]
+    fn trees_think_at_the_retail_rates() {
+        const SECONDS: u64 = 3;
+        let rates = crate::mob_ai::RETAIL_AI_RATES;
+        // Standing without a target: one run per idle interval.
+        let mut idle = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
+        idle.set_cells(every);
+        run(&mut idle, &[player_at(SPAWN_X + 30.0)], 0, SECONDS * 1_000);
+        let expected = SECONDS * 1_000 / rates.idle_interval_ms;
+        assert!(
+            idle.brain_runs().abs_diff(expected) <= 1,
+            "{}",
+            idle.brain_runs()
+        );
+        // Fighting: every tick.
+        let mut fighting = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
+        fighting.set_cells(every);
+        run(
+            &mut fighting,
+            &[player_at(SPAWN_X + 2.0)],
+            0,
+            SECONDS * 1_000,
+        );
+        let ticks = SECONDS * 1_000 / TICK_MS;
+        assert!(
+            fighting.brain_runs() + 2 >= ticks,
+            "{}",
+            fighting.brain_runs()
+        );
+        assert_eq!(rates.interval_ms(crate::mob_ai::Activity::Moving, 10.0), 98);
+        assert_eq!(
+            rates.interval_ms(crate::mob_ai::Activity::Moving, 25.0),
+            218
+        );
+        assert_eq!(
+            rates.interval_ms(crate::mob_ai::Activity::Moving, 45.0),
+            333
+        );
+    }
+
+    #[test]
+    fn many_mobs_think_the_same_on_threads() {
+        const MOBS: u32 = 4 * MIN_MOBS_PER_THREAD as u32;
+        const THREADS: usize = 4;
+        const SPACING_M: f32 = 2.0;
+        let spawns: Vec<VitalsSpawn> = (0..MOBS)
+            .map(|index| spawn_at(SPAWN_X + index as f32 * SPACING_M, TEST_MOB, TEST_LEVEL))
+            .collect();
+        let player = player_at(SPAWN_X + 30.0);
+        let positions = |threads: usize| {
+            let mut mobs = mobs(spawns.clone());
+            mobs.set_cells(every);
+            let mut hits = 0;
+            for now in (0..2_000).step_by(TICK_MS as usize) {
+                hits += mobs.tick(&[player], now, &Flat, threads).len();
+            }
+            let places: Vec<(u32, u32)> = (0..MOBS)
+                .map(|index| {
+                    let at = at(&mobs, index);
+                    (at.x.to_bits(), at.y.to_bits())
+                })
+                .collect();
+            (places, hits)
+        };
+        let one = positions(1);
+        assert!(one.1 > 0, "the mobs near the player fought");
+        assert_eq!(positions(THREADS), one);
+    }
+
+    #[test]
+    fn a_mob_that_takes_a_target_shares_it_with_its_group() {
+        // The second mob is passive: it takes only shared targets and attackers.
+        let mut mobs = designed(
+            vec![
+                spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL),
+                spawn_at(SPAWN_X - TEST_GROUP_AGGRO_M / 2.0, TEST_MOB, TEST_LEVEL),
+                // In sight of the player, beyond the group distance of the first.
+                spawn_at(SPAWN_X + 2.0 * TEST_GROUP_AGGRO_M, TEST_MOB, TEST_LEVEL),
+            ],
+            vec![
+                None,
+                Some(AiProfile {
+                    behaviour: AiBehaviour::Idle,
+                    ..AiProfile::default()
+                }),
+                Some(AiProfile {
+                    behaviour: AiBehaviour::Idle,
+                    ..AiProfile::default()
+                }),
+            ],
+        );
+        let player = player_at(SPAWN_X + TEST_SIGHT_M / 2.0);
+        run(&mut mobs, &[player], 0, 3 * TICK_MS);
+        assert_eq!(
+            mobs.target(mob_entity(0)),
+            Some(PLAYER),
+            "it sees the player"
+        );
+        assert_eq!(mobs.target(mob_entity(1)), Some(PLAYER), "shared");
+        assert_eq!(
+            mobs.target(mob_entity(2)),
+            None,
+            "passive, and too far from the first"
+        );
+    }
+
+    #[test]
+    fn design_profiles_override_the_slice_values() {
+        const LEASH_M: f32 = 20.0;
+        const INTERVAL_MS: u64 = 5_000;
+        const SPEED_MPS: f32 = 3.0;
+        const SIGHT_M: f32 = 5.0;
+        let mut mobs = designed(
+            vec![
+                spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL),
+                spawn_at(SPAWN_X + FAR_M, TEST_MOB, TEST_LEVEL),
+                spawn_at(SPAWN_X + 2.0 * FAR_M, TEST_MOB, TEST_LEVEL),
+            ],
+            vec![
+                Some(AiProfile {
+                    behaviour: AiBehaviour::Guard,
+                    leash_radius_m: Some(LEASH_M),
+                    attack_interval_ms: Some(INTERVAL_MS),
+                    ..AiProfile::default()
+                }),
+                Some(AiProfile {
+                    speed_mps: Some(SPEED_MPS),
+                    sight_m: Some(SIGHT_M),
+                    ..AiProfile::default()
+                }),
+                Some(AiProfile {
+                    behaviour: AiBehaviour::Idle,
+                    ..AiProfile::default()
+                }),
+            ],
+        );
+        let ai = Arc::clone(&mobs.ai);
+        let data = ai.data();
+        let fact = |mobs: &Mobs, index: u32, key: &str| {
+            mobs.tree(mob_entity(index))
+                .and_then(|mind| mind.brain().fact(data.key(key)?))
+        };
+        assert_eq!(
+            fact(&mobs, 0, "CombatLeashDistance"),
+            Some(nw_ai::value::Value::Float(LEASH_M))
+        );
+        assert_eq!(
+            fact(&mobs, 0, "Enable_Wander"),
+            Some(nw_ai::value::Value::Bool(false))
+        );
+        assert_eq!(
+            fact(&mobs, 2, "Is_Passive"),
+            Some(nw_ai::value::Value::Bool(true))
+        );
+        // The guard strikes with its own cooldown.
+        let strikes = run(&mut mobs, &[player_at(SPAWN_X + 2.0)], 0, 12_000);
+        let first: Vec<u64> = strikes
+            .iter()
+            .filter(|(_, hit)| hit.mob == mob_entity(0))
+            .map(|(at, _)| *at)
+            .collect();
+        let gap = first[1] - first[0];
+        let expected = ms(TEST_ATTACK_S) + INTERVAL_MS;
+        assert!(gap >= expected && gap <= expected + 2 * TICK_MS, "{gap}");
+        // Its leash: past 20 m it resets.
+        let entity = mob_entity(0);
+        mobs.get_mut(entity).expect("mob").position.x += LEASH_M + 1.0;
+        tick(&mut mobs, &[], 12_033);
+        assert_eq!(mobs.state(entity), Some(MobState::Return));
+        // The second sees only 5 m and runs at most 3 m/s.
+        let second = SPAWN_X + FAR_M;
+        run(
+            &mut mobs,
+            &[player_at(second + SIGHT_M + 1.0)],
+            13_000,
+            15_000,
+        );
+        assert_eq!(mobs.target(mob_entity(1)), None, "beyond its sight");
+        let start = at(&mobs, 1);
+        run(
+            &mut mobs,
+            &[player_at(second + SIGHT_M - 1.0)],
+            15_033,
+            16_033,
+        );
+        let moved = at(&mobs, 1).horizontal_distance(start);
+        assert!(moved > 0.0 && moved <= SPEED_MPS + NEAR_ZERO_M, "{moved}");
+        // The third is passive: it fights only when hurt.
+        let third = SPAWN_X + 2.0 * FAR_M;
+        let near_third = player_at(third + 2.0);
+        assert!(run(&mut mobs, &[near_third], 16_066, 18_000).is_empty());
+        mobs.hurt(mob_entity(2), PLAYER, near_third.position, 1, 18_033);
+        assert!(!run(&mut mobs, &[near_third], 18_066, 20_000).is_empty());
+    }
+
+    #[test]
+    fn a_reaction_stops_the_swing_and_holds_the_tree() {
+        let mut mobs = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
+        mobs.set_cells(every);
+        let entity = mob_entity(0);
+        let player = player_at(SPAWN_X + 2.0);
+        tick(&mut mobs, &[player], 0);
+        assert!(mobs.tree(entity).is_some_and(TreeMind::attacking));
+        const REACTION_MS: u64 = 800;
+        mobs.react(entity, TICK_MS, REACTION_MS);
+        assert!(
+            !mobs.tree(entity).is_some_and(TreeMind::attacking),
+            "the swing is lost"
+        );
+        assert!(run(&mut mobs, &[player], 2 * TICK_MS, REACTION_MS).is_empty());
+        assert!(!run(&mut mobs, &[player], REACTION_MS + TICK_MS, 4_000).is_empty());
     }
 
     #[test]
@@ -999,9 +1959,9 @@ mod tests {
         assert_eq!(mobs.owner(entity), None, "every player sees it");
         assert_eq!(mobs.gm_mobs(), [entity]);
         assert!(mobs.health(entity).is_some());
-        mobs.tick(&[], 0, &Flat);
+        tick(&mut mobs, &[], 0);
         let runs = mobs.brain_runs;
-        mobs.tick(&[], LATER_MS, &Flat);
+        tick(&mut mobs, &[], LATER_MS);
         assert!(mobs.brain_runs > runs, "it stays awake with no player near");
         assert!(mobs.remove_gm(entity));
         assert!(!mobs.remove_gm(entity));
@@ -1018,96 +1978,23 @@ mod tests {
         );
     }
 
-    fn designed(behaviour: nw_sim_core::Behaviour, route: Option<nw_sim_core::Route>) -> MobAi {
-        MobAi {
-            behaviour,
-            settings: test_combat().brain,
-            sight_m: None,
-            route,
-        }
-    }
-
-    /// The position of mob `entity` after ticking from `from_ms` to `to_ms` with a player near
-    /// enough to wake the mobs and too far to be seen.
-    fn walk(mobs: &mut Mobs, entity: u64, from_ms: u64, to_ms: u64) -> Position {
-        let player = Seen {
-            entity: PLAYER,
-            position: Position {
-                x: 50.0,
-                y: 1060.0,
-                z: HEIGHT,
-            },
-        };
-        for now in (from_ms..=to_ms).step_by(TICK_MS as usize) {
-            mobs.tick(&[player], now, &Flat);
-        }
-        mobs.get_mut(entity).expect("mob").brain.position()
-    }
-
     #[test]
-    fn a_guard_spawn_stands_and_a_patrol_spawn_walks_its_route_awake() {
-        const ROUTE_END_X: f32 = 90.0;
-        let mut mobs = mobs(vec![
-            spawn_at(10.0, TEST_MOB, TEST_LEVEL),
-            spawn_at(10.0, TEST_MOB, TEST_LEVEL),
-        ]);
-        let route = nw_sim_core::Route {
-            points: vec![Position {
-                x: ROUTE_END_X,
-                y: 1000.0,
-                z: HEIGHT,
-            }],
-            waits_ms: Vec::new(),
-            mode: nw_sim_core::RouteMode::Once,
-        };
-        mobs.set_ai(Arc::from([
-            Some(designed(nw_sim_core::Behaviour::Guard, None)),
-            Some(designed(nw_sim_core::Behaviour::Patrol, Some(route))),
-        ]));
+    fn a_dead_world_mob_respawns_after_its_time() {
+        let mut mobs = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
         mobs.set_cells(every);
-        let guard = walk(&mut mobs, mob_entity(0), 0, 40_000);
-        assert!(
-            (guard.x - 10.0).abs() < 0.01,
-            "the guard stands at its spawn: {guard:?}"
-        );
-        let patrol = mobs.get_mut(mob_entity(1)).expect("mob").brain.position();
-        assert!(
-            (patrol.x - ROUTE_END_X).abs() < 0.1,
-            "the patrol reached its route end: {patrol:?}"
-        );
-        let later = walk(&mut mobs, mob_entity(1), 40_033, 200_000);
-        assert!(
-            (later.x - ROUTE_END_X).abs() < 0.1,
-            "it stays awake and at its end"
-        );
-    }
-
-    #[test]
-    fn a_patrol_spawn_walks_its_route_with_no_player_in_the_world() {
-        const ROUTE_END_X: f32 = 40.0;
-        let mut mobs = mobs(vec![spawn_at(10.0, TEST_MOB, TEST_LEVEL)]);
-        let route = nw_sim_core::Route {
-            points: vec![Position {
-                x: ROUTE_END_X,
-                y: 1000.0,
-                z: HEIGHT,
-            }],
-            waits_ms: Vec::new(),
-            mode: nw_sim_core::RouteMode::Once,
-        };
-        mobs.set_ai(Arc::from([Some(designed(
-            nw_sim_core::Behaviour::Patrol,
-            Some(route),
-        ))]));
-        mobs.set_cells(every);
-        for now in (0..=100_000).step_by(TICK_MS as usize) {
-            mobs.tick(&[], now, &Flat);
-        }
-        let patrol = mobs.get_mut(mob_entity(0)).expect("mob").brain.position();
-        assert!(
-            (patrol.x - ROUTE_END_X).abs() < 0.1,
-            "the patrol walked alone: {patrol:?}"
-        );
+        let entity = mob_entity(0);
+        let mob = mobs.get_mut(entity).expect("mob");
+        mob.health.take(mob.health.max());
+        mobs.died(entity, 0);
+        assert_eq!(mobs.state(entity), Some(MobState::Dead));
+        let respawn_ms = test_combat().mob_respawn_ms;
+        tick(&mut mobs, &[], respawn_ms - 1);
+        assert!(mobs.take_respawned().is_empty());
+        tick(&mut mobs, &[], respawn_ms);
+        assert_eq!(mobs.take_respawned(), [entity]);
+        assert_eq!(at(&mobs, 0).x, SPAWN_X);
+        let mob = mobs.get(entity).expect("mob");
+        assert_eq!(mob.health.current(), mob.health.max());
     }
 
     #[test]
@@ -1140,6 +2027,27 @@ mod tests {
     }
 
     #[test]
+    fn a_mob_without_a_tree_stands() {
+        const OTHER_MOB: &str = "Test_Treeless";
+        let mut combat = test_combat();
+        let mut source = crate::combat::test_support::test_source();
+        source
+            .base_types
+            .push((OTHER_MOB.to_owned(), nw_content::combat::MobType::PLAIN));
+        combat.data = Arc::new(
+            CombatData::build(source, &nw_content::combat::CombatRows::default()).expect("rows"),
+        );
+        let mut mobs = Mobs::new(
+            vec![spawn_at(SPAWN_X, OTHER_MOB, TEST_LEVEL)].into(),
+            &combat,
+        );
+        mobs.set_cells(every);
+        assert!(mobs.tree(mob_entity(0)).is_none(), "no slice look: no tree");
+        assert!(run(&mut mobs, &[player_at(SPAWN_X + 1.0)], 0, 5_000).is_empty());
+        assert_eq!(at(&mobs, 0).x, SPAWN_X);
+    }
+
+    #[test]
     fn mob_numbers_hold_the_spawn_index() {
         assert_eq!(mob_entity(5), MOB_ENTITY_BASE + FIRST_MOB_OFFSET + 5);
         // No mob number has its low 32 bits all zero (the client does not show such a mob).
@@ -1161,24 +2069,38 @@ mod tests {
     }
 
     #[test]
-    fn only_awake_mobs_run_their_brain() {
+    fn only_awake_mobs_think() {
         let mut mobs = mobs(vec![
             spawn_at(100.0, TEST_MOB, TEST_LEVEL),
             spawn_at(100.0 + FAR_M, TEST_MOB, TEST_LEVEL),
             spawn_at(100.0 + 2.0 * FAR_M, TEST_MOB, TEST_LEVEL),
         ]);
         mobs.set_cells(every);
-        mobs.tick(&[], 0, &Flat);
-        assert_eq!(mobs.brain_runs(), 0, "no player, no brain");
-        mobs.tick(&[player_at(150.0)], TICK_MS, &Flat);
+        tick(&mut mobs, &[], 0);
+        assert_eq!(mobs.brain_runs(), 0, "no player, no thought");
+        tick(&mut mobs, &[player_at(150.0)], TICK_MS);
         assert_eq!(mobs.brain_runs(), 1, "only the mob near the player");
-        mobs.tick(&[player_at(FAR_M * 4.0)], 2 * TICK_MS, &Flat);
-        assert_eq!(mobs.brain_runs(), 2, "the awake mob runs until it sleeps");
+        let sleep_ms = test_combat().sleep_after_ms;
+        run(&mut mobs, &[player_at(FAR_M * 4.0)], 2 * TICK_MS, sleep_ms);
+        assert_eq!(
+            mobs.state(mob_entity(0)),
+            Some(MobState::Idle),
+            "awake until its sleep time"
+        );
+        // It falls asleep at its next tree tick after the sleep time.
+        let next_tick_ms = sleep_ms + crate::mob_ai::RETAIL_AI_RATES.idle_interval_ms;
+        run(
+            &mut mobs,
+            &[player_at(FAR_M * 4.0)],
+            sleep_ms + TICK_MS,
+            next_tick_ms + TICK_MS,
+        );
+        assert_eq!(mobs.state(mob_entity(0)), Some(MobState::Asleep));
         let awake = mobs
             .counts()
             .into_iter()
-            .find(|(state, _)| *state == MobState::Idle);
-        assert_eq!(awake, Some((MobState::Idle, 1)));
+            .find(|(state, _)| *state == MobState::Asleep);
+        assert_eq!(awake, Some((MobState::Asleep, 3)));
     }
 
     #[test]
@@ -1189,7 +2111,7 @@ mod tests {
             spawn_at(100.0 + 2.0 * FAR_M, TEST_MOB, TEST_LEVEL),
         ]);
         mobs.set_cells(every);
-        mobs.tick(&[player_at(150.0)], TICK_MS, &Flat);
+        tick(&mut mobs, &[player_at(150.0)], TICK_MS);
         let (awake, counts) = mobs.snapshot();
         assert_eq!(
             awake.iter().map(|mob| mob.entity).collect::<Vec<_>>(),
@@ -1218,7 +2140,7 @@ mod tests {
             .collect();
         let mut mobs = mobs(spawns);
         mobs.set_cells(every);
-        mobs.tick(&[player_at(150.0)], TICK_MS, &Flat);
+        mobs.tick(&[player_at(150.0)], TICK_MS, &Flat, 1);
         assert_eq!(
             mobs.snapshot().0.len(),
             AWAKE as usize,
@@ -1234,50 +2156,7 @@ mod tests {
     }
 
     #[test]
-    fn mobs_walk_on_the_ground() {
-        let mut spawn = spawn_at(100.0, TEST_MOB, TEST_LEVEL);
-        spawn.position[2] = 0.0;
-        let mut mobs = mobs(vec![spawn]);
-        mobs.set_cells(every);
-        for tick in 0..10 {
-            mobs.tick(&[player_at(110.0)], tick * TICK_MS, &Flat);
-        }
-        let mob = mobs.get_mut(mob_entity(0)).expect("mob");
-        assert_eq!(mob.brain.state(), MobState::Chase);
-        assert_eq!(mob.brain.position().z, HEIGHT);
-    }
-
-    #[test]
-    fn a_mob_on_a_deck_keeps_its_height() {
-        const DECK: f32 = 90.0;
-        let mut spawn = spawn_at(100.0, TEST_MOB, TEST_LEVEL);
-        spawn.position[2] = DECK;
-        let mut mobs = mobs(vec![spawn]);
-        mobs.set_cells(every);
-        for tick in 0..10 {
-            mobs.tick(&[player_at(110.0)], tick * TICK_MS, &Flat);
-        }
-        let mob = mobs.get_mut(mob_entity(0)).expect("mob");
-        assert_eq!(mob.brain.state(), MobState::Chase);
-        assert_eq!(
-            mob.brain.position().z,
-            DECK,
-            "the ground is far below the deck"
-        );
-        let near = Position {
-            x: 0.0,
-            y: 0.0,
-            z: HEIGHT + MAX_STEP_DOWN_M,
-        };
-        assert_eq!(
-            height_after_move(&Flat, near),
-            HEIGHT,
-            "a step down onto the ground"
-        );
-    }
-
-    #[test]
-    fn a_mob_with_moves_swings_them_and_waits_for_their_end() {
+    fn a_paced_mob_with_moves_swings_them_and_waits_for_their_end() {
         const COOLDOWN_MS: u64 = 1_000;
         const FIRST: MobMove = MobMove {
             fragment: MoveFragment {
@@ -1287,7 +2166,6 @@ mod tests {
             },
             length_ms: 2_000,
             hits: &[],
-            tag: 5,
         };
         const SECOND: MobMove = MobMove {
             length_ms: 500,
@@ -1300,10 +2178,9 @@ mod tests {
             swing_gap_ms: (COOLDOWN_MS, COOLDOWN_MS),
             speed_mps: 5.5,
             hit_delay_ms: 0,
-            block_stamina: DEFAULT_BLOCK_STAMINA,
-            gait: Gait::uniform(3.0, 5.5),
+            attack: TEST_ATTACK,
+            gait: GAIT,
             sight_m: 20.0,
-            hit_tag: DEFAULT_HIT_TAG,
             hit_scale: 1.0,
             capsule: DEFAULT_MOB_CAPSULE,
             reach: None,
@@ -1311,7 +2188,6 @@ mod tests {
             phase_two: Some(PhaseTwo {
                 moves: &SECOND_MOVES,
                 damage_mult: 2.2,
-                fire_tag: 9,
             }),
         };
         const START: u64 = 1_000;
@@ -1329,7 +2205,7 @@ mod tests {
         let mut swings = Vec::new();
         let mut now = START;
         while swings.len() < 2 {
-            for intent in mobs.tick(&[player_at(101.0)], now, &Flat) {
+            for intent in tick(&mut mobs, &[player_at(101.0)], now) {
                 swings.push((now, intent.mob_move));
             }
             now += TICK_MS;
@@ -1340,11 +2216,24 @@ mod tests {
         mobs.enter_phase_two(boss);
         assert!(mobs.phase_two(boss).is_some());
         let next = (0..)
-            .map(|tick| now + tick * TICK_MS)
-            .find_map(|at| mobs.tick(&[player_at(101.0)], at, &Flat).first().copied())
+            .map(|tick_number| now + tick_number * TICK_MS)
+            .find_map(|at| tick(&mut mobs, &[player_at(101.0)], at).first().cloned())
             .expect("a swing");
         assert_eq!(next.mob_move, Some(SECOND));
     }
+
+    /// The test paces' attack.
+    const TEST_ATTACK: PaceAttack = PaceAttack {
+        table: "TestTable",
+        row: "Test_Attack",
+        weapon: "TestWeapon",
+    };
+    /// A pace's gait: swings at 3 m, else runs.
+    const GAIT: Gait = Gait {
+        swing_start_m: 3.0,
+        run_beyond_m: 3.0,
+        walk_speed_mps: 5.5,
+    };
 
     #[test]
     fn a_paced_mob_waits_one_interval_after_its_fight_starts_and_between_hits() {
@@ -1355,10 +2244,9 @@ mod tests {
             swing_gap_ms: (GAP_MS, GAP_MS + SPREAD_MS),
             speed_mps: 5.5,
             hit_delay_ms: 456,
-            block_stamina: DEFAULT_BLOCK_STAMINA,
-            gait: Gait::uniform(3.0, 5.5),
+            attack: TEST_ATTACK,
+            gait: GAIT,
             sight_m: 20.0,
-            hit_tag: DEFAULT_HIT_TAG,
             hit_scale: 1.0,
             capsule: DEFAULT_MOB_CAPSULE,
             reach: None,
@@ -1382,7 +2270,7 @@ mod tests {
         let mut hits = Vec::new();
         let mut now = START;
         while now < START + 3 * PACE.swing_gap_ms.0 {
-            if !mobs.tick(&[player_at(101.0)], now, &Flat).is_empty() {
+            if !tick(&mut mobs, &[player_at(101.0)], now).is_empty() {
                 hits.push(now);
             }
             now += TICK_MS;
@@ -1402,9 +2290,9 @@ mod tests {
             .expect("rows");
         let ticks_to_try = 3 * PACE.swing_gap_ms.0 / TICK_MS;
         let first = (0..ticks_to_try)
-            .map(|tick| now + tick * TICK_MS)
+            .map(|tick_number| now + tick_number * TICK_MS)
             .find(|at| {
-                mobs.tick(&[player_at(101.0)], *at, &Flat)
+                tick(&mut mobs, &[player_at(101.0)], *at)
                     .iter()
                     .any(|intent| intent.mob == at_once)
             })
@@ -1413,60 +2301,43 @@ mod tests {
     }
 
     #[test]
-    fn mob_attack_intents_name_the_target() {
-        let mut mobs = mobs(vec![spawn_at(100.0, TEST_MOB, TEST_LEVEL)]);
-        mobs.set_cells(every);
-        assert!(
-            mobs.tick(&[player_at(101.0)], 0, &Flat).is_empty(),
-            "it wakes first"
-        );
-        let intents = mobs.tick(&[player_at(101.0)], TICK_MS, &Flat);
-        assert_eq!(
-            intents,
-            vec![MobAttackIntent {
-                mob: mob_entity(0),
-                target: PLAYER,
-                target_at: player_at(101.0).position,
-                mob_move: None,
-            }]
-        );
-    }
-
-    #[test]
     fn a_player_that_stands_still_does_not_rescan() {
         let mut mobs = mobs(vec![spawn_at(100.0, TEST_MOB, TEST_LEVEL)]);
         mobs.set_cells(every);
-        mobs.tick(&[player_at(150.0)], 0, &Flat);
+        tick(&mut mobs, &[player_at(150.0)], 0);
         assert_eq!(mobs.wake_scans(), 1);
-        mobs.tick(&[player_at(150.0 + WAKE_RESCAN_M - 1.0)], TICK_MS, &Flat);
+        tick(
+            &mut mobs,
+            &[player_at(150.0 + WAKE_RESCAN_M - 1.0)],
+            TICK_MS,
+        );
         assert_eq!(mobs.wake_scans(), 1, "still near its last scan");
-        mobs.tick(
+        tick(
+            &mut mobs,
             &[player_at(150.0 + WAKE_RESCAN_M + 1.0)],
             2 * TICK_MS,
-            &Flat,
         );
         assert_eq!(mobs.wake_scans(), 2, "moved far enough");
         mobs.set_cells(|_| false);
         mobs.set_cells(every);
-        mobs.tick(
+        tick(
+            &mut mobs,
             &[player_at(150.0 + WAKE_RESCAN_M + 1.0)],
             3 * TICK_MS,
-            &Flat,
         );
         assert_eq!(mobs.wake_scans(), 3, "new mobs: everyone scans again");
     }
 
     #[test]
     fn a_mob_forgets_a_player_who_left() {
-        let mut mobs = mobs(vec![spawn_at(100.0, TEST_MOB, TEST_LEVEL)]);
+        let mut mobs = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
         mobs.set_cells(every);
-        mobs.tick(&[player_at(115.0)], 0, &Flat);
-        let mob = mobs.get_mut(mob_entity(0)).expect("mob");
-        assert!(hurt(&mut mob.brain, PLAYER, 1, 0));
+        let player = player_at(SPAWN_X + 2.0);
+        tick(&mut mobs, &[player], 0);
+        assert_eq!(mobs.target(mob_entity(0)), Some(PLAYER));
         mobs.forget(PLAYER);
-        mobs.tick(&[], TICK_MS, &Flat);
-        let mob = mobs.get_mut(mob_entity(0)).expect("mob");
-        assert_eq!(mob.brain.state(), MobState::Return);
+        tick(&mut mobs, &[], TICK_MS);
+        assert_eq!(mobs.target(mob_entity(0)), None);
     }
 
     #[test]
@@ -1476,4 +2347,301 @@ mod tests {
         assert_eq!(Arc::strong_count(&spawns), 2);
         assert_eq!(mobs.len(), 0, "nothing spawns before the cells are known");
     }
+}
+
+/// Mobs that run the game's own trees (the AI data file of `local-data/content`; run
+/// `content-tool ai-data` first).
+#[cfg(all(test, feature = "local-data"))]
+mod retail_tests {
+    use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
+
+    use nw_ai::AiData;
+    use nw_content::client_build::load_client_build;
+    use nw_content::combat::{CombatRows, MobType};
+    use nw_formats::objectstream::lowercase_crc32;
+
+    use super::tests::{Flat, HEIGHT, PLAYER, SPAWN_X, TICK_MS, at, every, player_at, spawn_at};
+    use super::*;
+    use crate::combat::test_support::{TEST_LEVEL, test_source};
+    use crate::combat::tests::test_combat;
+    use crate::mob_ai::{AiRates, LookAssets};
+
+    const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
+    /// The slice assets of the beach boar, the tutorial's swarmer and the risen (their
+    /// creature animation rows).
+    const BOAR: &str = "db96d765b50459d98c9e04adaa9c9485";
+    const SWARMER: &str = "e06d1bb7311f5acb9857cc20464ce4df";
+    const RISEN: &str = "a8b60bc7feaf574cbe7ae3c2d8a48dec";
+
+    fn asset(hex: &str) -> [u8; ASSET_ID_LEN] {
+        hex::decode(hex)
+            .expect("hex")
+            .try_into()
+            .expect("an asset id")
+    }
+
+    fn repo() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    }
+
+    fn retail_data() -> AiData {
+        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
+        AiData::load(&repo().join("local-data/content"), &build)
+            .expect("run `content-tool ai-data` first")
+    }
+
+    /// Mobs of the vitals ids `kinds`, each shown with its slice asset, on the retail trees.
+    fn retail_mobs(spawns: Vec<VitalsSpawn>, kinds: &[(&str, [u8; ASSET_ID_LEN])]) -> Mobs {
+        let looks: LookAssets = kinds
+            .iter()
+            .map(|(id, asset)| (lowercase_crc32(id), *asset))
+            .collect();
+        let mut source = test_source();
+        source.base_types.extend(
+            kinds
+                .iter()
+                .map(|(id, _)| ((*id).to_owned(), MobType::PLAIN)),
+        );
+        let mut combat = test_combat();
+        combat.data = Arc::new(CombatData::build(source, &CombatRows::default()).expect("rows"));
+        combat.ai = Arc::new(MobAi::new(retail_data(), AiRates::default(), looks));
+        let mut mobs = Mobs::new(spawns.into(), &combat);
+        mobs.set_cells(every);
+        mobs
+    }
+
+    /// The names of the fragments mob `entity` started, in order.
+    fn played(mobs: &Mobs, entity: u64, seen: &mut Option<u32>, out: &mut Vec<String>) {
+        if let Some((shown, _, fragment)) = mobs.shown(entity)
+            && *seen != Some(shown.serial)
+        {
+            *seen = Some(shown.serial);
+            out.push(fragment.to_owned());
+        }
+    }
+
+    #[test]
+    fn the_beach_boar_wanders_inside_its_wander_distance() {
+        const BOAR_ID: &str = "Retail_Boar";
+        // Slice `boar`: `WanderDistanceMax` 25 m; its `Wander` nav config arrives within 0.1 m.
+        const WANDER_MAX_M: f32 = 25.0;
+        const MINUTE_MS: u64 = 60_000;
+        let mut mobs = retail_mobs(
+            vec![spawn_at(SPAWN_X, BOAR_ID, TEST_LEVEL)],
+            &[(BOAR_ID, asset(BOAR))],
+        );
+        // Out of its ambient sight (12 m) and in the wake radius.
+        let watcher = player_at(SPAWN_X + 2.0 * WANDER_MAX_M);
+        let spawn = at(&mobs, 0);
+        let mut farthest: f32 = 0.0;
+        let mut fragments = Vec::new();
+        let mut serial = None;
+        for now in (0..MINUTE_MS).step_by(TICK_MS as usize) {
+            mobs.tick(&[watcher], now, &Flat, 1);
+            farthest = farthest.max(at(&mobs, 0).horizontal_distance(spawn));
+            played(&mobs, mob_entity(0), &mut serial, &mut fragments);
+        }
+        assert!(farthest > 1.0, "its tree wanders: {fragments:?}");
+        assert!(farthest <= WANDER_MAX_M + 1.0, "{farthest}");
+        assert!(
+            fragments.iter().any(|fragment| fragment == "Move"),
+            "{fragments:?}"
+        );
+        assert_eq!(
+            mobs.target(mob_entity(0)),
+            None,
+            "a passive boar takes no target by sight"
+        );
+        assert_eq!(at(&mobs, 0).z, HEIGHT);
+    }
+
+    #[test]
+    fn the_tutorials_swarmer_and_risen_fight_with_their_trees() {
+        const SWARMER_ID: &str = "Corruption_Entity_Crawler_FTUE";
+        const RISEN_ID: &str = "Corruption_Entity";
+        const FIGHT_MS: u64 = 20_000;
+        const OWNER: u64 = PLAYER;
+        let mut mobs = retail_mobs(
+            Vec::new(),
+            &[(SWARMER_ID, asset(SWARMER)), (RISEN_ID, asset(RISEN))],
+        );
+        let swarmer = mobs
+            .spawn_personal(
+                spawn_at(SPAWN_X, SWARMER_ID, TEST_LEVEL),
+                OWNER,
+                false,
+                None,
+                None,
+                0,
+            )
+            .expect("swarmer");
+        let risen = mobs
+            .spawn_personal(
+                spawn_at(SPAWN_X, RISEN_ID, TEST_LEVEL),
+                OWNER,
+                false,
+                None,
+                None,
+                0,
+            )
+            .expect("risen");
+        // In front of them: a spawn faces north (the world file keeps no spawn rotation), and
+        // their ambient vision cones are 65 and 75 degrees wide (slices).
+        let player = Seen {
+            entity: PLAYER,
+            position: Position {
+                y: super::tests::ROW_Y + 4.0,
+                ..player_at(SPAWN_X).position
+            },
+        };
+        let mut strikes: Vec<(u64, MobAttackIntent)> = Vec::new();
+        let mut fragments = [Vec::new(), Vec::new()];
+        let mut serials = [None, None];
+        for now in (0..FIGHT_MS).step_by(TICK_MS as usize) {
+            strikes.extend(
+                mobs.tick(&[player], now, &Flat, 1)
+                    .into_iter()
+                    .map(|hit| (now, hit)),
+            );
+            for (index, mob) in [swarmer, risen].into_iter().enumerate() {
+                played(&mobs, mob, &mut serials[index], &mut fragments[index]);
+            }
+        }
+        // Retail (trace finding b; capture fragments of these slices): the swarmer slashed with
+        // `Attack_Crawler_Slash_R`/`_L` from `CorruptedSwarmerDamageTable`, the risen swiped and
+        // smashed from `CorruptionEntityDamageTable`.
+        let tables = |mob: u64| -> Vec<(String, String)> {
+            strikes
+                .iter()
+                .filter(|(_, hit)| hit.mob == mob)
+                .filter_map(|(_, hit)| hit.strike.as_ref())
+                .map(|strike| (strike.table.clone(), strike.row.clone()))
+                .collect()
+        };
+        let swarmer_hits = tables(swarmer);
+        assert!(!swarmer_hits.is_empty(), "{:?}", fragments[0]);
+        assert!(
+            swarmer_hits
+                .iter()
+                .all(|(table, _)| table == "CorruptedSwarmerDamageTable")
+        );
+        assert!(
+            fragments[0]
+                .iter()
+                .any(|fragment| fragment.starts_with("Attack_Crawler_Slash")),
+            "{:?}",
+            fragments[0]
+        );
+        let risen_hits = tables(risen);
+        assert!(!risen_hits.is_empty(), "{:?}", fragments[1]);
+        assert!(
+            risen_hits
+                .iter()
+                .all(|(table, _)| table == "CorruptionEntityDamageTable")
+        );
+        assert!(
+            fragments[1]
+                .iter()
+                .any(|fragment| fragment.starts_with("Attack_Stretch")),
+            "{:?}",
+            fragments[1]
+        );
+    }
+
+    /// Run with `cargo test --release -p sim --features local-data hundred_thousand -- --ignored
+    /// --nocapture`. The layout: 100,000 mobs on a square of 10 km (32 m apart) and 10,000
+    /// players spread on it (100 m apart), as on the open world map (14 km): each player has a
+    /// few mobs in sight, every mob a few players in its wake radius. Every mob type with a tree
+    /// in Server.pak takes its turn.
+    #[test]
+    #[ignore = "release-mode timing of 100,000 mobs on the retail trees"]
+    fn a_hundred_thousand_mobs_think_within_the_tick_budget() {
+        /// The scale goal: 10,000 players and 100,000 mobs on one machine.
+        const MOBS: usize = 100_000;
+        const PLAYERS: usize = 10_000;
+        const MOB_SPACING_M: f32 = 32.0;
+        const PLAYER_SPACING_M: f32 = 100.0;
+        const MOB_ROW: usize = 316;
+        const PLAYER_ROW: usize = 100;
+        const TICKS: u64 = 300;
+        /// One server tick.
+        const BUDGET: Duration = Duration::from_millis(33);
+        let data = retail_data();
+        let with_tree: Vec<[u8; ASSET_ID_LEN]> = data
+            .creatures
+            .iter()
+            .filter(|creature| {
+                data.archetypes[creature.archetype as usize]
+                    .trees
+                    .iter()
+                    .any(|tree| tree.tree.is_some())
+            })
+            .map(|creature| creature.asset)
+            .collect();
+        let names: Vec<String> = (0..with_tree.len())
+            .map(|index| format!("Scale_Mob_{index}"))
+            .collect();
+        let kinds: Vec<(&str, [u8; ASSET_ID_LEN])> = names
+            .iter()
+            .map(String::as_str)
+            .zip(with_tree.iter().copied())
+            .collect();
+        let grid_at = |index: usize, row: usize, spacing: f32| {
+            (
+                SPAWN_X + (index % row) as f32 * spacing,
+                ROW_Y_OFFSET + (index / row) as f32 * spacing,
+            )
+        };
+        let spawns: Vec<VitalsSpawn> = (0..MOBS)
+            .map(|index| {
+                let (x, y) = grid_at(index, MOB_ROW, MOB_SPACING_M);
+                VitalsSpawn {
+                    vitals_id: lowercase_crc32(kinds[index % kinds.len()].0),
+                    level: TEST_LEVEL,
+                    position: [x, y, HEIGHT],
+                    ..VitalsSpawn::default()
+                }
+            })
+            .collect();
+        let mut mobs = retail_mobs(spawns, &kinds);
+        let players: Vec<Seen> = (0..PLAYERS)
+            .map(|index| {
+                let (x, y) = grid_at(index, PLAYER_ROW, PLAYER_SPACING_M);
+                Seen {
+                    entity: index as u64 + 1,
+                    position: Position {
+                        x: x + PLAYER_SPACING_M / 2.0,
+                        y,
+                        z: HEIGHT,
+                    },
+                }
+            })
+            .collect();
+        let threads = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
+        let mut worst = Duration::ZERO;
+        let mut total = Duration::ZERO;
+        let mut measured = 0;
+        for tick_number in 0..TICKS {
+            let started = Instant::now();
+            mobs.tick(&players, tick_number * TICK_MS, &Flat, threads);
+            let took = started.elapsed();
+            // The first second wakes every mob and makes every first plan.
+            if tick_number * TICK_MS >= 1_000 {
+                worst = worst.max(took);
+                total += took;
+                measured += 1;
+            }
+        }
+        let average = total / measured;
+        let (_, counts) = mobs.snapshot();
+        println!(
+            "{MOBS} mobs, {PLAYERS} players, {threads} threads: tick average {average:?}, worst {worst:?}, states {counts:?} (asleep, idle, chase, attack, return, dead), tree runs {}",
+            mobs.brain_runs()
+        );
+        assert!(average < BUDGET, "{average:?}");
+    }
+
+    /// The rows of the scale test start here.
+    const ROW_Y_OFFSET: f32 = 1_000.0;
 }

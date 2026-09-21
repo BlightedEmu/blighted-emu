@@ -2,9 +2,9 @@
 //! `ClientActorRoutingAuthorizationTrait::ClientAddEntryMsg` (bodies note, section 164): one
 //! 16-byte id. Reader `FUN_1407c8a70`.
 //!
-//! What the retail id means is Unknown. This server puts the player's entity number in it
-//! ([`raw_id_of_entity`]), so a test client knows which bundle member it is:
-//! [`ClientAddEntryMsg::for_entity`] and [`ClientAddEntryMsg::entity_number`].
+//! What the retail id means is Unknown. This server sends the player's raw id in it
+//! ([`raw_id_of_entity`]), the same as its spawn card, so a test client knows which bundle member
+//! it is: [`ClientAddEntryMsg::for_entity`] and [`ClientAddEntryMsg::entity_number`].
 
 use crate::wire::{
     BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer, entity_of_raw_id, raw_id_of_entity,

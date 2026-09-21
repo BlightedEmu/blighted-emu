@@ -8,9 +8,10 @@
 
 use std::collections::BTreeMap;
 
+use nw_messages::entity_ids::IdHolder;
 use nw_messages::{
-    EntitySlots, FacetHeader, LOGIN_MESSAGE_TYPES, MemberState, MessageError, PLAYER_SLICE_ASSET,
-    ServerMessage, SlotRead, WorldPosition,
+    EntitySlots, LOGIN_MESSAGE_TYPES, MemberState, MessageError, PLAYER_SLICE_ASSET, ServerMessage,
+    SlotRead, WorldPosition, entity_of_facet, number_of_seen_raw_id, release_raw_id,
 };
 use thiserror::Error;
 
@@ -30,14 +31,14 @@ pub enum ViewError {
     },
 }
 
-/// A combat message, by the entity it is for.
+/// A combat message, by the entity it is for; `None` for an entity this process never saw.
 enum CombatEvent {
     /// 2071: a hit the entity made.
-    Dealt { attacker: u64 },
+    Dealt { attacker: Option<u64> },
     /// 3601: a hit the entity took.
-    Taken { target: u64 },
+    Taken { target: Option<u64> },
     /// 4299: the entity died.
-    Died { player: u64 },
+    Died { player: Option<u64> },
 }
 
 /// One world message, read.
@@ -54,12 +55,27 @@ enum Read {
     Other { type_index: u64 },
 }
 
-/// The entity number of a facet call's header (`target`, `entity`).
-const fn facet_entity(target: u64, entity: u64) -> u64 {
-    FacetHeader { target, entity }.entity_number()
+/// Numbers the entity of every spawn card in `read` by its raw id ([`number_of_seen_raw_id`]),
+/// held by `holder`: the server's raw ids carry no entity number, so the clients of this process
+/// key the entities they see by these numbers, and all of them agree.
+fn number_cards(read: &mut SlotRead, holder: IdHolder) {
+    for update in &mut read.updates {
+        if let Some(gde_ref) = update.card.and_then(|card| card.gde_ref) {
+            update.entity = Some(number_of_seen_raw_id(holder, &gde_ref));
+        }
+    }
 }
 
-fn decode(received: &Received) -> Result<Read, ViewError> {
+/// How [`decode`] numbers the entities of the spawn cards: by `holder`, or not at all.
+#[derive(Debug, Clone, Copy)]
+enum Cards {
+    /// The cards' entities are numbered and held by the holder.
+    Numbered,
+    /// The cards are read without numbers (a view that keeps only its own player).
+    Skipped,
+}
+
+fn decode(received: &Received, holder: IdHolder, cards: Cards) -> Result<Read, ViewError> {
     let envelope = &received.envelope;
     let Some(decoded) = ServerMessage::from_envelope(envelope) else {
         return Ok(Read::Skipped);
@@ -67,28 +83,34 @@ fn decode(received: &Received) -> Result<Read, ViewError> {
     let type_index = envelope.type_index().unwrap_or_default();
     let failed = |source| ViewError::Message { type_index, source };
     Ok(match decoded.map_err(failed)? {
-        ServerMessage::Bundle(bundle) => Read::Bundle(SlotRead::of(&bundle).map_err(failed)?),
+        ServerMessage::Bundle(bundle) => {
+            let mut read = SlotRead::of(&bundle).map_err(failed)?;
+            if matches!(cards, Cards::Numbered) {
+                number_cards(&mut read, holder);
+            }
+            Read::Bundle(read)
+        }
         ServerMessage::DamageDealt(hit) => Read::Combat {
             type_index,
             event: CombatEvent::Dealt {
-                attacker: facet_entity(hit.head_a, hit.head_b),
+                attacker: entity_of_facet(hit.head_b),
             },
         },
         ServerMessage::OnDamage(hit) => Read::Combat {
             type_index,
             event: CombatEvent::Taken {
-                target: facet_entity(hit.head_a, hit.head_b),
+                target: entity_of_facet(hit.head_b),
             },
         },
         ServerMessage::DeathRecap(death) => Read::Combat {
             type_index,
             event: CombatEvent::Died {
-                player: facet_entity(death.head_a, death.head_b),
+                player: entity_of_facet(death.head_b),
             },
         },
         ServerMessage::ClientAddEntry(entry) => Read::Entry {
             type_index,
-            own: entry.entity_number(),
+            own: Some(number_of_seen_raw_id(holder, &entry.entry_id)),
         },
         _ => Read::Other { type_index },
     })
@@ -99,6 +121,8 @@ fn decode(received: &Received) -> Result<Read, ViewError> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OwnView {
     own: Option<u64>,
+    /// Its hold on the ids of its own player and the entities its owner view keeps.
+    holder: IdHolder,
 }
 
 impl OwnView {
@@ -108,7 +132,7 @@ impl OwnView {
     ///
     /// Returns [`ViewError`] for a world message or a bundle payload that does not decode.
     pub fn read(&mut self, received: &Received) -> Result<Option<WorldPosition>, ViewError> {
-        Ok(self.apply(&decode(received)?))
+        Ok(self.apply(&decode(received, self.holder, Cards::Skipped)?))
     }
 
     /// Learns the own number from `read`; returns the own position when it is in a bundle.
@@ -159,11 +183,13 @@ impl SyncView {
     ///
     /// Returns [`ViewError`] for a world message or a bundle payload that does not decode.
     pub fn read(&mut self, received: &Received) -> Result<SyncRead, ViewError> {
-        let mut read = decode(received)?;
+        let mut read = decode(received, self.own.holder, Cards::Numbered)?;
         let own_position = self.own.apply(&read);
         let mut blocks = Vec::new();
         if let Read::Bundle(bundle) = &mut read {
-            self.slots.resolve(bundle);
+            for gone in self.slots.resolve(bundle) {
+                release_raw_id(self.own.holder, gone);
+            }
             for update in &bundle.updates {
                 let Some(entity) = update.entity.filter(|entity| !self.own.is_own(*entity)) else {
                     continue;
@@ -229,12 +255,13 @@ impl CombatView {
     ///
     /// Returns [`ViewError`] for a world message or a bundle payload that does not decode.
     pub fn read(&mut self, received: &Received) -> Result<Option<WorldPosition>, ViewError> {
-        let read = decode(received)?;
+        let read = decode(received, self.own.holder, Cards::Numbered)?;
         let own_position = self.own.apply(&read);
         match read {
             Read::Bundle(mut bundle) => {
                 for gone in self.slots.resolve(&mut bundle) {
                     self.mobs.remove(&gone);
+                    release_raw_id(self.own.holder, gone);
                 }
                 let round = self.round;
                 for update in bundle
@@ -277,7 +304,7 @@ impl CombatView {
                     CombatEvent::Taken { target } => (&mut self.hits_taken, target),
                     CombatEvent::Died { player } => (&mut self.deaths, player),
                 };
-                if self.own.is_own(number) {
+                if number.is_some_and(|number| self.own.is_own(number)) {
                     *counter += 1;
                 }
             }
@@ -310,7 +337,7 @@ impl CombatView {
 }
 
 /// The world as one client saw it.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default)]
 pub struct WorldView {
     /// Type indexes of the world messages that are not bundles, in arrival order.
     login: Vec<u64>,
@@ -319,6 +346,20 @@ pub struct WorldView {
     own: Option<u64>,
     slots: EntitySlots,
     tracks: BTreeMap<u64, Vec<WorldPosition>>,
+    /// Its hold on the ids it numbered; a world view keeps every track of its run, so it holds
+    /// them for its life (it reads one short run).
+    holder: IdHolder,
+}
+
+/// Two views are equal when they saw the same; their id holders differ.
+impl PartialEq for WorldView {
+    fn eq(&self, other: &Self) -> bool {
+        self.login == other.login
+            && self.login_before_first_bundle == other.login_before_first_bundle
+            && self.own == other.own
+            && self.slots == other.slots
+            && self.tracks == other.tracks
+    }
 }
 
 impl WorldView {
@@ -341,7 +382,7 @@ impl WorldView {
     ///
     /// Returns [`ViewError`] for a world message or a bundle payload that does not decode.
     pub fn read(&mut self, received: &Received) -> Result<(), ViewError> {
-        match decode(received)? {
+        match decode(received, self.holder, Cards::Numbered)? {
             Read::Skipped => {}
             Read::Bundle(mut bundle) => {
                 self.login_before_first_bundle

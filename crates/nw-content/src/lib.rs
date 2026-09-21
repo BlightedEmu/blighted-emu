@@ -8,16 +8,21 @@ pub mod combat;
 pub mod container;
 pub mod crafting;
 pub mod creature_animations;
+pub mod datatable_overrides;
 pub mod fill;
 /// Typed row structs and `Tables`, written by `content-tool codegen`. Do not edit by hand.
 // The generator writes prettyplease output, which rustfmt would format differently.
 #[rustfmt::skip]
 pub mod generated;
 pub mod ftue_entities;
+pub mod gameplay_config;
 pub mod gathering;
 pub mod ids;
+pub mod leaderboards;
 pub mod loot;
+pub mod loot_limits;
 pub mod mob_prefabs;
+pub mod player_attacks;
 pub mod poi_tags;
 pub mod respawn_points;
 pub mod rewards;

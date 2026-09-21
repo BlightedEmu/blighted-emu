@@ -46,6 +46,7 @@ const LOOT_DROP_OFF: &[u8] = &[0x01, 0x01, 0x00, 0x00, 0x00, 0x00];
 /// The interact state of a taken container (retail take group): off.
 const INTERACT_TAKEN: InteractState = InteractState {
     enabled: Some(false),
+    has_interactors: None,
 };
 /// `MB::DelayedEventComponentReplicatedState` (class 3139) bodies the bag's event components
 /// send at the take (retail values, recorded).
@@ -53,8 +54,7 @@ const DELAYED_EVENT_TYPE_INDEX: u64 = 3139;
 const BAG_EVENT_BODIES: [&[u8]; 2] = [&[0x01, 0x01, 0x3d, 0x00], &[0x01, 0x01, 0x2e, 0x66]];
 /// The player's component of its gather state (`MB::GatheringComponentReplicatedState`).
 const GATHERING_COMPONENT: u64 = 36;
-/// `m_status` of an idle (Inferred), a running and a done gather (retail chest 1 and 3).
-const GATHER_IDLE: u8 = 0;
+/// `m_status` of a running and a done gather (retail chest 1 and 3).
 const GATHER_RUNNING: u8 = 1;
 const GATHER_DONE: u8 = 3;
 /// The chest's gather (retail 237342): 2.5 left, efficiency 1, no other gatherer.
@@ -327,27 +327,9 @@ pub(super) fn gather_started(facet: u64, gather: u32, run: GatherRun) -> [Bundle
     ]
 }
 
-/// The own member when gather number `gather` of the player stops before its end (Inferred:
-/// idle and not gathering; retail's answer to a cancel mid-gather is Unknown).
-pub(super) fn gather_stopped(gather: u32) -> BundleMember {
-    let count = gather.saturating_add(1).saturating_mul(STATES_PER_GATHER);
-    BundleMember {
-        component: GATHERING_COMPONENT,
-        state: MemberState::Gathering(GatheringState {
-            status: Some(GATHER_IDLE),
-            amount_remaining: Some(0.0),
-            efficiency: Some(0.0),
-            gatherer_count: None,
-            gather_ref_count: Some(count),
-            is_gathering: Some(false),
-            gatherable: Some(NO_GATHERABLE),
-            sync_ref_count: Some(count),
-        }),
-    }
-}
-
 /// The own member when gather number `gather` of the object with facet entity `facet` ends
-/// (retail chest 239343 and flint, with the 3746).
+/// (retail chest 239343 and flint, with the 3746), or stops at a cancel (retail `NH-MSQ-1`
+/// 1789560435207: the same done state).
 pub(super) fn chest_gather_ended(facet: u64, gather: u32) -> BundleMember {
     let count = gather.saturating_add(1).saturating_mul(STATES_PER_GATHER);
     BundleMember {

@@ -6,8 +6,10 @@
 
 /// The only stream version in the pinned client.
 pub const OBJECT_STREAM_VERSION: u32 = 3;
-/// Deepest element nesting this reader accepts (the pinned client nests at most 27 deep).
-pub const MAX_OBJECT_STREAM_DEPTH: usize = 64;
+/// Deepest element nesting this reader accepts. The client paks nest at most 27 deep; the
+/// Server.pak behavior trees nest up to 127 deep (behavior-tree study 2026-09-18, section 1.1:
+/// every one of the 1,075 `.behaviortree` files read with a reader without a limit).
+pub const MAX_OBJECT_STREAM_DEPTH: usize = 128;
 /// Size of a type UUID.
 pub const UUID_SIZE: usize = 16;
 

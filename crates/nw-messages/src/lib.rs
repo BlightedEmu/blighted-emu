@@ -10,6 +10,7 @@ pub mod achievements;
 pub mod afflictions;
 pub mod alc;
 pub mod appearance;
+pub mod buildables;
 pub mod bundle;
 pub mod client_add_entry;
 pub mod client_input;
@@ -19,6 +20,7 @@ pub mod connected;
 pub mod containers;
 pub mod cooldowns;
 pub mod day_phase;
+pub mod entity_ids;
 pub mod entity_slots;
 pub mod facet;
 pub mod gathering;
@@ -27,6 +29,7 @@ pub mod gear;
 pub mod interactor;
 pub mod items;
 pub mod level_info;
+pub mod loot;
 pub mod objectives;
 pub mod paperdoll;
 pub mod payload;
@@ -51,12 +54,19 @@ pub use achievements::{
 pub use afflictions::{Affliction, AfflictionId, AfflictionList, ColdLong, HotLong, LongForm};
 pub use alc::{
     ALC_TYPE_INDEX, AlcChild, AlcStamp, AlcState, CardPlace, DATA_BITS_ACTIVE, FRAG_TAGS_LEN,
-    LayerEntry, LookDir, MobAnimation, MobStep, POS_REL_CHILD, POS10_CHILD, RemoteStep,
-    SLOT0_CHILDREN, SLOT1_CHILDREN, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, ScopeEntry,
-    SecondSlayerState, SlayerState, StepPlace, StepScope, TeleportStep,
+    LayerEntry, LookDir, MobAnimation, MobStep, POS_REL_CHILD, POS_REL_STEP_M, POS3_LEN,
+    POS10_CHILD, RemoteStep, SLOT0_CHILDREN, SLOT1_CHILDREN, SPAWN_STATE_ID, SPAWN_STATE_MS,
+    SPAWN_TELEPORT, ScopeEntry, SecondSlayerState, SlayerState, StepPlace, StepScope, TeleportStep,
+    offset_from, offset_metres,
 };
 pub use appearance::{
     LOOK_CHOICES, PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState, PlayerIconData, PlayerLook,
+};
+pub use buildables::{
+    BUILDABLE_CONTROLLER_TYPE_INDEX, BUILDABLE_GRID_TYPE_INDEX, BuildableControllerState,
+    BuildableGridState, CommittedResource, GridSide, GuildCrest, OWNERSHIP_TYPE_INDEX,
+    OwnerIdentification, OwnershipState, PLACEMENT_OBSTRUCTION_TYPE_INDEX,
+    PlacementObstructionState, TERRITORY_INTERFACE_TYPE_INDEX, TerritoryInterfaceState,
 };
 pub use bundle::{
     IndexBlock, LOCAL_PLAYER_INTEREST, MAX_BUNDLE_INDEXES, OBSERVED_BUNDLE_BYTE_4,
@@ -65,7 +75,8 @@ pub use bundle::{
 pub use client_add_entry::{CLIENT_ADD_ENTRY_MSG_TYPE_INDEX, ClientAddEntryMsg};
 pub use client_input::{
     Bit8, ClientInputMsg, HeadStep9, INPUT_Z_MAX, INPUT_Z_MIN, InputHead, InputPosition,
-    InputRecord, InputSlots, InteractionRequest, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, SlayerInput,
+    InputRecord, InputSlots, InteractionRequest, MoveKeys, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+    SlayerInput,
 };
 pub use combat::{
     DAMAGE_DEALT_TYPE_INDEX, DEATH_RECAP_TYPE_INDEX, DamageDealtMsg, DamageItem, DeathRecapMsg,
@@ -92,6 +103,13 @@ pub use cooldowns::{
     COOLDOWNS_COMPONENT, COOLDOWNS_TYPE_INDEX, ConsumableCooldown, CooldownsState,
 };
 pub use day_phase::{OBSERVED_DAY_PHASE, SYNC_DAY_PHASE_MSG_TYPE_INDEX, SyncDayPhaseMsg};
+#[cfg(any(test, feature = "test-util"))]
+pub use entity_ids::number_of_facet;
+pub use entity_ids::{
+    Adopted, IdHolder, RawIdError, adopt_raw_id, as_dynamic_raw_id, entity_of_facet,
+    facet_of_raw_id, hold_raw_id, is_dynamic_raw_id, number_of_seen_raw_id, raw_id_count,
+    release_raw_id, renew_raw_id,
+};
 pub use entity_slots::{EntitySlots, SlotRead, SlotUpdate};
 pub use facet::{
     AdjustFxScriptsMsg, ClientFacetMsg, CraftIngredient, CraftProgressMsg, CutsceneEndFinalizedMsg,
@@ -105,12 +123,19 @@ pub use gde::{
     AssetId, DYNAMIC_SLICE_SUB_ID, GDE_ID_LEN, GDE_METADATA_COMPONENT, GDE_METADATA_TYPE_INDEX,
     GdeMetadataReplicatedState, PLAYER_SLICE_ASSET,
 };
-pub use gear::{EquippedItem, GearItem, Hands, PlayerGear, STARTER_BAG_SLOTS, is_visible_slot};
+pub use gear::{
+    EquippedItem, GearItem, Hands, PlayerGear, STARTER_BAG_SLOTS, ShownItem, is_visible_slot,
+};
 pub use interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
 pub use items::{FullList, ItemRecord};
 pub use level_info::{
     LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, LEVELS, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg,
     LevelSpec, OPEN_WORLD_LEVEL, PhasingEntry, TUTORIAL_LEVEL,
+};
+pub use loot::{
+    GLOBAL_STORAGE_COMPONENT, GLOBAL_STORAGE_TYPE_INDEX, GlobalStorageState, LOOT_CREATURE,
+    LOOT_ROLLED, LOOT_TAKEN, LOOT_TRACKER_COMPONENT, LOOT_TRACKER_TYPE_INDEX, LootTrackerState,
+    StoredItems, TrackedLoot,
 };
 pub use objectives::{
     OBJECTIVES_COMPONENT, OBJECTIVES_TYPE_INDEX, ObjectiveRecord, ObjectivesState, TaskEntry,

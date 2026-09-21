@@ -87,6 +87,45 @@ impl Rewards {
     }
 }
 
+/// The experience of a mob kill by the mob's level: `RewardData.KillExperience` (Observed,
+/// content bundle 25810808: 10 at level 1, 11 at level 2). Retail gave 20 for each level 1 kill
+/// of the tutorial (tutorial note, section 8): this base times
+/// `javelin.xp-multipliers.character` 2 (Inferred).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KillExperience {
+    by_level: HashMap<u32, u32>,
+}
+
+impl KillExperience {
+    /// The kill experience of `RewardData` in `tables`.
+    pub fn from_tables(tables: &Tables) -> Self {
+        Self::build(
+            tables
+                .reward_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .map(|row| (row.level, row.kill_experience)),
+        )
+    }
+
+    /// The kill experience of `rows` (level, points); the first row of a level wins, and rows
+    /// out of range are left out.
+    pub fn build(rows: impl IntoIterator<Item = (i64, i64)>) -> Self {
+        let mut by_level = HashMap::new();
+        for (level, points) in rows {
+            if let (Ok(level), Ok(points)) = (u32::try_from(level), u32::try_from(points)) {
+                by_level.entry(level).or_insert(points);
+            }
+        }
+        Self { by_level }
+    }
+
+    /// The experience of a kill of a level `level` mob, before the multipliers.
+    pub fn of(&self, level: u32) -> Option<u32> {
+        self.by_level.get(&level).copied()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +146,13 @@ mod tests {
         assert_eq!(reward.experience, 275);
         assert_eq!(number_of::<u64>(Some("")), 0);
         assert!(rewards.get("other").is_none());
+    }
+
+    #[test]
+    fn a_kill_gives_the_experience_of_the_mob_level() {
+        let kills = KillExperience::build([(1, 10), (2, 11), (1, 99), (-1, 5)]);
+        assert_eq!(kills.of(1), Some(10), "the first row of a level wins");
+        assert_eq!(kills.of(2), Some(11));
+        assert_eq!(kills.of(3), None);
     }
 }

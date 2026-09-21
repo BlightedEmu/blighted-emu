@@ -78,6 +78,14 @@ impl Slots {
         }
     }
 
+    /// Stops the slot of `entity` when it has one, so the next [`Slots::slot`] gives it a new
+    /// slot and its new card (a respawned mob: GDE id note).
+    pub(super) fn restart(&mut self, entity: u64) {
+        if let Some(interest) = self.assigned.remove(&entity) {
+            self.stops.push(interest);
+        }
+    }
+
     /// The slot of `entity`, given now when it has none; `None` when every slot is in use.
     pub(super) fn slot(&mut self, entity: u64) -> Option<Slot> {
         if let Some(interest) = self.assigned.get(&entity) {

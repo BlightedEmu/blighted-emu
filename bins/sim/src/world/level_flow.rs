@@ -240,19 +240,20 @@ impl LevelFlow {
         }
     }
 
-    /// The set achievement bits, for a handoff; none for a player taken without a level change.
-    pub(super) fn achievement_bits(&self) -> Vec<u32> {
-        let Some(achievements) = &self.achievements else {
-            return Vec::new();
-        };
-        (0..)
-            .zip(&achievements.bits)
-            .flat_map(|(byte, value): (u32, &u8)| {
-                (0..u8::BITS)
-                    .filter(move |bit| value & (1 << bit) != 0)
-                    .map(move |bit| byte * u8::BITS + bit)
-            })
-            .collect()
+    /// The set achievement bits, ascending, for a handoff or a save; `None` for a player taken
+    /// without a level change, whose bits this flow does not hold.
+    pub(super) fn achievement_bits(&self) -> Option<Vec<u32>> {
+        let achievements = self.achievements.as_ref()?;
+        Some(
+            (0..)
+                .zip(&achievements.bits)
+                .flat_map(|(byte, value): (u32, &u8)| {
+                    (0..u8::BITS)
+                        .filter(move |bit| value & (1 << bit) != 0)
+                        .map(move |bit| byte * u8::BITS + bit)
+                })
+                .collect(),
+        )
     }
 
     /// The version of the newest achievement state, for a handoff; 0 for a player taken without
@@ -354,6 +355,7 @@ impl LevelFlow {
             | ClientFacetMsg::SwapItems { .. }
             | ClientFacetMsg::UnequipItem { .. }
             | ClientFacetMsg::CancelInteraction { .. }
+            | ClientFacetMsg::SetReplicateStorage { .. }
             | ClientFacetMsg::TriggerAreaPassthrough { .. }
             | ClientFacetMsg::TakeAllItems { .. }
             | ClientFacetMsg::EquipItem { .. }
@@ -462,7 +464,7 @@ impl LevelFlow {
         })
     }
 
-    const fn header(&self, component: u64) -> FacetHeader {
+    fn header(&self, component: u64) -> FacetHeader {
         FacetHeader::of(component, self.entity)
     }
 }
@@ -558,7 +560,7 @@ mod tests {
         );
         let mut expected = vec![EXPANSION_BIT, WARMONGER_BIT, CARRIED[0], CARRIED[1]];
         expected.sort_unstable();
-        assert_eq!(flow.achievement_bits(), expected);
+        assert_eq!(flow.achievement_bits(), Some(expected));
         let Some(AchievementBits::Full(first)) =
             flow.first_achievements().and_then(|state| state.bits)
         else {
@@ -575,7 +577,7 @@ mod tests {
             "the full state holds them"
         );
         assert_eq!(flow.achievement_version(), CARRIED_VERSION + 1);
-        assert!(LevelFlow::resumed(ENTITY, 0).achievement_bits().is_empty());
+        assert_eq!(LevelFlow::resumed(ENTITY, 0).achievement_bits(), None);
         assert_eq!(LevelFlow::resumed(ENTITY, 0).achievement_version(), 0);
     }
 

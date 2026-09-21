@@ -20,6 +20,9 @@ const MAX_STAMINA: f32 = 100.0;
 pub(super) const DODGE_STAMINA: f32 = 45.0;
 /// The stamina a dash in the water takes (`StaminaData` `Swim_Dash`; retail 3 of 3).
 pub(super) const SWIM_DASH_STAMINA: f32 = 50.0;
+/// A dodge needs more stamina than this (`playeractions_dodge.actionlist`, action `Dodge`:
+/// `IfStaminaValue ComparisonValue="0.0" ComparisonType="GreaterThan"`).
+const DODGE_MIN_STAMINA: f32 = 0.0;
 /// The regen delay after a spend (vitals row `Player`, `StaminaRegenDelay` 1 s).
 const REGEN_DELAY_MS: u64 = 1_000;
 /// The regen delay that a blocked hit's first message shows: one tick of the delay is gone
@@ -86,15 +89,15 @@ impl Stamina {
         self.cur
     }
 
-    /// A dodge press at `now_ms`: it takes its stamina and gives `true`, or gives `false` and
-    /// changes nothing when the stamina is too low (Inferred: retail never let a press take
-    /// stamina below 0; no press with too little stamina is in the capture).
+    /// A dodge press at `now_ms`: while the stamina is above [`DODGE_MIN_STAMINA`] it takes its
+    /// stamina, at most all of it, and gives `true`; else it gives `false` and changes nothing.
+    /// The action list also refuses a dodge while the `Exhausted` condition holds; when the
+    /// client sets it is Unknown, so it is not checked here.
     pub(super) fn dodge(&mut self, dodge: Dodge, now_ms: u64) -> bool {
-        let cost = dodge.cost();
-        if self.cur < cost {
+        if self.cur <= DODGE_MIN_STAMINA {
             return false;
         }
-        self.spend(cost, REGEN_DELAY_MS);
+        self.spend(dodge.cost().min(self.cur), REGEN_DELAY_MS);
         self.restart_at_ms =
             (dodge == Dodge::Roll).then(|| now_ms.saturating_add(DODGE_RESTART_MS));
         true
@@ -244,16 +247,21 @@ mod tests {
     }
 
     #[test]
-    fn a_dodge_with_too_little_stamina_does_nothing() {
+    fn a_dodge_needs_stamina_above_zero_and_takes_at_most_all() {
         let mut stamina = Stamina::default();
         stamina.tick(NOW);
         assert!(stamina.dodge(Dodge::Roll, NOW));
         stamina.take_change();
         assert!(stamina.dodge(Dodge::Roll, NOW + TICK), "55 is enough");
         stamina.take_change();
-        assert!(!stamina.dodge(Dodge::Roll, NOW + 2 * TICK), "10 is not");
+        assert!(
+            stamina.dodge(Dodge::Roll, NOW + 2 * TICK),
+            "10 is above zero too"
+        );
+        assert_eq!(stamina.take_change(), change(Some(0.0), Some(1.0)));
+        assert!(!stamina.dodge(Dodge::Roll, NOW + 3 * TICK), "0 is not");
         assert_eq!(stamina.take_change(), None);
-        assert_eq!(stamina.current(), 10.0);
+        assert_eq!(stamina.current(), 0.0);
     }
 
     #[test]

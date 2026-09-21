@@ -64,6 +64,10 @@ pub const PINNED_OPEN_WORLD_LANDMARKS: usize = 2_020;
 pub const PINNED_OPEN_WORLD_ENCOUNTERS: usize = 1_036;
 /// Open world capitals.
 pub const PINNED_OPEN_WORLD_CAPITALS: usize = 268_113;
+/// Open world slices that the capitals spawn (`region.slicedata`).
+pub const PINNED_OPEN_WORLD_SPAWNED: usize = 31_145;
+/// Open world crafting stations among the spawned slices.
+pub const PINNED_OPEN_WORLD_STATIONS: usize = 295;
 
 /// The install folder from [`GAME_DIR_ENV`]. Panics with a clear message when it is not set,
 /// because the `local-data` tests cannot run without it.

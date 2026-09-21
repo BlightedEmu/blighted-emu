@@ -1,0 +1,28 @@
+[package]
+name = "nw-ai"
+version = "0.1.0"
+description = "Mob AI from the game's own Server.pak behavior trees: the tree decoder, the shared AI data file and the per-mob runtime."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+nw-content.workspace = true
+nw-formats.workspace = true
+postcard.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+nw-oodle.workspace = true
+tempfile.workspace = true
+
+[features]
+# Tests that read local-data/server-pak/Server.pak and the built AI data file.
+local-data = []
+# `build`: small AI data sets for other crates' tests.
+test-util = []
+
+[lints]
+workspace = true

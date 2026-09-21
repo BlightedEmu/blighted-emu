@@ -13,11 +13,13 @@ clap.workspace = true
 getrandom.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
+nw-ai.workspace = true
 nw-bus.workspace = true
 nw-common.workspace = true
 nw-content.workspace = true
 nw-db.workspace = true
 nw-formats.workspace = true
+nw-login.workspace = true
 nw-messages.workspace = true
 nw-reflect.workspace = true
 nw-sim-core.workspace = true
@@ -31,16 +33,22 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+hex.workspace = true
+nw-ai = { workspace = true, features = ["test-util"] }
 nw-sim-core = { workspace = true, features = ["test-util"] }
 nw-bus = { workspace = true, features = ["test-util"] }
 nw-carrier.workspace = true
+nw-content = { workspace = true, features = ["test-util"] }
 nw-db = { workspace = true, features = ["test-util"] }
 
 [features]
-# `combat::test_support`: combat rows for other crates' tests.
-test-util = []
+# `combat::test_support` and `mob_ai::test_support`: combat rows and a test AI for other
+# crates' tests.
+test-util = ["nw-ai/test-util"]
 # Tests that need the Docker Compose NATS and PostgreSQL (`just test-infra`).
 infra = []
+# Tests that read the AI data file of local-data/content (run `content-tool ai-data` first).
+local-data = []
 
 [lints]
 workspace = true

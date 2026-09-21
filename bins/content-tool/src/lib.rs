@@ -3,6 +3,10 @@
 //! capture check, the mob prefab table, the creature animation table and the tutorial static
 //! entity table.
 
+pub mod ai_data;
+#[cfg(all(test, feature = "ai-replay"))]
+mod ai_replay;
+pub mod ai_trace;
 pub mod build;
 pub mod capture;
 pub mod codegen;
@@ -12,7 +16,9 @@ pub mod error;
 pub mod extra_members;
 pub mod ftue_entities;
 pub mod map_tiles;
+pub mod melee_shapes;
 pub mod mob_prefabs;
+pub mod player_attacks;
 pub mod source;
 pub mod world;
 
@@ -51,6 +57,13 @@ mod local_data_tests {
     const LEVEL_1_MAP_TILES: u64 = 2_156;
     /// Highest level 1 tile index: 56 tiles of 256 m over 14,336 m.
     const LAST_LEVEL_1_INDEX: u16 = 55;
+    /// Joints of `player_male.chr`.
+    const PLAYER_JOINTS: usize = 130;
+    /// The greatsword's light attack clip, its last frame and its root motion
+    /// (`m_fDistance` of its motion parameters).
+    const GREATSWORD_LIGHT_CLIP: &str = "grtswrd_prim_c1";
+    const GREATSWORD_LIGHT_FRAMES: i32 = 73;
+    const GREATSWORD_LIGHT_DISTANCE_M: f32 = 1.585_972_3;
 
     fn repo_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -244,6 +257,8 @@ mod local_data_tests {
                 landmarks: PINNED_OPEN_WORLD_LANDMARKS,
                 encounters: PINNED_OPEN_WORLD_ENCOUNTERS,
                 capitals: PINNED_OPEN_WORLD_CAPITALS,
+                spawned: PINNED_OPEN_WORLD_SPAWNED,
+                stations: PINNED_OPEN_WORLD_STATIONS,
             }
         );
         assert!(
@@ -269,5 +284,47 @@ mod local_data_tests {
             median.abs() < MAX_MEDIAN_HEIGHT_ERROR_METRES,
             "median height error {median} m"
         );
+    }
+
+    #[test]
+    fn the_player_attack_table_of_the_paks_is_the_committed_one() {
+        let bundle = repo_root().join(default_bundle_path(PINNED_STEAM_BUILD));
+        let tables = nw_content::ContentBundle::load(&bundle, PINNED_STEAM_BUILD)
+            .unwrap()
+            .tables;
+        let rows = crate::player_attacks::BundleRows::of(&tables);
+        let source = GameSource::open(&game_dir()).unwrap();
+        let sources = crate::player_attacks::read_sources(&source, &rows).unwrap();
+        // The clip, skeleton and attachment readers on the pinned paks: `grtswrd_prim_c1` holds
+        // frames 0 to 73 and moves the root 1.5859723 m forward (its motion parameters'
+        // `m_fDistance`), the player's skeleton has 130 joints from `Xform`, and the greatsword
+        // hangs on `righthandattach`.
+        let bodies = &sources.bodies;
+        assert_eq!(bodies.player.joints.len(), PLAYER_JOINTS);
+        assert_eq!(bodies.player.joints[0].name, "Xform");
+        let swing = bodies.clip(GREATSWORD_LIGHT_CLIP).unwrap();
+        assert_eq!(
+            (swing.start_frame, swing.end_frame),
+            (0, GREATSWORD_LIGHT_FRAMES)
+        );
+        let root = &swing.tracks[&bodies.player.joints[0].controller_id];
+        let moved = root.position_at(swing.frame_at(swing.duration_s()));
+        assert!((moved.unwrap()[1] - GREATSWORD_LIGHT_DISTANCE_M).abs() < 1e-4);
+        assert_eq!(
+            bodies
+                .equip_attachments
+                .get("greatsword")
+                .map(String::as_str),
+            Some("righthandattach")
+        );
+        let (stances, _) = crate::player_attacks::build_stances(&sources, &rows);
+        let committed: Vec<nw_content::player_attacks::Stance> = serde_json::from_str(
+            &std::fs::read_to_string(
+                repo_root().join("bins/sim/src/world/testdata/player-attacks-25810808.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(stances, committed);
     }
 }

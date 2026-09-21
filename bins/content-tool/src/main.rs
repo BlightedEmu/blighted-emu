@@ -10,6 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use content_tool::ai_data::{AiDataReport, DEFAULT_SERVER_PAK, build_ai_data};
+use content_tool::ai_trace::{
+    AiTrace, DEFAULT_TRACE_PATH, read_creatures, trace_ledger, write_trace,
+};
 use content_tool::build::{
     DEFAULT_CONTENT_DIR, DEFAULT_RETAIL_DIR, default_bundle_path, default_retail_bundle_path,
     run_build,
@@ -25,6 +29,7 @@ use content_tool::mob_prefabs::{
     DEFAULT_CAPTURE_ROOTS, LedgerSource, MobPrefabsError, PrefabTable, SourceList,
     find_ledger_sources, run_workers, scan_ledger, vitals_names, worker_process, write_entries,
 };
+use content_tool::player_attacks::{BundleRows, PlayerAttacksReport, build_stances, read_sources};
 use content_tool::source::GameSource;
 use content_tool::world::{LevelReport, UnmatchedIds, run_world, world_totals};
 use nw_capture::{CLIENT_TO_SERVER, CaptureError, SERVER_TO_CLIENT, TypeNames};
@@ -34,6 +39,7 @@ use nw_content::combat::{CombatData, CombatRows};
 use nw_content::creature_animations::{creature_animations_path, write_rows};
 use nw_content::ftue_entities::ftue_entities_path;
 use nw_content::mob_prefabs::{MobPrefabs, mob_prefabs_path};
+use nw_content::player_attacks::{player_attacks_path, write_stances};
 use nw_design::{DesignMode, DesignPaths, DesignReport, run_design};
 use nw_world::WorldFile;
 use nw_world::metadata::SkipCounts;
@@ -182,6 +188,39 @@ enum Command {
         #[arg(long)]
         out: Option<PathBuf>,
         /// Content bundle for the weapon tags (default: `local-data/content/bundle-<build>.bin`).
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+    },
+    /// Writes what the retail mobs of a capture ledger did (ALC states, FullBody animations),
+    /// the own player's positions and the hits on the player, as JSON (run it under a memory
+    /// limit, for example `ulimit -v 4000000`).
+    /// Builds the AI data file (every Server.pak behavior tree, the AI of every creature slice
+    /// and the CAGE task resolution of their grids) from Server.pak and the game paks, for the
+    /// creatures of the creature animation table.
+    AiData {
+        /// The Server.pak file.
+        #[arg(long, default_value = DEFAULT_SERVER_PAK)]
+        server_pak: PathBuf,
+        /// Output folder for `ai-data-<build>.bin`.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        out_dir: PathBuf,
+    },
+    /// Writes the mob trace of a capture ledger.
+    AiTrace {
+        /// The `ledger.bin` file.
+        ledger: PathBuf,
+        /// Output file.
+        #[arg(long, default_value = DEFAULT_TRACE_PATH)]
+        out: PathBuf,
+    },
+    /// Builds the player attack table (each weapon stance's basic attacks, dodge and item uses)
+    /// from the game paks.
+    PlayerAttacks {
+        /// Output file (default: `local-data/content/player-attacks-<build>.json`).
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Content bundle for the weapon, spell, ammo and consumable rows (default:
+        /// `local-data/content/bundle-<build>.bin`).
         #[arg(long)]
         bundle: Option<PathBuf>,
     },
@@ -378,6 +417,48 @@ fn run(cli: Cli) -> Result<(), ToolError> {
                 .map_err(content_tool::creature_animations::CreatureAnimationsError::from)?;
             print_creature_animations(&report, &out);
         }
+        Command::AiData {
+            server_pak,
+            out_dir,
+        } => {
+            let creatures = read_creatures(&creature_animations_path(
+                Path::new(DEFAULT_CONTENT_DIR),
+                &client_build,
+            ))?;
+            let dir = game_dir(cli.game_dir.as_deref())?;
+            let source = GameSource::open(dir)?;
+            let (data, report) = build_ai_data(&source, dir, &server_pak, &creatures)?;
+            let path = data.save(&out_dir, &client_build)?;
+            let reloaded = nw_ai::AiData::load(&out_dir, &client_build)?;
+            if reloaded != data {
+                return Err(ToolError::CountMismatch {
+                    what: "AI data nodes",
+                    expected: data.nodes.len(),
+                    found: reloaded.nodes.len(),
+                });
+            }
+            print_ai_data(&report, &path);
+        }
+        Command::AiTrace { ledger, out } => {
+            let creatures = read_creatures(&creature_animations_path(
+                Path::new(DEFAULT_CONTENT_DIR),
+                &client_build,
+            ))?;
+            let trace = trace_ledger(&read_ledger(&ledger)?, &creatures);
+            write_trace(&out, &trace)?;
+            print_ai_trace(&trace, &out);
+        }
+        Command::PlayerAttacks { out, bundle } => {
+            let out = out.unwrap_or_else(|| {
+                player_attacks_path(Path::new(DEFAULT_CONTENT_DIR), &client_build)
+            });
+            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
+            let rows = BundleRows::of(&ContentBundle::load(&bundle, &client_build)?.tables);
+            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
+            let (stances, report) = build_stances(&read_sources(&source, &rows)?, &rows);
+            write_stances(&out, &stances)?;
+            print_player_attacks(&report, &out);
+        }
         Command::MobPrefabsLedger { ledger, entry } => {
             let tally = scan_ledger(
                 &LedgerSource {
@@ -395,6 +476,90 @@ fn run(cli: Cli) -> Result<(), ToolError> {
         }
     }
     Ok(())
+}
+
+/// Missing values printed per kind by `ai-data`.
+const SHOWN_AI_GAPS: usize = 40;
+
+fn print_ai_data(report: &AiDataReport, out: &Path) {
+    println!(
+        "ai-data: {} trees, {} shared nodes ({} expanded), {} creatures, {} archetypes, {} grids, {} CAGE actions -> {}",
+        report.trees,
+        report.nodes,
+        report.expanded_nodes,
+        report.creatures,
+        report.archetypes,
+        report.grids,
+        report.cage_actions,
+        out.display()
+    );
+    println!(
+        "archetypes with a Server.pak tree {}, a grid {}, an animation database {}; fragment entries {}, with a length {}",
+        report.with_tree,
+        report.with_grid,
+        report.with_animation_database,
+        report.variants,
+        report.timed_variants
+    );
+    println!(
+        "trees named by slices and not in Server.pak: {}",
+        report.missing_trees.len()
+    );
+    for (tree, slices) in report.missing_trees.iter().take(SHOWN_AI_GAPS) {
+        println!("  {tree}: {} slices", slices.len());
+    }
+    println!(
+        "slices whose tree runs a task their grid lacks: {}",
+        report.missing_tasks.len()
+    );
+    for (slice, tasks) in report.missing_tasks.iter().take(SHOWN_AI_GAPS) {
+        println!("  {slice}: {tasks:?}");
+    }
+    println!("clips of Unknown length: {}", report.unknown_clips.len());
+    for (clip, reason) in report.unknown_clips.iter().take(SHOWN_AI_GAPS) {
+        println!("  {clip}: {reason}");
+    }
+    println!(
+        "fragment entries of Unknown length: {} in {} animation databases",
+        report.unknown_fragments.values().sum::<usize>(),
+        report.unknown_fragments.len()
+    );
+    println!("files not used: {}", report.skipped.len());
+    for (file, reason) in report.skipped.iter().take(SHOWN_AI_GAPS) {
+        println!("  {file}: {reason}");
+    }
+}
+
+fn print_ai_trace(trace: &AiTrace, out: &Path) {
+    let stats = &trace.stats;
+    println!(
+        "ai-trace: {} mob lifetimes, {} mob states, {} player positions, {} player hits ({} by an unknown attacker) -> {}",
+        trace.mobs.len(),
+        stats.mob_states,
+        trace.player.len(),
+        trace.player_hits.len(),
+        stats.unknown_attackers,
+        out.display()
+    );
+    println!(
+        "  {} bundles, {} groups, {} resyncs, {} other-component states, {} bad scope blobs",
+        stats.bundles,
+        stats.groups,
+        stats.resyncs,
+        stats.other_component_states,
+        stats.bad_scope_blobs
+    );
+}
+
+fn print_player_attacks(report: &PlayerAttacksReport, out: &Path) {
+    println!(
+        "player-attacks: {} stances -> {}",
+        report.stances,
+        out.display()
+    );
+    for (stance, why) in &report.skipped {
+        println!("  skipped {stance}: {why}");
+    }
 }
 
 fn print_creature_animations(report: &CreatureAnimationsReport, out: &Path) {
@@ -682,7 +847,7 @@ fn print_level_summary(
     unmatched: &UnmatchedIds,
 ) {
     println!(
-        "{label}: {} regions ({} with terrain), {} npcs, {} vitals, {} gatherables, {} lore, {} landmarks, {} encounters, {} capitals, {file_bytes} bytes",
+        "{label}: {} regions ({} with terrain), {} npcs, {} vitals, {} gatherables, {} lore, {} landmarks, {} encounters, {} capitals, {} spawned slices, {} stations, {file_bytes} bytes",
         counts.regions,
         counts.terrain_regions,
         counts.npcs,
@@ -692,6 +857,8 @@ fn print_level_summary(
         counts.landmarks,
         counts.encounters,
         counts.capitals,
+        counts.spawned,
+        counts.stations,
     );
     for (section, records) in &skipped.sections {
         println!("  skipped section {section:08x}: {records} records");

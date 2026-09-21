@@ -13,6 +13,7 @@ use nw_formats::objectstream::lowercase_crc32;
 use thiserror::Error;
 
 use crate::Tables;
+use crate::player_attacks::{PlayerAttacks, Stance, stance_key};
 
 /// Separates the status effects of an `AddStatusEffects` cell.
 const EFFECT_SEPARATOR: char = '+';
@@ -23,12 +24,16 @@ const PLAIN_MOD: f64 = 1.0;
 pub const DEFAULT_PLAYER_VITALS_ID: &str = "Player";
 /// The player sword of `WeaponItemDefinitions`.
 pub const DEFAULT_WEAPON_ID: &str = "SwordT1";
-/// The light and heavy sword attacks of `DamageData`.
-pub const DEFAULT_ATTACK_DAMAGE_IDS: [&str; 2] = ["1H_Sword_Attack1", "1H_Sword_Attack2"];
-/// The `DamageData` row of one blunderbuss pellet (ranged note: coefficient 0.19 per pellet).
-pub const DEFAULT_SPREADSHOT_DAMAGE_ID: &str = "Blunderbuss_Primary_Attack";
 /// The `RangedAttackProfile` of a weapon that fires spread shots.
 const SPREAD_SHOT_PROFILE: &str = "Blunderbuss";
+/// The player's damage table: the unique id of the datasheet that the player slice names
+/// (`slices/player.dynamicslice` refers to `datatables/javelindata_damagetable`, whose unique id
+/// is `DamageTable`; build 25810808). A damage row id is unique within one table only.
+pub const DEFAULT_PLAYER_DAMAGE_TABLE: &str = "DamageTable";
+/// The separator of a damage row's `Affixes` cell.
+const AFFIX_SEPARATOR: char = ',';
+/// A block stability is a percentage.
+const PERCENT: f64 = 100.0;
 
 /// The config rows a `sim` needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,10 +42,8 @@ pub struct CombatRows {
     pub player_vitals_id: String,
     /// The player weapon row of `WeaponItemDefinitions`.
     pub weapon_id: String,
-    /// The `DamageData` rows of the weapon's attacks.
-    pub attack_damage_ids: Vec<String>,
-    /// The `DamageData` row of one pellet of a spread shot.
-    pub spreadshot_damage_id: String,
+    /// The unique id of the player's damage table, where its attack rows are.
+    pub damage_table: String,
 }
 
 impl Default for CombatRows {
@@ -48,8 +51,7 @@ impl Default for CombatRows {
         Self {
             player_vitals_id: DEFAULT_PLAYER_VITALS_ID.to_owned(),
             weapon_id: DEFAULT_WEAPON_ID.to_owned(),
-            attack_damage_ids: DEFAULT_ATTACK_DAMAGE_IDS.map(str::to_owned).to_vec(),
-            spreadshot_damage_id: DEFAULT_SPREADSHOT_DAMAGE_ID.to_owned(),
+            damage_table: DEFAULT_PLAYER_DAMAGE_TABLE.to_owned(),
         }
     }
 }
@@ -108,243 +110,17 @@ pub struct WeaponRow {
     pub crit_multiplier: f64,
     /// It fires spread shots (a blunderbuss): its attacks come as 2719 requests.
     pub spread_shot: bool,
-    /// What kind of weapon it is.
-    pub kind: WeaponKind,
     /// The shots it holds when loaded (`MaxLoadedAmmo`; the blunderbuss 2, melee weapons 0).
     pub max_loaded_ammo: u8,
     /// How long it takes to load again (`AutoReloadAmmoSeconds`; the blunderbuss 1.46 s).
     pub reload_ms: u64,
+    /// The key of its stance: its `MannequinTag` ([`crate::player_attacks::stance_key`]).
+    pub stance: u32,
+    /// `BlockStaminaDamage`: the stamina its hits take from a blocker, before the attack's mod.
+    pub block_stamina_damage: f64,
+    /// `BlockStability`: the share (percent) of a blocked hit's stamina it takes off.
+    pub block_stability: f64,
 }
-
-/// The kind of a weapon. A melee kind sets the shape and time of its swing; a ranged or magic
-/// kind hits through its own client requests (the blunderbuss's 2719; the others' are Unknown).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WeaponKind {
-    /// A sword (`1hSword…`, `1hLongsword…`).
-    Sword,
-    /// A hatchet (`1hHatchet…`, `1hThrowingAxe…`).
-    Hatchet,
-    /// A rapier.
-    Rapier,
-    /// A flail.
-    Flail,
-    /// A spear.
-    Spear,
-    /// A great axe.
-    GreatAxe,
-    /// A war hammer (`2hWarhammer…`, `2hDemoHammer…`).
-    WarHammer,
-    /// A greatsword.
-    GreatSword,
-    /// A bow.
-    Bow,
-    /// A musket.
-    Musket,
-    /// A blunderbuss.
-    Blunderbuss,
-    /// A fire staff (`2hStaffFire…`, `2hFireStaff…`).
-    FireStaff,
-    /// A life staff (`2hStaffLife…`, `2hLifeStaff…`).
-    LifeStaff,
-    /// An ice gauntlet (`1hGauntletIce…`, `2hIceGauntlet…`).
-    IceGauntlet,
-    /// A void gauntlet (`1hGauntletVoid…`, `2hVoidGauntlet…`).
-    VoidGauntlet,
-    /// Any other item in a weapon slot (a tool such as a skinning knife, or an unknown id).
-    Other,
-}
-
-impl WeaponKind {
-    /// The names in retail weapon ids (content bundle strings, 2026-09-18), longest match first:
-    /// a greatsword id also holds "sword", a throwing axe "axe".
-    const NAMES: [(&'static str, Self); 21] = [
-        ("greatsword", Self::GreatSword),
-        ("greataxe", Self::GreatAxe),
-        ("warhammer", Self::WarHammer),
-        ("demohammer", Self::WarHammer),
-        ("throwingaxe", Self::Hatchet),
-        ("hatchet", Self::Hatchet),
-        ("rapier", Self::Rapier),
-        ("flail", Self::Flail),
-        ("spear", Self::Spear),
-        ("blunderbuss", Self::Blunderbuss),
-        ("musket", Self::Musket),
-        ("bow", Self::Bow),
-        ("stafffire", Self::FireStaff),
-        ("firestaff", Self::FireStaff),
-        ("stafflife", Self::LifeStaff),
-        ("lifestaff", Self::LifeStaff),
-        ("gauntletice", Self::IceGauntlet),
-        ("icegauntlet", Self::IceGauntlet),
-        ("gauntletvoid", Self::VoidGauntlet),
-        ("voidgauntlet", Self::VoidGauntlet),
-        ("sword", Self::Sword),
-    ];
-
-    /// The damage rows of its light and heavy attacks (`javelindata_damagetable`); `None` for a
-    /// kind that does not swing.
-    pub const fn attack_ids(self) -> Option<(&'static str, &'static str)> {
-        Some(match self {
-            Self::Sword => ("1H_Sword_Attack1", "1H_Sword_Attack2"),
-            Self::Hatchet => ("Hatchet_Damage_PrimaryAttack", "Hatchet_Damage_HeavyAttack"),
-            Self::Rapier => ("1H_Rapier_PrimaryAttack", "1H_Rapier_HeavyAttack"),
-            Self::Flail => ("1H_Flail_LightAttack1", "1H_Flail_HeavyAttackChain_1"),
-            Self::Spear => ("2H_Spear_PrimaryAttack", "2H_Spear_HeavyAttack"),
-            Self::GreatAxe => ("GreatAxe_PrimaryAttack", "GreatAxe_HeavyAttack"),
-            Self::WarHammer => ("Warhammer_PrimaryAttack", "Warhammer_HeavyAttack"),
-            Self::GreatSword => ("GreatSword_PrimaryAttack1", "GreatSword_HeavyAttack1"),
-            // The ranged and magic kinds: the weapon rows' `TooltipPrimaryAttackData` and
-            // `TooltipAlternateAttackData` (Observed, build 25810808), the damage rows their
-            // projectile spells name (`SpellData.DamageTableRow`).
-            Self::Bow => ("BowAttack1", "BowAttack2"),
-            Self::Musket => ("MusketAttack1", "MusketAttack2"),
-            Self::FireStaff => ("Firestaff_PrimaryAttackC1", "Firestaff_PrimaryAttackC2"),
-            Self::LifeStaff => ("LifeStaff_PrimaryAttackC1", "LifeStaff_PrimaryAttackC2"),
-            Self::IceGauntlet => ("IceMagic_Primary", "IceMagic_Heavy"),
-            Self::VoidGauntlet => ("VoidGauntlet_Primary", "VoidGauntlet_Heavy"),
-            // The blunderbuss fires through its own request (2719).
-            Self::Blunderbuss | Self::Other => return None,
-        })
-    }
-
-    /// The kind that the item class `item_class` (`MasterItemDefinitions.ItemClass`, such as
-    /// `Weapon+EquippableMainHand+IceMagic+Magic`) names; `None` for a class with no weapon kind
-    /// (a tool, a shield). Every weapon item has one (Observed, build 25810808), while its stats
-    /// id does not always name its kind: the starter ice gauntlet's is
-    /// `1hElementalGauntlet_IceT2` (live 2026-09-18: it swung as a sword).
-    pub fn of_item_class(item_class: &str) -> Option<Self> {
-        item_class.split(ITEM_CLASS_SEPARATOR).find_map(|class| {
-            ITEM_CLASS_KINDS
-                .iter()
-                .find(|(name, _)| class.eq_ignore_ascii_case(name))
-                .map(|(_, kind)| *kind)
-        })
-    }
-
-    /// The projectile of an attack with a ranged or magic weapon of this kind; `None` for a kind
-    /// that swings or the blunderbuss, which fires through its own request.
-    pub const fn projectile(self) -> Option<Projectile> {
-        Some(match self {
-            Self::FireStaff => FIRE_STAFF_PROJECTILE,
-            Self::LifeStaff => LIFE_STAFF_PROJECTILE,
-            Self::IceGauntlet | Self::VoidGauntlet => GAUNTLET_PROJECTILE,
-            Self::Bow => BOW_PROJECTILE,
-            Self::Musket => MUSKET_PROJECTILE,
-            Self::Sword
-            | Self::Hatchet
-            | Self::Rapier
-            | Self::Flail
-            | Self::Spear
-            | Self::GreatAxe
-            | Self::WarHammer
-            | Self::GreatSword
-            | Self::Blunderbuss
-            | Self::Other => return None,
-        })
-    }
-
-    /// It hits with a swing in front of the body (a melee weapon, or an item of another kind,
-    /// which swings as a sword): not a ranged or magic weapon.
-    pub const fn swings(self) -> bool {
-        matches!(
-            self,
-            Self::Sword
-                | Self::Hatchet
-                | Self::Rapier
-                | Self::Flail
-                | Self::Spear
-                | Self::GreatAxe
-                | Self::WarHammer
-                | Self::GreatSword
-                | Self::Other
-        )
-    }
-
-    /// The kind that the weapon id `weapon_id` names.
-    pub fn of_id(weapon_id: &str) -> Self {
-        let id = weapon_id.to_lowercase();
-        Self::NAMES
-            .iter()
-            .find(|(name, _)| id.contains(name))
-            .map_or(Self::Other, |(_, kind)| *kind)
-    }
-}
-
-/// The separator of an item class's parts.
-const ITEM_CLASS_SEPARATOR: char = '+';
-/// The item class parts that name a weapon kind (Observed: every weapon `ItemClass` of build
-/// 25810808 holds one of them).
-const ITEM_CLASS_KINDS: [(&str, WeaponKind); 15] = [
-    ("Sword", WeaponKind::Sword),
-    ("Hatchet", WeaponKind::Hatchet),
-    ("Rapier", WeaponKind::Rapier),
-    ("Flail", WeaponKind::Flail),
-    ("Spear", WeaponKind::Spear),
-    ("2HAxe", WeaponKind::GreatAxe),
-    ("2HHammer", WeaponKind::WarHammer),
-    ("GreatSword", WeaponKind::GreatSword),
-    ("Bow", WeaponKind::Bow),
-    ("Musket", WeaponKind::Musket),
-    ("Blunderbuss", WeaponKind::Blunderbuss),
-    ("FireStaff", WeaponKind::FireStaff),
-    ("LifeStaff", WeaponKind::LifeStaff),
-    ("IceMagic", WeaponKind::IceGauntlet),
-    ("VoidGauntlet", WeaponKind::VoidGauntlet),
-];
-
-/// How the projectile of a ranged or magic attack flies. Retail clients send no hit request for
-/// these weapons (Observed: the fire staff and bow capture has only inputs around 293 hits); the
-/// server casts the projectile spell (`SpellData`, `CastingTypes` Projectile) from the attack.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Projectile {
-    /// When it leaves the weapon after the attack starts.
-    pub cast_ms: u64,
-    /// How far it flies.
-    pub range_m: f32,
-    /// How fast it flies.
-    pub speed_mps: f32,
-    /// How wide it is: a body this near its line is hit.
-    pub radius_m: f32,
-}
-
-// The flight values are Inferred: the `RangedAttackProfile` assets that hold them are not in
-// the datasheets this server reads. Each range covers the spell's `CastDistance` (fire 10 m, life
-// 10 m, gauntlets 20 m) and the reach players see in retail videos.
-/// A fire staff fireball.
-const FIRE_STAFF_PROJECTILE: Projectile = Projectile {
-    cast_ms: 300,
-    range_m: 30.0,
-    speed_mps: 40.0,
-    radius_m: 0.5,
-};
-/// A life staff orb.
-const LIFE_STAFF_PROJECTILE: Projectile = Projectile {
-    cast_ms: 300,
-    range_m: 20.0,
-    speed_mps: 30.0,
-    radius_m: 0.5,
-};
-/// An ice or void gauntlet bolt.
-const GAUNTLET_PROJECTILE: Projectile = Projectile {
-    cast_ms: 250,
-    range_m: 25.0,
-    speed_mps: 40.0,
-    radius_m: 0.4,
-};
-/// A bow's arrow.
-const BOW_PROJECTILE: Projectile = Projectile {
-    cast_ms: 200,
-    range_m: 60.0,
-    speed_mps: 60.0,
-    radius_m: 0.25,
-};
-/// A musket's shot.
-const MUSKET_PROJECTILE: Projectile = Projectile {
-    cast_ms: 150,
-    range_m: 80.0,
-    speed_mps: 200.0,
-    radius_m: 0.2,
-};
 
 /// A consumable that heals: a potion.
 #[derive(Debug, Clone, PartialEq)]
@@ -357,6 +133,33 @@ pub struct HealingConsumable {
     pub health: f64,
     /// Its share of max health (`HealthModifierPercent`).
     pub health_share: f64,
+    /// Its `MannequinTag`: the item use it plays (`Potion`); empty for none.
+    pub use_tag: String,
+}
+
+/// One row of `ConsumableItemDefinitions` that has a cooldown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumableRow {
+    /// `ConsumableID`.
+    pub id: String,
+    /// `CooldownDuration`, seconds.
+    pub cooldown_s: u32,
+    /// `CooldownId`.
+    pub cooldown_id: String,
+    /// `AddStatusEffects`.
+    pub status_effects: String,
+    /// `MannequinTag`; empty for none.
+    pub use_tag: String,
+}
+
+/// The extra damage of an attack's affix (`AffixStatData`): its share of the hit and the
+/// `DamageTypeData` `IntID` of its type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AffixDamage {
+    /// `DamagePercentage`, 0 to 1.
+    pub share: f64,
+    /// The `IntID` of its `DamageType`.
+    pub damage_type: u8,
 }
 
 /// One attack of `DamageData`.
@@ -372,6 +175,22 @@ pub struct AttackRow {
     pub threat: u64,
     /// The `IntID` of its `DamageType` in `DamageTypeData`, when the row names a known one.
     pub damage_type: Option<u8>,
+    /// The unique id of its table.
+    pub table: String,
+    /// `BlockStaminaDmgMod`: multiplies the attacker weapon's `BlockStaminaDamage` when a blocker
+    /// takes the hit; 0 without a number.
+    pub block_stamina_mod: f64,
+    /// The extra damage of its first affix with one (`Affixes`, `AffixStatData`).
+    pub affix: Option<AffixDamage>,
+}
+
+impl AttackRow {
+    /// The stamina it takes from a blocker of `block_stability` (percent) when the attacker's
+    /// weapon is `weapon` (retail: 14.6 and 25.55 from the legionnaire's and Thorpe's stabs on a
+    /// warhammer of stability 27, `100 x 0.2 x 0.73` and `125 x 0.28 x 0.73`).
+    pub fn block_stamina(&self, weapon: &WeaponRow, block_stability: f64) -> f64 {
+        weapon.block_stamina_damage * self.block_stamina_mod * (1.0 - block_stability / PERCENT)
+    }
 }
 
 /// The plain content of the combat datasheets.
@@ -389,11 +208,8 @@ pub struct CombatSource {
     pub weapons: Vec<(String, WeaponRow)>,
     /// `MasterItemDefinitions`: (item id, `ItemStatsRef`) of the items that have stats.
     pub item_stats: Vec<(String, String)>,
-    /// `MasterItemDefinitions`: (item id, `ItemClass`) of the items that have a class.
-    pub item_classes: Vec<(String, String)>,
-    /// `ConsumableItemDefinitions`: (consumable id, cooldown seconds, cooldown id, status
-    /// effects) of the consumables with a cooldown.
-    pub consumables: Vec<(String, u32, String, String)>,
+    /// `ConsumableItemDefinitions`: the consumables with a cooldown.
+    pub consumables: Vec<ConsumableRow>,
     /// `StatusEffectData`: (status id, health, health share) of the effects that heal.
     pub heals: Vec<(String, f64, f64)>,
     /// `DamageData` rows.
@@ -415,6 +231,20 @@ impl CombatSource {
             .iter()
             .flat_map(|table| &table.rows)
             .filter_map(|row| Some((row.type_id.as_str(), u8::try_from(row.int_id).ok()?)))
+            .collect();
+        let affixes: HashMap<&str, AffixDamage> = tables
+            .affix_stat_data
+            .iter()
+            .flat_map(|table| &table.rows)
+            .filter_map(|row| {
+                Some((
+                    row.status_id.as_str(),
+                    AffixDamage {
+                        share: row.damage_percentage?,
+                        damage_type: *damage_types.get(row.damage_type.as_deref()?)?,
+                    },
+                ))
+            })
             .collect();
         Self {
             base_types: base_rows()
@@ -470,7 +300,6 @@ impl CombatSource {
                             crit_multiplier: row.crit_damage_multiplier.unwrap_or(PLAIN_MOD),
                             spread_shot: row.ranged_attack_profile.as_deref()
                                 == Some(SPREAD_SHOT_PROFILE),
-                            kind: WeaponKind::of_id(&row.weapon_id),
                             max_loaded_ammo: row
                                 .max_loaded_ammo
                                 .and_then(|ammo| u8::try_from(ammo).ok())
@@ -479,6 +308,13 @@ impl CombatSource {
                             reload_ms: row
                                 .auto_reload_ammo_seconds
                                 .map_or(0, |seconds| (seconds * MS_PER_SECOND).round() as u64),
+                            stance: stance_key(row.mannequin_tag.as_deref().unwrap_or_default()),
+                            block_stamina_damage: row
+                                .block_stamina_damage
+                                .map_or(0.0, |damage| damage as f64),
+                            block_stability: row
+                                .block_stability
+                                .map_or(0.0, |stability| stability as f64),
                         },
                     )
                 })
@@ -488,12 +324,13 @@ impl CombatSource {
                 .iter()
                 .flat_map(|table| &table.rows)
                 .filter_map(|row| {
-                    Some((
-                        row.consumable_id.clone(),
-                        u32::try_from(row.cooldown_duration?).ok()?,
-                        row.cooldown_id.clone()?,
-                        row.add_status_effects.clone()?,
-                    ))
+                    Some(ConsumableRow {
+                        id: row.consumable_id.clone(),
+                        cooldown_s: u32::try_from(row.cooldown_duration?).ok()?,
+                        cooldown_id: row.cooldown_id.clone()?,
+                        status_effects: row.add_status_effects.clone()?,
+                        use_tag: row.mannequin_tag.clone().unwrap_or_default(),
+                    })
                 })
                 .collect(),
             heals: tables
@@ -517,17 +354,11 @@ impl CombatSource {
                 .flat_map(|table| &table.rows)
                 .filter_map(|row| Some((row.item_id.clone(), row.item_stats_ref.clone()?)))
                 .collect(),
-            item_classes: tables
-                .master_item_definitions
-                .iter()
-                .flat_map(|table| &table.rows)
-                .filter_map(|row| Some((row.item_id.clone(), row.item_class.clone()?)))
-                .collect(),
             attacks: tables
                 .damage_data
                 .iter()
-                .flat_map(|table| &table.rows)
-                .map(|row| AttackRow {
+                .flat_map(|table| table.rows.iter().map(move |row| (table, row)))
+                .map(|(table, row)| AttackRow {
                     damage_id: row.damage_id.clone(),
                     coefficient: row.dmg_coef.unwrap_or(PLAIN_MOD),
                     can_crit: row.can_crit.unwrap_or(true),
@@ -539,6 +370,16 @@ impl CombatSource {
                         .damage_type
                         .as_deref()
                         .and_then(|name| damage_types.get(name).copied()),
+                    table: table.unique_id.clone(),
+                    block_stamina_mod: row
+                        .block_stamina_dmg_mod
+                        .as_deref()
+                        .and_then(|cell| cell.trim().parse().ok())
+                        .unwrap_or(0.0),
+                    affix: row.affixes.as_deref().and_then(|cell| {
+                        cell.split(AFFIX_SEPARATOR)
+                            .find_map(|affix| affixes.get(affix.trim()).copied())
+                    }),
                 })
                 .collect(),
             vision_offsets: tables
@@ -588,9 +429,6 @@ pub enum CombatDataError {
     /// No `WeaponItemDefinitions` row.
     #[error("no weapon row `{0}`")]
     MissingWeapon(String),
-    /// No `DamageData` row.
-    #[error("no damage row `{0}`")]
-    MissingAttack(String),
 }
 
 /// What a `sim` looks up during a tick.
@@ -603,10 +441,12 @@ pub struct CombatData {
     item_weapons: HashMap<String, WeaponRow>,
     /// The healing consumable of each item that is one, by lower-case item id.
     item_heals: HashMap<String, HealingConsumable>,
-    attacks: Vec<AttackRow>,
-    /// The light and heavy attacks of each weapon kind whose rows the tables hold.
-    kind_attacks: HashMap<WeaponKind, [AttackRow; 2]>,
-    spreadshot: AttackRow,
+    /// Every attack row, by lower-case table unique id and row id.
+    table_attacks: HashMap<(String, String), AttackRow>,
+    /// The player's damage table (lower-case unique id).
+    player_table: String,
+    /// The basic attacks of each weapon stance.
+    player_attacks: PlayerAttacks,
     vision_offsets: HashMap<String, f32>,
     player_max_health: u32,
 }
@@ -639,57 +479,27 @@ impl CombatData {
             .find(|(id, _)| *id == rows.weapon_id)
             .map(|(_, weapon)| *weapon)
             .ok_or_else(|| CombatDataError::MissingWeapon(rows.weapon_id.clone()))?;
-        let attack_row = |wanted: &String| {
-            source
-                .attacks
-                .iter()
-                .find(|row| row.damage_id == *wanted)
-                .cloned()
-                .ok_or_else(|| CombatDataError::MissingAttack(wanted.clone()))
-        };
-        let attacks = rows
-            .attack_damage_ids
+        let table_attacks: HashMap<(String, String), AttackRow> = source
+            .attacks
             .iter()
-            .map(attack_row)
-            .collect::<Result<Vec<_>, _>>()?;
-        let spreadshot = attack_row(&rows.spreadshot_damage_id)?;
-        let row_of = |id: &str| {
-            source
-                .attacks
-                .iter()
-                .find(|row| row.damage_id == id)
-                .cloned()
-        };
-        let kind_attacks = WeaponKind::NAMES
-            .iter()
-            .filter_map(|(_, kind)| {
-                let (light, heavy) = kind.attack_ids()?;
-                Some((*kind, [row_of(light)?, row_of(heavy)?]))
+            .map(|row| {
+                (
+                    (row.table.to_lowercase(), row.damage_id.clone()),
+                    row.clone(),
+                )
             })
             .collect();
+        let player_table = rows.damage_table.to_lowercase();
         let weapons: HashMap<String, WeaponRow> = source
             .weapons
             .iter()
             .map(|(id, weapon)| (id.to_lowercase(), *weapon))
             .collect();
-        // An item's kind is its class's; its stats row's id is the fall-back.
-        let item_kinds: HashMap<String, WeaponKind> = source
-            .item_classes
-            .iter()
-            .filter_map(|(item, class)| {
-                Some((item.to_lowercase(), WeaponKind::of_item_class(class)?))
-            })
-            .collect();
         let item_weapons = source
             .item_stats
             .iter()
             .filter_map(|(item, stats)| {
-                let item = item.to_lowercase();
-                let mut weapon = *weapons.get(&stats.to_lowercase())?;
-                if let Some(kind) = item_kinds.get(&item) {
-                    weapon.kind = *kind;
-                }
-                Some((item, weapon))
+                Some((item.to_lowercase(), *weapons.get(&stats.to_lowercase())?))
             })
             .collect();
         let heals: HashMap<String, (f64, f64)> = source
@@ -700,17 +510,19 @@ impl CombatData {
         let consumables: HashMap<String, HealingConsumable> = source
             .consumables
             .iter()
-            .filter_map(|(id, cooldown_s, cooldown_id, effects)| {
-                let (health, health_share) = effects
+            .filter_map(|row| {
+                let (health, health_share) = row
+                    .status_effects
                     .split(EFFECT_SEPARATOR)
                     .find_map(|effect| heals.get(&effect.trim().to_lowercase()))?;
                 Some((
-                    id.to_lowercase(),
+                    row.id.to_lowercase(),
                     HealingConsumable {
-                        cooldown_s: *cooldown_s,
-                        cooldown_id: cooldown_id.clone(),
+                        cooldown_s: row.cooldown_s,
+                        cooldown_id: row.cooldown_id.clone(),
                         health: *health,
                         health_share: *health_share,
+                        use_tag: row.use_tag.clone(),
                     },
                 ))
             })
@@ -764,9 +576,9 @@ impl CombatData {
             weapon,
             item_weapons,
             item_heals,
-            attacks,
-            kind_attacks,
-            spreadshot,
+            table_attacks,
+            player_table,
+            player_attacks: PlayerAttacks::default(),
             vision_offsets: source.vision_offsets.into_iter().collect(),
             player_max_health,
         })
@@ -804,37 +616,34 @@ impl CombatData {
         &self.weapon
     }
 
-    /// The first of the config's weapon attacks: the light attack.
-    pub fn first_attack(&self) -> Option<&AttackRow> {
-        self.attacks.first()
+    /// The player attack row `damage_id` of the player's damage table.
+    pub fn attack(&self, damage_id: &str) -> Option<&AttackRow> {
+        self.table_attack(&self.player_table, damage_id)
     }
 
-    /// The second of the config's weapon attacks: the heavy attack.
-    pub fn heavy_attack(&self) -> Option<&AttackRow> {
-        self.attacks.get(1)
+    /// The attack row `damage_id` of the table of unique id `table` (any case).
+    pub fn table_attack(&self, table: &str, damage_id: &str) -> Option<&AttackRow> {
+        self.table_attacks
+            .get(&(table.to_lowercase(), damage_id.to_owned()))
     }
 
-    /// The attack of one pellet of a spread shot.
-    pub const fn spreadshot_attack(&self) -> &AttackRow {
-        &self.spreadshot
-    }
-
-    /// The light (`heavy` false) or heavy attack of a weapon of `kind`: its own rows, else the
-    /// config's.
-    pub fn weapon_attack(&self, kind: WeaponKind, heavy: bool) -> Option<&AttackRow> {
-        match self.kind_attacks.get(&kind) {
-            Some([light, heavy_row]) => Some(if heavy { heavy_row } else { light }),
-            None if heavy => self.heavy_attack(),
-            None => self.first_attack(),
+    /// This data with the basic attacks of the weapon stances, `attacks`.
+    #[must_use]
+    pub fn with_player_attacks(self, attacks: PlayerAttacks) -> Self {
+        Self {
+            player_attacks: attacks,
+            ..self
         }
     }
 
-    /// The weapon attack `damage_id`, if it is one of the config's or of a weapon kind.
-    pub fn attack(&self, damage_id: &str) -> Option<&AttackRow> {
-        self.attacks
-            .iter()
-            .chain(self.kind_attacks.values().flatten())
-            .find(|row| row.damage_id == damage_id)
+    /// The stance of key `key` ([`WeaponRow::stance`]).
+    pub fn stance(&self, key: u32) -> Option<&Stance> {
+        self.player_attacks.stance(key)
+    }
+
+    /// The stance of a character with no weapon.
+    pub fn unarmed_stance(&self) -> Option<&Stance> {
+        self.stance(stance_key(""))
     }
 
     /// The out-of-combat vision offset of `creature_type`; 0 without a row.
@@ -902,19 +711,41 @@ mod tests {
                 ],
             ],
         );
+        // Retail rows of `javelindata_damagetable_damned_commander_ftue`: the stab's phase-two row
+        // has a quarter fire, its phase-one row none.
         let attacks = sheet(
             "DamageData",
-            &[("DamageID", Text), ("DamageType", Text)],
             &[
-                &["1H_Sword_Attack1", "Slash"],
-                &["1H_Sword_Attack2", "Thrust"],
-                &["Unknown_Type", "Mystery"],
-                &["No_Type", ""],
+                ("DamageID", Text),
+                ("DamageType", Text),
+                ("BlockStaminaDmgMod", Text),
+                ("Affixes", Text),
             ],
+            &[
+                &["1H_Sword_Attack1", "Slash", "0.4", ""],
+                &[
+                    "1H_Sword_Attack2",
+                    "Thrust",
+                    "0.28000000000000003",
+                    "AI_FireDMG_25",
+                ],
+                &["Unknown_Type", "Mystery", "", "No_Such_Affix"],
+                &["No_Type", "", "x", ""],
+            ],
+        );
+        let affixes = sheet(
+            "AffixStatData",
+            &[
+                ("StatusID", Text),
+                ("DamagePercentage", Number),
+                ("DamageType", Text),
+            ],
+            &[&["AI_FireDMG_25", "0.25", "Thrust"]],
         );
         let tables = Tables {
             damage_type_data: vec![Table::fill("types", &types).expect("types")],
             damage_data: vec![Table::fill("attacks", &attacks).expect("attacks")],
+            affix_stat_data: vec![Table::fill("affixes", &affixes).expect("affixes")],
             ..Tables::default()
         };
         let source = CombatSource::from_tables(&tables);
@@ -932,40 +763,37 @@ mod tests {
                 ("No_Type", None),
             ]
         );
+        let stab = &source.attacks[1];
+        assert_eq!(stab.table, "DamageData_1", "the sheet's unique id");
+        assert!((stab.block_stamina_mod - 0.28).abs() < 1e-9);
+        assert_eq!(
+            stab.affix,
+            Some(AffixDamage {
+                share: 0.25,
+                damage_type: 5
+            })
+        );
+        assert_eq!(source.attacks[0].affix, None);
+        assert_eq!(source.attacks[2].affix, None, "an affix without a row");
+        assert_eq!(source.attacks[3].block_stamina_mod, 0.0, "not a number");
     }
 
     #[test]
-    fn retail_weapon_ids_name_their_kind() {
-        assert_eq!(WeaponKind::of_id("1hSwordT2"), WeaponKind::Sword);
-        assert_eq!(WeaponKind::of_id("1hLongswordT2"), WeaponKind::Sword);
-        assert_eq!(
-            WeaponKind::of_id("1hGreatSword_HalloweenT5"),
-            WeaponKind::GreatSword
-        );
-        assert_eq!(WeaponKind::of_id("1hhatchetBLostT2"), WeaponKind::Hatchet);
-        assert_eq!(WeaponKind::of_id("2hWarHammerT2"), WeaponKind::WarHammer);
-        assert_eq!(WeaponKind::of_id("2hGreatAxeT2"), WeaponKind::GreatAxe);
-        assert_eq!(WeaponKind::of_id("BlunderbussT2"), WeaponKind::Blunderbuss);
-        assert_eq!(WeaponKind::of_id("2hDemoHammerT3"), WeaponKind::WarHammer);
-        assert_eq!(WeaponKind::of_id("1hThrowingAxeT2"), WeaponKind::Hatchet);
-        assert_eq!(WeaponKind::of_id("1hFlailT2"), WeaponKind::Flail);
-        assert_eq!(WeaponKind::of_id("2hBowT2"), WeaponKind::Bow);
-        assert_eq!(WeaponKind::of_id("2hMusketT2"), WeaponKind::Musket);
-        assert_eq!(WeaponKind::of_id("2hStaffFireT2"), WeaponKind::FireStaff);
-        assert_eq!(
-            WeaponKind::of_id("2hLifeStaff_WinterT5"),
-            WeaponKind::LifeStaff
-        );
-        assert_eq!(
-            WeaponKind::of_id("1hGauntletIceT2"),
-            WeaponKind::IceGauntlet
-        );
-        assert_eq!(
-            WeaponKind::of_id("2hVoidGauntletT2"),
-            WeaponKind::VoidGauntlet
-        );
-        assert_eq!(WeaponKind::of_id("1hSkinningKnifeT1"), WeaponKind::Other);
-        assert!(WeaponKind::Flail.swings() && !WeaponKind::Bow.swings());
+    fn a_blocked_hit_takes_the_retail_stamina() {
+        // Retail tutorial, warhammer of `BlockStability` 27: the legionnaire's
+        // `Legionnaire_LightStab` (0.2) with `Legion_1HSpear` (100) took 14.6, Thorpe's
+        // `Attack_Stab_02` (0.28) with his sword (125) 25.55.
+        let warhammer = 27.0;
+        let row = |mod_: f64| AttackRow {
+            block_stamina_mod: mod_,
+            ..source().attacks[0].clone()
+        };
+        let weapon = |damage: f64| WeaponRow {
+            block_stamina_damage: damage,
+            ..sword_row()
+        };
+        assert!((row(0.2).block_stamina(&weapon(100.0), warhammer) - 14.6).abs() < 1e-9);
+        assert!((row(0.28).block_stamina(&weapon(125.0), warhammer) - 25.55).abs() < 1e-9);
     }
 
     const PLAYER_HEALTH: u32 = 856;
@@ -983,14 +811,14 @@ mod tests {
     const LIGHT: &str = "1H_Sword_Attack1";
     const HEAVY: &str = "1H_Sword_Attack2";
     const PELLET: &str = "Blunderbuss_Primary_Attack";
+    const PLAYER_TABLE: &str = "DamageTable";
     const VISION_OFFSET: f32 = 5.0;
 
     fn rows() -> CombatRows {
         CombatRows {
             player_vitals_id: "Player".to_owned(),
             weapon_id: "SwordT1".to_owned(),
-            attack_damage_ids: vec![LIGHT.to_owned(), HEAVY.to_owned()],
-            spreadshot_damage_id: PELLET.to_owned(),
+            damage_table: PLAYER_TABLE.to_owned(),
         }
     }
 
@@ -1002,9 +830,11 @@ mod tests {
         }
     }
 
-    /// The occultist's starter ice gauntlet and its stats row (retail rows, build 25810808).
+    /// The occultist's starter ice gauntlet, its stats row and the row's `MannequinTag` (retail
+    /// rows, build 25810808).
     const ICE_GAUNTLET_ITEM: &str = "OccultistArchetype_1hGauntletIce";
     const ICE_GAUNTLET_STATS: &str = "1hElementalGauntlet_IceT2";
+    const ICE_GAUNTLET_TAGS: &str = "MagicGauntlet,Ice";
 
     fn sword_row() -> WeaponRow {
         WeaponRow {
@@ -1012,104 +842,12 @@ mod tests {
             crit_chance: 0.03,
             crit_multiplier: 1.3,
             spread_shot: false,
-            kind: WeaponKind::Sword,
             max_loaded_ammo: 0,
             reload_ms: 0,
+            stance: stance_key("1H_Melee,Sword"),
+            block_stamina_damage: 0.0,
+            block_stability: 0.0,
         }
-    }
-
-    #[test]
-    fn an_item_is_the_kind_its_class_names() {
-        assert_eq!(
-            WeaponKind::of_id(ICE_GAUNTLET_STATS),
-            WeaponKind::Other,
-            "its stats id names no kind"
-        );
-        let data = CombatData::build(source(), &rows()).expect("data");
-        assert_eq!(
-            data.weapon_of_item(ICE_GAUNTLET_ITEM)
-                .map(|weapon| weapon.kind),
-            Some(WeaponKind::IceGauntlet)
-        );
-        // Every starter backstory weapon's class (retail rows).
-        let starters = [
-            ("Weapon+EquippableMainHand+Sword+Melee", WeaponKind::Sword),
-            (
-                "Weapon+EquippableMainHand+Hatchet+Melee",
-                WeaponKind::Hatchet,
-            ),
-            ("Weapon+EquippableTwoHand+2HAxe+Melee", WeaponKind::GreatAxe),
-            (
-                "Weapon+EquippableTwoHand+2HHammer+Melee",
-                WeaponKind::WarHammer,
-            ),
-            ("Weapon+EquippableTwoHand+Bow+Ranged", WeaponKind::Bow),
-            ("Weapon+EquippableTwoHand+Spear+Melee", WeaponKind::Spear),
-            ("Weapon+EquippableMainHand+Rapier+Melee", WeaponKind::Rapier),
-            ("Weapon+EquippableTwoHand+Musket+Ranged", WeaponKind::Musket),
-            (
-                "Weapon+EquippableMainHand+FireStaff+Magic",
-                WeaponKind::FireStaff,
-            ),
-            (
-                "Weapon+EquippableMainHand+IceMagic+Magic",
-                WeaponKind::IceGauntlet,
-            ),
-            (
-                "Weapon+EquippableMainHand+VoidGauntlet+Magic",
-                WeaponKind::VoidGauntlet,
-            ),
-            (
-                "Weapon+EquippableMainHand+LifeStaff+Magic",
-                WeaponKind::LifeStaff,
-            ),
-            (
-                "Weapon+EquippableTwoHand+GreatSword+Melee",
-                WeaponKind::GreatSword,
-            ),
-            (
-                "Weapon+EquippableTwoHand+Blunderbuss+Ranged",
-                WeaponKind::Blunderbuss,
-            ),
-            (
-                "Weapon+EquippableMainHand+Flail+Melee+Named",
-                WeaponKind::Flail,
-            ),
-        ];
-        for (class, kind) in starters {
-            assert_eq!(WeaponKind::of_item_class(class), Some(kind), "{class}");
-        }
-        assert_eq!(
-            WeaponKind::of_item_class("EquippableTool+Axe+SkinningKnife"),
-            None,
-            "a tool"
-        );
-        assert_eq!(
-            WeaponKind::of_item_class("Weapon+EquippableOffHand+Shield+KiteShield"),
-            None,
-            "a shield"
-        );
-    }
-
-    #[test]
-    fn ranged_and_magic_kinds_fly_and_melee_kinds_do_not() {
-        for kind in [
-            WeaponKind::FireStaff,
-            WeaponKind::LifeStaff,
-            WeaponKind::IceGauntlet,
-            WeaponKind::VoidGauntlet,
-            WeaponKind::Bow,
-            WeaponKind::Musket,
-        ] {
-            assert!(kind.projectile().is_some(), "{kind:?}");
-            assert!(kind.attack_ids().is_some(), "{kind:?}");
-            assert!(!kind.swings(), "{kind:?}");
-        }
-        assert!(
-            WeaponKind::Blunderbuss.projectile().is_none(),
-            "it fires spread shots"
-        );
-        assert!(WeaponKind::Sword.projectile().is_none());
     }
 
     fn source() -> CombatSource {
@@ -1130,17 +868,18 @@ mod tests {
                 (
                     ICE_GAUNTLET_STATS.to_owned(),
                     WeaponRow {
-                        kind: WeaponKind::of_id(ICE_GAUNTLET_STATS),
+                        stance: stance_key(ICE_GAUNTLET_TAGS),
                         ..sword_row()
                     },
                 ),
             ],
-            consumables: vec![(
-                "PotionHealthT1".to_owned(),
-                POTION_COOLDOWN_S,
-                "SurvivalPotion".to_owned(),
-                "PotionHeal".to_owned(),
-            )],
+            consumables: vec![ConsumableRow {
+                id: "PotionHealthT1".to_owned(),
+                cooldown_s: POTION_COOLDOWN_S,
+                cooldown_id: "SurvivalPotion".to_owned(),
+                status_effects: "PotionHeal".to_owned(),
+                use_tag: "Potion".to_owned(),
+            }],
             heals: vec![("PotionHeal".to_owned(), POTION_HEAL, POTION_SHARE)],
             // As in the retail tables: the potion has no stats row.
             item_stats: vec![
@@ -1148,40 +887,18 @@ mod tests {
                 ("Shield".to_owned(), "NoWeaponRow".to_owned()),
                 (ICE_GAUNTLET_ITEM.to_owned(), ICE_GAUNTLET_STATS.to_owned()),
             ],
-            // Retail classes of the two items.
-            item_classes: vec![
-                (
-                    SWORD_ITEM.to_owned(),
-                    "Weapon+EquippableMainHand+Sword+Melee".to_owned(),
-                ),
-                (
-                    ICE_GAUNTLET_ITEM.to_owned(),
-                    "Weapon+EquippableMainHand+IceMagic+Magic".to_owned(),
-                ),
-            ],
-            attacks: vec![
-                AttackRow {
-                    damage_id: LIGHT.to_owned(),
-                    coefficient: 1.0,
+            attacks: [(LIGHT, 1.0, 0), (HEAVY, 1.2, 1), (PELLET, 0.19, 0)]
+                .map(|(id, coefficient, threat)| AttackRow {
+                    damage_id: id.to_owned(),
+                    coefficient,
                     can_crit: true,
-                    threat: 0,
+                    threat,
                     damage_type: None,
-                },
-                AttackRow {
-                    damage_id: HEAVY.to_owned(),
-                    coefficient: 1.2,
-                    can_crit: true,
-                    threat: 1,
-                    damage_type: None,
-                },
-                AttackRow {
-                    damage_id: PELLET.to_owned(),
-                    coefficient: 0.19,
-                    can_crit: true,
-                    threat: 0,
-                    damage_type: None,
-                },
-            ],
+                    table: PLAYER_TABLE.to_owned(),
+                    block_stamina_mod: 0.0,
+                    affix: None,
+                })
+                .to_vec(),
             vision_offsets: vec![("Beast".to_owned(), VISION_OFFSET)],
             player_health: vec![("Player".to_owned(), PLAYER_HEALTH)],
             categories: Vec::new(),
@@ -1208,6 +925,7 @@ mod tests {
                 cooldown_id: "SurvivalPotion".to_owned(),
                 health: POTION_HEAL,
                 health_share: POTION_SHARE,
+                use_tag: "Potion".to_owned(),
             })
         );
         assert_eq!(
@@ -1217,50 +935,58 @@ mod tests {
     }
 
     #[test]
-    fn the_first_attack_is_the_first_config_id() {
-        let mut heavy_first = rows();
-        heavy_first.attack_damage_ids.reverse();
-        let data = CombatData::build(source(), &heavy_first).expect("data");
+    fn an_attack_is_found_in_its_own_table() {
+        let mut source = source();
+        // Retail: `1H_Sword_Attack1` is in the player table (1.0) and in NPC tables (0.15).
+        source.attacks.push(AttackRow {
+            coefficient: 0.15,
+            table: "DamnedDamageTable_Damned_FTUE".to_owned(),
+            ..source.attacks[0].clone()
+        });
+        let data = CombatData::build(source, &rows()).expect("data");
+        assert_eq!(data.attack(LIGHT).map(|row| row.coefficient), Some(1.0));
         assert_eq!(
-            data.first_attack().map(|row| row.damage_id.as_str()),
-            Some(HEAVY)
+            data.table_attack("damneddamagetable_damned_ftue", LIGHT)
+                .map(|row| row.coefficient),
+            Some(0.15)
         );
+        assert_eq!(data.table_attack("NoTable", LIGHT), None);
     }
 
     #[test]
-    fn a_weapon_kind_attacks_with_its_own_rows() {
-        let mut source = source();
-        for (damage_id, coefficient) in [
-            ("Warhammer_PrimaryAttack", 1.0),
-            ("Warhammer_HeavyAttack", 1.3),
-        ] {
-            source.attacks.push(AttackRow {
-                damage_id: damage_id.to_owned(),
-                coefficient,
-                can_crit: true,
-                threat: 0,
-                damage_type: None,
-            });
-        }
-        let data = CombatData::build(source, &rows()).expect("data");
-        let id = |row: Option<&AttackRow>| row.map(|row| row.damage_id.clone());
+    fn a_weapon_finds_its_stance() {
+        let stance = Stance {
+            tags: "1H_Melee,Sword".to_owned(),
+            light: None,
+            light_from_ms: 0,
+            heavy_from_ms: None,
+            heavy: None,
+            charged_at_ms: None,
+            charged: None,
+            dodge_invulnerable_ms: Some([0, 500]),
+            uses: Vec::new(),
+            combo: Vec::new(),
+            variants: Vec::new(),
+        };
+        let unarmed = Stance {
+            tags: String::new(),
+            ..stance.clone()
+        };
+        let data = data().with_player_attacks(PlayerAttacks::of_stances(vec![stance, unarmed]));
+        let sword = data.weapon_of_item(SWORD_ITEM).expect("sword");
         assert_eq!(
-            id(data.weapon_attack(WeaponKind::WarHammer, true)),
-            Some("Warhammer_HeavyAttack".to_owned())
+            data.stance(sword.stance).map(|stance| stance.tags.as_str()),
+            Some("1H_Melee,Sword")
         );
         assert_eq!(
-            data.attack("Warhammer_HeavyAttack")
-                .map(|row| row.coefficient),
-            Some(1.3)
+            data.unarmed_stance().map(|stance| stance.tags.as_str()),
+            Some("")
         );
-        // A kind without rows, or another weapon, swings the config's.
+        // The starter ice gauntlet's stats id names no weapon; its row's tags do.
         assert_eq!(
-            id(data.weapon_attack(WeaponKind::Spear, false)),
-            id(data.first_attack())
-        );
-        assert_eq!(
-            id(data.weapon_attack(WeaponKind::Other, true)),
-            id(data.heavy_attack())
+            data.weapon_of_item(ICE_GAUNTLET_ITEM)
+                .map(|weapon| weapon.stance),
+            Some(stance_key(ICE_GAUNTLET_TAGS))
         );
     }
 
@@ -1332,12 +1058,6 @@ mod tests {
         assert!(matches!(
             CombatData::build(source(), &no_weapon),
             Err(CombatDataError::MissingWeapon(_))
-        ));
-        let mut no_attack = rows();
-        no_attack.attack_damage_ids.push("Spoon_Attack".to_owned());
-        assert!(matches!(
-            CombatData::build(source(), &no_attack),
-            Err(CombatDataError::MissingAttack(_))
         ));
         assert!(matches!(
             CombatData::from_tables(&Tables::default(), &rows()),

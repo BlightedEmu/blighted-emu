@@ -2,15 +2,19 @@
 //! The content a sim needs for its players besides combat: the starter kit of each archetype
 //! pick, the bit of each achievement, the look of each mob prefab, and the quests.
 
-use nw_content::crafting::Recipes;
+use nw_content::crafting::{Recipes, StructureCosts};
 use nw_content::creature_animations::CreatureAnimations;
-use nw_content::gathering::Gatherables;
-use nw_content::loot::{LootTables, MobLoot};
+use nw_content::gameplay_config::GameplayConfig;
+use nw_content::gathering::{CrateLoot, CrateVariant, Gatherables};
+use nw_content::leaderboards::LeaderboardStats;
+use nw_content::loot::{LootTables, MobLoot, PlayerLootLevels};
+use nw_content::loot_limits::{LootLimitRules, LootLimits, ResetClock};
 use nw_content::poi_tags::PoiTags;
-use nw_content::rewards::Rewards;
+use nw_content::rewards::{KillExperience, Rewards};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_sim_core::Position;
-use nw_world::records::GatherablePoint;
+use nw_world::records::{GatherablePoint, WorldFile};
+use nw_world::stations::CraftingStation;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
@@ -402,10 +406,28 @@ pub struct PlayerContent {
     pub loot: LootTables,
     /// What each mob type drops when killed.
     pub mob_loot: MobLoot,
+    /// The loot table of each loot crate of the level.
+    pub crates: CrateLoot,
+    /// The level's crafting stations.
+    pub stations: Vec<CraftingStation>,
+    /// The resources each structure blueprint costs, for the stations' committed resources.
+    pub structure_costs: StructureCosts,
+    /// The loot value of a player's level by its experience.
+    pub player_loot_levels: PlayerLootLevels,
     /// The point-of-interest tags of each territory, for go-to and exit tasks.
     pub poi_tags: PoiTags,
     /// The level's quest objects that the player breaks with its weapons.
     pub quest_objects: QuestObjects,
+    /// The leaderboards each stat feeds.
+    pub leaderboards: LeaderboardStats,
+    /// The gameplay values of the remote config layers (`crate::gameplay`).
+    pub gameplay: GameplayConfig,
+    /// The experience of a kill by the mob's level, before the multipliers.
+    pub kill_experience: KillExperience,
+    /// The lowercase ids of the items that `javelin.disabled-item-classes` disables.
+    pub disabled_items: HashSet<String>,
+    /// The loot limits and their resets; `None` applies no limit.
+    pub loot_limits: Option<LootLimitRules>,
 }
 
 /// A quest object of the level: a gatherable point whose gather is a game event that a quest's
@@ -482,16 +504,21 @@ impl QuestObjects {
 }
 
 impl PlayerContent {
-    /// The player content of `tables` with the mob looks `mob_looks`, the creature animations
-    /// `creature_animations`, the tutorial level's entities `tutorial_level` and the gatherable
-    /// points of the sim's level `level_gatherables`.
+    /// The player content of `tables` (with the datasheet overrides of `gameplay` applied)
+    /// with the mob looks `mob_looks`, the creature animations `creature_animations`, the
+    /// tutorial level's entities `tutorial_level`, the gatherable points and capitals of the
+    /// sim's level `level`, the gameplay values `gameplay` and the loot limit resets
+    /// `loot_reset`.
     pub fn new(
         tables: &Tables,
         mob_looks: MobLooks,
         creature_animations: CreatureAnimations,
         tutorial_level: FtueLevel,
-        level_gatherables: &[GatherablePoint],
+        level: &WorldFile,
+        gameplay: GameplayConfig,
+        loot_reset: ResetClock,
     ) -> Self {
+        let level_gatherables = &level.gatherables;
         let rows = task_rows(tables);
         let gatherables = Gatherables::from_tables(tables);
         let quest_objects =
@@ -519,15 +546,90 @@ impl PlayerContent {
             rewards: Rewards::from_tables(tables),
             loot: LootTables::from_tables(tables),
             mob_loot: MobLoot::from_tables(tables),
+            crates: CrateLoot::build(
+                CrateVariant::from_tables(tables),
+                level.capitals.iter().filter_map(|capital| {
+                    Some((capital.id.as_str(), capital.variant_name.as_deref()?))
+                }),
+                level
+                    .spawned
+                    .iter()
+                    .map(|slice| (slice.id, slice.variant.as_str())),
+            ),
+            stations: level.stations.clone(),
+            structure_costs: StructureCosts::from_tables(tables),
+            player_loot_levels: PlayerLootLevels::from_tables(tables),
             poi_tags: PoiTags::from_tables(tables),
             quest_objects,
+            leaderboards: LeaderboardStats::from_tables(tables),
+            kill_experience: KillExperience::from_tables(tables),
+            disabled_items: disabled_items(
+                tables
+                    .master_item_definitions
+                    .iter()
+                    .flat_map(|table| &table.rows)
+                    .map(|row| (row.item_id.as_str(), row.item_class.as_deref())),
+                &gameplay,
+            ),
+            loot_limits: Some(LootLimitRules {
+                limits: LootLimits::from_tables(tables),
+                clock: loot_reset,
+            }),
+            gameplay,
         }
     }
+
+    /// Whether item `item_id` (any case) is disabled.
+    pub fn is_item_disabled(&self, item_id: &str) -> bool {
+        self.disabled_items.contains(&item_id.to_lowercase())
+    }
+}
+
+/// The lowercase ids of the master `items` (`ItemID`, `ItemClass`) whose class list holds a
+/// class that `gameplay` disables (client check `FUN_14443ea80`, build 25810808: an item is
+/// disabled when one of its classes is in `javelin.disabled-item-classes`).
+fn disabled_items<'a>(
+    items: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    gameplay: &GameplayConfig,
+) -> HashSet<String> {
+    items
+        .into_iter()
+        .filter(|(_, class)| class.is_some_and(|class| gameplay.is_class_disabled(class)))
+        .map(|(item_id, _)| item_id.to_lowercase())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_items_of_a_disabled_class_are_disabled() {
+        let gameplay = GameplayConfig {
+            disabled_item_classes: vec!["Dagger".to_owned()],
+            ..GameplayConfig::default()
+        };
+        let content = PlayerContent {
+            disabled_items: disabled_items(
+                [
+                    (
+                        "1hDaggerDropT2",
+                        Some("Weapon+EquippableMainHand+Dagger+Melee"),
+                    ),
+                    (
+                        "1hSwordT2_FTUE",
+                        Some("Weapon+EquippableMainHand+Sword+Melee"),
+                    ),
+                    ("NoClass", None),
+                ],
+                &gameplay,
+            ),
+            ..PlayerContent::default()
+        };
+        assert!(content.is_item_disabled("1hdaggerdropt2"));
+        assert!(!content.is_item_disabled("1hSwordT2_FTUE"));
+        assert!(!content.is_item_disabled("NoClass"));
+    }
 
     const SAILOR: u32 = 2_288_616_137;
 

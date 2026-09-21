@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Saved launcher settings (M2 spec section 6): server address, launcher token, Steam path.
+//! Saved launcher settings (M2 spec section 6): server address and launcher token.
 //! The file is readable only by the user on Unix.
 
 use std::io::Write;
@@ -15,16 +15,15 @@ pub const SETTINGS_FILE: &str = "settings.json";
 #[cfg(unix)]
 const OWNER_ONLY_MODE: u32 = 0o600;
 
-/// What the launcher remembers.
+/// What the launcher remembers. Keys of older launchers (`steam_path`, from when the game started
+/// through Steam's launcher) are ignored.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Settings {
     /// The server address as typed.
     pub server: String,
     /// Launcher session token, when logged in.
     pub launcher_token: Option<String>,
-    /// Steam program, when not the default.
-    pub steam_path: Option<PathBuf>,
 }
 
 /// The settings file could not be read or written.
@@ -157,7 +156,6 @@ mod tests {
         Settings {
             server: "example.org".to_owned(),
             launcher_token: Some("token".to_owned()),
-            steam_path: None,
         }
     }
 
@@ -232,6 +230,18 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & PERMISSION_BITS, OWNER_ONLY_MODE);
+    }
+
+    #[test]
+    fn an_older_file_with_a_steam_path_still_loads() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join(SETTINGS_FILE);
+        std::fs::write(
+            &path,
+            r#"{"server":"example.org","launcher_token":"token","steam_path":null}"#,
+        )
+        .expect("write");
+        assert_eq!(Settings::load(&path).expect("load"), sample());
     }
 
     #[test]

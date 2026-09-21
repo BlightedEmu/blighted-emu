@@ -171,6 +171,9 @@ pub enum Bit8 {
 
 /// The interaction kind of a gather.
 pub const GATHER_KIND: u8 = 14;
+/// The interaction kind of a loot bag (retail 2026-09-18: the bag of a killed boar and the
+/// tutorial's beach bag).
+pub const LOOT_KIND: u8 = 28;
 /// The interaction kind of a crafting station (beach-quests note: Urda's Campfire).
 pub const CRAFTING_STATION_KIND: u8 = 20;
 /// The interaction kind of a talk to an NPC (beach-quests note: Aelstrom and Urda).
@@ -198,7 +201,7 @@ pub struct InteractionRequest {
     pub target_entity: u64,
     /// The interaction id (the server's answer and the client's cancel carry it).
     pub interaction: u64,
-    /// The interaction kind (14 to gather, 28 a loot satchel).
+    /// The interaction kind ([`GATHER_KIND`], [`LOOT_KIND`], ...).
     pub kind: u8,
     /// A gather's gatherable: the CRC-32 of its lowercase `GatherableID` (gather note: retail
     /// flint `a417137f` = `SingleStone`).
@@ -439,6 +442,29 @@ const RUN_MODE_BIT: u32 = 14;
 /// The slot values and bits of the presses of the first and second weapon keys (input note: the
 /// weapon in the hand changed 331 to 418 ms after each).
 const WEAPON_KEYS: [(usize, u32); 2] = [(0, 9), (3, 13)];
+/// The slot values and bits of the movement keys, set while the key is held (movement study
+/// 2026-09-20: in 15,000 retail records of the newchar and clean movement captures, the own
+/// player's next place moved from the last one at a median angle to the camera yaw of 0.1° with
+/// forward alone (10,799 records), 180° with back (1,532), 87° with right (249), -87° with left
+/// (163), 44° with forward and right (1,364), -44° with forward and left (759), 136° with back
+/// and right (363) and -135° with back and left (270)).
+const FORWARD_KEY: (usize, u32) = (6, 32);
+const BACK_KEY: (usize, u32) = (6, 5);
+const LEFT_KEY: (usize, u32) = (4, 32);
+const RIGHT_KEY: (usize, u32) = (4, 1);
+/// The slot value and bit of the jump key, set while it is held (movement study: 10 of its 16
+/// presses in the newchar capture lifted the own player 0.6 m or more within six states; the
+/// others were on stairs and slopes).
+const JUMP_KEY: (usize, u32) = (1, 9);
+/// The slot value and bit of a press of the walk toggle (movement study: set in one record per
+/// press with value 4 bit 3; in the clean toggle captures each of the 20 presses while running
+/// switched the speed between 5.5 and 3.25 m/s forward, 4.0 and 3.25 m/s back).
+const WALK_TOGGLE_KEY: (usize, u32) = (4, 22);
+/// The slot values and bits of the presses that change the camera's boom (movement study, in
+/// the newchar capture: value 2 bit 35 lengthened the resting boom by 1 m in 9 of 11 presses,
+/// value 5 bit 57 shortened it by 1 m or ended the short boom in 28 of 35, value 5 bit 51 set
+/// the short 2.75 m boom in all 5).
+const BOOM_KEYS: [(usize, u32); 3] = [(2, 35), (5, 57), (5, 51)];
 /// Slots of a client record (19 words of the action set, as 10 values).
 const ACTION_SLOTS: u8 = 19;
 /// The neutral scaled bytes of a record.
@@ -506,6 +532,45 @@ impl InputRecord {
             .find(|(_, (value, bit))| self.slot_bit(*value, *bit))
             .map(|(key, _)| key)
     }
+
+    /// The movement keys the player holds in this record.
+    pub fn move_keys(&self) -> MoveKeys {
+        let held = |(value, bit): (usize, u32)| self.slot_bit(value, bit);
+        MoveKeys {
+            forward: held(FORWARD_KEY),
+            back: held(BACK_KEY),
+            left: held(LEFT_KEY),
+            right: held(RIGHT_KEY),
+            jump: held(JUMP_KEY),
+        }
+    }
+
+    /// Whether the player presses the walk toggle in this record.
+    pub fn walk_toggle_pressed(&self) -> bool {
+        self.slot_bit(WALK_TOGGLE_KEY.0, WALK_TOGGLE_KEY.1)
+    }
+
+    /// Whether the player presses a key that changes the camera's boom in this record.
+    pub fn boom_key_pressed(&self) -> bool {
+        BOOM_KEYS
+            .iter()
+            .any(|&(value, bit)| self.slot_bit(value, bit))
+    }
+}
+
+/// The movement keys of one input record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MoveKeys {
+    /// Forward.
+    pub forward: bool,
+    /// Back.
+    pub back: bool,
+    /// Left.
+    pub left: bool,
+    /// Right.
+    pub right: bool,
+    /// Jump.
+    pub jump: bool,
 }
 
 /// A slayer action the client starts: row 1 of an input record (slayer note, 2026-09-18: in the
@@ -1205,6 +1270,160 @@ mod tests {
             elements_104: vec![8; ELEMENT_LENS[0] * ELEMENT_COUNT],
             ..InputRecord::default()
         }
+    }
+
+    /// A record with the retail slot values `values`.
+    fn with_slots(values: [u64; 10]) -> InputRecord {
+        InputRecord {
+            slots: InputSlots {
+                count: ACTION_SLOTS,
+                values: values.to_vec(),
+                bytes: NEUTRAL_SLOT_BYTES,
+            },
+            ..InputRecord::default()
+        }
+    }
+
+    /// The slot values of a standing retail record: values 7 and 8 are set in every record.
+    const STANDING: [u64; 10] = [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0x0402_0000_0800_0000,
+        0x0200_0000_0000_0000,
+        0,
+    ];
+
+    /// [`STANDING`] with `extra` set in each value.
+    fn standing_with(extra: [u64; 10]) -> InputRecord {
+        let mut values = STANDING;
+        for (value, more) in values.iter_mut().zip(extra) {
+            *value |= more;
+        }
+        with_slots(values)
+    }
+
+    #[test]
+    fn the_movement_keys_read_as_in_the_retail_records() {
+        // Retail records (movement study): forward (running forward capture, every record),
+        // back (walking back capture), right and left (newchar records 1903 and 4880), forward
+        // with right (newchar 2594) and forward with the jump (newchar open world 22640).
+        const FORWARD: [u64; 10] = [
+            0x0800_0000_4000,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0x1_0000_0000,
+            0,
+            0x4000_0000,
+            0,
+        ];
+        const BACK: [u64; 10] = [0, 0, 0, 0x0400_0000_0000_0000, 0, 0x80, 0x20, 0, 0, 0];
+        const RIGHT: [u64; 10] = [0, 0, 0, 0, 2, 0, 0, 0, 0x0100_0000_1000_0000, 0];
+        const LEFT: [u64; 10] = [0, 0, 0, 0x0100_0000_0080_0000, 0x1_0000_0000, 0, 0, 0, 0, 0];
+        const FORWARD_RIGHT: [u64; 10] = [
+            0x0800_0000_4000,
+            0,
+            0,
+            0,
+            2,
+            0,
+            0x1_0000_0000,
+            0,
+            0x0100_0000_5000_0000,
+            0,
+        ];
+        const FORWARD_JUMP: [u64; 10] = [
+            0x0040_0800_0000_4000,
+            0x0040_0000_0200,
+            0,
+            0,
+            0,
+            0x1_0000_0000,
+            0x1_0800_0000,
+            0,
+            0x4000_0000,
+            0,
+        ];
+        let keys = |forward, back, left, right, jump| MoveKeys {
+            forward,
+            back,
+            left,
+            right,
+            jump,
+        };
+        let cases = [
+            ([0; 10], keys(false, false, false, false, false)),
+            (FORWARD, keys(true, false, false, false, false)),
+            (BACK, keys(false, true, false, false, false)),
+            (RIGHT, keys(false, false, false, true, false)),
+            (LEFT, keys(false, false, true, false, false)),
+            (FORWARD_RIGHT, keys(true, false, false, true, false)),
+            (FORWARD_JUMP, keys(true, false, false, false, true)),
+        ];
+        for (extra, expected) in cases {
+            assert_eq!(standing_with(extra).move_keys(), expected, "{extra:x?}");
+        }
+        assert_eq!(InputRecord::default().move_keys(), MoveKeys::default());
+    }
+
+    #[test]
+    fn the_walk_toggle_and_the_boom_keys_read_as_in_the_retail_records() {
+        // A walk toggle press while running forward (toggle capture record 321), a press that
+        // lengthened the boom (newchar 6453), one that shortened it (newchar 7042) and one that
+        // set the short boom (newchar 4521).
+        const TOGGLE: [u64; 10] = [
+            0x0800_0000_4000,
+            0,
+            0,
+            0,
+            0x40_0008,
+            0,
+            0x1_0000_0000,
+            0,
+            0x4000_0000,
+            0,
+        ];
+        const LONGER: [u64; 10] = [
+            0,
+            0x1000_0000_0000,
+            0x0808_0000_0000,
+            0,
+            0,
+            0x100_0000,
+            0,
+            0,
+            0,
+            0,
+        ];
+        const SHORTER: [u64; 10] = [
+            0x80,
+            0x0800_0000_0000,
+            0x0800_0000_0000,
+            0x8000_0000_0000,
+            0,
+            0x0200_0000_0000_0000,
+            0x0080_0000_0000_0000,
+            0,
+            0,
+            0x200,
+        ];
+        const SHORT: [u64; 10] = [0, 0, 0, 0, 0, 0x0008_0000_0000_0000, 0, 0, 0, 0];
+        let toggle = standing_with(TOGGLE);
+        assert!(toggle.walk_toggle_pressed());
+        assert!(!toggle.boom_key_pressed());
+        assert!(toggle.move_keys().forward);
+        for boom in [LONGER, SHORTER, SHORT] {
+            assert!(standing_with(boom).boom_key_pressed(), "{boom:x?}");
+            assert!(!standing_with(boom).walk_toggle_pressed());
+        }
+        assert!(!with_slots(STANDING).boom_key_pressed());
     }
 
     #[test]

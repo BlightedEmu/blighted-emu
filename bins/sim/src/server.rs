@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The loop of `sim` (M4 spec sections 6, 7.1, 7.5, 11; M5 spec sections 3, 7; M5 load spec
 //! sections 4, 5, 8): admits, inputs, the cell table, handoffs, ghosts, the 30 Hz tick, position
-//! saves, and heartbeats. One task owns the world. Database work, handoff requests and replies
+//! saves, leaderboard stats, and heartbeats. One task owns the world. Database work, handoff requests and replies
 //! run in their own tasks, and bus messages go out through queues, so neither a slow database, a
 //! slow sim nor a lost NATS connection stops the tick.
 //!
@@ -15,23 +15,26 @@ use std::time::{Duration, Instant};
 
 use nw_bus::{
     AdminAction, AdminCommand, AdminReply, Admit, AdmitReply, Bus, BusError, BusId, CarriedItem,
-    CellTable, ConnectionRef, GatewayOutput, Ghosts, HandoffMessage, HandoffReply, Heartbeat, Hit,
-    Incoming, InputBatch, ItemPlace, OutputBatch, PlayerQuests, Point, Publisher, ScriptLog,
-    SimHeartbeat, SimInput, SimSlot, SimSnapshot, snapshot_parts, split_batches, subject,
+    CellTable, ConnectionRef, GatewayOutput, Ghost, Ghosts, HandoffMessage, HandoffReply,
+    Heartbeat, Hit, Incoming, InputBatch, ItemPlace, OutputBatch, PlayerProgression, PlayerQuests,
+    Point, Publisher, ScriptLog, SimHeartbeat, SimInput, SimSlot, SimSnapshot, snapshot_parts,
+    split_batches, subject,
 };
-use nw_common::time::unix_ms;
+use nw_common::time::{unix_ms, unix_seconds};
+use nw_content::leaderboards::RotationCalendar;
 use nw_db::{
-    PgPool, SaveOutcome, SavedItem, SavedPlace, SavedPosition, SavedQuests, save_character_items,
-    save_character_position, save_character_quests,
+    PgPool, SaveOutcome, SavedItem, SavedLootLimit, SavedPlace, SavedPosition, SavedProgression,
+    SavedQuests, StatUpdate, save_character_items, save_character_position,
+    save_character_progression, save_character_quests, submit_stats,
 };
 use nw_messages::facet::TIME_SYNC_REQUEST_TYPE_INDEX;
 use nw_messages::{
-    BodyCodec, ClientFacetMsg, ClientInputMsg, InputPosition, InputRecord, LookDir,
-    RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
-    SPREADSHOT_REQUEST_TYPE_INDEX, SpreadshotRequestMsg,
+    BodyCodec, ClientFacetMsg, ClientInputMsg, InputRecord, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+    REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX,
+    SpreadshotRequestMsg,
 };
 use nw_reflect::Envelope;
-use nw_sim_core::{Ground, GroundCheck, Position, TickClock};
+use nw_sim_core::{Ground, GroundCheck, TickClock};
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 use uuid::Uuid;
@@ -40,13 +43,13 @@ use crate::combat::{AttackOutcome, AttackRefusal, CombatSettings, RemoteHit};
 use crate::forward::{Forward, ForwardTable};
 use crate::gateways::GatewayTracker;
 use crate::login::WorldIds;
-use crate::mob_ai::MobAi;
+use crate::mob_ai::SpawnAi;
 use crate::mobs::{MobChanges, spawn_index};
 use crate::player_content::PlayerContent;
-use crate::saves::{ItemSave, QuestSave, SaveQueue};
+use crate::saves::{ItemSave, ProgressionSave, QuestSave, SaveQueue};
+use crate::stats::stat_updates;
 use crate::world::{
-    CameraSample, Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, Strike,
-    WorldSettings,
+    Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, Strike, WorldSettings,
 };
 use nw_world::script::LevelDesign;
 
@@ -99,6 +102,10 @@ pub const METRIC_FORWARDED_INPUTS: &str = "sim_forwarded_inputs_total";
 pub const METRIC_STALE_FORWARDS: &str = "sim_stale_forwards_total";
 /// Metric: failed saves.
 pub const METRIC_FAILED_SAVES: &str = "sim_failed_saves_total";
+/// Prometheus counter of leaderboard stat values added.
+pub const METRIC_STAT_UPDATES: &str = "sim_stat_updates_total";
+/// Prometheus counter of leaderboard stat batches the database refused.
+pub const METRIC_FAILED_STATS: &str = "sim_failed_stat_batches_total";
 /// Metric: client messages of a type that `sim` does not read yet.
 pub const METRIC_IGNORED_MESSAGES: &str = "sim_ignored_client_messages_total";
 /// Metric: client messages that do not decode.
@@ -193,9 +200,20 @@ pub struct LoopSettings {
     /// Time between two admin snapshots on the bus; `None` is off.
     pub snapshot_interval: Option<Duration>,
     /// The design AI of the level's spawns, in spawn order.
-    pub mob_ai: Arc<[Option<MobAi>]>,
+    pub mob_ai: Arc<[Option<SpawnAi>]>,
     /// The scripts and events of the level.
     pub design: Arc<LevelDesign>,
+    /// The leaderboard rotations, as the config layers give them to the client.
+    pub leaderboard_calendar: RotationCalendar,
+}
+
+/// The databases of the loop.
+#[derive(Debug, Clone)]
+pub struct Databases {
+    /// The world database: positions, items and quests.
+    pub world: PgPool,
+    /// The global database: leaderboard stats.
+    pub global: PgPool,
 }
 
 /// The loop's failure.
@@ -215,6 +233,7 @@ enum SaveKind {
     Position,
     Items,
     Quests,
+    Progression,
 }
 
 type SaveResult = (SaveKind, Uuid, bool);
@@ -277,12 +296,14 @@ struct Loop {
     snapshots: Publisher<SimSnapshot>,
     script_logs: Publisher<ScriptLog>,
     db: PgPool,
+    global_db: PgPool,
     world: SimWorld,
     gateways: GatewayTracker,
     forwards: ForwardTable,
     queue: SaveQueue<SavedPosition>,
     item_queue: SaveQueue<ItemSave>,
     quest_queue: SaveQueue<QuestSave>,
+    progression_queue: SaveQueue<ProgressionSave>,
     saves: JoinSet<SaveResult>,
     handoff_results: mpsc::Sender<HandoffResult>,
     started: Instant,
@@ -300,7 +321,7 @@ pub async fn serve(
     settings: LoopSettings,
     ground: Arc<dyn Ground + Send + Sync>,
     bus: Bus,
-    db: PgPool,
+    databases: Databases,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), ServeError> {
     let mut inbox = Inbox::subscribe(&bus, settings.world_id, &settings.sim_id).await?;
@@ -336,10 +357,12 @@ pub async fn serve(
         script_logs: Publisher::start(bus.clone(), SIM_QUEUE),
         settings,
         bus,
-        db,
+        db: databases.world,
+        global_db: databases.global,
         queue: SaveQueue::default(),
         item_queue: SaveQueue::default(),
         quest_queue: SaveQueue::default(),
+        progression_queue: SaveQueue::default(),
         saves: JoinSet::new(),
         handoff_results,
         started: Instant::now(),
@@ -405,8 +428,8 @@ impl Loop {
         u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// Adds the player of an admit. A position or an item list of this sim that is still waiting
-    /// to be saved is newer than the database, so it wins.
+    /// Adds the player of an admit. A position, an item list, quests or a progression of this
+    /// sim that is still waiting to be saved is newer than the database, so it wins.
     fn admit(&mut self, admit: Incoming<Admit>) {
         let mut message = admit.message.clone();
         if let Some(unsaved) = self.queue.latest(message.character) {
@@ -418,6 +441,9 @@ impl Loop {
         }
         if let Some(unsaved) = self.quest_queue.latest(message.character) {
             message.quests = unsaved.quests.clone();
+        }
+        if let Some(unsaved) = self.progression_queue.latest(message.character) {
+            message.progression = unsaved.progression.clone();
         }
         let reply = match self.world.admit(&message, self.now_ms(), server_time()) {
             Ok(login) => {
@@ -556,21 +582,14 @@ impl Loop {
         }
     }
 
-    /// Moves the player to the position of the input's last record that has one (M4 spec section
-    /// 5.3), then attacks once per rising edge of its attack bits (M6-B spec section 6).
+    /// Moves the player by the input's new records (movement study 2026-09-20), then attacks
+    /// once per rising edge of its attack bits (M6-B spec section 6).
     fn client_input(&mut self, connection: &ConnectionRef, body: &[u8]) {
         let Ok(input) = ClientInputMsg::decode(body) else {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
             return;
         };
-        if let Some((position, view, counter)) = input.newest_view() {
-            self.move_player(
-                connection,
-                position,
-                view.map(|[yaw, pitch]| LookDir { yaw, pitch }),
-                Some(counter),
-            );
-        }
+        self.move_player(connection, &input.records);
         let now_ms = self.now_ms();
         if let Some(request) = input.interaction() {
             self.world
@@ -621,30 +640,15 @@ impl Loop {
         metrics::counter!(METRIC_RESPAWNS, RESULT_LABEL => result).increment(1);
     }
 
-    /// Moves the player of `connection` to the body under its camera at `position`, looking
-    /// along `view` when the record says, from the record of client counter `counter`, and
-    /// counts a refusal.
-    fn move_player(
-        &mut self,
-        connection: &ConnectionRef,
-        position: InputPosition,
-        view: Option<LookDir>,
-        counter: Option<u16>,
-    ) {
-        let camera = Position {
-            x: position.x,
-            y: position.y,
-            z: position.z(),
+    /// Moves the player of `connection` by the new records of its input `records`
+    /// ([`SimWorld::move_from_input`]), and counts a refusal.
+    fn move_player(&mut self, connection: &ConnectionRef, records: &[InputRecord]) {
+        let Some((result, next)) = self
+            .world
+            .move_from_input(connection, records, self.now_ms())
+        else {
+            return;
         };
-        let (result, next) = self.world.move_from_camera(
-            connection,
-            CameraSample {
-                camera,
-                view,
-                counter,
-            },
-            self.now_ms(),
-        );
         if result.is_ok() {
             tracing::trace!(x = next.x, y = next.y, z = next.z, "client move");
         }
@@ -660,7 +664,6 @@ impl Loop {
                     x = next.x,
                     y = next.y,
                     z = next.z,
-                    z_raw = position.z_raw,
                     "refused client move"
                 );
                 metrics::counter!(METRIC_REFUSED_MOVES, REASON_LABEL => refusal.reason())
@@ -712,6 +715,7 @@ impl Loop {
     }
 
     fn ghosts_in(&mut self, ghosts: Ghosts) {
+        self.world.adopt_ghost_ids(&ghosts.gde_refs);
         self.world
             .set_ghosts(&ghosts.from, ghosts.entities, self.now_ms());
     }
@@ -871,6 +875,7 @@ impl Loop {
             metrics::counter!(METRIC_DEATHS, KIND_LABEL => PLAYER_KIND).increment(1);
             self.save(death);
         }
+        self.add_stats();
         if !output.script_log.is_empty() {
             let subject = subject::sim_script_log(self.settings.world_id, &self.settings.sim_id);
             let log = ScriptLog {
@@ -890,14 +895,47 @@ impl Loop {
         self.flush();
         for (target, entities) in output.ghosts {
             let subject = subject::sim_ghosts(self.settings.world_id, &target);
+            let gde_refs = ghost_ids(&entities);
             let ghosts = Ghosts {
                 from: self.settings.sim_id.clone(),
                 entities,
+                gde_refs,
             };
             if !self.ghosts.send(subject, ghosts) {
                 metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
             }
         }
+    }
+
+    /// Adds the leaderboard values of what the players did since the last call, in a task. The
+    /// values only add up, so tasks may end in any order; a refused batch is lost and counted
+    /// (a retry could count a value twice).
+    fn add_stats(&mut self) {
+        let events = self.world.take_stat_events();
+        if events.is_empty() {
+            return;
+        }
+        let updates: Vec<StatUpdate> = stat_updates(
+            &self.settings.content.leaderboards,
+            &self.settings.leaderboard_calendar,
+            self.settings.world_id,
+            &events,
+            unix_seconds(),
+        );
+        if updates.is_empty() {
+            return;
+        }
+        let global = self.global_db.clone();
+        tokio::spawn(async move {
+            match submit_stats(&global, &updates).await {
+                Ok(()) => metrics::counter!(METRIC_STAT_UPDATES)
+                    .increment(u64::try_from(updates.len()).unwrap_or(u64::MAX)),
+                Err(error) => {
+                    metrics::counter!(METRIC_FAILED_STATS).increment(1);
+                    tracing::error!(%error, values = updates.len(), "leaderboard stats lost");
+                }
+            }
+        });
     }
 
     /// Asks the target of a handoff in its own task.
@@ -1096,6 +1134,9 @@ impl Loop {
         for (character, quests) in self.quest_queue.retry() {
             self.spawn_quest_save(character, quests);
         }
+        for (character, progression) in self.progression_queue.retry() {
+            self.spawn_progression_save(character, progression);
+        }
     }
 
     fn save(&mut self, departure: &Departure) {
@@ -1127,6 +1168,15 @@ impl Loop {
             };
             if let Some(save) = self.quest_queue.want(departure.character, save) {
                 self.spawn_quest_save(departure.character, save);
+            }
+        }
+        if let Some(progression) = &departure.progression {
+            let save = ProgressionSave {
+                progression: progression.clone(),
+                taken_at_ms: unix_ms(),
+            };
+            if let Some(save) = self.progression_queue.want(departure.character, save) {
+                self.spawn_progression_save(departure.character, save);
             }
         }
     }
@@ -1178,6 +1228,19 @@ impl Loop {
         });
     }
 
+    fn spawn_progression_save(&mut self, character: Uuid, save: ProgressionSave) {
+        let db = self.db.clone();
+        self.spawn_store(SaveKind::Progression, character, async move {
+            save_character_progression(
+                &db,
+                character,
+                &saved_progression(&save.progression),
+                save.taken_at_ms,
+            )
+            .await
+        });
+    }
+
     /// A save ended; the next wanted value of that character and kind starts now.
     fn saved(&mut self, result: Result<SaveResult, tokio::task::JoinError>) {
         let (kind, character, ok) = match result {
@@ -1206,6 +1269,11 @@ impl Loop {
                     self.spawn_quest_save(character, next);
                 }
             }
+            SaveKind::Progression => {
+                if let Some(next) = self.progression_queue.finished(character, ok) {
+                    self.spawn_progression_save(character, next);
+                }
+            }
         }
     }
 
@@ -1221,9 +1289,15 @@ impl Loop {
             }
         })
         .await;
-        let waiting = self.queue.waiting() + self.item_queue.waiting() + self.quest_queue.waiting();
+        let waiting = self.queue.waiting()
+            + self.item_queue.waiting()
+            + self.quest_queue.waiting()
+            + self.progression_queue.waiting();
         if drained.is_err() || waiting > 0 {
-            tracing::error!(waiting, "positions, items or quests not saved at shutdown");
+            tracing::error!(
+                waiting,
+                "positions, items, quests or progression not saved at shutdown"
+            );
         }
     }
 }
@@ -1237,6 +1311,25 @@ fn saved_quests(quests: &PlayerQuests) -> SavedQuests {
                 .map(|run| (objective.clone(), run))
         }),
         done: quests.done.clone(),
+    }
+}
+
+/// The progression as the database stores it.
+fn saved_progression(progression: &PlayerProgression) -> SavedProgression {
+    SavedProgression {
+        experience: progression.experience,
+        coins: progression.coins,
+        achievements: progression.achievements.clone(),
+        loot_limits: progression
+            .loot_limits
+            .iter()
+            .map(|limit| SavedLootLimit {
+                limit_id: limit.limit_id.clone(),
+                count: limit.count,
+                counted_ns: limit.counted_ns,
+                ends_ns: limit.ends_ns,
+            })
+            .collect(),
     }
 }
 
@@ -1293,6 +1386,42 @@ fn server_time() -> u64 {
     unix_ms().saturating_sub(SERVER_EPOCH_UNIX_MS)
 }
 
+/// The raw id of each ghost, by entity number, for the receiving sim ([`Ghosts::gde_refs`]).
+fn ghost_ids(ghosts: &[Ghost]) -> Vec<(u64, [u8; nw_messages::RAW_ID_LEN])> {
+    ghosts
+        .iter()
+        .map(|ghost| (ghost.entity, nw_messages::raw_id_of_entity(ghost.entity)))
+        .collect()
+}
+
+#[cfg(test)]
+mod ghost_id_tests {
+    use nw_bus::Point;
+
+    use super::*;
+
+    /// An entity number no other test of this process gives a raw id.
+    const OWNED: u64 = 0x3e00_0000_0001;
+
+    #[test]
+    fn a_ghost_batch_names_each_ghost_by_its_owners_id() {
+        let ghost = Ghost {
+            entity: OWNED,
+            position: Point {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+            },
+            mob: None,
+            player: None,
+        };
+        assert_eq!(
+            ghost_ids(&[ghost]),
+            [(OWNED, nw_messages::raw_id_of_entity(OWNED))]
+        );
+    }
+}
+
 #[cfg(test)]
 mod metric_tests {
     use super::*;
@@ -1340,8 +1469,8 @@ mod tests {
     use nw_bus::{HandoffOffer, Subscription};
     use nw_db::test_db::with_test_schema;
     use nw_db::{
-        NewCharacter, WORLD_MIGRATOR, character_items, character_position, character_quests,
-        insert_character,
+        NewCharacter, WORLD_MIGRATOR, character_items, character_position, character_progression,
+        character_quests, insert_character,
     };
 
     /// A finished objective a test player carries.
@@ -1436,6 +1565,7 @@ mod tests {
             snapshot_interval: None,
             mob_ai: Arc::from([]),
             design: Arc::default(),
+            leaderboard_calendar: config.leaderboard_calendar().expect("calendar"),
         }
     }
 
@@ -1474,7 +1604,10 @@ mod tests {
                 settings.clone(),
                 Arc::new(NoGround),
                 bus.clone(),
-                db.clone(),
+                Databases {
+                    world: db.clone(),
+                    global: db.clone(),
+                },
                 async {
                     let _ = stopped.await;
                 },
@@ -1778,6 +1911,7 @@ mod tests {
             backstory: None,
             items: None,
             quests: PlayerQuests::default(),
+            progression: PlayerProgression::default(),
         }
     }
 
@@ -2120,7 +2254,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_leave_saves_the_items_and_quests() {
+    async fn a_leave_saves_the_items_quests_and_progression() {
+        /// An achievement bit the player carries in.
+        const ACHIEVEMENT_BIT: u32 = 15_317;
         with_test_schema(async |db| {
             WORLD_MIGRATOR.run(db).await.expect("migrate");
             let ada = character(db).await;
@@ -2135,8 +2271,37 @@ mod tests {
                 done: vec![DONE_QUEST.to_owned()],
                 ..PlayerQuests::default()
             };
+            // The retail newchar loot limit count.
+            let limit = nw_bus::LootLimitCount {
+                limit_id: "2hwarhammer_ftue_corruptedsailer_v2".to_owned(),
+                count: 1,
+                counted_ns: 1_793_091_600_894_621_000,
+                ends_ns: 1_793_091_600_894_621_000,
+            };
+            first.progression = PlayerProgression {
+                experience: 1_250,
+                coins: 375,
+                achievements: vec![ACHIEVEMENT_BIT],
+                loot_limits: vec![limit.clone()],
+            };
             admit(&bus, world_id, sim.id(), &first).await;
             sim.stop().await;
+            let progression = character_progression(db, ada.1)
+                .await
+                .expect("load")
+                .expect("saved");
+            assert_eq!((progression.experience, progression.coins), (1_250, 375));
+            assert!(progression.achievements.contains(&ACHIEVEMENT_BIT));
+            assert_eq!(
+                progression.loot_limits,
+                vec![nw_db::SavedLootLimit {
+                    limit_id: limit.limit_id,
+                    count: limit.count,
+                    counted_ns: limit.counted_ns,
+                    ends_ns: limit.ends_ns,
+                }],
+                "a limit this sim does not apply keeps its saved count"
+            );
             assert_eq!(
                 character_items(db, ada.1).await.expect("load"),
                 Some(Vec::new()),
@@ -2663,6 +2828,7 @@ mod tests {
                 character: character(db).await.1,
                 name: CHARACTER_NAME.to_owned(),
                 entity: CONNECTION,
+                gde_ref: nw_messages::raw_id_of_entity(CONNECTION),
                 position: at(BORDER_X),
                 move_age_ms: 0,
                 budget_m: 0.0,
@@ -2679,10 +2845,8 @@ mod tests {
                 enter_level: false,
                 items: None,
                 drawn_weapon: None,
-                experience: 0,
-                coins: 0,
                 quests: PlayerQuests::default(),
-                achievements: Vec::new(),
+                progression: PlayerProgression::default(),
                 achievement_version: 0,
             };
             let subject = subject::sim_handoff(world_id, &id);

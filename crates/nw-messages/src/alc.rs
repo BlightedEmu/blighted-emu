@@ -93,10 +93,17 @@ const AT_ANCHOR: [u8; POS3_LEN] = [0xff; POS3_LEN];
 const POS_REL_ZERO: u8 = 0x7f;
 /// The most `worldPosRel` steps from `pos10` on one axis, either way.
 const POS_REL_MAX_STEPS: f32 = 127.0;
-/// One `worldPosRel` step, in metres (Inferred: in the retail newchar own states, an offset of
-/// -127 steps before the next `pos10` matched -2.0992 m of its move, -121 steps -2.0001 m: 2.1 m
-/// over 127 steps).
-const POS_REL_STEP_M: f32 = 2.1 / POS_REL_MAX_STEPS;
+/// The span of the `worldPosRel` steps of one axis, in metres: 255 steps over 4 m.
+const POS_REL_SPAN_M: f32 = 4.0;
+/// The `worldPosRel` steps of [`POS_REL_SPAN_M`].
+const POS_REL_SPAN_STEPS: f32 = 255.0;
+/// One `worldPosRel` step, in metres: 4/255 m (Observed fit, movement study 2026-09-20: at each
+/// new `pos10` after a steady walk, the old `pos10` plus the last offset plus one state's step
+/// lands on the new `pos10` with a step of median 0.015695 m over 889 anchor changes of the
+/// newchar capture and 0.01566 to 0.01572 m in each of the ten clean run and walk captures; with
+/// the 2.1/127 m read before, every offset overshot and each new `pos10` pulled the own player
+/// back by 0.08 to 0.14 m).
+pub const POS_REL_STEP_M: f32 = POS_REL_SPAN_M / POS_REL_SPAN_STEPS;
 /// `scopeData` with only the FullBody scope (bit 0).
 const FULL_BODY_SCOPE: u64 = 1;
 /// The playback speed of a scope entry that plays at its own speed.
@@ -342,6 +349,15 @@ pub enum StepPlace {
     Anchor(InputPosition),
     /// An offset from the `pos10` the client has.
     Offset([u8; POS3_LEN]),
+    /// The `pos10` the state before sent, again, with an offset from it (retail own states:
+    /// the state after each new own `pos10` carries it again, movement study 2026-09-20: states
+    /// 38, 62, 228 and 247 of the clean walking capture, each after a new `pos10` at zero offset).
+    AnchorAgain {
+        /// The `pos10`.
+        anchor: InputPosition,
+        /// The offset from it.
+        offset: [u8; POS3_LEN],
+    },
 }
 
 impl StepPlace {
@@ -353,18 +369,19 @@ impl StepPlace {
             .map_or(Self::Anchor(at), Self::Offset)
     }
 
-    /// Its children: `worldPosRel` and, with a new anchor, `pos10`.
+    /// Its children: `worldPosRel` and, with an anchor, `pos10`.
     fn children(self) -> Vec<(usize, Vec<u8>)> {
         match self {
             Self::Anchor(at) => position_children(at).into(),
             Self::Offset(offset) => vec![(POS_REL_CHILD, offset.to_vec())],
+            Self::AnchorAgain { anchor, offset } => offset_children(anchor, offset).into(),
         }
     }
 
-    /// The new `pos10`, when it sends one.
+    /// The `pos10` it sends, when it sends one.
     const fn pos10(self) -> Option<InputPosition> {
         match self {
-            Self::Anchor(at) => Some(at),
+            Self::Anchor(at) | Self::AnchorAgain { anchor: at, .. } => Some(at),
             Self::Offset(_) => None,
         }
     }
@@ -393,19 +410,19 @@ impl CardPlace {
     /// Its `worldPosRel` and `pos10` children, and the `pos10`.
     fn children(self) -> (Vec<(usize, Vec<u8>)>, InputPosition) {
         match self.resolved() {
-            (anchor, Some(offset)) => {
-                let mut position = Writer::new();
-                anchor.write(&mut position);
-                (
-                    vec![
-                        (POS_REL_CHILD, offset.to_vec()),
-                        (POS10_CHILD, position.finish()),
-                    ],
-                    anchor,
-                )
-            }
+            (anchor, Some(offset)) => (offset_children(anchor, offset).into(), anchor),
             (at, None) => (position_children(at).into(), at),
         }
+    }
+}
+
+/// The metres of one `worldPosRel` byte from the `pos10`: 0 for the byte that puts the axis at
+/// the `pos10`.
+pub fn offset_metres(byte: u8) -> f32 {
+    if byte == AT_ANCHOR[0] {
+        0.0
+    } else {
+        (f32::from(byte) - f32::from(POS_REL_ZERO)) * POS_REL_STEP_M
     }
 }
 
@@ -637,6 +654,16 @@ fn stamp_children(stamp: AlcStamp) -> [(usize, Vec<u8>); 4] {
     ]
 }
 
+/// The position children of an offset `offset` from the `pos10` `anchor`, which goes with it.
+fn offset_children(anchor: InputPosition, offset: [u8; POS3_LEN]) -> [(usize, Vec<u8>); 2] {
+    let mut position = Writer::new();
+    anchor.write(&mut position);
+    [
+        (POS_REL_CHILD, offset.to_vec()),
+        (POS10_CHILD, position.finish()),
+    ]
+}
+
 /// The position children of `pos`: no offset from the new `pos10`.
 fn position_children(pos: InputPosition) -> [(usize, Vec<u8>); 2] {
     let mut position = Writer::new();
@@ -655,7 +682,7 @@ const FRAG_LEN: usize = 12;
 /// Bytes after a set `bounds` flag, before its `u8` and the next flag.
 const BOUNDS_LEN: usize = 16;
 /// Bytes of a `pos3` child.
-const POS3_LEN: usize = 3;
+pub const POS3_LEN: usize = 3;
 /// The child presence bits the client tests.
 const PRESENCE_BITS: u64 = (1 << 54) - 1;
 /// Slot bits of the first byte.
@@ -1734,13 +1761,10 @@ mod tests {
             Some([POS_REL_ZERO; POS3_LEN]),
             "no step"
         );
-        // Retail own states: -127 steps on x before the next pos10 matched -2.0992 m.
-        assert_eq!(offset_from(anchor, at(-2.0992, 0.0)).map(|o| o[0]), Some(0));
-        assert_eq!(
-            offset_from(anchor, at(2.0992, 0.0)).map(|o| o[0]),
-            Some(0xfe)
-        );
-        assert_eq!(offset_from(anchor, at(2.2, 0.0)), None, "out of reach");
+        // The reach is 127 steps of 4/255 m: 1.992 m either way.
+        assert_eq!(offset_from(anchor, at(-1.99, 0.0)).map(|o| o[0]), Some(0));
+        assert_eq!(offset_from(anchor, at(1.99, 0.0)).map(|o| o[0]), Some(0xfe));
+        assert_eq!(offset_from(anchor, at(2.01, 0.0)), None, "out of reach");
         assert_eq!(
             StepPlace::of(Some(anchor), at(3.0, 0.0)),
             StepPlace::Anchor(at(3.0, 0.0)),
@@ -1765,6 +1789,77 @@ mod tests {
         assert_eq!(pos10, anchor);
         assert_eq!(children[0], near.children()[0]);
         assert_eq!(children[1].0, POS10_CHILD);
+    }
+
+    #[test]
+    fn an_offset_byte_is_its_steps_of_four_255ths_of_a_metre() {
+        assert_eq!(offset_metres(AT_ANCHOR[0]), 0.0, "at the pos10");
+        assert_eq!(offset_metres(POS_REL_ZERO), 0.0, "no step");
+        assert!((offset_metres(0) + 127.0 * 4.0 / 255.0).abs() < 1e-6);
+        assert!((offset_metres(0xfe) - 127.0 * 4.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_retail_offset_plus_one_step_lands_on_the_next_anchor() {
+        // Retail walk (clean walking capture, own states 37 to 61): `pos10` of state 37, the
+        // offsets of states 59 and 60, then state 61 with a new `pos10`.
+        const FIRST_ANCHOR: [f32; 3] = [4232.022, 9452.522, 342.635];
+        const STATE_59: [u8; POS3_LEN] = [0xdb, 0xf8, 0x81];
+        const STATE_60: [u8; POS3_LEN] = [0xdf, 0xfd, 0x81];
+        const NEXT_ANCHOR: [f32; 3] = [4233.588, 9454.587, 342.686];
+        /// The new anchor is within this of the last offset plus one state's step.
+        const WITHIN_M: f32 = 0.025;
+        let steps = |byte: u8| f32::from(byte) - f32::from(POS_REL_ZERO);
+        for axis in 0..POS3_LEN {
+            let last = steps(STATE_60[axis]);
+            let step = last - steps(STATE_59[axis]);
+            let predicted = FIRST_ANCHOR[axis] + (last + step) * POS_REL_STEP_M;
+            assert!(
+                (predicted - NEXT_ANCHOR[axis]).abs() < WITHIN_M,
+                "axis {axis}: {predicted} vs {}",
+                NEXT_ANCHOR[axis]
+            );
+        }
+    }
+
+    #[test]
+    fn the_anchor_again_sends_the_pos10_with_its_offset_as_retail_did() {
+        // Retail clean walking capture, own state 62 after the new pos10 of state 61: children
+        // 0, 1, 2, 10 and 27, offset `83 84 80` from the same pos10 (child 2, the slayer
+        // sequence time, is not part of the place).
+        const RETAIL_OFFSET: [u8; POS3_LEN] = [0x83, 0x84, 0x80];
+        let anchor = InputPosition::from_metres(4233.588, 9454.587, 342.686).expect("finite");
+        let state = AlcState::own_step(
+            STAMP,
+            Some(StepPlace::AnchorAgain {
+                anchor,
+                offset: RETAIL_OFFSET,
+            }),
+            None,
+            false,
+            None,
+            None,
+        )
+        .expect("step");
+        assert_eq!(state.pos10, Some(anchor), "the client keeps the same pos10");
+        let children = state.slot0_children().expect("walk");
+        let numbers: Vec<usize> = children.iter().map(|(child, _)| *child).collect();
+        assert_eq!(
+            numbers,
+            [
+                ID_REL_CHILD,
+                TIME_REL_CHILD,
+                POS_REL_CHILD,
+                ID_ABS_CHILD,
+                TIME_ABS_CHILD,
+                POS10_CHILD
+            ]
+        );
+        let offset = children
+            .iter()
+            .find(|(child, _)| *child == POS_REL_CHILD)
+            .map(|(_, bytes)| bytes.clone());
+        assert_eq!(offset, Some(RETAIL_OFFSET.to_vec()));
     }
 
     const STAMP: AlcStamp = AlcStamp {

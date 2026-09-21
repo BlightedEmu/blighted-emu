@@ -1,21 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! Starting New World through Steam (M2 spec section 6). Steam must run, because the game asks it
-//! for a Steam ticket.
+//! Starting New World (M2 spec section 6): the game executable runs directly under Proton,
+//! inside `bwrap` with the private network files of [`crate::mirror`]. Steam must run, because the
+//! game asks it for a Steam ticket. The launcher never starts the game through Steam's own
+//! launcher: that path runs the retail executable in Steam's retail prefix, and there the game
+//! would call Amazon's remote-config, analytics and STS hosts.
 
 use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::mirror::{BWRAP_PROGRAM, NetworkFiles, bwrap_arguments};
+
 use nw_protocol::launcher_api::{SESSION_PLACEHOLDER, is_forbidden_host};
 use reqwest::Url;
 
 /// Steam application id of New World: Aeternum.
 pub const STEAM_APP_ID: &str = "1063730";
-/// Steam argument that starts an application.
-pub const APPLAUNCH_ARGUMENT: &str = "-applaunch";
-/// The only game arguments a server may ask for (endpoint RE note).
-pub const ALLOWED_ARGUMENTS: [&str; 7] = [
+/// The only game arguments a server may ask for (endpoint RE note; `-CognitoPool` names the
+/// `CognitoId` remote-config layers, remote-config note).
+pub const ALLOWED_ARGUMENTS: [&str; 8] = [
     "-ChannelService",
     "-LoginChannelOverride",
     "-GatewayMode",
@@ -23,7 +27,11 @@ pub const ALLOWED_ARGUMENTS: [&str; 7] = [
     "-HttpGatewayAddr",
     "-AuthEndpoint",
     "-AuthBackend",
+    "-CognitoPool",
 ];
+/// The end of Steam's own prefix of New World (`<library>/steamapps/compatdata/1063730`). Retail
+/// play uses it, so the launcher refuses it as the direct-launch prefix.
+const RETAIL_PREFIX_PARTS: [&str; 3] = ["steamapps", "compatdata", STEAM_APP_ID];
 /// Launch argument that points the client at an absolute override-config file, bypassing the
 /// packed `@assets@` lookup.
 pub const OVERRIDE_CONFIG_ARG: &str = "-OverrideConfigPath";
@@ -31,12 +39,6 @@ pub const OVERRIDE_CONFIG_ARG: &str = "-OverrideConfigPath";
 /// [`OVERRIDE_CONFIG_ARG`] with that value, so the client reads an absolute override-config file
 /// instead of the packed `@assets@/ClientOverride.json` that a retail client does not read.
 pub const OVERRIDE_CONFIG_ENV: &str = "NW_LAUNCHER_OVERRIDE_CONFIG";
-/// Default Steam program.
-#[cfg(windows)]
-pub const DEFAULT_STEAM: &str = r"C:\Program Files (x86)\Steam\steam.exe";
-/// Default Steam program (found on `PATH`).
-#[cfg(not(windows))]
-pub const DEFAULT_STEAM: &str = "steam";
 /// A value must not start with these, so that it cannot act as an argument name.
 const ARGUMENT_SIGILS: [char; 2] = ['-', '+'];
 /// Characters that could change how the game or Steam splits the arguments.
@@ -66,7 +68,20 @@ pub enum GameError {
     /// An argument value points to an Amazon or CloudFront host.
     #[error("the server asked for the Amazon or CloudFront address {0}")]
     Forbidden(String),
-    /// The game program (Steam or Proton) could not be started.
+    /// The four direct-launch variables are not all set.
+    #[error(
+        "set NW_LAUNCHER_PROTON, NW_LAUNCHER_GAME_EXE, NW_LAUNCHER_STEAM_COMPAT_DATA and \
+         NW_LAUNCHER_STEAM_CLIENT_INSTALL: the game runs directly under Proton, never through \
+         Steam's launcher"
+    )]
+    NoDirectLaunch,
+    /// The direct-launch prefix is Steam's retail prefix of New World.
+    #[error(
+        "{} is Steam's retail prefix of New World; give the launcher a prefix of its own",
+        .0.display()
+    )]
+    RetailPrefix(PathBuf),
+    /// The game program (`bwrap` running Proton) could not be started.
     #[error("could not start the game: {} failed: {source}", .program.display())]
     Start {
         /// The program that failed to start.
@@ -78,14 +93,15 @@ pub enum GameError {
 }
 
 /// A direct Proton launch of a game executable, bypassing Steam's own game launcher (and so
-/// Easy Anti-Cheat). Set by the four [`DIRECT_EXE_ENV`] family variables.
+/// Easy Anti-Cheat). Set by the four [`DIRECT_EXE_ENV`] family variables. The prefix must be the
+/// launcher's own, never Steam's retail prefix ([`is_retail_prefix`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectLaunch {
     /// The Proton program.
     pub proton: PathBuf,
     /// The game executable to run (for example the patched `BlightedNewWorld.exe`).
     pub exe: PathBuf,
-    /// `STEAM_COMPAT_DATA_PATH`: the game's Proton prefix (`compatdata/<app-id>`).
+    /// `STEAM_COMPAT_DATA_PATH`: the launcher's own Proton prefix folder.
     pub compat_data: PathBuf,
     /// `STEAM_COMPAT_CLIENT_INSTALL_PATH`: the Steam install directory.
     pub client_install: PathBuf,
@@ -118,11 +134,24 @@ pub fn direct_launch_from_env() -> Option<DirectLaunch> {
     })
 }
 
-/// `<proton> run <exe> <arguments>` with the Steam compatibility environment, so a patched game
-/// executable runs under Proton without Steam's own launcher and without Easy Anti-Cheat.
-pub fn direct_command(launch: &DirectLaunch, arguments: &[String]) -> Command {
-    let mut command = Command::new(&launch.proton);
+/// Whether `prefix` ends in `steamapps/compatdata/1063730`: Steam's retail prefix of New World.
+pub fn is_retail_prefix(prefix: &Path) -> bool {
+    let parts: Vec<_> = prefix.components().map(|part| part.as_os_str()).collect();
+    parts.ends_with(&RETAIL_PREFIX_PARTS.map(std::ffi::OsStr::new))
+}
+
+/// `bwrap <private files> -- <proton> run <exe> <arguments>` with the Steam compatibility
+/// environment, so a patched game executable runs under Proton without Steam's own launcher and
+/// without Easy Anti-Cheat, and sees the private network files.
+pub fn direct_command(
+    launch: &DirectLaunch,
+    files: &NetworkFiles,
+    arguments: &[String],
+) -> Command {
+    let mut command = Command::new(BWRAP_PROGRAM);
     command
+        .args(bwrap_arguments(files))
+        .arg(&launch.proton)
         .arg(PROTON_VERB)
         .arg(&launch.exe)
         .args(arguments)
@@ -213,23 +242,22 @@ pub fn append_override_config(mut arguments: Vec<String>) -> Vec<String> {
     arguments
 }
 
-/// `steam -applaunch 1063730 <arguments>`.
-pub fn steam_command(steam: &Path, arguments: &[String]) -> Command {
-    let mut command = Command::new(steam);
-    command
-        .arg(APPLAUNCH_ARGUMENT)
-        .arg(STEAM_APP_ID)
-        .args(arguments);
-    command
+/// The direct launch from the environment, refused when it is missing or uses the retail prefix.
+pub fn checked_direct_launch(launch: Option<DirectLaunch>) -> Result<DirectLaunch, GameError> {
+    let launch = launch.ok_or(GameError::NoDirectLaunch)?;
+    if is_retail_prefix(&launch.compat_data) {
+        return Err(GameError::RetailPrefix(launch.compat_data));
+    }
+    Ok(launch)
 }
 
-/// Starts the game and returns at once. Uses a direct Proton launch when
-/// [`direct_launch_from_env`] is configured, otherwise Steam.
-pub fn start_game(steam: &Path, arguments: &[String]) -> Result<(), GameError> {
-    let mut command = match direct_launch_from_env() {
-        Some(launch) => direct_command(&launch, arguments),
-        None => steam_command(steam, arguments),
-    };
+/// Starts the game with the private network `files` and returns at once.
+pub fn start_game(
+    launch: &DirectLaunch,
+    files: &NetworkFiles,
+    arguments: &[String],
+) -> Result<(), GameError> {
+    let mut command = direct_command(launch, files, arguments);
     let program = PathBuf::from(command.get_program());
     command
         .spawn()
@@ -351,27 +379,6 @@ mod tests {
     }
 
     #[test]
-    fn steam_command_launches_the_app() {
-        let command = steam_command(
-            Path::new(DEFAULT_STEAM),
-            &template(&["-LoginChannelOverride", KEY]),
-        );
-        let arguments: Vec<_> = command
-            .get_args()
-            .map(|arg| arg.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            arguments,
-            [
-                APPLAUNCH_ARGUMENT,
-                STEAM_APP_ID,
-                "-LoginChannelOverride",
-                KEY
-            ]
-        );
-    }
-
-    #[test]
     fn override_config_pair_is_added_only_for_a_non_empty_path() {
         assert_eq!(
             override_config_pair(Some("Z:/x/ClientOverride.json")),
@@ -391,23 +398,45 @@ mod tests {
         assert_eq!(result[..base.len()], base[..]);
     }
 
-    #[test]
-    fn direct_command_runs_the_exe_under_proton_with_steam_env() {
-        let launch = DirectLaunch {
+    fn launch(compat_data: &str) -> DirectLaunch {
+        DirectLaunch {
             proton: PathBuf::from("/opt/GE-Proton/proton"),
             exe: PathBuf::from("/games/New World/Bin64/BlightedNewWorld.exe"),
-            compat_data: PathBuf::from("/steam/steamapps/compatdata/1063730"),
+            compat_data: PathBuf::from(compat_data),
             client_install: PathBuf::from("/home/p/.local/share/Steam"),
-        };
-        let command = direct_command(&launch, &template(&["-LoginChannelOverride", KEY]));
-        assert_eq!(command.get_program(), OsStr::new("/opt/GE-Proton/proton"));
+        }
+    }
+
+    const OWN_PREFIX: &str = "/games/blighted-prefix";
+
+    fn files() -> NetworkFiles {
+        NetworkFiles {
+            hosts: PathBuf::from("/run/x/hosts"),
+            trust: PathBuf::from("/run/x/ca-certificates.crt"),
+        }
+    }
+
+    #[test]
+    fn direct_command_runs_proton_inside_bwrap_with_steam_env() {
+        let command = direct_command(
+            &launch(OWN_PREFIX),
+            &files(),
+            &template(&["-LoginChannelOverride", KEY]),
+        );
+        assert_eq!(command.get_program(), OsStr::new(BWRAP_PROGRAM));
         let args: Vec<_> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
+        let sandbox: Vec<String> = bwrap_arguments(&files())
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args[..sandbox.len()], sandbox[..]);
         assert_eq!(
-            args,
+            args[sandbox.len()..],
             [
+                "/opt/GE-Proton/proton",
                 "run",
                 "/games/New World/Bin64/BlightedNewWorld.exe",
                 "-LoginChannelOverride",
@@ -431,7 +460,7 @@ mod tests {
         );
         assert_eq!(
             envs.get("STEAM_COMPAT_DATA_PATH").map(String::as_str),
-            Some("/steam/steamapps/compatdata/1063730")
+            Some(OWN_PREFIX)
         );
         assert_eq!(
             envs.get("STEAM_COMPAT_CLIENT_INSTALL_PATH")
@@ -441,10 +470,44 @@ mod tests {
     }
 
     #[test]
-    fn missing_steam_is_reported() {
+    fn the_retail_prefix_and_a_missing_launch_are_refused() {
+        for retail in [
+            "/mnt/disk/SteamLibrary/steamapps/compatdata/1063730",
+            "/home/p/.local/share/Steam/steamapps/compatdata/1063730/",
+        ] {
+            assert!(matches!(
+                checked_direct_launch(Some(launch(retail))),
+                Err(GameError::RetailPrefix(path)) if path == Path::new(retail)
+            ));
+        }
+        for own in [
+            OWN_PREFIX,
+            "/mnt/disk/SteamLibrary/steamapps/compatdata/1063731",
+            "/x/compatdata/1063730",
+        ] {
+            assert_eq!(
+                checked_direct_launch(Some(launch(own))).expect("own prefix"),
+                launch(own)
+            );
+        }
         assert!(matches!(
-            start_game(Path::new("/nonexistent/steam"), &[]),
-            Err(GameError::Start { .. })
+            checked_direct_launch(None),
+            Err(GameError::NoDirectLaunch)
         ));
+    }
+
+    #[test]
+    fn the_cognito_pool_argument_is_allowed() {
+        let arguments = game_arguments(
+            &template(&[
+                "-LoginChannelOverride",
+                SESSION_PLACEHOLDER,
+                "-CognitoPool",
+                "b04fbfcd-942c-472d-88c0-c762c4076b2f",
+            ]),
+            KEY,
+        )
+        .expect("arguments");
+        assert_eq!(arguments[2], "-CognitoPool");
     }
 }
