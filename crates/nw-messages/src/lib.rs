@@ -27,6 +27,7 @@ pub mod facet;
 pub mod gathering;
 pub mod gde;
 pub mod gear;
+pub mod gm_client;
 pub mod interactor;
 pub mod items;
 pub mod level_info;
@@ -133,6 +134,7 @@ pub use gde::{
 pub use gear::{
     EquippedItem, GearItem, Hands, PlayerGear, STARTER_BAG_SLOTS, ShownItem, is_visible_slot,
 };
+pub use gm_client::GmClientMsg;
 pub use interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
 pub use items::{FullList, ItemRecord};
 pub use level_info::{

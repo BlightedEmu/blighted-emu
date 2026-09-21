@@ -29,9 +29,9 @@ use nw_db::{
 };
 use nw_messages::facet::TIME_SYNC_REQUEST_TYPE_INDEX;
 use nw_messages::{
-    BodyCodec, ClientFacetMsg, ClientInputMsg, InputRecord, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
-    REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX,
-    SpreadshotRequestMsg,
+    BodyCodec, ClientFacetMsg, ClientInputMsg, GmClientMsg, InputRecord,
+    RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
+    SPREADSHOT_REQUEST_TYPE_INDEX, SpreadshotRequestMsg,
 };
 use nw_reflect::Envelope;
 use nw_sim_core::{Ground, GroundCheck, TickClock};
@@ -561,6 +561,20 @@ impl Loop {
             }
             Some(REQUEST_RESPAWN_TYPE_INDEX) => self.respawn_request(connection, &envelope.body),
             Some(SPREADSHOT_REQUEST_TYPE_INDEX) => self.spreadshot(connection, &envelope.body),
+            Some(index) if let Some(call) = GmClientMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.gm_call(connection, call, self.now_ms()),
+                    Err(error) => {
+                        metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
+                        tracing::warn!(
+                            type_index = index,
+                            %error,
+                            body = %hex_of(&envelope.body),
+                            "GM call does not read"
+                        );
+                    }
+                }
+            }
             Some(index) if let Some(facet) = ClientFacetMsg::decode(index, &envelope.body) => {
                 let Ok(facet) = facet else {
                     metrics::counter!(METRIC_BAD_MESSAGES).increment(1);

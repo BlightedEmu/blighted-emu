@@ -110,7 +110,7 @@ impl SimWorld {
 
     /// Moves the player with entity number `entity` to `to`. The next own state of the player
     /// carries the teleport to its client.
-    fn teleport_player(&mut self, entity: u64, to: Point, now_ms: u64) -> AdminReply {
+    pub(super) fn teleport_player(&mut self, entity: u64, to: Point, now_ms: u64) -> AdminReply {
         let bounds = self.settings.bounds;
         let inside = (bounds.min_x..=bounds.max_x).contains(&to.x)
             && (bounds.min_y..=bounds.max_y).contains(&to.y)

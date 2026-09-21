@@ -158,6 +158,11 @@ impl Progression {
             .find(|mastery| mastery.id.eq_ignore_ascii_case(id))
     }
 
+    /// The weapon mastery whose wire id is `crc`.
+    pub fn mastery_by_crc(&self, crc: u32) -> Option<&Mastery> {
+        self.masteries.iter().find(|mastery| mastery.crc == crc)
+    }
+
     /// Every weapon mastery, in table order.
     pub fn masteries(&self) -> &[Mastery] {
         &self.masteries
@@ -226,6 +231,13 @@ pub(crate) mod tests {
         assert_eq!(sword.rank_of(u32::MAX), (4, 0));
         assert_eq!(sword.experience_for_rank(u16::MAX), sword.max_experience());
         assert!(progression.mastery("Cooking").is_none());
+        assert_eq!(
+            progression
+                .mastery_by_crc(GREATSWORD_CRC)
+                .map(|mastery| mastery.id.as_str()),
+            Some(GREATSWORD)
+        );
+        assert!(progression.mastery_by_crc(0).is_none());
     }
 
     #[test]

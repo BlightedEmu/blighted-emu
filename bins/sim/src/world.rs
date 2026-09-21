@@ -59,6 +59,7 @@ mod encounter;
 mod events;
 mod gathering;
 mod gear;
+mod gm_client;
 mod hit_shape;
 mod level_assets;
 mod level_flow;
