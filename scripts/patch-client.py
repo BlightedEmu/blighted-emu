@@ -3,7 +3,7 @@
 """Make the patched copy of the New World client that the emulator needs.
 
 This tool writes a patched copy, ``BlightedNewWorld.exe``, next to the official
-``NewWorld.exe`` (which it never modifies). The copy has three changes:
+``NewWorld.exe`` (which it never modifies). The copy has two changes:
 
 1. Certificate bypass. The real client refuses the emulator's self-signed
    game-server certificate. The tool finds OpenSSL ``SSL_CTX_set_verify`` by a
@@ -19,15 +19,7 @@ This tool writes a patched copy, ``BlightedNewWorld.exe``, next to the official
    are found by byte signatures; the vtable slot is the single pointer to the
    Steam function.
 
-3. Camera lock at mobs with mouse and keyboard. The lock candidate check
-   (build 25810808: FUN_142c866e0) refuses every target that is not a player
-   unless the gamepad is used or ``javelin.enable-camera-lock-kbam-pve-targeting``
-   is true. Retail gets that key from remote config layers that need a signed-in
-   player, and the client reads no local file for it. The tool replaces the
-   ``JZ`` after that key's read with ``NOP`` instructions, as if the key were true.
-   No other function reads the key.
-
-No change alters the file length. See ``docs/client-patch.md`` for the
+Neither change alters the file length. See ``docs/client-patch.md`` for the
 procedure, the reasoning, and how to re-derive a signature if a build changes it.
 
 Usage:
@@ -71,22 +63,6 @@ STEAM_END_SESSION = re.compile(
     re.DOTALL,
 )
 POINTER_LEN = 8
-# The kbam PvE camera-lock key's read in the lock candidate check (build 25810808: VA
-# 0x142C86C9D): CMP [RSI+0x81] (player target), JNZ; CMP [RSI+0x88] (gamepad), JNZ; LEA RCX,
-# key; CALL read; TEST AL, AL; JZ refuse. The six JZ bytes at the end are patched out.
-CAMERA_LOCK_KBAM_PVE = re.compile(
-    re.escape(bytes.fromhex("4038be81000000" "0f85"))
-    + b".{4}"
-    + re.escape(bytes.fromhex("4038be88000000" "75"))
-    + b"."
-    + re.escape(bytes.fromhex("488d0d"))
-    + b".{4}\xe8.{4}"
-    + re.escape(bytes.fromhex("84c0" "0f84"))
-    + b".{4}",
-    re.DOTALL,
-)
-# The refusing JZ rel32 the camera-lock patch replaces.
-CAMERA_LOCK_JZ_LEN = 6
 
 OFFICIAL_NAME = "NewWorld.exe"
 BACKUP_NAME = "NewWorld.exe.orig"
@@ -144,12 +120,9 @@ def plan_patches(data: bytes) -> "list[tuple[str, int, bytes]]":
     sonic = virtual_address(data, find_unique(data, SONIC_END_SESSION, "Sonic EndSession"))
     steam = virtual_address(data, find_unique(data, STEAM_END_SESSION, "Steam EndSession"))
     slot = find_unique(data, struct.pack("<Q", steam), "Steam EndSession vtable slot")
-    lock = find_unique(data, CAMERA_LOCK_KBAM_PVE, "camera lock kbam PvE")
-    lock_jz = lock + len(CAMERA_LOCK_KBAM_PVE.match(data, lock).group(0)) - CAMERA_LOCK_JZ_LEN
     return [
         ("certificate bypass", verify_site, NOPS),
         ("exit to desktop", slot, struct.pack("<Q", sonic)),
-        ("camera lock kbam PvE", lock_jz, b"\x90" * CAMERA_LOCK_JZ_LEN),
     ]
 
 
@@ -193,7 +166,7 @@ def make_patched(official: str, backup: str, patched: str) -> None:
 
     if not is_patched(original, read_file(patched)):
         sys.exit("error: verification of the patched copy failed")
-    print(f"wrote {patched} (certificate bypass, exit to desktop, camera lock kbam PvE)")
+    print(f"wrote {patched} (certificate bypass, exit to desktop)")
 
 
 def verify_patched(official: str, patched: str) -> int:
