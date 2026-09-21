@@ -919,6 +919,36 @@ impl AlcState {
         })
     }
 
+    /// The slot-0 `worldPosRel` offset of the body, when it sends one.
+    pub fn offset(&self) -> Option<[u8; POS3_LEN]> {
+        let walked = walk(&mut Reader::new(&self.bytes)).ok()?;
+        let (_, range) = walked
+            .slot0_ranges
+            .into_iter()
+            .find(|(child, _)| *child == POS_REL_CHILD)?;
+        self.bytes.get(range)?.try_into().ok()
+    }
+
+    /// Where the body puts its entity for a client whose `pos10` of the entity is `anchor`, as
+    /// the client does: the body's own `pos10`, else `anchor`, plus the body's offset. `None` when
+    /// the body sends no place, or only an offset and the client has no `pos10`.
+    pub fn place(&self, anchor: Option<InputPosition>) -> Option<InputPosition> {
+        let offset = self.offset();
+        let base = match (self.pos10, offset) {
+            (Some(pos10), _) => pos10,
+            (None, Some(_)) => anchor?,
+            (None, None) => return None,
+        };
+        let Some([dx, dy, dz]) = offset else {
+            return Some(base);
+        };
+        InputPosition::from_metres(
+            base.x + offset_metres(dx),
+            base.y + offset_metres(dy),
+            base.z() + offset_metres(dz),
+        )
+    }
+
     /// The same body as the first state of a mob at `pos`, with the number and clock of `stamp`
     /// and, when known, its facing and animation: a retail first state of a mob, moved to another spawn
     /// point and to this server's clock. Its offset from `pos10` becomes none. A child that the

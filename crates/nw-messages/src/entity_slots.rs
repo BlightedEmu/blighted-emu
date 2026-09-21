@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use crate::bundle::{LOCAL_PLAYER_INTEREST, ReplicatedStateBundle};
+use crate::client_input::InputPosition;
 use crate::gde::GdeMetadataReplicatedState;
 use crate::payload::{BundleMember, BundlePayload, MemberState};
 use crate::position::WorldPosition;
@@ -22,7 +23,9 @@ pub struct SlotUpdate {
     pub entity: Option<u64>,
     /// The spawn card in the group, when it holds one.
     pub card: Option<GdeMetadataReplicatedState>,
-    /// The last position in the group (a position member or an `ALCReplicatedState` position).
+    /// The last position in the group (a position member or an `ALCReplicatedState` place). An
+    /// `ALCReplicatedState` that sends only an offset gets its place from the `pos10` an earlier
+    /// group of the slot sent ([`EntitySlots::resolve`]).
     pub position: Option<WorldPosition>,
     /// The members.
     pub members: Vec<BundleMember>,
@@ -89,22 +92,28 @@ impl SlotRead {
     }
 }
 
-/// The entity of each slot, as one client keeps it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The entity of each slot and its last `pos10`, as one client keeps them.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct EntitySlots {
     entities: BTreeMap<u16, u64>,
+    anchors: BTreeMap<u16, InputPosition>,
 }
 
 impl EntitySlots {
     /// Applies the stops and cards of `read`, in bundle order, and fills the entity of each
-    /// update from them. Returns the entities of the stopped slots.
+    /// update from them, and the place of each `ALCReplicatedState` that sends only an offset
+    /// from the slot's last `pos10`. Returns the entities of the stopped slots.
     pub fn resolve(&mut self, read: &mut SlotRead) -> Vec<u64> {
+        for slot in &read.stops {
+            self.anchors.remove(slot);
+        }
         let stopped = read
             .stops
             .iter()
             .filter_map(|slot| self.entities.remove(slot))
             .collect();
         for update in &mut read.updates {
+            self.place(update);
             match update.entity {
                 Some(entity) => {
                     self.entities.insert(update.interest, entity);
@@ -113,6 +122,26 @@ impl EntitySlots {
             }
         }
         stopped
+    }
+
+    /// Sets the position of `update` from its members in order, with the slot's last `pos10`
+    /// for a state that sends only an offset, and keeps the newest `pos10`.
+    fn place(&mut self, update: &mut SlotUpdate) {
+        for member in &update.members {
+            let at = match &member.state {
+                MemberState::Alc(alc) => {
+                    let anchor = self.anchors.get(&update.interest).copied();
+                    if let Some(pos10) = alc.pos10 {
+                        self.anchors.insert(update.interest, pos10);
+                    }
+                    alc.place(anchor).and_then(world_position)
+                }
+                _ => position_of(member),
+            };
+            if at.is_some() {
+                update.position = at;
+            }
+        }
     }
 
     /// Ties `interest` to `entity` without a spawn card: type 164 names the local player's
@@ -131,9 +160,7 @@ impl EntitySlots {
 fn position_of(member: &BundleMember) -> Option<WorldPosition> {
     match &member.state {
         MemberState::Position(state) => state.position,
-        MemberState::Alc(alc) => alc
-            .pos10
-            .and_then(|at| WorldPosition::from_metres(at.x, at.y, at.z())),
+        MemberState::Alc(alc) => alc.place(None).and_then(world_position),
         MemberState::GdeMetadata(_)
         | MemberState::Vitals(_)
         | MemberState::Stamina(_)
@@ -166,6 +193,10 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::Empty(_)
         | MemberState::Recorded { .. } => None,
     }
+}
+
+fn world_position(at: InputPosition) -> Option<WorldPosition> {
+    WorldPosition::from_metres(at.x, at.y, at.z())
 }
 
 /// The client keeps the low 16 bits of the group integer.
@@ -249,6 +280,55 @@ mod tests {
         assert_eq!(slots.resolve(&mut stopped), vec![MOB]);
         assert_eq!(slots.entity(MOB_SLOT), None);
         assert_eq!(slots.entity(LOCAL_PLAYER_INTEREST), Some(OWN));
+    }
+
+    /// An own state that sends only the `worldPosRel` offset `offset` from the client's `pos10`.
+    fn alc_offset(offset: [u8; crate::alc::POS3_LEN]) -> BundleMember {
+        let mut writer = crate::wire::Writer::new();
+        writer
+            .u8(SLOT0_BIT)
+            .wide_prefixed(1 << crate::alc::POS_REL_CHILD)
+            .bytes(&offset);
+        let bytes = writer.finish();
+        BundleMember {
+            component: ALC_COMPONENT,
+            state: MemberState::Alc(
+                AlcState::read(&mut crate::wire::Reader::new(&bytes)).expect("state"),
+            ),
+        }
+    }
+
+    /// The slot-0 bit of an `ALCReplicatedState` body.
+    const SLOT0_BIT: u8 = 0b01;
+    /// 1 m east of the test anchor, a whole number of offset steps away.
+    const STEPS_EAST: f32 = 64.0;
+
+    #[test]
+    fn an_offset_alone_places_the_slot_from_its_last_pos10() {
+        let mut slots = EntitySlots::default();
+        let anchor = InputPosition::from_metres(1.0, 0.0, 0.0).expect("finite");
+        let east = 1.0 + STEPS_EAST * crate::alc::POS_REL_STEP_M;
+        let moved = InputPosition::from_metres(east, 0.0, 0.0).expect("finite");
+        let offset = crate::alc::offset_from(anchor, moved).expect("in reach");
+        let mut alone = read(
+            Vec::new(),
+            vec![group(LOCAL_PLAYER_INTEREST, vec![alc_offset(offset)])],
+        );
+        assert_eq!(alone.local_player_position(), None, "no pos10 yet");
+        slots.resolve(&mut alone);
+        assert_eq!(alone.local_player_position(), None, "still no pos10");
+        let mut first = read(
+            Vec::new(),
+            vec![group(LOCAL_PLAYER_INTEREST, vec![card(OWN), alc_at(1.0)])],
+        );
+        slots.resolve(&mut first);
+        let mut later = read(
+            Vec::new(),
+            vec![group(LOCAL_PLAYER_INTEREST, vec![alc_offset(offset)])],
+        );
+        slots.resolve(&mut later);
+        let at = later.local_player_position().expect("placed");
+        assert!((at.x - east).abs() < crate::alc::POS_REL_STEP_M, "{at:?}");
     }
 
     #[test]
