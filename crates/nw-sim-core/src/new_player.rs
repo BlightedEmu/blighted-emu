@@ -8,12 +8,23 @@ use crate::movement::Position;
 /// The world-file folder name of the tutorial level (`FTUE_V2` on the client).
 pub const TUTORIAL_FOLDER: &str = "ftue_v2";
 
-/// Where a new character appears in the tutorial: the client's first position after the
-/// tutorial `LevelInfoChangedMsg`.
+/// Where a new character appears in the tutorial: retail's `worldPosAbs` in the first own state
+/// (Observed: the entry bundle of the newchar capture of 2026-09-18 and of the Soul Survivor
+/// capture). The client's first input point after the tutorial `LevelInfoChangedMsg`, 480.57,
+/// 850.16, 91.26, is its camera, 1.67 m higher; a body held there hung over the deck (run 13).
 pub const TUTORIAL_START: Position = Position {
-    x: 480.57,
-    y: 850.16,
-    z: 91.26,
+    x: 478.5,
+    y: 849.7,
+    z: 89.586,
+};
+
+/// The ship's deck under [`TUTORIAL_START`] (Observed: the newchar own places after the start,
+/// 89.508, 89.414 and 89.382 in the first own states that moved it, before any key). The deck is
+/// not in the level's height map (the terrain there is at 50 m), so the tutorial knows this floor
+/// from the start.
+pub const TUTORIAL_START_FLOOR: Position = Position {
+    z: 89.38,
+    ..TUTORIAL_START
 };
 
 /// The tutorial's end: the client's last position before the server changed the level to the
@@ -27,12 +38,14 @@ pub const TUTORIAL_EXIT: Position = Position {
 /// How close (horizontally, in metres) a player must come to [`TUTORIAL_EXIT`] to leave.
 pub const TUTORIAL_EXIT_RADIUS_M: f32 = 20.0;
 
-/// Where a player appears in the open world after the tutorial (the beach start): the client's
-/// first position after the open-world `LevelInfoChangedMsg`.
+/// Where a player appears in the open world after the tutorial (the beach start): retail's
+/// `worldPosAbs` in the first own state after the open-world `LevelInfoChangedMsg` (Observed:
+/// Soul Survivor capture; the terrain there is at 40.125 m). The client's first input point,
+/// 7278.91, 3143.20, 41.45, is its camera.
 pub const OPEN_WORLD_START: Position = Position {
-    x: 7278.91,
-    y: 3143.20,
-    z: 41.45,
+    x: 7280.4863,
+    y: 3141.4854,
+    z: 40.121,
 };
 
 /// Whether `position` is at the tutorial's exit.

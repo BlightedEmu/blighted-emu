@@ -44,7 +44,7 @@ use nw_messages::{
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
     Motion, MotionState, MoveLimits, MoveRefusal, OPEN_WORLD_START, Position, Seen, SpatialGrid,
-    TrackedBody, at_tutorial_exit,
+    TUTORIAL_START_FLOOR, TrackedBody, at_tutorial_exit,
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -157,6 +157,17 @@ const REFUSED_RESYNC_MS: u64 = 1_000;
 /// How long the client camera still glides back after the inventory closes, while its inputs
 /// do not yet carry the body (retail 2026-09-18: 663 ms, 870114 to 870777).
 const LOADOUT_CAMERA_SETTLE_MS: u64 = 700;
+
+/// How a body the server puts somewhere lands there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    /// It stands at the place (the last good place of a player whose moves were refused).
+    Stand,
+    /// It falls from the place to the floor it finds (a teleport, a respawn, a script's move:
+    /// retail's move into the tutorial sea put the player 7.6 m above the water, and it fell).
+    Drop,
+}
+
 /// How far under the terrain a body estimate may be and still count as standing on it (our
 /// choice: the terrain samples are about 0.06 m apart in height; the camera estimate is good to
 /// about 0.1 m, retail median).
@@ -602,6 +613,10 @@ pub struct SimWorld {
     mob_trails: mob_trail::MobTrails,
     me: SimSlot,
     cells: Option<Cells>,
+    /// The last cell table this sim applied. The director sends its table again every second (on
+    /// its heartbeat timer), and applying one walks every spawn of the level: 30 to 38 ms for
+    /// the open world's 115,965 spawns, a late tick each second (run 13: 505 in 9 minutes).
+    applied_table: Option<CellTable>,
     /// Tutorial sims only: the open-world sim that owns [`OPEN_WORLD_START`], where the exit
     /// hands players.
     exit_target: Option<SimSlot>,
@@ -742,6 +757,11 @@ impl SimWorld {
         combat: CombatSettings,
         content: Arc<PlayerContent>,
     ) -> Self {
+        // The tutorial's ship deck under the start is in no height map; the start stands on it.
+        let mut walked_floor = walked_floor::WalkedFloor::default();
+        if settings.level == TUTORIAL_LEVEL {
+            walked_floor.walked(TUTORIAL_START_FLOOR);
+        }
         Self {
             achievement_rules: AchievementRules::of(
                 &content.achievements,
@@ -772,7 +792,7 @@ impl SimWorld {
             mob_changes: MobChanges::default(),
             dice: Dice::new(combat.seed),
             deaths: Vec::new(),
-            walked_floor: walked_floor::WalkedFloor::default(),
+            walked_floor,
             replica_memory: HashMap::new(),
             mob_trails: mob_trail::MobTrails::default(),
             combat_messages: Vec::new(),
@@ -791,6 +811,7 @@ impl SimWorld {
             ground,
             me,
             cells: None,
+            applied_table: None,
             exit_target: None,
             ghosts: HashMap::new(),
             ghost_targets: BTreeSet::new(),
@@ -1174,7 +1195,7 @@ impl SimWorld {
                     z = back.z,
                     "moves refused too long: player moved back"
                 );
-                self.place_player(entity, back, None, now_ms);
+                self.place_player(entity, back, None, Placement::Stand, now_ms);
                 Err(MoveError::Refused(refusal))
             }
             Ok(check) => {
@@ -1272,8 +1293,16 @@ impl SimWorld {
     }
 
     /// The server puts player `entity` at `to` at `now_ms`, facing `facing` when given: its
-    /// next own state moves its client there ([`OwnTeleport`]), and a push on it ends.
-    fn place_player(&mut self, entity: Entity, to: Position, facing: Option<f32>, now_ms: u64) {
+    /// next own state moves its client there ([`OwnTeleport`]), a push on it ends, and its body
+    /// lands as `placement` says.
+    fn place_player(
+        &mut self,
+        entity: Entity,
+        to: Position,
+        facing: Option<f32>,
+        placement: Placement,
+        now_ms: u64,
+    ) {
         if let Some(mut body) = self.world.get_mut::<Body>(entity) {
             body.motion = Motion::new(to, now_ms, &self.settings.limits);
         }
@@ -1281,6 +1310,10 @@ impl SimWorld {
             player.moved = true;
             player.move_facing = facing;
             player.push = None;
+            match placement {
+                Placement::Stand => player.tracked.stand_at(to),
+                Placement::Drop => player.tracked.drop_at(to),
+            }
         }
     }
 
@@ -1362,6 +1395,16 @@ impl SimWorld {
     /// Returns [`TableError::WrongSize`] for a table that does not fit the level; the last table
     /// stays.
     pub fn set_table(&mut self, table: &CellTable) -> Result<Vec<Departure>, TableError> {
+        if self.applied_table.as_ref() == Some(table) {
+            return Ok(Vec::new());
+        }
+        let departures = self.apply_table(table)?;
+        self.applied_table = Some(table.clone());
+        Ok(departures)
+    }
+
+    /// Applies the new cell table `table` ([`SimWorld::set_table`]).
+    fn apply_table(&mut self, table: &CellTable) -> Result<Vec<Departure>, TableError> {
         if self.is_tutorial() {
             // A tutorial sim owns its whole private level and is in no open-world table; from the
             // table it needs only the sim its exit hands players to.
@@ -2141,7 +2184,7 @@ impl SimWorld {
                     continue;
                 }
                 if let Order::MoveTo(position, facing) = order {
-                    self.place_player(entity, position, Some(facing), now_ms);
+                    self.place_player(entity, position, Some(facing), Placement::Drop, now_ms);
                     continue;
                 }
                 let Some(mut player) = self.world.get_mut::<Player>(entity) else {
@@ -8089,6 +8132,134 @@ mod tests {
         );
     }
 
+    /// The `ftue_v2` terrain under the tutorial ship (the deck is in no height map), m.
+    const SHIP_TERRAIN_M: f32 = 50.0;
+    /// The `ftue_v2` terrain under the tutorial's move into the water, m.
+    const WATER_SEABED_M: f32 = 10.82;
+    /// The view of the tutorial tests' client.
+    const TUTORIAL_VIEW: LookDir = LookDir {
+        yaw: 0.0,
+        pitch: 0.2,
+    };
+    /// Records that the tutorial tests' client shows the server's own place late.
+    const CLIENT_LAG_RECORDS: usize = 3;
+    /// Input records of the tutorial tests: the start video, a run, a rest.
+    const VIDEO_RECORDS: u16 = 30;
+    const RUN_RECORDS: u16 = 40;
+    const REST_RECORDS: u16 = 60;
+
+    /// A tutorial world on flat terrain at `terrain_m` with player 1 at the tutorial start.
+    fn tutorial_world_on(terrain_m: f32) -> SimWorld {
+        let mut tutorial_settings = settings(MANY, MAX_PLAYERS);
+        tutorial_settings.level = TUTORIAL_LEVEL;
+        let mut combat = test_combat();
+        combat.spawns = Vec::new().into();
+        let mut world = SimWorld::new(
+            tutorial_settings,
+            WorldIds::random(0).expect("ids"),
+            Arc::new(FlatGround(terrain_m)),
+            slot("tut-1"),
+            combat,
+            Arc::default(),
+        );
+        world.set_table(&table(&["tut-1"])).expect("table");
+        let mut admit = admit_at(1, TUTORIAL_START.x, true);
+        admit.position = Point::from(TUTORIAL_START);
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        world
+    }
+
+    /// The body of player 1.
+    fn body_of_first(world: &SimWorld) -> Position {
+        world
+            .world
+            .get::<Body>(world.by_connection[&connection(1)])
+            .expect("body")
+            .motion
+            .position()
+    }
+
+    /// The server's body of player 1 after `record` of `counter`, received at its own time.
+    fn after_record(world: &mut SimWorld, counter: u16, record: InputRecord) -> Position {
+        let now = NOW + u64::from(counter) * u64::from(attack::INPUT_RECORD_MS);
+        let (result, body) = world
+            .move_from_input(&connection(1), &[record], now)
+            .expect("a new record");
+        assert!(result.is_ok(), "record {counter}: {result:?}");
+        body
+    }
+
+    #[test]
+    fn a_new_player_stands_on_the_ship_s_deck_not_above_it() {
+        // Run 13: the start 1.67 m above the deck (the client's camera point) held the player in
+        // the air over the deck for the whole ship fight.
+        let mut world = tutorial_world_on(SHIP_TERRAIN_M);
+        let deck = TUTORIAL_START_FLOOR.z;
+        // The start video: no camera follows the body.
+        for counter in 1..=VIDEO_RECORDS {
+            let record = InputRecord {
+                bit_7: None,
+                ..camera_record(
+                    counter,
+                    TUTORIAL_START,
+                    TUTORIAL_VIEW,
+                    [0.0; 2],
+                    STANDING_SLOTS,
+                )
+            };
+            let body = after_record(&mut world, counter, record);
+            assert!(
+                (body.z - deck).abs() < CLOSE_M,
+                "record {counter}: {body:?}"
+            );
+        }
+        // A run over the deck, where the server knows no floor but the start's: a client that
+        // shows the server's place.
+        let mut body = body_of_first(&world);
+        for counter in VIDEO_RECORDS + 1..=VIDEO_RECORDS + RUN_RECORDS {
+            let record = camera_record(counter, body, TUTORIAL_VIEW, [0.0; 2], FORWARD_SLOTS);
+            body = after_record(&mut world, counter, record);
+            assert!(
+                (body.z - deck).abs() < CLOSE_M,
+                "record {counter}: {body:?}"
+            );
+        }
+        assert!(body.y > TUTORIAL_START.y + 1.0, "it ran: {body:?}");
+    }
+
+    #[test]
+    fn the_move_into_the_water_drops_the_player_into_the_sea() {
+        // Run 13: after the move the server's body stayed at the place 7.6 m above the sea, the
+        // client hung there with it, and the walked floor kept it there.
+        let mut world = tutorial_world_on(WATER_SEABED_M);
+        let water = encounter::WATER_AT;
+        world.carry_out(1, vec![Order::MoveTo(water, encounter::WATER_FACING)], NOW);
+        assert_eq!(body_of_first(&world), water);
+        let swim = nw_sim_core::character::swim_floor(OCEAN_LEVEL_M);
+        let mut shown: std::collections::VecDeque<Position> =
+            std::iter::repeat_n(water, CLIENT_LAG_RECORDS).collect();
+        let mut body = water;
+        let mut landed = None;
+        for counter in 1..=REST_RECORDS {
+            shown.push_back(body);
+            let client = shown.pop_front().expect("lagged places");
+            let record = camera_record(counter, client, TUTORIAL_VIEW, [0.0; 2], STANDING_SLOTS);
+            let next = after_record(&mut world, counter, record);
+            assert!(next.z <= body.z, "record {counter}: it rose to {next:?}");
+            body = next;
+            if landed.is_none() && (body.z - swim).abs() < CLOSE_M {
+                landed = Some(counter);
+            }
+        }
+        assert!(landed.is_some(), "never in the water: {body:?}");
+        assert!((body.z - swim).abs() < CLOSE_M, "it swims: {body:?}");
+        assert_eq!(
+            world.walked_floor.floor_at(water),
+            None,
+            "the place in the air is no floor"
+        );
+    }
+
     #[test]
     fn a_move_inside_the_limits_is_seen_and_a_fast_one_is_refused() {
         let mut world = world();
@@ -8908,6 +9079,23 @@ mod tests {
             tick(&mut world, NOW).handoffs.is_empty(),
             "no table, no handoff"
         );
+    }
+
+    #[test]
+    fn the_same_table_again_is_not_applied_again() {
+        // Run 13: the director sends its table every second; applying it walked every spawn and
+        // made a wake scan of every player again.
+        let mut world = world_with_spawns(vec![test_spawn(CELL_M / 2.0)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        join(&mut world, 1, CELL_M / 2.0);
+        tick(&mut world, NOW);
+        let (_, scans) = world.mob_work();
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        tick(&mut world, NOW + 33);
+        assert_eq!(world.mob_work().1, scans, "no new wake scan");
+        world.set_table(&table(&["sim-b", "sim-a"])).expect("table");
+        let changes = world.take_mob_changes();
+        assert_eq!(changes.removed, 1, "a changed table still applies");
     }
 
     #[test]

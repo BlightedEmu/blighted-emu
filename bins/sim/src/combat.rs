@@ -36,9 +36,9 @@ pub enum AttackRefusal {
     /// Attacks come faster than the weapon allows (parent spec section 9: attack rate).
     #[error("faster than the weapon allows")]
     TooFast,
-    /// No living, not returning mob is in reach (M6-B spec section 6.2).
-    #[error("no target in reach")]
-    NoTarget,
+    /// The shot has no aim: the client sent no view and holds no lock-on.
+    #[error("no aim")]
+    NoAim,
     /// The weapon has no shot loaded.
     #[error("no shot loaded")]
     NoAmmo,
@@ -56,7 +56,7 @@ impl AttackRefusal {
             Self::NotWeaponAttack => "not_weapon_attack",
             Self::OutOfReach => "out_of_reach",
             Self::TooFast => "too_fast",
-            Self::NoTarget => "no_target",
+            Self::NoAim => "no_aim",
             Self::NoAmmo => "no_ammo",
         }
     }
@@ -113,6 +113,11 @@ pub enum AttackOutcome {
     },
     /// The target belongs to another sim; the hit goes there.
     Remote(RemoteHit),
+    /// The attack happened and hit nothing: a melee swing whose damage window closed with no
+    /// living, not returning mob in its shapes, or a shot whose line met none. It is still a
+    /// swing: the client's action goes to its own state and to the other players' views, and
+    /// attacks cost no stamina (run 13: 34 swings at nothing were counted as refused).
+    Missed,
 }
 
 impl AttackOutcome {
@@ -122,6 +127,7 @@ impl AttackOutcome {
             Self::Hit { .. } => "hit",
             Self::Killed { .. } => "killed",
             Self::Remote(_) => "remote",
+            Self::Missed => "missed",
         }
     }
 }

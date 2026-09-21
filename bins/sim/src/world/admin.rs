@@ -9,7 +9,7 @@ use nw_formats::objectstream::lowercase_crc32;
 use nw_world::records::VitalsSpawn;
 
 use super::attack::Vitals;
-use super::{Player, QuestRefusal, SimWorld};
+use super::{Placement, Player, QuestRefusal, SimWorld};
 
 /// Most GM mobs one command spawns.
 pub const MAX_GM_SPAWN: u32 = 50;
@@ -113,7 +113,7 @@ impl SimWorld {
             y: to.y,
             z: to.z,
         };
-        self.place_player(target, position, None, now_ms);
+        self.place_player(target, position, None, Placement::Drop, now_ms);
         AdminReply::Done
     }
 

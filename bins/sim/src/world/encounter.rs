@@ -71,13 +71,13 @@ const SHIP_SINKING_VIDEO: &str = "ftue_intro3";
 /// Time from the start of that video to the move (retail 13.5 s).
 const WATER_MOVE_DELAY_MS: u64 = 13_500;
 /// Where the player comes into the water (retail own position after the move).
-const WATER_AT: Position = Position {
+pub(super) const WATER_AT: Position = Position {
     x: 793.84,
     y: 337.42,
     z: 26.16,
 };
 /// Where the player faces in the water (retail own state 118546: rotation `66f6`, yaw 1.434 rad).
-const WATER_FACING: f32 = 1.434;
+pub(super) const WATER_FACING: f32 = 1.434;
 /// Thorpe's intermission starts when his health falls to this part of his maximum (retail
 /// `Boss_Phase` entry: health 60 %; he stopped at 59.5 %).
 const CAPTAIN_INTERMISSION_FRACTION: f64 = 0.6;

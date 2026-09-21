@@ -129,7 +129,7 @@ impl SimWorld {
         let met = first_on_line(&shot, position, aim, places);
         tracing::debug!(attacker = ?attacker, damage_id, ?aim, met = ?met, "player cast");
         let Some((target, flight_s)) = met else {
-            return vec![Err(AttackRefusal::NoTarget)];
+            return vec![Ok(AttackOutcome::Missed)];
         };
         // A flight of at most its lifetime, a few seconds.
         #[allow(

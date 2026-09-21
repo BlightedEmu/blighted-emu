@@ -35,7 +35,7 @@ pub use movement::{
 };
 pub use new_player::{
     OPEN_WORLD_START, TUTORIAL_EXIT, TUTORIAL_EXIT_RADIUS_M, TUTORIAL_FOLDER, TUTORIAL_START,
-    at_tutorial_exit,
+    TUTORIAL_START_FLOOR, at_tutorial_exit,
 };
 pub use steering::{Mover, Steering, turn_toward, yaw_gap, yaw_toward};
 pub use tick::{DueTicks, TICKS_PER_SECOND, TickClock};

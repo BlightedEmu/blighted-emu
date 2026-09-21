@@ -47,7 +47,7 @@ use super::hit_shape::{
 use super::mob_timeline::yaw_toward;
 use super::projectile::{AimLine, Shot};
 use super::stamina::Dodge;
-use super::{Body, MESSAGE_CHANNEL, Outgoing, Player, Position, SimWorld};
+use super::{Body, MESSAGE_CHANNEL, Outgoing, Placement, Player, Position, SimWorld};
 use crate::combat::{AttackOutcome, AttackRefusal, RemoteHit, RespawnRefusal};
 use crate::mobs::{
     Capsule, DEFAULT_BLOCK_STAMINA, DEFAULT_HIT_TAG, MobAttackIntent, MobReach, MoveHit,
@@ -798,8 +798,9 @@ impl SimWorld {
     /// (respawn note, 2026-09-18: retail moved its three open-world deaths 305 to 541 m): in the
     /// tutorial at the start of its newest fight ([`Tutorial::respawn_at`]); in the open world
     /// at the respawn point `point` its client chose, else at the known point nearest its death
-    /// ([`nw_content::respawn_points`]). No mob keeps it as a target, and its new place is
-    /// walked floor. Gives where it came back.
+    /// ([`nw_content::respawn_points`]). No mob keeps it as a target, a respawn point is walked
+    /// floor, and the body falls from its new place to the floor it finds (in the tutorial after
+    /// the move into the water: into the sea). Gives where it came back.
     ///
     /// # Errors
     ///
@@ -844,16 +845,19 @@ impl SimWorld {
             let at = point
                 .and_then(respawn_point)
                 .unwrap_or_else(|| nearest_respawn_point([died_at.x, died_at.y, died_at.z]));
-            Position {
+            let at = Position {
                 x: at[0],
                 y: at[1],
                 z: at[2],
-            }
+            };
+            // A respawn point stands on a floor. The tutorial's respawn places are not all
+            // floors: the one after the move into the water is in the air over the sea.
+            self.walked_floor.walked(at);
+            at
         };
         self.mobs.forget(number);
         self.scripted_swings.retain(|swing| swing.target != number);
-        self.place_player(entity, to, None, now_ms);
-        self.walked_floor.walked(to);
+        self.place_player(entity, to, None, Placement::Drop, now_ms);
         Ok(to)
     }
 
@@ -1350,7 +1354,7 @@ impl SimWorld {
                 if now_ms < swing.closes_ms() {
                     Landing::Waiting(landed)
                 } else if swing.hits.is_empty() {
-                    done(AttackRefusal::NoTarget)
+                    Landing::Done(vec![Ok(AttackOutcome::Missed)])
                 } else {
                     Landing::Done(landed)
                 }
@@ -1468,7 +1472,7 @@ impl SimWorld {
     ) -> Landing {
         let yaw = Self::aim_yaw(swing.aim.lock_target, swing.aim.facing, position, places);
         let (Some(yaw), Some(pitch)) = (yaw, swing.aim.pitch) else {
-            return Landing::Done(vec![Err(AttackRefusal::NoTarget)]);
+            return Landing::Done(vec![Err(AttackRefusal::NoAim)]);
         };
         Landing::Done(self.cast(
             &swing.attacker,
@@ -2297,7 +2301,7 @@ mod tests {
         assert!(opened.is_empty(), "it waits through its window: {opened:?}");
         assert_eq!(
             world.player_swings_due(start + window(AttackKind::Light)[1]),
-            vec![Err(AttackRefusal::NoTarget)],
+            vec![Ok(AttackOutcome::Missed)],
             "and misses when it closes"
         );
     }
@@ -2375,17 +2379,48 @@ mod tests {
     }
 
     #[test]
-    fn no_mob_in_reach_is_no_target() {
+    fn a_swing_with_no_mob_in_reach_still_swings_and_misses() {
         let mut world = awake_fight();
         join(&mut world, 2, MOB_X + 10.0);
         assert_eq!(
             swing(&mut world, 2, facing(FACING_WEST), AttackKind::Light, NOW),
-            vec![Err(AttackRefusal::NoTarget)]
+            vec![Ok(AttackOutcome::Missed)]
         );
         assert_eq!(
             swing(&mut world, 7, facing(FACING_WEST), AttackKind::Light, NOW),
             vec![Err(AttackRefusal::NotInWorld)]
         );
+    }
+
+    #[test]
+    fn a_swing_at_nothing_is_still_a_swing() {
+        // Run 13: 34 swings at nothing went to the log as refused. The client plays them: its
+        // action goes to its own state and the other players' views, attacks cost no stamina,
+        // and only the hit is absent.
+        /// A light attack sequence the client started in the retail newchar capture (`r1`
+        /// 5051:ffff000a), and its states.
+        const LIGHT_SEQUENCE: u64 = 5051;
+        const LIGHT_STATES: u64 = 0xffff_000a;
+        let mut world = awake_fight();
+        join(&mut world, 2, MOB_X + 10.0);
+        let entity = world.player_by_number(2).expect("player");
+        let mut records = message(1, &[Key::Press, Key::Release]);
+        let press = records.last_mut().expect("the press, oldest");
+        press.row_1 = Some([LIGHT_SEQUENCE, LIGHT_STATES, 0]);
+        let press_counter = press.u16_after_mask;
+        let _ = world.move_from_input(&connection(2), &records, NOW);
+        assert!(world.attack_input(&connection(2), &records, NOW).is_empty());
+        let started = world.player_swings.first().expect("a swing").started_ms;
+        assert_eq!(
+            world.player_swings_due(started + window(AttackKind::Light)[1]),
+            vec![Ok(AttackOutcome::Missed)]
+        );
+        let mut player = world.world.get_mut::<Player>(entity).expect("player");
+        player.slayer.advance(press_counter, NOW);
+        let due = player.slayer.take_due().state.expect("the action goes out");
+        assert_eq!(due.sequence, LIGHT_SEQUENCE);
+        assert_eq!(due.started, press_counter);
+        assert!(player.stamina.take_change().is_none(), "no stamina spent");
     }
 
     #[test]
@@ -2405,7 +2440,7 @@ mod tests {
                 AttackKind::Light,
                 NOW + LONG_AFTER_MS
             ),
-            vec![Err(AttackRefusal::NoTarget)],
+            vec![Ok(AttackOutcome::Missed)],
             "no homing to a mob behind, and the swing is in front"
         );
         // Inside the homing's 3.75 m radius, beyond the blade.
@@ -2413,7 +2448,7 @@ mod tests {
         tick(&mut far, NOW);
         assert_eq!(
             swing(&mut far, 1, facing(FACING_WEST), AttackKind::Light, NOW),
-            vec![Err(AttackRefusal::NoTarget)],
+            vec![Ok(AttackOutcome::Missed)],
             "the homing turns, the client moves the body: the shape does not reach"
         );
     }
@@ -2459,7 +2494,7 @@ mod tests {
         let late = late_ms - window[0];
         assert_eq!(
             swing(&mut world, 1, facing(FACING_WEST), AttackKind::Light, late),
-            vec![Err(AttackRefusal::NoTarget)]
+            vec![Ok(AttackOutcome::Missed)]
         );
     }
 
@@ -2549,7 +2584,7 @@ mod tests {
         world.set_ghosts(&sim_b(), vec![mob_ghost(GHOST_X, MOB_HEALTH, true)], NOW);
         assert_eq!(
             swing(&mut world, 1, facing(FACING_EAST), AttackKind::Light, NOW),
-            vec![Err(AttackRefusal::NoTarget)],
+            vec![Ok(AttackOutcome::Missed)],
             "a returning mob is no target"
         );
         world.set_ghosts(&sim_b(), vec![mob_ghost(GHOST_X, MOB_HEALTH, false)], NOW);
@@ -2920,7 +2955,7 @@ mod tests {
         world.attack_input(&connection(1), &away, NOW + LONG_AFTER_MS);
         assert_eq!(
             world.player_swings_due(NOW + 2 * LONG_AFTER_MS),
-            vec![Err(AttackRefusal::NoTarget)],
+            vec![Ok(AttackOutcome::Missed)],
             "a cast away from the mob meets nothing"
         );
     }
@@ -3912,7 +3947,7 @@ mod tests {
                     return (now, hits);
                 }
                 AttackOutcome::Hit { amount, .. } => assert_eq!(amount, SWORD_HIT),
-                AttackOutcome::Remote(remote) => panic!("a local mob, not {remote:?}"),
+                other => panic!("a hit on a local mob, not {other:?}"),
             }
             now += INTERVAL_MS;
         }

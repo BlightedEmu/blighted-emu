@@ -10,7 +10,11 @@
 //! floor under the body (the terrain or a floor the caller knows), and the speed is along it
 //! (retail ran 5.50 m/s along slopes, median of 33 steady windows, and less over the ground).
 //! There is no level collision here: walls and structures are the camera check's
-//! ([`crate::camera_check`]).
+//! ([`crate::camera_check`]). A body on a floor the server does not know (a deck, a roof: high
+//! above the terrain under it) keeps that floor's height where no other floor is known, also when
+//! it lands from a jump; only a body on the terrain falls off an edge. The client shows the
+//! server's own place (run 13, 2026-09-20: a body the server held in the air hung there), so a
+//! body that fell through such a floor would take its client with it.
 
 use crate::movement::{Ground, Position};
 
@@ -43,6 +47,10 @@ pub const STEP_DOWN_M: f32 = 0.282;
 pub const JUMP_SPEED_MPS: f32 = 5.48;
 /// See [`JUMP_SPEED_MPS`].
 pub const GRAVITY_MPS2: f32 = 15.24;
+/// The pull down on a body that falls without a jump, m/s² (Observed: a least squares fit of the
+/// retail drop into the tutorial sea after the server put the player 7.6 m above it, newchar
+/// records 3073 to 3108, 36 places, root mean square 0.007 m; the jump's pull is stronger).
+pub const FALL_GRAVITY_MPS2: f32 = 9.76;
 /// Input records between a standing jump's key and the lift (Observed: 3 in 7 of the newchar
 /// standing jumps; a running jump lifts at once).
 pub const STANDING_JUMP_WIND_UP: u8 = 3;
@@ -125,8 +133,12 @@ enum Vertical {
     Grounded,
     /// A standing jump before the lift: records left.
     WindUp(u8),
-    /// In a jump, rising at this speed (falling below 0).
-    Jumping(f32),
+    /// In a jump, rising at `rise` m/s (falling below 0); `takeoff_floor` is the height it took
+    /// off from when that is a floor the server does not know: it lands there at the latest.
+    Jumping {
+        rise: f32,
+        takeoff_floor: Option<f32>,
+    },
     /// Falling off a floor, rising at this speed (falling below 0).
     Falling(f32),
 }
@@ -146,6 +158,11 @@ pub struct Character {
     dodge_held: bool,
     /// Seconds left of a swim dash.
     dash_s: f32,
+}
+
+/// The height of a swimming body's feet in the sea at `sea_level_m`.
+pub fn swim_floor(sea_level_m: f32) -> f32 {
+    sea_level_m - SWIM_DEPTH_M
 }
 
 /// The unit vectors in the ground plane of camera yaw `yaw`: forward and right.
@@ -196,7 +213,15 @@ impl Character {
 
     /// Whether it is in a jump (the client's camera does not follow a jump up and down).
     pub const fn is_jumping(&self) -> bool {
-        matches!(self.vertical, Vertical::WindUp(_) | Vertical::Jumping(_))
+        matches!(
+            self.vertical,
+            Vertical::WindUp(_) | Vertical::Jumping { .. }
+        )
+    }
+
+    /// Whether it stands on a floor: not in a jump and not falling.
+    pub const fn is_grounded(&self) -> bool {
+        matches!(self.vertical, Vertical::Grounded)
     }
 
     /// Puts it at `at`, keeping its motion (the camera check found it elsewhere in a jump).
@@ -222,6 +247,15 @@ impl Character {
         self.position = at;
         self.speed_mps = 0.0;
         self.vertical = Vertical::Grounded;
+    }
+
+    /// Puts it at `at` in the air: from there it falls to the floor it finds (a server move that
+    /// drops the player: retail's move into the tutorial sea placed it 7.6 m above the water, and
+    /// it fell).
+    pub const fn drop_at(&mut self, at: Position) {
+        self.position = at;
+        self.speed_mps = 0.0;
+        self.vertical = Vertical::Falling(0.0);
     }
 
     /// Moves it by one input record over `ground` with the sea at `sea_level_m`; gives its
@@ -255,7 +289,7 @@ impl Character {
         } else {
             (self.speed_mps - deceleration * dt_s).max(target)
         };
-        self.start_jump(intent.jump);
+        self.start_jump(intent.jump, ground);
         let distance = self.speed_mps * dt_s;
         let start = self.position;
         let mut next = Position {
@@ -268,22 +302,38 @@ impl Character {
             Vertical::WindUp(left) => {
                 next = start;
                 self.vertical = match left.saturating_sub(1) {
-                    0 => Vertical::Jumping(JUMP_SPEED_MPS),
+                    0 => self.lift(ground),
                     left => Vertical::WindUp(left),
                 };
             }
-            Vertical::Jumping(rise) => {
-                self.vertical = self
-                    .fly(&mut next, rise, dt_s, ground)
-                    .map_or(Vertical::Grounded, Vertical::Jumping);
+            Vertical::Jumping {
+                rise,
+                takeoff_floor,
+            } => {
+                let fall = Fall {
+                    rise,
+                    gravity: GRAVITY_MPS2,
+                    at_least: takeoff_floor,
+                };
+                self.vertical =
+                    self.fly(&mut next, fall, dt_s, ground)
+                        .map_or(Vertical::Grounded, |rise| Vertical::Jumping {
+                            rise,
+                            takeoff_floor,
+                        });
             }
             Vertical::Falling(rise) => {
+                let fall = Fall {
+                    rise,
+                    gravity: FALL_GRAVITY_MPS2,
+                    at_least: None,
+                };
                 self.vertical = self
-                    .fly(&mut next, rise, dt_s, ground)
+                    .fly(&mut next, fall, dt_s, ground)
                     .map_or(Vertical::Grounded, Vertical::Falling);
             }
         }
-        let swim_floor = sea_level_m - SWIM_DEPTH_M;
+        let swim_floor = swim_floor(sea_level_m);
         if next.z < swim_floor {
             next.z = swim_floor;
             self.vertical = Vertical::Grounded;
@@ -338,22 +388,39 @@ impl Character {
         }
     }
 
-    /// Starts a jump on a new press of the jump key while it stands on a floor.
-    fn start_jump(&mut self, held: bool) {
+    /// Starts a jump on a new press of the jump key while it stands on a floor over `ground`.
+    fn start_jump(&mut self, held: bool, ground: &(impl Ground + ?Sized)) {
         let pressed = held && !self.jump_held;
         self.jump_held = held;
         if pressed && self.vertical == Vertical::Grounded {
             self.vertical = if self.speed_mps == 0.0 {
                 Vertical::WindUp(STANDING_JUMP_WIND_UP)
             } else {
-                Vertical::Jumping(JUMP_SPEED_MPS)
+                self.lift(ground)
             };
         }
     }
 
+    /// A jump that leaves the floor now over `ground`.
+    fn lift(&self, ground: &(impl Ground + ?Sized)) -> Vertical {
+        Vertical::Jumping {
+            rise: JUMP_SPEED_MPS,
+            takeoff_floor: (!self.on_terrain(ground)).then_some(self.position.z),
+        }
+    }
+
+    /// Whether it stands on the terrain of `ground` (within a step above it, or below it), not
+    /// on a floor high above it that the server does not know.
+    fn on_terrain(&self, ground: &(impl Ground + ?Sized)) -> bool {
+        ground
+            .height_at(self.position.x, self.position.y)
+            .is_some_and(|terrain| self.position.z - terrain <= STEP_DOWN_M)
+    }
+
     /// A walk to `next` on the floor: along a floor within a step, the distance is along the
-    /// slope; a floor further down starts a fall; a floor further up, or none, is not known
-    /// here and the body keeps its height.
+    /// slope; a floor further down starts a fall from the terrain; a floor further up, or none,
+    /// or one further down under a body that is not on the terrain, is not known here and the
+    /// body keeps its height.
     fn walk(&mut self, next: &mut Position, distance: f32, ground: &(impl Ground + ?Sized)) {
         let Some(floor) = ground.floor_at(next.x, next.y, next.z) else {
             return;
@@ -363,7 +430,9 @@ impl Character {
             return;
         }
         if -rise > STEP_DOWN_M {
-            self.vertical = Vertical::Falling(0.0);
+            if self.on_terrain(ground) {
+                self.vertical = Vertical::Falling(0.0);
+            }
             return;
         }
         if distance > 0.0 {
@@ -375,24 +444,50 @@ impl Character {
         next.z = ground.floor_at(next.x, next.y, next.z).unwrap_or(floor);
     }
 
-    /// One record in the air: up by the rise, pulled down, and onto the floor when it reaches it.
-    /// Gives the rise after the record, or `None` when it landed.
+    /// One record in the air: up by the rise, pulled down, and onto the floor when it reaches it
+    /// (the floor of `ground`, or the fall's lowest floor when that is higher). Where no floor is
+    /// known at all (no height data), it stays at its height: nothing says it may fall. Gives the
+    /// rise after the record, or `None` when it landed.
     fn fly(
         &self,
         next: &mut Position,
-        rise: f32,
+        fall: Fall,
         dt_s: f32,
         ground: &(impl Ground + ?Sized),
     ) -> Option<f32> {
-        next.z += rise * dt_s - GRAVITY_MPS2 * dt_s * dt_s / 2.0;
-        match ground.floor_at(next.x, next.y, self.position.z) {
+        let Fall {
+            rise,
+            gravity,
+            at_least,
+        } = fall;
+        next.z += rise * dt_s - gravity * dt_s * dt_s / 2.0;
+        let floor = match (ground.floor_at(next.x, next.y, self.position.z), at_least) {
+            (Some(floor), Some(lowest)) => Some(floor.max(lowest)),
+            (floor, lowest) => floor.or(lowest),
+        };
+        match floor {
             Some(floor) if next.z <= floor => {
                 next.z = floor;
                 None
             }
-            _ => Some(rise - GRAVITY_MPS2 * dt_s),
+            Some(_) => Some(rise - gravity * dt_s),
+            None => {
+                next.z = self.position.z;
+                None
+            }
         }
     }
+}
+
+/// One record of a body in the air.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Fall {
+    /// Its upward speed, m/s (falling below 0).
+    rise: f32,
+    /// The pull down, m/s².
+    gravity: f32,
+    /// The lowest floor it lands on, when it is one the server does not know.
+    at_least: Option<f32>,
 }
 
 #[cfg(test)]
@@ -716,5 +811,172 @@ mod tests {
         run(&mut character, 30, 1, 0);
         character.step(moving(1, 0, false, true), &Flat, SEA);
         assert!((character.velocity()[1] - SPRINT_SPEED_MPS).abs() < CLOSE);
+    }
+
+    /// The `ftue_v2` terrain under the tutorial's move into the water, m.
+    const TUTORIAL_SEABED_M: f32 = 10.82;
+
+    /// The tutorial sea where the server moved the player into it.
+    struct TutorialSea;
+
+    impl Ground for TutorialSea {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(TUTORIAL_SEABED_M)
+        }
+    }
+
+    /// Retail's place before its drop into the tutorial sea, held to newchar record 3072, m.
+    const RETAIL_DROP_FROM_M: f32 = 26.155;
+    /// Retail's own places in that drop: records after 3072 and the place's height (newchar
+    /// records 3073 to 3108; 3079 carried no place).
+    const RETAIL_DROP: [(u32, f32); 35] = [
+        (1, 26.140),
+        (2, 26.124),
+        (3, 26.093),
+        (4, 26.046),
+        (5, 25.999),
+        (6, 25.920),
+        (8, 25.763),
+        (9, 25.669),
+        (10, 25.559),
+        (11, 25.434),
+        (12, 25.308),
+        (13, 25.167),
+        (14, 25.010),
+        (15, 24.854),
+        (16, 24.681),
+        (17, 24.493),
+        (18, 24.289),
+        (19, 24.074),
+        (20, 23.855),
+        (21, 23.635),
+        (22, 23.384),
+        (23, 23.133),
+        (24, 22.882),
+        (25, 22.600),
+        (26, 22.317),
+        (27, 22.026),
+        (28, 21.728),
+        (29, 21.399),
+        (30, 21.085),
+        (31, 20.740),
+        (32, 20.395),
+        (33, 20.034),
+        (34, 19.677),
+        (35, 19.300),
+        (36, 18.908),
+    ];
+    /// The record after 3072 in which retail's place was in the water (3109: 18.50 m).
+    const RETAIL_DROP_IN_WATER_RECORD: u32 = 37;
+    /// How far the server's drop may be from retail's place, m: retail's fall was 0.5 m/s fast
+    /// at its first record (the fit), the server's starts from rest.
+    const RETAIL_DROP_TOLERANCE_M: f32 = 0.25;
+
+    #[test]
+    fn a_dropped_body_falls_into_the_sea_as_retail_s_did() {
+        let mut character = Character::new(origin());
+        character.drop_at(Position {
+            z: RETAIL_DROP_FROM_M,
+            ..origin()
+        });
+        let mut in_water = None;
+        for record in 1..=RETAIL_DROP_IN_WATER_RECORD + 2 {
+            character.step(input(0, 0), &TutorialSea, TUTORIAL_SEA);
+            let z = character.position().z;
+            if let Some((_, retail)) = RETAIL_DROP.iter().find(|(at, _)| *at == record) {
+                assert!(
+                    (z - retail).abs() < RETAIL_DROP_TOLERANCE_M,
+                    "record {record}: {z} against retail {retail}"
+                );
+            }
+            if in_water.is_none() && z <= swim_floor(TUTORIAL_SEA) {
+                in_water = Some(record);
+            }
+        }
+        assert!(
+            in_water.is_some_and(|record| record.abs_diff(RETAIL_DROP_IN_WATER_RECORD) <= 1),
+            "{in_water:?}"
+        );
+        assert!(character.is_grounded(), "it swims");
+        assert!((character.position().z - swim_floor(TUTORIAL_SEA)).abs() < CLOSE);
+    }
+
+    #[test]
+    fn a_drop_where_no_floor_is_known_stays_where_it_was_put() {
+        struct NoHeights;
+        impl Ground for NoHeights {
+            fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+                None
+            }
+        }
+        let mut character = Character::new(origin());
+        character.drop_at(origin());
+        character.step(input(0, 0), &NoHeights, SEA);
+        assert!(character.is_grounded());
+        assert!(character.position().z.abs() < CLOSE);
+    }
+
+    /// The tutorial ship: its deck is not in the height map, the terrain is 39 m under it.
+    struct UnderTheShip;
+
+    impl Ground for UnderTheShip {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(SHIP_TERRAIN_M)
+        }
+    }
+
+    /// The `ftue_v2` terrain under the tutorial ship, m.
+    const SHIP_TERRAIN_M: f32 = 50.0;
+    /// The ship's deck (retail own places 89.37 to 89.50 m), m.
+    const DECK_M: f32 = 89.42;
+
+    fn on_deck() -> Position {
+        Position {
+            z: DECK_M,
+            ..origin()
+        }
+    }
+
+    #[test]
+    fn a_body_on_a_floor_the_server_does_not_know_walks_on_at_its_height() {
+        // Run 13: on the ship the server knows only the terrain 39 m down; a fall there takes the
+        // client through the deck.
+        let mut character = Character::new(on_deck());
+        for _ in 0..60 {
+            character.step(input(1, 1), &UnderTheShip, TUTORIAL_SEA);
+            assert!(character.is_grounded());
+            assert!((character.position().z - DECK_M).abs() < CLOSE);
+        }
+        assert!(character.position().y > on_deck().y + 1.0, "it walked");
+    }
+
+    #[test]
+    fn a_jump_from_such_a_floor_lands_back_on_its_height() {
+        let mut character = Character::new(on_deck());
+        let jump = CharacterInput {
+            intent: Intent {
+                jump: true,
+                ..Intent::default()
+            },
+            ..input(1, 0)
+        };
+        run_on(&mut character, 10, input(1, 0));
+        character.step(jump, &UnderTheShip, TUTORIAL_SEA);
+        assert!(character.is_jumping());
+        let mut peak = DECK_M;
+        for _ in 0..60 {
+            character.step(input(1, 0), &UnderTheShip, TUTORIAL_SEA);
+            peak = peak.max(character.position().z);
+        }
+        assert!(peak > DECK_M + 0.5, "it jumped: {peak}");
+        assert!(character.is_grounded());
+        assert!((character.position().z - DECK_M).abs() < CLOSE);
+    }
+
+    /// `records` steps of `input` over the ground under the ship.
+    fn run_on(character: &mut Character, records: usize, input: CharacterInput) {
+        for _ in 0..records {
+            character.step(input, &UnderTheShip, TUTORIAL_SEA);
+        }
     }
 }

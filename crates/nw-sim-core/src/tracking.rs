@@ -10,15 +10,20 @@
 //! client held at a wall stays there instead of being pulled back record after record; replay of
 //! the newchar capture: 1,433 pull-backs instead of 1,622 in the tutorial and 1,638 instead of
 //! 2,022 in the open world, a median of 0.22 m instead of 0.29 m in the tutorial and 0.16 m
-//! instead of 0.14 m in the open world). The height is the floor under the body nearest the
-//! camera's height when one is within [`FLOOR_PICK_M`] of it, else the camera's height (a deck,
-//! stairs or a roof the server does not know), and the body stands there; a body in a jump keeps
-//! the character's height (retail's jump suppresses the camera's vertical motion,
-//! `playeractions_traversal.actionlist` `SuppressVerticalCameraMovement`). A record whose camera
-//! does not follow the body changes nothing.
+//! instead of 0.14 m in the open world). The height of a body on a floor is the floor under the
+//! body nearest the camera's height when one is within [`FLOOR_PICK_M`] of it (the terrain, a
+//! walked floor, or the swim floor of a sea deep enough), else the camera's height (a deck, stairs
+//! or a roof the server does not know), and the body stands there; a body in a jump or a fall
+//! keeps the character's height (retail's jump suppresses the camera's vertical motion,
+//! `playeractions_traversal.actionlist` `SuppressVerticalCameraMovement`, and the camera trails a
+//! fall), and so does a body under a camera that comes down from above it, a camera that still
+//! trails the fall the body landed from (retail tutorial sea: the camera's body 1.1 m above the
+//! landed place, then 0.75, 0.48, 0.36, 0.20 and 0.15 m in the next records). The client shows the
+//! server's own place, so a height taken from a trailing camera would hold the body and its client
+//! up there (run 13, 2026-09-20). A record whose camera does not follow the body changes nothing.
 
 use crate::camera_check::{CameraCheck, CameraView};
-use crate::character::{Character, CharacterInput};
+use crate::character::{Character, CharacterInput, swim_floor};
 use crate::movement::{Ground, Position};
 
 /// How far the server's body may be from the camera's body before it goes there, m (Observed:
@@ -59,7 +64,7 @@ pub struct Tracked {
     pub resynced: bool,
     /// The camera followed the body.
     pub consistent: bool,
-    /// The body stands on a floor (it is not in a jump).
+    /// The body stands on a floor (it is not in a jump or a fall).
     pub on_floor: bool,
 }
 
@@ -114,6 +119,14 @@ impl TrackedBody {
         self.last_seen = None;
     }
 
+    /// The server puts it at `at` in the air (a teleport, a respawn): it falls from there to the
+    /// floor it finds, and the camera that follows it starts again.
+    pub fn drop_at(&mut self, at: Position) {
+        self.character.drop_at(at);
+        self.camera.forget();
+        self.last_seen = None;
+    }
+
     /// Moves it by one input record over `ground`, with the sea at `sea_level_m`.
     pub fn record(
         &mut self,
@@ -144,7 +157,7 @@ impl TrackedBody {
                 position,
                 resynced: false,
                 consistent: false,
-                on_floor: !self.character.is_jumping(),
+                on_floor: self.character.is_grounded(),
             };
         };
         let resynced = position.horizontal_distance(seen.at) > RESYNC_M;
@@ -162,11 +175,11 @@ impl TrackedBody {
             position.x = seen.at.x;
             position.y = seen.at.y;
         }
-        if self.character.is_jumping() {
+        let trailing = last_seen.is_some_and(|last| seen.at.z < last.z) && seen.at.z > position.z;
+        if !self.character.is_grounded() || trailing {
             self.character.place(position);
         } else {
-            position.z = ground
-                .floor_at(position.x, position.y, seen.at.z)
+            position.z = floor_near(ground, position, seen.at.z, sea_level_m)
                 .filter(|floor| (floor - seen.at.z).abs() <= FLOOR_PICK_M)
                 .unwrap_or(seen.at.z);
             self.character.land_at(position);
@@ -175,9 +188,29 @@ impl TrackedBody {
             position,
             resynced,
             consistent: true,
-            on_floor: !self.character.is_jumping(),
+            on_floor: self.character.is_grounded(),
         }
     }
+}
+
+/// The known floor at the ground-plane point of `at` nearest the height `z`: the floor of
+/// `ground` there, or the swim floor of the sea at `sea_level_m` where the terrain is under it.
+fn floor_near(
+    ground: &(impl Ground + ?Sized),
+    at: Position,
+    z: f32,
+    sea_level_m: f32,
+) -> Option<f32> {
+    let swim = swim_floor(sea_level_m);
+    let sea = ground
+        .height_at(at.x, at.y)
+        .is_none_or(|terrain| terrain < swim)
+        .then_some(swim);
+    ground
+        .floor_at(at.x, at.y, z)
+        .into_iter()
+        .chain(sea)
+        .min_by(|a, b| (a - z).abs().total_cmp(&(b - z).abs()))
 }
 
 #[cfg(test)]
@@ -389,6 +422,122 @@ mod tests {
         assert!(tracked.consistent && !tracked.resynced);
         assert!(tracked.position.horizontal_distance(moved) < 0.01);
     }
+
+    /// The tutorial sea (the `ftue_v2` ocean level) and the terrain under the move into it, m.
+    const TUTORIAL_SEA_M: f32 = 20.0;
+    const TUTORIAL_SEABED_M: f32 = 10.82;
+    /// Records that the test client shows the server's place late: the client shows the
+    /// server's own place, a few records after the server moved it.
+    const CLIENT_LAG_RECORDS: usize = 3;
+    /// Where the camera's body was above the landed retail place in the records after its drop
+    /// into the tutorial sea (newchar records 3110 to 3114), m.
+    const RETAIL_CAMERA_TRAIL_M: [f32; 5] = [0.75, 0.48, 0.36, 0.20, 0.15];
+
+    struct TutorialSea;
+
+    impl Ground for TutorialSea {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(TUTORIAL_SEABED_M)
+        }
+    }
+
+    /// A client at rest that shows the server's places `CLIENT_LAG_RECORDS` late.
+    struct LateClient {
+        shown: std::collections::VecDeque<Position>,
+    }
+
+    impl LateClient {
+        fn at(place: Position) -> Self {
+            Self {
+                shown: std::iter::repeat_n(place, CLIENT_LAG_RECORDS).collect(),
+            }
+        }
+
+        /// The camera of the place it shows now; it gets `server` for later.
+        fn camera(&mut self, server: Position) -> CameraView {
+            self.shown.push_back(server);
+            let shown = self.shown.pop_front().expect("lagged places");
+            view_of(shown, BOOM, [0.0; 2])
+        }
+    }
+
+    #[test]
+    fn a_dropped_body_falls_while_its_client_s_camera_shows_it_late() {
+        // Run 13: after the move into the water the server's body took the height of the camera
+        // of a client that showed the server's place, and both hung 7.6 m above the sea.
+        let placed = Position {
+            z: 26.16,
+            ..start()
+        };
+        let mut body = TrackedBody::new(start());
+        body.drop_at(placed);
+        let mut free = Character::new(placed);
+        free.drop_at(placed);
+        let mut client = LateClient::at(placed);
+        let mut server = placed;
+        for record in 0..60 {
+            let tracked = body.record(
+                input(0, client.camera(server)),
+                &TutorialSea,
+                TUTORIAL_SEA_M,
+            );
+            free.step(
+                input(0, view_of(placed, BOOM, [0.0; 2])).character,
+                &TutorialSea,
+                TUTORIAL_SEA_M,
+            );
+            assert!(
+                (tracked.position.z - free.position().z).abs() < 1e-4,
+                "record {record}: the camera held the drop at {:?}",
+                tracked.position
+            );
+            assert_eq!(tracked.on_floor, free.is_grounded(), "no floor in the air");
+            server = tracked.position;
+        }
+        assert!(
+            (server.z - swim_floor(TUTORIAL_SEA_M)).abs() < 1e-4,
+            "{server:?}"
+        );
+    }
+
+    #[test]
+    fn a_camera_settling_over_the_sea_keeps_the_landed_body_on_the_swim_floor() {
+        let swim = swim_floor(TUTORIAL_SEA_M);
+        let placed = Position {
+            z: swim + 3.0,
+            ..start()
+        };
+        let mut body = TrackedBody::new(start());
+        body.drop_at(placed);
+        let mut client = LateClient::at(placed);
+        let mut server = placed;
+        while !body.character.is_grounded() {
+            server = body
+                .record(
+                    input(0, client.camera(server)),
+                    &TutorialSea,
+                    TUTORIAL_SEA_M,
+                )
+                .position;
+        }
+        let trail = RETAIL_CAMERA_TRAIL_M.into_iter().chain([0.0]);
+        for above in trail {
+            let camera = view_of(
+                Position {
+                    z: swim + above,
+                    ..server
+                },
+                BOOM,
+                [0.0; 2],
+            );
+            let tracked = body.record(input(0, camera), &TutorialSea, TUTORIAL_SEA_M);
+            assert!(
+                (tracked.position.z - swim).abs() < 1e-4,
+                "{above} m above: {tracked:?}"
+            );
+        }
+    }
+
     /// The retail replay data: a 1 m terrain grid and input records with the retail places.
     struct Replay {
         x0: f32,
