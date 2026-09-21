@@ -143,20 +143,30 @@ manager vtable is the one its constructor stores (build 25810808:
 
 ## Launching the patched client (no EAC)
 
-The project `launcher` runs the patched exe directly under Proton when these
-environment variables are set (Linux/Proton):
+The project `launcher` runs the patched exe directly under Proton. It needs
+these environment variables (Linux/Proton):
 
 ```bash
 NW_LAUNCHER_GAME_EXE="<Bin64>/BlightedNewWorld.exe"
 NW_LAUNCHER_PROTON="<Steam>/compatibilitytools.d/<Proton>/proton"
-NW_LAUNCHER_STEAM_COMPAT_DATA="<SteamLibrary>/steamapps/compatdata/1063730"
+NW_LAUNCHER_STEAM_COMPAT_DATA="<a folder of its own, for example <drive>/Blighted/prefix>"
 NW_LAUNCHER_STEAM_CLIENT_INSTALL="<Steam install dir>"
 ```
 
-With them set, the launcher logs in as usual but starts
-`BlightedNewWorld.exe` through Proton, skipping `NewWorldLauncher.exe` and so
-Easy Anti-Cheat. Without them it launches the stock client through Steam as
-before.
+The prefix must be the launcher's own folder. The launcher refuses Steam's
+retail prefix (`<SteamLibrary>/steamapps/compatdata/1063730`), so retail play
+through Steam keeps its prefix untouched. Proton makes a new prefix in an empty
+folder on the first start.
+
+The launcher logs in as usual and starts `BlightedNewWorld.exe` through Proton
+inside `bwrap`, skipping `NewWorldLauncher.exe` and so Easy Anti-Cheat. `bwrap`
+binds two private files for the game process only: a hosts file that leads the
+server's `[aws_mirror]` names (remote-config bucket, Kinesis, STS) to the
+server, and a trust file with the server's mirror certificate added
+(`docs/re/2026-09-18-remote-config-layers.md`). Without the four variables the
+launcher does not start the game: the Steam launch path ran the stock client in
+the retail prefix, where it called Amazon's remote-config, analytics and STS
+hosts.
 
 ## Files
 
