@@ -649,6 +649,17 @@ impl ClientInputMsg {
         }
     }
 
+    /// The same input with the view `view` (yaw and pitch, bit 6) in every record: the client
+    /// looks that way.
+    #[must_use]
+    pub fn looking(mut self, view: [f32; 2]) -> Self {
+        for record in &mut self.records {
+            record.mask |= 1 << BIT_6;
+            record.bit_6 = Some(view);
+        }
+        self
+    }
+
     /// The newest position: that of the first record that has one. The client sends the newest
     /// record first (see [`Self::blocking`]); the later records repeat older inputs.
     pub fn newest_position(&self) -> Option<InputPosition> {
@@ -1643,6 +1654,23 @@ mod tests {
         };
         assert!(press.attack_pressed() && press.u16_after_mask == COUNTER);
         assert!(release.attack_released() && release.u16_after_mask == COUNTER + 1);
+    }
+
+    #[test]
+    fn a_looking_input_carries_its_view_in_every_record() {
+        const VIEW: [f32; 2] = [1.5, -0.25];
+        let input = ClientInputMsg::attack(position(), 1).looking(VIEW);
+        let decoded = ClientInputMsg::decode(&input.encode().expect("encode")).expect("decode");
+        assert!(
+            decoded
+                .records
+                .iter()
+                .all(|record| record.bit_6 == Some(VIEW))
+        );
+        assert_eq!(
+            decoded.newest_view().and_then(|(_, view, _)| view),
+            Some(VIEW)
+        );
     }
 
     #[test]

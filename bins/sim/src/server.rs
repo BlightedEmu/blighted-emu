@@ -1466,6 +1466,7 @@ mod tests {
 
     use nw_bus::test_support::test_bus;
     use nw_bus::{HandoffOffer, Subscription};
+    use nw_content::respawn_points::nearest_respawn_point;
     use nw_db::test_db::with_test_schema;
     use nw_db::{
         NewCharacter, WORLD_MIGRATOR, character_items, character_position, character_progression,
@@ -1828,9 +1829,15 @@ mod tests {
             .collect()
     }
 
-    /// The own x of a bundle.
-    fn own_x(read: &SlotRead) -> f32 {
-        read.local_player_position().expect("own position").x
+    /// The own x of a bundle; `None` when its own states carry no position (a state that only
+    /// numbers the newest input record).
+    fn own_x(read: &SlotRead) -> Option<f32> {
+        read.local_player_position().map(|position| position.x)
+    }
+
+    /// Whether the own x of a bundle is `x`.
+    fn own_x_is(read: &SlotRead, x: f32) -> bool {
+        own_x(read).is_some_and(|own| (own - x).abs() < MOVE_TOLERANCE_M)
     }
 
     /// The slots of `sims` from their heartbeats.
@@ -1927,15 +1934,26 @@ mod tests {
 
     /// A position-only input to `x`.
     fn move_to(connection: ConnectionRef, x: f32) -> SimInput {
-        let target = InputPosition::from_metres(x, Y, Z).expect("finite");
+        move_to_point(connection, [x, Y, Z])
+    }
+
+    /// A movement input to `[x, y, z]`.
+    fn move_to_point(connection: ConnectionRef, [x, y, z]: [f32; 3]) -> SimInput {
+        let target = InputPosition::from_metres(x, y, z).expect("finite");
         let body = ClientInputMsg::position(target).encode().expect("input");
         client_message(connection, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, body)
     }
 
-    /// An attack input at `x`.
+    /// An attack input at `x`, looking west: the test mobs stand west of the player, and the
+    /// swing's shape points where the client looks.
     fn attack_at(connection: ConnectionRef, x: f32) -> SimInput {
+        /// The yaw that looks west (`-x`).
+        const LOOKING_WEST: [f32; 2] = [std::f32::consts::FRAC_PI_2, 0.0];
         let at = InputPosition::from_metres(x, Y, Z).expect("finite");
-        let body = ClientInputMsg::attack(at, 1).encode().expect("input");
+        let body = ClientInputMsg::attack(at, 1)
+            .looking(LOOKING_WEST)
+            .encode()
+            .expect("input");
         client_message(connection, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, body)
     }
 
@@ -2079,7 +2097,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn an_attack_input_hits_a_mob_and_the_gateway_gets_a_2071() {
         const MOB_X: f32 = 1000.0;
-        const PLAYER_X: f32 = MOB_X + 2.0;
+        /// Within the light sword swing's reach of the mob's middle: its capsule passes 1.06 m
+        /// ahead, 0.3 m long each way and 0.3 m round, and the test mob is 0.5 m round
+        /// (`player-attacks-25810808.json`).
+        const SWORD_REACH_M: f32 = 1.2;
+        const PLAYER_X: f32 = MOB_X + SWORD_REACH_M;
         with_test_schema(async |db| {
             WORLD_MIGRATOR.run(db).await.expect("migrate");
             let ada = character(db).await;
@@ -2225,9 +2247,7 @@ mod tests {
             let target = BORDER_X + STEP_M;
             input(&bus, world_id, sim.id(), &move_to(connection, target)).await;
             gateway
-                .until_bundles(|_, _, reads| {
-                    ((own_x(&reads[0]) - target).abs() < MOVE_TOLERANCE_M).then_some(())
-                })
+                .until_bundles(|_, _, reads| own_x_is(&reads[0], target).then_some(()))
                 .await;
             sim.stop().await;
         })
@@ -2428,8 +2448,7 @@ mod tests {
             assert_eq!(again, (east.clone(), FIRST_HANDOFF));
             pair.gateway
                 .until_bundles(|sim, _, reads| {
-                    (*sim == east && (own_x(&reads[0]) - further).abs() < MOVE_TOLERANCE_M)
-                        .then_some(())
+                    (*sim == east && own_x_is(&reads[0], further)).then_some(())
                 })
                 .await;
             let left = SimInput::Left { connection };
@@ -2454,10 +2473,30 @@ mod tests {
         })
     }
 
+    /// The test combat with a mob hit of 100 x the level damage: more than a player's health.
+    fn lethal_combat() -> CombatSettings {
+        const LETHAL_FACTOR: f64 = 100.0;
+        let mut source = crate::combat::test_support::test_source();
+        for row in &mut source.attacks {
+            if row.damage_id == crate::mob_ai::test_support::TEST_MOB_ROW {
+                row.coefficient = LETHAL_FACTOR;
+            }
+        }
+        CombatSettings {
+            data: Arc::new(
+                nw_content::combat::CombatData::build(
+                    source,
+                    &nw_content::combat::CombatRows::default(),
+                )
+                .expect("rows")
+                .with_player_attacks(crate::combat::test_support::test_player_attacks()),
+            ),
+            ..test_combat()
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_killed_player_gets_a_4299_and_respawns_on_request() {
-        /// A mob hit of 100 x 100: more than a player's health.
-        const LETHAL_FACTOR: f64 = 100.0;
         const RESPAWN: Duration = Duration::from_millis(300);
         const MOB_X: f32 = 1000.0;
         const PLAYER_X: f32 = MOB_X + 2.0;
@@ -2467,8 +2506,7 @@ mod tests {
             let bus = test_bus().await;
             let world_id = Uuid::new_v4();
             let mut gateway = TestGateway::start(&bus, world_id, true).await;
-            let mut combat = test_combat();
-            combat.mob_attack_factor = LETHAL_FACTOR;
+            let mut combat = lethal_combat();
             combat.min_respawn_ms = u64::try_from(RESPAWN.as_millis()).expect("ms");
             combat.spawns = one_mob(MOB_X);
             let sim = Running::start(
@@ -2517,10 +2555,13 @@ mod tests {
                     .is_err(),
                 "dead until it asks"
             );
+            // The respawn puts it at the retail respawn point nearest to where it died.
+            let [x, y, z] = nearest_respawn_point([PLAYER_X, Y, Z]);
             let request = respawn_request(gateway.connection(CONNECTION));
             input(&bus, world_id, sim.id(), &request).await;
+            let step = move_to_point(gateway.connection(CONNECTION), [x + STEP_M, y, z]);
             input(&bus, world_id, sim.id(), &step).await;
-            tokio::time::timeout(WAIT, wait_for_x(&mut gateway, sim.id(), PLAYER_X + STEP_M))
+            tokio::time::timeout(WAIT, wait_for_x(&mut gateway, sim.id(), x + STEP_M))
                 .await
                 .expect("it moves again after its respawn");
             tables.abort();
@@ -2531,12 +2572,9 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_mob_of_the_other_sim_kills_a_player_through_the_bus() {
-        /// A mob hit of 100 x 100: more than a player's health.
-        const LETHAL_FACTOR: f64 = 100.0;
         with_test_schema(async |db| {
             WORLD_MIGRATOR.run(db).await.expect("migrate");
-            let mut combat = test_combat();
-            combat.mob_attack_factor = LETHAL_FACTOR;
+            let mut combat = lethal_combat();
             combat.spawns = one_mob(BORDER_X + 2.0);
             let pair = Pair::start_with(db, combat).await;
             let ada = character(db).await;
@@ -2771,11 +2809,13 @@ mod tests {
         .await;
     }
 
-    /// The own x of the next bundle of `sim` for the test's connection.
+    /// The own x of the next bundle of `sim` for the test's connection that has one.
     async fn own_x_from(gateway: &mut TestGateway, sim: &BusId) -> f32 {
         gateway
             .until_bundles(|from, connection, reads| {
-                (from == sim && connection == CONNECTION).then(|| own_x(&reads[0]))
+                (from == sim && connection == CONNECTION)
+                    .then(|| own_x(&reads[0]))
+                    .flatten()
             })
             .await
     }
@@ -2803,10 +2843,11 @@ mod tests {
             send_inputs(&bus, world_id, &id, false, vec![step(2.0)]).await;
             wait_for_x(&mut gateway, &id, BORDER_X + 2.0).await;
             send_inputs(&bus, world_id, &id, true, vec![step(3.0)]).await;
-            tokio::time::sleep(QUIET).await;
-            gateway.drain().await;
             assert!(
-                (own_x_from(&mut gateway, &id).await - (BORDER_X + 2.0)).abs() < MOVE_TOLERANCE_M
+                tokio::time::timeout(QUIET, wait_for_x(&mut gateway, &id, BORDER_X + 3.0))
+                    .await
+                    .is_err(),
+                "a direct input after a forwarded one is dropped"
             );
             sim.stop().await;
         })
