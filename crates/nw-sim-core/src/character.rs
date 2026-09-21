@@ -49,6 +49,35 @@ pub const STANDING_JUMP_WIND_UP: u8 = 3;
 /// How far below the sea a swimming body's feet are, m (Observed: the retail own place at 18.59 m
 /// in the tutorial sea of level 20, every record of the swim to shore).
 pub const SWIM_DEPTH_M: f32 = 1.41;
+/// The speed while the block key is held and a key goes forward, m/s
+/// (`playeractions_nav.actionlist` `Block_Nav_Speed` `Speed` 2.0; retail newchar: 5 of the 11
+/// steady forward block windows at 1.98 m/s, the others still ramping, and 3 of 3 forward and
+/// right at 1.96 m/s).
+pub const BLOCK_SPEED_MPS: f32 = 2.0;
+/// The speed while the block key is held and no key goes forward, m/s (`playeractions_nav.
+/// actionlist` `Nav` `Speed` 1.65 in every direction; retail newchar: back 1.647 m/s, median of 87
+/// steady block windows with quartiles 1.647 and 1.674, back and right 1.58 of 19).
+pub const BLOCK_BACK_SPEED_MPS: f32 = 1.65;
+/// How fast the speed rises and falls while blocking, m/s² (`Block_Nav_Speed` `Accel` and `Decel`
+/// 25).
+pub const BLOCK_ACCELERATION_MPS2: f32 = 25.0;
+/// The speed of a swimming body, m/s (`playeractions_swim.actionlist` `Swim_Nav` `Speed` 3.0;
+/// retail newchar tutorial swim: 3.0 m/s after the ramp).
+pub const SWIM_SPEED_MPS: f32 = 3.0;
+/// How fast a swimming body speeds up, m/s² (`Swim_Nav` `Accel` 3.0: retail swim windows of 10
+/// records from 1.25 to 3.0 m/s as it ramps), and slows down (`Decel` 130: retail 6.1 to 3.3 m/s
+/// in one record after a dash).
+pub const SWIM_ACCELERATION_MPS2: f32 = 3.0;
+/// See [`SWIM_ACCELERATION_MPS2`].
+pub const SWIM_DECELERATION_MPS2: f32 = 130.0;
+/// The speed of a swimming body's dash, a press of the dodge key in the water, m/s
+/// (`playeractions_dodge.actionlist` `Dodge` `InheritVelocityMaxSpeed` 6; retail newchar tutorial:
+/// 23 of the 25 steady dash windows at 6.0 m/s, from the first record of the press).
+pub const SWIM_DASH_SPEED_MPS: f32 = 6.0;
+/// How long a dash lasts, s (Observed: 37, 37 and 38 records of 1/30 s in the three tutorial dashes
+/// that held the key to their end; the speed went back to the swim speed with the key still
+/// held).
+pub const SWIM_DASH_S: f32 = 37.0 / 30.0;
 
 /// What the keys of one input record ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -61,6 +90,10 @@ pub struct Intent {
     pub jump: bool,
     /// The walk toggle is pressed in this record.
     pub walk_toggle: bool,
+    /// The block key is held.
+    pub block: bool,
+    /// The dodge key is held.
+    pub dodge: bool,
 }
 
 impl Intent {
@@ -108,6 +141,11 @@ pub struct Character {
     walking: bool,
     vertical: Vertical,
     jump_held: bool,
+    /// It swims: it ended the record before at the swim depth.
+    swimming: bool,
+    dodge_held: bool,
+    /// Seconds left of a swim dash.
+    dash_s: f32,
 }
 
 /// The unit vectors in the ground plane of camera yaw `yaw`: forward and right.
@@ -126,6 +164,9 @@ impl Character {
             walking: false,
             vertical: Vertical::Grounded,
             jump_held: false,
+            swimming: false,
+            dodge_held: false,
+            dash_s: 0.0,
         }
     }
 
@@ -195,12 +236,24 @@ impl Character {
         if intent.walk_toggle {
             self.walking = !self.walking;
         }
-        let (target, heading) = self.target(intent, yaw);
+        let dodge_pressed = intent.dodge && !self.dodge_held;
+        self.dodge_held = intent.dodge;
+        if self.swimming && dodge_pressed {
+            self.dash_s = SWIM_DASH_S;
+        }
+        // A record is in the dash when its middle is.
+        let dashing = self.swimming && self.dash_s > dt_s / 2.0;
+        self.dash_s = (self.dash_s - dt_s).max(0.0);
+        let (target, heading) = self.target(intent, yaw, dashing);
         self.heading = heading.unwrap_or(self.heading);
-        self.speed_mps = if target >= self.speed_mps {
-            (self.speed_mps + ACCELERATION_MPS2 * dt_s).min(target)
+        let (acceleration, deceleration) = self.ramp(intent);
+        self.speed_mps = if dashing && heading.is_some() {
+            // The dash takes its speed at once (the dodge inherits it).
+            target
+        } else if target >= self.speed_mps {
+            (self.speed_mps + acceleration * dt_s).min(target)
         } else {
-            (self.speed_mps - DECELERATION_MPS2 * dt_s).max(target)
+            (self.speed_mps - deceleration * dt_s).max(target)
         };
         self.start_jump(intent.jump);
         let distance = self.speed_mps * dt_s;
@@ -235,12 +288,17 @@ impl Character {
             next.z = swim_floor;
             self.vertical = Vertical::Grounded;
         }
+        self.swimming = next.z <= swim_floor;
+        if !self.swimming {
+            self.dash_s = 0.0;
+        }
         self.position = next;
         [next.x - start.x, next.y - start.y]
     }
 
-    /// The speed its keys ask for and the direction, when they ask for one.
-    fn target(&self, intent: Intent, yaw: f32) -> (f32, Option<[f32; 2]>) {
+    /// The speed its keys ask for and the direction, when they ask for one; `dashing` in a swim
+    /// dash.
+    fn target(&self, intent: Intent, yaw: f32, dashing: bool) -> (f32, Option<[f32; 2]>) {
         if intent.forward == 0 && intent.right == 0 {
             return (0.0, None);
         }
@@ -251,7 +309,15 @@ impl Character {
             (along * forward[0] + side * right[0]) / length,
             (along * forward[1] + side * right[1]) / length,
         ];
-        let speed = if self.walking {
+        let speed = if dashing {
+            SWIM_DASH_SPEED_MPS
+        } else if self.swimming {
+            SWIM_SPEED_MPS
+        } else if intent.block && intent.forward > 0 {
+            BLOCK_SPEED_MPS
+        } else if intent.block {
+            BLOCK_BACK_SPEED_MPS
+        } else if self.walking {
             RUN_SPEED_MPS
         } else if intent.forward < 0 {
             BACK_SPEED_MPS
@@ -259,6 +325,17 @@ impl Character {
             SPRINT_SPEED_MPS
         };
         (speed, Some(heading))
+    }
+
+    /// How fast its speed rises and falls in its movement now, m/s².
+    const fn ramp(&self, intent: Intent) -> (f32, f32) {
+        if self.swimming {
+            (SWIM_ACCELERATION_MPS2, SWIM_DECELERATION_MPS2)
+        } else if intent.block {
+            (BLOCK_ACCELERATION_MPS2, BLOCK_ACCELERATION_MPS2)
+        } else {
+            (ACCELERATION_MPS2, DECELERATION_MPS2)
+        }
     }
 
     /// Starts a jump on a new press of the jump key while it stands on a floor.
@@ -549,5 +626,95 @@ mod tests {
             character.step(input(1, 0), &SeaBed, TUTORIAL_SEA);
         }
         assert!((character.position().z - (TUTORIAL_SEA - SWIM_DEPTH_M)).abs() < CLOSE);
+    }
+
+    fn moving(forward: i8, right: i8, block: bool, dodge: bool) -> CharacterInput {
+        CharacterInput {
+            intent: Intent {
+                block,
+                dodge,
+                ..input(forward, right).intent
+            },
+            ..input(forward, right)
+        }
+    }
+
+    #[test]
+    fn blocking_moves_at_the_block_speeds() {
+        let mut character = Character::new(origin());
+        character.step(moving(1, 0, true, false), &Flat, SEA);
+        assert!(
+            (character.velocity()[1] - BLOCK_ACCELERATION_MPS2 * DT).abs() < CLOSE,
+            "the block ramp"
+        );
+        for _ in 0..30 {
+            character.step(moving(1, 0, true, false), &Flat, SEA);
+        }
+        assert!((character.velocity()[1] - BLOCK_SPEED_MPS).abs() < CLOSE);
+        for _ in 0..30 {
+            character.step(moving(-1, 0, true, false), &Flat, SEA);
+        }
+        assert!((character.velocity()[1] + BLOCK_BACK_SPEED_MPS).abs() < CLOSE);
+        for _ in 0..30 {
+            character.step(moving(0, 1, true, false), &Flat, SEA);
+        }
+        assert!((character.velocity()[0] - BLOCK_BACK_SPEED_MPS).abs() < CLOSE);
+    }
+
+    /// Water 5 m deep everywhere, the sea at the tutorial's 20 m.
+    const TUTORIAL_SEA: f32 = 20.0;
+    struct SeaBed;
+    impl Ground for SeaBed {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(5.0)
+        }
+    }
+
+    fn swimmer() -> Character {
+        let mut character = Character::new(Position {
+            x: 0.0,
+            y: 0.0,
+            z: TUTORIAL_SEA - SWIM_DEPTH_M,
+        });
+        character.step(input(0, 0), &SeaBed, TUTORIAL_SEA);
+        character
+    }
+
+    #[test]
+    fn a_swimmer_ramps_to_the_swim_speed_and_dashes_on_a_dodge_press() {
+        let mut character = swimmer();
+        character.step(input(1, 0), &SeaBed, TUTORIAL_SEA);
+        assert!((character.velocity()[1] - SWIM_ACCELERATION_MPS2 * DT).abs() < CLOSE);
+        for _ in 0..60 {
+            character.step(input(1, 0), &SeaBed, TUTORIAL_SEA);
+        }
+        assert!((character.velocity()[1] - SWIM_SPEED_MPS).abs() < CLOSE);
+        character.step(moving(1, 0, false, true), &SeaBed, TUTORIAL_SEA);
+        assert!(
+            (character.velocity()[1] - SWIM_DASH_SPEED_MPS).abs() < CLOSE,
+            "the dash at once"
+        );
+        let mut records = 1;
+        loop {
+            character.step(moving(1, 0, false, true), &SeaBed, TUTORIAL_SEA);
+            if (character.velocity()[1] - SWIM_DASH_SPEED_MPS).abs() >= CLOSE {
+                break;
+            }
+            records += 1;
+        }
+        // 37 records of 1/30 s, held to the end.
+        assert_eq!(records, 37);
+        assert!(
+            (character.velocity()[1] - SWIM_SPEED_MPS).abs() < CLOSE,
+            "back to the swim speed with the key held"
+        );
+    }
+
+    #[test]
+    fn a_dodge_on_land_is_no_dash() {
+        let mut character = Character::new(origin());
+        run(&mut character, 30, 1, 0);
+        character.step(moving(1, 0, false, true), &Flat, SEA);
+        assert!((character.velocity()[1] - SPRINT_SPEED_MPS).abs() < CLOSE);
     }
 }

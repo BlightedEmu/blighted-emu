@@ -434,11 +434,13 @@ const ATTACK_PRESS_BIT: u32 = 40;
 /// The slot value and bit of the attack key's release: set in one record only.
 const ATTACK_RELEASE_VALUE: usize = 2;
 const ATTACK_RELEASE_BIT: u32 = 31;
-/// The slot value and bit of the movement mode the run toggle key sets: set while the mode is on
-/// (replication note: in the run-toggle capture each press of value 1 bit 24 flipped it, and the
-/// retail own state's slayer state went 1a while it was set, 1b while clear, 24 times each).
-const RUN_MODE_VALUE: usize = 0;
-const RUN_MODE_BIT: u32 = 14;
+/// The slot value and bit of the forward navigation input (the action lists' `ForwardNav`, the
+/// forward input of every move): set while the forward key is held and while the autorun is on.
+/// Observed: in the newchar capture it is set in all 12,756 records with the forward key and in no
+/// other; in the autorun capture (`brim_runtoggle_spam`) each press of the autorun key (value 1
+/// bit 24) turned it on or off with no movement key held, and the own place moved forward at the
+/// sprint speed while it was on. (The replication note read it as a run toggle.)
+const FORWARD_NAV_KEY: (usize, u32) = (0, 14);
 /// The slot values and bits of the presses of the first and second weapon keys (input note: the
 /// weapon in the hand changed 331 to 418 ms after each).
 const WEAPON_KEYS: [(usize, u32); 2] = [(0, 9), (3, 13)];
@@ -493,11 +495,6 @@ impl InputRecord {
         self.slot_bit(QUICK_SLOT_1_VALUE, QUICK_SLOT_1_BIT)
     }
 
-    /// Whether the run toggle's movement mode is on in this record.
-    pub fn run_mode(&self) -> bool {
-        self.slot_bit(RUN_MODE_VALUE, RUN_MODE_BIT)
-    }
-
     /// Whether the player pressed the attack key in this record.
     pub fn attack_pressed(&self) -> bool {
         self.slot_bit(ATTACK_PRESS_VALUE, ATTACK_PRESS_BIT)
@@ -537,7 +534,7 @@ impl InputRecord {
     pub fn move_keys(&self) -> MoveKeys {
         let held = |(value, bit): (usize, u32)| self.slot_bit(value, bit);
         MoveKeys {
-            forward: held(FORWARD_KEY),
+            forward: held(FORWARD_KEY) || held(FORWARD_NAV_KEY),
             back: held(BACK_KEY),
             left: held(LEFT_KEY),
             right: held(RIGHT_KEY),
@@ -1374,6 +1371,23 @@ mod tests {
     }
 
     #[test]
+    fn the_autorun_moves_forward_without_the_forward_key() {
+        // Retail autorun capture (`brim_runtoggle_spam`): record 187 presses the autorun key,
+        // records 188 on carry the forward navigation bit alone.
+        const PRESS: [u64; 10] = [0, 0x100_0000, 0, 0, 0, 0, 0, 0, 0, 0];
+        const AUTORUN: [u64; 10] = [0x4000, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(standing_with(PRESS).move_keys(), MoveKeys::default());
+        let running = standing_with(AUTORUN);
+        assert_eq!(
+            running.move_keys(),
+            MoveKeys {
+                forward: true,
+                ..MoveKeys::default()
+            }
+        );
+    }
+
+    #[test]
     fn the_walk_toggle_and_the_boom_keys_read_as_in_the_retail_records() {
         // A walk toggle press while running forward (toggle capture record 321), a press that
         // lengthened the boom (newchar 6453), one that shortened it (newchar 7042) and one that
@@ -1471,17 +1485,6 @@ mod tests {
         assert!(!press(8_796_093_022_208).dodging());
         assert!(press(8_388_608).using_quick_slot_1());
         assert!(!press(8_388_608).dodging());
-        // Retail run toggle (replication note): value 0 bit 14 holds the mode.
-        let mode = |value: u64| InputRecord {
-            slots: InputSlots {
-                count: 19,
-                values: vec![value],
-                bytes: [128; SLOT_BYTES],
-            },
-            ..InputRecord::default()
-        };
-        assert!(mode(0x4000).run_mode());
-        assert!(!mode(0x80).run_mode());
         let at = InputPosition::from_metres(1.0, 2.0, 3.0).expect("finite");
         for blocking in [true, false] {
             let input = ClientInputMsg::position_with_block(at, blocking);

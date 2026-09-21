@@ -21,14 +21,15 @@ use nw_messages::{
     GDE_METADATA_COMPONENT, GatherableControllerState, GdeMetadataReplicatedState, InputPosition,
     LOCAL_PLAYER_INTEREST, LookDir, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState,
     MessageError, PLAYER_SLICE_ASSET, POS3_LEN, PlayerStates, ReplicatedStateBundle,
-    SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, ServerMessage, SlayerState, StepPlace,
-    TeleportStep, VitalsData, VitalsState, boss_phase_change, change_members, offset_from,
-    player_members, raw_id_of_entity,
+    SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, ServerMessage, StepPlace, TeleportStep,
+    VitalsData, VitalsState, boss_phase_change, change_members, offset_from, player_members,
+    raw_id_of_entity,
 };
 use nw_sim_core::Position;
 
 use super::MAX_BUNDLE_MEMBERS;
 use super::mob_timeline::MobFrame;
+use super::slayer::SlayerDue;
 use super::slots::Slots;
 use crate::player_content::MobLook;
 
@@ -224,7 +225,7 @@ pub(super) fn entity_group(
 fn full_first_position(
     group: &mut BundleGroup,
     position: Position,
-    anchor_us: u64,
+    stamp: AlcStamp,
 ) -> Result<(), MessageError> {
     if let Some(pos) = InputPosition::from_metres(position.x, position.y, position.z)
         && let Some(alc) = group.members.last_mut()
@@ -234,7 +235,7 @@ fn full_first_position(
                 anchor: None,
                 at: pos,
             },
-            anchor_us,
+            stamp,
         )?);
     }
     Ok(())
@@ -257,7 +258,7 @@ pub(super) fn remote_group(
         return Ok(None);
     };
     if carded {
-        full_first_position(&mut group, position, NO_ANCHOR_US)?;
+        full_first_position(&mut group, position, NO_CLOCK_STAMP)?;
     }
     Ok(Some(group))
 }
@@ -458,8 +459,9 @@ pub(super) fn log_mob_group(mob: u64, carded: bool, group: &BundleGroup) {
 /// `gatherableState` Depleted (client enum): a skinned corpse.
 const DEPLETED_GATHERABLE: u8 = 8;
 
-/// Milliseconds per own state number (retail: the own state number goes up by one per 33 ms,
-/// live capture 117010 to 117112 ms).
+/// Milliseconds per own state number of a client that does not number its input records (the
+/// test client, the load-test bots): one per 33 ms, retail's pace (live capture 117010 to 117112
+/// ms).
 const OWN_STATE_MS: u64 = 33;
 
 /// A move of the client's own player by the server (retail moves the player into the water so):
@@ -480,8 +482,42 @@ const OWN_ANCHOR_PERIOD_MS: u64 = 60_000;
 const OWN_ANCHOR_REPEAT_MS: u64 = 100;
 /// Microseconds per millisecond.
 const US_PER_MS: u64 = 1_000;
-/// The anchor of a spawn state of an entity that is not the client's own player.
-const NO_ANCHOR_US: u64 = 0;
+/// The number and time of the full first state of an entity that is not the client's own player:
+/// the first own state's, with no anchor.
+const NO_CLOCK_STAMP: AlcStamp = AlcStamp {
+    id: SPAWN_STATE_ID,
+    anchor_us: 0,
+    offset_ms: SPAWN_STATE_MS,
+};
+
+/// The number of a player's ALC states while its client numbers its input records: the counter
+/// of the newest record the server moved the body by, and the server time of the first state
+/// with it. Retail numbers every own state so (Observed: all 39,955 own state numbers of the
+/// newchar capture were the counter of a record the client had sent, 36 ms before at the median;
+/// a state numbered with a record repeats unchanged until a newer one came), and the slayer
+/// states start in the state of the record that started them ([`super::slayer`]). Ours counted
+/// the time instead and ran 110 to 148 records ahead of the client in the run-12 capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct StateNumber {
+    /// The number.
+    pub(super) number: u16,
+    /// The server time of the first state with it (ms since 2000-01-01).
+    pub(super) since_ms: u64,
+}
+
+impl StateNumber {
+    /// The number after the client's newest record `counter` at server time `server_ms`: the same
+    /// state again until the counter moves on.
+    pub(super) const fn after(this: Option<Self>, counter: u16, server_ms: u64) -> Self {
+        match this {
+            Some(number) if number.number == counter => number,
+            _ => Self {
+                number: counter,
+                since_ms: server_ms,
+            },
+        }
+    }
+}
 
 /// The clock of the client's own player: the client's 'now' is its anchor plus its offset, and
 /// the cooldowns count down on it (clock note: with anchor 0 the potion's cooldown showed the
@@ -492,9 +528,25 @@ pub(super) struct OwnClock {
     pub(super) since_spawn_ms: u64,
     /// The server time of the first own state (ms since 2000-01-01).
     pub(super) spawn_ms: u64,
+    /// The state number from the client's input, when it numbers its records.
+    pub(super) number: Option<u16>,
 }
 
 impl OwnClock {
+    /// The clock of a player whose first state went at `spawn_ms`, at server time `server_ms`:
+    /// with `number`, the state is that number's, at its time.
+    pub(super) const fn at(spawn_ms: u64, server_ms: u64, number: Option<StateNumber>) -> Self {
+        let (state_ms, number) = match number {
+            Some(number) => (number.since_ms, Some(number.number)),
+            None => (server_ms, None),
+        };
+        Self {
+            since_spawn_ms: state_ms.saturating_sub(spawn_ms),
+            spawn_ms,
+            number,
+        }
+    }
+
     /// Milliseconds since the first anchor: the first own state's offset was
     /// [`SPAWN_STATE_MS`].
     const fn elapsed_ms(self) -> u64 {
@@ -506,13 +558,16 @@ impl OwnClock {
         self.spawn_ms.saturating_sub(SPAWN_STATE_MS as u64) * US_PER_MS
     }
 
-    /// The number and time of the own state now: the number goes on from the first state's,
-    /// the anchor moves on each [`OWN_ANCHOR_PERIOD_MS`].
+    /// The number and time of the own state now: the client's number, else the number goes on
+    /// from the first state's; the anchor moves on each [`OWN_ANCHOR_PERIOD_MS`].
     pub(super) const fn stamp(self) -> AlcStamp {
         let elapsed = self.elapsed_ms();
         let periods = elapsed / OWN_ANCHOR_PERIOD_MS;
         AlcStamp {
-            id: SPAWN_STATE_ID.wrapping_add((self.since_spawn_ms / OWN_STATE_MS) as u16),
+            id: match self.number {
+                Some(number) => number,
+                None => SPAWN_STATE_ID.wrapping_add((self.since_spawn_ms / OWN_STATE_MS) as u16),
+            },
             anchor_us: self.first_anchor_us() + periods * OWN_ANCHOR_PERIOD_MS * US_PER_MS,
             // Below the period, which fits 16 bits.
             offset_ms: (elapsed % OWN_ANCHOR_PERIOD_MS) as u16,
@@ -583,8 +638,8 @@ pub(super) struct OwnTick {
     pub(super) with_position: bool,
     /// Send the movement flags without the throttle bit (the first state after the spawn).
     pub(super) clear_throttle: bool,
-    /// The slayer state that goes with this state ([`super::slayer`]).
-    pub(super) slayer: Option<SlayerState>,
+    /// The slayer state and sequence time that go with this state ([`super::slayer`]).
+    pub(super) slayer: SlayerDue,
     /// The facing and look direction of the client's newest input, when they changed since the
     /// last own state (retail sends them back in the own state; lock-on note).
     pub(super) view: Option<LookDir>,
@@ -645,7 +700,7 @@ pub(super) fn own_group(
         return Ok(None);
     };
     if card == OwnCard::Spawn {
-        full_first_position(&mut group, position, tick.clock.first_anchor_us())?;
+        full_first_position(&mut group, position, tick.clock.stamp())?;
     } else if let (Some(teleport), Some(pos), Some(alc)) = (
         teleport,
         InputPosition::from_metres(position.x, position.y, position.z),
@@ -657,6 +712,7 @@ pub(super) fn own_group(
             teleport.facing,
             teleport.number,
             teleport.step,
+            tick.slayer.time,
         ));
     } else if let Some(alc) = group.members.last_mut() {
         let place = InputPosition::from_metres(position.x, position.y, position.z)
@@ -667,8 +723,9 @@ pub(super) fn own_group(
             place,
             tick.clear_throttle.then_some(DATA_BITS_ACTIVE),
             tick.clock.anchored(),
-            tick.slayer,
+            tick.slayer.state,
             tick.view,
+            tick.slayer.time,
         )?);
     }
     if let Some(MemberState::Alc(alc)) = group.members.last().map(|alc| &alc.state)
@@ -920,6 +977,7 @@ mod tests {
     const SPAWN_CLOCK: OwnClock = OwnClock {
         since_spawn_ms: 0,
         spawn_ms: SPAWN_MS,
+        number: None,
     };
 
     /// A tick whose place may go, and one of a player whose moves are refused.
@@ -927,7 +985,10 @@ mod tests {
         clock: SPAWN_CLOCK,
         with_position: true,
         clear_throttle: false,
-        slayer: None,
+        slayer: SlayerDue {
+            state: None,
+            time: None,
+        },
         view: None,
     };
     const REFUSED: OwnTick = OwnTick {
@@ -970,6 +1031,7 @@ mod tests {
         let clock = OwnClock {
             since_spawn_ms: SINCE_SPAWN_MS,
             spawn_ms: SPAWN_MS,
+            number: None,
         };
         let teleport = OwnTeleport::of(1, clock, Some(FACING), TeleportStep::Confirm);
         assert_eq!(teleport.number, SPAWN_TELEPORT + 1, "retail: 1, then 2");
@@ -1000,6 +1062,7 @@ mod tests {
                 Some(FACING),
                 teleport.number,
                 TeleportStep::Confirm,
+                None,
             )))
         );
     }
@@ -1027,7 +1090,8 @@ mod tests {
         };
         assert_eq!(
             refused,
-            AlcState::own_step(SPAWN_CLOCK.stamp(), None, None, true, None, None).expect("step")
+            AlcState::own_step(SPAWN_CLOCK.stamp(), None, None, true, None, None, None)
+                .expect("step")
         );
         let MemberState::Alc(spawn) = alc_of(OwnCard::Spawn, REFUSED) else {
             panic!("an ALC");
@@ -1048,6 +1112,7 @@ mod tests {
                     None,
                     Some(DATA_BITS_ACTIVE),
                     true,
+                    None,
                     None,
                     None
                 )
@@ -1082,7 +1147,7 @@ mod tests {
                         anchor: None,
                         at: pos,
                     },
-                    SPAWN_CLOCK.first_anchor_us(),
+                    SPAWN_CLOCK.stamp(),
                 )
                 .expect("spawn"),
             ),
@@ -1094,6 +1159,7 @@ mod tests {
                 Some(StepPlace::Anchor(pos)),
                 None,
                 true,
+                None,
                 None,
                 None,
             )

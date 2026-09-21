@@ -37,9 +37,9 @@ use nw_messages::{
     CurrencyState, DisableCollisionMsg, GatheringInterruptedMsg, Hands, HealthChange, InputRecord,
     InteractionEndedMsg, InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT,
     LevelInfoChangedMsg, LevelSpec, LookDir, MeleeHitMsg, MessageError, PlayerLook,
-    PlayerSeenByAiMsg, PlayerStates, ProgressionState, SPAWN_STATE_ID, SelectedAsTargetMsg,
-    ServerMessage, ShownItem, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg,
-    UnselectedAsTargetMsg, VitalsData, WorldPosition, facet_entity,
+    PlayerSeenByAiMsg, PlayerStates, ProgressionState, SelectedAsTargetMsg, ServerMessage,
+    ShownItem, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg, UnselectedAsTargetMsg,
+    VitalsData, WorldPosition, facet_entity,
 };
 use nw_sim_core::{
     CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, MobState,
@@ -86,7 +86,7 @@ use level_assets::{ASSET_ENTITY_BASE, AssetViews, asset_gde_ref, spell_gde_ref};
 use level_flow::{AchievementRules, LevelFlow};
 use members::{
     CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, OwnClock, OwnPlaces, OwnTeleport, OwnTick,
-    bundles, card_of, log_mob_group, mob_group, own_group, remote_group,
+    StateNumber, bundles, card_of, log_mob_group, mob_group, own_group, remote_group,
 };
 use mob_timeline::{Animations, MobPose, MobTimelines, TreeEntry, TreePose, animations_of};
 pub use quest_objects::Strike;
@@ -416,16 +416,14 @@ struct Player {
     tracked: TrackedBody,
     /// The counter of the newest input record its body moved by.
     input_counter: Option<u16>,
+    /// The number of its ALC states from that counter ([`StateNumber`]).
+    state_number: Option<StateNumber>,
     /// The view angles of its newest input: where other players see it face and look.
     view: Option<LookDir>,
     /// The view angles the newest own state carried back to its client.
     view_sent: Option<LookDir>,
-    /// The run toggle's movement mode of its newest input, and the ALC state number in which it
-    /// started: its slayer state for other players ([`replica`]).
-    run_mode: Option<bool>,
-    mode_started: u16,
-    /// The action it plays: the one its client started, then the server's follow-up
-    /// ([`slayer`]).
+    /// Its slayer state: the action its client started, then the server's follow-up, or its
+    /// movement ([`slayer`]).
     slayer: slayer::SlayerTrack,
     /// Which other players it got in which bundle step ([`replica::RemotePlan`]).
     remote_plan: replica::RemotePlan,
@@ -1245,6 +1243,12 @@ impl SimWorld {
             }
             player.input_counter = Some(counter);
             read_any = true;
+            player.slayer.record(slayer::SlayerRecord {
+                counter,
+                frame_s: input.character.dt_s,
+                action: record.slayer_input(),
+                intent: (!held).then_some(input.character.intent),
+            });
             if held {
                 continue;
             }
@@ -2626,39 +2630,13 @@ impl SimWorld {
     }
 
     /// The clock of player `player`'s ALC states at server time `server_ms`: from its first own
-    /// state, or from now before it has one.
+    /// state, or from now before it has one, numbered by its client's input when it numbers it.
     const fn alc_clock(player: &Player, server_ms: u64) -> OwnClock {
         let spawn_ms = match player.own_spawned_ms {
             Some(spawned) => spawned,
             None => server_ms,
         };
-        OwnClock {
-            since_spawn_ms: server_ms.saturating_sub(spawn_ms),
-            spawn_ms,
-        }
-    }
-
-    /// Takes the run toggle's movement mode of the newest input record `newest` of player
-    /// `entity`: a new mode starts in the player's ALC state of now.
-    fn note_movement_mode(&mut self, entity: Entity, newest: &InputRecord) {
-        let server_ms = self.server_ms;
-        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            let mode = Some(newest.run_mode());
-            if player.run_mode != mode {
-                player.run_mode = mode;
-                player.mode_started = Self::alc_clock(&player, server_ms).stamp().id;
-            }
-        }
-    }
-
-    /// Reads the actions the client of `connection` started in the input records `records`
-    /// ([`slayer`]).
-    pub fn slayer_input(&mut self, connection: &ConnectionRef, records: &[InputRecord]) {
-        if let Some(&entity) = self.by_connection.get(connection)
-            && let Some(mut player) = self.world.get_mut::<Player>(entity)
-        {
-            player.slayer.input(records);
-        }
+        OwnClock::at(spawn_ms, server_ms, player.state_number)
     }
 
     /// What other players see of `player` now ([`replica`]).
@@ -2677,8 +2655,7 @@ impl SimWorld {
             health: vitals.health.current(),
             max_health: vitals.health.max(),
             view: player.view,
-            run_mode: player.run_mode,
-            mode_started: player.mode_started,
+            number: player.state_number,
             action: player.slayer.current(),
             blocking: vitals.blocking(),
             spawned_ms: clock.spawn_ms,
@@ -2746,10 +2723,20 @@ impl SimWorld {
             .collect();
         let own: HashSet<u64> = everyone.iter().map(|(number, _)| *number).collect();
         let mut cards: HashMap<u64, MobCard> = HashMap::new();
-        // The actions move on to this tick: the own state and the players who see it get the same.
+        // The state numbers and the actions move on to this tick: the own state and the players
+        // who see it get the same.
         for mut player in self.world.query::<&mut Player>().iter_mut(&mut self.world) {
-            let id = Self::alc_clock(&player, server_time).stamp().id;
-            player.slayer.advance(id);
+            if let Some(counter) = player.input_counter {
+                player.state_number = Some(StateNumber::after(
+                    player.state_number,
+                    counter,
+                    server_time,
+                ));
+            }
+            let clock = Self::alc_clock(&player, server_time);
+            player
+                .slayer
+                .advance(clock.stamp().id, clock.since_spawn_ms);
         }
         // Every player as the players who see it get it this tick: ours, then the ghosts'.
         let mut sources: Vec<(u64, ReplicaSource)> = self
@@ -3013,10 +3000,9 @@ impl SimWorld {
                     push: None,
                     tracked: TrackedBody::new(motion.position()),
                     input_counter: None,
+                    state_number: None,
                     view: None,
                     view_sent: None,
-                    run_mode: None,
-                    mode_started: SPAWN_STATE_ID,
                     slayer: slayer::SlayerTrack::default(),
                     remote_plan: replica::RemotePlan::default(),
                     throttle_cleared: false,
@@ -3428,6 +3414,7 @@ impl Neighbourhood<'_> {
                 player.own_card_sent = true;
                 player.own_spawned_ms = Some(self.server_time);
                 player.life_ms = self.server_time;
+                player.slayer.spawned();
             }
             let own_carded = first_card
                 || (self.local_player_card
@@ -3452,11 +3439,7 @@ impl Neighbourhood<'_> {
             } else {
                 None
             };
-            let spawn_ms = player.own_spawned_ms.unwrap_or(self.server_time);
-            let clock = OwnClock {
-                since_spawn_ms: self.server_time.saturating_sub(spawn_ms),
-                spawn_ms,
-            };
+            let clock = SimWorld::alc_clock(player, self.server_time);
             let teleport = step.map(|step| {
                 player.teleport_step = step.next();
                 tracing::debug!(
@@ -6488,15 +6471,14 @@ mod tests {
         world
     }
 
-    /// An input record of player stance keys: the run toggle's mode and block held.
-    fn stance_record(counter: u16) -> InputRecord {
-        const RUN_MODE: u64 = 0x4000;
+    /// An input record with block held.
+    fn block_record(counter: u16) -> InputRecord {
         const BLOCK: u64 = 1 << 62;
         InputRecord {
             u16_after_mask: counter,
             slots: nw_messages::client_input::InputSlots {
                 count: 19,
-                values: vec![RUN_MODE, BLOCK],
+                values: vec![0, BLOCK],
                 bytes: [128; 4],
             },
             ..InputRecord::default()
@@ -6540,8 +6522,8 @@ mod tests {
         const FACING: usize = 11;
         const LOOK_DIR: usize = 12;
         const SLAYER_STATE: usize = 13;
-        /// The run toggle's slayer state (Observed).
-        const RUN_MODE_STATE: u8 = 0x1a;
+        /// The slayer state of a move from standing still (movement study).
+        const START_STATE: u8 = 0x1a;
         const VIEW: LookDir = LookDir {
             yaw: 1.0,
             pitch: 0.3,
@@ -6558,10 +6540,10 @@ mod tests {
             .position();
         let _ = world.move_from_input(
             &a,
-            &[camera_record(1, at, VIEW, [0.0; 2], STANDING_SLOTS)],
+            &[camera_record(1, at, VIEW, [0.0; 2], FORWARD_SLOTS)],
             input_at,
         );
-        world.attack_input(&a, &[stance_record(1)], input_at);
+        world.attack_input(&a, &[block_record(1)], input_at);
         let outgoing = tick(&mut world, input_at);
         let seen = states_of(&world, &outgoing.messages, &b, 1);
         let alc = alc_children(&seen);
@@ -6572,8 +6554,8 @@ mod tests {
         };
         assert_eq!(
             child(SLAYER_STATE),
-            Some(vec![RUN_MODE_STATE]),
-            "the stance"
+            Some(vec![START_STATE]),
+            "the start of its move"
         );
         assert_eq!(
             child(FACING),
@@ -6595,20 +6577,181 @@ mod tests {
     }
 
     #[test]
+    fn own_states_take_the_number_of_the_newest_input_record_as_retail() {
+        // Retail newchar capture (243164 to 243197 ms): records 6497 and 6498 went together, and
+        // the next own state was `0=62` (6498), skipping 6497; it repeated unchanged until the
+        // next record.
+        const RECORDS: [u16; 2] = [6497, 6498];
+        const RETAIL_ID: [u8; 2] = [0x19, 0x62];
+        /// The ALC children of the number and time (sailor-movement note).
+        const ID_REL: usize = 0;
+        const TIME_REL: usize = 1;
+        const ID_ABS: usize = 25;
+        const TIME_ABS: usize = 26;
+        let mut world = two_players();
+        let a = connection(1);
+        let entity = world.by_connection[&a];
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let view = LookDir {
+            yaw: 0.0,
+            pitch: 0.3,
+        };
+        let newest_first: Vec<InputRecord> = RECORDS
+            .iter()
+            .rev()
+            .map(|counter| camera_record(*counter, at, view, [0.0; 2], STANDING_SLOTS))
+            .collect();
+        let _ = world.move_from_input(&a, &newest_first, NOW + 33);
+        let stamp_of = |world: &SimWorld, outgoing: &TickOutput| {
+            let own = alc_children(&states_of(world, &outgoing.messages, &a, 1));
+            let child = |index| {
+                own.iter()
+                    .find(|(child, _)| *child == index)
+                    .map(|(_, bytes)| bytes.clone())
+                    .expect("child")
+            };
+            (
+                [child(ID_ABS)[0], child(ID_REL)[0]],
+                [child(TIME_ABS)[0], child(TIME_REL)[0]],
+            )
+        };
+        let first = tick(&mut world, NOW + 33);
+        let (id, time) = stamp_of(&world, &first);
+        assert_eq!(id, RETAIL_ID, "the newest record's counter");
+        let again = tick(&mut world, NOW + 66);
+        assert_eq!(
+            stamp_of(&world, &again),
+            (id, time),
+            "no new record: the same state"
+        );
+        let next = camera_record(RECORDS[1] + 1, at, view, [0.0; 2], STANDING_SLOTS);
+        let _ = world.move_from_input(&a, &[next], NOW + 99);
+        let later = tick(&mut world, NOW + 99);
+        assert_eq!(
+            stamp_of(&world, &later).0,
+            (RECORDS[1] + 1).to_be_bytes(),
+            "the next record's"
+        );
+    }
+
+    #[test]
+    fn a_client_that_numbers_no_records_gets_numbers_on_the_clock() {
+        // The test client and the load-test bots send counter 0 and no view angles.
+        let mut world = two_players();
+        let a = connection(1);
+        let spawned = NOW + OWN_CARD_DELAY_MS;
+        world
+            .tick(spawned, SERVER_TIME + OWN_CARD_DELAY_MS)
+            .expect("spawn");
+        let id_of = |world: &SimWorld, outgoing: &TickOutput| {
+            alc_children(&states_of(world, &outgoing.messages, &a, 1))
+                .into_iter()
+                .find(|(child, _)| *child == 0)
+                .map(|(_, bytes)| bytes[0])
+                .expect("id")
+        };
+        let entity = world.by_connection[&a];
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let point = nw_messages::ClientInputMsg::position(
+            InputPosition::from_metres(at.x, at.y, at.z).expect("finite"),
+        );
+        let _ = world.move_from_input(&a, &point.records, spawned + 33);
+        let first = world
+            .tick(spawned + 33, SERVER_TIME + OWN_CARD_DELAY_MS + 33)
+            .expect("tick");
+        let later = world
+            .tick(spawned + 99, SERVER_TIME + OWN_CARD_DELAY_MS + 99)
+            .expect("tick");
+        assert_eq!(
+            id_of(&world, &later).wrapping_sub(id_of(&world, &first)),
+            2,
+            "one number per 33 ms"
+        );
+    }
+
+    #[test]
+    fn the_first_own_state_takes_the_input_number_and_the_sequence_time_runs_on() {
+        // Retail: every own state is numbered with the client's newest record, the first one
+        // too (2 in most logins), and its slayer slots started the state before.
+        const BEFORE_SPAWN: [u16; 2] = [41, 40];
+        const NEXT: u16 = 42;
+        /// The ALC children of the number, the sequence time and the slayer start.
+        const ID_REL: usize = 0;
+        const SEQUENCE_TIME_REL: usize = 2;
+        const STARTED_IN: usize = 14;
+        let mut world = world();
+        join(&mut world, 1, 0.0);
+        let a = connection(1);
+        let entity = world.by_connection[&a];
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let view = LookDir {
+            yaw: 0.0,
+            pitch: 0.3,
+        };
+        let records: Vec<InputRecord> = BEFORE_SPAWN
+            .iter()
+            .map(|counter| camera_record(*counter, at, view, [0.0; 2], STANDING_SLOTS))
+            .collect();
+        let _ = world.move_from_input(&a, &records, NOW);
+        let spawned = NOW + OWN_CARD_DELAY_MS;
+        let card = tick(&mut world, spawned);
+        let first = alc_children(&states_of(&world, &card.messages, &a, 1));
+        assert!(first.contains(&(ID_REL, vec![41])), "{first:?}");
+        assert!(first.contains(&(STARTED_IN, 40_u16.to_be_bytes().to_vec())));
+        let next = camera_record(NEXT, at, view, [0.0; 2], STANDING_SLOTS);
+        let _ = world.move_from_input(&a, &[next], spawned + 33);
+        let later = tick(&mut world, spawned + 33);
+        let own = alc_children(&states_of(&world, &later.messages, &a, 1));
+        assert!(own.contains(&(ID_REL, vec![42])), "{own:?}");
+        assert!(
+            own.contains(&(SEQUENCE_TIME_REL, vec![0x83])),
+            "the first state's two steps and one record more: {own:?}"
+        );
+    }
+
+    #[test]
     fn the_own_state_and_another_player_get_the_action_then_its_follow_up() {
         /// The slayer sequence child (slayer note).
         const SEQUENCE: usize = 15;
         /// Retail newchar capture: record 5568 started 5055, and the server followed with 4603.
         const STARTED: u64 = 5055;
         const FOLLOW_UP: u64 = 4603;
+        const RECORD: u16 = 5568;
+        /// The slayer start child (slayer note).
+        const STARTED_IN: usize = 14;
         let mut world = two_players();
         let (a, b) = (connection(1), connection(2));
-        let attack = InputRecord {
-            u16_after_mask: 5568,
-            row_1: Some([STARTED, 0x002c_000a, 0]),
-            ..InputRecord::default()
+        let entity = world.by_connection[&a];
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let view = LookDir {
+            yaw: 0.0,
+            pitch: 0.3,
         };
-        world.slayer_input(&a, &[attack]);
+        let attack = InputRecord {
+            row_1: Some([STARTED, 0x002c_000a, 0]),
+            ..camera_record(RECORD, at, view, [0.0; 2], STANDING_SLOTS)
+        };
+        let _ = world.move_from_input(&a, &[attack], NOW + 33);
         let sequence_bytes = |sequence: u64| {
             nw_messages::wire::Writer::new()
                 .prefixed(sequence)
@@ -6626,6 +6769,11 @@ mod tests {
         assert!(
             sequences(&world, &first.messages, &a).contains(&sequence_bytes(STARTED)),
             "the own state echoes the action"
+        );
+        let own = alc_children(&states_of(&world, &first.messages, &a, 1));
+        assert!(
+            own.contains(&(STARTED_IN, RECORD.to_be_bytes().to_vec())),
+            "started in the state of its record: {own:?}"
         );
         assert!(
             sequences(&world, &first.messages, &b).contains(&sequence_bytes(STARTED)),
@@ -6728,7 +6876,13 @@ mod tests {
             mob: None,
             player: Some(PlayerGhost {
                 look: Some(SAVED_LOOK),
-                run_mode: Some(true),
+                action: Some(nw_bus::GhostSlayer {
+                    state: Some(0x1a),
+                    started: 0x28c5,
+                    sequence: 2794,
+                    second_started: None,
+                    second_playing: None,
+                }),
                 ..replica::tests::source().ghost()
             }),
         };

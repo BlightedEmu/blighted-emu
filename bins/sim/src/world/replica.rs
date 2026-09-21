@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! What other players see of a player (replication note, 2026-09-18): its look, the items that
-//! show on it, its health, its block, where it faces and its movement mode, on its own ALC clock.
+//! show on it, its health, its block, where it faces and its slayer state (its action or its
+//! movement), on its own ALC clock and numbering.
 //! Retail sends a remote player in every tick of a small fight: every state with its number and
 //! time, the place, the facing, the look direction and the slayer state, and the changes of the
 //! vitals (15), the paperdoll (3183) and the damage receiver (1528). Before, our remote players
@@ -27,8 +28,7 @@ use nw_messages::{
 };
 use nw_sim_core::Position;
 
-use super::attack::counter_is_newer;
-use super::members::{EntityKind, OwnClock, PLAYER_ALC_COMPONENT, entity_group};
+use super::members::{EntityKind, OwnClock, PLAYER_ALC_COMPONENT, StateNumber, entity_group};
 
 /// The own player component of the vitals.
 const VITALS_COMPONENT: u64 = nw_messages::PLAYER_VITALS_COMPONENT;
@@ -36,14 +36,6 @@ const VITALS_COMPONENT: u64 = nw_messages::PLAYER_VITALS_COMPONENT;
 const DAMAGE_RECEIVER_COMPONENT: u64 = 14;
 /// The player component of the paperdoll (player component table).
 const PAPERDOLL_COMPONENT: u64 = 62;
-/// The slayer state and sequence of the run toggle's mode, on and off (Observed: the retail own
-/// state in the run-toggle and crouch captures, `13=1a 15=aa2b` while the mode was on and
-/// `13=1b 15=b625` after it went off; the sequence of the off state varies, its meaning is
-/// Unknown).
-const RUN_MODE_STATE: u64 = 0x1a;
-const RUN_MODE_SEQUENCE: u64 = 2794;
-const WALK_MODE_STATE: u64 = 0x1b;
-const WALK_MODE_SEQUENCE: u64 = 2422;
 /// A remote player this near the viewer goes every tick (our choice: a melee and short-range
 /// fight; retail sent the duel's remote player every 17 ms tick).
 const NEAR_M: f32 = 30.0;
@@ -64,9 +56,10 @@ pub(super) struct ReplicaSource {
     pub(super) health: u32,
     pub(super) max_health: u32,
     pub(super) view: Option<LookDir>,
-    pub(super) run_mode: Option<bool>,
-    pub(super) mode_started: u16,
-    /// The action it plays, from its client or the server's follow-up ([`super::slayer`]).
+    /// The number of its ALC states from its client's input ([`StateNumber`]).
+    pub(super) number: Option<StateNumber>,
+    /// Its slayer state: the action it plays, from its client or the server's follow-up, or its
+    /// movement ([`super::slayer`]).
     pub(super) action: Option<SlayerState>,
     pub(super) blocking: bool,
     pub(super) spawned_ms: u64,
@@ -96,8 +89,7 @@ impl ReplicaSource {
             facing: self.view.map(|view| view.yaw),
             pitch: self.view.map(|view| view.pitch),
             target: self.target,
-            run_mode: self.run_mode,
-            mode_started: self.mode_started,
+            state_number: self.number.map(|number| (number.number, number.since_ms)),
             blocking: self.blocking,
             spawned_ms: self.spawned_ms,
             gear_version: self.gear_version,
@@ -125,8 +117,9 @@ impl ReplicaSource {
                 yaw,
                 pitch: ghost.pitch.unwrap_or_default(),
             }),
-            run_mode: ghost.run_mode,
-            mode_started: ghost.mode_started,
+            number: ghost
+                .state_number
+                .map(|(number, since_ms)| StateNumber { number, since_ms }),
             action: ghost.action.map(|action| SlayerState {
                 state: action.state,
                 started: action.started,
@@ -156,27 +149,6 @@ impl ReplicaSource {
             // A ghost's fight is its own sim's: near, it goes every tick anyway.
             in_combat: false,
             target: ghost.target,
-        }
-    }
-
-    /// Its slayer state: the newer of the action it plays and its movement mode.
-    fn slayer(&self) -> Option<SlayerState> {
-        let mode = self.run_mode.map(|run| SlayerState {
-            state: Some(if run { RUN_MODE_STATE } else { WALK_MODE_STATE }),
-            started: self.mode_started,
-            sequence: if run {
-                RUN_MODE_SEQUENCE
-            } else {
-                WALK_MODE_SEQUENCE
-            },
-            second: None,
-        });
-        match (self.action, mode) {
-            (Some(action), Some(mode)) if counter_is_newer(mode.started, action.started) => {
-                Some(mode)
-            }
-            (Some(action), _) => Some(action),
-            (None, mode) => mode,
         }
     }
 
@@ -253,10 +225,7 @@ impl Replica {
             _ => seen_anchor,
         };
         let anchor_moved = seen.is_some() && matches!(place, Some(StepPlace::Anchor(_)));
-        let clock = OwnClock {
-            since_spawn_ms: server_ms.saturating_sub(source.spawned_ms),
-            spawn_ms: source.spawned_ms,
-        };
+        let clock = OwnClock::at(source.spawned_ms, server_ms, source.number);
         let health = source.health;
         let action = source
             .action
@@ -381,7 +350,7 @@ impl Replica {
                     anchor: self.anchor,
                     at: pos,
                 };
-                alc.state = MemberState::Alc(AlcState::spawn(place, self.stamp.anchor_us)?);
+                alc.state = MemberState::Alc(AlcState::spawn(place, self.stamp)?);
             }
             return Ok(Some(group));
         }
@@ -392,7 +361,8 @@ impl Replica {
                 position: self.place,
                 facing: source.view.map(|view| view.yaw),
                 look: source.view,
-                slayer: source.slayer(),
+                slayer: source.action,
+                sequence_time: None,
             })?),
         }];
         if let Some(change) = self.health_change {
@@ -534,8 +504,10 @@ pub(super) mod tests {
                 yaw: 1.0,
                 pitch: 0.25,
             }),
-            run_mode: Some(true),
-            mode_started: 2,
+            number: Some(StateNumber {
+                number: 0x28c5,
+                since_ms: SPAWNED_MS + 10,
+            }),
             action: None,
             blocking: false,
             spawned_ms: SPAWNED_MS,

@@ -57,6 +57,24 @@ const SLAYER_SEQUENCE_CHILD: usize = 15;
 const SECOND_SLAYER_STATE_CHILD: usize = 16;
 const SECOND_SLAYER_STARTED_CHILD: usize = 17;
 const SECOND_SLAYER_SEQUENCE_CHILD: usize = 18;
+/// Slot 0 children of the time into the first slayer slot's sequence: `slayerSeqTimeRel`, one
+/// byte of [`SEQUENCE_TIME_STEP_S`] steps from [`SEQUENCE_TIME_REL_ZERO`], and
+/// `slayerSeqTimeAbs`, a `half` in seconds that the steps count from ([`SequenceClock`]).
+const SEQUENCE_TIME_REL_CHILD: usize = 2;
+const SEQUENCE_TIME_ABS_CHILD: usize = 3;
+/// One `slayerSeqTimeRel` step: 4/255 s (Observed: in the retail newchar capture, the own
+/// sequence time `abs + (rel - 0x7f) × step` is the sum of the input records' frame times since
+/// the record that started the slayer state, that record's own included, with this step: exact
+/// in 10,653 and one step off in 1,309 of the 11,962 states whose start the scan placed; the
+/// tutorial's 20 Hz records step it by 3 or 4, the 30 Hz ones by 2 or 3).
+pub const SEQUENCE_TIME_STEP_S: f32 = 4.0 / 255.0;
+/// The `slayerSeqTimeRel` byte of no step: every state that sends a new `slayerSeqTimeAbs`
+/// carries it (Observed: 228 of 228 new absolute parts of the newchar capture).
+pub const SEQUENCE_TIME_REL_ZERO: u8 = 0x7f;
+/// The most steps the byte counts from its absolute part: one more and the state sends a new
+/// absolute part (Observed: each new absolute part of a running sequence came when the steps
+/// would have been 128 to 133, every 2.0 to 2.1 s).
+const SEQUENCE_TIME_MAX_STEPS: f32 = 127.0;
 /// Child 16 carries the client's second state plus one, so "none" (`0xffff`) is 0 (Observed:
 /// row 1 `0x0024` came back as `25`, in all 7 retail rows with a second sequence).
 const SECOND_STATE_WIRE_OFFSET: u16 = 1;
@@ -263,6 +281,24 @@ fn half_bits(value: f32) -> u16 {
     };
     // Sign and magnitude fit 16 bits.
     (sign | magnitude) as u16
+}
+
+/// The value of the `half` bits `bits`.
+fn half_value(bits: u16) -> f32 {
+    let bits = u32::from(bits);
+    let sign = if bits & HALF_SIGN == 0 { 1.0 } else { -1.0 };
+    let exponent = (bits & HALF_INFINITY) >> HALF_MANTISSA_BITS;
+    let mantissa = bits & ((1 << HALF_MANTISSA_BITS) - 1);
+    // A half's exponent field and mantissa fit an f32 exactly.
+    #[allow(clippy::cast_precision_loss, reason = "10 mantissa bits")]
+    let fraction = mantissa as f32 / (1 << HALF_MANTISSA_BITS) as f32;
+    // The exponent field has 5 bits.
+    let magnitude = match exponent {
+        0 => fraction * 2.0_f32.powi(1 - HALF_EXPONENT_BIAS),
+        exponent if exponent == HALF_MAX_EXPONENT as u32 => f32::INFINITY,
+        exponent => (1.0 + fraction) * 2.0_f32.powi(exponent as i32 - HALF_EXPONENT_BIAS),
+    };
+    sign * magnitude
 }
 
 /// A scope above FullBody that plays with it (the look pose): its scope bit, its entry and its
@@ -533,6 +569,104 @@ impl SlayerState {
     }
 }
 
+/// The time into a character's first slayer slot sequence as one state sends it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SequenceTime {
+    /// `slayerSeqTimeRel`.
+    pub rel: u8,
+    /// `slayerSeqTimeAbs` (`half` bits), when it goes with the state.
+    pub abs: Option<u16>,
+}
+
+impl SequenceTime {
+    fn children(self) -> Vec<(usize, Vec<u8>)> {
+        let mut children = vec![(SEQUENCE_TIME_REL_CHILD, vec![self.rel])];
+        if let Some(abs) = self.abs {
+            children.push((SEQUENCE_TIME_ABS_CHILD, abs.to_be_bytes().to_vec()));
+        }
+        children
+    }
+}
+
+/// The sequence time of one character as its client has it: the absolute part it took last.
+/// Retail sends a new absolute part, with the relative byte at zero, when a slayer state starts
+/// and when the steps from the old part would pass [`SEQUENCE_TIME_MAX_STEPS`]; the states of the
+/// next [`SEQUENCE_ABS_REPEAT_MS`] carry it again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SequenceClock {
+    /// The absolute part the client has (`half` bits).
+    abs: Option<u16>,
+    /// The state time (ms) of the state that sent it first.
+    abs_sent_ms: Option<u64>,
+}
+
+/// The states this soon after a new absolute part carry it again, ms (Observed in the newchar
+/// capture: the next state carried it in 217 of 249 cases when it came under 35 ms later and in
+/// 31 of 247 when it came 40 ms or more later).
+pub const SEQUENCE_ABS_REPEAT_MS: u64 = 40;
+
+/// The `slayerSeqTimeRel` and `slayerSeqTimeAbs` of the first own state (the most common retail
+/// first own ALC): 2 steps from 1/30 s, two input records into the slot's state.
+const SPAWN_SEQUENCE_REL: u8 = 0x81;
+const SPAWN_SEQUENCE_ABS: u16 = 0x2844;
+
+impl SequenceClock {
+    /// The clock of a client that took the first own state ([`AlcState::spawn`]): it has that
+    /// state's absolute part.
+    pub const fn after_spawn() -> Self {
+        Self {
+            abs: Some(SPAWN_SEQUENCE_ABS),
+            abs_sent_ms: None,
+        }
+    }
+
+    /// The sequence time, s, that the first own state sends.
+    pub fn spawn_seconds() -> f32 {
+        half_value(SPAWN_SEQUENCE_ABS)
+            + f32::from(SPAWN_SEQUENCE_REL - SEQUENCE_TIME_REL_ZERO) * SEQUENCE_TIME_STEP_S
+    }
+
+    /// The wire form of `seconds` into the sequence for the next state, whose time is `state_ms`.
+    /// `started` is the time at the record that started the sequence when it starts in this
+    /// state: the absolute part is that time, the steps count the records since (retail
+    /// sequence at 0x2aa: started by a 0.05 s record, first sent two records later as
+    /// `85 2a66`). Steps round half away from zero; retail rounded some exact half steps down
+    /// late in a sequence (110.5 and 127.5 at 0x6bb3), so such a state is one step above
+    /// retail's, and the 127.5 one sends a new absolute part one state early.
+    pub fn time(&mut self, seconds: f32, started: Option<f32>, state_ms: u64) -> SequenceTime {
+        if let Some(start) = started {
+            self.abs = Some(half_bits(start));
+            self.abs_sent_ms = Some(state_ms);
+        }
+        let steps = self
+            .abs
+            .map(|abs| ((seconds - half_value(abs)) / SEQUENCE_TIME_STEP_S).round())
+            .filter(|steps| (0.0..=SEQUENCE_TIME_MAX_STEPS).contains(steps));
+        let Some(steps) = steps else {
+            let abs = half_bits(seconds);
+            self.abs = Some(abs);
+            self.abs_sent_ms = Some(state_ms);
+            return SequenceTime {
+                rel: SEQUENCE_TIME_REL_ZERO,
+                abs: Some(abs),
+            };
+        };
+        let recent = self
+            .abs_sent_ms
+            .is_some_and(|sent| state_ms.saturating_sub(sent) < SEQUENCE_ABS_REPEAT_MS);
+        // 0 to 127 steps above the zero byte: at most 254.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "checked to 0..=127 steps"
+        )]
+        SequenceTime {
+            rel: SEQUENCE_TIME_REL_ZERO + steps as u8,
+            abs: self.abs.filter(|_| recent),
+        }
+    }
+}
+
 /// One state of another player, as the clients that see it get it (replication note: retail
 /// remote states carry their number and time, the place, the facing, where the player looks, and
 /// its slayer state).
@@ -550,6 +684,8 @@ pub struct RemoteStep {
     pub look: Option<LookDir>,
     /// Its slayer state, when it goes with the state.
     pub slayer: Option<SlayerState>,
+    /// The time into its slayer state's sequence, when it goes with the state.
+    pub sequence_time: Option<SequenceTime>,
 }
 
 /// Where a character looks (the client input's view angles, record bit 6: yaw then pitch, in
@@ -894,6 +1030,9 @@ impl AlcState {
         if let Some(slayer) = step.slayer {
             children.extend(slayer.children()?);
         }
+        if let Some(time) = step.sequence_time {
+            children.extend(time.children());
+        }
         Ok(Self::of_slot0(
             children,
             step.position.and_then(StepPlace::pos10),
@@ -913,7 +1052,8 @@ impl AlcState {
     /// server's follow-up (slayer note). With `view`, the facing and the look direction of the
     /// client's newest input (lock-on note: retail sent the own `rotation` in 938 and the own
     /// `lookDir` in 408 of 1,193 own states around the first lock; ours sent neither, and the
-    /// client's locks broke within 0.35 to 1.1 s).
+    /// client's locks broke within 0.35 to 1.1 s). With `sequence_time`, the time into the
+    /// slayer state's sequence (retail sends it in 86,132 of 86,677 own states).
     ///
     /// # Errors
     ///
@@ -925,8 +1065,12 @@ impl AlcState {
         anchored: bool,
         slayer: Option<SlayerState>,
         view: Option<LookDir>,
+        sequence_time: Option<SequenceTime>,
     ) -> Result<Self, MessageError> {
         let mut children: Vec<(usize, Vec<u8>)> = stamp_children(stamp).into();
+        if let Some(time) = sequence_time {
+            children.extend(time.children());
+        }
         if let Some(view) = view {
             children.push((ROTATION_CHILD, rotation_bytes(view.yaw)));
             children.push((LOOK_DIR_CHILD, view.bytes()));
@@ -949,15 +1093,20 @@ impl AlcState {
     /// One of the three states that move the client's own player to `pos`, facing `facing`
     /// (yaw, radians) when it is known, with teleport number `teleport` (retail moved the player
     /// into the water so, 118546 to 118614 ms): see [`TeleportStep`]. Each carries the number and
-    /// time of `stamp`.
+    /// time of `stamp`, and the sequence time `sequence_time` when given (retail: `2=ce` with
+    /// the move into the water).
     pub fn teleport(
         stamp: AlcStamp,
         pos: InputPosition,
         facing: Option<f32>,
         teleport: u8,
         step: TeleportStep,
+        sequence_time: Option<SequenceTime>,
     ) -> Self {
         let mut children: Vec<(usize, Vec<u8>)> = stamp_children(stamp).into();
+        if let Some(time) = sequence_time {
+            children.extend(time.children());
+        }
         let [at_anchor, pos10] = position_children(pos);
         let rotation = facing.map(|yaw| (ROTATION_CHILD, rotation_bytes(yaw)));
         let zero_offset = (POS_REL_CHILD, ZERO_POS3.to_vec());
@@ -1014,11 +1163,14 @@ impl AlcState {
     /// `timeOffsetAbs` and `worldPosAbs` parts); a lone `pos10` leaves it at the grid origin. Its
     /// `pos10` is the place's anchor and its `worldPosRel` the offset from it, so that a viewer
     /// that sees another player from now on keeps the anchor the others have ([`CardPlace`]).
+    /// It carries the number, time and anchor of `stamp` (retail: number 2 and 9 ms in the most
+    /// common first own state, the number of the client's input record then, as every own
+    /// state's), and its slayer slots started one state before it, as retail's started at 1.
     ///
     /// # Errors
     ///
     /// Returns [`MessageError`] when a prefix value cannot be encoded.
-    pub fn spawn(place: CardPlace, anchor_us: u64) -> Result<Self, MessageError> {
+    pub fn spawn(place: CardPlace, stamp: AlcStamp) -> Result<Self, MessageError> {
         let (pos10, offset) = place.resolved();
         let at = SpawnPlace {
             pos10,
@@ -1026,8 +1178,8 @@ impl AlcState {
         };
         let mut writer = Writer::new();
         writer.u8(SLOT_BITS[0] | SLOT_BITS[1]);
-        write_children(&mut writer, &SPAWN_SLOT0, at, anchor_us)?;
-        write_children(&mut writer, &SPAWN_SLOT1, at, anchor_us)?;
+        write_children(&mut writer, &SPAWN_SLOT0, at, stamp)?;
+        write_children(&mut writer, &SPAWN_SLOT1, at, stamp)?;
         Ok(Self {
             bytes: writer.finish(),
             pos10: Some(pos10),
@@ -1117,10 +1269,19 @@ enum SpawnValue {
     PositionOffset,
     /// The clock anchor (µs since 2000-01-01).
     Anchor,
+    /// The low or the high byte of the state number.
+    IdLow,
+    IdHigh,
+    /// The low or the high byte of the state time.
+    TimeLow,
+    TimeHigh,
+    /// The number of the state before: where the slayer slots started.
+    StartedBefore,
 }
 
 use SpawnValue::{
-    Anchor, Byte, Float, Position as SpawnPosition, PositionOffset, Prefixed, Raw, Word,
+    Anchor, Byte, Float, IdHigh, IdLow, Position as SpawnPosition, PositionOffset, Prefixed, Raw,
+    StartedBefore, TimeHigh, TimeLow, Word,
 };
 
 /// Where a first state puts the player: its `pos10` and its `worldPosRel` offset from it.
@@ -1141,6 +1302,8 @@ const FULL_SEGMENTED_STAMINA: u64 = 4_021_696_251;
 
 /// The number of the first own state (the most common retail first own ALC).
 pub const SPAWN_STATE_ID: u16 = 2;
+/// How many states before the first state its slayer slots started (retail: 1 before 2).
+const SPAWN_STARTED_BEFORE: u16 = 1;
 /// The time of the first own state after its anchor of 0, in ms.
 pub const SPAWN_STATE_MS: u16 = 9;
 /// The teleport number of the first own state.
@@ -1151,10 +1314,10 @@ pub const SPAWN_TELEPORT: u8 = 1;
 /// the absolute parts 0 with `worldPosAbs`, `teleportAndMigrationId` 1, and the fixed scope,
 /// water, anchor and stamina children. Child 40 (`timeAnchor`) is 0, as in 16 logins.
 const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
-    (ID_REL_CHILD, Byte(SPAWN_STATE_ID.to_be_bytes()[1])),
-    (TIME_REL_CHILD, Byte(SPAWN_STATE_MS.to_be_bytes()[1])),
-    (2, Byte(129)),
-    (3, Word(0x2844)),
+    (ID_REL_CHILD, IdLow),
+    (TIME_REL_CHILD, TimeLow),
+    (SEQUENCE_TIME_REL_CHILD, Byte(SPAWN_SEQUENCE_REL)),
+    (SEQUENCE_TIME_ABS_CHILD, Word(SPAWN_SEQUENCE_ABS)),
     (4, Byte(127)),
     (5, Word(0)),
     (6, Byte(127)),
@@ -1165,10 +1328,10 @@ const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
     (11, Raw(&[0x66, 0xfe])),
     (12, Raw(&[0x19, 0x7f])),
     (13, Prefixed(31)),
-    (14, Word(1)),
+    (14, StartedBefore),
     (15, Prefixed(1081)),
     (16, Prefixed(45)),
-    (17, Word(1)),
+    (17, StartedBefore),
     (18, Prefixed(0)),
     (19, Prefixed(0)),
     (20, Word(0)),
@@ -1176,8 +1339,8 @@ const SPAWN_SLOT0: [(usize, SpawnValue); 46] = [
     (22, Prefixed(0)),
     (23, Word(0)),
     (24, Prefixed(0)),
-    (25, Byte(0)),
-    (26, Byte(0)),
+    (ID_ABS_CHILD, IdHigh),
+    (TIME_ABS_CHILD, TimeHigh),
     (POS10_CHILD, SpawnPosition),
     (29, Raw(&EMPTY_BLOB)),
     (TELEPORT_CHILD, Byte(SPAWN_TELEPORT)),
@@ -1215,7 +1378,7 @@ fn write_children(
     writer: &mut Writer,
     children: &[(usize, SpawnValue)],
     place: SpawnPlace,
-    anchor_us: u64,
+    stamp: AlcStamp,
 ) -> Result<(), MessageError> {
     let present = children
         .iter()
@@ -1243,7 +1406,22 @@ fn write_children(
                 writer.bytes(&place.offset);
             }
             Anchor => {
-                writer.u64(anchor_us);
+                writer.u64(stamp.anchor_us);
+            }
+            IdLow => {
+                writer.u8(AlcStamp::low(stamp.id));
+            }
+            IdHigh => {
+                writer.u8(AlcStamp::high(stamp.id));
+            }
+            TimeLow => {
+                writer.u8(AlcStamp::low(stamp.offset_ms));
+            }
+            TimeHigh => {
+                writer.u8(AlcStamp::high(stamp.offset_ms));
+            }
+            StartedBefore => {
+                writer.u16(stamp.id.wrapping_sub(SPAWN_STARTED_BEFORE));
             }
         }
     }
@@ -1438,7 +1616,8 @@ mod tests {
                 .map(|(child, _)| child)
                 .collect()
         };
-        let clock_only = AlcState::own_step(stamp, None, None, false, None, None).expect("step");
+        let clock_only =
+            AlcState::own_step(stamp, None, None, false, None, None, None).expect("step");
         assert_eq!(
             children_of(&clock_only),
             [ID_REL_CHILD, TIME_REL_CHILD, ID_ABS_CHILD, TIME_ABS_CHILD]
@@ -1450,6 +1629,7 @@ mod tests {
             Some(StepPlace::of(None, pos)),
             Some(DATA_BITS_ACTIVE),
             false,
+            None,
             None,
             None,
         )
@@ -1483,6 +1663,7 @@ mod tests {
             None,
             None,
             true,
+            None,
             None,
             None,
         )
@@ -1522,7 +1703,8 @@ mod tests {
         .expect("finite");
         let place = StepPlace::of(Some(anchor), at);
         assert_eq!(place, StepPlace::Offset(RETAIL_OFFSET));
-        let state = AlcState::own_step(stamp, Some(place), None, false, None, None).expect("step");
+        let state =
+            AlcState::own_step(stamp, Some(place), None, false, None, None, None).expect("step");
         assert_eq!(state.pos10, None, "the client keeps its pos10");
         let children = state.slot0_children().expect("walk");
         assert_eq!(
@@ -1542,6 +1724,7 @@ mod tests {
             Some(StepPlace::of(Some(anchor), far)),
             None,
             false,
+            None,
             None,
             None,
         )
@@ -1719,9 +1902,30 @@ mod tests {
                 anchor: None,
                 at: pos,
             },
-            RETAIL_ANCHOR_US,
+            AlcStamp {
+                id: SPAWN_STATE_ID,
+                anchor_us: RETAIL_ANCHOR_US,
+                offset_ms: SPAWN_STATE_MS,
+            },
         )
         .expect("spawn");
+        // The retail first own state's number, time, slayer starts and sequence time.
+        let children = state.slot0_children().expect("walk");
+        for (child, retail) in [
+            (ID_REL_CHILD, &[0x02][..]),
+            (TIME_REL_CHILD, &[0x09]),
+            (SEQUENCE_TIME_REL_CHILD, &[0x81]),
+            (SEQUENCE_TIME_ABS_CHILD, &[0x28, 0x44]),
+            (SLAYER_STARTED_CHILD, &[0x00, 0x01]),
+            (SECOND_SLAYER_STARTED_CHILD, &[0x00, 0x01]),
+            (ID_ABS_CHILD, &[0x00]),
+            (TIME_ABS_CHILD, &[0x00]),
+        ] {
+            assert!(
+                children.contains(&(child, retail.to_vec())),
+                "child {child}"
+            );
+        }
         let at = state
             .bytes
             .windows(8)
@@ -1837,6 +2041,7 @@ mod tests {
             }),
             None,
             false,
+            None,
             None,
             None,
         )
@@ -2096,7 +2301,8 @@ mod tests {
         const WATER_YAW: f32 = 1.434;
         let pos = InputPosition::read(&mut Reader::new(&hex(RETAIL_POS10))).expect("pos10");
         let state = |step| {
-            let state = AlcState::teleport(STAMP, pos, Some(WATER_YAW), SPAWN_TELEPORT + 1, step);
+            let state =
+                AlcState::teleport(STAMP, pos, Some(WATER_YAW), SPAWN_TELEPORT + 1, step, None);
             assert_eq!(
                 AlcState::read(&mut Reader::new(&state.bytes)).expect("read"),
                 state
@@ -2189,7 +2395,7 @@ mod tests {
             anchor_us: 0,
         };
         let with_view =
-            AlcState::own_step(stamp, None, None, false, None, Some(view)).expect("step");
+            AlcState::own_step(stamp, None, None, false, None, Some(view), None).expect("step");
         let children = with_view.slot0_children().expect("walk");
         let child = |index: usize| {
             children
@@ -2199,7 +2405,7 @@ mod tests {
         };
         assert_eq!(child(ROTATION_CHILD), Some(rotation_bytes(view.yaw)));
         assert_eq!(child(LOOK_DIR_CHILD), Some(view.bytes()));
-        let without = AlcState::own_step(stamp, None, None, false, None, None).expect("step");
+        let without = AlcState::own_step(stamp, None, None, false, None, None, None).expect("step");
         assert!(
             without
                 .slot0_children()
@@ -2273,7 +2479,8 @@ mod tests {
             offset_ms: 0,
         };
         let slayer = SlayerState::of_input(input, STARTED);
-        let state = AlcState::own_step(stamp, None, None, false, Some(slayer), None).expect("step");
+        let state =
+            AlcState::own_step(stamp, None, None, false, Some(slayer), None, None).expect("step");
         let slayer_children: Vec<(usize, Vec<u8>)> = state
             .slot0_children()
             .expect("walk")
@@ -2323,6 +2530,7 @@ mod tests {
                 None,
                 false,
                 Some(SlayerState::of_input(plain, started)),
+                None,
                 None,
             )
             .expect("step");
@@ -2375,11 +2583,16 @@ mod tests {
                 pitch: 0.0,
             }),
             slayer: Some(slayer),
+            sequence_time: Some(SequenceTime {
+                rel: retail_child(SEQUENCE_TIME_REL_CHILD)[0],
+                abs: None,
+            }),
         };
         let ours = AlcState::remote_step(&step).expect("step");
         for index in [
             ID_REL_CHILD,
             TIME_REL_CHILD,
+            SEQUENCE_TIME_REL_CHILD,
             POS_REL_CHILD,
             SLAYER_STATE_CHILD,
             SLAYER_STARTED_CHILD,
@@ -2413,6 +2626,7 @@ mod tests {
             facing: None,
             look: None,
             slayer: None,
+            sequence_time: None,
             ..step
         })
         .expect("step");
@@ -2422,5 +2636,128 @@ mod tests {
             [0, 1, 25, 26, 40],
             "a state is never without its time"
         );
+    }
+
+    /// The retail newchar sequence started at record 0x2aa (20 Hz records of 0.05 s): the
+    /// `slayerSeqTimeRel` of its states at records 0x2ac to 0x2d1, and the absolute part the
+    /// first two carried.
+    const RETAIL_RELS_FROM_0X2AC: [u8; 38] = [
+        0x85, 0x89, 0x8c, 0x8f, 0x92, 0x95, 0x99, 0x9c, 0x9f, 0xa2, 0xa5, 0xa8, 0xac, 0xaf, 0xb2,
+        0xb5, 0xb8, 0xbc, 0xbf, 0xc2, 0xc5, 0xc8, 0xcc, 0xcf, 0xd2, 0xd5, 0xd8, 0xdb, 0xdf, 0xe2,
+        0xe5, 0xe8, 0xeb, 0xef, 0xf2, 0xf5, 0xf8, 0xfb,
+    ];
+    const RETAIL_ABS_0X2AA: u16 = 0x2a66;
+    const TUTORIAL_FRAME_S: f32 = 0.05;
+    /// Records from the start to the first state that carried it.
+    const FIRST_SENT_AFTER: usize = 2;
+    /// Our own states' spacing, ms (one per 30 Hz tick).
+    const TICK_MS: u64 = 33;
+
+    #[test]
+    fn the_sequence_time_counts_the_records_since_the_start_as_retail() {
+        let mut clock = SequenceClock::default();
+        let mut seconds = TUTORIAL_FRAME_S;
+        for _ in 0..FIRST_SENT_AFTER {
+            seconds += TUTORIAL_FRAME_S;
+        }
+        let mut state_ms = 0;
+        let mut sent = Vec::new();
+        for (index, _) in RETAIL_RELS_FROM_0X2AC.iter().enumerate() {
+            let started = (index == 0).then_some(TUTORIAL_FRAME_S);
+            sent.push(clock.time(seconds, started, state_ms));
+            seconds += TUTORIAL_FRAME_S;
+            state_ms += TICK_MS;
+        }
+        let rels: Vec<u8> = sent.iter().map(|time| time.rel).collect();
+        assert_eq!(rels, RETAIL_RELS_FROM_0X2AC);
+        let abs: Vec<Option<u16>> = sent.iter().take(3).map(|time| time.abs).collect();
+        assert_eq!(
+            abs,
+            [Some(RETAIL_ABS_0X2AA), Some(RETAIL_ABS_0X2AA), None],
+            "the start's absolute part goes again in the next state"
+        );
+    }
+
+    #[test]
+    fn a_long_sequence_takes_a_new_absolute_part_every_two_seconds() {
+        // Retail sequence at 0x6bb3 (30 Hz): `7f 4022` at 2.0667 s.
+        const RETAIL_REBASE_ABS: u16 = 0x4022;
+        const FRAME_S: f32 = 1.0 / 30.0;
+        const REBASE_RECORD: usize = 61;
+        let mut clock = SequenceClock::default();
+        let mut seconds = 0.0;
+        let mut first_new = None;
+        for record in 0..=REBASE_RECORD {
+            seconds += FRAME_S;
+            let started = (record == 0).then_some(FRAME_S);
+            let time = clock.time(seconds, started, record as u64 * TICK_MS);
+            if record > 0 && time.rel == SEQUENCE_TIME_REL_ZERO && first_new.is_none() {
+                first_new = Some((record, time.abs));
+            }
+        }
+        let (record, abs) = first_new.expect("a new absolute part");
+        // One state before retail's: the exact half step (see `SequenceClock::time`).
+        assert_eq!(record, REBASE_RECORD - 1);
+        assert_eq!(
+            abs.map(half_value).map(|value| (value * 1000.0).round()),
+            Some(2033.0)
+        );
+        assert!((half_value(RETAIL_REBASE_ABS) - 2.066).abs() < 0.001);
+        let next = clock.time(
+            seconds + FRAME_S,
+            None,
+            (REBASE_RECORD as u64 + 1) * TICK_MS,
+        );
+        assert_eq!(
+            next.abs, None,
+            "two ticks on, the part is too old to go again"
+        );
+    }
+
+    #[test]
+    fn the_first_own_state_starts_the_clock() {
+        let mut clock = SequenceClock::after_spawn();
+        let seconds = SequenceClock::spawn_seconds();
+        assert!((seconds - 0.0647).abs() < 0.0005, "{seconds}");
+        let time = clock.time(seconds + 1.0 / 30.0, None, 0);
+        assert_eq!(
+            time,
+            SequenceTime {
+                rel: 0x83,
+                abs: None
+            }
+        );
+    }
+
+    #[test]
+    fn own_and_remote_steps_carry_the_sequence_time() {
+        let time = SequenceTime {
+            rel: 0x85,
+            abs: Some(RETAIL_ABS_0X2AA),
+        };
+        let own =
+            AlcState::own_step(STAMP, None, None, false, None, None, Some(time)).expect("step");
+        assert_eq!(child(&own, SEQUENCE_TIME_REL_CHILD), Some(vec![0x85]));
+        assert_eq!(child(&own, SEQUENCE_TIME_ABS_CHILD), Some(vec![0x2a, 0x66]));
+        let without_abs = AlcState::own_step(
+            STAMP,
+            None,
+            None,
+            false,
+            None,
+            None,
+            Some(SequenceTime { abs: None, ..time }),
+        )
+        .expect("step");
+        assert_eq!(child(&without_abs, SEQUENCE_TIME_ABS_CHILD), None);
+        let teleport = AlcState::teleport(
+            STAMP,
+            InputPosition::from_metres(1.0, 2.0, 3.0).expect("finite"),
+            None,
+            SPAWN_TELEPORT,
+            TeleportStep::Hold,
+            Some(time),
+        );
+        assert_eq!(child(&teleport, SEQUENCE_TIME_REL_CHILD), Some(vec![0x85]));
     }
 }

@@ -56,8 +56,8 @@ pub use alc::{
     ALC_TYPE_INDEX, AlcChild, AlcStamp, AlcState, CardPlace, DATA_BITS_ACTIVE, FRAG_TAGS_LEN,
     LayerEntry, LookDir, MobAnimation, MobStep, POS_REL_CHILD, POS_REL_STEP_M, POS3_LEN,
     POS10_CHILD, RemoteStep, SLOT0_CHILDREN, SLOT1_CHILDREN, SPAWN_STATE_ID, SPAWN_STATE_MS,
-    SPAWN_TELEPORT, ScopeEntry, SecondSlayerState, SlayerState, StepPlace, StepScope, TeleportStep,
-    offset_from, offset_metres,
+    SPAWN_TELEPORT, ScopeEntry, SecondSlayerState, SequenceClock, SequenceTime, SlayerState,
+    StepPlace, StepScope, TeleportStep, offset_from, offset_metres,
 };
 pub use appearance::{
     LOOK_CHOICES, PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState, PlayerIconData, PlayerLook,

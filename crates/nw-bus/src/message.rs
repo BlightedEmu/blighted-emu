@@ -458,10 +458,9 @@ pub struct PlayerGhost {
     pub pitch: Option<f32>,
     /// The entity it locks on or homes to (its newest input), when it has one.
     pub target: Option<u64>,
-    /// Its run toggle (the input's movement mode), when known.
-    pub run_mode: Option<bool>,
-    /// The ALC state number in which its movement mode started.
-    pub mode_started: u16,
+    /// The number of its ALC states from its client's input and the server time (ms since
+    /// 2000-01-01) of the first state with it, while its client numbers its input records.
+    pub state_number: Option<(u16, u64)>,
     /// It holds block.
     pub blocking: bool,
     /// The server time of its first own state (ms since 2000-01-01): its ALC clock.
@@ -968,8 +967,7 @@ mod tests {
                 facing: Some(f32::MAX),
                 pitch: Some(f32::MAX),
                 target: Some(u64::MAX),
-                run_mode: Some(true),
-                mode_started: u16::MAX,
+                state_number: Some((u16::MAX, u64::MAX)),
                 blocking: true,
                 spawned_ms: u64::MAX,
                 gear_version: u64::MAX,

@@ -599,7 +599,6 @@ impl Loop {
             self.world
                 .strike_quest_objects(connection, Strike::Swing, now_ms);
         }
-        self.world.slayer_input(connection, &input.records);
         for result in self.world.attack_input(connection, &input.records, now_ms) {
             self.attack_result(result);
         }

@@ -883,7 +883,6 @@ impl SimWorld {
         });
         if let Some(newest) = records.first() {
             self.stamina_input(entity, number, newest, swimming, now_ms);
-            self.note_movement_mode(entity, newest);
         }
         // The weapon the attack key uses: the one in the hand, else, while the hand holds a
         // spread-shot weapon (which fires through its own request), the melee option.

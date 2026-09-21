@@ -264,9 +264,16 @@ impl CameraCheck {
     }
 
     /// The body and boom of a resting body: the body stays, the boom is its distance along the
-    /// view, or the zoom length near it as the body comes to rest.
+    /// view, or the zoom length near it as the body comes to rest. A camera whose view passes
+    /// more than [`CAMERA_FIT_M`] beside the body does not look at it: a cutscene or video camera,
+    /// or one that has not followed a server move yet (replay of the newchar tutorial: after the
+    /// move into the water the video's camera, 601 m beside the new place, put the body 62 m up
+    /// for three records).
     fn resting(view: CameraView, body: Position, came_to_rest: bool) -> Option<CameraBody> {
         let boom = view.boom_to(body, [0.0; 2]);
+        if view.body(boom, [0.0; 2]).horizontal_distance(body) > CAMERA_FIT_M {
+            return None;
+        }
         let zoom = zoom_length(boom).filter(|_| came_to_rest);
         Some(match zoom {
             Some(zoom) => CameraBody {
@@ -337,6 +344,38 @@ mod tests {
 
     fn at(x: f32, y: f32) -> Position {
         Position { x, y, z: 10.0 }
+    }
+
+    #[test]
+    fn a_camera_looking_past_a_resting_body_gives_nothing() {
+        // Retail newchar tutorial, records 3065 to 3067: after the move into the water the
+        // client still sent the video's camera (478.6, 850.3, 91.8, yaw 2.133, pitch 0.172): the
+        // new place (793.84, 337.42, 26.16) is 7 m along its view, which passes 601 m beside it.
+        const BODY: Position = Position {
+            x: 793.842,
+            y: 337.422,
+            z: 26.155,
+        };
+        let video = CameraView {
+            camera: Position {
+                x: 478.595,
+                y: 850.321,
+                z: 91.801,
+            },
+            yaw: 2.133_29,
+            pitch: 0.172_12,
+        };
+        let mut check = CameraCheck::default();
+        assert_eq!(
+            check.observe(video, BODY, [0.0; 2], [0.0; 2], true, false),
+            None
+        );
+        // The player's own camera, 4 m behind on the same yaw, fits.
+        let own = camera_of(BODY, 2.133_29, BOOM, [0.0; 2]);
+        let seen = check
+            .observe(own, BODY, [0.0; 2], [0.0; 2], true, false)
+            .expect("fits");
+        assert!(seen.at.horizontal_distance(BODY) < CLOSE_M);
     }
 
     #[test]

@@ -162,3 +162,28 @@ NW_SECRET_TESTCLIENT_SWARM_PASSWORD=... target/release/nw-testclient swarm --bot
 - The slayer state and sequence of each action (section 2.1). Retail remote Mannequin scopes
   (children 28, 33, 34) came only in a few states of the duel (`33=0700cc2c15000053` with tags
   `0210...`), not with the attacks.
+
+## 6. Corrections (2026-09-20, movement study)
+
+Source: the retail newchar capture (`local-data/captures/own/newchar-retail-2026-09-18`), the
+autorun capture (`brim_runtoggle_spam`), scratch scanners in `local-data/scratch-work/movement2`.
+
+- **Observed:** slot value 0 bit 14 is the forward navigation input (`ForwardNav` in the action
+  lists), not a run toggle: it is set in all 12,756 newchar records with the forward key and in
+  no other, and in the autorun capture each press of value 1 bit 24 (autorun) turned it on with
+  no movement key, while the own place moved forward at the sprint speed. The slayer states `1a`
+  and `1b` of section 2 follow the start and the stop of a move, not a mode. The sim now moves
+  the body forward on it and sends the movement states of `bins/sim/src/world/slayer.rs`
+  (start `1a`/`aa2b`, back start `1b`/`9814`, stop `1b`/`bd15`, restart `1b`/`b625`, idle
+  `1f`/`b910` 39 records after a stop: the most common sequence of each transition; the rest
+  vary with what the capture does not show, Unknown).
+- **Observed:** every own state is numbered with the counter of the newest input record the
+  server moved the body by (39,955 of 39,955 distinct own numbers; 36 ms median after the
+  record); a state repeats unchanged until a newer record comes. `slayerStateIdStarted` is the
+  counter of the record that started the state. The sim numbers own and remote states so
+  (`StateNumber`, members.rs); clients that number no records keep the 33 ms clock.
+- **Observed:** child 2 (`slayerSeqTimeRel`) and child 3 (`slayerSeqTimeAbs`, a `half`) give the
+  time into the slot-1 sequence: `abs + (rel - 0x7f) × 4/255 s`, the sum of the record frame
+  times since the start record. A new `abs` comes with each start and every 2 s. The own states
+  carry it now (`SequenceClock`, alc.rs). Unknown: the remote states' child 2 (the duel's starts
+  carry `7e` and `7f`), and children 4 to 9.

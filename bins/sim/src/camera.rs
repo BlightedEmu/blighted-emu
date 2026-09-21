@@ -62,6 +62,8 @@ pub fn track_input(record: &InputRecord, seen: RecordView) -> Option<TrackInput>
     let intent = Intent {
         jump: keys.jump,
         walk_toggle: record.walk_toggle_pressed(),
+        block: record.blocking(),
+        dodge: record.dodging(),
         ..Intent::of_keys(keys.forward, keys.back, keys.left, keys.right)
     };
     Some(TrackInput {
@@ -172,5 +174,29 @@ mod tests {
         assert_eq!(track_input(&record, no_camera).expect("a view").view, None);
         let point_only = RecordView { view: None, ..seen };
         assert_eq!(track_input(&record, point_only), None);
+    }
+
+    #[test]
+    fn the_block_and_dodge_keys_go_to_the_character() {
+        // Slot value 1: bit 62 while block is held, bit 3 while the dodge key is (input note).
+        const BLOCK_AND_DODGE: u64 = 1 << 62 | 1 << 3;
+        let record = InputRecord {
+            slots: InputSlots {
+                count: 19,
+                values: vec![0, BLOCK_AND_DODGE],
+                bytes: [128; 4],
+            },
+            ..InputRecord::default()
+        };
+        let seen = RecordView {
+            frame_s: None,
+            view: Some(LookDir {
+                yaw: 0.0,
+                pitch: 0.0,
+            }),
+            camera: None,
+        };
+        let intent = track_input(&record, seen).expect("a view").character.intent;
+        assert!(intent.block && intent.dodge, "{intent:?}");
     }
 }
