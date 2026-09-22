@@ -48,10 +48,77 @@ pub trait Ground {
     /// Ground height at (`x`, `y`), or `None` where the level has no height data.
     fn height_at(&self, x: f32, y: f32) -> Option<f32>;
 
-    /// The height of the floor at (`x`, `y`) under a body at height `_z`: the ground's, unless
-    /// the implementation knows other floors there.
+    /// The height of the floor at (`x`, `y`) under a body whose feet are at height `_z`: the
+    /// ground's, unless the implementation knows other floors there (the level's structures:
+    /// [`crate::LevelGround`]).
     fn floor_at(&self, x: f32, y: f32, _z: f32) -> Option<f32> {
         self.height_at(x, y)
+    }
+
+    /// Whether a solid stands on the straight line from `_from` to `_to`: a wall between them.
+    /// No wall where the implementation knows only the terrain.
+    fn blocked(&self, _from: Position, _to: Position) -> bool {
+        false
+    }
+
+    /// How much of the ground at (`_x`, `_y`) is road, 0 to 1: the share of the road cells of the
+    /// level's tract map in the bilinear blend around the point ([`nw_world::roads::RoadMap`]).
+    /// No road where the implementation knows no tract map.
+    fn road_share(&self, _x: f32, _y: f32) -> f32 {
+        0.0
+    }
+
+    /// The water surface at (`_x`, `_y`) when water is there, m: the level's water map's
+    /// ([`nw_world::water::WaterMap`]: the sea, lakes, rivers and ponds), or the sea at
+    /// `sea_level_m` where the implementation knows no water map.
+    fn water_surface(&self, _x: f32, _y: f32, sea_level_m: f32) -> Option<f32> {
+        Some(sea_level_m)
+    }
+}
+
+/// The ground a reference names.
+impl<T: Ground + ?Sized> Ground for &T {
+    fn height_at(&self, x: f32, y: f32) -> Option<f32> {
+        (**self).height_at(x, y)
+    }
+
+    fn floor_at(&self, x: f32, y: f32, z: f32) -> Option<f32> {
+        (**self).floor_at(x, y, z)
+    }
+
+    fn blocked(&self, from: Position, to: Position) -> bool {
+        (**self).blocked(from, to)
+    }
+
+    fn road_share(&self, x: f32, y: f32) -> f32 {
+        (**self).road_share(x, y)
+    }
+
+    fn water_surface(&self, x: f32, y: f32, sea_level_m: f32) -> Option<f32> {
+        (**self).water_surface(x, y, sea_level_m)
+    }
+}
+
+/// The ground a shared value holds.
+impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
+    fn height_at(&self, x: f32, y: f32) -> Option<f32> {
+        (**self).height_at(x, y)
+    }
+
+    fn floor_at(&self, x: f32, y: f32, z: f32) -> Option<f32> {
+        (**self).floor_at(x, y, z)
+    }
+
+    fn blocked(&self, from: Position, to: Position) -> bool {
+        (**self).blocked(from, to)
+    }
+
+    fn road_share(&self, x: f32, y: f32) -> f32 {
+        (**self).road_share(x, y)
+    }
+
+    fn water_surface(&self, x: f32, y: f32, sea_level_m: f32) -> Option<f32> {
+        (**self).water_surface(x, y, sea_level_m)
     }
 }
 

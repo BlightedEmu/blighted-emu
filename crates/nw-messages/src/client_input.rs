@@ -178,6 +178,14 @@ pub const LOOT_KIND: u8 = 28;
 pub const CRAFTING_STATION_KIND: u8 = 20;
 /// The interaction kind of a talk to an NPC (beach-quests note: Aelstrom and Urda).
 pub const TALK_KIND: u8 = 63;
+/// The interaction kind of a revive of a downed player (the client's `InteractionUIActions`
+/// value 30, `RevivePlayer`, registered by `FUN_1435eaa20`).
+pub const REVIVE_PLAYER_KIND: u8 = 30;
+/// The interaction kind of a trigger object (`InteractionUIActions` value 33, `Trigger`).
+pub const TRIGGER_KIND: u8 = 33;
+/// The interaction kind of the exit of a dungeon (`InteractionUIActions` value 74,
+/// `ExitDungeon`).
+pub const EXIT_DUNGEON_KIND: u8 = 74;
 /// The interaction kind of a lore note the player reads (retail 2026-09-18: Kubikiri's
 /// Occupation and La Rousette's Manifest on the start beach).
 pub const LORE_KIND: u8 = 47;
@@ -444,6 +452,10 @@ const FORWARD_NAV_KEY: (usize, u32) = (0, 14);
 /// The slot values and bits of the presses of the first and second weapon keys (input note: the
 /// weapon in the hand changed 331 to 418 ms after each).
 const WEAPON_KEYS: [(usize, u32); 2] = [(0, 9), (3, 13)];
+/// The slot value and bit of the sheathe key (the Azoth catalog input 428, `sheathe`: input `n` is
+/// value `n / 64` bit `n % 64`). Retail, 721 ledgers: with every weapon sheathed the server
+/// drew the selected option 42 ms (median) after it, 106 of 109 presses.
+const SHEATHE_KEY: (usize, u32) = (6, 44);
 /// The slot values and bits of the movement keys, set while the key is held (movement study
 /// 2026-09-20: in 15,000 retail records of the newchar and clean movement captures, the own
 /// player's next place moved from the last one at a median angle to the camera yaw of 0.1° with
@@ -462,6 +474,19 @@ const JUMP_KEY: (usize, u32) = (1, 9);
 /// press with value 4 bit 3; in the clean toggle captures each of the 20 presses while running
 /// switched the speed between 5.5 and 3.25 m/s forward, 4.0 and 3.25 m/s back).
 const WALK_TOGGLE_KEY: (usize, u32) = (4, 22);
+/// The slot value and bit of a press of the crouch toggle (the Azoth catalog input 277, `crouch
+/// toggle`; posture study 2026-09-20: set in one record per press, 7 presses in the three retail
+/// `walk_running_crouch_prone` captures, each followed by the crouch speeds: 2.50 m/s forward, the
+/// sprint action list's `Crouch` `Speed` 2.5).
+const CROUCH_TOGGLE_KEY: (usize, u32) = (4, 21);
+/// The slot value and bit of a press of the prone toggle (the Azoth catalog input 331, `prone
+/// toggle`; posture study: set in one record per press, 5 presses, after the first of each pair
+/// the own place went 1.23 to 1.26 m/s forward, the sprint action list's `Prone` `Speed` 1.25).
+const PRONE_TOGGLE_KEY: (usize, u32) = (5, 11);
+/// The slot value and bit of the walk key, set while it is held (the Azoth catalog input 313,
+/// `walk`; posture study: set in every record of the 4 slow periods of the
+/// `walk_running_crouch_prone` captures and in no record of their running periods).
+const WALK_KEY: (usize, u32) = (4, 57);
 /// The slot values and bits of the presses that change the camera's boom (movement study, in
 /// the newchar capture: value 2 bit 35 lengthened the resting boom by 1 m in 9 of 11 presses,
 /// value 5 bit 57 shortened it by 1 m or ended the short boom in 28 of 35, value 5 bit 51 set
@@ -545,6 +570,26 @@ impl InputRecord {
     /// Whether the player presses the walk toggle in this record.
     pub fn walk_toggle_pressed(&self) -> bool {
         self.slot_bit(WALK_TOGGLE_KEY.0, WALK_TOGGLE_KEY.1)
+    }
+
+    /// Whether the player presses the crouch toggle in this record.
+    pub fn crouch_toggle_pressed(&self) -> bool {
+        self.slot_bit(CROUCH_TOGGLE_KEY.0, CROUCH_TOGGLE_KEY.1)
+    }
+
+    /// Whether the player presses the prone toggle in this record.
+    pub fn prone_toggle_pressed(&self) -> bool {
+        self.slot_bit(PRONE_TOGGLE_KEY.0, PRONE_TOGGLE_KEY.1)
+    }
+
+    /// Whether the player holds the walk key in this record.
+    pub fn walk_held(&self) -> bool {
+        self.slot_bit(WALK_KEY.0, WALK_KEY.1)
+    }
+
+    /// Whether the player presses the sheathe key in this record.
+    pub fn sheathe_pressed(&self) -> bool {
+        self.slot_bit(SHEATHE_KEY.0, SHEATHE_KEY.1)
     }
 
     /// Whether the player presses a key that changes the camera's boom in this record.
@@ -1449,6 +1494,58 @@ mod tests {
             assert!(!standing_with(boom).walk_toggle_pressed());
         }
         assert!(!with_slots(STANDING).boom_key_pressed());
+    }
+
+    #[test]
+    fn the_posture_toggles_and_the_walk_key_read_as_in_the_retail_records() {
+        // Retail `walk_running_crouch_prone_2` record 902 (a crouch press), 1328 (a prone press)
+        // and `walk_running_crouch_prone` record 600 (running forward with the walk key held).
+        const CROUCH: [u64; 10] = [
+            0x100_0000_0000_0000,
+            0x80_0000_0000_0000,
+            0x2000_0000,
+            0x4000_0000_0000,
+            0x20_0000,
+            0,
+            0,
+            0x402_0000_0800_0000,
+            0x200_0000_8000_0000,
+            0,
+        ];
+        const PRONE: [u64; 10] = [
+            0,
+            0,
+            0x40_0000_0000_0000,
+            0x800_0000_0000_0000,
+            0,
+            0x800,
+            0x2_0000_0000_0000,
+            0x402_0000_0808_0000,
+            0x200_0000_0000_0000,
+            0,
+        ];
+        const WALKING: [u64; 10] = [
+            0x800_0000_4000,
+            0,
+            0x800_0000_0000,
+            0,
+            0x200_0000_0000_0000,
+            0,
+            0x4001_0000_0000,
+            0x402_0000_0800_0000,
+            0x200_0004_4000_0000,
+            0x200,
+        ];
+        let crouch = standing_with(CROUCH);
+        assert!(crouch.crouch_toggle_pressed());
+        assert!(!crouch.prone_toggle_pressed() && !crouch.walk_held());
+        let prone = standing_with(PRONE);
+        assert!(prone.prone_toggle_pressed());
+        assert!(!prone.crouch_toggle_pressed() && !prone.walk_held());
+        let walking = standing_with(WALKING);
+        assert!(walking.walk_held() && walking.move_keys().forward);
+        assert!(!walking.crouch_toggle_pressed() && !walking.prone_toggle_pressed());
+        assert!(!walking.walk_toggle_pressed());
     }
 
     #[test]

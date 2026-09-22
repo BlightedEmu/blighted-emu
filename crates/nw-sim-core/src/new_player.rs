@@ -20,8 +20,8 @@ pub const TUTORIAL_START: Position = Position {
 
 /// The ship's deck under [`TUTORIAL_START`] (Observed: the newchar own places after the start,
 /// 89.508, 89.414 and 89.382 in the first own states that moved it, before any key). The deck is
-/// not in the level's height map (the terrain there is at 50 m), so the tutorial knows this floor
-/// from the start.
+/// not in the level's height map (the terrain there is at 50 m); the level collision's deck (the
+/// galleon's `galleon_body.rnr`) is at 89.38 m here.
 pub const TUTORIAL_START_FLOOR: Position = Position {
     z: 89.38,
     ..TUTORIAL_START

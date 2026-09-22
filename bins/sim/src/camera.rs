@@ -64,6 +64,9 @@ pub fn track_input(record: &InputRecord, seen: RecordView) -> Option<TrackInput>
         walk_toggle: record.walk_toggle_pressed(),
         block: record.blocking(),
         dodge: record.dodging(),
+        crouch_toggle: record.crouch_toggle_pressed(),
+        prone_toggle: record.prone_toggle_pressed(),
+        walk: record.walk_held(),
         ..Intent::of_keys(keys.forward, keys.back, keys.left, keys.right)
     };
     Some(TrackInput {
@@ -198,5 +201,34 @@ mod tests {
         };
         let intent = track_input(&record, seen).expect("a view").character.intent;
         assert!(intent.block && intent.dodge, "{intent:?}");
+    }
+
+    #[test]
+    fn the_posture_toggles_and_the_walk_key_go_to_the_character() {
+        // Slot value 4: bit 21 a crouch press, bit 57 the walk key; value 5 bit 11 a prone press
+        // (posture study 2026-09-20).
+        const CROUCH_AND_WALK: u64 = 1 << 21 | 1 << 57;
+        const PRONE: u64 = 1 << 11;
+        let record = InputRecord {
+            slots: InputSlots {
+                count: 19,
+                values: vec![0, 0, 0, 0, CROUCH_AND_WALK, PRONE],
+                bytes: [128; 4],
+            },
+            ..InputRecord::default()
+        };
+        let seen = RecordView {
+            frame_s: None,
+            view: Some(LookDir {
+                yaw: 0.0,
+                pitch: 0.0,
+            }),
+            camera: None,
+        };
+        let intent = track_input(&record, seen).expect("a view").character.intent;
+        assert!(
+            intent.crouch_toggle && intent.prone_toggle && intent.walk,
+            "{intent:?}"
+        );
     }
 }

@@ -1,19 +1,24 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The floor the players walked on: the server has no level collision, but every move a client
-//! sends went through the client's own walls and stood on the client's own floors. So a spot a
-//! player stood on, at that height, is open floor, and a server push (a mob's shove or pull) goes
-//! only as far along its line as such floor reaches, and lands on it. A push through a wall ends
-//! at the wall (live 2026-09-18: Thorpe's shockwave pushed the player 5 m through the arena wall
-//! into a pocket), and a pull never lands under a platform (live 2026-09-18: his grab pulled a
-//! player who stood in the water at 19 m under his 22.2 m platform, stuck).
+//! The floor the players walked on: every move a client sends went through the client's own walls
+//! and stood on the client's own floors. So a spot a player stood on, at that height, is open
+//! floor, and a server push (a mob's shove or pull) goes only as far along its line as such floor
+//! reaches, and lands on it, and it stops at a wall of the level's collision on the way. A push
+//! through a wall ends at the wall (live 2026-09-18: Thorpe's shockwave pushed the player 5 m
+//! through the arena wall into a pocket), and a pull never lands under a platform (live
+//! 2026-09-18: his grab pulled a player who stood in the water at 19 m under his 22.2 m platform,
+//! stuck).
 //!
-//! A moving mob stands on such floor too ([`WalkedGround`]): the height map holds only the
-//! terrain, and a boar that chased the player up onto a deck walked on the terrain 3 to 4.5 m
-//! under it, out of reach of the swings (run 10, 2026-09-18: 30 of 40 hammer swings missed with
-//! the boar more than 2.8 m below the player; the retail deck boars stood 0.4 to 0.6 m below).
+//! The floors themselves are the level collision's ([`nw_sim_core::LevelGround`]), with the solids
+//! of the tutorial's shown asset entities (the arena's fog-wall gate, the boat wreck's
+//! `AI_Wall_Collision` box: [`crate::asset_solids`]). The walked floor stays for pushes because
+//! the collision file does not hold every solid the client stands on or stops at
+//! (level-collision note 2026-09-20: solids that name no shape, assets the build lacks, variant
+//! capitals, vegetation, housing, and the open world's later slices, which no sim shows yet);
+//! the walked floor is what the clients' own moves proved open.
 
 use std::collections::HashMap;
 
+use nw_sim_core::character::STEP_UP_M;
 use nw_sim_core::{Ground, Position};
 
 /// The side of one floor cell (our choice: about a body's width).
@@ -76,10 +81,16 @@ impl WalkedFloor {
     }
 
     /// The farthest point of the straight line from `from` to `to` that a body reaches over
-    /// walked floor only, standing on that floor: `to` (on its floor) when the whole line is
-    /// walked floor near its height, else the last point before the first one that is not
-    /// (`from` when that is the first step).
-    pub(super) fn reach(&self, from: Position, to: Position) -> Position {
+    /// walked floor only, standing on that floor, with no wall of `ground` a step above that
+    /// floor on the way: `to` (on its floor) when the whole line is open walked floor near its
+    /// height, else the last point before the first one that is not (`from` when that is the
+    /// first step).
+    pub(super) fn reach(
+        &self,
+        from: Position,
+        to: Position,
+        ground: &(impl Ground + ?Sized),
+    ) -> Position {
         let length = to.horizontal_distance(from);
         #[allow(
             clippy::cast_possible_truncation,
@@ -99,35 +110,24 @@ impl WalkedFloor {
             let Some(floor) = self.floor_at(point) else {
                 return reached;
             };
-            reached = Position { z: floor, ..point };
+            let knee = |at: Position| Position {
+                z: at.z + STEP_UP_M,
+                ..at
+            };
+            let stand = Position { z: floor, ..point };
+            if ground.blocked(knee(reached), knee(stand)) {
+                return reached;
+            }
+            reached = stand;
         }
         reached
-    }
-}
-
-/// The level's `ground` with the floors the players `walked`: a body stands on a walked floor
-/// near its height, else on the ground.
-pub(super) struct WalkedGround<'a> {
-    pub(super) ground: &'a dyn Ground,
-    pub(super) walked: &'a WalkedFloor,
-}
-
-impl Ground for WalkedGround<'_> {
-    fn height_at(&self, x: f32, y: f32) -> Option<f32> {
-        self.ground.height_at(x, y)
-    }
-
-    fn floor_at(&self, x: f32, y: f32, z: f32) -> Option<f32> {
-        self.walked
-            .floor_at(Position { x, y, z })
-            .or_else(|| self.ground.height_at(x, y))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nw_sim_core::test_support::FlatGround;
+    use nw_sim_core::test_support::NoGround;
 
     const START: Position = Position {
         x: 480.5,
@@ -143,36 +143,6 @@ mod tests {
     }
 
     #[test]
-    fn a_body_stands_on_a_walked_floor_near_its_height_else_on_the_ground() {
-        /// Run 10: the terrain at 42.5 m under a deck the player walked at 46 m.
-        const TERRAIN_Z: f32 = 42.5;
-        const DECK_Z: f32 = 46.0;
-        let mut walked = WalkedFloor::default();
-        walked.walked(Position { z: DECK_Z, ..START });
-        let terrain = FlatGround(TERRAIN_Z);
-        let ground = WalkedGround {
-            ground: &terrain,
-            walked: &walked,
-        };
-        let floor = |at: Position| ground.floor_at(at.x, at.y, at.z);
-        assert_eq!(
-            floor(Position { z: 45.0, ..START }),
-            Some(DECK_Z),
-            "on the deck"
-        );
-        assert_eq!(
-            floor(Position {
-                z: TERRAIN_Z,
-                ..START
-            }),
-            Some(TERRAIN_Z),
-            "under the deck: the deck is out of its reach"
-        );
-        assert_eq!(floor(east(5.0)), Some(TERRAIN_Z), "where nobody walked");
-        assert_eq!(ground.height_at(START.x, START.y), Some(TERRAIN_Z));
-    }
-
-    #[test]
     fn a_push_goes_only_over_walked_floor() {
         const WALKED_M: f32 = 3.0;
         const PUSH_M: f32 = 5.0;
@@ -182,17 +152,45 @@ mod tests {
             floor.walked(east(metres));
             metres += PATH_STEP_M;
         }
-        let reached = floor.reach(START, east(PUSH_M));
+        let reached = floor.reach(START, east(PUSH_M), &NoGround);
         assert!(reached.x <= east(WALKED_M + CELL_M).x, "stops at the wall");
         assert!(reached.x >= east(WALKED_M).x, "goes over the floor walked");
         assert!(
-            floor.reach(START, east(-PUSH_M)).x >= east(-CELL_M).x,
+            floor.reach(START, east(-PUSH_M), &NoGround).x >= east(-CELL_M).x,
             "nobody walked west of its cell"
         );
         assert_eq!(
-            floor.reach(START, east(1.0)),
+            floor.reach(START, east(1.0), &NoGround),
             east(1.0),
             "a short push lands"
+        );
+    }
+
+    #[test]
+    fn a_push_stops_at_a_wall_of_the_level() {
+        /// A wall of the level 2 m east of the start.
+        const WALL_M: f32 = 2.0;
+        struct Wall;
+        impl Ground for Wall {
+            fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+                None
+            }
+
+            fn blocked(&self, from: Position, to: Position) -> bool {
+                from.x < START.x + WALL_M && to.x >= START.x + WALL_M
+            }
+        }
+        let mut floor = WalkedFloor::default();
+        let mut metres = 0.0;
+        while metres <= 5.0 {
+            floor.walked(east(metres));
+            metres += PATH_STEP_M;
+        }
+        let reached = floor.reach(START, east(5.0), &Wall);
+        assert!(reached.x < east(WALL_M).x, "{reached:?}");
+        assert!(
+            reached.x >= east(WALL_M - PATH_STEP_M).x - 1e-3,
+            "{reached:?}"
         );
     }
 
@@ -211,7 +209,7 @@ mod tests {
         }
         floor.walked(at(4.0, PLATFORM_Z));
         // Pulled toward a mob on the platform: never onto the water floor under it at the end.
-        let reached = floor.reach(at(0.0, WATER_Z), at(4.0, PLATFORM_Z));
+        let reached = floor.reach(at(0.0, WATER_Z), at(4.0, PLATFORM_Z), &NoGround);
         assert!(
             (reached.z - WATER_Z).abs() < f32::EPSILON
                 || (reached.z - PLATFORM_Z).abs() < f32::EPSILON,
@@ -226,7 +224,7 @@ mod tests {
         high_only.walked(at(0.0, PLATFORM_Z));
         high_only.walked(at(1.0, PLATFORM_Z));
         assert_eq!(
-            high_only.reach(at(0.0, WATER_Z), at(1.0, WATER_Z)),
+            high_only.reach(at(0.0, WATER_Z), at(1.0, WATER_Z), &NoGround),
             at(0.0, WATER_Z),
             "no floor at the water's height"
         );

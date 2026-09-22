@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! `serve`: reads the configuration and the world file, connects to the world database and NATS,
-//! and runs the loop until Ctrl-C.
+//! `serve`: reads the configuration, the world file and the level collision file, connects to the
+//! world database and NATS, and runs the loop until Ctrl-C.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -22,11 +22,16 @@ use nw_content::gameplay_config::GameplayConfig;
 use nw_content::mob_prefabs::MobPrefabs;
 use nw_content::player_attacks::PlayerAttacks;
 use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
-use nw_sim_core::level_bounds;
+use nw_sim_core::{LevelGround, level_bounds};
 use nw_world::WorldFile;
+use nw_world::collision::{LevelCollision, collision_file_path};
+use nw_world::collision_index::CollisionIndex;
+use nw_world::roads::{RoadMap, road_file_path};
+use nw_world::water::{WaterMap, water_file_path};
 use nw_world::script::{DesignData, LevelDesign, design_data_path};
 use nw_world::world_file::world_file_path;
 
+use crate::asset_solids::AssetSolids;
 use crate::config::{SimConfig, SimConfigError, load_sim_config};
 use crate::gameplay::{GameplayError, load_gameplay};
 use crate::mob_ai::{LookAssets, MobAi, resolve_ai};
@@ -50,6 +55,9 @@ pub enum RunError {
     /// The world file cannot be read.
     #[error("world file: {0}")]
     WorldFile(#[from] ContainerError),
+    /// The level collision file cannot be read (`content-tool collision` writes it).
+    #[error("level collision file: {0}")]
+    Collision(#[source] ContainerError),
     /// The gameplay values of the remote config sets cannot be loaded.
     #[error(transparent)]
     Gameplay(#[from] GameplayError),
@@ -104,6 +112,47 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let build = load_client_build(&config.client_build_config).map_err(RunError::ClientBuild)?;
     let path = world_file_path(&config.content_dir, &build, &config.level);
     let world_file = Arc::new(WorldFile::load(&path, &build)?);
+    let collision_path = collision_file_path(&config.content_dir, &build, &config.level);
+    let level_collision =
+        LevelCollision::load(&collision_path, &build).map_err(RunError::Collision)?;
+    let deferred = level_collision.deferred.clone();
+    let collision = Arc::new(CollisionIndex::new(LevelCollision {
+        deferred: Vec::new(),
+        ..level_collision
+    }));
+    let deferred_level = LevelCollision {
+        deferred,
+        ..LevelCollision::default()
+    };
+    tracing::info!(
+        bodies = collision.body_count(),
+        shapes = collision.geometry_count(),
+        bytes = collision.memory_bytes(),
+        "level collision"
+    );
+    let roads_path = road_file_path(&config.content_dir, &build, &config.level);
+    let level_ground = LevelGround::new(Arc::clone(&world_file), Arc::clone(&collision));
+    let water_path = water_file_path(&config.content_dir, &build, &config.level);
+    let level_ground = match WaterMap::load(&water_path, &build) {
+        Ok(water) => {
+            tracing::info!(regions = water.regions.len(), "level water");
+            level_ground.with_water(Arc::new(water))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no water file: the sea level is the only water");
+            level_ground
+        }
+    };
+    let ground = match RoadMap::load(&roads_path, &build) {
+        Ok(roads) => {
+            tracing::info!(regions = roads.regions.len(), "level roads");
+            level_ground.with_roads(Arc::new(roads))
+        }
+        Err(error) => {
+            tracing::warn!(%error, "no road file: no road sprint boost");
+            level_ground
+        }
+    };
     let gameplay = load_gameplay(&config.edge_config, config.world_id)?;
     let mut bundle = ContentBundle::load(&bundle_path(&config.content_dir, &build), &build)
         .map_err(RunError::Bundle)?;
@@ -180,7 +229,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
             FtueLevel::default()
         }
     };
-    let content = Arc::new(PlayerContent::new(
+    let mut content = PlayerContent::new(
         &bundle.tables,
         mob_looks,
         creature_animations,
@@ -188,7 +237,14 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         &world_file,
         gameplay,
         config.loot_limits,
-    ));
+    );
+    content.asset_solids =
+        AssetSolids::of(&deferred_level, &collision, &content.tutorial_level.assets);
+    tracing::info!(
+        assets = content.asset_solids.solid_assets(),
+        "tutorial asset entities with solids"
+    );
+    let content = Arc::new(content);
     tracing::info!(
         disabled_items = content.disabled_items.len(),
         "items of the disabled item classes"
@@ -225,7 +281,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         .block_on(serve_async(
             config,
             passwords,
-            world_file,
+            Arc::new(ground),
             combat,
             content,
             design,
@@ -278,7 +334,7 @@ fn secret(name: &str) -> Result<String, RunError> {
 async fn serve_async(
     config: SimConfig,
     passwords: DatabasePasswords,
-    ground: Arc<WorldFile>,
+    ground: Arc<LevelGround<Arc<WorldFile>>>,
     combat: Arc<CombatData>,
     content: Arc<PlayerContent>,
     design: LevelDesign,
@@ -319,21 +375,25 @@ async fn serve_async(
         })
         .and_then(PrometheusBuilder::install)
         .map_err(|error| RunError::Metrics(error.to_string()))?;
+    let world_file = ground.terrain();
     tracing::info!(sim = %config.sim_id, world = %config.world_id, level = %config.level, "serving");
     let settings = LoopSettings {
         sim_id: config.sim_id.clone(),
         world_id: config.world_id,
         level: config.level.clone(),
-        world: config.world_settings(level_bounds(&ground.level), ground.level.ocean_level)?,
+        world: config.world_settings(
+            level_bounds(&world_file.level),
+            world_file.level.ocean_level,
+        )?,
         handoff_timeout: std::time::Duration::from_millis(config.handoff_timeout_ms),
         forward_ttl_ms: config.forward_ttl_ms,
         save_interval: std::time::Duration::from_millis(config.save_interval_ms),
         heartbeat_interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
         heartbeat_misses: config.heartbeat_misses,
-        mob_ai: resolve_ai(&ground, &mob_ai),
+        mob_ai: resolve_ai(world_file, &mob_ai),
         combat: config.combat_settings(
             combat,
-            spawns_of_level(&config.level, &ground.vitals),
+            spawns_of_level(&config.level, &world_file.vitals),
             mob_ai,
         ),
         design: Arc::new(design),

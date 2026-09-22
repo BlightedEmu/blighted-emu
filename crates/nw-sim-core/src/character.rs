@@ -7,15 +7,28 @@
 //!
 //! The direction follows the keys and the camera yaw at once (a first diagonal record already
 //! moved at 45° at full speed); the speed ramps at the action lists' rates. Up and down follow the
-//! floor under the body (the terrain or a floor the caller knows), and the speed is along it
-//! (retail ran 5.50 m/s along slopes, median of 33 steady windows, and less over the ground).
-//! There is no level collision here: walls and structures are the camera check's
-//! ([`crate::camera_check`]). A body on a floor the server does not know (a deck, a roof: high
-//! above the terrain under it) keeps that floor's height where no other floor is known, also when
-//! it lands from a jump; only a body on the terrain falls off an edge. The client shows the
-//! server's own place (run 13, 2026-09-20: a body the server held in the air hung there), so a
-//! body that fell through such a floor would take its client with it.
+//! floor under the body (the ground's: the terrain and the level's structures, decks, roofs,
+//! stairs: [`crate::LevelGround`]), and the speed is along it (retail ran 5.50 m/s along slopes,
+//! median of 33 steady windows, and less over the ground). A body walks off an edge and falls to
+//! the floor below, and a floor too high to step onto is an obstacle it does not climb. Walls are
+//! the camera check's ([`crate::camera_check`]): a replay of the retail tutorial that stopped the
+//! body at the level's solids a step above its feet erred by a median 0.73 m against 0.22 m
+//! without (the client's capsule slides along and over what a ray at one height calls a wall).
+//!
+//! The movement modes (movement modes study 2026-09-20, `local-data/scratch-work/movemodes`):
+//! - The posture: the crouch and prone toggles (`playeractions_postureinput.actionlist`
+//!   `ToggleCrouch`, `ToggleProne`) switch between standing, crouching and lying prone, and the
+//!   posture picks the action lists' speed rows (`Crouch`, `Prone`, `Crouch_Walk`, `Prone_Walk`).
+//! - The walk key, held: the slow walk.
+//!   A posture change holds the body for its transition fragment's time while it slows.
+//! - Wading: a body on a floor whose feet are deep enough under the local water (the sea, a
+//!   lake, a river: [`Ground::water_surface`]) moves at the `Wade` rows.
+//! - The road boost: sprinting on a road for long enough adds the `Traversal_RoadSprintBoost_Haste`
+//!   status's `SprintSpeedMod` to the sprint speed; combat on the road ends it.
+//! - The land dodge: a dodge press on a floor moves the body by the root motion of the dodge clip
+//!   of its equip load class ([`EquipLoad`]); an overburdened body neither dodges nor sprints.
 
+use crate::equip_load::EquipLoad;
 use crate::movement::{Ground, Position};
 
 /// The forward speed by default, m/s (`playeractions_sprint.actionlist`
@@ -36,11 +49,14 @@ pub const ACCELERATION_MPS2: f32 = 20.0;
 pub const DECELERATION_MPS2: f32 = 20.0;
 /// The most the floor rises under a walking body in one input record, m (Observed: the largest
 /// rise of the retail own place in one record while walking, 28,600 records of the newchar open
-/// world). A higher floor is a structure the server does not know: the body keeps its height.
+/// world). A higher floor is an obstacle: the body keeps its height.
 pub const STEP_UP_M: f32 = 0.376;
 /// The most the floor falls under a walking body in one input record before it falls, m
 /// (Observed: the 99.9th percentile of the retail drops while walking, same records).
 pub const STEP_DOWN_M: f32 = 0.282;
+/// The radius of the player's capsule, m (`slices/player.dynamicslice`: the character's capsule
+/// shape, radius 0.41).
+pub const PLAYER_RADIUS_M: f32 = 0.41;
 /// The upward speed of a jump, m/s, and the pull down while in the air, m/s² (Observed: a least
 /// squares fit of a retail standing jump on flat ground, newchar record 24187, 22 states, root
 /// mean square 0.03 m; two more jumps gave 5.26 and 5.49 m/s, 14.8 and 15.5 m/s²).
@@ -87,6 +103,257 @@ pub const SWIM_DASH_SPEED_MPS: f32 = 6.0;
 /// held).
 pub const SWIM_DASH_S: f32 = 37.0 / 30.0;
 
+/// The speed of a crouching body without the walk toggle, forward and to the side, m/s
+/// (`playeractions_sprint.actionlist` `Crouch` `Speed` 2.5, `Accel` and `Decel` 20; retail
+/// `walk_running_crouch_prone` captures: 2.50 m/s, median of 118 and 246 steady windows).
+pub const CROUCH_SPEED_MPS: f32 = 2.5;
+/// The speed of a crouching body with the back key, m/s (`playeractions_nav.actionlist`
+/// `Crouch_Unarmed` and `Combat_Nav_Crouch` `Speed` 1.25, `Accel` and `Decel` 25; retail
+/// `walk_running_crouch_prone` records 2993 to 3257: 1.23 m/s, median of 30 steady windows).
+pub const CROUCH_BACK_SPEED_MPS: f32 = 1.25;
+/// How fast a crouching body's back speed rises and falls, m/s² (see [`CROUCH_BACK_SPEED_MPS`]).
+pub const CROUCH_BACK_ACCELERATION_MPS2: f32 = 25.0;
+/// The speed of a crouching body after the walk toggle, m/s (`playeractions_nav.actionlist`
+/// `Crouch` `Speed` 1.65, `Accel` and `Decel` 10; no retail sample).
+pub const CROUCH_RUN_SPEED_MPS: f32 = 1.65;
+/// How fast a crouching body's speed after the walk toggle rises and falls, m/s².
+pub const CROUCH_RUN_ACCELERATION_MPS2: f32 = 10.0;
+/// The speed of a crouching body with the walk key held, m/s (`playeractions_nav.actionlist`
+/// `Crouch_Walk` `Speed` 0.825, `Accel` and `Decel` 2.5; no retail sample).
+pub const CROUCH_WALK_SPEED_MPS: f32 = 0.825;
+/// How fast a crouching walk's speed rises and falls, m/s².
+pub const CROUCH_WALK_ACCELERATION_MPS2: f32 = 2.5;
+/// The speed of a prone body without the walk toggle, forward and to the side, m/s
+/// (`playeractions_sprint.actionlist` `Prone` `Speed` 1.25, `Accel` and `Decel` 20; retail
+/// `walk_running_crouch_prone` captures: 1.23 to 1.26 m/s, medians of 129 to 322 steady
+/// windows).
+pub const PRONE_SPEED_MPS: f32 = 1.25;
+/// The speed of a prone body with the back key, m/s (Observed: retail `walk_running_crouch_prone`
+/// records 1855 to 2992, 0.63 m/s, median of 64 steady windows, 0.61 back and left; no action
+/// list row holds it).
+pub const PRONE_BACK_SPEED_MPS: f32 = 0.63;
+/// The speed of a prone body after the walk toggle, m/s (`playeractions_nav.actionlist` `Prone`
+/// `Speed` 0.375, `Accel` 1, `Decel` 5; no retail sample).
+pub const PRONE_RUN_SPEED_MPS: f32 = 0.375;
+/// The speed of a prone body with the walk key held, m/s (`playeractions_nav.actionlist`
+/// `Prone_Walk` `Speed` 0.1875, `Accel` 1, `Decel` 5; no retail sample).
+pub const PRONE_WALK_SPEED_MPS: f32 = 0.1875;
+/// How fast a prone body's slow speeds rise, m/s² (`Prone` and `Prone_Walk` `Accel` 1).
+pub const PRONE_SLOW_ACCELERATION_MPS2: f32 = 1.0;
+/// How fast a prone body's slow speeds fall, m/s² (`Prone` and `Prone_Walk` `Decel` 5).
+pub const PRONE_SLOW_DECELERATION_MPS2: f32 = 5.0;
+/// The speed of a standing body with the walk key held, in every direction, m/s (Observed: retail
+/// `walk_running_crouch_prone` captures, 2.00 m/s forward, back and to the side, medians of 7
+/// periods of 49 to 321 steady windows; the action lists' `Stand_Walk` row says 1.65).
+pub const WALK_SPEED_MPS: f32 = 2.0;
+/// How fast a standing walk's speed rises and falls, m/s² (`playeractions_nav.actionlist`
+/// `Stand_Walk` `Accel` and `Decel` 25).
+pub const WALK_ACCELERATION_MPS2: f32 = 25.0;
+/// The feet of a body on a floor at least this deep under the water's surface wade, m
+/// (Observed: the own state's water depth went from very shallow to shallow at feet depths of
+/// 0.894 to 0.945 m and back at 0.835 to 0.897 m in about 50 changes in six lakes of an
+/// open-world capture, two of them both at 0.897 m; in the newchar swim to shore it went to very
+/// shallow between 0.874 and 0.842 m, and the sprint started there. No hysteresis).
+pub const WADE_DEPTH_M: f32 = 0.895;
+/// The speed of a wading body without the walk toggle, forward and to the side, m/s
+/// (`playeractions_sprint.actionlist` `Wade` `Speed` 2.5, `Accel` and `Decel` 20; retail newchar
+/// swim to shore: 2.2 m/s over the ground up a slope while the feet were 1.42 to 0.89 m deep).
+pub const WADE_SPEED_MPS: f32 = 2.5;
+/// The speed of a crouching wading body, m/s (`playeractions_sprint.actionlist` `Wade+Crouch`
+/// `Speed` 1.75).
+pub const WADE_CROUCH_SPEED_MPS: f32 = 1.75;
+/// The speed of a wading body with the back key, the walk toggle or the walk key, m/s
+/// (`playeractions_nav.actionlist` `Wade` `Speed` 1.65, `Accel` and `Decel` 10).
+pub const WADE_SLOW_SPEED_MPS: f32 = 1.65;
+/// How fast a wading body's slow speed rises and falls, m/s².
+pub const WADE_SLOW_ACCELERATION_MPS2: f32 = 10.0;
+/// The share of road under the body from which it is on a road (`playeractions_global.actionlist`
+/// `Traversal_Road_Sprint_Speed_Boost`: `IfOnRoad` `GreaterThanOrEqual` 0.1). `IfOnRoad` reads
+/// the share at the place as it is (`FUN_142c41000`), not the `RoadStateComponent`'s state with
+/// its 3 s on and 2 s off delays; retail `r-ow` records 11215 to 11245: the boost 0.3 to 0.8 s
+/// after the own place entered the road, after 28 s of sprint off it.
+pub const ROAD_SHARE_MIN: f32 = 0.1;
+/// How far above or below the terrain a body may be and still be on its road, m
+/// (`ActionConditionIfOnRoad` `HeightThreshold` 1.0, the default the action lists keep:
+/// constructor `FUN_142c40cf0`; its check `FUN_145c52f40` gives no road when the place is
+/// farther from the terrain height: a bridge, a roof, a cave).
+pub const ROAD_HEIGHT_THRESHOLD_M: f32 = 1.0;
+/// How long a body sprints before a road speeds it up, s (`Traversal_Road_Sprint_Speed_Boost`:
+/// `Sprint_TravelMode` installed for 3 s; retail `walk_running_crouch_prone_2_freedom`: the boost
+/// 3.1 to 3.3 s after the motion started, twice).
+pub const ROAD_SPRINT_DELAY_S: f32 = 3.0;
+/// The road boost's `SprintSpeedMod` (`javelindata_statuseffects_common.datasheet`
+/// `Traversal_RoadSprintBoost_Haste`; retail `walk_running_crouch_prone`: 6.32 m/s on a road
+/// against 5.50 m/s before the boost, 1.15 times).
+pub const ROAD_SPRINT_SPEED_MOD: f32 = 0.15;
+/// How long the road boost lasts after its last refresh, s (`Traversal_RoadSprintBoost_Haste`
+/// `BaseDuration` 3).
+pub const ROAD_HASTE_S: f32 = 3.0;
+/// How long the road boost stays off after combat removed it, s
+/// (`Traversal_RoadSprintBoost_CombatTimer` `BaseDuration` 5; `Traversal_Road_Sprint_Speed_Boost_
+/// CombatRemoval` removes the boost on an attack, a block or a dodge).
+pub const ROAD_COMBAT_S: f32 = 5.0;
+/// How fast the body slows while it changes its posture, m/s² (Observed: in the retail
+/// `walk_running_crouch_prone` capture the prone press at record 1855 slowed the sprint from 5.4
+/// to 0.3 m/s in 20 records, 1.96 m, a least squares slope of 8.0 m/s²; the crouch press at
+/// record 927 slowed it from 5.5 m/s to 1.5 to 2.0 m/s at 0.5 s, then the crouch speed held).
+pub const POSTURE_CHANGE_DECELERATION_MPS2: f32 = 8.0;
+/// How long a posture change holds the body before its keys move it again, s
+/// (`player.adb` `Sprint_PostureTransition` fragments: the `ResumeSprint` marker of
+/// `Crouch+FromStand` at 0.433 s, `Prone+FromStand` and `Prone+FromCrouch` at 0.667 s,
+/// `Stand+FromProne` at 0.767 s, `Crouch+FromProne` at 0.8 s; standing up from a crouch has no
+/// transition fragment. Retail: a prone press with the forward key held moved the body again
+/// after 0.70 s, `walk_running_crouch_prone_2` record 1328).
+const POSTURE_CHANGE_S: [(Posture, Posture, f32); 5] = [
+    (Posture::Stand, Posture::Crouch, 0.433_333_34),
+    (Posture::Stand, Posture::Prone, 0.666_666_7),
+    (Posture::Crouch, Posture::Prone, 0.666_666_7),
+    (Posture::Prone, Posture::Stand, 0.766_666_65),
+    (Posture::Prone, Posture::Crouch, 0.8),
+];
+/// Frames per second of the dodge clips' root motion (`Xform` bone keys at 30 fps).
+const DODGE_CLIP_FPS: f32 = 30.0;
+/// How long a dodge holds the body before a movement key takes it over again, s (every dodge
+/// fragment of `playeractions_dodge.actionlist`: the `CanTransition` marker from 0.5 s; retail
+/// newchar: the run came back 2 to 3 records after 0.5 s).
+pub const DODGE_CONTROL_S: f32 = 0.5;
+/// How long the dodge's translation multiplier holds, s (every dodge fragment of
+/// `playeractions_dodge.actionlist`: the `Dodge_Roll*_Translation` markers from 0 to 0.567 s;
+/// after them the clip's root moves the body as it is).
+const DODGE_TRANSLATION_S: f32 = 0.566_666_66;
+/// The normal dodge's translation multiplier (`playeractions_dodge.actionlist`
+/// `AnimationDrivenMotion` `Roll_Translation` 1.28; retail `walk_running_crouch_prone` record
+/// 3328, a back dodge of the normal class: the place at 0.5 s within 0.034 m).
+pub const NORMAL_DODGE_TRANSLATION: f32 = 1.28;
+/// The fast dodge's translation multiplier (`FastRoll_Translation` 1.15; no retail sample).
+pub const FAST_DODGE_TRANSLATION: f32 = 1.15;
+/// The slow dodge's translation multiplier (Observed: a least squares fit of the 13 clean retail
+/// newchar land dodges, a character of the slow class, to the `quickstep_hvy` clips: 1.124 to
+/// 1.173 per dodge, median 1.15; the place at 0.5 s erred by a median 0.021 m. The action list's
+/// `SlowRoll_Translation` says 1.43; what makes retail's factor smaller is Unknown).
+pub const SLOW_DODGE_TRANSLATION: f32 = 1.15;
+/// The root of the normal forward dodge (`unarmed_quickstep_f`): frame and distance along the
+/// dodge, m; linear between keys.
+const NORMAL_DODGE_FORWARD_ROOT: [(u8, f32); 13] = [
+    (0, 0.0),
+    (15, 2.8),
+    (16, 2.786),
+    (17, 2.802),
+    (18, 2.832),
+    (19, 2.853),
+    (20, 2.866),
+    (21, 2.871),
+    (22, 2.871),
+    (23, 2.867),
+    (24, 2.86),
+    (26, 2.855),
+    (44, 2.854),
+];
+/// The root of the normal back dodge (`unarmed_quickstep_b`).
+const NORMAL_DODGE_BACK_ROOT: [(u8, f32); 9] = [
+    (0, 0.0),
+    (15, 2.8),
+    (17, 2.963),
+    (18, 3.0),
+    (21, 2.998),
+    (25, 2.994),
+    (26, 2.994),
+    (27, 3.0),
+    (44, 3.0),
+];
+/// The root of the fast forward dodge (`unarmed_dodgeroll_f_light_to_crch`).
+const FAST_DODGE_FORWARD_ROOT: [(u8, f32); 9] = [
+    (0, 0.0),
+    (2, 0.519),
+    (9, 2.326),
+    (11, 2.846),
+    (13, 3.368),
+    (14, 3.631),
+    (15, 3.895),
+    (16, 4.16),
+    (29, 4.16),
+];
+/// The root of the fast back dodge (`unarmed_dodgeroll_b_light_to_crch`).
+const FAST_DODGE_BACK_ROOT: [(u8, f32); 13] = [
+    (0, 0.0),
+    (3, 0.72),
+    (8, 1.915),
+    (10, 2.395),
+    (12, 2.878),
+    (13, 3.121),
+    (14, 3.364),
+    (15, 3.609),
+    (16, 3.856),
+    (17, 4.103),
+    (20, 4.105),
+    (27, 4.114),
+    (29, 4.115),
+];
+/// The root of the slow forward dodge (`unarmed_quickstep_hvy_f`, the same for the one-handed,
+/// two-handed and bow stances).
+const SLOW_DODGE_FORWARD_ROOT: [(u8, f32); 27] = [
+    (0, 0.0),
+    (4, 0.646),
+    (5, 0.81),
+    (6, 0.976),
+    (8, 1.316),
+    (9, 1.484),
+    (10, 1.647),
+    (11, 1.803),
+    (12, 1.947),
+    (13, 2.078),
+    (14, 2.202),
+    (15, 2.321),
+    (16, 2.44),
+    (17, 2.549),
+    (18, 2.636),
+    (19, 2.703),
+    (20, 2.762),
+    (21, 2.815),
+    (22, 2.86),
+    (23, 2.898),
+    (24, 2.93),
+    (25, 2.956),
+    (26, 2.976),
+    (27, 2.989),
+    (28, 2.997),
+    (29, 3.0),
+    (38, 3.0),
+];
+/// The root of the slow back dodge (`unarmed_quickstep_hvy_b`, the same for the other stances).
+const SLOW_DODGE_BACK_ROOT: [(u8, f32); 30] = [
+    (0, 0.0),
+    (1, 0.125),
+    (2, 0.366),
+    (3, 0.603),
+    (4, 0.806),
+    (5, 1.012),
+    (6, 1.204),
+    (7, 1.363),
+    (8, 1.493),
+    (9, 1.609),
+    (10, 1.716),
+    (11, 1.816),
+    (13, 2.011),
+    (14, 2.112),
+    (15, 2.222),
+    (16, 2.327),
+    (17, 2.4),
+    (21, 2.598),
+    (22, 2.646),
+    (23, 2.693),
+    (24, 2.738),
+    (25, 2.781),
+    (26, 2.822),
+    (27, 2.861),
+    (28, 2.896),
+    (29, 2.928),
+    (30, 2.956),
+    (31, 2.98),
+    (32, 3.0),
+    (38, 3.0),
+];
+
 /// What the keys of one input record ask for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Intent {
@@ -102,6 +369,12 @@ pub struct Intent {
     pub block: bool,
     /// The dodge key is held.
     pub dodge: bool,
+    /// The crouch toggle is pressed in this record.
+    pub crouch_toggle: bool,
+    /// The prone toggle is pressed in this record.
+    pub prone_toggle: bool,
+    /// The walk key is held.
+    pub walk: bool,
 }
 
 impl Intent {
@@ -112,6 +385,11 @@ impl Intent {
             right: i8::from(right) - i8::from(left),
             ..Self::default()
         }
+    }
+
+    /// Whether a direction key is held.
+    const fn moves(self) -> bool {
+        self.forward != 0 || self.right != 0
     }
 }
 
@@ -126,6 +404,121 @@ pub struct CharacterInput {
     pub dt_s: f32,
 }
 
+/// How the body holds itself (`playeractions_postureinput.actionlist`: the mannequin tags
+/// `Stand`, `Crouch` and `Prone`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Posture {
+    /// Standing.
+    #[default]
+    Stand,
+    /// Crouching.
+    Crouch,
+    /// Lying prone.
+    Prone,
+}
+
+impl Posture {
+    /// The posture after a press of the crouch toggle (`ToggleCrouch`: `Crouch_Desired`, or
+    /// `Stand_Desired` when crouching).
+    const fn crouch_toggled(self) -> Self {
+        match self {
+            Self::Crouch => Self::Stand,
+            Self::Stand | Self::Prone => Self::Crouch,
+        }
+    }
+
+    /// The posture after a press of the prone toggle (`ToggleProne`: `Prone_Desired`, or
+    /// `Stand_Desired` when prone).
+    const fn prone_toggled(self) -> Self {
+        match self {
+            Self::Prone => Self::Stand,
+            Self::Stand | Self::Crouch => Self::Prone,
+        }
+    }
+}
+
+/// A speed and how fast it is reached, from one action list row.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Pace {
+    speed_mps: f32,
+    acceleration_mps2: f32,
+    deceleration_mps2: f32,
+}
+
+impl Pace {
+    /// A row whose speed rises and falls at the same rate.
+    const fn even(speed_mps: f32, rate_mps2: f32) -> Self {
+        Self {
+            speed_mps,
+            acceleration_mps2: rate_mps2,
+            deceleration_mps2: rate_mps2,
+        }
+    }
+}
+
+/// The clip that moves a dodging body and its translation multiplier.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DodgeRoot {
+    keys: &'static [(u8, f32)],
+    translation: f32,
+}
+
+impl DodgeRoot {
+    /// The dodge of a body of equip load `load`, back or forward (`playeractions_dodge.
+    /// actionlist`: the fragment `Dodge_Roll_Fast` for the fast class, `Dodge_Roll_Slow` for the
+    /// slow one, `Dodge_Roll` for the others).
+    const fn of(load: EquipLoad, back: bool) -> Self {
+        let (keys, translation): (&'static [(u8, f32)], f32) = match (load, back) {
+            (EquipLoad::Fast, false) => (&FAST_DODGE_FORWARD_ROOT, FAST_DODGE_TRANSLATION),
+            (EquipLoad::Fast, true) => (&FAST_DODGE_BACK_ROOT, FAST_DODGE_TRANSLATION),
+            (EquipLoad::Slow, false) => (&SLOW_DODGE_FORWARD_ROOT, SLOW_DODGE_TRANSLATION),
+            (EquipLoad::Slow, true) => (&SLOW_DODGE_BACK_ROOT, SLOW_DODGE_TRANSLATION),
+            (EquipLoad::Normal | EquipLoad::Overburdened, false) => {
+                (&NORMAL_DODGE_FORWARD_ROOT, NORMAL_DODGE_TRANSLATION)
+            }
+            (EquipLoad::Normal | EquipLoad::Overburdened, true) => {
+                (&NORMAL_DODGE_BACK_ROOT, NORMAL_DODGE_TRANSLATION)
+            }
+        };
+        Self { keys, translation }
+    }
+
+    /// The clip's root at `at_s` seconds, m: linear between its keys, its last key after them.
+    fn root(self, at_s: f32) -> f32 {
+        let frame = at_s * DODGE_CLIP_FPS;
+        let keys = self.keys;
+        keys.windows(2)
+            .find(|pair| frame < f32::from(pair[1].0))
+            .map_or(keys[keys.len() - 1].1, |pair| {
+                let ((from, start), (to, end)) = (pair[0], pair[1]);
+                let share = (frame - f32::from(from)) / f32::from(to - from);
+                start + (end - start) * share.max(0.0)
+            })
+    }
+
+    /// How far the body has gone at `at_s` seconds, m: the root times the multiplier while the
+    /// translation marker holds, the root alone after it.
+    fn distance(self, at_s: f32) -> f32 {
+        let held = at_s.min(DODGE_TRANSLATION_S);
+        self.root(held) * self.translation + self.root(at_s) - self.root(held)
+    }
+
+    /// How long the clip moves, s.
+    fn length_s(self) -> f32 {
+        f32::from(self.keys[self.keys.len() - 1].0) / DODGE_CLIP_FPS
+    }
+}
+
+/// A land dodge under way.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Dodge {
+    root: DodgeRoot,
+    /// The direction of the dodge (a unit vector in the ground plane).
+    direction: [f32; 2],
+    /// Seconds since the press.
+    at_s: f32,
+}
+
 /// Where the character is between the floors.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Vertical {
@@ -133,12 +526,8 @@ enum Vertical {
     Grounded,
     /// A standing jump before the lift: records left.
     WindUp(u8),
-    /// In a jump, rising at `rise` m/s (falling below 0); `takeoff_floor` is the height it took
-    /// off from when that is a floor the server does not know: it lands there at the latest.
-    Jumping {
-        rise: f32,
-        takeoff_floor: Option<f32>,
-    },
+    /// In a jump, rising at `rise` m/s (falling below 0).
+    Jumping(f32),
     /// Falling off a floor, rising at this speed (falling below 0).
     Falling(f32),
 }
@@ -158,6 +547,22 @@ pub struct Character {
     dodge_held: bool,
     /// Seconds left of a swim dash.
     dash_s: f32,
+    posture: Posture,
+    /// The land dodge under way.
+    dodge: Option<Dodge>,
+    /// Seconds it has sprinted standing (`Sprint_TravelMode` installed).
+    sprint_s: f32,
+    /// Seconds left of a posture change ([`POSTURE_CHANGE_S`]).
+    posture_change_s: f32,
+    /// Its equip load category.
+    equip_load: EquipLoad,
+    /// Seconds left of the road boost.
+    road_haste_s: f32,
+    /// The road boost's action is on (`Traversal_Road_Sprint_Speed_Boost` installed): the
+    /// body is on a road and refreshes the boost.
+    road_boost_on: bool,
+    /// Seconds left while combat keeps the road boost off.
+    combat_s: f32,
 }
 
 /// The height of a swimming body's feet in the sea at `sea_level_m`.
@@ -165,10 +570,36 @@ pub fn swim_floor(sea_level_m: f32) -> f32 {
     sea_level_m - SWIM_DEPTH_M
 }
 
+/// The height of a swimming body's feet at (`x`, `y`) of `ground`, with the sea at
+/// `sea_level_m`, when water is there (the local surface: a lake's, a river's, the sea's).
+pub fn swim_floor_at(
+    ground: &(impl Ground + ?Sized),
+    x: f32,
+    y: f32,
+    sea_level_m: f32,
+) -> Option<f32> {
+    ground.water_surface(x, y, sea_level_m).map(swim_floor)
+}
+
 /// The unit vectors in the ground plane of camera yaw `yaw`: forward and right.
 pub fn yaw_axes(yaw: f32) -> ([f32; 2], [f32; 2]) {
     let (sin, cos) = yaw.sin_cos();
     ([-sin, cos], [cos, sin])
+}
+
+/// The unit vector in the ground plane of the keys of `intent` with camera yaw `yaw`, when they
+/// ask for a direction.
+fn key_direction(intent: Intent, yaw: f32) -> Option<[f32; 2]> {
+    if !intent.moves() {
+        return None;
+    }
+    let (forward, right) = yaw_axes(yaw);
+    let (along, side) = (f32::from(intent.forward), f32::from(intent.right));
+    let length = along.hypot(side);
+    Some([
+        (along * forward[0] + side * right[0]) / length,
+        (along * forward[1] + side * right[1]) / length,
+    ])
 }
 
 impl Character {
@@ -184,6 +615,14 @@ impl Character {
             swimming: false,
             dodge_held: false,
             dash_s: 0.0,
+            posture: Posture::Stand,
+            dodge: None,
+            sprint_s: 0.0,
+            posture_change_s: 0.0,
+            equip_load: EquipLoad::Normal,
+            road_haste_s: 0.0,
+            road_boost_on: false,
+            combat_s: 0.0,
         }
     }
 
@@ -200,15 +639,20 @@ impl Character {
         ]
     }
 
-    /// Whether it stands still: no speed on the ground plane and not in a jump (a fall moves it
-    /// only up and down).
+    /// Whether it stands still: no speed on the ground plane, not in a jump and not in a dodge
+    /// (a fall moves it only up and down).
     pub fn is_resting(&self) -> bool {
-        self.speed_mps == 0.0 && !self.is_jumping()
+        self.speed_mps == 0.0 && !self.is_jumping() && self.dodge.is_none()
     }
 
     /// The direction of its motion (a unit vector in the ground plane).
     pub const fn heading(&self) -> [f32; 2] {
         self.heading
+    }
+
+    /// How it holds itself.
+    pub const fn posture(&self) -> Posture {
+        self.posture
     }
 
     /// Whether it is in a jump (the client's camera does not follow a jump up and down).
@@ -222,6 +666,29 @@ impl Character {
     /// Whether it stands on a floor: not in a jump and not falling.
     pub const fn is_grounded(&self) -> bool {
         matches!(self.vertical, Vertical::Grounded)
+    }
+
+    /// Its equip load category changes to `load` (the server weighed its equipped items).
+    pub const fn set_equip_load(&mut self, load: EquipLoad) {
+        self.equip_load = load;
+    }
+
+    /// Whether the road boost speeds up its sprint.
+    pub fn has_road_boost(&self) -> bool {
+        self.road_haste_s > 0.0
+    }
+
+    /// Combat (an attack of the player, a block, a dodge, or a hit on it) while the road boost's
+    /// action is on ends the boost and keeps it off for [`ROAD_COMBAT_S`]
+    /// (`Traversal_Road_Sprint_Speed_Boost_CombatRemoval`: it fires only while
+    /// `Traversal_Road_Sprint_Speed_Boost` is installed, on the frame of the hit, `IfDamaged`).
+    /// Off the road the boost's last seconds stay.
+    pub const fn enter_combat(&mut self) {
+        if self.road_boost_on {
+            self.road_boost_on = false;
+            self.road_haste_s = 0.0;
+            self.combat_s = ROAD_COMBAT_S;
+        }
     }
 
     /// Puts it at `at`, keeping its motion (the camera check found it elsewhere in a jump).
@@ -247,6 +714,13 @@ impl Character {
         self.position = at;
         self.speed_mps = 0.0;
         self.vertical = Vertical::Grounded;
+        self.dodge = None;
+    }
+
+    /// Puts it at `at` falling, keeping its speed (the camera check found it past an edge).
+    pub const fn fall_from(&mut self, at: Position) {
+        self.position = at;
+        self.vertical = Vertical::Falling(0.0);
     }
 
     /// Puts it at `at` in the air: from there it falls to the floor it finds (a server move that
@@ -256,10 +730,12 @@ impl Character {
         self.position = at;
         self.speed_mps = 0.0;
         self.vertical = Vertical::Falling(0.0);
+        self.dodge = None;
     }
 
-    /// Moves it by one input record over `ground` with the sea at `sea_level_m`; gives its
-    /// motion in the ground plane.
+    /// Moves it by one input record over `ground` with the sea at `sea_level_m` (the water of
+    /// `ground` where it knows its water: [`Ground::water_surface`]); gives its motion in the
+    /// ground plane.
     pub fn step(
         &mut self,
         input: CharacterInput,
@@ -270,27 +746,43 @@ impl Character {
         if intent.walk_toggle {
             self.walking = !self.walking;
         }
+        let surface = ground.water_surface(self.position.x, self.position.y, sea_level_m);
+        // Where no water is, no floor of water holds the body.
+        let swim = surface.map_or(f32::NEG_INFINITY, swim_floor);
+        let wading = self.is_wading(surface);
+        let posture = self.posture;
+        self.change_posture(intent, wading);
+        if self.posture != posture {
+            self.posture_change_s = POSTURE_CHANGE_S
+                .iter()
+                .find(|(from, to, _)| *from == posture && *to == self.posture)
+                .map_or(0.0, |(_, _, seconds)| *seconds);
+        }
         let dodge_pressed = intent.dodge && !self.dodge_held;
         self.dodge_held = intent.dodge;
         if self.swimming && dodge_pressed {
             self.dash_s = SWIM_DASH_S;
         }
+        if dodge_pressed || intent.block {
+            self.enter_combat();
+        }
+        let can_dodge = self.equip_load != EquipLoad::Overburdened
+            && self.is_grounded()
+            && !self.swimming
+            && !wading;
+        if dodge_pressed && self.dodge.is_none() && can_dodge {
+            self.dodge = Some(self.dodge_of(intent, yaw));
+        }
         // A record is in the dash when its middle is.
         let dashing = self.swimming && self.dash_s > dt_s / 2.0;
         self.dash_s = (self.dash_s - dt_s).max(0.0);
-        let (target, heading) = self.target(intent, yaw, dashing);
-        self.heading = heading.unwrap_or(self.heading);
-        let (acceleration, deceleration) = self.ramp(intent);
-        self.speed_mps = if dashing && heading.is_some() {
-            // The dash takes its speed at once (the dodge inherits it).
-            target
-        } else if target >= self.speed_mps {
-            (self.speed_mps + acceleration * dt_s).min(target)
+        let distance = if let Some(dodge) = self.dodge {
+            self.dodge_step(dodge, intent, dt_s)
         } else {
-            (self.speed_mps - deceleration * dt_s).max(target)
+            self.key_step(intent, yaw, dt_s, dashing, wading)
         };
-        self.start_jump(intent.jump, ground);
-        let distance = self.speed_mps * dt_s;
+        self.update_road_boost(ground, dt_s);
+        self.start_jump(intent.jump);
         let start = self.position;
         let mut next = Position {
             x: start.x + self.heading[0] * distance,
@@ -298,47 +790,30 @@ impl Character {
             z: start.z,
         };
         match self.vertical {
-            Vertical::Grounded => self.walk(&mut next, distance, ground),
+            Vertical::Grounded => self.walk(&mut next, distance, ground, swim),
             Vertical::WindUp(left) => {
                 next = start;
                 self.vertical = match left.saturating_sub(1) {
-                    0 => self.lift(ground),
+                    0 => Vertical::Jumping(JUMP_SPEED_MPS),
                     left => Vertical::WindUp(left),
                 };
             }
-            Vertical::Jumping {
-                rise,
-                takeoff_floor,
-            } => {
-                let fall = Fall {
-                    rise,
-                    gravity: GRAVITY_MPS2,
-                    at_least: takeoff_floor,
-                };
-                self.vertical =
-                    self.fly(&mut next, fall, dt_s, ground)
-                        .map_or(Vertical::Grounded, |rise| Vertical::Jumping {
-                            rise,
-                            takeoff_floor,
-                        });
+            Vertical::Jumping(rise) => {
+                self.vertical = self
+                    .fly(&mut next, rise, GRAVITY_MPS2, dt_s, ground)
+                    .map_or(Vertical::Grounded, Vertical::Jumping);
             }
             Vertical::Falling(rise) => {
-                let fall = Fall {
-                    rise,
-                    gravity: FALL_GRAVITY_MPS2,
-                    at_least: None,
-                };
                 self.vertical = self
-                    .fly(&mut next, fall, dt_s, ground)
+                    .fly(&mut next, rise, FALL_GRAVITY_MPS2, dt_s, ground)
                     .map_or(Vertical::Grounded, Vertical::Falling);
             }
         }
-        let swim_floor = swim_floor(sea_level_m);
-        if next.z < swim_floor {
-            next.z = swim_floor;
+        if next.z < swim {
+            next.z = swim;
             self.vertical = Vertical::Grounded;
         }
-        self.swimming = next.z <= swim_floor;
+        self.swimming = next.z <= swim;
         if !self.swimming {
             self.dash_s = 0.0;
         }
@@ -346,83 +821,248 @@ impl Character {
         [next.x - start.x, next.y - start.y]
     }
 
-    /// The speed its keys ask for and the direction, when they ask for one; `dashing` in a swim
-    /// dash.
-    fn target(&self, intent: Intent, yaw: f32, dashing: bool) -> (f32, Option<[f32; 2]>) {
-        if intent.forward == 0 && intent.right == 0 {
-            return (0.0, None);
-        }
-        let (forward, right) = yaw_axes(yaw);
-        let (along, side) = (f32::from(intent.forward), f32::from(intent.right));
-        let length = along.hypot(side);
-        let heading = [
-            (along * forward[0] + side * right[0]) / length,
-            (along * forward[1] + side * right[1]) / length,
-        ];
-        let speed = if dashing {
-            SWIM_DASH_SPEED_MPS
-        } else if self.swimming {
-            SWIM_SPEED_MPS
-        } else if intent.block && intent.forward > 0 {
-            BLOCK_SPEED_MPS
-        } else if intent.block {
-            BLOCK_BACK_SPEED_MPS
-        } else if self.walking {
-            RUN_SPEED_MPS
-        } else if intent.forward < 0 {
-            BACK_SPEED_MPS
-        } else {
-            SPRINT_SPEED_MPS
-        };
-        (speed, Some(heading))
+    /// Whether it wades: on a floor out of the swim, its feet at least [`WADE_DEPTH_M`] under
+    /// the water `surface` there.
+    fn is_wading(&self, surface: Option<f32>) -> bool {
+        !self.swimming
+            && self.is_grounded()
+            && surface.is_some_and(|surface| surface - self.position.z >= WADE_DEPTH_M)
     }
 
-    /// How fast its speed rises and falls in its movement now, m/s².
-    const fn ramp(&self, intent: Intent) -> (f32, f32) {
+    /// The posture after the record's toggles (`ToggleCrouch`, `ToggleProne`: no change while
+    /// blocking; no prone in wading water) and the water (`ToggleCrouch` fires by itself for a
+    /// prone body in water deeper than very shallow and for a crouching one deeper than
+    /// shallow: the prone body crouches, the crouching swimmer stands).
+    fn change_posture(&mut self, intent: Intent, wading: bool) {
+        // No toggle while blocking, nor before the posture change's marker (`ToggleCrouch` and
+        // `ToggleProne`: `CanTransition`, or no `Idle_PostureTransition` playing).
+        if !intent.block && self.posture_change_s <= 0.0 {
+            if intent.crouch_toggle {
+                self.posture = self.posture.crouch_toggled();
+            }
+            if intent.prone_toggle && !wading && !self.swimming {
+                self.posture = self.posture.prone_toggled();
+            }
+        }
         if self.swimming {
-            (SWIM_ACCELERATION_MPS2, SWIM_DECELERATION_MPS2)
-        } else if intent.block {
-            (BLOCK_ACCELERATION_MPS2, BLOCK_ACCELERATION_MPS2)
-        } else {
-            (ACCELERATION_MPS2, DECELERATION_MPS2)
+            self.posture = Posture::Stand;
+        } else if wading && self.posture == Posture::Prone {
+            self.posture = Posture::Crouch;
         }
     }
 
-    /// Starts a jump on a new press of the jump key while it stands on a floor over `ground`.
-    fn start_jump(&mut self, held: bool, ground: &(impl Ground + ?Sized)) {
+    /// The dodge of a press with the keys of `intent` and camera yaw `yaw`
+    /// (`playeractions_dodge.actionlist`: forward along the keys; back with the back key or with
+    /// no key, straight back from the camera without one).
+    fn dodge_of(&self, intent: Intent, yaw: f32) -> Dodge {
+        let (forward, _) = yaw_axes(yaw);
+        let back = intent.forward < 0 || !intent.moves();
+        let direction = key_direction(intent, yaw).unwrap_or([-forward[0], -forward[1]]);
+        Dodge {
+            root: DodgeRoot::of(self.equip_load, back),
+            direction,
+            at_s: 0.0,
+        }
+    }
+
+    /// One record of the dodge `dodge`: the clip's distance in the record. After
+    /// [`DODGE_CONTROL_S`] a movement key ends it and the keys move the body on from the
+    /// dodge's speed; without one the clip runs to its end.
+    fn dodge_step(&mut self, dodge: Dodge, intent: Intent, dt_s: f32) -> f32 {
+        let end_s = dodge.at_s + dt_s;
+        let distance = dodge.root.distance(end_s) - dodge.root.distance(dodge.at_s);
+        self.heading = dodge.direction;
+        self.speed_mps = distance / dt_s;
+        let taken_over = end_s >= DODGE_CONTROL_S && intent.moves();
+        self.dodge = (!taken_over && end_s < dodge.root.length_s()).then_some(Dodge {
+            at_s: end_s,
+            ..dodge
+        });
+        distance
+    }
+
+    /// One record of the keys' motion: the new speed and heading; gives the distance.
+    fn key_step(
+        &mut self,
+        intent: Intent,
+        yaw: f32,
+        dt_s: f32,
+        dashing: bool,
+        wading: bool,
+    ) -> f32 {
+        if self.posture_change_s > 0.0 {
+            // The posture change holds the body: it slows in its own direction.
+            self.posture_change_s = (self.posture_change_s - dt_s).max(0.0);
+            self.speed_mps = (self.speed_mps - POSTURE_CHANGE_DECELERATION_MPS2 * dt_s).max(0.0);
+            self.sprint_s = 0.0;
+            return self.speed_mps * dt_s;
+        }
+        let heading = key_direction(intent, yaw);
+        self.heading = heading.unwrap_or(self.heading);
+        let pace = self.pace(intent, dashing, wading);
+        let target = if heading.is_some() {
+            pace.speed_mps
+        } else {
+            0.0
+        };
+        self.speed_mps = if dashing && heading.is_some() {
+            // The dash takes its speed at once (the dodge inherits it).
+            target
+        } else if target >= self.speed_mps {
+            (self.speed_mps + pace.acceleration_mps2 * dt_s).min(target)
+        } else {
+            (self.speed_mps - pace.deceleration_mps2 * dt_s).max(target)
+        };
+        let travel_sprint = heading.is_some()
+            && self.posture == Posture::Stand
+            && !(dashing || self.swimming || wading || intent.block || intent.walk)
+            && !self.walking
+            && self.equip_load != EquipLoad::Overburdened
+            && intent.forward >= 0;
+        if travel_sprint {
+            self.sprint_s += dt_s;
+        } else if self.is_grounded() {
+            self.sprint_s = 0.0;
+        }
+        self.speed_mps * dt_s
+    }
+
+    /// The speed its keys ask for in its mode now, and how fast it gets there; `dashing` in a
+    /// swim dash, `wading` in shallow water. The order is the action lists' (`Wade` first, then
+    /// `Block_Nav_Speed`, the walk rows, the posture rows).
+    fn pace(&self, intent: Intent, dashing: bool, wading: bool) -> Pace {
+        let back = intent.forward < 0;
+        // An overburdened body does not sprint (`SprintDisabled`: `Overburdened`): it runs.
+        let running = self.walking || self.equip_load == EquipLoad::Overburdened;
+        let slow = back || running || intent.walk || intent.block;
+        if dashing {
+            return Pace::even(SWIM_DASH_SPEED_MPS, SWIM_DECELERATION_MPS2);
+        }
+        if self.swimming {
+            return Pace {
+                speed_mps: SWIM_SPEED_MPS,
+                acceleration_mps2: SWIM_ACCELERATION_MPS2,
+                deceleration_mps2: SWIM_DECELERATION_MPS2,
+            };
+        }
+        if wading {
+            return match (slow, self.posture) {
+                (true, _) => Pace::even(WADE_SLOW_SPEED_MPS, WADE_SLOW_ACCELERATION_MPS2),
+                (false, Posture::Stand) => Pace::even(WADE_SPEED_MPS, ACCELERATION_MPS2),
+                (false, Posture::Crouch | Posture::Prone) => {
+                    Pace::even(WADE_CROUCH_SPEED_MPS, ACCELERATION_MPS2)
+                }
+            };
+        }
+        if intent.block {
+            let speed = if intent.forward > 0 {
+                BLOCK_SPEED_MPS
+            } else {
+                BLOCK_BACK_SPEED_MPS
+            };
+            return Pace::even(speed, BLOCK_ACCELERATION_MPS2);
+        }
+        let prone_slow = |speed_mps| Pace {
+            speed_mps,
+            acceleration_mps2: PRONE_SLOW_ACCELERATION_MPS2,
+            deceleration_mps2: PRONE_SLOW_DECELERATION_MPS2,
+        };
+        match self.posture {
+            Posture::Stand if intent.walk => Pace::even(WALK_SPEED_MPS, WALK_ACCELERATION_MPS2),
+            Posture::Crouch if intent.walk => {
+                Pace::even(CROUCH_WALK_SPEED_MPS, CROUCH_WALK_ACCELERATION_MPS2)
+            }
+            Posture::Prone if intent.walk => prone_slow(PRONE_WALK_SPEED_MPS),
+            Posture::Stand if running => Pace::even(RUN_SPEED_MPS, ACCELERATION_MPS2),
+            Posture::Crouch if running => {
+                Pace::even(CROUCH_RUN_SPEED_MPS, CROUCH_RUN_ACCELERATION_MPS2)
+            }
+            Posture::Prone if running => prone_slow(PRONE_RUN_SPEED_MPS),
+            Posture::Stand if back => Pace::even(BACK_SPEED_MPS, ACCELERATION_MPS2),
+            Posture::Crouch if back => {
+                Pace::even(CROUCH_BACK_SPEED_MPS, CROUCH_BACK_ACCELERATION_MPS2)
+            }
+            Posture::Prone if back => Pace::even(PRONE_BACK_SPEED_MPS, ACCELERATION_MPS2),
+            Posture::Stand => Pace {
+                speed_mps: SPRINT_SPEED_MPS * self.sprint_speed_mod(),
+                acceleration_mps2: ACCELERATION_MPS2,
+                deceleration_mps2: DECELERATION_MPS2,
+            },
+            Posture::Crouch => Pace::even(CROUCH_SPEED_MPS, ACCELERATION_MPS2),
+            Posture::Prone => Pace::even(PRONE_SPEED_MPS, ACCELERATION_MPS2),
+        }
+    }
+
+    /// The sprint speed's factor: 1 plus the road boost's `SprintSpeedMod` while it lasts.
+    fn sprint_speed_mod(&self) -> f32 {
+        if self.has_road_boost() {
+            1.0 + ROAD_SPRINT_SPEED_MOD
+        } else {
+            1.0
+        }
+    }
+
+    /// The road boost after a record of `dt_s` (`Traversal_Road_Sprint_Speed_Boost`): on a road
+    /// of `ground` after [`ROAD_SPRINT_DELAY_S`] of standing sprint and out of combat it lasts
+    /// [`ROAD_HASTE_S`] from now; else it runs down.
+    fn update_road_boost(&mut self, ground: &(impl Ground + ?Sized), dt_s: f32) {
+        self.combat_s = (self.combat_s - dt_s).max(0.0);
+        let Position { x, y, z } = self.position;
+        let near_terrain = ground
+            .height_at(x, y)
+            .is_some_and(|terrain| (z - terrain).abs() <= ROAD_HEIGHT_THRESHOLD_M);
+        let on_road = near_terrain && ground.road_share(x, y) >= ROAD_SHARE_MIN;
+        self.road_boost_on =
+            on_road && self.sprint_s >= ROAD_SPRINT_DELAY_S && self.combat_s == 0.0;
+        if self.road_boost_on {
+            self.road_haste_s = ROAD_HASTE_S;
+        } else {
+            self.road_haste_s = (self.road_haste_s - dt_s).max(0.0);
+        }
+    }
+
+    /// Starts a jump on a new press of the jump key while it stands on a floor.
+    fn start_jump(&mut self, held: bool) {
         let pressed = held && !self.jump_held;
         self.jump_held = held;
         if pressed && self.vertical == Vertical::Grounded {
             self.vertical = if self.speed_mps == 0.0 {
                 Vertical::WindUp(STANDING_JUMP_WIND_UP)
             } else {
-                self.lift(ground)
+                Vertical::Jumping(JUMP_SPEED_MPS)
             };
         }
     }
 
-    /// A jump that leaves the floor now over `ground`.
-    fn lift(&self, ground: &(impl Ground + ?Sized)) -> Vertical {
-        Vertical::Jumping {
-            rise: JUMP_SPEED_MPS,
-            takeoff_floor: (!self.on_terrain(ground)).then_some(self.position.z),
-        }
-    }
-
-    /// Whether it stands on the terrain of `ground` (within a step above it, or below it), not
-    /// on a floor high above it that the server does not know.
-    fn on_terrain(&self, ground: &(impl Ground + ?Sized)) -> bool {
-        ground
-            .height_at(self.position.x, self.position.y)
-            .is_some_and(|terrain| self.position.z - terrain <= STEP_DOWN_M)
-    }
-
-    /// A walk to `next` on the floor: along a floor within a step, the distance is along the
-    /// slope; a floor further down starts a fall from the terrain; a floor further up, or none,
-    /// or one further down under a body that is not on the terrain, is not known here and the
-    /// body keeps its height.
-    fn walk(&mut self, next: &mut Position, distance: f32, ground: &(impl Ground + ?Sized)) {
-        let Some(floor) = ground.floor_at(next.x, next.y, next.z) else {
+    /// A walk to `next` on the floor (the floor of `ground`, or the water at `swim` where that is
+    /// higher): along a floor within a step, the distance is along its slope; a floor further
+    /// down starts a fall; a floor further up is an obstacle and the body keeps its height; with
+    /// no floor known (no height data) it keeps its height.
+    ///
+    /// On the terrain the slope is the floor's rise in the record (module comment). A structure's
+    /// physics mesh is no smooth slope (a rock pile's triangles rise and fall by up to a step from
+    /// one record to the next), so its slope is the rise across the body's capsule
+    /// ([`PLAYER_RADIUS_M`] ahead and behind), and only a climb shortens the step. Replay of the
+    /// retail captures with the level collision (level-collision note 2026-09-20): with the
+    /// per-record rise on structures too, a median of 0.59 m from retail's own place in the
+    /// tutorial; with no slope on structures 0.221 m and 1,370 pull-backs; with the climb across
+    /// the capsule 0.226 m and 1,314 pull-backs (open world 1,611 and 1,580, 1,495 and 1,460; a
+    /// climb or descent across the capsule: 1,283 in the tutorial but medians up to 0.026 m
+    /// worse).
+    fn walk(
+        &mut self,
+        next: &mut Position,
+        distance: f32,
+        ground: &(impl Ground + ?Sized),
+        swim: f32,
+    ) {
+        let start = self.position;
+        let floor_at = |at: &Position| {
+            ground
+                .floor_at(at.x, at.y, at.z)
+                .map(|floor| floor.max(swim))
+        };
+        let Some(floor) = floor_at(next) else {
             return;
         };
         let rise = floor - next.z;
@@ -430,42 +1070,51 @@ impl Character {
             return;
         }
         if -rise > STEP_DOWN_M {
-            if self.on_terrain(ground) {
-                self.vertical = Vertical::Falling(0.0);
-            }
+            self.vertical = Vertical::Falling(0.0);
             return;
         }
-        if distance > 0.0 {
+        let on_terrain = ground
+            .height_at(next.x, next.y)
+            .is_some_and(|terrain| (terrain - floor).abs() <= f32::EPSILON);
+        let slope_rise = if on_terrain {
+            Some(rise)
+        } else {
+            let floor_along = |offset: f32| {
+                ground
+                    .floor_at(
+                        next.x + self.heading[0] * offset,
+                        next.y + self.heading[1] * offset,
+                        floor,
+                    )
+                    .map(|floor| floor.max(swim))
+            };
+            floor_along(PLAYER_RADIUS_M)
+                .zip(floor_along(-PLAYER_RADIUS_M))
+                .map(|(ahead, behind)| (ahead - behind) / (2.0 * PLAYER_RADIUS_M) * distance)
+                .filter(|climb| *climb > 0.0)
+        };
+        if let Some(rise) = slope_rise.filter(|_| distance > 0.0) {
             let along = distance / distance.hypot(rise);
-            let start = self.position;
             next.x = start.x + (next.x - start.x) * along;
             next.y = start.y + (next.y - start.y) * along;
         }
-        next.z = ground.floor_at(next.x, next.y, next.z).unwrap_or(floor);
+        next.z = floor_at(next).unwrap_or(floor);
     }
 
-    /// One record in the air: up by the rise, pulled down, and onto the floor when it reaches it
-    /// (the floor of `ground`, or the fall's lowest floor when that is higher). Where no floor is
-    /// known at all (no height data), it stays at its height: nothing says it may fall. Gives the
-    /// rise after the record, or `None` when it landed.
+    /// One record in the air: up by `rise`, pulled down by `gravity`, and onto the floor of
+    /// `ground` when it reaches it. Where no floor is known at all (no height data), it stays at
+    /// its height: nothing says it may fall. Gives the rise after the record, or `None` when it
+    /// landed.
     fn fly(
         &self,
         next: &mut Position,
-        fall: Fall,
+        rise: f32,
+        gravity: f32,
         dt_s: f32,
         ground: &(impl Ground + ?Sized),
     ) -> Option<f32> {
-        let Fall {
-            rise,
-            gravity,
-            at_least,
-        } = fall;
         next.z += rise * dt_s - gravity * dt_s * dt_s / 2.0;
-        let floor = match (ground.floor_at(next.x, next.y, self.position.z), at_least) {
-            (Some(floor), Some(lowest)) => Some(floor.max(lowest)),
-            (floor, lowest) => floor.or(lowest),
-        };
-        match floor {
+        match ground.floor_at(next.x, next.y, self.position.z) {
             Some(floor) if next.z <= floor => {
                 next.z = floor;
                 None
@@ -477,17 +1126,6 @@ impl Character {
             }
         }
     }
-}
-
-/// One record of a body in the air.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Fall {
-    /// Its upward speed, m/s (falling below 0).
-    rise: f32,
-    /// The pull down, m/s².
-    gravity: f32,
-    /// The lowest floor it lands on, when it is one the server does not know.
-    at_least: Option<f32>,
 }
 
 #[cfg(test)]
@@ -638,6 +1276,43 @@ mod tests {
         let along = (after.x - before.x).hypot(after.z - before.z);
         assert!((along - SPRINT_SPEED_MPS * DT).abs() < 1e-3, "{along}");
         assert!((after.z - after.x).abs() < CLOSE, "on the ramp");
+    }
+
+    #[test]
+    fn on_a_structure_a_climb_is_along_it_and_a_descent_is_not() {
+        /// A 45° rock ramp up to the east, 50 m over the terrain.
+        struct RockRamp;
+        impl Ground for RockRamp {
+            fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+                Some(-50.0)
+            }
+            fn floor_at(&self, x: f32, _: f32, z: f32) -> Option<f32> {
+                Some(if x <= z + 1.0 { x } else { -50.0 })
+            }
+        }
+        let step = |character: &mut Character, right: i8| {
+            let before = character.position();
+            character.step(input(0, right), &RockRamp, SEA);
+            (character.position().x - before.x).abs()
+        };
+        let mut character = Character::new(origin());
+        for _ in 0..60 {
+            step(&mut character, 1);
+        }
+        let climb = step(&mut character, 1);
+        assert!(
+            (climb - SPRINT_SPEED_MPS * DT / 2.0_f32.sqrt()).abs() < 1e-3,
+            "{climb}"
+        );
+        for _ in 0..60 {
+            step(&mut character, -1);
+        }
+        let descent = step(&mut character, -1);
+        assert!((descent - SPRINT_SPEED_MPS * DT).abs() < 1e-3, "{descent}");
+        assert!(
+            (character.position().z - character.position().x).abs() < CLOSE,
+            "on the ramp"
+        );
     }
 
     #[test]
@@ -805,12 +1480,495 @@ mod tests {
         );
     }
 
+    fn keyed(forward: i8, right: i8, change: impl Fn(&mut Intent)) -> CharacterInput {
+        let mut keys = input(forward, right);
+        change(&mut keys.intent);
+        keys
+    }
+
+    /// The speed along the ground plane, m/s.
+    fn speed(character: &Character) -> f32 {
+        let [x, y] = character.velocity();
+        x.hypot(y)
+    }
+
+    /// Records of 1/30 s in the dodge's hold ([`DODGE_CONTROL_S`]).
+    const DODGE_RECORDS: usize = 15;
+    /// Records after the hold until the run is back at its speed (retail: 2 to 3; one more for
+    /// the record in which the hold ends).
+    const RUN_BACK_RECORDS: usize = 4;
+    /// Records of 1/30 s of the back dodge clip (frame 38).
+    const BACK_CLIP_RECORDS: usize = 38;
+
     #[test]
-    fn a_dodge_on_land_is_no_dash() {
+    fn a_land_dodge_moves_the_body_by_the_clip_root_then_the_run_takes_over() {
+        // Retail newchar: forward dodges with the key held were 2.61 to 2.69 m from the press at
+        // 0.5 s, and the run was back at 5.4 to 5.5 m/s 2 to 3 records later.
+        const RETAIL_AT_HOLD_END_M: [f32; 2] = [2.61, 2.69];
+        let mut character = Character::new(origin());
+        character.set_equip_load(EquipLoad::Slow);
+        run(&mut character, 30, 1, 0);
+        let pressed_at = character.position().y;
+        let dodge = keyed(1, 0, |keys| keys.dodge = true);
+        for _ in 0..DODGE_RECORDS {
+            character.step(dodge, &Flat, SEA);
+        }
+        let gone = character.position().y - pressed_at;
+        assert!(
+            (RETAIL_AT_HOLD_END_M[0]..=RETAIL_AT_HOLD_END_M[1]).contains(&gone),
+            "{gone}"
+        );
+        assert!(!character.is_resting());
+        for _ in 0..RUN_BACK_RECORDS {
+            character.step(dodge, &Flat, SEA);
+        }
+        assert!(
+            (speed(&character) - SPRINT_SPEED_MPS).abs() < CLOSE,
+            "the run"
+        );
+    }
+
+    #[test]
+    fn a_dodge_without_keys_goes_back_from_the_camera_for_the_whole_clip() {
+        /// Past the end of every clip, s.
+        const AFTER_CLIP_S: f32 = 2.0;
+        let mut character = Character::new(origin());
+        character.set_equip_load(EquipLoad::Slow);
+        let dodge = keyed(0, 0, |keys| keys.dodge = true);
+        for _ in 0..BACK_CLIP_RECORDS {
+            character.step(dodge, &Flat, SEA);
+        }
+        // The root times the multiplier to the marker's end, the root alone after it.
+        let back = DodgeRoot::of(EquipLoad::Slow, true).distance(AFTER_CLIP_S);
+        let root_end = SLOW_DODGE_BACK_ROOT[SLOW_DODGE_BACK_ROOT.len() - 1].1;
+        assert!(back > root_end && back < root_end * SLOW_DODGE_TRANSLATION);
+        assert!(
+            (character.position().y + back).abs() < 1e-3,
+            "{:?}",
+            character.position()
+        );
+        assert!(character.position().x.abs() < CLOSE);
+        character.step(input(0, 0), &Flat, SEA);
+        assert!(
+            character.is_resting(),
+            "the clip ended, holding the key starts no other"
+        );
+    }
+
+    #[test]
+    fn a_normal_load_dodges_the_quick_step_and_an_overburdened_one_neither_dodges_nor_sprints() {
+        // Retail `walk_running_crouch_prone` record 3328, a back dodge of the normal class:
+        // 3.55 m at 0.5 s.
+        const RETAIL_NORMAL_BACK_M: f32 = 3.55;
+        const RETAIL_TOLERANCE_M: f32 = 0.06;
+        let mut normal = Character::new(origin());
+        let dodge = keyed(-1, 0, |keys| keys.dodge = true);
+        for _ in 0..DODGE_RECORDS {
+            normal.step(dodge, &Flat, SEA);
+        }
+        let back = -normal.position().y;
+        assert!(
+            (back - RETAIL_NORMAL_BACK_M).abs() < RETAIL_TOLERANCE_M,
+            "{back}"
+        );
+        let mut fast = Character::new(origin());
+        fast.set_equip_load(EquipLoad::Fast);
+        for _ in 0..DODGE_RECORDS {
+            fast.step(keyed(1, 0, |keys| keys.dodge = true), &Flat, SEA);
+        }
+        assert!(fast.position().y > back, "the light roll goes farther");
+        let mut heavy = Character::new(origin());
+        heavy.set_equip_load(EquipLoad::Overburdened);
+        assert!((settle(&mut heavy, input(1, 0)) - RUN_SPEED_MPS).abs() < CLOSE);
+        heavy.step(keyed(1, 0, |keys| keys.dodge = true), &Flat, SEA);
+        assert!((speed(&heavy) - RUN_SPEED_MPS).abs() < CLOSE, "no dodge");
+    }
+
+    #[test]
+    fn a_dodge_in_wading_water_or_in_the_air_moves_nothing() {
+        let mut wader = Character::new(Position {
+            z: SHALLOW_FLOOR_M,
+            ..origin()
+        });
+        wader.step(
+            keyed(0, 0, |keys| keys.dodge = true),
+            &Shallows,
+            TUTORIAL_SEA,
+        );
+        assert!(wader.is_resting());
+        let mut jumper = Character::new(origin());
+        run(&mut jumper, 30, 1, 0);
+        jumper.step(keyed(1, 0, |keys| keys.jump = true), &Flat, SEA);
+        jumper.step(keyed(1, 0, |keys| keys.dodge = true), &Flat, SEA);
+        assert!(
+            (speed(&jumper) - SPRINT_SPEED_MPS).abs() < CLOSE,
+            "no dodge"
+        );
+    }
+
+    /// Records of 1/30 s to reach any speed from any other.
+    const SETTLE: usize = 120;
+
+    fn settle(character: &mut Character, keys: CharacterInput) -> f32 {
+        for _ in 0..SETTLE {
+            character.step(keys, &Flat, SEA);
+        }
+        speed(character)
+    }
+
+    #[test]
+    fn the_crouch_and_prone_toggles_pick_the_posture_speeds() {
+        let mut character = Character::new(origin());
+        character.step(keyed(0, 0, |keys| keys.crouch_toggle = true), &Flat, SEA);
+        assert_eq!(character.posture(), Posture::Crouch);
+        assert!((settle(&mut character, input(1, 0)) - CROUCH_SPEED_MPS).abs() < CLOSE);
+        assert!((settle(&mut character, input(0, 1)) - CROUCH_SPEED_MPS).abs() < CLOSE);
+        assert!((settle(&mut character, input(-1, 0)) - CROUCH_BACK_SPEED_MPS).abs() < CLOSE);
+        let walk = keyed(1, 0, |keys| keys.walk = true);
+        assert!((settle(&mut character, walk) - CROUCH_WALK_SPEED_MPS).abs() < CLOSE);
+        character.step(keyed(1, 0, |keys| keys.prone_toggle = true), &Flat, SEA);
+        assert_eq!(character.posture(), Posture::Prone);
+        assert!((settle(&mut character, input(1, 0)) - PRONE_SPEED_MPS).abs() < CLOSE);
+        assert!((settle(&mut character, input(-1, 0)) - PRONE_BACK_SPEED_MPS).abs() < CLOSE);
+        assert!((settle(&mut character, walk) - PRONE_WALK_SPEED_MPS).abs() < CLOSE);
+        character.step(keyed(1, 0, |keys| keys.crouch_toggle = true), &Flat, SEA);
+        assert_eq!(character.posture(), Posture::Crouch, "prone to crouch");
+        settle(&mut character, input(1, 0));
+        character.step(keyed(1, 0, |keys| keys.prone_toggle = true), &Flat, SEA);
+        assert_eq!(character.posture(), Posture::Prone);
+        character.step(keyed(1, 0, |keys| keys.crouch_toggle = true), &Flat, SEA);
+        assert_eq!(
+            character.posture(),
+            Posture::Prone,
+            "no toggle in the change"
+        );
+        settle(&mut character, input(1, 0));
+        character.step(keyed(1, 0, |keys| keys.prone_toggle = true), &Flat, SEA);
+        assert_eq!(character.posture(), Posture::Stand, "prone to standing");
+        assert!((settle(&mut character, walk) - WALK_SPEED_MPS).abs() < CLOSE);
+        assert!((settle(&mut character, input(1, 0)) - SPRINT_SPEED_MPS).abs() < CLOSE);
+    }
+
+    #[test]
+    fn going_prone_from_a_sprint_slows_the_body_to_rest_then_it_crawls() {
+        // Retail `walk_running_crouch_prone` record 1855: 1.96 m from the press to rest at 0.63 s.
+        const RETAIL_DIVE_M: f32 = 1.96;
+        const DIVE_TOLERANCE_M: f32 = 0.25;
+        /// Retail's speed at the marker, record 1875: 0.6 m/s.
+        const RETAIL_RESUME_MPS: f32 = 0.6;
+        /// Records of 1/30 s to the `ResumeSprint` marker of `Prone+FromStand` (0.667 s).
+        const PRONE_CHANGE_RECORDS: usize = 20;
         let mut character = Character::new(origin());
         run(&mut character, 30, 1, 0);
-        character.step(moving(1, 0, false, true), &Flat, SEA);
-        assert!((character.velocity()[1] - SPRINT_SPEED_MPS).abs() < CLOSE);
+        let pressed_at = character.position().y;
+        character.step(keyed(1, 0, |keys| keys.prone_toggle = true), &Flat, SEA);
+        for _ in 1..PRONE_CHANGE_RECORDS {
+            character.step(input(1, 0), &Flat, SEA);
+        }
+        let dive = character.position().y - pressed_at;
+        assert!((dive - RETAIL_DIVE_M).abs() < DIVE_TOLERANCE_M, "{dive}");
+        assert!(speed(&character) < RETAIL_RESUME_MPS, "near rest");
+        assert!((settle(&mut character, input(1, 0)) - PRONE_SPEED_MPS).abs() < CLOSE);
+        // From rest with the key held, the body waits for the marker.
+        let mut lying = Character::new(origin());
+        lying.step(keyed(1, 0, |keys| keys.prone_toggle = true), &Flat, SEA);
+        for _ in 1..PRONE_CHANGE_RECORDS - 1 {
+            lying.step(input(1, 0), &Flat, SEA);
+        }
+        assert!(lying.position().y.abs() < CLOSE, "still in the change");
+        for _ in 0..3 {
+            lying.step(input(1, 0), &Flat, SEA);
+        }
+        assert!(lying.position().y > 0.0, "it crawls");
+    }
+
+    #[test]
+    fn standing_up_from_a_crouch_has_no_hold() {
+        let mut character = Character::new(origin());
+        character.step(keyed(0, 0, |keys| keys.crouch_toggle = true), &Flat, SEA);
+        assert!((settle(&mut character, input(1, 0)) - CROUCH_SPEED_MPS).abs() < CLOSE);
+        character.step(keyed(1, 0, |keys| keys.crouch_toggle = true), &Flat, SEA);
+        assert!(speed(&character) > CROUCH_SPEED_MPS, "it speeds up at once");
+    }
+
+    #[test]
+    fn the_walk_toggle_in_a_posture_picks_its_run_row_and_block_keeps_the_posture() {
+        let mut character = Character::new(origin());
+        character.step(keyed(0, 0, |keys| keys.walk_toggle = true), &Flat, SEA);
+        character.step(keyed(0, 0, |keys| keys.crouch_toggle = true), &Flat, SEA);
+        assert!((settle(&mut character, input(1, 0)) - CROUCH_RUN_SPEED_MPS).abs() < CLOSE);
+        assert!((settle(&mut character, input(-1, 0)) - CROUCH_RUN_SPEED_MPS).abs() < CLOSE);
+        character.step(keyed(0, 0, |keys| keys.prone_toggle = true), &Flat, SEA);
+        assert!((settle(&mut character, input(1, 0)) - PRONE_RUN_SPEED_MPS).abs() < CLOSE);
+        let blocked = keyed(0, 0, |keys| {
+            keys.block = true;
+            keys.crouch_toggle = true;
+        });
+        character.step(blocked, &Flat, SEA);
+        assert_eq!(
+            character.posture(),
+            Posture::Prone,
+            "no toggle while blocking"
+        );
+    }
+
+    /// The tutorial sea's floor 1 m under the sea east of x 0 and 0.5 m under it west of it.
+    struct Shallows;
+
+    /// The feet's depth of [`Shallows`] east and west, m.
+    const SHALLOW_FLOOR_M: f32 = TUTORIAL_SEA - 1.0;
+    const BEACH_FLOOR_M: f32 = TUTORIAL_SEA - 0.5;
+
+    impl Ground for Shallows {
+        fn height_at(&self, x: f32, _: f32) -> Option<f32> {
+            Some(if x >= 0.0 {
+                SHALLOW_FLOOR_M
+            } else {
+                BEACH_FLOOR_M
+            })
+        }
+    }
+
+    fn settle_in(character: &mut Character, keys: CharacterInput) -> f32 {
+        for _ in 0..SETTLE {
+            character.step(keys, &Shallows, TUTORIAL_SEA);
+        }
+        speed(character)
+    }
+
+    #[test]
+    fn a_body_in_wading_water_moves_at_the_wade_speeds_and_rises_from_prone() {
+        // North along x 10: 1 m deep the whole way.
+        let mut character = Character::new(Position {
+            x: 10.0,
+            y: 0.0,
+            z: SHALLOW_FLOOR_M,
+        });
+        assert!((settle_in(&mut character, input(1, 0)) - WADE_SPEED_MPS).abs() < CLOSE);
+        assert!((settle_in(&mut character, input(-1, 0)) - WADE_SLOW_SPEED_MPS).abs() < CLOSE);
+        character.step(
+            keyed(0, 0, |keys| keys.prone_toggle = true),
+            &Shallows,
+            TUTORIAL_SEA,
+        );
+        assert_eq!(
+            character.posture(),
+            Posture::Stand,
+            "no prone in wading water"
+        );
+        character.step(
+            keyed(0, 0, |keys| keys.crouch_toggle = true),
+            &Shallows,
+            TUTORIAL_SEA,
+        );
+        assert!((settle_in(&mut character, input(1, 0)) - WADE_CROUCH_SPEED_MPS).abs() < CLOSE);
+        // West of x 0 the feet are 0.5 m deep: no wading, and a prone body walks into the deeper
+        // water and crouches.
+        let mut beach = Character::new(Position {
+            x: -10.0,
+            y: 0.0,
+            z: BEACH_FLOOR_M,
+        });
+        assert!((settle_in(&mut beach, input(1, 0)) - SPRINT_SPEED_MPS).abs() < CLOSE);
+        beach.step(
+            keyed(0, 0, |keys| keys.prone_toggle = true),
+            &Shallows,
+            TUTORIAL_SEA,
+        );
+        assert_eq!(beach.posture(), Posture::Prone);
+        for _ in 0..SETTLE * 4 {
+            beach.step(input(0, 1), &Shallows, TUTORIAL_SEA);
+        }
+        assert!(beach.position().x > 0.0);
+        assert_eq!(beach.posture(), Posture::Crouch);
+    }
+
+    /// A lake 1 m deep over flat ground at 99 m, its surface at 100 m, far above the sea.
+    struct Lake;
+    const LAKE_BED_M: f32 = 99.0;
+    const LAKE_SURFACE_M: f32 = 100.0;
+
+    impl Ground for Lake {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(LAKE_BED_M)
+        }
+
+        fn water_surface(&self, _: f32, _: f32, _: f32) -> Option<f32> {
+            Some(LAKE_SURFACE_M)
+        }
+    }
+
+    #[test]
+    fn a_lake_s_surface_makes_the_body_wade_and_a_dry_map_place_does_not() {
+        let mut wader = Character::new(Position {
+            z: LAKE_BED_M,
+            ..origin()
+        });
+        for _ in 0..SETTLE {
+            wader.step(input(1, 0), &Lake, SEA);
+        }
+        assert!((speed(&wader) - WADE_SPEED_MPS).abs() < CLOSE);
+        /// A water map that knows no water here, over ground under the sea's level.
+        struct Dry;
+        impl Ground for Dry {
+            fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+                Some(0.0)
+            }
+
+            fn water_surface(&self, _: f32, _: f32, _: f32) -> Option<f32> {
+                None
+            }
+        }
+        const HIGH_SEA_M: f32 = 10.0;
+        let mut walker = Character::new(origin());
+        for _ in 0..SETTLE {
+            walker.step(input(1, 0), &Dry, HIGH_SEA_M);
+        }
+        assert!((speed(&walker) - SPRINT_SPEED_MPS).abs() < CLOSE);
+        assert!(
+            walker.position().z.abs() < CLOSE,
+            "on the ground, not swimming"
+        );
+    }
+
+    /// Flat ground that is road east of x 0.
+    struct Road;
+
+    impl Ground for Road {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(0.0)
+        }
+
+        fn road_share(&self, x: f32, _: f32) -> f32 {
+            if x >= 0.0 { 1.0 } else { 0.0 }
+        }
+    }
+
+    /// Records of 1/30 s in [`ROAD_SPRINT_DELAY_S`] and [`ROAD_HASTE_S`].
+    const ROAD_DELAY_RECORDS: usize = 90;
+    /// Records of 1/30 s in [`ROAD_COMBAT_S`].
+    const COMBAT_RECORDS: usize = 150;
+    /// Records west at the boosted sprint from x 1 to off the road (0.21 m a record).
+    const OFF_ROAD_RECORDS: usize = 10;
+
+    #[test]
+    fn a_sprint_on_a_road_speeds_up_after_the_delay_and_the_boost_outlasts_the_road() {
+        let boosted = SPRINT_SPEED_MPS * (1.0 + ROAD_SPRINT_SPEED_MOD);
+        let mut character = Character::new(Position { x: 1.0, ..origin() });
+        let north = input(1, 0);
+        for _ in 0..ROAD_DELAY_RECORDS - 1 {
+            character.step(north, &Road, SEA);
+        }
+        assert!(!character.has_road_boost(), "not before the delay");
+        assert!((speed(&character) - SPRINT_SPEED_MPS).abs() < CLOSE);
+        for _ in 0..2 {
+            character.step(north, &Road, SEA);
+        }
+        assert!(character.has_road_boost());
+        for _ in 0..3 {
+            character.step(north, &Road, SEA);
+        }
+        assert!(
+            (speed(&character) - boosted).abs() < CLOSE,
+            "{}",
+            speed(&character)
+        );
+        // West off the road: the boost lasts its 3 s.
+        let west = input(0, -1);
+        for _ in 0..ROAD_DELAY_RECORDS - 2 {
+            character.step(west, &Road, SEA);
+        }
+        assert!(character.position().x < 0.0);
+        assert!((speed(&character) - boosted).abs() < CLOSE);
+        for _ in 0..ROAD_DELAY_RECORDS {
+            character.step(west, &Road, SEA);
+        }
+        assert!((speed(&character) - SPRINT_SPEED_MPS).abs() < CLOSE);
+    }
+
+    #[test]
+    fn combat_ends_the_road_boost_and_keeps_it_off() {
+        let mut character = Character::new(Position { x: 1.0, ..origin() });
+        let north = input(1, 0);
+        for _ in 0..ROAD_DELAY_RECORDS + 1 {
+            character.step(north, &Road, SEA);
+        }
+        assert!(character.has_road_boost());
+        character.enter_combat();
+        assert!(!character.has_road_boost());
+        for _ in 0..COMBAT_RECORDS - 1 {
+            character.step(north, &Road, SEA);
+        }
+        assert!(!character.has_road_boost(), "the combat timer");
+        for _ in 0..2 {
+            character.step(north, &Road, SEA);
+        }
+        assert!(
+            character.has_road_boost(),
+            "it sprinted on the road all along"
+        );
+        character.step(keyed(1, 0, |keys| keys.block = true), &Road, SEA);
+        assert!(!character.has_road_boost(), "a block");
+    }
+
+    #[test]
+    fn combat_off_the_road_or_before_the_boost_leaves_it_alone() {
+        // Off the road the boost's action is off: a hit keeps the boost's last seconds.
+        let mut character = Character::new(Position { x: 1.0, ..origin() });
+        for _ in 0..ROAD_DELAY_RECORDS + 1 {
+            character.step(input(1, 0), &Road, SEA);
+        }
+        for _ in 0..OFF_ROAD_RECORDS {
+            character.step(input(0, -1), &Road, SEA);
+        }
+        assert!(character.position().x < 0.0);
+        character.enter_combat();
+        assert!(character.has_road_boost(), "the tail stays");
+        // On the road before the delay: no combat timer, the boost comes on time.
+        let mut early = Character::new(Position { x: 1.0, ..origin() });
+        early.step(input(1, 0), &Road, SEA);
+        early.enter_combat();
+        for _ in 0..ROAD_DELAY_RECORDS {
+            early.step(input(1, 0), &Road, SEA);
+        }
+        assert!(early.has_road_boost());
+    }
+
+    #[test]
+    fn a_road_far_under_the_body_gives_no_boost() {
+        /// Road under a bridge 5 m over the terrain.
+        struct Bridge;
+        const BRIDGE_M: f32 = 5.0;
+        impl Ground for Bridge {
+            fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+                Some(0.0)
+            }
+            fn floor_at(&self, _: f32, _: f32, _: f32) -> Option<f32> {
+                Some(BRIDGE_M)
+            }
+            fn road_share(&self, _: f32, _: f32) -> f32 {
+                1.0
+            }
+        }
+        let mut character = Character::new(Position {
+            z: BRIDGE_M,
+            ..origin()
+        });
+        for _ in 0..ROAD_DELAY_RECORDS * 2 {
+            character.step(input(1, 0), &Bridge, SEA);
+        }
+        assert!(!character.has_road_boost());
+    }
+
+    #[test]
+    fn a_crouched_sprint_on_a_road_gets_no_boost() {
+        let mut character = Character::new(Position { x: 1.0, ..origin() });
+        character.step(keyed(0, 0, |keys| keys.crouch_toggle = true), &Road, SEA);
+        for _ in 0..ROAD_DELAY_RECORDS * 2 {
+            character.step(input(1, 0), &Road, SEA);
+        }
+        assert!(!character.has_road_boost());
+        assert!((speed(&character) - CROUCH_SPEED_MPS).abs() < CLOSE);
     }
 
     /// The `ftue_v2` terrain under the tutorial's move into the water, m.
@@ -916,19 +2074,27 @@ mod tests {
         assert!(character.position().z.abs() < CLOSE);
     }
 
-    /// The tutorial ship: its deck is not in the height map, the terrain is 39 m under it.
-    struct UnderTheShip;
+    /// The `ftue_v2` terrain under the tutorial ship, m.
+    const SHIP_TERRAIN_M: f32 = 50.0;
+    /// The ship's deck (the galleon's physics asset at the tutorial start; retail own place
+    /// 89.38 m), m.
+    const DECK_M: f32 = 89.38;
+    /// The deck spans y from -10 to 10 m.
+    const DECK_HALF_M: f32 = 10.0;
 
-    impl Ground for UnderTheShip {
+    /// The tutorial ship as the level's ground knows it: its deck over the terrain.
+    struct Ship;
+
+    impl Ground for Ship {
         fn height_at(&self, _: f32, _: f32) -> Option<f32> {
             Some(SHIP_TERRAIN_M)
         }
-    }
 
-    /// The `ftue_v2` terrain under the tutorial ship, m.
-    const SHIP_TERRAIN_M: f32 = 50.0;
-    /// The ship's deck (retail own places 89.37 to 89.50 m), m.
-    const DECK_M: f32 = 89.42;
+        fn floor_at(&self, _: f32, y: f32, z: f32) -> Option<f32> {
+            let on_deck = y.abs() <= DECK_HALF_M && z + 1.3 >= DECK_M;
+            Some(if on_deck { DECK_M } else { SHIP_TERRAIN_M })
+        }
+    }
 
     fn on_deck() -> Position {
         Position {
@@ -938,34 +2104,26 @@ mod tests {
     }
 
     #[test]
-    fn a_body_on_a_floor_the_server_does_not_know_walks_on_at_its_height() {
-        // Run 13: on the ship the server knows only the terrain 39 m down; a fall there takes the
-        // client through the deck.
+    fn a_body_on_a_known_deck_walks_on_it_and_jumps_back_onto_it() {
         let mut character = Character::new(on_deck());
-        for _ in 0..60 {
-            character.step(input(1, 1), &UnderTheShip, TUTORIAL_SEA);
+        for _ in 0..30 {
+            character.step(input(0, 1), &Ship, TUTORIAL_SEA);
             assert!(character.is_grounded());
             assert!((character.position().z - DECK_M).abs() < CLOSE);
         }
-        assert!(character.position().y > on_deck().y + 1.0, "it walked");
-    }
-
-    #[test]
-    fn a_jump_from_such_a_floor_lands_back_on_its_height() {
-        let mut character = Character::new(on_deck());
+        assert!(character.position().x > 1.0, "it walked");
         let jump = CharacterInput {
             intent: Intent {
                 jump: true,
                 ..Intent::default()
             },
-            ..input(1, 0)
+            ..input(0, 1)
         };
-        run_on(&mut character, 10, input(1, 0));
-        character.step(jump, &UnderTheShip, TUTORIAL_SEA);
+        character.step(jump, &Ship, TUTORIAL_SEA);
         assert!(character.is_jumping());
         let mut peak = DECK_M;
         for _ in 0..60 {
-            character.step(input(1, 0), &UnderTheShip, TUTORIAL_SEA);
+            character.step(input(0, 1), &Ship, TUTORIAL_SEA);
             peak = peak.max(character.position().z);
         }
         assert!(peak > DECK_M + 0.5, "it jumped: {peak}");
@@ -973,10 +2131,14 @@ mod tests {
         assert!((character.position().z - DECK_M).abs() < CLOSE);
     }
 
-    /// `records` steps of `input` over the ground under the ship.
-    fn run_on(character: &mut Character, records: usize, input: CharacterInput) {
-        for _ in 0..records {
-            character.step(input, &UnderTheShip, TUTORIAL_SEA);
+    #[test]
+    fn it_walks_off_the_deck_s_edge_and_falls_to_the_floor_below() {
+        let mut character = Character::new(on_deck());
+        for _ in 0..150 {
+            character.step(input(1, 0), &Ship, TUTORIAL_SEA);
         }
+        assert!(character.position().y > DECK_HALF_M);
+        assert!(character.is_grounded());
+        assert!((character.position().z - SHIP_TERRAIN_M).abs() < CLOSE);
     }
 }

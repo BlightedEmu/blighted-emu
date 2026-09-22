@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! A player's body as the server keeps it: moved by its keys ([`crate::character`]) and held to
-//! the client's own view ([`crate::camera_check`]) where the server cannot see the level.
+//! A player's body as the server keeps it: moved by its keys ([`crate::character`]) over the
+//! level's floors, and held to the client's own view ([`crate::camera_check`]) on the ground
+//! plane.
 //!
 //! The rule, per input record: the character moves; the camera check solves where the client's
 //! camera puts the body; when the two are more than [`RESYNC_M`] apart on the ground plane, the
@@ -8,22 +9,39 @@
 //! the server's speed was not the client's). When that pulls the body back against its motion,
 //! the character's speed drops to the camera body's own speed along it since the record before (a
 //! client held at a wall stays there instead of being pulled back record after record; replay of
-//! the newchar capture: 1,433 pull-backs instead of 1,622 in the tutorial and 1,638 instead of
-//! 2,022 in the open world, a median of 0.22 m instead of 0.29 m in the tutorial and 0.16 m
-//! instead of 0.14 m in the open world). The height of a body on a floor is the floor under the
-//! body nearest the camera's height when one is within [`FLOOR_PICK_M`] of it (the terrain, a
-//! walked floor, or the swim floor of a sea deep enough), else the camera's height (a deck, stairs
-//! or a roof the server does not know), and the body stands there; a body in a jump or a fall
-//! keeps the character's height (retail's jump suppresses the camera's vertical motion,
-//! `playeractions_traversal.actionlist` `SuppressVerticalCameraMovement`, and the camera trails a
-//! fall), and so does a body under a camera that comes down from above it, a camera that still
-//! trails the fall the body landed from (retail tutorial sea: the camera's body 1.1 m above the
-//! landed place, then 0.75, 0.48, 0.36, 0.20 and 0.15 m in the next records). The client shows the
-//! server's own place, so a height taken from a trailing camera would hold the body and its client
-//! up there (run 13, 2026-09-20). A record whose camera does not follow the body changes nothing.
+//! the newchar capture, 2026-09-20: 1,366 pull-backs instead of 1,486 in the tutorial and 1,610
+//! instead of 1,945 in the open world, a median of 0.34 m instead of 0.29 m in the tutorial and
+//! 0.16 m instead of 0.14 m in the open world).
+//!
+//! The height is the level's floor, not the camera's. The ground knows the level's floors: the
+//! terrain and the structures of the level collision file (`crate::LevelGround`; the tutorial deck
+//! at the retail own place, 89.38 m at the start). Out of a jump, the camera's height only picks
+//! which floor under the body the client stands on: the highest one at most a step-up detection
+//! height above the camera's body ([`nw_world::collision_index::FLOOR_SEARCH_ABOVE_M`]); the
+//! deck and not the sea under it, a building's upper floor and not its cellar. A camera's height
+//! errs by up to half a metre, the floors of one place lie metres apart. A body that falls lands
+//! on that floor once it is down at it. Only where the level has neither height data nor a
+//! structure does the body take the camera's height.
+//!
+//! A camera does not give the body's height itself: the boom is never sent, the camera check
+//! measures it from the server's own motion of the body while the view turns, and an action
+//! moves the body by its animation, which the solve reads as a change of the boom. Run 14
+//! (2026-09-20), the first sailor fight on the tutorial deck: in a fast turn of the view the
+//! solve's boom grew from 4.4 to 5.25 m without a boom key, the camera's body went 0.55 m under
+//! the deck, and a body that took the camera's height went down through the deck, 89.39 to 82.1 m
+//! in two seconds. The client's camera also shortens its boom where it meets the level
+//! (`libs/camera/gamecamera.xml`: `CameraCollides`); on the retail tutorial deck the camera's body
+//! stood 0.48 m below to 0.73 m above the retail own place while moving (5% to 95%). Replay of
+//! the retail newchar tutorial with the level collision (level-collision note 2026-09-20): the
+//! body's height erred by a median 0.022 m and 0.117 m at the 90th percentile, against 0.124 m and
+//! 0.654 m with the camera's height. In a jump the body keeps its own height and the camera moves
+//! it only on the ground plane (a jump that dropped the camera's pull-back went on 0.58 m beside
+//! retail's place over the Fury Bay ledge gap, open-world replay records 25,304 to 25,321). A record whose camera does not follow the body changes
+//! nothing.
 
 use crate::camera_check::{CameraCheck, CameraView};
-use crate::character::{Character, CharacterInput, swim_floor};
+use crate::character::{Character, CharacterInput, swim_floor_at};
+use crate::equip_load::EquipLoad;
 use crate::movement::{Ground, Position};
 
 /// How far the server's body may be from the camera's body before it goes there, m (Observed:
@@ -32,9 +50,6 @@ use crate::movement::{Ground, Position};
 /// replay of the retail keys erred by a median 0.15 m with 0.1 m, 0.16 m with 0.15 m and 0.16 m
 /// with 0.2 m in the open world, 0.35, 0.22 and 0.55 m in the tutorial).
 pub const RESYNC_M: f32 = 0.15;
-/// A floor this near the camera's height is the floor the body stands on, m (the camera height
-/// trails a moving body over slopes by up to 1 m: retail running camera rise 1.03 to 2.15 m).
-pub const FLOOR_PICK_M: f32 = 1.0;
 /// Records after the client starts an action (an attack, a dodge, an ability) while its moves may
 /// carry the body without the movement keys, so the camera check does not hold it still
 /// (Observed: after the 20 actions the newchar tutorial started without a movement key, the own
@@ -51,7 +66,8 @@ pub struct TrackInput {
     pub view: Option<CameraView>,
     /// The record pressed a key that changes the camera's boom.
     pub boom_key: bool,
-    /// The client starts an action in this record.
+    /// The client starts an action in this record (an attack or an ability: combat, which ends
+    /// the road boost).
     pub action_started: bool,
 }
 
@@ -64,7 +80,7 @@ pub struct Tracked {
     pub resynced: bool,
     /// The camera followed the body.
     pub consistent: bool,
-    /// The body stands on a floor (it is not in a jump or a fall).
+    /// The body stands on a floor: not in a jump or a fall.
     pub on_floor: bool,
 }
 
@@ -106,6 +122,22 @@ impl TrackedBody {
         self.character.is_resting() && self.acting_records == 0
     }
 
+    /// Its equip load category changes to `load` ([`Character::set_equip_load`]).
+    pub const fn set_equip_load(&mut self, load: EquipLoad) {
+        self.character.set_equip_load(load);
+    }
+
+    /// Whether the road boost speeds up its sprint.
+    pub fn has_road_boost(&self) -> bool {
+        self.character.has_road_boost()
+    }
+
+    /// A hit on it: combat, which ends the road boost while its action is on
+    /// ([`Character::enter_combat`]).
+    pub const fn enter_combat(&mut self) {
+        self.character.enter_combat();
+    }
+
     /// The camera boom it holds, once a camera fitted.
     pub const fn boom_m(&self) -> Option<f32> {
         self.camera.boom_m()
@@ -136,6 +168,7 @@ impl TrackedBody {
     ) -> Tracked {
         if input.action_started {
             self.acting_records = ACTION_RECORDS;
+            self.character.enter_combat();
         }
         let moved = self.character.step(input.character, ground, sea_level_m);
         let mut position = self.character.position();
@@ -175,17 +208,27 @@ impl TrackedBody {
             position.x = seen.at.x;
             position.y = seen.at.y;
         }
-        let trailing = last_seen.is_some_and(|last| seen.at.z < last.z) && seen.at.z > position.z;
-        if !self.character.is_grounded() || trailing {
+        let falling = !self.character.is_grounded() && !self.character.is_jumping();
+        if self.character.is_jumping() {
+            // A jump keeps its own height; the camera only moves it on the ground plane.
             self.character.place(position);
         } else {
-            position.z = floor_near(ground, position, seen.at.z, sea_level_m)
-                .filter(|floor| (floor - seen.at.z).abs() <= FLOOR_PICK_M)
-                .unwrap_or(seen.at.z);
-            self.character.land_at(position);
+            let seen_at = Position {
+                z: seen.at.z,
+                ..position
+            };
+            match floor_under(ground, seen_at, sea_level_m) {
+                Some(floor) if !falling || position.z <= floor => {
+                    position.z = floor;
+                    self.character.land_at(position);
+                }
+                Some(_) => self.character.place(position),
+                // No height data and no structure here: only the camera gives a height.
+                None => self.character.land_at(seen_at),
+            }
         }
         Tracked {
-            position,
+            position: self.character.position(),
             resynced,
             consistent: true,
             on_floor: self.character.is_grounded(),
@@ -193,32 +236,22 @@ impl TrackedBody {
     }
 }
 
-/// The known floor at the ground-plane point of `at` nearest the height `z`: the floor of
-/// `ground` there, or the swim floor of the sea at `sea_level_m` where the terrain is under it.
-fn floor_near(
-    ground: &(impl Ground + ?Sized),
-    at: Position,
-    z: f32,
-    sea_level_m: f32,
-) -> Option<f32> {
-    let swim = swim_floor(sea_level_m);
-    let sea = ground
-        .height_at(at.x, at.y)
-        .is_none_or(|terrain| terrain < swim)
-        .then_some(swim);
-    ground
-        .floor_at(at.x, at.y, z)
-        .into_iter()
-        .chain(sea)
-        .min_by(|a, b| (a - z).abs().total_cmp(&(b - z).abs()))
+/// The floor under the feet of a body at `at`: the floor of `ground` there, or the swim floor of
+/// the water there (the sea at `sea_level_m` where `ground` knows no water) when that is higher.
+fn floor_under(ground: &(impl Ground + ?Sized), at: Position, sea_level_m: f32) -> Option<f32> {
+    let swim = swim_floor_at(ground, at.x, at.y, sea_level_m);
+    match ground.floor_at(at.x, at.y, at.z) {
+        Some(floor) => Some(swim.map_or(floor, |swim| floor.max(swim))),
+        None => ground.height_at(at.x, at.y).and(swim),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::camera_check::{CAMERA_LAG_S, CAMERA_RISE_M, SHOULDER_RIGHT_M};
-    use crate::character::CharacterInput;
     use crate::character::{ACCELERATION_MPS2, Intent, SPRINT_SPEED_MPS, yaw_axes};
+    use crate::character::{CharacterInput, swim_floor};
 
     const DT: f32 = 1.0 / 30.0;
     const SEA: f32 = -100.0;
@@ -232,15 +265,6 @@ mod tests {
     impl Ground for Flat {
         fn height_at(&self, _: f32, _: f32) -> Option<f32> {
             Some(GROUND_Z)
-        }
-    }
-
-    /// No terrain: a deck the server does not know.
-    struct Nothing;
-
-    impl Ground for Nothing {
-        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
-            None
         }
     }
 
@@ -364,15 +388,196 @@ mod tests {
     }
 
     #[test]
-    fn on_a_deck_the_server_does_not_know_the_body_stands_at_the_camera_height() {
-        let deck = Position {
-            z: 89.42,
-            ..start()
+    fn a_camera_that_holds_a_jumping_body_moves_it_on_the_ground_plane_only() {
+        // Both run north and jump; the client's body stops at a wall 1 m ahead in the air, the
+        // server's flies on until the camera puts it back.
+        let keys = |jump: bool| CharacterInput {
+            intent: Intent {
+                forward: 1,
+                jump,
+                ..Intent::default()
+            },
+            yaw: 0.0,
+            dt_s: DT,
         };
-        let mut body = TrackedBody::new(deck);
-        let tracked = body.record(input(0, view_of(deck, BOOM, [0.0; 2])), &Nothing, SEA);
+        let mut body = TrackedBody::new(start());
+        let mut client = Character::new(start());
+        for _ in 0..30 {
+            client.step(keys(false), &Flat, SEA);
+            body.record(
+                input(1, view_of(client.position(), BOOM, client.velocity())),
+                &Flat,
+                SEA,
+            );
+        }
+        let wall_y = client.position().y + 1.0;
+        let bound = RESYNC_M + (CAMERA_LAG_S + DT) * SPRINT_SPEED_MPS;
+        let mut highest: f32 = GROUND_Z;
+        for record in 0..15 {
+            if client.position().y < wall_y {
+                client.step(keys(record == 0), &Flat, SEA);
+            }
+            let stopped = client.position().y >= wall_y;
+            let velocity = if stopped { [0.0; 2] } else { client.velocity() };
+            let tracked = body.record(
+                TrackInput {
+                    character: keys(record == 0),
+                    ..input(1, view_of(client.position(), BOOM, velocity))
+                },
+                &Flat,
+                SEA,
+            );
+            assert!(
+                tracked.position.horizontal_distance(client.position()) <= bound,
+                "record {record}: {tracked:?}"
+            );
+            highest = highest.max(tracked.position.z);
+        }
+        assert!(highest > GROUND_Z + 0.5, "the jump keeps its own height");
+    }
+
+    /// Stairs: a floor that rises 0.25 m per 0.5 m north of [`start`], over the flat ground.
+    struct Stairs;
+
+    impl Ground for Stairs {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(GROUND_Z)
+        }
+
+        fn floor_at(&self, _: f32, y: f32, z: f32) -> Option<f32> {
+            const RISER_M: f32 = 0.25;
+            const TREAD_M: f32 = 0.5;
+            let steps = ((y - start().y) / TREAD_M).floor().max(0.0);
+            let step = GROUND_Z + steps * RISER_M;
+            Some(if step <= z + 1.3 { step } else { GROUND_Z })
+        }
+    }
+
+    #[test]
+    fn the_body_climbs_known_stairs_whatever_height_the_camera_gives() {
+        // The camera's body 0.5 m under the stairs: the floor is the ground's, not the camera's.
+        const CAMERA_ERROR_M: f32 = -0.5;
+        let mut body = TrackedBody::new(start());
+        let mut runner = Character::new(start());
+        for _ in 0..40 {
+            let keys = input(1, view_of(start(), BOOM, [0.0; 2]));
+            runner.step(keys.character, &Stairs, SEA);
+            let client = runner.position();
+            let shown = Position {
+                z: client.z + CAMERA_ERROR_M,
+                ..client
+            };
+            let tracked = body.record(
+                input(1, view_of(shown, BOOM, runner.velocity())),
+                &Stairs,
+                SEA,
+            );
+            let floor = Stairs
+                .floor_at(tracked.position.x, tracked.position.y, tracked.position.z)
+                .expect("floor");
+            assert!((tracked.position.z - floor).abs() < 1e-3, "{tracked:?}");
+        }
+        assert!(body.position().z > GROUND_Z + 1.0, "{:?}", body.position());
+    }
+
+    /// The tutorial galleon's upper deck ([`deck_triangles`]) over the `ftue_v2` terrain.
+    fn galleon() -> crate::LevelGround<crate::test_support::FlatGround> {
+        use nw_world::collision::{Body, Geometry, IDENTITY_AFFINE, LevelCollision};
+        use nw_world::collision_index::CollisionIndex;
+        /// The `ftue_v2` terrain under the ship, m.
+        const SHIP_TERRAIN_M: f32 = 50.0;
+        let triangles = deck_triangles();
+        let points: Vec<[f32; 3]> = triangles.iter().flatten().copied().collect();
+        let corners = (0..triangles.len())
+            .map(|index| {
+                let first = u16::try_from(index * 3).expect("a few triangles");
+                [first, first + 1, first + 2]
+            })
+            .collect();
+        let collision = CollisionIndex::new(LevelCollision {
+            level: "ftue_v2".to_owned(),
+            geometries: vec![Geometry::Mesh {
+                points,
+                triangles: corners,
+            }],
+            bodies: vec![Body {
+                geometry: 0,
+                place: IDENTITY_AFFINE,
+            }],
+            deferred: Vec::new(),
+        });
+        crate::LevelGround::new(
+            crate::test_support::FlatGround(SHIP_TERRAIN_M),
+            std::sync::Arc::new(collision),
+        )
+    }
+
+    /// The triangles of `testdata/ftue-galleon-deck.txt`.
+    fn deck_triangles() -> Vec<[[f32; 3]; 3]> {
+        include_str!("testdata/ftue-galleon-deck.txt")
+            .lines()
+            .filter(|line| !line.starts_with('#'))
+            .map(|line| {
+                let v: Vec<f32> = line
+                    .split_whitespace()
+                    .map(|value| value.parse().expect("number"))
+                    .collect();
+                [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn where_the_level_has_no_data_the_body_takes_the_camera_height() {
+        let place = Position { z: 40.0, ..start() };
+        let mut body = TrackedBody::new(start());
+        let tracked = body.record(
+            input(0, view_of(place, BOOM, [0.0; 2])),
+            &crate::test_support::NoGround,
+            SEA,
+        );
         assert!(tracked.consistent);
-        assert!((tracked.position.z - deck.z).abs() < 0.01, "{tracked:?}");
+        assert!((tracked.position.z - place.z).abs() < 0.01, "{tracked:?}");
+    }
+
+    #[test]
+    fn the_retail_start_stands_on_the_galleon_deck() {
+        // The tutorial start: retail's own place 89.382 m at (478.5, 849.7) before any key.
+        const RETAIL_START: Position = Position {
+            x: 478.5,
+            y: 849.7,
+            z: 89.382,
+        };
+        /// The own place's step: 4/255 m.
+        const PLACE_STEP_M: f32 = 4.0 / 255.0;
+        let deck = galleon()
+            .floor_at(RETAIL_START.x, RETAIL_START.y, RETAIL_START.z)
+            .expect("deck");
+        assert!((deck - RETAIL_START.z).abs() < PLACE_STEP_M, "{deck}");
+    }
+
+    #[test]
+    fn the_run_14_ship_fight_keeps_the_body_on_the_deck() {
+        // Run 14 (2026-09-20): in the first sailor fight the solve's boom drifted 1.1 m long in
+        // a fast turn of the view, the camera's body went down to 0.55 m under the deck, and a
+        // body that took the camera's height went through the deck (89.38 to 88.84 m in these
+        // records, then 82.1 m). The deck of the level's collision is the floor.
+        const TUTORIAL_SEA_M: f32 = 20.0;
+        /// The deck's lowest point in the fight's area, m.
+        const DECK_LOW_M: f32 = 89.27;
+        let replay = parse_replay(include_str!("testdata/run14-ship-fight.txt"));
+        let ground = galleon();
+        let mut body = TrackedBody::new(replay.start);
+        for (record, (input, _)) in replay.records.iter().enumerate() {
+            let tracked = body.record(*input, &ground, TUTORIAL_SEA_M);
+            let deck = ground
+                .floor_at(tracked.position.x, tracked.position.y, tracked.position.z)
+                .expect("deck");
+            assert!(
+                (tracked.position.z - deck).abs() < 1e-3 && deck >= DECK_LOW_M,
+                "record {record}: {tracked:?}"
+            );
+        }
     }
 
     #[test]

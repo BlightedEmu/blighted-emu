@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! Where the client's camera says the body is (movement study 2026-09-20). The server has no
-//! level collision, so the character it moves from the keys ([`crate::character`]) walks through
-//! walls the client stops at; the camera of each input record is the client's own view and shows
-//! where the client's body really is.
+//! Where the client's camera says the body is (movement study 2026-09-20). The server stands the
+//! character on the level's floors but does not stop it at walls ([`crate::character`]), so the
+//! character it moves from the keys walks through walls the client stops at; the camera of each
+//! input record is the client's own view and shows where the client's body really is.
 //!
 //! Retail's third-person camera sits on a boom behind the body: the body is the camera moved
 //! along the view by the boom (horizontally `boom × cos(pitch)`), 0.50 m to the left of the
