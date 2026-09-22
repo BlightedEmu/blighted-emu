@@ -328,12 +328,12 @@ mod tests {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.expect("bind");
         let address = listener.local_addr().expect("addr");
         let handle = tokio::spawn(async move {
-            if let Ok((stream, _)) = listener.accept().await {
-                if let Ok(mut tls) = acceptor.accept(stream).await {
-                    let mut buffer = [0_u8; 64];
-                    let read = tls.read(&mut buffer).await.unwrap_or(0);
-                    let _ = tls.write_all(&buffer[..read]).await;
-                }
+            if let Ok((stream, _)) = listener.accept().await
+                && let Ok(mut tls) = acceptor.accept(stream).await
+            {
+                let mut buffer = [0_u8; 64];
+                let read = tls.read(&mut buffer).await.unwrap_or(0);
+                let _ = tls.write_all(&buffer[..read]).await;
             }
         });
         (address, handle)

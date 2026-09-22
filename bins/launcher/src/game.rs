@@ -602,7 +602,7 @@ mod tests {
         );
         assert!(matches!(
             checked_windows_launch(Some(windows_launch("D:/x/Bin64/NewWorld.exe"))),
-            Err(GameError::NotPatchedExe(path)) if path == PathBuf::from("D:/x/Bin64/NewWorld.exe")
+            Err(GameError::NotPatchedExe(path)) if path == Path::new("D:/x/Bin64/NewWorld.exe")
         ));
         assert!(matches!(
             checked_windows_launch(None),
