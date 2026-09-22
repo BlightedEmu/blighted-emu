@@ -1,4 +1,4 @@
-# 03 - Engine and Client Game Data
+# 03 - Engine and client game data
 
 Research date: 2026-08-29. All facts come from public sources. Each claim has a link.
 Labels:
@@ -71,7 +71,7 @@ All are in https://github.com/o3de/o3de (branch `development`).
 | Sample size: "125 paks 1178744 files". | Verified (source, nw-buddy docs log output; date of sample unknown) | https://github.com/giniedp/nw-buddy/blob/main/docs/level-server.md |
 | nw-buddy skips `shadercachestartup.pak` and `shadersbin_d3d11.pak` when it loads the archive. | Verified (code) | https://github.com/giniedp/nw-buddy/blob/main/tools/nwbt/nwfs/pak_archive.go |
 | The new-world-tools README shows an example input path `...\New World\assets\server\server.pak`. | Verified (source). | https://github.com/new-world-tools/new-world-tools/blob/master/README.md |
-| `Server.pak` recovered 2026-09-08 via Steam depot rollback (app 1063730, depot 1063731, manifest 3129454692625577733, 2024-02-13 build). It is REMOVED from the current build 25810808 ("Aeternum"). The real path is `assets/Server.pak` (capital S), not `assets/server/server.pak`. | Verified (pulled). 9,647,766 bytes, SHA256 `39caa6fb4e075e856cce0c120d3228373e5d59dc517e296070bdb06b25b85a85`. Contents: ONLY 1,075 `.behaviortree` files under `sharedassets/ai/behaviortrees/` (mob AI); NO datasheets/schema/JSON. So it does NOT help the wire protocol or world-entry bundle encoding — it is for mob AI (M6+). Stored (git-ignored) at `local-data/server-pak/Server.pak` and `<re-scratch>/serverpak-pull/assets/Server.pak`. | Local pull. |
+| `Server.pak` recovered 2026-09-08 via Steam depot rollback (app 1063730, depot 1063731, manifest 3129454692625577733, 2024-02-13 build). It is removed from the current build 25810808 ("Aeternum"). The real path is `assets/Server.pak` (capital S), not `assets/server/server.pak`. | Verified (pulled). 9,647,766 bytes, SHA256 `39caa6fb4e075e856cce0c120d3228373e5d59dc517e296070bdb06b25b85a85`. Contents: only 1,075 `.behaviortree` files under `sharedassets/ai/behaviortrees/` (mob AI). It has no datasheets, schema, or JSON. It does not help with the wire protocol or the world-entry bundle encoding. It is for mob AI (M6+). Stored (git-ignored) at `local-data/server-pak/Server.pak` and `<re-scratch>/serverpak-pull/assets/Server.pak`. | Local pull. |
 
 #### 2.2.2 Oodle
 
@@ -266,7 +266,7 @@ Source for table names: https://github.com/giniedp/nw-buddy/blob/main/libs/nw-da
 
 1. Which Lumberyard version did Azoth fork from? Does the networking layer derive from GridMate or CryNetwork, or is it custom?
 2. Does `NewWorld.exe` hold server-side logic for any `*ServerFacet` component, or only reflection stubs?
-3. ~~Does `assets/server/server.pak` still ship? What is in it?~~ ANSWERED 2026-09-08: it is `assets/Server.pak`, removed from the current build, recovered from the 2024-02-13 build via Steam depot rollback. Holds only mob AI behavior trees (no protocol/schema). See the table in section 2.2.1 and memory `server-pak-retrieved`.
+3. ~~Does `assets/server/server.pak` still ship? What is in it?~~ Answered 2026-09-08: it is `assets/Server.pak`, removed from the current build, recovered from the 2024-02-13 build via Steam depot rollback. Holds only mob AI behavior trees (no protocol/schema). See the table in section 2.2.1 and memory `server-pak-retrieved`.
 4. What do the `.luac` scripts do (UI only, or game rules)? Which Lua version?
 5. What is the binary format of `.actionlist`? Is it an ObjectStream? How does the AI runtime execute it?
 6. Are behavior tree assets and navmeshes in the paks? Under which paths?

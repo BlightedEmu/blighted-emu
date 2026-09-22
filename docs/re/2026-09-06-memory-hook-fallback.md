@@ -7,16 +7,16 @@ Date: 2026-09-06.
 Tested against the live retail client (build 25810808, GE-Proton, world
 `faqfirebase.com`). The client reached character select and started the REP
 connection to `127.0.0.1:33435`, then failed with
-`@mm_csdkerr_transport_security_error (2)` — the `gridmate-udp` DTLS cert
+`@mm_csdkerr_transport_security_error (2)`. That is the `gridmate-udp` DTLS cert
 wall. Three attempts to switch it to the no-cert TCP transport all failed,
 because the client never read our override file:
 
-1. Loose `@assets@/ClientOverride.json` in the game `assets/` folder —
+1. Loose `@assets@/ClientOverride.json` in the game `assets/` folder.
    Game.log: "Client config override file not found: @assets@/ClientOverride.json".
 2. Launch arg `-OverrideConfigPath` with an absolute `Z:` path (added to our
-   launcher via `NW_LAUNCHER_OVERRIDE_CONFIG`) — Game.log: "not found:
+   launcher via `NW_LAUNCHER_OVERRIDE_CONFIG`). Game.log: "not found:
    Z:/.../New World/assets/ClientOverride.json".
-3. Same arg with an absolute `C:` path inside the Proton prefix — Game.log:
+3. Same arg with an absolute `C:` path inside the Proton prefix. Game.log:
    "not found: C:/ClientOverride.json".
 
 Conclusion: this retail build does not honour an external `transport-type`

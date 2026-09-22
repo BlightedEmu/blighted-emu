@@ -12,7 +12,7 @@ rejects the gateway certificate with
 `@mm_csdkerr_transport_security_error (2)`. The client trusts only its
 embedded self-signed certificate and we do not have its private key.
 
-The config route to avoid this (select the no-cert TCP transport) is dead:
+The config route to avoid this (select the no-cert TCP transport) does not work:
 the retail client reads no external `transport-type` override from any path
 (see [memory-hook / config-failure note](2026-09-06-memory-hook-fallback.md)).
 

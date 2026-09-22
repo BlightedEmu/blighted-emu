@@ -1,4 +1,4 @@
-# 01 - New World: AWS Backend Architecture (Public-Source Research)
+# 01 - New World: AWS backend architecture (public-source research)
 
 Research date: 2026-08-29
 Scope: public sources only. No client or server binaries were examined for this document.
@@ -9,19 +9,19 @@ Convention: each claim has a source link. **Unknown** = no public source found. 
 ## 1. Summary
 
 - The main primary source for the backend is the AWS for Games blog post "The Unique Architecture behind Amazon Games' Seamless MMO New World" (06 Apr 2022). It names the parts of the system and gives scale numbers. [S1]
-- Topology per world: clients connect to one of **4 Remote Entry Points (REPs)** (EC2 `c5.2xlarge`, the only public IPs). Behind the REPs are **7 compute units** (EC2 `c5.9xlarge`) that together form a **"hub"**. The world map has a **grid overlay**; each grid cell is a physical simulation volume, and each hub owns **two non-consecutive grid subdivisions**. Player state is **handed off** between hubs as players move. Instanced content (expeditions, quest sessions) runs on a **separate shared pool of hubs**. [S1]
-- Simulation runs at **30 updates per second** (compared with about 5 for a "traditional MMO", as the blog says). [S1]
-- One world: **2,500 players**, more than **7,000 AI entities**, hundreds of thousands of objects. [S1] The launch cap was reported as **2,000** per world, later raised in steps of 250 (unconfirmed for the final value per world). [S9][S10][S11]
-- Persistence: **Amazon DynamoDB** holds game state. About **800,000 writes every 30 seconds**. It scaled from single test servers to more than 500 servers in production. [S1]
-- Microservices: **AWS Lambda** behind **Amazon API Gateway**. Global services: achievements, channels (chat), globally unique naming. Local (per-region or per-world) services: queues (login queue), contracts (very probably the trading post order book; unconfirmed), sessions, guilds (companies), characters. [S1]
-- Telemetry: **Kinesis Data Streams -> Kinesis Data Firehose -> S3 -> Athena** (about 23 million events per minute). [S1]
-- Werner Vogels' re:Invent 2021 keynote also named **ElastiCache, Elasticsearch (now OpenSearch), and Redshift**. Their exact roles in New World are **Unknown**. [S3]
-- Game servers are written in **C++** (Amazon job postings for "SDE Game Server"). [S16] The engine is Amazon's in-house "Azoth" engine, derived from Lumberyard (the Azoth name is from an Amazon job post; the Lumberyard lineage is from secondary sources). [S17]
-- Official shutdown: **31 January 2027**, all platforms. Announced **15 January 2026** in the official post "The Future of New World: What to Expect". In-game purchases ended **20 July 2026**. The post says nothing about private servers, offline mode, or server-file release. [S4][S5]
+- Topology per world: clients connect to one of 4 Remote Entry Points (REPs) (EC2 `c5.2xlarge`, the only public IPs). Behind the REPs are 7 compute units (EC2 `c5.9xlarge`) that together form a "hub". The world map has a grid overlay; each grid cell is a physical simulation volume, and each hub owns two non-consecutive grid subdivisions. Player state is handed off between hubs as players move. Instanced content (expeditions, quest sessions) runs on a separate shared pool of hubs. [S1]
+- Simulation runs at 30 updates per second (compared with about 5 for a "traditional MMO", as the blog says). [S1]
+- One world: 2,500 players, more than 7,000 AI entities, hundreds of thousands of objects. [S1] The launch cap was reported as 2,000 per world, later raised in steps of 250 (unconfirmed for the final value per world). [S9][S10][S11]
+- Persistence: Amazon DynamoDB holds game state. About 800,000 writes every 30 seconds. It scaled from single test servers to more than 500 servers in production. [S1]
+- Microservices: AWS Lambda behind Amazon API Gateway. Global services: achievements, channels (chat), globally unique naming. Local (per-region or per-world) services: queues (login queue), contracts (very probably the trading post order book; unconfirmed), sessions, guilds (companies), characters. [S1]
+- Telemetry: Kinesis Data Streams -> Kinesis Data Firehose -> S3 -> Athena (about 23 million events per minute). [S1]
+- Werner Vogels' re:Invent 2021 keynote also named ElastiCache, Elasticsearch (now OpenSearch), and Redshift. Their exact roles in New World are **Unknown**. [S3]
+- Game servers are written in C++ (Amazon job postings for "SDE Game Server"). [S16] The engine is Amazon's in-house "Azoth" engine, derived from Lumberyard (the Azoth name is from an Amazon job post; the Lumberyard lineage is from secondary sources). [S17]
+- Official shutdown: 31 January 2027, all platforms. Announced 15 January 2026 in the official post "The Future of New World: What to Expect". In-game purchases ended 20 July 2026. The post says nothing about private servers, offline mode, or server-file release. [S4][S5]
 
 ---
 
-## 2. Findings by Sub-Topic
+## 2. Findings by sub-topic
 
 ### 2.1 Primary sources about the backend
 
@@ -189,7 +189,7 @@ Compute per world (from S1): 4 x 8 + 7 x 36 = 284 vCPUs for 2,500 players. This 
 
 ---
 
-## 3. Implications for a Non-AWS Emulator
+## 3. Implications for a non-AWS emulator
 
 Target: one normal dedicated server (or a small cluster), no AWS dependency. The emulator only has to reproduce what the **client** sees. The internal AWS layout is a guide for the service boundaries, not a requirement.
 
@@ -225,7 +225,7 @@ Target: one normal dedicated server (or a small cluster), no AWS dependency. The
 
 ---
 
-## 4. Open Questions
+## 4. Open questions
 
 1. Client-to-server transport and protocol: UDP or TCP, encryption, message format, handshake with the REP. Not public. Needs client analysis.
 2. Which client features call HTTPS / Lambda microservices directly, and at which host names?
@@ -244,7 +244,7 @@ Target: one normal dedicated server (or a small cluster), no AWS dependency. The
 
 ---
 
-## 5. Source List
+## 5. Source list
 
 Primary (Amazon / AWS):
 - [S1] AWS for Games blog, "The Unique Architecture behind Amazon Games' Seamless MMO New World", 06 Apr 2022: https://aws.amazon.com/blogs/gametech/the-unique-architecture-behind-amazon-games-seamless-mmo-new-world

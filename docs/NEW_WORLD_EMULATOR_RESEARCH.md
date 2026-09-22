@@ -1,4 +1,4 @@
-# New World Emulator - Research Overview
+# New World emulator - research overview
 
 Research date: 2026-08-29
 Scope: public sources only.
@@ -11,13 +11,13 @@ This file is the summary. The full detail and all source links are in four resea
 | 01 | [research/01-aws-backend-architecture.md](research/01-aws-backend-architecture.md) | How the official backend ran on AWS, and what replaces each AWS part |
 | 02 | [research/02-network-protocol-and-login.md](research/02-network-protocol-and-login.md) | Ports, login flow, game protocol, encryption, anti-cheat, existing projects |
 | 03 | [research/03-engine-and-game-data.md](research/03-engine-and-game-data.md) | Engine lineage, client file formats, data-mining tools, client data vs server logic |
-| 04 | [research/04-shutdown-precedent-and-legal.md](research/04-shutdown-precedent-and-legal.md) | Shutdown facts, other MMO emulators, legal landscape |
+| 04 | [research/04-shutdown-precedent-and-legal.md](research/04-shutdown-precedent-and-legal.md) | Shutdown facts, other MMO emulators, legal situation |
 
 Conventions: **Unknown** = no public source found. "Unconfirmed" = weak or single source.
 
 ---
 
-## 1. Key facts
+## 1. Main facts
 
 1. **Shutdown date: 2027-01-31, all platforms.** Amazon announced it on 2026-01-15 in "The Future of New World: Aeternum - What to Expect" (https://www.newworld.com/en-us/news/articles/the-future-of-new-world-aeternum-what-to-expect). The game was delisted on 2026-01-15. Cash shop sales stopped on 2026-07-20. Amazon said nothing about offline mode, private servers, or a server or source release. [01, 04]
 2. **Days left to capture live data (from 2026-08-29): about 155.** After 2027-01-31, no live traffic, behavior, or server responses can be recorded. [02, 03, 04]
@@ -135,7 +135,7 @@ Full table in file 04, section 4. [04]
 - **Return of Reckoning and The Crew Unlimited** both depended on captures made before the shutdown. The Crew Unlimited shipped an offline local-server mode first.
 - **Do not distribute game files. Do not take money.** Scapegaming (a paid WoW server) got an $88.6M default judgment.
 
-## 7. Legal landscape (facts only, not legal advice)
+## 7. Legal situation (facts only, not legal advice)
 
 [03, 04]
 

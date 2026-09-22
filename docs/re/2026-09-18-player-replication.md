@@ -106,7 +106,7 @@ decoded fields of input 1589 against the own ALC slot-0 children, scratch scanne
   states 31, 7 and 9) and fixed follow-ups of client actions, one to four states later (0 to
   132 ms): 5047 then 487, 5055 then 4603, 5051 then 484, 5056 then 468, 5050 then 485, 3120
   then 2030, 1221 then 463 (5 to 13 times each, never another).
-- Observed: child 2 (`slayerSeqTimeRel`) is one raw byte. It went `0x80`, `0x83`, `0x86`, …
+- Observed: child 2 (`slayerSeqTimeRel`) is one raw byte. It went `0x80`, `0x83`, `0x86`, and so on,
   about 3 per 33 ms state after an action, and was `0x7f` or `0x7d` in other echo states.
   Its unit and meaning: Unknown; the sim does not send it.
 - Inferred from the client code: neither lock-on gate reads the own slayer state.

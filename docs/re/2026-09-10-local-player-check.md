@@ -147,11 +147,11 @@ add-slot calls: three slots, one slot byte. Slot 1 (`param_1[0x1e7]`) is packet
 `group0` (22 children, `loginMatchId` first). Slot 2 (`param_1[0x1e8]`) is
 packet `group1` (9 children):
 
-0. `characterId` — vtable `PTR_FUN_1481e3e38`, reader `FUN_1434cb580`
+0. `characterId`: vtable `PTR_FUN_1481e3e38`, reader `FUN_1434cb580`
    (`FUN_14087ac50` presence: flag + 16 bytes)
 1. `characterName`
-2. `homeWorldId` — same presence vtable as `characterId`
-3. `playerConnected` — vtable `PTR_FUN_148040208`, reader `FUN_1417b4c20`
+2. `homeWorldId`: same presence vtable as `characterId`
+3. `playerConnected`: vtable `PTR_FUN_148040208`, reader `FUN_1417b4c20`
    (one byte, 0 or 1)
 4. `lookingThroughLoadout`
 5. `playerType`

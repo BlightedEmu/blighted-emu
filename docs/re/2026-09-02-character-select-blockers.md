@@ -14,11 +14,11 @@ Status: Resolved for the empty-list click. The request bus is not on that path.
 
 **Observed.** The select screen is the canvas `LyShineUI/Main Menu/LandingScreenV2.uicanvas` (`0x14831c4e0`). `FUN_1441e3500` (`0x1441e3500`) loads it at `0x1441e3767` with no compare. The text `Create Character` is not in `NewWorld.exe` as ASCII or UTF-16. The slot label in localization is the key `@ui_createcharacter`.
 
-**Observed.** The press handler is `OnPress` in `lyshineui/main menu/charactercreatebutton.luac` (lines 411–415). It does not test `CHARSTATUS_EMPTY_AND_BLOCKED`. If `createCharacterCallback` is a function, it calls that callback.
+**Observed.** The press handler is `OnPress` in `lyshineui/main menu/charactercreatebutton.luac` (lines 411-415). It does not test `CHARSTATUS_EMPTY_AND_BLOCKED`. If `createCharacterCallback` is a function, it calls that callback.
 
-**Observed.** `SetEmptyCharacterSlot` in `lyshineui/main menu/landingscreenv2.luac` (lines 4039–4064) sets that callback to `OnCreateCharacterPressed` before the status check. `OnCreateCharacterPressed` (lines 2421–2443) returns when `#self.selectableWorldList` is 0. It shows the `@mm_serverunavailable` popup and does not call `HandleCreateCharacter`.
+**Observed.** `SetEmptyCharacterSlot` in `lyshineui/main menu/landingscreenv2.luac` (lines 4039-4064) sets that callback to `OnCreateCharacterPressed` before the status check. `OnCreateCharacterPressed` (lines 2421-2443) returns when `#self.selectableWorldList` is 0. It shows the `@mm_serverunavailable` popup and does not call `HandleCreateCharacter`.
 
-**Observed.** `HandleCreateCharacter` (lines 2445–2460) only opens a yes/no popup. A yes result calls `RequestGoToIntro`. Neither function calls `UiCharacterServiceRequestBus.CreateCharacter`. The only `UiCharacterServiceRequestBus` call in `landingscreenv2.luac` is `DeactivateCharacter`. `charactercreatebutton.luac` has no such call.
+**Observed.** `HandleCreateCharacter` (lines 2445-2460) only opens a yes/no popup. A yes result calls `RequestGoToIntro`. Neither function calls `UiCharacterServiceRequestBus.CreateCharacter`. The only `UiCharacterServiceRequestBus` call in `landingscreenv2.luac` is `DeactivateCharacter`. `charactercreatebutton.luac` has no such call.
 
 **Inferred.** On the live screen the list length is 0, so the click reaches `OnCreateCharacterPressed` and returns. That return sends no HTTP and writes no log line. The script does show the `@mm_serverunavailable` popup. The live note did not record a popup.
 
@@ -37,15 +37,15 @@ Status: Resolved for the empty-list click. The request bus is not on that path.
 
 **Observed.** A second native gate loads a different canvas. `FUN_1441e3500` stores byte 0 at `[RBP+0x60]` (`0x1441e3d68`) and then reads `javelin.use-new-character-creation-flow` (`0x14831c6f8`) through `FUN_14033d610`. The compare at `0x1441e3d96` skips `LyShineUI/Main Menu/CharacterCreation.uicanvas` when that byte is not 0. `FUN_14616c670` passes byte 1 in `R8B` at `0x14616dea7` to virtual slot `+0x60` with that key. `LandingScreenV2` is the canvas that loads with no compare. The live screen is that canvas.
 
-**Observed.** When the remote layers have no value for that key, the byte at `[RBP+0x60]` becomes 1. `FUN_14033d610` calls thunk `0x1405714a4` (`JMP [RAX+0x1F0]`). `FUN_140845950` stores vtable `0x147f4d700` at `0x1408459ac`. Slot `+0x1F0` is `FUN_140850100`. Slot `+0x60` is `FUN_140856420`. A non-zero `R8B` makes `FUN_140856420` store the text `true` (type byte 6) in the layer list. `FUN_140852900` skips a layer whose type byte is `0xe`. A remote layer that lacks the key is that miss. The walk then finds `true`. `FUN_14083fba0` turns `true` into byte 1, and `FUN_140850100` returns 1. That 1 overwrites the caller’s 0, so `CharacterCreation.uicanvas` is skipped. `LandingScreenV2` does not use this compare.
+**Observed.** When the remote layers have no value for that key, the byte at `[RBP+0x60]` becomes 1. `FUN_14033d610` calls thunk `0x1405714a4` (`JMP [RAX+0x1F0]`). `FUN_140845950` stores vtable `0x147f4d700` at `0x1408459ac`. Slot `+0x1F0` is `FUN_140850100`. Slot `+0x60` is `FUN_140856420`. A non-zero `R8B` makes `FUN_140856420` store the text `true` (type byte 6) in the layer list. `FUN_140852900` skips a layer whose type byte is `0xe`. A remote layer that lacks the key is that miss. The walk then finds `true`. `FUN_14083fba0` turns `true` into byte 1, and `FUN_140850100` returns 1. That 1 overwrites the caller's 0, so `CharacterCreation.uicanvas` is skipped. `LandingScreenV2` does not use this compare.
 
 ## 2. The `!` icon
 
 Status: Resolved.
 
-**Observed.** `SetEmptyCharacterSlot` calls `CurrentRegionContainsSelectableWorlds` (lines 5729–5731). That function returns false when `#self.selectableWorldList` is 0. A false result sets `CHARSTATUS_EMPTY_AND_BLOCKED` and passes the tooltip key to `SetWorldMessageTooltip`. A true result sets `CHARSTATUS_CANCREATE` and passes no tooltip, which hides the icon.
+**Observed.** `SetEmptyCharacterSlot` calls `CurrentRegionContainsSelectableWorlds` (lines 5729-5731). That function returns false when `#self.selectableWorldList` is 0. A false result sets `CHARSTATUS_EMPTY_AND_BLOCKED` and passes the tooltip key to `SetWorldMessageTooltip`. A true result sets `CHARSTATUS_CANCREATE` and passes no tooltip, which hides the icon.
 
-**Observed.** `SetWorldMessageTooltip` in `charactercreatebutton.luac` (lines 249–261) enables `WorldMessageHintIcon` when the tooltip is not nil and is not `""`. The canvas element is `CharacterMergeHint`. Its image is `lyshineui/images/landingscreen/iconexclamation.dds`.
+**Observed.** `SetWorldMessageTooltip` in `charactercreatebutton.luac` (lines 249-261) enables `WorldMessageHintIcon` when the tooltip is not nil and is not `""`. The canvas element is `CharacterMergeHint`. Its image is `lyshineui/images/landingscreen/iconexclamation.dds`.
 
 **Observed.** The tooltip key is `@mm_noactiveworldsinregion_characterselectbutton_tooltip`. The English sentence in `localization/en-us/frontendcommontext.loc.xml` is `No active worlds in your region. Please try again later.` Flavor `SetItem` in `dynamictooltip_flavor.luac` looks the key up through `LyShineScriptBindRequestBus.Broadcast.LocalizeWithDataSheetData` and sets the text with `eUiTextSet_SetLocalized`.
 
@@ -55,7 +55,7 @@ Status: Resolved.
 
 **Observed.** `FUN_142eb6eb0` takes the world id in `EDX` and one extra byte in `R8B`.
 
-1. Each token of `javelin.worlds-that-bypass-entitlement` (`0x148157580`) is a CRC32 from `FUN_1412f4730` (A–Z made lower case). A hash equal to the world id returns 1.
+1. Each token of `javelin.worlds-that-bypass-entitlement` (`0x148157580`) is a CRC32 from `FUN_1412f4730` (A through Z made lower case). A hash equal to the world id returns 1.
 2. A world row is loaded with type code `0x11`. If the qword at row `+0x18` is 0, there is no entitlement list. The return is the extra byte XOR 1. Byte 0 returns 1. Any other byte returns 0.
 3. If the row has entries, each entitlement id is the dword at node `+0x10`. Slot `+0x130` (`FUN_142eb7080` on vtable `0x148157250`) tests that id in the bitset at `this+0xd0`. The first set bit returns 1. If every test fails, the function returns 0.
 
@@ -99,7 +99,7 @@ Status: The wait is named. The call that would finish it is a static limit.
 
 ## 5. Remote config from `ags-javelin-remote-config`
 
-Status: The download, the bucket, and the keys that questions 1–4 read are named. The byte left for one missing bool is a static limit.
+Status: The download, the bucket, and the keys that questions 1-4 read are named. The byte left for one missing bool is a static limit.
 
 **Observed.** `FUN_1410376e0` (`0x1410376e0`) logs `Using remote config: %s`. The caller is `FUN_14102ee20` (`0x14102ee20`). `client-connection.enable-remoteCfg` defaults to true. The caller stores 1 before the read. A false value skips the bucket.
 

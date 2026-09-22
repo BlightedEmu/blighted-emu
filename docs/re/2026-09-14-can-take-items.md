@@ -3,7 +3,7 @@
 Date: 2026-09-14. Build: Steam `25810808`. Labels: **Observed**, **Inferred**, **Unknown**.
 
 Sources: the Ghidra project `<re-scratch>/ghidra-25810808` (analyzed `NewWorld.exe`,
-Ghidra 12.1.4, headless Java scripts — see section 5), the client `Game.log` of the live run of
+Ghidra 12.1.4, headless Java scripts, see section 5), the client `Game.log` of the live run of
 2026-09-14 (`local-data/logs/run-2026-09-14-1233/Game.log`), and the retail ledger
 `local-data/captures/own/newchar-linux-2026-09-12/ledger.bin`.
 
@@ -44,7 +44,7 @@ if (plVar3 != NULL) {
 
 The resolver `FUN_142d875d0` walks the entity's components for the interface id
 `{91B8850B-3BDF-1D1F-16BB-4B7CB8DDC4E1}` (the container interface; three component classes
-implement it) and logs its own errors — "unknown Container EntityId", "no container component",
+implement it) and logs its own errors: "unknown Container EntityId", "no container component",
 "invalid container". None of those appear in the live `Game.log`, so the bag's container
 component resolved and the failure was the empty items vector.
 
@@ -55,11 +55,11 @@ item) and `FUN_142d97810`.
 
 **Observed.** The bag's replicated card carries no item state: `LootDropReplicatedState`
 (type 2027) is only `m_rarityLevel` (the glow). Between the bag card (t=164262) and the take
-(t=169077) retail sends only own-position bundles — the item list is not client-slice data
+(t=169077) retail sends only own-position bundles. The item list is not client-slice data
 either. At t=164578 (~316 ms after the card) the retail server emits on the bag's group:
 
 - `c2/t1755` `MB::ContainerComponentReplicatedState`: list version 5, the three archetype items
-  (`syncReason` 3, container slots 0–2, counters 0–2, gear score 75, bound, 16-byte instance
+  (`syncReason` 3, container slots 0 to 2, counters 0 to 2, gear score 75, bound, 16-byte instance
   ids), `bonusMaxEncumbrance` 0, `wasEmptied` false;
 - `c6/t2027` body `010100000001` (glow on).
 
@@ -67,7 +67,7 @@ At the take (t=169112) it empties the container (version 6, three zeroed records
 `syncReason` 6, `wasEmptied` true), sets `c3/t2930` `010100`, `c6/t2027` off, the two delayed
 events (`c7`/`c8` `MB::DelayedEventComponentReplicatedState`), and clears the player's
 interaction target (`c26/t3752` on the own group, body `01 01` + the bag's entity id). At
-t=169143 the player's `c61/t1755` delta adds the items at bag slots 6–8, instance ids
+t=169143 the player's `c61/t1755` delta adds the items at bag slots 6 to 8, instance ids
 unchanged.
 
 **Observed.** `VInitialContainerContents` exists as a type name in the binary; how the retail

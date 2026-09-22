@@ -54,7 +54,7 @@ No extra per-write prefix is added at this layer.
 
 Conclusion: the TCP transport carries the same GridMate carrier frames as
 the UDP path (see [crates/nw-carrier/src/frame.rs](../../crates/nw-carrier/src/frame.rs)).
-The DTLS layer is simply absent. Each written buffer is one serialized
+The DTLS layer is absent. Each written buffer is one serialized
 carrier "datagram body".
 
 The carrier frame is `[flags][u16 BE length][channel?][...][payload]`, where

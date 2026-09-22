@@ -138,12 +138,12 @@ Other hostnames in the first-light hosts list
 - Five more API Gateway hosts: `8otrnl8e8d` (eu-central-1), `ei4rb8pwvd` (sa-east-1),
   `3khxmonavl` (us-east-1), `mwsyzhfoe5` (us-west-2), `9jlv7mxmw1` (ap-southeast-2),
   all `*.execute-api.<region>.amazonaws.com`. Their role is **Unknown**.
-- `d1hkbwzm1bktgo.cloudfront.net` - MOTD (`/motd/worlds_*.json`), news, marketing tiles.
+- `d1hkbwzm1bktgo.cloudfront.net`: MOTD (`/motd/worlds_*.json`), news, marketing tiles.
 - `client.content-service.amazongames.com`, `client.catalogservice.amazongames.com`,
   `client.entitlementservice.amazongames.com`,
   `client.agsprivacysettingsservice.amazongames.com`.
-- `tokenservice.amazongames.com` - OmniSDK token service.
-- `ags-javelin-remote-config.s3.amazonaws.com` - remote configuration layers.
+- `tokenservice.amazongames.com`: OmniSDK token service.
+- `ags-javelin-remote-config.s3.amazonaws.com`: remote configuration layers.
 
 Remote configuration (S3 keys from the log, [pastebin 4ynb16Rb](https://pastebin.com/4ynb16Rb)):
 
@@ -501,9 +501,9 @@ date. Listing sites that advertise New World private servers
 
 Data mining and file tools (no traffic parsing):
 
-- https://github.com/new-world-tools/new-world-tools - pak extractor, AZCS object
+- https://github.com/new-world-tools/new-world-tools: pak extractor, AZCS object
   stream and datasheet converters (Go).
-- https://github.com/giniedp/nw-buddy - companion app and data viewer; also
+- https://github.com/giniedp/nw-buddy: companion app and data viewer; also
   https://github.com/giniedp/nw-buddy-data.
 - https://github.com/imunproductive/NewWorldExplorer,
   https://github.com/PeterZhenhh/New-World-Pak-Extractor,

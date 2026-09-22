@@ -39,7 +39,7 @@ Labels: **Observed** = seen in code, captures, or logs. **Inferred** = a conclus
 
 **Observed.** `nw-carrier` acked only datagrams with a reliable frame. The client sends its frequent input and many ack-only datagrams without a reliable frame. Our server never acked them.
 
-**Inferred.** The client counted those datagrams as lost. That is the most likely cause of the warning flag. The live retest will confirm it.
+**Inferred.** The client counted those datagrams as lost. That is the most likely cause of the warning flag. A live retest must confirm it.
 
 **Observed (captures).** Every unreliable frame carries, as its reliable sequence, the number of the last reliable frame sent on its channel: difference 0 in 6,055 server frames (4 frames show 1, after loss). A client unreliable frame sent before any reliable frame on its channel carries 65535.
 

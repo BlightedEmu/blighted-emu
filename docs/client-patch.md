@@ -12,7 +12,7 @@ the emulator gateway's self-signed certificate and fails world entry with
 no-certificate transport by config either (the retail client reads no
 external override).
 
-The fix is one tiny change to the client: stop it verifying the server
+The fix is one small change to the client: stop it verifying the server
 certificate. Then its normal `gridmate-udp` DTLS connection accepts the
 emulator gateway, and the whole UDP/DTLS path is reused.
 
@@ -164,7 +164,7 @@ scripts/patch-client.py "<Bin64>"
 The tool reads the new official exe, finds the signature again (new address is
 fine), writes a fresh `BlightedNewWorld.exe`, and refreshes the `.orig`
 backup. If the update changed the function so the signature is gone, the tool
-stops with an error instead of patching the wrong place — then re-derive the
+stops with an error instead of patching the wrong place. Then re-derive the
 signature (below).
 
 ## Re-deriving the signature if a build changes it
@@ -289,15 +289,15 @@ built (`cargo build -p launcher --release`):
 
 ## Files
 
-- `scripts/patch-client.py` — makes/checks/reverts the patched copy (with
+- `scripts/patch-client.py`: makes/checks/reverts the patched copy (with
   `--aws-proxy` for Windows).
-- `scripts/patch-client.test.sh` — tests the tool on a synthetic exe
+- `scripts/patch-client.test.sh`: tests the tool on a synthetic exe
   (`just test-scripts`).
-- `bins/launcher/src/aws_proxy.rs` — the Windows loopback proxy.
-- `bins/launcher/testdata/proxy-tls.crt` / `proxy-tls-key.pem` — the proxy's own
+- `bins/launcher/src/aws_proxy.rs`: the Windows loopback proxy.
+- `bins/launcher/testdata/proxy-tls.crt` / `proxy-tls-key.pem`: the proxy's own
   game-facing certificate (the patched client does not check it).
-- `bins/launcher/testdata/proxy-mirror.crt` / `proxy-mirror-key.pem` — a stand-in
+- `bins/launcher/testdata/proxy-mirror.crt` / `proxy-mirror-key.pem`: a stand-in
   server mirror certificate for the proxy tests.
-- `<Bin64>/NewWorld.exe` — official client, never modified.
-- `<Bin64>/NewWorld.exe.orig` — one-time backup of the official client.
-- `<Bin64>/BlightedNewWorld.exe` — the patched client our launcher runs.
+- `<Bin64>/NewWorld.exe`: official client, never modified.
+- `<Bin64>/NewWorld.exe.orig`: one-time backup of the official client.
+- `<Bin64>/BlightedNewWorld.exe`: the patched client our launcher runs.

@@ -14,8 +14,8 @@ established).
   Certificate trust always uses the Windows certificate stores of the machine or of the user.
 - The game itself has no setting, environment variable or config file that changes the three
   Amazon addresses, sends them through a proxy, or adds a trusted certificate.
-- So no per-process route exists **without a change in the game process**. This note lists the
-  options. **The choice is the user's.** No system-wide change is chosen, and nothing for Windows
+- So no per-process route exists without a change in the game process. This note lists the
+  options. The choice is the user's. No system-wide change is chosen, and nothing for Windows
   was built yet.
 
 ## 1. Evidence
@@ -41,7 +41,7 @@ established).
 - **Observed.** The executable has the RTTI names `WinHttpSyncHttpClient` and
   `WinINetSyncHttpClient` and imports `WINHTTP.dll` and `WININET.dll`. There is no
   `CurlHttpClient`.
-- **Observed (resolves §5.3).** The clients use the **WinHTTP** client. The HTTP client factory
+- **Observed (resolves §5.3).** The clients use the WinHTTP client. The HTTP client factory
   `FUN_146b73730` picks the WinINet client only when the configuration byte at `+0x220` is `2`;
   the `ClientConfiguration` constructor `FUN_147467a40` sets it to `0`, and the three builders do
   not change it, so the factory builds `WinHttpSyncHttpClient` (constructor `FUN_147491570`). With

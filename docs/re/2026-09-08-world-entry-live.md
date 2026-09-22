@@ -22,7 +22,7 @@ walls are cleared; one remains.
 
 ## What the two fixes did
 
-### Type 1628 — PlayerManagerSelfIdentificationMsg
+### Type 1628: PlayerManagerSelfIdentificationMsg
 
 The sim never sent it, so the client could not leave
 `WaitingForActorGameConnection`. Its handler `FUN_146454c00` always calls the
@@ -40,7 +40,7 @@ second presence block. All zero except the two `0x01` presence flags.
 Live: Game.log logs "actor game connection succeeds" and advances to
 `WaitingForSpawnPoint` and then `WaitingForPlayerSpawn`. Committed in `1268829`.
 
-### Type 1635 — LevelInfoChangedMsg
+### Type 1635: LevelInfoChangedMsg
 
 Needed so the client loads the level/context. Layout taken from existing data,
 not a fresh decompile: the field list of
@@ -116,7 +116,7 @@ spawned).
 
 `FUN_146449f90` (LoadContextAndLevel, old `FUN_146448cd0`) is the only thing
 that issues `map %s` and sets `+0x252`. It is NOT called by the 1628 or 1635
-handlers. Its one caller is `FUN_14643fa70` — the GameMessagePort handler for
+handlers. Its one caller is `FUN_14643fa70`, the GameMessagePort handler for
 incoming replication. When a type-8 `ReplicatedStateBundle` arrives whose
 clientContextInstanceId equals the port's expected context and the context
 object is still null, `FUN_14643fa70` calls LoadContextAndLevel and logs
@@ -136,7 +136,7 @@ clientContextInstanceId = bundle `byte_3`. The sim sets `byte_3 = 1`
 ### The actual blocker: no channel-1 bundle reaches the client
 
 Game.log shows NONE of `FUN_14643fa70`'s log lines (no "skipping
-ReceiveStateBundle…", no "MayHandleReplicationUnreliable returning false", no
+ReceiveStateBundle...", no "MayHandleReplicationUnreliable returning false", no
 "received bundle for a previous ClientContext"). So the client's game port is
 not receiving any type-8 bundle. With the context byte already matching, the
 only explanation is delivery: the real client is not getting the sim's
@@ -204,7 +204,7 @@ So, firmly isolated: the real client ingests channel-0 reliable messages fully
 (it processed every login message including 1635) but does NOT ingest our
 channel-1 UNRELIABLE state bundles. The gateway sends them (verified in
 `send_envelopes`), so this is the carrier framing/handling of unreliable
-channel-1 frames — which `nw-carrier` has only ever exchanged with our own
+channel-1 frames. `nw-carrier` has only ever exchanged these with our own
 `nw-testclient`, never with the real gridmate client.
 
 A raw UDP capture does not help: the REP traffic is DTLS-encrypted, so tcpdump
@@ -243,20 +243,20 @@ Then the real wall, logged every bundle:
 [ERROR] TypeRegistry: Invalid index requested in GetTypeIdForIndex {"index":13690,"size":7052}
 [ERROR] StateReplication: Failure during read of ReplicatedStateBundle. {"stateSequence":...}
 ```
-Our type table has 7052 slots; index 13690 (and 9290) is out of range — a DESYNC:
+Our type table has 7052 slots; index 13690 (and 9290) is out of range. This is a DESYNC:
 one bundle member's state body is a different length than the real client's reader
 expects, so the next member's type-id is read from the wrong offset. The whole
 bundle read aborts, so no entity (incl. the player) spawns -> black screen.
 
 ROOT INSIGHT: the replication-and-movement note (2026-09-02) only ever validated
 bundles made ENTIRELY of position members (type 13); the capture walk "stops at the
-first member that is not type 13". So our MOB-card members — GDE metadata (type 10)
-and vitals (type 15), from `bins/sim/src/world/members.rs` `mob_members` — were
+first member that is not type 13". So our MOB-card members (GDE metadata, type 10,
+and vitals, type 15, from `bins/sim/src/world/members.rs` `mob_members`) were
 reverse-engineered but NEVER validated end-to-end against the real client, and they
 are what desync its reader. The player's own member is position-only (validated).
 
 Also seen: "MayHandleReplicationUnreliable() returning false ... seq 0
-m_lastUnreliableReplicationSeq 1" — the client tracks a per-context replication
+m_lastUnreliableReplicationSeq 1". The client tracks a per-context replication
 sequence and rejects a bundle whose seq is not newer; our bundle sequence numbering
 (the group leading / bundles_sent) may also need to match this.
 
@@ -297,14 +297,14 @@ member-class frequencies in docs/re/2026-09-02-replication-and-movement.md
   next member's type-id reads as garbage (index 13690) -> whole bundle read
   aborts. This is the desync.
 - GDE metadata (type 10): real median body ~281 bytes vs our ~37 (fewer children
-  set) — plausibly fine structurally but also never validated against the client.
+  set). This is plausibly fine structurally but also never validated against the client.
 
 Conclusion: the mob-member set/layout we send was invented in M6 and never
 validated against the real client. Proper fix = represent mobs with the members
 retail actually sends (GDE spawn card + ALC per-tick state), with layouts matched
 byte-for-byte to captures; drop the type-15 vitals member from the bundle path.
 This is a real RE/impl chunk (finishing the M6 bundle wire format). The player's
-own member is position (type 13), which IS validated — so the NW_POSITIONS_ONLY
+own member is position (type 13), which IS validated. So the NW_POSITIONS_ONLY
 test should still spawn the player without any mob members.
 
 ## Spawn condition traced 2026-09-08 (evening): no local player entity

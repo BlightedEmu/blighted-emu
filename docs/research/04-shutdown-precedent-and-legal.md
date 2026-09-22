@@ -125,7 +125,7 @@ The client fetches `SiteConfig.xml` over HTTPS, then logs in at `/AuthServer`. T
 
 **City of Heroes Homecoming.** Not an emulator: runs original server code that leaked in 2019. It later got an official licence from NCSoft (January 2024), with conditions: closed source, own launcher, NCSoft may request shutdown at any time [S50][S51]. Lesson: a licence is possible, but it came after years and only to one team.
 
-**Return of Reckoning.** Players archived packets before the 2013 shutdown; development started January 2014 as a protocol re-implementation with no original code [S53]. Lesson: captures before shutdown are critical.
+**Return of Reckoning.** Players archived packets before the 2013 shutdown; development started January 2014 as a protocol re-implementation with no original code [S53]. Lesson: captures before shutdown are necessary.
 
 **The Crew Unlimited.** Team formed within days of the shutdown notice, logged traffic, and shipped a save-dumper tool before shutdown so players could keep progress [S56][S57]. Release 1.0 (September 2025) was offline-first (local server on the player PC) [S57]. Lesson: a single-process "local server" mode is a strong first deliverable.
 

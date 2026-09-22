@@ -30,7 +30,7 @@ Observed in local logs at 2026-09-06 19:05:24 UTC (15:05:24 America/New_York):
   `tlsv1 alert unknown ca`, SSL alert number 48.
 
 The game reached the gateway and sent a certificate trust rejection.
-This establishes the immediate failure, not a complete proof of all later
+This shows the cause of the first failure. It does not prove all later
 world entry behavior.
 No tokens or account details are copied into this note.
 
@@ -53,13 +53,13 @@ No tokens or account details are copied into this note.
    The same session family has TCP bind/listen error strings next to its
    vtable, and a libUV worker loop.
 
-Inference: this is a TCP transport alternative, not the existing GridMate
+Inference: this is an alternative TCP transport, not the existing GridMate
 UDP carrier. A UDP packet relay alone is not sufficient for it.
 
-Bounded observation: no embedded certificate parameter is passed to this
-transport constructor. This does NOT establish that no later layer can
-perform a security check. Deferred callbacks and the complete receive path
-still need to be traced.
+Limit of this observation: no embedded certificate parameter is passed to
+this transport constructor. This does not prove that no later layer does a
+security check. The deferred callbacks and the full receive path still need
+a trace.
 
 ## Config input
 
@@ -77,7 +77,7 @@ No launch arguments or client config were changed in this study.
 External first-light archive notes report failed loose @assets@ override
 attempts on an older client. Those are historical reports, not tests of
 this project's patched client. They do not rule out an explicit absolute
-OverrideConfigPath, but they also do not prove it works.
+OverrideConfigPath. They also do not prove that it works.
 
 ## Candidate bridge
 
@@ -124,7 +124,7 @@ All new scripts and exports for this study are in /tmp:
 - /tmp/nw-session-trace/
 - /tmp/nw-transport-config-detail/
 
-Those temporary files are not durable evidence storage.
-The addresses and observations above preserve the useful findings.
-The established work root for future RE tasks is
-`<re-scratch>/`; notes belong in this repository's `docs/re/`.
+These temporary files are not kept as evidence.
+The addresses and observations above keep the findings.
+The work root for future RE tasks is
+`<re-scratch>/`; notes go in this repository's `docs/re/`.

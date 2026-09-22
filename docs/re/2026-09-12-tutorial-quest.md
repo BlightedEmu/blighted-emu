@@ -33,14 +33,14 @@ Task types and what completes them (implemented in `bins/sim/src/objectives.rs`)
 | `PartialTaskContainer` | one child is done (the others stop) |
 | `SimpleTaskContainer` | all children are done |
 | `TaskUnlockAchievement` | at once; sets the achievement |
-| `TaskRemoveItem` | at once; removes the item |
+| `TaskRemoveItem` | at once; removes `TargetQty` of the item (every row has one, 1 to 7), the bag first (**Inferred**); all of it when the player holds no more |
 | `TaskTimer` | after `Duration` seconds |
 | `TaskCinematicStart` / `TaskCinematicComplete` | 6606 / 6542 with the CRC-32 of the lowercase `ItemName` |
 | `TaskCutsceneComplete` | 6705 of the cutscene the client asked for (6703) |
 | `TaskTriggerArea` | the player within 12 m of `OverrideLocation` (**Our choice**: retail tasks completed 4 to 12 m from it; the real volumes are level data) |
 | `TaskKillContribution` | `TargetQty` kills whose vitals id or `VitalsCategories` names `KillEnemyType` (an id start counts: `Legion_Legionnaire` names `Legion_Legionnaire_FTUE`; **Inferred**) |
-| `TaskHaveAndReturnItems` | the player gets `ItemName`; without one, the player takes all items of a loot container (**Inferred**: the four `Take*` tasks completed with the bag) |
-| `TaskEquipItem` | 3895 equips `ItemName` |
+| `TaskHaveAndReturnItems` | the player gets `ItemName`; without one, the player takes all items of a loot container (**Observed**, objectives state 3857 of newchar-retail-2026-09-18 and newchar-linux-2026-09-12: `EquipWeapon_partial` and the `MSQ_Tutorial_Inventory` unlock completed 66 and 56 ms after the bag take 2939, in both runs through the three `Take*` tasks of `Weapon2_container`, each with progress 3, the bag's item count; the four of `Weapon1_container` were not listed. Why `Weapon1_container` did not count is **Unknown**: its rows differ from those of `Weapon2_container` in no field that `TaskRow` reads; the server completes the partial through `Weapon1_container`, at the same time) |
+| `TaskEquipItem` | 3895 equips `ItemName` (**Observed** later in retail: the equip tasks completed 3.1 to 5.8 s after the weapon equips, and the potion equip task only at the next kill, 13.5 to 24.7 s after; what makes retail check them is **Unknown**) |
 | `TaskOpenUiScreen` | 2617 with the CRC-32 of the lowercase `UIScreenTag` (`hud` = `a1126b78`) |
 
 **Observed.** With the retail events of the live run in order, the content's tree sets the 27
@@ -70,8 +70,8 @@ the door.
 it at any time (paperdoll note, section 2). **Our choice:** after a gear change, the server sends
 the four gear states again whole, at a higher version, instead of deltas.
 
-**Inferred.** Paperdoll slots 0–4 (armor) and 24–29 (weapon options) are the visible items;
-other slots (amulet 5, quick slots 14–17) are the hidden items (retail: the potion stack in slot
+**Inferred.** Paperdoll slots 0 to 4 (armor) and 24 to 29 (weapon options) are the visible items;
+other slots (amulet 5, quick slots 14 to 17) are the hidden items (retail: the potion stack in slot
 14).
 
 **Our choice:** a handoff carries the items (`HandoffOffer.items`), so the open world keeps the

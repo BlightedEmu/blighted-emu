@@ -2,7 +2,7 @@
 
 Date: 2026-09-02
 Build: Steam build `22469132`, `Bin64/NewWorld.exe`, image base `0x140000000`, x86-64, Windows compiler spec. Ghidra project `<re-scratch>/ghidra` (program `NewWorld.exe`, 355,815 functions).
-Method: static analysis only, on the already-analyzed project, opened read-only with analysis left off (`analyzeHeadless <re-scratch>/ghidra NewWorld.gpr -process NewWorld.exe -noanalysis -readOnly`). One comprehensive script pass (`FollowUps.java`) ran a fixed pool of 14 decompiler instances in parallel and decompiled 208 functions in 23 seconds. One small follow-up pass (`SuppDump.java`) added 179 functions. Offline inspection used the earlier corpora (`<re-scratch>/out-20260902`, 726 files; `/tmp/nw-shapes`, 97 files) with parallel ripgrep. Two small functions were disassembled straight from the executable with `objdump` (`FUN_1408e8550`, `FUN_141720c20`, `FUN_1479c94f0`). The game was not run. No game file, no Ghidra project file, and no repository code file was changed. Easy Anti-Cheat was not analyzed.
+Method: static analysis only, on the already-analyzed project, opened read-only with analysis left off (`analyzeHeadless <re-scratch>/ghidra NewWorld.gpr -process NewWorld.exe -noanalysis -readOnly`). One script pass (`FollowUps.java`) ran a fixed pool of 14 decompiler instances in parallel and decompiled 208 functions in 23 seconds. One small follow-up pass (`SuppDump.java`) added 179 functions. Offline inspection used the earlier corpora (`<re-scratch>/out-20260902`, 726 files; `/tmp/nw-shapes`, 97 files) with parallel ripgrep. Two small functions were disassembled straight from the executable with `objdump` (`FUN_1408e8550`, `FUN_141720c20`, `FUN_1479c94f0`). The game was not run. No game file, no Ghidra project file, and no repository code file was changed. Easy Anti-Cheat was not analyzed.
 
 Labels: **Observed** = an address, a string, or decompiler output in this build. **Inferred** = a conclusion from that evidence. **Unknown** = not established.
 
@@ -145,7 +145,7 @@ The Omni GetOrCreateToken call sits in the AGS session layer (session.cpp, above
 | State | Name | What happens |
 |---|---|---|
 | 1 | `QueryGameUpdateCheck` | `FUN_1463e4000` (`0x1463e4000`) runs the update check job. Result 0 logs `QueryGameUpdateCheck: no game update check needed.` (`0x1484fe440`). |
-| 2 | `WaitingForGameUpdateCheck` | Results: keep waiting; `failed to fetch game update status from first party.` (`0x1484fe4b0`); `no game update available.` (`0x1484fe478`); `a game update is available.` (`0x1484fe500`, then `FUN_146460240` with id `0x15`). **The failure result falls through to the next state**, like the no-update result. |
+| 2 | `WaitingForGameUpdateCheck` | Results: keep waiting; `failed to fetch game update status from first party.` (`0x1484fe4b0`); `no game update available.` (`0x1484fe478`); `a game update is available.` (`0x1484fe500`, then `FUN_146460240` with id `0x15`). The failure result falls through to the next state, like the no-update result. |
 | 3 | `QueueGameLogin` | queue login begins (world and character already chosen at the UI level). |
 | 5/6 | `QueryForRemoteConfigClass` / `WaitingForRemoteConfigClass` | iterate a class list (stride `0xb8` at `+0x1508`) through `FUN_1463e4550` (`0x1463e4550`); these run after the queue, not before character select. |
 

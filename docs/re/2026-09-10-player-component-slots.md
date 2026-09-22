@@ -50,18 +50,18 @@ to `FUN_141775c60` when they register each named child.
 **Observed.** The generic bundle reader is virtual `+0x90`. On the old build it is
 `FUN_1417b4110`; on the current build `FUN_1417b5080`. It computes
 `slotCount = (obj+0x18 - obj+0x10) / 800`, then reads one byte per group of up to 8 slots:
-byte 0 covers slots 0–7, byte 1 covers slots 8–9. The read is positional, not driven by a
+byte 0 covers slots 0-7, byte 1 covers slots 8-9. The read is positional, not driven by a
 continuation bit: `ceil(slotCount / 8)` bytes are consumed always. A set bit reads that
 slot's child list through `FUN_1417b5330` (current) / child virtual `+0x30`; a clear bit
 reads nothing.
 
-**Observed.** So an empty body is `ceil(slotCount / 8)` zero bytes: `0x00` for 1–8 slots,
-`0x00 0x00` for 9–10. No player component reaches 9 slots.
+**Observed.** So an empty body is `ceil(slotCount / 8)` zero bytes: `0x00` for 1-8 slots,
+`0x00 0x00` for 9-10. No player component reaches 9 slots.
 
 **Observed.** The capture ground truth agrees: in
 `local-data/captures/open-world/NH-MSQ-10.2-Quest-61c0a783ba281885/fragments.jsonl` every
 type index of the 56 classes (and also type 10, the spawn card) was decoded with RVA
-`0x17b4110` — the generic reader — on every fragment. Only type 11 used its custom decoder
+`0x17b4110` (the generic reader) on every fragment. Only type 11 used its custom decoder
 `0x2a436b0`.
 
 **Observed.** For each of the 56 classes the qword at `vtable + 0x90` of the vtable the
@@ -146,7 +146,7 @@ that function registers 26 `guild*` children, stores vtable `0x1481e3038`, and c
 add-slot once. Two slots.
 
 **Observed.** Type 10 (component 0, the spawn card) is also read by the generic reader in
-the capture (decoder `0x17b4110`, bodies 18–38 bytes). It is not an empty state.
+the capture (decoder `0x17b4110`, bodies 18-38 bytes). It is not an empty state.
 
 \* ALC `+0x90` is the custom decoder `FUN_142a436b0` (old) / `FUN_142a44650` (current), not
 the generic reader; see section 3. Its slot byte also selects nothing on `0x00`, but a bare
@@ -183,8 +183,8 @@ old build):
   the decompiled reader list and passes all walked bodies).
 
 **Observed.** On this capture's local player (key 16), the first type-11 body after each
-spawn card is 9–25 bytes and walks cleanly (65 of 65). Slot-0 children 0, 1, 2 are set in
-all 65; children 10 and 11 in ~49–53; children 4, 12, 26, 27 (the `pos10` position child)
+spawn card is 9-25 bytes and walks cleanly (65 of 65). Slot-0 children 0, 1, 2 are set in
+all 65; children 10 and 11 in ~49-53; children 4, 12, 26, 27 (the `pos10` position child)
 less often. Slot 1 appears in 11 of 65 (child 0 only). Other entities' first ALC bodies
 (key 5 in the same table) are larger, up to ~76 bytes with ~26 slot-0 children.
 
@@ -198,7 +198,7 @@ wide-prefix presence mask `1 << 27` = bytes `e0 00 00 80`, then the 10-byte `pos
 
 **Inferred.** For a newly portrayed player the client does not require a fixed set of ALC
 children to parse; the decoder accepts any subset. But the retail first body always carries
-at least children 0–2 and usually the movement group 10–12; the safe minimal first body is
+at least children 0-2 and usually the movement group 10-12; the safe minimal first body is
 the 15-byte `pos10` form above. Whether an ALC with no position causes a later failure is
 **Unknown**; the crashes below are elsewhere.
 
@@ -213,7 +213,7 @@ the 15-byte `pos10` form above. Whether an ALC with no position causes a later f
 The object with that vtable is allocated by `FUN_1440842d0`, which passes the debug name
 `"PlayerTimeComponentClientFacet"` and stores the facet at `component + 0x80`. So the
 crashing apply belongs to component index 5, `MB::PlayerTimeComponentReplicatedState`
-(type 3290) — consistent with `r9 = 5`.
+(type 3290). That is consistent with `r9 = 5`.
 
 **Observed.** The apply body:
 
@@ -226,7 +226,7 @@ if ((*(state+0x850)->vtable + 0x60)(state+0x850))  *(facet_out+0x110) = *(state+
 `state+0x7c0`, `+0x808`, `+0x850` are the three embedded child objects registered by the
 PlayerTime constructor `FUN_14407de10` (`startTimePoint`, `durationAtStart`,
 `paidDurationAtStart`, all slot 0). In a constructed state, `state+0x7c0` is the child's
-vtable pointer — never `-1`.
+vtable pointer, never `-1`.
 
 **Observed.** The apply runs over the entity's component-state map, not over the received
 records: `FUN_14167b0a0` walks a tree (`entity+0x88`) of per-component records and calls
@@ -243,8 +243,8 @@ through `FUN_146160ae0`). The same shape holds for the other classes (e.g. type 
 
 **Inferred.** The state argument is invalid when no type-3290 record ever unmarshalled into
 this entity's component-5 slot: the record then holds the raw `CreateInstance` allocation
-(or an equivalent placeholder), where `+0x7c0` is uninitialized heap data — `0xff` bytes in
-this run — instead of the `startTimePoint` child vtable. The apply dereferences it as a
+(or an equivalent placeholder), where `+0x7c0` is uninitialized heap data (`0xff` bytes in
+this run) instead of the `startTimePoint` child vtable. The apply dereferences it as a
 child object and calls through `rax = -1`. This also explains why crash 1 happens with card
 + ALC and no component records at all: the apply iterates the entity's own component map,
 which is filled when the entity is created, independent of what the bundle carried.
@@ -252,7 +252,7 @@ which is filled when the entity is created, independent of what the bundle carri
 **Inferred.** To pass this path the record for component 5 must go through unmarshal once,
 which builds the real `0x898`-byte state with the three children embedded. A `0x00` body
 constructs the object (the ctor runs inside unmarshal) but leaves every child unset; the
-apply then calls the children's `+0x60` "is set" check on real objects — safe. The records
+apply then calls the children's `+0x60` "is set" check on real objects, which is safe. The records
 that must exist are therefore all components the client creates facets for, not only
 PlayerTime; the retail server sends a real body for every one of the 56.
 
@@ -263,7 +263,7 @@ shows the server always sends the 26-byte body with all three children set.
 ## 5. Crashes 2 and 3: `FUN_14172dce0`
 
 **Observed.** Fault at `0x14172de81` inside `FUN_14172dce0`, read access at
-`0x0000006c65526471` — `rax = 0x0000006c65526469` is ASCII text (`"idRel…"`) used as a
+`0x0000006c65526471`. `rax = 0x0000006c65526469` is ASCII text (`"idRel…"`) used as a
 pointer, faulting on `[rax+8]`. Called from `FUN_141718de0` (per-record state handler on
 the portrayal path) ← `FUN_14175dbe0` (bundle member walk).
 
@@ -274,7 +274,7 @@ and inside each slot a child table of stride `0x18`, dereferencing each child en
 inner child-pointer load.
 
 **Inferred.** The walked object is not a constructed state: its slot-vector or child-table
-fields hold bytes of a string (ASCII), the same class of corruption as crash 1 — the
+fields hold bytes of a string (ASCII), the same class of corruption as crash 1. The
 entity-side record for the component held a placeholder/raw block (or a descriptor record,
 whose embedded uuid/name fields are ASCII) rather than a constructed state when the merge
 ran. A wrong-length read upstream that left the cursor on ASCII is a possible alternative,
@@ -292,7 +292,7 @@ not sufficient: the client builds a component map for the entity at spawn and ap
 merges every entry, and an entry that never unmarshalled a real record holds a raw
 allocation, not a state object. The minimum fixable set is: a real spawn card (type 10),
 a parseable ALC (type 11; the 15-byte `pos10` minimum), and a record per component that
-runs that class's unmarshal — a `0x00` body does run it, because the constructor executes
+runs that class's unmarshal. A `0x00` body does run it, because the constructor executes
 inside `Unmarshal` before any body bytes are consumed. The remaining risk is facets whose
 apply reads fields a `0x00` body leaves unset (PlayerTime reads only "is set" flags; other
 facets may do more). The reliable reference is the capture's per-type first bodies, which

@@ -144,8 +144,8 @@ to 7; `FUN_1469ef840` (`javelin.enable-register-dynamic-gde`) uses it. So the cl
 tag-7 ids for dynamic GDEs it registers itself; the level tag-7 ids of section 4 still come
 from the server.
 
-**Observed.** In no function of the GDE code, the camera-lock code (`0x142c6…` to `0x142cb…`) or
-the id code (`0x14615…` to `0x14616…`) found another test of the low 3 bits.
+**Observed.** A search of the GDE code, the camera-lock code (`0x142c6…` to `0x142cb…`) and
+the id code (`0x14615…` to `0x14616…`) found no other test of the low 3 bits.
 
 ### 5.3 Respawns
 

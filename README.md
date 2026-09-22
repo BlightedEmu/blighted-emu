@@ -8,7 +8,7 @@ A preservation server emulator for New World: Aeternum. The official servers shu
 
 Design: the architecture spec is kept locally (not in git).
 Research: [docs/NEW_WORLD_EMULATOR_RESEARCH.md](docs/NEW_WORLD_EMULATOR_RESEARCH.md)
-Client patch: [docs/client-patch.md](docs/client-patch.md) — how to make `BlightedNewWorld.exe` (cert bypass) so the real client can enter the emulator, and how to re-make it after a game update.
+Client patch: [docs/client-patch.md](docs/client-patch.md): how to make `BlightedNewWorld.exe` (cert bypass) so the real client can enter the emulator, and how to re-make it after a game update.
 
 ## Licences
 
@@ -69,6 +69,7 @@ export NW_GAME_DIR="/path/to/steamapps/common/New World"
 just bundle
 just world
 just design
+just collision
 ```
 
 `just bundle` writes the retail bundle `local-data/content/retail/bundle-<build>.bin`, then reloads it and checks every table and row. The pinned client build is in `config/client-build.toml`.
@@ -76,6 +77,8 @@ just design
 `just world` writes the retail world files `local-data/content/retail/world-<build>-<level>.bin` for each of the 41 levels (about 620 MB in all), reloads each file, and prints the record counts, the skipped metadata fields, and the spawn IDs that no datasheet row has.
 
 `just design` reads the retail files, merges the team's design files from `content/` over them (see [content/README.md](content/README.md)), and writes `local-data/content/bundle-<build>.bin` and `local-data/content/world-<build>-<level>.bin`: the files the servers and the admin tools read. It does not read the game install. With no design files, the merged files are equal to the retail files. When a design file has a problem, it prints each one and writes nothing.
+
+`just collision` writes the level collision files `local-data/content/collision-<build>-<level>.bin` of the tutorial and the open world (about 104 MB in all): the solid shapes of each level's placed slices (variant capitals as their variation data shows them, and the slices encounters spawn later), read from the game's physics assets (`.rnr`), which the sims stand the players and mobs on. A sim does not start without the collision file of its level. See `docs/re/2026-09-20-level-collision.md`.
 
 ### Recovery
 
@@ -349,7 +352,7 @@ blighted-admin revoke-rank ada
 
 Five wrong passwords in 10 minutes lock a name for 15 minutes. The session cookie is `HttpOnly`, `Secure` and `SameSite=Strict`, and lasts 12 hours. In server mode the design routes (Check, Apply) and bot batches are refused: design work happens on a team member's own PC and reaches the server through git.
 
-GM commands go to the sim that owns the target, found from the sim snapshots and the cell table, and wait up to 5 s for its answer. Every command (and every login) writes a row to the audit log. On the live page, select a player or bot for: **Teleport** to a point or to another player, **Heal**, **Kill**, **God on/off**, **Kick**, **Give/Take** an item, **Set level** and **Give XP**, **Weapon mastery** (set the rank of one weapon or of all, or give one weapon mastery experience; levels and ranks are the ones the game shows), and **Set coins**. Experience and coins are saved with the progression (world migration 0006), weapon masteries too (0007). The **GM mobs** form spawns up to 50 mobs of a vitals id at a point (right-click the map to fill x and y); they stay awake and respawn until a GM despawns them. The GM page (`/gm`) shows the audit log (a head admin sees all rows, others their own), bans and unbans by login name, and, for head admins, the ranks. Kick needs the CSR rank, rank changes the head admin rank, everything else the game master rank. There is no chat or mute command yet: the server has no chat.
+GM commands go to the sim that owns the target, found from the sim snapshots and the cell table, and wait up to 5 s for its answer. Every command (and every login) writes a row to the audit log. On the live page, select a player or bot for: **Teleport** to a point or to another player, **Heal**, **Kill**, **God on/off**, **Kick**, **Give/Take** an item, **Set level** and **Give XP**, **Weapon mastery** (set the rank of one weapon or of all, or give one weapon mastery experience; levels and ranks are the ones the game shows), and **Set coins**. Experience and coins are saved with the progression (world migration 0006), weapon masteries too (0007), and the attribute and weapon points a player spends in the game (0008). The **GM mobs** form spawns up to 50 mobs of a vitals id at a point (right-click the map to fill x and y); they stay awake and respawn until a GM despawns them. The GM page (`/gm`) shows the audit log (a head admin sees all rows, others their own), bans and unbans by login name, and, for head admins, the ranks. Kick needs the CSR rank, rank changes the head admin rank, everything else the game master rank. There is no chat or mute command yet: the server has no chat.
 
 **GM mode in the game client.** An account with the `game_master` rank (or higher) gets the client's own GM mode at login: `world-director` reads the rank from the `[global_database]` of `config/world-director.toml` (leave the section out to give no account GM rights), and `rep-gateway` sets flag byte 1 of the registration response. With `r_DisplayInfo 1` the client shows "GM Client Enabled". The sim then takes the client's GM calls (set level, set coins, change or set a weapon mastery rank, debug teleport) from that account only, and logs and refuses them from every other account. See `docs/re/2026-09-18-progression-and-gm-mode.md`.
 
