@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The launcher window (M2 spec section 6). Network calls run on a worker thread; the window
-//! reads their results each frame. The look follows `DESIGN.md`: one status line (a state bar, a
+//! reads their results each frame. The window shows one status line (a state bar, a
 //! state word and a detail line), then the server, account and settings sections divided by
 //! rules.
 
@@ -12,11 +12,17 @@ use eframe::egui::{self, Color32, RichText, Sense, TextStyle, vec2};
 use nw_protocol::launcher_api::{AuthMode, DiscordPollReply, LauncherInfo, PasswordCredentials};
 
 use crate::api::{ApiError, LauncherApi, discord_login_page};
-use crate::game::{
-    append_override_config, checked_direct_launch, direct_launch_from_env, game_arguments,
-    start_game,
-};
+use crate::game::{append_override_config, game_arguments};
+// Linux runs the game under Proton inside `bwrap`; Windows starts the patched exe directly behind
+// the loopback proxy ([`crate::aws_proxy`]). Each path uses only its own helpers.
+#[cfg(not(windows))]
+use crate::game::{checked_direct_launch, direct_launch_from_env, start_game};
+#[cfg(not(windows))]
 use crate::mirror::{NETWORK_DIR, write_network_files};
+#[cfg(any(windows, test))]
+use crate::game::{checked_windows_launch, start_game_windows, windows_launch_from_env};
+#[cfg(windows)]
+use crate::aws_proxy::AwsProxy;
 use crate::server::api_base_url;
 use crate::settings::Settings;
 use crate::theme::{self, LABEL_STYLE, LINE_WIDTH, Palette, TITLE_STYLE, ThemeChoice, mix};
@@ -30,7 +36,7 @@ const BUSY_REPAINT: Duration = Duration::from_millis(100);
 /// Error code of an expired launcher session.
 const NO_SESSION_CODE: &str = "no_session";
 
-/// Time the state bar takes to grow after a change (`DESIGN.md` server status).
+/// Time the state bar takes to grow after a change.
 pub const BAR_GROWTH: Duration = Duration::from_millis(480);
 /// Height of the state bar, of a section rule, and of the play button.
 const BAR_HEIGHT: f32 = 3.0;
@@ -131,6 +137,10 @@ pub struct LauncherApp {
     status: Status,
     status_since: Instant,
     job: Option<Receiver<Event>>,
+    /// The loopback proxy that carries the game's AWS calls to the server. It must outlive the
+    /// game, so the window keeps it; dropping it stops the proxy. Windows only.
+    #[cfg(windows)]
+    proxy: Option<AwsProxy>,
 }
 
 fn run_job(job: impl FnOnce() -> Event + Send + 'static) -> Receiver<Event> {
@@ -146,6 +156,33 @@ fn failure(error: &ApiError) -> Event {
     match error {
         ApiError::Server { code, .. } if code == NO_SESSION_CODE => Event::SessionExpired,
         other => Event::Failed(other.to_string()),
+    }
+}
+
+/// The worker job that gets a game session key and starts the patched game directly on Windows (the
+/// loopback proxy is started first, by `play`). Compiled on Linux too, so tests type-check it, but
+/// called only on Windows.
+#[cfg(any(windows, test))]
+fn windows_play_job(
+    api: LauncherApi,
+    info: LauncherInfo,
+    token: String,
+) -> impl FnOnce() -> Event + Send + 'static {
+    move || {
+        let launch = match checked_windows_launch(windows_launch_from_env()) {
+            Ok(launch) => launch,
+            Err(error) => return Event::Failed(error.to_string()),
+        };
+        let key = match api.play(&token) {
+            Ok(reply) => reply.game_session_key,
+            Err(error) => return failure(&error),
+        };
+        match game_arguments(&info.launch_arguments, &key)
+            .and_then(|arguments| start_game_windows(&launch, &append_override_config(arguments)))
+        {
+            Ok(()) => Event::GameStarted,
+            Err(error) => Event::Failed(error.to_string()),
+        }
     }
 }
 
@@ -242,6 +279,8 @@ impl LauncherApp {
             status: Status::not_connected(),
             status_since: Instant::now(),
             job: None,
+            #[cfg(windows)]
+            proxy: None,
         };
         if !app.server_input.is_empty() {
             app.connect();
@@ -339,32 +378,49 @@ impl LauncherApp {
     /// Checks the direct launch and the server's mirror, writes the private network files next to
     /// the settings, then asks for a game session key and starts the game.
     fn play(&mut self, api: LauncherApi, info: LauncherInfo, token: String) {
-        let network_dir = self.settings_path.with_file_name(NETWORK_DIR);
         self.set_status(Status::new(
             Tone::Busy,
             "starting",
             "Getting a game session and starting the game.",
         ));
-        self.job = Some(run_job(move || {
-            let launch = match checked_direct_launch(direct_launch_from_env()) {
-                Ok(launch) => launch,
-                Err(error) => return Event::Failed(error.to_string()),
-            };
-            let files = match write_network_files(&network_dir, &info.aws_mirror, api.host()) {
-                Ok(files) => files,
-                Err(error) => return Event::Failed(error.to_string()),
-            };
-            let key = match api.play(&token) {
-                Ok(reply) => reply.game_session_key,
-                Err(error) => return failure(&error),
-            };
-            match game_arguments(&info.launch_arguments, &key).and_then(|arguments| {
-                start_game(&launch, &files, &append_override_config(arguments))
-            }) {
-                Ok(()) => Event::GameStarted,
-                Err(error) => Event::Failed(error.to_string()),
+        #[cfg(not(windows))]
+        {
+            let network_dir = self.settings_path.with_file_name(NETWORK_DIR);
+            self.job = Some(run_job(move || {
+                let launch = match checked_direct_launch(direct_launch_from_env()) {
+                    Ok(launch) => launch,
+                    Err(error) => return Event::Failed(error.to_string()),
+                };
+                let files = match write_network_files(&network_dir, &info.aws_mirror, api.host()) {
+                    Ok(files) => files,
+                    Err(error) => return Event::Failed(error.to_string()),
+                };
+                let key = match api.play(&token) {
+                    Ok(reply) => reply.game_session_key,
+                    Err(error) => return failure(&error),
+                };
+                match game_arguments(&info.launch_arguments, &key).and_then(|arguments| {
+                    start_game(&launch, &files, &append_override_config(arguments))
+                }) {
+                    Ok(()) => Event::GameStarted,
+                    Err(error) => Event::Failed(error.to_string()),
+                }
+            }));
+        }
+        #[cfg(windows)]
+        {
+            // Start the loopback proxy before the game and keep it for the window's life, so the
+            // game's AWS calls reach the server for the whole session. A new play replaces it.
+            self.proxy = None;
+            match AwsProxy::start(&info.aws_mirror, api.host()) {
+                Ok(proxy) => self.proxy = Some(proxy),
+                Err(error) => {
+                    self.set_status(Status::error(error.to_string()));
+                    return;
+                }
             }
-        }));
+            self.job = Some(run_job(windows_play_job(api, info, token)));
+        }
     }
 
     fn logout(&mut self, api: LauncherApi, token: String) {
@@ -687,6 +743,16 @@ mod tests {
                 certificate_pem: String::new(),
             },
         }
+    }
+
+    #[test]
+    fn the_windows_play_job_is_a_sendable_worker() {
+        // Building the job (without running it) type-checks the whole Windows start path on Linux;
+        // `run_job` needs a `Send + 'static` closure.
+        fn assert_send_static<T: Send + 'static>(_: &T) {}
+        let api = LauncherApi::new("https://login.example.org".to_owned()).expect("api");
+        let job = windows_play_job(api, info(), "token".to_owned());
+        assert_send_static(&job);
     }
 
     #[test]
