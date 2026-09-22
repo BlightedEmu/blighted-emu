@@ -10,6 +10,9 @@ use nw_design::DesignRunError;
 use crate::ai_data::AiDataError;
 use crate::ai_trace::AiTraceError;
 use crate::codegen::CodegenError;
+use crate::collision::CollisionError;
+use crate::roads::RoadsError;
+use crate::water::WaterError;
 use crate::combat::NwdbError;
 use crate::creature_animations::CreatureAnimationsError;
 use crate::ftue_entities::FtueEntitiesError;
@@ -43,6 +46,15 @@ pub enum ToolError {
     /// A world file cannot be built, written or read back.
     #[error(transparent)]
     World(#[from] WorldBuildError),
+    /// A collision file cannot be built, written or read back.
+    #[error(transparent)]
+    Collision(#[from] CollisionError),
+    /// A road file cannot be built, written or read back.
+    #[error(transparent)]
+    Roads(#[from] RoadsError),
+    /// A water file cannot be built, written or read back.
+    #[error(transparent)]
+    Water(#[from] WaterError),
     /// The reloaded bundle does not hold what was written.
     #[error("bundle check failed: {what} is {found} after reload, expected {expected}")]
     CountMismatch {

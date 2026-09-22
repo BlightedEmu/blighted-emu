@@ -20,6 +20,7 @@ use content_tool::build::{
 };
 use content_tool::capture::CaptureReport;
 use content_tool::codegen::run_codegen;
+use content_tool::collision::{CollisionError, CollisionReport, PakIndex, build_level_collision};
 use content_tool::combat::{CombatCheck, DEFAULT_LEVEL, DEFAULT_NWDB_DIR, check, read_nwdb};
 use content_tool::creature_animations::{CreatureAnimationsReport, build_rows};
 use content_tool::error::ToolError;
@@ -30,6 +31,8 @@ use content_tool::mob_prefabs::{
     find_ledger_sources, run_workers, scan_ledger, vitals_names, worker_process, write_entries,
 };
 use content_tool::player_attacks::{BundleRows, PlayerAttacksReport, build_stances, read_sources};
+use content_tool::roads::{RoadsError, RoadsReport, build_level_roads};
+use content_tool::water::{WaterError, build_level_water};
 use content_tool::source::GameSource;
 use content_tool::world::{LevelReport, UnmatchedIds, run_world, world_totals};
 use nw_capture::{CLIENT_TO_SERVER, CaptureError, SERVER_TO_CLIENT, TypeNames};
@@ -47,6 +50,10 @@ use nw_world::records::RecordCounts;
 use nw_world::world_file::world_file_path;
 
 const DEFAULT_CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
+/// The level the `collision` command builds when none is named.
+const DEFAULT_COLLISION_LEVEL: &str = "ftue_v2";
+/// The level `roads` builds by default: the open world, whose tract maps hold the roads.
+const DEFAULT_ROADS_LEVEL: &str = "newworld_vitaeeterna";
 /// The team's design files (admin studio spec section 5).
 const DEFAULT_DESIGN_DIR: &str = "content";
 const DEFAULT_GENERATED_DIR: &str = "crates/nw-content/src/generated";
@@ -102,6 +109,36 @@ enum Command {
         /// `local-data/content/retail/bundle-<build>.bin`).
         #[arg(long)]
         bundle: Option<PathBuf>,
+    },
+    /// Writes the collision file of each level (its solid shapes from the game paks) and checks
+    /// it by reloading it.
+    Collision {
+        /// Levels to build.
+        #[arg(default_values = [DEFAULT_COLLISION_LEVEL])]
+        levels: Vec<String>,
+        /// Output folder for `collision-<build>-<level>.bin`.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        out_dir: PathBuf,
+    },
+    /// Writes the road file of each level (the road cells of its tract maps from the game paks)
+    /// and checks it by reloading it.
+    Roads {
+        /// Levels to build.
+        #[arg(default_values = [DEFAULT_ROADS_LEVEL])]
+        levels: Vec<String>,
+        /// Output folder for `roads-<build>-<level>.bin`.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        out_dir: PathBuf,
+    },
+    /// Writes the water file of each level (the water surfaces of its region water trees from
+    /// the game paks) and checks it by reloading it.
+    Water {
+        /// Levels to build.
+        #[arg(default_values = [DEFAULT_COLLISION_LEVEL, DEFAULT_ROADS_LEVEL])]
+        levels: Vec<String>,
+        /// Output folder for `water-<build>-<level>.bin`.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        out_dir: PathBuf,
     },
     /// Merges the design files over the retail files and writes the bundle and world files the
     /// servers read. Needs no game install.
@@ -251,6 +288,45 @@ fn main() -> ExitCode {
     }
 }
 
+fn print_roads(report: &RoadsReport) {
+    println!(
+        "roads {}: {} tract maps, {} regions with roads, {} road cells -> {}",
+        report.level,
+        report.tractmaps,
+        report.road_regions,
+        report.road_cells,
+        report.path.display()
+    );
+}
+
+fn print_collision(report: &CollisionReport, took: std::time::Duration) {
+    println!(
+        "collision {}: {} placements ({} variant capitals, {} of an unknown variant), {} slices, {} solid entities as the level loads (no shape named {}, query shape kind not read {}, mesh without physics geometry {}, mesh with physics geometry but no .rnr {}, asset missing {}), {} physics assets ({} shapes of kinds not read), {} shapes, {} bodies, {} deferred slices with {} bodies, {} placed triangles, {} file bytes, {} index bytes, {:.1} s -> {}",
+        report.level,
+        report.placements,
+        report.variant_placements,
+        report.unknown_variants,
+        report.slices,
+        report.solid_entities,
+        report.shapeless_entities,
+        report.unread_entities,
+        report.meshes_without_physics,
+        report.meshes_with_physics_without_rnr,
+        report.missing_assets,
+        report.assets,
+        report.unsupported_shapes,
+        report.geometries,
+        report.bodies,
+        report.deferred_slices,
+        report.deferred_bodies,
+        report.placed_triangles,
+        report.file_bytes,
+        report.index_bytes,
+        took.as_secs_f64(),
+        report.path.display()
+    );
+}
+
 fn print_design(report: &DesignReport, out_dir: &Path) {
     let target = if report.written {
         out_dir.display().to_string()
@@ -306,6 +382,36 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             let bundle = bundle.unwrap_or_else(|| default_retail_bundle_path(&client_build));
             let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
             print_world(&run_world(&source, &client_build, &bundle, &out_dir)?);
+        }
+        Command::Collision { levels, out_dir } => {
+            let index =
+                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
+            for level in &levels {
+                let started = std::time::Instant::now();
+                let report = build_level_collision(&index, level, &client_build, &out_dir)?;
+                print_collision(&report, started.elapsed());
+            }
+        }
+        Command::Roads { levels, out_dir } => {
+            let index =
+                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(RoadsError::from)?;
+            for level in &levels {
+                print_roads(&build_level_roads(&index, level, &client_build, &out_dir)?);
+            }
+        }
+        Command::Water { levels, out_dir } => {
+            let index =
+                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(WaterError::from)?;
+            for level in &levels {
+                let report = build_level_water(&index, level, &client_build, &out_dir)?;
+                println!(
+                    "water {}: {} regions, {} nodes -> {}",
+                    report.level,
+                    report.regions,
+                    report.nodes,
+                    report.path.display()
+                );
+            }
         }
         Command::Design {
             design,
@@ -411,8 +517,9 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             let tables = ContentBundle::load(&bundle, &client_build)?.tables;
             let prefabs = MobPrefabs::load(content_dir, &client_build)
                 .map_err(content_tool::creature_animations::CreatureAnimationsError::from)?;
-            let source = GameSource::open(game_dir(cli.game_dir.as_deref())?)?;
-            let (rows, report) = build_rows(&source, &prefabs, &tables)?;
+            let dir = game_dir(cli.game_dir.as_deref())?;
+            let source = GameSource::open(dir)?;
+            let (rows, report) = build_rows(&source, dir, &prefabs, &tables)?;
             write_rows(&out, &rows)
                 .map_err(content_tool::creature_animations::CreatureAnimationsError::from)?;
             print_creature_animations(&report, &out);

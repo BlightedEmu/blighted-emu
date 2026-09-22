@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Library part of `content-tool`: code generation, bundle building, world file building, the
-//! capture check, the mob prefab table, the creature animation table and the tutorial static
-//! entity table.
+//! capture check, the mob prefab table, the creature animation table, the tutorial static
+//! entity table and the level collision files.
 
 pub mod ai_data;
 #[cfg(all(test, feature = "ai-replay"))]
@@ -10,6 +10,7 @@ pub mod ai_trace;
 pub mod build;
 pub mod capture;
 pub mod codegen;
+pub mod collision;
 pub mod combat;
 pub mod creature_animations;
 pub mod error;
@@ -19,7 +20,9 @@ pub mod map_tiles;
 pub mod melee_shapes;
 pub mod mob_prefabs;
 pub mod player_attacks;
+pub mod roads;
 pub mod source;
+pub mod water;
 pub mod world;
 
 #[cfg(all(test, feature = "local-data"))]

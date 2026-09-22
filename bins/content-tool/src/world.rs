@@ -482,7 +482,7 @@ fn stations_of(
 }
 
 /// `work` over `items` on every core, in order.
-fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
+pub(crate) fn in_parallel<T: Sync, R: Send>(items: &[T], work: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let workers = std::thread::available_parallelism().map_or(1, NonZeroUsize::get);
     let chunk_size = items.len().div_ceil(workers).max(1);
     let work = &work;

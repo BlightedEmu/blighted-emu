@@ -78,6 +78,11 @@ world:
 design:
     cargo run --release -p content-tool -- design
 
+# Build the level collision files the sims read (the tutorial and the open world) into
+# local-data/content/ from your install.
+collision:
+    cargo run --release -p content-tool -- collision ftue_v2 newworld_vitaeeterna
+
 # Check the design files of content/ against the retail files; writes nothing.
 check-design:
     cargo run --release -p content-tool -- design --check
