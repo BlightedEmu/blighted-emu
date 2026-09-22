@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-//! The launcher's look, taken from the Blighted Emu design system (`DESIGN.md`): a neutral night
-//! theme with no blue tint (the default), a warm day theme, flat fills, 1px lines, 2px corners on
-//! controls, and installed system fonts only.
+//! The launcher's look: a neutral night theme with no blue tint (the default), a warm day theme,
+//! flat fills, 1px lines, 2px corners on controls, and installed system fonts only.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -43,7 +42,7 @@ impl ThemeChoice {
     }
 }
 
-/// The colours of one theme (`DESIGN.md` colour tokens).
+/// The colours of one theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Palette {
     /// The window and the base of every control.
@@ -204,7 +203,7 @@ pub const LABEL_STYLE: &str = "label";
 /// Text style of the server name and the state word (title type).
 pub const TITLE_STYLE: &str = "title";
 
-/// Font size of each role (`DESIGN.md` typography).
+/// Font size of each role.
 const BODY_SIZE: f32 = 14.0;
 const SMALL_SIZE: f32 = 12.0;
 const BUTTON_SIZE: f32 = 13.0;
@@ -246,7 +245,7 @@ struct FontRole {
     files: &'static [&'static str],
 }
 
-/// Installed faces per role on Linux (`DESIGN.md` font stacks: Fira Sans, then common faces).
+/// Installed faces per role on Linux (Fira Sans, then common faces).
 #[cfg(unix)]
 const FONT_ROLES: [FontRole; 3] = [
     FontRole {
@@ -271,8 +270,8 @@ const FONT_ROLES: [FontRole; 3] = [
     },
 ];
 
-/// Installed faces per role on Windows, under the Windows font folder (`DESIGN.md` font stacks:
-/// Segoe UI, Arial Narrow, Cascadia Mono, Consolas).
+/// Installed faces per role on Windows, under the Windows font folder
+/// (Segoe UI, Arial Narrow, Cascadia Mono, Consolas).
 #[cfg(windows)]
 const FONT_ROLES: [FontRole; 3] = [
     FontRole {
