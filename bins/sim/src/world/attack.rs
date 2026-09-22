@@ -37,6 +37,7 @@ use nw_messages::{
     InputRecord, MeleeDamage, MeleeHitMsg, OnDamageMsg, ServerMessage, SpreadshotProcessedMsg,
     SpreadshotRequestMsg,
 };
+use nw_sim_core::character::swim_floor;
 use nw_sim_core::{Damage, Health, PlayerAttack, TUTORIAL_START, mob_hit, player_hit};
 
 use super::encounter::Tutorial;
@@ -101,8 +102,8 @@ pub(super) struct Vitals {
     input_counter: Option<u16>,
     /// The mob the player locked on in its newest input.
     lock_target: Option<u64>,
-    /// When the player last fired a spread shot.
-    last_shot_ms: Option<u64>,
+    /// The input record (the request's frame) of the player's last spread shot.
+    last_shot_frame: Option<u16>,
     /// When the client last asked to fire a spread shot, fired or refused.
     shot_requested_ms: Option<u64>,
     /// The player holds block (the newest input record, [`ClientInputMsg::blocking`]).
@@ -138,7 +139,7 @@ impl Vitals {
             combo: None,
             input_counter: None,
             lock_target: None,
-            last_shot_ms: None,
+            last_shot_frame: None,
             shot_requested_ms: None,
             blocking: false,
             dodge_held: false,
@@ -228,11 +229,17 @@ pub(super) const fn amount_of(amount: u32) -> f32 {
 /// 1.5 m, inside every creature's reach).
 const LUNGE_GAP_M: f32 = 0.4;
 
-/// The shortest time between two spread shots (our choice: retail's shortest gap was 266 ms, and
-/// the 33 ms tick and network jitter shorten the gap the sim sees; at 250 ms the live tutorial
-/// refused shots the client showed, 2026-09-18). The ammo (two loads, then a reload) limits the
-/// rate as retail does.
-const SPREADSHOT_MIN_INTERVAL_MS: u64 = 200;
+/// The fewest input records between two spread shots of the shot attack `attack`: its next
+/// attack's start ([`BasicAttack::next_attack_from_ms`]: the blunderbuss hip fire's
+/// `CanTransition` marker at 0.76666665 s, 23 records; the aimed fire's
+/// `Firearm_Shoot_Primary_UpperBody` entry leaves for `Firearm_Aim_UpperBody` at the same time).
+/// The request's frame is the client's input record counter, so jitter does not count. Retail
+/// (2026-09-18 capture, 56 gaps between 57 shots): the shortest gap was 23 records, on 5 shots,
+/// none shorter; the ammo (two loads, then a reload) makes the longer ones.
+fn shot_records(attack: &BasicAttack) -> u64 {
+    attack.next_attack_from_ms() / u64::from(INPUT_RECORD_MS)
+}
+
 /// How near an attack key press a spread shot request shows that the attack was a shot. The
 /// client sends its 2719 at the press, before the input that carries the key's release (live
 /// 2026-09-18: the release came 0.2 to 0.5 s after the shot); the network adds a few ticks
@@ -597,16 +604,11 @@ impl SimWorld {
         if vitals.health.is_dead() {
             return refused(AttackRefusal::Dead);
         }
-        let too_fast = vitals
-            .last_shot_ms
-            .is_some_and(|last| now_ms.saturating_sub(last) < SPREADSHOT_MIN_INTERVAL_MS);
+        let last_shot_frame = vitals.last_shot_frame;
         let number = player.number;
         let position = body.motion.position();
         if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
             vitals.shot_requested_ms = Some(now_ms);
-        }
-        if too_fast {
-            return refused(AttackRefusal::TooFast);
         }
         let data = Arc::clone(&self.combat.data);
         // A shot shows the spread-shot weapon in the client's hand: the server's hand follows
@@ -630,13 +632,18 @@ impl SimWorld {
             .and_then(|stance| stance.attack(AttackKind::Light))
             .and_then(|attack| match attack.hit {
                 AttackHit::HitScan { range_m, .. } => {
-                    Some((data.attack(&attack.damage_row)?, range_m))
+                    Some((data.attack(&attack.damage_row)?, range_m, attack))
                 }
                 AttackHit::Melee { .. } | AttackHit::Projectile { .. } => None,
             });
-        let Some((row, range_m)) = shot else {
+        let Some((row, range_m, attack)) = shot else {
             return refused(AttackRefusal::NotWeaponAttack);
         };
+        if last_shot_frame
+            .is_some_and(|last| u64::from(request.frame.wrapping_sub(last)) < shot_records(attack))
+        {
+            return refused(AttackRefusal::TooFast);
+        }
         let fired = self
             .world
             .get_mut::<Player>(entity)
@@ -646,7 +653,7 @@ impl SimWorld {
             return refused(AttackRefusal::NoAmmo);
         }
         if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
-            vitals.last_shot_ms = Some(now_ms);
+            vitals.last_shot_frame = Some(request.frame);
         }
         let config = if request.pellets.len() == EIGHT_PELLETS {
             EIGHT_PELLET_CONFIG
@@ -921,6 +928,10 @@ impl SimWorld {
         // hold to the charge, of a combo step.
         let mut attacks: Vec<(usize, AttackKind, u64, u64)> = Vec::new();
         let mut weapon_key = None;
+        // A new press of the attack key, which draws a sheathed weapon (`Gear::draw_to_attack`).
+        let mut attack_pressed = false;
+        // A new press of the sheathe key ([`Gear::draw_selected`]).
+        let mut sheathe_pressed = false;
         let newest_counter = records.first().map(|record| record.u16_after_mask);
         for record in records.iter().rev() {
             let counter = record.u16_after_mask;
@@ -932,6 +943,8 @@ impl SimWorld {
             }
             vitals.input_counter = Some(counter);
             weapon_key = record.weapon_key_pressed().or(weapon_key);
+            attack_pressed |= record.attack_pressed();
+            sheathe_pressed |= record.sheathe_pressed();
             let behind = newest_counter.map_or(0, |newest| newest.wrapping_sub(counter));
             let record_ms =
                 now_ms.saturating_sub(u64::from(behind.saturating_mul(INPUT_RECORD_MS)));
@@ -999,12 +1012,33 @@ impl SimWorld {
         if std::mem::replace(&mut vitals.lock_target, lock_target) != lock_target {
             tracing::info!(player = number, target = ?lock_target, "lock target");
         }
-        if let Some(key) = weapon_key
-            && let Some(mut player) = self.world.get_mut::<Player>(entity)
+        let time_ns = unix_ns(self.server_ms);
+        let sheathe_ms = self.sheathe_ms(entity);
+        if let Some(mut player) = self.world.get_mut::<Player>(entity)
             && let Some(gear) = player.gear.as_mut()
-            && gear.draw(key, now_ms, unix_ns(self.server_ms))
         {
-            tracing::debug!(player = number, key, "weapon drawn");
+            match weapon_key {
+                Some(key) => {
+                    if gear.draw(key, now_ms, time_ns) {
+                        tracing::debug!(player = number, key, "weapon drawn");
+                    }
+                }
+                // The sheathe key with a weapon drawn starts the sheathe action.
+                None if sheathe_pressed && gear.drawn().is_some() => {
+                    if let Some(after_ms) = sheathe_ms
+                        && gear.sheathe(now_ms, after_ms)
+                    {
+                        tracing::debug!(player = number, after_ms, "weapon sheathed by the key");
+                    }
+                }
+                None => {
+                    if sheathe_pressed && gear.draw_selected(now_ms, time_ns) {
+                        tracing::debug!(player = number, "weapon drawn by the sheathe key");
+                    } else if attack_pressed && gear.draw_to_attack(time_ns) {
+                        tracing::debug!(player = number, "weapon drawn to attack");
+                    }
+                }
+            }
         }
         // Every attack of one message has the same receive time, so only the first can hit: the
         // others are too fast, and a client cannot make the loop search for targets per record.
@@ -1263,8 +1297,34 @@ impl SimWorld {
         for mut player in query.iter_mut(&mut self.world) {
             if let Some(gear) = player.gear.as_mut() {
                 gear.arm(weapon_of, unix_ns(server_ms));
-                gear.tick_hands(now_ms);
+                gear.tick_hands(now_ms, unix_ns(server_ms));
             }
+        }
+    }
+
+    /// How long the sheathe action of the weapon in the hand of player `entity` takes to put it
+    /// away ([`Stance::sheathe_ms`]); `None` when the weapon or its stance's marker is not known.
+    fn sheathe_ms(&self, entity: Entity) -> Option<u64> {
+        let (weapon, _) = self.held_weapon(entity)?;
+        self.combat.data.stance(weapon.stance)?.sheathe_ms
+    }
+
+    /// Player `entity` stands at `at` at `now_ms`: in deep water (its body at the swim floor, as
+    /// [`nw_sim_core::character`] swims) the sheathe action starts and puts the drawn weapon away
+    /// (`playeractions_sheathe.actionlist`: `Sheathe_MainHand_*_UB` starts on `IfWaterDepth`
+    /// `Deep`, the depth at which `playeractions_swim.actionlist` starts the swim).
+    pub(super) fn sheathe_in_deep_water(&mut self, entity: Entity, at: Position, now_ms: u64) {
+        if at.z > swim_floor(self.settings.ocean_level_m) {
+            return;
+        }
+        let Some(after_ms) = self.sheathe_ms(entity) else {
+            return;
+        };
+        if let Some(mut player) = self.world.get_mut::<Player>(entity)
+            && let Some(gear) = player.gear.as_mut()
+            && gear.sheathe(now_ms, after_ms)
+        {
+            tracing::debug!(player = player.number, after_ms, "weapon sheathed in deep water");
         }
     }
 
@@ -1618,6 +1678,11 @@ impl SimWorld {
         if damage == Damage::AlreadyDead {
             return None;
         }
+        // A hit is combat: it ends the road boost on the frame of the hit
+        // (`Traversal_Road_Sprint_Speed_Boost_CombatRemoval` `IfDamaged`).
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            player.tracked.enter_combat();
+        }
         let total = amount_of(amount);
         let affix = style.and_then(|style| style.affix);
         // A share of a hit: f32 holds it.
@@ -1639,6 +1704,13 @@ impl SimWorld {
             return Some(AttackOutcome::Hit { target, amount });
         }
         self.mobs.forget(target);
+        // A death puts the drawn weapon away (retail: 161 put-aways at the 4299).
+        let time_ns = unix_ns(self.server_ms);
+        if let Some(mut player) = self.world.get_mut::<Player>(entity)
+            && let Some(gear) = player.gear.as_mut()
+        {
+            gear.put_away(time_ns, None);
+        }
         if let Some(departure) = self.departure(entity) {
             self.deaths.push(departure);
         }
@@ -1962,7 +2034,8 @@ mod tests {
     use nw_content::combat::{CombatData, CombatRows};
     use nw_content::player_attacks::stance_key;
     use nw_messages::{
-        BodyCodec, DamageDealtMsg, DeathRecapMsg, FacetHeader, RAW_ID_LEN, ServerMessage, SpreadHit,
+        BodyCodec, DamageDealtMsg, DeathRecapMsg, FacetHeader, RAW_ID_LEN, ServerMessage, SlotBits,
+        SpreadHit,
     };
 
     const LIGHT: &str = "1H_Sword_Attack1";
@@ -2743,6 +2816,37 @@ mod tests {
     }
 
     #[test]
+    fn a_tap_with_every_weapon_sheathed_draws_the_weapon_and_the_client_is_told() {
+        let mut world = caster_at(
+            MOB_X + SWORD_REACH_M,
+            crate::combat::test_support::TEST_SWORD_STANCE,
+        );
+        let entity = world.by_connection[&connection(1)];
+        let gear_change = |world: &mut SimWorld| {
+            world
+                .world
+                .get_mut::<Player>(entity)
+                .and_then(|mut player| player.gear.as_mut()?.take_change())
+        };
+        gear_change(&mut world);
+        assert_eq!(drawn(&world), None, "every weapon sheathed at login");
+        world.attack_input(
+            &connection(1),
+            &message(1, &[Key::Press, Key::Release]),
+            NOW,
+        );
+        assert_eq!(drawn(&world), Some(slot::MAIN_HAND_OPTION_1));
+        let hands = gear_change(&mut world)
+            .and_then(|states| states.paperdoll.public)
+            .and_then(|public| public.attached);
+        assert_eq!(
+            hands,
+            Some(SlotBits::of([slot::MAIN_HAND_OPTION_1])),
+            "the client is told the weapon is in the hand"
+        );
+    }
+
+    #[test]
     fn a_melee_attack_with_no_shot_takes_the_melee_weapon_in_hand() {
         let mut world = gun_and_blade_at(MOB_X + SWORD_REACH_M);
         world.attack_input(
@@ -2821,10 +2925,10 @@ mod tests {
     #[test]
     fn an_attack_with_the_gun_empty_reloads_and_swaps_nothing() {
         let mut world = gun_and_blade_at(MOB_X + 2.0);
-        for shot_at in [NOW, NOW + SPREADSHOT_MIN_INTERVAL_MS] {
-            world.spreadshot(&connection(1), &shot(2), shot_at);
+        for (frame, shot_at) in [(0, NOW), (SHOT_RECORDS, NOW + SHOT_GAP_MS)] {
+            world.spreadshot(&connection(1), &shot_at_frame(2, frame), shot_at);
         }
-        let empty_at = NOW + 2 * SPREADSHOT_MIN_INTERVAL_MS;
+        let empty_at = NOW + 2 * SHOT_GAP_MS;
         world.attack_input(
             &connection(1),
             &message(1, &[Key::Press, Key::Release]),
@@ -2851,7 +2955,7 @@ mod tests {
         );
         world.player_swings_due(lands_at());
         assert_eq!(drawn(&world), Some(slot::MAIN_HAND_OPTION_2), "the blade");
-        let later = lands_at() + SPREADSHOT_MIN_INTERVAL_MS;
+        let later = lands_at() + SHOT_GAP_MS;
         let results = world.spreadshot(&connection(1), &shot(2), later);
         assert!(
             matches!(results.as_slice(), [Ok(AttackOutcome::Hit { .. })]),
@@ -2993,6 +3097,58 @@ mod tests {
         }
     }
 
+    /// The input records between two hip-fire shots: the blunderbuss hip fire's `CanTransition`
+    /// marker at 0.76666665 s (`player_blunderbuss.adb`), the shortest retail gap (23 records on
+    /// 5 of 56 gaps, 2026-09-18).
+    const SHOT_RECORDS: u16 = 23;
+    /// [`SHOT_RECORDS`] in ms.
+    const SHOT_GAP_MS: u64 = SHOT_RECORDS as u64 * INPUT_RECORD_MS as u64;
+
+    /// [`shot`] in the client's input record `frame`.
+    fn shot_at_frame(pellets: usize, frame: u16) -> SpreadshotRequestMsg {
+        SpreadshotRequestMsg {
+            frame,
+            ..shot(pellets)
+        }
+    }
+
+    #[test]
+    fn the_shot_gap_is_the_hip_fire_can_transition_marker_in_records() {
+        let stance = crate::combat::test_support::test_player_attacks()
+            .stance(stance_key(BLUNDERBUSS_STANCE))
+            .cloned()
+            .expect("blunderbuss stance");
+        let hip_fire = stance.attack(AttackKind::Light).expect("hip fire");
+        assert_eq!(hip_fire.can_transition_ms, Some(767));
+        assert_eq!(shot_records(hip_fire), u64::from(SHOT_RECORDS));
+    }
+
+    #[test]
+    fn the_shot_gap_counts_the_client_records_not_the_arrival() {
+        let mut world = shooter_at(MOB_X + 2.0);
+        let first = world.spreadshot(&connection(1), &shot_at_frame(2, 100), NOW);
+        assert!(first.iter().all(Result::is_ok), "{first:?}");
+        // Both arrive in one tick: the network held the first back.
+        let second = world.spreadshot(&connection(1), &shot_at_frame(2, 100 + SHOT_RECORDS), NOW);
+        assert!(
+            matches!(second.as_slice(), [Ok(AttackOutcome::Hit { .. })]),
+            "{second:?}"
+        );
+        // The counter wraps.
+        let mut world = shooter_at(MOB_X + 2.0);
+        world.spreadshot(&connection(1), &shot_at_frame(2, u16::MAX), NOW);
+        assert_eq!(
+            world
+                .spreadshot(
+                    &connection(1),
+                    &shot_at_frame(2, SHOT_RECORDS - 2),
+                    NOW + SHOT_GAP_MS
+                )
+                .as_slice(),
+            [Err(AttackRefusal::TooFast)]
+        );
+    }
+
     #[test]
     fn each_pellet_that_hit_is_one_hit_after_the_answer() {
         const SIX: usize = 6;
@@ -3030,16 +3186,16 @@ mod tests {
             world
                 .spreadshot(
                     &connection(1),
-                    &shot(EIGHT),
-                    NOW + SPREADSHOT_MIN_INTERVAL_MS - 1
+                    &shot_at_frame(EIGHT, SHOT_RECORDS - 1),
+                    NOW + SHOT_GAP_MS
                 )
                 .as_slice(),
             [Err(AttackRefusal::TooFast)]
         );
         world.spreadshot(
             &connection(1),
-            &shot(EIGHT),
-            NOW + SPREADSHOT_MIN_INTERVAL_MS,
+            &shot_at_frame(EIGHT, SHOT_RECORDS),
+            NOW + SHOT_GAP_MS,
         );
         assert!(matches!(
             &messages_to(&world.take_messages(), 1)[0],
@@ -3751,6 +3907,56 @@ mod tests {
     }
 
     #[test]
+    fn a_hit_ends_the_player_s_road_boost() {
+        /// Flat ground that is road everywhere.
+        struct Road;
+        impl nw_sim_core::Ground for Road {
+            fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+                Some(0.0)
+            }
+            fn road_share(&self, _: f32, _: f32) -> f32 {
+                1.0
+            }
+        }
+        /// Records of 1/30 s past the road boost's sprint delay (3 s).
+        const SPRINT_RECORDS: usize = 95;
+        const FRAME_S: f32 = 1.0 / 30.0;
+        const SEA_M: f32 = -100.0;
+        let mut body = nw_sim_core::TrackedBody::new(Position {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+        });
+        let sprint = nw_sim_core::TrackInput {
+            character: nw_sim_core::CharacterInput {
+                intent: nw_sim_core::Intent {
+                    forward: 1,
+                    ..nw_sim_core::Intent::default()
+                },
+                yaw: 0.0,
+                dt_s: FRAME_S,
+            },
+            view: None,
+            boom_key: false,
+            action_started: false,
+        };
+        for _ in 0..SPRINT_RECORDS {
+            body.record(sprint, &Road, SEA_M);
+        }
+        assert!(body.has_road_boost());
+        let mut world = border();
+        let entity = world.player_by_number(1).expect("player 1");
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .tracked = body;
+        assert!(world.apply_hit(1, mob(), SWORD_HIT, 0, NOW).is_some());
+        let player = world.world.get::<Player>(entity).expect("player");
+        assert!(!player.tracked.has_road_boost());
+    }
+
+    #[test]
     fn a_death_sends_a_4299() {
         let mut world = fight();
         world.apply_hit(1, mob(), LETHAL, 0, NOW);
@@ -3760,6 +3966,98 @@ mod tests {
             Some(&ServerMessage::DeathRecap(DeathRecapMsg::of(1)))
         );
         assert!(matches!(messages[0], ServerMessage::OnDamage(_)));
+    }
+
+    #[test]
+    fn a_death_puts_the_drawn_weapon_away() {
+        let mut world = caster_at(
+            MOB_X + SWORD_REACH_M,
+            crate::combat::test_support::TEST_SWORD_STANCE,
+        );
+        let entity = world.by_connection[&connection(1)];
+        let gear = |world: &mut SimWorld| {
+            world
+                .world
+                .get_mut::<Player>(entity)
+                .and_then(|mut player| player.gear.as_mut().map(|gear| gear.draw_to_attack(1)))
+        };
+        assert_eq!(gear(&mut world), Some(true), "drawn");
+        world.apply_hit(1, mob(), LETHAL, 0, NOW);
+        assert_eq!(drawn(&world), None, "put away at the death");
+    }
+
+    /// An input message of one record whose sheathe key is pressed (the Azoth catalog input 428:
+    /// slot value 6, bit 44).
+    fn sheathe_message() -> Vec<InputRecord> {
+        const SHEATHE_VALUE: usize = 6;
+        const SHEATHE_BIT: u32 = 44;
+        let mut records = message(1, &[Key::Hold]);
+        records[0].slots.values[SHEATHE_VALUE] = 1 << SHEATHE_BIT;
+        records
+    }
+
+    #[test]
+    fn the_sheathe_key_draws_the_selected_weapon() {
+        let mut world = caster_at(
+            MOB_X + SWORD_REACH_M,
+            crate::combat::test_support::TEST_SWORD_STANCE,
+        );
+        world.attack_input(&connection(1), &sheathe_message(), NOW);
+        assert_eq!(drawn(&world), Some(slot::MAIN_HAND_OPTION_1));
+    }
+
+    /// A sword fight with the sword drawn: the world, the player and the sword's put-away time.
+    fn drawn_sword() -> (SimWorld, Entity, u64) {
+        /// `Sheathe_UpperBody` `From_1H_Melee_Sword` of `player.adb`: `sheathe_weapon` at 0.4 s.
+        const SWORD_SHEATHE_MS: u64 = 400;
+        let mut world = caster_at(
+            MOB_X + SWORD_REACH_M,
+            crate::combat::test_support::TEST_SWORD_STANCE,
+        );
+        let entity = world.by_connection[&connection(1)];
+        let player = world.world.get_mut::<Player>(entity);
+        assert!(
+            player
+                .and_then(|mut player| player.gear.as_mut().map(|gear| gear.draw_to_attack(1)))
+                .expect("gear")
+        );
+        assert_eq!(sword().sheathe_ms, Some(SWORD_SHEATHE_MS));
+        (world, entity, SWORD_SHEATHE_MS)
+    }
+
+    #[test]
+    fn the_sheathe_key_puts_the_drawn_weapon_away_at_the_marker_of_its_stance() {
+        let (mut world, _, marker_ms) = drawn_sword();
+        world.attack_input(&connection(1), &sheathe_message(), NOW);
+        world.tick_hands(NOW + marker_ms - 1, SERVER_TIME);
+        assert_eq!(
+            drawn(&world),
+            Some(slot::MAIN_HAND_OPTION_1),
+            "in the hand until the marker"
+        );
+        world.tick_hands(NOW + marker_ms, SERVER_TIME);
+        assert_eq!(drawn(&world), None, "put away at the marker");
+    }
+
+    #[test]
+    fn deep_water_puts_the_drawn_weapon_away_at_the_marker() {
+        /// Above the swim floor: wading, not swimming.
+        const WADE_M: f32 = 0.5;
+        let (mut world, entity, marker_ms) = drawn_sword();
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let swim = swim_floor(world.settings.ocean_level_m);
+        world.sheathe_in_deep_water(entity, Position { z: swim + WADE_M, ..at }, NOW);
+        world.tick_hands(NOW + marker_ms, SERVER_TIME);
+        assert_eq!(drawn(&world), Some(slot::MAIN_HAND_OPTION_1), "not deep");
+        let later = NOW + marker_ms;
+        world.sheathe_in_deep_water(entity, Position { z: swim, ..at }, later);
+        world.tick_hands(later + marker_ms, SERVER_TIME);
+        assert_eq!(drawn(&world), None, "put away while swimming");
     }
 
     /// A fight whose player died at `NOW`.
@@ -4403,6 +4701,7 @@ mod tests {
                 kits.item(gear::tests::POTION).expect("potion"),
                 POTIONS,
                 slot::QUICK_SLOT_1,
+                0,
             );
             let entity = world.by_connection[&connection(1)];
             world.world.get_mut::<Player>(entity).expect("player").gear = Some(gear);

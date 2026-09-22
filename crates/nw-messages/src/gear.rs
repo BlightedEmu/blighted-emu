@@ -134,6 +134,9 @@ fn record(
 pub struct Hands {
     /// The main-hand option slot drawn; `None`: every weapon is sheathed.
     pub drawn: Option<u32>,
+    /// The main-hand option slot selected (`activeMap`), kept while every weapon is sheathed;
+    /// `None`: the drawn one, else the first.
+    pub active: Option<u32>,
     /// The drawn weapon is in the hand (retail 331 to 418 ms after the key).
     pub attached: bool,
     /// The ammo of main-hand options 1 and 2; `None` before the server knows it.
@@ -155,10 +158,13 @@ impl Hands {
         SlotBits::of(self.drawn.filter(|_| self.attached))
     }
 
-    /// The active map: the drawn main-hand option (else the first) and the first off-hand.
+    /// The active map: the selected main-hand option (else the drawn one, else the first) and
+    /// the first off-hand.
     fn active(&self) -> SlotBits {
         SlotBits::of([
-            self.drawn.unwrap_or(slot::MAIN_HAND_OPTION_1),
+            self.active
+                .or(self.drawn)
+                .unwrap_or(slot::MAIN_HAND_OPTION_1),
             slot::OFF_HAND_OPTION_1,
         ])
     }
@@ -327,6 +333,7 @@ pub(crate) mod tests {
         // `00 00 00 0a 00 00 00`, then attach `00 00 00 02 00 00 00`.
         let drawn = Hands {
             drawn: Some(slot::MAIN_HAND_OPTION_1 + 1),
+            active: None,
             attached: false,
             ammo: [None; 2],
         };
@@ -353,6 +360,20 @@ pub(crate) mod tests {
         assert_eq!(
             stowed.active().0,
             [0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00]
+        );
+        // Sheathed again after the second option: it stays the active one (retail newchar
+        // 2026-09-18 at 1792696137458: every weapon sheathed, active slots 25 and 27).
+        let put_away = Hands {
+            active: Some(slot::MAIN_HAND_OPTION_1 + 1),
+            ..stowed
+        };
+        assert_eq!(
+            put_away.sheathed().0,
+            [0x00, 0x02, 0x00, 0x3f, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(
+            put_away.active().0,
+            [0x00, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00]
         );
     }
     use crate::wire::{Reader, Writer};

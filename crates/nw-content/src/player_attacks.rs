@@ -204,6 +204,20 @@ pub struct BasicAttack {
     /// The presses of the attack key that start the next combo step.
     #[serde(default)]
     pub links: Vec<ComboLink>,
+    /// The start of its fragment's `CAGE-Named` `CanTransition` clip, ms: the action list's
+    /// "Disable AttackAction on CanTransition" unsets `AttackAction` there, and an attack action
+    /// starts only without it (`playeractions_firearms.actionlist`,
+    /// `Firearm_Shoot_HipFire_FullBody`). `None`: the fragment has no such clip.
+    #[serde(default)]
+    pub can_transition_ms: Option<u64>,
+}
+
+impl BasicAttack {
+    /// How long after its start the next attack action may start: at its `CanTransition`
+    /// marker, else when its fragment ends (the action holds `AttackAction` until it ends).
+    pub fn next_attack_from_ms(&self) -> u64 {
+        self.can_transition_ms.unwrap_or(self.length_ms)
+    }
 }
 
 /// A melee hit shape (`MeleeAttackShapeCastType`, numbered as the client's enum in
@@ -406,6 +420,11 @@ pub struct Stance {
     pub charged: Option<BasicAttack>,
     /// The `Invulnerability` window of its dodge roll, ms after the roll starts.
     pub dodge_invulnerable_ms: Option<[u64; 2]>,
+    /// When its sheathe action puts the weapon away, ms after the action starts: the marker of
+    /// the sheathe fragment's entry for a standing character ([`crate::sheathe`]); `None` when
+    /// no entry has the marker.
+    #[serde(default)]
+    pub sheathe_ms: Option<u64>,
     /// When its item uses take effect, by consumable tag.
     pub uses: Vec<ItemUse>,
     /// The later steps of its combo, in chain order ([`ComboLink::step`]).
@@ -578,6 +597,7 @@ mod tests {
             },
             length_ms: 0,
             links: Vec::new(),
+            can_transition_ms: None,
         }
     }
 
@@ -605,7 +625,7 @@ mod tests {
     }
 
     /// The greatsword's charge schedule (`player_greatsword.adb`): heavy from 329 ms, charged at
-    /// 667 ms.
+    /// 667 ms; put away 833 ms into its sheathe (`player.adb` `From_Greatsword`).
     fn greatsword() -> Stance {
         Stance {
             tags: "2H_Melee,GreatSword".to_owned(),
@@ -616,6 +636,7 @@ mod tests {
             charged_at_ms: Some(667),
             charged: Some(melee("Attack_Heavy_Charged")),
             dodge_invulnerable_ms: Some([0, 500]),
+            sheathe_ms: Some(833),
             uses: vec![ItemUse {
                 tag: "Potion".to_owned(),
                 effect_ms: 333,
@@ -775,6 +796,27 @@ mod tests {
         assert!(stance.combo.is_empty() && stance.variants.is_empty());
         let light = stance.attack(AttackKind::Light).expect("light");
         assert!(matches!(&light.hit, AttackHit::Melee { shapes, .. } if shapes.is_empty()));
+        assert_eq!(
+            light.can_transition_ms, None,
+            "an older table has no marker"
+        );
+    }
+
+    #[test]
+    fn the_next_attack_starts_at_the_can_transition_marker_else_at_the_end() {
+        // The blunderbuss hip fire (`player_blunderbuss.adb`, `2H_Ranged+Blunderbuss`): fragment
+        // 900 ms, `CanTransition` at 0.76666665 s.
+        let hip_fire = BasicAttack {
+            length_ms: 900,
+            can_transition_ms: Some(767),
+            ..melee("Firearm_Shoot_HipFire_FullBody")
+        };
+        assert_eq!(hip_fire.next_attack_from_ms(), 767);
+        let without_marker = BasicAttack {
+            can_transition_ms: None,
+            ..hip_fire
+        };
+        assert_eq!(without_marker.next_attack_from_ms(), 900);
     }
 
     #[test]

@@ -11,6 +11,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -52,6 +53,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -93,6 +95,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -440,6 +443,7 @@
       0,
       500
     ],
+    "sheathe_ms": 300,
     "uses": [
       {
         "tag": "Bandage",
@@ -1765,6 +1769,7 @@
       0,
       500
     ],
+    "sheathe_ms": 300,
     "uses": [
       {
         "tag": "Bandage",
@@ -3014,6 +3019,7 @@
       0,
       500
     ],
+    "sheathe_ms": 300,
     "uses": [
       {
         "tag": "Bandage",
@@ -3518,6 +3524,7 @@
       0,
       500
     ],
+    "sheathe_ms": 300,
     "uses": [
       {
         "tag": "Bandage",
@@ -5266,6 +5273,7 @@
       0,
       500
     ],
+    "sheathe_ms": 300,
     "uses": [
       {
         "tag": "Bandage",
@@ -5834,6 +5842,7 @@
       0,
       500
     ],
+    "sheathe_ms": 400,
     "uses": [
       {
         "tag": "Bandage",
@@ -6282,6 +6291,7 @@
       0,
       500
     ],
+    "sheathe_ms": 300,
     "uses": [
       {
         "tag": "Bandage",
@@ -6640,6 +6650,7 @@
       0,
       500
     ],
+    "sheathe_ms": 300,
     "uses": [
       {
         "tag": "Bandage",
@@ -7651,6 +7662,7 @@
       0,
       500
     ],
+    "sheathe_ms": 300,
     "uses": [
       {
         "tag": "Bandage",
@@ -8345,6 +8357,7 @@
       0,
       500
     ],
+    "sheathe_ms": 300,
     "uses": [
       {
         "tag": "Bandage",
@@ -8694,6 +8707,7 @@
       0,
       500
     ],
+    "sheathe_ms": 300,
     "uses": [
       {
         "tag": "Bandage",
@@ -9475,6 +9489,7 @@
       0,
       500
     ],
+    "sheathe_ms": 300,
     "uses": [
       {
         "tag": "Bandage",
@@ -9874,6 +9889,7 @@
       0,
       500
     ],
+    "sheathe_ms": 400,
     "uses": [
       {
         "tag": "Bandage",
@@ -10951,6 +10967,7 @@
       0,
       500
     ],
+    "sheathe_ms": 300,
     "uses": [
       {
         "tag": "Bandage",
@@ -10992,6 +11009,7 @@
       0,
       567
     ],
+    "sheathe_ms": 500,
     "uses": [
       {
         "tag": "Bandage",
@@ -11033,6 +11051,7 @@
       0,
       500
     ],
+    "sheathe_ms": 733,
     "uses": [
       {
         "tag": "Bandage",
@@ -11074,6 +11093,7 @@
       0,
       500
     ],
+    "sheathe_ms": 733,
     "uses": [
       {
         "tag": "Bandage",
@@ -11115,6 +11135,7 @@
       0,
       500
     ],
+    "sheathe_ms": 733,
     "uses": [
       {
         "tag": "Bandage",
@@ -11156,6 +11177,7 @@
       0,
       500
     ],
+    "sheathe_ms": 733,
     "uses": [
       {
         "tag": "Bandage",
@@ -11598,6 +11620,7 @@
       0,
       500
     ],
+    "sheathe_ms": 733,
     "uses": [
       {
         "tag": "Bandage",
@@ -12388,6 +12411,7 @@
       0,
       500
     ],
+    "sheathe_ms": 833,
     "uses": [
       {
         "tag": "Bandage",
@@ -13502,6 +13526,7 @@
             0,
             500
           ],
+          "sheathe_ms": 833,
           "uses": [
             {
               "tag": "Bandage",
@@ -14279,6 +14304,7 @@
       0,
       500
     ],
+    "sheathe_ms": 733,
     "uses": [
       {
         "tag": "Bandage",
@@ -14320,6 +14346,7 @@
       0,
       500
     ],
+    "sheathe_ms": 733,
     "uses": [
       {
         "tag": "Bandage",
@@ -14706,6 +14733,7 @@
       0,
       500
     ],
+    "sheathe_ms": 900,
     "uses": [
       {
         "tag": "Bandage",
@@ -15434,6 +15462,7 @@
       0,
       500
     ],
+    "sheathe_ms": 733,
     "uses": [
       {
         "tag": "Bandage",
@@ -15830,7 +15859,8 @@
         "range_m": 14.0
       },
       "length_ms": 900,
-      "links": []
+      "links": [],
+      "can_transition_ms": 767
     },
     "light_from_ms": 0,
     "heavy_from_ms": null,
@@ -15841,6 +15871,7 @@
       0,
       500
     ],
+    "sheathe_ms": 733,
     "uses": [
       {
         "tag": "Bandage",
@@ -15892,7 +15923,8 @@
               }
             },
             "length_ms": 1611,
-            "links": []
+            "links": [],
+            "can_transition_ms": 1600
           },
           "light_from_ms": 0,
           "heavy_from_ms": null,
@@ -15903,6 +15935,7 @@
             0,
             500
           ],
+          "sheathe_ms": 733,
           "uses": [
             {
               "tag": "Bandage",
@@ -15948,7 +15981,8 @@
               "range_m": 14.0
             },
             "length_ms": 900,
-            "links": []
+            "links": [],
+            "can_transition_ms": 767
           },
           "light_from_ms": 0,
           "heavy_from_ms": null,
@@ -15959,6 +15993,7 @@
             0,
             500
           ],
+          "sheathe_ms": 733,
           "uses": [
             {
               "tag": "Bandage",
@@ -16022,6 +16057,7 @@
       0,
       500
     ],
+    "sheathe_ms": 733,
     "uses": [
       {
         "tag": "Bandage",
@@ -16063,6 +16099,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -16104,6 +16141,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -16164,6 +16202,7 @@
       0,
       500
     ],
+    "sheathe_ms": 533,
     "uses": [
       {
         "tag": "Bandage",
@@ -16326,6 +16365,7 @@
       0,
       500
     ],
+    "sheathe_ms": 533,
     "uses": [
       {
         "tag": "Bandage",
@@ -16367,6 +16407,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -16408,6 +16449,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -16449,6 +16491,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -16490,6 +16533,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -16531,6 +16575,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -16572,6 +16617,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -16677,6 +16723,7 @@
       0,
       500
     ],
+    "sheathe_ms": 667,
     "uses": [
       {
         "tag": "Bandage",
@@ -16794,6 +16841,7 @@
       0,
       500
     ],
+    "sheathe_ms": 200,
     "uses": [
       {
         "tag": "Bandage",
@@ -16947,6 +16995,7 @@
       0,
       500
     ],
+    "sheathe_ms": 733,
     "uses": [
       {
         "tag": "Bandage",
@@ -17026,6 +17075,7 @@
       0,
       500
     ],
+    "sheathe_ms": 733,
     "uses": [
       {
         "tag": "Bandage",
@@ -17105,6 +17155,7 @@
       0,
       500
     ],
+    "sheathe_ms": 733,
     "uses": [
       {
         "tag": "Bandage",
@@ -17146,6 +17197,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -17187,6 +17239,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -17228,6 +17281,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -17269,6 +17323,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -17310,6 +17365,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",
@@ -17351,6 +17407,7 @@
       0,
       500
     ],
+    "sheathe_ms": null,
     "uses": [
       {
         "tag": "Bandage",

@@ -94,6 +94,7 @@ impl ReplicaSource {
             spawned_ms: self.spawned_ms,
             gear_version: self.gear_version,
             drawn: self.hands.drawn,
+            active: self.hands.active,
             attached: self.hands.attached,
             items,
             action: self.action.map(|action| GhostSlayer {
@@ -143,6 +144,7 @@ impl ReplicaSource {
                 .collect(),
             hands: Hands {
                 drawn: ghost.drawn,
+                active: ghost.active,
                 attached: ghost.attached,
                 ammo: [None; 2],
             },

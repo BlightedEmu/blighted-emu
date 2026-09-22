@@ -25,6 +25,8 @@ const UNIX_MS_AT_2000: u64 = 946_684_800_000;
 pub(crate) const MAX_STACK_QUANTITY: u32 = i32::MAX as u32;
 /// Nanoseconds per millisecond.
 const NS_PER_MS: u64 = 1_000_000;
+/// The main-hand option selected at login (retail first paperdoll: active map slots 24 and 27).
+const FIRST_ACTIVE_OPTION: u32 = slot::MAIN_HAND_OPTION_1;
 
 /// The ns since 1970-01-01 at server time `server_ms` (ms since 2000-01-01): the time of a
 /// loaded-ammo state (client-gates note: retail Unix time in ns).
@@ -38,6 +40,14 @@ pub(super) const fn unix_ns(server_ms: u64) -> u64 {
 fn ammo_index(slot_id: u32) -> Option<usize> {
     let index = usize::try_from(slot_id.checked_sub(slot::MAIN_HAND_OPTION_1)?).ok()?;
     (index < AMMO_OPTIONS).then_some(index)
+}
+
+/// The other one of main-hand options 1 and 2, the options with ammo.
+fn paired_option(slot_id: u32) -> Option<u32> {
+    match ammo_index(slot_id)? {
+        0 => Some(slot::MAIN_HAND_OPTION_1 + 1),
+        _ => Some(slot::MAIN_HAND_OPTION_1),
+    }
 }
 
 /// The shots of one main-hand option.
@@ -109,6 +119,18 @@ pub(super) enum EquipRefusal {
     Disabled,
 }
 
+/// Why the server put the drawn weapon away while the player does something else, and when it
+/// gives it back (retail, 721 ledgers; see [`Gear::put_away`] and [`Gear::give_back`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Stow {
+    /// A gather by hand: given back, in the hand at once, when the interaction ends (1,307 of
+    /// the gathers that put a weapon away, 36 ms after the client's end).
+    Gather,
+    /// The inventory (3970 open): given back, drawn as by its weapon key, when it closes (385,
+    /// 68 ms after the 3970 close).
+    Inventory,
+}
+
 /// What a player wears and carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Gear {
@@ -126,6 +148,10 @@ pub(super) struct Gear {
     unsaved: bool,
     /// The main-hand option slot drawn; `None`: every weapon is sheathed.
     drawn: Option<u32>,
+    /// The main-hand option slot selected (the active map): the last one drawn, kept while every
+    /// weapon is sheathed (retail, 721 ledgers: every attack-press draw from all sheathed, 334,
+    /// drew it).
+    active: u32,
     /// The drawn weapon reaches the hand at this time.
     attach_at_ms: Option<u64>,
     /// The drawn weapon is in the hand.
@@ -137,6 +163,10 @@ pub(super) struct Gear {
     /// Weapons the hand took from the client's attacks ([`Gear::take_in_hand`]): changes the
     /// own client is not told of, but other players must see.
     hand_follows: u64,
+    /// The option slot the server put away and gives back, and why.
+    stowed: Option<(u32, Stow)>,
+    /// The sheathe action puts the drawn weapon away at this time ([`Gear::sheathe`]).
+    sheathe_at_ms: Option<u64>,
 }
 
 impl Gear {
@@ -160,22 +190,27 @@ impl Gear {
             changed: false,
             unsaved: false,
             drawn: None,
+            active: FIRST_ACTIVE_OPTION,
             attach_at_ms: None,
             attached: false,
             ammo: [Ammo::default(); AMMO_OPTIONS],
             armed: [None, None],
             hand_follows: 0,
+            stowed: None,
+            sheathe_at_ms: None,
         })
     }
 
     /// The gear of `character` from the `items` another sim sent, with main-hand option slot
-    /// `drawn` in the hand; an item `kits` does not know is left out, and one whose bag slot is
-    /// taken or out of range goes to a free one.
+    /// `drawn` in the hand and option slot `active` selected (`None`: the drawn one, else the
+    /// first); an item `kits` does not know is left out, and one whose bag slot is taken or out
+    /// of range goes to a free one.
     pub(super) fn carried_in(
         kits: &StarterKits,
         character: Uuid,
         items: &[CarriedItem],
         drawn: Option<u32>,
+        active: Option<u32>,
     ) -> Self {
         let mut gear = Self {
             character,
@@ -185,11 +220,14 @@ impl Gear {
             changed: false,
             unsaved: false,
             drawn,
+            active: drawn.or(active).unwrap_or(FIRST_ACTIVE_OPTION),
             attach_at_ms: None,
             attached: drawn.is_some(),
             ammo: [Ammo::default(); AMMO_OPTIONS],
             armed: [None, None],
             hand_follows: 0,
+            stowed: None,
+            sheathe_at_ms: None,
         };
         for carried in items {
             let Some(item) = kits.item(&carried.item_id) else {
@@ -263,9 +301,9 @@ impl Gear {
     }
 
     /// Every stack of `item` becomes one new stack of `quantity` worn in paperdoll slot
-    /// `slot_id`.
-    pub(super) fn renew(&mut self, item: &KitItem, quantity: u32, slot_id: u32) {
-        self.remove(&item.item_id);
+    /// `slot_id`, at time `time_ns` ([`Gear::remove`]).
+    pub(super) fn renew(&mut self, item: &KitItem, quantity: u32, slot_id: u32, time_ns: u64) {
+        self.remove(&item.item_id, time_ns);
         self.worn
             .retain(|(worn, stack)| *worn != slot_id || stack.is_none());
         self.put_on(slot_id, stack(self.character, item, quantity));
@@ -294,22 +332,37 @@ impl Gear {
     }
 
     /// Takes the worn entry at `index` off the list: a visible slot stays, emptied, in its place
-    /// (retail 2026-09-18); a hidden one leaves the list. Its weapon leaves the hand.
-    fn empty_worn(&mut self, index: usize) {
+    /// (retail 2026-09-18); a hidden one leaves the list. Its weapon leaves the hand: the option
+    /// slot that was drawn, when it was.
+    fn empty_worn(&mut self, index: usize) -> Option<u32> {
         let slot_id = self.worn[index].0;
         if is_visible_slot(slot_id) {
             self.worn[index].1 = None;
         } else {
             self.worn.remove(index);
         }
-        if self.drawn == Some(slot_id) {
+        let was_drawn = self.drawn == Some(slot_id);
+        if was_drawn {
             self.drawn = None;
             self.attached = false;
             self.attach_at_ms = None;
+            self.sheathe_at_ms = None;
         }
         if let Some(option) = ammo_index(slot_id) {
             self.ammo[option] = Ammo::default();
             self.armed[option] = None;
+        }
+        was_drawn.then_some(slot_id)
+    }
+
+    /// The ammo of main-hand option slot `slot_id` (options 1 and 2) takes the time it is loaded
+    /// when put away at `time_ns`: that time plus its reload (retail, 721 ledgers: a melee or
+    /// empty option took the server time, a blunderbuss option 1.46 s later, its
+    /// `AutoReloadAmmoSeconds`; the count kept its shots).
+    fn stamp(&mut self, slot_id: u32, time_ns: u64) {
+        if let Some(index) = ammo_index(slot_id) {
+            let ammo = &mut self.ammo[index];
+            ammo.time_ns = time_ns.saturating_add(ammo.reload_ms.saturating_mul(NS_PER_MS));
         }
     }
 
@@ -324,7 +377,8 @@ impl Gear {
         let item_id = stack.item_id.clone();
         stack.item.quantity = stack.item.quantity.saturating_sub(1);
         if stack.item.quantity == 0 {
-            self.empty_worn(at);
+            // A used-up stack is a consumable of a slot that is never drawn.
+            let _ = self.empty_worn(at);
         }
         self.changed = true;
         self.unsaved = true;
@@ -349,10 +403,14 @@ impl Gear {
     }
 
     /// The main-hand option slot in the hand: the drawn one when it holds a weapon, else the
-    /// lowest one that does.
+    /// selected one ([`Gear::draw_to_attack`] draws it), else the lowest one that does.
     fn held_option(&self) -> Option<u32> {
         self.main_hand()
             .find(|(slot_id, _)| Some(*slot_id) == self.drawn)
+            .or_else(|| {
+                self.main_hand()
+                    .find(|(slot_id, _)| *slot_id == self.active)
+            })
             .or_else(|| self.main_hand().min_by_key(|(slot_id, _)| *slot_id))
             .map(|(slot_id, _)| slot_id)
     }
@@ -369,22 +427,143 @@ impl Gear {
         self.drawn
     }
 
-    /// The player draws main-hand option `option` (0 for the first key) at `now_ms`: its weapon
-    /// reaches the hand [`ATTACH_MS`] later, and the option put away keeps the time `time_ns`
-    /// (client-gates note: retail answered each weapon key so). Whether it was a new draw.
+    /// The main-hand option slot selected, kept while every weapon is sheathed.
+    pub(super) const fn active(&self) -> u32 {
+        self.active
+    }
+
+    /// The player draws main-hand option `option` (0 for the first key) at `now_ms`: it is the
+    /// selected option, its weapon reaches the hand [`ATTACH_MS`] later, and the option
+    /// selected before and the other option of the picked one are stamped at `time_ns`
+    /// ([`Gear::stamp`]). Retail, 721 ledgers: every one of 1,243 weapon-key swaps stamped the
+    /// option put away; a key draw from all sheathed stamped the option selected before when it
+    /// picked the other one (106 of 106) and both options when it picked the selected one (47 of
+    /// 49). Whether it was a new draw.
     pub(super) fn draw(&mut self, option: u32, now_ms: u64, time_ns: u64) -> bool {
         let picked = slot::MAIN_HAND_OPTION_1.saturating_add(option);
         if picked > slot::MAIN_HAND_OPTION_3 || self.drawn == Some(picked) {
             return false;
         }
-        if let Some(stowed) = self.drawn.and_then(ammo_index) {
-            self.ammo[stowed].time_ns = time_ns;
+        self.stamp(self.active, time_ns);
+        if let Some(paired) = paired_option(picked) {
+            self.stamp(paired, time_ns);
         }
         self.drawn = Some(picked);
+        self.active = picked;
+        self.stowed = None;
+        self.sheathe_at_ms = None;
         self.attached = false;
         self.attach_at_ms = Some(now_ms.saturating_add(ATTACH_MS));
         self.changed = true;
         true
+    }
+
+    /// The player attacks with every weapon sheathed: the weapon of the selected option is drawn
+    /// straight into the hand, the other option is stamped at `time_ns` ([`Gear::stamp`]), and
+    /// the client is told. Retail, 721 ledgers: 344 attack presses drew from all sheathed, each
+    /// the selected option (334 with the selection known, 96 of them option 2) and in the same
+    /// state attached it (newchar 2026-09-12 and 2026-09-18: 32 and 35 ms after the first press
+    /// of the ship fight, no weapon key); 341 stamped only the other option. Without it the
+    /// client showed no weapon in the hand (live run 14). An empty selected option draws nothing
+    /// (no retail case: in no ledger was option 1 empty while option 2 held a weapon). Whether
+    /// it drew one.
+    pub(super) fn draw_to_attack(&mut self, time_ns: u64) -> bool {
+        if self.drawn.is_some() {
+            return false;
+        }
+        self.stowed = None;
+        self.draw_at_once(self.active, time_ns)
+    }
+
+    /// The player presses the sheathe key with every weapon sheathed at `now_ms`: the selected
+    /// option is drawn as by its weapon key ([`Gear::draw`]; retail: 85 of 105 such draws were
+    /// attached later with both options stamped). Whether it drew one.
+    pub(super) fn draw_selected(&mut self, now_ms: u64, time_ns: u64) -> bool {
+        if self.drawn.is_some() || self.worn_item(self.active).is_none() {
+            return false;
+        }
+        self.active
+            .checked_sub(slot::MAIN_HAND_OPTION_1)
+            .is_some_and(|key| self.draw(key, now_ms, time_ns))
+    }
+
+    /// Draws main-hand option slot `picked` straight into the hand and stamps the other option
+    /// at `time_ns`; whether it holds an item to draw.
+    fn draw_at_once(&mut self, picked: u32, time_ns: u64) -> bool {
+        if self.worn_item(picked).is_none() {
+            return false;
+        }
+        if let Some(paired) = paired_option(picked) {
+            self.stamp(paired, time_ns);
+        }
+        self.drawn = Some(picked);
+        self.sheathe_at_ms = None;
+        self.attach_at_ms = None;
+        self.attached = true;
+        self.changed = true;
+        true
+    }
+
+    /// The server puts the drawn weapon away at `time_ns`, the option stamped as a sheathe, to
+    /// give it back for `back` ([`Gear::give_back`]; `None`: it stays away until the player
+    /// draws). Retail, 721 ledgers, the own paperdoll 18 to 68 ms (medians) after the client's
+    /// call, only the put-away option stamped (2,494 of 2,496): the inventory opening (3970 on:
+    /// 639 of 641 with a weapon drawn), a gather by hand (1,351 of 1,449; with a tool 0 of 827),
+    /// a talk (246 of 247), a lore note (115 of 116), a crafting station (6 of 6), a revive (90 of
+    /// 92), a trigger (20 of 24), a cutscene request (6703: 43 of 44), the load of a new level
+    /// (5181 after a change: 37 of 37) and a death (161 put-aways at the 4299). Whether a weapon
+    /// was put away.
+    pub(super) fn put_away(&mut self, time_ns: u64, back: Option<Stow>) -> bool {
+        let Some(sheathed) = self.drawn.take() else {
+            return false;
+        };
+        self.sheathe_at_ms = None;
+        self.attached = false;
+        self.attach_at_ms = None;
+        self.stamp(sheathed, time_ns);
+        self.stowed = back.map(|reason| (sheathed, reason));
+        self.changed = true;
+        true
+    }
+
+    /// The sheathe action starts at `now_ms` (the sheathe key, deep water): it puts the drawn
+    /// weapon away `after_ms` later, at the marker of its fragment ([`Stance::sheathe_ms`]), the
+    /// option stamped as by [`Gear::put_away`]. Retail, 707 ledgers: 220 of 250 presses of the
+    /// sheathe key with a weapon drawn put it away; the life staff (marker 733 ms) at 704 to
+    /// 784 ms for 53 of 141 presses, never before 674 ms but one; the spear (marker 900 ms) at
+    /// 1,031 ms and later (16 of 17). A new draw ends it (Inferred). Whether it started: `false`
+    /// with every weapon sheathed or a put-away already coming.
+    ///
+    /// [`Stance::sheathe_ms`]: nw_content::player_attacks::Stance::sheathe_ms
+    pub(super) fn sheathe(&mut self, now_ms: u64, after_ms: u64) -> bool {
+        if self.drawn.is_none() || self.sheathe_at_ms.is_some() {
+            return false;
+        }
+        self.sheathe_at_ms = Some(now_ms.saturating_add(after_ms));
+        true
+    }
+
+    /// The reason `reason` of a put-away ends at `now_ms`: the option comes back when nothing
+    /// was drawn since, after a gather in the hand at once with the other option stamped (as an
+    /// attack's draw: 1,288 of 1,310), after the inventory as by its weapon key (attached
+    /// [`ATTACH_MS`] later, both options stamped: 361 of 369). Whether it came back.
+    pub(super) fn give_back(&mut self, reason: Stow, now_ms: u64, time_ns: u64) -> bool {
+        let Some((option, stowed_for)) = self.stowed else {
+            return false;
+        };
+        if stowed_for != reason {
+            return false;
+        }
+        self.stowed = None;
+        if self.drawn.is_some() {
+            return false;
+        }
+        match reason {
+            Stow::Gather => self.draw_at_once(option, time_ns),
+            Stow::Inventory => option
+                .checked_sub(slot::MAIN_HAND_OPTION_1)
+                .is_some_and(|key| self.draw(key, now_ms, time_ns)),
+        }
     }
 
     /// The weapon of main-hand option slot `slot_id` is in the client's hand already (its attack
@@ -458,9 +637,13 @@ impl Gear {
         true
     }
 
-    /// Moves the hands on to `now_ms`: the drawn weapon reaches the hand, an empty weapon is
-    /// loaded again.
-    pub(super) fn tick_hands(&mut self, now_ms: u64) {
+    /// Moves the hands on to `now_ms`, server time `time_ns` ([`unix_ns`]): the drawn weapon
+    /// reaches the hand, the sheathe action puts it away at its marker, an empty weapon is loaded
+    /// again.
+    pub(super) fn tick_hands(&mut self, now_ms: u64, time_ns: u64) {
+        if self.sheathe_at_ms.is_some_and(|at| now_ms >= at) {
+            self.put_away(time_ns, None);
+        }
         if self.attach_at_ms.is_some_and(|at| now_ms >= at) {
             self.attach_at_ms = None;
             self.attached = true;
@@ -500,6 +683,7 @@ impl Gear {
     pub(super) fn hands(&self) -> Hands {
         Hands {
             drawn: self.drawn,
+            active: Some(self.active),
             attached: self.attached,
             ammo: self.ammo.map(|ammo| {
                 Some(LoadedAmmo {
@@ -620,16 +804,21 @@ impl Gear {
         true
     }
 
-    /// Removes every stack of `item_id`, worn or in the bag; whether there was one. A worn one
-    /// leaves its visible slot emptied in its place, and its weapon leaves the hand.
-    pub(super) fn remove(&mut self, item_id: &str) -> bool {
+    /// Removes every stack of `item_id`, worn or in the bag, at time `time_ns`; whether there
+    /// was one. A worn one leaves its visible slot emptied in its place, and its weapon leaves
+    /// the hand.
+    pub(super) fn remove(&mut self, item_id: &str, time_ns: u64) -> bool {
         let mut removed = false;
         while let Some(index) = self
             .worn
             .iter()
             .position(|(_, stack)| stack.as_ref().is_some_and(|stack| stack.item_id == item_id))
         {
-            self.empty_worn(index);
+            // The drawn weapon is put away: its option is stamped (retail newchar 2026-09-12 and
+            // 2026-09-18: the tutorial sword's removal sent option 1's ammo 0 at the server time).
+            if let Some(sheathed) = self.empty_worn(index) {
+                self.stamp(sheathed, time_ns);
+            }
             removed = true;
         }
         for entry in &mut self.bag {
@@ -763,7 +952,7 @@ pub(crate) mod tests {
     use nw_content::starter::{ItemRow, StarterSource};
 
     use super::*;
-    use nw_messages::paperdoll::ItemVisual;
+    use nw_messages::paperdoll::{ItemVisual, SlotBits};
 
     pub(crate) const BACKSTORY: &str = "Archetype_Mystic";
     pub(crate) const CHARACTER: Uuid = Uuid::from_u128(0x2b87_684d_c82c_46a4_90e4_c764_0247_7507);
@@ -871,8 +1060,8 @@ pub(crate) mod tests {
         let kits = kits();
         let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
         assert_eq!(gear.take_change(), None);
-        assert!(gear.remove(SWORD));
-        assert!(!gear.remove(SWORD));
+        assert!(gear.remove(SWORD, 0));
+        assert!(!gear.remove(SWORD, 0));
         let after = gear.take_change().expect("change");
         assert_eq!(
             visible_slots(&after),
@@ -943,7 +1132,7 @@ pub(crate) mod tests {
         assert_eq!(gear.worn_item(POTION_SLOT), None);
         assert_eq!(gear.use_one(POTION_SLOT), None);
         // The quest's end: a fresh stack of potions in the quick slot.
-        gear.renew(potion, POTIONS, POTION_SLOT);
+        gear.renew(potion, POTIONS, POTION_SLOT, 0);
         assert_eq!(gear.worn_item(POTION_SLOT), Some(POTION));
         assert_eq!(gear.use_one(POTION_SLOT), Some(POTION.to_owned()));
         assert_eq!(gear.worn_item(POTION_SLOT), Some(POTION), "one left");
@@ -951,10 +1140,12 @@ pub(crate) mod tests {
 
     #[test]
     fn a_removed_weapon_leaves_the_hand_and_its_place_for_the_next() {
+        const DRAWN_NS: u64 = 1;
+        const REMOVED_NS: u64 = 2;
         let kits = kits();
         let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
-        gear.take_in_hand(slot::MAIN_HAND_OPTION_1, 1);
-        assert!(gear.remove(SWORD));
+        gear.take_in_hand(slot::MAIN_HAND_OPTION_1, DRAWN_NS);
+        assert!(gear.remove(SWORD, REMOVED_NS));
         let after = gear.take_change().expect("change");
         let public = after.paperdoll.public.as_ref().expect("public");
         assert_eq!(
@@ -965,19 +1156,21 @@ pub(crate) mod tests {
             gear.hands(),
             Hands {
                 drawn: None,
+                active: Some(slot::MAIN_HAND_OPTION_1),
                 attached: false,
                 ammo: [
                     Some(LoadedAmmo {
                         count: 0,
-                        time_ns: 0
+                        time_ns: REMOVED_NS
                     }),
                     Some(LoadedAmmo {
                         count: 0,
-                        time_ns: 0
+                        time_ns: DRAWN_NS
                     }),
                 ],
             },
-            "nothing in the hand, the option's ammo cleared"
+            "nothing in the hand; the put-away option stamped at the removal (retail 2026-09-18: \
+             option 1's ammo 0 at the server time), still the selected one"
         );
         assert_eq!(gear.main_weapon(), None);
         assert!(
@@ -1018,7 +1211,7 @@ pub(crate) mod tests {
             gear.add(item, 1);
         }
         let mut carried = gear.carried();
-        let again = Gear::carried_in(&kits, CHARACTER, &carried, None);
+        let again = Gear::carried_in(&kits, CHARACTER, &carried, None, None);
         assert_eq!(again.states(), gear.states());
         carried.push(CarriedItem {
             item_id: "NoSuchItem".to_owned(),
@@ -1031,7 +1224,7 @@ pub(crate) mod tests {
             place: ItemPlace::Bag(0),
         };
         carried.push(potion);
-        let moved = Gear::carried_in(&kits, CHARACTER, &carried, None);
+        let moved = Gear::carried_in(&kits, CHARACTER, &carried, None, None);
         assert_eq!(
             moved.bag[1].as_ref().map(|stack| stack.item_id.as_str()),
             Some(POTION),
@@ -1054,7 +1247,7 @@ pub(crate) mod tests {
         assert!(gear.add(&flint, 1));
         assert_eq!(gear.take_unsaved(), Some(gear.carried()));
         assert_eq!(gear.take_unsaved(), None);
-        assert!(gear.remove(FLINT));
+        assert!(gear.remove(FLINT, 0));
         assert!(gear.take_unsaved().is_some());
     }
 
@@ -1085,11 +1278,23 @@ pub(crate) mod tests {
         let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
         gear.draw(1, 0, 0);
         assert_eq!(gear.drawn(), Some(SECOND_OPTION));
-        let taken = Gear::carried_in(&kits, CHARACTER, &gear.carried(), gear.drawn());
+        let taken = Gear::carried_in(
+            &kits,
+            CHARACTER,
+            &gear.carried(),
+            gear.drawn(),
+            Some(gear.active()),
+        );
         assert_eq!(taken.drawn(), Some(SECOND_OPTION));
         assert!(taken.hands().attached, "already in the hand");
-        let fresh = Gear::carried_in(&kits, CHARACTER, &gear.carried(), None);
+        let fresh = Gear::carried_in(&kits, CHARACTER, &gear.carried(), None, None);
         assert_eq!(fresh.drawn(), None);
+        assert_eq!(fresh.active(), slot::MAIN_HAND_OPTION_1, "the first one");
+        // Sheathed on the other sim, the second option stays the selected one.
+        let sheathed =
+            Gear::carried_in(&kits, CHARACTER, &gear.carried(), None, Some(gear.active()));
+        assert_eq!(sheathed.drawn(), None);
+        assert_eq!(sheathed.active(), SECOND_OPTION);
     }
 
     #[test]
@@ -1138,20 +1343,235 @@ pub(crate) mod tests {
         gear.draw(0, NOW, TIME_NS);
         assert_eq!(gear.hands().drawn, Some(slot::MAIN_HAND_OPTION_1));
         assert!(!gear.hands().attached);
-        gear.tick_hands(NOW + ATTACH_MS);
+        gear.tick_hands(NOW + ATTACH_MS, 0);
         assert!(gear.hands().attached, "in the hand after the attach time");
         assert!(gear.fire(NOW));
         assert!(gear.fire(NOW));
         assert!(!gear.fire(NOW), "empty after two shots");
         assert_eq!(gear.hands().ammo[0].map(|ammo| ammo.count), Some(0));
-        gear.tick_hands(NOW + RELOAD_MS - 1);
+        gear.tick_hands(NOW + RELOAD_MS - 1, 0);
         assert!(!gear.fire(NOW + RELOAD_MS - 1));
-        gear.tick_hands(NOW + RELOAD_MS);
+        gear.tick_hands(NOW + RELOAD_MS, 0);
         assert_eq!(gear.hands().ammo[0].map(|ammo| ammo.count), Some(SHOTS));
         // The same weapon again keeps its shots; arming checks only changed slots.
         assert!(gear.fire(NOW + RELOAD_MS));
         gear.arm(|_| Some((SHOTS, RELOAD_MS)), TIME_NS);
         assert_eq!(gear.hands().ammo[0].map(|ammo| ammo.count), Some(SHOTS - 1));
+    }
+
+    /// The kit gear with its sword a gun of `shots` shots and a reload of `reload_ms`, armed at
+    /// `time_ns`.
+    fn gun_kit_gear(shots: u8, reload_ms: u64, time_ns: u64) -> Gear {
+        let mut gear = Gear::starter(&kits(), CHARACTER, Some(BACKSTORY)).expect("gear");
+        gear.arm(
+            |item| (item == SWORD).then_some((shots, reload_ms)),
+            time_ns,
+        );
+        gear
+    }
+
+    #[test]
+    fn an_attack_with_every_weapon_sheathed_draws_it_into_the_hand_and_tells_the_client() {
+        /// Retail newchar 2026-09-12 at 1792415139441 and 2026-09-18 at 1792695769648, 32 and
+        /// 35 ms after the first attack press of the ship fight: the own paperdoll's sheathed map
+        /// (slots 9, 25 to 29) and attached map (slot 24).
+        const RETAIL_SHEATHED: SlotBits = SlotBits([0, 2, 0, 62, 0, 0, 0]);
+        const RETAIL_ATTACHED: SlotBits = SlotBits([0, 0, 0, 1, 0, 0, 0]);
+        const NOW_NS: u64 = 1_792_695_769_624_369_200;
+        const LATER_NS: u64 = NOW_NS + 1;
+        let kits = kits();
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
+        assert_eq!(gear.take_change(), None);
+        assert!(gear.draw_to_attack(NOW_NS));
+        let states = gear.take_change().expect("the client is told");
+        let public = states.paperdoll.public.as_ref().expect("public");
+        assert_eq!(public.sheathed, Some(RETAIL_SHEATHED));
+        assert_eq!(
+            public.attached,
+            Some(RETAIL_ATTACHED),
+            "in the hand at once"
+        );
+        assert_eq!(
+            gear.hands().ammo,
+            [
+                Some(LoadedAmmo {
+                    count: 0,
+                    time_ns: 0
+                }),
+                Some(LoadedAmmo {
+                    count: 0,
+                    time_ns: NOW_NS
+                }),
+            ],
+            "only the other option is stamped (retail a2=0 at the server time)"
+        );
+        assert!(!gear.draw_to_attack(LATER_NS), "a drawn weapon stays");
+        assert_eq!(gear.take_change(), None);
+    }
+
+    #[test]
+    fn an_attack_with_every_weapon_sheathed_draws_the_selected_option() {
+        const SECOND_OPTION: u32 = slot::MAIN_HAND_OPTION_1 + 1;
+        const NOW_NS: u64 = 5;
+        let kits = kits();
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
+        assert!(gear.add(kits.item(STAFF).expect("staff"), 1));
+        assert_eq!(
+            gear.equip(0, SECOND_OPTION, 1, instance(STAFF), none_disabled),
+            Ok(STAFF.to_owned())
+        );
+        // Selected on another sim, every weapon sheathed: the second option is drawn.
+        let mut moved =
+            Gear::carried_in(&kits, CHARACTER, &gear.carried(), None, Some(SECOND_OPTION));
+        assert!(moved.draw_to_attack(NOW_NS));
+        assert_eq!(moved.drawn(), Some(SECOND_OPTION));
+        assert_eq!(moved.main_weapon().map(|(item, _)| item), Some(STAFF));
+        assert_eq!(
+            moved.hands().ammo[0].map(|ammo| ammo.time_ns),
+            Some(NOW_NS),
+            "the first option is the other one"
+        );
+        // An empty selected option draws nothing.
+        let mut empty =
+            Gear::carried_in(&kits, CHARACTER, &gear.carried(), None, Some(SECOND_OPTION));
+        assert!(empty.remove(STAFF, NOW_NS));
+        assert!(!empty.draw_to_attack(NOW_NS));
+        assert_eq!(empty.drawn(), None);
+    }
+
+    #[test]
+    fn a_put_away_gun_is_stamped_when_it_is_loaded_again() {
+        /// The retail blunderbuss: `MaxLoadedAmmo` 2, `AutoReloadAmmoSeconds` 1.46.
+        const SHOTS: u8 = 2;
+        const RELOAD_MS: u64 = 1_460;
+        const ARMED_NS: u64 = 1;
+        const KEY_NS: u64 = 1_000_000_000;
+        // Retail newchar 2026-09-18 at 1792695954760: the second weapon key put the blunderbuss
+        // away with its 2 shots, loaded at the server time plus 1.46 s.
+        let mut gear = gun_kit_gear(SHOTS, RELOAD_MS, ARMED_NS);
+        assert!(gear.draw(0, 0, ARMED_NS));
+        assert!(gear.draw(1, 0, KEY_NS));
+        assert_eq!(
+            gear.hands().ammo[0],
+            Some(LoadedAmmo {
+                count: SHOTS,
+                time_ns: KEY_NS + RELOAD_MS * NS_PER_MS
+            })
+        );
+    }
+
+    #[test]
+    fn a_weapon_key_from_all_sheathed_stamps_the_selected_and_the_other_option() {
+        const FIRST_NS: u64 = 3;
+        const SECOND_NS: u64 = 4;
+        // The selected option picked again (retail: both options stamped, 47 of 49).
+        let mut gear = Gear::starter(&kits(), CHARACTER, Some(BACKSTORY)).expect("gear");
+        assert!(gear.draw(0, 0, FIRST_NS));
+        let stamps = |gear: &Gear| gear.hands().ammo.map(|ammo| ammo.map(|ammo| ammo.time_ns));
+        assert_eq!(stamps(&gear), [Some(FIRST_NS), Some(FIRST_NS)]);
+        // A swap stamps the option put away only (retail: 1,243 of 1,243).
+        assert!(gear.draw(1, 0, SECOND_NS));
+        assert_eq!(stamps(&gear), [Some(SECOND_NS), Some(FIRST_NS)]);
+        assert_eq!(gear.active(), slot::MAIN_HAND_OPTION_1 + 1);
+    }
+
+    #[test]
+    fn a_gather_puts_the_weapon_away_and_gives_it_back_in_the_hand() {
+        const DRAWN_NS: u64 = 1;
+        const AWAY_NS: u64 = 2;
+        const BACK_NS: u64 = 3;
+        const NOW: u64 = 10;
+        let stamps = |gear: &Gear| gear.hands().ammo.map(|ammo| ammo.map(|ammo| ammo.time_ns));
+        let mut gear = Gear::starter(&kits(), CHARACTER, Some(BACKSTORY)).expect("gear");
+        assert!(gear.draw_to_attack(DRAWN_NS));
+        assert!(gear.take_change().is_some());
+        assert!(gear.put_away(AWAY_NS, Some(Stow::Gather)));
+        let away = gear.take_change().expect("the client is told");
+        let public = away.paperdoll.public.as_ref().expect("public");
+        assert_eq!(public.sheathed, Some(SlotBits([0, 2, 0, 63, 0, 0, 0])));
+        assert_eq!(public.attached, Some(SlotBits([0; 7])));
+        assert_eq!(
+            stamps(&gear),
+            [Some(AWAY_NS), Some(DRAWN_NS)],
+            "the put-away option"
+        );
+        assert!(
+            !gear.give_back(Stow::Inventory, NOW, BACK_NS),
+            "not the inventory's"
+        );
+        assert!(gear.give_back(Stow::Gather, NOW, BACK_NS));
+        assert_eq!(gear.hands().drawn, Some(slot::MAIN_HAND_OPTION_1));
+        assert!(gear.hands().attached, "in the hand at once");
+        assert_eq!(
+            stamps(&gear),
+            [Some(AWAY_NS), Some(BACK_NS)],
+            "the other option"
+        );
+        assert!(!gear.give_back(Stow::Gather, NOW, BACK_NS), "once");
+    }
+
+    #[test]
+    fn the_inventory_gives_the_weapon_back_as_its_weapon_key() {
+        const AWAY_NS: u64 = 2;
+        const BACK_NS: u64 = 3;
+        const NOW: u64 = 10;
+        let mut gear = Gear::starter(&kits(), CHARACTER, Some(BACKSTORY)).expect("gear");
+        assert!(gear.draw_to_attack(1));
+        assert!(gear.put_away(AWAY_NS, Some(Stow::Inventory)));
+        assert!(gear.give_back(Stow::Inventory, NOW, BACK_NS));
+        let hands = gear.hands();
+        assert_eq!(hands.drawn, Some(slot::MAIN_HAND_OPTION_1));
+        assert!(!hands.attached, "attached later");
+        assert_eq!(
+            hands.ammo.map(|ammo| ammo.map(|ammo| ammo.time_ns)),
+            [Some(BACK_NS), Some(BACK_NS)],
+            "both options stamped"
+        );
+        gear.tick_hands(NOW + ATTACH_MS, 0);
+        assert!(gear.hands().attached);
+        // Put away for good, or drawn again by the player meanwhile: nothing comes back.
+        assert!(gear.put_away(AWAY_NS, None));
+        assert!(!gear.give_back(Stow::Inventory, NOW, BACK_NS));
+        assert!(
+            gear.draw_selected(NOW, BACK_NS),
+            "the sheathe key draws the selected one"
+        );
+        assert!(gear.put_away(AWAY_NS, Some(Stow::Gather)));
+        assert!(gear.draw_selected(NOW, BACK_NS));
+        assert!(
+            !gear.give_back(Stow::Gather, NOW, BACK_NS),
+            "the player drew it"
+        );
+        assert!(!gear.draw_selected(NOW, BACK_NS), "already drawn");
+    }
+
+    #[test]
+    fn the_sheathe_action_puts_the_weapon_away_at_its_marker_once() {
+        const MARKER_MS: u64 = 400;
+        const NOW: u64 = 10;
+        const AWAY_NS: u64 = 5;
+        let mut gear = Gear::starter(&kits(), CHARACTER, Some(BACKSTORY)).expect("gear");
+        assert!(!gear.sheathe(NOW, MARKER_MS), "nothing drawn");
+        assert!(gear.draw_to_attack(1));
+        assert!(gear.take_change().is_some());
+        assert!(gear.sheathe(NOW, MARKER_MS));
+        assert!(!gear.sheathe(NOW + 1, MARKER_MS), "one put-away at a time");
+        gear.tick_hands(NOW + MARKER_MS - 1, AWAY_NS);
+        assert_eq!(gear.drawn(), Some(slot::MAIN_HAND_OPTION_1));
+        gear.tick_hands(NOW + MARKER_MS, AWAY_NS);
+        assert_eq!(gear.drawn(), None);
+        assert_eq!(
+            gear.hands().ammo[0].map(|ammo| ammo.time_ns),
+            Some(AWAY_NS),
+            "stamped as a put-away"
+        );
+        assert!(gear.take_change().is_some(), "the client is told");
+        // A new draw before the marker ends the action.
+        assert!(gear.draw_to_attack(1));
+        assert!(gear.sheathe(NOW, MARKER_MS));
+        assert!(gear.draw(1, NOW, 1));
+        gear.tick_hands(NOW + MARKER_MS, AWAY_NS);
+        assert_eq!(gear.drawn(), Some(slot::MAIN_HAND_OPTION_1 + 1));
     }
 
     #[test]

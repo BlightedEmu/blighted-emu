@@ -32,6 +32,7 @@ use nw_content::player_attacks::{
     AttackHit, BasicAttack, ChargeStep, ComboLink, Flight, Homing, ItemUse, Stance, StanceVariant,
     stance_tags,
 };
+use nw_content::sheathe::SheatheAction;
 use nw_formats::azcs::{decode_azcs, is_azcs};
 use nw_formats::caf::Caf;
 use nw_formats::character::CharacterDefinition;
@@ -68,6 +69,8 @@ const CHARGE_ACTIONS: [&str; 2] = ["Attack_Start_Charge", "Attack_Start_Charge_U
 /// The dodge action and the item use of quick slot 1.
 const DODGE_ACTION: &str = "Dodge";
 const USE_ACTION: &str = "Use_QuickSlot_1";
+/// The sheathe action of main-hand option 1 (`playeractions_sheathe.actionlist`).
+const SHEATHE_ACTION: &str = "Sheathe_MainHand_1_UB";
 
 /// Clip types and parameters.
 const TRANSITION_INSTANT: &str = "CAGE-TransitionInstant";
@@ -77,6 +80,9 @@ const RANGED_CLIP: &str = "CAGE-RangedAttack";
 const CAST_CLIP: &str = "CAGE-CastSpell";
 const NAMED_CLIP: &str = "CAGE-Named";
 const NAMED_CLIP_NAME: &str = "Name";
+/// The marker whose start lets the next attack action start (the action lists unset
+/// `AttackAction` on it: "Disable AttackAction on CanTransition").
+const CAN_TRANSITION_MARKER: &str = "CanTransition";
 const HOMING_CLIP: &str = "Homing";
 const INVULNERABILITY_CLIP: &str = "Invulnerability";
 const USE_CLIP: &str = "UsePaperdollItem";
@@ -148,6 +154,8 @@ pub struct AnimationSources {
     pub attach: HashMap<String, AnimDatabase>,
     /// Every player action list.
     pub actions: Vec<ActionList>,
+    /// The sheathe action of the action lists.
+    pub sheathe: Option<SheatheAction>,
     /// The ranged attack database: (profile, attack) to (range, radius, hit scan).
     pub ranged: HashMap<(String, String), (f32, f32, bool)>,
     /// The projectile flights, by lowercase prefab path.
@@ -498,6 +506,16 @@ fn attack_of(
         })
         .transpose()?
         .unwrap_or_default();
+    // When a marker clip (`CAGE-Named`) of the fragment starts.
+    let marker_start = |marker: &str| {
+        fragments.iter().find_map(|(fragment, _)| {
+            fragment
+                .clips_of(NAMED_CLIP)
+                .find(|clip| clip.param(NAMED_CLIP_NAME) == Some(marker))
+                .map(|clip| clip.start_s)
+        })
+    };
+    let can_transition_ms = marker_start(CAN_TRANSITION_MARKER).map(ms);
     let attack = |damage_row: &str, hit| BasicAttack {
         action: action.to_owned(),
         fragment: fragment_name.to_owned(),
@@ -505,6 +523,7 @@ fn attack_of(
         hit,
         length_ms,
         links: Vec::new(),
+        can_transition_ms,
     };
     let (melee, context) = playing_in(DAMAGE_CLIP);
     if let Some(first) = melee.first() {
@@ -600,14 +619,6 @@ fn attack_of(
         return Ok(attack(damage_row, hit));
     }
     // A cast clip, else a spell the action casts while a marker clip is on.
-    let marker_start = |marker: &str| {
-        fragments.iter().find_map(|(fragment, _)| {
-            fragment
-                .clips_of(NAMED_CLIP)
-                .find(|clip| clip.param(NAMED_CLIP_NAME) == Some(marker))
-                .map(|clip| clip.start_s)
-        })
-    };
     let cast = playing(CAST_CLIP)
         .first()
         .map(|clip| (clip.start_s, clip.param(SPELL_NAME).unwrap_or_default()))
@@ -852,6 +863,12 @@ fn stance_of(
                 .collect()
         })
         .unwrap_or_default();
+    let sheathe_ms = sources.sheathe.as_ref().and_then(|sheathe| {
+        let picked = sheathe.fragment_tags(&owned);
+        let picked: Vec<&str> = picked.iter().map(String::as_str).collect();
+        let entry = sources.player_fragment_any_case(&sheathe.fragment, &picked)?;
+        sheathe.marker_clip(entry).map(|clip| ms(clip.start_s))
+    });
     let mut steps = steps.into_iter();
     let first = steps.next();
     Stance {
@@ -863,6 +880,7 @@ fn stance_of(
         charged_at_ms: first.as_ref().and_then(|step| step.charged_at_ms),
         charged: first.and_then(|step| step.charged),
         dodge_invulnerable_ms: dodge,
+        sheathe_ms,
         uses,
         combo: steps.collect(),
         variants: Vec::new(),
@@ -989,6 +1007,7 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
         player: Vec::new(),
         attach: HashMap::new(),
         actions: Vec::new(),
+        sheathe: None,
         ranged: HashMap::new(),
         flights: HashMap::new(),
         bodies: Bodies::default(),
@@ -1034,6 +1053,11 @@ pub fn read_sources(source: &GameSource, rows: &BundleRows) -> Result<AnimationS
             } else if path.ends_with(ACTION_LIST_SUFFIX) {
                 if let Some(list) = text().and_then(|text| ActionList::parse(text).ok()) {
                     sources.actions.push(list);
+                }
+                if sources.sheathe.is_none() {
+                    sources.sheathe = text()
+                        .and_then(|text| SheatheAction::parse(text, SHEATHE_ACTION).ok())
+                        .flatten();
                 }
             } else if let Some(adb) = text().and_then(|text| AnimDatabase::parse(text).ok()) {
                 if attach_paths.contains(path) {
@@ -1112,6 +1136,8 @@ mod tests {
   <Blend ExitTime="0.1"/><Procedural type="Homing"><ProceduralParams><Radius value="3.75"/><MaxAngle value="60"/><Height value="5"/><RadiusWeight value="1"/><AngleWeight value="1"/><UseRadiusforAITarget value="true"/></ProceduralParams></Procedural>
   <Blend ExitTime="0.3"/><Procedural type=""/>
  </ProcLayer><ProcLayer>
+  <Blend ExitTime="0.76666665"/><Procedural type="CAGE-Named"><ProceduralParams><Name value="CanTransition"/></ProceduralParams></Procedural>
+ </ProcLayer><ProcLayer>
   <Blend ExitTime="0.33333334"/><Procedural type="CAGE-TransitionBuffered"><ProceduralParams><Condition value="CanAttack_Heavy"/><NewAction value="Attack_Start_Charge_C2"/></ProceduralParams></Procedural>
   <Blend ExitTime="0.2"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Condition value="CanAttack_Heavy"/><NewAction value="Attack_Start_Charge_C2"/></ProceduralParams></Procedural>
  </ProcLayer></Fragment></Attack_Primary>
@@ -1131,6 +1157,11 @@ mod tests {
  </ProcLayer></Fragment><Fragment Tags="Crouch+Potion"><ProcLayer>
   <Blend ExitTime="0.8333333"/><Procedural type="UsePaperdollItem"><ProceduralParams/></Procedural>
  </ProcLayer></Fragment></Use>
+ <Sheathe_UpperBody><Fragment Tags="From_1H_Melee_Sword"><ProcLayer>
+  <Blend ExitTime="0.40000001"/><Procedural type="CAGE-Named"><ProceduralParams><Name value="sheathe_weapon"/></ProceduralParams></Procedural>
+ </ProcLayer></Fragment><Fragment Tags="Sword+Crouch+From_1H_Melee"><ProcLayer>
+  <Blend ExitTime="0.40000001"/><Procedural type="CAGE-Named"><ProceduralParams><Name value="sheathe_weapon"/></ProceduralParams></Procedural>
+ </ProcLayer></Fragment></Sheathe_UpperBody>
 </FragmentList></AnimDB>"#;
 
     /// The sword's attach database cut (`playermaleanims_1h_meleeattach.adb`): the light
@@ -1161,6 +1192,12 @@ mod tests {
  <Action Name="Attack_Heavy_Charged" FragmentName="Attack_Heavy_Charged"/>
  <Action Name="Dodge" FragmentName="Dodge_Roll"/>
  <Action Name="Use_QuickSlot_1" FragmentName="Use"/>
+ <Action Name="Sheathe_MainHand_1_UB" FragmentName="Sheathe_UpperBody"><Activities>
+  <IfThenElse><IfCondition><IfMannequinMarker MarkerName="sheathe_weapon"/></IfCondition>
+   <ThenActivity><SheatheWeapon><Default SheatheOption="Sheathe" SlotToSheathe="MAIN_HAND_OPTION_1"/></SheatheWeapon></ThenActivity></IfThenElse>
+  <SetMannequinTag><Default TagName="From_Unarmed" OnEnter="Set"/><Conditional Name="1H_Melee_Sword" TagName="From_1H_Melee_Sword" OnEnter="Set"/></SetMannequinTag>
+  <SetMannequinTagFromSource><Default TagSource="PaperdollSlot" SourceSlot="MAIN_HAND_OPTION_1" OnEnter="Unset"/></SetMannequinTagFromSource>
+ </Activities></Action>
  <Action Name="Sword_OffenseStance">
   <ActivationCondition><And><IfHasStatusEffect StatusEffect="Sword_Stance_Offense"/><IfMannequinTag TagName="Sword"/></And></ActivationCondition>
   <Activities><SetMannequinTag><Default TagName="GenericTagA" OnEnter="Set" OnExit="Unset"/></SetMannequinTag></Activities>
@@ -1169,7 +1206,9 @@ mod tests {
   <ActivationCondition><And><IfHasStatusEffect StatusEffect="Bow_Stance"/><IfMannequinTag TagName="Bow"/></And></ActivationCondition>
   <Activities><SetMannequinTag><Default TagName="GenericTagB" OnEnter="Set" OnExit="Unset"/></SetMannequinTag></Activities>
  </Action>
-</Actions></ActionList>"#;
+</Actions>
+<Conditions><And Name="1H_Melee_Sword"><IfMannequinTag TagName="1H_Melee"/><IfMannequinTag TagName="Sword"/></And></Conditions>
+</ActionList>"#;
 
     const ATTACH: &str = "animations/mannequin/adb/playermaleanims_1h_meleeattach.adb";
     const SWORD: &str = "1H_Melee,Sword";
@@ -1182,6 +1221,7 @@ mod tests {
                 AnimDatabase::parse(ATTACH_ADB).expect("attach"),
             )]),
             actions: vec![ActionList::parse(ACTIONS).expect("actions")],
+            sheathe: SheatheAction::parse(ACTIONS, SHEATHE_ACTION).expect("actions"),
             ranged: HashMap::new(),
             flights: HashMap::new(),
             bodies: crate::melee_shapes::test_support::bodies(),
@@ -1246,9 +1286,19 @@ mod tests {
         assert_eq!(shapes.len(), 1, "not the perk clip");
         assert_eq!(shapes[0].window_ms, [333, 433]);
         assert_eq!(light.length_ms, 1_000, "the clip's 30 frames at its speed");
+        assert_eq!(
+            light.can_transition_ms,
+            Some(767),
+            "its CanTransition marker"
+        );
         assert_eq!(sword.heavy, None, "its clip has no end");
         assert_eq!(sword.charged, None, "no clip at all");
         assert_eq!(sword.dodge_invulnerable_ms, Some([0, 500]));
+        assert_eq!(
+            sword.sheathe_ms,
+            Some(400),
+            "the sheathe marker of From_1H_Melee_Sword: the sword's own tags are cleared"
+        );
         assert_eq!(
             sword.use_effect_ms("Potion"),
             Some(333),
@@ -1292,6 +1342,7 @@ mod tests {
         assert_eq!(light_2.action, "Attack_Primary_C2");
         // (1 s - 0.5 s) / 2.
         assert_eq!(light_2.length_ms, 250);
+        assert_eq!(light_2.can_transition_ms, None, "no CanTransition marker");
         assert_eq!(light_2.links[0].step, 0, "back to the stance's own step");
         let AttackHit::Melee { shapes, .. } = &light_2.hit else {
             panic!("melee");

@@ -9,6 +9,7 @@ use nw_formats::objectstream::lowercase_crc32;
 use nw_world::records::VitalsSpawn;
 
 use super::attack::Vitals;
+use super::gear::unix_ns;
 use super::{Placement, Player, QuestRefusal, SimWorld};
 
 /// Most GM mobs one command spawns.
@@ -224,6 +225,7 @@ impl SimWorld {
         let Some(target) = self.player_by_number(entity) else {
             return AdminReply::NotMine;
         };
+        let time_ns = unix_ns(self.server_ms);
         let taken = self
             .world
             .get_mut::<Player>(target)
@@ -231,7 +233,7 @@ impl SimWorld {
                 player
                     .gear
                     .as_mut()
-                    .is_some_and(|gear| gear.remove(item_id))
+                    .is_some_and(|gear| gear.remove(item_id, time_ns))
             });
         if taken {
             AdminReply::Done

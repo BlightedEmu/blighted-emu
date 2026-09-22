@@ -308,10 +308,18 @@ pub struct HandoffOffer {
     /// dropped every greatsword swing).
     #[serde(default)]
     pub drawn_weapon: Option<u32>,
+    /// The main-hand option slot the player has selected, kept while every weapon is sheathed:
+    /// a press of attack with every weapon sheathed draws it (retail, 334 of 334 such draws).
+    #[serde(default)]
+    pub active_weapon: Option<u32>,
     /// The versions of the newest weapon mastery (911) and point pool (3681) lists the client
     /// has; the taker's full lists go on above them (retail's list versions only rise).
     #[serde(default)]
     pub mastery_versions: (u64, u64),
+    /// The version of the newest attribute bonus lists (type 129) the client has; the taker's
+    /// full lists go on above it.
+    #[serde(default)]
+    pub attribute_version: u64,
     /// Whether the account has the game master rank, as in [`Admit::game_master`].
     #[serde(default)]
     pub game_master: bool,
@@ -361,6 +369,14 @@ pub struct PlayerProgression {
     /// The total experience of each weapon mastery, by its `CategoricalProgressionData` id
     /// (world migration 0007).
     pub masteries: BTreeMap<String, u32>,
+    /// The attribute points spent on each attribute (`CharacterAttributeType` id, points), in
+    /// the order they were first spent (world migration 0008).
+    #[serde(default)]
+    pub attributes: Vec<(u32, u32)>,
+    /// The level of each weapon progression point (`ProgressionPointId`, level), in the order
+    /// they were first assigned (world migration 0008).
+    #[serde(default)]
+    pub weapon_points: Vec<(String, u16)>,
 }
 
 /// One loot limit's count of a player (`nw_content::loot_limits`).
@@ -486,6 +502,8 @@ pub struct PlayerGhost {
     pub gear_version: u64,
     /// The main-hand option slot drawn.
     pub drawn: Option<u32>,
+    /// The main-hand option slot selected, kept while every weapon is sheathed.
+    pub active: Option<u32>,
     /// The drawn weapon is in the hand.
     pub attached: bool,
     /// The items that show on it.
@@ -785,6 +803,8 @@ mod tests {
                 ends_ns: 1_793_091_600_894_621_000,
             }],
             masteries: BTreeMap::from([("GreatSwordAbilityTable".to_owned(), 20)]),
+            attributes: vec![(2, 15)],
+            weapon_points: vec![("Ability_Greatsword_Combo".to_owned(), 1)],
         }
     }
 
@@ -848,6 +868,7 @@ mod tests {
             enter_level: false,
             progression: progression(),
             mastery_versions: (12, 7),
+            attribute_version: 9,
             game_master: true,
             achievement_version: 25,
             items: Some(vec![CarriedItem {
@@ -856,6 +877,7 @@ mod tests {
                 place: ItemPlace::Worn(14),
             }]),
             drawn_weapon: Some(25),
+            active_weapon: Some(25),
             quests: PlayerQuests {
                 active: Some((
                     "12_GetOffBeach".to_owned(),
@@ -994,6 +1016,7 @@ mod tests {
                 spawned_ms: u64::MAX,
                 gear_version: u64::MAX,
                 drawn: Some(u32::MAX),
+                active: Some(u32::MAX),
                 attached: true,
                 items: [Some(item); GHOST_VISIBLE_ITEMS],
                 action: Some(GhostSlayer {

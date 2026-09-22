@@ -14,6 +14,8 @@ const SKINNING: &str = "Skinning";
 /// The `Restriction` of a gatherable that needs its tradeskill's tool (a corpse needs a skinning
 /// knife; bushes say `ItemRequired` and retail gathered them by hand).
 const TOOL_REQUIRED: &str = "ToolRequired";
+/// The `GatheringType` of a gatherable taken by hand, not with a tool's action.
+const BY_HAND: &str = "None";
 /// Milliseconds per second.
 const MS_PER_SECOND: f64 = 1_000.0;
 
@@ -34,6 +36,10 @@ pub struct Gatherable {
     pub tradeskill: Option<String>,
     /// It needs its tradeskill's tool (`Restriction` ToolRequired).
     pub tool_required: bool,
+    /// Its `GatheringType` is `None`: it is taken by hand, not with a tool's action (chopping,
+    /// cutting, dressing, mining, the Azoth staff). Retail put the drawn weapon away for 1,351
+    /// of 1,449 gathers by hand and for none of 827 with a tool (721 ledgers).
+    pub by_hand: bool,
     /// `GameEventID`: the game event of a gather of it (`MSQ_CorruptedNodule_1_interact` for a
     /// quest nodule, which a quest's `TaskGameEvent` counts).
     pub game_event: Option<String>,
@@ -74,6 +80,10 @@ impl Gatherables {
                     loot_container: row.is_loot_container.unwrap_or_default(),
                     tradeskill: row.tradeskill.clone(),
                     tool_required: row.restriction.as_deref() == Some(TOOL_REQUIRED),
+                    by_hand: row
+                        .gathering_type
+                        .as_deref()
+                        .is_none_or(|kind| kind == BY_HAND),
                     game_event: row.game_event_id.clone().filter(|event| !event.is_empty()),
                 }),
         )
@@ -256,6 +266,7 @@ mod tests {
             loot_container: false,
             tradeskill: None,
             tool_required: false,
+            by_hand: true,
             game_event: None,
         }]);
         // Retail flint request: crc `a417137f`.
