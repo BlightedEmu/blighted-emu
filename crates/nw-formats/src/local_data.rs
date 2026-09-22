@@ -66,6 +66,8 @@ pub const PINNED_OPEN_WORLD_ENCOUNTERS: usize = 1_036;
 pub const PINNED_OPEN_WORLD_CAPITALS: usize = 268_113;
 /// Open world slices that the capitals spawn (`region.slicedata`).
 pub const PINNED_OPEN_WORLD_SPAWNED: usize = 31_145;
+/// `.rnr` physics assets in all paks (level-collision note 2026-09-20).
+pub const PINNED_RNR_FILES: usize = 10_621;
 /// Open world crafting stations among the spawned slices.
 pub const PINNED_OPEN_WORLD_STATIONS: usize = 295;
 

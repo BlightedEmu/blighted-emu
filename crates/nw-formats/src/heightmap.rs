@@ -4,6 +4,10 @@
 //! the two FTUE levels' are 1024 x 1024. The Photometric tag is ignored,
 //! because 59 files of the pinned client set it to RGB with one sample, which generic TIFF
 //! readers refuse.
+//!
+//! Region tract maps (`region.tractmap.tif`, road study 2026-09-20) are the same TIFF profile with
+//! one 8-bit palette index per cell: 1024 x 1024, LZW, one strip, no predictor. A cell's value is
+//! the index of its tract in the level's `tracts.json` list.
 
 use weezl::decode::Configuration;
 use weezl::{BitOrder, LzwStatus};
@@ -35,6 +39,8 @@ const COMPRESSION_LZW: u32 = 5;
 const PREDICTOR_NONE: u32 = 1;
 const PREDICTOR_HORIZONTAL: u32 = 2;
 const BITS_PER_SAMPLE: u32 = 16;
+/// Bits of one tract map cell.
+const TRACT_BITS_PER_SAMPLE: u32 = 8;
 const SAMPLES_PER_PIXEL: u32 = 1;
 const PLANAR_CHUNKY: u32 = 1;
 const PHOTOMETRIC_BLACK_IS_ZERO: u32 = 1;
@@ -55,6 +61,15 @@ pub struct Heightmap {
     pub size: usize,
     /// `size` rows of `size` raw samples, row 0 first (as in the file).
     pub samples: Vec<u16>,
+}
+
+/// Decoded tract map cells.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tractmap {
+    /// Rows and columns, one of [`SUPPORTED_HEIGHTMAP_SIZES`].
+    pub size: usize,
+    /// `size` rows of `size` tract indices, row 0 first (as in the file).
+    pub cells: Vec<u8>,
 }
 
 /// Error from heightmap reading.
@@ -167,8 +182,19 @@ const HEIGHTMAP_LAYOUT: TiffLayout = TiffLayout {
     predictor: PREDICTOR_HORIZONTAL,
 };
 
-/// Reads a `region.heightmap` file.
-pub fn parse_heightmap(bytes: &[u8]) -> Result<Heightmap, HeightmapError> {
+/// The layout of the retail tract maps: one strip, no predictor.
+const TRACTMAP_LAYOUT: TiffLayout = TiffLayout {
+    rows_per_strip: None,
+    predictor: PREDICTOR_NONE,
+};
+
+/// The square image of `bytes` with `bits` bits per sample and one of `predictors`: its edge,
+/// its raw sample bytes (row 0 first) and its predictor.
+fn decode_image(
+    bytes: &[u8],
+    bits: u32,
+    predictors: &[u32],
+) -> Result<(usize, Vec<u8>, u32), HeightmapError> {
     if bytes.get(..TIFF_LITTLE_ENDIAN_MAGIC.len()) != Some(&TIFF_LITTLE_ENDIAN_MAGIC[..]) {
         return Err(HeightmapError::BadMagic);
     }
@@ -190,12 +216,8 @@ pub fn parse_heightmap(bytes: &[u8]) -> Result<Heightmap, HeightmapError> {
     if width != height || !SUPPORTED_HEIGHTMAP_SIZES.contains(&size) {
         return Err(HeightmapError::UnsupportedSize { width, height });
     }
-    let row_bytes = size * SAMPLE_SIZE;
-    expect_value(
-        TAG_BITS_PER_SAMPLE,
-        required(TAG_BITS_PER_SAMPLE)?,
-        &[BITS_PER_SAMPLE],
-    )?;
+    let row_bytes = size * bits as usize / u8::BITS as usize;
+    expect_value(TAG_BITS_PER_SAMPLE, required(TAG_BITS_PER_SAMPLE)?, &[bits])?;
     expect_value(
         TAG_COMPRESSION,
         required(TAG_COMPRESSION)?,
@@ -210,11 +232,7 @@ pub fn parse_heightmap(bytes: &[u8]) -> Result<Heightmap, HeightmapError> {
     let planar = scalar(TAG_PLANAR_CONFIGURATION)?.unwrap_or(PLANAR_CHUNKY);
     expect_value(TAG_PLANAR_CONFIGURATION, planar, &[PLANAR_CHUNKY])?;
     let predictor = scalar(TAG_PREDICTOR)?.unwrap_or(PREDICTOR_NONE);
-    expect_value(
-        TAG_PREDICTOR,
-        predictor,
-        &[PREDICTOR_NONE, PREDICTOR_HORIZONTAL],
-    )?;
+    expect_value(TAG_PREDICTOR, predictor, predictors)?;
     let rows_per_strip =
         scalar(TAG_ROWS_PER_STRIP)?.map_or(size, |rows| (rows as usize).clamp(1, size));
     let strips = size.div_ceil(rows_per_strip);
@@ -240,6 +258,16 @@ pub fn parse_heightmap(bytes: &[u8]) -> Result<Heightmap, HeightmapError> {
         let input = slice(bytes, offset as usize, count as usize)?;
         decode_strip(strip, input, output)?;
     }
+    Ok((size, raw, predictor))
+}
+
+/// Reads a `region.heightmap` file.
+pub fn parse_heightmap(bytes: &[u8]) -> Result<Heightmap, HeightmapError> {
+    let (size, raw, predictor) = decode_image(
+        bytes,
+        BITS_PER_SAMPLE,
+        &[PREDICTOR_NONE, PREDICTOR_HORIZONTAL],
+    )?;
     let mut samples: Vec<u16> = raw
         .chunks_exact(SAMPLE_SIZE)
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
@@ -254,10 +282,29 @@ pub fn parse_heightmap(bytes: &[u8]) -> Result<Heightmap, HeightmapError> {
     Ok(Heightmap { size, samples })
 }
 
+/// Reads a `region.tractmap.tif` file.
+pub fn parse_tractmap(bytes: &[u8]) -> Result<Tractmap, HeightmapError> {
+    let (size, cells, _) = decode_image(bytes, TRACT_BITS_PER_SAMPLE, &[PREDICTOR_NONE])?;
+    Ok(Tractmap { size, cells })
+}
+
 /// Writes `map` as a heightmap file in the profile [`parse_heightmap`] reads: 4 rows per strip,
 /// LZW, horizontal predictor.
 pub fn encode_heightmap(map: &Heightmap) -> Result<Vec<u8>, HeightmapError> {
     write_tiff(map, &HEIGHTMAP_LAYOUT)
+}
+
+/// Writes `map` as a tract map file in the profile [`parse_tractmap`] reads: one strip, LZW, no
+/// predictor.
+pub fn encode_tractmap(map: &Tractmap) -> Result<Vec<u8>, HeightmapError> {
+    let size = map.size;
+    if !SUPPORTED_HEIGHTMAP_SIZES.contains(&size) || map.cells.len() != size * size {
+        return Err(HeightmapError::SampleCount {
+            size,
+            actual: map.cells.len(),
+        });
+    }
+    write_image(size, TRACT_BITS_PER_SAMPLE, &map.cells, &TRACTMAP_LAYOUT)
 }
 
 fn write_tiff(map: &Heightmap, layout: &TiffLayout) -> Result<Vec<u8>, HeightmapError> {
@@ -268,26 +315,38 @@ fn write_tiff(map: &Heightmap, layout: &TiffLayout) -> Result<Vec<u8>, Heightmap
             actual: samples.len(),
         });
     }
+    let mut raw = Vec::with_capacity(samples.len() * SAMPLE_SIZE);
+    for row in samples.chunks_exact(size) {
+        for (column, &sample) in row.iter().enumerate() {
+            let stored = if layout.predictor == PREDICTOR_HORIZONTAL && column > 0 {
+                sample.wrapping_sub(row[column - 1])
+            } else {
+                sample
+            };
+            raw.extend_from_slice(&stored.to_le_bytes());
+        }
+    }
+    write_image(size, BITS_PER_SAMPLE, &raw, layout)
+}
+
+/// Writes a square image of `size` rows of `raw` bytes (`bits` bits per sample, the predictor
+/// already applied) in `layout`.
+fn write_image(
+    size: usize,
+    bits: u32,
+    raw: &[u8],
+    layout: &TiffLayout,
+) -> Result<Vec<u8>, HeightmapError> {
+    let row_bytes = size * bits as usize / u8::BITS as usize;
     let rows_per_strip = layout.rows_per_strip.unwrap_or(size);
     let mut out = TIFF_LITTLE_ENDIAN_MAGIC.to_vec();
     out.extend_from_slice(&[0; size_of::<u32>()]);
     let mut offsets = Vec::new();
     let mut counts = Vec::new();
-    for (strip, rows) in samples.chunks(rows_per_strip * size).enumerate() {
-        let mut raw = Vec::with_capacity(rows.len() * SAMPLE_SIZE);
-        for row in rows.chunks_exact(size) {
-            for (column, &sample) in row.iter().enumerate() {
-                let stored = if layout.predictor == PREDICTOR_HORIZONTAL && column > 0 {
-                    sample.wrapping_sub(row[column - 1])
-                } else {
-                    sample
-                };
-                raw.extend_from_slice(&stored.to_le_bytes());
-            }
-        }
+    for (strip, rows) in raw.chunks(rows_per_strip * row_bytes).enumerate() {
         let packed =
             weezl::encode::Encoder::with_tiff_size_switch(BitOrder::Msb, LZW_MIN_CODE_SIZE)
-                .encode(&raw)
+                .encode(rows)
                 .map_err(|_| HeightmapError::Lzw { strip })?;
         offsets.push(file_offset(&out));
         counts.push(file_offset(&packed));
@@ -296,7 +355,7 @@ fn write_tiff(map: &Heightmap, layout: &TiffLayout) -> Result<Vec<u8>, Heightmap
     let mut entries = vec![
         short_entry(TAG_IMAGE_WIDTH, size as u32),
         short_entry(TAG_IMAGE_LENGTH, size as u32),
-        short_entry(TAG_BITS_PER_SAMPLE, BITS_PER_SAMPLE),
+        short_entry(TAG_BITS_PER_SAMPLE, bits),
         short_entry(TAG_COMPRESSION, COMPRESSION_LZW),
         short_entry(TAG_PHOTOMETRIC, PHOTOMETRIC_BLACK_IS_ZERO),
         long_entry(TAG_STRIP_OFFSETS, &offsets, &mut out),
@@ -593,6 +652,46 @@ mod tests {
         assert_eq!(
             parse_heightmap(&encode_heightmap(&small).unwrap()).unwrap(),
             small
+        );
+    }
+
+    #[test]
+    fn a_tract_map_round_trips_and_refuses_the_heightmap_profile() {
+        let map = Tractmap {
+            size: SMALL_HEIGHTMAP_SIZE,
+            cells: (0..SMALL_HEIGHTMAP_SIZE * SMALL_HEIGHTMAP_SIZE)
+                .map(|index| u8::try_from(index % 7).expect("below 7"))
+                .collect(),
+        };
+        let bytes = encode_tractmap(&map).unwrap();
+        assert_eq!(parse_tractmap(&bytes).unwrap(), map);
+        assert_eq!(
+            parse_tractmap(&with_tag(&bytes, TAG_PREDICTOR, PREDICTOR_HORIZONTAL)),
+            Err(HeightmapError::UnsupportedValue {
+                tag: TAG_PREDICTOR,
+                value: PREDICTOR_HORIZONTAL
+            })
+        );
+        let small = Heightmap {
+            size: SMALL_HEIGHTMAP_SIZE,
+            samples: samples_of(SMALL_HEIGHTMAP_SIZE),
+        };
+        assert_eq!(
+            parse_tractmap(&encode_heightmap(&small).unwrap()),
+            Err(HeightmapError::UnsupportedValue {
+                tag: TAG_BITS_PER_SAMPLE,
+                value: BITS_PER_SAMPLE
+            })
+        );
+        assert_eq!(
+            encode_tractmap(&Tractmap {
+                size: SMALL_HEIGHTMAP_SIZE,
+                cells: vec![0; 3],
+            }),
+            Err(HeightmapError::SampleCount {
+                size: SMALL_HEIGHTMAP_SIZE,
+                actual: 3
+            })
         );
     }
 

@@ -94,6 +94,7 @@ mod local_data_tests {
     use nw_formats::datasheet::DATASHEET_EXTENSION;
     use nw_formats::local_data::*;
     use nw_formats::pak::{EntryMethod, PakArchive, find_paks};
+    use nw_formats::rnr::{RNR_EXTENSION, parse_rnr};
 
     #[test]
     fn every_oodle_datasheet_of_the_pinned_build_decodes_with_matching_crc() {
@@ -110,5 +111,23 @@ mod local_data_tests {
             }
         }
         assert_eq!(decoded, PINNED_OODLE_DATASHEETS);
+    }
+
+    #[test]
+    fn every_rnr_physics_asset_of_the_pinned_build_reads_to_its_end() {
+        let mut read = 0;
+        for path in find_paks(&game_dir()).unwrap() {
+            let mut pak = PakArchive::open(&path).unwrap();
+            for entry in pak.entries().unwrap() {
+                if entry.path.ends_with(RNR_EXTENSION) {
+                    let bytes = pak
+                        .read(&entry, &KrakenDecompressor)
+                        .unwrap_or_else(|error| panic!("{error}"));
+                    parse_rnr(&bytes).unwrap_or_else(|error| panic!("{}: {error}", entry.path));
+                    read += 1;
+                }
+            }
+        }
+        assert_eq!(read, PINNED_RNR_FILES);
     }
 }

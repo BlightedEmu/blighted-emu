@@ -738,22 +738,31 @@ impl AnimDatabase {
         Ok(Self { fragments })
     }
 
-    /// The entry of fragment `name` that Mannequin plays for the tag state `tags`: of the entries
-    /// without fragment tags whose every tag is in `tags` (any case), the one with the most
-    /// tags, the first in file order on a tie; `None` when no entry fits.
+    /// The entry of fragment `name` that Mannequin plays for the tag state `tags`: the first of
+    /// its [`AnimDatabase::options`]; `None` when no entry fits.
     pub fn best(&self, name: &str, tags: &[&str]) -> Option<&Fragment> {
+        self.options(name, tags).into_iter().next()
+    }
+
+    /// The entries of fragment `name` that Mannequin picks among for the tag state `tags` (its
+    /// options): of the entries without fragment tags whose every tag is in `tags` (any case),
+    /// those with the most tags, in file order.
+    pub fn options(&self, name: &str, tags: &[&str]) -> Vec<&Fragment> {
         let has = |tag: &String| tags.iter().any(|wanted| wanted.eq_ignore_ascii_case(tag));
-        self.fragments
+        let fitting: Vec<&Fragment> = self
+            .fragments
             .iter()
             .filter(|fragment| {
                 fragment.name == name
                     && fragment.frag_tags.is_empty()
                     && fragment.tags.iter().all(has)
             })
-            .fold(None, |best: Option<&Fragment>, fragment| match best {
-                Some(best) if best.tags.len() >= fragment.tags.len() => Some(best),
-                _ => Some(fragment),
-            })
+            .collect();
+        let most = fitting.iter().map(|fragment| fragment.tags.len()).max();
+        fitting
+            .into_iter()
+            .filter(|fragment| Some(fragment.tags.len()) == most)
+            .collect()
     }
 }
 
@@ -1241,6 +1250,35 @@ mod tests {
     }
 
     #[test]
+    fn the_options_are_the_entries_with_the_most_tags_in_file_order() {
+        // `npc_risen_anims.adb`: two plain `r_Death` entries and tagged ones.
+        let text = r#"<AnimDB><FragmentList><r_Death>
+ <Fragment Tags="BlightFiend"><ProcLayer/></Fragment>
+ <Fragment Tags=""><AnimLayer><Blend ExitTime="0"/><Animation name="first"/></AnimLayer></Fragment>
+ <Fragment Tags=""><AnimLayer><Blend ExitTime="0"/><Animation name="second"/></AnimLayer></Fragment>
+</r_Death></FragmentList></AnimDB>"#;
+        let adb = AnimDatabase::parse(text).expect("adb");
+        let names = |tags: &[&str]| -> Vec<String> {
+            adb.options("r_Death", tags)
+                .iter()
+                .filter_map(|entry| Some(entry.main_animation()?.name.clone()))
+                .collect()
+        };
+        assert_eq!(names(&["Base", "DT5"]), ["first", "second"]);
+        assert_eq!(
+            adb.options("r_Death", &["BlightFiend"]).len(),
+            1,
+            "only the tagged one: it has more tags"
+        );
+        assert_eq!(
+            adb.best("r_Death", &["Base"])
+                .and_then(Fragment::main_animation)
+                .map(|clip| clip.name.as_str()),
+            Some("first")
+        );
+    }
+
+    #[test]
     fn the_best_entry_has_every_tag_and_no_fragment_tags() {
         let adb = AnimDatabase::parse(GREATSWORD_ADB).expect("adb");
         let tags = |wanted: &[&str]| {
@@ -1258,6 +1296,9 @@ mod tests {
             "the most tags"
         );
         assert_eq!(tags(&["1H_Melee", "Sword"]), None);
+        let options = |wanted: &[&str]| adb.options("Attack_Primary", wanted).len();
+        assert_eq!(options(&["2H_Melee", "Greatsword"]), 1);
+        assert_eq!(options(&["1H_Melee", "Sword"]), 0);
     }
 
     #[test]
