@@ -360,3 +360,23 @@ GM commands go to the sim that owns the target, found from the sim snapshots and
 - Never commit game files, captures, or `deploy/.env`. Put local game data in `local-data/` (ignored by git).
 - Never connect a changed client to Amazon's servers.
 - Every new copyleft crate must be added to `[licenses] exceptions` in `deny.toml`.
+
+## Licence and trademarks
+
+### Our code
+
+Blighted Emu is free software. The code written for this project is under the GNU Affero General Public License, version 3 or later (`LICENSE`), unless a crate's `Cargo.toml` names another licence: the launcher and `nw-oodle` are GPL-3.0-or-later, and `nw-formats` is MIT OR Apache-2.0. Third-party libraries keep their own licences, which must be respected; `deny.toml` lists the licences this project accepts. OpenSSL 3 is under the Apache License 2.0, which is compatible with the GPL and AGPL version 3, so no extra linking exception is needed.
+
+### What our licence does not cover
+
+Our licence covers only the code and documents written for this project. It gives no rights to anything that belongs to the owners of New World, including:
+
+- the New World game, its client, its files and data, its art, sound, text and other content;
+- the names, logos and trademarks New World, New World: Aeternum, Amazon Games and Amazon;
+- any value, table or byte sequence taken from the game or from captures of it, including the small extracts in test files (`testdata/`), which are here only so the tests can check this project against the real game.
+
+Those remain the property of their respective owners and are used here only for interoperability. This repository ships no game files: the tools read game data only from a New World install that you own. Never connect a changed client to Amazon's servers.
+
+### Not affiliated
+
+Blighted Emu is not affiliated with, endorsed by, or connected to Amazon Games or Amazon.com, Inc. New World and New World: Aeternum are trademarks of their respective owners. This is an independent, community-built implementation based on reverse engineering and the work of the New World emulation and preservation community. It is provided for educational and game-preservation purposes only.
