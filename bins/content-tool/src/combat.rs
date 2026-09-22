@@ -144,7 +144,11 @@ pub struct CombatCheck {
 fn our_health(data: &CombatData, vitals_crc: u32, level: u32) -> Option<u32> {
     let kind = data.mob_type(vitals_crc)?;
     let row = data.level(level)?;
-    Some(mob_max_health(row.base_max_health, kind.health_mod))
+    Some(mob_max_health(
+        row.base_max_health,
+        kind.health_mod,
+        kind.category_health_mod,
+    ))
 }
 
 /// Whether `ours` is `nwdb`'s health within the tolerance.
@@ -157,7 +161,12 @@ fn same_health(ours: u32, nwdb: u64) -> bool {
 fn at_other_level(data: &CombatData, vitals_crc: u32, nwdb: u64) -> bool {
     data.mob_type(vitals_crc).is_some_and(|kind| {
         data.levels()
-            .any(|(_, row)| same_health(mob_max_health(row.base_max_health, kind.health_mod), nwdb))
+            .any(|(_, row)| {
+                same_health(
+                    mob_max_health(row.base_max_health, kind.health_mod, kind.category_health_mod),
+                    nwdb,
+                )
+            })
     })
 }
 
@@ -217,6 +226,7 @@ mod tests {
                 "Boar".to_owned(),
                 MobType {
                     health_mod: HALF,
+                    category_health_mod: 1.0,
                     damage_mod: 1.0,
                     creature_type: None,
                 },

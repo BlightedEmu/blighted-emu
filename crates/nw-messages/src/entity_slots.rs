@@ -192,6 +192,8 @@ fn position_of(member: &BundleMember) -> Option<WorldPosition> {
         | MemberState::Ownership(_)
         | MemberState::CategoricalProgression(_)
         | MemberState::ProgressionPoints(_)
+        | MemberState::Attributes(_)
+        | MemberState::Abilities(_)
         | MemberState::Empty(_)
         | MemberState::Recorded { .. } => None,
     }

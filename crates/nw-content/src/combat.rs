@@ -68,8 +68,11 @@ pub struct CategoryMods {
 /// A mob type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MobType {
-    /// Multiplies the level's base health (with the creature type's category mod).
+    /// Multiplies the level's base health (`HealthMod`).
     pub health_mod: f64,
+    /// Multiplies that health again: the creature type's `CategoryHealthMod` (each product
+    /// loses its fraction, as on the retail cards).
+    pub category_health_mod: f64,
     /// Multiplies the level's base damage (with the creature type's category mod).
     pub damage_mod: f64,
     /// The creature type, for the vision offset.
@@ -80,6 +83,7 @@ impl MobType {
     /// A type without mods.
     pub const PLAIN: Self = Self {
         health_mod: PLAIN_MOD,
+        category_health_mod: PLAIN_MOD,
         damage_mod: PLAIN_MOD,
         creature_type: None,
     };
@@ -253,6 +257,7 @@ impl CombatSource {
                         row.vitals_id.clone(),
                         MobType {
                             health_mod: row.health_mod.unwrap_or(PLAIN_MOD),
+                            category_health_mod: PLAIN_MOD,
                             damage_mod: row.damage_mod.unwrap_or(PLAIN_MOD),
                             creature_type: row.creature_type.clone(),
                         },
@@ -551,7 +556,7 @@ impl CombatData {
                     .as_ref()
                     .and_then(|kind| categories.get(kind))
                 {
-                    kind.health_mod *= mods.health;
+                    kind.category_health_mod = mods.health;
                     kind.damage_mod *= mods.damage;
                 }
                 (lowercase_crc32(&id), kind)
@@ -825,6 +830,7 @@ mod tests {
     fn boar() -> MobType {
         MobType {
             health_mod: BOAR_HEALTH_MOD,
+            category_health_mod: 1.0,
             damage_mod: BOAR_DAMAGE_MOD,
             creature_type: Some("Beast".to_owned()),
         }
@@ -964,6 +970,7 @@ mod tests {
             charged_at_ms: None,
             charged: None,
             dodge_invulnerable_ms: Some([0, 500]),
+            sheathe_ms: None,
             uses: Vec::new(),
             combo: Vec::new(),
             variants: Vec::new(),
@@ -1009,12 +1016,13 @@ mod tests {
         )];
         let data = CombatData::build(source, &rows()).expect("data");
         let boar = data.mob_type(lowercase_crc32("Boar_20")).expect("boar");
-        assert_eq!(boar.health_mod, BOAR_HEALTH_MOD * 2.0);
+        assert_eq!(boar.health_mod, BOAR_HEALTH_MOD);
+        assert_eq!(boar.category_health_mod, 2.0);
         assert_eq!(boar.damage_mod, BOAR_DAMAGE_MOD * 1.5);
         let elite = data
             .mob_type(lowercase_crc32("Boar_20_Elite"))
             .expect("variant");
-        assert_eq!(elite.health_mod, BOAR_HEALTH_MOD * 2.0, "a variant too");
+        assert_eq!(elite.category_health_mod, 2.0, "a variant too");
     }
 
     #[test]

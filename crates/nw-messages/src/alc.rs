@@ -980,6 +980,47 @@ impl AlcState {
         if let Some(animation) = animation {
             values.extend(animation.children()?);
         }
+        Ok(Some(Self {
+            bytes: self.with_children(walked, &values),
+            pos10: Some(pos10),
+        }))
+    }
+
+    /// The same body as the spawn card of a mob that has just spawned, at `at`: no state number,
+    /// no clock, no time anchor and no scope, at its `pos10` (retail: 119 of 119 cards of fresh
+    /// mob spawns in newchar-retail-2026-09-18; the mob's first state, about 100 ms later,
+    /// starts its spawn fragment). A child that the body does not send stays unsent. `None`
+    /// when the body sends no `pos10`.
+    pub fn mob_spawn_card(&self, at: InputPosition) -> Option<Self> {
+        let walked = walk(&mut Reader::new(&self.bytes)).ok()?;
+        if walked.pos10.is_none() {
+            return None;
+        }
+        let mut values: Vec<(usize, Vec<u8>)> = position_children(at).into();
+        values.extend(FRESH_CARD_VALUES.iter().map(|(child, bytes)| (*child, bytes.to_vec())));
+        Some(Self {
+            bytes: self.with_children(walked, &values),
+            pos10: Some(at),
+        })
+    }
+
+    /// Whether the body is the card of a fresh spawn: state number 0 and a time anchor of 0, as
+    /// [`Self::mob_spawn_card`] writes (a card of a mob already alive carries its newest state).
+    pub fn is_fresh_card(&self) -> bool {
+        let Ok(children) = self.slot0_children() else {
+            return false;
+        };
+        let zero = |index: usize| {
+            children
+                .iter()
+                .find(|(child, _)| *child == index)
+                .is_none_or(|(_, bytes)| bytes.iter().all(|byte| *byte == 0))
+        };
+        zero(ID_REL_CHILD) && zero(ID_ABS_CHILD) && zero(TIME_ANCHOR_CHILD)
+    }
+
+    /// The body with the slot-0 children of `values` written over the ones `walked` found.
+    fn with_children(&self, walked: Walked, values: &[(usize, Vec<u8>)]) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.bytes.len());
         let mut copied = 0;
         for (child, range) in walked.slot0_ranges {
@@ -990,10 +1031,7 @@ impl AlcState {
             }
         }
         bytes.extend_from_slice(&self.bytes[copied..]);
-        Ok(Some(Self {
-            bytes,
-            pos10: Some(pos10),
-        }))
+        bytes
     }
 
     /// A later state of a mob: its number and time, the time anchor when it is new, the retail
@@ -1325,6 +1363,36 @@ struct SpawnPlace {
 const ZERO_POS3: [u8; POS3_LEN] = [0x7f; POS3_LEN];
 /// An empty blob: count 0.
 const EMPTY_BLOB: [u8; 1] = [0];
+/// The two `half` children after the facing angle (meaning Unknown): 0 on every fresh mob card.
+const FRESH_CARD_HALVES: [usize; 2] = [36, 37];
+/// The slot-0 children of a fresh mob card that are the same on all 119 retail fresh spawn
+/// cards of newchar-retail-2026-09-18 (only the facing, child 44 and the position differ): the
+/// number and time parts 0, the scope times, mask, entries and tags empty, the facing angle,
+/// the two halves and the time anchor 0, the look `3a`, the teleport number 1, the data bits
+/// `10 10 00 _ 00`, the segmented stamina, child 47 and child 53 (2.0).
+const FRESH_CARD_VALUES: [(usize, &[u8]); 21] = [
+    (ID_REL_CHILD, &[0]),
+    (TIME_REL_CHILD, &[0]),
+    (LOOK_DIR_CHILD, &[0x3a]),
+    (ID_ABS_CHILD, &[0]),
+    (TIME_ABS_CHILD, &[0]),
+    (SCOPE_TIME_CHILDREN[0], &[0]),
+    (SCOPE_TIME_EX_CHILD, &EMPTY_BLOB),
+    (TELEPORT_CHILD, &[1]),
+    (SCOPE_DATA_CHILD, &[0]),
+    (SCOPE_INFO_CHILD, &EMPTY_BLOB),
+    (FRAG_TAGS_CHILD, &[0; FRAG_TAGS_LEN]),
+    (FACING_GAP_CHILD, &[0; 4]),
+    (FRESH_CARD_HALVES[0], &[0; 2]),
+    (FRESH_CARD_HALVES[1], &[0; 2]),
+    (TIME_ANCHOR_CHILD, &[0; 8]),
+    (DATA_BITS_CHILD, &[0x10]),
+    (42, &[0x10]),
+    (43, &[0]),
+    (45, &[0]),
+    (46, &[0xf3, 0xdf, 0xc6, 0xf6, 0x1d]),
+    (47, &[0]),
+];
 /// A `frag` of zeros.
 const ZERO_FRAG: [u8; FRAG_LEN] = [0; FRAG_LEN];
 /// The retail `segmentedStamina` (child 46) of every first own ALC (315 of 315 logins).
@@ -2209,6 +2277,62 @@ mod tests {
                 .expect("encode")
                 .map(|alc| alc.pos10),
             Some(Some(to))
+        );
+    }
+
+    /// The card of retail sailor 1 at its spawn (newchar-retail-2026-09-18, 16319 ms).
+    const RETAIL_FRESH_SAILOR_CARD: &str = concat!(
+        "01fe031c00ae3fff200000ffffff66003a000043e9cefc445380802c410001000000000000000000000000",
+        "0000000000000000000000000000000000001010000b00f3dfc6f61d0040000000"
+    );
+
+    #[test]
+    fn a_fresh_spawn_card_has_no_number_clock_or_scope() {
+        let template = AlcState::read(&mut Reader::new(&hex(RETAIL_SAILOR))).expect("read");
+        let fresh =
+            AlcState::read(&mut Reader::new(&hex(RETAIL_FRESH_SAILOR_CARD))).expect("read");
+        let at = InputPosition::from_metres(467.617, 846.008, 89.42).expect("position");
+        let card = template.mob_spawn_card(at).expect("a card");
+        assert_eq!(
+            AlcState::read(&mut Reader::new(&card.bytes)).expect("read"),
+            card
+        );
+        assert_eq!(card.pos10, Some(at));
+        for index in [
+            ID_REL_CHILD,
+            TIME_REL_CHILD,
+            POS_REL_CHILD,
+            ID_ABS_CHILD,
+            TIME_ABS_CHILD,
+            SCOPE_TIME_EX_CHILD,
+            SCOPE_DATA_CHILD,
+            SCOPE_INFO_CHILD,
+            FRAG_TAGS_CHILD,
+            FACING_GAP_CHILD,
+            FRESH_CARD_HALVES[0],
+            FRESH_CARD_HALVES[1],
+            TIME_ANCHOR_CHILD,
+            LOOK_DIR_CHILD,
+            TELEPORT_CHILD,
+            DATA_BITS_CHILD,
+            42,
+            43,
+            45,
+            46,
+            47,
+            53,
+        ] {
+            assert_eq!(child(&card, index), child(&fresh, index), "child {index}");
+        }
+        // The prefab's own facing stays.
+        assert_eq!(child(&card, 11), child(&template, 11));
+        assert!(card.is_fresh_card() && fresh.is_fresh_card());
+        assert!(!template.is_fresh_card(), "a state of a mob already alive");
+        assert_eq!(
+            AlcState::at_position(at)
+                .mob_spawn_card(at)
+                .map(|card| card.pos10),
+            Some(Some(at))
         );
     }
 

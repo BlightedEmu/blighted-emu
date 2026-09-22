@@ -9,21 +9,27 @@
 //! whose `MannequinTag` adds tags (retail: the sailor's `1H_Melee` and `Club` come from its
 //! `1hClubT2FTUE`). The controller definitions name the tag definition.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::path::Path;
 
+use nw_ai::data::FragmentLength;
 use nw_content::Tables;
 use nw_content::creature_animations::{CreatureRow, tag_row};
 use nw_content::mob_prefabs::{ASSET_ID_LEN, MobPrefabs};
 use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, SLICE_SUB_ID, paths_of};
-use nw_formats::mannequin::{ActionList, CageGrid, ControllerDef, GridList, TagDefinition};
+use nw_formats::mannequin::{
+    ActionList, AnimDatabase, CageGrid, ControllerDef, GridList, TagDefinition,
+};
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
 
+use crate::ai_data::{AdbEntry, ClipLengths, adb_entries, fragment_length};
 use crate::error::ToolError;
 use crate::source::GameSource;
 
 /// The Mannequin component's fields (Observed names: their CRCs are those of these names).
 const DEFAULT_TAGS_FIELD: &str = "m_defaulttags";
 const CONTROLLER_FIELD: &str = "m_controllerdefinition";
+const ANIMATION_DATABASE_FIELD: &str = "m_animationdatabase";
 const ASSET_PATH_FIELD: &str = "assetpath";
 /// The CAGE grid field of the same component: its name is Unknown, its CRC Observed in every
 /// creature slice read (a value holding an asset reference whose hint ends in `.grid`).
@@ -40,6 +46,11 @@ const ITEM_SLOT_FIELD_CRC: u32 = 0x5cdb_aa46;
 const MAIN_HAND_SLOT: u32 = 24;
 /// The separator of a `MannequinTag` cell (retail `1H_Melee,Club`).
 const MANNEQUIN_TAG_SEPARATOR: char = ',';
+/// Scope time ticks per second (`DAT_14807f948` = 1/30 s).
+const SCOPE_TICKS_PER_SECOND: f64 = 30.0;
+/// The slack of a length counted in ticks: a length is a sum of f32 frame times, so a length
+/// of exactly 56 ticks can come out a millionth of a tick short.
+const TICK_SLACK: f64 = 1e-3;
 
 /// A failure of the creature animation build.
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +87,8 @@ pub struct SliceMannequin {
     pub controller: String,
     /// The CAGE grid (lowercase pak path).
     pub grid: String,
+    /// The animation database (lowercase pak path), when the slice names one.
+    pub animation_database: Option<String>,
     /// Its default tags.
     pub default_tags: Vec<String>,
     /// The item in its main hand, when it has one.
@@ -120,14 +133,12 @@ pub fn slice_mannequin(bytes: &[u8]) -> Option<SliceMannequin> {
             .iter()
             .find(|child| child.name_crc == Some(crc))
     };
-    let mut in_controller = Vec::new();
-    descendants(field(controller_crc)?, &mut in_controller);
-    let asset_path_crc = lowercase_crc32(ASSET_PATH_FIELD);
-    let controller = in_controller
+    let controller = asset_path_below(field(controller_crc)?)?;
+    let database_crc = lowercase_crc32(ANIMATION_DATABASE_FIELD);
+    let animation_database = all
         .iter()
-        .find(|element| element.name_crc == Some(asset_path_crc))
-        .and_then(|element| string_of(element))?
-        .to_lowercase();
+        .find(|element| element.name_crc == Some(database_crc))
+        .and_then(|element| asset_path_below(element));
     let grid =
         asset_hint(&field(GRID_FIELD_CRC)?.value).filter(|grid| grid.ends_with(GRID_SUFFIX))?;
     let default_tags = field(lowercase_crc32(DEFAULT_TAGS_FIELD))
@@ -136,9 +147,93 @@ pub fn slice_mannequin(bytes: &[u8]) -> Option<SliceMannequin> {
     Some(SliceMannequin {
         controller,
         grid,
+        animation_database,
         default_tags,
         main_hand: main_hand_in(&all),
     })
+}
+
+/// The `AssetPath` (lowercase) below the asset field `field`.
+fn asset_path_below(field: &Element) -> Option<String> {
+    let mut below = Vec::new();
+    descendants(field, &mut below);
+    let asset_path_crc = lowercase_crc32(ASSET_PATH_FIELD);
+    below
+        .iter()
+        .find(|element| element.name_crc == Some(asset_path_crc))
+        .and_then(|element| string_of(element))
+        .filter(|path| !path.is_empty())
+        .map(|path| path.to_lowercase())
+}
+
+/// A length in whole scope ticks (the last tick the fragment plays); `None` for a loop, an
+/// Unknown length or one beyond `u32`.
+fn whole_ticks(length: FragmentLength) -> Option<u32> {
+    let FragmentLength::Seconds(seconds) = length else {
+        return None;
+    };
+    let ticks = (f64::from(seconds) * SCOPE_TICKS_PER_SECOND + TICK_SLACK).floor();
+    if !(0.0..=f64::from(u32::MAX)).contains(&ticks) {
+        return None;
+    }
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "checked to be within u32 above"
+    )]
+    let whole = ticks as u32;
+    Some(whole)
+}
+
+/// An animation database: its entries' base layers and its fragments, in the same order.
+struct ParsedDatabase {
+    /// The base animation layer of each entry.
+    entries: Vec<AdbEntry>,
+    /// The entries.
+    database: AnimDatabase,
+}
+
+impl ParsedDatabase {
+    /// The database `text`; `None` when it does not parse or its two readings do not line up.
+    fn parse(text: &str) -> Option<Self> {
+        let entries = adb_entries(text).ok()?;
+        let database = AnimDatabase::parse(text).ok()?;
+        (entries.len() == database.fragments.len()).then_some(Self { entries, database })
+    }
+
+    /// The whole scope ticks of each option of each fragment of `fragments` for `tags`
+    /// (Mannequin's options, [`AnimDatabase::options`]), by `lengths`; a fragment without an
+    /// option of known length is left out.
+    fn fragment_ticks(
+        &self,
+        fragments: &[String],
+        tags: &[String],
+        lengths: &ClipLengths,
+    ) -> BTreeMap<String, Vec<Option<u32>>> {
+        let tags: Vec<&str> = tags.iter().map(String::as_str).collect();
+        fragments
+            .iter()
+            .filter_map(|name| {
+                let ticks: Vec<Option<u32>> = self
+                    .database
+                    .options(name, &tags)
+                    .into_iter()
+                    .map(|option| {
+                        let index = self
+                            .database
+                            .fragments
+                            .iter()
+                            .position(|entry| std::ptr::eq(entry, option))?;
+                        whole_ticks(fragment_length(self.entries.get(index)?, lengths).ok()?)
+                    })
+                    .collect();
+                ticks
+                    .iter()
+                    .any(Option::is_some)
+                    .then(|| (name.clone(), ticks))
+            })
+            .collect()
+    }
 }
 
 /// The item of the main hand of the creature slice `root`'s paperdoll.
@@ -288,6 +383,7 @@ pub fn grid_action_lists<'a>(
 /// Returns [`ToolError`] when the paks or the asset catalog cannot be read.
 pub fn build_rows(
     source: &GameSource,
+    game_dir: &Path,
     prefabs: &MobPrefabs,
     tables: &Tables,
 ) -> Result<(Vec<CreatureRow>, CreatureAnimationsReport), ToolError> {
@@ -322,6 +418,24 @@ pub fn build_rows(
         .map(|def| def.tags_file.to_lowercase())
         .collect();
     let tag_bytes = read_entries(source, &tag_files)?;
+    let database_paths: HashSet<String> = mannequins
+        .values()
+        .filter_map(|mannequin| mannequin.animation_database.clone())
+        .collect();
+    let databases: HashMap<String, ParsedDatabase> = read_entries(source, &database_paths)?
+        .into_iter()
+        .filter_map(|(path, bytes)| {
+            let parsed = ParsedDatabase::parse(std::str::from_utf8(&bytes).ok()?)?;
+            Some((path, parsed))
+        })
+        .collect();
+    let clip_names: BTreeSet<String> = databases
+        .values()
+        .flat_map(|parsed| parsed.entries.iter().flatten())
+        .map(|clip| clip.animation.clone())
+        .filter(|name| !name.is_empty())
+        .collect();
+    let lengths = ClipLengths::read(source, game_dir, &clip_names)?;
     let weapons = weapon_tags(tables);
     let mut rows = Vec::new();
     for asset in &assets {
@@ -364,6 +478,12 @@ pub fn build_rows(
         {
             default_tags.extend(weapon.iter().cloned());
         }
+        let fragment_ticks = mannequin
+            .animation_database
+            .as_ref()
+            .and_then(|path| databases.get(path))
+            .map(|parsed| parsed.fragment_ticks(&controller.fragments, &default_tags, &lengths))
+            .unwrap_or_default();
         rows.push(CreatureRow {
             asset: name,
             slice: slice.clone(),
@@ -375,6 +495,7 @@ pub fn build_rows(
                 .map(|(tag, bits)| (tag.clone(), tag_row(bits)))
                 .collect::<BTreeMap<_, _>>(),
             default_tags,
+            fragment_ticks,
         });
     }
     rows.sort_by(|left, right| left.asset.cmp(&right.asset));
@@ -417,6 +538,13 @@ mod tests {
                 ),
             ],
         );
+        let database = named(
+            ANIMATION_DATABASE_FIELD,
+            vec![text(
+                ASSET_PATH_FIELD,
+                "Animations/Mannequin/ADB/NPC_Boar_Anims.adb",
+            )],
+        );
         let item = Element::with_children(
             0,
             vec![
@@ -424,7 +552,8 @@ mod tests {
                 text(ITEM_NAME_FIELD, "Wolf_Teeth"),
             ],
         );
-        write_object_stream(&Element::with_children(0, vec![component, item])).expect("stream")
+        write_object_stream(&Element::with_children(0, vec![component, database, item]))
+            .expect("stream")
     }
 
     #[test]
@@ -437,6 +566,76 @@ mod tests {
         );
         assert_eq!(mannequin.default_tags, ["Boar"]);
         assert_eq!(mannequin.main_hand.as_deref(), Some("Wolf_Teeth"));
+        assert_eq!(
+            mannequin.animation_database.as_deref(),
+            Some("animations/mannequin/adb/npc_boar_anims.adb")
+        );
+    }
+
+    /// A cut of `npc_boar_anims.adb` (build 25810808): its death's armadillo and plain entries
+    /// and a looping idle.
+    const BOAR_DATABASE: &str = r#"<AnimDB><FragmentList>
+ <r_Death>
+  <Fragment Tags="Armadillo+CurledBall"><AnimLayer><Blend ExitTime="0" StartTime="0"/><Animation name="armadillo_death"/></AnimLayer></Fragment>
+  <Fragment Tags=""><AnimLayer><Blend ExitTime="0" StartTime="0"/><Animation name="boar_death"/></AnimLayer></Fragment>
+ </r_Death>
+ <Idle><Fragment Tags=""><AnimLayer><Blend ExitTime="0" StartTime="0"/><Animation name="boar_idle" flags="Loop"/></AnimLayer></Fragment></Idle>
+</FragmentList></AnimDB>"#;
+
+    #[test]
+    fn a_fragment_lasts_the_whole_ticks_of_the_entry_the_creature_plays() {
+        let parsed = ParsedDatabase::parse(BOAR_DATABASE).expect("database");
+        // The boar's death clip: 2.963 s (89 frames at 1/30 s, 88.89 ticks); retail's dead boar
+        // states ended at tick 0x58 (glide note).
+        let lengths = ClipLengths::of(&[
+            ("armadillo_death", Ok(3.363)),
+            ("boar_death", Ok(2.963)),
+            ("boar_idle", Ok(1.0)),
+        ]);
+        let fragments = ["r_Death".to_owned(), "Idle".to_owned(), "Spawn".to_owned()];
+        let ticks = parsed.fragment_ticks(&fragments, &["Boar".to_owned()], &lengths);
+        assert_eq!(
+            ticks,
+            BTreeMap::from([("r_Death".to_owned(), vec![Some(0x58)])]),
+            "the plain entry; a loop and a fragment with no entry have no length"
+        );
+    }
+
+    #[test]
+    fn each_option_of_a_fragment_has_its_ticks_in_file_order() {
+        // `npc_risen_anims.adb`: two plain `r_Death` entries of 56 and 73 frames; retail's dead
+        // risen ended at tick 0x49 (option 1, its tail 0x8f).
+        let parsed = ParsedDatabase::parse(
+            r#"<AnimDB><FragmentList><r_Death>
+ <Fragment Tags="BlightFiend"><AnimLayer><Blend ExitTime="0"/><Animation name="fiend_death"/></AnimLayer></Fragment>
+ <Fragment Tags=""><AnimLayer><Blend ExitTime="0"/><Animation name="risen_death_a"/></AnimLayer></Fragment>
+ <Fragment Tags=""><AnimLayer><Blend ExitTime="0"/><Animation name="risen_death_b"/></AnimLayer></Fragment>
+</r_Death></FragmentList></AnimDB>"#,
+        )
+        .expect("database");
+        let lengths = ClipLengths::of(&[
+            ("fiend_death", Ok(4.6)),
+            ("risen_death_a", Ok(1.866_666_7)),
+            ("risen_death_b", Ok(2.433_333_4)),
+        ]);
+        let ticks = parsed.fragment_ticks(
+            &["r_Death".to_owned()],
+            &["Base".to_owned(), "DT5".to_owned()],
+            &lengths,
+        );
+        assert_eq!(ticks["r_Death"], [Some(56), Some(0x49)]);
+    }
+
+    #[test]
+    fn whole_ticks_count_the_last_tick_the_fragment_plays() {
+        // The sailor's `r_Death_F`: 56 frames at 1/30 s, a little short in f32 (retail 0x38).
+        assert_eq!(
+            whole_ticks(FragmentLength::Seconds(1.866_666_6)),
+            Some(0x38)
+        );
+        assert_eq!(whole_ticks(FragmentLength::Seconds(2.963)), Some(88));
+        assert_eq!(whole_ticks(FragmentLength::Loops), None);
+        assert_eq!(whole_ticks(FragmentLength::Unknown), None);
     }
 }
 

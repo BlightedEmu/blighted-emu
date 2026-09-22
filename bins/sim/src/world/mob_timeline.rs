@@ -29,8 +29,21 @@ use nw_sim_core::{Position, yaw_gap};
 
 use crate::mobs::MoveFragment;
 
-/// The number of the first state of a mob (retail sailors 1 to 3).
-const FIRST_STATE_ID: u16 = 2;
+/// The number a fresh mob's spawn card carries: none (retail: all 119 fresh spawn cards of
+/// newchar-retail-2026-09-18 carry number 0, no clock and no scope).
+const CARD_STATE_ID: u16 = 0;
+/// The number of a mob's first state, which starts its spawn fragment (retail sailor 1: state 1,
+/// with scope entry `0001 b902 24 0000 77`, starting at state 1).
+const FIRST_STATE_ID: u16 = 1;
+/// How long after its card a fresh mob sends its first state, unless it moves, turns or acts
+/// before (retail sailor 1: card at 16319 ms, state 1 at 16421 ms).
+const FIRST_STATE_DELAY_MS: u64 = 100;
+/// How many of a fresh mob's first states carry its draw (retail sailor 1: its paperdoll
+/// change in the three groups after its card, 16421 to 16455 ms).
+const DRAW_STATES: u32 = 3;
+/// How far apart a fresh mob's draw states go (retail sailor 1: 16421, 16437 and 16455 ms); a
+/// tick is longer, so they go in the next ticks.
+const DRAW_STATE_MS: u64 = 16;
 /// An idle mob sends a state once per this many ms (retail sailor 1 while held: 16584 to 29048).
 const IDLE_STATE_MS: u64 = 333;
 /// A dead mob sends a state once per this many ms (retail sailor 1 after its death).
@@ -153,6 +166,8 @@ pub(super) struct Animations {
     walk: FragmentEntry,
     /// It runs at its target.
     chase: FragmentEntry,
+    /// The swing of a paced mob: its retail attack, else its combat idle (a creature without a
+    /// tree and without a retail attack never swings: it stands, `Mind::Still`).
     attack: FragmentEntry,
     death: FragmentEntry,
     /// The full-body reactions to a first and a second hit; `None` when it has none.
@@ -175,8 +190,11 @@ pub(super) struct Animations {
     phase_two_tags: Option<[u8; FRAG_TAGS_LEN]>,
     /// How long its light and heavy reactions play.
     reaction_ms: (u64, u64),
-    /// The scope ticks of its death fragment: its dead states carry the ticks until then.
-    death_ticks: u32,
+    /// The last scope tick of its death fragment: the length of the option its entry's tail
+    /// picks, in whole ticks (`CreatureAnimation::fragment_ticks`). Its dead states carry the
+    /// ticks until then; `None` when the length is Unknown (the table has none): they carry
+    /// them on.
+    death_ticks: Option<u32>,
 }
 
 impl Animations {
@@ -247,6 +265,7 @@ impl Animations {
         let chase = pick(Role::Chase);
         let light = pick(Role::ReactLight);
         let reactions = light.map(|light| (light, pick(Role::ReactHeavy).unwrap_or(light)));
+        let death = pick(Role::Death).unwrap_or(idle);
         let fights_quietly = retail.is_some_and(|retail| retail.fights_quietly);
         let look_pose = pick(Role::LookPose)
             .zip(creature.scope_bit(LOOK_POSE))
@@ -259,7 +278,7 @@ impl Animations {
             walk: walk.or(chase).unwrap_or(idle),
             chase: chase.or(walk).unwrap_or(combat_idle),
             attack: pick(Role::Attack).unwrap_or(combat_idle),
-            death: pick(Role::Death).unwrap_or(idle),
+            death,
             reactions,
             alert: pick(Role::Alert).filter(|_| !fights_quietly),
             look_pose,
@@ -270,7 +289,10 @@ impl Animations {
                 .has_tag(PHASE_TWO_TAG)
                 .then(|| creature.tag_state(&[PHASE_ONE_TAG], &[PHASE_TWO_TAG, ALERTED_TAG])),
             reaction_ms: retail.map_or(CREATURE_REACTION_MS, |retail| retail.reaction_ms),
-            death_ticks: retail.map_or(DEFAULT_DEATH_TICKS, |retail| retail.death_ticks),
+            death_ticks: usize::from(death.fragment)
+                .checked_sub(1)
+                .and_then(|index| creature.fragments().get(index))
+                .and_then(|name| creature.fragment_ticks(name, death.tail)),
         })
     }
 }
@@ -288,13 +310,6 @@ const LOOK_POSE: &str = "LookPose";
 /// sent several for one fragment of one creature, the boar's `Move` 0x10, 0x14, 0x1d, 0x27,
 /// 0x29).
 const DEFAULT_ENTRY_TAIL: u8 = 0;
-/// The scope ticks of a death fragment whose retail value is Unknown (our choice: the
-/// legionnaire's).
-const DEFAULT_DEATH_TICKS: u32 = LEGION_DEATH_TICKS;
-/// The parts of an attack that runs in pieces: not an attack of its own.
-const ATTACK_PIECES: [&str; 5] = ["_Start", "_Loop", "_LOOP", "_End", "_Outro"];
-const ATTACK_PREFIX: &str = "Attack";
-const ATTACK_START_SUFFIX: &str = "_Start";
 
 /// What a mob shows, by the names of its creature's fragments and actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,28 +346,15 @@ impl Role {
             Self::ReactHeavy => (&["r_R3_F"], &["Reaction"]),
             Self::Alert => (&["Alert_Turn", "Alert"], &["Alert_Turn", "Alert"]),
             Self::LookPose => (&[LOOK_POSE], &[LOOK_POSE]),
-            // The attack is picked by [`Role::by_rule`].
+            // A mob with a tree plays the CAGE action its tree picks ([`Fragment::Tree`]); the
+            // swing of a paced mob is the attack retail played for its creature
+            // ([`RetailCreature::choices`]). No name rule picks one.
             Self::Attack => (&[], &[]),
         }
     }
 
-    /// The fragment and action numbers the role's names find in `creature`. An attack is the
-    /// first full attack fragment with an action of its name (our choice; retail picks one per
-    /// move: the boar's `Attack_Gore`).
+    /// The fragment and action numbers the role's names find in `creature`.
     fn by_rule(self, creature: &CreatureAnimation) -> Option<(u16, u16)> {
-        if self == Self::Attack {
-            return creature
-                .fragments()
-                .iter()
-                .filter(|name| name.starts_with(ATTACK_PREFIX))
-                .filter(|name| !ATTACK_PIECES.iter().any(|piece| name.ends_with(piece)))
-                .filter(|name| {
-                    creature
-                        .fragment(&format!("{name}{ATTACK_START_SUFFIX}"))
-                        .is_none()
-                })
-                .find_map(|name| Some((creature.fragment(name)?, creature.action(name)?)));
-        }
         let (fragments, actions) = self.names();
         let fragment = fragments.iter().find_map(|name| creature.fragment(name))?;
         let action = actions.iter().find_map(|name| creature.action(name))?;
@@ -369,8 +371,6 @@ struct RetailCreature {
     choices: &'static [(Role, &'static str, &'static str)],
     /// The last byte of its retail entries.
     tails: &'static [(Role, u8)],
-    /// The scope ticks of its death fragment.
-    death_ticks: u32,
     /// How long its light and heavy reactions play.
     reaction_ms: (u64, u64),
     /// See [`Animations::alert_after_hurt`].
@@ -387,6 +387,12 @@ const FTUE_SAILOR: RetailCreature = RetailCreature {
         0xe7,
     ],
     choices: &[
+        // Retail entry fragment 109, action 71 (mob-animation note, section 3.4).
+        (
+            Role::Attack,
+            "Attack_Close_1H_Sword_01",
+            "Attack_Close_1H_Sword_01",
+        ),
         (Role::Death, "r_Death_F", "Death"),
         (Role::ReactHeavy, "r_R1_F", "Reaction"),
         (Role::Alert, "Alert", "Alert"),
@@ -403,7 +409,6 @@ const FTUE_SAILOR: RetailCreature = RetailCreature {
         (Role::Alert, 0x85),
         (Role::LookPose, 0x7b),
     ],
-    death_ticks: SAILOR_DEATH_TICKS,
     reaction_ms: CREATURE_REACTION_MS,
     alert_after_hurt: false,
     fights_quietly: false,
@@ -437,7 +442,6 @@ const FTUE_LEGIONNAIRE: RetailCreature = RetailCreature {
     ],
     choices: LEGION_CHOICES,
     tails: LEGION_TAILS,
-    death_ticks: LEGION_DEATH_TICKS,
     reaction_ms: CREATURE_REACTION_MS,
     alert_after_hurt: false,
     fights_quietly: false,
@@ -475,7 +479,6 @@ const FTUE_SWARMER: RetailCreature = RetailCreature {
         (Role::Alert, 0x0f),
         (Role::LookPose, 0xda),
     ],
-    death_ticks: SWARMER_DEATH_TICKS,
     reaction_ms: CREATURE_REACTION_MS,
     alert_after_hurt: false,
     fights_quietly: false,
@@ -507,7 +510,6 @@ const FTUE_RISEN: RetailCreature = RetailCreature {
         (Role::Alert, 0xa4),
         (Role::LookPose, 0xde),
     ],
-    death_ticks: RISEN_DEATH_TICKS,
     reaction_ms: CREATURE_REACTION_MS,
     alert_after_hurt: false,
     fights_quietly: false,
@@ -534,7 +536,6 @@ const FTUE_THORPE: RetailCreature = RetailCreature {
         (Role::ReactLight, 0x47),
         (Role::ReactHeavy, 0x43),
     ],
-    death_ticks: THORPE_DEATH_TICKS,
     reaction_ms: THORPE_REACTION_MS,
     alert_after_hurt: true,
     fights_quietly: true,
@@ -553,21 +554,10 @@ const BOAR: RetailCreature = RetailCreature {
         (Role::Walk, 0x29),
         (Role::Death, 0xe9),
     ],
-    death_ticks: BOAR_DEATH_TICKS,
     reaction_ms: CREATURE_REACTION_MS,
     alert_after_hurt: false,
     fights_quietly: false,
 };
-
-/// The last scope tick of each creature's death fragment in its retail dead states (dead-mob
-/// note: sailor 0x38, legionnaire 0x32, risen 0x49, Thorpe 0x64; glide note: boar 0x58). The
-/// swarmer's is Unknown: our choice, the legionnaire's.
-const SAILOR_DEATH_TICKS: u32 = 0x38;
-const LEGION_DEATH_TICKS: u32 = 0x32;
-const RISEN_DEATH_TICKS: u32 = 0x49;
-const THORPE_DEATH_TICKS: u32 = 0x64;
-const BOAR_DEATH_TICKS: u32 = 0x58;
-const SWARMER_DEATH_TICKS: u32 = LEGION_DEATH_TICKS;
 
 /// The creatures retail showed, with what it showed of them.
 const RETAIL_CREATURES: [RetailCreature; 7] = [
@@ -627,6 +617,11 @@ pub(super) struct MobFrame {
     pub(super) step: Option<MobStep>,
     /// Its alert started this tick: it stands for [`ALERT_MS`].
     pub(super) alert_started: bool,
+    /// It has sent no state yet: a card shows it as retail shows a fresh spawn
+    /// ([`nw_messages::alc::AlcState::mob_spawn_card`]).
+    pub(super) fresh: bool,
+    /// The new state of this tick is one of its first [`DRAW_STATES`]: its draw goes with it.
+    pub(super) drawing: bool,
 }
 
 /// The timeline of one mob.
@@ -676,22 +671,26 @@ struct MobTimeline {
     facing_gap_sent: bool,
     /// The tag state of its tree, when it runs one.
     tree_tags: Option<[u8; FRAG_TAGS_LEN]>,
+    /// It sent its first state: before it, a card shows it fresh, with no number and no scope.
+    started: bool,
+    /// States sent since its spawn, up to [`DRAW_STATES`] + 1.
+    states: u32,
 }
 
 impl MobTimeline {
-    /// A mob whose first state is at `now_ms`: retail starts the spawn fragment one state before
-    /// it.
+    /// A mob that spawns at `now_ms`: its card carries no state; its first state starts the
+    /// spawn fragment ([`FIRST_STATE_DELAY_MS`]).
     fn new(now_ms: u64, position: Position) -> Self {
         Self {
             anchor_ms: now_ms,
-            id: FIRST_STATE_ID,
+            id: CARD_STATE_ID,
             last_state_ms: now_ms,
             position,
             anchor: InputPosition::from_metres(position.x, position.y, position.z),
             last_moved_ms: None,
             born_ms: now_ms,
             fragment: Fragment::Spawn,
-            entry_start_id: FIRST_STATE_ID - 1,
+            entry_start_id: FIRST_STATE_ID,
             entry_start_ms: now_ms,
             ticks: 0,
             attack_until_ms: now_ms,
@@ -709,6 +708,8 @@ impl MobTimeline {
             look_pose_start: None,
             facing_gap_sent: false,
             tree_tags: None,
+            started: false,
+            states: 0,
         }
     }
 
@@ -869,7 +870,11 @@ impl MobTimeline {
         let turn = self.turn(pose, moved);
         let fragment = self.fragment_at(pose, now_ms);
         let changed = fragment != self.fragment;
-        let period_ms = if pose.dead {
+        let period_ms = if !self.started {
+            FIRST_STATE_DELAY_MS
+        } else if self.states < DRAW_STATES {
+            DRAW_STATE_MS
+        } else if pose.dead {
             DEAD_STATE_MS
         } else {
             IDLE_STATE_MS
@@ -879,13 +884,18 @@ impl MobTimeline {
             || changed
             || now_ms.saturating_sub(self.last_state_ms) >= period_ms;
         let step = due.then(|| self.next_state(now_ms, pose, fragment, moved, turn, animations));
+        let drawing = step.is_some() && self.states <= DRAW_STATES;
         MobFrame {
             stamp: self.stamp(now_ms),
-            animation: animations.map(|animations| self.animation(animations, now_ms, None)),
+            animation: animations
+                .filter(|_| self.started)
+                .map(|animations| self.animation(animations, now_ms, None)),
             facing: self.yaw,
             anchor: self.anchor,
             step,
             alert_started,
+            fresh: !self.started,
+            drawing,
         }
     }
 
@@ -935,11 +945,14 @@ impl MobTimeline {
         animations: Option<&Animations>,
     ) -> MobStep {
         self.id = self.id.wrapping_add(1);
-        let anchored = now_ms.saturating_sub(self.anchor_ms) >= ANCHOR_PERIOD_MS;
+        // The first state brings the clock and the first scope entry: the card had neither.
+        let first = !std::mem::replace(&mut self.started, true);
+        self.states = self.states.saturating_add(1).min(DRAW_STATES + 1);
+        let anchored = first || now_ms.saturating_sub(self.anchor_ms) >= ANCHOR_PERIOD_MS;
         if anchored {
             self.anchor_ms = now_ms;
         }
-        let changed = fragment != self.fragment;
+        let changed = first || fragment != self.fragment;
         let mut facing_gap = None;
         if changed {
             self.fragment = fragment;
@@ -973,7 +986,8 @@ impl MobTimeline {
                     self.animation(animations, now_ms, facing_gap),
                 ))
             } else {
-                (!pose.dead || ticks <= animations.death_ticks).then_some(StepScope::Ticks {
+                let playing = !pose.dead || animations.death_ticks.is_none_or(|end| ticks <= end);
+                playing.then_some(StepScope::Ticks {
                     ticks,
                     high_changed,
                     look_pose_seconds: animations
@@ -1123,6 +1137,13 @@ mod tests {
     /// A server time (ms since 2000-01-01).
     const START: u64 = 845_730_278_284;
     const TICK_MS: u64 = 33;
+    /// The last scope tick of each creature's death fragment in its retail dead states (dead-mob
+    /// note: sailor 0x38, legionnaire 0x32, risen 0x49, Thorpe 0x64; glide note: boar 0x58).
+    const SAILOR_DEATH_TICKS: u32 = 0x38;
+    const LEGION_DEATH_TICKS: u32 = 0x32;
+    const RISEN_DEATH_TICKS: u32 = 0x49;
+    const THORPE_DEATH_TICKS: u32 = 0x64;
+    const BOAR_DEATH_TICKS: u32 = 0x58;
 
     fn at(x: f32) -> Position {
         Position {
@@ -1208,6 +1229,7 @@ mod tests {
             ]),
             tags: std::collections::BTreeMap::new(),
             default_tags: Vec::new(),
+            fragment_ticks: std::collections::BTreeMap::new(),
         };
         let table = CreatureAnimations::of_rows(vec![row]).expect("table");
         Animations::of(&ASSET, table.get(&ASSET).expect("row")).expect("animations")
@@ -1307,6 +1329,45 @@ mod tests {
     }
 
     #[test]
+    fn each_death_lasts_the_option_its_tail_picks_as_retail_showed() {
+        // The last tick of the retail dead states: each creature's death fragment option
+        // (tail modulo the options) in whole ticks.
+        assert_eq!(
+            sailor().death_ticks,
+            Some(SAILOR_DEATH_TICKS),
+            "0xa5 % 5 options"
+        );
+        assert_eq!(legionnaire().death_ticks, Some(LEGION_DEATH_TICKS));
+        assert_eq!(
+            creature(&FTUE_RISEN).death_ticks,
+            Some(RISEN_DEATH_TICKS),
+            "0x8f % 2 options: the second"
+        );
+        assert_eq!(thorpe().death_ticks, Some(THORPE_DEATH_TICKS));
+        // Not seen in the captures: its files' `r_Death_R4_F` for `Crawler`, 2.667 s.
+        assert_eq!(creature(&FTUE_SWARMER).death_ticks, Some(80));
+    }
+
+    #[test]
+    fn a_dead_mob_of_unknown_death_length_keeps_its_ticks() {
+        let plain = without_reactions();
+        assert_eq!(plain.death_ticks, None, "the row has no lengths");
+        let mut timelines = MobTimelines::default();
+        let dead = MobPose {
+            dead: true,
+            ..pose(1.0, true)
+        };
+        timelines.advance(MOB, START, &pose(1.0, true), Some(&plain));
+        timelines.advance(MOB, START + SPAWN_MS, &dead, Some(&plain));
+        let long_after = START + SPAWN_MS + 60 * DEAD_STATE_MS;
+        let step = timelines
+            .advance(MOB, long_after, &dead, Some(&plain))
+            .step
+            .expect("due");
+        assert!(matches!(step.scope, Some(StepScope::Ticks { .. })));
+    }
+
+    #[test]
     fn the_boar_walks_with_its_retail_entries_and_tags() {
         let boar = creature(&BOAR);
         // Retail card `07 0001 22 01 0000 1c`, idle `0c 01 17 0000 0a`, walk `0b 1b 1f 0000 29`,
@@ -1315,19 +1376,30 @@ mod tests {
         assert_eq!(boar.idle, entry(1, 23, 0x0a));
         assert_eq!(boar.walk, entry(27, 31, 0x29));
         assert_eq!(boar.death, entry(4, 17, 0xe9));
-        assert_eq!(boar.death_ticks, BOAR_DEATH_TICKS);
+        assert_eq!(boar.death_ticks, Some(BOAR_DEATH_TICKS));
         assert_eq!(boar.calm_tags, tags(&[0x02]));
         assert_eq!(boar.alert_tags, tags(&[0x22]));
         // Not seen in the captures: from its files (Inferred).
         assert_eq!(boar.chase, entry(26, 32, DEFAULT_ENTRY_TAIL), "Move_Combat");
-        assert_eq!(boar.attack, entry(23, 9, DEFAULT_ENTRY_TAIL), "Attack_Gore");
+        assert_eq!(
+            boar.attack, boar.combat_idle,
+            "its tree picks its attacks; no name rule does"
+        );
         let mut timelines = MobTimelines::default();
-        let card = timelines
-            .advance(MOB, START, &pose(1.0, false), Some(&boar))
-            .animation
-            .expect("a known creature");
-        assert_eq!((card.entry.fragment, card.entry.action), (34, 1));
-        assert_eq!(card.tags, boar.calm_tags);
+        let card = timelines.advance(MOB, START, &pose(1.0, false), Some(&boar));
+        assert!(card.fresh && card.animation.is_none(), "a fresh card shows no scope");
+        let first = timelines
+            .advance(
+                MOB,
+                START + FIRST_STATE_DELAY_MS,
+                &pose(1.0, false),
+                Some(&boar),
+            )
+            .step
+            .expect("the first state");
+        let spawn = animation_of(&first).expect("the spawn starts");
+        assert_eq!((spawn.entry.fragment, spawn.entry.action), (34, 1));
+        assert_eq!(spawn.tags, boar.calm_tags);
         let wanders = timelines
             .advance(MOB, START + SPAWN_MS, &pose(1.2, false), Some(&boar))
             .step
@@ -1472,23 +1544,48 @@ mod tests {
     }
 
     #[test]
-    fn the_first_frame_is_state_2_at_its_own_anchor() {
+    fn the_card_is_fresh_and_the_first_state_starts_the_spawn_at_its_own_anchor() {
         let sailor = sailor();
         let mut timelines = MobTimelines::default();
-        let frame = timelines.advance(MOB, START, &pose(1.0, false), Some(&sailor));
+        let card = timelines.advance(MOB, START, &pose(1.0, false), Some(&sailor));
+        assert!(card.fresh, "retail: the card of a fresh spawn carries no state");
+        assert_eq!(card.stamp.id, CARD_STATE_ID);
+        assert_eq!((card.step, card.animation), (None, None));
+        let early = timelines.advance(MOB, START + TICK_MS, &pose(1.0, false), Some(&sailor));
+        assert_eq!(early.step, None, "standing still, it waits for its first state");
+        let at = START + FIRST_STATE_DELAY_MS;
+        let frame = timelines.advance(MOB, at, &pose(1.0, false), Some(&sailor));
+        assert!(!frame.fresh && frame.drawing);
+        let step = frame.step.expect("the first state");
         assert_eq!(
-            frame.stamp,
+            step.stamp,
             AlcStamp {
                 id: FIRST_STATE_ID,
-                anchor_us: START * US_PER_MS,
+                anchor_us: at * US_PER_MS,
                 offset_ms: 0
             }
         );
-        assert_eq!(frame.step, None, "the card carries the first state");
-        let animation = frame.animation.expect("a known creature");
+        assert!(step.anchored, "the card had no clock");
+        let animation = animation_of(&step).expect("the spawn starts");
         assert_eq!(animation.entry.fragment, sailor.spawn.fragment);
-        assert_eq!(animation.entry.start_id, FIRST_STATE_ID - 1);
+        assert_eq!(animation.entry.start_id, FIRST_STATE_ID);
         assert_eq!(animation.tags, sailor.calm_tags);
+        // The draw goes with three states, one per tick as retail's 16 ms apart, then the idle
+        // period holds.
+        let frames: Vec<(bool, bool)> = (1..=DRAW_STATES + 1)
+            .map(|tick| {
+                let now = at + u64::from(tick) * TICK_MS;
+                let frame = timelines.advance(MOB, now, &pose(1.0, false), Some(&sailor));
+                (frame.step.is_some(), frame.drawing)
+            })
+            .collect();
+        assert_eq!(
+            frames,
+            [(true, true), (true, true), (false, false), (false, false)]
+        );
+        let later = at + IDLE_STATE_MS + 3 * TICK_MS;
+        let idle = timelines.advance(MOB, later, &pose(1.0, false), Some(&sailor));
+        assert!(idle.step.is_some() && !idle.drawing, "then the idle period, no draw");
     }
 
     #[test]
@@ -1507,7 +1604,7 @@ mod tests {
         let ids: Vec<u16> = steps.iter().map(|(_, step)| step.stamp.id).collect();
         assert_eq!(
             ids,
-            (3..3 + ids.len() as u16).collect::<Vec<_>>(),
+            (FIRST_STATE_ID..FIRST_STATE_ID + ids.len() as u16).collect::<Vec<_>>(),
             "+1 per state"
         );
         assert!(
@@ -1515,12 +1612,19 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[1].0 - pair[0].0 <= IDLE_STATE_MS + TICK_MS)
         );
-        for (now, step) in &steps {
-            assert_eq!(u64::from(step.stamp.offset_ms), now - START);
+        let (anchor, first) = &steps[0];
+        assert!(first.anchored, "the first state brings the clock");
+        for (now, step) in &steps[1..] {
+            assert_eq!(u64::from(step.stamp.offset_ms), now - anchor);
             assert!(!step.anchored);
             assert_eq!(step.position, None);
         }
-        let idle_at = steps
+        assert_eq!(
+            scope_entry(first).map(|entry| entry.fragment),
+            Some(sailor.spawn.fragment),
+            "the first state starts the spawn"
+        );
+        let idle_at = steps[1..]
             .iter()
             .find(|(_, step)| scope_entry(step).is_some())
             .expect("the idle fragment starts");
@@ -1758,7 +1862,8 @@ mod tests {
         timelines.keep_only(&HashSet::new());
         let again = timelines.advance(MOB, later, &idle, None);
         assert_eq!(
-            again.stamp.id, FIRST_STATE_ID,
+            (again.stamp.id, again.fresh),
+            (CARD_STATE_ID, true),
             "a forgotten mob starts over"
         );
     }
@@ -1791,18 +1896,25 @@ mod tests {
         let boar = creature(&BOAR);
         let alerted = tags(&[0x22]);
         let mut timelines = MobTimelines::default();
-        let card = timelines
+        let card = timelines.advance(
+            MOB,
+            START,
+            &tree_pose(Some(GORE), alerted, None),
+            Some(&boar),
+        );
+        assert!(card.fresh);
+        let first = timelines
             .advance(
                 MOB,
-                START,
+                START + FIRST_STATE_DELAY_MS,
                 &tree_pose(Some(GORE), alerted, None),
                 Some(&boar),
             )
-            .animation
-            .expect("a known creature");
+            .step
+            .expect("the first state");
         assert_eq!(
-            (card.entry.fragment, card.entry.action),
-            (34, 1),
+            scope_entry(&first).map(|entry| (entry.fragment, entry.action)),
+            Some((34, 1)),
             "it spawns first"
         );
         let after_spawn = START + SPAWN_MS;

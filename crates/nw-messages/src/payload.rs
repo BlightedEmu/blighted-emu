@@ -10,9 +10,11 @@ use std::ops::Range;
 
 use nw_reflect::{TypeId, decode_type_id, encode_type_id};
 
+use crate::abilities::{ABILITY_TYPE_INDEX, AbilityState};
 use crate::achievements::{ACHIEVEMENT_TYPE_INDEX, AchievementState};
 use crate::alc::{ALC_TYPE_INDEX, AlcState};
 use crate::appearance::{PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState};
+use crate::attributes::{ATTRIBUTE_TYPE_INDEX, AttributeState};
 use crate::buildables::{
     BUILDABLE_CONTROLLER_TYPE_INDEX, BUILDABLE_GRID_TYPE_INDEX, BuildableControllerState,
     BuildableGridState, OWNERSHIP_TYPE_INDEX, OwnershipState, PLACEMENT_OBSTRUCTION_TYPE_INDEX,
@@ -114,6 +116,10 @@ pub enum MemberState {
     CategoricalProgression(CategoricalProgressionState),
     /// `ProgressionPointReplicatedState`.
     ProgressionPoints(ProgressionPointState),
+    /// `MB::AttributeComponentReplicatedState`.
+    Attributes(AttributeState),
+    /// `MB::AbilityComponentReplicatedState`.
+    Abilities(AbilityState),
     /// An empty state of a player component class without a reader of its own.
     Empty(EmptyState),
     /// A state of `class` sent as recorded body bytes (a retail state replayed as it was, of a
@@ -163,6 +169,8 @@ impl MemberState {
             Self::Ownership(_) => OWNERSHIP_TYPE_INDEX,
             Self::CategoricalProgression(_) => CATEGORICAL_PROGRESSION_TYPE_INDEX,
             Self::ProgressionPoints(_) => PROGRESSION_POINT_TYPE_INDEX,
+            Self::Attributes(_) => ATTRIBUTE_TYPE_INDEX,
+            Self::Abilities(_) => ABILITY_TYPE_INDEX,
             Self::Empty(state) => state.class,
             Self::Recorded { class, .. } => *class,
         }
@@ -278,6 +286,10 @@ impl MemberState {
             TypeId::FileSlot(PROGRESSION_POINT_TYPE_INDEX) => {
                 ProgressionPointState::read(reader).map(Self::ProgressionPoints)
             }
+            TypeId::FileSlot(ATTRIBUTE_TYPE_INDEX) => {
+                AttributeState::read(reader).map(Self::Attributes)
+            }
+            TypeId::FileSlot(ABILITY_TYPE_INDEX) => AbilityState::read(reader).map(Self::Abilities),
             TypeId::FileSlot(index) if EmptyState::covers(index) => {
                 EmptyState::read(index, reader).map(Self::Empty)
             }
@@ -374,6 +386,11 @@ impl MemberState {
             Self::Ownership(state) => state.write(writer),
             Self::CategoricalProgression(state) => state.write(writer),
             Self::ProgressionPoints(state) => state.write(writer),
+            Self::Attributes(state) => state.write(writer),
+            Self::Abilities(state) => {
+                state.write(writer);
+                Ok(())
+            }
             Self::Empty(state) => {
                 state.write(writer);
                 Ok(())

@@ -63,6 +63,12 @@ pub struct CreatureRow {
     pub tags: BTreeMap<String, TagRow>,
     /// The tags it always has: its slice's default tags and its main-hand weapon's tags.
     pub default_tags: Vec<String>,
+    /// How long each option of each fragment lasts for the creature's default tags (the entries
+    /// Mannequin picks among: the most tags, in file order), in whole scope ticks (1/30 s,
+    /// `DAT_14807f948`); `None` for an option that loops or whose length is Unknown. A fragment
+    /// without an option of known length is left out; a table from before this field has none.
+    #[serde(default)]
+    pub fragment_ticks: BTreeMap<String, Vec<Option<u32>>>,
 }
 
 /// One creature's animation names.
@@ -75,6 +81,7 @@ pub struct CreatureAnimation {
     actions: Vec<String>,
     tags: TagDefinition,
     default_tags: Vec<String>,
+    fragment_ticks: BTreeMap<String, Vec<Option<u32>>>,
 }
 
 /// The 1-based number of `name` in `names`.
@@ -103,6 +110,17 @@ impl CreatureAnimation {
     pub fn scope_bit(&self, name: &str) -> Option<u8> {
         let index = self.scopes.iter().position(|known| known == name)?;
         u8::try_from(index).ok()
+    }
+
+    /// How long fragment `name` lasts in whole scope ticks ([`CreatureRow::fragment_ticks`]) in
+    /// the option that an entry of last byte `tail` plays: option `tail` modulo the option
+    /// count (Inferred from the retail dead states: the sailor's `r_Death_F` tail 0xa5 of 5
+    /// options played option 0, 56 ticks, its last tick 0x38; the risen's `r_Death` tail 0x8f of
+    /// 2 options played option 1, 73 ticks, 0x49).
+    pub fn fragment_ticks(&self, name: &str, tail: u8) -> Option<u32> {
+        let options = self.fragment_ticks.get(name)?;
+        let option = usize::from(tail).checked_rem(options.len())?;
+        options.get(option).copied().flatten()
     }
 
     /// Whether the creature has tag `name`.
@@ -179,6 +197,7 @@ impl CreatureAnimations {
                         actions: row.actions,
                         tags,
                         default_tags: row.default_tags,
+                        fragment_ticks: row.fragment_ticks,
                     },
                 ))
             })
@@ -250,6 +269,10 @@ mod tests {
                 ("Alerted".to_owned(), [0, 5, 1]),
             ]),
             default_tags: vec!["Boar".to_owned()],
+            fragment_ticks: BTreeMap::from([
+                ("r_Death".to_owned(), vec![Some(88)]),
+                ("Alert".to_owned(), vec![Some(56), Some(73), None]),
+            ]),
         }
     }
 
@@ -269,6 +292,23 @@ mod tests {
         assert_eq!(boar.tag_state(&[], &["Alerted"])[0], 0x22);
         assert_eq!(boar.tag_state(&["Boar"], &[])[0], 0x00);
         assert!(boar.has_tag("Alerted") && !boar.has_tag("Phase_2"));
+        assert_eq!(boar.fragment_ticks("r_Death", 0xe9), Some(88));
+        assert_eq!(boar.fragment_ticks("Idle", 0), None, "not in the table");
+        // Three options: the tail picks one, modulo 3.
+        assert_eq!(boar.fragment_ticks("Alert", 3), Some(56));
+        assert_eq!(boar.fragment_ticks("Alert", 4), Some(73));
+        assert_eq!(boar.fragment_ticks("Alert", 0x8f), None, "a looping option");
+    }
+
+    #[test]
+    fn a_table_without_fragment_lengths_still_reads() {
+        let text = r#"[{"asset":"db96d765b50459d98c9e04adaa9c9485","slice":"s","fragments":["r_Death"],"scopes":[],"actions":[],"tags":{},"default_tags":[]}]"#;
+        let table = CreatureAnimations::parse(text).expect("table");
+        let asset = <[u8; ASSET_ID_LEN]>::try_from(hex::decode(BOAR).expect("hex")).expect("len");
+        assert_eq!(
+            table.get(&asset).expect("row").fragment_ticks("r_Death", 0),
+            None
+        );
     }
 
     #[test]

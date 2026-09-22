@@ -563,7 +563,11 @@ impl Mobs {
             .map_or(Mind::Still, |mind| Mind::Tree(Box::new(mind)));
         Some(Mob {
             position: at,
-            health: Health::full(mob_max_health(level.base_max_health, kind.health_mod)),
+            health: Health::full(mob_max_health(
+                level.base_max_health,
+                kind.health_mod,
+                kind.category_health_mod,
+            )),
             attack: MobAttack {
                 base_damage: level.base_damage,
                 damage_mod: kind.damage_mod,

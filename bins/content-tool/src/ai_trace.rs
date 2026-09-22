@@ -956,6 +956,7 @@ mod tests {
             actions: names("Action", 4),
             tags: BTreeMap::new(),
             default_tags: Vec::new(),
+            fragment_ticks: BTreeMap::new(),
         }]
     }
 

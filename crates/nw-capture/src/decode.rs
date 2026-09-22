@@ -299,6 +299,8 @@ fn member_position(state: &MemberState) -> Option<[f32; 3]> {
         | MemberState::Progression(_)
         | MemberState::CategoricalProgression(_)
         | MemberState::ProgressionPoints(_)
+        | MemberState::Attributes(_)
+        | MemberState::Abilities(_)
         | MemberState::Cooldowns(_)
         | MemberState::LootTracker(_)
         | MemberState::GlobalStorage(_)

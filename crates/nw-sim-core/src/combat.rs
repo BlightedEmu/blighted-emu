@@ -125,11 +125,14 @@ impl Health {
     }
 }
 
-/// Max health of a mob: the level's base health times the type's health mod, without the
-/// fraction (retail tutorial cards: sailor 353 and legionnaire 370, where rounding gave 354 and
-/// 371; lock-on note, 2026-09-18).
-pub fn mob_max_health(base_max_health: f64, health_mod: f64) -> u32 {
-    to_whole((base_max_health * health_mod).floor())
+/// Max health of a mob: the level's base health, its `HealthMod`, then its creature type's
+/// `CategoryHealthMod`, each product without its fraction (the base too). Observed on all 14
+/// kinds and levels of the retail cards of newchar-retail-2026-09-18, among them the tutorial
+/// sailor (337.5, 1.05, 1.0: 353, where the plain product gives 354), the level-3 boar (412.5,
+/// 1.75, 0.6: 432) and the named level-4 sailor (466.55, 1.3, 2.5: 605 x 2.5 = 1512).
+pub fn mob_max_health(base_max_health: f64, health_mod: f64, category_mod: f64) -> u32 {
+    let typed = (base_max_health.floor() * health_mod).floor();
+    to_whole((typed * category_mod).floor())
 }
 
 /// A rounded, finite, non-negative value as a whole number.
@@ -260,12 +263,38 @@ mod tests {
     }
 
     #[test]
-    fn mob_health_is_base_times_mod_without_the_fraction() {
-        /// A product just below 371, as retail's legionnaire card (370).
+    fn mob_health_is_the_whole_base_times_mod_without_the_fraction() {
+        /// A product just below 371.
         const NEAR_371: f64 = 370.9;
-        assert_eq!(mob_max_health(LEVEL_20_HEALTH, HALF), 936);
-        assert_eq!(mob_max_health(LEVEL_20_HEALTH, 1.0), 1872);
-        assert_eq!(mob_max_health(NEAR_371, 1.0), 370);
+        assert_eq!(mob_max_health(LEVEL_20_HEALTH, HALF, 1.0), 936);
+        assert_eq!(mob_max_health(LEVEL_20_HEALTH, 1.0, 1.0), 1872);
+        assert_eq!(mob_max_health(NEAR_371, 1.0, 1.0), 370);
+    }
+
+    /// The retail cards of newchar-retail-2026-09-18 (vitals `maxHealth`; `VitalsLevelData`
+    /// `BaseMaxHealth`, `HealthMod`, `CategoryHealthMod` of the creature type).
+    #[test]
+    fn mob_health_matches_the_retail_cards() {
+        const LEVEL_1: f64 = 337.5;
+        const LEVEL_2: f64 = 375.0;
+        const LEVEL_3: f64 = 412.5;
+        const LEVEL_4: f64 = 466.55;
+        // Corrupted_Sailor_1H_Club_FTUE (card 0x0161), Legion_Legionnaire_FTUE.
+        assert_eq!(mob_max_health(LEVEL_1, 1.05, 1.0), 353);
+        assert_eq!(mob_max_health(LEVEL_1, 1.1, 1.0), 370);
+        // Boar_StarterBeach, Solo-_StarterBeach.
+        assert_eq!(mob_max_health(LEVEL_2, 1.75, 0.6), 393);
+        assert_eq!(mob_max_health(LEVEL_3, 1.75, 0.6), 432);
+        // Corrupted_Sailor_1H_Club, _1H_Sword, _2H_Axe, Solo_StarterBeach.
+        assert_eq!(mob_max_health(LEVEL_2, 0.6, 1.0), 225);
+        assert_eq!(mob_max_health(LEVEL_3, 0.6, 1.0), 247);
+        assert_eq!(mob_max_health(LEVEL_3, 0.7, 1.0), 288);
+        assert_eq!(mob_max_health(LEVEL_4, 0.6, 1.0), 279);
+        assert_eq!(mob_max_health(LEVEL_4, 0.7, 1.0), 326);
+        // Named_00 sailors, Solo+_StarterBeach; the named beach captain, Named_Solo+.
+        assert_eq!(mob_max_health(LEVEL_2, 0.75, 2.0), 562);
+        assert_eq!(mob_max_health(LEVEL_3, 0.75, 2.0), 618);
+        assert_eq!(mob_max_health(LEVEL_4, 1.3, 2.5), 1512);
     }
 
     #[test]

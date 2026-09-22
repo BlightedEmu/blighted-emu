@@ -548,7 +548,8 @@ pub fn height_after_move(ground: &dyn Ground, to: Position) -> f32 {
 /// two steps must stay within
 /// `max_slope_deg` (the slice's `m_maxSlope`; no limit without one). `None` when the line is too
 /// steep. The server has no navigation mesh (the level `.bai` files are not read, their format
-/// is Unknown): the height map and the walked floors stand in for it (Inferred).
+/// is Unknown): the level's floors (the terrain and the level collision's structures) stand in
+/// for it (Inferred).
 pub fn floor_line(
     ground: &dyn Ground,
     from: Position,
@@ -691,7 +692,7 @@ pub struct Surroundings<'a> {
     pub now_ms: u64,
     /// The players it may take as targets.
     pub seen: &'a [Seen],
-    /// The ground and the walked floors.
+    /// The level's ground: the terrain and the level collision's structures.
     pub ground: &'a (dyn Ground + Sync),
     /// Its health, 0 to 1.
     pub health_share: f32,

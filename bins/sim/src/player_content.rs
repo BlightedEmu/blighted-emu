@@ -4,6 +4,7 @@
 
 use nw_content::crafting::{Recipes, StructureCosts};
 use nw_content::creature_animations::CreatureAnimations;
+use nw_content::equip_load::EquipLoads;
 use nw_content::gameplay_config::GameplayConfig;
 use nw_content::gathering::{CrateLoot, CrateVariant, Gatherables};
 use nw_content::leaderboards::LeaderboardStats;
@@ -13,7 +14,7 @@ use nw_content::poi_tags::PoiTags;
 use nw_content::progression::Progression;
 use nw_content::rewards::{KillExperience, Rewards};
 use nw_formats::objectstream::lowercase_crc32;
-use nw_sim_core::Position;
+use nw_sim_core::{EquipLoad, EquipLoadLimits, Position};
 use nw_world::records::{GatherablePoint, WorldFile};
 use nw_world::stations::CraftingStation;
 use std::collections::{HashMap, HashSet};
@@ -26,6 +27,7 @@ use nw_content::mob_prefabs::{ASSET_ID_LEN, MobPrefabs, PrefabKey, PrefabMember}
 use nw_content::starter::StarterKits;
 use nw_messages::{AlcState, AssetId, BundleMember, MemberState, VitalsState};
 
+use crate::asset_solids::AssetSolids;
 use crate::objectives::{
     KillTypes, ObjectiveTree, TaskBook, TaskRow, counted_game_events, task_rows,
 };
@@ -283,6 +285,9 @@ pub struct MobLook {
     pub first: Vec<BundleMember>,
     /// Its other states when it dies.
     pub death: Vec<BundleMember>,
+    /// The paperdoll states that draw its weapon right after a fresh spawn (retail sailor 1:
+    /// with its first states, 102 to 136 ms after its card).
+    pub drawn: Vec<BundleMember>,
 }
 
 /// The look of every mob prefab, by vitals id and slice asset.
@@ -341,6 +346,7 @@ impl MobLooks {
                     vitals,
                     first,
                     death: members(&prefab.death_members),
+                    drawn: members(&prefab.drawn_members),
                 };
                 (key, look)
             })
@@ -431,6 +437,11 @@ pub struct PlayerContent {
     pub loot_limits: Option<LootLimitRules>,
     /// The level table and the weapon masteries.
     pub progression: Progression,
+    /// The solids of the tutorial's asset entities; empty until the sim sets them from the
+    /// level collision.
+    pub asset_solids: AssetSolids,
+    /// The item weights and the player's equip load limits.
+    pub equip_loads: EquipLoads,
 }
 
 /// A quest object of the level: a gatherable point whose gather is a game event that a quest's
@@ -580,7 +591,26 @@ impl PlayerContent {
             }),
             gameplay,
             progression: Progression::of_tables(tables),
+            equip_loads: EquipLoads::from_tables(tables),
+            asset_solids: AssetSolids::default(),
         }
+    }
+
+    /// The equip load category of a character wearing `items`; `None` without the player's
+    /// limits.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "equip loads and limits of a few hundred"
+    )]
+    pub fn equip_load<'a>(&self, items: impl IntoIterator<Item = &'a str>) -> Option<EquipLoad> {
+        let ratios = self.equip_loads.limits?;
+        let limits = EquipLoadLimits {
+            base_max: ratios.base_max as f32,
+            normal_percent: ratios.normal_percent as f32,
+            slow_percent: ratios.slow_percent as f32,
+            overburdened_percent: ratios.overburdened_percent as f32,
+        };
+        Some(limits.category(self.equip_loads.load(items) as f32))
     }
 
     /// Whether item `item_id` (any case) is disabled.
@@ -606,6 +636,65 @@ fn disabled_items<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tutorial_swordsman_s_gear_is_a_slow_equip_load() {
+        // The player row of the retail encumbrance limits, the Swordsman kit's tutorial armor
+        // overrides and sword: 304.5 of 500, slow; retail's newchar dodges fit the slow clips.
+        let content = PlayerContent {
+            equip_loads: EquipLoads::new(
+                [
+                    (
+                        "SwordsmanArchetypeChest",
+                        Some(120.0),
+                        Some("HeavyChest_Balanced"),
+                    ),
+                    (
+                        "SwordsmanArchetypeHands",
+                        Some(60.0),
+                        Some("HeavyHands_Balanced"),
+                    ),
+                    (
+                        "SwordsmanArchetypeLegs",
+                        Some(80.0),
+                        Some("HeavyLegs_Balanced"),
+                    ),
+                    (
+                        "SwordsmanArchetypeFeet",
+                        Some(60.0),
+                        Some("HeavyFeet_Balanced"),
+                    ),
+                    ("1hSwordT2_FTUE", Some(36.0), Some("1hSwordT2_FTUE")),
+                ],
+                [
+                    ("HeavyChest_Balanced", Some(110.555_807_775)),
+                    ("HeavyHands_Balanced", Some(47.381_060_475)),
+                    ("HeavyLegs_Balanced", Some(63.174_747_3)),
+                    ("HeavyFeet_Balanced", Some(47.381_060_475)),
+                ],
+                Some(nw_content::equip_load::EquipLoadRatios {
+                    base_max: 500.0,
+                    normal_percent: 26.0,
+                    slow_percent: 46.0,
+                    overburdened_percent: 100.0,
+                }),
+            ),
+            ..PlayerContent::default()
+        };
+        let worn = [
+            "SwordsmanArchetypeChest",
+            "SwordsmanArchetypeHands",
+            "SwordsmanArchetypeLegs",
+            "SwordsmanArchetypeFeet",
+            "1hSwordT2_FTUE",
+        ];
+        assert_eq!(content.equip_load(worn), Some(EquipLoad::Slow));
+        assert_eq!(
+            content.equip_load(["1hSwordT2_FTUE"]),
+            Some(EquipLoad::Fast)
+        );
+        assert_eq!(PlayerContent::default().equip_load(worn), None);
+    }
 
     #[test]
     fn the_items_of_a_disabled_class_are_disabled() {

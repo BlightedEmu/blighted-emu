@@ -313,6 +313,8 @@ pub(super) fn mob_group(
                 let pos =
                     InputPosition::from_metres(card.position.x, card.position.y, card.position.z);
                 match (&look.alc, pos) {
+                    // A fresh spawn's card carries no state: its first state follows.
+                    (Some(first), Some(at)) if frame.fresh => first.mob_spawn_card(at),
                     (Some(first), Some(at)) => first.mob_first(
                         frame.stamp,
                         CardPlace {
@@ -427,6 +429,11 @@ pub(super) fn mob_group(
     }
     if dead && (carded || card.health_changed) {
         group.members.extend(look.death.iter().cloned());
+    }
+    // A fresh spawn draws its weapon with its first states (retail sailor 1: its paperdoll
+    // change in the three groups after its card).
+    if !carded && card.alc.is_some_and(|frame| frame.drawing) {
+        group.members.extend(look.drawn.iter().cloned());
     }
     // The position stays the last member.
     group.members.extend(position);
@@ -665,8 +672,6 @@ impl OwnTeleport {
 pub(super) enum OwnCard {
     /// No card: only the position.
     Without,
-    /// The card again, with the position.
-    Refresh,
     /// The first card, with the full first state that sets the client's start position
     /// ([`AlcState::spawn`]).
     Spawn,
@@ -1169,11 +1174,6 @@ mod tests {
             )
             .expect("step"),
         );
-        assert_eq!(
-            alc_of(OwnCard::Refresh),
-            still,
-            "a refresh moves nothing: the clock and the place"
-        );
         assert_eq!(alc_of(OwnCard::Without), still);
     }
 
@@ -1224,6 +1224,7 @@ mod tests {
             vitals: None,
             first: Vec::new(),
             death: Vec::new(),
+            drawn: Vec::new(),
         };
         let state = MobGhost {
             health: 370,
@@ -1283,6 +1284,7 @@ mod tests {
             vitals: None,
             first: Vec::new(),
             death: Vec::new(),
+            drawn: Vec::new(),
         };
         let state = MobGhost {
             health: 245,
@@ -1333,6 +1335,7 @@ mod tests {
             vitals: None,
             first: vec![card_phase.clone()],
             death: Vec::new(),
+            drawn: Vec::new(),
         };
         let state = MobGhost {
             health: 100,
@@ -1396,6 +1399,7 @@ mod tests {
             vitals: None,
             first: Vec::new(),
             death: Vec::new(),
+            drawn: Vec::new(),
         };
         let looking = BundleMember {
             component: LOOK_TARGETING_COMPONENT,
@@ -1472,6 +1476,7 @@ mod tests {
             vitals: None,
             first: vec![gatherable.clone()],
             death: vec![death.clone()],
+            drawn: Vec::new(),
         };
         let state = |health| MobGhost {
             health,
@@ -1493,6 +1498,8 @@ mod tests {
             anchor: None,
             step,
             alert_started: false,
+            fresh: false,
+            drawing: false,
         };
         const CARD_SERVER_MS: u64 = 845_730_278_206;
         let card = MobCard {

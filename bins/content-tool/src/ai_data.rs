@@ -665,21 +665,22 @@ struct GridLists {
 
 /// One clip of a fragment's base animation layer.
 #[derive(Debug, Clone, PartialEq)]
-struct LayerClip {
+pub(crate) struct LayerClip {
     exit_s: f64,
     start_s: f64,
-    animation: String,
+    /// The animation's name, lower case.
+    pub(crate) animation: String,
     speed: f64,
     looping: bool,
 }
 
 /// The base animation layer of one fragment entry; the entry's name, tags and procedural clips
 /// are those of the `nw_formats::mannequin::Fragment` at the same index.
-type AdbEntry = Vec<LayerClip>;
+pub(crate) type AdbEntry = Vec<LayerClip>;
 
 /// The base layers of the entries of an animation database, in file order (the order of
 /// `AnimDatabase::parse`).
-fn adb_entries(text: &str) -> Result<Vec<AdbEntry>, MannequinError> {
+pub(crate) fn adb_entries(text: &str) -> Result<Vec<AdbEntry>, MannequinError> {
     let root = parse_tree(text)?;
     let mut entries = Vec::new();
     for named in &root.child(FRAGMENT_LIST)?.children {
@@ -718,7 +719,7 @@ fn adb_entries(text: &str) -> Result<Vec<AdbEntry>, MannequinError> {
 }
 
 /// The length of one clip in seconds, or why it is Unknown.
-type ClipLength = Result<f64, String>;
+pub(crate) type ClipLength = Result<f64, String>;
 
 /// The length of a `.caf` (its `MotionParams` chunk).
 fn caf_seconds(bytes: &[u8]) -> Option<f64> {
@@ -782,14 +783,25 @@ fn base_name(path: &str) -> String {
 }
 
 /// Clip lengths by base name, read from the game paks.
-struct ClipLengths {
+pub(crate) struct ClipLengths {
     lengths: HashMap<String, ClipLength>,
 }
 
 impl ClipLengths {
+    /// The lengths `entries`, by clip name.
+    #[cfg(test)]
+    pub(crate) fn of(entries: &[(&str, ClipLength)]) -> Self {
+        Self {
+            lengths: entries
+                .iter()
+                .map(|(name, length)| ((*name).to_owned(), length.clone()))
+                .collect(),
+        }
+    }
+
     /// Lists the animation files of the install and reads the clips `names` play, and the clips
     /// their blend spaces play.
-    fn read(
+    pub(crate) fn read(
         source: &GameSource,
         game_dir: &Path,
         names: &BTreeSet<String>,
@@ -932,7 +944,10 @@ impl ClipLengths {
 /// never ends. The time base of `ExitTime` and `StartTime` (seconds) is Inferred; it fits the
 /// retail boar `Attack_Gore` (one clip; 1,465 and 1,498 ms observed against 1,404 ms + one or two
 /// ticks) and `Combat_Turn` (a blend space of 1.8 s clips, 1,632 and 1,683 ms against 1,600 ms).
-fn fragment_length(clips: &[LayerClip], lengths: &ClipLengths) -> Result<FragmentLength, String> {
+pub(crate) fn fragment_length(
+    clips: &[LayerClip],
+    lengths: &ClipLengths,
+) -> Result<FragmentLength, String> {
     let Some(last) = clips.len().checked_sub(1) else {
         return Err("no animation layer".to_owned());
     };
@@ -1585,12 +1600,7 @@ mod tests {
     }
 
     fn lengths(entries: &[(&str, ClipLength)]) -> ClipLengths {
-        ClipLengths {
-            lengths: entries
-                .iter()
-                .map(|(name, length)| ((*name).to_owned(), length.clone()))
-                .collect(),
-        }
+        ClipLengths::of(entries)
     }
 
     fn clip(exit_s: f64, animation: &str, speed: f64, looping: bool) -> LayerClip {

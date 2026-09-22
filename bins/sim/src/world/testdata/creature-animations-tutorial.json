@@ -440,7 +440,12 @@
    "NoShield",
    "1H_Melee",
    "Spear"
-  ]
+  ],
+  "fragment_ticks": {
+   "r_Death_R4_F": [
+    50
+   ]
+  }
  },
  {
   "asset": "929831a98dd25e3e8bd8d45d4e0868ac",
@@ -932,7 +937,12 @@
    "Phase_1",
    "1H_Melee",
    "Sword"
-  ]
+  ],
+  "fragment_ticks": {
+   "r_Death": [
+    100
+   ]
+  }
  },
  {
   "asset": "a8b60bc7feaf574cbe7ae3c2d8a48dec",
@@ -1401,7 +1411,13 @@
    "CorruptionConstruct",
    "Base",
    "DT5"
-  ]
+  ],
+  "fragment_ticks": {
+   "r_Death": [
+    56,
+    73
+   ]
+  }
  },
  {
   "asset": "b7e33b294bcf57b8a476abdc3a31fae7",
@@ -2715,7 +2731,16 @@
    "Sailor",
    "1H_Melee",
    "Club"
-  ]
+  ],
+  "fragment_ticks": {
+   "r_Death_F": [
+    56,
+    70,
+    70,
+    76,
+    213
+   ]
+  }
  },
  {
   "asset": "c05fc95784875559afe874a78f95fb64",
@@ -3158,7 +3183,12 @@
    "NoShield",
    "1H_Melee",
    "Spear"
-  ]
+  ],
+  "fragment_ticks": {
+   "r_Death_R4_F": [
+    50
+   ]
+  }
  },
  {
   "asset": "db96d765b50459d98c9e04adaa9c9485",
@@ -3334,7 +3364,12 @@
   },
   "default_tags": [
    "Boar"
-  ]
+  ],
+  "fragment_ticks": {
+   "r_Death": [
+    88
+   ]
+  }
  },
  {
   "asset": "e06d1bb7311f5acb9857cc20464ce4df",
@@ -3905,6 +3940,11 @@
    "CorruptionConstruct",
    "Swarmer",
    "Hard"
-  ]
+  ],
+  "fragment_ticks": {
+   "r_Death_R4_F": [
+    80
+   ]
+  }
  }
 ]

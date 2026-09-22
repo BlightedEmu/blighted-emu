@@ -37,7 +37,8 @@ use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::{
     ALC_TYPE_INDEX, AssetId, BodyCodec, BundleMember, BundlePayload, GDE_METADATA_COMPONENT,
-    GDE_METADATA_TYPE_INDEX, MemberState, PLAYER_SLICE_ASSET, REPLICATED_STATE_BUNDLE_TYPE_INDEX,
+    GDE_METADATA_TYPE_INDEX, MemberState, PAPERDOLL_TYPE_INDEX, PLAYER_SLICE_ASSET,
+    REPLICATED_STATE_BUNDLE_TYPE_INDEX,
     Reader, ReplicatedStateBundle, VITALS_TYPE_INDEX, Writer,
 };
 use nw_reflect::{TypeId, decode_type_id};
@@ -55,6 +56,10 @@ const ZIP_SEPARATOR: char = '/';
 const ZIP_EXTENSION: &str = "zip";
 /// Archives of this kind cannot be read here; their ledgers are unpacked under `captures/`.
 const RAR_EXTENSION: &str = "rar";
+/// How long after its card a mob's first paperdoll change counts as its spawn draw: retail
+/// changed the public paperdoll of most fresh mobs 50 to 150 ms after their card (sailor 1 of
+/// newchar-retail-2026-09-18 at 102 ms, its main hand drawn), and a few up to 800 ms.
+const DRAW_WINDOW_MS: u64 = 1_000;
 /// Health at or below which a vitals state is a death.
 const DEAD_HEALTH: f32 = 0.0;
 /// Most different bodies counted for one member of one group form; later new bodies are not
@@ -399,6 +404,9 @@ pub struct PrefabCounts {
     /// Death groups, by form.
     #[serde(with = "pairs")]
     pub death: BTreeMap<MemberForm, FormCounts>,
+    /// The paperdoll changes right after the card, by form.
+    #[serde(with = "pairs")]
+    pub drawn: BTreeMap<MemberForm, FormCounts>,
 }
 
 impl PrefabCounts {
@@ -408,6 +416,9 @@ impl PrefabCounts {
         }
         for (form, counts) in other.death {
             self.death.entry(form).or_default().merge(counts);
+        }
+        for (form, counts) in other.drawn {
+            self.drawn.entry(form).or_default().merge(counts);
         }
     }
 }
@@ -433,6 +444,7 @@ pub fn scan_ledger(bytes: &[u8]) -> LedgerTally {
             break;
         };
         let output = decoder.record(&record);
+        scan.now_ms = record.time_ms;
         if output.new_connection {
             scan.live
                 .retain(|(context, _), _| *context != record.context);
@@ -458,6 +470,10 @@ pub fn scan_ledger(bytes: &[u8]) -> LedgerTally {
 struct LiveMob {
     key: PrefabKey,
     dead: bool,
+    /// When its card came (ledger ms).
+    card_ms: u64,
+    /// Its first paperdoll change was seen, or came too late.
+    drawn: bool,
 }
 
 /// The scan of one ledger.
@@ -466,6 +482,8 @@ struct LedgerScan {
     /// Mobs in view, by connection context and slot.
     live: HashMap<(u64, u16), LiveMob>,
     tally: LedgerTally,
+    /// The time of the record being read (ledger ms).
+    now_ms: u64,
 }
 
 impl LedgerScan {
@@ -544,8 +562,39 @@ impl LedgerScan {
             self.tally.stats.first_groups += 1;
             let counts = self.tally.prefabs.entry(key).or_default();
             counts.first.entry(form).or_default().add(bodies);
-            self.live.insert(slot, LiveMob { key, dead: false });
+            // Only a fresh spawn draws: a mob already alive came into view as it was.
+            let fresh = group.members.iter().any(|member| {
+                matches!(&member.state, Some(MemberState::Alc(alc)) if alc.is_fresh_card())
+            });
+            self.live.insert(
+                slot,
+                LiveMob {
+                    key,
+                    dead: false,
+                    card_ms: self.now_ms,
+                    drawn: !fresh,
+                },
+            );
             return;
+        }
+        let Some(mob) = self.live.get_mut(&slot) else {
+            return;
+        };
+        let has_paperdoll = group
+            .members
+            .iter()
+            .any(|member| member.class == PAPERDOLL_TYPE_INDEX);
+        if !mob.drawn && has_paperdoll {
+            mob.drawn = true;
+            if self.now_ms.saturating_sub(mob.card_ms) <= DRAW_WINDOW_MS {
+                let key = mob.key;
+                let (form, bodies) =
+                    other_members(group, payload, |member| member.class != PAPERDOLL_TYPE_INDEX);
+                if !form.members.is_empty() {
+                    let counts = self.tally.prefabs.entry(key).or_default();
+                    counts.drawn.entry(form).or_default().add(bodies);
+                }
+            }
         }
         let Some(mob) = self.live.get_mut(&slot) else {
             return;
@@ -895,6 +944,9 @@ pub struct PrefabEntry {
     pub first_members: Vec<MemberEntry>,
     /// The other states of the most common death group; empty when no death was seen.
     pub death_members: Vec<MemberEntry>,
+    /// The paperdoll states of the most common change right after the card; empty when none was
+    /// seen.
+    pub drawn_members: Vec<MemberEntry>,
     /// First groups seen.
     pub seen: u32,
     /// Classes of the members left out of `first_members` and `death_members`.
@@ -935,6 +987,7 @@ impl PrefabTable {
             .filter_map(|(key, counts)| {
                 let (first_form, first) = most_common(&counts.first)?;
                 let death = most_common(&counts.death);
+                let drawn = most_common(&counts.drawn);
                 let mut skipped = first_form.rest.skipped.clone();
                 if let Some((form, _)) = death {
                     skipped.extend(&form.skipped);
@@ -950,6 +1003,9 @@ impl PrefabTable {
                     vitals_component: first_form.vitals_component,
                     first_members: member_entries(&first_form.rest, first),
                     death_members: death
+                        .map(|(form, counts)| member_entries(form, counts))
+                        .unwrap_or_default(),
+                    drawn_members: drawn
                         .map(|(form, counts)| member_entries(form, counts))
                         .unwrap_or_default(),
                     seen: counts
@@ -1300,6 +1356,7 @@ mod tests {
                     entry(EVENT_COMPONENT, &delayed_event(false)),
                 ],
                 death_members: Vec::new(),
+                drawn_members: Vec::new(),
                 seen: 1,
                 skipped_classes: Vec::new(),
             }]
@@ -1319,6 +1376,44 @@ mod tests {
             entries[0].death_members,
             vec![entry(EVENT_COMPONENT, &delayed_event(true))]
         );
+    }
+
+    /// Retail sailor 1's public paperdoll change 102 ms after its card (newchar-retail-2026-09-18,
+    /// 16421 ms): its main hand drawn.
+    const DRAWN_BODY: &str = "04030000000800000000000001000000";
+    const PAPERDOLL_COMPONENT: u64 = 15;
+
+    fn drawn() -> BundleMember {
+        let body = hex::decode(DRAWN_BODY).expect("hex");
+        member(
+            PAPERDOLL_COMPONENT,
+            MemberState::decode(PAPERDOLL_TYPE_INDEX, &body).expect("a paperdoll"),
+        )
+    }
+
+    #[test]
+    fn the_first_paperdoll_change_after_the_card_is_the_draw() {
+        let mut scan = LedgerScan::default();
+        scan.payload(CONTEXT, &payload(&[(INTEREST, first_group())]));
+        scan.now_ms = DRAW_WINDOW_MS;
+        scan.payload(
+            CONTEXT,
+            &payload(&[(INTEREST, vec![bytes(&drawn()), bytes(&alc())])]),
+        );
+        let entries = entries_of(scan);
+        assert_eq!(
+            entries[0].drawn_members,
+            vec![MemberEntry {
+                component: PAPERDOLL_COMPONENT,
+                class: PAPERDOLL_TYPE_INDEX,
+                body: DRAWN_BODY.to_owned(),
+            }]
+        );
+        let mut late = LedgerScan::default();
+        late.payload(CONTEXT, &payload(&[(INTEREST, first_group())]));
+        late.now_ms = DRAW_WINDOW_MS + 1;
+        late.payload(CONTEXT, &payload(&[(INTEREST, vec![bytes(&drawn())])]));
+        assert!(entries_of(late)[0].drawn_members.is_empty(), "too late");
     }
 
     #[test]

@@ -14,9 +14,11 @@
 //! every captured body only bits 0 to 2 are set, so one slot byte of 0 is a whole empty body.
 //! Component 0 (the spawn card) and 16 (`ALCReplicatedState`) are not in the table.
 
+use crate::abilities::{ABILITY_COMPONENT, ABILITY_TYPE_INDEX, AbilityState};
 use crate::achievements::{ACHIEVEMENT_TYPE_INDEX, AchievementState};
 use crate::appearance::PlayerLook;
 use crate::appearance::{PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState};
+use crate::attributes::{ATTRIBUTE_COMPONENT, ATTRIBUTE_TYPE_INDEX, AttributeState};
 use crate::categorical::{
     CATEGORICAL_PROGRESSION_COMPONENT, CATEGORICAL_PROGRESSION_TYPE_INDEX,
     CategoricalProgressionState,
@@ -103,7 +105,7 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 57] = [
     (24, 3312),
     (25, 1292),
     (26, INTERACTOR_TYPE_INDEX),
-    (27, 129),
+    (ATTRIBUTE_COMPONENT, ATTRIBUTE_TYPE_INDEX),
     (28, COMBAT_STATUS_TYPE_INDEX),
     (29, 6234),
     (31, 1927),
@@ -118,7 +120,7 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 57] = [
     (43, 1525),
     (44, 4236),
     (45, 2932),
-    (46, 185),
+    (ABILITY_COMPONENT, ABILITY_TYPE_INDEX),
     (47, MANA_TYPE_INDEX),
     (48, 5257),
     (49, 3152),
@@ -161,6 +163,90 @@ const AUDIO_PROXY_TYPE_INDEX: u64 = 603;
 /// Type index of `MB::ObjectiveInteractorComponentReplicatedState` (component 10).
 const OBJECTIVE_INTERACTOR_TYPE_INDEX: u64 = 3829;
 
+/// Type index of `Javelin::PointsAccumulatorComponentReplicatedState` (component 1).
+const POINTS_ACCUMULATOR_TYPE_INDEX: u64 = 6951;
+/// Type index of `MB::MagicComponentReplicatedState` (component 32).
+const MAGIC_TYPE_INDEX: u64 = 2895;
+/// Type index of `MB::MountComponentReplicatedState` (component 39).
+const MOUNT_TYPE_INDEX: u64 = 5620;
+/// Type index of `Javelin::GuildsComponentReplicatedState` (component 56).
+const GUILDS_TYPE_INDEX: u64 = 3147;
+/// Type index of `Javelin::MusicalPerformancePlayerComponentReplicatedState` (component 71).
+const MUSICAL_PERFORMANCE_TYPE_INDEX: u64 = 4878;
+/// Type index of `MB::PlayerHomeComponentReplicatedState` (component 20).
+const PLAYER_HOME_TYPE_INDEX: u64 = 3652;
+/// Type index of `Javelin::InstancedSlayerScriptReplicatedState` (component 29).
+const INSTANCED_SLAYER_SCRIPT_TYPE_INDEX: u64 = 6234;
+/// Type index of `MB::RewardTrackComponentReplicatedState` (component 34).
+const REWARD_TRACK_TYPE_INDEX: u64 = 4913;
+/// Type index of `MB::ChatReplicatedState` (component 57).
+const CHAT_TYPE_INDEX: u64 = 1566;
+/// Type index of `Javelin::GameEventComponentReplicatedState` (component 68).
+const GAME_EVENT_TYPE_INDEX: u64 = 497;
+/// Type index of `MB::ItemSkinningComponentReplicatedState` (component 35).
+const ITEM_SKINNING_TYPE_INDEX: u64 = 3765;
+
+/// The first bodies retail gives these classes on a new character's card: the bodies of both
+/// new characters of newchar-retail-2026-09-18 and newchar-linux-2026-09-12 (counts: retail first
+/// own groups of the 482 captured sessions with the same body). A full list's version (a counter
+/// of the retail session, 12236 to 17921 in those captures) is our [`crate::items::FIRST_VERSION`].
+const NEW_CHARACTER_FIRST_BODIES: [(u64, &[u8]); 11] = [
+    // Slot 0 children 0 to 2: all 0 (482 of 482 retail first groups).
+    (
+        POINTS_ACCUMULATOR_TYPE_INDEX,
+        &[
+            0x01, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    // `state` and `channel` 0 (473 of 482).
+    (MAGIC_TYPE_INDEX, &[0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+    // No mount: slot 1 and 2 of a character without one (both new characters; 28 of 482).
+    (
+        MOUNT_TYPE_INDEX,
+        &[
+            0x06, 0xdf, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x42, 0xc8,
+            0x00, 0x00, 0x3f, 0x42, 0xc8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f,
+            0x80, 0x00, 0x00, 0x3f, 0x80, 0x00, 0x00, 0x3f, 0x80, 0x00, 0x00, 0x3f,
+            0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+        ],
+    ),
+    // Slot 1 child 9 `lastGuildLeaveTime` 0: no guild (both new characters; 90 of 482).
+    (GUILDS_TYPE_INDEX, &[0x02, 0x80, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+    // No performance (476 of 479).
+    (
+        MUSICAL_PERFORMANCE_TYPE_INDEX,
+        &[
+            0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x06, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+        ],
+    ),
+    // Slot 0 child 0: an empty list.
+    (PLAYER_HOME_TYPE_INDEX, &[0x01, 0x01, 0x00, 0x01, 0x03, 0x00]),
+    // Slot 0 children 2 and 3: two empty lists.
+    (
+        INSTANCED_SLAYER_SCRIPT_TYPE_INDEX,
+        &[
+            0x01, 0x0c, 0x00, 0x01, 0x03, 0x00, 0x00, 0x01, 0x03, 0x00,
+        ],
+    ),
+    // Slot 2 child 0 `m_rolledRewards`: an empty list.
+    (REWARD_TRACK_TYPE_INDEX, &[0x04, 0x01, 0x00, 0x01, 0x03, 0x00]),
+    // Slot 0 child 0: an empty list.
+    (CHAT_TYPE_INDEX, &[0x01, 0x01, 0x00, 0x01, 0x03, 0x00]),
+    // Slot 0 child 1 `dailyBonusesUsed`: an empty list.
+    (GAME_EVENT_TYPE_INDEX, &[0x01, 0x02, 0x00, 0x01, 0x03, 0x00]),
+    // Slot 1: `m_enabledItemSkins` with one 0, `m_skinDyeData` empty.
+    (
+        ITEM_SKINNING_TYPE_INDEX,
+        &[
+            0x02, 0x03, 0x00, 0x01, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x01, 0x03, 0x00,
+        ],
+    ),
+];
+
 /// The first bodies retail gives these classes on every new player's card, the same for all
 /// (targeting note, 2026-09-18: beach capture q1). Our card left them empty, and the client then
 /// never picked a lock-on or attack target (Inferred: its relation filter reads the faction).
@@ -183,10 +269,12 @@ const RETAIL_FIRST_BODIES: [(u64, &[u8]); 5] = [
 ];
 
 /// The first body of player component `class`: retail's when it is in
-/// [`RETAIL_FIRST_BODIES`], else one slot byte of 0 (no slot set).
+/// [`RETAIL_FIRST_BODIES`] or [`NEW_CHARACTER_FIRST_BODIES`], else one slot byte of 0 (no slot
+/// set).
 fn first_body(class: u64) -> &'static [u8] {
     RETAIL_FIRST_BODIES
         .iter()
+        .chain(&NEW_CHARACTER_FIRST_BODIES)
         .find(|(retail, _)| *retail == class)
         .map_or(&[NO_SLOT], |(_, body)| body)
 }
@@ -401,6 +489,8 @@ pub fn empty_state(class: u64) -> MemberState {
         GLOBAL_STORAGE_TYPE_INDEX => MemberState::GlobalStorage(GlobalStorageState::default()),
         GATHERING_TYPE_INDEX => MemberState::Gathering(GatheringState::default()),
         INTERACTOR_TYPE_INDEX => MemberState::Interactor(InteractorState::default()),
+        ATTRIBUTE_TYPE_INDEX => MemberState::Attributes(AttributeState::default()),
+        ABILITY_TYPE_INDEX => MemberState::Abilities(AbilityState::default()),
         _ => MemberState::Empty(EmptyState { class }),
     }
 }
@@ -644,7 +734,22 @@ fn has_own_reader(class: u64) -> bool {
             | CURRENCY_TYPE_INDEX
             | LOOT_TRACKER_TYPE_INDEX
             | GLOBAL_STORAGE_TYPE_INDEX
+            | ATTRIBUTE_TYPE_INDEX
+            | ABILITY_TYPE_INDEX
     )
+}
+
+/// Puts `member` into the own group `members`: in place of the member of its component (an
+/// empty state of the card), else before the last member (the position, which ends an own
+/// group, as [`change_members`] go).
+pub fn put_member(members: &mut Vec<BundleMember>, member: BundleMember) {
+    match members
+        .iter_mut()
+        .find(|known| known.component == member.component)
+    {
+        Some(known) => *known = member,
+        None => members.insert(members.len().saturating_sub(1), member),
+    }
 }
 
 #[cfg(test)]
@@ -676,6 +781,48 @@ mod tests {
         };
         let read = BundlePayload::decode(&payload.encode().expect("payload")).expect("read");
         assert_eq!(read.groups[0].members, members);
+    }
+
+    /// The first bodies of the new character of newchar-retail-2026-09-18 (open-world card,
+    /// 451700 ms), whose list versions are `8c bf` (12236).
+    const NEW_CHARACTER_RETAIL: [(u64, &str); 11] = [
+        (POINTS_ACCUMULATOR_TYPE_INDEX, "010700000000000000000000000000000000"),
+        (MAGIC_TYPE_INDEX, "01030000000000000000"),
+        (
+            MOUNT_TYPE_INDEX,
+            concat!(
+                "06df000000000000000000000000000000000000000042c800003f42c80000000000003f80",
+                "00003f8000003f8000003f8000000100000000"
+            ),
+        ),
+        (GUILDS_TYPE_INDEX, "0280040000000000000000"),
+        (MUSICAL_PERFORMANCE_TYPE_INDEX, "030100000000ffffffff060000000000ffffffff"),
+        (PLAYER_HOME_TYPE_INDEX, "010100018cbf00"),
+        (INSTANCED_SLAYER_SCRIPT_TYPE_INDEX, "010c00018cbf0000018cbf00"),
+        (REWARD_TRACK_TYPE_INDEX, "040100018cbf00"),
+        (CHAT_TYPE_INDEX, "010100018cbf00"),
+        (GAME_EVENT_TYPE_INDEX, "010200018cbf00"),
+        (ITEM_SKINNING_TYPE_INDEX, "020300018cbf01000000000000000000018cbf00"),
+    ];
+
+    #[test]
+    fn a_new_characters_first_bodies_are_retails_with_our_list_version() {
+        /// Retail's list version and ours, as wide prefix integers.
+        const RETAIL_VERSION: &str = "8cbf";
+        const OUR_VERSION: &str = "03";
+        for (class, retail) in NEW_CHARACTER_RETAIL {
+            let ours: String = first_body(class)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            assert_eq!(ours, retail.replace(RETAIL_VERSION, OUR_VERSION), "class {class}");
+            let mut reader = Reader::new(first_body(class));
+            assert_eq!(
+                EmptyState::read(class, &mut reader),
+                Ok(EmptyState { class }),
+                "class {class} reads back"
+            );
+        }
     }
 
     #[test]
@@ -1064,7 +1211,16 @@ mod tests {
 
     #[test]
     fn a_set_slot_of_an_empty_class_stops_the_walk() {
-        let class = PLAYER_EMPTY_COMPONENTS[0].1;
+        // A class we still have no fixed first body for: a set slot stops the bundle walk.
+        // Classes with a known first body ([`RETAIL_FIRST_BODIES`]/[`NEW_CHARACTER_FIRST_BODIES`])
+        // read that body instead, so they are not what this test checks.
+        let class = PLAYER_EMPTY_COMPONENTS
+            .iter()
+            .map(|(_, player_class)| *player_class)
+            .find(|player_class| {
+                EmptyState::covers(*player_class) && first_body(*player_class) == [NO_SLOT]
+            })
+            .expect("a covered player-empty class with no fixed first body");
         assert!(EmptyState::covers(class));
         assert!(
             !EmptyState::covers(VITALS_TYPE_INDEX),

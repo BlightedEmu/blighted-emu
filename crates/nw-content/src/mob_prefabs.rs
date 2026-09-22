@@ -51,6 +51,8 @@ pub struct MobPrefab {
     pub first_members: Vec<PrefabMember>,
     /// The other states of the death group.
     pub death_members: Vec<PrefabMember>,
+    /// The paperdoll states it sends right after a fresh spawn card (its draw).
+    pub drawn_members: Vec<PrefabMember>,
 }
 
 /// A bad table file.
@@ -93,6 +95,9 @@ struct PrefabRow {
     vitals_component: u64,
     first_members: Vec<MemberRow>,
     death_members: Vec<MemberRow>,
+    /// Absent in tables made before the draw was recorded.
+    #[serde(default)]
+    drawn_members: Vec<MemberRow>,
     seen: u32,
 }
 
@@ -204,6 +209,7 @@ fn prefab_of(row: PrefabRow) -> Result<MobPrefab, MobPrefabsError> {
         vitals_component: row.vitals_component,
         first_members: members(row.first_members, "first_members")?,
         death_members: members(row.death_members, "death_members")?,
+        drawn_members: members(row.drawn_members, "drawn_members")?,
     })
 }
 
