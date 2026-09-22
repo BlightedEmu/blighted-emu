@@ -39,7 +39,7 @@ use nw_testclient::udp::{Hold, run_rep};
 use nw_testclient::walk::{WalkSettings, login_token, walk};
 use sim::combat::test_support::test_data;
 use sim::config::{SimConfig, load_sim_config};
-use sim::server::{LoopSettings, serve as serve_sim};
+use sim::server::{Databases, LoopSettings, serve as serve_sim};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
@@ -270,7 +270,7 @@ impl Stack {
         let mut sims = Vec::new();
         for name in SIM_NAMES {
             let sim_id = BusId::try_from(format!("{name}-{unique}")).expect("id");
-            sims.push(start_sim(world_id, sim_id, world_pool).await);
+            sims.push(start_sim(world_id, sim_id, global, world_pool).await);
         }
         let both = async {
             loop {
@@ -336,9 +336,14 @@ impl Stack {
     }
 }
 
-/// Starts a sim for `world_id` on the world database and waits for its first heartbeat; the
-/// handle stops it as a crash would, with no last save.
-async fn start_sim(world_id: Uuid, sim_id: BusId, world_pool: &PgPool) -> JoinHandle<()> {
+/// Starts a sim for `world_id` on the global and world databases and waits for its first
+/// heartbeat; the handle stops it as a crash would, with no last save.
+async fn start_sim(
+    world_id: Uuid,
+    sim_id: BusId,
+    global: &PgPool,
+    world_pool: &PgPool,
+) -> JoinHandle<()> {
     let bus = test_bus().await;
     let mut beats = bus
         .subscribe::<SimHeartbeat>(subject::sim_heartbeat(world_id, &sim_id))
@@ -366,14 +371,18 @@ async fn start_sim(world_id: Uuid, sim_id: BusId, world_pool: &PgPool) -> JoinHa
         snapshot_interval: None,
         mob_ai: Arc::from([]),
         design: Arc::default(),
+        leaderboard_calendar: config.leaderboard_calendar().expect("calendar"),
     };
-    let db = world_pool.clone();
+    let databases = Databases {
+        world: world_pool.clone(),
+        global: global.clone(),
+    };
     let sim = tokio::spawn(async move {
         let served = serve_sim(
             settings,
             Arc::new(NoGround),
             bus,
-            db,
+            databases,
             std::future::pending(),
         );
         // A serve error ends the sim like a crash; the tests see it as a silent sim.
