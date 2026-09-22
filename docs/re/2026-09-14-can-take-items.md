@@ -81,12 +81,12 @@ positions all miss). Records go out without perks until the rule is known.
 
 **Observed.** The project `<re-scratch>/ghidra-25810808/NewWorld25810808.gpr` holds an analyzed
 `NewWorld.exe` of build `25810808`. Ghidra 12.1.4 runs it headless; the Java scripts are in
-`local-data/tools/ghidra/scripts/` (find a string's xrefs and decompile the owners, decompile
+`tools/ghidra/scripts/` (find a string's xrefs and decompile the owners, decompile
 at an address, dump bytes, resolve a vtable's owner class). Example:
 
 ```
 $GHIDRA/support/analyzeHeadless <re-scratch>/ghidra-25810808 NewWorld25810808 \
-    -process NewWorld.exe -noanalysis -scriptPath local-data/tools/ghidra/scripts \
+    -process NewWorld.exe -noanalysis -scriptPath tools/ghidra/scripts \
     -postScript FindAndDecompile.java "PlayerTradeComponent - CanTakeItems" out.txt
 ```
 
