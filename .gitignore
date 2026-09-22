@@ -4,7 +4,8 @@
 # Secrets for the infrastructure (copy from deploy/.env.example)
 /deploy/.env
 
-# Local Amazon game data and captures (spec 10.2). Never commit these.
+# Local Amazon game data, captures and decompiled client output (spec 10.2). Never commit
+# these; our own tools that read them live in tools/ and scripts/.
 /local-data/
 
 # Game files and decoded client data. scripts/no-game-data.sh refuses these.
@@ -46,14 +47,6 @@ secrets/
 !bins/launcher/testdata/proxy-mirror-key.pem
 
 # =============================================================================
-# PHP tooling
-# =============================================================================
-
-vendor/
-.phpunit.result.cache
-.phpunit.cache/
-
-# =============================================================================
 # IDEs and editors
 # =============================================================================
 
@@ -78,7 +71,6 @@ vendor/
 .claude/
 .claude-code/
 .codex/
-.aider/
 .aider*
 .cline/
 .continue/
@@ -109,7 +101,6 @@ vendor/
 .tabnine/
 .devin/
 .factory/
-.hindsight/
 .specstory/
 .same/
 .bolt/
@@ -129,12 +120,10 @@ GEMINI.md
 .cursorindexingignore
 .windsurfrules
 .clinerules
-.clinerules/
 .roomodes
 .rooignore
 .aiderignore
 .codeiumignore
-.github/copilot-instructions.md
 .github/instructions/
 .github/prompts/
 .github/agents/
