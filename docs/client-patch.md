@@ -81,6 +81,57 @@ function. Reasoning and addresses:
 
 "Exit to main menu" is a different path and is not changed by this patch.
 
+## Third change: AWS proxy (Windows only, `--aws-proxy`)
+
+This change is for Windows, where there is no `bwrap` sandbox to give the game
+process a private hosts file and trust file. On Linux leave it off.
+
+The game has three AWS clients that call fixed Amazon names with certificate
+checks on: remote-config (S3), analytics (Kinesis) and analytics credentials
+(STS). Each builds an `Aws::Client::ClientConfiguration` (constructor
+`FUN_147467a40`) and uses the WinHTTP client (`FUN_147491570`; the factory
+`FUN_146b73730` picks WinINet only when the configuration byte `+0x220` is `2`,
+and the constructor sets it to `0`). With `--aws-proxy` the patch sends all
+three through the launcher's loopback proxy instead
+(`docs/re/2026-09-20-windows-launcher-network.md`).
+
+After each builder's constructor call (the fresh config is in `RAX`), the patch
+replaces the following `NOP` and one instruction with a jump to a code cave in
+the `.text` INT3 padding. The cave sets, through `RAX`:
+
+```text
+proxyHost  +0xA0  = "127.0.0.1"   (MSVC std::string: inline buffer, size 9 at +0xB0)
+proxyPort  +0xC0  = 47443         (AWS_PROXY_PORT; bins/launcher/src/aws_proxy.rs uses the same)
+verifySSL  +0x1B8 = 0
+```
+
+then replays the instruction the jump replaced and jumps back. The remote-config
+builder also writes `verifySSL = 1` itself a little later
+(`MOV byte ptr [RSP+0x208],1`); the patch flips that immediate to `0` too. No
+change alters the file length.
+
+The three builders are `FUN_140853a80` (S3), `FUN_1461c3cc0` (Kinesis) and
+`FUN_1461c5220` (STS). The tool finds each by the bytes around its constructor
+call, so a build change that keeps the shape still matches; a build change that
+breaks it makes the tool stop rather than patch the wrong place.
+
+With `verifySSL` off, the WinHTTP request sets `WINHTTP_OPTION_SECURITY_FLAGS`
+to `0x1100` (ignore unknown CA and CN mismatch; the date check stays on), so the
+weakened check reaches only the launcher on loopback. The launcher proxy keeps
+the real check: it opens its own TLS to the server and pins the server's mirror
+certificate (`bins/launcher/src/aws_proxy.rs`, the same rule as `check_mirror`),
+and it accepts a `CONNECT` only for the three mirror host kinds.
+
+Run it with `--aws-proxy`:
+
+```bash
+scripts/patch-client.py "<Bin64>" --aws-proxy
+scripts/patch-client.py "<Bin64>" --verify --aws-proxy
+```
+
+Reasoning, options and the safety analysis:
+[docs/re/2026-09-20-windows-launcher-network.md](re/2026-09-20-windows-launcher-network.md).
+
 ## How to make the patched copy
 
 The tool finds the function by its byte signature, not by a fixed address,
@@ -141,6 +192,15 @@ manager vtable is the one its constructor stores (build 25810808:
 `+0x130` is the function that calls the callback first. Update
 `SONIC_END_SESSION` and `STEAM_END_SESSION` in `scripts/patch-client.py`.
 
+For the AWS proxy patch, re-find the `ClientConfiguration` constructor
+(`FUN_147467a40`: writes the two 5,000 ms timeouts and `verifySSL = 1` into a
+fresh object) and the three builders that call it with the S3, Kinesis and STS
+regions. Update `CONFIG_CONSTRUCTOR`, the three `AWS_CONFIG_SITES` and the S3
+`S3_VERIFY_SSL_WRITE` in `scripts/patch-client.py`. If the struct offsets change,
+read them from the WinHTTP client `FUN_147491570` (it reads `proxyHost +0xA0`,
+`proxyPort +0xC0`) and update `CONFIG_PROXY_HOST`, `CONFIG_PROXY_PORT` and
+`CONFIG_VERIFY_SSL`.
+
 ## Launching the patched client (no EAC)
 
 The project `launcher` runs the patched exe directly under Proton. It needs
@@ -168,11 +228,76 @@ launcher does not start the game: the Steam launch path ran the stock client in
 the retail prefix, where it called Amazon's remote-config, analytics and STS
 hosts.
 
+## Launching the patched client on Windows
+
+Windows has no `bwrap`, so the private hosts file and trust file are not used.
+Instead the client is patched with `--aws-proxy` (above) and the launcher runs a
+loopback proxy on `127.0.0.1:47443` (`bins/launcher/src/aws_proxy.rs`). The
+patched client sends its three AWS calls there; the proxy checks the server's
+mirror certificate and relays them to the server.
+
+The launcher starts the patched exe directly (no Proton, no `bwrap`). It needs
+only the game exe path:
+
+```bat
+set NW_LAUNCHER_GAME_EXE=<Bin64>\BlightedNewWorld.exe
+```
+
+Steam must be running for the Steam ticket, as on Linux. The launcher sets
+`SteamAppId` and `SteamGameId` to `1063730` for the game process and refuses any
+exe whose file name is not `BlightedNewWorld.exe`, so it never starts the retail
+client.
+
+### Windows live test
+
+On a Windows PC with Steam and New World installed, and the project launcher
+built (`cargo build -p launcher --release`):
+
+1. Make the patched copy with the proxy patch, then check it:
+
+   ```bat
+   python scripts\patch-client.py "<Bin64>" --aws-proxy
+   python scripts\patch-client.py "<Bin64>" --verify --aws-proxy
+   ```
+
+   Expect `patched copy: OK`. This writes `NewWorld.exe.orig` and
+   `BlightedNewWorld.exe`; it never changes `NewWorld.exe`.
+2. Start Steam and log in.
+3. Set `NW_LAUNCHER_GAME_EXE` to the patched exe and start the launcher:
+
+   ```bat
+   set NW_LAUNCHER_GAME_EXE=<Bin64>\BlightedNewWorld.exe
+   launcher.exe
+   ```
+
+4. Log in to the community server in the launcher and press play.
+5. **What passes:** the game reaches character select with the server's
+   remote-config layers (the same client-read values as on Linux: UI flags and
+   feature toggles). Check the launcher has the proxy port `47443` open
+   (`netstat -ano | findstr 47443` shows it listening on `127.0.0.1`).
+6. **If it fails:**
+   - The game asks the real Amazon bucket (the config layers are missing): the
+     client was not patched with `--aws-proxy`, or the proxy did not start. Run
+     `--verify --aws-proxy` and check port `47443` is listening.
+   - The game cannot connect at all: Steam is not running, or the server address
+     or mirror certificate is wrong (the launcher refuses a mirror certificate
+     that is not a non-CA certificate valid for exactly the three names).
+   - A TLS error toward the proxy: the `--aws-proxy` patch did not clear
+     `verifySSL`; re-run the patch and `--verify --aws-proxy`.
+   - The retail `NewWorld.exe` starts, or anti-cheat runs: `NW_LAUNCHER_GAME_EXE`
+     does not point at `BlightedNewWorld.exe`.
+
 ## Files
 
-- `scripts/patch-client.py` — makes/checks/reverts the patched copy.
+- `scripts/patch-client.py` — makes/checks/reverts the patched copy (with
+  `--aws-proxy` for Windows).
 - `scripts/patch-client.test.sh` — tests the tool on a synthetic exe
   (`just test-scripts`).
+- `bins/launcher/src/aws_proxy.rs` — the Windows loopback proxy.
+- `bins/launcher/testdata/proxy-tls.crt` / `proxy-tls-key.pem` — the proxy's own
+  game-facing certificate (the patched client does not check it).
+- `bins/launcher/testdata/proxy-mirror.crt` / `proxy-mirror-key.pem` — a stand-in
+  server mirror certificate for the proxy tests.
 - `<Bin64>/NewWorld.exe` — official client, never modified.
 - `<Bin64>/NewWorld.exe.orig` — one-time backup of the official client.
 - `<Bin64>/BlightedNewWorld.exe` — the patched client our launcher runs.

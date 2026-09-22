@@ -40,6 +40,10 @@ secrets/
 *.pfx
 *.mobileprovision
 *.provisionprofile
+# Throwaway test fixtures, no real secret: the launcher proxy's own game-facing key (the patched
+# client never checks it) and a stand-in server mirror key for the proxy tests.
+!bins/launcher/testdata/proxy-tls-key.pem
+!bins/launcher/testdata/proxy-mirror-key.pem
 
 # =============================================================================
 # PHP tooling

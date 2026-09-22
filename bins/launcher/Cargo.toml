@@ -17,10 +17,17 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
+# The Windows loopback proxy (bins/launcher/src/aws_proxy.rs) needs an async runtime and TLS.
+# Linux uses the bwrap path instead, so these stay off the Linux build.
+[target.'cfg(windows)'.dependencies]
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "io-util"] }
+tokio-rustls.workspace = true
+
 [dev-dependencies]
 axum.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "io-util"] }
+tokio-rustls.workspace = true
 
 [lints]
 workspace = true

@@ -81,6 +81,15 @@ pub enum GameError {
         .0.display()
     )]
     RetailPrefix(PathBuf),
+    /// The Windows game executable is not set.
+    #[error(
+        "set {DIRECT_EXE_ENV} to the patched {PATCHED_EXE_NAME}: on Windows the launcher starts it \
+         directly, never Steam's launcher"
+    )]
+    NoWindowsLaunch,
+    /// The Windows game executable is not the patched copy.
+    #[error("{} is not the patched {PATCHED_EXE_NAME}; start the patched copy, never the retail exe", .0.display())]
+    NotPatchedExe(PathBuf),
     /// The game program (`bwrap` running Proton) could not be started.
     #[error("could not start the game: {} failed: {source}", .program.display())]
     Start {
@@ -249,6 +258,63 @@ pub fn checked_direct_launch(launch: Option<DirectLaunch>) -> Result<DirectLaunc
         return Err(GameError::RetailPrefix(launch.compat_data));
     }
     Ok(launch)
+}
+
+/// The patched client copy (`scripts/patch-client.py`). The Windows launcher starts only this,
+/// never the retail `NewWorld.exe`.
+pub const PATCHED_EXE_NAME: &str = "BlightedNewWorld.exe";
+
+/// A native Windows launch: the patched game executable started directly, with no `bwrap`, no
+/// Proton and no Easy Anti-Cheat. The private network view there is the launcher's loopback proxy
+/// ([`crate::aws_proxy`]), not the private files of [`crate::mirror`]. Set by [`DIRECT_EXE_ENV`].
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowsLaunch {
+    /// The patched game executable to run (`...\Bin64\BlightedNewWorld.exe`).
+    pub exe: PathBuf,
+}
+
+/// A [`WindowsLaunch`] from [`DIRECT_EXE_ENV`], or none when it is unset.
+#[cfg(any(windows, test))]
+pub fn windows_launch_from_env() -> Option<WindowsLaunch> {
+    Some(WindowsLaunch {
+        exe: std::env::var_os(DIRECT_EXE_ENV)?.into(),
+    })
+}
+
+/// The launch from the environment, refused when it is missing or is not the patched copy.
+#[cfg(any(windows, test))]
+pub fn checked_windows_launch(launch: Option<WindowsLaunch>) -> Result<WindowsLaunch, GameError> {
+    let launch = launch.ok_or(GameError::NoWindowsLaunch)?;
+    if launch.exe.file_name() != Some(std::ffi::OsStr::new(PATCHED_EXE_NAME)) {
+        return Err(GameError::NotPatchedExe(launch.exe));
+    }
+    Ok(launch)
+}
+
+/// `BlightedNewWorld.exe <arguments>` with the Steam context, so the patched game runs directly
+/// without Steam's own launcher and without Easy Anti-Cheat. Steam must run for the Steam ticket,
+/// as on Linux.
+#[cfg(any(windows, test))]
+pub fn windows_command(launch: &WindowsLaunch, arguments: &[String]) -> Command {
+    let mut command = Command::new(&launch.exe);
+    command
+        .args(arguments)
+        .env(STEAM_APP_ID_ENV, STEAM_APP_ID)
+        .env(STEAM_GAME_ID_ENV, STEAM_APP_ID);
+    command
+}
+
+/// Starts the patched game on Windows and returns at once. The caller starts
+/// [`crate::aws_proxy::AwsProxy`] first, so the game's AWS calls reach the server.
+#[cfg(any(windows, test))]
+pub fn start_game_windows(launch: &WindowsLaunch, arguments: &[String]) -> Result<(), GameError> {
+    let mut command = windows_command(launch, arguments);
+    let program = launch.exe.clone();
+    command
+        .spawn()
+        .map(drop)
+        .map_err(|source| GameError::Start { program, source })
 }
 
 /// Starts the game with the private network `files` and returns at once.
@@ -493,6 +559,54 @@ mod tests {
         assert!(matches!(
             checked_direct_launch(None),
             Err(GameError::NoDirectLaunch)
+        ));
+    }
+
+    fn windows_launch(exe: &str) -> WindowsLaunch {
+        WindowsLaunch {
+            exe: PathBuf::from(exe),
+        }
+    }
+
+    #[test]
+    fn the_windows_command_starts_the_exe_directly_with_steam_env() {
+        let launch = windows_launch("C:/games/New World/Bin64/BlightedNewWorld.exe");
+        let command = windows_command(&launch, &template(&["-LoginChannelOverride", KEY]));
+        assert_eq!(command.get_program(), launch.exe.as_os_str());
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, ["-LoginChannelOverride", KEY]);
+        let envs: std::collections::HashMap<String, String> = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(envs.get("SteamAppId").map(String::as_str), Some(STEAM_APP_ID));
+        assert_eq!(envs.get("SteamGameId").map(String::as_str), Some(STEAM_APP_ID));
+    }
+
+    #[test]
+    fn only_the_patched_exe_is_launched_on_windows() {
+        assert_eq!(
+            checked_windows_launch(Some(windows_launch("D:/x/Bin64/BlightedNewWorld.exe")))
+                .expect("patched exe"),
+            windows_launch("D:/x/Bin64/BlightedNewWorld.exe")
+        );
+        assert!(matches!(
+            checked_windows_launch(Some(windows_launch("D:/x/Bin64/NewWorld.exe"))),
+            Err(GameError::NotPatchedExe(path)) if path == PathBuf::from("D:/x/Bin64/NewWorld.exe")
+        ));
+        assert!(matches!(
+            checked_windows_launch(None),
+            Err(GameError::NoWindowsLaunch)
         ));
     }
 

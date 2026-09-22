@@ -5,6 +5,10 @@
 
 pub mod api;
 pub mod app;
+/// The Windows loopback proxy (`docs/re/2026-09-20-windows-launcher-network.md`). Linux uses the
+/// `bwrap` path of [`mirror`] instead, so this is built only on Windows and for tests.
+#[cfg(any(windows, test))]
+pub mod aws_proxy;
 pub mod game;
 pub mod mirror;
 pub mod server;

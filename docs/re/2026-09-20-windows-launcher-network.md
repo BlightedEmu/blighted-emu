@@ -27,9 +27,30 @@ established).
   then sets the region (`us-east-1`), the scheme (`1`, HTTPS), `verifySSL` (`1`), two 5,000 ms
   timeouts and a `DefaultRetryStrategy`. It does not set `endpointOverride`, `proxyHost`,
   `proxyPort` or a CA file.
+- **Observed (resolves §5.2).** The Kinesis analytics client set-up is `FUN_1461c3cc0` and the STS
+  client set-up is `FUN_1461c5220`. Each calls the same constructor `FUN_147467a40` and shows the
+  same field writes as the S3 set-up with its own region and service. `scripts/patch-client.py`
+  finds all three by the bytes around their constructor call (`AWS_CONFIG_SITES`).
+- **Observed (resolves §5.1 for the fields we patch).** The `ClientConfiguration` fields the patch
+  writes are at these offsets in the constructed object (seen in `FUN_147491570`, which reads them
+  to open the WinHTTP session): `proxyScheme +0x98`, `proxyHost +0xA0` (an MSVC `std::string`:
+  16-byte inline buffer, size at `+0xB0`, capacity at `+0xB8`), `proxyPort +0xC0`,
+  `verifySSL +0x1B8`. The patch sets `proxyHost = "127.0.0.1"`, `proxyPort = 47443` and
+  `verifySSL = 0`; it leaves `proxyScheme` at its default, which the WinHTTP client does not read
+  for a named proxy.
 - **Observed.** The executable has the RTTI names `WinHttpSyncHttpClient` and
   `WinINetSyncHttpClient` and imports `WINHTTP.dll` and `WININET.dll`. There is no
   `CurlHttpClient`.
+- **Observed (resolves §5.3).** The clients use the **WinHTTP** client. The HTTP client factory
+  `FUN_146b73730` picks the WinINet client only when the configuration byte at `+0x220` is `2`;
+  the `ClientConfiguration` constructor `FUN_147467a40` sets it to `0`, and the three builders do
+  not change it, so the factory builds `WinHttpSyncHttpClient` (constructor `FUN_147491570`). With
+  `proxyHost` set, that client opens the WinHTTP session with `WINHTTP_ACCESS_TYPE_NAMED_PROXY` and
+  the proxy string `HTTPS=http://127.0.0.1:47443` (built from the literals `=`, `://` and `:` at
+  `0x147fe0f5c`, `0x1484d8b28`, `0x147efc3d4`), so each HTTPS request is a `CONNECT host:443` to the
+  proxy followed by TLS inside the tunnel. With `verifySSL` off, each request sets
+  `WINHTTP_OPTION_SECURITY_FLAGS = 0x1100` in `FUN_1474940f0` (ignore unknown CA and CN mismatch
+  only; the date check stays on).
 - **Inferred (AWS SDK for C++ source).** With an empty `proxyHost`, both Windows HTTP clients of
   the SDK open their session with no proxy. A Windows proxy setting or a `HTTPS_PROXY` variable does
   not apply to them.
@@ -73,17 +94,24 @@ needs no system change.
 
 ### 2.1 Work that option A needs
 
-1. Find the `ClientConfiguration` builders of the Kinesis and the STS clients (only the S3 one,
-   `FUN_140853a80`, is known) and the offsets of `proxyHost`, `proxyPort` and `verifySSL` in that
-   SDK version's `ClientConfiguration`. **Unknown** now.
-2. A code cave per builder that writes the proxy host string and port, and clears `verifySSL`.
-3. The launcher proxy (`cfg(windows)`): HTTP `CONNECT` on loopback for the three mirror names only,
-   TLS to the game with a launcher-made certificate, TLS to the server with the mirror certificate
-   pinned.
-4. Windows game start: `BlightedNewWorld.exe` started directly by the launcher (never
-   `NewWorld.exe`, never Steam's launcher, never Easy Anti-Cheat), with the server's arguments.
-   Steam must run for the Steam ticket (as on Linux).
-5. A live test on Windows.
+1. **Done.** The Kinesis builder (`FUN_1461c3cc0`), the STS builder (`FUN_1461c5220`) and the
+   `ClientConfiguration` offsets are found (§1.1).
+2. **Done.** `scripts/patch-client.py --aws-proxy` adds a code cave per builder that sets
+   `proxyHost`, `proxyPort` and `verifySSL = 0`, and flips the S3 client's own later `verifySSL`
+   write to 0. `--verify` and `--revert` cover the new patches; `scripts/patch-client.test.sh`
+   tests them on a synthetic PE.
+3. **Done.** The launcher proxy is `bins/launcher/src/aws_proxy.rs` (`cfg(any(windows, test))`):
+   an HTTP `CONNECT` proxy on `127.0.0.1:47443` that accepts only `is_aws_mirror_host` names (else
+   `403`), ends the game's TLS with the launcher's own throwaway certificate (the patched client
+   does not check it), and opens its own TLS to the server with the mirror certificate pinned (a
+   `RootCertStore` of only that certificate, the same rule as `check_mirror`), then relays the
+   bytes.
+4. **Done (not wired into `play()`).** `bins/launcher/src/game.rs` has `WindowsLaunch`,
+   `windows_command` and `start_game_windows`: the patched `BlightedNewWorld.exe` started directly,
+   with the Steam app-id environment and the server's arguments, and a check that refuses the
+   retail `NewWorld.exe`. Wiring these into `app.rs::play()` (start the proxy, then the game, stop
+   the proxy on exit) is left for the user, because `app.rs` is owned by another session.
+5. **Open.** A live test on Windows (`docs/client-patch.md`, Windows live test).
 
 ## 3. Safety
 
@@ -109,8 +137,13 @@ needs no system change.
 
 ## 5. Unknown
 
-1. The AWS SDK for C++ version in the client (needed for the `ClientConfiguration` offsets).
-2. The Kinesis and STS client builders.
-3. Whether the SDK's WinHTTP client is the one used, or WinINet (both are present).
-4. Whether `BlightedNewWorld.exe` starts on Windows without Steam's launcher (it does under
-   Proton on Linux).
+1. **Resolved for the patched fields** (§1.1). The exact AWS SDK for C++ version is still not
+   named, but the `ClientConfiguration` offsets the patch needs (`proxyScheme +0x98`,
+   `proxyHost +0xA0`, size `+0xB0`, `proxyPort +0xC0`, `verifySSL +0x1B8`) are observed in the
+   constructor `FUN_147467a40` and the WinHTTP client `FUN_147491570`.
+2. **Resolved** (§1.1). Kinesis builder `FUN_1461c3cc0`, STS builder `FUN_1461c5220`.
+3. **Resolved** (§1.1). The WinHTTP client is the one used; the factory `FUN_146b73730` picks
+   WinINet only when the configuration byte `+0x220` is `2`, and the constructor sets it to `0`.
+4. **Still unknown.** Whether `BlightedNewWorld.exe` starts on Windows without Steam's launcher
+   (it does under Proton on Linux). It needs a live test on Windows (`docs/client-patch.md`,
+   Windows live test).

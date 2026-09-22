@@ -54,6 +54,7 @@ syn = { version = "3.0.9", default-features = false, features = ["full", "parsin
 tempfile = { version = "3.27.0", default-features = false }
 thiserror = { version = "2.0.21", default-features = false, features = ["std"] }
 tokio = { version = "1.53.2", default-features = false }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
 toml = { version = "0.8.23", default-features = false, features = ["parse", "display"] }
 tower = { version = "0.5.3", default-features = false, features = ["util"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
