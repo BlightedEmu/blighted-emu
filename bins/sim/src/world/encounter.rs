@@ -57,9 +57,6 @@ use crate::objectives::{Effect, Event, KillTypes, ObjectiveRun, ObjectiveTree, T
 pub(super) const FIRST_SAILOR_DELAY_MS: u64 = 15_882;
 /// The level of every tutorial mob (retail cards).
 const TUTORIAL_MOB_LEVEL: u32 = 1;
-/// How long Thorpe's body stays (our choice: the capture's tutorial ends before retail removed
-/// it).
-const THORPE_CORPSE_MS: u64 = 10_000;
 /// How long a dead mob's body stays, by kind (retail: from its 3916 to its slot's stop; sailors
 /// 5105, 5105 and 5136 ms; legionnaire 6055, signifier 6087; risen 7041; swarmers 7101-7123).
 const SAILOR_CORPSE_MS: u64 = 5_105;
@@ -164,8 +161,8 @@ struct SpawnPoint {
     pace: Option<Pace>,
     /// When it comes after its fight starts.
     delay_ms: u64,
-    /// How long its body stays after its death.
-    corpse_ms: u64,
+    /// How long its body stays after its death; `None`: until the player leaves the tutorial.
+    corpse_ms: Option<u64>,
 }
 
 /// How the tutorial mobs fight (tutorial-ai and creature-animation session notes, live capture
@@ -335,11 +332,15 @@ const THORPE_FLURRY: MobMove = MobMove {
         thorpe_hit(1_915, "Attack_Flurry_Finisher"),
     ],
 };
-/// No retail overhead slash landed: its hit time is our choice, the middle of the fragment.
+/// No retail overhead slash landed, so its hit comes when its damage window opens: the
+/// `CAGE-Damage` clip of `Attack_Overhead_Slash` in `npc_commander_1h_swordanims.adb` starts
+/// 1.038 s into the fragment (row `Attack_Overhead_Slash`). The retail hits of his other moves
+/// landed 0 to 117 ms after their windows opened in the same file (stab 01 at 0.594 s: 595 ms;
+/// flurry at 0.725, 1.219 and 1.860 s: 781, 1249 and 1915 ms).
 const THORPE_OVERHEAD: MobMove = MobMove {
     fragment: fragment(54, 23, 0x2f),
     length_ms: 2_233,
-    hits: &[thorpe_hit(1_116, "Attack_Overhead_Slash")],
+    hits: &[thorpe_hit(1_038, "Attack_Overhead_Slash")],
 };
 /// His first phase: the stabs and swipes of the retail fight.
 const THORPE_MOVES: [MobMove; 4] = [
@@ -399,9 +400,12 @@ const MS_PER_SECOND_F32: f32 = 1_000.0;
 /// The shockwave of his transition: 7748 ms after it starts it pushes the player 5 m away.
 const SHOCKWAVE_AT_MS: u64 = 7_748;
 const SHOCKWAVE_PUSH_M: f32 = 5.0;
-/// How long a server move of the player takes (retail grab pulls: 200 to 300 ms; our choice for
-/// the shockwave too).
-const SHOVE_MS: u64 = 282;
+/// How long a grab pull of the player takes (retail grab pulls: 200 to 300 ms).
+const GRAB_PULL_MS: u64 = 282;
+/// How long the shockwave's push of the player takes: retail moved the own body from the 2218
+/// at 501031 until 501596, its last step of 1 cm or more (newchar 2026-09-12; 90 % of the way
+/// at +271 ms, 99 % at +503 ms).
+const SHOCKWAVE_PUSH_MS: u64 = 565;
 /// His force grab: its fragment and length (retail 2200 to 2232 ms).
 const THORPE_FORCE_GRAB: MoveFragment = fragment(47, 14, 0xb8);
 const GRAB_MS: u64 = 2_210;
@@ -495,7 +499,7 @@ const FIRST_SAILOR: SpawnPoint = SpawnPoint {
     collision: SAILOR_COLLISION,
     pace: Some(SAILOR_PACE),
     delay_ms: 0,
-    corpse_ms: SAILOR_CORPSE_MS,
+    corpse_ms: Some(SAILOR_CORPSE_MS),
 };
 /// When the last sailor comes after the first one died (the wave's slice delays are 0 s and 1 s,
 /// Observed: cards 55 ms and 1058 ms after the first sailor's 3916).
@@ -524,7 +528,7 @@ const SWARMER: SpawnPoint = SpawnPoint {
     collision: SWARMER_COLLISION,
     pace: None,
     delay_ms: 1_315,
-    corpse_ms: SWARMER_CORPSE_MS,
+    corpse_ms: Some(SWARMER_CORPSE_MS),
 };
 /// A fight of the tutorial: the task that starts it, where a player who dies in it comes back,
 /// and its mobs.
@@ -552,7 +556,7 @@ const FIGHTS_AFTER: [Fight; 4] = [
             pace: Some(LEGION_PACE),
             // Retail card 179393, 4200 ms after the door (175193).
             delay_ms: 4_200,
-            corpse_ms: LEGION_CORPSE_MS,
+            corpse_ms: Some(LEGION_CORPSE_MS),
         }],
     },
     Fight {
@@ -567,7 +571,7 @@ const FIGHTS_AFTER: [Fight; 4] = [
             pace: Some(LEGION_PACE),
             // Retail card 202592, 5782 ms after the trigger (196810).
             delay_ms: 5_782,
-            corpse_ms: LEGION_CORPSE_MS,
+            corpse_ms: Some(LEGION_CORPSE_MS),
         }],
     },
     Fight {
@@ -584,7 +588,7 @@ const FIGHTS_AFTER: [Fight; 4] = [
                 // Retail cards after the trigger (282975): risen +417 ms, swarmers +1315,
                 // +2316 and +3313 ms, each about 50 ms after a spawner timer ends.
                 delay_ms: 417,
-                corpse_ms: RISEN_CORPSE_MS,
+                corpse_ms: Some(RISEN_CORPSE_MS),
             },
             SWARMER,
             SpawnPoint {
@@ -611,7 +615,10 @@ const FIGHTS_AFTER: [Fight; 4] = [
             collision: LEGION_COLLISION,
             pace: Some(THORPE_PACE),
             delay_ms: 0,
-            corpse_ms: THORPE_CORPSE_MS,
+            // His body stays until the player leaves the tutorial: retail never stopped his
+            // slot after his 3916 (newchar 2026-09-12: 546969 to the 502 at 653910; newchar
+            // 2026-09-18: 437309 to the 502 at 448027).
+            corpse_ms: None,
         }],
     },
 ];
@@ -655,8 +662,8 @@ enum ShipWave {
 pub(super) enum Order {
     /// Set this achievement.
     Achievement(String),
-    /// Remove this item.
-    RemoveItem(String),
+    /// Remove this many of this item.
+    RemoveItem(String, u32),
     /// Give this many of this item.
     GiveItem(String, u32),
     /// The player's potions of this item become a new stack of this many in quick slot 1, and
@@ -755,8 +762,8 @@ struct Fighter {
     /// When a mob that picks the player at its spawn announces it; `None` for a mob that picks
     /// the player when it first sees it.
     announce_at_ms: Option<u64>,
-    /// How long its body stays after its death.
-    corpse_ms: u64,
+    /// How long its body stays after its death; `None`: until the player leaves the tutorial.
+    corpse_ms: Option<u64>,
 }
 
 /// The tutorial of one player.
@@ -770,8 +777,8 @@ pub(super) struct Tutorial {
     /// The end of the quest gave its rewards.
     rewarded: bool,
     fighters: Vec<Fighter>,
-    /// Dead mobs and when their bodies go.
-    corpses: Vec<(u64, u64)>,
+    /// Dead mobs and when their bodies go; `None`: when the player leaves.
+    corpses: Vec<(u64, Option<u64>)>,
     /// When the player moves into the water; `None` before the video or after the move.
     water_at_ms: Option<u64>,
     moved_to_water: bool,
@@ -1188,8 +1195,10 @@ impl Tutorial {
                 mob = fighter.entity,
                 "tutorial: a mob died"
             );
-            self.corpses
-                .push((fighter.entity, now_ms.saturating_add(fighter.corpse_ms)));
+            self.corpses.push((
+                fighter.entity,
+                fighter.corpse_ms.map(|ms| now_ms.saturating_add(ms)),
+            ));
             orders.push(Order::Died {
                 mob: fighter.entity,
                 collision: fighter.collision,
@@ -1232,7 +1241,7 @@ impl Tutorial {
             tracing::info!(player = self.owner, "tutorial: two more sailors come");
         }
         self.corpses.retain(|(mob, gone_at_ms)| {
-            let stays = now_ms < *gone_at_ms;
+            let stays = gone_at_ms.is_none_or(|gone_at_ms| now_ms < gone_at_ms);
             if !stays {
                 mobs.remove_personal(*mob);
             }
@@ -1332,7 +1341,7 @@ impl Tutorial {
             Order::Shove {
                 mob: captain,
                 shove: Shove::Away(SHOCKWAVE_PUSH_M),
-                length_ms: SHOVE_MS,
+                length_ms: SHOCKWAVE_PUSH_MS,
             },
         ));
         let tell_ms = now_ms + CAPTAIN_TRANSITION_MS + TELL_AFTER_TRANSITION_MS;
@@ -1434,7 +1443,7 @@ impl Tutorial {
             Order::Shove {
                 mob: captain,
                 shove: Shove::To(GRAB_PULL_STOP_M),
-                length_ms: SHOVE_MS,
+                length_ms: GRAB_PULL_MS,
             },
         ));
         tracing::info!(
@@ -1450,7 +1459,7 @@ impl Tutorial {
             match effect {
                 Effect::Achievement(id) => orders.push(Order::Achievement(id)),
                 Effect::LockAchievement(id) => orders.push(Order::LockAchievement(id)),
-                Effect::RemoveItem(id) => orders.push(Order::RemoveItem(id)),
+                Effect::RemoveItem(id, count) => orders.push(Order::RemoveItem(id, count)),
                 // The tutorial's tree fires no game event (build 25810808).
                 Effect::GameEvent(event) => {
                     tracing::debug!(player = self.owner, %event, "tutorial game event");
@@ -1742,7 +1751,7 @@ pub(crate) mod tests {
                     collision: SAILOR_COLLISION
                 },
                 Order::Achievement("FTUE_Intro3_Cinematic_Unlock".to_owned()),
-                Order::RemoveItem("1hSwordT2_FTUE".to_owned()),
+                Order::RemoveItem("1hSwordT2_FTUE".to_owned(), 1),
                 Order::Achievement("FTUE_AncientRuins_Door".to_owned()),
             ]
         );
@@ -2021,7 +2030,7 @@ pub(crate) mod tests {
         assert!(pull.contains(&Order::Shove {
             mob: thorpe,
             shove: Shove::To(GRAB_PULL_STOP_M),
-            length_ms: SHOVE_MS,
+            length_ms: GRAB_PULL_MS,
         }));
         assert_eq!(
             grabs(&tutorial.tick(&mut mobs, &kill_types, far, first + GRAB_INTERVAL_MS)),
@@ -2093,7 +2102,7 @@ pub(crate) mod tests {
         assert!(shockwave.contains(&Order::Shove {
             mob: thorpe,
             shove: Shove::Away(SHOCKWAVE_PUSH_M),
-            length_ms: SHOVE_MS,
+            length_ms: SHOCKWAVE_PUSH_MS,
         }));
         let tell_ms = NOW + CAPTAIN_TRANSITION_MS + TELL_AFTER_TRANSITION_MS;
         let tell = tutorial.tick(&mut mobs, &kill_types, near, tell_ms);
@@ -2188,6 +2197,31 @@ pub(crate) mod tests {
                 .iter()
                 .all(|fighter| fighter.entity != thorpe)
         );
+        // His body stays to the end of the tutorial: retail still had his slot 106941 ms after
+        // his 3916, when the player left (newchar 2026-09-12).
+        const RETAIL_BODY_SEEN_MS: u64 = 106_941;
+        tutorial.tick(
+            &mut mobs,
+            &KillTypes::default(),
+            SHIP,
+            NOW + CAPTAIN_INTERMISSION_MS + 2 + RETAIL_BODY_SEEN_MS,
+        );
+        assert!(mobs.get(thorpe).is_some(), "his body stays");
+        tutorial.end(&mut mobs);
+        assert!(mobs.get(thorpe).is_none(), "it goes with the tutorial");
+    }
+
+    #[test]
+    fn thorpe_overhead_hits_when_its_damage_window_opens() {
+        // `npc_commander_1h_swordanims.adb`, `Attack_Overhead_Slash`: `CAGE-Damage` 1.038 to
+        // 1.233 s, row `Attack_Overhead_Slash`.
+        const WINDOW_MS: (u64, u64) = (1_038, 1_233);
+        let [hit] = THORPE_OVERHEAD.hits else {
+            panic!("one hit");
+        };
+        assert_eq!(hit.at_ms, WINDOW_MS.0);
+        assert!(hit.at_ms < WINDOW_MS.1 && WINDOW_MS.1 < THORPE_OVERHEAD.length_ms);
+        assert_eq!(hit.row, "Attack_Overhead_Slash");
     }
 
     /// Its spawn's point and a player `metres` east of it.

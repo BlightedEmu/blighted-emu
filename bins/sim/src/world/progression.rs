@@ -2,8 +2,10 @@
 //! A player's weapon masteries as its client keeps them (docs/re/2026-09-18-progression-and-gm-
 //! mode.md sections 2 and 4): the categorical progression list (type 911) and the weapon point
 //! pools (type 3681). The sim keeps the total experience of each mastery; the rank and the
-//! points inside it come from the rank table. Each rank gives one unspent point of the weapon's
-//! pool.
+//! points inside it come from the rank table. Each rank gives one point of the weapon's pool;
+//! the client assigns them to the progression points of the weapon's tree (1112), and the
+//! applied active abilities go into the weapon table's mapped slots (2857, type 185;
+//! docs/re/2026-09-18-progression-and-gm-mode.md section 6).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -11,7 +13,8 @@ use nw_bus::AdminReply;
 use nw_content::progression::{Mastery, Progression};
 use nw_messages::items::FIRST_VERSION;
 use nw_messages::{
-    CategoricalProgressionState, MasteryChange, MasteryEntry, MasteryFields, PointPool,
+    AbilityState, CategoricalProgressionState, MAX_MAPPED_SLOTS, MappedSlot, MappedTable,
+    MasteryChange, MasteryEntry, MasteryFields, PersistentAbilities, PointEntry, PointPool,
     PoolCategory, ProgressionPointState,
 };
 
@@ -21,6 +24,37 @@ use super::{Player, SimWorld};
 const MAX_COINS: u64 = i64::MAX.unsigned_abs();
 /// The answer for a level or mastery command when the content has no level table.
 const NO_LEVELS: &str = "the content has no level table";
+/// The slot key of each mapped slot of an ability table: retail sends 402, 115 and 139 for the
+/// three slots of all 29 tables (newchar 2026-09-18 and NH-MSQ-2.1 logins; meaning Unknown).
+const RETAIL_SLOT_KEYS: [u32; MAX_MAPPED_SLOTS] = [402, 115, 139];
+
+/// One weapon progression point a player assigned points to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WeaponPoint {
+    /// Its `ProgressionPointId`.
+    id: String,
+    /// Its wire id.
+    crc: u32,
+    /// Its pool's wire id.
+    pool: u32,
+    /// The points in it.
+    level: u16,
+    /// Whether it is an active ability.
+    active: bool,
+}
+
+/// Why an assignment of weapon points (1112) is refused; the state stays as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AssignRefusal {
+    /// The point is no ability-tree point of a weapon pool, or not of the pool sent.
+    UnknownPoint,
+    /// No points, or more than the point's `MaxLevel`.
+    BadLevel,
+    /// Its `RequiredProgressionPointId` has fewer points than `RequiredProgressionPointLevel`.
+    Required,
+    /// The pool has fewer unspent points.
+    NotEnoughPoints,
+}
 
 /// The weapon masteries of one player, in the order its client lists them.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -38,6 +72,16 @@ pub(super) struct Masteries {
     version: u64,
     /// The version of the newest 3681 pool list the client has.
     pools_version: u64,
+    /// The weapon progression points with assigned points, in the order first assigned.
+    points: Vec<WeaponPoint>,
+    /// Saved points the content does not know: kept as they are for the save.
+    kept_points: Vec<(String, u16)>,
+    /// The pools whose unspent count an assignment changed since the last bundle.
+    assigned: BTreeSet<u32>,
+    /// Whether the client applied its points (2857) since the last bundle.
+    applied: bool,
+    /// The mapped abilities its client has.
+    mapping_sent: Option<PersistentAbilities>,
 }
 
 impl Masteries {
@@ -72,6 +116,184 @@ impl Masteries {
             version: versions.0,
             pools_version: versions.1,
             ..Self::default()
+        }
+    }
+
+    /// These masteries with the saved weapon points `saved` (point id, level, in assignment
+    /// order): the points `progression` knows count; another is kept unsent, with a log line.
+    pub(super) fn with_points(
+        mut self,
+        saved: &[(String, u16)],
+        progression: &Progression,
+    ) -> Self {
+        for (id, level) in saved {
+            match progression.points.point_by_id(id) {
+                Some(rule) => self.points.push(WeaponPoint {
+                    id: rule.id.clone(),
+                    crc: rule.crc,
+                    pool: rule.pool,
+                    level: *level,
+                    active: rule.active,
+                }),
+                None => {
+                    tracing::warn!(point = %id, "unknown weapon point kept unsent");
+                    self.kept_points.push((id.clone(), *level));
+                }
+            }
+        }
+        self
+    }
+
+    /// Each weapon point and its level, as a save or a handoff carries them.
+    pub(super) fn carried_points(&self) -> Vec<(String, u16)> {
+        self.points
+            .iter()
+            .map(|point| (point.id.clone(), point.level))
+            .chain(self.kept_points.iter().cloned())
+            .collect()
+    }
+
+    /// Assigns `points` of pool `pool` to the progression point `point` (1112), as the content's
+    /// `ProgressionPointData` allows; the next bundle sends the pool's count and the point list.
+    pub(super) fn assign(
+        &mut self,
+        progression: &Progression,
+        pool: u32,
+        point: u32,
+        points: u32,
+    ) -> Result<(), AssignRefusal> {
+        let rule = progression
+            .points
+            .point(point)
+            .filter(|rule| rule.pool == pool)
+            .ok_or(AssignRefusal::UnknownPoint)?;
+        let points = u16::try_from(points)
+            .ok()
+            .filter(|points| *points > 0)
+            .ok_or(AssignRefusal::BadLevel)?;
+        let level = self.level_of(point);
+        if level
+            .checked_add(points)
+            .is_none_or(|level| level > rule.max_level)
+        {
+            return Err(AssignRefusal::BadLevel);
+        }
+        if let Some((required, required_level)) = rule.requires
+            && self.level_of(required) < required_level
+        {
+            return Err(AssignRefusal::Required);
+        }
+        if self.unspent(progression, pool) < points {
+            return Err(AssignRefusal::NotEnoughPoints);
+        }
+        match self.points.iter_mut().find(|known| known.crc == point) {
+            Some(known) => known.level += points,
+            None => self.points.push(WeaponPoint {
+                id: rule.id.clone(),
+                crc: rule.crc,
+                pool,
+                level: points,
+                active: rule.active,
+            }),
+        }
+        self.assigned.insert(pool);
+        Ok(())
+    }
+
+    /// The client applied its assigned points (2857): the next bundle sends the mapped
+    /// abilities when they changed.
+    pub(super) fn apply(&mut self) {
+        self.applied = true;
+    }
+
+    /// The mapped abilities: whole with the first card, then after an apply that changed them.
+    pub(super) fn take_abilities(
+        &mut self,
+        progression: &Progression,
+        first: bool,
+    ) -> Option<AbilityState> {
+        let applied = std::mem::take(&mut self.applied);
+        // Before the first card the client has no state to change: the card sends it whole.
+        if !first && (!applied || self.mapping_sent.is_none()) {
+            return None;
+        }
+        let mapping = self.mapping(progression);
+        if !first && self.mapping_sent.as_ref() == Some(&mapping) {
+            return None;
+        }
+        self.mapping_sent = Some(mapping.clone());
+        Some(AbilityState {
+            persistent: Some(mapping),
+        })
+    }
+
+    /// The points in progression point `point`.
+    fn level_of(&self, point: u32) -> u16 {
+        self.points
+            .iter()
+            .find(|known| known.crc == point)
+            .map_or(0, |known| known.level)
+    }
+
+    /// The unspent points of weapon pool `pool`: one per rank of its mastery, less the
+    /// assigned ones.
+    fn unspent(&self, progression: &Progression, pool: u32) -> u16 {
+        let rank = progression
+            .mastery_by_crc(pool)
+            .and_then(|mastery| self.position(mastery))
+            .and_then(|index| self.wire_entry(progression, index))
+            .map_or(0, |entry| entry.rank);
+        rank.saturating_sub(self.assigned_in(pool))
+    }
+
+    fn assigned_in(&self, pool: u32) -> u16 {
+        self.points
+            .iter()
+            .filter(|point| point.pool == pool)
+            .fold(0, |sum, point| sum.saturating_add(point.level))
+    }
+
+    /// The point list as the client keeps it.
+    fn point_entries(&self) -> Vec<PointEntry> {
+        self.points
+            .iter()
+            .map(|point| PointEntry {
+                pool: point.pool,
+                point: point.crc,
+                level: point.level,
+            })
+            .collect()
+    }
+
+    /// Every ability table with its mapped slots (the pool's active abilities, in assignment
+    /// order, first slot first: retail mapped `Ability_Greatsword_Combo` and
+    /// `Ability_Blunderbuss_AzothShrapnelBlast` into the first slot at their 2857, and no
+    /// upgrade or passive), and the weapon pool versions.
+    fn mapping(&self, progression: &Progression) -> PersistentAbilities {
+        let rules = &progression.points;
+        PersistentAbilities {
+            tables: rules
+                .ability_tables()
+                .iter()
+                .map(|table| {
+                    let mut active = self
+                        .points
+                        .iter()
+                        .filter(|point| point.active && point.pool == *table)
+                        .map(|point| point.crc);
+                    MappedTable {
+                        table: *table,
+                        slots: RETAIL_SLOT_KEYS
+                            .iter()
+                            .map(|key| MappedSlot {
+                                ability: active.next().unwrap_or_default(),
+                                key: *key,
+                            })
+                            .collect(),
+                    }
+                })
+                .collect(),
+            pool_versions: rules.pool_versions().to_vec(),
         }
     }
 
@@ -142,16 +364,55 @@ impl Masteries {
         let entries: Vec<MasteryEntry> = self.wire_entries(progression).collect();
         (
             CategoricalProgressionState::full(self.version, &entries),
-            ProgressionPointState::full(self.pools_version, &self.pools(progression), &[]),
+            ProgressionPointState::full(
+                self.pools_version,
+                &self.pools(progression),
+                &self.point_entries(),
+            ),
         )
     }
 
-    /// The changes since the last bundle: the 911 changes, and the whole pool list when a rank
-    /// changed; `None` without a change.
+    /// The changes since the last bundle: the 911 changes (`None` without one), and the point
+    /// lists: the whole pool lists when a rank changed, else the counts of the pools an
+    /// assignment changed, with the whole point list after an assignment (retail answer to a
+    /// 1112, newchar 2026-09-18); `None` without a change.
     pub(super) fn take_change(
         &mut self,
         progression: &Progression,
-    ) -> Option<(CategoricalProgressionState, Option<ProgressionPointState>)> {
+    ) -> (
+        Option<CategoricalProgressionState>,
+        Option<ProgressionPointState>,
+    ) {
+        let assigned = std::mem::take(&mut self.assigned);
+        let ranked = !std::mem::take(&mut self.ranked).is_empty();
+        let points = (ranked || !assigned.is_empty()).then(|| {
+            self.pools_version += 1;
+            let pools = self.pools(progression);
+            let state = if ranked {
+                ProgressionPointState::pools(self.pools_version, &pools)
+            } else {
+                let counts: Vec<(u32, u16)> = pools
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, pool)| assigned.contains(&pool.pool))
+                    .filter_map(|(index, pool)| Some((u32::try_from(index).ok()?, pool.count)))
+                    .collect();
+                ProgressionPointState::pool_counts(self.pools_version, &counts)
+            };
+            if assigned.is_empty() {
+                state
+            } else {
+                state.with_points(self.pools_version, &self.point_entries())
+            }
+        });
+        (self.take_mastery_change(progression), points)
+    }
+
+    /// The 911 changes since the last bundle; `None` without a change.
+    fn take_mastery_change(
+        &mut self,
+        progression: &Progression,
+    ) -> Option<CategoricalProgressionState> {
         if self.changed.is_empty() {
             return None;
         }
@@ -166,14 +427,7 @@ impl Masteries {
                 })
             })
             .collect();
-        let pools = (!std::mem::take(&mut self.ranked).is_empty()).then(|| {
-            self.pools_version += 1;
-            ProgressionPointState::pools(self.pools_version, &self.pools(progression))
-        });
-        Some((
-            CategoricalProgressionState::changes(self.version, &changes),
-            pools,
-        ))
+        Some(CategoricalProgressionState::changes(self.version, &changes))
     }
 
     fn position(&self, mastery: &Mastery) -> Option<usize> {
@@ -200,14 +454,16 @@ impl Masteries {
         (0..self.entries.len()).filter_map(|index| self.wire_entry(progression, index))
     }
 
-    /// One weapon point pool per mastery with a rank: one unspent point per rank (spending is
-    /// not taken yet, so every point stays unspent).
+    /// One weapon point pool per mastery with a rank: one point per rank, less the assigned
+    /// ones.
     fn pools(&self, progression: &Progression) -> Vec<PointPool> {
         self.wire_entries(progression)
             .filter(|entry| entry.rank > 0)
             .map(|entry| PointPool {
                 pool: entry.progression_id,
-                count: entry.rank,
+                count: entry
+                    .rank
+                    .saturating_sub(self.assigned_in(entry.progression_id)),
                 category: PoolCategory::Weapon,
             })
             .collect()
@@ -368,11 +624,11 @@ mod tests {
         let (first, pools) = masteries.first_states(&progression);
         assert_eq!(first, CategoricalProgressionState::full(FIRST_VERSION, &[]));
         assert_eq!(pools, ProgressionPointState::full(FIRST_VERSION, &[], &[]));
-        assert!(masteries.take_change(&progression).is_none());
+        assert_eq!(masteries.take_change(&progression), (None, None));
         // Retail first kill: greatsword +20 (rank 1, 10 points), blunderbuss +4.
         masteries.set(&sword, 20);
         masteries.set(&buss, 4);
-        let (change, pools) = masteries.take_change(&progression).expect("change");
+        let (change, pools) = masteries.take_change(&progression);
         let entry = |crc, rank, points| MasteryEntry {
             progression_id: crc,
             rank,
@@ -380,7 +636,7 @@ mod tests {
         };
         assert_eq!(
             change,
-            CategoricalProgressionState::changes(
+            Some(CategoricalProgressionState::changes(
                 FIRST_VERSION + 1,
                 &[
                     MasteryChange {
@@ -394,7 +650,7 @@ mod tests {
                         fields: MasteryFields::ALL,
                     },
                 ]
-            )
+            ))
         );
         let pool = PointPool {
             pool: sword.crc,
@@ -407,17 +663,17 @@ mod tests {
         );
         // Points alone: no pool list.
         masteries.set(&buss, 5);
-        let (change, pools) = masteries.take_change(&progression).expect("change");
+        let (change, pools) = masteries.take_change(&progression);
         assert_eq!(
             change,
-            CategoricalProgressionState::changes(
+            Some(CategoricalProgressionState::changes(
                 FIRST_VERSION + 2,
                 &[MasteryChange {
                     index: 1,
                     entry: entry(buss.crc, 0, 5),
                     fields: MasteryFields::POINTS,
                 }]
-            )
+            ))
         );
         assert_eq!(pools, None);
     }
@@ -460,8 +716,9 @@ mod tests {
             "an id the content does not know is kept for the save"
         );
         masteries.set(&sword, u32::MAX);
-        assert!(
-            masteries.take_change(&progression).is_none(),
+        assert_eq!(
+            masteries.take_change(&progression),
+            (None, None),
             "no change at the top"
         );
         let (first, _) = masteries.first_states(&progression);
@@ -476,6 +733,175 @@ mod tests {
                 }]
             )
         );
+    }
+
+    /// The rules of the sword tree's first two points (retail rows).
+    fn with_points() -> Progression {
+        use nw_content::character_points::{CharacterPoints, PointRow};
+        let mut progression = progression();
+        let point = |id, requires| PointRow {
+            id,
+            pool: SWORD,
+            max_level: MAX_POINT_LEVEL,
+            requires,
+        };
+        progression.points = CharacterPoints::build(
+            Vec::new(),
+            Vec::new(),
+            [SWORD_TABLE],
+            [COMBO],
+            [(SWORD, SWORD_VERSION)],
+            [point(COMBO, None), point(UPGRADE, Some((COMBO, 1)))],
+        );
+        progression
+    }
+
+    const SWORD_TABLE: &str = "GreatswordAbilityTable";
+    const COMBO: &str = "Ability_Greatsword_Combo";
+    const UPGRADE: &str = "Upgrade_Greatsword_Combo_1";
+    const SWORD_VERSION: i64 = 1;
+    const MAX_POINT_LEVEL: i64 = 10;
+    /// Rank 2 of the test caps: two points.
+    const RANK_TWO_XP: u32 = 60;
+
+    #[test]
+    fn assigned_points_leave_the_pool_and_go_out_as_retail_answers() {
+        let progression = with_points();
+        let sword = progression.mastery(SWORD).expect("sword").clone();
+        let combo = progression.points.point_by_id(COMBO).expect("combo").crc;
+        let upgrade = progression
+            .points
+            .point_by_id(UPGRADE)
+            .expect("upgrade")
+            .crc;
+        let saved = BTreeMap::from([(SWORD.to_owned(), RANK_TWO_XP)]);
+        let mut masteries = Masteries::of(&saved, &progression, (0, 0))
+            .with_points(&[("Retired_Point".to_owned(), 1)], &progression);
+        masteries.first_states(&progression);
+        assert_eq!(
+            masteries.assign(&progression, sword.crc, upgrade, 1),
+            Err(AssignRefusal::Required)
+        );
+        assert_eq!(
+            masteries.assign(&progression, sword.crc, 0, 1),
+            Err(AssignRefusal::UnknownPoint)
+        );
+        assert_eq!(
+            masteries.assign(&progression, 0, combo, 1),
+            Err(AssignRefusal::UnknownPoint)
+        );
+        assert_eq!(
+            masteries.assign(&progression, sword.crc, combo, 0),
+            Err(AssignRefusal::BadLevel)
+        );
+        assert_eq!(
+            masteries.assign(&progression, sword.crc, combo, 3),
+            Err(AssignRefusal::NotEnoughPoints)
+        );
+        assert_eq!(masteries.assign(&progression, sword.crc, combo, 1), Ok(()));
+        let entry = |point, level| PointEntry {
+            pool: sword.crc,
+            point,
+            level,
+        };
+        // Retail answer: the pool's count and the whole point list.
+        assert_eq!(
+            masteries.take_change(&progression),
+            (
+                None,
+                Some(
+                    ProgressionPointState::pool_counts(FIRST_VERSION + 1, &[(0, 1)])
+                        .with_points(FIRST_VERSION + 1, &[entry(combo, 1)])
+                )
+            )
+        );
+        assert_eq!(
+            masteries.assign(&progression, sword.crc, upgrade, 1),
+            Ok(())
+        );
+        assert_eq!(
+            masteries.assign(&progression, sword.crc, upgrade, 1),
+            Err(AssignRefusal::NotEnoughPoints)
+        );
+        assert_eq!(
+            masteries.carried_points(),
+            [
+                (COMBO.to_owned(), 1),
+                (UPGRADE.to_owned(), 1),
+                ("Retired_Point".to_owned(), 1)
+            ],
+            "an unknown saved point is kept for the save"
+        );
+        // A later login lists the points and an empty pool.
+        let (_, pools) = masteries.first_states(&progression);
+        let pool = PointPool {
+            pool: sword.crc,
+            count: 0,
+            category: PoolCategory::Weapon,
+        };
+        assert_eq!(
+            pools,
+            ProgressionPointState::full(
+                FIRST_VERSION + 2,
+                &[pool],
+                &[entry(combo, 1), entry(upgrade, 1)]
+            )
+        );
+    }
+
+    #[test]
+    fn applied_active_abilities_fill_the_first_free_slot() {
+        let progression = with_points();
+        let sword = progression.mastery(SWORD).expect("sword").clone();
+        let combo = progression.points.point_by_id(COMBO).expect("combo").crc;
+        let upgrade = progression
+            .points
+            .point_by_id(UPGRADE)
+            .expect("upgrade")
+            .crc;
+        let saved = BTreeMap::from([(SWORD.to_owned(), RANK_TWO_XP)]);
+        let mut masteries = Masteries::of(&saved, &progression, (0, 0));
+        masteries.apply();
+        assert_eq!(
+            masteries.take_abilities(&progression, false),
+            None,
+            "nothing before the card"
+        );
+        let slots = |state: Option<AbilityState>| -> Vec<u32> {
+            state
+                .and_then(|state| state.persistent)
+                .map(|abilities| {
+                    abilities.tables[0]
+                        .slots
+                        .iter()
+                        .map(|slot| slot.ability)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            slots(masteries.take_abilities(&progression, true)),
+            [0, 0, 0]
+        );
+        masteries
+            .assign(&progression, sword.crc, combo, 1)
+            .expect("combo");
+        assert_eq!(
+            masteries.take_abilities(&progression, false),
+            None,
+            "not applied"
+        );
+        masteries.apply();
+        assert_eq!(
+            slots(masteries.take_abilities(&progression, false)),
+            [combo, 0, 0]
+        );
+        // An upgrade is no active ability: the mapping stays, so nothing goes out.
+        masteries
+            .assign(&progression, sword.crc, upgrade, 1)
+            .expect("upgrade");
+        masteries.apply();
+        assert_eq!(masteries.take_abilities(&progression, false), None);
     }
 
     fn command(action: AdminAction) -> AdminCommand {

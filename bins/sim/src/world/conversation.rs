@@ -69,8 +69,11 @@ impl SimWorld {
     /// `objective`: when it is the player's active quest and its tasks are done, the tracker
     /// shows it completed, the player gets its rewards and gives back the items it brought, and
     /// its game mode schedule is refreshed (6426; retail 2026-09-18: 27 ms after each 794). The
-    /// client asks only at the quest's NPC; the server does not check the NPC (our choice: it
-    /// has no NPC positions).
+    /// client asks only at the quest's NPC (`NpcDestinationId`); the 794 names no NPC, only the
+    /// objective. Whether retail checks the NPC or its distance is Unknown: no capture holds a
+    /// refused 794, and the NPC's place (world file `npcData`) and the reach of its interact
+    /// volume (the master NPC slice's 3 m cylinder, which slice variants may override with
+    /// `InteractOverride_Radius`) are not checked against a retail turn-in yet.
     pub(super) fn turn_in(&mut self, entity: Entity, number: u64, objective: u32) {
         let Some(quest) = self
             .quests

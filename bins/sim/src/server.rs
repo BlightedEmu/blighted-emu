@@ -29,9 +29,9 @@ use nw_db::{
 };
 use nw_messages::facet::TIME_SYNC_REQUEST_TYPE_INDEX;
 use nw_messages::{
-    BodyCodec, ClientFacetMsg, ClientInputMsg, GmClientMsg, InputRecord,
-    RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
-    SPREADSHOT_REQUEST_TYPE_INDEX, SpreadshotRequestMsg,
+    BodyCodec, ClientFacetMsg, ClientInputMsg, GmClientMsg, InputRecord, LookupRequest,
+    PointsClientMsg, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX,
+    RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX, SpreadshotRequestMsg,
 };
 use nw_reflect::Envelope;
 use nw_sim_core::{Ground, GroundCheck, TickClock};
@@ -49,7 +49,7 @@ use crate::player_content::PlayerContent;
 use crate::saves::{ItemSave, ProgressionSave, QuestSave, SaveQueue};
 use crate::stats::stat_updates;
 use crate::world::{
-    Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, Strike, WorldSettings,
+    Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
 };
 use nw_world::script::LevelDesign;
 
@@ -543,8 +543,9 @@ impl Loop {
         }
     }
 
-    /// Reads one client message: an input (1589), a respawn request (1938) or a facet call of
-    /// the level flow ([`ClientFacetMsg`]); every other type is counted and ignored. The
+    /// Reads one client message: an input (1589), a respawn request (1938), a lookup
+    /// ([`LookupRequest`]) or a facet call of the level flow ([`ClientFacetMsg`]); every other
+    /// type is counted and ignored. The
     /// messages it makes wait in the world for the next tick. Bad bytes are counted and never
     /// close the connection.
     fn client_message(&mut self, connection: &ConnectionRef, bytes: &[u8]) {
@@ -561,6 +562,15 @@ impl Loop {
             }
             Some(REQUEST_RESPAWN_TYPE_INDEX) => self.respawn_request(connection, &envelope.body),
             Some(SPREADSHOT_REQUEST_TYPE_INDEX) => self.spreadshot(connection, &envelope.body),
+            Some(index) if let Some(request) = LookupRequest::decode(index, &envelope.body) => {
+                match request {
+                    Ok(request) => self.world.lookup(connection, &request),
+                    Err(error) => {
+                        metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
+                        tracing::warn!(type_index = index, %error, "lookup does not read");
+                    }
+                }
+            }
             Some(index) if let Some(call) = GmClientMsg::decode(index, &envelope.body) => {
                 match call {
                     Ok(call) => self.world.gm_call(connection, call, self.now_ms()),
@@ -571,6 +581,20 @@ impl Loop {
                             %error,
                             body = %hex_of(&envelope.body),
                             "GM call does not read"
+                        );
+                    }
+                }
+            }
+            Some(index) if let Some(call) = PointsClientMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.points_call(connection, call),
+                    Err(error) => {
+                        metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
+                        tracing::warn!(
+                            type_index = index,
+                            %error,
+                            body = %hex_of(&envelope.body),
+                            "point call does not read"
                         );
                     }
                 }
@@ -605,14 +629,15 @@ impl Loop {
         };
         self.move_player(connection, &input.records);
         let now_ms = self.now_ms();
-        if let Some(request) = input.interaction() {
-            self.world
-                .interact(connection, request, &input.interaction_name(), now_ms);
+        match input.interaction() {
+            Some(request) => {
+                self.world
+                    .interact(connection, request, &input.interaction_name(), now_ms);
+            }
+            None => self.world.interaction_over(connection, now_ms),
         }
-        if input.records.iter().any(InputRecord::attack_pressed) {
-            self.world
-                .strike_quest_objects(connection, Strike::Swing, now_ms);
-        }
+        self.world
+            .swing_at_quest_objects(connection, &input.records, now_ms);
         for result in self.world.attack_input(connection, &input.records, now_ms) {
             self.attack_result(result);
         }
@@ -626,9 +651,11 @@ impl Loop {
         };
         let now_ms = self.now_ms();
         tracing::debug!(pellets = request.pellets.len(), "spread shot");
-        self.world
-            .strike_quest_objects(connection, Strike::Shot, now_ms);
-        for result in self.world.spreadshot(connection, &request, now_ms) {
+        let results = self.world.spreadshot(connection, &request, now_ms);
+        if results.iter().any(Result::is_ok) {
+            self.world.shoot_at_quest_objects(connection, now_ms);
+        }
+        for result in results {
             self.attack_result(result);
         }
     }
@@ -1344,6 +1371,8 @@ fn saved_progression(progression: &PlayerProgression) -> SavedProgression {
             })
             .collect(),
         masteries: progression.masteries.clone(),
+        attributes: progression.attributes.clone(),
+        weapon_points: progression.weapon_points.clone(),
     }
 }
 
@@ -2319,6 +2348,8 @@ mod tests {
                 achievements: vec![ACHIEVEMENT_BIT],
                 loot_limits: vec![limit.clone()],
                 masteries: BTreeMap::from([("BowAbilityTable".to_owned(), 30)]),
+                attributes: vec![(2, 15)],
+                weapon_points: Vec::new(),
             };
             admit(&bus, world_id, sim.id(), &first).await;
             sim.stop().await;
@@ -2902,7 +2933,9 @@ mod tests {
                 enter_level: false,
                 items: None,
                 drawn_weapon: None,
+                active_weapon: None,
                 mastery_versions: (0, 0),
+                attribute_version: 0,
                 game_master: false,
                 quests: PlayerQuests::default(),
                 progression: PlayerProgression::default(),

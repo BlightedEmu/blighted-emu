@@ -5,14 +5,13 @@
 //!
 //! Slot 0 holds four parallel lists: child 0 the pool ids (`u32`; a weapon pool has the type 911
 //! id of its mastery), child 1 the unspent points of each pool (`u16`), child 2 the pool
-//! categories (`u8`), child 3 the spent points (10 bytes each). Retail sends the four lists empty
+//! categories (`u8`), child 3 the spent points (10 bytes each: pool, point, level). Retail sends
+//! the four lists empty
 //! at login of a new character, the three pool lists whole when the first pool comes, a new pool
 //! as an appended entry of the three pool lists, and a count change of one pool after each
 //! weapon rank up (+1) and each spent point.
 
-#[cfg(test)]
-use crate::list_delta::child_changes;
-use crate::list_delta::{ReplicatedList, full_child, write_child};
+use crate::list_delta::{ReplicatedList, child_changes, full_child, write_child};
 use crate::slots::{SLOT_0, children_mask, read_slot_0, write_children};
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -26,8 +25,6 @@ const CHILDREN: u8 = 4;
 const POOL_IDS_CHILD: u8 = 0;
 const POOL_COUNTS_CHILD: u8 = 1;
 const POOL_CATEGORIES_CHILD: u8 = 2;
-/// Bytes of the unknown end of a spent point.
-const POINT_TAIL_BYTES: usize = 2;
 const FIELD: &str = "progression points";
 
 /// The category of a pool.
@@ -68,8 +65,10 @@ pub struct PointEntry {
     pub pool: u32,
     /// The `ProgressionPointId` CRC.
     pub point: u32,
-    /// Two bytes of Unknown meaning, kept as sent.
-    pub tail: [u8; POINT_TAIL_BYTES],
+    /// The points in it: retail's rose by the points of each 1112 (newchar 2026-09-18: 1 each
+    /// time); territory standing entries hold up to 14 and refunded weapon entries 0
+    /// (NH-MSQ-2.1).
+    pub level: u16,
 }
 
 impl PointEntry {
@@ -77,12 +76,12 @@ impl PointEntry {
         Ok(Self {
             pool: reader.u32()?,
             point: reader.u32()?,
-            tail: reader.array()?,
+            level: reader.u16()?,
         })
     }
 
     fn write(&self, writer: &mut Writer) {
-        writer.u32(self.pool).u32(self.point).bytes(&self.tail);
+        writer.u32(self.pool).u32(self.point).u16(self.level);
     }
 }
 
@@ -131,9 +130,17 @@ impl ProgressionPointState {
         }
     }
 
+    /// This state with the whole spent point list `points` at `version` (retail's answer to a
+    /// 1112: the pool's new count and the whole point list, newchar 2026-09-18).
+    pub fn with_points(self, version: u64, points: &[PointEntry]) -> Self {
+        Self {
+            point_entries: full_child(version, points, |point| *point),
+            ..self
+        }
+    }
+
     /// New unspent counts, as (pool list index, count) in send order, with the shared `version`.
-    #[cfg(test)]
-    pub(crate) fn pool_counts(version: u64, counts: &[(u32, u16)]) -> Self {
+    pub fn pool_counts(version: u64, counts: &[(u32, u16)]) -> Self {
         Self {
             pool_counts: child_changes(version, counts.iter().copied()),
             ..Self::default()
@@ -242,6 +249,14 @@ mod tests {
         0x20, 0xb3, 0x3f, 0x47, 0x3a, 0xc2, 0xed, 0x00, 0x01,
     ];
 
+    /// Retail answer to the first 1112 (newchar 2026-09-18): the greatsword pool count to 0 and
+    /// the whole point list with `Ability_Greatsword_Combo` at level 1, version 6787.
+    const RETAIL_ASSIGNED: [u8; 25] = [
+        0x01, 0x0a, 0x01, 0x01, 0x00, 0x01, 0x83, 0x6a, 0x00, 0x00, 0x00, 0x01, 0x83, 0x6a, 0x01,
+        0x18, 0x0b, 0x9a, 0x9f, 0x2e, 0xdf, 0x28, 0xbe, 0x00, 0x01,
+    ];
+    const RETAIL_ASSIGNED_VERSION: u64 = 6787;
+
     fn weapon_pool(name: &str) -> PointPool {
         PointPool {
             pool: lowercase_crc32(name),
@@ -296,7 +311,6 @@ mod tests {
 
     #[test]
     fn a_spent_point_reads_and_writes_the_same_bytes() {
-        const SPENT_TAIL: [u8; POINT_TAIL_BYTES] = [0x00, 0x01];
         let state = decode(&RETAIL_SPENT);
         assert_eq!(encode(&state), RETAIL_SPENT);
         let Some(ReplicatedList::Changes(points)) = &state.point_entries else {
@@ -306,8 +320,21 @@ mod tests {
             points[1].value.pool,
             lowercase_crc32("BlunderbussAbilityTable")
         );
-        assert_eq!(points[1].value.tail, SPENT_TAIL);
+        assert_eq!(points[1].value.level, 1);
         assert_eq!(state.pool_ids, None);
+    }
+
+    #[test]
+    fn an_assigned_point_is_the_retail_answer() {
+        let point = PointEntry {
+            pool: lowercase_crc32("GreatSwordAbilityTable"),
+            point: lowercase_crc32("Ability_Greatsword_Combo"),
+            level: 1,
+        };
+        let state = ProgressionPointState::pool_counts(RETAIL_ASSIGNED_VERSION, &[(0, 0)])
+            .with_points(RETAIL_ASSIGNED_VERSION, &[point]);
+        assert_eq!(encode(&state), RETAIL_ASSIGNED);
+        assert_eq!(decode(&RETAIL_ASSIGNED), state);
     }
 
     #[test]

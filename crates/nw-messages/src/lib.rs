@@ -6,10 +6,12 @@
 //! `docs/re/2026-09-02-replication-and-movement.md` for the replicated states. A field without a
 //! name in the notes keeps a neutral name. `decode` fails on missing bytes and on bytes left over.
 
+pub mod abilities;
 pub mod achievements;
 pub mod afflictions;
 pub mod alc;
 pub mod appearance;
+pub mod attributes;
 pub mod buildables;
 pub mod bundle;
 pub mod categorical;
@@ -32,11 +34,13 @@ pub mod interactor;
 pub mod items;
 pub mod level_info;
 pub mod list_delta;
+pub mod lookups;
 pub mod loot;
 pub mod objectives;
 pub mod paperdoll;
 pub mod payload;
 pub mod player_components;
+pub mod points_client;
 pub mod position;
 pub mod progression;
 pub mod progression_points;
@@ -52,6 +56,10 @@ pub mod time_synch;
 pub mod vitals;
 pub mod wire;
 
+pub use abilities::{
+    ABILITY_COMPONENT, ABILITY_TYPE_INDEX, AbilityState, MAX_MAPPED_SLOTS, MappedSlot, MappedTable,
+    PersistentAbilities,
+};
 pub use achievements::{
     ACHIEVEMENT_COMPONENT, ACHIEVEMENT_TYPE_INDEX, AchievementBits, AchievementState, ByteChange,
 };
@@ -65,6 +73,9 @@ pub use alc::{
 };
 pub use appearance::{
     LOOK_CHOICES, PLAYER_APPEARANCE_TYPE_INDEX, PlayerAppearanceState, PlayerIconData, PlayerLook,
+};
+pub use attributes::{
+    ATTRIBUTE_COMPONENT, ATTRIBUTE_TYPE_INDEX, AttributeState, AttributeValue, PersistentAttributes,
 };
 pub use buildables::{
     BUILDABLE_CONTROLLER_TYPE_INDEX, BUILDABLE_GRID_TYPE_INDEX, BuildableControllerState,
@@ -123,8 +134,8 @@ pub use facet::{
     AdjustFxScriptsMsg, ClientFacetMsg, CraftIngredient, CraftProgressMsg, CutsceneEndFinalizedMsg,
     CutsceneGrantedMsg, DisableCollisionMsg, FacetHeader, GameModeSchedulerRefreshedMsg,
     GatheringInterruptedMsg, InteractionEndedMsg, InteractionValidatedMsg, PlayerSeenByAiMsg,
-    SelectedAsTargetMsg, StartWhisperMsg, TargetMsg, TeleportWithLoadingScreenMsg,
-    UnselectedAsTargetMsg, UpdatePhasingMsg, facet_entity,
+    SelectedAsTargetMsg, StartWhisperMsg, StorageSearchItemsMsg, TargetMsg,
+    TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg, facet_entity,
 };
 pub use gathering::{GATHERING_TYPE_INDEX, GatheringState, NO_GATHERABLE};
 pub use gde::{
@@ -142,6 +153,10 @@ pub use level_info::{
     LevelSpec, OPEN_WORLD_LEVEL, PhasingEntry, TUTORIAL_LEVEL,
 };
 pub use list_delta::{ListChange, ReplicatedList};
+pub use lookups::{
+    ContractsLookedUpMsg, JoinableSubArmiesMsg, LobbyCountsMsg, LookupRequest,
+    PendingMetaAchievementsMsg,
+};
 pub use loot::{
     GLOBAL_STORAGE_COMPONENT, GLOBAL_STORAGE_TYPE_INDEX, GlobalStorageState, LOOT_CREATURE,
     LOOT_ROLLED, LOOT_TAKEN, LOOT_TRACKER_COMPONENT, LOOT_TRACKER_TYPE_INDEX, LootTrackerState,
@@ -159,8 +174,9 @@ pub use payload::{BundleGroup, BundleMember, BundlePayload, KnownMembers, Member
 pub use player_components::{
     EmptyState, HealthChange, PLAYER_COMPONENT_TYPE_INDEX, PLAYER_EMPTY_COMPONENTS,
     PLAYER_VITALS_COMPONENT, PlayerComponentState, PlayerStates, change_members, empty_state,
-    gear_members, player_members,
+    gear_members, player_members, put_member,
 };
+pub use points_client::PointsClientMsg;
 pub use position::{
     POSITION_IN_THE_WORLD_TYPE_INDEX, POSITION_Z_MAX, POSITION_Z_MIN,
     PositionInTheWorldReplicatedState, Rotation, RotationComponent, Scale, WorldPosition,

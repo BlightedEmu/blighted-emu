@@ -10,6 +10,7 @@
 use nw_formats::objectstream::lowercase_crc32;
 
 use crate::Tables;
+use crate::character_points::CharacterPoints;
 
 /// The level table (`javelindata_xpamountsbylevel`).
 pub const LEVEL_TABLE: &str = "XPLevels";
@@ -71,6 +72,8 @@ pub struct Progression {
     level_starts: Vec<u32>,
     /// The weapon masteries, in table order.
     masteries: Vec<Mastery>,
+    /// The rules of the attribute and weapon points.
+    pub points: CharacterPoints,
 }
 
 impl Progression {
@@ -102,7 +105,10 @@ impl Progression {
                     .is_some_and(|table| table.eq_ignore_ascii_case(WEAPON_MASTERY_RANK_TABLE))
             })
             .map(|row| (row.categorical_progression_id.as_str(), row.max_level));
-        Self::build(levels, ranks, masteries)
+        Self {
+            points: CharacterPoints::of_tables(tables),
+            ..Self::build(levels, ranks, masteries)
+        }
     }
 
     /// The progression of `levels` (level number, `XPToLevel`), the weapon `ranks` (rank,
@@ -128,6 +134,7 @@ impl Progression {
                     max_rank: u16::try_from(max_level.max(0)).unwrap_or(u16::MAX),
                 })
                 .collect(),
+            points: CharacterPoints::default(),
         }
     }
 

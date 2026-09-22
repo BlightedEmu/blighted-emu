@@ -98,6 +98,65 @@ pool CRC `u32`, `ProgressionPointId` CRC `u32`, two bytes of Unknown meaning). L
 - Correction to the S10 study: `FUN_143225fc0` sends 5419 `ResetDailyWarCountForPlayer`; the
   type 26 sender is `FUN_143226a20`.
 
+## 6. Attribute and weapon points (2026-09-20)
+
+Sources: newchar N (4 x 1502, 8 x 1112, 8 x 2857, each with the server answer 30 to 50 ms
+later), NH-MSQ-2.1 M (logins), the tables, the decompile. Scan tools:
+`local-data/scratch-work/quests/pts` (client calls and the answers in a time window, or every
+body that holds a byte pattern) and `local-data/scratch-work/quests/ptrows` (the tables).
+
+**Client calls (Observed, N).** Each body is the 16-byte facet header, then:
+- 1502 `AttributeComponentServerFacet_RequestSpendAttributePoints`: a count and `u32`
+  attribute ids, a count and `u32` points (parallel). N sent Strength 15, 5, then
+  Constitution 5 with Strength 0, then Strength 5.
+- 1112 `ProgressionPointComponentServerFacet_RequestAssignPoolPoints`: `u32` pool id, `u32`
+  `ProgressionPointId` CRC, `u32` points (1 in all 8).
+- 2857 `AbilityComponentServerFacet_RequestApplyAbilityPoints`: no arguments; N sent it in the
+  same millisecond as each 1112.
+
+**Attribute ids (Observed).** Client enum `CharacterAttributeType` (`FUN_142797540`):
+Constitution 0, Focus 1, Strength 2, Dexterity 3, Intelligence 4. Each names an
+`AttributeDefinition` table; its `Level` rows run 5 to 500, and every attribute of a new
+character is 5.
+
+**Type 129 `AttributeComponentReplicatedState`, component 27 (Observed).** Slot 0, four
+children (`FUN_14276d1f0`): `attributes` (count, then `u32` id and `u32` value; retail order
+4, 3, 2, 1, 0; value = 5 + spent), `attributeBonuses` and `placingBonuses` (replicated lists:
+empty, and five 0), `persistentAttributeData` (`FUN_142797fc0`: `m_unspentAttributePoints`
+`u32`, `m_ignoreBackstoryPoints` and `m_hasRespec` one byte each, `m_spentPoints` count and
+(`u32` id, `u32` points) pairs in first-spent order, `m_chosenMagnifyBehavior` `u32`). Login:
+all four, lists at version 3, unspent 0, flags 0, magnify 5. Level up: children 1 to 3 with a new
+version; unspent = the `AttributePoints` of every level up to the new one less the spent points
+(N: 10 at level 2, then 15, 5, 5, 5; M at level 66: 480 spent = the sum, 0 unspent). A spend:
+all four. M has `m_ignoreBackstoryPoints` 1 and magnify 5.
+
+**Type 3681 answer to a 1112 (Observed).** The pool's count change (pool count = weapon rank
+less the assigned points) and the whole point list. The 2-byte end of a point entry is the
+point's level: it rose by the 1112 points; territory entries of M hold up to 14, refunded
+weapon entries 0.
+
+**Type 185 `AbilityComponentReplicatedState`, component 46 (Observed).** Slot 0, five children
+(`FUN_1466eba40`); only child 0 `persistentAbilityData` is built here. Writer
+`FUN_146856460`, reader `FUN_14669f600`/`FUN_14669fb50`: a count, then per ability table its id
+(CRC of the `AbilityData` table id; all 29 tables) and up to 3 mapped slots (`u32` ability CRC,
+`u32` key), then a map (`FUN_143025640`) of the 16 weapon pools to their
+`ProgressionPoolData.VersionNumber`. The slot keys are 402, 115, 139 in all 29 tables of N and
+M (meaning Unknown). The answer to 2857: N's `Ability_Greatsword_Combo` and
+`Ability_Blunderbuss_AzothShrapnelBlast` (`IsActiveAbility` true) went into the first slot of
+their table; upgrades and passives (`IsActiveAbility` false) changed nothing. M's tables hold
+two or three mapped abilities.
+
+**Rules used (Observed in the tables).** Weapon points: `ProgressionPointData` rows with
+`IsAbility` 1 of a pool with a `VersionNumber`; `MaxLevel`; `RequiredProgressionPointId` and
+`RequiredProgressionPointLevel`. No weapon row sets `RequiredCategoricalProgression*`,
+`RequiredCharacterLevel` or `DoNotSpendPoint`.
+
+**Unknown.** The meaning of the slot keys, of `m_chosenMagnifyBehavior` 5 and of the placing
+bonuses; whether retail adds a 0-point entry to `m_spentPoints` (N's 0-point Strength already
+had points); the retail order of the 29 tables (the same in N and M; this server uses the
+content's table order) and of the version map; the tree-tier rules of the client UI (points
+spent per row), which no server table holds; what retail answers to a refused call.
+
 ## Unknown
 
 The last two bytes of a point entry; the 899 bonus level; how retail splits mastery experience

@@ -3,12 +3,14 @@
 
 pub mod achievements;
 pub mod bundle;
+pub mod character_points;
 pub mod client_build;
 pub mod combat;
 pub mod container;
 pub mod crafting;
 pub mod creature_animations;
 pub mod datatable_overrides;
+pub mod equip_load;
 pub mod fill;
 /// Typed row structs and `Tables`, written by `content-tool codegen`. Do not edit by hand.
 // The generator writes prettyplease output, which rustfmt would format differently.
@@ -27,6 +29,7 @@ pub mod poi_tags;
 pub mod progression;
 pub mod respawn_points;
 pub mod rewards;
+pub mod sheathe;
 pub mod starter;
 pub mod table;
 

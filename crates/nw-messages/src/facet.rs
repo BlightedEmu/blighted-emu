@@ -51,6 +51,14 @@ pub mod component {
     /// `GameModeParticipantComponent` (retail 2026-09-18: the 6426 target less the player
     /// entity).
     pub const GAME_MODE_PARTICIPANT: u64 = 0x8de6_3359_0b8f_bee0;
+    /// `GlobalStorageComponent`, on the child entity [`GLOBAL_STORAGE_CHILD`]. Solved from the
+    /// 7048 headers of 17 retail characters (newchar-retail-2026-09-18, newchar-linux-2026-09-12,
+    /// 15 open-world and side-quest ledgers): (entity XOR child) + component gave every target;
+    /// no constant added to the entity alone did (live 2026-09-14: the client dropped such a
+    /// target).
+    pub const GLOBAL_STORAGE: u64 = 0xfcf8_f502_9cc7_d818;
+    /// The XOR of the player prefab's main entity and the child that holds its global storage.
+    pub const GLOBAL_STORAGE_CHILD: u64 = 0x5aee_2731_f432_3d04;
 }
 
 /// Type index of `PlayerComponentServerFacet_OnAckLevelInfoChanged`.
@@ -127,6 +135,8 @@ pub const TERRITORY_EXITED_TYPE_INDEX: u64 = 6416;
 pub const START_WHISPER_TYPE_INDEX: u64 = 5070;
 /// Type index of `GameModeParticipantComponentClientFacet_OnGameModeSchedulerRefreshed`.
 pub const GAME_MODE_SCHEDULER_REFRESHED_TYPE_INDEX: u64 = 6426;
+/// Type index of `GlobalStorageComponentClientFacet_ReceiveStorageSearchItems`.
+pub const RECEIVE_STORAGE_SEARCH_ITEMS_TYPE_INDEX: u64 = 7048;
 /// Type index of `PlayerComponentServerFacet_RequestSetIsLookingThroughLoadout`.
 pub const LOOKING_THROUGH_LOADOUT_TYPE_INDEX: u64 = 3970;
 /// The ingredient kind of an item named by its id (beach-quests note: every captured ingredient).
@@ -737,6 +747,78 @@ impl BodyCodec for TeleportWithLoadingScreenMsg {
         let message = Self {
             header: FacetHeader::read(&mut reader)?,
             flag: reader.boolean()?,
+        };
+        reader.finish()?;
+        Ok(message)
+    }
+}
+
+/// 7048: storage search items for the player's global storage. Retail sends it with no search
+/// and no items before the bundle of each change of the player's items (tutorial-quest note,
+/// section 10). Its arguments (Azoth catalog: a 16-byte id at 16, a prefix-coded count
+/// at 32) are the search id, the items found (a prefix-coded count), the search's item total
+/// (`u32`) and one more byte. Inferred: the one retail body with a search (settlement capture)
+/// held no items and the total of the 7046 answer of the same search id (158); the last byte
+/// was 0 in every retail body; the layout of an item in the list is Unknown, so only the empty
+/// list is read and written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageSearchItemsMsg {
+    /// The header (the player's `GlobalStorageComponent`).
+    pub header: FacetHeader,
+    /// The search id; all zero for no search.
+    pub search: [u8; RAW_ID_LEN],
+    /// The search's item total.
+    pub total: u32,
+    /// The last byte (0 in every retail body; meaning Unknown).
+    pub last: u8,
+}
+
+/// The item count of a [`StorageSearchItemsMsg`] this crate reads and writes.
+const NO_STORAGE_ITEMS: u64 = 0;
+
+impl StorageSearchItemsMsg {
+    /// The message retail sends at a change of the items of the player of entity number
+    /// `entity_number`: no search, no items.
+    pub fn item_change(entity_number: u64) -> Self {
+        Self {
+            header: FacetHeader::of_child(
+                component::GLOBAL_STORAGE,
+                component::GLOBAL_STORAGE_CHILD,
+                entity_number,
+            ),
+            search: [0; RAW_ID_LEN],
+            total: 0,
+            last: 0,
+        }
+    }
+}
+
+impl BodyCodec for StorageSearchItemsMsg {
+    const TYPE_INDEX: u64 = RECEIVE_STORAGE_SEARCH_ITEMS_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        writer.bytes(&self.search).prefixed(NO_STORAGE_ITEMS)?;
+        Ok(writer.u32(self.total).u8(self.last).finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let header = FacetHeader::read(&mut reader)?;
+        let search = reader.array()?;
+        let items = reader.prefixed()?;
+        if items != NO_STORAGE_ITEMS {
+            return Err(MessageError::CountTooLarge {
+                count: items,
+                limit: NO_STORAGE_ITEMS,
+            });
+        }
+        let message = Self {
+            header,
+            search,
+            total: reader.u32()?,
+            last: reader.u8()?,
         };
         reader.finish()?;
         Ok(message)
@@ -1513,6 +1595,53 @@ mod tests {
             Some(Ok(ClientFacetMsg::TimeSyncRequest {
                 header: soul(component::TIME),
             }))
+        );
+    }
+
+    #[test]
+    fn the_storage_search_items_of_an_item_change_match_the_retail_body() {
+        // Retail 7048 of the new character of 2026-09-18: the header and 22 zero bytes.
+        const RETAIL_ITEM_CHANGE: &str = concat!(
+            "7af4d38ff285bbe2",
+            "2715f9bca18fdece",
+            "00000000000000000000000000000000",
+            "00",
+            "00000000",
+            "00"
+        );
+        let number = crate::entity_ids::number_of_facet(RETAIL_ENTITY);
+        let message = StorageSearchItemsMsg::item_change(number);
+        assert_eq!(message.encode(), Ok(hex(RETAIL_ITEM_CHANGE)));
+        assert_eq!(
+            StorageSearchItemsMsg::decode(&hex(RETAIL_ITEM_CHANGE)),
+            Ok(message)
+        );
+    }
+
+    #[test]
+    fn a_storage_search_reads_its_total_and_refuses_items() {
+        // The settlement capture's form: a search id, no items, the total 158 (0x9e), 0.
+        const SEARCH_TOTAL: u32 = 158;
+        let header = FacetHeader::of_child(
+            component::GLOBAL_STORAGE,
+            component::GLOBAL_STORAGE_CHILD,
+            1,
+        );
+        let searched = StorageSearchItemsMsg {
+            header,
+            search: [7; RAW_ID_LEN],
+            total: SEARCH_TOTAL,
+            last: 0,
+        };
+        let body = searched.encode().expect("encode");
+        assert_eq!(&body[body.len() - 6..], &hex("000000009e00")[..]);
+        assert_eq!(StorageSearchItemsMsg::decode(&body), Ok(searched));
+        let mut with_items = body;
+        let count_at = with_items.len() - 6;
+        with_items[count_at] = 1;
+        assert_eq!(
+            StorageSearchItemsMsg::decode(&with_items),
+            Err(MessageError::CountTooLarge { count: 1, limit: 0 })
         );
     }
 }

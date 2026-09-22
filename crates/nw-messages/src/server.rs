@@ -10,9 +10,13 @@ use crate::facet::{
     AdjustFxScriptsMsg, CraftProgressMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg,
     DisableCollisionMsg, GameModeSchedulerRefreshedMsg, GatheringInterruptedMsg,
     InteractionEndedMsg, InteractionValidatedMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg,
-    StartWhisperMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg, UpdatePhasingMsg,
+    StartWhisperMsg, StorageSearchItemsMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg,
+    UpdatePhasingMsg,
 };
 use crate::level_info::LevelInfoChangedMsg;
+use crate::lookups::{
+    ContractsLookedUpMsg, JoinableSubArmiesMsg, LobbyCountsMsg, PendingMetaAchievementsMsg,
+};
 use crate::self_ident::PlayerManagerSelfIdentificationMsg;
 use crate::spawn_point::ReceivePlayerSpawnPointMsg;
 use crate::spreadshot::SpreadshotProcessedMsg;
@@ -87,6 +91,8 @@ pub enum ServerMessage {
     SpreadshotProcessed(SpreadshotProcessedMsg),
     /// 3951.
     TeleportWithLoadingScreen(TeleportWithLoadingScreenMsg),
+    /// 7048.
+    StorageSearchItems(StorageSearchItemsMsg),
     /// 3743.
     InteractionValidated(InteractionValidatedMsg),
     /// 3746.
@@ -107,12 +113,21 @@ pub enum ServerMessage {
     StartWhisper(StartWhisperMsg),
     /// 6426.
     GameModeSchedulerRefreshed(GameModeSchedulerRefreshedMsg),
+    /// 2278.
+    ContractsLookedUp(ContractsLookedUpMsg),
+    /// 4178.
+    JoinableSubArmies(JoinableSubArmiesMsg),
+    /// 3802.
+    PendingMetaAchievements(PendingMetaAchievementsMsg),
+    /// 5458.
+    LobbyCounts(LobbyCountsMsg),
 }
 
 impl ServerMessage {
     /// Decodes `body` when `type_index` is one of [`SERVER_MESSAGE_TYPES`], a combat message of
     /// M6-B (2071, 3601, 4299, 2218) or a facet call (6310, 6707, 6709, 3951, 3743, 3746, 2724,
-    /// 955, 2415, 3916, 1793, 2993, 5070, 6426); `None` otherwise.
+    /// 955, 2415, 3916, 1793, 2993, 5070, 6426) or a lookup answer (2278, 4178, 3802, 5458);
+    /// `None` otherwise.
     pub fn decode(type_index: u64, body: &[u8]) -> Option<Result<Self, MessageError>> {
         let message = match type_index {
             TimingConfigurationConnectedMsg::TYPE_INDEX => {
@@ -160,6 +175,9 @@ impl ServerMessage {
             TeleportWithLoadingScreenMsg::TYPE_INDEX => {
                 TeleportWithLoadingScreenMsg::decode(body).map(Self::TeleportWithLoadingScreen)
             }
+            StorageSearchItemsMsg::TYPE_INDEX => {
+                StorageSearchItemsMsg::decode(body).map(Self::StorageSearchItems)
+            }
             InteractionValidatedMsg::TYPE_INDEX => {
                 InteractionValidatedMsg::decode(body).map(Self::InteractionValidated)
             }
@@ -186,6 +204,16 @@ impl ServerMessage {
             GameModeSchedulerRefreshedMsg::TYPE_INDEX => {
                 GameModeSchedulerRefreshedMsg::decode(body).map(Self::GameModeSchedulerRefreshed)
             }
+            ContractsLookedUpMsg::TYPE_INDEX => {
+                ContractsLookedUpMsg::decode(body).map(Self::ContractsLookedUp)
+            }
+            JoinableSubArmiesMsg::TYPE_INDEX => {
+                JoinableSubArmiesMsg::decode(body).map(Self::JoinableSubArmies)
+            }
+            PendingMetaAchievementsMsg::TYPE_INDEX => {
+                PendingMetaAchievementsMsg::decode(body).map(Self::PendingMetaAchievements)
+            }
+            LobbyCountsMsg::TYPE_INDEX => LobbyCountsMsg::decode(body).map(Self::LobbyCounts),
             _ => return None,
         };
         Some(message)
@@ -214,6 +242,7 @@ impl ServerMessage {
             Self::CutsceneEndFinalized(_) => CutsceneEndFinalizedMsg::TYPE_INDEX,
             Self::SpreadshotProcessed(_) => SpreadshotProcessedMsg::TYPE_INDEX,
             Self::TeleportWithLoadingScreen(_) => TeleportWithLoadingScreenMsg::TYPE_INDEX,
+            Self::StorageSearchItems(_) => StorageSearchItemsMsg::TYPE_INDEX,
             Self::InteractionValidated(_) => InteractionValidatedMsg::TYPE_INDEX,
             Self::InteractionEnded(_) => InteractionEndedMsg::TYPE_INDEX,
             Self::GatheringInterrupted(_) => GatheringInterruptedMsg::TYPE_INDEX,
@@ -224,6 +253,10 @@ impl ServerMessage {
             Self::CraftProgress(_) => CraftProgressMsg::TYPE_INDEX,
             Self::StartWhisper(_) => StartWhisperMsg::TYPE_INDEX,
             Self::GameModeSchedulerRefreshed(_) => GameModeSchedulerRefreshedMsg::TYPE_INDEX,
+            Self::ContractsLookedUp(_) => ContractsLookedUpMsg::TYPE_INDEX,
+            Self::JoinableSubArmies(_) => JoinableSubArmiesMsg::TYPE_INDEX,
+            Self::PendingMetaAchievements(_) => PendingMetaAchievementsMsg::TYPE_INDEX,
+            Self::LobbyCounts(_) => LobbyCountsMsg::TYPE_INDEX,
         }
     }
 
@@ -268,6 +301,7 @@ impl ServerMessage {
             Self::CutsceneEndFinalized(message) => message.encode(),
             Self::SpreadshotProcessed(message) => message.encode(),
             Self::TeleportWithLoadingScreen(message) => message.encode(),
+            Self::StorageSearchItems(message) => message.encode(),
             Self::InteractionValidated(message) => message.encode(),
             Self::InteractionEnded(message) => message.encode(),
             Self::GatheringInterrupted(message) => message.encode(),
@@ -278,6 +312,10 @@ impl ServerMessage {
             Self::CraftProgress(message) => message.encode(),
             Self::StartWhisper(message) => message.encode(),
             Self::GameModeSchedulerRefreshed(message) => message.encode(),
+            Self::ContractsLookedUp(message) => message.encode(),
+            Self::JoinableSubArmies(message) => message.encode(),
+            Self::PendingMetaAchievements(message) => message.encode(),
+            Self::LobbyCounts(message) => message.encode(),
         }
     }
 }

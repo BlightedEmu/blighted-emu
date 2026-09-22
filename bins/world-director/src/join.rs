@@ -299,6 +299,8 @@ fn player_progression(saved: SavedProgression) -> PlayerProgression {
             })
             .collect(),
         masteries: saved.masteries,
+        attributes: saved.attributes,
+        weapon_points: saved.weapon_points,
     }
 }
 
@@ -356,6 +358,8 @@ mod tests {
                 ends_ns: 1_793_091_600_894_621_000,
             }],
             masteries: std::collections::BTreeMap::from([("BowAbilityTable".to_owned(), 30)]),
+            attributes: vec![(2, 15)],
+            weapon_points: vec![("Ability_Greatsword_Combo".to_owned(), 1)],
         };
         assert_eq!(
             player_progression(saved),
@@ -370,6 +374,8 @@ mod tests {
                     ends_ns: 1_793_091_600_894_621_000,
                 }],
                 masteries: std::collections::BTreeMap::from([("BowAbilityTable".to_owned(), 30)]),
+                attributes: vec![(2, 15)],
+                weapon_points: vec![("Ability_Greatsword_Combo".to_owned(), 1)],
             }
         );
     }

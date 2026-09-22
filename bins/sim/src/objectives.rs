@@ -19,39 +19,325 @@ use nw_content::Tables;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_sim_core::Position;
 
-/// How near a player must come to a trigger area's `OverrideLocation` when its volume has no
-/// size of its own in [`TRIGGER_RADIUS_BY_TAG`] (our choice: the open-world start trigger fired
-/// with the player 17.2 m from it at its spawn; the real trigger volumes are client level data
-/// the server does not read).
+/// How near a player must come to a trigger area's `OverrideLocation` when [`TRIGGER_VOLUMES`]
+/// holds no volume of its `TP_TargetTag` (Unknown: the open-world quest volumes, such as the
+/// beach's `TriggerVol_12_Spawn_A`, were not found in the region capitals, the beach region's
+/// `region.slicedata` or the 2,321 trigger, volume, quest and tutorial slices of the paks; the
+/// open-world start trigger fired with the player 17.2 m from it at its spawn).
 const TRIGGER_RADIUS_M: f32 = 18.0;
-/// The size of a trigger volume by its `TP_TargetTag`, just above the distance at which retail
-/// fired it (tutorial capture, ruins-to-exit and beach-ruins-chest notes). One 18 m circle fired
-/// the ruins entry 15.6 m away through the closed door in a live run (2026-09-14) and fired too
-/// late where retail fires from farther.
-const TRIGGER_RADIUS_BY_TAG: [(&str, f32); 6] = [
-    // Fired at 6.9 m.
-    ("FTUE_EnterRuins_00_Trigger", 7.0),
-    // Fired at 4.9 m.
-    ("FTUE_First_Fight_Trigger", 5.5),
-    // Not fired with the player 10 to 11 m away for 5 s; the failsafe shares it.
-    ("FTUE_First_Fight_Trigger_Failsafe", 9.5),
-    // Fired at 4.2 m.
-    ("FTUE_Chest_Discovery_Trigger", 4.5),
-    // ForClimb fired at 24.8 m.
-    ("FTUE_Second_Fight_Trigger_Failsafe", 25.0),
-    // Fired at 20.1 m.
-    ("FTUE_TF_Trigger", 20.5),
+/// Half of a box side.
+const HALF: f32 = 0.5;
+/// A rotation quaternion turns by twice the angle of its (z, w) pair.
+const QUATERNION_HALF_ANGLES: f32 = 2.0;
+
+/// The shape of a quest trigger volume.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum VolumeShape {
+    /// `SphereShapeComponent` `Radius`.
+    Sphere { radius_m: f32 },
+    /// `BoxShapeComponent` `Dimensions`: its full size along its own x, y and z.
+    Box { size_m: [f32; 3] },
+}
+
+/// A quest trigger volume of the level: the `TriggerAreaComponent` slice whose tag component
+/// names `tag`, the place and turn of its capital, and its shape.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TriggerVolume {
+    tag: &'static str,
+    at: Position,
+    /// The z and w of the capital's rotation (its x and y are 0: a turn about z).
+    turn: [f32; 2],
+    shape: VolumeShape,
+}
+
+impl TriggerVolume {
+    /// Whether `position` is in the volume.
+    fn contains(&self, position: Position) -> bool {
+        let (dx, dy, dz) = (
+            position.x - self.at.x,
+            position.y - self.at.y,
+            position.z - self.at.z,
+        );
+        match self.shape {
+            VolumeShape::Sphere { radius_m } => {
+                dx.mul_add(dx, dy.mul_add(dy, dz * dz)) <= radius_m * radius_m
+            }
+            VolumeShape::Box {
+                size_m: [length, width, height],
+            } => {
+                let [z, w] = self.turn;
+                let (sin, cos) = (QUATERNION_HALF_ANGLES * z.atan2(w)).sin_cos();
+                let along = dx.mul_add(cos, dy * sin);
+                let across = dy.mul_add(cos, -dx * sin);
+                along.abs() <= length * HALF
+                    && across.abs() <= width * HALF
+                    && dz.abs() <= height * HALF
+            }
+        }
+    }
+}
+
+const fn volume(
+    tag: &'static str,
+    [x, y, z]: [f32; 3],
+    turn: [f32; 2],
+    shape: VolumeShape,
+) -> TriggerVolume {
+    TriggerVolume {
+        tag,
+        at: Position { x, y, z },
+        turn,
+        shape,
+    }
+}
+
+/// The quest trigger volumes of the tutorial level (`ftue_v2`): the 27 `AncientIvory_Trigger`
+/// slices of `quest_lore.capitals.json` (`coatgen/71abcdfc/ancientivory_trigger_*.dynamicslice`,
+/// `SharedDataStrm` paks, build 25810808), each a `TriggerAreaComponent` with one sphere or box
+/// shape on its root entity (identity local transform; every capital scale is 1 within 2e-6).
+/// The retail tutorial player entered them in the quest's order (newchar 2026-09-12 and
+/// 2026-09-18: `FTUE_First_Fight_Trigger` 4.5 m from its `OverrideLocation`).
+const TRIGGER_VOLUMES: [TriggerVolume; 27] = [
+    volume(
+        "FTUE_Cave_Midpoint_Trigger",
+        [465.319, 266.99216, 35.863567],
+        [-0.13052656, 0.9914448],
+        VolumeShape::Box {
+            size_m: [20.0, 5.0, 7.0],
+        },
+    ),
+    volume(
+        "FTUE_Cave_Trigger",
+        [479.59375, 294.95087, 36.52487],
+        [-0.13052656, 0.9914448],
+        VolumeShape::Box {
+            size_m: [10.0, 5.0, 7.0],
+        },
+    ),
+    volume(
+        "FTUE_Chest_Discovery_Trigger",
+        [663.01825, 407.27808, 27.548208],
+        [0.99809176, 0.06174778],
+        VolumeShape::Box {
+            size_m: [18.0, 3.0, 5.0],
+        },
+    ),
+    volume(
+        "FTUE_Climb_Trigger",
+        [595.99335, 385.81693, 20.533539],
+        [-0.15677612, 0.9876342],
+        VolumeShape::Sphere { radius_m: 15.0 },
+    ),
+    volume(
+        "FTUE_Dash_Trigger",
+        [755.5905, 342.64047, 20.0],
+        [-0.819152, 0.5735765],
+        VolumeShape::Box {
+            size_m: [20.0, 5.0, 5.0],
+        },
+    ),
+    volume(
+        "FTUE_EnterRuins_00_Trigger",
+        [714.24896, 379.6992, 24.04622],
+        [-0.40252402, 0.91540945],
+        VolumeShape::Box {
+            size_m: [12.0, 15.0, 5.0],
+        },
+    ),
+    volume(
+        "FTUE_EnterRuins_01_Trigger",
+        [701.63873, 378.4184, 24.04622],
+        [-0.7933534, 0.6087614],
+        VolumeShape::Box {
+            size_m: [40.0, 2.0, 2.0],
+        },
+    ),
+    volume(
+        "FTUE_First_Fight_Trigger",
+        [690.17737, 381.5598, 27.37356],
+        [-0.7933534, 0.6087614],
+        VolumeShape::Sphere { radius_m: 7.0 },
+    ),
+    volume(
+        "FTUE_First_Fight_Trigger_Failsafe",
+        [660.8932, 396.27426, 27.548208],
+        [0.9812974, -0.19249813],
+        VolumeShape::Box {
+            size_m: [18.0, 3.0, 5.0],
+        },
+    ),
+    volume(
+        "FTUE_Intro2_Trigger",
+        [479.1835, 850.0, 90.0],
+        [0.0, 1.0],
+        VolumeShape::Box {
+            size_m: [3.0, 7.0, 3.0],
+        },
+    ),
+    volume(
+        "FTUE_Intro3_Trigger",
+        [487.829, 541.0021, 89.3834],
+        [0.0, 1.0],
+        VolumeShape::Box {
+            size_m: [1000.0, 1000.0, 1000.0],
+        },
+    ),
+    volume(
+        "FTUE_Jump_Trigger",
+        [542.4708, 367.10342, 31.975632],
+        [-0.7372772, 0.6755904],
+        VolumeShape::Box {
+            size_m: [30.0, 6.0, 13.0],
+        },
+    ),
+    volume(
+        "FTUE_Jump_Trigger_Failsafe",
+        [522.6977, 368.83334, 40.202774],
+        [-0.7372772, 0.6755904],
+        VolumeShape::Box {
+            size_m: [30.0, 6.0, 13.0],
+        },
+    ),
+    volume(
+        "FTUE_PCCM_Trigger",
+        [479.2432, 850.0, 90.0],
+        [0.0, 1.0],
+        VolumeShape::Box {
+            size_m: [3.0, 7.0, 3.0],
+        },
+    ),
+    volume(
+        "FTUE_Rez_Trigger",
+        [484.23718, 220.87, 21.362934],
+        [0.0, 1.0],
+        VolumeShape::Sphere { radius_m: 28.0 },
+    ),
+    volume(
+        "FTUE_RuinStairs_Trigger",
+        [637.0443, 420.1288, 23.500929],
+        [-0.7708795, 0.63698095],
+        VolumeShape::Box {
+            size_m: [20.0, 4.0, 5.0],
+        },
+    ),
+    volume(
+        "FTUE_RuinStairs_Trigger_Failsafe",
+        [629.9816, 423.27362, 22.134699],
+        [-0.7247116, 0.68905234],
+        VolumeShape::Box {
+            size_m: [20.0, 4.0, 5.0],
+        },
+    ),
+    volume(
+        "FTUE_RuinsInventory_Trigger",
+        [718.30383, 369.91855, 23.163818],
+        [0.9659258, -0.25881904],
+        VolumeShape::Box {
+            size_m: [7.0, 3.0, 3.0],
+        },
+    ),
+    volume(
+        "FTUE_S1_Trigger",
+        [793.7658, 337.43307, 19.69],
+        [0.0, 1.0],
+        VolumeShape::Sphere { radius_m: 30.0 },
+    ),
+    volume(
+        "FTUE_Second_Fight_Trigger_Failsafe",
+        [599.5421, 401.24615, 21.760458],
+        [-0.16506681, 0.98628235],
+        VolumeShape::Box {
+            size_m: [20.0, 4.0, 5.0],
+        },
+    ),
+    volume(
+        "FTUE_SeeCave_Trigger",
+        [484.1753, 321.1511, 32.516506],
+        [-0.05231581, 0.9986306],
+        VolumeShape::Box {
+            size_m: [10.0, 5.0, 7.0],
+        },
+    ),
+    volume(
+        "FTUE_Skill_Trigger_Failsafe",
+        [564.84326, 371.00024, 26.859451],
+        [-0.5185991, 0.85501754],
+        VolumeShape::Box {
+            size_m: [20.0, 3.0, 5.0],
+        },
+    ),
+    volume(
+        "FTUE_Stairs_Trigger",
+        [487.09857, 349.11597, 38.47406],
+        [-0.05576592, 0.9984439],
+        VolumeShape::Box {
+            size_m: [10.0, 5.0, 7.0],
+        },
+    ),
+    volume(
+        "FTUE_TF_Trigger",
+        [477.72824, 232.44313, 22.363],
+        [0.9659258, -0.25881904],
+        VolumeShape::Box {
+            size_m: [30.0, 3.0, 18.0],
+        },
+    ),
+    volume(
+        "FTUE_TR_Trigger",
+        [725.4063, 358.0765, 20.0],
+        [0.9659258, -0.25881904],
+        VolumeShape::Box {
+            size_m: [10.0, 3.0, 9.0],
+        },
+    ),
+    volume(
+        "FTUE_Third_Fight_Trigger_Failsafe",
+        [569.30365, 373.3245, 26.298578],
+        [-0.5185991, 0.85501754],
+        VolumeShape::Box {
+            size_m: [20.0, 3.0, 5.0],
+        },
+    ),
+    volume(
+        "FTUE_Vista_Trigger",
+        [516.0, 371.0, 45.56475],
+        [0.0, 1.0],
+        VolumeShape::Box {
+            size_m: [3.0, 20.0, 12.0],
+        },
+    ),
 ];
 
-/// The size of the trigger volume of tag `tag`.
-fn trigger_radius_m(tag: Option<&str>) -> f32 {
-    tag.and_then(|tag| {
-        TRIGGER_RADIUS_BY_TAG
-            .iter()
-            .find(|(known, _)| known.eq_ignore_ascii_case(tag))
-    })
-    .map_or(TRIGGER_RADIUS_M, |(_, radius)| *radius)
+/// Where a trigger area task waits for the player.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TriggerArea {
+    /// The level's volume of its tag.
+    Volume(TriggerVolume),
+    /// [`TRIGGER_RADIUS_M`] around its `OverrideLocation`, for a tag without a known volume.
+    Around(Position),
 }
+
+impl TriggerArea {
+    /// The area of a task of tag `tag` and `OverrideLocation` `location`; `None` without either.
+    fn of(tag: Option<&str>, location: Option<Position>) -> Option<Self> {
+        tag.and_then(|tag| {
+            TRIGGER_VOLUMES
+                .iter()
+                .find(|volume| volume.tag.eq_ignore_ascii_case(tag))
+        })
+        .map(|volume| Self::Volume(*volume))
+        .or_else(|| location.map(Self::Around))
+    }
+
+    /// Whether `position` is in the area.
+    fn contains(&self, position: Position) -> bool {
+        match self {
+            Self::Volume(volume) => volume.contains(position),
+            Self::Around(at) => at.horizontal_distance(position) <= TRIGGER_RADIUS_M,
+        }
+    }
+}
+
 /// Separates the numbers of an `OverrideLocation` cell.
 const LOCATION_SEPARATOR: char = ' ';
 /// Milliseconds per second of a `TaskTimer` duration.
@@ -86,8 +372,10 @@ enum TaskKind {
     LockAchievement(String),
     /// Done when the player has the achievement.
     HasAchievement(String),
-    /// Removes an item from the player and is done.
-    RemoveItem(String),
+    /// Removes `TargetQty` of an item from the player and is done (all 104 `TaskRemoveItem`
+    /// rows of build 25810808 carry a `TargetQty` of 1 to 7; the four
+    /// `13A_SQ_28_BearUrine_Gift_BearPee*` tasks each take one of the same item).
+    RemoveItem { item: String, count: u32 },
     /// Done after a time.
     Timer { duration_ms: u64 },
     /// Done when the cinematic video of this id starts.
@@ -96,13 +384,11 @@ enum TaskKind {
     CinematicComplete(u32),
     /// Done when the in-game cutscene of this id ends.
     CutsceneComplete(u32),
-    /// Done when the player comes within `radius_m` of the location, or goes out of it when it
-    /// waits for a `leave`; without a location, never.
+    /// Done when the player comes into the area, or goes out of it when it waits for a
+    /// `leave`; without an area, never.
     TriggerArea {
-        /// The location.
-        at: Option<Position>,
-        /// The size of its volume.
-        radius_m: f32,
+        /// The area.
+        area: Option<TriggerArea>,
         /// It waits for the player to leave the volume (`TriggerAreaType` Leave).
         leave: bool,
     },
@@ -322,7 +608,10 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "taskunlockachievement" => TaskKind::UnlockAchievement(item()),
         "tasklockachievement" => TaskKind::LockAchievement(item()),
         "taskachievement" => TaskKind::HasAchievement(item()),
-        "taskremoveitem" => TaskKind::RemoveItem(item()),
+        "taskremoveitem" => TaskKind::RemoveItem {
+            item: item(),
+            count,
+        },
         "tasktimer" => TaskKind::Timer {
             // Durations are a few seconds: the cast cannot overflow.
             duration_ms: (row.duration.unwrap_or_default().max(0.0) * MS_PER_SECOND) as u64,
@@ -331,8 +620,10 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "taskcinematiccomplete" => TaskKind::CinematicComplete(crc()),
         "taskcutscenecomplete" => TaskKind::CutsceneComplete(crc()),
         "tasktriggerarea" => TaskKind::TriggerArea {
-            at: row.override_location.as_deref().and_then(location_of),
-            radius_m: trigger_radius_m(row.target_tag.as_deref()),
+            area: TriggerArea::of(
+                row.target_tag.as_deref(),
+                row.override_location.as_deref().and_then(location_of),
+            ),
             leave: row
                 .trigger_area_type
                 .as_deref()
@@ -553,8 +844,8 @@ pub enum Effect {
     Achievement(String),
     /// Clear this achievement.
     LockAchievement(String),
-    /// Remove this item from the player.
-    RemoveItem(String),
+    /// Remove this many of this item from the player.
+    RemoveItem(String, u32),
     /// Fire this game event: its whisper plays and its reward goes to the player.
     GameEvent(String),
     /// This task is done.
@@ -937,16 +1228,11 @@ impl ObjectiveRun {
                 ) => (kills_count(enemy, vitals_id, categories), 1, *count),
                 (
                     TaskKind::TriggerArea {
-                        at: Some(at),
-                        radius_m,
+                        area: Some(area),
                         leave,
                     },
                     Event::Moved(position),
-                ) => (
-                    (at.horizontal_distance(position) > *radius_m) == *leave,
-                    1,
-                    1,
-                ),
+                ) => (area.contains(position) != *leave, 1, 1),
                 (TaskKind::HaveItem(Some(wanted)), Event::ItemGained { item, .. })
                 | (TaskKind::EquipItem(wanted), Event::Equipped(item))
                 | (TaskKind::CraftRecipe(wanted), Event::Crafted(item)) => {
@@ -1034,8 +1320,8 @@ impl ObjectiveRun {
                 effects.push(Effect::Achievement(achievement.clone()));
                 self.complete(index, now_ms, effects);
             }
-            TaskKind::RemoveItem(item) => {
-                effects.push(Effect::RemoveItem(item.clone()));
+            TaskKind::RemoveItem { item, count } => {
+                effects.push(Effect::RemoveItem(item.clone(), *count));
                 self.complete(index, now_ms, effects);
             }
             TaskKind::LockAchievement(achievement) => {
@@ -1382,35 +1668,183 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_tagged_area_fires_at_its_own_size() {
-        let at = Position {
-            x: 717.6479,
-            y: 371.0387,
-            z: 23.0589,
-        };
+    fn a_removal_asks_for_its_target_quantity() {
+        const FEATHERS: u32 = 3;
         let rows = vec![
-            container("Root", "ConsecutiveTaskContainer", &["Ruins"]),
+            container("Root", "ConsecutiveTaskContainer", &["Feathers", "Lute"]),
             TaskRow {
-                override_location: Some("717.6479 371.0387 23.0589".to_owned()),
-                target_tag: Some("FTUE_EnterRuins_00_Trigger".to_owned()),
-                ..row("Ruins", "TaskTriggerArea")
+                target_qty: Some(i64::from(FEATHERS)),
+                ..with_item("Feathers", "TaskRemoveItem", "95a_s02_PeacockFeather_item")
             },
+            with_item("Lute", "TaskRemoveItem", "95a_s02_LuteofPhoebos_item"),
         ];
         let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let (run, effects) = ObjectiveRun::start(tree, NOW);
+        assert!(run.finished());
+        assert!(effects.contains(&Effect::RemoveItem(
+            "95a_s02_PeacockFeather_item".to_owned(),
+            FEATHERS
+        )));
+        // A row without a `TargetQty` removes one.
+        assert!(effects.contains(&Effect::RemoveItem(
+            "95a_s02_LuteofPhoebos_item".to_owned(),
+            1
+        )));
+    }
+
+    /// Retail (newchar-retail-2026-09-18 and newchar-linux-2026-09-12, objectives state 3857):
+    /// the bag take (2939) completed `EquipWeapon_partial` and the `MSQ_Tutorial_Inventory` unlock
+    /// 66 and 56 ms after it; the archetype's equip tasks stayed active until its weapons were
+    /// worn.
+    #[test]
+    fn the_bag_take_ends_the_weapon_pick_and_the_equips_wait_for_the_weapons() {
+        let rows = vec![
+            container(
+                "LootingRuin",
+                "ConsecutiveTaskContainer",
+                &["EquipWeapon_partial", "Equip_Tutorials"],
+            ),
+            container(
+                "EquipWeapon_partial",
+                "PartialTaskContainer",
+                &["Weapon1_container", "Weapon2_container"],
+            ),
+            container(
+                "Weapon1_container",
+                "SimpleTaskContainer",
+                &["TakeLongsword", "TakeGreatAxe"],
+            ),
+            row("TakeLongsword", "TaskHaveAndReturnItems"),
+            row("TakeGreatAxe", "TaskHaveAndReturnItems"),
+            container(
+                "Weapon2_container",
+                "SimpleTaskContainer",
+                &["TakeGreatSword"],
+            ),
+            row("TakeGreatSword", "TaskHaveAndReturnItems"),
+            container(
+                "Equip_Tutorials",
+                "ConsecutiveTaskContainer",
+                &["Inventory", "EquipWeapon_partial_redux", "UnlockDoor"],
+            ),
+            with_item(
+                "Inventory",
+                "TaskUnlockAchievement",
+                "MSQ_Tutorial_Inventory",
+            ),
+            container(
+                "EquipWeapon_partial_redux",
+                "PartialTaskContainer",
+                &["WeaponSwordsman_container"],
+            ),
+            container(
+                "WeaponSwordsman_container",
+                "SimpleTaskContainer",
+                &["EquipGreatSword", "EquipBlunderbuss"],
+            ),
+            with_item(
+                "EquipGreatSword",
+                "TaskEquipItem",
+                "SwordsmanArchetype_2hGreatsword",
+            ),
+            with_item(
+                "EquipBlunderbuss",
+                "TaskEquipItem",
+                "SwordsmanArchetype_2hBlunderbuss",
+            ),
+            with_item(
+                "UnlockDoor",
+                "TaskUnlockAchievement",
+                "FTUE_AncientRuins_Door",
+            ),
+        ];
+        let tree = Arc::new(ObjectiveTree::build(&rows, "LootingRuin").expect("tree"));
         let (mut run, _) = ObjectiveRun::start(tree, NOW);
-        let outside_door = Position {
-            x: at.x + 15.6,
-            ..at
+        let effects = run.event(Event::ContainerLooted, NOW);
+        assert!(run.is_done("EquipWeapon_partial"));
+        assert_eq!(achievements(&effects), ["MSQ_Tutorial_Inventory"]);
+        // The weapons came into the bag: not worn.
+        let in_bag = [
+            ("SwordsmanArchetype_2hGreatsword", 1, false),
+            ("SwordsmanArchetype_2hBlunderbuss", 1, false),
+        ];
+        assert!(achievements(&run.sync_held(&in_bag, NOW)).is_empty());
+        assert!(run.is_active("EquipGreatSword"));
+        run.event(Event::Equipped("SwordsmanArchetype_2hGreatsword"), NOW);
+        assert!(run.is_active("EquipBlunderbuss"));
+        let effects = run.event(Event::Equipped("SwordsmanArchetype_2hBlunderbuss"), NOW);
+        assert_eq!(achievements(&effects), ["FTUE_AncientRuins_Door"]);
+        assert!(run.finished());
+    }
+
+    #[test]
+    fn a_tagged_area_fires_in_its_level_volume() {
+        // Retail own places before and at the entry into each volume (newchar 2026-09-12:
+        // 196744 and 196760 ms; 184192 and 184210 ms).
+        let place = |x, y, z| Position { x, y, z };
+        let cases = [
+            (
+                "FTUE_First_Fight_Trigger",
+                "692.4614 381.3468 26.4687",
+                place(696.92, 379.35, 26.22),
+                place(696.69, 379.49, 26.42),
+            ),
+            (
+                "FTUE_EnterRuins_00_Trigger",
+                "717.6479 371.0387 23.0589",
+                place(715.87, 372.99, 23.12),
+                place(715.78, 373.07, 23.12),
+            ),
+        ];
+        for (tag, location, before, inside) in cases {
+            let rows = vec![
+                container("Root", "ConsecutiveTaskContainer", &["Area"]),
+                TaskRow {
+                    override_location: Some(location.to_owned()),
+                    target_tag: Some(tag.to_owned()),
+                    ..row("Area", "TaskTriggerArea")
+                },
+            ];
+            let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+            let (mut run, _) = ObjectiveRun::start(tree, NOW);
+            run.event(Event::Moved(before), NOW);
+            assert!(!run.is_done("Area"), "{tag}: not in it yet");
+            run.event(Event::Moved(inside), NOW);
+            assert!(run.is_done("Area"), "{tag}: in it");
+        }
+    }
+
+    #[test]
+    fn a_box_volume_turns_with_its_capital_and_a_sphere_is_round() {
+        // `FTUE_TF_Trigger`: 30 x 3 x 18 m, turned 210 degrees.
+        let tf = TRIGGER_VOLUMES
+            .iter()
+            .find(|volume| volume.tag == "FTUE_TF_Trigger")
+            .expect("volume");
+        let yaw = QUATERNION_HALF_ANGLES * tf.turn[0].atan2(tf.turn[1]);
+        let at = |along: f32, across: f32, up: f32| Position {
+            x: tf.at.x + along * yaw.cos() - across * yaw.sin(),
+            y: tf.at.y + along * yaw.sin() + across * yaw.cos(),
+            z: tf.at.z + up,
         };
-        run.event(Event::Moved(outside_door), NOW);
-        assert!(!run.is_done("Ruins"), "15.6 m out, behind the door");
-        let inside = Position {
-            x: at.x + 6.9,
-            ..at
+        assert!(tf.contains(at(14.9, 1.4, 8.9)), "inside a corner");
+        assert!(!tf.contains(at(15.1, 0.0, 0.0)), "past its length");
+        assert!(!tf.contains(at(0.0, 1.6, 0.0)), "past its width");
+        assert!(!tf.contains(at(0.0, 0.0, 9.1)), "above it");
+        let fight = TRIGGER_VOLUMES
+            .iter()
+            .find(|volume| volume.tag == "FTUE_First_Fight_Trigger")
+            .expect("volume");
+        let up = |metres: f32| Position {
+            z: fight.at.z + metres,
+            ..fight.at
         };
-        run.event(Event::Moved(inside), NOW);
-        assert!(run.is_done("Ruins"), "retail fired at 6.9 m");
-        assert!((trigger_radius_m(None) - TRIGGER_RADIUS_M).abs() < f32::EPSILON);
+        assert!(fight.contains(up(6.9)));
+        assert!(!fight.contains(up(7.1)), "a sphere, not a circle");
+        // A tag the level has no volume for waits around its location.
+        let around = TriggerArea::of(Some("TriggerVol_12_Spawn_A"), Some(AREA));
+        assert_eq!(around, Some(TriggerArea::Around(AREA)));
+        assert_eq!(TriggerArea::of(Some("TriggerVol_12_Spawn_A"), None), None);
     }
 
     #[test]
@@ -1650,7 +2084,7 @@ pub(crate) mod tests {
         // The tree sets `FTUE_OTB_Cinematic_Watched` twice; the second changes nothing.
         set.dedup();
         assert_eq!(set, RETAIL_ACHIEVEMENTS);
-        assert!(effects.contains(&Effect::RemoveItem("1hSwordT2_FTUE".to_owned())));
+        assert!(effects.contains(&Effect::RemoveItem("1hSwordT2_FTUE".to_owned(), 1)));
     }
 
     #[test]

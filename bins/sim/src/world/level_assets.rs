@@ -99,11 +99,14 @@ impl AssetViews {
         self.shown.remove(&index);
     }
 
+    /// The table indices of the shown entities.
+    pub(super) fn indices(&self) -> impl Iterator<Item = usize> + '_ {
+        self.shown.keys().copied()
+    }
+
     /// The slot keys of the shown entities.
     pub(super) fn numbers(&self) -> impl Iterator<Item = u64> + '_ {
-        self.shown
-            .keys()
-            .map(|index| ASSET_ENTITY_BASE + *index as u64)
+        self.indices().map(|index| ASSET_ENTITY_BASE + index as u64)
     }
 
     /// The group of the entity of slot key `number` in `slot`: its first spawn states when the

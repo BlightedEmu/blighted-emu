@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The progression of a character besides its items and quests (world migrations 0006 and
-//! 0007): its experience, coins, achievement bits, loot limit counts and weapon masteries. `sim`
-//! saves it; the director loads it at a join.
+//! The progression of a character besides its items and quests (world migrations 0006 to
+//! 0008): its experience, coins, achievement bits, loot limit counts, weapon masteries and spent
+//! points. `sim` saves it; the director loads it at a join.
 //!
 //! Each save carries the time its state was taken; an older state never overwrites a newer one.
 
@@ -44,11 +44,19 @@ pub struct SavedProgression {
     pub loot_limits: Vec<SavedLootLimit>,
     /// The total experience of each weapon mastery, by its `CategoricalProgressionID`.
     pub masteries: BTreeMap<String, u32>,
+    /// The attribute points spent on each attribute (`CharacterAttributeType` id, points), in
+    /// the order they were first spent.
+    pub attributes: Vec<(u32, u32)>,
+    /// The level of each weapon progression point (`ProgressionPointId`, level), in the order
+    /// they were first assigned.
+    pub weapon_points: Vec<(String, u16)>,
 }
 
 type ProgressionRow = (bool, i64, i64, Vec<i32>);
 type LootLimitRow = (String, i64, i64, i64);
 type MasteryRow = (String, i64);
+type AttributeRow = (i16, i64);
+type WeaponPointRow = (String, i32);
 
 /// A stored value as the program's type.
 fn from_column<T: TryFrom<i64>>(value: i64, field: &'static str) -> Result<T, DbError> {
@@ -57,6 +65,11 @@ fn from_column<T: TryFrom<i64>>(value: i64, field: &'static str) -> Result<T, Db
 
 /// A program value as its column.
 fn to_column<T: TryInto<i64>>(value: T, field: &'static str) -> Result<i64, DbError> {
+    value.try_into().map_err(|_| DbError::OutOfRange { field })
+}
+
+/// A program value as its `SMALLINT` column.
+fn small_column<T: TryInto<i16>>(value: T, field: &'static str) -> Result<i16, DbError> {
     value.try_into().map_err(|_| DbError::OutOfRange { field })
 }
 
@@ -94,6 +107,20 @@ pub async fn character_progression(
     .bind(character_id)
     .fetch_all(world)
     .await?;
+    let attributes: Vec<AttributeRow> = sqlx::query_as(
+        "SELECT attribute, points FROM character_attribute WHERE character_id = $1 \
+         ORDER BY position",
+    )
+    .bind(character_id)
+    .fetch_all(world)
+    .await?;
+    let weapon_points: Vec<WeaponPointRow> = sqlx::query_as(
+        "SELECT point_id, level FROM character_weapon_point WHERE character_id = $1 \
+         ORDER BY position",
+    )
+    .bind(character_id)
+    .fetch_all(world)
+    .await?;
     Ok(Some(SavedProgression {
         experience: from_column(experience, "experience")?,
         coins: from_column(coins, "coins")?,
@@ -115,6 +142,19 @@ pub async fn character_progression(
         masteries: masteries
             .into_iter()
             .map(|(category, experience)| Ok((category, from_column(experience, "mastery")?)))
+            .collect::<Result<_, DbError>>()?,
+        attributes: attributes
+            .into_iter()
+            .map(|(attribute, points)| {
+                Ok((
+                    from_column(i64::from(attribute), "attribute")?,
+                    from_column(points, "attribute points")?,
+                ))
+            })
+            .collect::<Result<_, DbError>>()?,
+        weapon_points: weapon_points
+            .into_iter()
+            .map(|(point, level)| Ok((point, from_column(i64::from(level), "weapon point")?)))
             .collect::<Result<_, DbError>>()?,
     }))
 }
@@ -212,6 +252,40 @@ pub async fn save_character_progression(
         .execute(&mut *transaction)
         .await?;
     }
+    sqlx::query("DELETE FROM character_attribute WHERE character_id = $1")
+        .bind(character_id)
+        .execute(&mut *transaction)
+        .await?;
+    for (position, (attribute, points)) in progression.attributes.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO character_attribute (character_id, attribute, points, position) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(character_id)
+        .bind(small_column(*attribute, "attribute")?)
+        .bind(i64::from(*points))
+        .bind(small_column(position, "attribute position")?)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    sqlx::query("DELETE FROM character_weapon_point WHERE character_id = $1")
+        .bind(character_id)
+        .execute(&mut *transaction)
+        .await?;
+    for (position, (point, level)) in progression.weapon_points.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO character_weapon_point (character_id, point_id, level, position) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(character_id)
+        .bind(point)
+        .bind(i32::from(*level))
+        .bind(i32::try_from(position).map_err(|_| DbError::OutOfRange {
+            field: "weapon point position",
+        })?)
+        .execute(&mut *transaction)
+        .await?;
+    }
     transaction.commit().await?;
     Ok(SaveOutcome::Saved)
 }
@@ -231,6 +305,13 @@ mod tests {
             })
         ));
         assert_eq!(from_column::<u64>(1, "count").ok(), Some(1));
+        assert_eq!(small_column(4_u32, "attribute").ok(), Some(4));
+        assert!(matches!(
+            small_column(usize::MAX, "attribute position"),
+            Err(DbError::OutOfRange {
+                field: "attribute position"
+            })
+        ));
     }
 }
 
@@ -270,6 +351,12 @@ mod infra_tests {
                 ("GreatSwordAbilityTable".to_owned(), 20),
                 ("BlunderbussAbilityTable".to_owned(), 4),
             ]),
+            // Retail newchar 2026-09-18: Strength first, then Constitution.
+            attributes: vec![(2, 25), (0, 5)],
+            weapon_points: vec![
+                ("Ability_Greatsword_Combo".to_owned(), 1),
+                ("Upgrade_Greatsword_Combo_1".to_owned(), 1),
+            ],
         }
     }
 

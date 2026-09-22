@@ -10,11 +10,13 @@ use std::collections::HashMap;
 
 use bevy_ecs::entity::Entity;
 use nw_content::gameplay_config::{GameplayConfig, XpMultipliers};
+use nw_content::player_attacks::{AttackHit, AttackKind};
 use nw_content::poi_tags::PoiTags;
 use nw_content::rewards::Reward;
 use nw_formats::objectstream::lowercase_crc32;
-use nw_messages::{InteractionRequest, ServerMessage, StartWhisperMsg};
+use nw_messages::{InputRecord, InteractionRequest, ServerMessage, StartWhisperMsg};
 
+use super::attack::counter_is_newer;
 use super::{Body, Player, SimWorld, gather_answer, send_now};
 use crate::objectives::Event;
 use crate::stats::{GAME_EVENT_STAT, ONE_COMPLETION, StatEvent};
@@ -36,30 +38,18 @@ const HITS_TO_BREAK: u32 = 2;
 /// How far from the player a swing breaks a quest object (Inferred: about a greatsword's reach
 /// plus the object's size; the client's hit shapes are Unknown here).
 const SWING_REACH_M: f32 = 4.0;
-/// How far from the player a spread shot breaks a quest object at once (Observed: one
-/// blunderbuss shot broke the fourth nodule; the distance is our choice).
-const SHOT_REACH_M: f32 = 20.0;
-/// The shortest time between two strikes of one player (our choice: the client repeats an
-/// attack press in older input records).
-const STRIKE_INTERVAL_MS: u64 = 500;
 
 /// A weapon attack that can break quest objects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Strike {
+enum Strike {
     /// A melee swing: one hit on the nearest object in reach.
     Swing,
-    /// A spread shot: it breaks the nearest object in its reach.
+    /// A spread shot: it breaks the nearest object in its reach (Observed: one blunderbuss shot
+    /// broke the fourth nodule).
     Shot,
 }
 
 impl Strike {
-    const fn reach_m(self) -> f32 {
-        match self {
-            Self::Swing => SWING_REACH_M,
-            Self::Shot => SHOT_REACH_M,
-        }
-    }
-
     const fn hits(self) -> u32 {
         match self {
             Self::Swing => 1,
@@ -73,8 +63,10 @@ impl Strike {
 pub(super) struct Strikes {
     /// Hits so far on each object, by its index, and until when a broken one stays broken.
     objects: HashMap<usize, (u32, Option<u64>)>,
-    /// When its last strike landed.
-    last_ms: Option<u64>,
+    /// The counter of the newest input record its swings were read from: the client repeats a
+    /// record in the older copies of its next inputs (swing note: counters 7290, 7289, 7288), so
+    /// a press counts in the first input that carries it only.
+    input_counter: Option<u16>,
 }
 
 /// The `POITag`s of the territories `territories`.
@@ -185,19 +177,73 @@ impl SimWorld {
         self.quest_event(number, Event::GameEvent(event), now_ms);
     }
 
-    /// The player of `connection` attacks at `now_ms` (`strike`): the nearest quest object in
-    /// reach whose game event its quest counts takes the hits, and a broken one is that game
-    /// event for the quest. The client is not told: the server does not know the object's entity
-    /// id (Unknown; retail sent 2071 and 2724 to it).
-    pub fn strike_quest_objects(
+    /// The player of `connection` sent the input `records` (newest first) at `now_ms`: a new
+    /// press of the attack key in them is one swing at the quest objects
+    /// ([`Self::strike_quest_objects`]); a press its earlier inputs carried does not count again.
+    pub fn swing_at_quest_objects(
         &mut self,
         connection: &ConnectionRef,
-        strike: Strike,
+        records: &[InputRecord],
         now_ms: u64,
     ) {
         let Some(&entity) = self.by_connection.get(connection) else {
             return;
         };
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        let last = player.strikes.input_counter;
+        let new = |record: &&InputRecord| {
+            last.is_none_or(|last| counter_is_newer(record.u16_after_mask, last))
+        };
+        let pressed = records.iter().filter(new).any(InputRecord::attack_pressed);
+        if let Some(newest) = records.iter().find(new) {
+            player.strikes.input_counter = Some(newest.u16_after_mask);
+        }
+        if pressed {
+            self.strike_quest_objects(entity, Strike::Swing, SWING_REACH_M, now_ms);
+        }
+    }
+
+    /// The player of `connection` fired a spread shot at `now_ms` that the server took: it
+    /// strikes the quest objects within its hand weapon's hit-scan range (the stance's light
+    /// attack: `BlunderbussPrimaryFire_Spread`, 14 m in `rangedattackdatabase.radb`).
+    pub fn shoot_at_quest_objects(&mut self, connection: &ConnectionRef, now_ms: u64) {
+        let Some(&entity) = self.by_connection.get(connection) else {
+            return;
+        };
+        if let Some(reach_m) = self.hit_scan_range_m(entity) {
+            self.strike_quest_objects(entity, Strike::Shot, reach_m, now_ms);
+        }
+    }
+
+    /// The hit-scan range of the light attack of the weapon in `entity`'s hand.
+    fn hit_scan_range_m(&self, entity: Entity) -> Option<f32> {
+        let data = &self.combat.data;
+        let (item, _) = self
+            .world
+            .get::<Player>(entity)?
+            .gear
+            .as_ref()?
+            .main_weapon()?;
+        let weapon = data.weapon_of_item(item)?;
+        match data.stance(weapon.stance)?.attack(AttackKind::Light)?.hit {
+            AttackHit::HitScan { range_m, .. } => Some(range_m),
+            AttackHit::Melee { .. } | AttackHit::Projectile { .. } => None,
+        }
+    }
+
+    /// Player `entity` attacks at `now_ms` (`strike`, reaching `reach_m`): the nearest quest
+    /// object in reach whose game event its quest counts takes the hits, and a broken one is
+    /// that game event for the quest. The client is not told: the server does not know the
+    /// object's entity id (Unknown; retail sent 2071 and 2724 to it).
+    fn strike_quest_objects(
+        &mut self,
+        entity: Entity,
+        strike: Strike,
+        reach_m: f32,
+        now_ms: u64,
+    ) {
         let Some(at) = self
             .world
             .get::<Body>(entity)
@@ -209,20 +255,13 @@ impl SimWorld {
             return;
         };
         let number = player.number;
-        if player
-            .strikes
-            .last_ms
-            .is_some_and(|last| now_ms.saturating_sub(last) < STRIKE_INTERVAL_MS)
-        {
-            return;
-        }
         let Some(quest) = self.quests.get(&number) else {
             return;
         };
         let target = self
             .content
             .quest_objects
-            .nearest(at, strike.reach_m(), |index, object| {
+            .nearest(at, reach_m, |index, object| {
                 let broken = player
                     .strikes
                     .objects
@@ -238,7 +277,6 @@ impl SimWorld {
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
-        player.strikes.last_ms = Some(now_ms);
         let (hits, until) = player.strikes.objects.entry(index).or_default();
         *hits = if until.is_some() { 0 } else { *hits } + strike.hits();
         *until = None;
