@@ -160,8 +160,9 @@ mcp.json
 .mcpservers/
 .playwright-mcp/
 
-# Agent design notes, plans and specs
+# Agent design notes, plans, specs and prompts
 /docs/superpowers/
+/docs/prompts/
 # Design-tool context (Impeccable): product brief and design record
 /PRODUCT.md
 /DESIGN.md
