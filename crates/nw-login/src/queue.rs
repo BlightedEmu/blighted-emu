@@ -149,11 +149,10 @@ pub trait QueueStore: Clone + Send + Sync + 'static {
 
 /// The reply body for a queue status. A waiting reply has no `Token`, so the client waits and
 /// refreshes after `RefreshInterval` (protocol note 1.3). An admitted reply carries the signed
-/// `Token` with `RepAddress`.
+/// `Token` with the `RepAddress` of the world's own `rep-gateway`.
 pub fn queue_reply(
     status: &QueueStatus,
     world: &WorldConfig,
-    rep_address: &str,
     key: &SigningKey,
     now: i64,
 ) -> LoginQueueReply {
@@ -185,7 +184,7 @@ pub fn queue_reply(
                 ticket_id: Some(record.ticket_id.clone()),
                 token: Some(LoginQueueToken {
                     signature: Some(sign_entry(key, &record.claims())),
-                    rep_address: Some(rep_address.to_owned()),
+                    rep_address: Some(world.rep_address.clone()),
                     ticket_id: Some(record.ticket_id.clone()),
                     world_id: Some(record.world_id.to_string()),
                     character_id: Some(record.character_id.to_string()),
@@ -249,7 +248,7 @@ mod tests {
             ticket_id: "ticket-1".to_owned(),
             position: POSITION,
         };
-        let reply = queue_reply(&status, &config.worlds[0], &config.rep_address, &key, NOW);
+        let reply = queue_reply(&status, &config.worlds[0], &key, NOW);
         let response = reply.login_queue_response;
         let refresh = i64::try_from(config.worlds[0].refresh_interval_seconds).expect("small");
         assert_eq!(
@@ -266,7 +265,7 @@ mod tests {
         let config = valid();
         let key = SigningKey::from_hex(KEY_HEX).expect("key");
         let status = QueueStatus::Admitted(record());
-        let reply = queue_reply(&status, &config.worlds[0], &config.rep_address, &key, NOW);
+        let reply = queue_reply(&status, &config.worlds[0], &key, NOW);
         let token = reply.login_queue_response.token.expect("token");
         assert_eq!(token.rep_address.as_deref(), Some("127.0.0.1:33435"));
         assert_eq!(token.persona_id, Some(Uuid::from_u128(1).to_string()));

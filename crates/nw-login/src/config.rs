@@ -55,8 +55,6 @@ pub struct EdgeConfig {
     pub https_listen: SocketAddr,
     /// Internal Prometheus listener (review finding I1).
     pub metrics_listen: SocketAddr,
-    /// `Token.RepAddress`: `IPv4:port` of a `rep-gateway`.
-    pub rep_address: String,
     /// Time limit for one HTTP request.
     pub request_timeout_seconds: u64,
     /// Most requests in progress at one time (spec amendment 6). More requests wait for a free
@@ -167,6 +165,8 @@ pub struct WorldConfig {
     pub name: String,
     /// Region text shown in the world list.
     pub region: String,
+    /// `Token.RepAddress`: `IPv4:port` of the `rep-gateway` that serves this world.
+    pub rep_address: String,
     /// The world database.
     pub database: DatabaseConfig,
     /// Environment variable that holds the world database password.
@@ -179,6 +179,26 @@ pub struct WorldConfig {
     pub refresh_interval_seconds: u64,
     /// Queue joins and refreshes allowed per account per minute.
     pub queue_requests_per_minute: u32,
+}
+
+impl WorldConfig {
+    /// `rep_address` as a socket address.
+    pub fn rep_socket_address(&self) -> Result<SocketAddrV4, EdgeConfigError> {
+        let address: SocketAddrV4 =
+            self.rep_address
+                .parse()
+                .map_err(|_| EdgeConfigError::Invalid {
+                    key: "world.rep_address",
+                    reason: "must be IPv4:port".to_owned(),
+                })?;
+        if address.port() == 0 {
+            return Err(EdgeConfigError::Invalid {
+                key: "world.rep_address",
+                reason: "port must not be 0".to_owned(),
+            });
+        }
+        Ok(address)
+    }
 }
 
 /// Error from [`load_edge_config`].
@@ -229,24 +249,6 @@ impl EdgeConfig {
         ]
     }
 
-    /// `rep_address` as a socket address.
-    pub fn rep_socket_address(&self) -> Result<SocketAddrV4, EdgeConfigError> {
-        let address: SocketAddrV4 =
-            self.rep_address
-                .parse()
-                .map_err(|_| EdgeConfigError::Invalid {
-                    key: "rep_address",
-                    reason: "must be IPv4:port".to_owned(),
-                })?;
-        if address.port() == 0 {
-            return Err(EdgeConfigError::Invalid {
-                key: "rep_address",
-                reason: "port must not be 0".to_owned(),
-            });
-        }
-        Ok(address)
-    }
-
     /// The world with this id.
     pub fn world(&self, id: Uuid) -> Option<&WorldConfig> {
         self.worlds.iter().find(|world| world.id == id)
@@ -290,7 +292,6 @@ impl EdgeConfig {
         if is_forbidden_host(&self.domain) {
             return invalid("domain", "must not be an Amazon or CloudFront domain");
         }
-        self.rep_socket_address()?;
         if self.request_timeout_seconds == 0 {
             return invalid("request_timeout_seconds", "must be above 0");
         }
@@ -317,9 +318,14 @@ impl EdgeConfig {
             return invalid("world", "at least one [[world]] is required");
         }
         let mut ids = HashSet::new();
+        let mut rep_addresses = HashSet::new();
         for world in &self.worlds {
             if !ids.insert(world.id) {
                 return invalid("world.id", "world ids must be unique");
+            }
+            // One rep-gateway serves one world, so worlds cannot share its address.
+            if !rep_addresses.insert(world.rep_socket_address()?) {
+                return invalid("world.rep_address", "each world needs its own rep-gateway");
             }
             if world.capacity == 0 || world.refresh_interval_seconds == 0 {
                 return invalid(
@@ -363,7 +369,6 @@ server_name = "Test server"
 domain = "example.org"
 https_listen = "0.0.0.0:443"
 metrics_listen = "127.0.0.1:9100"
-rep_address = "127.0.0.1:33435"
 request_timeout_seconds = 10
 max_connections = 4096
 log_filter = "info"
@@ -405,6 +410,7 @@ private_key_pem_path = "local-data/edge-http/aws-mirror-key.pem"
 id = "8d0f4c2e-0000-4000-8000-000000000001"
 name = "Aeternum"
 region = "us-east"
+rep_address = "127.0.0.1:33435"
 database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
 capacity = 100
 max_characters_per_account = 2
@@ -415,6 +421,29 @@ queue_requests_per_minute = 30
 url = "postgres://nw@127.0.0.1:5432/nw_world_1"
 max_connections = 5
 "#;
+
+    /// The id of the world in [`VALID`].
+    const FIRST_WORLD_ID: &str = "8d0f4c2e-0000-4000-8000-000000000001";
+    /// The id of the second world in [`two_worlds`].
+    const SECOND_WORLD_ID: &str = "8d0f4c2e-0000-4000-8000-000000000002";
+    /// The rep-gateway of the world in [`VALID`].
+    const FIRST_REP_ADDRESS: &str = "127.0.0.1:33435";
+    /// The rep-gateway of the second world in [`two_worlds`].
+    const SECOND_REP_ADDRESS: &str = "127.0.0.1:33436";
+
+    /// [`VALID`] with a second world that has its own id and rep-gateway.
+    pub(crate) fn two_worlds() -> String {
+        let start = VALID.find("[[world]]").expect("world block");
+        let second = VALID[start..]
+            .replace(FIRST_WORLD_ID, SECOND_WORLD_ID)
+            .replace(FIRST_REP_ADDRESS, SECOND_REP_ADDRESS);
+        format!("{VALID}{second}")
+    }
+
+    /// The valid two-world configuration as a value.
+    pub(crate) fn valid_two_worlds() -> EdgeConfig {
+        load(&two_worlds()).expect("valid two-world config")
+    }
 
     fn load(text: &str) -> Result<EdgeConfig, EdgeConfigError> {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -465,11 +494,11 @@ max_connections = 5
         );
         refused(
             &VALID.replace("\"127.0.0.1:33435\"", "\"rep.example.org:33435\""),
-            "rep_address",
+            "world.rep_address",
         );
         refused(
             &VALID.replace("\"127.0.0.1:33435\"", "\"127.0.0.1:0\""),
-            "rep_address",
+            "world.rep_address",
         );
         refused(
             &VALID.replace("mode = \"password\"", "mode = \"discord\""),
@@ -566,6 +595,20 @@ max_connections = 5
         let start = VALID.find("[[world]]").expect("world block");
         let twice = format!("{VALID}{}", &VALID[start..]);
         refused(&twice, "world.id");
+    }
+
+    #[test]
+    fn worlds_cannot_share_a_rep_gateway() {
+        let start = VALID.find("[[world]]").expect("world block");
+        let second = VALID[start..].replace(FIRST_WORLD_ID, SECOND_WORLD_ID);
+        refused(&format!("{VALID}{second}"), "world.rep_address");
+    }
+
+    #[test]
+    fn two_worlds_with_their_own_rep_gateways_load() {
+        let config = load(&two_worlds()).expect("two worlds");
+        assert_eq!(config.worlds.len(), 2);
+        assert_ne!(config.worlds[0].rep_address, config.worlds[1].rep_address);
     }
 
     #[test]

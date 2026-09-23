@@ -158,7 +158,7 @@ The game itself cannot connect to the gateway. It trusts only one certificate th
 
 Set up the gateway once:
 
-1. In `config/rep-gateway.toml`, set `world_id` to the `[[world]] id` in `config/edge.toml`. The `rep_address` in `config/edge.toml` must reach `udp_listen` (the example files match).
+1. In `config/rep-gateway.toml`, set `world_id` to the `[[world]] id` in `config/edge.toml`. The `rep_address` of that `[[world]]` must reach `udp_listen` (the example files match). Each world has its own gateway, so each `[[world]]` has its own `rep_address`.
 2. Make the gateway's certificate and key. The files go to `local-data/rep-gateway/` and are never replaced:
 
 ```bash

@@ -14,8 +14,6 @@ domain = "example.org"
 https_listen = "0.0.0.0:443"
 # Prometheus metrics. Keep this on an internal address.
 metrics_listen = "127.0.0.1:9100"
-# Token.RepAddress: IPv4:port of a rep-gateway.
-rep_address = "127.0.0.1:33435"
 request_timeout_seconds = 10
 # Most requests in progress at one time.
 max_connections = 4096
@@ -77,6 +75,9 @@ private_key_pem_path = "local-data/edge-http/aws-mirror-key.pem"
 id = "8d0f4c2e-0000-4000-8000-000000000001"
 name = "Aeternum"
 region = "us-east"
+# Token.RepAddress: IPv4:port of the rep-gateway that serves this world. One rep-gateway serves
+# one world, so each [[world]] needs its own address.
+rep_address = "127.0.0.1:33435"
 database_password_env = "NW_SECRET_WORLD_1_DATABASE_PASSWORD"
 # Live entry tickets at one time. Players are admitted only while world-director also reports
 # free player slots (M5).

@@ -3,7 +3,7 @@
 # Any key below can be overridden with NW_GATEWAY_<KEY>, nested keys joined by "__",
 # for example NW_GATEWAY_LIMITS__MAX_CONNECTIONS=500.
 
-# Public UDP listener. config/edge.toml rep_address must point here.
+# Public UDP listener. rep_address of this world's [[world]] in config/edge.toml must point here.
 udp_listen = "0.0.0.0:33435"
 # The [[world]] id in config/edge.toml that this gateway serves.
 world_id = "8d0f4c2e-0000-4000-8000-000000000001"

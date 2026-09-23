@@ -133,7 +133,7 @@ impl Edge {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(EDGE_CONFIG);
         let mut config = load_edge_config(&path).expect("edge config");
         config.worlds[0].id = world_id;
-        config.rep_address = gateway.to_string();
+        config.worlds[0].rep_address = gateway.to_string();
         let config = Arc::new(config);
         valkey
             .set_free_slots(world_id, FREE_SLOTS, FREE_SLOTS_TTL_MS)

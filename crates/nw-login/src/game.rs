@@ -539,7 +539,6 @@ async fn queue_step<G, C, R, Q: QueueStore>(
     Ok(Json(queue_reply(
         &status,
         world,
-        &state.config.rep_address,
         &state.signing_key,
         unix_seconds(),
     )))
@@ -744,7 +743,7 @@ pub(crate) mod tests {
     use nw_db::NewCharacter;
 
     use super::*;
-    use crate::config::tests::valid;
+    use crate::config::tests::{valid, valid_two_worlds};
     use crate::keys::new_game_session_key;
     use crate::memory::{MemoryCharacters, MemoryGameSessions, MemoryQueue, MemoryRateLimiter};
     use crate::signature::verify_entry;
@@ -1274,8 +1273,21 @@ pub(crate) mod tests {
         .to_string()
     }
 
+    /// A queue join with an empty `WorldId`, as the client sends right after it creates a
+    /// character.
+    fn empty_world_queue_body(character: Uuid) -> String {
+        serde_json::json!({"LoginQueueRequest": {
+            "WorldId": "",
+            "CharacterId": character.to_string(),
+        }})
+        .to_string()
+    }
+
     async fn character_of(state: &TestState, account: Uuid, name: &str) -> Uuid {
-        let world = state.config.worlds[0].id;
+        character_in(state, state.config.worlds[0].id, account, name).await
+    }
+
+    async fn character_in(state: &TestState, world: Uuid, account: Uuid, name: &str) -> Uuid {
         let new = NewCharacter {
             id: Uuid::new_v4(),
             account_id: account,
@@ -1314,7 +1326,7 @@ pub(crate) mod tests {
         assert_eq!(token.character_id, Some(character.to_string()));
         assert_eq!(
             token.rep_address,
-            Some(fixture.state.config.rep_address.clone())
+            Some(fixture.state.config.worlds[0].rep_address.clone())
         );
         let ticket_id = token.ticket_id.clone().expect("ticket");
         assert!(ticket_id.starts_with(&world.simple().to_string()));
@@ -1340,6 +1352,27 @@ pub(crate) mod tests {
             &record.claims(),
             &signature
         ));
+    }
+
+    #[tokio::test]
+    async fn each_world_admits_to_its_own_rep_gateway() {
+        let fixture = fixture_with(valid_two_worlds()).await;
+        let app = game_router(fixture.state.clone());
+        let worlds = fixture.state.config.worlds.clone();
+        for (world, name) in worlds.iter().zip([NAME, SECOND_NAME]) {
+            let character = character_in(&fixture.state, world.id, fixture.account, name).await;
+            // An empty `WorldId` (as right after character creation) still finds the world.
+            for body in [
+                queue_body(world.id, character),
+                empty_world_queue_body(character),
+            ] {
+                let (status, body) = post(&app, &queue_path(&fixture.session, None), &body).await;
+                assert_eq!(status, StatusCode::OK);
+                let token = reply(&body).token.expect("token");
+                assert_eq!(token.world_id, Some(world.id.to_string()));
+                assert_eq!(token.rep_address, Some(world.rep_address.clone()));
+            }
+        }
     }
 
     #[tokio::test]
@@ -1422,11 +1455,7 @@ pub(crate) mod tests {
         let foreign = character_of(&fixture.state, other_account, SECOND_NAME).await;
         let app = game_router(fixture.state.clone());
         let join = queue_path(&fixture.session, None);
-        let empty_world = serde_json::json!({"LoginQueueRequest": {
-            "WorldId": "",
-            "CharacterId": character.to_string(),
-        }})
-        .to_string();
+        let empty_world = empty_world_queue_body(character);
         let no_world = serde_json::json!({"LoginQueueRequest": {
             "CharacterId": character.to_string(),
         }})
@@ -1438,12 +1467,7 @@ pub(crate) mod tests {
             assert_eq!(token.character_id, Some(character.to_string()));
             assert_eq!(token.world_id, Some(world.to_string()));
         }
-        let foreign_body = serde_json::json!({"LoginQueueRequest": {
-            "WorldId": "",
-            "CharacterId": foreign.to_string(),
-        }})
-        .to_string();
-        let (status, body) = post(&app, &join, &foreign_body).await;
+        let (status, body) = post(&app, &join, &empty_world_queue_body(foreign)).await;
         assert_eq!(
             (status, error_code(&body).as_str()),
             (StatusCode::NOT_FOUND, "unknown_character")
