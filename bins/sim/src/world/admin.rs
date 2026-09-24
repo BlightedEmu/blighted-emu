@@ -44,7 +44,7 @@ impl SimWorld {
                 item,
                 quantity,
             } => self.give_item(*entity, item, *quantity),
-            AdminAction::TakeItem { entity, item } => self.take_item(*entity, item),
+            AdminAction::TakeItem { entity, item } => self.admin_take_item(*entity, item),
             AdminAction::StartQuest { entity, objective } => {
                 match self.start_quest(*entity, objective, now_ms) {
                     Ok(()) => AdminReply::Done,
@@ -221,7 +221,7 @@ impl SimWorld {
         }
     }
 
-    fn take_item(&mut self, entity: u64, item_id: &str) -> AdminReply {
+    fn admin_take_item(&mut self, entity: u64, item_id: &str) -> AdminReply {
         let Some(target) = self.player_by_number(entity) else {
             return AdminReply::NotMine;
         };

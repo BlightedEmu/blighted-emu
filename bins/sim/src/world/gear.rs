@@ -9,9 +9,21 @@ use nw_content::starter::{EquipSlot, KitItem, StarterKits};
 use nw_messages::paperdoll::slot;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    EquippedItem, GearItem, Hands, LoadedAmmo, PlayerGear, STARTER_BAG_SLOTS, is_visible_slot,
+    EquippedItem, GearItem, Hands, ItemLook, LoadedAmmo, PlayerGear, STARTER_BAG_SLOTS,
+    is_visible_slot,
 };
 use uuid::Uuid;
+
+mod charms;
+mod durability;
+mod holdings;
+mod look;
+mod rolls;
+
+use holdings::Holdings;
+pub(super) use charms::{CharmRefusal, CharmTarget};
+pub(super) use holdings::{DroppedStack, ItemRefusal, MAX_CONTAINER_SLOTS};
+pub(super) use durability::RepairPick;
 
 /// The version of the first gear states (retail value).
 const FIRST_GEAR_VERSION: u64 = 3;
@@ -102,6 +114,13 @@ struct Stack {
     item_id: String,
     kind: Option<EquipSlot>,
     item: GearItem,
+    /// Its owned-items key while it is worn or a saved loadout names it ([`EquippedItem::key`]).
+    key: Option<u16>,
+    /// The most one stack of its item holds; `None` for no limit of the item's own.
+    max_stack: Option<u32>,
+    /// Its perk ids in slot order, as it keeps them over saves and handoffs (`item.perks` holds
+    /// their wire indexes).
+    perks: Vec<String>,
 }
 
 /// Why an equip request was refused.
@@ -142,7 +161,7 @@ pub(super) struct Gear {
     bag: Vec<Option<Stack>>,
     /// The version of the last states sent.
     version: u64,
-    /// Whether the states changed since they were sent.
+    /// Whether the items changed since the states were sent.
     changed: bool,
     /// Whether the items changed since they were last taken for a save.
     unsaved: bool,
@@ -160,13 +179,18 @@ pub(super) struct Gear {
     ammo: [Ammo; AMMO_OPTIONS],
     /// The items whose ammo [`Gear::arm`] last set, per option.
     armed: [Option<String>; AMMO_OPTIONS],
-    /// Weapons the hand took from the client's attacks ([`Gear::take_in_hand`]): changes the
-    /// own client is not told of, but other players must see.
-    hand_follows: u64,
+    /// The hands the own client was last told of: a change of the hands alone goes out as the
+    /// children that differ from them ([`Gear::take_change`]).
+    told: Hands,
     /// The option slot the server put away and gives back, and why.
     stowed: Option<(u32, Stow)>,
     /// The sheathe action puts the drawn weapon away at this time ([`Gear::sheathe`]).
     sheathe_at_ms: Option<u64>,
+    /// The storage chests, the second container, the loadouts and the item counter.
+    holdings: Holdings,
+    /// The states last sent whole or changed: the next change goes out as the children that
+    /// differ from them ([`PlayerGear::changes`]).
+    sent: Option<PlayerGear>,
 }
 
 impl Gear {
@@ -178,13 +202,9 @@ impl Gear {
         backstory: Option<&str>,
     ) -> Option<Self> {
         let kit = kits.kit(backstory?)?;
-        let worn = kit
-            .iter()
-            .filter_map(|item| Some((first_slot(item.slot?), Some(stack(character, item, 1)))))
-            .collect();
-        Some(Self {
+        let mut gear = Self {
             character,
-            worn,
+            worn: Vec::new(),
             bag: vec![None; STARTER_BAG_SLOTS],
             version: FIRST_GEAR_VERSION,
             changed: false,
@@ -195,16 +215,31 @@ impl Gear {
             attached: false,
             ammo: [Ammo::default(); AMMO_OPTIONS],
             armed: [None, None],
-            hand_follows: 0,
+            told: Hands::default(),
             stowed: None,
             sheathe_at_ms: None,
-        })
+            holdings: Holdings::default(),
+            sent: None,
+        };
+        for item in kit {
+            if let Some(kind) = item.slot {
+                let worn = gear.new_stack(item, 1);
+                gear.put_on(first_slot(kind), worn);
+            }
+        }
+        Some(gear.told_now())
+    }
+
+    /// The gear whose own client knows its hands as they are.
+    fn told_now(mut self) -> Self {
+        self.told = self.hands();
+        self
     }
 
     /// The gear of `character` from the `items` another sim sent, with main-hand option slot
     /// `drawn` in the hand and option slot `active` selected (`None`: the drawn one, else the
-    /// first); an item `kits` does not know is left out, and one whose bag slot is taken or out
-    /// of range goes to a free one.
+    /// first); an item `kits` does not know is left out, a bag slot past the bag grows it, and an
+    /// item whose bag slot is taken goes to a free one.
     pub(super) fn carried_in(
         kits: &StarterKits,
         character: Uuid,
@@ -225,50 +260,49 @@ impl Gear {
             attached: drawn.is_some(),
             ammo: [Ammo::default(); AMMO_OPTIONS],
             armed: [None, None],
-            hand_follows: 0,
+            told: Hands::default(),
             stowed: None,
             sheathe_at_ms: None,
+            holdings: Holdings::default(),
+            sent: None,
         };
         for carried in items {
             let Some(item) = kits.item(&carried.item_id) else {
                 continue;
             };
-            let stack = stack(character, item, carried.quantity);
+            let stack = gear.restored_stack(kits, item, carried.quantity, &carried.state);
             match carried.place {
-                ItemPlace::Worn(slot_id) => gear.worn.push((slot_id, Some(stack))),
+                ItemPlace::Worn(slot_id) => gear.put_on(slot_id, stack),
                 ItemPlace::Bag(bag_slot) => {
-                    let wanted = gear
-                        .bag
-                        .get_mut(usize::from(bag_slot))
-                        .filter(|entry| entry.is_none());
-                    match wanted {
+                    let wanted = usize::from(bag_slot);
+                    if wanted < MAX_CONTAINER_SLOTS && gear.bag.len() <= wanted {
+                        gear.bag.resize(wanted + 1, None);
+                    }
+                    match gear.bag.get_mut(wanted).filter(|entry| entry.is_none()) {
                         Some(entry) => *entry = Some(stack),
                         None => {
-                            if let Some(free) = gear.bag.iter_mut().find(|entry| entry.is_none()) {
-                                *free = Some(stack);
-                            }
+                            gear.put_in_bag(stack);
                         }
                     }
                 }
             }
         }
-        gear
+        gear.told_now()
     }
 
     /// The items to carry to another sim.
     pub(super) fn carried(&self) -> Vec<CarriedItem> {
-        let worn = self.worn_stacks().map(|(slot_id, stack)| CarriedItem {
+        let carried = |stack: &Stack, place| CarriedItem {
             item_id: stack.item_id.clone(),
             quantity: stack.item.quantity,
-            place: ItemPlace::Worn(slot_id),
-        });
+            place,
+            state: stack.state(),
+        };
+        let worn = self
+            .worn_stacks()
+            .map(|(slot_id, stack)| carried(stack, ItemPlace::Worn(slot_id)));
         let bag = (0_u16..).zip(&self.bag).filter_map(|(bag_slot, entry)| {
-            let stack = entry.as_ref()?;
-            Some(CarriedItem {
-                item_id: stack.item_id.clone(),
-                quantity: stack.item.quantity,
-                place: ItemPlace::Bag(bag_slot),
-            })
+            Some(carried(entry.as_ref()?, ItemPlace::Bag(bag_slot)))
         });
         worn.chain(bag).collect()
     }
@@ -289,6 +323,7 @@ impl Gear {
             .iter()
             .map(|(slot_id, stack)| EquippedItem {
                 slot: *slot_id,
+                key: stack.as_ref().and_then(|stack| stack.key).unwrap_or_default(),
                 item: stack.as_ref().map(|stack| stack.item),
             })
             .collect();
@@ -297,7 +332,13 @@ impl Gear {
             .iter()
             .map(|stack| stack.as_ref().map(|stack| stack.item))
             .collect();
-        PlayerGear::of(&equipped, &bag, self.version, self.hands())
+        PlayerGear::with_extras(
+            &equipped,
+            &bag,
+            self.version,
+            self.hands(),
+            &self.extras(),
+        )
     }
 
     /// Every stack of `item` becomes one new stack of `quantity` worn in paperdoll slot
@@ -306,7 +347,8 @@ impl Gear {
         self.remove(&item.item_id, time_ns);
         self.worn
             .retain(|(worn, stack)| *worn != slot_id || stack.is_none());
-        self.put_on(slot_id, stack(self.character, item, quantity));
+        let renewed = self.new_stack(item, quantity);
+        self.put_on(slot_id, renewed);
         self.changed = true;
         self.unsaved = true;
     }
@@ -320,7 +362,11 @@ impl Gear {
 
     /// Wears `stack` in paperdoll slot `slot_id`: in the place of its emptied slot when it has
     /// one (retail 2026-09-18: the greatsword went into the sword's place, key 4), else last.
-    fn put_on(&mut self, slot_id: u32, stack: Stack) {
+    /// A stack without an owned-items key takes the lowest free one.
+    fn put_on(&mut self, slot_id: u32, mut stack: Stack) {
+        if stack.key.is_none() {
+            stack.key = Some(self.lowest_free_key());
+        }
         match self
             .worn
             .iter_mut()
@@ -454,7 +500,6 @@ impl Gear {
         self.sheathe_at_ms = None;
         self.attached = false;
         self.attach_at_ms = Some(now_ms.saturating_add(ATTACH_MS));
-        self.changed = true;
         true
     }
 
@@ -500,7 +545,6 @@ impl Gear {
         self.sheathe_at_ms = None;
         self.attach_at_ms = None;
         self.attached = true;
-        self.changed = true;
         true
     }
 
@@ -522,7 +566,6 @@ impl Gear {
         self.attach_at_ms = None;
         self.stamp(sheathed, time_ns);
         self.stowed = back.map(|reason| (sheathed, reason));
-        self.changed = true;
         true
     }
 
@@ -568,15 +611,14 @@ impl Gear {
 
     /// The weapon of main-hand option slot `slot_id` is in the client's hand already (its attack
     /// showed it): drawn and in the hand at once, the option put away keeping the time `time_ns`.
-    /// The client is not told: a sent change makes it switch weapons (live 2026-09-18).
+    /// The client is not told: a sent change makes it switch weapons (live 2026-09-18). Other
+    /// players see the new hand ([`Gear::hands`]).
     pub(super) fn take_in_hand(&mut self, slot_id: u32, time_ns: u64) {
         let option = slot_id.saturating_sub(slot::MAIN_HAND_OPTION_1);
-        let changed = self.changed;
         if self.draw(option, 0, time_ns) {
             self.attach_at_ms = None;
             self.attached = true;
-            self.changed = changed;
-            self.hand_follows += 1;
+            self.told = self.hands();
         }
     }
 
@@ -607,7 +649,6 @@ impl Gear {
                     reload_at_ms: None,
                     time_ns,
                 };
-                self.changed = true;
             }
         }
     }
@@ -633,7 +674,6 @@ impl Gear {
         if ammo.loaded == 0 {
             ammo.reload_at_ms = Some(now_ms.saturating_add(ammo.reload_ms));
         }
-        self.changed = true;
         true
     }
 
@@ -647,13 +687,11 @@ impl Gear {
         if self.attach_at_ms.is_some_and(|at| now_ms >= at) {
             self.attach_at_ms = None;
             self.attached = true;
-            self.changed = true;
         }
         for ammo in &mut self.ammo {
             if ammo.reload_at_ms.is_some_and(|at| now_ms >= at) {
                 ammo.reload_at_ms = None;
                 ammo.loaded = ammo.max;
-                self.changed = true;
             }
         }
     }
@@ -666,17 +704,17 @@ impl Gear {
             .filter(|(slot_id, _)| is_visible_slot(*slot_id))
             .map(|(slot_id, stack)| EquippedItem {
                 slot: *slot_id,
+                key: stack.as_ref().and_then(|stack| stack.key).unwrap_or_default(),
                 item: stack.as_ref().map(|stack| stack.item),
             })
             .collect()
     }
 
-    /// The version other players see: the version of the states with the changes not yet taken,
-    /// plus the weapons the hand took from the client's attacks. A new one is a change other
-    /// players must see; without the hand's weapons, a swap the server saw only in an attack
-    /// never reached them.
+    /// The version of the items other players see: the version of the states with the changes
+    /// not yet taken. A new one is a change of the items other players must see; they see a
+    /// change of the hands by the hands ([`Gear::hands`]).
     pub(super) const fn shown_version(&self) -> u64 {
-        self.version + self.changed as u64 + self.hand_follows
+        self.version + self.changed as u64
     }
 
     /// The weapon in the hand and the ammo.
@@ -737,32 +775,61 @@ impl Gear {
     /// Takes off the worn item of paperdoll slot `slot_id` into bag slot `bag_slot`, or the first
     /// free one when that is taken or out of range (`u32::MAX`: any).
     pub(super) fn unequip(&mut self, slot_id: u32, bag_slot: u32) -> Result<(), EquipRefusal> {
-        let worn = self
-            .worn
-            .iter()
-            .position(|(worn, stack)| *worn == slot_id && stack.is_some())
-            .ok_or(EquipRefusal::NotWorn)?;
+        if self.worn_item(slot_id).is_none() {
+            return Err(EquipRefusal::NotWorn);
+        }
         let wanted = usize::try_from(bag_slot)
             .ok()
             .filter(|index| self.bag.get(*index).is_some_and(Option::is_none));
-        let free = wanted
-            .or_else(|| self.bag.iter().position(Option::is_none))
-            .ok_or(EquipRefusal::BagFull)?;
-        let (_, stack) = self.worn.remove(worn);
-        self.bag[free] = stack;
+        if wanted.is_none() && !self.bag_has_room() {
+            return Err(EquipRefusal::BagFull);
+        }
+        let stack = self.take_off(slot_id).ok_or(EquipRefusal::NotWorn)?;
+        match wanted {
+            Some(index) => self.bag[index] = Some(stack),
+            None => {
+                self.put_in_bag(stack);
+            }
+        }
         self.changed = true;
         self.unsaved = true;
         Ok(())
     }
 
-    /// The states after a change, at a new version, once; `None` without a change.
+    /// The states after a change, once; `None` without a change. A change of the items sends the
+    /// children that changed, a list as its changed elements, at a new version
+    /// ([`PlayerGear::changes`]; retail newchar 2026-09-18: each equip and take); a change of
+    /// the hands alone (a draw, a put-away, an attach, a shot, a reload) sends the hand children
+    /// that changed and keeps the version ([`PlayerGear::hands_change`]). Live run 15 sent the
+    /// whole states at the draw of an attack press and the client showed no weapon in the hand.
     pub(super) fn take_change(&mut self) -> Option<PlayerGear> {
-        if !self.changed {
+        let hands = self.hands();
+        let told = std::mem::replace(&mut self.told, hands);
+        if self.changed {
+            self.changed = false;
+            self.version += 1;
+            self.settle_keys();
+            let now = self.states();
+            let change = PlayerGear::changes(self.sent.as_ref(), &now, self.version);
+            self.sent = Some(now);
+            return Some(change);
+        }
+        let change = PlayerGear::hands_change(told, hands);
+        if change.paperdoll.is_empty() {
             return None;
         }
-        self.changed = false;
-        self.version += 1;
-        Some(self.states())
+        self.sent = Some(self.states());
+        Some(change)
+    }
+
+    /// The whole states for the first own state: the client knows the hands and the items from
+    /// then on.
+    pub(super) fn first_states(&mut self) -> PlayerGear {
+        self.told = self.hands();
+        self.settle_keys();
+        let states = self.states();
+        self.sent = Some(states.clone());
+        states
     }
 
     /// How many of `item_id` (any case) the bag holds.
@@ -804,6 +871,36 @@ impl Gear {
         true
     }
 
+    /// The item in bag slot `bag_slot`: its item id and record; `None` for an empty slot.
+    pub(super) fn bag_item(&self, bag_slot: u32) -> Option<(&str, &GearItem)> {
+        let stack = self.bag.get(usize::try_from(bag_slot).ok()?)?.as_ref()?;
+        Some((stack.item_id.as_str(), &stack.item))
+    }
+
+    /// Takes `quantity` of the stack in bag slot `bag_slot`, emptying the slot when the stack is
+    /// used up; whether the slot held that many (it changes nothing when not).
+    pub(super) fn take_from_slot(&mut self, bag_slot: u32, quantity: u32) -> bool {
+        let Some(entry) = usize::try_from(bag_slot)
+            .ok()
+            .and_then(|index| self.bag.get_mut(index))
+        else {
+            return false;
+        };
+        let Some(stack) = entry
+            .as_mut()
+            .filter(|stack| quantity > 0 && stack.item.quantity >= quantity)
+        else {
+            return false;
+        };
+        stack.item.quantity -= quantity;
+        if stack.item.quantity == 0 {
+            *entry = None;
+        }
+        self.changed = true;
+        self.unsaved = true;
+        true
+    }
+
     /// Removes every stack of `item_id`, worn or in the bag, at time `time_ns`; whether there
     /// was one. A worn one leaves its visible slot emptied in its place, and its weapon leaves
     /// the hand.
@@ -832,35 +929,39 @@ impl Gear {
         removed
     }
 
-    /// Puts `quantity` of `item` into the bag: onto a stack of it, else into the first free
-    /// slot; whether it fit.
+    /// Puts `quantity` of `item` into the bag: onto its stacks up to its `MaxStackSize`, the
+    /// rest as new stacks in the first free slots, new slots when none is free (retail bags grew
+    /// to 406 slots); whether all of it fit.
     pub(super) fn add(&mut self, item: &KitItem, quantity: u32) -> bool {
         if quantity == 0 {
             return false;
         }
-        let quantity = quantity.min(MAX_STACK_QUANTITY);
-        if let Some(stack) = self
+        let limit = item
+            .max_stack
+            .unwrap_or(MAX_STACK_QUANTITY)
+            .clamp(1, MAX_STACK_QUANTITY);
+        let mut left = quantity.min(MAX_STACK_QUANTITY);
+        for stack in self
             .bag
             .iter_mut()
             .flatten()
-            .find(|stack| stack.item_id == item.item_id)
+            .filter(|stack| stack.item_id == item.item_id)
         {
-            stack.item.quantity = stack
-                .item
-                .quantity
-                .saturating_add(quantity)
-                .min(MAX_STACK_QUANTITY);
-            self.changed = true;
-            self.unsaved = true;
-            return true;
+            let added = limit.saturating_sub(stack.item.quantity).min(left);
+            stack.item.quantity += added;
+            left -= added;
         }
-        let Some(free) = self.bag.iter_mut().find(|entry| entry.is_none()) else {
-            return false;
-        };
-        *free = Some(stack(self.character, item, quantity));
+        while left > 0 {
+            let part = left.min(limit);
+            let new = self.new_stack(item, part);
+            if !self.put_in_bag(new) {
+                break;
+            }
+            left -= part;
+        }
         self.changed = true;
         self.unsaved = true;
-        true
+        left == 0
     }
 
     /// Equips `quantity` of the item of instance `instance` in bag slot `bag_slot` into paperdoll
@@ -893,7 +994,7 @@ impl Gear {
             .worn
             .iter()
             .position(|(worn, stack)| *worn == slot_id && stack.is_some());
-        if replaced.is_some() && !whole && !self.bag.iter().any(Option::is_none) {
+        if replaced.is_some() && !whole && !self.bag_has_room() {
             return Err(EquipRefusal::BagFull);
         }
         let mut put_on = if whole {
@@ -906,16 +1007,17 @@ impl Gear {
             left.clone()
         };
         put_on.item.quantity = moved;
+        let put_on = self.own_instance(put_on);
         let item_id = put_on.item_id.clone();
-        if let Some(index) = replaced {
-            let (_, taken_off) = self.worn.remove(index);
-            let free = if whole {
-                Some(bag_index)
+        // The item worn there leaves its place emptied for the new one (retail newchar
+        // 2026-09-18: the class kit's chest replaced the wanderer's at its visible index).
+        if replaced.is_some()
+            && let Some(taken_off) = self.take_off(slot_id)
+        {
+            if whole {
+                self.bag[bag_index] = Some(taken_off);
             } else {
-                self.bag.iter().position(Option::is_none)
-            };
-            if let Some(free) = free {
-                self.bag[free] = taken_off;
+                self.put_in_bag(taken_off);
             }
         }
         self.put_on(slot_id, put_on);
@@ -935,9 +1037,17 @@ fn stack(character: Uuid, item: &KitItem, quantity: u32) -> Stack {
             quantity,
             gear_score: item.gear_score,
             durability: item.durability,
+            max_durability: item.durability,
+            perks: item.perks,
+            look: ItemLook::default(),
+            counter: 0,
             bound: item.bound,
+            locked: false,
             instance: instance_id(character, &item.item_id),
         },
+        key: None,
+        max_stack: item.max_stack,
+        perks: item.perk_ids.clone(),
     }
 }
 
@@ -953,6 +1063,7 @@ pub(crate) mod tests {
 
     use super::*;
     use nw_messages::paperdoll::{ItemVisual, SlotBits};
+    use nw_messages::{ContainerState, OwnedItems, ReplicatedList};
 
     pub(crate) const BACKSTORY: &str = "Archetype_Mystic";
     pub(crate) const CHARACTER: Uuid = Uuid::from_u128(0x2b87_684d_c82c_46a4_90e4_c764_0247_7507);
@@ -972,6 +1083,25 @@ pub(crate) mod tests {
     /// A kit of [`BACKSTORY`]: a chest and the sword at login, the staff in the bag.
     pub(crate) fn kits() -> StarterKits {
         kits_with(&[])
+    }
+
+    /// The kit of [`BACKSTORY`] with its bag's staff worn in the second main-hand option: two
+    /// weapons of two masteries (kill rewards).
+    pub(crate) fn gear_with_staff() -> Gear {
+        let kits = kits();
+        let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("kit");
+        for item in kits.bag(BACKSTORY) {
+            assert!(gear.add(item, 1));
+        }
+        gear.equip(
+            0,
+            slot::MAIN_HAND_OPTION_1 + 1,
+            1,
+            instance(STAFF),
+            none_disabled,
+        )
+        .expect("staff");
+        gear
     }
 
     /// [`kits`] with the master rows of `extra` items too: (item id, item class).
@@ -1002,16 +1132,38 @@ pub(crate) mod tests {
                 BACKSTORY.to_owned(),
                 format!("MysticArchetypeChest:1,{SWORD}:1,{STAFF}:0"),
             )],
+            perk_indexes: std::collections::HashMap::new(),
         })
     }
 
-    fn visible_slots(gear: &PlayerGear) -> Vec<u32> {
-        gear.paperdoll
-            .public
-            .as_ref()
-            .and_then(|public| public.visible_slots.clone())
-            .expect("slots")
+    /// The whole elements of a list child of whole states.
+    fn whole<T: Clone>(list: Option<&ReplicatedList<T>>) -> Vec<T> {
+        list.and_then(ReplicatedList::full)
+            .expect("a whole list")
             .elements
+            .clone()
+    }
+
+    fn visible_slots(gear: &PlayerGear) -> Vec<u32> {
+        whole(
+            gear.paperdoll
+                .public
+                .as_ref()
+                .and_then(|public| public.visible_slots.as_ref()),
+        )
+    }
+
+    /// The owned-items keys of whole states.
+    fn owned_keys(gear: &PlayerGear) -> Vec<u16> {
+        gear.owned
+            .owned
+            .as_ref()
+            .and_then(OwnedItems::full)
+            .expect("owned")
+            .elements
+            .iter()
+            .map(|owned| owned.key)
+            .collect()
     }
 
     fn instance(item_id: &str) -> [u8; RAW_ID_LEN] {
@@ -1102,18 +1254,19 @@ pub(crate) mod tests {
             gear.equip(1, POTION_SLOT, POTIONS, instance(POTION), none_disabled),
             Ok(POTION.to_owned())
         );
-        let states = gear.take_change().expect("change");
+        assert!(gear.take_change().is_some());
+        let states = gear.states();
         assert_eq!(
             visible_slots(&states),
             vec![slot::CHEST, slot::MAIN_HAND_OPTION_1]
         );
-        let hidden = states
-            .paperdoll
-            .owner
-            .as_ref()
-            .and_then(|owner| owner.hidden_items.clone())
-            .expect("hidden")
-            .elements;
+        let hidden = whole(
+            states
+                .paperdoll
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.hidden_items.as_ref()),
+        );
         assert_eq!(hidden[0].quantity, POTIONS);
         assert!(
             gear.bag.iter().all(Option::is_none),
@@ -1148,10 +1301,7 @@ pub(crate) mod tests {
         assert!(gear.remove(SWORD, REMOVED_NS));
         let after = gear.take_change().expect("change");
         let public = after.paperdoll.public.as_ref().expect("public");
-        assert_eq!(
-            public.visuals.as_ref().expect("visuals").elements[1],
-            ItemVisual::of(0)
-        );
+        assert_eq!(whole(public.visuals.as_ref())[1], ItemVisual::of(0));
         assert_eq!(
             gear.hands(),
             Hands {
@@ -1191,16 +1341,13 @@ pub(crate) mod tests {
             ),
             Ok(STAFF.to_owned())
         );
-        let states = gear.take_change().expect("change");
+        assert!(gear.take_change().is_some());
+        let states = gear.states();
         assert_eq!(
             visible_slots(&states),
             vec![slot::CHEST, slot::MAIN_HAND_OPTION_1]
         );
-        let owned = states.owned.owned.expect("owned").elements;
-        assert_eq!(
-            owned.iter().map(|owned| owned.key).collect::<Vec<_>>(),
-            [0, 1]
-        );
+        assert_eq!(owned_keys(&states), [0, 1]);
     }
 
     #[test]
@@ -1217,11 +1364,13 @@ pub(crate) mod tests {
             item_id: "NoSuchItem".to_owned(),
             quantity: 1,
             place: ItemPlace::Bag(0),
+            state: nw_bus::ItemState::default(),
         });
         let potion = CarriedItem {
             item_id: POTION.to_owned(),
             quantity: 1,
             place: ItemPlace::Bag(0),
+            state: nw_bus::ItemState::default(),
         };
         carried.push(potion);
         let moved = Gear::carried_in(&kits, CHARACTER, &carried, None, None);
@@ -1259,15 +1408,16 @@ pub(crate) mod tests {
         assert!(!gear.add(&flint, 0), "no stack of nothing");
         assert!(gear.add(&flint, MAX_STACK_QUANTITY));
         assert!(gear.add(&flint, 1));
-        let held: u32 = gear
+        let stacks: Vec<u32> = gear
             .carried()
             .iter()
             .filter(|stack| stack.item_id == FLINT)
             .map(|stack| stack.quantity)
-            .sum();
+            .collect();
         assert_eq!(
-            held, MAX_STACK_QUANTITY,
-            "the database stores at most i32::MAX"
+            stacks,
+            [MAX_STACK_QUANTITY, 1],
+            "the database stores at most i32::MAX per stack; the rest starts a new one"
         );
     }
 
@@ -1578,27 +1728,88 @@ pub(crate) mod tests {
     fn other_players_see_the_weapon_the_hand_took_from_an_attack() {
         let kits = kits();
         let mut gear = Gear::starter(&kits, CHARACTER, Some(BACKSTORY)).expect("gear");
-        let before = gear.shown_version();
+        let items = gear.shown_version();
+        let before = gear.hands();
         gear.take_in_hand(slot::MAIN_HAND_OPTION_1, 1);
         assert_eq!(gear.take_change(), None, "the own client is not told");
-        assert!(
-            gear.shown_version() > before,
-            "other players see the new hand"
-        );
+        assert_ne!(gear.hands(), before, "other players see the new hand");
         assert_eq!(gear.hands().drawn, Some(slot::MAIN_HAND_OPTION_1));
-        let held = gear.shown_version();
+        assert_eq!(gear.shown_version(), items, "the items did not change");
+        let held = gear.hands();
         gear.take_in_hand(slot::MAIN_HAND_OPTION_1, 2);
-        assert_eq!(gear.shown_version(), held, "the same weapon is no change");
-        // A later change the own client is told of keeps the number rising.
+        assert_eq!(gear.hands(), held, "the same weapon is no change");
+        // A later draw the own client is told of is a change of the hands alone.
         assert!(gear.draw(1, 0, 3));
-        assert!(gear.shown_version() > held);
-        let drawn = gear.shown_version();
-        assert!(gear.take_change().is_some());
+        let change = gear.take_change().expect("the client is told");
         assert_eq!(
-            gear.shown_version(),
-            drawn,
-            "taking the change keeps the number"
+            change
+                .paperdoll
+                .owner
+                .as_ref()
+                .and_then(|owner| owner.visible_items.as_ref()),
+            None
         );
+        assert_eq!(gear.shown_version(), items, "the version stays");
+    }
+
+    #[test]
+    fn a_change_of_the_hands_goes_out_as_its_children_alone() {
+        /// Retail newchar 2026-09-18 at 1792695769648: the draw of the attack press sent the
+        /// own paperdoll's `a2`, `sheathed` and `attached`, not the item lists or the bag.
+        const DRAW_NS: u64 = 1_792_695_769_624_369_200;
+        let mut gear = Gear::starter(&kits(), CHARACTER, Some(BACKSTORY)).expect("gear");
+        let first = gear.first_states();
+        assert!(
+            first
+                .paperdoll
+                .owner
+                .as_ref()
+                .is_some_and(|owner| owner.visible_items.is_some())
+        );
+        assert_eq!(gear.take_change(), None, "the first states told the hands");
+        assert!(gear.draw_to_attack(DRAW_NS));
+        let draw = gear.take_change().expect("the client is told");
+        let owner = draw.paperdoll.owner.as_ref().expect("owner");
+        assert_eq!(
+            (
+                owner.main_hand_ammo_1,
+                owner.main_hand_ammo_2.map(|ammo| ammo.time_ns)
+            ),
+            (None, Some(DRAW_NS)),
+            "the stamped option alone"
+        );
+        assert_eq!(
+            (
+                owner.visible_items.as_ref(),
+                owner.loadouts.as_ref(),
+                owner.is_local_player
+            ),
+            (None, None, None)
+        );
+        let public = draw.paperdoll.public.as_ref().expect("public");
+        assert!(public.sheathed.is_some() && public.attached.is_some());
+        assert_eq!(
+            (
+                public.active,
+                public.visible_slots.as_ref(),
+                public.visuals.as_ref()
+            ),
+            (None, None, None),
+            "the selected option did not change; no slot or look list"
+        );
+        assert_eq!(draw.bag, ContainerState::default(), "no bag");
+        assert_eq!(gear.take_change(), None, "once");
+        // A change of the items sends its changed children at a new version.
+        let version = gear.shown_version();
+        assert!(gear.remove(SWORD, DRAW_NS));
+        let whole = gear.take_change().expect("change");
+        assert!(
+            whole
+                .paperdoll
+                .owner
+                .is_some_and(|owner| owner.visible_items.is_some())
+        );
+        assert!(gear.shown_version() > version);
     }
 
     #[test]

@@ -24,6 +24,18 @@ const SAMPLE_MAX_HEALTH: f32 = 856.0;
 /// The item tag of [`melee_sample`] (a retail sailor's).
 const SAMPLE_HIT_TAG: u8 = 6;
 
+/// Bytes of a hex string of capture bytes (two digits per byte).
+///
+/// # Panics
+///
+/// Panics on a digit that is not hex: a test's sample is broken.
+pub fn hex_bytes(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex sample"))
+        .collect()
+}
+
 /// A creature's hit of `amount` on player `target` by creature `attacker`, standing at the origin.
 pub fn melee_sample(target: u64, attacker: u64, amount: f32) -> OnDamageMsg {
     OnDamageMsg::melee(

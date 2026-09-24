@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::slice_data::SpawnedSlice;
 use crate::stations::CraftingStation;
+use crate::travel_slices::{HousingPlot, Teleporter};
 
 /// A world position in metres: x, y, z (z up).
 pub type Position = [f32; 3];
@@ -47,6 +48,10 @@ pub struct WorldFile {
     /// The profile and path of each vitals spawn, in the order of `vitals`; empty when no spawn
     /// has one.
     pub vitals_ai: Vec<SpawnAi>,
+    /// The house plots among the spawned slices.
+    pub plots: Vec<HousingPlot>,
+    /// The teleporters among the capitals.
+    pub teleporters: Vec<Teleporter>,
 }
 
 /// What an awake mob does without a target.

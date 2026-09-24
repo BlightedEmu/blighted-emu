@@ -34,6 +34,9 @@ pub const SYNC_REMOVED: u8 = 5;
 pub const SYNC_OWNED: u8 = 17;
 /// Item flags bit 0: bound to the character.
 pub const ITEM_BOUND: u8 = 0x01;
+/// Item flags bit 1: locked by its owner (retail 2549 set it and cleared it: flags 1 to 3 and
+/// back, open-world `item_actions`).
+pub const ITEM_LOCKED: u8 = 0x02;
 /// The version that retail first (full) states carry.
 pub const FIRST_VERSION: u64 = 3;
 

@@ -38,9 +38,12 @@ impl Dice {
 
     /// `true` with chance `p` (0 never, 1 always).
     pub fn chance(&mut self, p: f64) -> bool {
-        let fraction =
-            (self.next() >> (u64::BITS - FRACTION_BITS)) as f64 / (1_u64 << FRACTION_BITS) as f64;
-        fraction < p
+        self.fraction() < p
+    }
+
+    /// A fraction from 0 (included) to 1 (excluded).
+    pub fn fraction(&mut self) -> f64 {
+        (self.next() >> (u64::BITS - FRACTION_BITS)) as f64 / (1_u64 << FRACTION_BITS) as f64
     }
 
     /// A roll from 0 to `n - 1`; 0 when `n` is 0.

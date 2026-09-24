@@ -50,6 +50,21 @@ pub fn sim_admit(world: Uuid, sim: &BusId) -> String {
     format!("nw.{world}.sim.{sim}.admit")
 }
 
+/// Sim to director, request/reply: open or find a group's instance.
+pub fn director_instance(world: Uuid) -> String {
+    format!("nw.{world}.director.instance")
+}
+
+/// Director to an instance sim: open, end or extend its instance (open is request/reply).
+pub fn sim_instance(world: Uuid, sim: &BusId) -> String {
+    format!("nw.{world}.sim.{sim}.instance")
+}
+
+/// Director to the social service, request/reply: the group of a character.
+pub fn social_group(world: Uuid) -> String {
+    format!("nw.{world}.social.group")
+}
+
 /// Sim to sim: handoff offers and cancels.
 pub fn sim_handoff(world: Uuid, sim: &BusId) -> String {
     format!("nw.{world}.sim.{sim}.handoff")
@@ -88,6 +103,21 @@ pub fn all_sim_script_logs(world: Uuid) -> String {
 /// Every sim snapshot of a world (a NATS wildcard), for the admin tool.
 pub fn all_sim_snapshots(world: Uuid) -> String {
     format!("nw.{world}.sim.*.snapshot")
+}
+
+/// Sims to the social service: the social calls and presence of their players.
+pub fn social_input(world: Uuid) -> String {
+    format!("nw.{world}.social.input")
+}
+
+/// Social service to one sim: the social messages for its players.
+pub fn sim_social(world: Uuid, sim: &BusId) -> String {
+    format!("nw.{world}.sim.{sim}.social")
+}
+
+/// Social service to one sim, request/reply: move a player's coins (company treasury).
+pub fn sim_coins(world: Uuid, sim: &BusId) -> String {
+    format!("nw.{world}.sim.{sim}.coins")
 }
 
 #[cfg(test)]
@@ -139,5 +169,28 @@ mod tests {
             format!("{prefix}.sim.sim-1.snapshot")
         );
         assert_eq!(all_sim_snapshots(world), format!("{prefix}.sim.*.snapshot"));
+    }
+
+    #[test]
+    fn social_subjects_follow_the_pattern() {
+        let world = Uuid::nil();
+        let sim = BusId::try_from("sim-1".to_owned()).expect("id");
+        let prefix = "nw.00000000-0000-0000-0000-000000000000";
+        assert_eq!(social_input(world), format!("{prefix}.social.input"));
+        assert_eq!(sim_social(world, &sim), format!("{prefix}.sim.sim-1.social"));
+        assert_eq!(sim_coins(world, &sim), format!("{prefix}.sim.sim-1.coins"));
+    }
+
+    #[test]
+    fn instance_subjects_follow_the_pattern() {
+        let world = Uuid::nil();
+        let sim = BusId::try_from("inst-1".to_owned()).expect("id");
+        let prefix = "nw.00000000-0000-0000-0000-000000000000";
+        assert_eq!(director_instance(world), format!("{prefix}.director.instance"));
+        assert_eq!(
+            sim_instance(world, &sim),
+            format!("{prefix}.sim.inst-1.instance")
+        );
+        assert_eq!(social_group(world), format!("{prefix}.social.group"));
     }
 }

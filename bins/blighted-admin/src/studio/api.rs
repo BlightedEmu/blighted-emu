@@ -508,6 +508,7 @@ mod tests {
             players: 0,
             max_players: 1,
             level: MAP.to_owned(),
+            instance: None,
         }
     }
 

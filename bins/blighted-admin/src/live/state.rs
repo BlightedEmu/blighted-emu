@@ -594,6 +594,7 @@ mod tests {
             players,
             max_players: 1000,
             level: "newworld_vitaeeterna".to_owned(),
+            instance: None,
         }
     }
 

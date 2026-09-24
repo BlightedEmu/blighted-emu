@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use crate::Tables;
 use crate::player_attacks::{PlayerAttacks, Stance, stance_key};
+use crate::player_sequences::PlayerSequences;
 
 /// Separates the status effects of an `AddStatusEffects` cell.
 const EFFECT_SEPARATOR: char = '+';
@@ -452,6 +453,8 @@ pub struct CombatData {
     player_table: String,
     /// The basic attacks of each weapon stance.
     player_attacks: PlayerAttacks,
+    /// The slayer sequences the server starts for each weapon stance.
+    player_sequences: PlayerSequences,
     vision_offsets: HashMap<String, f32>,
     player_max_health: u32,
 }
@@ -584,6 +587,7 @@ impl CombatData {
             table_attacks,
             player_table,
             player_attacks: PlayerAttacks::default(),
+            player_sequences: PlayerSequences::default(),
             vision_offsets: source.vision_offsets.into_iter().collect(),
             player_max_health,
         })
@@ -639,6 +643,20 @@ impl CombatData {
             player_attacks: attacks,
             ..self
         }
+    }
+
+    /// The same data with the player sequence table `sequences`.
+    #[must_use]
+    pub fn with_player_sequences(self, sequences: PlayerSequences) -> Self {
+        Self {
+            player_sequences: sequences,
+            ..self
+        }
+    }
+
+    /// The player sequence table.
+    pub const fn player_sequences(&self) -> &PlayerSequences {
+        &self.player_sequences
     }
 
     /// The stance of key `key` ([`WeaponRow::stance`]).
@@ -974,6 +992,8 @@ mod tests {
             uses: Vec::new(),
             combo: Vec::new(),
             variants: Vec::new(),
+            aimed: None,
+            aimed_charged: None,
         };
         let unarmed = Stance {
             tags: String::new(),

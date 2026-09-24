@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use nw_bus::{CarriedItem, PlayerProgression, PlayerQuests};
+use nw_bus::{CarriedItem, PlayerInventory, PlayerProgression, PlayerQuests};
 use uuid::Uuid;
 
 /// The item list of a character to save, with the Unix time it was taken.
@@ -15,6 +15,8 @@ use uuid::Uuid;
 pub struct ItemSave {
     /// Every item stack of the character.
     pub items: Vec<CarriedItem>,
+    /// Its storage chests and loadouts, saved with the items.
+    pub inventory: PlayerInventory,
     /// Unix milliseconds when the list was taken: a save of an older list never overwrites a
     /// newer one.
     pub taken_at_ms: u64,

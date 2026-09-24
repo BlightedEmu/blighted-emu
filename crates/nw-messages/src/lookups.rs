@@ -10,9 +10,12 @@
 //! | 843 `MetaAchievementComponentServerFacet_ServerRequestGetPendingMetaAchievements` | 3802 `MetaAchievementComponentClientFacet_ClientOnReceiveRewardPendingMetaAchievements` |
 //! | 5463 `GroupsComponentServerFacet_RequestJoinableLobbyCountsForActivity` | 5458 `GroupsComponentClientFacet_OnJoinableLobbyCountsForActivityReceived` |
 //!
-//! This server has no trading post contracts, streamer groups, meta achievement rewards or
-//! group finder lobbies, so each answer is the empty form retail sent to a new character.
+//! The trading post answers the contracts lookup from the world database
+//! ([`crate::contracts`]). This server has no streamer groups, meta achievement rewards or
+//! group finder lobbies, so each of those answers is the empty form retail sent to a new
+//! character.
 
+use crate::contracts::ParticipantQuery;
 use crate::facet::FacetHeader;
 use crate::server::ServerMessage;
 use crate::wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer};
@@ -34,24 +37,20 @@ pub const REQUEST_LOBBY_COUNTS_TYPE_INDEX: u64 = 5463;
 /// Type index of `GroupsComponentClientFacet_OnJoinableLobbyCountsForActivityReceived`.
 pub const LOBBY_COUNTS_TYPE_INDEX: u64 = 5458;
 
-/// The bytes after the lookup id of a contracts answer with no contract: six zero bytes in all
-/// four retail answers (two characters, two captures). Their layout is Unknown.
-pub const NO_CONTRACTS: [u8; NO_CONTRACTS_LEN] = [0; NO_CONTRACTS_LEN];
-const NO_CONTRACTS_LEN: usize = 6;
-
 /// How many lobby counts a lobby-counts answer carries: 132 in all 81 retail answers of the two
 /// own captures and the first 60 open-world sessions (each count a big-endian `u32`, 0 or 1).
 pub const LOBBY_COUNT_SLOTS: usize = 132;
 
 /// One lookup call of the client.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LookupRequest {
-    /// 2556: the trading post contracts of the player. The body after the header holds the
-    /// character, three numbers and a search block (layout Unknown); its last 16 bytes are the
-    /// lookup id, which the answer repeats.
+    /// 2556: the trading post contracts of a participant; the lookup id, which the answer
+    /// repeats, ends the body.
     Contracts {
         /// The header (the player's `ContractsComponent`).
         header: FacetHeader,
+        /// The participant, filters and paging.
+        query: ParticipantQuery,
         /// The lookup id.
         lookup: [u8; RAW_ID_LEN],
     },
@@ -81,20 +80,11 @@ impl LookupRequest {
         let read = |reader: &mut Reader<'_>| -> Result<Self, MessageError> {
             let header = FacetHeader::read(reader)?;
             let request = match type_index {
-                LOOKUP_CONTRACTS_TYPE_INDEX => {
-                    let rest = reader.rest();
-                    let search = rest.len().checked_sub(RAW_ID_LEN).ok_or(
-                        MessageError::Truncated {
-                            needed: RAW_ID_LEN,
-                            available: rest.len(),
-                        },
-                    )?;
-                    reader.bytes(search)?;
-                    Self::Contracts {
-                        header,
-                        lookup: reader.raw_id()?,
-                    }
-                }
+                LOOKUP_CONTRACTS_TYPE_INDEX => Self::Contracts {
+                    header,
+                    query: ParticipantQuery::read(reader)?,
+                    lookup: reader.raw_id()?,
+                },
                 REQUEST_SUB_ARMIES_TYPE_INDEX => Self::SubArmies { header },
                 REQUEST_PENDING_META_ACHIEVEMENTS_TYPE_INDEX => {
                     Self::PendingMetaAchievements { header }
@@ -118,64 +108,28 @@ impl LookupRequest {
         }
     }
 
-    /// The answer retail sent to a player with no contract, streamer group, waiting reward or
-    /// open lobby.
-    pub fn answer(&self) -> ServerMessage {
+    /// The answer retail sent to a player with no streamer group, waiting reward or open
+    /// lobby; `None` for the contracts lookup, which the trading post answers.
+    pub fn answer(&self) -> Option<ServerMessage> {
         match *self {
-            Self::Contracts { header, lookup } => {
-                ServerMessage::ContractsLookedUp(ContractsLookedUpMsg {
-                    header,
-                    lookup,
-                    contracts: NO_CONTRACTS.to_vec(),
-                })
-            }
-            Self::SubArmies { header } => {
-                ServerMessage::JoinableSubArmies(JoinableSubArmiesMsg { header })
-            }
-            Self::PendingMetaAchievements { header } => {
+            Self::Contracts { .. } => None,
+            Self::SubArmies { header } => Some(ServerMessage::JoinableSubArmies(
+                JoinableSubArmiesMsg { header },
+            )),
+            Self::PendingMetaAchievements { header } => Some(
                 ServerMessage::PendingMetaAchievements(PendingMetaAchievementsMsg {
                     header,
                     achievements: Vec::new(),
-                })
+                }),
+            ),
+            Self::LobbyCounts { header, activity } => {
+                Some(ServerMessage::LobbyCounts(LobbyCountsMsg {
+                    header,
+                    activity,
+                    counts: vec![0; LOBBY_COUNT_SLOTS],
+                }))
             }
-            Self::LobbyCounts { header, activity } => ServerMessage::LobbyCounts(LobbyCountsMsg {
-                header,
-                activity,
-                counts: vec![0; LOBBY_COUNT_SLOTS],
-            }),
         }
-    }
-}
-
-/// 2278: the contracts of a lookup.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContractsLookedUpMsg {
-    /// The header of the lookup.
-    pub header: FacetHeader,
-    /// The lookup id of the call.
-    pub lookup: [u8; RAW_ID_LEN],
-    /// The contracts block ([`NO_CONTRACTS`] for none; the layout of a contract is Unknown).
-    pub contracts: Vec<u8>,
-}
-
-impl BodyCodec for ContractsLookedUpMsg {
-    const TYPE_INDEX: u64 = CONTRACTS_LOOKED_UP_TYPE_INDEX;
-
-    fn encode(&self) -> Result<Vec<u8>, MessageError> {
-        let mut writer = Writer::new();
-        self.header.write(&mut writer);
-        Ok(writer.bytes(&self.lookup).bytes(&self.contracts).finish())
-    }
-
-    fn decode(body: &[u8]) -> Result<Self, MessageError> {
-        let mut reader = Reader::new(body);
-        let header = FacetHeader::read(&mut reader)?;
-        let lookup = reader.raw_id()?;
-        Ok(Self {
-            header,
-            lookup,
-            contracts: reader.rest().to_vec(),
-        })
     }
 }
 
@@ -299,6 +253,7 @@ fn read_u32_list(reader: &mut Reader<'_>) -> Result<Vec<u32>, MessageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contracts::{ContractListMsg, ContractsLookedUpMsg};
 
     fn bytes(hex: &str) -> Vec<u8> {
         (0..hex.len())
@@ -311,16 +266,51 @@ mod tests {
         let request = LookupRequest::decode(type_index, &bytes(request))
             .expect("a lookup")
             .expect("decodes");
-        request.answer().encode().expect("encodes")
+        request
+            .answer()
+            .expect("an answer")
+            .encode()
+            .expect("encodes")
     }
 
-    /// Retail 2026-09-18, 9117 and 9180 ms: the first lookup and its answer.
+    fn contracts_query(request: &str) -> (FacetHeader, ParticipantQuery, [u8; RAW_ID_LEN]) {
+        let Some(Ok(LookupRequest::Contracts {
+            header,
+            query,
+            lookup,
+        })) = LookupRequest::decode(LOOKUP_CONTRACTS_TYPE_INDEX, &bytes(request))
+        else {
+            panic!("a contracts lookup");
+        };
+        (header, query, lookup)
+    }
+
+    /// Retail 2026-09-18, 9117 and 9180 ms: the first lookup (the player's open sell orders, ten
+    /// per page) and the answer of a player with none.
     #[test]
-    fn a_contracts_lookup_gets_the_retail_empty_answer() {
+    fn a_contracts_lookup_reads_its_query_and_the_empty_answer_has_the_retail_bytes() {
         const REQUEST: &str = "b39cd7472ccfb38e2715f9bca18fdececede8fa1bcf915277764e12f21bd772800000000000000010000000100000000000a0100000001010009883e449578cc43b3a08879f64b511b7e";
         const ANSWER: &str =
             "b39cd7472ccfb38e2715f9bca18fdece883e449578cc43b3a08879f64b511b7e000000000000";
-        assert_eq!(answer_of(LOOKUP_CONTRACTS_TYPE_INDEX, REQUEST), bytes(ANSWER));
+        let (header, query, lookup) = contracts_query(REQUEST);
+        assert_eq!(query.participant.kind, 0);
+        assert_eq!(
+            (query.open_filter, query.role_filter, query.page, query.page_size),
+            (
+                crate::contracts::open_filter::OPEN,
+                crate::contracts::role_filter::CREATOR,
+                0,
+                10
+            )
+        );
+        assert_eq!(query.kinds, vec![1]);
+        assert_eq!(query.tail, vec![9]);
+        let empty = ContractsLookedUpMsg(ContractListMsg {
+            header,
+            lookup,
+            contracts: Vec::new(),
+        });
+        assert_eq!(empty.encode().expect("encodes"), bytes(ANSWER));
         let message =
             ServerMessage::decode(CONTRACTS_LOOKED_UP_TYPE_INDEX, &bytes(ANSWER)).expect("known");
         assert_eq!(
@@ -329,13 +319,16 @@ mod tests {
         );
     }
 
-    /// Retail 2026-09-18, 18776 and 18834 ms: the second form of the call (72 bytes).
+    /// Retail 2026-09-18, 18776 ms: the second form of the call (72 bytes, every role and state,
+    /// 100 per page, the make-good contracts).
     #[test]
-    fn the_short_contracts_lookup_repeats_its_own_id() {
+    fn the_short_contracts_lookup_reads() {
         const REQUEST: &str = "b39cd7472ccfb38e2715f9bca18fdececede8fa1bcf915277764e12f21bd772800000000000000000000000000000000006401000000020050b74284e0f14ae5b9cacd3470c8acff";
-        const ANSWER: &str =
-            "b39cd7472ccfb38e2715f9bca18fdece50b74284e0f14ae5b9cacd3470c8acff000000000000";
-        assert_eq!(answer_of(LOOKUP_CONTRACTS_TYPE_INDEX, REQUEST), bytes(ANSWER));
+        let (_, query, lookup) = contracts_query(REQUEST);
+        assert_eq!((query.open_filter, query.page_size), (0, 100));
+        assert_eq!(query.kinds, vec![2]);
+        assert!(query.tail.is_empty());
+        assert_eq!(lookup[0], 0x50);
     }
 
     /// Retail 2026-09-18, 16342 and 16367 ms.

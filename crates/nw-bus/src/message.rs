@@ -188,6 +188,9 @@ pub struct Admit {
     pub backstory: Option<String>,
     /// The character's saved items; `None` when it never saved items (it gets its starter kit).
     pub items: Option<Vec<CarriedItem>>,
+    /// The character's storage chests and saved loadouts; empty when it never saved any.
+    #[serde(default)]
+    pub inventory: PlayerInventory,
     /// The character's saved quests; empty when it never saved any.
     pub quests: PlayerQuests,
     /// The character's saved progression; empty when it never saved any.
@@ -254,6 +257,83 @@ pub struct CarriedItem {
     pub quantity: u32,
     /// Where it is.
     pub place: ItemPlace,
+    /// What the stack keeps beyond its id and quantity.
+    #[serde(default)]
+    pub state: ItemState,
+}
+
+/// What an item stack keeps beyond its id and quantity (world migrations 0011 and 0017). A
+/// `None` keeps the item's data value: a stack saved before it kept its own.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemState {
+    /// The instance id the client names the stack by; `None`: the id the sim derives from the
+    /// character and the item id (a stack saved before it kept one).
+    pub instance: Option<[u8; RAW_ID_LEN]>,
+    /// Whether its owner locked it (2549).
+    pub locked: bool,
+    /// Its rolled or upgraded gear score; `None`: the item's data gear score.
+    pub gear_score: Option<u32>,
+    /// Its current durability; `None`: full.
+    pub durability: Option<u32>,
+    /// Its perk ids (`PerkData` `PerkID`) by perk slot, no gaps; `None`: the item's fixed perks.
+    pub perks: Option<Vec<String>>,
+    /// Whether it is bound to the character; `None`: the item's `BindOnPickup`.
+    pub bound: Option<bool>,
+    /// Its look: dye, applied skin and skin dye.
+    pub look: ItemLookState,
+}
+
+/// How an item looks beyond its item: the `DyeColorData` indexes of its four dye channels, the
+/// skin applied over it (CRC-32 of the lowercase appearance id, 0 for none) and that skin's dye.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemLookState {
+    /// The item's dye, channels R, G, B, A; 0 is no dye.
+    pub dye: [u8; DYE_CHANNELS],
+    /// The applied skin; 0 is none.
+    pub appearance: u32,
+    /// The applied skin's dye.
+    pub skin_dye: [u8; DYE_CHANNELS],
+}
+
+/// Dye channels of an item (R, G, B, A).
+pub const DYE_CHANNELS: usize = 4;
+
+/// One item stack in one of a player's storage chests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredItem {
+    /// The storage: the entity id of its chest as the client names it.
+    pub storage: [u8; RAW_ID_LEN],
+    /// The slot of the storage's container.
+    pub slot: u16,
+    /// The item id (`MasterItemDefinitions` `ItemID`).
+    pub item_id: String,
+    /// Stack size.
+    pub quantity: u32,
+    /// What the stack keeps beyond its id and quantity.
+    pub state: ItemState,
+}
+
+/// One saved loadout (gear set) of a player; loadout 0, the worn items, is not saved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedLoadout {
+    /// Its place in the loadout list, 1 or more.
+    pub index: u8,
+    /// Its name as the client shows it (`@lo_name <index>` until the player renames it).
+    pub name: String,
+    /// Each paperdoll slot it fills and the instance id of the item that goes there.
+    pub items: Vec<(u32, [u8; RAW_ID_LEN])>,
+    /// The attribute points saved with it (attribute, points).
+    pub attributes: Vec<(u32, u32)>,
+}
+
+/// A player's items besides what it wears and carries: its storage chests and its saved
+/// loadouts, as a join, a handoff and a save carry them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerInventory {
+    /// The items of its storage chests.
+    pub stored: Vec<StoredItem>,
+    /// Its saved loadouts.
+    pub loadouts: Vec<SavedLoadout>,
 }
 
 /// One player moving to another sim (M5 spec section 3.3).
@@ -303,6 +383,9 @@ pub struct HandoffOffer {
     /// The items the player carries; `None` when the sender kept none, so the taker gives the
     /// login kit of the backstory.
     pub items: Option<Vec<CarriedItem>>,
+    /// The player's storage chests and saved loadouts.
+    #[serde(default)]
+    pub inventory: PlayerInventory,
     /// The main-hand option slot the player holds drawn, when it holds one (live 2026-09-18:
     /// without it the open world took the slot-24 blunderbuss as the weapon in the hand and
     /// dropped every greatsword swing).
@@ -320,6 +403,10 @@ pub struct HandoffOffer {
     /// full lists go on above it.
     #[serde(default)]
     pub attribute_version: u64,
+    /// The sequence of the next fishing step (type 5338): the client takes only steps from the
+    /// one it expects, so the taker's steps go on from it.
+    #[serde(default)]
+    pub fishing_sequence: u16,
     /// Whether the account has the game master rank, as in [`Admit::game_master`].
     #[serde(default)]
     pub game_master: bool,
@@ -377,6 +464,194 @@ pub struct PlayerProgression {
     /// they were first assigned (world migration 0008).
     #[serde(default)]
     pub weapon_points: Vec<(String, u16)>,
+    /// The territory standing points spent: pool and point (both CRC-32 wire ids of the
+    /// 3681 point list) and the level, in the order they were first spent (world migration
+    /// 0021).
+    #[serde(default)]
+    pub territory_points: Vec<(u32, u32, u16)>,
+    /// Its travel and housing state (world migration 0010).
+    #[serde(default)]
+    pub travel: PlayerTravel,
+    /// The mapped ability slots: the weapon mastery of the tree, the slot (0 to 2) and the
+    /// ability's `ProgressionPointId` (world migration 0013).
+    #[serde(default)]
+    pub ability_slots: Vec<(String, u8, String)>,
+    /// The meta achievement counters (kills, gathers, deaths), by lowercase counter key (world
+    /// migration 0013).
+    #[serde(default)]
+    pub meta_counters: BTreeMap<String, u64>,
+    /// The completed meta achievements (`MetaAchievementId`), in completion order, each with
+    /// whether its reward still waits for the player to see it (world migration 0013).
+    #[serde(default)]
+    pub meta_completed: Vec<(String, bool)>,
+    /// The title it shows (CRC-32 of the lowercase `TitleID`); `None` for none (world
+    /// migration 0013).
+    #[serde(default)]
+    pub title: Option<u32>,
+    /// Its chosen mount and its dyed or named mounts (world migration 0012).
+    #[serde(default)]
+    pub mounts: PlayerMounts,
+    /// Its expedition, raid and trial state: counters, cooldowns and its instance stay (world
+    /// migration 0015).
+    #[serde(default)]
+    pub arena: crate::instance::PlayerArena,
+    /// Its musical performance lockout (world migration 0018).
+    #[serde(default)]
+    pub music: PlayerMusic,
+}
+
+/// A player's musical performance lockout (world migration 0018), as a join, a handoff and a save
+/// carry it: the client's `MusicalPerformancePlayerPersistence` `m_nextPerformanceStartTime`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerMusic {
+    /// Server time (ms since 2000-01-01) from which it may create a performance again; `None`
+    /// for no lockout.
+    pub next_performance_ms: Option<u64>,
+}
+
+/// Bytes of a mount dye: one color index per mask channel, R, G, B, A.
+pub const MOUNT_DYE_LEN: usize = 4;
+
+/// A player's mounts (world migration 0012), as a join, a handoff and a save carry them: the
+/// client's `MountComponentPersistentData`. The mounts it owns are its achievements'.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerMounts {
+    /// The chosen mount (the CRC-32 of its lowercase `MountId`); `None` for none.
+    pub selected: Option<u32>,
+    /// The mounts with a dye or a name, in the order first customized.
+    pub customized: Vec<CarriedMount>,
+    /// The mount it rides: a handoff carries the ride to the next sim; a save does not keep it
+    /// (a login starts on foot, as retail's login cards).
+    #[serde(default)]
+    pub riding: Option<u32>,
+}
+
+/// One mount with a dye or a name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CarriedMount {
+    /// The mount id.
+    pub mount_id: u32,
+    /// The color index of each mask channel, R, G, B, A (0 for none).
+    pub dye: [u8; MOUNT_DYE_LEN],
+    /// The name bytes the client sent (empty for none).
+    pub name: Vec<u8>,
+}
+
+/// A world position kept as the bit patterns of its metres (`f32::to_bits`): a travel state then
+/// compares whole and keeps every bit through a handoff and a save.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct StoredPoint([u32; 3]);
+
+impl StoredPoint {
+    /// The stored form of `point`.
+    pub const fn of(point: Point) -> Self {
+        Self([point.x.to_bits(), point.y.to_bits(), point.z.to_bits()])
+    }
+
+    /// The position.
+    pub const fn point(self) -> Point {
+        Point {
+            x: f32::from_bits(self.0[0]),
+            y: f32::from_bits(self.0[1]),
+            z: f32::from_bits(self.0[2]),
+        }
+    }
+
+    /// The point of the bit patterns `bits` (x, y, z), as a save stores them.
+    pub const fn from_bits(bits: [u32; 3]) -> Self {
+        Self(bits)
+    }
+
+    /// The bit patterns (x, y, z), as a save stores them.
+    pub const fn bits(self) -> [u32; 3] {
+        self.0
+    }
+}
+
+/// A player's travel and housing state (world migration 0010), as a join, a handoff and a save
+/// carry it. Times are Unix milliseconds.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayerTravel {
+    /// The map marker its client set (2728); `None` when it has none.
+    pub waypoint: Option<StoredPoint>,
+    /// The inn it checked in at (interaction 18, `SetSpawnPoint`): the facet entity of the inn's
+    /// spawn point, the id its client names in a respawn request (1938).
+    pub inn: Option<u64>,
+    /// The respawn camp it bound to (interaction 73, `BindToCamp`): its facet entity, the id its
+    /// client names in a respawn request (1938).
+    pub camp: Option<u64>,
+    /// The skin of its camp (742, `CampSkinData` id as its CRC-32).
+    pub camp_skin: Option<u32>,
+    /// When it may ask to be unstuck again (388); 0 for at once.
+    pub unstuck_ready_ms: u64,
+    /// The homes it owns.
+    pub homes: Vec<OwnedHome>,
+    /// Its played time before this session, ms (the player time state, type 3290).
+    pub played_ms: u64,
+    /// When it last recalled to its inn (3713 to its inn), Unix ms; 0 for never.
+    pub inn_recalled_ms: u64,
+    /// The camp it placed (2236).
+    pub placed_camp: Option<PlacedCamp>,
+}
+
+/// A camp a player placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacedCamp {
+    /// Where it stands.
+    pub position: StoredPoint,
+    /// Its tier (the player's `Camping` rank when placed).
+    pub tier: u8,
+    /// When it was placed, Unix ms.
+    pub placed_ms: u64,
+}
+
+/// The housing state of a home beyond its place and furniture (world migration 0020).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeRecord {
+    /// The plot's facet entity, as its client names it.
+    pub plot_facet: u64,
+    /// The third id of the plot reference, as its client names it (meaning Unknown).
+    pub plot_extra: u64,
+    /// The house data entity's raw id (544); all zero until the client named it.
+    pub house_data: [u8; RAW_ID_LEN],
+    /// The house data entity's facet entity.
+    pub house_data_facet: u64,
+    /// The house type: the CRC-32 of the lowercase `HouseTypeID`.
+    pub house_type: u32,
+    /// The plot's `TerritoryID`.
+    pub territory: u16,
+    /// When the taxes are due, Unix ms.
+    pub taxes_due_ms: u64,
+    /// When the fast travel home may be used again, Unix ms; 0 for at once.
+    pub fast_travel_ready_ms: u64,
+}
+
+/// A home a player owns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnedHome {
+    /// The raw id of the house plot entity, as its client names it (3712, 3716, 2149).
+    pub plot: [u8; RAW_ID_LEN],
+    /// Where the player stood when it bought the home: where a fast travel home puts it.
+    pub position: StoredPoint,
+    /// When it bought the home.
+    pub purchased_ms: u64,
+    /// Its placed furniture, by item index.
+    pub items: Vec<HousingItem>,
+    /// Its housing state.
+    pub record: HomeRecord,
+}
+
+/// One piece of furniture placed in a home (3277).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HousingItem {
+    /// Its index in the home, which the client's move and remove calls name.
+    pub index: u16,
+    /// The item the client placed, as its placement call names it.
+    pub item: u32,
+    /// Its position in the home's frame, metres.
+    pub position: StoredPoint,
+    /// Its rotation quaternion (x, y, z, w) as `f32` bit patterns.
+    pub rotation: [u32; 4],
 }
 
 /// One loot limit's count of a player (`nw_content::loot_limits`).
@@ -453,23 +728,39 @@ pub const MOB_ENTITY_BASE: u64 = 1 << 34;
 
 /// Most bytes of one [`Ghost`] in `postcard`: a 10-byte entity number, three 4-byte floats, two
 /// option tags, and the larger of a mob's state (five 5-byte numbers and a 1-byte flag) and a
-/// player's ([`PlayerGhost`]: about 236 bytes with all its visible items, its view, target and
-/// action).
-pub const MAX_GHOST_BYTES: usize = 288;
+/// player's ([`PlayerGhost`]: about 246 bytes with all its visible items, its view, target,
+/// action and mount, and 13 more bytes per visible item for its look: a 5-byte skin and two
+/// 4-byte dyes), and its upper slayer slots ([`GHOST_UPPER_SLOTS_BYTES`]).
+pub const MAX_GHOST_BYTES: usize =
+    288 + GHOST_VISIBLE_ITEMS * GHOST_ITEM_LOOK_BYTES + GHOST_UPPER_SLOTS_BYTES;
+/// Most `postcard` bytes of one ghost item's look.
+const GHOST_ITEM_LOOK_BYTES: usize = 13;
+/// Most `postcard` bytes of an optional `u64`: the option tag and a 10-byte varint.
+const OPTION_U64_BYTES: usize = 11;
+/// Most `postcard` bytes of an optional `u16`: the option tag and a 3-byte varint.
+const OPTION_U16_BYTES: usize = 4;
+/// Most `postcard` bytes of one [`GhostSlotChange`]: its state, start and sequence.
+const GHOST_SLOT_BYTES: usize = 2 * OPTION_U64_BYTES + OPTION_U16_BYTES;
+/// Most `postcard` bytes of a player ghost's [`GhostUpperSlots`]: the option tag, three slots,
+/// the marker and the order flag.
+const GHOST_UPPER_SLOTS_BYTES: usize = 1 + 3 * GHOST_SLOT_BYTES + OPTION_U64_BYTES + 1;
 
 /// The paperdoll slots that show on a character (armor and weapon options; the
 /// `nw_messages::is_visible_slot` slots): a [`PlayerGhost`] carries at most one item for each.
 pub const GHOST_VISIBLE_ITEMS: usize = 11;
 
-/// One worn item that shows on a player ghost: its slot and item, all that the public paperdoll
-/// of another player names (retail sends other players the public slot only: no durability,
-/// gear score or instance; replication note).
+/// One worn item that shows on a player ghost: its slot, item and look, all that the public
+/// paperdoll of another player names (retail sends other players the public slot only: no
+/// durability, gear score or instance; replication note; the look is the item visual's dye and
+/// transmog).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GhostItem {
     /// The paperdoll slot.
     pub slot: u8,
     /// The client item index.
     pub item_index: u32,
+    /// Its dye and applied skin.
+    pub look: ItemLookState,
 }
 
 /// What other players see of a player near a border (replication note): its look, health,
@@ -506,10 +797,58 @@ pub struct PlayerGhost {
     pub active: Option<u32>,
     /// The drawn weapon is in the hand.
     pub attached: bool,
+    /// It has its inventory open (`lookingThroughLoadout`).
+    pub looking_through_loadout: bool,
+    /// The mount it rides, as other players see it.
+    pub mount: GhostMount,
     /// The items that show on it.
     pub items: [Option<GhostItem>; GHOST_VISIBLE_ITEMS],
     /// The action it plays (its slayer state), when it plays one.
     pub action: Option<GhostSlayer>,
+    /// Its slayer slots past the first and the slayer marker (its block, aim, aimed shot,
+    /// reload and draw), when it has a change of them.
+    #[serde(default)]
+    pub upper: Option<GhostUpperSlots>,
+}
+
+/// A change of one slayer slot past the first of a player ghost (ALC children 16 to 24).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GhostSlotChange {
+    /// Its state (the second slot's as on the wire), when sent.
+    pub state: Option<u64>,
+    /// The ALC state number in which it starts, when sent.
+    pub started: Option<u16>,
+    /// Its sequence, when sent.
+    pub sequence: Option<u64>,
+}
+
+/// The slayer slots past the first and the slayer marker of a player ghost (ALC children 16 to
+/// 24 and 48): what other players see of its block, aim, aimed shot, reload and draw (Observed:
+/// the retail duel capture's remote players carried these children as the own states do).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GhostUpperSlots {
+    /// The second slot (children 16 to 18).
+    pub second: GhostSlotChange,
+    /// The third slot (children 19 to 21).
+    pub third: GhostSlotChange,
+    /// The fourth slot (children 22 to 24).
+    pub fourth: GhostSlotChange,
+    /// The slayer marker (child 48).
+    pub marker: Option<u64>,
+    /// They changed after its slayer state started: they take the place of its second slot.
+    pub after_state: bool,
+}
+
+/// The mount of a player ghost, as other players see it (the mount state's `m_mountId` and slot
+/// 3).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GhostMount {
+    /// The mount it rides; 0 when it rides none.
+    pub mount_id: u32,
+    /// `mountRemoteFlags`.
+    pub flags: u8,
+    /// `remoteDyeData`.
+    pub dye: [u8; MOUNT_DYE_LEN],
 }
 
 /// The slayer state of a player ghost: the action it plays (ALC children 13 to 18; slayer note).
@@ -573,7 +912,8 @@ pub struct Hit {
     pub threat: u64,
 }
 
-/// The ghosts of one sim for another, every tick (M5 spec section 3.4).
+/// The ghosts of one sim for another, every tick (M5 spec section 3.4), in one or more parts
+/// ([`crate::ghost_parts`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ghosts {
     /// The sender.
@@ -583,6 +923,12 @@ pub struct Ghosts {
     /// The raw id (`GdeRef`) of each entity in [`Ghosts::entities`], by entity number: the
     /// receiver's clients see the entity by the same id as the owner's.
     pub gde_refs: Vec<(u64, [u8; RAW_ID_LEN])>,
+    /// The sender's ghost round: every part of one round has it.
+    pub round: u64,
+    /// This part of the round, from 0.
+    pub part: u16,
+    /// The parts of the round; at least 1.
+    pub parts: u16,
 }
 
 /// A sim is alive, with its load for the director.
@@ -600,6 +946,10 @@ pub struct SimHeartbeat {
     /// director splits the open map over the sims of its own level and sends new characters to
     /// the sims of the tutorial level.
     pub level: String,
+    /// `Some` for a sim with the instance role (it gets no cells; the director opens instances
+    /// on it), with the instance it runs.
+    #[serde(default)]
+    pub instance: Option<crate::instance::InstanceBeat>,
 }
 
 /// Largest batch, in envelope bytes: well below [`MAX_BUS_MESSAGE_BYTES`] (M5 load spec
@@ -805,7 +1155,112 @@ mod tests {
             masteries: BTreeMap::from([("GreatSwordAbilityTable".to_owned(), 20)]),
             attributes: vec![(2, 15)],
             weapon_points: vec![("Ability_Greatsword_Combo".to_owned(), 1)],
+            territory_points: vec![(0xd65a_1577, 0x1234_5678, 3)],
+            travel: travel(),
+            mounts: PlayerMounts {
+                selected: Some(u32::MAX),
+                customized: vec![CarriedMount {
+                    mount_id: u32::MAX,
+                    dye: [u8::MAX; MOUNT_DYE_LEN],
+                    name: b"Rex".to_vec(),
+                }],
+                riding: Some(u32::MAX),
+            },
+            ability_slots: vec![(
+                "GreatSwordAbilityTable".to_owned(),
+                0,
+                "Ability_Greatsword_Combo".to_owned(),
+            )],
+            meta_counters: BTreeMap::from([("pve_totalkills".to_owned(), u64::MAX)]),
+            meta_completed: vec![("CharacterProgression1".to_owned(), true)],
+            title: Some(u32::MAX),
+            arena: arena(),
+            music: PlayerMusic {
+                next_performance_ms: Some(u64::MAX),
+            },
         }
+    }
+
+    /// An arena state with every field set: the counters of a retail expedition entry.
+    fn arena() -> crate::instance::PlayerArena {
+        crate::instance::PlayerArena {
+            dungeon_cooldown_since_2000_ns: u64::MAX,
+            solo_trial_cooldown_since_2000_ns: 1,
+            ranks: vec![3, 3, 3],
+            last_dungeon: Some([0x2d; 16]),
+            last_mutated_dungeon: Some([0x7d; 16]),
+            base_entered: 1,
+            mutated_entered: u32::MAX,
+            group_trials_entered: 2,
+            next_base_refresh_ns: 1_792_746_000_226_611_400,
+            next_mutated_refresh_ns: 1_793_091_600_226_670_700,
+            next_group_trial_refresh_ns: 1_792_746_000_226_725_900,
+            mutation_award: true,
+            last_dungeon_mutated: true,
+            stay: Some(crate::instance::InstanceStay {
+                instance: Uuid::from_u128(u128::MAX),
+                game_mode: "DungeonAmrine".to_owned(),
+                phase: u64::MAX,
+                return_level: "newworld_vitaeeterna".to_owned(),
+                return_position: StoredPoint::from_bits([u32::MAX, 0, 1]),
+                activated_ns: u64::MAX,
+                mutation_difficulty: Some(u8::MAX),
+            }),
+        }
+    }
+
+    /// A travel state with every field set.
+    fn travel() -> PlayerTravel {
+        PlayerTravel {
+            waypoint: Some(StoredPoint::of(POINT)),
+            inn: Some(17_680_737_194_352_937_251),
+            camp: Some(16_695_474_225_659_806_323),
+            camp_skin: Some(0x3e89_166b),
+            unstuck_ready_ms: 1_790_860_734_747,
+            homes: vec![OwnedHome {
+                plot: [7; RAW_ID_LEN],
+                position: StoredPoint::of(POINT),
+                purchased_ms: 1_783_814_228_305,
+                items: vec![HousingItem {
+                    index: 24,
+                    item: 0xb39e,
+                    position: StoredPoint::of(POINT),
+                    rotation: [0, 0, 0.967_457_f32.to_bits(), 0.255_766_f32.to_bits()],
+                }],
+                record: HomeRecord {
+                    plot_facet: 0x6a41_43a0_cd66_37c7,
+                    plot_extra: 0x99ed_e7e1_d5a5_b24d,
+                    house_data: [9; RAW_ID_LEN],
+                    house_data_facet: 0xc13e_b7f0_5396_3b4c,
+                    house_type: 0xd0e4_0188,
+                    territory: 16,
+                    taxes_due_ms: 1_784_418_228_305,
+                    fast_travel_ready_ms: 1_783_828_628_305,
+                },
+            }],
+            played_ms: 448_201,
+            inn_recalled_ms: 1_790_860_000_000,
+            placed_camp: Some(PlacedCamp {
+                position: StoredPoint::of(POINT),
+                tier: 2,
+                placed_ms: 1_790_861_000_000,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_stored_point_keeps_every_bit() {
+        let odd = Point {
+            x: -0.0,
+            y: f32::MIN_POSITIVE,
+            z: 14_335.875,
+        };
+        let back = StoredPoint::of(odd).point();
+        assert_eq!(
+            [back.x.to_bits(), back.y.to_bits(), back.z.to_bits()],
+            [odd.x.to_bits(), odd.y.to_bits(), odd.z.to_bits()]
+        );
+        assert_eq!(StoredPoint::of(POINT).point(), POINT);
     }
 
     #[test]
@@ -826,7 +1281,35 @@ mod tests {
                 item_id: "PotionHealthT1".to_owned(),
                 quantity: 5,
                 place: ItemPlace::Bag(0),
+                state: ItemState {
+                    instance: Some(GDE_REF),
+                    locked: true,
+                    gear_score: Some(590),
+                    durability: Some(1200),
+                    perks: Some(vec!["PerkID_StatSwap_BaseDamage".to_owned()]),
+                    bound: Some(true),
+                    look: ItemLookState {
+                        dye: [4, 0, 184, 0],
+                        appearance: u32::MAX,
+                        skin_dye: [0, 5, 0, 0],
+                    },
+                },
             }]),
+            inventory: PlayerInventory {
+                stored: vec![StoredItem {
+                    storage: GDE_REF,
+                    slot: 3,
+                    item_id: "FlintT1".to_owned(),
+                    quantity: 12,
+                    state: ItemState::default(),
+                }],
+                loadouts: vec![SavedLoadout {
+                    index: 1,
+                    name: "@lo_name 1".to_owned(),
+                    items: vec![(24, GDE_REF)],
+                    attributes: vec![(0, 150), (1, 350)],
+                }],
+            },
             quests: PlayerQuests::default(),
             progression: progression(),
             game_master: false,
@@ -869,13 +1352,16 @@ mod tests {
             progression: progression(),
             mastery_versions: (12, 7),
             attribute_version: 9,
+            fishing_sequence: 4,
             game_master: true,
             achievement_version: 25,
             items: Some(vec![CarriedItem {
                 item_id: "PotionHealthT1".to_owned(),
                 quantity: 2,
                 place: ItemPlace::Worn(14),
+                state: ItemState::default(),
             }]),
+            inventory: PlayerInventory::default(),
             drawn_weapon: Some(25),
             active_weapon: Some(25),
             quests: PlayerQuests {
@@ -915,6 +1401,9 @@ mod tests {
                 player: None,
             }],
             gde_refs: vec![(CONNECTION, GDE_REF)],
+            round: 1,
+            part: 0,
+            parts: 1,
         });
         round_trip(SimHeartbeat {
             id: sim(),
@@ -922,6 +1411,24 @@ mod tests {
             players: 10,
             max_players: 2000,
             level: "newworld_vitaeeterna".to_owned(),
+            instance: None,
+        });
+        round_trip(SimHeartbeat {
+            id: sim(),
+            started_at_ms: STARTED_AT_MS,
+            players: 1,
+            max_players: 5,
+            level: "nw_dungeon_windsward_00".to_owned(),
+            instance: Some(crate::instance::InstanceBeat {
+                running: Some(crate::instance::RunningInstance {
+                    instance: Uuid::from_u128(1),
+                    game_mode: "DungeonAmrine".to_owned(),
+                    members: vec![Uuid::from_u128(2)],
+                    players: 1,
+                    empty_for_ms: Some(u64::MAX),
+                    open_for_ms: 1,
+                }),
+            }),
         });
     }
 
@@ -1000,6 +1507,16 @@ mod tests {
         let item = GhostItem {
             slot: u8::MAX,
             item_index: u32::MAX,
+            look: ItemLookState {
+                dye: [u8::MAX; DYE_CHANNELS],
+                appearance: u32::MAX,
+                skin_dye: [u8::MAX; DYE_CHANNELS],
+            },
+        };
+        let largest_slot = GhostSlotChange {
+            state: Some(u64::MAX),
+            started: Some(u16::MAX),
+            sequence: Some(u64::MAX),
         };
         let player = Ghost {
             mob: None,
@@ -1018,6 +1535,12 @@ mod tests {
                 drawn: Some(u32::MAX),
                 active: Some(u32::MAX),
                 attached: true,
+                looking_through_loadout: true,
+                mount: GhostMount {
+                    mount_id: u32::MAX,
+                    flags: u8::MAX,
+                    dye: [u8::MAX; MOUNT_DYE_LEN],
+                },
                 items: [Some(item); GHOST_VISIBLE_ITEMS],
                 action: Some(GhostSlayer {
                     state: Some(u64::MAX),
@@ -1025,6 +1548,13 @@ mod tests {
                     sequence: u64::MAX,
                     second_started: Some(u16::MAX),
                     second_playing: Some((u64::MAX, u64::MAX)),
+                }),
+                upper: Some(GhostUpperSlots {
+                    second: largest_slot,
+                    third: largest_slot,
+                    fourth: largest_slot,
+                    marker: Some(u64::MAX),
+                    after_state: true,
                 }),
             }),
             ..ghost

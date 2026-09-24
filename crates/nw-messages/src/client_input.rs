@@ -171,6 +171,9 @@ pub enum Bit8 {
 
 /// The interaction kind of a gather.
 pub const GATHER_KIND: u8 = 14;
+/// The interaction kind of a water gather (`InteractionUIActions` `GatherWaterResource`; retail
+/// `Hive_Dye`: two requests, their gatherable CRC 0).
+pub const WATER_GATHER_KIND: u8 = 15;
 /// The interaction kind of a loot bag (retail 2026-09-18: the bag of a killed boar and the
 /// tutorial's beach bag).
 pub const LOOT_KIND: u8 = 28;
@@ -442,6 +445,18 @@ const ATTACK_PRESS_BIT: u32 = 40;
 /// The slot value and bit of the attack key's release: set in one record only.
 const ATTACK_RELEASE_VALUE: usize = 2;
 const ATTACK_RELEASE_BIT: u32 = 31;
+/// The slot value and bit set while the attack key is held (the Azoth catalog input 191, `primary
+/// attack (held)`; fishing study, run 15: set from the record after each press until the
+/// release in all 9 casts and 7 reels of `open-world/Fishing`).
+const ATTACK_HELD_KEY: (usize, u32) = (2, 63);
+/// The slot value and bit of a press of the fishing key (fishing study, run 15: in
+/// `open-world/Fishing` each of its 4 presses took the pole out or put it away, 63 to 68 ms
+/// later, with no other key).
+const FISHING_TOGGLE_KEY: (usize, u32) = (4, 49);
+/// The slot value and bit of a press of the bait window key (fishing study, run 15: each of the
+/// 4 presses with the pole out opened or closed the bait window, the state `ApplyingBait` and
+/// back).
+const BAIT_WINDOW_KEY: (usize, u32) = (4, 9);
 /// The slot value and bit of the forward navigation input (the action lists' `ForwardNav`, the
 /// forward input of every move): set while the forward key is held and while the autorun is on.
 /// Observed: in the newchar capture it is set in all 12,756 records with the forward key and in no
@@ -456,6 +471,10 @@ const WEAPON_KEYS: [(usize, u32); 2] = [(0, 9), (3, 13)];
 /// value `n / 64` bit `n % 64`). Retail, 721 ledgers: with every weapon sheathed the server
 /// drew the selected option 42 ms (median) after it, 106 of 109 presses.
 const SHEATHE_KEY: (usize, u32) = (6, 44);
+/// The slot value and bit of the summon mount key (the Azoth catalog input 26, `summon mount`).
+/// Retail, 20 mount ledgers: each press got its 5747, 5937 or 5752 within 40 ms (Mount-quest
+/// capture: 13 summons, 13 dismounts, 1 refusal); one record per press.
+const SUMMON_MOUNT_KEY: (usize, u32) = (0, 26);
 /// The slot values and bits of the movement keys, set while the key is held (movement study
 /// 2026-09-20: in 15,000 retail records of the newchar and clean movement captures, the own
 /// player's next place moved from the last one at a median angle to the camera yaw of 0.1° with
@@ -530,6 +549,21 @@ impl InputRecord {
         self.slot_bit(ATTACK_RELEASE_VALUE, ATTACK_RELEASE_BIT)
     }
 
+    /// Whether the player holds the attack key in this record.
+    pub fn attack_held(&self) -> bool {
+        self.slot_bit(ATTACK_HELD_KEY.0, ATTACK_HELD_KEY.1)
+    }
+
+    /// Whether the player pressed the fishing key in this record.
+    pub fn fishing_toggle_pressed(&self) -> bool {
+        self.slot_bit(FISHING_TOGGLE_KEY.0, FISHING_TOGGLE_KEY.1)
+    }
+
+    /// Whether the player pressed the bait window key in this record.
+    pub fn bait_window_pressed(&self) -> bool {
+        self.slot_bit(BAIT_WINDOW_KEY.0, BAIT_WINDOW_KEY.1)
+    }
+
     /// The entity the player locked on in this record: the id of row 3 (lock-on note: retail
     /// sent it only while locked on a target).
     pub fn lock_target(&self) -> Option<u64> {
@@ -590,6 +624,12 @@ impl InputRecord {
     /// Whether the player presses the sheathe key in this record.
     pub fn sheathe_pressed(&self) -> bool {
         self.slot_bit(SHEATHE_KEY.0, SHEATHE_KEY.1)
+    }
+
+    /// Whether the player presses the summon mount key in this record: a summon, or a
+    /// dismount while riding.
+    pub fn summon_mount_pressed(&self) -> bool {
+        self.slot_bit(SUMMON_MOUNT_KEY.0, SUMMON_MOUNT_KEY.1)
     }
 
     /// Whether the player presses a key that changes the camera's boom in this record.
@@ -1546,6 +1586,38 @@ mod tests {
         assert!(walking.walk_held() && walking.move_keys().forward);
         assert!(!walking.crouch_toggle_pressed() && !walking.prone_toggle_pressed());
         assert!(!walking.walk_toggle_pressed());
+    }
+
+    #[test]
+    fn the_summon_mount_press_reads_as_in_the_retail_record() {
+        // Retail slot values of the record of a summon press (Mount-quest capture, the press
+        // that got the summon 40 ms later) and of the record after it.
+        const PRESS: [u64; 10] = [
+            0x400_0400_0080,
+            0x800_0000_0000,
+            0x800_0000_0002,
+            0,
+            0,
+            0,
+            0x2080_0000_0000_0000,
+            0x402_0000_0800_0000,
+            0x200_0000_0001_0000,
+            0x200,
+        ];
+        const AFTER: [u64; 10] = [
+            0x80,
+            0x800_0000_0000,
+            0,
+            0,
+            0,
+            0,
+            0x80_0000_0000_0000,
+            0x402_0000_0800_0000,
+            0x200_0000_0000_0000,
+            0,
+        ];
+        assert!(with_slots(PRESS).summon_mount_pressed());
+        assert!(!with_slots(AFTER).summon_mount_pressed());
     }
 
     #[test]

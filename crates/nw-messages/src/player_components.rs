@@ -33,12 +33,15 @@ use crate::containers::{
     ItemManagementState,
 };
 use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
+use crate::game_events::GAME_EVENT_TYPE_INDEX as GAME_EVENTS_TYPE;
 use crate::gathering::{GATHERING_TYPE_INDEX, GatheringState};
 use crate::gear::PlayerGear;
 use crate::interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
 use crate::loot::{
     GLOBAL_STORAGE_TYPE_INDEX, GlobalStorageState, LOOT_TRACKER_TYPE_INDEX, LootTrackerState,
 };
+use crate::mount::{MOUNT_COMPONENT, MOUNT_TYPE_INDEX, MountState};
+use crate::objective_interactor::OBJECTIVE_INTERACTOR_TYPE_INDEX as OBJECTIVES_BOARD;
 use crate::objectives::{OBJECTIVES_TYPE_INDEX, ObjectivesState};
 use crate::paperdoll::PAPERDOLL_TYPE_INDEX;
 use crate::payload::{BundleMember, MemberState};
@@ -47,6 +50,14 @@ use crate::progression_points::{
     PROGRESSION_POINT_COMPONENT, PROGRESSION_POINT_TYPE_INDEX, ProgressionPointState,
 };
 use crate::slots::{children_mask, read_children, read_slot_byte, write_known_children};
+use crate::social::states::{
+    CHAT_STATE_COMPONENT, CHAT_STATE_TYPE_INDEX, ChatState, GROUPS_STATE_COMPONENT,
+    GROUPS_STATE_TYPE_INDEX, GUILDS_STATE_COMPONENT, GUILDS_STATE_TYPE_INDEX, GroupsState,
+    GuildsState, SocialState,
+};
+use crate::status_effects::{STATUS_EFFECTS_TYPE_INDEX, StatusEffectsState};
+use crate::temporary_affiliation::TEMPORARY_AFFILIATION_TYPE_INDEX;
+use crate::title_choice::{SOCIAL_COMPONENT, SOCIAL_TYPE_INDEX};
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsData, VitalsState};
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
 
@@ -76,6 +87,11 @@ const SLOT_2_CHILDREN: u8 = 9;
 const CHILD_CHARACTER_ID: u16 = 1 << 0;
 /// Slot 2 child 3: `playerConnected` (one boolean byte, `FUN_1417b4c20`).
 const CHILD_PLAYER_CONNECTED: u16 = 1 << 3;
+/// Slot 2 child 4: `lookingThroughLoadout`, one boolean byte (retail `04 10 01` and `04 10 00`).
+const CHILD_LOOKING_THROUGH_LOADOUT: u16 = 1 << 4;
+/// Slot 2 child 6: `isInStore`, one boolean byte (retail `unlock_store_content`: `04 40 01` 84 ms
+/// after the client's 4908 with 1, `04 40 00` 48 ms after the one with 0).
+const CHILD_IS_IN_STORE: u16 = 1 << 6;
 /// Presence flag bit 0: take the fixed 16-byte path (`FUN_14087ac50`).
 const PRESENCE_FLAG_FIXED: u8 = 0x01;
 /// Presence flag bit 2: the client turns the 16 bytes into lowercase dashed UUID text. The
@@ -114,7 +130,7 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 57] = [
     (34, 4913),
     (35, 3765),
     (36, GATHERING_TYPE_INDEX),
-    (39, 5620),
+    (MOUNT_COMPONENT, MOUNT_TYPE_INDEX),
     (PLAYER_VITALS_COMPONENT, VITALS_TYPE_INDEX),
     (PLAYER_STAMINA_COMPONENT, STAMINA_TYPE_INDEX),
     (43, 1525),
@@ -125,11 +141,11 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 57] = [
     (48, 5257),
     (49, 3152),
     (50, 4321),
-    (51, 1994),
+    (GROUPS_STATE_COMPONENT, GROUPS_STATE_TYPE_INDEX),
     (54, PLAYER_NAME_TAG_TYPE_INDEX),
-    (55, 4176),
-    (56, 3147),
-    (57, 1566),
+    (SOCIAL_COMPONENT, SOCIAL_TYPE_INDEX),
+    (GUILDS_STATE_COMPONENT, GUILDS_STATE_TYPE_INDEX),
+    (CHAT_STATE_COMPONENT, CHAT_STATE_TYPE_INDEX),
     (crate::components::CURRENCY_COMPONENT, CURRENCY_TYPE_INDEX),
     (61, 1755),
     (62, 3183),
@@ -167,10 +183,6 @@ const OBJECTIVE_INTERACTOR_TYPE_INDEX: u64 = 3829;
 const POINTS_ACCUMULATOR_TYPE_INDEX: u64 = 6951;
 /// Type index of `MB::MagicComponentReplicatedState` (component 32).
 const MAGIC_TYPE_INDEX: u64 = 2895;
-/// Type index of `MB::MountComponentReplicatedState` (component 39).
-const MOUNT_TYPE_INDEX: u64 = 5620;
-/// Type index of `Javelin::GuildsComponentReplicatedState` (component 56).
-const GUILDS_TYPE_INDEX: u64 = 3147;
 /// Type index of `Javelin::MusicalPerformancePlayerComponentReplicatedState` (component 71).
 const MUSICAL_PERFORMANCE_TYPE_INDEX: u64 = 4878;
 /// Type index of `MB::PlayerHomeComponentReplicatedState` (component 20).
@@ -179,8 +191,6 @@ const PLAYER_HOME_TYPE_INDEX: u64 = 3652;
 const INSTANCED_SLAYER_SCRIPT_TYPE_INDEX: u64 = 6234;
 /// Type index of `MB::RewardTrackComponentReplicatedState` (component 34).
 const REWARD_TRACK_TYPE_INDEX: u64 = 4913;
-/// Type index of `MB::ChatReplicatedState` (component 57).
-const CHAT_TYPE_INDEX: u64 = 1566;
 /// Type index of `Javelin::GameEventComponentReplicatedState` (component 68).
 const GAME_EVENT_TYPE_INDEX: u64 = 497;
 /// Type index of `MB::ItemSkinningComponentReplicatedState` (component 35).
@@ -190,7 +200,7 @@ const ITEM_SKINNING_TYPE_INDEX: u64 = 3765;
 /// new characters of newchar-retail-2026-09-18 and newchar-linux-2026-09-12 (counts: retail first
 /// own groups of the 482 captured sessions with the same body). A full list's version (a counter
 /// of the retail session, 12236 to 17921 in those captures) is our [`crate::items::FIRST_VERSION`].
-const NEW_CHARACTER_FIRST_BODIES: [(u64, &[u8]); 11] = [
+const NEW_CHARACTER_FIRST_BODIES: [(u64, &[u8]); 8] = [
     // Slot 0 children 0 to 2: all 0 (482 of 482 retail first groups).
     (
         POINTS_ACCUMULATOR_TYPE_INDEX,
@@ -201,19 +211,6 @@ const NEW_CHARACTER_FIRST_BODIES: [(u64, &[u8]); 11] = [
     ),
     // `state` and `channel` 0 (473 of 482).
     (MAGIC_TYPE_INDEX, &[0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
-    // No mount: slot 1 and 2 of a character without one (both new characters; 28 of 482).
-    (
-        MOUNT_TYPE_INDEX,
-        &[
-            0x06, 0xdf, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x42, 0xc8,
-            0x00, 0x00, 0x3f, 0x42, 0xc8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f,
-            0x80, 0x00, 0x00, 0x3f, 0x80, 0x00, 0x00, 0x3f, 0x80, 0x00, 0x00, 0x3f,
-            0x80, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
-        ],
-    ),
-    // Slot 1 child 9 `lastGuildLeaveTime` 0: no guild (both new characters; 90 of 482).
-    (GUILDS_TYPE_INDEX, &[0x02, 0x80, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
     // No performance (476 of 479).
     (
         MUSICAL_PERFORMANCE_TYPE_INDEX,
@@ -233,8 +230,6 @@ const NEW_CHARACTER_FIRST_BODIES: [(u64, &[u8]); 11] = [
     ),
     // Slot 2 child 0 `m_rolledRewards`: an empty list.
     (REWARD_TRACK_TYPE_INDEX, &[0x04, 0x01, 0x00, 0x01, 0x03, 0x00]),
-    // Slot 0 child 0: an empty list.
-    (CHAT_TYPE_INDEX, &[0x01, 0x01, 0x00, 0x01, 0x03, 0x00]),
     // Slot 0 child 1 `dailyBonusesUsed`: an empty list.
     (GAME_EVENT_TYPE_INDEX, &[0x01, 0x02, 0x00, 0x01, 0x03, 0x00]),
     // Slot 1: `m_enabledItemSkins` with one 0, `m_skinDyeData` empty.
@@ -322,12 +317,17 @@ impl EmptyState {
     pub(crate) fn write(&self, writer: &mut Writer) {
         writer.bytes(first_body(self.class));
     }
+
+    /// Whether `bytes` are the first body this state writes for `class`.
+    pub(crate) fn is_first_body(class: u64, bytes: &[u8]) -> bool {
+        bytes == first_body(class)
+    }
 }
 
 /// `MB::PlayerComponentReplicatedState` (type 3935, component 9). Slot 2 holds
-/// `characterId` and `playerConnected` (local-player-check note) of slot 2, and the
-/// `onDeathRespawnCooldown` of slot 1 (death note). Other children and slot 0 are not encoded
-/// here.
+/// `characterId`, `playerConnected` (local-player-check note) and `lookingThroughLoadout` of
+/// slot 2, and the `onDeathRespawnCooldown` of slot 1 (death note). Other children and slot 0
+/// are not encoded here.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PlayerComponentState {
     /// Slot 1 child 12: the respawn cooldown that opens the death screen, when sent.
@@ -336,6 +336,10 @@ pub struct PlayerComponentState {
     pub character_id: Option<[u8; RAW_ID_LEN]>,
     /// Slot 2 child 3: whether this player is connected, when sent.
     pub player_connected: Option<bool>,
+    /// Slot 2 child 4: whether this player has its inventory open, when sent.
+    pub looking_through_loadout: Option<bool>,
+    /// Slot 2 child 6: whether this player has the store open, when sent.
+    pub is_in_store: Option<bool>,
 }
 
 impl PlayerComponentState {
@@ -345,6 +349,8 @@ impl PlayerComponentState {
             on_death_respawn_cooldown: None,
             character_id: Some(id),
             player_connected: Some(true),
+            looking_through_loadout: None,
+            is_in_store: None,
         }
     }
 
@@ -355,6 +361,36 @@ impl PlayerComponentState {
             on_death_respawn_cooldown: Some(OPEN_WORLD_RESPAWN_COOLDOWN),
             character_id: None,
             player_connected: None,
+            looking_through_loadout: None,
+            is_in_store: None,
+        }
+    }
+
+    /// The change of `lookingThroughLoadout` to `looking`. Retail sends it at every open and
+    /// close of the inventory, 30 to 40 ms after the client's 3970 that changed it (newchar
+    /// 2026-09-18: `09 9f3d 04 10 01` at 1792695864643 after the open at 1792695864606, `04 10 00`
+    /// at 1792695870142 after the close at 1792695870106). Without it the client closed every
+    /// inventory it opened 50 to 60 ms later, with no other server message between (live run
+    /// 15; Inferred: its UI follows the replicated flag, `OnIsLookingThroughLoadoutChanged`).
+    pub const fn looking_through_loadout(looking: bool) -> Self {
+        Self {
+            on_death_respawn_cooldown: None,
+            character_id: None,
+            player_connected: None,
+            looking_through_loadout: Some(looking),
+            is_in_store: None,
+        }
+    }
+
+    /// The change of `isInStore` to `in_store`, which retail sends after the client's 4908
+    /// (`PlayerComponentServerFacet_RequestSetIsInStore`).
+    pub const fn in_store(in_store: bool) -> Self {
+        Self {
+            on_death_respawn_cooldown: None,
+            character_id: None,
+            player_connected: None,
+            looking_through_loadout: None,
+            is_in_store: Some(in_store),
         }
     }
 
@@ -391,6 +427,10 @@ impl PlayerComponentState {
                 match 1 << child {
                     CHILD_CHARACTER_ID => state.character_id = Some(read_presence_id(reader)?),
                     CHILD_PLAYER_CONNECTED => state.player_connected = Some(reader.boolean()?),
+                    CHILD_LOOKING_THROUGH_LOADOUT => {
+                        state.looking_through_loadout = Some(reader.boolean()?);
+                    }
+                    CHILD_IS_IN_STORE => state.is_in_store = Some(reader.boolean()?),
                     _ => return Err(unsized_child(child)),
                 }
                 Ok(())
@@ -404,11 +444,16 @@ impl PlayerComponentState {
         let cooldown = self.on_death_respawn_cooldown;
         let character_id = self.character_id;
         let player_connected = self.player_connected;
+        let looking = self.looking_through_loadout;
+        let in_store = self.is_in_store;
         let slot_2_children = children_mask(&[
             character_id.is_some(),
             false,
             false,
             player_connected.is_some(),
+            looking.is_some(),
+            false,
+            in_store.is_some(),
         ]);
         let slots = if cooldown.is_some() {
             SLOT_1_BIT
@@ -431,17 +476,29 @@ impl PlayerComponentState {
             );
         }
         if slot_2_children != 0 {
-            write_known_children(writer, slot_2_children, SLOT_2_CHILDREN, |writer, child| {
-                if 1 << child == CHILD_CHARACTER_ID {
-                    character_id.map(|id| {
-                        writer
-                            .u8(PRESENCE_FLAG_FIXED | PRESENCE_FLAG_UUID_TEXT)
-                            .bytes(&id)
-                    });
-                } else {
-                    player_connected.map(|connected| writer.boolean(connected));
-                }
-            });
+            write_known_children(
+                writer,
+                slot_2_children,
+                SLOT_2_CHILDREN,
+                |writer, child| match 1 << child {
+                    CHILD_CHARACTER_ID => {
+                        character_id.map(|id| {
+                            writer
+                                .u8(PRESENCE_FLAG_FIXED | PRESENCE_FLAG_UUID_TEXT)
+                                .bytes(&id)
+                        });
+                    }
+                    CHILD_PLAYER_CONNECTED => {
+                        player_connected.map(|connected| writer.boolean(connected));
+                    }
+                    CHILD_IS_IN_STORE => {
+                        in_store.map(|in_store| writer.boolean(in_store));
+                    }
+                    _ => {
+                        looking.map(|looking| writer.boolean(looking));
+                    }
+                },
+            );
         }
     }
 }
@@ -491,6 +548,41 @@ pub fn empty_state(class: u64) -> MemberState {
         INTERACTOR_TYPE_INDEX => MemberState::Interactor(InteractorState::default()),
         ATTRIBUTE_TYPE_INDEX => MemberState::Attributes(AttributeState::default()),
         ABILITY_TYPE_INDEX => MemberState::Abilities(AbilityState::default()),
+        // No mount: retail's login card (mounts note; both new characters, 28 of 482).
+        MOUNT_TYPE_INDEX => MemberState::Mount(MountState::login_card()),
+        // No group and no title yet: the social service sends them as changes after the admit.
+        GROUPS_STATE_TYPE_INDEX => MemberState::Groups(GroupsState::default()),
+        SOCIAL_TYPE_INDEX => MemberState::Social(SocialState::default()),
+        // No company: `lastGuildLeaveTime` 0 (both new characters; 90 of 482).
+        GUILDS_STATE_TYPE_INDEX => MemberState::Guilds(Box::new(GuildsState::new_character())),
+        // No mutes: an empty list.
+        CHAT_STATE_TYPE_INDEX => MemberState::Chat(ChatState::first()),
+        // No board open: the retail first body `01 08 00` (both new characters).
+        OBJECTIVE_INTERACTOR_TYPE_INDEX => MemberState::ObjectiveInteractor(
+            crate::objective_interactor::ObjectiveInteractorState::new_character(),
+        ),
+        // No played time yet: one slot byte of 0.
+        crate::travel_states::PLAYER_TIME_TYPE_INDEX => {
+            MemberState::PlayerTime(crate::travel_states::PlayerTimeState::default())
+        }
+        // No house yet: one slot byte of 0.
+        crate::travel_states::PLAYER_HOUSING_TYPE_INDEX => {
+            MemberState::PlayerHousing(crate::travel_states::PlayerHousingState::default())
+        }
+        // No camp yet: one slot byte of 0.
+        crate::travel_states::CAMPING_TYPE_INDEX => {
+            MemberState::Camping(crate::travel_states::CampingState::default())
+        }
+        // No fishing step yet: the empty slot byte, as the generic first body.
+        crate::fishing::FISHING_TYPE_INDEX => {
+            MemberState::Fishing(crate::fishing::FishingComponentState::default())
+        }
+        // No performance (476 of 479 retail first groups, [`NEW_CHARACTER_FIRST_BODIES`]).
+        MUSICAL_PERFORMANCE_TYPE_INDEX => {
+            MemberState::PerformancePlayer(crate::music::PerformancePlayerState::NONE)
+        }
+        // No status effect yet: the empty slot byte; the sim puts its own state in its place.
+        STATUS_EFFECTS_TYPE_INDEX => MemberState::StatusEffects(StatusEffectsState::default()),
         _ => MemberState::Empty(EmptyState { class }),
     }
 }
@@ -572,7 +664,7 @@ pub fn change_members(states: PlayerStates<'_>) -> Vec<BundleMember> {
             COOLDOWNS_TYPE_INDEX => states.cooldowns.is_some(),
             COMBAT_STATUS_TYPE_INDEX => states.combat_status.is_some(),
             PAPERDOLL_TYPE_INDEX | CONTAINER_TYPE_INDEX | ITEM_MANAGEMENT_TYPE_INDEX => {
-                states.gear.is_some()
+                states.gear.is_some() && carries_gear_change(&member.state)
             }
             _ => false,
         })
@@ -603,6 +695,17 @@ pub fn change_members(states: PlayerStates<'_>) -> Vec<BundleMember> {
         });
     }
     members
+}
+
+/// Whether the gear member `state` of a change carries a child: a change of the hands alone
+/// ([`PlayerGear::hands_change`]) sends the paperdoll alone, as retail does.
+fn carries_gear_change(state: &MemberState) -> bool {
+    match state {
+        MemberState::Paperdoll(paperdoll) => !paperdoll.is_empty(),
+        MemberState::Container(container) => *container != ContainerState::default(),
+        MemberState::ItemManagement(owned) => owned.owned.is_some(),
+        _ => true,
+    }
 }
 
 /// The members of the gear components of a player who has `gear`: a gear change sends them
@@ -736,6 +839,20 @@ fn has_own_reader(class: u64) -> bool {
             | GLOBAL_STORAGE_TYPE_INDEX
             | ATTRIBUTE_TYPE_INDEX
             | ABILITY_TYPE_INDEX
+            | MOUNT_TYPE_INDEX
+            | GROUPS_STATE_TYPE_INDEX
+            | SOCIAL_TYPE_INDEX
+            | GUILDS_STATE_TYPE_INDEX
+            | CHAT_STATE_TYPE_INDEX
+            | crate::fishing::FISHING_TYPE_INDEX
+            | MUSICAL_PERFORMANCE_TYPE_INDEX
+            | STATUS_EFFECTS_TYPE_INDEX
+            | crate::travel_states::PLAYER_TIME_TYPE_INDEX
+            | crate::travel_states::PLAYER_HOUSING_TYPE_INDEX
+            | crate::travel_states::CAMPING_TYPE_INDEX
+            | OBJECTIVES_BOARD
+            | TEMPORARY_AFFILIATION_TYPE_INDEX
+            | GAME_EVENTS_TYPE
     )
 }
 
@@ -749,6 +866,51 @@ pub fn put_member(members: &mut Vec<BundleMember>, member: BundleMember) {
     {
         Some(known) => *known = member,
         None => members.insert(members.len().saturating_sub(1), member),
+    }
+}
+
+/// Puts the change of `lookingThroughLoadout` to `looking` into the own group `members`: into
+/// the 3935 state the group carries already (the card's, a death's), else as its own member
+/// before the position ([`put_member`]; retail sends it before the own ALC).
+pub fn put_looking_through_loadout(members: &mut Vec<BundleMember>, looking: bool) {
+    put_player_change(
+        members,
+        PlayerComponentState::looking_through_loadout(looking),
+        |state| state.looking_through_loadout = Some(looking),
+    );
+}
+
+/// Puts the change of `isInStore` to `in_store` into the own group `members`, as
+/// [`put_looking_through_loadout`] puts its change.
+pub fn put_is_in_store(members: &mut Vec<BundleMember>, in_store: bool) {
+    put_player_change(members, PlayerComponentState::in_store(in_store), |state| {
+        state.is_in_store = Some(in_store);
+    });
+}
+
+/// Applies `apply` to the 3935 state that `members` carries already, else puts `change` as its
+/// own member ([`put_member`]).
+fn put_player_change(
+    members: &mut Vec<BundleMember>,
+    change: PlayerComponentState,
+    apply: impl FnOnce(&mut PlayerComponentState),
+) {
+    let known = members
+        .iter_mut()
+        .filter(|known| known.component == PLAYER_COMPONENT_COMPONENT)
+        .find_map(|known| match &mut known.state {
+            MemberState::PlayerComponent(state) => Some(state),
+            _ => None,
+        });
+    match known {
+        Some(state) => apply(state),
+        None => put_member(
+            members,
+            BundleMember {
+                component: PLAYER_COMPONENT_COMPONENT,
+                state: MemberState::PlayerComponent(change),
+            },
+        ),
     }
 }
 
@@ -785,25 +947,37 @@ mod tests {
 
     /// The first bodies of the new character of newchar-retail-2026-09-18 (open-world card,
     /// 451700 ms), whose list versions are `8c bf` (12236).
-    const NEW_CHARACTER_RETAIL: [(u64, &str); 11] = [
+    const NEW_CHARACTER_RETAIL: [(u64, &str); 8] = [
         (POINTS_ACCUMULATOR_TYPE_INDEX, "010700000000000000000000000000000000"),
         (MAGIC_TYPE_INDEX, "01030000000000000000"),
-        (
-            MOUNT_TYPE_INDEX,
-            concat!(
-                "06df000000000000000000000000000000000000000042c800003f42c80000000000003f80",
-                "00003f8000003f8000003f8000000100000000"
-            ),
-        ),
-        (GUILDS_TYPE_INDEX, "0280040000000000000000"),
         (MUSICAL_PERFORMANCE_TYPE_INDEX, "030100000000ffffffff060000000000ffffffff"),
         (PLAYER_HOME_TYPE_INDEX, "010100018cbf00"),
         (INSTANCED_SLAYER_SCRIPT_TYPE_INDEX, "010c00018cbf0000018cbf00"),
         (REWARD_TRACK_TYPE_INDEX, "040100018cbf00"),
-        (CHAT_TYPE_INDEX, "010100018cbf00"),
         (GAME_EVENT_TYPE_INDEX, "010200018cbf00"),
         (ITEM_SKINNING_TYPE_INDEX, "020300018cbf01000000000000000000018cbf00"),
     ];
+
+    #[test]
+    fn a_new_characters_company_and_chat_states_are_retails_with_our_list_version() {
+        const RETAIL_VERSION: &str = "8cbf";
+        const OUR_VERSION: &str = "03";
+        for (class, retail) in [
+            (GUILDS_STATE_TYPE_INDEX, "0280040000000000000000"),
+            (CHAT_STATE_TYPE_INDEX, "010100018cbf00"),
+        ] {
+            let member = BundleMember {
+                component: 0,
+                state: empty_state(class),
+            };
+            let bytes = member.encode().expect("member");
+            let ours: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+            assert!(
+                ours.ends_with(&retail.replace(RETAIL_VERSION, OUR_VERSION)),
+                "class {class}: {ours}"
+            );
+        }
+    }
 
     #[test]
     fn a_new_characters_first_bodies_are_retails_with_our_list_version() {
@@ -860,6 +1034,14 @@ mod tests {
                     member.state,
                     MemberState::DamageReceiver(DamageReceiverState::player())
                 );
+                continue;
+            }
+            if class == MOUNT_TYPE_INDEX {
+                assert_eq!(member.state, MemberState::Mount(MountState::login_card()));
+                continue;
+            }
+            if matches!(class, GUILDS_STATE_TYPE_INDEX | CHAT_STATE_TYPE_INDEX) {
+                assert_eq!(member.state, empty_state(class));
                 continue;
             }
             assert!(bytes.ends_with(first_body(class)), "{member:?}");
@@ -1155,12 +1337,18 @@ mod tests {
         const SWORD_GEAR_SCORE: u32 = 60;
         let gear = PlayerGear::first(&[crate::gear::EquippedItem {
             slot: crate::paperdoll::slot::MAIN_HAND_OPTION_1,
+            key: 0,
             item: Some(crate::gear::GearItem {
                 item_index: SWORD_INDEX,
                 quantity: 1,
                 gear_score: SWORD_GEAR_SCORE,
                 durability: SWORD_DURABILITY,
+                max_durability: SWORD_DURABILITY,
+                perks: [0; crate::items::PERK_SLOTS],
+                look: crate::gear::ItemLook::default(),
+                counter: 0,
                 bound: true,
+                locked: false,
                 instance: CHARACTER_ID,
             }),
         }]);
@@ -1277,5 +1465,124 @@ mod tests {
                 Err(MessageError::Unsized { .. })
             ));
         }
+    }
+
+    #[test]
+    fn the_inventory_open_and_close_are_the_retail_slot_2_child_4() {
+        // Retail newchar 2026-09-18 at 1792695864643 and 1792695870142.
+        for (looking, retail) in [(true, [0x04, 0x10, 0x01]), (false, [0x04, 0x10, 0x00])] {
+            let state = PlayerComponentState::looking_through_loadout(looking);
+            let mut writer = Writer::new();
+            state.write(&mut writer);
+            assert_eq!(writer.finish(), retail);
+            let mut reader = Reader::new(&retail);
+            assert_eq!(
+                PlayerComponentState::read(&mut reader).expect("read"),
+                state
+            );
+            reader.finish().expect("to the end");
+        }
+    }
+
+    #[test]
+    fn the_inventory_change_joins_the_groups_3935_state_or_goes_before_the_position() {
+        const POSITION_COMPONENT: u64 = 16;
+        let position = BundleMember {
+            component: POSITION_COMPONENT,
+            state: MemberState::PlayerComponent(PlayerComponentState::default()),
+        };
+        let mut members = vec![position.clone()];
+        put_looking_through_loadout(&mut members, true);
+        assert_eq!(
+            members,
+            [
+                BundleMember {
+                    component: PLAYER_COMPONENT_COMPONENT,
+                    state: MemberState::PlayerComponent(
+                        PlayerComponentState::looking_through_loadout(true)
+                    ),
+                },
+                position.clone(),
+            ],
+            "retail: component 9 before the own ALC"
+        );
+        let mut card = vec![
+            BundleMember {
+                component: PLAYER_COMPONENT_COMPONENT,
+                state: MemberState::PlayerComponent(PlayerComponentState::connected(CHARACTER_ID)),
+            },
+            position,
+        ];
+        put_looking_through_loadout(&mut card, false);
+        assert_eq!(
+            card[0].state,
+            MemberState::PlayerComponent(PlayerComponentState {
+                looking_through_loadout: Some(false),
+                ..PlayerComponentState::connected(CHARACTER_ID)
+            }),
+            "the card keeps its character id"
+        );
+        assert_eq!(card.len(), 2);
+    }
+
+    /// Retail `unlock_store_content`: the 3935 bodies after the client's 4908 with 1 and with 0.
+    #[test]
+    fn the_store_flag_has_the_retail_bytes() {
+        for (in_store, body) in [(true, [0x04, 0x40, 0x01]), (false, [0x04, 0x40, 0x00])] {
+            let mut writer = Writer::new();
+            PlayerComponentState::in_store(in_store).write(&mut writer);
+            assert_eq!(writer.finish(), body);
+            let read = PlayerComponentState::read(&mut Reader::new(&body)).expect("read");
+            assert_eq!(read.is_in_store, Some(in_store));
+        }
+        let mut members = Vec::new();
+        put_is_in_store(&mut members, true);
+        put_looking_through_loadout(&mut members, true);
+        assert_eq!(
+            members[0].state,
+            MemberState::PlayerComponent(PlayerComponentState {
+                looking_through_loadout: Some(true),
+                ..PlayerComponentState::in_store(true)
+            }),
+            "one 3935 member carries both changes"
+        );
+    }
+
+    #[test]
+    fn a_change_of_the_hands_alone_sends_the_paperdoll_alone() {
+        let before = crate::gear::Hands::default();
+        let now = crate::gear::Hands {
+            drawn: Some(crate::paperdoll::slot::MAIN_HAND_OPTION_1),
+            attached: true,
+            ..before
+        };
+        let gear = PlayerGear::hands_change(before, now);
+        let states = PlayerStates {
+            character_id: CHARACTER_ID,
+            look: None,
+            health: None,
+            gear: Some(&gear),
+            achievements: None,
+            objectives: None,
+            progression: None,
+            categorical_progression: None,
+            progression_points: None,
+            currency: None,
+            health_change: None,
+            cooldowns: None,
+            stamina: None,
+            combat_status: None,
+        };
+        let classes: Vec<u64> = change_members(states)
+            .iter()
+            .map(|member| member.state.type_index())
+            .collect();
+        assert_eq!(classes, [PAPERDOLL_TYPE_INDEX]);
+        let unchanged = PlayerGear::hands_change(now, now);
+        let states = PlayerStates {
+            gear: Some(&unchanged),
+            ..states
+        };
+        assert!(change_members(states).is_empty(), "nothing to send");
     }
 }

@@ -684,6 +684,9 @@ pub struct Thought {
     pub healed: bool,
     /// Its tree ran this step (its tick was due).
     pub ticked: bool,
+    /// The encounter events its tree sent (`EncounterEventDecorator`), for the encounter that
+    /// spawned it (dungeon scripts).
+    pub encounter_events: Vec<NameId>,
 }
 
 /// The surroundings of a mob in one step.
@@ -1598,11 +1601,14 @@ impl TreeMind {
                         "tree action the sim does not run"
                     ),
                 },
-                Command::EncounterEvent(event) => tracing::debug!(
-                    archetype = self.state.archetype,
-                    event = ai.name(event),
-                    "tree encounter event"
-                ),
+                Command::EncounterEvent(event) => {
+                    tracing::debug!(
+                        archetype = self.state.archetype,
+                        event = ai.name(event),
+                        "tree encounter event"
+                    );
+                    thought.encounter_events.push(event);
+                }
                 // The tags stay in the brain (the replicated tag state reads them); action
                 // targets are the mob's candidates (see `World::action_targets`).
                 Command::Tag { .. } | Command::TrackActionTargets(_) => {}

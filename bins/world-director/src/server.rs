@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use nw_bus::{
-    Bus, BusError, BusId, CellTable, Incoming, Join, JoinReply, Publisher, SimHeartbeat,
-    heartbeat_silence, subject,
+    Bus, BusError, BusId, CellTable, Incoming, InstanceRequest, Join, JoinReply, Publisher,
+    SimHeartbeat, heartbeat_silence, subject,
 };
 use nw_db::PgPool;
 use nw_login::queue::QueueStore;
@@ -19,6 +19,8 @@ use nw_sim_core::{CellGrid, Position, TUTORIAL_FOLDER};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use crate::instance_loop::{INSTANCE_QUEUE, InstanceLoop};
+use crate::instances::InstanceSettings;
 use crate::join::{JoinContext, route_join};
 use crate::sims::{Assignment, SimRegistry};
 
@@ -56,6 +58,8 @@ pub struct DirectorSettings {
     pub heartbeat_interval: Duration,
     /// Missed sim heartbeats before its cells move.
     pub heartbeat_misses: u32,
+    /// The instances; `None` for a world without them.
+    pub instances: Option<InstanceSettings>,
 }
 
 /// The loop's failure.
@@ -77,6 +81,8 @@ struct Loop<Q> {
     /// Join tasks report each sim that took a player here.
     admits: mpsc::Sender<BusId>,
     started: Instant,
+    /// The expeditions, raids and trials.
+    instances: InstanceLoop,
 }
 
 /// Serves joins, sim heartbeats, the cell table and the free player slots until `shutdown`
@@ -100,8 +106,12 @@ pub async fn serve<Q: QueueStore>(
     let mut beats = bus
         .subscribe::<SimHeartbeat>(subject::all_sim_heartbeats(world_id))
         .await?;
+    let mut instance_requests = bus
+        .subscribe::<InstanceRequest>(subject::director_instance(world_id))
+        .await?;
     bus.flush().await?;
     let (admits, mut admitted) = mpsc::channel(ADMIT_QUEUE);
+    let (instance_events, mut instance_results) = mpsc::channel(INSTANCE_QUEUE);
     let mut state = Loop {
         context: Arc::new(JoinContext {
             world_id,
@@ -113,6 +123,12 @@ pub async fn serve<Q: QueueStore>(
             bus: bus.clone(),
         }),
         sims: SimRegistry::new(settings.heartbeat_interval, settings.heartbeat_misses),
+        instances: InstanceLoop::new(
+            settings.instances.clone(),
+            world_id,
+            bus.clone(),
+            instance_events,
+        ),
         tables: Publisher::start(bus, TABLE_QUEUE),
         settings,
         store,
@@ -135,6 +151,11 @@ pub async fn serve<Q: QueueStore>(
                 Err(error) => tracing::warn!(%error, "bad sim heartbeat"),
             },
             Some(sim) = admitted.recv() => state.sims.admitted(&sim),
+            Some(request) = instance_requests.next() => match request {
+                Ok(request) => state.instances.request(request, &state.sims),
+                Err(error) => tracing::warn!(%error, "bad instance request"),
+            },
+            Some(event) = instance_results.recv() => state.instances.event(event, &state.sims),
             _ = timer.tick() => state.timer(),
         }
     }
@@ -154,11 +175,19 @@ impl<Q: QueueStore> Loop<Q> {
         let assignment = self.assignment.clone();
         let tutorial = self.sims.least_loaded(TUTORIAL_FOLDER);
         let admits = self.admits.clone();
+        let instances = self.instances.table();
         tokio::spawn(async move {
             let reply = match assignment {
                 Some(assignment) => {
-                    match route_join(&context, &assignment, tutorial.as_ref(), &join.message).await
-                    {
+                    let routed = route_join(
+                        &context,
+                        &assignment,
+                        &instances,
+                        tutorial.as_ref(),
+                        &join.message,
+                    )
+                    .await;
+                    match routed {
                         Ok((sim, entity, game_master)) => {
                             metrics::counter!(METRIC_JOINS, RESULT_LABEL => JOINED).increment(1);
                             tracing::info!(character = %join.message.character, sim = %sim.id, "joined");
@@ -208,6 +237,7 @@ impl<Q: QueueStore> Loop<Q> {
         if !silent.is_empty() {
             self.reassign();
         }
+        self.instances.timer(&self.sims);
         if self.assignment.is_none() && self.started.elapsed() >= self.silence() {
             self.reassign_now();
         }
@@ -327,6 +357,7 @@ mod tests {
             admit_timeout: ADMIT_TIMEOUT,
             heartbeat_interval: HEARTBEAT,
             heartbeat_misses: MISSES,
+            instances: None,
         }
     }
 
@@ -370,6 +401,7 @@ mod tests {
                 players: 0,
                 max_players: MAX_PLAYERS,
                 level: LEVEL.to_owned(),
+                instance: None,
             };
             let beats = tokio::spawn(async move {
                 loop {

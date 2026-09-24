@@ -4,7 +4,10 @@
 //! numbers, and reports the free player slots to the login queue.
 
 pub mod config;
+pub mod instance_loop;
+pub mod instances;
 pub mod join;
 pub mod run;
 pub mod server;
 pub mod sims;
+pub mod trading_post;

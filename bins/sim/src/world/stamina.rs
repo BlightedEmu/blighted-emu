@@ -108,6 +108,15 @@ impl Stamina {
         self.spend(loss.min(self.cur), BLOCKED_DELAY_MS);
     }
 
+    /// A used consumable gives `amount` (its status effect's `Stamina`), at most to the max.
+    pub(super) fn gain(&mut self, amount: f32) {
+        let gained = (self.cur + amount).min(MAX_STAMINA);
+        if gained > self.cur {
+            self.cur = gained;
+            self.change.cur = Some(self.cur);
+        }
+    }
+
     /// The player let go of the block key: the regen delay starts again.
     pub(super) fn block_released(&mut self) {
         self.delay_ms = REGEN_DELAY_MS;

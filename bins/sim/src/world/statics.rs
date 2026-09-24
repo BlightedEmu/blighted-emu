@@ -17,7 +17,7 @@ use nw_content::starter::KitItem;
 use nw_messages::items::{FullList, ITEM_BOUND, ItemRecord, SYNC_CONTAINER, SYNC_MOVED};
 use nw_messages::{
     BundleGroup, BundleMember, ContainerState, GatheringState, InteractState, InteractorState,
-    MemberState, NO_GATHERABLE,
+    MemberState, NO_GATHERABLE, ReplicatedList,
 };
 use uuid::Uuid;
 
@@ -190,14 +190,14 @@ pub(super) fn bag_loot(character: Uuid, items: &[KitItem]) -> Vec<BundleMember> 
         BundleMember {
             component: BAG_CONTAINER_COMPONENT,
             state: MemberState::Container(ContainerState {
-                items: Some(FullList {
+                items: Some(ReplicatedList::Full(FullList {
                     version: Some(BAG_FILLED_VERSION),
                     elements: items
                         .iter()
                         .enumerate()
                         .map(|(slot, item)| container_item(character, slot as u16, item))
                         .collect(),
-                }),
+                })),
                 bonus_max_encumbrance: Some(0),
                 was_emptied: Some(false),
                 ..ContainerState::default()
@@ -224,10 +224,10 @@ pub(super) fn bag_emptied(item_count: usize) -> Vec<BundleMember> {
         BundleMember {
             component: BAG_CONTAINER_COMPONENT,
             state: MemberState::Container(ContainerState {
-                items: Some(FullList {
+                items: Some(ReplicatedList::Full(FullList {
                     version: Some(BAG_EMPTIED_VERSION),
                     elements: vec![emptied; item_count],
-                }),
+                })),
                 was_emptied: Some(true),
                 ..ContainerState::default()
             }),
@@ -348,8 +348,8 @@ pub(super) fn chest_gather_ended(facet: u64, gather: u32) -> BundleMember {
 }
 
 /// The record of `item` in a loot container's slot `slot` (retail: quantity 1, sync reason
-/// [`SYNC_CONTAINER`], the slot as the counter). The wire perk index rule is not known, so the
-/// records go without perks.
+/// [`SYNC_CONTAINER`], the slot as the counter) with its fixed perks (retail: the Destroyer
+/// weapons carry wire perk 1203, `PerkID_StatSwap_BaseDamage`).
 fn container_item(character: Uuid, slot: u16, item: &KitItem) -> ItemRecord {
     ItemRecord {
         quantity: 1,
@@ -360,6 +360,7 @@ fn container_item(character: Uuid, slot: u16, item: &KitItem) -> ItemRecord {
         max_durability: item.durability,
         counter: u32::from(slot),
         gear_score: item.gear_score,
+        perks: item.perks,
         instance: instance_id(character, &item.item_id),
         flags: if item.bound { ITEM_BOUND } else { 0 },
         ..ItemRecord::EMPTY_SLOT
@@ -494,6 +495,9 @@ mod tests {
 
     const CHARACTER: Uuid = Uuid::from_u128(0x42);
 
+    /// The wire perk the retail Destroyer weapons carry (`PerkID_StatSwap_BaseDamage`).
+    const DESTROYER_WEAPON_PERK: u32 = 1203;
+
     /// The retail Destroyer bag: greataxe, head, warhammer (fill group of 164578).
     fn bag_items() -> [KitItem; 3] {
         let kit = |item_id: &str, item_index, gear_score, durability, slot| KitItem {
@@ -503,11 +507,19 @@ mod tests {
             gear_score,
             durability,
             bound: true,
+            max_stack: Some(1),
+            perk_ids: Vec::new(),
+            perks: [0; nw_messages::items::PERK_SLOTS],
+        };
+        let weapon = |item_id: &str, item_index| KitItem {
+            perk_ids: vec!["PerkID_StatSwap_BaseDamage".to_owned()],
+            perks: [DESTROYER_WEAPON_PERK, 0, 0, 0, 0],
+            ..kit(item_id, item_index, 75, 700, Some(EquipSlot::MainHand))
         };
         [
-            kit("greataxe", 40_265, 75, 700, Some(EquipSlot::MainHand)),
+            weapon("greataxe", 40_265),
             kit("head", 40_235, 75, 375, Some(EquipSlot::Head)),
-            kit("warhammer", 40_266, 75, 700, Some(EquipSlot::MainHand)),
+            weapon("warhammer", 40_266),
         ]
     }
 
@@ -521,7 +533,11 @@ mod tests {
         assert_eq!(members[0].component, 2);
         assert_eq!(state.bonus_max_encumbrance, Some(0));
         assert_eq!(state.was_emptied, Some(false));
-        let items = state.items.as_ref().expect("items");
+        let items = state
+            .items
+            .as_ref()
+            .and_then(ReplicatedList::full)
+            .expect("items");
         assert_eq!(items.version, Some(BAG_FILLED_VERSION));
         assert_eq!(items.elements.len(), 3);
         // The retail greataxe record's packed number, slot 0 (quantity 1, sync reason 3).
@@ -533,6 +549,8 @@ mod tests {
         assert_eq!(items.elements[0].max_durability, 700);
         assert_eq!(items.elements[0].gear_score, 75);
         assert_eq!(items.elements[0].flags, ITEM_BOUND);
+        assert_eq!(items.elements[0].perks[0], DESTROYER_WEAPON_PERK);
+        assert_eq!(items.elements[1].perks[0], 0);
         assert_eq!(
             items.elements[0].instance,
             instance_id(CHARACTER, "greataxe")
@@ -580,7 +598,11 @@ mod tests {
             panic!("container");
         };
         assert_eq!(state.was_emptied, Some(true));
-        let items = state.items.as_ref().expect("items");
+        let items = state
+            .items
+            .as_ref()
+            .and_then(ReplicatedList::full)
+            .expect("items");
         assert_eq!(items.version, Some(BAG_EMPTIED_VERSION));
         assert_eq!(items.elements.len(), 3);
         for record in &items.elements {

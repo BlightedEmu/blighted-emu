@@ -19,10 +19,16 @@ use content_tool::build::{
     run_build,
 };
 use content_tool::capture::CaptureReport;
+use content_tool::catacombs::{
+    CatacombCheck, DEFAULT_GAME_MODE as DEFAULT_CATACOMB_MODE,
+    DEFAULT_RUNS as DEFAULT_CATACOMB_RUNS, check as catacomb_check,
+    map_rows as catacomb_map_rows,
+};
 use content_tool::codegen::run_codegen;
 use content_tool::collision::{CollisionError, CollisionReport, PakIndex, build_level_collision};
 use content_tool::combat::{CombatCheck, DEFAULT_LEVEL, DEFAULT_NWDB_DIR, check, read_nwdb};
 use content_tool::creature_animations::{CreatureAnimationsReport, build_rows};
+use content_tool::dungeon_scripts::{DungeonScriptsReport, build_dungeon_scripts};
 use content_tool::error::ToolError;
 use content_tool::ftue_entities::{FtueScan, Timeline, read_ledger, write_table};
 use content_tool::map_tiles::{DEFAULT_MAP_DIR, MapTilesReport, YIndex, run_map_tiles};
@@ -69,6 +75,8 @@ const SHOWN_MOB_FAILURES: usize = 20;
 const SHOWN_CUT_CLASSES: usize = 10;
 /// Unread spawn cards of each kind printed by `ftue-entities`.
 const SHOWN_UNREAD_CARDS: usize = 20;
+/// Members without a reader left out of spawn groups, printed by `ftue-entities`.
+const SHOWN_SKIPPED_MEMBERS: usize = 20;
 
 #[derive(Parser)]
 #[command(
@@ -258,6 +266,29 @@ enum Command {
         out: Option<PathBuf>,
         /// Content bundle for the weapon, spell, ammo and consumable rows (default:
         /// `local-data/content/bundle-<build>.bin`).
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+    },
+    /// Makes the layouts of many runs of a generated game mode (the catacombs) and checks their
+    /// tile slices against the paks; prints the counts and the first run's map.
+    CatacombCheck {
+        /// The game mode.
+        #[arg(long, default_value = DEFAULT_CATACOMB_MODE)]
+        game_mode: String,
+        /// Runs to make (seeds 0 and up).
+        #[arg(long, default_value_t = DEFAULT_CATACOMB_RUNS)]
+        runs: u64,
+        /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
+        #[arg(long)]
+        bundle: Option<PathBuf>,
+    },
+    /// Writes the dungeon script file: the encounters and loot containers of every instance
+    /// level's script slice, from the game paks and the content bundle.
+    DungeonScripts {
+        /// Output folder for `dungeon-scripts-<build>.json`.
+        #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
+        out_dir: PathBuf,
+        /// Content bundle (default: `local-data/content/bundle-<build>.bin`).
         #[arg(long)]
         bundle: Option<PathBuf>,
     },
@@ -566,6 +597,35 @@ fn run(cli: Cli) -> Result<(), ToolError> {
             write_stances(&out, &stances)?;
             print_player_attacks(&report, &out);
         }
+        Command::CatacombCheck {
+            game_mode,
+            runs,
+            bundle,
+        } => {
+            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
+            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
+            let index =
+                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
+            let report = catacomb_check(&tables, &game_mode, runs, |wanted| {
+                index
+                    .paths(|path| wanted.contains(path))
+                    .into_iter()
+                    .collect()
+            })?;
+            print_catacombs(&report);
+        }
+        Command::DungeonScripts { out_dir, bundle } => {
+            let bundle = bundle.unwrap_or_else(|| default_bundle_path(&client_build));
+            let tables = ContentBundle::load(&bundle, &client_build)?.tables;
+            let index =
+                PakIndex::open(game_dir(cli.game_dir.as_deref())?).map_err(CollisionError::from)?;
+            print_dungeon_scripts(&build_dungeon_scripts(
+                &index,
+                &tables,
+                &client_build,
+                &out_dir,
+            )?);
+        }
         Command::MobPrefabsLedger { ledger, entry } => {
             let tally = scan_ledger(
                 &LedgerSource {
@@ -583,6 +643,56 @@ fn run(cli: Cli) -> Result<(), ToolError> {
         }
     }
     Ok(())
+}
+
+fn print_dungeon_scripts(report: &DungeonScriptsReport) {
+    println!(
+        "{}: {} levels, {} encounters, {} stages, {} spawns, {} chests",
+        report.path.display(),
+        report.levels,
+        report.encounters,
+        report.stages,
+        report.spawns,
+        report.chests
+    );
+    println!(
+        "target slices: {} spawner mobs ({} without a level), {} other slices",
+        report.spawner_mobs, report.levelless_mobs, report.other_slices
+    );
+    if !report.skipped_modes.is_empty() {
+        println!("game modes without a script: {}", report.skipped_modes.join(", "));
+    }
+    for path in report.missing_slices.iter().take(SHOWN_FAILURES) {
+        println!("not in the paks: {path}");
+    }
+}
+
+fn print_catacombs(report: &CatacombCheck) {
+    println!(
+        "{}: {} runs from cell {:?}: {} to {} tiles, {} to {} connectors",
+        report.game_mode,
+        report.runs,
+        report.start_cell,
+        report.tiles.0,
+        report.tiles.1,
+        report.connectors.0,
+        report.connectors.1
+    );
+    println!(
+        "run 0: cluster {}, theme {}, 1635 frame {:?}",
+        report.first.cluster,
+        report.first.theme.as_deref().unwrap_or("-"),
+        report.first.frame()
+    );
+    for row in catacomb_map_rows(&report.first) {
+        println!("  {row}");
+    }
+    if report.missing_slices.is_empty() {
+        println!("every tile variation slice is in the paks");
+    }
+    for slice in &report.missing_slices {
+        println!("missing tile slice: {slice}");
+    }
 }
 
 /// Missing values printed per kind by `ai-data`.
@@ -772,7 +882,7 @@ fn print_ftue_entities(scan: &FtueScan, out: &Path) {
     let stats = &scan.stats;
     let table = &scan.table;
     println!(
-        "ftue-entities: {} bundles, {} static and {} asset entities, {} mobs ({} mob cards), {} spawns ({} sent again), {} changes ({} sent again), {} static and {} asset cards in unread groups -> {}",
+        "ftue-entities: {} bundles, {} static and {} asset entities, {} mobs ({} mob cards), {} spawns ({} sent again), {} changes ({} sent again), {} static and {} asset cards in unread groups, {} members without a reader left out -> {}",
         stats.bundles,
         table.entities.len(),
         table.asset_entities.len(),
@@ -784,6 +894,7 @@ fn print_ftue_entities(scan: &FtueScan, out: &Path) {
         stats.repeated_changes,
         stats.unread_cards.len(),
         stats.unread_asset_cards.len(),
+        stats.skipped_members.len(),
         out.display()
     );
     for entity in &table.entities {
@@ -806,6 +917,9 @@ fn print_ftue_entities(scan: &FtueScan, out: &Path) {
             "  unread asset card at {time_ms} ms: {}",
             hex::encode(asset)
         );
+    }
+    for (time_ms, class) in stats.skipped_members.iter().take(SHOWN_SKIPPED_MEMBERS) {
+        println!("  member of class {class} without a reader left out at {time_ms} ms");
     }
 }
 

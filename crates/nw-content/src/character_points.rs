@@ -57,6 +57,10 @@ pub struct PointRule {
 pub struct CharacterPoints {
     /// `AttributePoints` of each level, level 0 first.
     level_points: Vec<u32>,
+    /// `AttributeRespecCost` of each level, by level: the coins a refund of the spent
+    /// attribute points (2409) costs (Observed, retail 2026-08-26 at level 69: the coins fell
+    /// by 5,000 at each of 38 refunds, the level row's cost).
+    respec_costs: BTreeMap<u32, u64>,
     /// The range of each attribute, by attribute id; empty when a table is missing.
     attributes: Vec<AttributeRange>,
     /// The ability-tree points of the weapon pools, by CRC.
@@ -122,6 +126,12 @@ impl CharacterPoints {
                         .zip(row.required_progression_point_level),
                 })
             });
+        let respec_costs = tables
+            .experience_data
+            .iter()
+            .filter(|table| table.unique_id.eq_ignore_ascii_case(LEVEL_TABLE))
+            .flat_map(|table| &table.rows)
+            .map(|row| (row.level_number, row.attribute_respec_cost));
         Self::build(
             levels,
             attribute_levels,
@@ -133,6 +143,26 @@ impl CharacterPoints {
             pools,
             points,
         )
+        .with_respec_costs(respec_costs)
+    }
+
+    /// These rules with the attribute refund cost `costs` of each level (level number,
+    /// `AttributeRespecCost`); a negative cost is 0.
+    #[must_use]
+    pub fn with_respec_costs(mut self, costs: impl IntoIterator<Item = (i64, i64)>) -> Self {
+        self.respec_costs = costs
+            .into_iter()
+            .filter_map(|(level, cost)| {
+                Some((u32::try_from(level).ok()?, u64::try_from(cost.max(0)).ok()?))
+            })
+            .collect();
+        self
+    }
+
+    /// The coins a refund of the spent attribute points costs a character of `level`; 0 for a
+    /// level the table does not list.
+    pub fn attribute_respec_cost(&self, level: u32) -> u64 {
+        self.respec_costs.get(&level).copied().unwrap_or_default()
     }
 
     /// The rules of the level rows `levels` (level number, `AttributePoints`), the attribute
@@ -202,6 +232,7 @@ impl CharacterPoints {
             points,
             ability_tables: ability_tables.into_iter().map(lowercase_crc32).collect(),
             pool_versions,
+            respec_costs: BTreeMap::new(),
         }
     }
 
@@ -333,6 +364,18 @@ pub(crate) mod tests {
         assert!(rules.point_by_id(TERRITORY_POINT).is_none());
         assert_eq!(rules.ability_tables(), [lowercase_crc32(POOL)]);
         assert_eq!(rules.pool_versions(), [(lowercase_crc32(POOL), 1)]);
+    }
+
+    /// Retail `AttributeRespecCost` of levels 58 and 59 (content bundle 25810808).
+    const RESPEC_COSTS: [(i64, i64); 3] = [(59, 5_000), (58, 0), (-1, 7)];
+
+    #[test]
+    fn a_refund_costs_the_level_rows_coins() {
+        let rules = rules().with_respec_costs(RESPEC_COSTS);
+        assert_eq!(rules.attribute_respec_cost(59), 5_000);
+        assert_eq!(rules.attribute_respec_cost(58), 0);
+        assert_eq!(rules.attribute_respec_cost(60), 0, "a level the table does not list");
+        assert_eq!(rules.attribute_points_at(2), 10, "the other rules stay");
     }
 
     #[test]

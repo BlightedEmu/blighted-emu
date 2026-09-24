@@ -35,8 +35,11 @@ pub struct LevelSpec {
     pub phasing_origin: [f32; 2],
     /// Phasing-grid width and height, metres.
     pub phasing_bounds: [f32; 2],
-    /// `flagA3`: 0 in the open world, 1 in the tutorial.
+    /// `flagA3`: 0 in the open world, 1 in the tutorial, 0 in every expedition, raid and trial.
     pub flag_a3: u8,
+    /// Whether every visit is a private instance: the tutorial and each expedition, raid and
+    /// trial (phasing key type 3, the phase id also in `reserved`), not the shared open world.
+    pub private: bool,
 }
 
 /// The open world.
@@ -48,6 +51,7 @@ pub const OPEN_WORLD_LEVEL: LevelSpec = LevelSpec {
     phasing_origin: [2048.0, 16.0],
     phasing_bounds: [12272.0, 10250.0],
     flag_a3: 0,
+    private: false,
 };
 
 /// The new-player tutorial: a private level before the open world.
@@ -58,15 +62,37 @@ pub const TUTORIAL_LEVEL: LevelSpec = LevelSpec {
     phasing_origin: [400.0, 150.0],
     phasing_bounds: [416.0, 736.0],
     flag_a3: 1,
+    private: true,
 };
 
 /// Every level this server can name.
 pub const LEVELS: [LevelSpec; 2] = [OPEN_WORLD_LEVEL, TUTORIAL_LEVEL];
 
+/// `flagA3` of an expedition, raid or trial level (Observed: 0 in the 1635 of every instance of
+/// 7 retail kinds: expeditions, raids, soul trials, catacombs and the instanced open-world areas).
+const INSTANCE_FLAG_A3: u8 = 0;
+
 impl LevelSpec {
     /// The level whose folder name is `folder`.
     pub fn of_folder(folder: &str) -> Option<Self> {
         LEVELS.into_iter().find(|level| level.folder == folder)
+    }
+
+    /// The private instance level of a game mode map (`GameModeMapData`): retail's 1635 of every
+    /// expedition, raid and trial names the map and terrain path of its `CoatlicueName` and sends
+    /// its `WorldBounds` (x, y, width, height) as the phasing frame (Observed, 7 instance kinds).
+    /// The strings live for the rest of the process: build each level once, at start.
+    pub fn instance(folder: &str, map_name: &str, coatlicue_path: &str, frame: [f32; 4]) -> Self {
+        let [x, y, width, height] = frame;
+        Self {
+            folder: Box::leak(folder.to_owned().into_boxed_str()),
+            map_name: Box::leak(map_name.as_bytes().to_vec().into_boxed_slice()),
+            coatlicue_path: Box::leak(coatlicue_path.as_bytes().to_vec().into_boxed_slice()),
+            phasing_origin: [x, y],
+            phasing_bounds: [width, height],
+            flag_a3: INSTANCE_FLAG_A3,
+            private: true,
+        }
     }
 }
 
@@ -212,11 +238,50 @@ impl LevelInfoChangedMsg {
         }
     }
 
+    /// The open-world message of a player who comes back from an instance at `position` (x, y): one
+    /// phasing entry, the grid cell of that spot (retail: 4 of 6 instance exits; the other two
+    /// named a territory area).
+    pub fn open_world_at(
+        client_context: u8,
+        instance: u64,
+        phase_id: u64,
+        position: [f32; 2],
+    ) -> Self {
+        let [x, y] = position;
+        let [origin_x, origin_y] = OPEN_WORLD_LEVEL.phasing_origin;
+        // Cell indexes of a spot on the map, a few dozen.
+        let cell = |at: f32, origin: f32| ((at - origin) / PHASING_CELL_M).floor().max(0.0) as u32;
+        Self {
+            level: OPEN_WORLD_LEVEL,
+            reserved: OPEN_WORLD_RESERVED,
+            client_context,
+            instance,
+            phasing: vec![PhasingEntry {
+                key_type: GRID_KEY_TYPE,
+                key_id: (cell(y, origin_y) << GRID_KEY_Y_SHIFT) | cell(x, origin_x),
+                phase_id,
+                extra: 0,
+            }],
+        }
+    }
+
     /// The tutorial message: the private instance `phase_id` (also in `reserved`, as in the
     /// captures).
     pub fn tutorial(client_context: u8, instance: u64, phase_id: u64) -> Self {
+        Self::private_instance(TUTORIAL_LEVEL, client_context, instance, phase_id)
+    }
+
+    /// The message of a private instance of `level` (the tutorial, an expedition, raid or trial):
+    /// the instance `phase_id` in `reserved` and in its one phasing entry (Observed in the
+    /// tutorial and every captured instance).
+    pub fn private_instance(
+        level: LevelSpec,
+        client_context: u8,
+        instance: u64,
+        phase_id: u64,
+    ) -> Self {
         Self {
-            level: TUTORIAL_LEVEL,
+            level,
             reserved: phase_id,
             client_context,
             instance,
@@ -229,10 +294,11 @@ impl LevelInfoChangedMsg {
         }
     }
 
-    /// The message of `level`: [`Self::tutorial`] for the tutorial, else [`Self::open_world`].
+    /// The message of `level`: [`Self::private_instance`] for a private level (the tutorial or
+    /// an instance), else [`Self::open_world`].
     pub fn of_level(level: LevelSpec, client_context: u8, instance: u64, phase_id: u64) -> Self {
-        if level == TUTORIAL_LEVEL {
-            Self::tutorial(client_context, instance, phase_id)
+        if level.private {
+            Self::private_instance(level, client_context, instance, phase_id)
         } else {
             Self::open_world(client_context, instance, phase_id)
         }
@@ -398,4 +464,53 @@ mod tests {
             message
         );
     }
+
+    /// The frame of the Amrine expedition (`GameModeMapData` `WorldBounds` of `DungeonAmrine`).
+    const AMRINE_FRAME: [f32; 4] = [610.0, 560.0, 352.0, 512.0];
+
+    #[test]
+    fn an_instance_level_names_its_map_and_frame_and_is_private() {
+        const PHASE: u64 = 0xbd6e_b5a2_6a1f_2b2f;
+        const STAMP: u64 = 0x0102;
+        let level = LevelSpec::instance(
+            "nw_dungeon_windsward_00",
+            "NW_Dungeon_Windsward_00",
+            "coatlicue/NW_Dungeon_Windsward_00",
+            AMRINE_FRAME,
+        );
+        assert!(level.private);
+        assert_eq!(level.flag_a3, INSTANCE_FLAG_A3);
+        let message = LevelInfoChangedMsg::of_level(level, 2, STAMP, PHASE);
+        assert_eq!(message.reserved, PHASE);
+        let body = message.encode().expect("encode");
+        // Retail Amrine 1635: 112 bytes; name, path, frame, reserved, one type-3 entry, then
+        // `01 02 01 00` and the stamp.
+        assert_eq!(body.len(), 112);
+        assert_eq!(&body[1..24], b"NW_Dungeon_Windsward_00");
+        let frame_at = 1 + 23 + 1 + 33;
+        assert_eq!(&body[frame_at..frame_at + 4], &610.0_f32.to_be_bytes());
+        let tail = body.len() - 12;
+        assert_eq!(&body[tail..tail + 4], &[1, 2, 1, 0]);
+        let entry = frame_at + 16 + 8 + 1;
+        assert_eq!(body[entry], INSTANCE_KEY_TYPE);
+        assert_eq!(&body[entry + 5..entry + 13], &PHASE.to_be_bytes());
+        assert_eq!(&body[entry + 13..entry + 17], &INSTANCE_EXTRA.to_be_bytes());
+    }
+
+    #[test]
+    fn a_return_from_an_instance_names_the_grid_cell_of_the_spot() {
+        // Retail Amrine exit: one grid entry, key (28 << 16) | 22 for a spot in that cell.
+        let x = 2048.0 + 22.0 * PHASING_CELL_M + 10.0;
+        let y = 16.0 + 28.0 * PHASING_CELL_M + 10.0;
+        let message = LevelInfoChangedMsg::open_world_at(3, 9, OPEN_WORLD_PHASE, [x, y]);
+        assert_eq!(message.phasing.len(), 1);
+        assert_eq!(message.phasing[0].key_type, GRID_KEY_TYPE);
+        assert_eq!(message.phasing[0].key_id, (28 << 16) | 22);
+        assert_eq!(message.reserved, OPEN_WORLD_RESERVED);
+        let body = message.encode().expect("encode");
+        assert_eq!(LevelInfoChangedMsg::decode(&body), Ok(message));
+    }
+
+    /// The phase of the shared open world in these tests.
+    const OPEN_WORLD_PHASE: u64 = 1;
 }

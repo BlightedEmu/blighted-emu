@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 bevy_ecs.workspace = true
 clap.workspace = true
+data-encoding.workspace = true
 getrandom.workspace = true
 metrics.workspace = true
 metrics-exporter-prometheus = { workspace = true, features = ["http-listener"] }
@@ -23,6 +24,7 @@ nw-login.workspace = true
 nw-messages.workspace = true
 nw-reflect.workspace = true
 nw-sim-core.workspace = true
+nw-social.workspace = true
 nw-world.workspace = true
 serde.workspace = true
 serde_json.workspace = true

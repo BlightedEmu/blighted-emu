@@ -37,6 +37,14 @@ pub enum ReplicatedList<T> {
 }
 
 impl<T> ReplicatedList<T> {
+    /// The whole list of a full form; `None` for changes.
+    pub const fn full(&self) -> Option<&FullList<T>> {
+        match self {
+            Self::Full(list) => Some(list),
+            Self::Changes(_) => None,
+        }
+    }
+
     /// Reads a list in either form; `read_element` reads one element.
     ///
     /// # Errors
@@ -114,6 +122,58 @@ pub(crate) fn write_child<T>(
             Ok(())
         })
     })
+}
+
+/// The change of a list whose elements were `before` (`None`: never sent) and are `now`, at
+/// `version`: the elements that differ or are new, alone (retail newchar 2026-09-18: an equip
+/// sent the changed index of each item list, the first entry with the version and the others
+/// with 0). The whole list goes when it was never sent or got shorter: a delta only sets
+/// elements. `None` when nothing changed.
+pub fn list_change<T: Clone + PartialEq>(
+    before: Option<&[T]>,
+    now: &[T],
+    version: u64,
+) -> Option<ReplicatedList<T>> {
+    let Some(before) = before.filter(|before| before.len() <= now.len()) else {
+        return Some(ReplicatedList::Full(FullList {
+            version: Some(version),
+            elements: now.to_vec(),
+        }));
+    };
+    child_changes(
+        version,
+        (0_u32..)
+            .zip(now)
+            .filter(|&(index, value)| {
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|index| before.get(index))
+                    != Some(value)
+            })
+            .map(|(index, value)| (index, value.clone())),
+    )
+}
+
+/// The change of a list child from `before` to `now` at `version` ([`list_change`]); a child
+/// that `now` holds as changes already goes as it is.
+pub(crate) fn child_change<T: Clone + PartialEq>(
+    before: Option<&ReplicatedList<T>>,
+    now: Option<&ReplicatedList<T>>,
+    version: u64,
+) -> Option<ReplicatedList<T>> {
+    let now = now?;
+    let Some(now_list) = now.full() else {
+        return Some(now.clone());
+    };
+    let before = before
+        .and_then(ReplicatedList::full)
+        .map(|list| list.elements.as_slice());
+    list_change(before, &now_list.elements, version)
+}
+
+/// The value of a plain child when it changed from `before` to `now`.
+pub(crate) fn value_change<T: Clone + PartialEq>(before: Option<&T>, now: Option<&T>) -> Option<T> {
+    now.filter(|now| Some(*now) != before).cloned()
 }
 
 /// Reads a delta form.
@@ -221,5 +281,27 @@ mod tests {
             decode(&[0x01, 0x00, 0x00, 0x01, 0x01]),
             Err(MessageError::Unsized { .. })
         ));
+    }
+
+    #[test]
+    fn a_list_change_sends_the_changed_and_new_elements_alone() {
+        const VERSION: u64 = 4688;
+        let before = [375_u16, 375, 375, 375, 0];
+        let now = [375_u16, 375, 375, 375, 700, 700];
+        assert_eq!(
+            list_change(Some(&before), &now, VERSION),
+            child_changes(VERSION, [(4, 700), (5, 700)])
+        );
+        assert_eq!(list_change(Some(&now), &now, VERSION), None);
+        let full = ReplicatedList::Full(FullList {
+            version: Some(VERSION),
+            elements: before.to_vec(),
+        });
+        assert_eq!(list_change(None, &before, VERSION), Some(full.clone()));
+        assert_eq!(
+            list_change(Some(&now), &before, VERSION),
+            Some(full),
+            "a shorter list goes whole"
+        );
     }
 }

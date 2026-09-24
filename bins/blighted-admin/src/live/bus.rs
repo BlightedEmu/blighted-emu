@@ -107,6 +107,7 @@ mod tests {
             players: 1,
             max_players: MAX_PLAYERS,
             level: "newworld_vitaeeterna".to_owned(),
+            instance: None,
         };
         let part = SimSnapshot {
             sim: sim.clone(),

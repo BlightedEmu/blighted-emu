@@ -217,7 +217,15 @@ impl AssetScript {
                 .spawns
                 .last()
                 .map_or(spawn_ms, |last| last.group.time_ms);
-            if let Some(gone_ms) = entity.despawns.last().filter(|gone| **gone > last_spawn_ms) {
+            // A stop that a later change of the same entity follows is the capture's player
+            // leaving and coming back into view, not a step of the level (retail: the Thorpe
+            // encounter, asset 14, stopped at 303772 and was carded again at 309357; its change
+            // at bit 15206 + 2316 ms is what makes the client ask for the boss cutscene).
+            let last_change_ms = entity.changes.iter().map(|change| change.group.time_ms).max();
+            let level_stop = entity.despawns.last().filter(|gone| {
+                **gone > last_spawn_ms && last_change_ms.is_none_or(|change| change <= **gone)
+            });
+            if let Some(gone_ms) = level_stop {
                 // The hide follows the last change before it, so the change goes out first
                 // (retail: the boss area trigger's change at 15206 + 2316 ms, its stop 14 ms
                 // later; timed from its spawn it went 2.1 s early live and the change was lost).
@@ -287,11 +295,39 @@ impl AssetScript {
 
     /// `trigger` happened at `now_ms`: the groups that wait for it are due after their delays.
     pub(super) fn on(&mut self, trigger: Trigger, now_ms: u64) {
+        let mut fired = Vec::new();
         for plan in self.plans.iter_mut().filter(|plan| !plan.done) {
             if plan.when.matches(trigger) {
                 plan.done = true;
-                self.due
-                    .push((now_ms.saturating_add(plan.delay_ms), plan.asset, plan.step));
+                fired.push((now_ms.saturating_add(plan.delay_ms), plan.asset, plan.step));
+            }
+        }
+        for (at_ms, asset, step) in fired {
+            if matches!(step, Step::Change(_)) {
+                self.show_by(asset, at_ms);
+            }
+            self.due.push((at_ms, asset, step));
+        }
+    }
+
+    /// Asset entity `asset` is in view by `at_ms`, when one of its changes goes out. Retail
+    /// cards a level entity when the player comes near it, so a card timed from an earlier
+    /// event can come after the change that needs it (the boss area trigger, asset 15: timed
+    /// 22565 ms after its passthrough, but in the retail run of 2026-09-18 carded 14165 ms after
+    /// the passthrough, 1081 ms before the bundle that set bit 15206).
+    fn show_by(&mut self, asset: usize, at_ms: u64) {
+        let waiting = self
+            .plans
+            .iter_mut()
+            .find(|plan| plan.asset == asset && plan.step == Step::Show && !plan.done);
+        if let Some(plan) = waiting {
+            plan.done = true;
+            self.due.push((at_ms, asset, Step::Show));
+            return;
+        }
+        for (due_ms, due_asset, step) in &mut self.due {
+            if *due_asset == asset && *step == Step::Show && *due_ms > at_ms {
+                *due_ms = at_ms;
             }
         }
     }
@@ -466,6 +502,84 @@ mod tests {
             script.take_due(27_297),
             [(0, Step::Change(0)), (0, Step::Hide)]
         );
+    }
+
+    #[test]
+    fn a_stop_before_a_later_change_is_a_view_exit_and_hides_nothing() {
+        // The Thorpe encounter (asset 14): shown 5433 ms after bit 15551, stopped at 303772 when
+        // the capture's player walked out of view, carded again, then changed 2316 ms after
+        // bit 15206 (retail 2026-09-18: the change came 2051 ms after the bundle that set that
+        // bit, and the client asked for the boss cutscene 228 ms later).
+        const CLIMB_BIT: u32 = 15_551;
+        const TF_BIT: u32 = 15_206;
+        let climb = LevelEvent::Achievements {
+            bits: vec![CLIMB_BIT],
+        };
+        let tf = LevelEvent::Achievements { bits: vec![TF_BIT] };
+        let encounter = entity(
+            group(292_857, Some(climb), 5_433),
+            vec![group(394_754, Some(tf), 2_316)],
+            vec![303_772],
+        );
+        let mut script = AssetScript::of(&FtueLevel {
+            statics: FtueEntities::default(),
+            static_causes: Vec::new(),
+            assets: vec![encounter],
+            mobs: Vec::new(),
+        });
+        script.on(Trigger::Achievement(CLIMB_BIT), 0);
+        assert_eq!(script.take_due(5_433), [(0, Step::Show)]);
+        assert!(script.take_due(60_000).is_empty(), "no hide at the view exit");
+        script.on(Trigger::Achievement(TF_BIT), 100_000);
+        assert_eq!(script.take_due(102_316), [(0, Step::Change(0))]);
+        assert!(script.take_due(u64::MAX).is_empty());
+    }
+
+    #[test]
+    fn a_change_brings_its_entity_into_view_first() {
+        // The boss area trigger (asset 15) is timed 22565 ms after its passthrough; the retail
+        // player of 2026-09-18 reached the boss trigger 15022 ms after it.
+        const TF_BIT: u32 = 15_206;
+        const PREFIX: [u8; GDE_REF_PREFIX_LEN] = [0xff, 0x78, 0x60, 0x38, 0x81, 0x41, 0x00, 0x84];
+        let passthrough = LevelEvent::Client {
+            message_type: PASSTHROUGH,
+            id: PREFIX.to_vec(),
+        };
+        let tf = LevelEvent::Achievements { bits: vec![TF_BIT] };
+        let trigger = || {
+            entity(
+                group(392_153, Some(passthrough.clone()), 22_565),
+                vec![group(394_754, Some(tf.clone()), 2_316)],
+                vec![394_768],
+            )
+        };
+        let level = |asset| FtueLevel {
+            statics: FtueEntities::default(),
+            static_causes: Vec::new(),
+            assets: vec![asset],
+            mobs: Vec::new(),
+        };
+        let mut script = AssetScript::of(&level(trigger()));
+        script.on(Trigger::Passthrough(PREFIX), 0);
+        script.on(Trigger::Achievement(TF_BIT), 15_022);
+        assert!(script.take_due(17_337).is_empty());
+        assert_eq!(
+            script.take_due(17_338),
+            [(0, Step::Show), (0, Step::Change(0))],
+            "the card goes with the change"
+        );
+        assert_eq!(script.take_due(17_352), [(0, Step::Hide)]);
+        assert!(script.take_due(u64::MAX).is_empty(), "no second card");
+        // Without the passthrough the change still has its card.
+        let mut script = AssetScript::of(&level(trigger()));
+        script.on(Trigger::Achievement(TF_BIT), 0);
+        assert_eq!(
+            script.take_due(2_316),
+            [(0, Step::Show), (0, Step::Change(0))]
+        );
+        script.on(Trigger::Passthrough(PREFIX), 3_000);
+        assert_eq!(script.take_due(2_330), [(0, Step::Hide)]);
+        assert!(script.take_due(u64::MAX).is_empty(), "the show is spent");
     }
 
     #[test]

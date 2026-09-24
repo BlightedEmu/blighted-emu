@@ -87,6 +87,102 @@ impl Rewards {
     }
 }
 
+/// Separates the low and high end of a `CurrencyReward` range (`2000-5000`).
+const RANGE_SEPARATOR: char = '-';
+
+/// What a game event grants besides its quest reward: the categorical progression it raises
+/// and its coins as a range.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EventGrant {
+    /// `CategoricalProgressionId` and `CategoricalProgressionReward`: the tradeskill (or other
+    /// categorical progression) and the experience one firing gives it, before the remote
+    /// config's progression multiplier (Observed, content bundle 25810808: `Gather_MiningT1`
+    /// gives Mining 64, `Craft_CookingT1` gives Cooking 4.6).
+    pub progression: Option<(String, f64)>,
+    /// `CurrencyReward` as its low and high end: a single number is both (`SalvageCoinGrantT2`
+    /// 25), a range rolls between them (`EventBagofJuniperBerriesLVL30` `2000-5000`).
+    pub coins: (u64, u64),
+    /// `TerritoryStanding`: the standing one firing gives the territory the player is in,
+    /// before the remote config's multiplier of that territory (Observed, retail newchar
+    /// 2026-09-18: two Light Ration crafts of `Craft_CookingT1`, standing 1, gave territory 6
+    /// standing 6 under multiplier 3). 0 for an event without one.
+    pub territory_standing: f64,
+}
+
+impl EventGrant {
+    /// Its coins, with `below(n)` a random number below `n`.
+    pub fn coins_rolled(&self, below: &mut impl FnMut(u32) -> u32) -> u64 {
+        let (low, high) = self.coins;
+        let spread = u32::try_from(high.saturating_sub(low)).unwrap_or(u32::MAX);
+        low.saturating_add(u64::from(below(spread.saturating_add(1))))
+    }
+}
+
+/// The grant of every game event by lowercase event id.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EventGrants {
+    by_id: HashMap<String, EventGrant>,
+}
+
+/// A `CurrencyReward` cell as its low and high end; `(0, 0)` for an empty or other cell.
+fn coin_range(cell: Option<&str>) -> (u64, u64) {
+    let Some(text) = cell.map(str::trim).filter(|text| !text.is_empty()) else {
+        return (0, 0);
+    };
+    match text.split_once(RANGE_SEPARATOR) {
+        Some((low, high)) => {
+            let low = number_of::<u64>(Some(low));
+            (low, number_of::<u64>(Some(high)).max(low))
+        }
+        None => {
+            let coins = number_of(Some(text));
+            (coins, coins)
+        }
+    }
+}
+
+impl EventGrants {
+    /// The grants of `GameEventData` in `tables`.
+    pub fn from_tables(tables: &Tables) -> Self {
+        Self::build(
+            tables
+                .game_event_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .map(|row| {
+                    let progression = row
+                        .categorical_progression_id
+                        .clone()
+                        .filter(|id| !id.is_empty())
+                        .zip(row.categorical_progression_reward)
+                        .filter(|(_, amount)| *amount > 0.0);
+                    (
+                        row.event_id.clone(),
+                        EventGrant {
+                            progression,
+                            coins: coin_range(row.currency_reward.as_deref()),
+                            territory_standing: number_of(row.territory_standing.as_deref()),
+                        },
+                    )
+                }),
+        )
+    }
+
+    /// The grants of `events` (event id, grant); the first row of an id wins.
+    pub fn build(events: impl IntoIterator<Item = (String, EventGrant)>) -> Self {
+        let mut by_id = HashMap::new();
+        for (id, grant) in events {
+            by_id.entry(id.to_lowercase()).or_insert(grant);
+        }
+        Self { by_id }
+    }
+
+    /// The grant of event `id` (any case).
+    pub fn get(&self, id: &str) -> Option<&EventGrant> {
+        self.by_id.get(&id.to_lowercase())
+    }
+}
+
 /// The experience of a mob kill by the mob's level: `RewardData.KillExperience` (Observed,
 /// content bundle 25810808: 10 at level 1, 11 at level 2). Retail gave 20 for each level 1 kill
 /// of the tutorial (tutorial note, section 8): this base times
@@ -146,6 +242,40 @@ mod tests {
         assert_eq!(reward.experience, 275);
         assert_eq!(number_of::<u64>(Some("")), 0);
         assert!(rewards.get("other").is_none());
+    }
+
+    #[test]
+    fn an_event_grants_its_progression_and_a_coin_range() {
+        assert_eq!(coin_range(Some("25")), (25, 25));
+        assert_eq!(coin_range(Some("2000-5000")), (2000, 5000));
+        assert_eq!(coin_range(Some("")), (0, 0));
+        assert_eq!(coin_range(None), (0, 0));
+        let grants = EventGrants::build([
+            (
+                "Gather_MiningT1".to_owned(),
+                EventGrant {
+                    progression: Some(("Mining".to_owned(), 64.0)),
+                    coins: (0, 0),
+                    territory_standing: 0.0,
+                },
+            ),
+            (
+                "EventBagofJuniperBerriesLVL30".to_owned(),
+                EventGrant {
+                    progression: None,
+                    coins: coin_range(Some("2000-5000")),
+                    territory_standing: number_of(Some("1")),
+                },
+            ),
+        ]);
+        let mining = grants.get("gather_miningt1").expect("mining");
+        assert_eq!(mining.progression, Some(("Mining".to_owned(), 64.0)));
+        let bag = grants.get("EVENTBAGOFJUNIPERBERRIESLVL30").expect("bag");
+        assert_eq!(bag.coins_rolled(&mut |_| 0), 2000);
+        assert_eq!(bag.coins_rolled(&mut |below| below - 1), 5000);
+        assert_eq!(bag.territory_standing, 1.0);
+        assert_eq!(mining.territory_standing, 0.0);
+        assert!(grants.get("other").is_none());
     }
 
     #[test]

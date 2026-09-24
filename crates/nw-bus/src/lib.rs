@@ -6,26 +6,44 @@
 
 pub mod admin;
 pub mod client;
+pub mod ghost_parts;
 pub mod id;
+pub mod instance;
 pub mod message;
 pub mod publisher;
 pub mod snapshot;
+pub mod social;
 pub mod subject;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_support;
 
 pub use admin::{AdminAction, AdminCommand, AdminReply, RunningEvent, ScriptLog, ScriptLogLine};
 pub use client::{Bus, BusError, Incoming, Subscription};
+pub use ghost_parts::{GhostAssembly, ghost_parts};
 pub use id::{BusId, BusIdError, MAX_BUS_ID_LEN};
+pub use instance::{
+    GroupAnswer, GroupQuery, InstanceBeat, InstanceCommand, InstanceOpened, InstanceRefusal,
+    InstanceReply, InstanceRequest, InstanceStay, PlayerArena, RunningInstance,
+};
 pub use message::{
-    Admit, AdmitReply, CarriedItem, CellTable, ConnectionRef, GHOST_VISIBLE_ITEMS, GatewayOutput,
-    Ghost, GhostItem, GhostSlayer, Ghosts, HandoffMessage, HandoffOffer, HandoffReply, Heartbeat,
-    Hit, InputBatch, ItemPlace, Join, JoinReply, LootLimitCount, MAX_BATCH_BYTES,
-    MAX_BUS_MESSAGE_BYTES, MAX_GHOST_BYTES, MOB_ENTITY_BASE, MobGhost, OutputBatch, PlayerGhost,
-    PlayerProgression, PlayerQuests, Point, QuestRun, QuestTask, ResumeOf, SimHeartbeat, SimInput,
-    SimSlot, decode, encode, heartbeat_silence, split_batches,
+    Admit, AdmitReply, CarriedItem, CarriedMount, CellTable, ConnectionRef, GHOST_VISIBLE_ITEMS,
+    GatewayOutput, Ghost, GhostItem, GhostMount, GhostSlayer, GhostSlotChange, GhostUpperSlots,
+    Ghosts, HandoffMessage, HandoffOffer,
+    DYE_CHANNELS, HandoffReply, Heartbeat, Hit, HomeRecord, HousingItem, InputBatch, ItemLookState, ItemPlace,
+    ItemState, Join, JoinReply,
+    LootLimitCount, MAX_BATCH_BYTES, MAX_BUS_MESSAGE_BYTES, MAX_GHOST_BYTES, MOB_ENTITY_BASE,
+    MOUNT_DYE_LEN, MobGhost, OutputBatch, OwnedHome, PlayerGhost, PlayerInventory, PlayerMounts,
+    PlacedCamp, PlayerMusic, PlayerProgression, PlayerQuests, PlayerTravel, Point, QuestRun, QuestTask, ResumeOf,
+    SavedLoadout, SimHeartbeat, SimInput, SimSlot, StoredItem, StoredPoint, decode, encode,
+    heartbeat_silence, split_batches,
 };
 pub use publisher::Publisher;
+pub use social::{
+    CoinReply, CoinTransfer, GroupEntityDelivery, GroupEntityView, LeaveReason, OwnStateDelivery,
+    PlayerVitals, SocialBatch, SocialDeliveries, SocialDelivery, SocialFacetKind, SocialHeader,
+    SocialInput, SocialPlayer, SocialStateKind,
+};
+pub use social::ICON_LEN as SOCIAL_ICON_LEN;
 pub use snapshot::{
     MOB_STATES, SNAPSHOT_PART_ENTITIES, SimSnapshot, SnapMob, SnapPlayer, snapshot_parts,
 };

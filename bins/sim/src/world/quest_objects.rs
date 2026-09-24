@@ -91,7 +91,7 @@ pub(super) fn grant(player: &mut Player, reward: &Reward, gameplay: &GameplayCon
 /// The coins of a wallet of `coins` that gets `gained`: at most `cap`
 /// (`javelin.wallet-cap-player`, Inferred from its name: no client code reads it, so the
 /// server applies it), and a wallet already above the cap keeps what it has.
-fn with_coins(coins: u64, gained: u64, cap: Option<u64>) -> u64 {
+pub(super) fn with_coins(coins: u64, gained: u64, cap: Option<u64>) -> u64 {
     let total = coins.saturating_add(gained);
     cap.map_or(total, |cap| total.min(cap).max(coins))
 }
@@ -150,7 +150,7 @@ impl SimWorld {
     }
 
     /// Fires game event `event` for player `number`: its whisper plays on the client (5070),
-    /// its coins, experience and item go to the player, it counts on the leaderboards it feeds,
+    /// its coins, experience, territory standing and item go to the player, it counts on the leaderboards it feeds,
     /// and it is an event of the quest.
     pub(super) fn fire_game_event(&mut self, number: u64, event: &str, now_ms: u64) {
         let reward = self.content.rewards.get(event).cloned().unwrap_or_default();
@@ -173,6 +173,7 @@ impl SimWorld {
             grant(&mut player, &reward, &self.content.gameplay);
         }
         tracing::info!(player = number, event, whisper = ?reward.whisper, "game event");
+        self.grant_event_standing(number, event);
         self.give_loot(number, reward.item.into_iter().collect(), now_ms);
         self.quest_event(number, Event::GameEvent(event), now_ms);
     }

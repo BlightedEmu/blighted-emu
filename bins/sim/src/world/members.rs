@@ -652,6 +652,9 @@ pub(super) struct OwnTick {
     /// The facing and look direction of the client's newest input, when they changed since the
     /// last own state (retail sends them back in the own state; lock-on note).
     pub(super) view: Option<LookDir>,
+    /// The `distGround` and `waterDepth` bytes of the ground and water under the player, each
+    /// when it changed since its client got it ([`nw_sim_core::Footing::change_since`]).
+    pub(super) footing: (Option<u8>, Option<u8>),
 }
 
 impl OwnTeleport {
@@ -725,15 +728,20 @@ pub(super) fn own_group(
         let place = InputPosition::from_metres(position.x, position.y, position.z)
             .filter(|_| tick.with_position)
             .and_then(|at| places.next(at));
-        alc.state = MemberState::Alc(AlcState::own_step(
-            tick.clock.stamp(),
-            place,
-            tick.clear_throttle.then_some(DATA_BITS_ACTIVE),
-            tick.clock.anchored(),
-            tick.slayer.state,
-            tick.view,
-            tick.slayer.time,
-        )?);
+        let (ground_distance, water_depth) = tick.footing;
+        alc.state = MemberState::Alc(
+            AlcState::own_step(
+                tick.clock.stamp(),
+                place,
+                tick.clear_throttle.then_some(DATA_BITS_ACTIVE),
+                tick.clock.anchored(),
+                tick.slayer.state,
+                tick.view,
+                tick.slayer.time,
+            )?
+            .with_upper_slots(tick.slayer.slots.unwrap_or_default())?
+            .with_footing(ground_distance, water_depth),
+        );
     }
     if let Some(MemberState::Alc(alc)) = group.members.last().map(|alc| &alc.state)
         && let Some(pos10) = alc.pos10
@@ -997,8 +1005,10 @@ mod tests {
         slayer: SlayerDue {
             state: None,
             time: None,
+            slots: None,
         },
         view: None,
+        footing: (None, None),
     };
     const REFUSED: OwnTick = OwnTick {
         with_position: false,
@@ -1175,6 +1185,46 @@ mod tests {
             .expect("step"),
         );
         assert_eq!(alc_of(OwnCard::Without), still);
+    }
+
+    #[test]
+    fn a_plain_own_state_carries_the_changed_footing_and_a_teleport_does_not() {
+        // The fall into the tutorial sea: `distGround` 193 and `waterDepth` 2 (retail newchar
+        // 2026-09-18, run-15 movement study).
+        const SWIM_FOOTING: (Option<u8>, Option<u8>) = (Some(193), Some(2));
+        /// The slot byte's bit of slot 1.
+        const SLOT_1_BIT: u8 = 0b10;
+        let swimming = OwnTick {
+            footing: SWIM_FOOTING,
+            ..REFUSED
+        };
+        let alc = |teleport: Option<OwnTeleport>| {
+            let group = own_group(
+                OWN,
+                own_states(),
+                at(),
+                OwnCard::Without,
+                teleport,
+                swimming,
+                &mut OwnPlaces::default(),
+            )
+            .expect("encode")
+            .expect("finite");
+            let MemberState::Alc(alc) = group.members.last().expect("alc").state.clone() else {
+                panic!("an ALC");
+            };
+            alc
+        };
+        let plain = AlcState::own_step(SPAWN_CLOCK.stamp(), None, None, true, None, None, None)
+            .expect("step");
+        assert_eq!(alc(None), plain.with_footing(SWIM_FOOTING.0, SWIM_FOOTING.1));
+        let teleport = OwnTeleport::of(1, SPAWN_CLOCK, None, TeleportStep::Place);
+        let moved = alc(Some(teleport));
+        assert_eq!(
+            moved.bytes.first().map(|mask| mask & SLOT_1_BIT),
+            Some(0),
+            "the server move's states carry no slot 1, as retail's"
+        );
     }
 
     #[test]

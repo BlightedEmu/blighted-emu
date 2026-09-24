@@ -47,9 +47,39 @@ pub(crate) fn read_children(
     reader: &mut Reader<'_>,
     field: &'static str,
     count: u8,
-    mut read_child: impl FnMut(&mut Reader<'_>, u8) -> Result<(), MessageError>,
+    read_child: impl FnMut(&mut Reader<'_>, u8) -> Result<(), MessageError>,
 ) -> Result<u16, MessageError> {
-    let mut children: u16 = 0;
+    let children = read_wide_children(reader, field, count, read_child)?;
+    u16::try_from(children).map_err(|_| MessageError::Unsized {
+        field,
+        // A child above bit 15: the class has more children than this reader keeps.
+        byte: CONTINUE,
+    })
+}
+
+/// [`read_children`] for a slot with more than 16 children (up to 32): the bitmap as a `u32`.
+pub(crate) fn read_wide_children(
+    reader: &mut Reader<'_>,
+    field: &'static str,
+    count: u8,
+    read_child: impl FnMut(&mut Reader<'_>, u8) -> Result<(), MessageError>,
+) -> Result<u32, MessageError> {
+    let children = read_children_64(reader, field, count, read_child)?;
+    u32::try_from(children).map_err(|_| MessageError::Unsized {
+        field,
+        // A child above bit 31: the class has more children than this reader keeps.
+        byte: CONTINUE,
+    })
+}
+
+/// [`read_children`] for a slot with up to 64 children: the bitmap as a `u64`.
+pub(crate) fn read_children_64(
+    reader: &mut Reader<'_>,
+    field: &'static str,
+    count: u8,
+    mut read_child: impl FnMut(&mut Reader<'_>, u8) -> Result<(), MessageError>,
+) -> Result<u64, MessageError> {
+    let mut children: u64 = 0;
     let mut first: u8 = 0;
     loop {
         let byte = reader.u8()?;
@@ -71,7 +101,7 @@ pub(crate) fn read_children(
         for child in (0..CHILDREN_PER_BYTE).filter(|bit| bits & 1 << bit != 0) {
             read_child(reader, first + child)?;
         }
-        children |= u16::from(bits) << first;
+        children |= u64::from(bits) << first;
         if last {
             return Ok(children);
         }
@@ -85,13 +115,35 @@ pub(crate) fn write_children<E>(
     writer: &mut Writer,
     children: u16,
     count: u8,
+    write_child: impl FnMut(&mut Writer, u8) -> Result<(), E>,
+) -> Result<(), E> {
+    write_wide_children(writer, u32::from(children), count, write_child)
+}
+
+/// [`write_children`] for a slot with more than 16 children (up to 32).
+pub(crate) fn write_wide_children<E>(
+    writer: &mut Writer,
+    children: u32,
+    count: u8,
+    write_child: impl FnMut(&mut Writer, u8) -> Result<(), E>,
+) -> Result<(), E> {
+    write_children_64(writer, u64::from(children), count, write_child)
+}
+
+/// [`write_children`] for a slot with up to 64 children.
+pub(crate) fn write_children_64<E>(
+    writer: &mut Writer,
+    children: u64,
+    count: u8,
     mut write_child: impl FnMut(&mut Writer, u8) -> Result<(), E>,
 ) -> Result<(), E> {
     let mut first: u8 = 0;
     while first < count {
         // A child byte holds 7 children: the shift leaves at most 7 bits.
         let bits = (children >> first) as u8 & CHILD_BITS;
-        let rest = children >> (first + CHILDREN_PER_BYTE);
+        let rest = children
+            .checked_shr(u32::from(first + CHILDREN_PER_BYTE))
+            .unwrap_or(0);
         writer.u8(if rest == 0 { bits } else { bits | CONTINUE });
         for child in (0..CHILDREN_PER_BYTE).filter(|bit| bits & 1 << bit != 0) {
             write_child(writer, first + child)?;

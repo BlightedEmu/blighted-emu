@@ -13,11 +13,14 @@
 //! ability id; 0 for an empty slot) and a slot key (`u32`); then a map (`FUN_143025640`) of
 //! weapon pool id to the pool's `VersionNumber` (`ProgressionPoolData`).
 
+use crate::facet::FacetHeader;
 use crate::slots::{read_slot_0, write_known};
-use crate::wire::{MessageError, Reader, Writer};
+use crate::wire::{BodyCodec, MessageError, Reader, Writer};
 
 /// Type index of `MB::AbilityComponentReplicatedState`.
 pub const ABILITY_TYPE_INDEX: u64 = 185;
+/// Type index of `AbilityComponentClientFacet_MasteryTreeRespecResponse`.
+pub const MASTERY_TREE_RESPEC_RESPONSE_TYPE_INDEX: u64 = 2858;
 /// The player component of the abilities.
 pub const ABILITY_COMPONENT: u64 = 46;
 
@@ -151,6 +154,42 @@ impl AbilityState {
     }
 }
 
+/// 2858: the answer to a weapon tree respec (186), on the call's header (Observed,
+/// WEAPON-CODEX: 17 answers 30 to 50 ms after their call, each `01` and the call's table as a
+/// `u32`, with the tree's points, the pool and the azoth in the next bundle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MasteryTreeRespecResponseMsg {
+    /// The header of the call.
+    pub header: FacetHeader,
+    /// Whether the respec was done (every retail answer says 1; a refusal's byte is Inferred).
+    pub done: bool,
+    /// The table of the call.
+    pub table: u32,
+}
+
+impl BodyCodec for MasteryTreeRespecResponseMsg {
+    const TYPE_INDEX: u64 = MASTERY_TREE_RESPEC_RESPONSE_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        Ok(writer.boolean(self.done).u32(self.table).finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let header = FacetHeader::read(&mut reader)?;
+        let done = reader.boolean()?;
+        let table = reader.u32()?;
+        reader.finish()?;
+        Ok(Self {
+            header,
+            done,
+            table,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +245,30 @@ mod tests {
         let mut reader = Reader::new(&bytes);
         assert_eq!(AbilityState::read(&mut reader).expect("read"), state);
         reader.finish().expect("whole");
+    }
+
+    /// Retail 2858 after the sword table's respec (WEAPON-CODEX), with a synthetic header.
+    const RETAIL_RESPEC_ANSWER: [u8; 5] = [0x01, 0x00, 0x00, 0x00, 0x1b];
+    const SWORD_TABLE: u32 = 27;
+
+    #[test]
+    fn a_respec_answer_is_the_retail_bytes() {
+        let header = FacetHeader {
+            target: 1,
+            entity: 2,
+        };
+        let answer = MasteryTreeRespecResponseMsg {
+            header,
+            done: true,
+            table: SWORD_TABLE,
+        };
+        let bytes = answer.encode().expect("encode");
+        let mut writer = Writer::new();
+        header.write(&mut writer);
+        let mut expected = writer.finish();
+        expected.extend_from_slice(&RETAIL_RESPEC_ANSWER);
+        assert_eq!(bytes, expected);
+        assert_eq!(MasteryTreeRespecResponseMsg::decode(&bytes).expect("decode"), answer);
     }
 
     #[test]

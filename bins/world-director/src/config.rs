@@ -51,6 +51,46 @@ pub struct DirectorConfig {
     pub metrics_listen: SocketAddr,
     /// `tracing` filter, for example `info`.
     pub log_filter: String,
+    /// The instances (expeditions, raids, trials); without this section the world opens none.
+    #[serde(default)]
+    pub instances: Option<InstancesConfig>,
+}
+
+/// The `[instances]` section: how the director runs the instance sims. These are operator
+/// settings (resource use), not game values.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstancesConfig {
+    /// An instance with no player for this long ends and its sim is free again.
+    pub empty_timeout_ms: u64,
+    /// Longest wait for an instance sim to open an instance.
+    pub open_timeout_ms: u64,
+    /// Longest wait for the social service's answer about a group.
+    pub group_timeout_ms: u64,
+    /// How the director starts instance sims itself; without it the operator starts them
+    /// (each with `role = "instance"` and the level of its expeditions).
+    #[serde(default)]
+    pub launch: Option<LaunchConfig>,
+}
+
+/// The `[instances.launch]` section: the command that starts one instance sim. The director
+/// adds the sim's id, level and role as `NW_SIM_SIM_ID`, `NW_SIM_LEVEL` and `NW_SIM_ROLE`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchConfig {
+    /// The `sim` program.
+    pub program: String,
+    /// Its arguments.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Free instance sims each level keeps ready while players ask for it.
+    pub spare_per_level: u32,
+    /// Most instance sims the director runs at once.
+    pub max_sims: u32,
+    /// Prefix of the ids of the sims it starts.
+    pub id_prefix: String,
+    /// A level nobody asked for in this long keeps no spare sim.
+    pub forget_after_ms: u64,
 }
 
 /// The global database and the environment variable with its password (it starts with
@@ -133,6 +173,28 @@ impl DirectorConfig {
         }
         if self.heartbeat_misses == 0 {
             return invalid("heartbeat_misses", "must be above 0");
+        }
+        if let Some(instances) = &self.instances {
+            if instances.empty_timeout_ms == 0
+                || instances.open_timeout_ms == 0
+                || instances.group_timeout_ms == 0
+            {
+                return invalid("instances", "timeouts must be above 0");
+            }
+            if instances.open_timeout_ms >= self.admit_timeout_ms {
+                return invalid("instances.open_timeout_ms", "must be below admit_timeout_ms");
+            }
+            if let Some(launch) = &instances.launch
+                && (launch.program.is_empty()
+                    || launch.id_prefix.is_empty()
+                    || launch.max_sims == 0
+                    || launch.forget_after_ms == 0)
+            {
+                return invalid(
+                    "instances.launch",
+                    "needs a program, an id prefix, max_sims and forget_after_ms above 0",
+                );
+            }
         }
         Ok(())
     }
@@ -227,5 +289,37 @@ mod tests {
         let mut config = committed();
         config.global_database = None;
         assert!(config.validate().is_ok(), "the ranks are optional");
+    }
+
+    #[test]
+    fn the_instance_section_is_checked() {
+        let config = committed();
+        let instances = config.instances.clone().expect("instances");
+        assert!(instances.open_timeout_ms < config.admit_timeout_ms);
+        let mut bad = config.clone();
+        if let Some(instances) = bad.instances.as_mut() {
+            instances.empty_timeout_ms = 0;
+        }
+        assert!(bad.validate().is_err());
+        let mut bad = config.clone();
+        if let Some(instances) = bad.instances.as_mut() {
+            instances.open_timeout_ms = config.admit_timeout_ms;
+        }
+        assert!(bad.validate().is_err());
+        let mut bad = config.clone();
+        if let Some(instances) = bad.instances.as_mut() {
+            instances.launch = Some(LaunchConfig {
+                program: String::new(),
+                args: Vec::new(),
+                spare_per_level: 1,
+                max_sims: 1,
+                id_prefix: "inst".to_owned(),
+                forget_after_ms: 1,
+            });
+        }
+        assert!(bad.validate().is_err());
+        let mut none = config;
+        none.instances = None;
+        assert!(none.validate().is_ok(), "a world without instances");
     }
 }

@@ -6,13 +6,14 @@ use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
-use nw_bus::{BusId, MAX_BUS_MESSAGE_BYTES, MAX_GHOST_BYTES};
+use nw_bus::BusId;
 use nw_common::config::{ConfigError, SECRET_ENV_PREFIX, load_config};
 use nw_db::DatabaseConfig;
 use std::sync::Arc;
 
 use nw_common::time::CivilDate;
 use nw_content::combat::{CombatData, CombatRows};
+use nw_content::instances::InstanceCatalog;
 use nw_content::leaderboards::RotationCalendar;
 use nw_content::loot_limits::{HOURS_PER_DAY, ResetClock};
 use nw_messages::LevelSpec;
@@ -23,6 +24,7 @@ use uuid::Uuid;
 use crate::combat::CombatSettings;
 use crate::mob_ai::{AiRates, MobAi};
 use crate::mobs::VitalsSpawn;
+use crate::trading_post::TradingPostConfig;
 use crate::world::WorldSettings;
 
 /// Most players and ghosts one player may see (our choice). Retail's 45-vs-45 war showed one
@@ -33,8 +35,6 @@ pub const MAX_VISIBLE_PLAYERS: usize = 500;
 
 /// Environment prefix of `sim` overrides.
 pub const SIM_ENV_PREFIX: &str = "NW_SIM_";
-/// Room in one ghost message for everything but the ghosts (the sender id and the list length).
-pub const GHOSTS_HEADER_BYTES: usize = 128;
 /// `tick_threads` value for every core of the PC.
 pub const ALL_CORES: usize = 0;
 /// One tick, rounded up to whole milliseconds: the shortest ghost lifetime.
@@ -249,6 +249,36 @@ pub struct SimConfig {
     /// The admin tool.
     #[serde(default)]
     pub admin: AdminSection,
+    /// The trading post's durations, limits, fees and taxes.
+    #[serde(default)]
+    pub trading_post: TradingPostConfig,
+    /// What this sim runs: cells of the open map, or one instance at a time.
+    #[serde(default)]
+    pub role: SimRole,
+    /// Longest wait for the director's answer to an expedition request (it asks the social
+    /// service and opens the instance first).
+    #[serde(default = "default_instance_request_timeout_ms")]
+    pub instance_request_timeout_ms: u64,
+}
+
+/// The role of a sim (architecture spec section 4.4).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SimRole {
+    /// Cells of the open map, or the tutorial.
+    #[default]
+    OpenMap,
+    /// One expedition, raid or trial at a time, on the level of its game mode (its `level` is
+    /// the lower-case map name, `nw_dungeon_windsward_00`).
+    Instance,
+}
+
+/// The wait for an instance answer when the file names none: the director's admit timeout of
+/// `config/world-director.toml`, above its group and opening waits.
+const DEFAULT_INSTANCE_REQUEST_TIMEOUT_MS: u64 = 3000;
+
+const fn default_instance_request_timeout_ms() -> u64 {
+    DEFAULT_INSTANCE_REQUEST_TIMEOUT_MS
 }
 
 /// `[admin]` (admin tools spec section 5).
@@ -326,14 +356,9 @@ impl SimConfig {
         if self.level.is_empty() {
             return invalid("level", "must not be empty");
         }
-        let ghosts_fit = (self.max_players as usize)
-            .checked_mul(MAX_GHOST_BYTES)
-            .is_some_and(|bytes| bytes + GHOSTS_HEADER_BYTES <= MAX_BUS_MESSAGE_BYTES);
-        if self.max_players == 0 || !ghosts_fit {
-            return invalid(
-                "max_players",
-                "must be above 0, and its ghosts must fit one bus message",
-            );
+        // Ghosts go in as many bus messages as they need (`nw_bus::ghost_parts`).
+        if self.max_players == 0 {
+            return invalid("max_players", "must be above 0");
         }
         if !(self.handoff_margin_m.is_finite() && self.handoff_margin_m >= 0.0) {
             return invalid("handoff_margin_m", "must be a finite number of at least 0");
@@ -367,6 +392,7 @@ impl SimConfig {
             return invalid("forward_ttl_ms", "must be longer than handoff_timeout_ms");
         }
         self.combat.validate(self.interest_radius_m)?;
+        self.trading_post.validate()?;
         if !self.mob_ai.is_valid() {
             return Err(SimConfigError::Invalid {
                 key: "mob_ai",
@@ -433,6 +459,7 @@ impl SimConfig {
         &self,
         bounds: CellBounds,
         ocean_level_m: f32,
+        instances: &InstanceCatalog,
     ) -> Result<WorldSettings, SimConfigError> {
         let limits = self
             .move_limits()
@@ -451,12 +478,41 @@ impl SimConfig {
             ghost_ttl_ms: self.ghost_ttl_ms,
             tick_threads: self.tick_threads(),
             local_player_card: crate::world::local_player_card(),
-            level: LevelSpec::of_folder(&self.level).ok_or(SimConfigError::Invalid {
+            level: self.level_spec(instances)?,
+            ocean_level_m,
+            instance_role: self.role == SimRole::Instance,
+            instance_request_timeout_ms: self.instance_request_timeout_ms,
+        })
+    }
+
+    /// The level this sim names to the client: the open map or the tutorial, or for an instance
+    /// sim the level of a game mode of `instances` (each instance names its own frame).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimConfigError::Invalid`] for a level this server cannot name.
+    pub fn level_spec(&self, instances: &InstanceCatalog) -> Result<LevelSpec, SimConfigError> {
+        match self.role {
+            SimRole::OpenMap => LevelSpec::of_folder(&self.level).ok_or(SimConfigError::Invalid {
                 key: "level",
                 reason: "not a level this server can name to the client",
-            })?,
-            ocean_level_m,
-        })
+            }),
+            SimRole::Instance => instances
+                .of_level(&self.level)
+                .next()
+                .map(|mode| {
+                    LevelSpec::instance(
+                        &mode.map.folder,
+                        &mode.map.map_name,
+                        &mode.map.coatlicue_path,
+                        mode.map.frame,
+                    )
+                })
+                .ok_or(SimConfigError::Invalid {
+                    key: "level",
+                    reason: "no expedition, raid or trial has this level",
+                }),
+        }
     }
 
     /// The combat settings on the rows of `data` with the vitals `spawns` of the level and the
@@ -560,6 +616,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_committed_sim_runs_the_open_map_and_waits_for_instance_answers() {
+        let config = committed();
+        assert_eq!(config.role, SimRole::OpenMap);
+        assert!(config.instance_request_timeout_ms > 0);
+        let level = config
+            .level_spec(&InstanceCatalog::default())
+            .expect("open map");
+        assert!(!level.private);
+        let instance = SimConfig {
+            role: SimRole::Instance,
+            level: "nw_dungeon_windsward_00".to_owned(),
+            ..config
+        };
+        assert!(
+            instance.level_spec(&InstanceCatalog::default()).is_err(),
+            "an instance level needs its game mode"
+        );
+    }
+
+    #[test]
     fn the_committed_config_has_no_snapshot() {
         assert_eq!(committed().admin.snapshot_interval_ms, 0);
     }
@@ -598,7 +674,7 @@ pub(crate) mod tests {
         assert!(config.validate().is_err());
         let mut config = committed();
         config.max_players = u32::MAX;
-        assert!(config.validate().is_err());
+        assert!(config.validate().is_ok(), "ghosts of any count go in parts");
         let mut config = committed();
         config.handoff_margin_m = -1.0;
         assert!(config.validate().is_err());

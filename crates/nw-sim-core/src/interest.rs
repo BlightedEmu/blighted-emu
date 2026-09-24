@@ -38,6 +38,11 @@ impl<Id: Copy + Ord> Interest<Id> {
         }
     }
 
+    /// Sees at most `max_visible` entities from the next [`Interest::update`] on.
+    pub const fn set_max_visible(&mut self, max_visible: usize) {
+        self.max_visible = max_visible;
+    }
+
     /// Updates the seen set from the observer's position and the other entities, each with
     /// whether it is pinned. The caller leaves the observer out of `others`.
     pub fn update(
@@ -116,6 +121,21 @@ mod tests {
         assert_eq!(second.entered, vec![1]);
         assert_eq!(second.left, vec![3]);
         assert_eq!(second.stayed, vec![2]);
+    }
+
+    #[test]
+    fn a_lower_limit_drops_the_farthest_at_the_next_update() {
+        let mut interest = Interest::new(RADIUS, MANY);
+        let crowd = [
+            (1, at(30.0), false),
+            (2, at(10.0), false),
+            (3, at(20.0), false),
+        ];
+        assert_eq!(interest.update(at(0.0), crowd).entered, vec![1, 2, 3]);
+        interest.set_max_visible(TWO);
+        let fewer = interest.update(at(0.0), crowd);
+        assert_eq!(fewer.left, vec![1]);
+        assert_eq!(fewer.stayed, vec![2, 3]);
     }
 
     #[test]

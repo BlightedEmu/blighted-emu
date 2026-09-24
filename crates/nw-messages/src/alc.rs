@@ -103,6 +103,11 @@ const TIME_ANCHOR_CHILD: usize = 40;
 /// to 20 Hz (clear: 30 Hz); the client sends 998 `SetInputsThrottled` when the bit changes
 /// (network note: all 27 retail toggles followed the server's value).
 const DATA_BITS_CHILD: usize = 41;
+/// Slot 1 children of the height of the feet over the floor (`distGround`, a byte over 0 to
+/// 10 m) and of the depth of the water at them (`waterDepth`) (ALC constructor `FUN_142a36d50`:
+/// the first two names of the slot-1 list; run-15 movement study).
+const DIST_GROUND_CHILD: usize = 0;
+const WATER_DEPTH_CHILD: usize = 1;
 /// `dataBits` of a retail own state without the throttle bit (40583 ms, then 998 `00`).
 pub const DATA_BITS_ACTIVE: u8 = 211;
 /// A `worldPosRel` that puts the entity at its `pos10`.
@@ -247,7 +252,7 @@ const DROPPED_BITS: u32 = F32_MANTISSA_BITS - HALF_MANTISSA_BITS;
 
 /// The `half` bits of `value`, rounded to the nearest (ties to even); a value too large for a
 /// `half` becomes infinity, and a value not a number becomes infinity too (never sent).
-fn half_bits(value: f32) -> u16 {
+pub(crate) fn half_bits(value: f32) -> u16 {
     let bits = value.to_bits();
     let sign = (bits >> u16::BITS) & HALF_SIGN;
     // The exponent field has 8 bits.
@@ -284,7 +289,7 @@ fn half_bits(value: f32) -> u16 {
 }
 
 /// The value of the `half` bits `bits`.
-fn half_value(bits: u16) -> f32 {
+pub(crate) fn half_value(bits: u16) -> f32 {
     let bits = u32::from(bits);
     let sign = if bits & HALF_SIGN == 0 { 1.0 } else { -1.0 };
     let exponent = (bits & HALF_INFINITY) >> HALF_MANTISSA_BITS;
@@ -569,6 +574,87 @@ impl SlayerState {
     }
 }
 
+/// Slot 0 children of the third and fourth slayer slots (state, the state number in which it
+/// started, sequence) and of the slayer marker (run-15 aim study, retail newchar 2026-09-18: the
+/// blunderbuss aim `19=2e 20=54ad 21=9706 48=28` in the state after the right-click record
+/// `54ad`, and `19=00 20=54b0 21=00 48=00` after its release; the block's fourth slot
+/// `22=20 24=b533`).
+const THIRD_SLAYER_STATE_CHILD: usize = 19;
+const THIRD_SLAYER_STARTED_CHILD: usize = 20;
+const THIRD_SLAYER_SEQUENCE_CHILD: usize = 21;
+const FOURTH_SLAYER_STATE_CHILD: usize = 22;
+const FOURTH_SLAYER_STARTED_CHILD: usize = 23;
+const FOURTH_SLAYER_SEQUENCE_CHILD: usize = 24;
+const SLAYER_MARKER_CHILD: usize = 48;
+
+/// A change of one slayer slot past the first: any of its state, start and sequence children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SlotChange {
+    /// Its state (the second slot's as on the wire).
+    pub state: Option<u64>,
+    /// The ALC state number in which it starts.
+    pub started: Option<u16>,
+    /// Its sequence.
+    pub sequence: Option<u64>,
+}
+
+impl SlotChange {
+    fn children(
+        self,
+        [state_child, started_child, sequence_child]: [usize; 3],
+    ) -> Result<Vec<(usize, Vec<u8>)>, MessageError> {
+        let mut children = Vec::new();
+        if let Some(state) = self.state {
+            children.push((state_child, prefixed_bytes(state)?));
+        }
+        if let Some(started) = self.started {
+            children.push((started_child, started.to_be_bytes().to_vec()));
+        }
+        if let Some(sequence) = self.sequence {
+            children.push((sequence_child, prefixed_bytes(sequence)?));
+        }
+        Ok(children)
+    }
+}
+
+/// The slayer slots past the first that one own state changes, and the slayer marker (child 48):
+/// the server's block, aim and draw (run-15 aim study).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UpperSlots {
+    /// The second slot (children 16 to 18).
+    pub second: SlotChange,
+    /// The third slot (children 19 to 21).
+    pub third: SlotChange,
+    /// The fourth slot (children 22 to 24).
+    pub fourth: SlotChange,
+    /// The slayer marker.
+    pub marker: Option<u64>,
+}
+
+impl UpperSlots {
+    fn children(self) -> Result<Vec<(usize, Vec<u8>)>, MessageError> {
+        let mut children = self.second.children([
+            SECOND_SLAYER_STATE_CHILD,
+            SECOND_SLAYER_STARTED_CHILD,
+            SECOND_SLAYER_SEQUENCE_CHILD,
+        ])?;
+        children.extend(self.third.children([
+            THIRD_SLAYER_STATE_CHILD,
+            THIRD_SLAYER_STARTED_CHILD,
+            THIRD_SLAYER_SEQUENCE_CHILD,
+        ])?);
+        children.extend(self.fourth.children([
+            FOURTH_SLAYER_STATE_CHILD,
+            FOURTH_SLAYER_STARTED_CHILD,
+            FOURTH_SLAYER_SEQUENCE_CHILD,
+        ])?);
+        if let Some(marker) = self.marker {
+            children.push((SLAYER_MARKER_CHILD, prefixed_bytes(marker)?));
+        }
+        Ok(children)
+    }
+}
+
 /// The time into a character's first slayer slot sequence as one state sends it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SequenceTime {
@@ -686,6 +772,35 @@ pub struct RemoteStep {
     pub slayer: Option<SlayerState>,
     /// The time into its slayer state's sequence, when it goes with the state.
     pub sequence_time: Option<SequenceTime>,
+    /// Its slayer slots past the first and its slayer marker, when they go with the state.
+    pub upper: Option<RemoteUpper>,
+}
+
+/// The slayer slots past the first and the slayer marker of another player as one of its states
+/// sends them (children 16 to 24 and 48; Observed: the retail duel capture's remote players
+/// carried them in the form of the own states, e.g. `19=2e 21=9706 48=28` at an aim, `48=01` at
+/// its end).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RemoteUpper {
+    /// The slots and the marker.
+    pub slots: UpperSlots,
+    /// They changed after the slayer state started: each of their children takes the place of
+    /// the same child of the slayer state; else the slayer state's children stay.
+    pub after_state: bool,
+}
+
+impl RemoteUpper {
+    /// Puts the children of the slots into `children` ([`RemoteUpper::after_state`]).
+    fn put(self, children: &mut Vec<(usize, Vec<u8>)>) -> Result<(), MessageError> {
+        for (child, value) in self.slots.children()? {
+            match children.iter_mut().find(|(known, _)| *known == child) {
+                Some(known) if self.after_state => known.1 = value,
+                Some(_) => {}
+                None => children.push((child, value)),
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Where a character looks (the client input's view angles, record bit 6: yaw then pitch, in
@@ -1098,6 +1213,9 @@ impl AlcState {
         if let Some(slayer) = step.slayer {
             children.extend(slayer.children()?);
         }
+        if let Some(upper) = step.upper {
+            upper.put(&mut children)?;
+        }
         if let Some(time) = step.sequence_time {
             children.extend(time.children());
         }
@@ -1156,6 +1274,64 @@ impl AlcState {
             children.push((DATA_BITS_CHILD, vec![bits]));
         }
         Ok(Self::of_slot0(children, place.and_then(StepPlace::pos10)))
+    }
+
+    /// The same own state with the ground and water under the player in slot 1: `distGround`
+    /// (child 0) when `ground_distance` is given and `waterDepth` (child 1) when `water_depth`
+    /// is (run-15 movement study: retail sends each in an own state when it changes; the client
+    /// swims, wades, jumps and dodges by them). A body that sends slot 1 already, or no change,
+    /// stays as it is.
+    #[must_use]
+    pub fn with_footing(mut self, ground_distance: Option<u8>, water_depth: Option<u8>) -> Self {
+        let has_slot1 = self
+            .bytes
+            .first()
+            .is_none_or(|mask| mask & SLOT_BITS[1] != 0);
+        if has_slot1 || (ground_distance.is_none() && water_depth.is_none()) {
+            return self;
+        }
+        let children = [
+            (DIST_GROUND_CHILD, ground_distance),
+            (WATER_DEPTH_CHILD, water_depth),
+        ];
+        let present = children
+            .iter()
+            .filter(|(_, value)| value.is_some())
+            .fold(0_u64, |mask, (child, _)| mask | 1 << child);
+        let mut writer = Writer::new();
+        writer.wide_prefixed(present);
+        for value in children.iter().filter_map(|(_, value)| *value) {
+            writer.u8(value);
+        }
+        self.bytes[0] |= SLOT_BITS[1];
+        self.bytes.extend_from_slice(&writer.finish());
+        self
+    }
+
+    /// The same own state of slot 0 alone with the slayer slots `slots` changed: each of their
+    /// children takes the place of the same child of the state. Call it before
+    /// [`AlcState::with_footing`]: a body that sends slot 1 stays as it is.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError`] when the body does not walk or a value does not fit the prefix
+    /// code.
+    pub fn with_upper_slots(self, slots: UpperSlots) -> Result<Self, MessageError> {
+        let has_slot1 = self
+            .bytes
+            .first()
+            .is_none_or(|mask| mask & SLOT_BITS[1] != 0);
+        if has_slot1 || slots == UpperSlots::default() {
+            return Ok(self);
+        }
+        let added = slots.children()?;
+        let mut children: Vec<(usize, Vec<u8>)> = self
+            .slot0_children()?
+            .into_iter()
+            .filter(|(child, _)| added.iter().all(|(new, _)| new != child))
+            .collect();
+        children.extend(added);
+        Ok(Self::of_slot0(children, self.pos10))
     }
 
     /// One of the three states that move the client's own player to `pos`, facing `facing`
@@ -1697,6 +1873,174 @@ mod tests {
         assert_eq!(SLOT0_CHILDREN.len(), 54);
         assert_eq!(SLOT1_CHILDREN.len(), 9);
         assert_eq!(SLOT0_CHILDREN[POS10_CHILD], AlcChild::Pos10);
+    }
+
+    #[test]
+    fn an_own_step_carries_the_footing_in_slot_1_as_retail() {
+        // Retail newchar 2026-09-18, the own state as the player sank into the tutorial sea:
+        // `03 87 30 0d f1 cc 7c 83 4c 66 f5 03 c1 02`, slot 1 `03 c1 02` (`distGround` 193,
+        // `waterDepth` 2) after slot 0.
+        const RETAIL_SLOT1: [u8; 3] = [0x03, 0xc1, 0x02];
+        const SWIM_DISTANCE: u8 = 0xc1;
+        const SHALLOW: u8 = 2;
+        const VERY_SHALLOW: u8 = 1;
+        /// Slot 1 presence of `waterDepth` alone.
+        const WATER_ONLY: u8 = 0b10;
+        let stamp = AlcStamp {
+            id: 0x0102,
+            anchor_us: 0,
+            offset_ms: 0x0304,
+        };
+        let plain =
+            || AlcState::own_step(stamp, None, None, false, None, None, None).expect("step");
+        let both = plain().with_footing(Some(SWIM_DISTANCE), Some(SHALLOW));
+        assert_eq!(both.bytes[0], SLOT_BITS[0] | SLOT_BITS[1]);
+        assert!(both.bytes.ends_with(&RETAIL_SLOT1), "{:02x?}", both.bytes);
+        let read = AlcState::read(&mut Reader::new(&both.bytes)).expect("walks");
+        assert_eq!(read.bytes, both.bytes, "the walk takes slot 1 to the end");
+        assert_eq!(read.slot0_children(), plain().slot0_children());
+        let water = plain().with_footing(None, Some(VERY_SHALLOW));
+        assert!(water.bytes.ends_with(&[WATER_ONLY, VERY_SHALLOW]));
+        assert_eq!(plain().with_footing(None, None), plain(), "no change");
+        let spawn = both.clone().with_footing(Some(0), Some(0));
+        assert_eq!(spawn, both, "a body with slot 1 keeps it");
+    }
+
+    #[test]
+    fn an_own_step_carries_the_aim_slots_as_retail() {
+        // Retail newchar 2026-09-18, the blunderbuss aim after right-click record 0x54ad:
+        // `19=2e 20=54ad 21=9706 48=28`.
+        const AIM_RECORD: u16 = 0x54ad;
+        const AIM_STATE: u64 = 0x2e;
+        const AIM_SEQUENCE: u64 = 407;
+        const AIM_MARKER: u64 = 0x28;
+        let stamp = AlcStamp {
+            id: 0x0102,
+            anchor_us: 0,
+            offset_ms: 0x0304,
+        };
+        let plain =
+            || AlcState::own_step(stamp, None, None, false, None, None, None).expect("step");
+        let aim = UpperSlots {
+            third: SlotChange {
+                state: Some(AIM_STATE),
+                started: Some(AIM_RECORD),
+                sequence: Some(AIM_SEQUENCE),
+            },
+            marker: Some(AIM_MARKER),
+            ..UpperSlots::default()
+        };
+        let state = plain().with_upper_slots(aim).expect("slots");
+        let children = state.slot0_children().expect("walks");
+        let child = |index: usize| {
+            children
+                .iter()
+                .find(|(child, _)| *child == index)
+                .map(|(_, bytes)| bytes.clone())
+        };
+        assert_eq!(child(THIRD_SLAYER_STATE_CHILD), Some(vec![0x2e]));
+        assert_eq!(child(THIRD_SLAYER_STARTED_CHILD), Some(vec![0x54, 0xad]));
+        assert_eq!(child(THIRD_SLAYER_SEQUENCE_CHILD), Some(vec![0x97, 0x06]));
+        assert_eq!(child(SLAYER_MARKER_CHILD), Some(vec![0x28]));
+        assert_eq!(
+            plain().with_upper_slots(UpperSlots::default()).expect("none"),
+            plain(),
+            "no change"
+        );
+        let again = state
+            .clone()
+            .with_upper_slots(UpperSlots {
+                marker: Some(0),
+                ..UpperSlots::default()
+            })
+            .expect("again");
+        assert_eq!(
+            again
+                .slot0_children()
+                .expect("walks")
+                .iter()
+                .filter(|(child, _)| *child == SLAYER_MARKER_CHILD)
+                .map(|(_, bytes)| bytes.clone())
+                .collect::<Vec<_>>(),
+            vec![vec![0]],
+            "a child takes the place of the same one"
+        );
+    }
+
+    #[test]
+    fn a_remote_step_carries_the_upper_slots_by_their_order_to_the_state() {
+        // Retail arena capture 2026-09-13, a remote aim: `19=2e 20=0dea 21=9606 48=28`; here
+        // with an attack whose second slot started later and a draw before it.
+        const AIM_STARTED: u16 = 0x0dea;
+        const ATTACK_STARTED: u16 = 0x0e2a;
+        const DRAW_STARTED: u16 = 0x0d00;
+        let stamp = AlcStamp {
+            id: 0x14e5,
+            anchor_us: 0,
+            offset_ms: 0x0010,
+        };
+        let attack = SlayerState {
+            state: None,
+            started: ATTACK_STARTED,
+            sequence: 2205,
+            second: Some(SecondSlayerState {
+                started: ATTACK_STARTED,
+                playing: None,
+            }),
+        };
+        let slots = UpperSlots {
+            second: SlotChange {
+                state: Some(0x2c),
+                started: Some(DRAW_STARTED),
+                sequence: Some(3099),
+            },
+            third: SlotChange {
+                state: Some(0x2e),
+                started: Some(AIM_STARTED),
+                sequence: Some(406),
+            },
+            marker: Some(0x28),
+            ..UpperSlots::default()
+        };
+        let step = |after_state| RemoteStep {
+            stamp,
+            position: None,
+            facing: None,
+            look: None,
+            slayer: Some(attack),
+            sequence_time: None,
+            upper: Some(RemoteUpper {
+                slots,
+                after_state,
+            }),
+        };
+        let child_of = |state: &AlcState, index: usize| {
+            state
+                .slot0_children()
+                .expect("walks")
+                .into_iter()
+                .find(|(child, _)| *child == index)
+                .map(|(_, bytes)| bytes)
+        };
+        let older = AlcState::remote_step(&step(false)).expect("step");
+        assert_eq!(
+            child_of(&older, SECOND_SLAYER_STARTED_CHILD),
+            Some(ATTACK_STARTED.to_be_bytes().to_vec()),
+            "the newer attack keeps its second slot"
+        );
+        assert_eq!(child_of(&older, THIRD_SLAYER_SEQUENCE_CHILD), Some(vec![0x96, 0x06]));
+        assert_eq!(child_of(&older, SLAYER_MARKER_CHILD), Some(vec![0x28]));
+        assert_eq!(
+            child_of(&older, SECOND_SLAYER_STATE_CHILD),
+            Some(vec![0x2c]),
+            "a child the state does not send goes"
+        );
+        let newer = AlcState::remote_step(&step(true)).expect("step");
+        assert_eq!(
+            child_of(&newer, SECOND_SLAYER_STARTED_CHILD),
+            Some(DRAW_STARTED.to_be_bytes().to_vec()),
+            "the newer slots take the second slot"
+        );
     }
 
     #[test]
@@ -2741,6 +3085,7 @@ mod tests {
                 rel: retail_child(SEQUENCE_TIME_REL_CHILD)[0],
                 abs: None,
             }),
+            upper: None,
         };
         let ours = AlcState::remote_step(&step).expect("step");
         for index in [

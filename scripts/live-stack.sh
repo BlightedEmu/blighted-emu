@@ -37,6 +37,7 @@ readonly BIN="target/release"
 readonly ENV_FILE="local-data/m3-test.env"
 readonly EDGE_CONFIG="local-data/edge-http/edge.toml"
 readonly DIRECTOR_CONFIG="local-data/world-director.toml"
+readonly SOCIAL_CONFIG="config/social.toml"
 if ((INSTANCE == 1)); then
   readonly LOG_DIR="local-data/logs/live"
 else
@@ -60,6 +61,7 @@ readonly SIM_METRICS_PORTS=(
 )
 readonly GATEWAY_METRICS_LISTEN="127.0.0.1:$((9101 + SHIFT))"
 readonly DIRECTOR_METRICS_LISTEN="127.0.0.1:$((9103 + SHIFT))"
+readonly SOCIAL_METRICS_LISTEN="127.0.0.1:$((9111 + SHIFT))"
 readonly GATEWAY_METRICS_URL="http://$GATEWAY_METRICS_LISTEN/metrics"
 readonly DIRECTOR_METRICS_URL="http://$DIRECTOR_METRICS_LISTEN/metrics"
 # Bot names of a second world (letters only), so they never share an account with the first.
@@ -76,7 +78,7 @@ readonly HANDSHAKES_PER_IP_PER_SECOND=1000
 # The sim joins after the director runs; the gateway starts after the sim has its cells.
 readonly DIRECTOR_START_S=2
 readonly SIM_START_S=8
-readonly PROGRAMS=(edge-http world-director sim rep-gateway blighted-admin nw-testclient)
+readonly PROGRAMS=(edge-http world-director social sim rep-gateway blighted-admin nw-testclient)
 
 sims="${1:-$DEFAULT_SIMS}"
 if [[ ! "$sims" =~ ^[1-9][0-9]*$ ]] || ((sims > ${#SIM_METRICS_PORTS[@]})); then
@@ -141,11 +143,14 @@ start_server() {
   pids+=("$!")
 }
 
-# Starts the world-director and the sims; their pids go to `pids` (in the world loop's shell).
+# Starts the world-director, the social service and the sims; their pids go to `pids` (in the world loop's shell).
 start_world() {
   start_server director env NW_DIRECTOR_WORLD_ID="$WORLD_ID" \
     NW_DIRECTOR_METRICS_LISTEN="$DIRECTOR_METRICS_LISTEN" \
     "$BIN/world-director" --config "$DIRECTOR_CONFIG"
+  start_server social env NW_SOCIAL_WORLD_ID="$WORLD_ID" NW_SOCIAL_GAME_DIR="$NW_GAME_DIR" \
+    NW_SOCIAL_METRICS_LISTEN="$SOCIAL_METRICS_LISTEN" \
+    "$BIN/social" --config "$SOCIAL_CONFIG"
   sleep "$DIRECTOR_START_S"
   local index
   for ((index = 0; index < sims; index++)); do

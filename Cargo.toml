@@ -80,6 +80,7 @@ nw-protocol = { path = "crates/nw-protocol", version = "0.1.0" }
 nw-messages = { path = "crates/nw-messages", version = "0.1.0" }
 nw-reflect = { path = "crates/nw-reflect", version = "0.1.0" }
 nw-sim-core = { path = "crates/nw-sim-core", version = "0.1.0" }
+nw-social = { path = "crates/nw-social", version = "0.1.0" }
 nw-world = { path = "crates/nw-world", version = "0.1.0" }
 rep-gateway = { path = "bins/rep-gateway", version = "0.1.0" }
 sim = { path = "bins/sim", version = "0.1.0" }

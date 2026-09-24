@@ -5,14 +5,34 @@
 use nw_content::crafting::{Recipes, StructureCosts};
 use nw_content::creature_animations::CreatureAnimations;
 use nw_content::equip_load::EquipLoads;
+use nw_content::item_repair::GearScoreUpgrades;
+use nw_content::charms::ItemNames;
+use nw_content::drop_rolls::DropRolls;
+use nw_content::item_rolls::ItemRolls;
+use nw_content::item_rules::ItemRules;
+use nw_content::status_effects::StatusEffectRules;
+use nw_content::skins::{DyeCatalog, SkinCatalog};
+use nw_content::chest_lockouts::ChestLockouts;
+use nw_content::starting_ranks::StartingRanks;
+use nw_content::tradeskill_xp::{BonusChances, TradeskillCurves};
 use nw_content::gameplay_config::GameplayConfig;
-use nw_content::gathering::{CrateLoot, CrateVariant, Gatherables};
+use nw_content::instances::InstanceCatalog;
+use nw_content::mutations::MutationCatalog;
+use nw_world::dungeon_scripts::DungeonScripts;
+use nw_content::gathering::{CrateLoot, CrateVariant, GatherRules, Gatherables, ToolEfficiencies};
 use nw_content::leaderboards::LeaderboardStats;
 use nw_content::loot::{LootTables, MobLoot, PlayerLootLevels};
 use nw_content::loot_limits::{LootLimitRules, LootLimits, ResetClock};
 use nw_content::poi_tags::PoiTags;
+use nw_content::kill_rewards::KillRewards;
+use nw_content::meta_achievements::MetaAchievementRules;
+use nw_content::mounts::MountRules;
 use nw_content::progression::Progression;
-use nw_content::rewards::{KillExperience, Rewards};
+use nw_content::rewards::{EventGrants, KillExperience, Rewards};
+use nw_content::salvage::Salvage;
+use nw_content::fishing::FishingRules;
+use nw_content::music::MusicRules;
+use nw_content::titles::TitleRules;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_sim_core::{EquipLoad, EquipLoadLimits, Position};
 use nw_world::records::{GatherablePoint, WorldFile};
@@ -28,9 +48,13 @@ use nw_content::starter::StarterKits;
 use nw_messages::{AlcState, AssetId, BundleMember, MemberState, VitalsState};
 
 use crate::asset_solids::AssetSolids;
+use crate::invite_rules::InviteRules;
 use crate::objectives::{
     KillTypes, ObjectiveTree, TaskBook, TaskRow, counted_game_events, task_rows,
 };
+use crate::shop::ShopCatalog;
+use crate::trading_post::{TradingCatalog, TradingPostConfig};
+use crate::travel_rules::{TravelRules, capital_id};
 
 /// The tutorial quest's objective id (`Objectives`).
 pub const TUTORIAL_OBJECTIVE: &str = "01_SoleSurvivor2";
@@ -431,17 +455,104 @@ pub struct PlayerContent {
     pub gameplay: GameplayConfig,
     /// The experience of a kill by the mob's level, before the multipliers.
     pub kill_experience: KillExperience,
+    /// The creature type and level gap factors of a kill and the weapon mastery of each
+    /// weapon item.
+    pub kill_rewards: KillRewards,
+    /// The meta achievements of the achievements window.
+    pub meta_achievements: MetaAchievementRules,
     /// The lowercase ids of the items that `javelin.disabled-item-classes` disables.
     pub disabled_items: HashSet<String>,
     /// The loot limits and their resets; `None` applies no limit.
     pub loot_limits: Option<LootLimitRules>,
     /// The level table and the weapon masteries.
     pub progression: Progression,
+    /// The player titles and what earns each.
+    pub titles: TitleRules,
     /// The solids of the tutorial's asset entities; empty until the sim sets them from the
     /// level collision.
     pub asset_solids: AssetSolids,
+    /// The fishing rules and the level's fishing hotspots.
+    pub fishing: FishingRules,
+    /// The musical performance rules: songs, sheets, rewards and grades.
+    pub music: MusicRules,
     /// The item weights and the player's equip load limits.
     pub equip_loads: EquipLoads,
+    /// The mounts, their types, movement rows and dyes.
+    pub mounts: MountRules,
+    /// The landmarks, discoverable territories, spawn points and timings of travel.
+    pub travel: TravelRules,
+    /// The categorical progression and coins of each game event, for the tradeskill experience
+    /// of gathers and crafts and the coins of salvages.
+    pub event_grants: EventGrants,
+    /// The gather level modifiers and craft roll bonuses of each tradeskill's rank table.
+    pub tradeskill_curves: TradeskillCurves,
+    /// The `BonusItemChance` of each crafting recipe.
+    pub bonus_chances: BonusChances,
+    /// The categorical progression ranks a new character of each archetype pick starts with.
+    pub starting_ranks: StartingRanks,
+    /// How long each loot container stays locked for the player who opened it.
+    pub chest_lockouts: ChestLockouts,
+    /// The tradeskill ranks and items that gatherables ask for.
+    pub gather_rules: GatherRules,
+    /// The gathering efficiency of each tool item.
+    pub tools: ToolEfficiencies,
+    /// What the salvage of each item gives.
+    pub salvage: Salvage,
+    /// What using and dropping each item does.
+    pub item_rules: ItemRules,
+    /// The rules of every status effect and the effects attack rows put on their target.
+    pub status_effects: StatusEffectRules,
+    /// Each item's gear score range, perks, durability and repair data, and the perk table.
+    pub item_rolls: ItemRolls,
+    /// The skin each item gives to the transmog collection and the free skins.
+    pub skins: SkinCatalog,
+    /// The dye colors and the dye items.
+    pub dyes: DyeCatalog,
+    /// The gear score rules of dropped items by player and mob level.
+    pub drop_rolls: DropRolls,
+    /// The `Name` text key of each item (the charm notification's `itemname`).
+    pub item_names: ItemNames,
+    /// The cost of each gear score upgrade level (3008).
+    pub gear_score_upgrades: GearScoreUpgrades,
+    /// The items the trading post takes, with their trading fields.
+    pub trading: TradingCatalog,
+    /// The trading post's durations, limits, fees and taxes (`[trading_post]` of the config).
+    pub trading_post: TradingPostConfig,
+    /// What the shops sell (faction, camp, stable and event shops).
+    pub shops: ShopCatalog,
+    /// The generic invite activities (trade invites).
+    pub invites: InviteRules,
+    /// The expeditions, raids and trials.
+    pub instances: InstanceCatalog,
+    /// The weekly expedition mutations and what each difficulty does.
+    pub mutations: MutationCatalog,
+    /// The expedition entrances of the level: the slice name of each entrance capital, by its
+    /// entity id (the facet entity of an `OpenDungeonMenu` or `EnterDungeon` interaction).
+    pub entrances: HashMap<u64, String>,
+    /// The encounters and loot containers of each instance game mode's level script
+    /// (`dungeon-scripts-<build>.json`).
+    pub dungeon_scripts: DungeonScripts,
+}
+
+/// The lower-case start of an expedition entrance's slice name
+/// (`Dungeon/Entrance/DungeonEntrance_Amrine`, `DungeonEntranceTrial_Season_01`).
+pub const ENTRANCE_PREFIX: &str = "dungeonentrance";
+
+/// The expedition entrances among the capitals of `level`: each one's slice name by its entity
+/// id (`capital_id`).
+pub fn dungeon_entrances(level: &WorldFile) -> HashMap<u64, String> {
+    level
+        .capitals
+        .iter()
+        .filter(|capital| {
+            capital
+                .slice_name
+                .rsplit('/')
+                .next()
+                .is_some_and(|name| name.to_lowercase().starts_with(ENTRANCE_PREFIX))
+        })
+        .filter_map(|capital| Some((capital_id(&capital.id)?, capital.slice_name.clone())))
+        .collect()
 }
 
 /// A quest object of the level: a gatherable point whose gather is a game event that a quest's
@@ -537,8 +648,10 @@ impl PlayerContent {
         let gatherables = Gatherables::from_tables(tables);
         let quest_objects =
             QuestObjects::build(level_gatherables, &gatherables, &counted_game_events(&rows));
+        let kits = StarterKits::from_tables(tables);
+        let travel = TravelRules::of(tables, level, &gameplay, &kits);
         Self {
-            kits: StarterKits::from_tables(tables),
+            kits,
             achievements: AchievementIndexes::from_tables(tables),
             mob_looks,
             creature_animations,
@@ -577,6 +690,8 @@ impl PlayerContent {
             quest_objects,
             leaderboards: LeaderboardStats::from_tables(tables),
             kill_experience: KillExperience::from_tables(tables),
+            kill_rewards: KillRewards::from_tables(tables),
+            meta_achievements: MetaAchievementRules::from_tables(tables),
             disabled_items: disabled_items(
                 tables
                     .master_item_definitions
@@ -591,8 +706,42 @@ impl PlayerContent {
             }),
             gameplay,
             progression: Progression::of_tables(tables),
+            titles: TitleRules::from_tables(tables),
             equip_loads: EquipLoads::from_tables(tables),
+            mounts: MountRules::from_tables(tables),
+            item_rules: ItemRules::from_tables(tables),
+            status_effects: StatusEffectRules::from_tables(tables),
+            item_rolls: ItemRolls::from_tables(tables),
+            skins: SkinCatalog::from_tables(tables),
+            dyes: DyeCatalog::from_tables(tables),
+            drop_rolls: DropRolls::from_tables(tables),
+            item_names: ItemNames::from_tables(tables),
+            gear_score_upgrades: GearScoreUpgrades::from_tables(tables),
+            trading: TradingCatalog::from_tables(tables),
+            trading_post: TradingPostConfig::default(),
+            shops: ShopCatalog::from_tables(tables),
+            invites: InviteRules::from_tables(tables),
+            travel,
+            event_grants: EventGrants::from_tables(tables),
+            tradeskill_curves: TradeskillCurves::from_tables(tables),
+            bonus_chances: BonusChances::from_tables(tables),
+            starting_ranks: StartingRanks::from_tables(tables),
+            chest_lockouts: ChestLockouts::from_tables(tables),
+            gather_rules: GatherRules::from_tables(tables),
+            tools: ToolEfficiencies::from_tables(tables),
+            salvage: Salvage::from_tables(tables),
             asset_solids: AssetSolids::default(),
+            fishing: FishingRules::from_tables(tables).with_hotspots(
+                level
+                    .spawned
+                    .iter()
+                    .map(|slice| (slice.slice.as_str(), slice.position)),
+            ),
+            music: MusicRules::from_tables(tables),
+            instances: InstanceCatalog::from_tables(tables),
+            mutations: MutationCatalog::from_tables(tables),
+            entrances: dungeon_entrances(level),
+            dungeon_scripts: DungeonScripts::default(),
         }
     }
 
@@ -616,6 +765,14 @@ impl PlayerContent {
     /// Whether item `item_id` (any case) is disabled.
     pub fn is_item_disabled(&self, item_id: &str) -> bool {
         self.disabled_items.contains(&item_id.to_lowercase())
+    }
+
+    /// Whether item `item_id` (any case) is of UI item class number `class` (the by-class item
+    /// calls 3938, 2946, 2945; `nw_content::ui_item_class`).
+    pub fn is_of_ui_class(&self, item_id: &str, class: u64) -> bool {
+        self.item_rolls.item(item_id).is_some_and(|row| {
+            nw_content::ui_item_class::is_of_ui_class(row.ui_item_class.as_deref(), class)
+        })
     }
 }
 

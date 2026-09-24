@@ -185,11 +185,18 @@ pub(super) struct LevelFlow {
     tutorial: bool,
     /// The sequence of the last 6310.
     phasing_sequence: u8,
+    /// The sequence of the newest 6310 its client acknowledged (6745); `None` before its first
+    /// acknowledgement in this flow.
+    phasing_acked: Option<u8>,
     /// The open-world phasing entries the client has; `None` until it took the level (then the
     /// entries follow the player, [`LevelFlow::phasing_at`]).
     phasing_entries: Option<Vec<PhasingEntry>>,
     /// The cutscene the client was allowed to play.
     cutscene: Option<u32>,
+    /// A later cutscene the client asked for while `cutscene` was still playing. The client
+    /// skips a grant of a different cutscene (`FUN_142f09470`: "Ask to stop a different
+    /// cutscene, skip it."). It is granted when the current one ends.
+    queued_cutscene: Option<u32>,
     /// `None` for a player taken without a level change (its client has them).
     achievements: Option<Achievements>,
 }
@@ -234,8 +241,10 @@ impl LevelFlow {
             level_info_again_at_ms: Some(now_ms.saturating_add(LEVEL_INFO_AGAIN_MS)),
             tutorial,
             phasing_sequence,
+            phasing_acked: None,
             phasing_entries: None,
             cutscene: None,
+            queued_cutscene: None,
             achievements: Some(achievements),
         }
     }
@@ -272,8 +281,11 @@ impl LevelFlow {
             level_info_again_at_ms: None,
             tutorial: false,
             phasing_sequence,
+            // The client acknowledged the last update at the sim before (nothing is pending).
+            phasing_acked: Some(phasing_sequence),
             phasing_entries: Some(Vec::new()),
             cutscene: None,
+            queued_cutscene: None,
             achievements: None,
         }
     }
@@ -290,6 +302,17 @@ impl LevelFlow {
         self.phasing_sequence
     }
 
+    /// The client acknowledged the phasing update with `sequence` (6745; retail acknowledged
+    /// each 6310 4 to 7 ms after it, with its sequence).
+    pub(super) fn ack_phasing(&mut self, sequence: u8) {
+        self.phasing_acked = Some(sequence);
+    }
+
+    /// Whether the client acknowledged the last phasing update.
+    pub(super) fn phasing_acknowledged(&self) -> bool {
+        self.phasing_acked == Some(self.phasing_sequence)
+    }
+
     /// The `LevelInfoChangedMsg` to send again at `now_ms`, once.
     pub(super) fn level_info_due(&mut self, now_ms: u64) -> Option<ServerMessage> {
         let due = self.level_info_again_at_ms.is_some_and(|at| now_ms >= at);
@@ -303,6 +326,20 @@ impl LevelFlow {
     /// The cutscene the client plays, when one was allowed.
     pub(super) const fn cutscene(&self) -> Option<u32> {
         self.cutscene
+    }
+
+    /// Grants `cutscene` when none is playing. A different one waits until the current one
+    /// ends: the client drops a grant whose name is not the cutscene it is in.
+    fn grant_cutscene(&mut self, cutscene: u32) -> Vec<ServerMessage> {
+        if self.cutscene.is_some_and(|current| current != cutscene) {
+            self.queued_cutscene = Some(cutscene);
+            return Vec::new();
+        }
+        self.cutscene = Some(cutscene);
+        vec![ServerMessage::CutsceneGranted(CutsceneGrantedMsg {
+            header: self.header(component::PLAYER_CUTSCENE),
+            cutscene,
+        })]
     }
 
     /// The answers to `message` from a client in `client_context`.
@@ -331,21 +368,21 @@ impl LevelFlow {
                 }
                 vec![self.phasing(entries, mode)]
             }
-            ClientFacetMsg::RequestCutscene { cutscene, .. } => {
-                self.cutscene = Some(cutscene);
-                vec![ServerMessage::CutsceneGranted(CutsceneGrantedMsg {
-                    header: self.header(component::PLAYER_CUTSCENE),
-                    cutscene,
-                })]
-            }
+            ClientFacetMsg::RequestCutscene { cutscene, .. } => self.grant_cutscene(cutscene),
+            ClientFacetMsg::CutsceneStarted { .. } => Vec::new(),
             ClientFacetMsg::CutsceneEnded { .. } => {
                 self.cutscene = None;
-                vec![ServerMessage::CutsceneEndFinalized(
+                let mut answers = vec![ServerMessage::CutsceneEndFinalized(
                     CutsceneEndFinalizedMsg {
                         header: self.header(component::PLAYER_CUTSCENE),
                     },
-                )]
+                )];
+                if let Some(next) = self.queued_cutscene.take() {
+                    answers.extend(self.grant_cutscene(next));
+                }
+                answers
             }
+            ClientFacetMsg::UpdateTrackedObjectives { .. } => Vec::new(),
             ClientFacetMsg::AckLevelInfo { .. }
             | ClientFacetMsg::CinematicStarted { .. }
             | ClientFacetMsg::CinematicEnded { .. }
@@ -365,8 +402,17 @@ impl LevelFlow {
             | ClientFacetMsg::CompleteObjective { .. }
             | ClientFacetMsg::SetCraftingDetails { .. }
             | ClientFacetMsg::CancelCrafting { .. }
+            | ClientFacetMsg::InitiateSalvage { .. }
+            | ClientFacetMsg::SalvageItems { .. }
+            | ClientFacetMsg::SalvageByClass { .. }
             | ClientFacetMsg::TerritoryEntered { .. }
-            | ClientFacetMsg::TerritoryExited { .. } => Vec::new(),
+            | ClientFacetMsg::TerritoryExited { .. }
+            | ClientFacetMsg::EnteredTerritoryFallback { .. }
+            | ClientFacetMsg::ExitedTerritoryFallback { .. }
+            | ClientFacetMsg::TogglePvpFlag { .. }
+            | ClientFacetMsg::SetInputsThrottled { .. }
+            | ClientFacetMsg::WhisperStarted { .. }
+            | ClientFacetMsg::SetObjectiveAutoPin { .. } => Vec::new(),
         }
     }
 
@@ -747,6 +793,43 @@ mod tests {
     }
 
     #[test]
+    fn a_second_cutscene_waits_until_the_first_ends() {
+        let mut flow = flow();
+        let crew = lowercase_crc32("ftue_01_solesurvivor_confrontingcrewmember_igc");
+        let pccm = lowercase_crc32("ftue_pccm");
+        flow.answer(
+            &ClientFacetMsg::RequestCutscene {
+                header: header(component::PLAYER_CUTSCENE),
+                cutscene: crew,
+            },
+            LOGIN_CLIENT_CONTEXT,
+        );
+        let held = flow.answer(
+            &ClientFacetMsg::RequestCutscene {
+                header: header(component::PLAYER_CUTSCENE),
+                cutscene: pccm,
+            },
+            LOGIN_CLIENT_CONTEXT,
+        );
+        assert!(held.is_empty(), "the client skips a different cutscene");
+        assert_eq!(flow.cutscene(), Some(crew));
+        let ended = flow.answer(
+            &ClientFacetMsg::CutsceneEnded {
+                header: header(component::PLAYER_CUTSCENE),
+            },
+            LOGIN_CLIENT_CONTEXT,
+        );
+        assert!(matches!(
+            ended.as_slice(),
+            [
+                ServerMessage::CutsceneEndFinalized(_),
+                ServerMessage::CutsceneGranted(CutsceneGrantedMsg { cutscene, .. })
+            ] if *cutscene == pccm
+        ));
+        assert_eq!(flow.cutscene(), Some(pccm));
+    }
+
+    #[test]
     fn leaving_shows_the_loading_screen_and_clears_the_phases() {
         let mut flow = flow();
         let messages = flow.leave();
@@ -760,6 +843,23 @@ mod tests {
         assert!(empty.entries.is_empty());
         assert_eq!((empty.mode, empty.sequence), (EMPTY_PHASING_MODE, 1));
         assert_eq!(flow.phasing_sequence(), 1);
+    }
+
+    #[test]
+    fn the_last_phasing_is_acknowledged_by_its_sequence() {
+        let mut flow = flow();
+        let ServerMessage::UpdatePhasing(empty) = flow.left() else {
+            panic!("empty phasing");
+        };
+        assert!(!flow.phasing_acknowledged(), "not acknowledged yet");
+        flow.ack_phasing(empty.sequence.wrapping_sub(1));
+        assert!(!flow.phasing_acknowledged(), "an older update");
+        flow.ack_phasing(empty.sequence);
+        assert!(flow.phasing_acknowledged());
+        assert!(
+            LevelFlow::resumed(ENTITY, empty.sequence).phasing_acknowledged(),
+            "a handoff has nothing pending"
+        );
     }
 
     #[test]

@@ -8,7 +8,8 @@
 //! paperdoll slots, the visible slot ids, their item visuals, and a loadout swap count. The
 //! visible lists are parallel: entry `i` of each is the same item.
 
-use crate::items::{DYE_BYTES, FullList, ItemRecord, read_number};
+use crate::items::{DYE_BYTES, ItemRecord, read_number};
+use crate::list_delta::{ReplicatedList, child_change, value_change};
 use crate::slots::{children_mask, read_children, read_slot_byte, write_children};
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -230,15 +231,15 @@ impl ItemVisual {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PaperdollOwner {
     /// Child 0: durability of each visible item.
-    pub visible_durability: Option<FullList<u32>>,
+    pub visible_durability: Option<ReplicatedList<u32>>,
     /// Child 1: the visible items.
-    pub visible_items: Option<FullList<ItemRecord>>,
+    pub visible_items: Option<ReplicatedList<ItemRecord>>,
     /// Child 2: the items of the other paperdoll slots.
-    pub hidden_items: Option<FullList<ItemRecord>>,
+    pub hidden_items: Option<ReplicatedList<ItemRecord>>,
     /// Child 3: the paperdoll slot ids of the other items.
-    pub hidden_slots: Option<FullList<u32>>,
+    pub hidden_slots: Option<ReplicatedList<u32>>,
     /// Child 4: durability of each other item.
-    pub hidden_durability: Option<FullList<u32>>,
+    pub hidden_durability: Option<ReplicatedList<u32>>,
     /// Child 5: `bonusEquipLoad`.
     pub bonus_equip_load: Option<u16>,
     /// Child 6: `isLocalPlayer`.
@@ -250,12 +251,73 @@ pub struct PaperdollOwner {
     /// Child 9: ammo of main-hand option 2.
     pub main_hand_ammo_2: Option<LoadedAmmo>,
     /// Child 10: the loadouts.
-    pub loadouts: Option<FullList<Loadout>>,
+    pub loadouts: Option<ReplicatedList<Loadout>>,
     /// Child 11: `hideSkins`, (skin id, hidden).
-    pub hide_skins: Option<FullList<(u32, bool)>>,
+    pub hide_skins: Option<ReplicatedList<(u32, bool)>>,
 }
 
 impl PaperdollOwner {
+    /// The children that changed from `before` (`None`: never sent) to `now` at `version`.
+    pub(crate) fn change(before: Option<&Self>, now: &Self, version: u64) -> Self {
+        Self {
+            visible_durability: child_change(
+                before.and_then(|before| before.visible_durability.as_ref()),
+                now.visible_durability.as_ref(),
+                version,
+            ),
+            visible_items: child_change(
+                before.and_then(|before| before.visible_items.as_ref()),
+                now.visible_items.as_ref(),
+                version,
+            ),
+            hidden_items: child_change(
+                before.and_then(|before| before.hidden_items.as_ref()),
+                now.hidden_items.as_ref(),
+                version,
+            ),
+            hidden_slots: child_change(
+                before.and_then(|before| before.hidden_slots.as_ref()),
+                now.hidden_slots.as_ref(),
+                version,
+            ),
+            hidden_durability: child_change(
+                before.and_then(|before| before.hidden_durability.as_ref()),
+                now.hidden_durability.as_ref(),
+                version,
+            ),
+            bonus_equip_load: value_change(
+                before.and_then(|before| before.bonus_equip_load.as_ref()),
+                now.bonus_equip_load.as_ref(),
+            ),
+            is_local_player: value_change(
+                before.and_then(|before| before.is_local_player.as_ref()),
+                now.is_local_player.as_ref(),
+            ),
+            is_loadout_panel_open: value_change(
+                before.and_then(|before| before.is_loadout_panel_open.as_ref()),
+                now.is_loadout_panel_open.as_ref(),
+            ),
+            main_hand_ammo_1: value_change(
+                before.and_then(|before| before.main_hand_ammo_1.as_ref()),
+                now.main_hand_ammo_1.as_ref(),
+            ),
+            main_hand_ammo_2: value_change(
+                before.and_then(|before| before.main_hand_ammo_2.as_ref()),
+                now.main_hand_ammo_2.as_ref(),
+            ),
+            loadouts: child_change(
+                before.and_then(|before| before.loadouts.as_ref()),
+                now.loadouts.as_ref(),
+                version,
+            ),
+            hide_skins: child_change(
+                before.and_then(|before| before.hide_skins.as_ref()),
+                now.hide_skins.as_ref(),
+                version,
+            ),
+        }
+    }
+
     fn present(&self) -> [bool; OWNER_CHILDREN as usize] {
         [
             self.visible_durability.is_some(),
@@ -275,19 +337,19 @@ impl PaperdollOwner {
 
     fn read_child(&mut self, reader: &mut Reader<'_>, child: u8) -> Result<(), MessageError> {
         match child {
-            0 => self.visible_durability = Some(FullList::read(reader, |reader| reader.u32())?),
-            1 => self.visible_items = Some(FullList::read(reader, ItemRecord::read)?),
-            2 => self.hidden_items = Some(FullList::read(reader, ItemRecord::read)?),
-            3 => self.hidden_slots = Some(FullList::read(reader, |reader| reader.u32())?),
-            4 => self.hidden_durability = Some(FullList::read(reader, |reader| reader.u32())?),
+            0 => self.visible_durability = Some(read_list(reader, |reader| reader.u32())?),
+            1 => self.visible_items = Some(read_list(reader, ItemRecord::read)?),
+            2 => self.hidden_items = Some(read_list(reader, ItemRecord::read)?),
+            3 => self.hidden_slots = Some(read_list(reader, |reader| reader.u32())?),
+            4 => self.hidden_durability = Some(read_list(reader, |reader| reader.u32())?),
             5 => self.bonus_equip_load = Some(reader.u16()?),
             6 => self.is_local_player = Some(reader.boolean()?),
             7 => self.is_loadout_panel_open = Some(reader.boolean()?),
             8 => self.main_hand_ammo_1 = Some(read_ammo(reader)?),
             9 => self.main_hand_ammo_2 = Some(read_ammo(reader)?),
-            10 => self.loadouts = Some(FullList::read(reader, Loadout::read)?),
+            10 => self.loadouts = Some(read_list(reader, Loadout::read)?),
             _ => {
-                self.hide_skins = Some(FullList::read(reader, |reader| {
+                self.hide_skins = Some(read_list(reader, |reader| {
                     Ok((reader.u32()?, reader.boolean()?))
                 })?);
             }
@@ -355,10 +417,18 @@ fn write_ammo(writer: &mut Writer, ammo: Option<LoadedAmmo>) {
     }
 }
 
+/// Reads a list child in either form.
+fn read_list<T>(
+    reader: &mut Reader<'_>,
+    read_element: impl FnMut(&mut Reader<'_>) -> Result<T, MessageError>,
+) -> Result<ReplicatedList<T>, MessageError> {
+    ReplicatedList::read(reader, FIELD, read_element)
+}
+
 /// Writes `list` when it is sent.
 fn write_list<T>(
     writer: &mut Writer,
-    list: Option<&FullList<T>>,
+    list: Option<&ReplicatedList<T>>,
     write_element: impl FnMut(&mut Writer, &T) -> Result<(), MessageError>,
 ) -> Result<(), MessageError> {
     list.map_or(Ok(()), |list| list.write(writer, write_element))
@@ -374,14 +444,46 @@ pub struct PaperdollPublic {
     /// Child 2: `activeMap`.
     pub active: Option<SlotBits>,
     /// Child 3: the paperdoll slot ids of the visible items.
-    pub visible_slots: Option<FullList<u32>>,
+    pub visible_slots: Option<ReplicatedList<u32>>,
     /// Child 4: the looks of the visible items.
-    pub visuals: Option<FullList<ItemVisual>>,
+    pub visuals: Option<ReplicatedList<ItemVisual>>,
     /// Child 5: `loadoutSwapIncrement`.
     pub loadout_swaps: Option<u8>,
 }
 
 impl PaperdollPublic {
+    /// The children that changed from `before` (`None`: never sent) to `now` at `version`.
+    pub(crate) fn change(before: Option<&Self>, now: &Self, version: u64) -> Self {
+        Self {
+            sheathed: value_change(
+                before.and_then(|before| before.sheathed.as_ref()),
+                now.sheathed.as_ref(),
+            ),
+            attached: value_change(
+                before.and_then(|before| before.attached.as_ref()),
+                now.attached.as_ref(),
+            ),
+            active: value_change(
+                before.and_then(|before| before.active.as_ref()),
+                now.active.as_ref(),
+            ),
+            visible_slots: child_change(
+                before.and_then(|before| before.visible_slots.as_ref()),
+                now.visible_slots.as_ref(),
+                version,
+            ),
+            visuals: child_change(
+                before.and_then(|before| before.visuals.as_ref()),
+                now.visuals.as_ref(),
+                version,
+            ),
+            loadout_swaps: value_change(
+                before.and_then(|before| before.loadout_swaps.as_ref()),
+                now.loadout_swaps.as_ref(),
+            ),
+        }
+    }
+
     fn present(&self) -> [bool; PUBLIC_CHILDREN as usize] {
         [
             self.sheathed.is_some(),
@@ -399,8 +501,8 @@ impl PaperdollPublic {
             0 => self.sheathed = Some(bits(reader)?),
             1 => self.attached = Some(bits(reader)?),
             2 => self.active = Some(bits(reader)?),
-            3 => self.visible_slots = Some(FullList::read(reader, |reader| reader.u32())?),
-            4 => self.visuals = Some(FullList::read(reader, ItemVisual::read)?),
+            3 => self.visible_slots = Some(read_list(reader, |reader| reader.u32())?),
+            4 => self.visuals = Some(read_list(reader, ItemVisual::read)?),
             _ => self.loadout_swaps = Some(reader.u8()?),
         }
         Ok(())
@@ -440,11 +542,24 @@ pub struct PaperdollState {
 }
 
 impl PaperdollState {
+    /// Whether it sends no child: no owner child and no public child.
+    pub fn is_empty(&self) -> bool {
+        let unset = |present: &[bool]| present.iter().all(|present| !present);
+        self.owner
+            .as_ref()
+            .is_none_or(|owner| unset(&owner.present()))
+            && self
+                .public
+                .as_ref()
+                .is_none_or(|public| unset(&public.present()))
+    }
+
     /// Reads the state from the bundle path.
     ///
     /// # Errors
     ///
-    /// Returns [`MessageError`] when the body ends early, sets slot 0, or a list is a delta.
+    /// Returns [`MessageError`] when the body ends early, sets slot 0, or a list change removes
+    /// an element.
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         let slots = read_slot_byte(reader, FIELD, PAPERDOLL_SLOTS)?;
         if slots & !(OWNER_SLOT_BIT | PUBLIC_SLOT_BIT) != 0 {

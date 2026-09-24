@@ -189,9 +189,13 @@ Query speed (one thread, 1,000,000 random queries near bodies, phase-1 file): op
   jump the body keeps its own height and the camera's pull-back moves it on the ground plane
   (before this, a pull-back in a jump was lost: over the Fury Bay ledge gap the body flew on
   0.58 m beside retail's place and fell into the gap).
-- `crates/nw-sim-core/src/character.rs`: a body walks off edges and falls on any floor; no stop
-  at walls (a stop at the level's solids a step above the feet erred by 0.73 m against 0.22 m:
-  the client's capsule slides along and over them). The speed is along the slope: on the
+- `crates/nw-sim-core/src/character.rs`: a body walks off edges and falls on any floor. A wall
+  stops it only where a solid too steep to stand on still stands at the step-up's highest
+  detection height (1.3 m) over its feet, a capsule radius ahead, and it slides along the wall
+  (`stop_at_walls`, run-15 note 2026-09-22; a stop at the level's solids a step above the feet
+  erred by 0.73 m against 0.22 m: the client's capsule steps onto low rocks and rails, and with
+  no wall at all run 15 walked the body into the 4 m block under the beach stair landing). The
+  camera check does not carry the body across such a wall either. The speed is along the slope: on the
   terrain by the floor's rise in the record; on a structure by the rise across the player's
   capsule (`PLAYER_RADIUS_M` 0.41 ahead and behind) and only uphill (6.1).
 - The tutorial's asset entities (5.1).
@@ -294,8 +298,9 @@ bodies; 100 places that matched a floor within 0.1 m before now have a higher fl
   shape slot (count 2): Unknown (no file has two shapes).
 - The role of the 48-byte shape trailer for nested shapes: every compound child has none.
 - The flags of the header block and the per-triangle material ids: not used.
-- Walls for the moving body: the server does not stop the body at walls (6.1); the camera
-  check holds the body to the client.
+- Walls for the moving body: since run 15 (2026-09-22) the server stops the body at solids
+  taller than the step-up's highest detection height (section 5); its effect on the retail
+  replays of 6.1 is not measured yet (no replay was run in that work).
 - The live stack: `local-data/tools/live/real-client-stack-card.sh` runs `target/release/sim`
   with `config/sim.toml` (`content_dir = "local-data/content"`), where the collision files are;
   the release `sim` must be rebuilt from this code first (the files are schema 2).

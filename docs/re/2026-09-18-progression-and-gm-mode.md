@@ -157,6 +157,67 @@ had points); the retail order of the 29 tables (the same in N and M; this server
 content's table order) and of the version map; the tree-tier rules of the client UI (points
 spent per row), which no server table holds; what retail answers to a refused call.
 
+## 7. Kill experience (2026-09-22)
+
+Sources: newchar N (19 island and beach kills), `open-world/levelling_weapon_up` (a level 69
+character, 19 kills), the tables, the retail remote config of 2026-09-18.
+
+- **Observed.** Raw experience of a kill = `RewardData.KillExperience` of the mob's level times
+  `RewardModifierData.Experience` of the mob's `VitalsBaseData.CreatureType` (a level variant of
+  `VitalsLevelVariantData` takes its base's). `NoExpNoCoin` 1 gives none: the ship's sailors.
+- **Observed.** Character gain = the raw value rounded down, times `javelin.xp-multipliers.character`
+  (2): level 1 `Solo` kills gave 20; a kill of raw 5.5 gave 10.
+- **Observed.** The weapon in the hand gains the raw value rounded up, times the remote
+  multiplier of its mastery (2): 20, and 12 for raw 5.5. The other worn main-hand weapon gains
+  `ceil(raw x share)` times the multiplier: every kill fits a share above 0.1389 and up to 0.1507
+  (raw 5.5, 10, 11, 12, 22, 24, 26, 36, 73 gave 1, 2, 2, 2, 4, 4, 4, 6, 11); the server uses 0.15.
+  No table holds the share.
+- **Inferred.** `LevelDisparityData.KillExpModifier` (mob level less player level, clamped to the
+  table) scales the raw value; no captured kill had a gap of 10 or more.
+- A weapon's mastery: `WeaponItemDefinitions.WeaponMasteryCategoryId` of the item's
+  `ItemStatsRef`.
+
+## 8. Meta achievements (2026-09-22)
+
+Sources: menus-linux 2026-09-12 (3794 x 30), Hive_achievements, claim_achievement_titles,
+buy_barbertoken, S8 ledger, newchar N.
+
+- **Observed.** 3092 (header alone) is answered by 1679 on its header: three lists, each a wide
+  prefix count: two meta achievement ids (the two latest completions, the older first:
+  Inferred from the newchar login), up to two (id, progress) pairs of the meta achievements
+  nearest completion (82 % to 97 % in four sessions, none in two), and every completed id (in no
+  stable order).
+- **Observed.** 3794 carries the CRC-32 of a lowercase `UIDisplayCategory`; 3800 answers with
+  every meta achievement of that tab as (id, progress) by ascending id, then the completed ones.
+- **Observed.** 331 (meta achievement component, target constant `0x2e4cdde64547e9ad`) carries
+  the id, the progress, `u32` 0, `u32` `ffffffff` and 8 bytes (zero for 5 of 7 characters). It
+  came at completions (progress at or above `Total`).
+- **Observed.** The tiers of one measure share a counter: the first tier names `ProgressId` and the
+  filters, the later tiers `ProgressIdParent`. A rank measure compares the zero-based type-911
+  rank with `Total` (newchar: Fishing rank 50 completed `SkillLevel_Fishing2`, `Total` 40, 331
+  progress 50).
+- **Inferred.** 843/3802 lists the completed meta achievements whose title waits (linux
+  2026-09-12 listed `AchievementsEarnedCount3`, which earns a title); 3227 (one byte, 0) clears
+  them.
+
+## 9. Ability slots, respec and refund (2026-09-22)
+
+Sources: `open-world/WEAPON-CODEX` (99 x 2701, 17 x 186), open world 2026-08-26 (38 x 2409).
+
+- **Observed.** 2701: `u16` table, `u32` slot (0 to 2), `u32` ability. The table is the position
+  in the 185 list (sword 27 of retail's 29). The 185 change after it holds the new slots.
+- **Observed.** 186: `u16` table, `u8` 0. 2858 on the call's header: `01`, `u32` table. Then the
+  tree's points go to level 0 (retail keeps the entries), the pool count back to the rank, the
+  table's slots empty, and the azoth (type-911 `Azoth_Currency`) falls by `AzothRespecCost` of
+  the weapon rank (50 at rank 19).
+- **Observed.** 2409 (header alone): the whole 129 state, spent points cleared, and the coins fall
+  by `ExperienceData.AttributeRespecCost` of the level (5,000 at level 69, every refund).
+
+## 10. Shown title (2026-09-22)
+
+- **Observed.** 2474 (Hive_Social): `u32` title; no facet answer. The own 4176 change 50 ms later
+  is slot 0 child 0 = the title.
+
 ## Unknown
 
 The last two bytes of a point entry; the 899 bonus level; how retail splits mastery experience

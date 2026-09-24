@@ -71,6 +71,12 @@ const DODGE_ACTION: &str = "Dodge";
 const USE_ACTION: &str = "Use_QuickSlot_1";
 /// The sheathe action of main-hand option 1 (`playeractions_sheathe.actionlist`).
 const SHEATHE_ACTION: &str = "Sheathe_MainHand_1_UB";
+/// The aim actions whose fragment changes to the aimed shot (`playeractions_firearms` and
+/// `playeractions_archery` action lists).
+const AIM_ACTIONS: [&str; 2] = ["Firearm_AimShoot_SubState", "Bow_AimChargeShoot_SubState"];
+/// The Mannequin tag of a character while it aims (`Firearm_Shoot_Primary_UpperBody` entry
+/// `2H_Ranged+Aim`).
+const AIM_TAG: &str = "Aim";
 
 /// Clip types and parameters.
 const TRANSITION_INSTANT: &str = "CAGE-TransitionInstant";
@@ -88,6 +94,7 @@ const INVULNERABILITY_CLIP: &str = "Invulnerability";
 const USE_CLIP: &str = "UsePaperdollItem";
 const CONDITION: &str = "Condition";
 const NEW_ACTION: &str = "NewAction";
+const NEW_FRAGMENT: &str = "NewFragment";
 const DAMAGE_ROW: &str = "DamageTableRow";
 const RANGED_ATTACK_NAME: &str = "RangedAttackName";
 const SPELL_NAME: &str = "SpellName";
@@ -460,6 +467,19 @@ fn attack_of(
     let fragment_name = sources
         .fragment_of(action)
         .ok_or_else(|| format!("action {action}: no fragment in the action lists"))?;
+    fragment_attack(sources, rows, weapon, body, tags, action, fragment_name)
+}
+
+/// The attack of fragment `fragment_name` that action `action` plays for `tags` ([`attack_of`]).
+fn fragment_attack(
+    sources: &AnimationSources,
+    rows: &BundleRows,
+    weapon: &WeaponStance,
+    body: Result<&Option<WeaponBody<'_>>, &String>,
+    tags: &[&str],
+    action: &str,
+    fragment_name: &str,
+) -> Result<BasicAttack, String> {
     let player = sources.player_fragment_any_case(fragment_name, tags);
     let attach = weapon
         .attach
@@ -648,6 +668,67 @@ fn attack_of(
         return Err(format!("{fragment_name}: no entry for the stance"));
     }
     Err(format!("{fragment_name}: no damage, ranged or cast clip"))
+}
+
+/// The fragments that the instant transitions of `fragment` change to.
+fn new_fragments(fragment: &Fragment) -> impl Iterator<Item = &str> {
+    fragment
+        .clips_of(TRANSITION_INSTANT)
+        .filter_map(|clip| clip.param(NEW_FRAGMENT))
+        .filter(|name| !name.is_empty())
+}
+
+/// The aimed shot and the drawn charge's shot of the stance of `tags` ([`Stance::aimed`],
+/// [`Stance::aimed_charged`]): the entry of an aim action's fragment for the stance while it
+/// aims (not the default entry), and its instant transitions to a fragment with an attack; a
+/// transition to a fragment without one is a charge, whose own transitions give the charged
+/// shot. A shot fragment with a ranged or cast clip that cannot be built goes to `skipped`.
+fn aimed_of(
+    sources: &AnimationSources,
+    rows: &BundleRows,
+    weapon: &WeaponStance,
+    body: Result<&Option<WeaponBody<'_>>, &String>,
+    tags: &[&str],
+    skipped: &mut Vec<(String, String)>,
+) -> (Option<BasicAttack>, Option<BasicAttack>) {
+    let aiming: Vec<&str> = tags.iter().copied().chain([AIM_TAG]).collect();
+    for action in AIM_ACTIONS {
+        let Some(aim) = charge_fragment(sources, &aiming, action) else {
+            continue;
+        };
+        let mut shot_of = |fragment: &str| {
+            let shoots = sources
+                .player_fragment_any_case(fragment, &aiming)
+                .is_some_and(|entry| {
+                    entry.clips_of(RANGED_CLIP).next().is_some()
+                        || entry.clips_of(CAST_CLIP).next().is_some()
+                });
+            if !shoots {
+                return None;
+            }
+            fragment_attack(sources, rows, weapon, body, &aiming, action, fragment)
+                .map_err(|why| skipped.push((tags.join(","), why)))
+                .ok()
+        };
+        let mut shot = None;
+        let mut charges = Vec::new();
+        for next in new_fragments(aim) {
+            match shot_of(next) {
+                Some(attack) => {
+                    shot = shot.or(Some(attack));
+                }
+                None => charges.push(next),
+            }
+        }
+        let charged = charges.into_iter().find_map(|charge| {
+            let entry = sources.player_fragment_any_case(charge, &aiming)?;
+            new_fragments(entry).find_map(&mut shot_of)
+        });
+        if shot.is_some() || charged.is_some() {
+            return (shot, charged);
+        }
+    }
+    (None, None)
 }
 
 /// One transition of a charge fragment.
@@ -869,6 +950,7 @@ fn stance_of(
         let entry = sources.player_fragment_any_case(&sheathe.fragment, &picked)?;
         sheathe.marker_clip(entry).map(|clip| ms(clip.start_s))
     });
+    let (aimed, aimed_charged) = aimed_of(sources, rows, weapon, body.as_ref(), &tags, skipped);
     let mut steps = steps.into_iter();
     let first = steps.next();
     Stance {
@@ -884,6 +966,8 @@ fn stance_of(
         uses,
         combo: steps.collect(),
         variants: Vec::new(),
+        aimed,
+        aimed_charged,
     }
 }
 
@@ -1368,6 +1452,109 @@ mod tests {
                 .charged_at_ms,
             Some(500)
         );
+    }
+
+    /// The aim fragments of `player_2h_ranged.adb` and `player_bow.adb` (build 25810808), cut:
+    /// the musket's aim changes to its aimed shot (`MusketAttack1` at 0.033 s) or lowers the
+    /// weapon; the bow's aim shoots at once (`BowAttack1`) or draws a charge whose release
+    /// shoots the charged arrow (`BowAttack2`).
+    const AIM_ADB: &str = r#"<AnimDB><FragmentList>
+ <Firearm_Aim_UpperBody><Fragment Tags="2H_Ranged"><ProcLayer>
+  <Blend ExitTime="0"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Condition value="Aim_Shoot"/><NewFragment value="Firearm_Shoot_Primary_UpperBody"/><NewAction value=""/></ProceduralParams></Procedural>
+  <Blend ExitTime="0"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Condition value="Aim_Exit"/><NewFragment value="Firearm_LowerWeapon_UpperBody"/><NewAction value=""/></ProceduralParams></Procedural>
+ </ProcLayer></Fragment></Firearm_Aim_UpperBody>
+ <Firearm_Shoot_Primary_UpperBody><Fragment Tags="2H_Ranged+Aim"><ProcLayer>
+  <Blend ExitTime="0.033333335"/><Procedural type="CAGE-RangedAttack"><ProceduralParams><RangedAttackName value="Basic"/><DamageTableRow value="MusketAttack1"/></ProceduralParams></Procedural>
+ </ProcLayer></Fragment></Firearm_Shoot_Primary_UpperBody>
+ <Firearm_Shoot_HipFire><Fragment Tags="2H_Ranged"><ProcLayer>
+  <Blend ExitTime="0.2"/><Procedural type="CAGE-RangedAttack"><ProceduralParams><RangedAttackName value="Basic"/><DamageTableRow value="MusketAttack_Hipfire"/></ProceduralParams></Procedural>
+ </ProcLayer></Fragment></Firearm_Shoot_HipFire>
+ <Firearm_LowerWeapon_UpperBody><Fragment Tags="2H_Ranged"><ProcLayer/></Fragment></Firearm_LowerWeapon_UpperBody>
+ <Bow_Aim_UpperBody><Fragment Tags="Bow"><ProcLayer>
+  <Blend ExitTime="0"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Condition value="Charge_Bow"/><NewFragment value="Bow_Charge_UpperBody"/><NewAction value=""/></ProceduralParams></Procedural>
+  <Blend ExitTime="0"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Condition value="Shoot_NoCharge_Bow"/><NewFragment value="Bow_Shoot_UpperBody"/><NewAction value=""/></ProceduralParams></Procedural>
+ </ProcLayer></Fragment></Bow_Aim_UpperBody>
+ <Bow_Charge_UpperBody><Fragment Tags="Bow"><ProcLayer>
+  <Blend ExitTime="0"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Condition value="Charge_Release_Bow"/><NewFragment value="Bow_Shoot_Charged"/><NewAction value=""/></ProceduralParams></Procedural>
+ </ProcLayer></Fragment></Bow_Charge_UpperBody>
+ <Bow_Shoot_UpperBody><Fragment Tags="Bow"><ProcLayer>
+  <Blend ExitTime="0.033333335"/><Procedural type="CAGE-RangedAttack"><ProceduralParams><RangedAttackName value="Basic"/><DamageTableRow value="BowAttack1"/></ProceduralParams></Procedural>
+ </ProcLayer></Fragment></Bow_Shoot_UpperBody>
+ <Bow_Shoot_Charged><Fragment Tags="Bow"><ProcLayer>
+  <Blend ExitTime="0"/><Procedural type="CAGE-RangedAttack"><ProceduralParams><RangedAttackName value="Basic"/><DamageTableRow value="BowAttack2"/></ProceduralParams></Procedural>
+ </ProcLayer></Fragment></Bow_Shoot_Charged>
+</FragmentList></AnimDB>"#;
+
+    const AIM_ACTION_LIST: &str = r#"<ActionList><Actions>
+ <Action Name="Firearm_AimShoot_SubState" FragmentName="Firearm_Aim_UpperBody"/>
+ <Action Name="Bow_AimChargeShoot_SubState" FragmentName="Bow_Aim_UpperBody"/>
+</Actions></ActionList>"#;
+
+    #[test]
+    fn a_gun_and_a_bow_fire_the_aimed_shots_of_their_aim_fragments() {
+        const MUSKET: &str = "2H_Ranged,Rifle";
+        const BOW: &str = "Bow,LongBow";
+        /// The hit scan of the test profiles: 200 m.
+        const RANGE_M: f32 = 200.0;
+        let weapon = |profile: &str| WeaponStance {
+            attach: None,
+            profile: Some(profile.to_owned()),
+            ammo_prefab: None,
+            equip_types: BTreeSet::new(),
+            definitions: BTreeSet::new(),
+        };
+        let sources = AnimationSources {
+            player: vec![AnimDatabase::parse(AIM_ADB).expect("player")],
+            attach: HashMap::new(),
+            actions: vec![ActionList::parse(AIM_ACTION_LIST).expect("actions")],
+            sheathe: None,
+            ranged: HashMap::from([
+                (("Musket".to_owned(), "Basic".to_owned()), (RANGE_M, 0.0, true)),
+                (("Bow".to_owned(), "Basic".to_owned()), (RANGE_M, 0.0, true)),
+            ]),
+            flights: HashMap::new(),
+            bodies: crate::melee_shapes::test_support::bodies(),
+        };
+        let rows = BundleRows {
+            weapons: BTreeMap::from([
+                (MUSKET.to_owned(), weapon("Musket")),
+                (BOW.to_owned(), weapon("Bow")),
+            ]),
+            spells: HashMap::new(),
+            use_tags: BTreeSet::new(),
+        };
+        let (stances, _) = build_stances(&sources, &rows);
+        let of = |tags: &str| {
+            stances
+                .iter()
+                .find(|stance| stance.tags == tags)
+                .expect("stance")
+        };
+        let musket = of(MUSKET);
+        let aimed = musket.aimed.as_ref().expect("the aimed shot");
+        assert_eq!(aimed.damage_row, "MusketAttack1", "not the hip fire's row");
+        assert_eq!(aimed.fragment, "Firearm_Shoot_Primary_UpperBody");
+        assert_eq!(
+            aimed.hit,
+            AttackHit::HitScan {
+                fire_ms: 33,
+                range_m: RANGE_M
+            }
+        );
+        assert_eq!(musket.aimed_charged, None, "lowering the gun is no charge");
+        let bow = of(BOW);
+        assert_eq!(
+            bow.aimed.as_ref().map(|shot| shot.damage_row.as_str()),
+            Some("BowAttack1")
+        );
+        assert_eq!(
+            bow.aimed_charged
+                .as_ref()
+                .map(|shot| shot.damage_row.as_str()),
+            Some("BowAttack2"),
+            "the charge's release"
+        );
+        assert_eq!(of("").aimed, None, "no weapon aims");
     }
 
     #[test]

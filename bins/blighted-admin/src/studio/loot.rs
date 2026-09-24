@@ -211,6 +211,7 @@ mod tests {
                 .iter()
                 .map(|(index, cell)| (*index, (*cell).to_owned()))
                 .collect(),
+            ..LootRow::default()
         }
     }
 

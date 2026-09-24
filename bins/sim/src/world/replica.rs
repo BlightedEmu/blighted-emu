@@ -18,24 +18,30 @@
 
 use std::collections::HashMap;
 
-use nw_bus::{GHOST_VISIBLE_ITEMS, GhostItem, GhostSlayer, PlayerGhost};
+use nw_bus::{
+    GHOST_VISIBLE_ITEMS, GhostItem, GhostMount, GhostSlayer, GhostSlotChange, GhostUpperSlots,
+    ItemLookState, PlayerGhost,
+};
+use nw_messages::mount::riding_active_map;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     AlcStamp, AlcState, BundleGroup, BundleMember, CardPlace, DamageReceiverState, Hands,
-    HealthChange, InputPosition, LookDir, MemberState, MessageError, PaperdollPublic,
-    PaperdollState, PlayerGear, PlayerLook, PlayerStates, RemoteStep, SecondSlayerState, ShownItem,
-    SlayerState, StepPlace, VitalsData, VitalsState,
+    HealthChange, InputPosition, ItemLook, LookDir, MemberState, MessageError, PaperdollPublic,
+    PaperdollState, PlayerGear, PlayerLook, PlayerStates, RemoteStep, RemoteUpper,
+    SecondSlayerState, ShownItem, SlayerState, SlotChange, StepPlace, UpperSlots, VitalsData,
+    VitalsState, put_looking_through_loadout, put_member,
 };
 use nw_sim_core::Position;
 
 use super::members::{EntityKind, OwnClock, PLAYER_ALC_COMPONENT, StateNumber, entity_group};
+use super::mount::remote_member;
 
 /// The own player component of the vitals.
 const VITALS_COMPONENT: u64 = nw_messages::PLAYER_VITALS_COMPONENT;
 /// The player component of the damage receiver (`isBlockActive`; player component table).
 const DAMAGE_RECEIVER_COMPONENT: u64 = 14;
 /// The player component of the paperdoll (player component table).
-const PAPERDOLL_COMPONENT: u64 = 62;
+pub(super) const PAPERDOLL_COMPONENT: u64 = 62;
 /// A remote player this near the viewer goes every tick (our choice: a melee and short-range
 /// fight; retail sent the duel's remote player every 17 ms tick).
 const NEAR_M: f32 = 30.0;
@@ -61,6 +67,10 @@ pub(super) struct ReplicaSource {
     /// Its slayer state: the action it plays, from its client or the server's follow-up, or its
     /// movement ([`super::slayer`]).
     pub(super) action: Option<SlayerState>,
+    /// Its slayer slots past the first and its marker, while its own states echo a change of
+    /// them ([`super::slayer::SlayerTrack::remote_upper`]): its block, aim, aimed shot, reload
+    /// and draw.
+    pub(super) upper: Option<RemoteUpper>,
     pub(super) blocking: bool,
     pub(super) spawned_ms: u64,
     pub(super) gear_version: u64,
@@ -69,6 +79,12 @@ pub(super) struct ReplicaSource {
     pub(super) in_combat: bool,
     /// The entity it locks on or homes to.
     pub(super) target: Option<u64>,
+    /// It has its inventory open (`lookingThroughLoadout`; retail sent others the change too,
+    /// newchar 2026-09-18 at 1792696377099).
+    pub(super) looking_through_loadout: bool,
+    /// The mount it rides as others see it (mount state slots 2 and 3; Observed: other players'
+    /// cards carried the ridden mount, or 0 and the flags 0x04 for a player on foot).
+    pub(super) mount: GhostMount,
 }
 
 impl ReplicaSource {
@@ -79,6 +95,11 @@ impl ReplicaSource {
             *shown = u8::try_from(worn.slot).ok().map(|slot| GhostItem {
                 slot,
                 item_index: worn.item_index,
+                look: ItemLookState {
+                    dye: worn.look.dye,
+                    appearance: worn.look.appearance,
+                    skin_dye: worn.look.skin_dye,
+                },
             });
         }
         PlayerGhost {
@@ -96,6 +117,8 @@ impl ReplicaSource {
             drawn: self.hands.drawn,
             active: self.hands.active,
             attached: self.hands.attached,
+            looking_through_loadout: self.looking_through_loadout,
+            mount: self.mount,
             items,
             action: self.action.map(|action| GhostSlayer {
                 state: action.state,
@@ -103,6 +126,13 @@ impl ReplicaSource {
                 sequence: action.sequence,
                 second_started: action.second.map(|second| second.started),
                 second_playing: action.second.and_then(|second| second.playing),
+            }),
+            upper: self.upper.map(|upper| GhostUpperSlots {
+                second: ghost_slot(upper.slots.second),
+                third: ghost_slot(upper.slots.third),
+                fourth: ghost_slot(upper.slots.fourth),
+                marker: upper.slots.marker,
+                after_state: upper.after_state,
             }),
         }
     }
@@ -130,6 +160,15 @@ impl ReplicaSource {
                     playing: action.second_playing,
                 }),
             }),
+            upper: ghost.upper.map(|upper| RemoteUpper {
+                slots: UpperSlots {
+                    second: slot_of_ghost(upper.second),
+                    third: slot_of_ghost(upper.third),
+                    fourth: slot_of_ghost(upper.fourth),
+                    marker: upper.marker,
+                },
+                after_state: upper.after_state,
+            }),
             blocking: ghost.blocking,
             spawned_ms: ghost.spawned_ms,
             gear_version: ghost.gear_version,
@@ -140,6 +179,11 @@ impl ReplicaSource {
                 .map(|item| ShownItem {
                     slot: u32::from(item.slot),
                     item_index: item.item_index,
+                    look: ItemLook {
+                        dye: item.look.dye,
+                        appearance: item.look.appearance,
+                        skin_dye: item.look.skin_dye,
+                    },
                 })
                 .collect(),
             hands: Hands {
@@ -151,6 +195,8 @@ impl ReplicaSource {
             // A ghost's fight is its own sim's: near, it goes every tick anyway.
             in_combat: false,
             target: ghost.target,
+            looking_through_loadout: ghost.looking_through_loadout,
+            mount: ghost.mount,
         }
     }
 
@@ -162,14 +208,36 @@ impl ReplicaSource {
         PlayerGear {
             paperdoll: PaperdollState {
                 owner: None,
-                public: Some(PaperdollPublic::of(
-                    &self.items,
-                    self.gear_version,
-                    self.hands,
-                )),
+                public: Some(PaperdollPublic {
+                    active: Some(riding_active_map(self.hands, self.riding())),
+                    ..PaperdollPublic::of(&self.items, self.gear_version, self.hands)
+                }),
             },
             ..PlayerGear::default()
         }
+    }
+
+    /// Whether it rides a mount.
+    const fn riding(&self) -> bool {
+        self.mount.mount_id != 0
+    }
+}
+
+/// One upper slayer slot of a player for its ghost.
+const fn ghost_slot(slot: SlotChange) -> GhostSlotChange {
+    GhostSlotChange {
+        state: slot.state,
+        started: slot.started,
+        sequence: slot.sequence,
+    }
+}
+
+/// One upper slayer slot of a ghost's player.
+const fn slot_of_ghost(slot: GhostSlotChange) -> SlotChange {
+    SlotChange {
+        state: slot.state,
+        started: slot.started,
+        sequence: slot.sequence,
     }
 }
 
@@ -179,6 +247,9 @@ pub(super) struct ReplicaMemory {
     health: u32,
     blocking: bool,
     gear_version: u64,
+    hands: Hands,
+    looking_through_loadout: bool,
+    mount: GhostMount,
     /// The start and sequence of its action.
     action: Option<(u16, u64)>,
     /// The server time of its last new life (ms since 2000-01-01).
@@ -197,10 +268,18 @@ pub(super) struct Replica {
     gear: PlayerGear,
     stamp: AlcStamp,
     health_change: Option<HealthChange>,
-    gear_changed: bool,
+    /// The change of its public paperdoll: the whole of it after a change of its items, the
+    /// changed hand maps alone after a change of its hands ([`PaperdollPublic::hands_change`]).
+    paperdoll_change: Option<PaperdollPublic>,
+    /// The change of its `lookingThroughLoadout`.
+    loadout_change: Option<bool>,
+    /// The change of its mount state as others see it.
+    mount_change: Option<BundleMember>,
     block_changed: bool,
     /// It started an action: the others see it now.
     action_changed: bool,
+    /// Its own state echoes a change of its upper slots: the others see it now.
+    upper_due: bool,
     /// Where its state of this tick puts it: an offset from its anchor, or a new anchor.
     place: Option<StepPlace>,
     /// Its anchor after this tick.
@@ -233,8 +312,27 @@ impl Replica {
             .action
             .map(|action| (action.started, action.sequence));
         let action_changed = seen.is_some_and(|seen| seen.action != action);
-        let (health_change, gear_changed, block_changed, life_ms) = match seen {
-            None => (None, false, false, source.spawned_ms),
+        let upper_due = seen.is_some() && source.upper.is_some();
+        let gear = source.gear();
+        let paperdoll_change = seen.and_then(|seen| {
+            // A mount-up or a dismount changes the active map ([`riding_active_map`]).
+            let riding_changed = (seen.mount.mount_id != 0) != source.riding();
+            if seen.gear_version == source.gear_version {
+                let mut change = PaperdollPublic::hands_change(seen.hands, source.hands);
+                if riding_changed || change.active.is_some() {
+                    change.active = Some(riding_active_map(source.hands, source.riding()));
+                }
+                Some(change).filter(|change| *change != PaperdollPublic::default())
+            } else {
+                gear.paperdoll.public.clone()
+            }
+        });
+        let loadout_change = seen
+            .filter(|seen| seen.looking_through_loadout != source.looking_through_loadout)
+            .map(|_| source.looking_through_loadout);
+        let mount_change = seen.and_then(|seen| remote_member(Some(seen.mount), source.mount));
+        let (health_change, block_changed, life_ms) = match seen {
+            None => (None, false, source.spawned_ms),
             Some(seen) => {
                 let life = match (seen.health, health) {
                     (shown, 0) if shown > 0 => Some(VitalsData::player_dead(seen.life_ms)),
@@ -251,30 +349,31 @@ impl Replica {
                     first_damage: seen.health == source.max_health,
                     life,
                 });
-                (
-                    change,
-                    seen.gear_version != source.gear_version,
-                    seen.blocking != source.blocking,
-                    life_ms,
-                )
+                (change, seen.blocking != source.blocking, life_ms)
             }
         };
         let memory = ReplicaMemory {
             health,
             blocking: source.blocking,
             gear_version: source.gear_version,
+            hands: source.hands,
+            looking_through_loadout: source.looking_through_loadout,
+            mount: source.mount,
             action,
             life_ms,
             anchor,
         };
         let replica = Self {
-            gear: source.gear(),
+            gear,
             stamp: clock.stamp(),
             source,
             health_change,
-            gear_changed,
+            paperdoll_change,
+            loadout_change,
+            mount_change,
             block_changed,
             action_changed,
+            upper_due,
             place,
             anchor,
             anchor_moved,
@@ -285,10 +384,13 @@ impl Replica {
     /// Whether it changed this tick: it goes to every viewer now, whatever its priority.
     pub(super) const fn changed(&self) -> bool {
         self.health_change.is_some()
-            || self.gear_changed
+            || self.paperdoll_change.is_some()
+            || self.loadout_change.is_some()
+            || self.mount_change.is_some()
             || self.block_changed
             || self.action_changed
             || self.anchor_moved
+            || self.upper_due
     }
 
     /// Whether it is in combat: it goes first.
@@ -349,6 +451,12 @@ impl Replica {
             ) else {
                 return Ok(None);
             };
+            if source.looking_through_loadout {
+                put_looking_through_loadout(&mut group.members, true);
+            }
+            if let Some(mount) = remote_member(None, source.mount) {
+                put_member(&mut group.members, mount);
+            }
             if let Some(alc) = group.members.last_mut() {
                 let place = CardPlace {
                     anchor: self.anchor,
@@ -367,6 +475,7 @@ impl Replica {
                 look: source.view,
                 slayer: source.action,
                 sequence_time: None,
+                upper: source.upper,
             })?),
         }];
         if let Some(change) = self.health_change {
@@ -380,12 +489,19 @@ impl Replica {
                 state: MemberState::Vitals(vitals),
             });
         }
-        if self.gear_changed {
+        if let Some(public) = &self.paperdoll_change {
             members.push(BundleMember {
                 component: PAPERDOLL_COMPONENT,
-                state: MemberState::Paperdoll(Box::new(self.gear.paperdoll.clone())),
+                state: MemberState::Paperdoll(Box::new(PaperdollState {
+                    owner: None,
+                    public: Some(public.clone()),
+                })),
             });
         }
+        if let Some(looking) = self.loadout_change {
+            put_looking_through_loadout(&mut members, looking);
+        }
+        members.extend(self.mount_change.clone());
         if self.block_changed {
             members.push(BundleMember {
                 component: DAMAGE_RECEIVER_COMPONENT,
@@ -492,6 +608,11 @@ pub(super) mod tests {
 
     const SPAWNED_MS: u64 = 1_000_000;
     const MAX_HEALTH: u32 = 856;
+    /// A remote aim of the retail arena capture (2026-09-13): `19=2e 20=0dea 21=9606 48=28`.
+    const AIM_STATE: u64 = 0x2e;
+    const AIM_STARTED: u16 = 0x0dea;
+    const AIM_SEQUENCE: u64 = 406;
+    const AIM_MARKER: u64 = 0x28;
     const AT: Position = Position {
         x: 7300.0,
         y: 3090.0,
@@ -513,16 +634,24 @@ pub(super) mod tests {
                 since_ms: SPAWNED_MS + 10,
             }),
             action: None,
+            upper: None,
             blocking: false,
             spawned_ms: SPAWNED_MS,
             gear_version: 3,
             items: vec![ShownItem {
                 slot: nw_messages::paperdoll::slot::MAIN_HAND_OPTION_1,
                 item_index: 42,
+                look: ItemLook {
+                    dye: [4, 0, 0, 0],
+                    appearance: 7,
+                    skin_dye: [0; 4],
+                },
             }],
             hands: Hands::default(),
             in_combat: false,
             target: None,
+            looking_through_loadout: false,
+            mount: GhostMount::default(),
         }
     }
 
@@ -535,16 +664,80 @@ pub(super) mod tests {
         );
         let public = gear.paperdoll.public.expect("public");
         assert_eq!(
-            public.visible_slots.map(|slots| slots.elements),
+            public
+                .visible_slots
+                .and_then(|slots| slots.full().map(|list| list.elements.clone())),
             Some(vec![nw_messages::paperdoll::slot::MAIN_HAND_OPTION_1])
         );
     }
 
+    /// The source of a player whose own state echoes the retail aim.
+    fn aiming() -> ReplicaSource {
+        ReplicaSource {
+            upper: Some(RemoteUpper {
+                slots: UpperSlots {
+                    third: SlotChange {
+                        state: Some(AIM_STATE),
+                        started: Some(AIM_STARTED),
+                        sequence: Some(AIM_SEQUENCE),
+                    },
+                    marker: Some(AIM_MARKER),
+                    ..UpperSlots::default()
+                },
+                after_state: true,
+            }),
+            ..source()
+        }
+    }
+
     #[test]
     fn a_ghost_carries_the_whole_replica() {
-        let source = source();
-        let back = ReplicaSource::of_ghost(&source.ghost());
-        assert_eq!(back, source);
+        for source in [source(), aiming()] {
+            let back = ReplicaSource::of_ghost(&source.ghost());
+            assert_eq!(back, source);
+        }
+    }
+
+    #[test]
+    fn others_see_the_block_and_aim_slots_while_they_echo() {
+        let (_, seen) = Replica::new(source(), AT, None, SPAWNED_MS + 10);
+        let (aim, seen) = Replica::new(aiming(), AT, Some(seen), SPAWNED_MS + 20);
+        assert!(aim.changed(), "every viewer gets the aim now");
+        let group = aim
+            .group(5, 9, AT, false)
+            .expect("encodes")
+            .expect("a group");
+        let MemberState::Alc(state) = &group.members[0].state else {
+            panic!("the state first: {group:?}");
+        };
+        let children = state.slot0_children().expect("walks");
+        let child = |index: usize| {
+            children
+                .iter()
+                .find(|(child, _)| *child == index)
+                .map(|(_, bytes)| bytes.clone())
+        };
+        assert_eq!(child(19), Some(vec![0x2e]), "the third slot's state");
+        assert_eq!(child(20), Some(AIM_STARTED.to_be_bytes().to_vec()));
+        assert_eq!(child(21), Some(vec![0x96, 0x06]), "the retail sequence bytes");
+        assert_eq!(child(48), Some(vec![0x28]), "the marker");
+        let (quiet, _) = Replica::new(source(), AT, Some(seen), SPAWNED_MS + 30);
+        assert!(!quiet.changed(), "the echo is over");
+        let group = quiet
+            .group(5, 9, AT, false)
+            .expect("encodes")
+            .expect("a group");
+        let MemberState::Alc(state) = &group.members[0].state else {
+            panic!("the state first: {group:?}");
+        };
+        assert!(
+            state
+                .slot0_children()
+                .expect("walks")
+                .iter()
+                .all(|(child, _)| !(16..=24).contains(child) && *child != 48),
+            "no upper slot after the echo"
+        );
     }
 
     #[test]
@@ -565,7 +758,7 @@ pub(super) mod tests {
             Some((500, true)),
             "the first damage from full health"
         );
-        assert!(changed.gear_changed && changed.block_changed);
+        assert!(changed.paperdoll_change.is_some() && changed.block_changed);
         let (dead, seen) = Replica::new(
             ReplicaSource { health: 0, ..hit },
             AT,
@@ -585,6 +778,87 @@ pub(super) mod tests {
                 .is_some_and(|life| !life.is_dead()),
             "a new life"
         );
+    }
+
+    #[test]
+    fn others_get_a_change_of_the_hands_as_the_changed_maps_alone() {
+        let (_, seen) = Replica::new(source(), AT, None, SPAWNED_MS);
+        let drawn = ReplicaSource {
+            hands: Hands {
+                drawn: Some(nw_messages::paperdoll::slot::MAIN_HAND_OPTION_1),
+                attached: true,
+                ..Hands::default()
+            },
+            ..source()
+        };
+        let (draw, seen) = Replica::new(drawn.clone(), AT, Some(seen), SPAWNED_MS + 33);
+        assert!(draw.changed(), "every viewer sees the draw now");
+        let public = draw.paperdoll_change.clone().expect("a paperdoll change");
+        assert!(public.sheathed.is_some() && public.attached.is_some());
+        assert_eq!(
+            (public.visible_slots, public.visuals),
+            (None, None),
+            "no slot or look list (retail newchar 2026-09-18)"
+        );
+        let group = draw.group(9, 1, AT, false).expect("group").expect("state");
+        assert!(group.members.iter().any(|member| matches!(
+            &member.state,
+            MemberState::Paperdoll(paperdoll) if paperdoll.owner.is_none()
+        )));
+        let (same, seen) = Replica::new(drawn.clone(), AT, Some(seen), SPAWNED_MS + 66);
+        assert_eq!(same.paperdoll_change, None, "nothing new");
+        // The inventory open goes to the viewers as `lookingThroughLoadout`.
+        let looking = ReplicaSource {
+            looking_through_loadout: true,
+            ..drawn
+        };
+        let (open, _) = Replica::new(looking, AT, Some(seen), SPAWNED_MS + 99);
+        assert_eq!(open.loadout_change, Some(true));
+        let group = open.group(9, 1, AT, false).expect("group").expect("state");
+        assert!(group.members.iter().any(|member| {
+            member.component == nw_messages::PLAYER_COMPONENT_COMPONENT
+                && member.state
+                    == MemberState::PlayerComponent(
+                        nw_messages::PlayerComponentState::looking_through_loadout(true),
+                    )
+        }));
+    }
+
+    #[test]
+    fn others_see_the_mount_with_the_card_and_after_each_change() {
+        /// `Mount_MTX_5_lion_basic`.
+        const LION_BASIC: u32 = 0x0c13_84ae;
+        let mount_member = |group: &BundleGroup| {
+            group
+                .members
+                .iter()
+                .find(|member| member.component == nw_messages::MOUNT_COMPONENT)
+                .cloned()
+        };
+        let (first, seen) = Replica::new(source(), AT, None, SPAWNED_MS);
+        let card = first.group(9, 1, AT, true).expect("group").expect("card");
+        assert_eq!(
+            mount_member(&card),
+            remote_member(None, GhostMount::default()),
+            "a card names no mount"
+        );
+        let riding = ReplicaSource {
+            mount: GhostMount {
+                mount_id: LION_BASIC,
+                flags: nw_messages::RemoteFlags::STAMINA_FULL,
+                dye: [0; nw_bus::MOUNT_DYE_LEN],
+            },
+            ..source()
+        };
+        let (up, seen) = Replica::new(riding.clone(), AT, Some(seen), SPAWNED_MS + 33);
+        assert!(up.changed(), "a mount-up goes to every viewer now");
+        let group = up.group(9, 1, AT, false).expect("group").expect("state");
+        assert_eq!(
+            mount_member(&group),
+            remote_member(Some(GhostMount::default()), riding.mount)
+        );
+        let (same, _) = Replica::new(riding, AT, Some(seen), SPAWNED_MS + 66);
+        assert_eq!(same.mount_change, None, "nothing new");
     }
 
     #[test]

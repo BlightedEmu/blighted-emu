@@ -13,9 +13,8 @@
 //! Each child's width is its reader at virtual `+0x30` of the child's vtable (the GDE id note
 //! lists them). The lists are the replicated list form ([`FullList`]).
 
-use crate::combat::{
-    RECAP_LAST_LIST_LIMIT, RECAP_LIST_LIMIT, read_list, read_string, write_list, write_string,
-};
+use crate::combat::{read_string, write_string};
+use crate::item_descriptor::ItemDescriptor;
 use crate::items::FullList;
 use crate::slots::{SLOT_0, children_mask, read_slot_0, write_children};
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
@@ -46,47 +45,19 @@ const GRID_CHILDREN: u8 = 1;
 /// `ownerPlayerIdentification`, `currentPermissionRule`, `guildStructureName`, `raidId`,
 /// `factionType`, `ownerPvpFlag`, `ownerFFAFlag`, `permissionOptions`.
 const OWNERSHIP_CHILDREN: u8 = 11;
-/// The second 32-bit field of a committed resource as its constructor sets it
-/// (`FUN_1447b8570`: `0xffffffff`, also every retail value).
-pub const RESOURCE_DEFAULT_A: u32 = u32::MAX;
-/// The third 32-bit field of a committed resource as its constructor sets it (`0x33`, also every
-/// retail value).
-pub const RESOURCE_DEFAULT_B: u32 = 0x33;
 /// Components of a crest colour (red, green, blue, alpha; `FUN_1415bd0c0`).
 const COLOR_COMPONENTS: usize = 4;
 /// Bytes of a guild id (`FUN_1433f63b0`).
 pub const GUILD_ID_LEN: usize = RAW_ID_LEN;
 
 /// One resource committed to a buildable: its item id and an item descriptor
-/// (`FUN_145ce9c50`; the same fields the death recap carries after its item id).
+/// ([`ItemDescriptor`]; the same fields the death recap carries after its item id).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommittedResource {
     /// The map key: the item id text.
     pub item: Vec<u8>,
-    /// The CRC-32 of the lowercase item id.
-    pub item_crc: u32,
-    /// A big-endian `u16` (name Unknown; retail 0).
-    pub word: u16,
-    /// The quantity.
-    pub quantity: u32,
-    /// A flag (name Unknown; retail 0).
-    pub flag_a: bool,
-    /// A big-endian `u32` (name Unknown; [`RESOURCE_DEFAULT_A`]).
-    pub value_a: u32,
-    /// A big-endian `u32` (name Unknown; [`RESOURCE_DEFAULT_B`]).
-    pub value_b: u32,
-    /// A flag (name Unknown; retail 0).
-    pub flag_b: bool,
-    /// A flag (name Unknown; retail 0).
-    pub flag_c: bool,
-    /// A list of fewer than 6 `u32` (name Unknown; retail empty).
-    pub list_a: Vec<u32>,
-    /// A list of fewer than 6 `u32` (name Unknown; retail empty).
-    pub list_b: Vec<u32>,
-    /// A flag (name Unknown; retail 0).
-    pub flag_d: bool,
-    /// A list of fewer than 4 `u32` (name Unknown; retail empty).
-    pub list_c: Vec<u32>,
+    /// The item's descriptor.
+    pub descriptor: ItemDescriptor,
 }
 
 impl CommittedResource {
@@ -95,54 +66,20 @@ impl CommittedResource {
     pub fn of(item: &str, item_crc: u32, quantity: u32) -> Self {
         Self {
             item: item.as_bytes().to_vec(),
-            item_crc,
-            word: 0,
-            quantity,
-            flag_a: false,
-            value_a: RESOURCE_DEFAULT_A,
-            value_b: RESOURCE_DEFAULT_B,
-            flag_b: false,
-            flag_c: false,
-            list_a: Vec::new(),
-            list_b: Vec::new(),
-            flag_d: false,
-            list_c: Vec::new(),
+            descriptor: ItemDescriptor::of(item_crc, quantity),
         }
     }
 
     fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         Ok(Self {
             item: read_string(reader)?,
-            item_crc: reader.u32()?,
-            word: reader.u16()?,
-            quantity: reader.u32()?,
-            flag_a: reader.boolean()?,
-            value_a: reader.u32()?,
-            value_b: reader.u32()?,
-            flag_b: reader.boolean()?,
-            flag_c: reader.boolean()?,
-            list_a: read_list(reader, RECAP_LIST_LIMIT)?,
-            list_b: read_list(reader, RECAP_LIST_LIMIT)?,
-            flag_d: reader.boolean()?,
-            list_c: read_list(reader, RECAP_LAST_LIST_LIMIT)?,
+            descriptor: ItemDescriptor::read(reader)?,
         })
     }
 
     fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
         write_string(writer, &self.item)?;
-        writer
-            .u32(self.item_crc)
-            .u16(self.word)
-            .u32(self.quantity)
-            .boolean(self.flag_a)
-            .u32(self.value_a)
-            .u32(self.value_b)
-            .boolean(self.flag_b)
-            .boolean(self.flag_c);
-        write_list(writer, &self.list_a, RECAP_LIST_LIMIT)?;
-        write_list(writer, &self.list_b, RECAP_LIST_LIMIT)?;
-        writer.boolean(self.flag_d);
-        write_list(writer, &self.list_c, RECAP_LAST_LIST_LIMIT)
+        self.descriptor.write(writer)
     }
 }
 
@@ -447,7 +384,7 @@ impl GuildCrest {
         foreground_color: NO_GUILD_COLOR,
     };
 
-    fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+    pub(crate) fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         let color = |reader: &mut Reader<'_>| -> Result<[f32; COLOR_COMPONENTS], MessageError> {
             Ok([reader.f32()?, reader.f32()?, reader.f32()?, reader.f32()?])
         };
@@ -459,7 +396,7 @@ impl GuildCrest {
         })
     }
 
-    fn write(&self, writer: &mut Writer) {
+    pub(crate) fn write(&self, writer: &mut Writer) {
         writer.u16(self.background);
         for component in self.background_color {
             writer.f32(component);

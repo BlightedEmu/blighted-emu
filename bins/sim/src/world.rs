@@ -21,14 +21,16 @@ use bevy_ecs::change_detection::Mut;
 use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
+use nw_content::mutations::MutationCatalog;
 use nw_bus::{
     Admit, BusId, CarriedItem, CellTable, ConnectionRef, Ghost, HandoffOffer, ItemPlace,
+    PlayerInventory,
     MOB_STATES, MobGhost, PlayerGhost, PlayerProgression, PlayerQuests, Point, QuestRun,
     ScriptLogLine, SimSlot, SnapMob, SnapPlayer,
 };
 use nw_messages::client_input::{
     CRAFTING_STATION_KIND, GATHER_KIND, LOOT_KIND, LORE_KIND, REVIVE_PLAYER_KIND, TALK_KIND,
-    TRIGGER_KIND,
+    TRIGGER_KIND, WATER_GATHER_KIND,
 };
 use nw_messages::entity_ids::IdHolder;
 use nw_messages::items::{FIRST_VERSION, FullList};
@@ -40,16 +42,17 @@ use nw_messages::{
     ABILITY_COMPONENT, ATTRIBUTE_COMPONENT, Adopted, BundleGroup, BundleMember, ClientFacetMsg,
     ConsumableCooldown, CooldownsState, CurrencyState, DisableCollisionMsg,
     GatheringInterruptedMsg, Hands, HealthChange, InputRecord, InteractionEndedMsg,
-    InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT, LevelInfoChangedMsg,
+    InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT,
     LevelSpec, LookDir, LookupRequest, MeleeHitMsg, MemberState, MessageError, PlayerLook,
     PlayerSeenByAiMsg, PlayerStates, ProgressionState, SelectedAsTargetMsg, ServerMessage,
     ShownItem, StorageSearchItemsMsg, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg,
-    UnselectedAsTargetMsg, VitalsData, WorldPosition, facet_entity, put_member,
+    UnselectedAsTargetMsg, VitalsData, WorldPosition, facet_entity, put_looking_through_loadout,
+    put_member,
 };
 use nw_sim_core::{
-    CellBounds, CellGrid, CellOwners, Dice, Ground, GroundCheck, Health, Interest, LevelGround,
-    MobState, Motion, MotionState, MoveLimits, MoveRefusal, OPEN_WORLD_START, Position, Seen,
-    SpatialGrid, TrackedBody, at_tutorial_exit,
+    CellBounds, CellGrid, CellOwners, Dice, Footing, Ground, GroundCheck, Health, Interest,
+    LevelGround, MobState, Motion, MotionState, MoveLimits, MoveRefusal, OPEN_WORLD_START,
+    Position, Seen, SpatialGrid, TrackedBody, at_tutorial_exit,
 };
 use nw_world::collision_index::CollisionIndex;
 use thiserror::Error;
@@ -58,33 +61,58 @@ use uuid::Uuid;
 mod admin;
 mod asset_script;
 mod attack;
+mod charms;
 mod combat_status;
 mod conversation;
 mod crafting;
+mod dungeon_script;
+pub mod economy;
 mod encounter;
 mod events;
 mod gathering;
+mod fall_damage;
+mod game_mode;
 mod gear;
 mod gm_client;
 mod hit_shape;
+pub(crate) mod instances;
+mod invites;
+mod item_calls;
+mod kill_rewards;
 mod level_assets;
 mod level_flow;
 mod loot_bag;
 mod members;
+mod meta_achievements;
+mod fishing;
+mod music;
+mod mutations;
 mod mob_timeline;
 mod mob_trail;
+mod mount;
 mod points;
 mod progression;
 mod projectile;
 mod quest_objects;
 mod quest_tracker;
+mod repair;
 mod replica;
+mod rolled_loot;
+mod salvage;
 mod scripts;
 mod slayer;
 mod slots;
+pub mod social;
+mod social_bus;
+mod social_states;
 mod stamina;
+mod status_effects;
 mod statics;
 mod storage_search;
+mod title_choice;
+mod tradeskill;
+pub mod transmog;
+mod travel;
 mod walked_floor;
 
 use asset_script::Step;
@@ -112,8 +140,7 @@ use attack::{PendingMobSwing, PlayerSwing, Vitals};
 
 use crate::combat::{AttackOutcome, AttackRefusal, CombatSettings};
 use crate::login::{
-    SessionIds, WorldIds, level_change_messages, login_level_info, login_messages, phase_id,
-    time_answers,
+    SessionIds, WorldIds, level_change_messages, login_level_info, login_messages, time_answers,
 };
 use crate::mob_ai::SpawnAi;
 use crate::mobs::{MobAttackIntent, MobChanges, Mobs};
@@ -264,6 +291,11 @@ pub struct WorldSettings {
     /// The height of the level's sea (`terrain.json` `oceanLevel`), in metres: a player near it
     /// swims.
     pub ocean_level_m: f32,
+    /// Whether this sim has the instance role: it runs one expedition, raid or trial at a time
+    /// ([`instances`]).
+    pub instance_role: bool,
+    /// Longest wait for the director's answer to an expedition request.
+    pub instance_request_timeout_ms: u64,
 }
 
 /// Fewest players for which the bundle step uses more than one thread; below that, starting
@@ -331,6 +363,8 @@ pub struct Departure {
     /// The items to save; `None` when there is nothing to save (no change since the last save,
     /// or the tutorial, which always starts from the starter kit).
     pub items: Option<Vec<CarriedItem>>,
+    /// The storage chests and loadouts, saved with the items: `Some` with them.
+    pub inventory: Option<PlayerInventory>,
     /// The progression to save; `None` when there is nothing to save (no change since the last
     /// save, or the tutorial).
     pub progression: Option<PlayerProgression>,
@@ -407,6 +441,9 @@ pub enum WorldError {
     /// A message cannot be encoded.
     #[error(transparent)]
     Message(#[from] MessageError),
+    /// An instance sim takes only the members of the instance it runs.
+    #[error("character {0} is not a member of this sim's instance")]
+    NotInInstance(Uuid),
 }
 
 /// A cell table that does not fit the level.
@@ -468,8 +505,19 @@ struct Player {
     remote_plan: replica::RemotePlan,
     /// An own state after the spawn cleared the input throttle that the spawn state sets.
     throttle_cleared: bool,
+    /// The client reported throttle on (998 `01`). The next plain state does not clear the
+    /// bit; the state after that does. Retail clears only after the client has applied it.
+    defer_throttle_clear: bool,
+    /// The client still auto-pins a new quest (2709). A mask of all zeros turns it off.
+    auto_pin: bool,
+    /// The player toggled the PvP flag (2525). Retail sends the faction header and no argument.
+    pvp_flagged: bool,
     /// The own places its client has ([`own_group`]).
     own_places: OwnPlaces,
+    /// The ground and water under its body after its newest moves ([`SimWorld::footing_of`]).
+    footing: Footing,
+    /// The footing its client has: the spawn state's, then what the own states carried.
+    footing_sent: Footing,
     /// Where the player faces after the server's move, when the move says so.
     move_facing: Option<f32>,
     /// The server moves the player now: its own states carry the place.
@@ -487,6 +535,12 @@ struct Player {
     /// Until this server time the client camera does not carry the body: the inventory camera
     /// is open, or still gliding back. Its inputs move nothing (retail held the player still).
     camera_held_until_ms: Option<u64>,
+    /// Its inventory is open (`lookingThroughLoadout` of its 3935 state), as its client said in
+    /// its newest 3970.
+    looking_through_loadout: bool,
+    /// The change of [`Player::looking_through_loadout`] is not sent yet
+    /// ([`put_looking_through_loadout`]).
+    loadout_change_due: bool,
     /// Server time of the first own state, the start of the own clock.
     own_spawned_ms: Option<u64>,
     /// Moves of the player by the server so far.
@@ -516,6 +570,11 @@ struct Player {
     masteries: progression::Masteries,
     /// Its attribute points.
     attributes: points::Attributes,
+    /// Its meta achievements.
+    meta: meta_achievements::MetaState,
+    /// The title it shows (2474), and whether its client was not told of it yet.
+    title: Option<u32>,
+    title_changed: bool,
     /// The level its client was last sent; `None` before the first card.
     level_sent: Option<u32>,
     /// Whether its account has the game master rank: the sim takes its client's GM messages.
@@ -536,12 +595,26 @@ struct Player {
     /// Its running consumable cooldowns, and whether they changed since the last bundle.
     cooldowns: Vec<ConsumableCooldown>,
     cooldowns_changed: bool,
+    /// The repeating vitals changes of the consumables it used.
+    item_effects: item_calls::ItemEffects,
+    /// Its status effects ([`status_effects`]).
+    status_effects: status_effects::StatusEffects,
+    /// The fall its body is in ([`fall_damage`]).
+    fall: fall_damage::FallTrack,
     /// The health its client last got (a card or a vitals change).
     health_sent: Option<u32>,
     /// The server time of its last spawn or respawn (ms since 2000-01-01).
     life_ms: u64,
     /// Its stamina.
     stamina: Stamina,
+    /// Its mounts: the chosen one, their dyes and names, the summon, the ride and its stamina
+    /// ([`mount`]).
+    mount: mount::PlayerMount,
+    /// Its fishing: the pole, the cast and the replicated steps ([`fishing`]).
+    fishing: fishing::PlayerFishing,
+    /// Its side of the musical performances: the one it plays in, the one it watches, its
+    /// lockout and what its client got of each ([`music`]).
+    music: music::PlayerMusicState,
     /// Its combat status timer.
     combat: CombatTimer,
     /// The version of its replicated lists that this server sends besides the gear.
@@ -549,6 +622,9 @@ struct Player {
     /// Own-group members to append to the next bundle (the interactor target of a take, the
     /// gather states of the chest).
     extra_members: Vec<BundleMember>,
+    /// Its replicated social states and group entity from the social service
+    /// ([`social_states`]).
+    social: social_states::PlayerSocial,
     /// Gathers this player made, for the counters of the gather state.
     gathers: u32,
     /// The version of each gather node its client has, by slot key.
@@ -566,6 +642,14 @@ struct Player {
     /// The solids of the asset entities it sees ([`crate::asset_solids`]): its ground stands on
     /// them over the level's.
     solids: Option<Arc<CollisionIndex>>,
+    /// Its travel state: what a save keeps and the travel that runs.
+    travel: travel::TravelState,
+    /// Its expeditions, raids and trials ([`instances`]).
+    arena: instances::ArenaPlayer,
+    /// Its matchmaking queue, war board and war sign-up state ([`game_mode`]).
+    game_mode: game_mode::GameModePlayer,
+    /// The weekly mutations its client has ([`mutations`]).
+    mutation_view: mutations::ScheduleView,
     frozen: bool,
     handoffs: u64,
     no_handoff_before_ms: u64,
@@ -585,6 +669,15 @@ impl Player {
             masteries: self.masteries.carried(),
             attributes: self.attributes.carried(),
             weapon_points: self.masteries.carried_points(),
+            territory_points: self.masteries.carried_territory_points(),
+            travel: self.travel.carried(),
+            mounts: self.mount.carried(),
+            ability_slots: self.masteries.carried_slots(),
+            meta_counters: self.meta.carried_counters(),
+            meta_completed: self.meta.carried_completed(),
+            title: self.title,
+            arena: self.arena.carried(),
+            music: self.music.carried(),
         }
     }
 
@@ -667,6 +760,18 @@ pub struct SimWorld {
     exit_target: Option<SimSlot>,
     ghosts: HashMap<BusId, ReceivedGhosts>,
     ghost_targets: BTreeSet<BusId>,
+    /// Whether this sim has the instance role ([`WorldSettings::instance_role`]).
+    instance_sim: bool,
+    /// The instance this instance sim runs.
+    instance_run: Option<instances::InstanceRun>,
+    /// The war sign-ups of this sim's players, by war ([`game_mode`]).
+    war_signups: game_mode::WarSignups,
+    /// The encounters of the running instance's level script.
+    dungeon_run: Option<dungeon_script::DungeonRun>,
+    /// The expedition requests for the director since the last tick.
+    instance_requests: Vec<(ConnectionRef, nw_bus::InstanceRequest)>,
+    /// The level of each instance game mode, by its CRC: an instance names its own frame.
+    instance_levels: HashMap<u32, LevelSpec>,
     /// This world's hold on the raw ids of its players, its shown mobs and the ghosts it adopted
     /// (GDE id note, "Dynamic entities").
     raw_ids: IdHolder,
@@ -707,6 +812,8 @@ pub struct SimWorld {
     stations: crafting::Stations,
     /// The loot bags of killed mobs.
     bags: loot_bag::LootBags,
+    /// The musical performances of this sim's players.
+    performances: music::Performances,
     /// The gathers that run.
     open_gathers: Vec<OpenGather>,
     /// The crafts that run.
@@ -732,6 +839,10 @@ pub struct SimWorld {
     /// What the players did that leaderboard stats count, since the last
     /// [`SimWorld::take_stat_events`].
     stat_events: Vec<StatEvent>,
+    /// The trading post calls, deliveries and player trades of this sim's players.
+    economy: economy::Economy,
+    /// The status effects of the mobs that have any, by entity number.
+    mob_effects: HashMap<u64, status_effects::StatusEffects>,
     /// The server time of the last tick (ms since 2000-01-01).
     server_ms: u64,
 }
@@ -781,6 +892,8 @@ struct Arrival {
     flow: LevelFlow,
     /// The items another sim sent; `None` gives the login kit.
     items: Option<Vec<CarriedItem>>,
+    /// Its storage chests and saved loadouts.
+    inventory: PlayerInventory,
     /// The main-hand option slot it held drawn on the other sim.
     drawn_weapon: Option<u32>,
     /// The main-hand option slot it had selected on the other sim.
@@ -794,6 +907,8 @@ struct Arrival {
     mastery_versions: (u64, u64),
     /// The version of the newest 129 lists its client has (0 for none).
     attribute_version: u64,
+    /// The sequence of the next fishing step its client expects (0 for a join).
+    fishing_sequence: u16,
     /// Whether its account has the game master rank.
     game_master: bool,
     /// Its saved or carried quests.
@@ -810,6 +925,12 @@ impl SimWorld {
         combat: CombatSettings,
         content: Arc<PlayerContent>,
     ) -> Self {
+        // Only an instance sim names the levels of the game modes.
+        let instance_levels = if settings.instance_role {
+            instances::instance_levels(&content.instances)
+        } else {
+            HashMap::new()
+        };
         Self {
             achievement_rules: AchievementRules::of(
                 &content.achievements,
@@ -829,6 +950,7 @@ impl SimWorld {
             nodes: Nodes::default(),
             stations: crafting::Stations::build(&content.stations, &content.structure_costs),
             bags: loot_bag::LootBags::default(),
+            performances: music::Performances::default(),
             open_gathers: Vec::new(),
             crafts: Vec::new(),
             skinned: HashSet::new(),
@@ -850,7 +972,15 @@ impl SimWorld {
             projectile_flights: Vec::new(),
             scripted_swings: Vec::new(),
             stat_events: Vec::new(),
+            economy: economy::Economy::default(),
+            mob_effects: HashMap::new(),
             server_ms: 0,
+            instance_sim: settings.instance_role,
+            instance_run: None,
+            war_signups: game_mode::WarSignups::default(),
+            dungeon_run: None,
+            instance_requests: Vec::new(),
+            instance_levels,
             combat,
             world: World::new(),
             by_connection: HashMap::new(),
@@ -905,9 +1035,9 @@ impl SimWorld {
         if here && !admit.login {
             return Ok(None);
         }
-        let level = self.settings.level;
+        let level = self.arrival_level();
         let level_info = if admit.login {
-            Some(login_level_info(level, server_time, phase_id(level)?))
+            Some(login_level_info(level, server_time, self.entry_phase(level)?))
         } else {
             None
         };
@@ -918,7 +1048,7 @@ impl SimWorld {
                 now_ms,
                 0,
                 &self.achievement_rules,
-                self.is_tutorial(),
+                self.settings.level.private,
                 admit.backstory.as_deref(),
                 &admit.progression.achievements,
                 0,
@@ -950,24 +1080,35 @@ impl SimWorld {
             client_context: LOGIN_CLIENT_CONTEXT,
             flow,
             items: admit.items.clone(),
+            inventory: admit.inventory.clone(),
             drawn_weapon: None,
             active_weapon: None,
             progression: admit.progression.clone(),
             progression_saved: true,
             mastery_versions: (0, 0),
             attribute_version: 0,
+            fishing_sequence: 0,
             game_master: admit.game_master,
             quests: admit.quests.clone(),
         };
         self.check(&arrival)?;
         let login = if let Some(level_info) = &level_info {
-            let envelopes = login_messages(
+            let mut envelopes = login_messages(
                 &self.ids,
                 SessionIds::random()?,
                 admit.entity,
                 server_time,
                 level_info,
             )?;
+            if admit.login {
+                // Retail leaves the game-mode queue 24 ms after the level info (4970, value 1).
+                envelopes.push(
+                    ServerMessage::LeftGameModeQueue(nw_messages::LeftGameModeQueueMsg::tutorial(
+                        admit.entity,
+                    ))
+                    .envelope()?,
+                );
+            }
             Some(Outgoing {
                 connection: admit.connection.clone(),
                 channel: MESSAGE_CHANNEL,
@@ -990,6 +1131,8 @@ impl SimWorld {
             slots: Slots::new(),
         };
         self.spawn(arrival, motion, replication, now_ms, admit.handoffs, now_ms);
+        self.arena_arrived(admit.entity);
+        self.transmog_arrived(admit.entity, admit.login);
         if admit.login {
             // Retail's login state lists the loot limit counts.
             self.send_loot_limits(admit.entity, loot_bag::LimitsSent::Spawn);
@@ -1027,14 +1170,8 @@ impl SimWorld {
         } else {
             offer.client_context
         };
-        let level = self.settings.level;
         let level_info = if enters {
-            Some(LevelInfoChangedMsg::of_level(
-                level,
-                client_context,
-                server_time,
-                phase_id(level)?,
-            ))
+            Some(self.entry_level_info(offer, client_context, server_time)?)
         } else {
             None
         };
@@ -1045,7 +1182,7 @@ impl SimWorld {
                 now_ms,
                 offer.phasing_sequence,
                 &self.achievement_rules,
-                self.is_tutorial(),
+                self.settings.level.private,
                 offer.backstory.as_deref(),
                 &offer.progression.achievements,
                 offer.achievement_version,
@@ -1076,12 +1213,14 @@ impl SimWorld {
             client_context,
             flow,
             items: offer.items.clone(),
+            inventory: offer.inventory.clone(),
             drawn_weapon: offer.drawn_weapon,
             active_weapon: offer.active_weapon,
             progression: offer.progression.clone(),
             progression_saved: false,
             mastery_versions: offer.mastery_versions,
             attribute_version: offer.attribute_version,
+            fishing_sequence: offer.fishing_sequence,
             game_master: offer.game_master,
             quests: offer.quests.clone(),
         };
@@ -1125,11 +1264,18 @@ impl SimWorld {
             offer.handoffs,
             retry_at,
         );
+        self.arena_arrived(offer.entity);
+        self.transmog_arrived(offer.entity, false);
         if enters {
             // A new level's spawn state lists them as a login's does (Inferred).
             self.send_loot_limits(offer.entity, loot_bag::LimitsSent::Spawn);
         }
-        if enters && !self.is_tutorial() {
+        // From the tutorial only: an instance move keeps the quests (its offer has a stay).
+        if enters
+            && !self.is_tutorial()
+            && !self.instance_sim
+            && offer.progression.arena.stay.is_none()
+        {
             // Retail: the first open-world state lists the tutorial as completed.
             if let Some(entity) = self.player_by_number(offer.entity)
                 && let Some(mut player) = self.world.get_mut::<Player>(entity)
@@ -1213,6 +1359,7 @@ impl SimWorld {
         {
             return Err(MoveError::Dead);
         }
+        let limits = self.move_limits_of(entity);
         let (result, last_good) = {
             let mut body = self
                 .world
@@ -1220,7 +1367,7 @@ impl SimWorld {
                 .ok_or(MoveError::NotInWorld)?;
             (
                 body.motion.try_move(
-                    &self.settings.limits,
+                    &limits,
                     &*self.ground,
                     &self.settings.bounds,
                     next,
@@ -1283,7 +1430,17 @@ impl SimWorld {
         let entity = *self.by_connection.get(connection)?;
         let server_at = self.world.get::<Body>(entity)?.motion.position();
         let views = crate::camera::record_views(records);
+        let combat = Arc::clone(&self.combat.data);
         let mut player = self.world.get_mut::<Player>(entity)?;
+        // The weapon in the hand picks the slayer sequences the server starts ([`slayer`]).
+        let weapon = player.gear.as_ref().and_then(|gear| {
+            let (item, _) = gear.main_weapon()?;
+            Some(slayer::HeldWeapon {
+                stance: combat.weapon_of_item(item)?.stance,
+                drawn: gear.drawn().is_some(),
+                empty: gear.held_empty(),
+            })
+        });
         let with_solids = player
             .solids
             .clone()
@@ -1338,7 +1495,12 @@ impl SimWorld {
                 frame_s: input.character.dt_s,
                 action: record.slayer_input(),
                 intent: (!held).then_some(input.character.intent),
-            });
+                attack: slayer::AttackKey {
+                    pressed: !held && record.attack_pressed(),
+                    released: !held && record.attack_released(),
+                },
+                weapon,
+            }, combat.player_sequences());
             if held {
                 continue;
             }
@@ -1359,7 +1521,37 @@ impl SimWorld {
             self.walked_floor.walked(at);
         }
         self.sheathe_in_deep_water(entity, next, now_ms);
-        Some((self.move_to(connection, next, now_ms), next))
+        // Retail sends the lock id on row 3 of the newest input while the lock is held, including
+        // movement records that are not an attack.
+        if let Some(target) = records.first().and_then(InputRecord::lock_target)
+            && let Some(mut vitals) = self.world.get_mut::<Vitals>(entity)
+        {
+            vitals.set_lock_target(Some(target));
+        }
+        let result = self.move_to(connection, next, now_ms);
+        if let Some(footing) = self.footing_of(entity)
+            && let Some(mut player) = self.world.get_mut::<Player>(entity)
+        {
+            player.footing = footing;
+        }
+        Some((result, next))
+    }
+
+    /// The ground and water under player `entity`'s body where the server has it, over its
+    /// ground with the solids shown to it ([`Footing`]): what its next own state tells its
+    /// client when it changed.
+    fn footing_of(&self, entity: Entity) -> Option<Footing> {
+        let at = self.world.get::<Body>(entity)?.motion.position();
+        let solids = self.world.get::<Player>(entity)?.solids.clone();
+        let sea_level_m = self.settings.ocean_level_m;
+        Some(match solids {
+            Some(solids) => Footing::of(
+                &LevelGround::new(&*self.ground, solids),
+                at,
+                sea_level_m,
+            ),
+            None => Footing::of(&*self.ground, at, sea_level_m),
+        })
     }
 
     /// The server puts player `entity` at `to` at `now_ms`, facing `facing` when given: its
@@ -1401,6 +1593,7 @@ impl SimWorld {
         if let Some(number) = self.world.get::<Player>(entity).map(|player| player.number) {
             nw_messages::release_raw_id(self.raw_ids, number);
             self.quests.remove(&number);
+            self.economy_left(number);
             if let Some(tutorial) = self.tutorials.remove(&number) {
                 tutorial.end(&mut self.mobs);
             }
@@ -1475,6 +1668,12 @@ impl SimWorld {
 
     /// Applies the new cell table `table` ([`SimWorld::set_table`]).
     fn apply_table(&mut self, table: &CellTable) -> Result<Vec<Departure>, TableError> {
+        if self.instance_sim {
+            // An instance sim owns its whole level for its instance; from the table it needs
+            // only the open-world sims its exits hand players to (looked up at each exit).
+            self.mob_changes.add(self.mobs.set_cells(|_| true));
+            return Ok(Vec::new());
+        }
         if self.is_tutorial() {
             // A tutorial sim owns its whole private level and is in no open-world table; from the
             // table it needs only the sim its exit hands players to.
@@ -1744,16 +1943,25 @@ impl SimWorld {
         self.tick_tutorials(now_ms);
         self.tick_quests(now_ms);
         self.tick_events(now_ms);
+        self.tick_dungeon_script(now_ms);
         self.tick_scripts(now_ms);
         self.drink_due(now_ms, server_time);
+        self.tick_item_effects(now_ms);
         self.tick_stamina(now_ms);
         self.server_ms = server_time;
+        self.tick_status_effects(now_ms);
+        self.tick_falls(now_ms);
+        self.tick_mounts(now_ms);
         self.tick_hands(now_ms, server_time);
         self.tick_pushes(now_ms);
         self.gathers_due(now_ms);
         self.bags.tick(now_ms);
         self.loot_rights_due(server_time);
         self.crafts_due(now_ms);
+        self.tick_fishing(now_ms);
+        self.tick_music(now_ms);
+        self.tick_meta_achievements();
+        self.tick_travel(now_ms);
         self.tick_phasing();
         let mut messages = self.take_messages();
         let bundled = self.bundles(now_ms, server_time)?;
@@ -1918,10 +2126,12 @@ impl SimWorld {
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             // The new lists go on above the ones the client has from the quest before.
             let shown = player.tracker_shown();
+            let pin = player.auto_pin;
             player.quest = Some(
                 QuestTracker::new(&def.id, number)
                     .after(&finished, number)
-                    .above(shown),
+                    .above(shown)
+                    .with_auto_pin(pin),
             );
             player.done_quests.clone_from(&done);
             player.quests_unsaved = true;
@@ -2026,6 +2236,9 @@ impl SimWorld {
                     gear.remove(&item, unix_ns(self.server_ms));
                 }
             }
+        }
+        if let Some(event) = quest.def.success_event.as_deref() {
+            self.grant_event_standing(number, event);
         }
         let items: Vec<(String, u32)> = quest.def.reward.into_iter().chain(reward.item).collect();
         self.give_loot(number, items, self.last_now_ms);
@@ -2505,13 +2718,26 @@ impl SimWorld {
             if player.last_interaction.replace(request.interaction) == Some(request.interaction) {
                 return;
             }
+            self.mount_interaction(entity, now_ms);
             match request.kind {
                 TALK_KIND => self.talk(entity, number, request),
                 CRAFTING_STATION_KIND => self.open_station(entity, number, request),
                 LORE_KIND => self.read_lore(entity, number, request, name, now_ms),
                 GATHER_KIND => self.gather_open_world(entity, number, request, name, now_ms),
+                WATER_GATHER_KIND => self.gather_water(number, request, now_ms),
                 LOOT_KIND => self.take_loot_bag(entity, number, request, now_ms),
-                kind => tracing::debug!(player = number, kind, "interaction of an unknown kind"),
+                item_calls::OPEN_STORAGE_KIND => self.open_storage(entity, number, request, name),
+                economy::TRADING_POST_KIND => {
+                    self.open_trading_post(entity, number, request, name);
+                }
+                kind => {
+                    if !self.travel_interaction(entity, number, request, name, now_ms)
+                        && !self.instance_interaction(entity, number, request, name)
+                        && !self.open_mount_screen(entity, number, request, name)
+                    {
+                        tracing::debug!(player = number, kind, "interaction of an unknown kind");
+                    }
+                }
             }
             return;
         };
@@ -2519,12 +2745,31 @@ impl SimWorld {
         self.carry_out(number, orders, now_ms);
     }
 
-    /// Answers a lookup call of `connection`'s player (contracts, streamer groups, waiting
-    /// meta achievement rewards, lobby counts) with the messages that go out at once; retail
-    /// answered 25 to 60 ms after the call.
+    /// Answers a lookup call of `connection`'s player (streamer groups, waiting meta achievement
+    /// rewards, lobby counts) with the messages that go out at once, retail answered 25 to 60 ms
+    /// after the call; the contracts lookup goes to the trading post.
     pub fn lookup(&mut self, connection: &ConnectionRef, request: &LookupRequest) {
-        if self.by_connection.contains_key(connection) {
-            send_now(&mut self.combat_messages, connection, &[request.answer()]);
+        let Some(&entity) = self.by_connection.get(connection) else {
+            return;
+        };
+        // The waiting meta achievement rewards are the player's (meta achievements module).
+        let answer = match *request {
+            LookupRequest::PendingMetaAchievements { header } => {
+                self.pending_meta_achievements(entity, header)
+            }
+            // The trading post's orders are in the world database (economy module).
+            LookupRequest::Contracts {
+                header,
+                ref query,
+                lookup,
+            } => {
+                self.lookup_contracts(entity, header, query, lookup);
+                None
+            }
+            _ => request.answer(),
+        };
+        if let Some(answer) = answer {
+            send_now(&mut self.combat_messages, connection, &[answer]);
         }
     }
 
@@ -2553,10 +2798,19 @@ impl SimWorld {
             ClientFacetMsg::CancelInteraction { interaction, .. } => {
                 self.cancel_gather(entity, *interaction);
                 self.give_weapon_back(entity, Stow::Gather, now_ms);
+                self.close_container(entity);
                 return Ok(());
             }
             ClientFacetMsg::SetReplicateStorage { storage, .. } => {
-                self.show_bag_items(entity, storage);
+                if !self.show_stored_items(entity, storage) {
+                    self.show_bag_items(entity, storage);
+                }
+                return Ok(());
+            }
+            ClientFacetMsg::TakeAllItems { .. }
+                if !self.tutorials.contains_key(&number)
+                    && self.take_all_open(entity, number, now_ms) =>
+            {
                 return Ok(());
             }
             ClientFacetMsg::AcceptObjective { objective, .. } => {
@@ -2570,30 +2824,124 @@ impl SimWorld {
             ClientFacetMsg::SetCraftingDetails {
                 recipe,
                 quantity,
+                fee,
+                gear_score,
+                perk_items,
                 ingredients,
                 ..
             } => {
-                self.craft(entity, number, *recipe, *quantity, ingredients, now_ms);
+                let choice = crafting::CraftChoice {
+                    gear_score: u32::from(*gear_score),
+                    perk_items: perk_items.clone(),
+                };
+                self.craft(
+                    entity,
+                    number,
+                    *recipe,
+                    *quantity,
+                    *fee,
+                    ingredients,
+                    &choice,
+                    now_ms,
+                );
                 return Ok(());
             }
             ClientFacetMsg::CancelCrafting { .. } => {
                 self.close_station(entity, number);
                 return Ok(());
             }
+            ClientFacetMsg::InitiateSalvage {
+                bag_slot,
+                instance,
+                quantity,
+                ..
+            } => {
+                let target = salvage::SalvageTarget {
+                    bag_slot: *bag_slot,
+                    instance: Some(*instance),
+                    quantity: Some(*quantity),
+                };
+                self.salvage(entity, number, &[target], now_ms);
+                return Ok(());
+            }
+            ClientFacetMsg::SalvageItems { bag_slots, .. } => {
+                let targets: Vec<salvage::SalvageTarget> = bag_slots
+                    .iter()
+                    .map(|bag_slot| salvage::SalvageTarget {
+                        bag_slot: *bag_slot,
+                        instance: None,
+                        quantity: None,
+                    })
+                    .collect();
+                self.salvage(entity, number, &targets, now_ms);
+                return Ok(());
+            }
+            ClientFacetMsg::SalvageByClass {
+                class, rarities, ..
+            } => {
+                self.salvage_by_class(entity, number, *class, *rarities, now_ms);
+                return Ok(());
+            }
             ClientFacetMsg::TerritoryEntered { territory, .. } => {
                 self.territory_changed(entity, *territory, true);
+                self.discover_territory(entity, *territory);
                 return Ok(());
             }
             ClientFacetMsg::TerritoryExited { territory, .. } => {
                 self.territory_changed(entity, *territory, false);
                 return Ok(());
             }
+            // The fallback forms (6733, 6734) name the territory alone; retail sends
+            // no answer, and the area form's discovery does not run.
+            ClientFacetMsg::EnteredTerritoryFallback { territory, .. } => {
+                self.territory_changed(entity, *territory, true);
+                return Ok(());
+            }
+            ClientFacetMsg::ExitedTerritoryFallback { territory, .. } => {
+                self.territory_changed(entity, *territory, false);
+                return Ok(());
+            }
+            ClientFacetMsg::TogglePvpFlag { .. } => {
+                if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                    player.pvp_flagged = !player.pvp_flagged;
+                }
+                return Ok(());
+            }
             // A cutscene and the load of a new level put the weapon away; the flow answers them.
             ClientFacetMsg::RequestCutscene { .. } | ClientFacetMsg::AckLevelInfo { .. } => {
                 self.put_weapon_away(connection, None);
             }
+            ClientFacetMsg::SetObjectiveAutoPin { flags, .. } => {
+                if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                    let pin = flags.iter().any(|flag| *flag != 0);
+                    player.auto_pin = pin;
+                    if let Some(quest) = player.quest.as_mut() {
+                        quest.set_auto_pin(pin);
+                    }
+                }
+                return Ok(());
+            }
+            ClientFacetMsg::SetInputsThrottled { throttled, .. } => {
+                if *throttled
+                    && let Some(mut player) = self.world.get_mut::<Player>(entity)
+                    && !player.throttle_cleared
+                {
+                    player.defer_throttle_clear = true;
+                }
+                return Ok(());
+            }
+            ClientFacetMsg::WhisperStarted { .. } => {}
+            ClientFacetMsg::UpdateTrackedObjectives { objectives, .. } => {
+                if let Some(mut player) = self.world.get_mut::<Player>(entity)
+                    && let Some(quest) = player.quest.as_mut()
+                {
+                    quest.client_pins(objectives);
+                }
+                return Ok(());
+            }
             ClientFacetMsg::LookingThroughLoadout { looking, .. } => {
                 if *looking {
+                    self.mount_inventory_opened(entity, now_ms);
                     self.put_weapon_away(connection, Some(Stow::Inventory));
                 } else {
                     self.give_weapon_back(entity, Stow::Inventory, now_ms);
@@ -2604,6 +2952,13 @@ impl SimWorld {
                     } else {
                         now_ms.saturating_add(LOADOUT_CAMERA_SETTLE_MS)
                     });
+                    // The server answers the open and the close with the new
+                    // `lookingThroughLoadout`; a repeated close changes nothing (retail newchar
+                    // 2026-09-18: one 3935 per change, none for the closes that follow).
+                    if std::mem::replace(&mut player.looking_through_loadout, *looking) != *looking
+                    {
+                        player.loadout_change_due = true;
+                    }
                 }
                 return Ok(());
             }
@@ -2728,7 +3083,13 @@ impl SimWorld {
                     .iter()
                     .map(|item| Order::GiveItem(item.item_id.clone(), 1))
                     .collect();
-                orders.extend(run.event(Event::ContainerLooted, mobs, now_ms));
+                let item_ids: Vec<&str> =
+                    items.iter().map(|item| item.item_id.as_str()).collect();
+                orders.extend(run.event(
+                    Event::ContainerLooted { items: &item_ids },
+                    mobs,
+                    now_ms,
+                ));
                 orders
             }
             _ => Vec::new(),
@@ -2738,19 +3099,25 @@ impl SimWorld {
     }
 
     fn start_handoffs(&mut self, now_ms: u64) -> Vec<HandoffStart> {
+        // The moves into and out of instances go first; their players are frozen then.
+        let mut starts = self.instance_transfers(now_ms);
         if self.is_tutorial() {
-            return self.tutorial_exits(now_ms);
+            starts.extend(self.tutorial_exits(now_ms));
+            return starts;
         }
         let Some(cells) = &self.cells else {
-            return Vec::new();
+            return starts;
         };
         let margin = self.settings.handoff_margin_m;
         let quests = &self.quests;
         let mut query = self.world.query::<(&mut Player, &Body, &Vitals)>();
-        let mut starts = Vec::new();
         for (mut player, body, vitals) in query.iter_mut(&mut self.world) {
             // A dead player stays until its respawn: the next sim could not revive it.
-            if player.frozen || now_ms < player.no_handoff_before_ms || vitals.health.is_dead() {
+            if player.frozen
+                || now_ms < player.no_handoff_before_ms
+                || vitals.health.is_dead()
+                || travel::moved_by_server(&player)
+            {
                 continue;
             }
             let position = body.motion.position();
@@ -2809,6 +3176,13 @@ impl SimWorld {
                     Some(left_ms) if now_ms < left_ms.saturating_add(PHASING_BEFORE_HANDOFF_MS) => {
                         continue;
                     }
+                    // Retail's client acknowledged the empty phasing 4 ms after it (6745).
+                    Some(_) if !player.flow.phasing_acknowledged() => {
+                        tracing::warn!(
+                            player = player.number,
+                            "handoff before the client acknowledged the empty phasing"
+                        );
+                    }
                     Some(_) => {}
                 }
             }
@@ -2861,6 +3235,7 @@ impl SimWorld {
             view: player.view,
             number: player.state_number,
             action: player.slayer.current(),
+            upper: player.slayer.remote_upper(),
             blocking: vitals.blocking(),
             spawned_ms: clock.spawn_ms,
             gear_version,
@@ -2868,6 +3243,8 @@ impl SimWorld {
             hands,
             in_combat: player.combat.in_combat(),
             target: vitals.lock_target(),
+            looking_through_loadout: player.looking_through_loadout,
+            mount: player.mount.remote(),
         }
     }
 
@@ -3095,7 +3472,10 @@ impl SimWorld {
             stations: (!self.is_tutorial()).then_some(&self.stations),
             view_radius_m: self.settings.interest_radius_m,
             bags: &self.bags,
+            performances: &self.performances,
             progression: &content.progression,
+            mutations: &content.mutations,
+            mutation_unix_s: self.unix_s(),
             replicas,
             local_player_card: self.settings.local_player_card,
             now_ms,
@@ -3151,6 +3531,9 @@ impl SimWorld {
         if WorldPosition::from_metres(position.x, position.y, position.z).is_none() {
             return Err(WorldError::NotFinite);
         }
+        if !self.may_enter(arrival.character) {
+            return Err(WorldError::NotInInstance(arrival.character));
+        }
         Ok(())
     }
 
@@ -3164,6 +3547,11 @@ impl SimWorld {
         no_handoff_before_ms: u64,
     ) {
         nw_messages::hold_raw_id(self.raw_ids, arrival.number);
+        let arrival_masteries = tradeskill::arrival_masteries(
+            &arrival.progression.masteries,
+            arrival.backstory.as_deref(),
+            &self.content,
+        );
         let entity = self
             .world
             .spawn((
@@ -3173,13 +3561,17 @@ impl SimWorld {
                     name: arrival.name,
                     look: arrival.look,
                     gear: match &arrival.items {
-                        Some(items) => Some(Gear::carried_in(
-                            &self.content.kits,
-                            arrival.character,
-                            items,
-                            arrival.drawn_weapon,
-                            arrival.active_weapon,
-                        )),
+                        Some(items) => {
+                            let mut gear = Gear::carried_in(
+                                &self.content.kits,
+                                arrival.character,
+                                items,
+                                arrival.drawn_weapon,
+                                arrival.active_weapon,
+                            );
+                            gear.restore_inventory(&self.content.kits, &arrival.inventory);
+                            Some(gear)
+                        }
                         None => Gear::starter(
                             &self.content.kits,
                             arrival.character,
@@ -3213,11 +3605,18 @@ impl SimWorld {
                     slayer: slayer::SlayerTrack::default(),
                     remote_plan: replica::RemotePlan::default(),
                     throttle_cleared: false,
+                    defer_throttle_clear: false,
+                    auto_pin: true,
+                    pvp_flagged: false,
                     own_places: OwnPlaces::default(),
+                    footing: Footing::SPAWN,
+                    footing_sent: Footing::SPAWN,
                     teleport_step: None,
                     refused_since_ms: None,
                     last_grounded: Some(motion.position()),
                     camera_held_until_ms: None,
+                    looking_through_loadout: false,
+                    loadout_change_due: false,
                     own_spawned_ms: None,
                     teleports: 0,
                     quest: None,
@@ -3234,33 +3633,52 @@ impl SimWorld {
                         .then(|| arrival.progression.clone()),
                     arrived_achievements: arrival.progression.achievements,
                     masteries: progression::Masteries::of(
-                        &arrival.progression.masteries,
+                        &arrival_masteries,
                         &self.content.progression,
                         arrival.mastery_versions,
                     )
                     .with_points(
                         &arrival.progression.weapon_points,
                         &self.content.progression,
+                    )
+                    .with_territory_points(&arrival.progression.territory_points)
+                    .with_slots(
+                        &arrival.progression.ability_slots,
+                        &self.content.progression,
                     ),
                     attributes: points::Attributes::of(
                         &arrival.progression.attributes,
                         arrival.attribute_version,
                     ),
+                    meta: meta_achievements::MetaState::of(
+                        &arrival.progression.meta_counters,
+                        &arrival.progression.meta_completed,
+                    ),
+                    title: arrival.progression.title,
+                    title_changed: arrival.progression.title.is_some(),
                     level_sent: None,
                     game_master: arrival.game_master,
                     station: None,
                     last_interaction: None,
                     interacting: false,
                     territories: Vec::new(),
+                    travel: travel::TravelState::of(arrival.progression.travel.clone()),
                     strikes: quest_objects::Strikes::default(),
                     cooldowns: Vec::new(),
                     cooldowns_changed: false,
+                    item_effects: item_calls::ItemEffects::default(),
+                    status_effects: status_effects::StatusEffects::default(),
+                    fall: fall_damage::FallTrack::default(),
                     health_sent: None,
                     life_ms: 0,
                     stamina: Stamina::default(),
+                    mount: mount::PlayerMount::of(&arrival.progression.mounts),
+                    fishing: fishing::PlayerFishing::continuing(arrival.fishing_sequence),
+                    music: music::PlayerMusicState::of(&arrival.progression.music),
                     combat: CombatTimer::default(),
                     list_version: FIRST_VERSION,
                     extra_members: Vec::new(),
+                    social: social_states::PlayerSocial::default(),
                     gathers: 0,
                     node_versions: HashMap::new(),
                     bag_versions: HashMap::new(),
@@ -3268,6 +3686,9 @@ impl SimWorld {
                     statics: StaticViews::default(),
                     assets: AssetViews::default(),
                     solids: None,
+                    arena: instances::ArenaPlayer::of(arrival.progression.arena.clone()),
+                    game_mode: game_mode::GameModePlayer::default(),
+                    mutation_view: mutations::ScheduleView::default(),
                     frozen: false,
                     handoffs,
                     no_handoff_before_ms,
@@ -3331,7 +3752,11 @@ fn shoved_to(from: Position, mob_at: Position, shove: Shove) -> Option<Position>
 
 /// Queues `messages` for the client of `connection` on the reliable message channel; a message
 /// that cannot be encoded is logged and left out.
-fn send_now(outgoing: &mut Vec<Outgoing>, connection: &ConnectionRef, messages: &[ServerMessage]) {
+pub(crate) fn send_now(
+    outgoing: &mut Vec<Outgoing>,
+    connection: &ConnectionRef,
+    messages: &[ServerMessage],
+) {
     let envelopes: Vec<Vec<u8>> = messages
         .iter()
         .filter_map(|message| {
@@ -3355,12 +3780,13 @@ fn send_now(outgoing: &mut Vec<Outgoing>, connection: &ConnectionRef, messages: 
 /// AI also saw the player (955; live-tutorial note, section 7).
 fn targeted(number: u64, mob: u64, tutorial_ai: bool) -> Vec<ServerMessage> {
     use nw_messages::facet::component;
-    let mut messages = vec![ServerMessage::SelectedAsTarget(SelectedAsTargetMsg(
-        TargetMsg {
+    let mut messages = vec![
+        ServerMessage::SelectedAsTarget(SelectedAsTargetMsg(TargetMsg {
             header: nw_messages::FacetHeader::of(component::AI_TARGETABLE, number),
             creature: facet_entity(mob),
-        },
-    ))];
+        })),
+        ServerMessage::HomingOverride(nw_messages::HomingOverrideMsg::clear(number)),
+    ];
     if tutorial_ai {
         messages.push(ServerMessage::PlayerSeenByAi(PlayerSeenByAiMsg {
             header: nw_messages::FacetHeader::of_child(
@@ -3456,6 +3882,10 @@ fn departure_of(
     quests: Option<PlayerQuests>,
     progression: Option<PlayerProgression>,
 ) -> Departure {
+    let inventory = items
+        .as_ref()
+        .and(player.gear.as_ref())
+        .map(Gear::inventory);
     Departure {
         connection: player.connection.clone(),
         character: player.character,
@@ -3463,6 +3893,7 @@ fn departure_of(
         moved_at_ms: body.motion.moved_ms(),
         quests,
         items,
+        inventory,
         progression,
     }
 }
@@ -3545,8 +3976,14 @@ struct Neighbourhood<'a> {
     view_radius_m: f32,
     /// The loot bags.
     bags: &'a loot_bag::LootBags,
+    /// The musical performances.
+    performances: &'a music::Performances,
     /// The level table and the weapon masteries.
     progression: &'a Progression,
+    /// The week's mutated expeditions.
+    mutations: &'a MutationCatalog,
+    /// Unix seconds of this tick, for the mutation week.
+    mutation_unix_s: u64,
     /// Every player as the players who see it get it this tick.
     replicas: HashMap<u64, Replica>,
     local_player_card: bool,
@@ -3601,6 +4038,11 @@ impl Neighbourhood<'_> {
                     numbers.extend(stations.numbers_near(own_position, self.view_radius_m));
                 }
                 numbers.extend(self.bags.numbers_near(own_position, self.view_radius_m));
+                numbers.extend(player.social.group_entity_number());
+                numbers.extend(
+                    self.performances
+                        .numbers_near(own_position, self.view_radius_m),
+                );
             }
             numbers.sort_unstable();
             player.slots.keep_only(&numbers);
@@ -3683,7 +4125,7 @@ impl Neighbourhood<'_> {
                 };
                 let gear = player.gear.as_mut().and_then(|gear| {
                     if first {
-                        Some(gear.states())
+                        Some(gear.first_states())
                     } else {
                         gear.take_change()
                     }
@@ -3761,6 +4203,11 @@ impl Neighbourhood<'_> {
                             component: ABILITY_COMPONENT,
                             state: MemberState::Abilities(state),
                         }),
+                    // The shown title (2474; title choice module).
+                    std::mem::take(&mut player.title_changed).then(|| BundleMember {
+                        component: nw_messages::SOCIAL_COMPONENT,
+                        state: nw_messages::title_state(player.title.unwrap_or_default()),
+                    }),
                 ];
                 // The coins: whole with the first card, then after each change (retail own c60
                 // with each quest reward, beach-quests note).
@@ -3825,12 +4272,19 @@ impl Neighbourhood<'_> {
                 // while its moves are refused: that body is the last good one, behind the client
                 // (live 2026-09-18: 529 refused moves while running and dodging).
                 let plain_tick = own_card != OwnCard::Spawn && teleport.is_none();
+                let hold_throttle = std::mem::take(&mut player.defer_throttle_clear);
                 let tick = OwnTick {
                     clock,
                     with_position: player.refused_since_ms.is_none() || player.push.is_some(),
-                    clear_throttle: plain_tick && !player.throttle_cleared,
+                    clear_throttle: plain_tick && !player.throttle_cleared && !hold_throttle,
                     slayer: player.slayer.take_due(),
                     view: player.view.filter(|view| Some(*view) != player.view_sent),
+                    // Retail's server moves carry no slot 1: a change waits for a plain state.
+                    footing: if plain_tick {
+                        player.footing.change_since(player.footing_sent)
+                    } else {
+                        (None, None)
+                    },
                 };
                 if tick.view.is_some() {
                     player.view_sent = tick.view;
@@ -3847,11 +4301,43 @@ impl Neighbourhood<'_> {
                     tick,
                     &mut player.own_places,
                 )? {
+                    if plain_tick {
+                        player.footing_sent = player.footing;
+                    }
                     for member in point_members.into_iter().flatten() {
                         put_member(&mut group.members, member);
                     }
+                    if let Some(member) = player.status_effects.take_member(first) {
+                        put_member(&mut group.members, member);
+                    }
+                    if let Some(member) = player.mount.take_own_member(first) {
+                        put_member(&mut group.members, member);
+                    }
+                    if let Some(member) = player.fishing.take_own_member(first) {
+                        put_member(&mut group.members, member);
+                    }
+                    if let Some(member) = player.music.take_own_member(first, self.server_time) {
+                        put_member(&mut group.members, member);
+                    }
+                    if achievements.is_some() {
+                        player.mount.achievements_changed();
+                    }
+                    if std::mem::take(&mut player.loadout_change_due) {
+                        put_looking_through_loadout(
+                            &mut group.members,
+                            player.looking_through_loadout,
+                        );
+                    }
                     group.members.append(&mut player.extra_members);
                     groups.push(group);
+                }
+                // The weekly mutations (slot 2), once the client spawned and at each new week.
+                if vitals.spawned {
+                    groups.extend(mutations::schedule_group(
+                        self.mutations,
+                        self.mutation_unix_s,
+                        &mut player.mutation_view,
+                    )?);
                 }
             }
             if let Some(level_info) = player.flow.level_info_due(self.now_ms) {
@@ -3874,6 +4360,29 @@ impl Neighbourhood<'_> {
                 }
             });
             for number in numbers {
+                if (music::PERFORMANCE_ENTITY_BASE..crafting::STATION_ENTITY_BASE).contains(&number)
+                {
+                    if let Some(slot) = player.slots.slot(number) {
+                        let player = &mut **player;
+                        groups.extend(self.performances.group(
+                            number,
+                            slot,
+                            own,
+                            own_position,
+                            &mut player.music.seen,
+                        ));
+                    }
+                    continue;
+                }
+                if (social_states::GROUP_ENTITY_BASE..music::PERFORMANCE_ENTITY_BASE)
+                    .contains(&number)
+                {
+                    let player = &mut **player;
+                    if let Some(slot) = player.slots.slot(number) {
+                        groups.extend(player.social.group_entity_group(number, slot));
+                    }
+                    continue;
+                }
                 if (crafting::STATION_ENTITY_BASE..loot_bag::BAG_ENTITY_BASE).contains(&number) {
                     let group = self
                         .stations
@@ -4037,10 +4546,16 @@ fn handoff_offer(
         client_context: player.client_context,
         enter_level: enters,
         items: player.gear.as_ref().map(Gear::carried),
+        inventory: player
+            .gear
+            .as_ref()
+            .map(Gear::inventory)
+            .unwrap_or_default(),
         drawn_weapon: player.gear.as_ref().and_then(Gear::drawn),
         active_weapon: player.gear.as_ref().map(Gear::active),
         mastery_versions: player.masteries.versions(),
         attribute_version: player.attributes.version(),
+        fishing_sequence: player.fishing.next_sequence(),
         game_master: player.game_master,
         quests,
         progression: player.progression(),
@@ -4155,16 +4670,19 @@ mod tests {
                 item_id: gear::tests::FLINT.to_owned(),
                 quantity: TARGET_QTY,
                 place: ItemPlace::Bag(0),
+                state: nw_bus::ItemState::default(),
             },
             CarriedItem {
                 item_id: gear::tests::POTION.to_owned(),
                 quantity: IN_BAG,
                 place: ItemPlace::Bag(1),
+                state: nw_bus::ItemState::default(),
             },
             CarriedItem {
                 item_id: gear::tests::POTION.to_owned(),
                 quantity: IN_QUICK_SLOT,
                 place: ItemPlace::Worn(QUICK_SLOT_1),
+                state: nw_bus::ItemState::default(),
             },
         ];
         let mut gear = Gear::carried_in(
@@ -4269,8 +4787,13 @@ mod tests {
             local_player_card: true,
             level: OPEN_WORLD_LEVEL,
             ocean_level_m: OCEAN_LEVEL_M,
+            instance_role: false,
+            instance_request_timeout_ms: INSTANCE_REQUEST_TIMEOUT_MS,
         }
     }
+
+    /// The instance request wait of the test worlds.
+    const INSTANCE_REQUEST_TIMEOUT_MS: u64 = 3000;
 
     fn world_of(name: &str, settings: WorldSettings) -> SimWorld {
         SimWorld::new(
@@ -4367,6 +4890,7 @@ mod tests {
             look: None,
             backstory: None,
             items: None,
+            inventory: PlayerInventory::default(),
             quests: PlayerQuests::default(),
             progression: PlayerProgression::default(),
             game_master: false,
@@ -4954,10 +5478,13 @@ mod tests {
         for number in 1..=3 {
             join(&mut world, number, CELL_M / 2.0 + number as f32);
         }
+        /// One mutation-scheduler member for each spawned player.
+        const SCHEDULE_MEMBERS: u64 = 3;
         assert_eq!(
             tick(&mut world, NOW + OWN_CARD_DELAY_MS).bundle_members,
-            9 * (2 + PLAYER_EMPTY_COMPONENTS.len() as u64),
-            "3 bundles of 3 groups, each a card, the empty player components and a position"
+            9 * (2 + PLAYER_EMPTY_COMPONENTS.len() as u64) + SCHEDULE_MEMBERS,
+            "3 bundles of 3 groups, each a card, the empty player components and a position, \
+             plus one scheduler member per player"
         );
     }
 
@@ -5782,6 +6309,7 @@ mod tests {
                 .iter()
                 .map(|(index, cell)| (*index, (*cell).to_owned()))
                 .collect(),
+            ..LootRow::default()
         };
         let gatherables = Gatherables::build([Gatherable {
             id: FLINT.to_owned(),
@@ -6175,6 +6703,15 @@ mod tests {
                     by_hand: false,
                     game_event: None,
                 }]),
+                // The T1 skinning knife's gathering efficiency range (2 to 2): retail skinned
+                // the boar in 7.5 s of its 15 s.
+                tools: nw_content::gathering::ToolEfficiencies::build([(
+                    KNIFE.to_owned(),
+                    nw_content::gathering::ToolEfficiency {
+                        efficiency: (2.0, 2.0),
+                        gear_score: (0, 0),
+                    },
+                )]),
                 recipes: Recipes::build(
                     [
                         Recipe {
@@ -6327,8 +6864,10 @@ mod tests {
             header,
             recipe: lowercase_crc32(recipe),
             quantity: 1,
+            fee: 0,
+            gear_score: 0,
+            perk_items: Vec::new(),
             unknown: 0,
-            details: 0,
             ingredients: items
                 .iter()
                 .map(|item| nw_messages::CraftIngredient {
@@ -7342,6 +7881,10 @@ mod tests {
         /// The slayer start child (slayer note).
         const STARTED_IN: usize = 14;
         let mut world = two_players();
+        let sequences = crate::combat::test_support::test_player_sequences();
+        let data = std::sync::Arc::clone(&world.combat.data);
+        world.combat.data =
+            std::sync::Arc::new(data.as_ref().clone().with_player_sequences(sequences));
         let (a, b) = (connection(1), connection(2));
         let entity = world.by_connection[&a];
         let at = world
@@ -7354,10 +7897,14 @@ mod tests {
             yaw: 0.0,
             pitch: 0.3,
         };
-        let attack = InputRecord {
+        /// The attack-key release (value 2, bit 31). This follow-up starts at that release.
+        const RELEASE_SLOT: usize = 2;
+        const RELEASE_BIT: u32 = 31;
+        let mut attack = InputRecord {
             row_1: Some([STARTED, 0x002c_000a, 0]),
             ..camera_record(RECORD, at, view, [0.0; 2], STANDING_SLOTS)
         };
+        attack.slots.values[RELEASE_SLOT] |= 1 << RELEASE_BIT;
         let _ = world.move_from_input(&a, &[attack], NOW + 33);
         let sequence_bytes = |sequence: u64| {
             nw_messages::wire::Writer::new()
@@ -7387,9 +7934,10 @@ mod tests {
             "the other player sees it in the same tick"
         );
         let next = tick(&mut world, NOW + 66);
+        let followed = sequences(&world, &next.messages, &a);
         assert!(
-            sequences(&world, &next.messages, &a).contains(&sequence_bytes(FOLLOW_UP)),
-            "the server's follow-up"
+            followed.contains(&sequence_bytes(FOLLOW_UP)),
+            "the server's follow-up: {followed:?}"
         );
         assert!(sequences(&world, &next.messages, &b).contains(&sequence_bytes(FOLLOW_UP)));
     }
@@ -7671,6 +8219,7 @@ mod tests {
             max_roll,
             trigger_limit_on_visit: false,
             cells: cells.into_iter().collect(),
+            ..LootRow::default()
         };
         let column = |value: &dyn Fn(&(&str, &str)) -> String| -> Vec<(u32, String)> {
             (1..).zip(cells.iter().map(value)).collect()
@@ -7814,6 +8363,8 @@ mod tests {
         const ACHIEVEMENT_BIT: u32 = 15_317;
         let counted_ns = loot_bag::unix_ns(SERVER_TIME);
         let week_ns = u64::try_from(WEEKLY_EXPIRE_S).expect("week") * NS_PER_SECOND;
+        // Still ahead of this server time, so arrival keeps the saved refresh.
+        let refresh_ns = counted_ns + week_ns;
         PlayerProgression {
             experience: 1_250,
             coins: 375,
@@ -7822,11 +8373,19 @@ mod tests {
                 limit_id: gear::tests::FLINT.to_lowercase(),
                 count: 1,
                 counted_ns,
-                ends_ns: counted_ns + week_ns,
+                ends_ns: refresh_ns,
             }],
+            arena: nw_bus::PlayerArena {
+                next_base_refresh_ns: refresh_ns,
+                next_mutated_refresh_ns: refresh_ns,
+                next_group_trial_refresh_ns: refresh_ns,
+                ..nw_bus::PlayerArena::default()
+            },
             masteries: BTreeMap::new(),
             attributes: Vec::new(),
             weapon_points: Vec::new(),
+            travel: nw_bus::PlayerTravel::default(),
+            ..PlayerProgression::default()
         }
     }
 
@@ -8925,6 +9484,15 @@ mod tests {
             None,
             "the place in the air is no floor"
         );
+        // Run 15: the client stood at the swim height until its own state said deep water.
+        let entity = world.player_by_number(1).expect("player");
+        let player = world.world.get::<Player>(entity).expect("player");
+        assert_eq!(
+            player.footing.water,
+            nw_sim_core::WaterDepth::Shallow,
+            "the next own state tells its client to swim"
+        );
+        assert_ne!(player.footing, player.footing_sent, "a change to send");
     }
 
     #[test]
@@ -9046,6 +9614,48 @@ mod tests {
             assert!(result.is_ok(), "{result:?}");
             assert!(body.horizontal_distance(target) < CLOSE_M, "{body:?}");
         }
+    }
+
+    #[test]
+    fn the_inventory_open_and_close_go_back_to_the_client_as_looking_through_loadout() {
+        const TICK_MS: u64 = 33;
+        let mut world = world();
+        let a = connection(1);
+        join(&mut world, 1, 0.0);
+        tick(&mut world, NOW);
+        let loadout = |looking| ClientFacetMsg::LookingThroughLoadout {
+            header: nw_messages::FacetHeader::of(nw_messages::facet::component::PLAYER, 1),
+            looking,
+        };
+        let looking_of = |states: Vec<MemberState>| -> Vec<bool> {
+            states
+                .into_iter()
+                .filter_map(|state| match state {
+                    MemberState::PlayerComponent(state) => state.looking_through_loadout,
+                    _ => None,
+                })
+                .collect()
+        };
+        // Retail newchar 2026-09-18: `04 10 01` 37 ms after the open, `04 10 00` 36 ms after
+        // the close; the client closed an inventory the server never answered (live run 15).
+        let mut at = NOW;
+        for (looking, sent) in [(true, vec![true]), (false, vec![false]), (false, vec![])] {
+            at += TICK_MS;
+            world
+                .facet_message(&a, loadout(looking), at)
+                .expect("loadout");
+            let out = tick(&mut world, at);
+            assert_eq!(
+                looking_of(states_of(&world, &out.messages, &a, 1)),
+                sent,
+                "after {looking}"
+            );
+        }
+        let out = tick(&mut world, at + TICK_MS);
+        assert!(
+            looking_of(states_of(&world, &out.messages, &a, 1)).is_empty(),
+            "once per change"
+        );
     }
 
     #[test]
@@ -9214,7 +9824,12 @@ mod tests {
             .expect("login messages");
         assert_eq!(login.channel, MESSAGE_CHANNEL);
         assert!(login.reliable);
-        assert_eq!(login.envelopes.len(), LOGIN_MESSAGE_TYPES.len());
+        /// 4970 follows the seven login messages.
+        const LEFT_QUEUE_MESSAGE: usize = 1;
+        assert_eq!(
+            login.envelopes.len(),
+            LOGIN_MESSAGE_TYPES.len() + LEFT_QUEUE_MESSAGE
+        );
         let outgoing = tick(&mut world, NOW + OWN_CARD_DELAY_MS).messages;
         assert_eq!(seen_by(&world, &outgoing, &connection(77)), vec![77]);
     }
@@ -9438,13 +10053,23 @@ mod tests {
     fn each_lookup_call_is_answered_at_once() {
         let mut world = world();
         join(&mut world, 1, 0.0);
-        let contracts = nw_messages::FacetHeader::of(0x8c86_dd8a_8b3f_d4c0, 1);
+        let contracts =
+            nw_messages::FacetHeader::of(nw_messages::contracts::CONTRACTS_COMPONENT, 1);
         let lobbies = nw_messages::FacetHeader::of(0xe6db_502a_b7ab_2bb2, 1);
         let lookup = [7; nw_messages::wire::RAW_ID_LEN];
         world.lookup(
             &connection(1),
             &LookupRequest::Contracts {
                 header: contracts,
+                query: nw_messages::contracts::ParticipantQuery {
+                    participant: nw_messages::contracts::Participant::NONE,
+                    open_filter: nw_messages::contracts::open_filter::OPEN,
+                    role_filter: nw_messages::contracts::role_filter::CREATOR,
+                    page: 0,
+                    page_size: 10,
+                    kinds: vec![1],
+                    tail: Vec::new(),
+                },
                 lookup,
             },
         );
@@ -9463,18 +10088,21 @@ mod tests {
         let answers = messages_to(&sent, 1);
         assert!(matches!(
             &answers[..],
-            [
-                ServerMessage::ContractsLookedUp(found),
-                ServerMessage::LobbyCounts(counts),
-            ] if found.header == contracts
-                && found.lookup == lookup
-                && found.contracts == nw_messages::lookups::NO_CONTRACTS
-                && counts.header == lobbies
+            [ServerMessage::LobbyCounts(counts)] if counts.header == lobbies
                 && counts.counts == vec![0; nw_messages::lookups::LOBBY_COUNT_SLOTS]
         ));
         assert!(
             messages_to(&sent, 2).is_empty(),
             "no answer for a connection without a player"
+        );
+        let jobs = world.take_economy_jobs();
+        assert!(
+            matches!(
+                &jobs[..],
+                [economy::EconomyJob::CharacterLookup { caller, wanted }]
+                    if caller.header == contracts && caller.request == lookup && wanted.open
+            ),
+            "the trading post answers the contracts lookup from the world database"
         );
     }
 

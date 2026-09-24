@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use crate::Tables;
+use crate::perks::{PERK_SLOTS, PerkTable, parts};
 
 /// The item type whose rows the client leaves out of its item index.
 const HOUSING_ITEM_TYPE: &str = "HousingItem";
@@ -80,6 +81,10 @@ pub struct ItemRow {
     pub durability: Option<u32>,
     /// `BindOnPickup` is set.
     pub bind_on_pickup: bool,
+    /// `MaxStackSize`.
+    pub max_stack: Option<u32>,
+    /// Its fixed perks (`Perk1..5`, swapped and in slot order).
+    pub perks: Vec<String>,
 }
 
 /// The plain content of the kit datasheets.
@@ -89,12 +94,15 @@ pub struct StarterSource {
     pub item_sheets: Vec<(String, Vec<ItemRow>)>,
     /// `BackstoryDefinition`: (backstory id, `InventoryItem` cell).
     pub backstories: Vec<(String, String)>,
+    /// The wire perk index of each lowercase perk id ([`PerkTable`]).
+    pub perk_indexes: HashMap<String, u32>,
 }
 
 impl StarterSource {
     /// The kit content of `tables`.
     pub fn from_tables(tables: &Tables) -> Self {
         let number = |value: Option<i64>| value.and_then(|value| u32::try_from(value).ok());
+        let perks = PerkTable::from_tables(tables);
         Self {
             item_sheets: tables
                 .master_item_definitions
@@ -111,6 +119,21 @@ impl StarterSource {
                                 .or_else(|| number(row.min_gear_score)),
                             durability: number(row.durability),
                             bind_on_pickup: row.bind_on_pickup.is_some_and(|bind| bind != 0),
+                            max_stack: row
+                                .max_stack_size
+                                .as_deref()
+                                .and_then(|size| size.trim().parse().ok()),
+                            perks: perks.fixed_perks(
+                                &row.item_id,
+                                &parts(row.item_class.as_deref()),
+                                [
+                                    row.perk1.as_deref(),
+                                    row.perk2.as_deref(),
+                                    row.perk3.as_deref(),
+                                    row.perk4.as_deref(),
+                                    row.perk5.as_deref(),
+                                ],
+                            ),
                         })
                         .collect();
                     (table.unique_id.clone(), rows)
@@ -125,8 +148,44 @@ impl StarterSource {
                     Some((row.backstory_id.clone(), items))
                 })
                 .collect(),
+            perk_indexes: perks.indexes(),
         }
     }
+}
+
+/// The housing items of `tables` in client order: the rows with a `HouseItemID` of the housing
+/// item sheets, the sheets in byte order of their unique id and each one's rows in file order;
+/// each with its `MaxStackSize`.
+pub fn housing_rows(tables: &Tables) -> Vec<(String, Option<u32>)> {
+    let mut sheets: Vec<_> = tables
+        .variation_data
+        .iter()
+        .filter(|table| table.rows.iter().any(|row| row.house_item_id.is_some()))
+        .collect();
+    sheets.sort_by(|left, right| left.unique_id.as_bytes().cmp(right.unique_id.as_bytes()));
+    sheets
+        .into_iter()
+        .flat_map(|table| &table.rows)
+        .filter_map(|row| {
+            let max_stack = row
+                .max_stack_size
+                .and_then(|size| u32::try_from(size).ok());
+            Some((row.house_item_id.clone()?, max_stack))
+        })
+        .collect()
+}
+
+/// The wire slots of `perk_ids` by `indexes` (lowercase perk id → wire index): slot order kept,
+/// a perk the client does not know and a perk past the last slot left out, 0 for an empty slot.
+fn perk_slots(indexes: &HashMap<String, u32>, perk_ids: &[String]) -> [u32; PERK_SLOTS] {
+    let mut slots = [0; PERK_SLOTS];
+    let known = perk_ids
+        .iter()
+        .filter_map(|perk_id| indexes.get(&perk_id.to_lowercase()).copied());
+    for (slot, index) in slots.iter_mut().zip(known) {
+        *slot = index;
+    }
+    slots
 }
 
 /// One item of the item catalog.
@@ -144,6 +203,12 @@ pub struct KitItem {
     pub durability: u32,
     /// Whether it is bound to the character.
     pub bound: bool,
+    /// The most one stack holds (`MaxStackSize`); `None` when its row gives no number.
+    pub max_stack: Option<u32>,
+    /// Its fixed perks in slot order.
+    pub perk_ids: Vec<String>,
+    /// Its fixed perks as wire perk indexes, in slot order (0: empty).
+    pub perks: [u32; PERK_SLOTS],
 }
 
 /// The kits of one backstory.
@@ -160,12 +225,48 @@ struct Kit {
 pub struct StarterKits {
     kits: HashMap<String, Kit>,
     items: HashMap<String, KitItem>,
+    /// The wire perk index of each lowercase perk id.
+    perk_indexes: HashMap<String, u32>,
 }
 
 impl StarterKits {
-    /// The kits of `tables`.
+    /// The kits of `tables`, with its housing items ([`housing_rows`]).
     pub fn from_tables(tables: &Tables) -> Self {
-        Self::build(StarterSource::from_tables(tables))
+        Self::build(StarterSource::from_tables(tables)).with_housing(housing_rows(tables))
+    }
+
+    /// These kits with the housing items `rows` (item id and `MaxStackSize`, in client order)
+    /// numbered after the other items: the client numbers them after its master item index
+    /// (travel2 furniture note: retail 3277 item 45982 is `House_HousingItem_Bed_Settler_Bed02_C`,
+    /// the 444th housing row; every placed item of the two furniture captures falls in the
+    /// range). An id the kits have already keeps its index.
+    pub fn with_housing(mut self, rows: impl IntoIterator<Item = (String, Option<u32>)>) -> Self {
+        let first = self
+            .items
+            .values()
+            .map(|item| item.item_index)
+            .max()
+            .unwrap_or_default()
+            .saturating_add(1);
+        for (item_index, (item_id, max_stack)) in (first..).zip(rows) {
+            self.items.entry(item_id.clone()).or_insert(KitItem {
+                item_id,
+                item_index,
+                slot: None,
+                gear_score: 0,
+                durability: 0,
+                bound: false,
+                max_stack,
+                perk_ids: Vec::new(),
+                perks: [0; PERK_SLOTS],
+            });
+        }
+        self
+    }
+
+    /// The item of client item index `index`.
+    pub fn item_at(&self, index: u32) -> Option<&KitItem> {
+        self.items.values().find(|item| item.item_index == index)
     }
 
     /// The kits of `source`. A kit item that has no item row or no worn slot is left out.
@@ -188,6 +289,9 @@ impl StarterKits {
                     gear_score: row.gear_score.unwrap_or_default(),
                     durability: row.durability.unwrap_or_default(),
                     bound: row.bind_on_pickup,
+                    max_stack: row.max_stack,
+                    perk_ids: row.perks.clone(),
+                    perks: perk_slots(&source.perk_indexes, &row.perks),
                 };
                 (row.item_id.clone(), item)
             })
@@ -210,7 +314,11 @@ impl StarterKits {
                 (backstory.clone(), kit)
             })
             .collect();
-        Self { kits, items }
+        Self {
+            kits,
+            items,
+            perk_indexes: source.perk_indexes,
+        }
     }
 
     /// The items that a character of `backstory` has equipped at login, in kit order; `None` for
@@ -230,6 +338,11 @@ impl StarterKits {
     /// The item `item_id`.
     pub fn item(&self, item_id: &str) -> Option<&KitItem> {
         self.items.get(item_id)
+    }
+
+    /// The wire slots of `perk_ids` (in slot order; unknown perks left out).
+    pub fn perk_slots(&self, perk_ids: &[String]) -> [u32; PERK_SLOTS] {
+        perk_slots(&self.perk_indexes, perk_ids)
     }
 }
 
@@ -251,6 +364,8 @@ mod tests {
     const ARMOR_DURABILITY: u32 = 375;
     const SWORD_GEAR_SCORE: u32 = 60;
     const SWORD_DURABILITY: u32 = 1000;
+    const SWORD_PERK: &str = "PerkID_StatSwap_BaseDamage";
+    const SWORD_PERK_INDEX: u32 = 1203;
 
     fn row(item_id: &str, item_class: &str, gear_score: u32, durability: u32) -> ItemRow {
         ItemRow {
@@ -260,6 +375,8 @@ mod tests {
             gear_score: Some(gear_score),
             durability: Some(durability),
             bind_on_pickup: true,
+            max_stack: Some(1),
+            perks: Vec::new(),
         }
     }
 
@@ -296,12 +413,15 @@ mod tests {
                             item_type: Some("Consumable".to_owned()),
                             ..armor("PotionHealthT1", "Consumable+Potion")
                         },
-                        row(
-                            "1hSwordT2_FTUE",
-                            "Weapon+EquippableMainHand+Sword+Melee",
-                            SWORD_GEAR_SCORE,
-                            SWORD_DURABILITY,
-                        ),
+                        ItemRow {
+                            perks: vec![SWORD_PERK.to_owned(), "PerkID_Unknown".to_owned()],
+                            ..row(
+                                "1hSwordT2_FTUE",
+                                "Weapon+EquippableMainHand+Sword+Melee",
+                                SWORD_GEAR_SCORE,
+                                SWORD_DURABILITY,
+                            )
+                        },
                     ],
                 ),
             ],
@@ -312,6 +432,7 @@ mod tests {
                  SwordsmanArchetype_2hGreatsword:0,NoSuchItem:1"
                     .to_owned(),
             )],
+            perk_indexes: HashMap::from([(SWORD_PERK.to_lowercase(), SWORD_PERK_INDEX)]),
         }
     }
 
@@ -351,6 +472,12 @@ mod tests {
             (sword.gear_score, sword.durability, sword.bound),
             (SWORD_GEAR_SCORE, SWORD_DURABILITY, true)
         );
+        assert_eq!(sword.perks, [SWORD_PERK_INDEX, 0, 0, 0, 0]);
+        assert_eq!(sword.perk_ids.len(), 2);
+        assert_eq!(
+            kits.perk_slots(&[SWORD_PERK.to_uppercase()]),
+            [SWORD_PERK_INDEX, 0, 0, 0, 0]
+        );
         assert_eq!(kits.kit("Archetype_Nobody"), None);
     }
 
@@ -365,5 +492,26 @@ mod tests {
             Some(EquipSlot::OffHand)
         );
         assert_eq!(EquipSlot::of_item_class("Consumable+Potion"), None);
+    }
+
+    #[test]
+    fn housing_items_take_the_indexes_after_the_other_items() {
+        const BED: &str = "House_HousingItem_Bed_Settler_Bed02_C";
+        let kits = StarterKits::build(source());
+        let last = kits
+            .items
+            .values()
+            .map(|item| item.item_index)
+            .max()
+            .expect("items");
+        let kits = kits.with_housing([
+            ("DEFAULTS".to_owned(), None),
+            (BED.to_owned(), Some(1)),
+            ("PotionHealthT1".to_owned(), None),
+        ]);
+        let bed = kits.item(BED).expect("bed");
+        assert_eq!((bed.item_index, bed.slot, bed.max_stack), (last + 2, None, Some(1)));
+        assert_eq!(kits.item_at(last + 2).map(|item| item.item_id.as_str()), Some(BED));
+        assert_eq!(kits.item("PotionHealthT1").map(|item| item.item_index), Some(1));
     }
 }

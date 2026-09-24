@@ -13,6 +13,11 @@
 //! writes its own values there ([`EntityMember::patched_body`]); nothing is searched at load
 //! time.
 //!
+//! A member body has no length on the wire, so the tool keeps only the states of classes that
+//! it can read. In a spawn group it leaves out a state of another class and keeps the rest, so a
+//! spawn can lack a state that retail sent with it; a change group with such a state is left
+//! out whole.
+//!
 //! The same file holds the level's entities whose card names an asset ([`FtueLevel`], FTUE level
 //! entity note): the lightning slices, the encounters, the AI spawn markers, the teleporters, the
 //! loot containers and the boss's spell slices. Their `GdeRef`s are made per spawn, so a server

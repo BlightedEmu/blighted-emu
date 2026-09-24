@@ -48,6 +48,10 @@ pub mod component {
     pub const CRAFTING: u64 = 0xf7e4_6d7c_2327_3ef2;
     /// `WhisperPlayerComponent` (retail 2026-09-18: the 5070 target less the player entity).
     pub const WHISPER_PLAYER: u64 = 0x5442_5e1a_b303_2637;
+    /// `ActionListComponent` (retail newchar 2026-09-18: the 998 target less the player entity).
+    pub const ACTION_LIST: u64 = 0x3c59_1a4e_a3c2_ad75;
+    /// `HomingComponent` (retail newchar 2026-09-18: the 1790 target less the player entity).
+    pub const HOMING: u64 = 0xad9a_1342_9d1d_3c9c;
     /// `GameModeParticipantComponent` (retail 2026-09-18: the 6426 target less the player
     /// entity).
     pub const GAME_MODE_PARTICIPANT: u64 = 0x8de6_3359_0b8f_bee0;
@@ -71,6 +75,24 @@ pub const CINEMATIC_ENDED_TYPE_INDEX: u64 = 6542;
 pub const REQUEST_CUTSCENE_TYPE_INDEX: u64 = 6703;
 /// Type index of `PlayerCutsceneComponentServerFacet_OnClientCutsceneEnded`.
 pub const CUTSCENE_ENDED_TYPE_INDEX: u64 = 6705;
+/// Type index of `PlayerCutsceneComponentServerFacet_OnClientCutsceneStarted`.
+pub const CUTSCENE_STARTED_TYPE_INDEX: u64 = 6706;
+/// Type index of `ObjectivesComponentServerFacet_UpdateTrackedObjectives`.
+pub const UPDATE_TRACKED_OBJECTIVES_TYPE_INDEX: u64 = 1458;
+/// Type index of `ObjectivesComponentServerFacet_SetObjectiveAutoPinning`.
+pub const SET_OBJECTIVE_AUTO_PIN_TYPE_INDEX: u64 = 2709;
+/// Type index of `ActionListComponentServerFacet_SetInputsThrottled`.
+pub const SET_INPUTS_THROTTLED_TYPE_INDEX: u64 = 998;
+/// Type index of `WhisperPlayerComponentServerFacet_RequestStartWhisper`.
+pub const WHISPER_STARTED_TYPE_INDEX: u64 = 5235;
+/// Type index of `HomingComponentClientFacet_SetHomingOverrideTarget`.
+pub const HOMING_OVERRIDE_TYPE_INDEX: u64 = 1790;
+/// Type index of `GameModeParticipantComponentClientFacet_OnLeftQueueForGameModeMsg`.
+pub const LEFT_GAME_MODE_QUEUE_TYPE_INDEX: u64 = 4970;
+/// The 1790 word retail sends when a mob picks the player and no homing target is set.
+pub const NO_HOMING_OVERRIDE: u32 = u32::MAX;
+/// The 4970 value retail sends as the player enters the tutorial (one left the queue).
+pub const LEFT_QUEUE_ONCE: u64 = 1;
 /// Type index of `PaperdollComponentServerFacet_ServerUnequipItem`.
 pub const UNEQUIP_ITEM_TYPE_INDEX: u64 = 3896;
 /// Type index of `InteractorComponentServerFacet_RequestCancelCommittedInteractionFromClient`.
@@ -127,10 +149,22 @@ pub const SET_CRAFTING_DETAILS_TYPE_INDEX: u64 = 2997;
 pub const CANCEL_CRAFTING_TYPE_INDEX: u64 = 2999;
 /// Type index of `CraftingComponentClientFacet_OnCraftingProgressUpdate`.
 pub const CRAFTING_PROGRESS_TYPE_INDEX: u64 = 2993;
+/// Type index of `CraftingComponentServerFacet_InitiateSalvage`.
+pub const INITIATE_SALVAGE_TYPE_INDEX: u64 = 1733;
+/// Type index of `CraftingComponentServerFacet_SalvageItemsInInventory`.
+pub const SALVAGE_ITEMS_TYPE_INDEX: u64 = 6188;
+/// Type index of `CraftingComponentServerFacet_InitiateSalvageByClass`.
+pub const SALVAGE_BY_CLASS_TYPE_INDEX: u64 = 6024;
 /// Type index of `TerritoryDetectorComponentServerFacet_AttemptTerritoryUnlock`.
 pub const TERRITORY_ENTERED_TYPE_INDEX: u64 = 2297;
 /// Type index of `TerritoryDetectorComponentServerFacet_AttemptTerritoryExit`.
 pub const TERRITORY_EXITED_TYPE_INDEX: u64 = 6416;
+/// Type index of `ObjectivesComponentServerFacet_EnteredTerritoryFallback`.
+pub const ENTERED_TERRITORY_FALLBACK_TYPE_INDEX: u64 = 6733;
+/// Type index of `ObjectivesComponentServerFacet_ExitedTerritoryFallback`.
+pub const EXITED_TERRITORY_FALLBACK_TYPE_INDEX: u64 = 6734;
+/// Type index of `FactionComponentServerFacet_RequestTogglePvpFlag`.
+pub const TOGGLE_PVP_FLAG_TYPE_INDEX: u64 = 2525;
 /// Type index of `WhisperPlayerComponentClientFacet_RequestStartWhisper`.
 pub const START_WHISPER_TYPE_INDEX: u64 = 5070;
 /// Type index of `GameModeParticipantComponentClientFacet_OnGameModeSchedulerRefreshed`.
@@ -248,6 +282,46 @@ pub enum ClientFacetMsg {
     CutsceneEnded {
         /// The header.
         header: FacetHeader,
+    },
+    /// 6706: the client started the cutscene it was granted. The id is the CRC-32 of its
+    /// lowercase name (retail newchar 2026-09-18: `a81bd1af` after the crew cutscene grant).
+    CutsceneStarted {
+        /// The header.
+        header: FacetHeader,
+        /// The cutscene.
+        cutscene: u32,
+    },
+    /// 1458: the quests the client has pinned. A count of 0 clears the pin (retail newchar
+    /// 2026-09-18: `00`, then `01` and one objective instance).
+    UpdateTrackedObjectives {
+        /// The header.
+        header: FacetHeader,
+        /// The pinned objective instances, in the client's order.
+        objectives: Vec<u64>,
+    },
+    /// 2709: which objective kinds the client pins on its own. Retail newchar sends a count
+    /// then that many flags (`24` and 36 bytes, one of them 0).
+    SetObjectiveAutoPin {
+        /// The header.
+        header: FacetHeader,
+        /// One flag per kind. A set flag pins that kind.
+        flags: Vec<u8>,
+    },
+    /// 998: the client applied the input throttle (`01`) or left it (`00`). Retail sends it
+    /// each time the server's movement-flag bit changes.
+    SetInputsThrottled {
+        /// The header.
+        header: FacetHeader,
+        /// Whether the client is throttling its input.
+        throttled: bool,
+    },
+    /// 5235: the client started the whisper the server asked for (5070). The id is the
+    /// CRC-32 of the lowercase whisper id.
+    WhisperStarted {
+        /// The header.
+        header: FacetHeader,
+        /// The whisper.
+        whisper: u32,
     },
     /// 4248: the client's time component asks for the time of day (facets note: retail answers
     /// with 4246 and 4247 at entry and after the exit, and sends them at no other time).
@@ -398,11 +472,19 @@ pub enum ClientFacetMsg {
         recipe: u32,
         /// How many to craft.
         quantity: u32,
-        /// A number of unknown meaning (0 in the captures).
-        unknown: u32,
-        /// A number of unknown meaning: `0x0064_0000` for the tools, 0 for food (Inferred: its
-        /// high half is the tools' gear score 100).
-        details: u32,
+        /// The coins the craft costs as the client shows it: the recipes' `CraftingFee` after
+        /// the station's tax (Observed: retail took exactly this many coins at 34 of 34 crafts
+        /// of four ledgers, `refining_all_stations_single_batch_territorylvlup`, `Refining`,
+        /// `Crafting_Forge`, `craft_one_and_batch_craft`; 0 for the beach campfire).
+        fee: u32,
+        /// The gear score the player picked (run-15 items2: retail made every item of a craft
+        /// at exactly this gear score, 18 items of four crafts; 100 for the tools, 0 for food).
+        gear_score: u16,
+        /// The perk items the player added: the CRC-32 of each one's lowercase item id
+        /// (retail spear craft: one `WhetstoneT1`).
+        perk_items: Vec<u32>,
+        /// A byte of unknown meaning after the perk items (0 in every retail request).
+        unknown: u8,
         /// The ingredients the player picked.
         ingredients: Vec<CraftIngredient>,
     },
@@ -410,6 +492,45 @@ pub enum ClientFacetMsg {
     CancelCrafting {
         /// The header.
         header: FacetHeader,
+    },
+    /// 1733: the player salvages one bag item, or opens a loot container item (salvage note:
+    /// retail `Playthrough_Part_03`, `MSQ6-lv28` and two other ledgers, 173 calls).
+    InitiateSalvage {
+        /// The header (the player's `CraftingComponent`).
+        header: FacetHeader,
+        /// A number of unknown meaning (1 in all 173 retail calls).
+        first: u32,
+        /// The bag slot of the item.
+        bag_slot: u32,
+        /// The item's instance id.
+        instance: [u8; RAW_ID_LEN],
+        /// A number of unknown meaning (0 in all 173 retail calls).
+        unknown: u32,
+        /// How many of the stack to salvage (Inferred: 1 in all 173 retail calls, and a stack
+        /// of two loot containers lost one).
+        quantity: u32,
+    },
+    /// 6188: the player salvages the items of several bag slots at once (retail
+    /// `20261008-145727-200`: two calls of 7 and 6 slots; each slot's item went).
+    SalvageItems {
+        /// The header (the player's `CraftingComponent`).
+        header: FacetHeader,
+        /// The bag slots.
+        bag_slots: Vec<u32>,
+    },
+    /// 6024: the player salvages every bag item of one UI item class (craft2 report: 17 retail
+    /// calls in 7 ledgers; the client's `SalvageAllByClass` writes a u32, a u64 and a u8).
+    SalvageByClass {
+        /// The header (the player's `CraftingComponent`).
+        header: FacetHeader,
+        /// The container (Inferred: 1 the bag in all 17 calls, as the first number of 1733).
+        container: u32,
+        /// The `eItemClass` number of the UI class (71 `UI_Weapon`, 72 `UI_Armor`;
+        /// `nw_content::ui_item_class`).
+        class: u64,
+        /// The rarities it takes, bit `n` for rarity `n` (Inferred: 0x1f in all 17 calls took
+        /// items of 0 to 5 perks).
+        rarities: u8,
     },
     /// 2297: the player came into a territory area: a point of interest or a larger area
     /// (retail 2026-09-18: one call per area entered, three at the level load; retail sends no
@@ -427,6 +548,27 @@ pub enum ClientFacetMsg {
         territory: u16,
         /// A number of unknown meaning (0 at the first entry, other values later).
         unknown: u32,
+    },
+    /// 6733: the player walked into a territory (the fallback of the territory detector;
+    /// retail sends one big-endian `u16` territory after the header, no answer).
+    EnteredTerritoryFallback {
+        /// The header.
+        header: FacetHeader,
+        /// The `TerritoryID`.
+        territory: u16,
+    },
+    /// 6734: the player left a territory; one `u16` after the header, no answer.
+    ExitedTerritoryFallback {
+        /// The header.
+        header: FacetHeader,
+        /// The `TerritoryID`.
+        territory: u16,
+    },
+    /// 2525: the player toggles the PvP flag. Retail `PvP_Flag` and `Hive_flag_pvp_on_and_off`
+    /// send the component header and nothing after it (6 of 6 calls, 16 bytes).
+    TogglePvpFlag {
+        /// The header (the player's `FactionComponent`).
+        header: FacetHeader,
     },
     /// 6416: the player left a territory area (retail sends no answer).
     TerritoryExited {
@@ -543,6 +685,36 @@ impl ClientFacetMsg {
                 })
             }),
             CUTSCENE_ENDED_TYPE_INDEX => read(|header, _| Ok(Self::CutsceneEnded { header })),
+            CUTSCENE_STARTED_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::CutsceneStarted {
+                    header,
+                    cutscene: reader.u32()?,
+                })
+            }),
+            UPDATE_TRACKED_OBJECTIVES_TYPE_INDEX => read(|header, reader| {
+                let count = reader.u8()?;
+                let objectives = (0..count)
+                    .map(|_| reader.u64())
+                    .collect::<Result<_, MessageError>>()?;
+                Ok(Self::UpdateTrackedObjectives { header, objectives })
+            }),
+            SET_OBJECTIVE_AUTO_PIN_TYPE_INDEX => read(|header, reader| {
+                let count = usize::from(reader.u8()?);
+                let flags = reader.bytes(count)?.to_vec();
+                Ok(Self::SetObjectiveAutoPin { header, flags })
+            }),
+            SET_INPUTS_THROTTLED_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::SetInputsThrottled {
+                    header,
+                    throttled: reader.u8()? != 0,
+                })
+            }),
+            WHISPER_STARTED_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::WhisperStarted {
+                    header,
+                    whisper: reader.u32()?,
+                })
+            }),
             TIME_SYNC_REQUEST_TYPE_INDEX => read(|header, _| Ok(Self::TimeSyncRequest { header })),
             QTE_COMPLETED_TYPE_INDEX => read(|header, reader| {
                 Ok(Self::QteCompleted {
@@ -577,8 +749,13 @@ impl ClientFacetMsg {
             SET_CRAFTING_DETAILS_TYPE_INDEX => read(|header, reader| {
                 let recipe = reader.u32()?;
                 let quantity = reader.u32()?;
-                let unknown = reader.u32()?;
-                let details = reader.u32()?;
+                let fee = reader.u32()?;
+                let gear_score = reader.u16()?;
+                let perk_count = reader.u8()?;
+                let perk_items = (0..perk_count)
+                    .map(|_| reader.u32())
+                    .collect::<Result<_, MessageError>>()?;
+                let unknown = reader.u8()?;
                 let count = reader.u8()?;
                 let ingredients = (0..count)
                     .map(|_| {
@@ -593,12 +770,39 @@ impl ClientFacetMsg {
                     header,
                     recipe,
                     quantity,
+                    fee,
+                    gear_score,
+                    perk_items,
                     unknown,
-                    details,
                     ingredients,
                 })
             }),
             CANCEL_CRAFTING_TYPE_INDEX => read(|header, _| Ok(Self::CancelCrafting { header })),
+            INITIATE_SALVAGE_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::InitiateSalvage {
+                    header,
+                    first: reader.u32()?,
+                    bag_slot: reader.u32()?,
+                    instance: reader.raw_id()?,
+                    unknown: reader.u32()?,
+                    quantity: reader.u32()?,
+                })
+            }),
+            SALVAGE_ITEMS_TYPE_INDEX => read(|header, reader| {
+                let count = reader.wide_prefixed()?;
+                let bag_slots = (0..count)
+                    .map(|_| reader.u32())
+                    .collect::<Result<_, MessageError>>()?;
+                Ok(Self::SalvageItems { header, bag_slots })
+            }),
+            SALVAGE_BY_CLASS_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::SalvageByClass {
+                    header,
+                    container: reader.u32()?,
+                    class: reader.u64()?,
+                    rarities: reader.u8()?,
+                })
+            }),
             TERRITORY_ENTERED_TYPE_INDEX => read(|header, reader| {
                 Ok(Self::TerritoryEntered {
                     header,
@@ -609,6 +813,19 @@ impl ClientFacetMsg {
                     unknown: reader.u32()?,
                 })
             }),
+            ENTERED_TERRITORY_FALLBACK_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::EnteredTerritoryFallback {
+                    header,
+                    territory: reader.u16()?,
+                })
+            }),
+            EXITED_TERRITORY_FALLBACK_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::ExitedTerritoryFallback {
+                    header,
+                    territory: reader.u16()?,
+                })
+            }),
+            TOGGLE_PVP_FLAG_TYPE_INDEX => read(|header, _reader| Ok(Self::TogglePvpFlag { header })),
             TERRITORY_EXITED_TYPE_INDEX => read(|header, reader| {
                 Ok(Self::TerritoryExited {
                     header,
@@ -755,26 +972,35 @@ impl BodyCodec for TeleportWithLoadingScreenMsg {
 
 /// 7048: storage search items for the player's global storage. Retail sends it with no search
 /// and no items before the bundle of each change of the player's items (tutorial-quest note,
-/// section 10). Its arguments (Azoth catalog: a 16-byte id at 16, a prefix-coded count
-/// at 32) are the search id, the items found (a prefix-coded count), the search's item total
-/// (`u32`) and one more byte. Inferred: the one retail body with a search (settlement capture)
-/// held no items and the total of the 7046 answer of the same search id (158); the last byte
-/// was 0 in every retail body; the layout of an item in the list is Unknown, so only the empty
-/// list is read and written.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// section 10). With a search (run-15 items2 study, MSQ16) it lists the results of the last
+/// 7046 whose totals changed: each one's index in the 7046 list and the item with its new
+/// total; then the count of the 7046 results (`u32`) and one more byte (0 in every retail
+/// body).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StorageSearchItemsMsg {
     /// The header (the player's `GlobalStorageComponent`).
     pub header: FacetHeader,
     /// The search id; all zero for no search.
     pub search: [u8; RAW_ID_LEN],
-    /// The search's item total.
+    /// The changed results.
+    pub items: Vec<SearchedItem>,
+    /// The count of the search's results.
     pub total: u32,
     /// The last byte (0 in every retail body; meaning Unknown).
     pub last: u8,
 }
 
-/// The item count of a [`StorageSearchItemsMsg`] this crate reads and writes.
-const NO_STORAGE_ITEMS: u64 = 0;
+/// One changed result of a 7048: its index in the 7046 list and the item with its new total.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchedItem {
+    /// The index of the result in the 7046 list.
+    pub index: u32,
+    /// The item and its new total.
+    pub item: crate::storage_search::StorageItemSimple,
+}
+
+/// Bytes of one [`SearchedItem`]: the index and the 11-byte item.
+const SEARCHED_ITEM_BYTES: usize = 15;
 
 impl StorageSearchItemsMsg {
     /// The message retail sends at a change of the items of the player of entity number
@@ -787,6 +1013,7 @@ impl StorageSearchItemsMsg {
                 entity_number,
             ),
             search: [0; RAW_ID_LEN],
+            items: Vec::new(),
             total: 0,
             last: 0,
         }
@@ -799,7 +1026,14 @@ impl BodyCodec for StorageSearchItemsMsg {
     fn encode(&self) -> Result<Vec<u8>, MessageError> {
         let mut writer = Writer::new();
         self.header.write(&mut writer);
-        writer.bytes(&self.search).prefixed(NO_STORAGE_ITEMS)?;
+        // A `usize` count fits 64 bits.
+        writer
+            .bytes(&self.search)
+            .wide_prefixed(self.items.len() as u64);
+        for searched in &self.items {
+            writer.u32(searched.index);
+            searched.item.write(&mut writer)?;
+        }
         Ok(writer.u32(self.total).u8(self.last).finish())
     }
 
@@ -807,16 +1041,19 @@ impl BodyCodec for StorageSearchItemsMsg {
         let mut reader = Reader::new(body);
         let header = FacetHeader::read(&mut reader)?;
         let search = reader.array()?;
-        let items = reader.prefixed()?;
-        if items != NO_STORAGE_ITEMS {
-            return Err(MessageError::CountTooLarge {
-                count: items,
-                limit: NO_STORAGE_ITEMS,
-            });
-        }
+        let count = crate::storage_search::read_count(&mut reader, SEARCHED_ITEM_BYTES)?;
+        let items = (0..count)
+            .map(|_| {
+                Ok(SearchedItem {
+                    index: reader.u32()?,
+                    item: crate::storage_search::StorageItemSimple::read(&mut reader)?,
+                })
+            })
+            .collect::<Result<_, MessageError>>()?;
         let message = Self {
             header,
             search,
+            items,
             total: reader.u32()?,
             last: reader.u8()?,
         };
@@ -897,32 +1134,32 @@ impl BodyCodec for InteractionValidatedMsg {
     }
 }
 
-/// 2993: the progress of the player's craft: the recipe crafted and how many, then an empty
-/// update when the station is idle again (beach-quests note: retail sends both 1,057 ms after the
-/// request, and one more empty update after the close).
+/// 2993: the progress of the player's craft: the recipe crafted and how many crafts, then an
+/// empty update when the station is idle again (beach-quests note: retail sends both 1,057 ms
+/// after the request, and one more empty update after the close). Both counts are the crafts of
+/// the request, not the items they make (Observed: 34 retail updates of four crafting ledgers,
+/// 1 to 85 crafts, both counts equal to the request's quantity; `Instrument_IridescentInlayT3`,
+/// `OutputQty` 2, showed 1 and 1 for one craft).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CraftProgressMsg {
     /// The header (the player's `CraftingComponent`).
     pub header: FacetHeader,
     /// The recipe id; empty when idle.
     pub recipe: Vec<u8>,
-    /// How many were crafted.
+    /// How many crafts the request asked for; 0 when idle.
     pub quantity: u32,
-    /// A number of unknown meaning: 1 with a recipe, 0 when idle.
-    pub extra: u32,
+    /// How many crafts were made; 0 when idle.
+    pub completed: u32,
 }
 
-/// The [`CraftProgressMsg::extra`] of a finished craft.
-const CRAFTED_EXTRA: u32 = 1;
-
 impl CraftProgressMsg {
-    /// Player `player` crafted `quantity` of recipe `recipe`.
-    pub fn crafted(player: u64, recipe: &str, quantity: u32) -> Self {
+    /// Player `player` crafted `crafts` crafts of recipe `recipe`.
+    pub fn crafted(player: u64, recipe: &str, crafts: u32) -> Self {
         Self {
             header: FacetHeader::of(component::CRAFTING, player),
             recipe: recipe.as_bytes().to_vec(),
-            quantity,
-            extra: CRAFTED_EXTRA,
+            quantity: crafts,
+            completed: crafts,
         }
     }
 
@@ -932,7 +1169,7 @@ impl CraftProgressMsg {
             header: FacetHeader::of(component::CRAFTING, player),
             recipe: Vec::new(),
             quantity: 0,
-            extra: 0,
+            completed: 0,
         }
     }
 }
@@ -948,7 +1185,7 @@ impl BodyCodec for CraftProgressMsg {
         Ok(writer
             .bytes(&self.recipe)
             .u32(self.quantity)
-            .u32(self.extra)
+            .u32(self.completed)
             .finish())
     }
 
@@ -961,7 +1198,7 @@ impl BodyCodec for CraftProgressMsg {
             header,
             recipe: reader.bytes(length)?.to_vec(),
             quantity: reader.u32()?,
-            extra: reader.u32()?,
+            completed: reader.u32()?,
         };
         reader.finish()?;
         Ok(message)
@@ -998,6 +1235,7 @@ macro_rules! header_only_message {
         }
     };
 }
+pub(crate) use header_only_message;
 
 header_only_message!(
     /// 955: a tutorial sailor saw the player; its header names the sailor's tutorial AI.
@@ -1175,6 +1413,103 @@ impl BodyCodec for StartWhisperMsg {
     }
 }
 
+/// 1790: clear the homing override when a mob picks the player (retail newchar 2026-09-18:
+/// sent with the 2415, a zero target and [`NO_HOMING_OVERRIDE`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HomingOverrideMsg {
+    /// The header (the player's `HomingComponent`).
+    pub header: FacetHeader,
+    /// The override target. All zeros: none.
+    pub target: [u8; RAW_ID_LEN],
+    /// A word retail leaves 0 in the tutorial clear.
+    pub kind: u32,
+    /// [`NO_HOMING_OVERRIDE`] when no entity is forced.
+    pub override_target: u32,
+    /// Two words retail leaves 0 in the tutorial clear.
+    pub rest: [u32; 2],
+}
+
+impl HomingOverrideMsg {
+    /// The clear retail sends to player `player` when a mob picks it.
+    pub fn clear(player: u64) -> Self {
+        Self {
+            header: FacetHeader::of(component::HOMING, player),
+            target: [0; RAW_ID_LEN],
+            kind: 0,
+            override_target: NO_HOMING_OVERRIDE,
+            rest: [0; 2],
+        }
+    }
+}
+
+impl BodyCodec for HomingOverrideMsg {
+    const TYPE_INDEX: u64 = HOMING_OVERRIDE_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        writer.bytes(&self.target);
+        writer.u32(self.kind).u32(self.override_target);
+        for word in self.rest {
+            writer.u32(word);
+        }
+        Ok(writer.finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let message = Self {
+            header: FacetHeader::read(&mut reader)?,
+            target: reader.raw_id()?,
+            kind: reader.u32()?,
+            override_target: reader.u32()?,
+            rest: [reader.u32()?, reader.u32()?],
+        };
+        reader.finish()?;
+        Ok(message)
+    }
+}
+
+/// 4970: the player left a game-mode queue (retail newchar 2026-09-18: one `u64` of 1,
+/// 24 ms after the level info).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeftGameModeQueueMsg {
+    /// The header (the player's `GameModeParticipantComponent`).
+    pub header: FacetHeader,
+    /// How the player left. Retail's tutorial value is [`LEFT_QUEUE_ONCE`].
+    pub left: u64,
+}
+
+impl LeftGameModeQueueMsg {
+    /// Player `player` left the queue the way the tutorial login does.
+    pub fn tutorial(player: u64) -> Self {
+        Self {
+            header: FacetHeader::of(component::GAME_MODE_PARTICIPANT, player),
+            left: LEFT_QUEUE_ONCE,
+        }
+    }
+}
+
+impl BodyCodec for LeftGameModeQueueMsg {
+    const TYPE_INDEX: u64 = LEFT_GAME_MODE_QUEUE_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        self.header.write(&mut writer);
+        Ok(writer.u64(self.left).finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let message = Self {
+            header: FacetHeader::read(&mut reader)?,
+            left: reader.u64()?,
+        };
+        reader.finish()?;
+        Ok(message)
+    }
+}
+
 header_only_message!(
     /// 3746: the interaction is over (the gather time ran out).
     InteractionEndedMsg,
@@ -1289,6 +1624,20 @@ mod tests {
     }
 
     #[test]
+    fn a_pvp_flag_toggle_is_the_retail_header() {
+        // Retail open-world_PvP_Flag and Hive_flag_pvp_on_and_off: 2525 is 16 bytes.
+        const BODY: &str = "68f3a2a317cab5dd4cb591511a7370e0";
+        let header = FacetHeader {
+            target: 0x68f3_a2a3_17ca_b5dd,
+            entity: 0x4cb5_9151_1a73_70e0,
+        };
+        assert_eq!(
+            ClientFacetMsg::decode(TOGGLE_PVP_FLAG_TYPE_INDEX, &hex(BODY)),
+            Some(Ok(ClientFacetMsg::TogglePvpFlag { header }))
+        );
+    }
+
+    #[test]
     fn the_territory_calls_read_the_retail_bodies() {
         // Retail 2026-09-18: the watchtower (40148) entered at the accept of Crewmates No More,
         // and left on the way to the wreck.
@@ -1348,8 +1697,99 @@ mod tests {
     }
 
     #[test]
+    fn a_salvage_by_class_names_its_class_and_rarities() {
+        // The retail 6024 shape (17 calls): 1, the class 0x47 (weapons) or 0x48 (armor), 0x1f.
+        const BY_CLASS: &str = concat!(
+            "5cf3e785f277f442650f7a09cf50b550",
+            "00000001",
+            "0000000000000047",
+            "1f"
+        );
+        assert_eq!(
+            ClientFacetMsg::decode(SALVAGE_BY_CLASS_TYPE_INDEX, &hex(BY_CLASS)),
+            Some(Ok(ClientFacetMsg::SalvageByClass {
+                header: soul(component::CRAFTING),
+                container: 1,
+                class: 0x47,
+                rarities: 0x1f,
+            }))
+        );
+        assert!(matches!(
+            ClientFacetMsg::decode(SALVAGE_BY_CLASS_TYPE_INDEX, &hex(&BY_CLASS[..50])),
+            Some(Err(_))
+        ));
+    }
+
+    #[test]
+    fn a_salvage_names_its_bag_items() {
+        // The retail 1733 shape (173 calls): 1, the bag slot, the instance id, 0, 1. The
+        // instance id here is made up.
+        const SALVAGE: &str = concat!(
+            "5cf3e785f277f442650f7a09cf50b550",
+            "00000001",
+            "00000013",
+            "00112233445566778899aabbccddeeff",
+            "00000000",
+            "00000001"
+        );
+        // The retail 6188 shape: a count, then that many bag slots.
+        const SALVAGE_ITEMS: &str = concat!(
+            "5cf3e785f277f442650f7a09cf50b550",
+            "03",
+            "0000000a0000000e0000000f"
+        );
+        let header = soul(component::CRAFTING);
+        assert_eq!(
+            ClientFacetMsg::decode(INITIATE_SALVAGE_TYPE_INDEX, &hex(SALVAGE)),
+            Some(Ok(ClientFacetMsg::InitiateSalvage {
+                header,
+                first: 1,
+                bag_slot: 0x13,
+                instance: <[u8; RAW_ID_LEN]>::try_from(
+                    hex("00112233445566778899aabbccddeeff").as_slice()
+                )
+                .expect("id"),
+                unknown: 0,
+                quantity: 1,
+            }))
+        );
+        assert_eq!(
+            ClientFacetMsg::decode(SALVAGE_ITEMS_TYPE_INDEX, &hex(SALVAGE_ITEMS)),
+            Some(Ok(ClientFacetMsg::SalvageItems {
+                header,
+                bag_slots: vec![10, 14, 15],
+            }))
+        );
+        assert!(matches!(
+            ClientFacetMsg::decode(INITIATE_SALVAGE_TYPE_INDEX, &hex(&SALVAGE[..40])),
+            Some(Err(_))
+        ));
+    }
+
+    #[test]
+    fn a_batch_craft_answers_with_its_crafts() {
+        // Retail 2993 of 40 crafts of ClothT2 (`refining_all_stations_single_batch_
+        // territorylvlup`): the recipe, then 40 twice.
+        const CRAFTED: &str = concat!(
+            "5cf3e785f277f442650f7a09cf50b550",
+            "07",
+            "436c6f74685432",
+            "00000028",
+            "00000028"
+        );
+        let player = crate::entity_ids::number_of_facet(SOUL_ENTITY);
+        let crafted = CraftProgressMsg::crafted(player, "ClothT2", 40);
+        assert_eq!(crafted.encode().expect("encode"), hex(CRAFTED));
+        assert_eq!(
+            CraftProgressMsg::decode(&hex(CRAFTED)).expect("decode"),
+            crafted
+        );
+    }
+
+    #[test]
     fn a_craft_request_reads_its_ingredients_and_the_answer_is_retail() {
         // Retail 2997 of the skinning knife: FlintT1 x1 and WoodT1 x1 (beach-quests note).
+        const KNIFE_GEAR_SCORE: u16 = 100;
         const REQUEST: &str = concat!(
             "5cf3e785f277f442650f7a09cf50b550",
             "a546f7c5",
@@ -1373,8 +1813,10 @@ mod tests {
                 header,
                 recipe: 0xa546_f7c5,
                 quantity: 1,
+                fee: 0,
+                gear_score: KNIFE_GEAR_SCORE,
+                perk_items: Vec::new(),
                 unknown: 0,
-                details: 0x0064_0000,
                 ingredients: vec![
                     CraftIngredient {
                         kind: INGREDIENT_ITEM,
@@ -1404,6 +1846,42 @@ mod tests {
             CraftProgressMsg::decode(&hex(CRAFTED)).expect("decode"),
             crafted
         );
+    }
+
+    #[test]
+    fn a_craft_request_reads_its_gear_score_and_perk_items() {
+        // The shape of the retail T4 spear craft (run-15 items2 R3): gear score 420, one perk
+        // item (`WhetstoneT1`), the unknown byte, then the ingredients.
+        const SPEAR_GEAR_SCORE: u16 = 420;
+        const WHETSTONE: u32 = 0x9979_b957;
+        const REQUEST: &str = concat!(
+            "5cf3e785f277f442650f7a09cf50b550",
+            "a546f7c5",
+            "00000001",
+            "0000005c",
+            "01a4",
+            "01",
+            "9979b957",
+            "00",
+            "01",
+            "01000000010c9280c8"
+        );
+        let Some(Ok(ClientFacetMsg::SetCraftingDetails {
+            fee,
+            gear_score,
+            perk_items,
+            unknown,
+            ingredients,
+            ..
+        })) = ClientFacetMsg::decode(SET_CRAFTING_DETAILS_TYPE_INDEX, &hex(REQUEST))
+        else {
+            panic!("a craft request");
+        };
+        assert_eq!(fee, 0x5c);
+        assert_eq!(gear_score, SPEAR_GEAR_SCORE);
+        assert_eq!(perk_items, [WHETSTONE]);
+        assert_eq!(unknown, 0);
+        assert_eq!(ingredients.len(), 1);
     }
 
     #[test]
@@ -1452,6 +1930,72 @@ mod tests {
             cutscene: 0xa81b_d1af,
         };
         assert_eq!(grant.encode().expect("encode"), hex(SOUL_GRANT));
+    }
+
+    #[test]
+    fn a_started_cutscene_and_a_pin_list_are_the_retail_bytes() {
+        // newchar-retail-2026-09-18: the crew cutscene started, then an empty pin and one pin.
+        const STARTED: &str = "fbaf2b0dafadb10d2715f9bca18fdecea81bd1af";
+        const EMPTY_PIN: &str = "7fa055bf3c7be17a2715f9bca18fdece00";
+        const ONE_PIN: &str = "7fa055bf3c7be17a2715f9bca18fdece014445f704683ebc78";
+        let started = ClientFacetMsg::decode(CUTSCENE_STARTED_TYPE_INDEX, &hex(STARTED))
+            .expect("type")
+            .expect("body");
+        assert!(matches!(
+            started,
+            ClientFacetMsg::CutsceneStarted {
+                cutscene: 0xa81b_d1af,
+                ..
+            }
+        ));
+        let empty = ClientFacetMsg::decode(UPDATE_TRACKED_OBJECTIVES_TYPE_INDEX, &hex(EMPTY_PIN))
+            .expect("type")
+            .expect("body");
+        assert!(matches!(
+            empty,
+            ClientFacetMsg::UpdateTrackedObjectives { objectives, .. } if objectives.is_empty()
+        ));
+        let one = ClientFacetMsg::decode(UPDATE_TRACKED_OBJECTIVES_TYPE_INDEX, &hex(ONE_PIN))
+            .expect("type")
+            .expect("body");
+        assert!(matches!(
+            one,
+            ClientFacetMsg::UpdateTrackedObjectives { objectives, .. }
+                if objectives == [0x4445_f704_683e_bc78]
+        ));
+    }
+
+    #[test]
+    fn the_homing_clear_and_the_queue_leave_are_the_retail_bytes() {
+        // newchar-retail-2026-09-18: 1790 with the 2415, and 4970 after the level info.
+        const HOMING: &str = "d4b00cff3ead1b6a2715f9bca18fdece0000000000000000000000000000000000000000ffffffff0000000000000000";
+        const LEFT: &str = "b4fc2d15ad1f9dae2715f9bca18fdece0000000000000001";
+        const THROTTLE: &str = "636f140b45528c432715f9bca18fdece01";
+        const WHISPER: &str = "7b5857d7549305052715f9bca18fdece52f36e05";
+        let homing = HomingOverrideMsg::decode(&hex(HOMING)).expect("homing");
+        assert_eq!(homing.target, [0; RAW_ID_LEN]);
+        assert_eq!(homing.override_target, NO_HOMING_OVERRIDE);
+        assert_eq!(HomingOverrideMsg::decode(&homing.encode().expect("encode")), Ok(homing));
+        let left = LeftGameModeQueueMsg::decode(&hex(LEFT)).expect("left");
+        assert_eq!(left.left, LEFT_QUEUE_ONCE);
+        assert_eq!(LeftGameModeQueueMsg::decode(&left.encode().expect("encode")), Ok(left));
+        let throttled = ClientFacetMsg::decode(SET_INPUTS_THROTTLED_TYPE_INDEX, &hex(THROTTLE))
+            .expect("type")
+            .expect("body");
+        assert!(matches!(
+            throttled,
+            ClientFacetMsg::SetInputsThrottled { throttled: true, .. }
+        ));
+        let whisper = ClientFacetMsg::decode(WHISPER_STARTED_TYPE_INDEX, &hex(WHISPER))
+            .expect("type")
+            .expect("body");
+        assert!(matches!(
+            whisper,
+            ClientFacetMsg::WhisperStarted {
+                whisper: 0x52f3_6e05,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1619,9 +2163,19 @@ mod tests {
     }
 
     #[test]
-    fn a_storage_search_reads_its_total_and_refuses_items() {
+    fn a_storage_search_reads_its_total_and_its_changed_items() {
         // The settlement capture's form: a search id, no items, the total 158 (0x9e), 0.
         const SEARCH_TOTAL: u32 = 158;
+        // Retail MSQ16: result 1 of 12 changed to a total of 2.
+        const RETAIL_CHANGED: &str = concat!(
+            "fd34bbfc0f73dcfe5ad5e1c8869e39e2",
+            "44031344c3064ddfb1025e7d99a01c12",
+            "01",
+            "00000001",
+            "01896e2997d99400000002",
+            "0000000c",
+            "00"
+        );
         let header = FacetHeader::of_child(
             component::GLOBAL_STORAGE,
             component::GLOBAL_STORAGE_CHILD,
@@ -1630,18 +2184,30 @@ mod tests {
         let searched = StorageSearchItemsMsg {
             header,
             search: [7; RAW_ID_LEN],
+            items: Vec::new(),
             total: SEARCH_TOTAL,
             last: 0,
         };
         let body = searched.encode().expect("encode");
         assert_eq!(&body[body.len() - 6..], &hex("000000009e00")[..]);
         assert_eq!(StorageSearchItemsMsg::decode(&body), Ok(searched));
-        let mut with_items = body;
-        let count_at = with_items.len() - 6;
-        with_items[count_at] = 1;
+        let retail = hex(RETAIL_CHANGED);
+        let changed = StorageSearchItemsMsg::decode(&retail).expect("changed");
+        assert_eq!(changed.total, 12);
         assert_eq!(
-            StorageSearchItemsMsg::decode(&with_items),
-            Err(MessageError::CountTooLarge { count: 1, limit: 0 })
+            changed.items,
+            [SearchedItem {
+                index: 1,
+                item: crate::storage_search::StorageItemSimple {
+                    item: 0x2997_d994,
+                    quantity: 2,
+                },
+            }]
         );
+        assert_eq!(changed.encode(), Ok(retail));
+        let mut cut = hex(RETAIL_CHANGED);
+        // Two items announced, one there.
+        cut[32] = 2;
+        assert!(StorageSearchItemsMsg::decode(&cut).is_err());
     }
 }

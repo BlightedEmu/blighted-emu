@@ -18,7 +18,8 @@ use nw_sim_core::{CellGrid, CellGridError};
 use nw_world::WorldFile;
 use nw_world::world_file::world_file_path;
 
-use crate::config::{DirectorConfig, DirectorConfigError, load_director_config};
+use crate::config::{DirectorConfig, DirectorConfigError, InstancesConfig, load_director_config};
+use crate::instances::{InstanceSettings, LaunchSettings};
 use crate::server::{DirectorSettings, ServeError, serve as serve_loop};
 
 /// Failure while starting or running `world-director`.
@@ -92,6 +93,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         admit_timeout: Duration::from_millis(config.admit_timeout_ms),
         heartbeat_interval: Duration::from_millis(config.heartbeat_interval_ms),
         heartbeat_misses: config.heartbeat_misses,
+        instances: config.instances.as_ref().map(instance_settings),
     };
     // The heights are needed only for the start position.
     drop(world_file);
@@ -100,6 +102,23 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         .build()
         .map_err(RunError::Runtime)?
         .block_on(serve_async(config, password, settings))
+}
+
+/// The instance rules of the `[instances]` section.
+fn instance_settings(config: &InstancesConfig) -> InstanceSettings {
+    InstanceSettings {
+        empty_timeout: Duration::from_millis(config.empty_timeout_ms),
+        open_timeout: Duration::from_millis(config.open_timeout_ms),
+        group_timeout: Duration::from_millis(config.group_timeout_ms),
+        launch: config.launch.as_ref().map(|launch| LaunchSettings {
+            program: launch.program.clone(),
+            args: launch.args.clone(),
+            spare_per_level: launch.spare_per_level,
+            max_sims: launch.max_sims,
+            id_prefix: launch.id_prefix.clone(),
+            forget_after: Duration::from_millis(launch.forget_after_ms),
+        }),
+    }
 }
 
 async fn serve_async(
@@ -136,6 +155,11 @@ async fn serve_async(
         .with_http_listener(config.metrics_listen)
         .install()
         .map_err(|error| RunError::Metrics(error.to_string()))?;
+    // The trading post's orders are the world's; one director expires them for every sim.
+    tokio::spawn(crate::trading_post::sweep_expired_orders(
+        db.clone(),
+        crate::trading_post::EXPIRY_SWEEP_INTERVAL,
+    ));
     tracing::info!(world = %config.world_id, level = %config.level, "serving");
     let shutdown = async {
         // A failed signal handler means the director runs until killed.

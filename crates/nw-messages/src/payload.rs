@@ -33,17 +33,35 @@ use crate::containers::{
 };
 use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
 use crate::gathering::{GATHERING_TYPE_INDEX, GatheringState};
+use crate::game_events::{GAME_EVENT_TYPE_INDEX, GameEventState};
 use crate::gde::{GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
 use crate::interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
 use crate::loot::{
     GLOBAL_STORAGE_TYPE_INDEX, GlobalStorageState, LOOT_TRACKER_TYPE_INDEX, LootTrackerState,
 };
+use crate::mount::{MOUNT_TYPE_INDEX, MountState};
+use crate::p2p_trade::{P2P_TRADE_STATE_TYPE_INDEX, P2PTradeState};
+use crate::generic_invite::{GENERIC_INVITE_STATE_TYPE_INDEX, GenericInviteState};
+use crate::fishing::{FISHING_TYPE_INDEX, FishingComponentState};
+use crate::music::{
+    MusicalPerformanceState, PERFORMANCE_PLAYER_TYPE_INDEX, PERFORMANCE_TYPE_INDEX,
+    PerformancePlayerState,
+};
 use crate::objectives::{OBJECTIVES_TYPE_INDEX, ObjectivesState};
+use crate::objective_interactor::{OBJECTIVE_INTERACTOR_TYPE_INDEX, ObjectiveInteractorState};
 use crate::paperdoll::{PAPERDOLL_TYPE_INDEX, PaperdollState};
 use crate::player_components::{EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PlayerComponentState};
 use crate::position::{POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState};
 use crate::progression::{PROGRESSION_TYPE_INDEX, ProgressionState};
 use crate::progression_points::{PROGRESSION_POINT_TYPE_INDEX, ProgressionPointState};
+use crate::social::group_data::{GROUP_DATA_TYPE_INDEX, GroupDataState};
+use crate::social::states::{
+    CHAT_STATE_TYPE_INDEX, ChatState, GROUPS_STATE_TYPE_INDEX, GUILDS_STATE_TYPE_INDEX,
+    GroupsState, GuildsState, SocialState,
+};
+use crate::status_effects::{STATUS_EFFECTS_TYPE_INDEX, StatusEffectsState};
+use crate::temporary_affiliation::{TEMPORARY_AFFILIATION_TYPE_INDEX, TemporaryAffiliationState};
+use crate::title_choice::SOCIAL_TYPE_INDEX;
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsState};
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -120,6 +138,44 @@ pub enum MemberState {
     Attributes(AttributeState),
     /// `MB::AbilityComponentReplicatedState`.
     Abilities(AbilityState),
+    /// `MB::ObjectiveInteractorComponentReplicatedState`.
+    ObjectiveInteractor(ObjectiveInteractorState),
+    /// `Javelin::GameEventComponentReplicatedState`.
+    GameEvents(GameEventState),
+    /// `MB::TemporaryAffiliationReplicatedState`.
+    TemporaryAffiliation(TemporaryAffiliationState),
+    /// `MB::MountComponentReplicatedState`.
+    Mount(MountState),
+    /// `Javelin::P2PTradeReplicatedState`.
+    P2PTrade(P2PTradeState),
+    /// `Javelin::PlayerGenericInviteReplicatedState`.
+    GenericInvite(GenericInviteState),
+    /// `MB::FishingComponentReplicatedState`.
+    Fishing(FishingComponentState),
+    /// `MB::PlayerTimeComponentReplicatedState`.
+    PlayerTime(crate::travel_states::PlayerTimeState),
+    /// `MB::PlayerHousingReplicatedState`.
+    PlayerHousing(crate::travel_states::PlayerHousingState),
+    /// `MB::PlayerHomeComponentReplicatedState`.
+    PlayerHome(crate::travel_states::PlayerHomeState),
+    /// `MB::CampingComponentReplicatedState`.
+    Camping(crate::travel_states::CampingState),
+    /// `Javelin::MusicalPerformancePlayerComponentReplicatedState`.
+    PerformancePlayer(PerformancePlayerState),
+    /// `Javelin::MusicalPerformanceReplicatedState`.
+    MusicalPerformance(MusicalPerformanceState),
+    /// `Javelin::GroupsComponentReplicatedState`.
+    Groups(GroupsState),
+    /// `MB::SocialReplicatedState`.
+    Social(SocialState),
+    /// `Javelin::GuildsComponentReplicatedState`.
+    Guilds(Box<GuildsState>),
+    /// `MB::ChatReplicatedState`.
+    Chat(ChatState),
+    /// `Javelin::GroupDataComponentReplicatedState` (the group entity).
+    GroupData(Box<GroupDataState>),
+    /// `MB::StatusEffectsComponentReplicatedState`.
+    StatusEffects(StatusEffectsState),
     /// An empty state of a player component class without a reader of its own.
     Empty(EmptyState),
     /// A state of `class` sent as recorded body bytes (a retail state replayed as it was, of a
@@ -130,6 +186,25 @@ pub enum MemberState {
         /// The body bytes.
         body: Vec<u8>,
     },
+}
+
+/// The retail first body of player component `class` is the empty state. Any other body is
+/// `read`.
+fn empty_player_body(
+    class: u64,
+    reader: &mut Reader<'_>,
+    read: impl FnOnce(&mut Reader<'_>) -> Result<MemberState, MessageError>,
+) -> Result<MemberState, MessageError> {
+    let rest = reader.rest();
+    let mut probe = Reader::new(rest);
+    if EmptyState::read(class, &mut probe).is_ok() {
+        let used = rest.len() - probe.remaining();
+        if EmptyState::is_first_body(class, &rest[..used]) {
+            reader.bytes(used)?;
+            return Ok(MemberState::Empty(EmptyState { class }));
+        }
+    }
+    read(reader)
 }
 
 impl MemberState {
@@ -171,6 +246,25 @@ impl MemberState {
             Self::ProgressionPoints(_) => PROGRESSION_POINT_TYPE_INDEX,
             Self::Attributes(_) => ATTRIBUTE_TYPE_INDEX,
             Self::Abilities(_) => ABILITY_TYPE_INDEX,
+            Self::ObjectiveInteractor(_) => OBJECTIVE_INTERACTOR_TYPE_INDEX,
+            Self::GameEvents(_) => GAME_EVENT_TYPE_INDEX,
+            Self::TemporaryAffiliation(_) => TEMPORARY_AFFILIATION_TYPE_INDEX,
+            Self::Mount(_) => MOUNT_TYPE_INDEX,
+            Self::P2PTrade(_) => P2P_TRADE_STATE_TYPE_INDEX,
+            Self::GenericInvite(_) => GENERIC_INVITE_STATE_TYPE_INDEX,
+            Self::Fishing(_) => FISHING_TYPE_INDEX,
+            Self::PlayerTime(_) => crate::travel_states::PLAYER_TIME_TYPE_INDEX,
+            Self::PlayerHousing(_) => crate::travel_states::PLAYER_HOUSING_TYPE_INDEX,
+            Self::PlayerHome(_) => crate::travel_states::PLAYER_HOME_TYPE_INDEX,
+            Self::Camping(_) => crate::travel_states::CAMPING_TYPE_INDEX,
+            Self::PerformancePlayer(_) => PERFORMANCE_PLAYER_TYPE_INDEX,
+            Self::MusicalPerformance(_) => PERFORMANCE_TYPE_INDEX,
+            Self::Groups(_) => GROUPS_STATE_TYPE_INDEX,
+            Self::Social(_) => SOCIAL_TYPE_INDEX,
+            Self::Guilds(_) => GUILDS_STATE_TYPE_INDEX,
+            Self::Chat(_) => CHAT_STATE_TYPE_INDEX,
+            Self::GroupData(_) => GROUP_DATA_TYPE_INDEX,
+            Self::StatusEffects(_) => STATUS_EFFECTS_TYPE_INDEX,
             Self::Empty(state) => state.class,
             Self::Recorded { class, .. } => *class,
         }
@@ -290,6 +384,65 @@ impl MemberState {
                 AttributeState::read(reader).map(Self::Attributes)
             }
             TypeId::FileSlot(ABILITY_TYPE_INDEX) => AbilityState::read(reader).map(Self::Abilities),
+            TypeId::FileSlot(OBJECTIVE_INTERACTOR_TYPE_INDEX) => {
+                ObjectiveInteractorState::read(reader).map(Self::ObjectiveInteractor)
+            }
+            TypeId::FileSlot(GAME_EVENT_TYPE_INDEX) => {
+                // The new-character body stays the empty state (`01 02 00 01 03 00`).
+                empty_player_body(GAME_EVENT_TYPE_INDEX, reader, |reader| {
+                    GameEventState::read(reader).map(Self::GameEvents)
+                })
+            }
+            TypeId::FileSlot(TEMPORARY_AFFILIATION_TYPE_INDEX) => {
+                // No affiliation yet: one slot byte of 0, the empty state.
+                empty_player_body(TEMPORARY_AFFILIATION_TYPE_INDEX, reader, |reader| {
+                    TemporaryAffiliationState::read(reader).map(Self::TemporaryAffiliation)
+                })
+            }
+            TypeId::FileSlot(MOUNT_TYPE_INDEX) => MountState::read(reader).map(Self::Mount),
+            TypeId::FileSlot(P2P_TRADE_STATE_TYPE_INDEX) => {
+                P2PTradeState::read(reader).map(Self::P2PTrade)
+            }
+            TypeId::FileSlot(GENERIC_INVITE_STATE_TYPE_INDEX) => {
+                GenericInviteState::read(reader).map(Self::GenericInvite)
+            }
+            TypeId::FileSlot(FISHING_TYPE_INDEX) => {
+                FishingComponentState::read(reader).map(Self::Fishing)
+            }
+            TypeId::FileSlot(crate::travel_states::PLAYER_TIME_TYPE_INDEX) => {
+                crate::travel_states::PlayerTimeState::read(reader).map(Self::PlayerTime)
+            }
+            TypeId::FileSlot(crate::travel_states::PLAYER_HOUSING_TYPE_INDEX) => {
+                crate::travel_states::PlayerHousingState::read(reader).map(Self::PlayerHousing)
+            }
+            TypeId::FileSlot(crate::travel_states::PLAYER_HOME_TYPE_INDEX) => empty_player_body(
+                crate::travel_states::PLAYER_HOME_TYPE_INDEX,
+                reader,
+                |reader| crate::travel_states::PlayerHomeState::read(reader).map(Self::PlayerHome),
+            ),
+            TypeId::FileSlot(crate::travel_states::CAMPING_TYPE_INDEX) => {
+                crate::travel_states::CampingState::read(reader).map(Self::Camping)
+            }
+            TypeId::FileSlot(PERFORMANCE_PLAYER_TYPE_INDEX) => {
+                PerformancePlayerState::read(reader).map(Self::PerformancePlayer)
+            }
+            TypeId::FileSlot(PERFORMANCE_TYPE_INDEX) => {
+                MusicalPerformanceState::read(reader).map(Self::MusicalPerformance)
+            }
+            TypeId::FileSlot(GROUPS_STATE_TYPE_INDEX) => {
+                GroupsState::read(reader).map(Self::Groups)
+            }
+            TypeId::FileSlot(SOCIAL_TYPE_INDEX) => SocialState::read(reader).map(Self::Social),
+            TypeId::FileSlot(GUILDS_STATE_TYPE_INDEX) => {
+                GuildsState::read(reader).map(Box::new).map(Self::Guilds)
+            }
+            TypeId::FileSlot(CHAT_STATE_TYPE_INDEX) => ChatState::read(reader).map(Self::Chat),
+            TypeId::FileSlot(GROUP_DATA_TYPE_INDEX) => GroupDataState::read(reader)
+                .map(Box::new)
+                .map(Self::GroupData),
+            TypeId::FileSlot(STATUS_EFFECTS_TYPE_INDEX) => {
+                StatusEffectsState::read(reader).map(Self::StatusEffects)
+            }
             TypeId::FileSlot(index) if EmptyState::covers(index) => {
                 EmptyState::read(index, reader).map(Self::Empty)
             }
@@ -391,6 +544,34 @@ impl MemberState {
                 state.write(writer);
                 Ok(())
             }
+            Self::ObjectiveInteractor(state) => state.write(writer),
+            Self::GameEvents(state) => state.write(writer),
+            Self::TemporaryAffiliation(state) => state.write(writer),
+            Self::Mount(state) => state.write(writer),
+            Self::P2PTrade(state) => state.write(writer),
+            Self::GenericInvite(state) => state.write(writer),
+            Self::Fishing(state) => state.write(writer),
+            Self::PlayerTime(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::PlayerHousing(state) => state.write(writer),
+            Self::PlayerHome(state) => state.write(writer),
+            Self::Camping(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::PerformancePlayer(state) => {
+                state.write(writer);
+                Ok(())
+            }
+            Self::MusicalPerformance(state) => state.write(writer),
+            Self::Groups(state) => state.write(writer),
+            Self::Social(state) => state.write(writer),
+            Self::Guilds(state) => state.write(writer),
+            Self::Chat(state) => state.write(writer),
+            Self::GroupData(state) => state.write(writer),
+            Self::StatusEffects(state) => state.write(writer),
             Self::Empty(state) => {
                 state.write(writer);
                 Ok(())

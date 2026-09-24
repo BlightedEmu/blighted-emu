@@ -30,12 +30,13 @@ use std::sync::Arc;
 use nw_content::combat::{AffixDamage, AttackRow, WeaponRow};
 use nw_content::player_attacks::{AttackHit, AttackKind, BasicAttack, Homing, MeleeShape, Stance};
 use nw_content::respawn_points::{nearest_respawn_point, respawn_point};
+use nw_content::status_effects::RowKey;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::paperdoll::slot;
 use nw_messages::{
-    AdjustFxScriptsMsg, ConsumableCooldown, DamageDealtMsg, DamageItem, DeathRecapMsg, HIT_TAG,
-    InputRecord, MeleeDamage, MeleeHitMsg, OnDamageMsg, ServerMessage, SpreadshotProcessedMsg,
-    SpreadshotRequestMsg,
+    AdjustFxScriptsMsg, CombatEffectMsg, DamageDealtMsg, DamageItem, DeathRecapMsg, FacetHeader,
+    HIT_TAG, InputRecord, MeleeDamage, MeleeHitMsg, OnDamageMsg, ServerMessage,
+    SpreadshotProcessedMsg, SpreadshotRequestMsg, facet_entity,
 };
 use nw_sim_core::character::swim_floor;
 use nw_sim_core::{Damage, Health, PlayerAttack, TUTORIAL_START, mob_hit, player_hit};
@@ -79,8 +80,6 @@ fn armor_share(armor: f64, gear_score: u32) -> f64 {
 const HEAL_SCRIPT: u32 = 0xf7e1_e0d6;
 /// Microseconds per millisecond.
 const US_PER_MS: u64 = 1000;
-/// Milliseconds per second.
-const MS_PER_SECOND: u64 = 1000;
 
 /// A player's health and attack times.
 #[derive(Component, Debug, Clone, Copy)]
@@ -127,6 +126,12 @@ impl Vitals {
     /// The entity the player locks on or homes to in its newest input.
     pub(super) const fn lock_target(&self) -> Option<u64> {
         self.lock_target
+    }
+
+    /// Stores the lock from the newest input record. `None` clears it: retail omits row 3 when
+    /// the player is not locked on.
+    pub(super) const fn set_lock_target(&mut self, target: Option<u64>) {
+        self.lock_target = target;
     }
 
     pub(super) const fn new(health: Health, spawned: bool) -> Self {
@@ -263,6 +268,8 @@ struct MobHitStyle {
     damage_scale: f64,
     /// The stamina a block takes.
     block_stamina: f32,
+    /// Its row, for the status effects it puts on the player ([`SimWorld::mob_hit_effects`]).
+    row: Option<RowKey>,
 }
 
 /// A mob swing that has not hit yet.
@@ -416,6 +423,85 @@ impl SimWorld {
         self.hit_paced(attacker, target, damage_id, reach_m, true, now_ms)
     }
 
+    /// The least health a PvP hit takes. Retail 2525 carries no damage number; a coefficient
+    /// below 1 still hurts.
+    const MIN_PVP_HIT: u32 = 1;
+
+    /// Health a flagged player loses from an attack of `coefficient`.
+    fn pvp_hit_amount(coefficient: f64) -> u32 {
+        let whole = coefficient.floor();
+        if whole >= f64::from(Self::MIN_PVP_HIT) {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "a damage coefficient floors into a health count"
+            )]
+            let amount = whole as u32;
+            amount
+        } else {
+            Self::MIN_PVP_HIT
+        }
+    }
+
+    /// A hit on another player. Retail `PvP_Flag` toggles 2525 with a header and no argument.
+    /// Both players must be flagged. A player who is not flagged is not a target.
+    fn pvp_hit(
+        &mut self,
+        attacker: Entity,
+        from: Position,
+        target: u64,
+        damage_id: &str,
+        reach_m: Option<f32>,
+    ) -> Result<AttackOutcome, AttackRefusal> {
+        let attacker_flagged = self
+            .world
+            .get::<Player>(attacker)
+            .is_some_and(|player| player.pvp_flagged);
+        if !attacker_flagged {
+            return Err(AttackRefusal::UnknownTarget);
+        }
+        let Some(target_entity) = self.player_by_number(target) else {
+            return Err(AttackRefusal::UnknownTarget);
+        };
+        if target_entity == attacker {
+            return Err(AttackRefusal::UnknownTarget);
+        }
+        let flagged = self
+            .world
+            .get::<Player>(target_entity)
+            .is_some_and(|player| player.pvp_flagged);
+        if !flagged {
+            return Err(AttackRefusal::UnknownTarget);
+        }
+        let at = self
+            .world
+            .get::<Body>(target_entity)
+            .ok_or(AttackRefusal::UnknownTarget)?
+            .motion
+            .position();
+        if reach_m.is_some_and(|reach_m| at.horizontal_distance(from) > reach_m) {
+            return Err(AttackRefusal::OutOfReach);
+        }
+        let row = self
+            .combat
+            .data
+            .attack(damage_id)
+            .ok_or(AttackRefusal::NotWeaponAttack)?;
+        let amount = Self::pvp_hit_amount(row.coefficient);
+        let mut vitals = self
+            .world
+            .get_mut::<Vitals>(target_entity)
+            .ok_or(AttackRefusal::UnknownTarget)?;
+        if vitals.health.is_dead() {
+            return Err(AttackRefusal::TargetDead);
+        }
+        match vitals.health.take(amount) {
+            Damage::AlreadyDead => Err(AttackRefusal::TargetDead),
+            Damage::Killed => Ok(AttackOutcome::Killed { target }),
+            Damage::Hurt => Ok(AttackOutcome::Hit { target, amount }),
+        }
+    }
+
     /// As [`SimWorld::hit`]; the attack interval applies only when `paced` (a second target of
     /// one swing is not a second attack).
     fn hit_paced(
@@ -450,7 +536,7 @@ impl SimWorld {
             return Err(AttackRefusal::Dead);
         }
         if spawn_index(target).is_none() {
-            return Err(AttackRefusal::UnknownTarget);
+            return self.pvp_hit(entity, position, target, damage_id, reach_m);
         }
         let view = self
             .target_view(target)
@@ -546,9 +632,24 @@ impl SimWorld {
                 attacker.clone(),
                 &ServerMessage::DamageDealt(DamageDealtMsg::absorbed(number, target)),
             );
+            self.send_reliable(
+                attacker.clone(),
+                &ServerMessage::CombatEffect(CombatEffectMsg::DisplayImmuneText {
+                    header: FacetHeader::of(
+                        nw_messages::facet::component::DAMAGE_RECEIVER,
+                        target,
+                    ),
+                    attacker: facet_entity(number),
+                }),
+            );
             return Ok(AttackOutcome::Hit { target, amount: 0 });
         }
-        let hit = player_hit(&attack, armor_share, &mut self.dice);
+        let mut hit = player_hit(&attack, armor_share, &mut self.dice);
+        // The status effects of the player and of the mob scale the hit (`Dmg*`, `Abs*`).
+        let effects_scale =
+            self.player_hit_scale(entity, target, row.damage_type.unwrap_or(HIT_TAG));
+        // A hit of a few thousand points.
+        hit.amount = (f64::from(hit.amount) * effects_scale).round() as u32;
         let threat = row.threat.saturating_add(u64::from(hit.amount));
         let outcome = match &view.owner {
             None => self
@@ -565,6 +666,14 @@ impl SimWorld {
         let killed = matches!(outcome, AttackOutcome::Killed { .. });
         if matches!(outcome, AttackOutcome::Hit { .. }) {
             self.mob_timelines.hurt(target);
+            if view.owner.is_none() {
+                self.player_hit_effects(
+                    target,
+                    number,
+                    RowKey::of(&row.table, &row.damage_id),
+                    hit.amount,
+                );
+            }
         }
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             player.combat.hit(now_ms, killed);
@@ -766,24 +875,13 @@ impl SimWorld {
             tracing::debug!(player = number, item, "drink: the item does not heal");
             return;
         };
-        let group = lowercase_crc32(&heal.cooldown_id);
         let now_us = server_ms.saturating_mul(US_PER_MS);
-        player.cooldowns.retain(|cooldown| cooldown.end_us > now_us);
-        if player
-            .cooldowns
-            .iter()
-            .any(|cooldown| cooldown.group == group)
-        {
+        let cooldown = Some((heal.cooldown_id.as_str(), heal.cooldown_s));
+        if !super::item_calls::start_cooldown(&mut player.cooldowns, &item, cooldown, now_us) {
             tracing::debug!(player = number, item, "drink: the cooldown runs");
             return;
         }
         gear.use_one(slot::QUICK_SLOT_1);
-        let cooldown_ms = u64::from(heal.cooldown_s) * MS_PER_SECOND;
-        player.cooldowns.push(ConsumableCooldown {
-            consumable: lowercase_crc32(&item),
-            end_us: now_us.saturating_add(cooldown_ms * US_PER_MS),
-            group,
-        });
         player.cooldowns_changed = true;
         let connection = player.connection.clone();
         let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) else {
@@ -795,9 +893,19 @@ impl SimWorld {
         let healed = vitals.health.heal(amount);
         tracing::debug!(player = number, item, amount, healed, "drink");
         self.send_reliable(
-            connection,
+            connection.clone(),
             &ServerMessage::AdjustFxScripts(AdjustFxScriptsMsg::on(number, HEAL_SCRIPT)),
         );
+        if healed > 0 {
+            self.send_reliable(
+                connection,
+                &ServerMessage::OnHealed(nw_messages::OnHealedMsg::of(
+                    number,
+                    number,
+                    healed as f32,
+                )),
+            );
+        }
     }
 
     /// The dead player of `connection` lives again with full health, when `min_respawn_ms` have
@@ -849,8 +957,14 @@ impl SimWorld {
                 .get(&number)
                 .map_or(TUTORIAL_START, Tutorial::respawn_at)
         } else {
+            // A point no capture shows is a capital of the level: an inn or a respawn camp the
+            // player bound (travel study: retail's 1938 named the bound ids).
             let at = point
-                .and_then(respawn_point)
+                .and_then(|point| {
+                    respawn_point(point)
+                        .or_else(|| self.content.travel.spawn_point(point))
+                        .or_else(|| self.own_spawn_point(entity, point))
+                })
                 .unwrap_or_else(|| nearest_respawn_point([died_at.x, died_at.y, died_at.z]));
             let at = Position {
                 x: at[0],
@@ -1062,9 +1176,20 @@ impl SimWorld {
                 return Vec::new();
             }
         }
-        let Some(attack) = stance
-            .and_then(|stance| stance.schedule(step))
-            .and_then(|schedule| schedule.attack(kind))
+        // With the right-click held, a gun or a bow fires the aimed shot of its aim fragment
+        // (`MusketAttack1`, `BowAttack1`, the drawn charge's `BowAttack2`), not the hip fire
+        // (`MusketAttack_Hipfire`, `BowAttack_Hipshot`; `player_2h_ranged.adb`,
+        // `player_bow.adb`).
+        let aiming = records.first().is_some_and(InputRecord::blocking);
+        let aimed = stance
+            .filter(|_| aiming)
+            .and_then(|stance| stance.aimed_attack(kind));
+        let Some(attack) = aimed
+            .or_else(|| {
+                stance
+                    .and_then(|stance| stance.schedule(step))
+                    .and_then(|schedule| schedule.attack(kind))
+            })
             .cloned()
         else {
             tracing::debug!(
@@ -1075,6 +1200,20 @@ impl SimWorld {
             );
             return vec![Err(AttackRefusal::NotWeaponAttack)];
         };
+        if !spread && held.is_some_and(|weapon| weapon.max_loaded_ammo > 0) {
+            // A weapon with loaded shots that fires through the server's attack (`MaxLoadedAmmo`
+            // of a musket) takes one; with none loaded the attack is the client's reload, as
+            // the spread-shot weapon's above.
+            let fired = self
+                .world
+                .get_mut::<Player>(entity)
+                .and_then(|mut player| Some(player.gear.as_mut()?.fire(now_ms)))
+                .unwrap_or(false);
+            if !fired {
+                tracing::debug!(player = number, "attack with an empty weapon");
+                return Vec::new();
+            }
+        }
         let view = self
             .world
             .get::<Player>(entity)
@@ -1652,10 +1791,14 @@ impl SimWorld {
                 }
                 Damage::Hurt | Damage::AlreadyDead => AttackOutcome::Hit { target, amount },
             };
+            if damage != Damage::AlreadyDead {
+                self.wear_weapon(attacker);
+            }
             if matches!(outcome, AttackOutcome::Killed { .. }) {
                 self.drop_loot(target, attacker, now_ms);
                 self.quest_kill(target, attacker, now_ms);
                 self.note_kill(target, attacker);
+                self.reward_kill(target, attacker);
             }
             return Some(outcome);
         }
@@ -1669,6 +1812,10 @@ impl SimWorld {
         let scale = self
             .mobs
             .hit_scale(attacker, (1.0 - self.combat.player_armor_share) as f32);
+        // The player's status effects take their share of the hit (`Abs*`).
+        let tag = style.map_or(DEFAULT_HIT_TAG, |style| style.tag);
+        let amount = self.player_absorbs(entity, tag, amount);
+        self.player_hit_taken(entity);
         let mut vitals = self.world.get_mut::<Vitals>(entity)?;
         let max_health = amount_of(vitals.health.max());
         let damage = vitals.health.take(amount);
@@ -1683,6 +1830,14 @@ impl SimWorld {
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             player.tracked.enter_combat();
         }
+        // A hit ends a summon and takes mount stamina; a death ends the ride ([`super::mount`]).
+        self.mount_hit(
+            entity,
+            amount_of(amount),
+            max_health,
+            damage == Damage::Killed,
+            now_ms,
+        );
         let total = amount_of(amount);
         let affix = style.and_then(|style| style.affix);
         // A share of a hit: f32 holds it.
@@ -1704,6 +1859,12 @@ impl SimWorld {
             return Some(AttackOutcome::Hit { target, amount });
         }
         self.mobs.forget(target);
+        self.meta_event(entity, super::meta_achievements::MetaEvent::Died);
+        // A death wears the worn items (durability loss, [`super::repair`]); a player killer
+        // makes it a PvP death.
+        let by_player =
+            spawn_index(attacker).is_none() && self.player_by_number(attacker).is_some();
+        self.wear_at_death(entity, by_player);
         // A death puts the drawn weapon away (retail: 161 put-aways at the 4299).
         let time_ns = unix_ns(self.server_ms);
         if let Some(mut player) = self.world.get_mut::<Player>(entity)
@@ -1866,6 +2027,7 @@ impl SimWorld {
             affix: None,
             damage_scale: 1.0,
             block_stamina: DEFAULT_BLOCK_STAMINA,
+            row: None,
         };
         let stability = defender
             .and_then(|defender| self.held_weapon(defender))
@@ -1890,6 +2052,7 @@ impl SimWorld {
                 affix: row.affix,
                 damage_scale: row.coefficient,
                 block_stamina,
+                row: Some(RowKey::of(&row.table, &row.damage_id)),
             };
         }
         let mob = intent.mob;
@@ -1916,6 +2079,7 @@ impl SimWorld {
             damage_scale: row.coefficient / attack_row.coefficient * phase_mult,
             // A few dozen stamina points.
             block_stamina: row.block_stamina(weapon, stability) as f32,
+            row: Some(RowKey::of(&row.table, &row.damage_id)),
         }
     }
 
@@ -1936,7 +2100,9 @@ impl SimWorld {
                 let defender = self.player_by_number(intent.target);
                 // The same hit for a player of this sim and one of another (a ghost).
                 let style = self.mob_hit_style(&intent, move_hit, defender);
-                let scaled = f64::from(hit.amount) * style.damage_scale;
+                let scaled = f64::from(hit.amount)
+                    * style.damage_scale
+                    * self.mob_hit_scale(intent.mob, style.tag);
                 // A hit of a few hundred points.
                 hit.amount = scaled.round() as u32;
                 tracing::debug!(
@@ -1989,7 +2155,7 @@ impl SimWorld {
                     if blocked {
                         return None;
                     }
-                    return self.apply_hit_with(
+                    let outcome = self.apply_hit_with(
                         intent.target,
                         intent.mob,
                         hit.amount,
@@ -1997,6 +2163,10 @@ impl SimWorld {
                         now_ms,
                         Some(&style),
                     );
+                    if outcome.is_some() {
+                        self.mob_hit_effects(entity, intent.mob, style.row, hit.amount);
+                    }
+                    return outcome;
                 }
                 let (owner, ghost) = self.ghost(intent.target)?;
                 let owner = owner.clone();
@@ -2034,8 +2204,8 @@ mod tests {
     use nw_content::combat::{CombatData, CombatRows};
     use nw_content::player_attacks::stance_key;
     use nw_messages::{
-        BodyCodec, DamageDealtMsg, DeathRecapMsg, FacetHeader, RAW_ID_LEN, ServerMessage, SlotBits,
-        SpreadHit,
+        BodyCodec, CombatEffectMsg, DamageDealtMsg, DeathRecapMsg, FacetHeader, RAW_ID_LEN,
+        ServerMessage, SlotBits, SpreadHit,
     };
 
     const LIGHT: &str = "1H_Sword_Attack1";
@@ -2700,6 +2870,39 @@ mod tests {
         assert_eq!(status.in_combat, Some(true), "the hit starts the combat");
     }
 
+    #[test]
+    fn a_hit_on_an_absorbing_mob_sends_the_attacker_a_2071_and_a_1924() {
+        /// How long the mob absorbs hits, from `NOW`.
+        const ABSORB_MS: u64 = 1_000;
+        let mut world = fight();
+        let mob = world
+            .mobs
+            .spawn_personal(test_spawn(MOB_X), 1, false, None, None, NOW)
+            .expect("rows");
+        world.mobs.absorb(mob, NOW + ABSORB_MS);
+        world
+            .attack(&connection(1), mob, LIGHT, NOW)
+            .expect("hit");
+        assert_eq!(
+            messages_to(&world.take_messages(), 1),
+            vec![
+                ServerMessage::DamageDealt(DamageDealtMsg::absorbed(1, mob)),
+                ServerMessage::CombatEffect(CombatEffectMsg::DisplayImmuneText {
+                    header: FacetHeader::of(
+                        nw_messages::facet::component::DAMAGE_RECEIVER,
+                        mob,
+                    ),
+                    attacker: nw_messages::facet_entity(1),
+                }),
+            ]
+        );
+        assert_eq!(
+            world.mobs.health(mob),
+            Some(MOB_HEALTH),
+            "an absorbed hit does no damage"
+        );
+    }
+
     /// The shots and reload time of the test blunderbuss (retail `BlunderbussT2`: 2, 1.46 s).
     const BLUNDERBUSS_SHOTS: u8 = 2;
     const BLUNDERBUSS_RELOAD_MS: u64 = 1_460;
@@ -3061,6 +3264,115 @@ mod tests {
             world.player_swings_due(NOW + 2 * LONG_AFTER_MS),
             vec![Ok(AttackOutcome::Missed)],
             "a cast away from the mob meets nothing"
+        );
+    }
+
+    #[test]
+    fn a_gun_fires_its_aimed_shot_while_aiming_and_waits_for_its_load() {
+        /// The musket's stance and its aimed shot's row (`player_2h_ranged.adb`).
+        const MUSKET: &str = "2H_Ranged,Rifle";
+        const MUSKET_STATS: &str = "MusketT2";
+        const AIMED_ROW: &str = "MusketAttack1";
+        /// The aimed row hits twice as hard as the hip fire's in this test.
+        const AIMED_COEFFICIENT: f64 = 2.0;
+        /// One load, loaded again 1 s after the shot (`MaxLoadedAmmo`, `AutoReloadAmmoSeconds`).
+        const LOADS: u8 = 1;
+        const RELOAD_MS: u64 = 1_000;
+        const AWAY_M: f32 = 15.0;
+        /// Right-click held: input slot value 1, bit 62.
+        const AIM_VALUE: usize = 1;
+        const AIM_BIT: u32 = 62;
+        let mut stances: Vec<Stance> =
+            serde_json::from_str(crate::combat::test_support::TEST_PLAYER_ATTACKS)
+                .expect("player attack table");
+        let musket = stances
+            .iter_mut()
+            .find(|stance| stance.tags == MUSKET)
+            .expect("the musket's stance");
+        let hip = musket.light.clone().expect("the hip fire");
+        musket.aimed = Some(BasicAttack {
+            damage_row: AIMED_ROW.to_owned(),
+            ..hip.clone()
+        });
+        let mut source = crate::combat::test_support::test_source();
+        let sword = source.weapons[0].1;
+        source.weapons.push((
+            MUSKET_STATS.to_owned(),
+            WeaponRow {
+                stance: stance_key(MUSKET),
+                max_loaded_ammo: LOADS,
+                reload_ms: RELOAD_MS,
+                ..sword
+            },
+        ));
+        source
+            .item_stats
+            .push((gear::tests::SWORD.to_owned(), MUSKET_STATS.to_owned()));
+        let hip_row = source
+            .attacks
+            .iter()
+            .find(|row| row.damage_id == hip.damage_row)
+            .cloned()
+            .expect("the hip fire's row");
+        source.attacks.push(AttackRow {
+            damage_id: AIMED_ROW.to_owned(),
+            coefficient: AIMED_COEFFICIENT,
+            ..hip_row
+        });
+        let data = CombatData::build(source, &CombatRows::default())
+            .expect("data")
+            .with_player_attacks(nw_content::player_attacks::PlayerAttacks::of_stances(
+                stances,
+            ));
+        let mut world = fight_at(MOB_X + AWAY_M);
+        world.combat = committed().combat_settings(
+            Arc::new(data),
+            Arc::from([]),
+            crate::combat::tests::test_mob_ai(),
+        );
+        let entity = world.by_connection[&connection(1)];
+        world.world.get_mut::<Player>(entity).expect("player").gear = Gear::starter(
+            &gear::tests::kits(),
+            gear::tests::CHARACTER,
+            Some(gear::tests::BACKSTORY),
+        );
+        tick(&mut world, NOW);
+        let amount = |landed: Vec<Result<AttackOutcome, AttackRefusal>>| match landed.as_slice() {
+            [Ok(AttackOutcome::Hit { amount, .. })] => *amount,
+            other => panic!("one hit: {other:?}"),
+        };
+        /// Long enough for the musket bolt to reach a mob 15 m away.
+        const PROJECTILE_FLIGHT_MS: u64 = 1_000;
+        let mut aimed = message(1, &[Key::Press, Key::Release]);
+        for record in &mut aimed {
+            record.slots.values[AIM_VALUE] |= 1 << AIM_BIT;
+        }
+        let shot = |world: &mut SimWorld, fired_ms: u64| {
+            let _ = world.player_swings_due(fired_ms);
+            amount(world.player_swings_due(fired_ms + PROJECTILE_FLIGHT_MS))
+        };
+        world.attack_input(&connection(1), &aimed, NOW);
+        let aimed_hit = shot(&mut world, NOW + LONG_AFTER_MS);
+        world.attack_input(
+            &connection(1),
+            &message(3, &[Key::Press, Key::Release]),
+            NOW + LONG_AFTER_MS,
+        );
+        assert!(
+            world.player_swings_due(NOW + 2 * LONG_AFTER_MS).is_empty(),
+            "no load: the client reloads"
+        );
+        let loaded_ms = NOW + 2 * LONG_AFTER_MS;
+        world.tick_hands(loaded_ms, loaded_ms);
+        world.attack_input(
+            &connection(1),
+            &message(5, &[Key::Press, Key::Release]),
+            loaded_ms,
+        );
+        let hip_hit = shot(&mut world, loaded_ms + LONG_AFTER_MS);
+        assert!(
+            aimed_hit > hip_hit,
+            "the aimed row hits harder: {aimed_hit} against {hip_hit}"
         );
     }
 
@@ -4621,7 +4933,20 @@ mod tests {
         world
             .request_respawn(&connection(1), None, NOW + MIN_RESPAWN_MS)
             .expect("respawn");
-        assert_eq!(tick(&mut world, NOW + MIN_RESPAWN_MS).handoffs.len(), 1);
+        // The respawn is a server move of three states. The handoff waits until that move
+        // has gone out. The nearest known point is still past this sim's margin.
+        /// The spawn card can take the first tick, then the move is three states.
+        const SERVER_MOVE_TICKS: u64 = 4;
+        let respawned = NOW + MIN_RESPAWN_MS;
+        assert!(
+            tick(&mut world, respawned).handoffs.is_empty(),
+            "the server move goes before the handoff"
+        );
+        let mut handed_off = 0;
+        for step in 1..=SERVER_MOVE_TICKS {
+            handed_off = tick(&mut world, respawned + step).handoffs.len();
+        }
+        assert_eq!(handed_off, 1);
     }
 
     #[test]

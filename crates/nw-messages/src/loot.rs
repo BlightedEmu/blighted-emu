@@ -45,8 +45,14 @@ const GLOBAL_STORAGE_FIELD: &str = "global storage";
 pub const LOOT_ROLLED: u32 = 1;
 /// `m_lootState` of a bag the player looted (retail 2 at the take).
 pub const LOOT_TAKEN: u32 = 2;
+/// `m_lootType` of a point of interest's loot: a chest the player opened (craft2 report: retail
+/// 0 at each chest's open; the client's enum names it `POILoot`).
+pub const LOOT_POI: u32 = 0;
 /// `m_lootType` of a creature's loot (retail 1 for every mob bag).
 pub const LOOT_CREATURE: u32 = 1;
+/// `m_lootType` of a bag of items its owner dropped (retail 5 at each drop, open-world
+/// `item_actions`).
+pub const LOOT_DROPPED: u32 = 5;
 
 /// One bag of the loot tracker: `InstancedLootData` (`FUN_14376b520`) keyed by the bag id.
 #[derive(Debug, Clone, Copy, PartialEq)]

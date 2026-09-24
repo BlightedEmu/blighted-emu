@@ -9,12 +9,14 @@ use nw_design::DesignRunError;
 
 use crate::ai_data::AiDataError;
 use crate::ai_trace::AiTraceError;
+use crate::catacombs::CatacombCheckError;
 use crate::codegen::CodegenError;
 use crate::collision::CollisionError;
 use crate::roads::RoadsError;
 use crate::water::WaterError;
 use crate::combat::NwdbError;
 use crate::creature_animations::CreatureAnimationsError;
+use crate::dungeon_scripts::DungeonScriptsBuildError;
 use crate::ftue_entities::FtueEntitiesError;
 use crate::map_tiles::MapTilesError;
 use crate::mob_prefabs::MobPrefabsError;
@@ -28,6 +30,9 @@ pub enum ToolError {
     /// A map tile cannot be decoded or written.
     #[error(transparent)]
     MapTiles(#[from] MapTilesError),
+    /// The catacomb check cannot run.
+    #[error(transparent)]
+    Catacombs(#[from] CatacombCheckError),
     /// Reading the install failed.
     #[error(transparent)]
     Source(#[from] SourceError),
@@ -55,6 +60,9 @@ pub enum ToolError {
     /// A water file cannot be built, written or read back.
     #[error(transparent)]
     Water(#[from] WaterError),
+    /// The dungeon script file cannot be built.
+    #[error(transparent)]
+    DungeonScripts(#[from] DungeonScriptsBuildError),
     /// The reloaded bundle does not hold what was written.
     #[error("bundle check failed: {what} is {found} after reload, expected {expected}")]
     CountMismatch {

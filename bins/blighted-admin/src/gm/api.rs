@@ -1153,6 +1153,7 @@ mod tests {
                     players: 0,
                     max_players: 1,
                     level: "lv".to_owned(),
+                    instance: None,
                 },
                 1,
             );

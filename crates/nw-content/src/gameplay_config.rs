@@ -91,6 +91,50 @@ pub mod keys {
     pub const COMPANY_ONLY_WAR_SLOTS: &str = "javelin.social.enable-company-only-war-slots";
     /// The server's Twitch system.
     pub const TWITCH_SYSTEM: &str = "javelin-server.enable-twitch-system";
+    /// Seconds a fast travel channels before the move.
+    pub const FAST_TRAVEL_CHANNELING_LENGTH: &str =
+        "javelin.housing.fast-travel-channeling-length";
+    /// Seconds from an accepted unstuck request to its move.
+    pub const UNSTUCK_TELEPORT_DELAY: &str = "javelin-server.unstuck-teleport-delay-seconds";
+    /// Seconds between two unstuck requests.
+    pub const UNSTUCK_MIN_INTERVAL: &str =
+        "javelin-server.min-time-between-unstuck-requests-seconds";
+    /// The most breadcrumbs (safe places) the server keeps of a player.
+    pub const MAX_PLAYER_BREADCRUMBS: &str = "javelin-server.max-player-breadcrumbs";
+    /// The least distance between two breadcrumbs, metres.
+    pub const MIN_PLAYER_BREADCRUMB_DISTANCE: &str =
+        "javelin-server.min-player-breadcrumb-distance";
+    /// Items lose durability (deaths, gathers, hits). Client default 0 (build 25810808 cvar
+    /// table); the retail remote config of 2026-09-18 does not set it.
+    pub const ITEM_DURABILITY_LOSS: &str = "javelin.enable-item-durability-loss";
+    /// Fast travel costs no azoth (client cvar `FUN_140169720`).
+    pub const DISABLE_FAST_TRAVEL_COSTS: &str = "javelin.playtest-disable-fast-travel-costs";
+    /// The base azoth cost of a fast travel to a settlement or shrine.
+    pub const FAST_TRAVEL_SETTLEMENT_COST: &str = "javelin.housing.fast-travel-settlement-cost";
+    /// The distance, metres, a fast travel goes before its distance cost starts.
+    pub const FAST_TRAVEL_MIN_DISTANCE: &str = "javelin.housing.fast-travel-settlement-minDist";
+    /// The metres of one distance cost step.
+    pub const FAST_TRAVEL_DISTANCE_STEP: &str =
+        "javelin.housing.fast-travel-settlement-additionalDistMod";
+    /// The azoth of one distance cost step.
+    pub const FAST_TRAVEL_DISTANCE_COST: &str = "javelin.housing.fast-travel-settlement-distCost";
+    /// The weight of one encumbrance cost step.
+    pub const FAST_TRAVEL_ENCUMBRANCE_STEP: &str =
+        "javelin.housing.fast-travel-settlement-encumbranceScaleFactor";
+    /// The azoth of one encumbrance cost step.
+    pub const FAST_TRAVEL_ENCUMBRANCE_COST: &str =
+        "javelin.housing.fast-travel-settlement-encumbranceCost";
+    /// The share of the cost taken off a fast travel within the player's territory.
+    pub const FAST_TRAVEL_TERRITORY_DISCOUNT: &str =
+        "javelin.housing.fast-travel-currentTerritoryDiscount";
+    /// The azoth of a home fast travel cooldown reset with the whole cooldown left.
+    pub const COOLDOWN_RESET_COST: &str = "javelin.fast-travel-cooldown-reset-cost";
+    /// The least azoth of a home fast travel cooldown reset.
+    pub const COOLDOWN_RESET_COST_MIN: &str = "javelin.fast-travel-cooldown-reset-cost-min";
+    /// The cost multiplier of a second house.
+    pub const SECOND_HOUSE_COST_MULTIPLIER: &str = "javelin.housing.second-house-cost-multiplier";
+    /// The cost multiplier of a third house.
+    pub const THIRD_HOUSE_COST_MULTIPLIER: &str = "javelin.housing.third-house-cost-multiplier";
 }
 
 /// A layer value that the server cannot read.
@@ -359,6 +403,52 @@ pub struct GameModes {
     pub matchmaking_modes: Vec<String>,
 }
 
+/// The travel keys (the client's registration `FUN_14358d7c0` for the housing ones and
+/// `FUN_14688f580`, the server unstuck component in the client binary, for the server ones).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TravelKeys {
+    /// `javelin.housing.fast-travel-channeling-length`, seconds.
+    pub fast_travel_channeling_seconds: Option<f64>,
+    /// `javelin-server.unstuck-teleport-delay-seconds`.
+    pub unstuck_delay_seconds: Option<f64>,
+    /// `javelin-server.min-time-between-unstuck-requests-seconds`.
+    pub unstuck_interval_seconds: Option<f64>,
+    /// `javelin-server.max-player-breadcrumbs`.
+    pub max_breadcrumbs: Option<u64>,
+    /// `javelin-server.min-player-breadcrumb-distance`, metres.
+    pub breadcrumb_distance_m: Option<f64>,
+}
+
+/// The fast travel cost and housing cost keys (the client's registration `FUN_14358d7c0`; its
+/// defaults are the housing facet constructor's, `FUN_14356a2f0`). No retail layer sets them.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct FastTravelCostKeys {
+    /// `javelin.playtest-disable-fast-travel-costs`.
+    pub disabled: Option<bool>,
+    /// `javelin.housing.fast-travel-settlement-cost`.
+    pub settlement_cost: Option<u64>,
+    /// `javelin.housing.fast-travel-settlement-minDist`, metres.
+    pub min_distance_m: Option<f64>,
+    /// `javelin.housing.fast-travel-settlement-additionalDistMod`, metres.
+    pub distance_step_m: Option<f64>,
+    /// `javelin.housing.fast-travel-settlement-distCost`.
+    pub distance_cost: Option<u64>,
+    /// `javelin.housing.fast-travel-settlement-encumbranceScaleFactor`.
+    pub encumbrance_step: Option<u64>,
+    /// `javelin.housing.fast-travel-settlement-encumbranceCost`.
+    pub encumbrance_cost: Option<u64>,
+    /// `javelin.housing.fast-travel-currentTerritoryDiscount`.
+    pub territory_discount: Option<f64>,
+    /// `javelin.fast-travel-cooldown-reset-cost`.
+    pub cooldown_reset_cost: Option<u64>,
+    /// `javelin.fast-travel-cooldown-reset-cost-min`.
+    pub cooldown_reset_cost_min: Option<u64>,
+    /// `javelin.housing.second-house-cost-multiplier`.
+    pub second_house_multiplier: Option<f64>,
+    /// `javelin.housing.third-house-cost-multiplier`.
+    pub third_house_multiplier: Option<f64>,
+}
+
 /// Every gameplay key of the layers that the server applies or keeps for a system.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GameplayConfig {
@@ -394,6 +484,12 @@ pub struct GameplayConfig {
     pub company_only_war_slots: Option<bool>,
     /// `javelin-server.enable-twitch-system`.
     pub twitch_system: Option<bool>,
+    /// The travel keys.
+    pub travel: TravelKeys,
+    /// `javelin.enable-item-durability-loss`; `None`: the client default, off.
+    pub item_durability_loss: Option<bool>,
+    /// The fast travel cost and housing cost keys.
+    pub fast_travel_costs: FastTravelCostKeys,
 }
 
 impl GameplayConfig {
@@ -485,7 +581,36 @@ impl GameplayConfig {
             },
             company_only_war_slots: stack.bool(keys::COMPANY_ONLY_WAR_SLOTS)?,
             twitch_system: stack.bool(keys::TWITCH_SYSTEM)?,
+            travel: TravelKeys {
+                fast_travel_channeling_seconds: stack
+                    .number(keys::FAST_TRAVEL_CHANNELING_LENGTH)?,
+                unstuck_delay_seconds: stack.number(keys::UNSTUCK_TELEPORT_DELAY)?,
+                unstuck_interval_seconds: stack.number(keys::UNSTUCK_MIN_INTERVAL)?,
+                max_breadcrumbs: stack.unsigned(keys::MAX_PLAYER_BREADCRUMBS)?,
+                breadcrumb_distance_m: stack.number(keys::MIN_PLAYER_BREADCRUMB_DISTANCE)?,
+            },
+            item_durability_loss: stack.bool(keys::ITEM_DURABILITY_LOSS)?,
+            fast_travel_costs: FastTravelCostKeys {
+                disabled: stack.bool(keys::DISABLE_FAST_TRAVEL_COSTS)?,
+                settlement_cost: stack.unsigned(keys::FAST_TRAVEL_SETTLEMENT_COST)?,
+                min_distance_m: stack.number(keys::FAST_TRAVEL_MIN_DISTANCE)?,
+                distance_step_m: stack.number(keys::FAST_TRAVEL_DISTANCE_STEP)?,
+                distance_cost: stack.unsigned(keys::FAST_TRAVEL_DISTANCE_COST)?,
+                encumbrance_step: stack.unsigned(keys::FAST_TRAVEL_ENCUMBRANCE_STEP)?,
+                encumbrance_cost: stack.unsigned(keys::FAST_TRAVEL_ENCUMBRANCE_COST)?,
+                territory_discount: stack.number(keys::FAST_TRAVEL_TERRITORY_DISCOUNT)?,
+                cooldown_reset_cost: stack.unsigned(keys::COOLDOWN_RESET_COST)?,
+                cooldown_reset_cost_min: stack.unsigned(keys::COOLDOWN_RESET_COST_MIN)?,
+                second_house_multiplier: stack.number(keys::SECOND_HOUSE_COST_MULTIPLIER)?,
+                third_house_multiplier: stack.number(keys::THIRD_HOUSE_COST_MULTIPLIER)?,
+            },
         })
+    }
+
+    /// Whether items lose durability: `javelin.enable-item-durability-loss`, off by default
+    /// (retail: no item record of 730 ledgers lost durability, through deaths and gathers).
+    pub fn durability_loss(&self) -> bool {
+        self.item_durability_loss.unwrap_or(DURABILITY_LOSS_DEFAULT)
     }
 
     /// Whether an item of `item_class` (an `ItemClass` cell, `+`-separated, for example
@@ -502,6 +627,8 @@ impl GameplayConfig {
 
 /// Separates the classes of an `ItemClass` cell.
 pub const ITEM_CLASS_SEPARATOR: char = '+';
+/// The client default of `javelin.enable-item-durability-loss`.
+const DURABILITY_LOSS_DEFAULT: bool = false;
 
 #[cfg(test)]
 mod tests {
@@ -536,6 +663,13 @@ mod tests {
             "the array of the later layer replaces the whole list"
         );
         assert!((config.xp.progression("Mining") - NEUTRAL_MULTIPLIER).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn durability_loss_is_off_until_a_layer_turns_it_on() {
+        assert!(!config(&[]).expect("config").durability_loss());
+        let on = json!({"javelin": {"enable-item-durability-loss": true}});
+        assert!(config(&[on]).expect("config").durability_loss());
     }
 
     #[test]
@@ -656,6 +790,63 @@ mod tests {
         );
         assert_eq!(config.company_only_war_slots, Some(false));
         assert_eq!(config.twitch_system, Some(false));
+    }
+
+    #[test]
+    fn the_travel_keys_read_from_the_housing_and_server_layers() {
+        let loaded = config(&[
+            json!({"javelin": {"housing": {"fast-travel-channeling-length": 10}}}),
+            json!({"javelin-server": {
+                "unstuck-teleport-delay-seconds": 10,
+                "min-time-between-unstuck-requests-seconds": 120,
+                "max-player-breadcrumbs": 11,
+                "min-player-breadcrumb-distance": 24.0
+            }}),
+        ])
+        .expect("config");
+        assert_eq!(
+            loaded.travel,
+            TravelKeys {
+                fast_travel_channeling_seconds: Some(10.0),
+                unstuck_delay_seconds: Some(10.0),
+                unstuck_interval_seconds: Some(120.0),
+                max_breadcrumbs: Some(11),
+                breadcrumb_distance_m: Some(24.0),
+            }
+        );
+        assert!(
+            config(&[json!({"javelin-server": {"max-player-breadcrumbs": -1}})])
+                .expect_err("refused")
+                .to_string()
+                .contains(keys::MAX_PLAYER_BREADCRUMBS)
+        );
+    }
+
+    #[test]
+    fn the_fast_travel_cost_keys_read_from_their_layers() {
+        let config = config(&[json!({
+            "javelin": {
+                "playtest-disable-fast-travel-costs": false,
+                "fast-travel-cooldown-reset-cost": 200,
+                "housing": {
+                    "fast-travel-settlement-cost": 500,
+                    "fast-travel-settlement-minDist": 1500.0,
+                    "second-house-cost-multiplier": 1.5
+                }
+            }
+        })])
+        .expect("config");
+        assert_eq!(
+            config.fast_travel_costs,
+            FastTravelCostKeys {
+                disabled: Some(false),
+                settlement_cost: Some(500),
+                min_distance_m: Some(1_500.0),
+                cooldown_reset_cost: Some(200),
+                second_house_multiplier: Some(1.5),
+                ..FastTravelCostKeys::default()
+            }
+        );
     }
 
     #[test]

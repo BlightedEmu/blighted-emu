@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The client's point calls (progression note, section 6): spending attribute points (1502),
-//! assigning a weapon point (1112) and applying the assigned points (2857). Each body is the
-//! facet header and the arguments; the layouts are those of the retail newchar capture
-//! (2026-09-18: 4 x 1502, 8 x 1112, 8 x 2857). A body of another length is refused.
+//! The client's point calls (progression note, sections 6 and 9): spending attribute points
+//! (1502), refunding them (2409), assigning a weapon point (1112), applying the assigned points
+//! (2857), mapping an ability into a slot (2701) and resetting a weapon tree (186). Each body is
+//! the facet header and the arguments; the layouts are those of the retail captures (newchar
+//! 2026-09-18: 4 x 1502, 8 x 1112, 8 x 2857; WEAPON-CODEX: 99 x 2701, 17 x 186; open world
+//! 2026-08-26: 38 x 2409). A body of another length is refused.
 
 use crate::facet::FacetHeader;
 use crate::wire::{MessageError, Reader, Writer};
@@ -13,6 +15,14 @@ pub const SPEND_ATTRIBUTE_POINTS_TYPE_INDEX: u64 = 1502;
 pub const ASSIGN_POOL_POINTS_TYPE_INDEX: u64 = 1112;
 /// `AbilityComponentServerFacet_RequestApplyAbilityPoints`.
 pub const APPLY_ABILITY_POINTS_TYPE_INDEX: u64 = 2857;
+/// `AttributeComponentServerFacet_RequestRefundSpentPoints`.
+pub const REFUND_SPENT_POINTS_TYPE_INDEX: u64 = 2409;
+/// `AbilityComponentServerFacet_RequestChangeMappedAbility`.
+pub const CHANGE_MAPPED_ABILITY_TYPE_INDEX: u64 = 2701;
+/// `AbilityComponentServerFacet_RequestMasteryTreeRespec`.
+pub const MASTERY_TREE_RESPEC_TYPE_INDEX: u64 = 186;
+/// `ProgressionPointComponentServerFacet_RequestSpendTerritoryStandingPoint`.
+pub const SPEND_TERRITORY_STANDING_POINT_TYPE_INDEX: u64 = 4040;
 /// The most entries of a 1502 list: one per attribute (client enum `CharacterAttributeType`).
 const MAX_ATTRIBUTES: u64 = 5;
 
@@ -45,6 +55,44 @@ pub enum PointsClientMsg {
         /// The header.
         header: FacetHeader,
     },
+    /// 2409: refund every spent attribute point (no arguments; retail answered with the whole
+    /// attribute state and took the level's `AttributeRespecCost` coins).
+    RefundSpentPoints {
+        /// The header.
+        header: FacetHeader,
+    },
+    /// 2701: put an ability into one mapped slot of an ability table.
+    ChangeMappedAbility {
+        /// The header.
+        header: FacetHeader,
+        /// The table: its position in the list of the player's ability state (type 185; retail
+        /// sent 27 for the sword table, the 28th of the 29 tables it lists).
+        table: u16,
+        /// The slot, 0 to 2.
+        slot: u32,
+        /// The ability (CRC-32 of the lowercase ability id).
+        ability: u32,
+    },
+    /// 4040: spend one territory standing point of a territory pool (retail
+    /// `refining_all_stations_single_batch_territorylvlup`: two big-endian `u32`s, the pool
+    /// and the progression point; three spends of one session share the pool).
+    SpendTerritoryStandingPoint {
+        /// The header.
+        header: FacetHeader,
+        /// The territory pool (CRC-32 of its lowercase id).
+        pool: u32,
+        /// The progression point (CRC-32 of the lowercase `ProgressionPointId`).
+        point: u32,
+    },
+    /// 186: reset the weapon tree of one ability table (its points go back to the pool).
+    MasteryTreeRespec {
+        /// The header.
+        header: FacetHeader,
+        /// The table, as in 2701.
+        table: u16,
+        /// One byte of Unknown meaning (0 in all 17 retail calls).
+        flag: u8,
+    },
 }
 
 impl PointsClientMsg {
@@ -75,6 +123,31 @@ impl PointsClientMsg {
             APPLY_ABILITY_POINTS_TYPE_INDEX => {
                 read(|header, _| Ok(Self::ApplyAbilityPoints { header }))
             }
+            REFUND_SPENT_POINTS_TYPE_INDEX => {
+                read(|header, _| Ok(Self::RefundSpentPoints { header }))
+            }
+            CHANGE_MAPPED_ABILITY_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::ChangeMappedAbility {
+                    header,
+                    table: reader.u16()?,
+                    slot: reader.u32()?,
+                    ability: reader.u32()?,
+                })
+            }),
+            SPEND_TERRITORY_STANDING_POINT_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::SpendTerritoryStandingPoint {
+                    header,
+                    pool: reader.u32()?,
+                    point: reader.u32()?,
+                })
+            }),
+            MASTERY_TREE_RESPEC_TYPE_INDEX => read(|header, reader| {
+                Ok(Self::MasteryTreeRespec {
+                    header,
+                    table: reader.u16()?,
+                    flag: reader.u8()?,
+                })
+            }),
             _ => return None,
         })
     }
@@ -85,6 +158,12 @@ impl PointsClientMsg {
             Self::SpendAttributePoints { .. } => SPEND_ATTRIBUTE_POINTS_TYPE_INDEX,
             Self::AssignPoolPoints { .. } => ASSIGN_POOL_POINTS_TYPE_INDEX,
             Self::ApplyAbilityPoints { .. } => APPLY_ABILITY_POINTS_TYPE_INDEX,
+            Self::RefundSpentPoints { .. } => REFUND_SPENT_POINTS_TYPE_INDEX,
+            Self::ChangeMappedAbility { .. } => CHANGE_MAPPED_ABILITY_TYPE_INDEX,
+            Self::SpendTerritoryStandingPoint { .. } => {
+                SPEND_TERRITORY_STANDING_POINT_TYPE_INDEX
+            }
+            Self::MasteryTreeRespec { .. } => MASTERY_TREE_RESPEC_TYPE_INDEX,
         }
     }
 
@@ -110,7 +189,30 @@ impl PointsClientMsg {
                 header.write(&mut writer);
                 writer.u32(*pool).u32(*point).u32(*points);
             }
-            Self::ApplyAbilityPoints { header } => header.write(&mut writer),
+            Self::ApplyAbilityPoints { header } | Self::RefundSpentPoints { header } => {
+                header.write(&mut writer);
+            }
+            Self::ChangeMappedAbility {
+                header,
+                table,
+                slot,
+                ability,
+            } => {
+                header.write(&mut writer);
+                writer.u16(*table).u32(*slot).u32(*ability);
+            }
+            Self::SpendTerritoryStandingPoint { header, pool, point } => {
+                header.write(&mut writer);
+                writer.u32(*pool).u32(*point);
+            }
+            Self::MasteryTreeRespec {
+                header,
+                table,
+                flag,
+            } => {
+                header.write(&mut writer);
+                writer.u16(*table).u8(*flag);
+            }
         }
         writer.finish()
     }
@@ -195,6 +297,79 @@ mod tests {
             .expect("reads");
         assert_eq!(apply.type_index(), APPLY_ABILITY_POINTS_TYPE_INDEX);
         assert_eq!(apply.encode(), HEADER);
+    }
+
+    /// Retail 2701 arguments (WEAPON-CODEX): sword table 27, slot 2, an ability.
+    const RETAIL_MAP: [u8; 10] = [0x00, 0x1b, 0x00, 0x00, 0x00, 0x02, 0xe6, 0xe1, 0xd6, 0x78];
+    /// Retail 186 arguments (WEAPON-CODEX): the sword table, flag 0.
+    const RETAIL_RESPEC: [u8; 3] = [0x00, 0x1b, 0x00];
+    /// The sword table's position in retail's ability state.
+    const SWORD_TABLE: u16 = 27;
+
+    #[test]
+    fn the_retail_respec_refund_and_map_bodies_read_and_write_back() {
+        let map = PointsClientMsg::decode(CHANGE_MAPPED_ABILITY_TYPE_INDEX, &body(&RETAIL_MAP))
+            .expect("a point call")
+            .expect("reads");
+        assert_eq!(
+            map,
+            PointsClientMsg::ChangeMappedAbility {
+                header: header(),
+                table: SWORD_TABLE,
+                slot: 2,
+                ability: 0xe6e1_d678,
+            }
+        );
+        assert_eq!(map.encode(), body(&RETAIL_MAP));
+        let respec =
+            PointsClientMsg::decode(MASTERY_TREE_RESPEC_TYPE_INDEX, &body(&RETAIL_RESPEC))
+                .expect("a point call")
+                .expect("reads");
+        assert_eq!(
+            respec,
+            PointsClientMsg::MasteryTreeRespec {
+                header: header(),
+                table: SWORD_TABLE,
+                flag: 0,
+            }
+        );
+        assert_eq!(respec.encode(), body(&RETAIL_RESPEC));
+        assert_eq!(respec.type_index(), MASTERY_TREE_RESPEC_TYPE_INDEX);
+        let refund = PointsClientMsg::decode(REFUND_SPENT_POINTS_TYPE_INDEX, &HEADER)
+            .expect("a point call")
+            .expect("reads");
+        assert_eq!(refund, PointsClientMsg::RefundSpentPoints { header: header() });
+        assert_eq!(refund.encode(), HEADER);
+        assert!(matches!(
+            PointsClientMsg::decode(REFUND_SPENT_POINTS_TYPE_INDEX, &body(&[0])),
+            Some(Err(_))
+        ));
+    }
+
+    /// Retail 4040 arguments (territory level-up ledger): one pool, three points.
+    const RETAIL_TERRITORY_POOL: u32 = 0xd65a_1577;
+
+    #[test]
+    fn the_retail_territory_spend_reads_and_writes_back() {
+        for point in [0x68c1_f9aa_u32, 0xb945_4238, 0xfa6c_80ba] {
+            let mut arguments = RETAIL_TERRITORY_POOL.to_be_bytes().to_vec();
+            arguments.extend_from_slice(&point.to_be_bytes());
+            let call = PointsClientMsg::decode(
+                SPEND_TERRITORY_STANDING_POINT_TYPE_INDEX,
+                &body(&arguments),
+            )
+            .expect("a point call")
+            .expect("reads");
+            assert_eq!(
+                call,
+                PointsClientMsg::SpendTerritoryStandingPoint {
+                    header: header(),
+                    pool: RETAIL_TERRITORY_POOL,
+                    point,
+                }
+            );
+            assert_eq!(call.encode(), body(&arguments));
+        }
     }
 
     #[test]

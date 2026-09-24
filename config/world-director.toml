@@ -42,3 +42,22 @@ password_env = "NW_SECRET_GLOBAL_DATABASE_PASSWORD"
 [global_database.database]
 url = "postgres://nw@127.0.0.1:5432/nw_global"
 max_connections = 2
+
+# Expeditions, raids and trials (run 15 instances study). Each instance runs on a sim with
+# role = "instance" and the level of its game mode (config/sim.toml). These are operator
+# settings: how long an empty instance stays (a group can come back), and the waits for the
+# instance sim and the social service. Leave the section out for a world without instances.
+[instances]
+empty_timeout_ms = 300000
+open_timeout_ms = 1000
+group_timeout_ms = 500
+
+# The director starts instance sims itself with this command (on this host, no cloud service)
+# and stops the ones it started when they stay free. Leave it out to start them by hand.
+# [instances.launch]
+# program = "target/release/sim"
+# args = ["--config", "config/sim.toml"]
+# spare_per_level = 1
+# max_sims = 64
+# id_prefix = "inst"
+# forget_after_ms = 600000

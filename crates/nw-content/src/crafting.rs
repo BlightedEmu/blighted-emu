@@ -3,6 +3,12 @@
 //! to seven ingredients at one of its stations. An ingredient of type `Category_Only` is any item
 //! whose `IngredientCategories` hold the category (the Light Ration takes one
 //! `FoodIngredientT1`: the captured craft used `PorkT1`); every other ingredient names an item.
+//!
+//! A station type is a name and a tier (`blacksmith2`, `camp1`): a station makes the recipes of
+//! its name up to its tier (Observed: retail crafted `weaving2`, `tanning2`, `smelting2`,
+//! `carpentry2` and `masonry2` recipes at the T5 refining stations and `blacksmith2` recipes at a
+//! T4 forge, ledgers `refining_all_stations_single_batch_territorylvlup` and `Crafting_Forge`). A
+//! recipe's tradeskill, recipe level, game event and fee are its [`RecipeDetails`].
 
 use std::collections::HashMap;
 
@@ -12,6 +18,8 @@ use crate::Tables;
 
 /// The ingredient type of a category.
 const CATEGORY_ONLY: &str = "Category_Only";
+/// Separates the steps of a `GearScoreBonus` or `GearScoreReduction` cell (`5,10,15,20,25`).
+const STEP_SEPARATOR: char = ',';
 /// Separates the categories of an `IngredientCategories` cell.
 const CATEGORY_SEPARATOR: char = ',';
 
@@ -49,12 +57,148 @@ pub struct Recipe {
 }
 
 impl Recipe {
-    /// Whether station type `station` (any case) makes it.
+    /// Whether station type `station` (any case) makes it: a station type of the same name with
+    /// a tier at least the recipe's, or the same type for a name without a tier.
     pub fn made_at(&self, station: &str) -> bool {
-        self.stations
-            .iter()
-            .any(|known| known.eq_ignore_ascii_case(station))
+        let (station_name, station_tier) = name_and_tier(station);
+        self.stations.iter().any(|known| {
+            let (name, tier) = name_and_tier(known);
+            name.eq_ignore_ascii_case(station_name)
+                && match (tier, station_tier) {
+                    (Some(tier), Some(station_tier)) => station_tier >= tier,
+                    (None, None) => true,
+                    _ => false,
+                }
+        })
     }
+}
+
+/// A station type's name and its tier: `blacksmith2` is `blacksmith` tier 2; a type that does
+/// not end in digits (`camp1_standing`) has no tier.
+fn name_and_tier(station: &str) -> (&str, Option<u32>) {
+    let name = station.trim_end_matches(|letter: char| letter.is_ascii_digit());
+    let tier = station[name.len()..].parse().ok();
+    match tier {
+        Some(tier) if !name.is_empty() => (name, Some(tier)),
+        _ => (station, None),
+    }
+}
+
+/// What a recipe gives and costs besides its items (`CraftingRecipeData`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecipeDetails {
+    /// `Tradeskill`: the tradeskill whose rank the recipe needs.
+    pub tradeskill: Option<String>,
+    /// `RecipeLevel`: the `RecipeLevel` the tradeskill's rank must reach.
+    pub recipe_level: u32,
+    /// `GameEventID`: the game event of each craft (its tradeskill experience).
+    pub game_event: Option<String>,
+    /// `CraftingFee`: the most coins one craft costs (Observed: retail took less, the fee its
+    /// client showed after the station's tax: 69 for one craft of a 184-coin recipe, 18 for 40
+    /// crafts of a 1-coin recipe).
+    pub fee: u32,
+    /// `BaseGearScore`: the gear score a craft starts from; `None`: the item's own.
+    pub base_gear_score: Option<u32>,
+    /// `BaseTier`: the tier its ingredients are measured against, and the tier of its rank
+    /// gear score bonus.
+    pub base_tier: u32,
+    /// `GearScoreBonus`: what a `Category_Only` ingredient of 1, 2, ... tiers above
+    /// [`Self::base_tier`] adds.
+    pub gear_score_bonus: Vec<u32>,
+    /// `GearScoreReduction`: what one of 1, 2, ... tiers below takes.
+    pub gear_score_reduction: Vec<u32>,
+    /// `DisallowBonusesToGS`: the craft gets its base gear score only.
+    pub disallow_bonuses: bool,
+    /// `MaxPerkItemsAllowed`: the most perk items one craft takes; `None`: as many as the item
+    /// has perk slots.
+    pub max_perk_items: Option<u32>,
+}
+
+/// What one picked ingredient adds to a craft's gear score range.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct IngredientGearScore {
+    /// `IngredientGearScoreBaseBonus`: added to both ends.
+    pub base_bonus: u32,
+    /// `IngredientGearScoreMaxBonus`: added to the top.
+    pub max_bonus: u32,
+    /// For a `Category_Only` ingredient: its item's `Tier`.
+    pub category_tier: Option<u32>,
+}
+
+/// The allowed gear score range of a craft (best guess of the client's
+/// `CraftingRequestBus.GetGearScoreBonus`, whose body is not in the decompile; run-15 items2
+/// R3): the base gear score, plus the rank bonus of the recipe tier, plus each ingredient's
+/// base bonus (both ends) and max bonus (top), plus `GearScoreBonus[d-1]` for a `Category_Only`
+/// ingredient `d` tiers above the base tier or minus `GearScoreReduction[d-1]` for one below;
+/// without bonuses when the recipe disallows them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CraftGearScore {
+    /// The lowest.
+    pub min: u32,
+    /// The highest.
+    pub max: u32,
+}
+
+impl RecipeDetails {
+    /// The gear score range of a craft from `base` (its `BaseGearScore`, else the item's own)
+    /// with the rank bonus `rank_bonus` (lowest, highest) and the picked `ingredients`.
+    pub fn gear_score_range(
+        &self,
+        base: u32,
+        rank_bonus: (u32, u32),
+        ingredients: &[IngredientGearScore],
+    ) -> CraftGearScore {
+        let base = self.base_gear_score.unwrap_or(base);
+        if self.disallow_bonuses {
+            return CraftGearScore {
+                min: base,
+                max: base,
+            };
+        }
+        let step = |steps: &[u32], distance: u32| {
+            usize::try_from(distance)
+                .ok()
+                .and_then(|distance| distance.checked_sub(1))
+                .and_then(|index| steps.get(index).or_else(|| steps.last()))
+                .copied()
+                .unwrap_or_default()
+        };
+        let (mut gain, mut loss, mut top) = (0_u32, 0_u32, 0_u32);
+        for ingredient in ingredients {
+            gain = gain.saturating_add(ingredient.base_bonus);
+            top = top.saturating_add(ingredient.max_bonus);
+            match ingredient.category_tier {
+                Some(tier) if tier > self.base_tier => {
+                    gain = gain.saturating_add(step(&self.gear_score_bonus, tier - self.base_tier));
+                }
+                Some(tier) if tier < self.base_tier => {
+                    loss = loss
+                        .saturating_add(step(&self.gear_score_reduction, self.base_tier - tier));
+                }
+                _ => {}
+            }
+        }
+        let min = base
+            .saturating_add(rank_bonus.0)
+            .saturating_add(gain)
+            .saturating_sub(loss);
+        let max = base
+            .saturating_add(rank_bonus.1)
+            .saturating_add(gain)
+            .saturating_add(top)
+            .saturating_sub(loss)
+            .max(min);
+        CraftGearScore { min, max }
+    }
+}
+
+/// The steps of a `GearScoreBonus` or `GearScoreReduction` cell; a step that is no number is
+/// left out.
+fn steps_of(cell: Option<&str>) -> Vec<u32> {
+    cell.unwrap_or_default()
+        .split(STEP_SEPARATOR)
+        .filter_map(|step| step.trim().parse().ok())
+        .collect()
 }
 
 /// Every recipe by the CRC-32 of its lowercase id, and the ingredient categories of every item.
@@ -63,6 +207,8 @@ pub struct Recipes {
     by_crc: HashMap<u32, Recipe>,
     /// The categories of each item, by lowercase item id.
     categories: HashMap<String, Vec<String>>,
+    /// The details of each recipe, by the CRC-32 of its lowercase id.
+    details: HashMap<u32, RecipeDetails>,
 }
 
 /// A quantity cell as a count of at least 1.
@@ -129,7 +275,55 @@ impl Recipes {
                 let cell = row.ingredient_categories.as_deref()?;
                 Some((row.item_id.clone(), cell.to_owned()))
             });
-        Self::build(recipes, categories)
+        let details = tables
+            .crafting_recipe_data
+            .iter()
+            .flat_map(|table| &table.rows)
+            .map(|row| {
+                let count = |cell: Option<i64>| {
+                    cell.and_then(|value| u32::try_from(value).ok())
+                        .unwrap_or_default()
+                };
+                (
+                    row.recipe_id.clone(),
+                    RecipeDetails {
+                        tradeskill: row.tradeskill.clone().filter(|skill| !skill.is_empty()),
+                        recipe_level: count(row.recipe_level),
+                        game_event: row.game_event_id.clone().filter(|event| !event.is_empty()),
+                        fee: count(row.crafting_fee),
+                        base_gear_score: row
+                            .base_gear_score
+                            .and_then(|value| u32::try_from(value).ok()),
+                        base_tier: count(row.base_tier),
+                        gear_score_bonus: steps_of(row.gear_score_bonus.as_deref()),
+                        gear_score_reduction: steps_of(row.gear_score_reduction.as_deref()),
+                        disallow_bonuses: row.disallow_bonuses_to_gs.unwrap_or_default(),
+                        max_perk_items: row
+                            .max_perk_items_allowed
+                            .and_then(|value| u32::try_from(value).ok()),
+                    },
+                )
+            });
+        Self::build(recipes, categories).with_details(details)
+    }
+
+    /// These recipes with the `details` of their ids (recipe id, details); the first row of an
+    /// id wins.
+    #[must_use]
+    pub fn with_details(
+        mut self,
+        details: impl IntoIterator<Item = (String, RecipeDetails)>,
+    ) -> Self {
+        for (id, detail) in details {
+            self.details.entry(lowercase_crc32(&id)).or_insert(detail);
+        }
+        self
+    }
+
+    /// The details of the recipe whose lowercase id has the CRC-32 `crc`; none for a recipe
+    /// without a row of them.
+    pub fn details(&self, crc: u32) -> RecipeDetails {
+        self.details.get(&crc).cloned().unwrap_or_default()
     }
 
     /// The book of `recipes`, with each item's `IngredientCategories` cell in `categories` (item
@@ -155,12 +349,28 @@ impl Recipes {
                     (item.to_lowercase(), list)
                 })
                 .collect(),
+            details: HashMap::new(),
         }
     }
 
     /// The recipe whose lowercase id has the CRC-32 `crc`.
     pub fn get(&self, crc: u32) -> Option<&Recipe> {
         self.by_crc.get(&crc)
+    }
+
+    /// The ingredients of every recipe made at a station whose type name, without its tier
+    /// digits, has the lowercase CRC-32 `station` (the 7044 storage search: retail `smelting`
+    /// for the `smelting1..5` stations).
+    pub fn ingredients_at(&self, station: u32) -> impl Iterator<Item = &Ingredient> {
+        self.by_crc
+            .values()
+            .filter(move |recipe| {
+                recipe
+                    .stations
+                    .iter()
+                    .any(|known| lowercase_crc32(name_and_tier(known).0) == station)
+            })
+            .flat_map(|recipe| &recipe.ingredients)
     }
 
     /// Whether item `item` (any case) is what `ingredient` takes.
@@ -241,6 +451,54 @@ impl StructureCosts {
 mod tests {
     use super::*;
 
+    /// A T4 armor recipe of base gear score 400 and base tier 4.
+    fn armor_recipe() -> RecipeDetails {
+        RecipeDetails {
+            base_gear_score: Some(400),
+            base_tier: 4,
+            gear_score_bonus: steps_of(Some("5,10,15,20,25")),
+            gear_score_reduction: steps_of(Some("5, 10,x")),
+            ..RecipeDetails::default()
+        }
+    }
+
+    #[test]
+    fn a_craft_range_adds_rank_and_ingredient_bonuses() {
+        let recipe = armor_recipe();
+        assert_eq!(recipe.gear_score_reduction, [5, 10]);
+        let ingot = IngredientGearScore {
+            base_bonus: 15,
+            max_bonus: 5,
+            category_tier: None,
+        };
+        let higher = IngredientGearScore {
+            category_tier: Some(5),
+            ..IngredientGearScore::default()
+        };
+        let lower = IngredientGearScore {
+            category_tier: Some(2),
+            ..IngredientGearScore::default()
+        };
+        assert_eq!(
+            recipe.gear_score_range(0, (20, 75), &[ingot, higher]),
+            CraftGearScore { min: 440, max: 500 }
+        );
+        assert_eq!(
+            recipe.gear_score_range(0, (0, 0), &[lower]),
+            CraftGearScore { min: 390, max: 390 }
+        );
+        let fixed = RecipeDetails {
+            disallow_bonuses: true,
+            ..armor_recipe()
+        };
+        assert_eq!(
+            fixed.gear_score_range(0, (20, 75), &[ingot]),
+            CraftGearScore { min: 400, max: 400 }
+        );
+        let own = RecipeDetails::default();
+        assert_eq!(own.gear_score_range(100, (0, 5), &[]).max, 105);
+    }
+
     #[test]
     fn a_blueprints_costs_are_found_in_any_case() {
         let costs = StructureCosts::build([(
@@ -310,5 +568,59 @@ mod tests {
         assert_eq!(count_of(None), 1);
         assert_eq!(count_of(Some(0)), 1);
         assert_eq!(count_of(Some(3)), 3);
+    }
+
+    #[test]
+    fn a_station_search_finds_the_ingredients_of_its_recipes() {
+        let recipes = recipes();
+        let cooking: Vec<&Ingredient> = recipes.ingredients_at(lowercase_crc32("cooking")).collect();
+        assert_eq!(cooking.len(), 1);
+        assert!(recipes.fits(cooking[0], "PorkT1"));
+        let camp: Vec<&Ingredient> = recipes.ingredients_at(lowercase_crc32("camp")).collect();
+        assert_eq!(camp.len(), 3, "the knife's two and the ration's one");
+        assert_eq!(recipes.ingredients_at(lowercase_crc32("cooking2")).count(), 0);
+    }
+
+    #[test]
+    fn a_station_makes_the_recipes_of_its_name_up_to_its_tier() {
+        let recipes = recipes();
+        let knife = recipes
+            .get(lowercase_crc32("1hSkinningKnifeT1"))
+            .expect("knife");
+        assert!(knife.made_at("engineering2"));
+        assert!(knife.made_at("Engineering5"), "a higher tier station");
+        assert!(!knife.made_at("engineering1"), "a lower tier station");
+        assert!(knife.made_at("camp3"));
+        assert!(!knife.made_at("camp1_standing"), "another name");
+        assert!(!knife.made_at("engineering"), "no tier");
+        assert_eq!(name_and_tier("blacksmith5"), ("blacksmith", Some(5)));
+        assert_eq!(name_and_tier("camp1_standing"), ("camp1_standing", None));
+        assert_eq!(name_and_tier("12"), ("12", None));
+    }
+
+    #[test]
+    fn a_recipes_details_are_found_by_the_crc_of_its_id() {
+        let ration = "Procedural_HealthRecoveryT1";
+        let recipes = recipes().with_details([
+            (
+                ration.to_owned(),
+                RecipeDetails {
+                    tradeskill: Some("Cooking".to_owned()),
+                    recipe_level: 0,
+                    game_event: Some("Craft_CookingT1".to_owned()),
+                    fee: 0,
+                    ..RecipeDetails::default()
+                },
+            ),
+            (ration.to_owned(), RecipeDetails::default()),
+        ]);
+        let details = recipes.details(lowercase_crc32(ration));
+        assert_eq!(
+            details.game_event.as_deref(),
+            Some("Craft_CookingT1"),
+            "the first row wins"
+        );
+        assert_eq!(details.tradeskill.as_deref(), Some("Cooking"));
+        assert_eq!(recipes.details(0), RecipeDetails::default());
     }
 }

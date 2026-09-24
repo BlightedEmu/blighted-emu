@@ -28,6 +28,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
+use nw_ai::value::NameId;
 use nw_bus::{MOB_ENTITY_BASE, MOB_STATES, MobGhost, SnapMob};
 use nw_content::combat::CombatData;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
@@ -377,6 +378,9 @@ pub struct Mobs {
     left: Vec<u64>,
     /// Mobs that respawned since the last [`Mobs::take_respawned`].
     respawned: Vec<u64>,
+    /// The encounter events the mobs' trees sent since the last
+    /// [`Mobs::take_encounter_events`]: (mob, event id).
+    encounter_events: Vec<(u64, String)>,
 }
 
 /// The spawns that a sim of `level` spawns. Every mob of the tutorial is a fight of its quest,
@@ -387,6 +391,19 @@ pub fn spawns_of_level(level: &str, spawns: &[VitalsSpawn]) -> Arc<[VitalsSpawn]
         return Arc::from([]);
     }
     spawns.iter().cloned().collect()
+}
+
+/// `spawns` without the encounter spawns (`IsEncounter`) when `scripted`: an instance sim whose
+/// level has a dungeon script spawns its encounters' mobs as their stages run.
+pub fn unscripted_spawns(spawns: Arc<[VitalsSpawn]>, scripted: bool) -> Arc<[VitalsSpawn]> {
+    if !scripted {
+        return spawns;
+    }
+    spawns
+        .iter()
+        .filter(|spawn| !spawn.is_encounter)
+        .cloned()
+        .collect()
 }
 
 fn position_of(spawn: &VitalsSpawn) -> Position {
@@ -411,6 +428,8 @@ struct Step {
     sleeps: bool,
     /// Its tree ran.
     ticked: bool,
+    /// The encounter events its tree sent.
+    encounter_events: Vec<NameId>,
 }
 
 /// What every mind reads in a tick.
@@ -444,6 +463,7 @@ impl TickView<'_> {
             acquired: None,
             sleeps: false,
             ticked: false,
+            encounter_events: Vec::new(),
         };
         if let Mind::Tree(mind) = &mob.mind
             && !mind.due(self.now_ms)
@@ -476,6 +496,7 @@ impl TickView<'_> {
         }
         step.acquired = thought.acquired;
         step.ticked = thought.ticked;
+        step.encounter_events = thought.encounter_events;
         step.hits = thought
             .hits
             .into_iter()
@@ -517,6 +538,7 @@ impl Mobs {
             wake_scans: 0,
             left: Vec::new(),
             respawned: Vec::new(),
+            encounter_events: Vec::new(),
         }
     }
 
@@ -535,6 +557,11 @@ impl Mobs {
     /// new id and card, as on retail (GDE id note).
     pub fn take_respawned(&mut self) -> Vec<u64> {
         std::mem::take(&mut self.respawned)
+    }
+
+    /// The encounter events the mobs' trees sent since the last call: (mob, event id).
+    pub fn take_encounter_events(&mut self) -> Vec<(u64, String)> {
+        std::mem::take(&mut self.encounter_events)
     }
 
     /// The archetype of a mob of `spawn` shown with slice asset `asset` (else its vitals id's
@@ -656,6 +683,11 @@ impl Mobs {
         self.awake.remove(&index);
         self.left.push(entity);
         true
+    }
+
+    /// Every live mob (spawned, alive or waiting for its respawn), by entity number.
+    pub fn live_entities(&self) -> Vec<u64> {
+        self.live.keys().map(|index| mob_entity(*index)).collect()
     }
 
     /// The GM mobs, by entity number.
@@ -1035,6 +1067,10 @@ impl Mobs {
         let mut acquired = Vec::new();
         for step in steps {
             self.brain_runs += u64::from(step.ticked);
+            for event in step.encounter_events {
+                let name = self.ai.name(event).to_owned();
+                self.encounter_events.push((mob_entity(step.index), name));
+            }
             intents.extend(step.hits);
             if let Some(target) = step.acquired {
                 acquired.push((step.index, target));
@@ -1617,6 +1653,18 @@ mod tests {
             &*spawns_of_level("newworld_vitaeeterna", &spawns),
             &spawns[..]
         );
+    }
+
+    #[test]
+    fn a_scripted_instance_leaves_its_encounter_spawns_to_the_script() {
+        let encounter = VitalsSpawn {
+            is_encounter: true,
+            ..spawn_at(0.0, TEST_MOB, TEST_LEVEL)
+        };
+        let standing = spawn_at(1.0, TEST_MOB, TEST_LEVEL);
+        let spawns: Arc<[VitalsSpawn]> = Arc::from([encounter, standing.clone()]);
+        assert_eq!(&*unscripted_spawns(Arc::clone(&spawns), false), &*spawns);
+        assert_eq!(&*unscripted_spawns(spawns, true), &[standing][..]);
     }
 
     #[test]

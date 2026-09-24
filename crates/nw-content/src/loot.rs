@@ -28,6 +28,13 @@
 //! `b`) or `Key:a` (`a` and up, nwdb `{!plvl}65+` for `Level:64`); a key that is not a level
 //! name never holds (Unknown: `HWMLoot*`, `DawnLevel`). An item without tags always drops; with
 //! `MatchOne` one tag that holds is enough, else every tag must hold (nwdb.info `bmo`).
+//!
+//! A salvage ([`LootTables::roll_salvage`]) rolls the item's `RepairRecipe` table with the
+//! salvaged item's values as its levels: `SalvageItemTier` the item's `Tier`,
+//! `SalvageItemRarity` its rarity and `SalvageItemGearScore` its gear score
+//! (`javelindata_loottables_salvage`: `MasterSalvageArmorLarge` picks its tier table, which picks
+//! its rarity table; nwdb.info shows them as `{!sit}`, `{!sir}` and `{!sigs}`). Their thresholds
+//! are the values themselves (tiers 1 to 5, rarities 0 to 4, gear scores 500 and 600).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -62,6 +69,10 @@ const ENEMY_LEVEL: &str = "EnemyLevel";
 const CONTENT_LEVEL: &str = "MinContLevel";
 const PLAYER_LEVEL: &str = "Level";
 const POI_LEVEL: &str = "MinPOIContLevel";
+/// The salvaged item's values of a salvage roll.
+const SALVAGE_TIER: &str = "SalvageItemTier";
+const SALVAGE_RARITY: &str = "SalvageItemRarity";
+const SALVAGE_GEAR_SCORE: &str = "SalvageItemGearScore";
 /// How deep `[LTID]` entries may nest (retail tables nest 3 deep).
 const MAX_DEPTH: u8 = 8;
 /// Most table rolls and bucket picks of one roll: a design table that rolls itself with a large
@@ -95,11 +106,40 @@ pub struct LootContext<'a> {
     pub reached_limits: &'a [String],
 }
 
+/// The salvaged item's values that a salvage roll reads as its levels.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SalvageLevels {
+    /// Its `Tier` (`SalvageItemTier`).
+    pub tier: u32,
+    /// Its rarity (`SalvageItemRarity`): 0 common to 4 legendary.
+    pub rarity: u32,
+    /// Its gear score (`SalvageItemGearScore`).
+    pub gear_score: u32,
+}
+
+/// What a dropped item's gear score and perks roll from (run-15 items2 study): the
+/// `GearScoreRange{n}` and `PerkOverrides{n}` of the entry that dropped it (or of the entry of
+/// an outer table or bucket on its path), and the `GSBonus` and `UseLevelGS` of its table.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DropGearScore {
+    /// The entry's gear score range (`a-b` or `a`).
+    pub range: Option<(u32, u32)>,
+    /// `GSBonus`: added to the rolled gear score (retail cells -15 to 10).
+    pub bonus: i32,
+    /// `UseLevelGS`: the range is the player level's `GSLimitT{tier}`.
+    pub use_level: bool,
+    /// `PerkOverrides{n}`: the perks the item gets (a comma list).
+    pub perks: Vec<String>,
+}
+
 /// What one roll drops, and the loot limits its tables count a visit on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LootRoll {
     /// The items, merged by item.
     pub items: Vec<(String, u32)>,
+    /// What each dropped item's gear score and perks roll from, by item id (the first entry
+    /// that dropped it).
+    pub gear_scores: BTreeMap<String, DropGearScore>,
     /// The ids of the limits of the `TriggerLimitOnVisit` tables it rolled, once per roll of
     /// each such table.
     pub limit_visits: Vec<String>,
@@ -112,6 +152,9 @@ enum LevelKind {
     Content,
     Player,
     Poi,
+    SalvageTier,
+    SalvageRarity,
+    SalvageGearScore,
 }
 
 impl LevelKind {
@@ -122,6 +165,9 @@ impl LevelKind {
             (CONTENT_LEVEL, Self::Content),
             (PLAYER_LEVEL, Self::Player),
             (POI_LEVEL, Self::Poi),
+            (SALVAGE_TIER, Self::SalvageTier),
+            (SALVAGE_RARITY, Self::SalvageRarity),
+            (SALVAGE_GEAR_SCORE, Self::SalvageGearScore),
         ]
         .into_iter()
         .find(|(known, _)| known.eq_ignore_ascii_case(name))
@@ -130,12 +176,17 @@ impl LevelKind {
 }
 
 impl LootContext<'_> {
-    fn level(&self, kind: LevelKind) -> Option<u32> {
+    /// The level `kind` of this context and of the salvaged item's values `salvage` (`None`
+    /// outside a salvage).
+    fn level(&self, kind: LevelKind, salvage: Option<SalvageLevels>) -> Option<u32> {
         match kind {
             LevelKind::Enemy => self.enemy,
             LevelKind::Content => self.content,
             LevelKind::Player => self.player,
             LevelKind::Poi => self.poi,
+            LevelKind::SalvageTier => salvage.map(|item| item.tier),
+            LevelKind::SalvageRarity => salvage.map(|item| item.rarity),
+            LevelKind::SalvageGearScore => salvage.map(|item| item.gear_score),
         }
     }
 }
@@ -146,6 +197,10 @@ struct LootEntry {
     item: String,
     quantity: (u32, u32),
     threshold: u32,
+    /// Its `GearScoreRange{n}`.
+    gear_score: Option<(u32, u32)>,
+    /// Its `PerkOverrides{n}`.
+    perks: Vec<String>,
 }
 
 /// What a table rolls on.
@@ -169,6 +224,67 @@ struct LootTable {
     /// Whether each roll of it counts a visit on its limit (`TriggerLimitOnVisit`).
     counts_visit: bool,
     entries: Vec<LootEntry>,
+    /// Its `RollBonusSetting`: how a roll bonus that one of its conditions names changes its
+    /// random roll ([`LootTables::roll_with_bonuses`]); `None` takes no bonus.
+    bonus_setting: Option<RollBonusSetting>,
+    /// `GSBonus`.
+    gs_bonus: i32,
+    /// `UseLevelGS`.
+    use_level_gs: bool,
+}
+
+/// A `RollBonusSetting` cell (`javelindata_loottables_fishing`: every fishing table has one): how
+/// a roll bonus is applied to a table's random roll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RollBonusSetting {
+    /// `AddToRoll`: the bonus is added; the sum may pass `MaxRoll` (`FishingLoot`'s diverted entry
+    /// has threshold 100001 over `MaxRoll` 100000: only a bonus reaches it).
+    AddToRoll,
+    /// `ClampMax`: the bonus is added and the sum is held at `MaxRoll`.
+    ClampMax,
+}
+
+impl RollBonusSetting {
+    /// The setting a cell names (any case); `None` for another text.
+    pub fn of(cell: &str) -> Option<Self> {
+        [
+            (ADD_TO_ROLL, Self::AddToRoll),
+            (CLAMP_MAX, Self::ClampMax),
+        ]
+        .into_iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(cell.trim()))
+        .map(|(_, setting)| setting)
+    }
+
+    /// The roll `rolled` of a table of `MaxRoll` `max` with `bonus` added.
+    pub const fn apply(self, rolled: u32, bonus: u32, max: u32) -> u32 {
+        let sum = rolled.saturating_add(bonus);
+        match self {
+            Self::AddToRoll => sum,
+            Self::ClampMax => {
+                if sum > max {
+                    max
+                } else {
+                    sum
+                }
+            }
+        }
+    }
+}
+
+/// The `RollBonusSetting` names.
+const ADD_TO_ROLL: &str = "AddToRoll";
+const CLAMP_MAX: &str = "ClampMax";
+
+/// One roll bonus of a roll: the condition that names it (`FishRarity`, `FishSize`,
+/// `LootTableDiverted`) and its value on the tables' `MaxRoll` scale. A table whose conditions
+/// name it takes it; the name is held as a tag of the roll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RollBonus<'a> {
+    /// The condition name.
+    pub name: &'a str,
+    /// The bonus.
+    pub value: u32,
 }
 
 /// One row of `javelindata_loottables`: a table, or its quantity or threshold row.
@@ -186,6 +302,14 @@ pub struct LootRow {
     pub trigger_limit_on_visit: bool,
     /// The `Item` cells by column number.
     pub cells: BTreeMap<u32, String>,
+    /// The `GearScoreRange` cells by column number.
+    pub gear_score_ranges: BTreeMap<u32, String>,
+    /// The `PerkOverrides` cells by column number.
+    pub perk_overrides: BTreeMap<u32, String>,
+    /// `GSBonus`.
+    pub gs_bonus: Option<i64>,
+    /// `UseLevelGS` is `TRUE` or `1`.
+    pub use_level_gs: bool,
 }
 
 /// One item of a loot bucket.
@@ -226,6 +350,10 @@ impl LootSource {
                 max_roll: row.max_roll,
                 trigger_limit_on_visit: counts_visits(row.trigger_limit_on_visit.as_deref()),
                 cells: row.item.clone(),
+                gear_score_ranges: row.gear_score_range.clone(),
+                perk_overrides: row.perk_overrides.clone(),
+                gs_bonus: row.gs_bonus,
+                use_level_gs: counts_visits(row.use_level_gs.as_deref()),
             })
             .collect();
         // Each bucket sheet names its columns' buckets in its own first row.
@@ -329,6 +457,9 @@ struct BucketEntry {
 /// What a roll holds while it walks: the context and the ids of the tables on its path.
 struct Holds<'a, 'b> {
     context: LootContext<'a>,
+    salvage: Option<SalvageLevels>,
+    /// The roll bonuses: their names are held tags.
+    bonuses: &'b [RollBonus<'b>],
     path: &'b [String],
 }
 
@@ -340,13 +471,17 @@ impl Holds<'_, '_> {
             .iter()
             .any(|own| own.eq_ignore_ascii_case(tag))
             || self.path.iter().any(|table| table == tag)
+            || self
+                .bonuses
+                .iter()
+                .any(|bonus| bonus.name.eq_ignore_ascii_case(tag))
     }
 
     fn bucket_tag(&self, tag: &BucketTag) -> bool {
         match tag {
             BucketTag::Level(kind, low, high) => self
                 .context
-                .level(*kind)
+                .level(*kind, self.salvage)
                 .is_some_and(|level| level >= *low && high.is_none_or(|high| level <= high)),
             BucketTag::Plain(tag) => self.tag(tag),
             BucketTag::Never => false,
@@ -375,7 +510,31 @@ pub struct LootTables {
 impl LootTables {
     /// The loot tables and buckets of `tables`.
     pub fn from_tables(tables: &Tables) -> Self {
-        Self::build(LootSource::from_tables(tables))
+        Self::build(LootSource::from_tables(tables)).with_roll_bonus_settings(
+            tables
+                .loot_tables_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter_map(|row| {
+                    let setting = RollBonusSetting::of(row.roll_bonus_setting.as_deref()?)?;
+                    Some((row.loot_table_id.clone(), setting))
+                }),
+        )
+    }
+
+    /// These tables with the `RollBonusSetting` of each table of `settings` (table id,
+    /// setting); an id that is no table here is left out.
+    #[must_use]
+    pub fn with_roll_bonus_settings(
+        mut self,
+        settings: impl IntoIterator<Item = (String, RollBonusSetting)>,
+    ) -> Self {
+        for (id, setting) in settings {
+            if let Some(table) = self.tables.get_mut(&id) {
+                table.bonus_setting = Some(setting);
+            }
+        }
+        self
     }
 
     /// The loot tables and buckets of `source`.
@@ -403,6 +562,13 @@ impl LootTables {
                         threshold: cell(thresholds, index)
                             .and_then(|text| text.trim().parse().ok())
                             .unwrap_or(0),
+                        gear_score: row
+                            .gear_score_ranges
+                            .get(index)
+                            .and_then(|text| quantity(text)),
+                        perks: names(row.perk_overrides.get(index).map(String::as_str))
+                            .map(str::to_owned)
+                            .collect(),
                     })
                     .collect();
                 let max_roll = thresholds
@@ -435,6 +601,12 @@ impl LootTables {
                         counts_visit: row.trigger_limit_on_visit && limit.is_some(),
                         limit,
                         entries,
+                        bonus_setting: None,
+                        gs_bonus: row
+                            .gs_bonus
+                            .and_then(|bonus| i32::try_from(bonus).ok())
+                            .unwrap_or_default(),
+                        use_level_gs: row.use_level_gs,
                     },
                 )
             })
@@ -469,9 +641,51 @@ impl LootTables {
         context: LootContext<'_>,
         below: &mut impl FnMut(u32) -> u32,
     ) -> LootRoll {
+        self.walk(table, context, None, &[], below)
+    }
+
+    /// What loot table `table` drops in `context` with the roll bonuses `bonuses` (a fishing
+    /// catch: `FishRarity`, `FishSize`, `LootTableDiverted`), with `below(n)` a random number
+    /// below `n`. A table whose conditions name a bonus takes it by its `RollBonusSetting`, and a
+    /// bonus's name is a tag the roll holds.
+    pub fn roll_with_bonuses(
+        &self,
+        table: &str,
+        context: LootContext<'_>,
+        bonuses: &[RollBonus<'_>],
+        below: &mut impl FnMut(u32) -> u32,
+    ) -> LootRoll {
+        self.walk(table, context, None, bonuses, below)
+    }
+
+    /// What the salvage of an item with the values `salvage` drops from loot table `table` in
+    /// `context`, with `below(n)` a random number below `n`.
+    pub fn roll_salvage(
+        &self,
+        table: &str,
+        context: LootContext<'_>,
+        salvage: SalvageLevels,
+        below: &mut impl FnMut(u32) -> u32,
+    ) -> LootRoll {
+        self.walk(table, context, Some(salvage), &[], below)
+    }
+
+    fn walk(
+        &self,
+        table: &str,
+        context: LootContext<'_>,
+        salvage: Option<SalvageLevels>,
+        bonuses: &[RollBonus<'_>],
+        below: &mut impl FnMut(u32) -> u32,
+    ) -> LootRoll {
         let mut drops: BTreeMap<String, u32> = BTreeMap::new();
+        let mut gear_scores = BTreeMap::new();
         let mut walk = Walk {
+            hint: DropGearScore::default(),
+            gear_scores: &mut gear_scores,
             context,
+            salvage,
+            bonuses,
             below,
             steps: 0,
             path: Vec::new(),
@@ -482,6 +696,7 @@ impl LootTables {
         let limit_visits = walk.limit_visits;
         LootRoll {
             items: drops.into_iter().collect(),
+            gear_scores,
             limit_visits,
         }
     }
@@ -490,12 +705,18 @@ impl LootTables {
 /// One roll as it walks the tables.
 struct Walk<'a, 'b, F> {
     context: LootContext<'a>,
+    salvage: Option<SalvageLevels>,
+    bonuses: &'b [RollBonus<'b>],
     below: &'b mut F,
     steps: u32,
     /// The lowercase ids of the tables on the path, outermost first.
     path: Vec<String>,
     drops: &'b mut BTreeMap<String, u32>,
     limit_visits: Vec<String>,
+    /// What the items dropped now roll their gear score from: the hint of the entries on the
+    /// path.
+    hint: DropGearScore,
+    gear_scores: &'b mut BTreeMap<String, DropGearScore>,
 }
 
 impl<F: FnMut(u32) -> u32> Walk<'_, '_, F> {
@@ -511,6 +732,8 @@ impl<F: FnMut(u32) -> u32> Walk<'_, '_, F> {
         self.path.push(id.to_lowercase());
         let holds = Holds {
             context: self.context,
+            salvage: self.salvage,
+            bonuses: self.bonuses,
             path: &self.path,
         };
         let below_limit = table
@@ -529,8 +752,17 @@ impl<F: FnMut(u32) -> u32> Walk<'_, '_, F> {
     /// The roll of `table`: `None` when its level is not known.
     fn draw(&mut self, table: &LootTable) -> Option<u32> {
         match table.roll {
-            Roll::Random(max) => Some((self.below)(max.max(1))),
-            Roll::Level(kind) => self.context.level(kind),
+            Roll::Random(max) => {
+                let rolled = (self.below)(max.max(1));
+                let bonus = table.bonus_setting.zip(table.required.iter().find_map(|tag| {
+                    self.bonuses
+                        .iter()
+                        .find(|bonus| bonus.name.eq_ignore_ascii_case(tag))
+                        .map(|bonus| bonus.value)
+                }));
+                Some(bonus.map_or(rolled, |(setting, bonus)| setting.apply(rolled, bonus, max)))
+            }
+            Roll::Level(kind) => self.context.level(kind, self.salvage),
         }
     }
 
@@ -561,18 +793,39 @@ impl<F: FnMut(u32) -> u32> Walk<'_, '_, F> {
         };
         for entry in dropped {
             let count = count_of(entry.quantity, self.below);
-            if let Some(inner) = entry.item.strip_prefix(TABLE_PREFIX) {
-                for _ in 0..count {
-                    if self.steps >= MAX_ROLL_STEPS {
-                        break;
-                    }
-                    self.table(tables, inner);
+            let outer = self.hint.clone();
+            self.hint = DropGearScore {
+                range: entry.gear_score.or(outer.range),
+                bonus: if table.gs_bonus == 0 {
+                    outer.bonus
+                } else {
+                    table.gs_bonus
+                },
+                use_level: table.use_level_gs || outer.use_level,
+                perks: if entry.perks.is_empty() {
+                    outer.perks.clone()
+                } else {
+                    entry.perks.clone()
+                },
+            };
+            self.entry(tables, entry, count);
+            self.hint = outer;
+        }
+    }
+
+    /// `count` drops of `entry`: its item, the rolls of its table or the picks of its bucket.
+    fn entry(&mut self, tables: &LootTables, entry: &LootEntry, count: u32) {
+        if let Some(inner) = entry.item.strip_prefix(TABLE_PREFIX) {
+            for _ in 0..count {
+                if self.steps >= MAX_ROLL_STEPS {
+                    break;
                 }
-            } else if let Some(bucket) = entry.item.strip_prefix(BUCKET_PREFIX) {
-                self.bucket(tables, bucket, count);
-            } else {
-                self.drop(&entry.item, count);
+                self.table(tables, inner);
             }
+        } else if let Some(bucket) = entry.item.strip_prefix(BUCKET_PREFIX) {
+            self.bucket(tables, bucket, count);
+        } else {
+            self.drop(&entry.item, count);
         }
     }
 
@@ -580,6 +833,8 @@ impl<F: FnMut(u32) -> u32> Walk<'_, '_, F> {
     fn bucket(&mut self, tables: &LootTables, bucket: &str, count: u32) {
         let holds = Holds {
             context: self.context,
+            salvage: self.salvage,
+            bonuses: self.bonuses,
             path: &self.path,
         };
         let items: Vec<&BucketEntry> = tables
@@ -605,6 +860,9 @@ impl<F: FnMut(u32) -> u32> Walk<'_, '_, F> {
         if count > 0 {
             let total = self.drops.entry(item.to_owned()).or_default();
             *total = total.saturating_add(count);
+            self.gear_scores
+                .entry(item.to_owned())
+                .or_insert_with(|| self.hint.clone());
         }
     }
 }
@@ -767,6 +1025,7 @@ mod tests {
                 .iter()
                 .map(|(index, text)| (*index, (*text).to_owned()))
                 .collect(),
+            ..LootRow::default()
         }
     }
 
@@ -850,6 +1109,52 @@ mod tests {
         }
     }
 
+    /// The gear score hints of `items` dropped by entries without gear score columns.
+    fn plain_hints(items: &[&str]) -> BTreeMap<String, DropGearScore> {
+        items
+            .iter()
+            .map(|item| ((*item).to_owned(), DropGearScore::default()))
+            .collect()
+    }
+
+    #[test]
+    fn a_dropped_item_keeps_its_entrys_gear_score_hint() {
+        // An outer table with `GSBonus` -10 and `UseLevelGS` names an inner table whose entry
+        // gives a range and two perk overrides; a second item has no hint of its own.
+        let mut rows = single("Outer", "[LTID]Inner", "AND", None);
+        rows[0].gs_bonus = Some(-10);
+        rows[0].use_level_gs = true;
+        rows[0].cells.insert(2, "PlainT1".to_owned());
+        rows[1].cells.insert(2, "1".to_owned());
+        rows[2].cells.insert(2, "0".to_owned());
+        let mut inner = single("Inner", "1hSwordT5", "AND", None);
+        inner[0].gear_score_ranges.insert(1, "650-700".to_owned());
+        inner[0].perk_overrides.insert(1, "PerkID_A, PerkID_B".to_owned());
+        rows.extend(inner);
+        let tables = LootTables::build(LootSource {
+            rows,
+            bucket_items: Vec::new(),
+        });
+        let rolled = tables.roll("Outer", LEVELS, &mut |_: u32| 0);
+        assert_eq!(
+            rolled.gear_scores.get("1hSwordT5"),
+            Some(&DropGearScore {
+                range: Some((650, 700)),
+                bonus: -10,
+                use_level: true,
+                perks: vec!["PerkID_A".to_owned(), "PerkID_B".to_owned()],
+            })
+        );
+        assert_eq!(
+            rolled.gear_scores.get("PlainT1"),
+            Some(&DropGearScore {
+                bonus: -10,
+                use_level: true,
+                ..DropGearScore::default()
+            })
+        );
+    }
+
     #[test]
     fn flint_always_gives_one_flint() {
         let tables = tables(Vec::new(), Vec::new());
@@ -888,6 +1193,125 @@ mod tests {
                 .items,
             [("PorkT1".to_owned(), 1)],
             "a level table rolls nothing without its level"
+        );
+    }
+
+    /// The retail salvage chain of a small armour piece (`javelindata_loottables_salvage`,
+    /// build 25810808), cut to tiers 1 and 2 and to rarities 0 and 4: the master table picks
+    /// the tier table by `SalvageItemTier`, the tier table the rarity table by
+    /// `SalvageItemRarity`.
+    fn salvage_rows() -> Vec<LootRow> {
+        vec![
+            loot(
+                "MasterSalvageArmorSmall",
+                &[
+                    (1, "[LTID]SalvageArmorTier1Small"),
+                    (2, "[LTID]SalvageArmorTier2Small"),
+                ],
+                Some("OR"),
+                Some("SalvageItemTier"),
+            ),
+            loot(
+                "MasterSalvageArmorSmall_Qty",
+                &[(1, "1"), (2, "1")],
+                None,
+                None,
+            ),
+            probs("MasterSalvageArmorSmall_Probs", &[(1, "1"), (2, "2")], 0),
+            loot(
+                "SalvageArmorTier2Small",
+                &[
+                    (1, "[LTID]SalvageArmorTier2Rareity0Small"),
+                    (2, "[LTID]SalvageArmorTier2Rareity4Small"),
+                ],
+                Some("OR"),
+                Some("SalvageItemRarity"),
+            ),
+            loot(
+                "SalvageArmorTier2Small_Qty",
+                &[(1, "1"), (2, "1")],
+                None,
+                None,
+            ),
+            probs("SalvageArmorTier2Small_Probs", &[(1, "0"), (2, "4")], 0),
+            loot(
+                "SalvageArmorTier2Rareity0Small",
+                &[(1, "PerfectSalvageArmorT2")],
+                Some("AND"),
+                None,
+            ),
+            loot(
+                "SalvageArmorTier2Rareity0Small_Qty",
+                &[(1, "1")],
+                None,
+                None,
+            ),
+            probs("SalvageArmorTier2Rareity0Small_Probs", &[(1, "0")], 0),
+            loot(
+                "SalvageArmorTier2Rareity4Small",
+                &[(1, "PerfectSalvageArmorT2"), (2, "DarkMatter")],
+                Some("AND"),
+                None,
+            ),
+            loot(
+                "SalvageArmorTier2Rareity4Small_Qty",
+                &[(1, "1"), (2, "1")],
+                None,
+                None,
+            ),
+            probs(
+                "SalvageArmorTier2Rareity4Small_Probs",
+                &[(1, "0"), (2, "0")],
+                0,
+            ),
+        ]
+    }
+
+    #[test]
+    fn a_salvage_rolls_on_the_items_tier_and_rarity() {
+        let tables = LootTables::build(LootSource {
+            rows: salvage_rows(),
+            bucket_items: Vec::new(),
+        });
+        let mut first = |_: u32| 0;
+        let common = SalvageLevels {
+            tier: 2,
+            rarity: 0,
+            gear_score: 150,
+        };
+        assert_eq!(
+            tables
+                .roll_salvage("MasterSalvageArmorSmall", LEVELS, common, &mut first)
+                .items,
+            [("PerfectSalvageArmorT2".to_owned(), 1)]
+        );
+        let legendary = SalvageLevels {
+            rarity: 4,
+            ..common
+        };
+        assert_eq!(
+            tables
+                .roll_salvage("MasterSalvageArmorSmall", LEVELS, legendary, &mut first)
+                .items,
+            [
+                ("DarkMatter".to_owned(), 1),
+                ("PerfectSalvageArmorT2".to_owned(), 1)
+            ]
+        );
+        assert_eq!(
+            tables
+                .roll("MasterSalvageArmorSmall", LEVELS, &mut first)
+                .items,
+            Vec::<(String, u32)>::new(),
+            "outside a salvage the item's values are not known"
+        );
+        let tier_one = SalvageLevels { tier: 1, ..common };
+        assert_eq!(
+            tables
+                .roll_salvage("MasterSalvageArmorSmall", LEVELS, tier_one, &mut first)
+                .items,
+            Vec::<(String, u32)>::new(),
+            "the cut tier-1 table is not loaded"
         );
     }
 
@@ -1197,6 +1621,7 @@ mod tests {
             tables.roll("PvPGM725RewardLimit", LEVELS, &mut first),
             LootRoll {
                 items: vec![("PvPGM725RewardContainer".to_owned(), 1)],
+                gear_scores: plain_hints(&["PvPGM725RewardContainer"]),
                 limit_visits: vec!["pvpgm725gear_limit".to_owned()],
             },
             "below the limit: the table rolls and counts a visit"
@@ -1205,6 +1630,7 @@ mod tests {
             tables.roll("Master", LEVELS, &mut first),
             LootRoll {
                 items: vec![("LNY_GiftSack_Bundle".to_owned(), 1)],
+                gear_scores: plain_hints(&["LNY_GiftSack_Bundle"]),
                 limit_visits: vec!["lny_giftlimit_b".to_owned()],
             },
             "an inner table counts its visit too"
@@ -1213,6 +1639,7 @@ mod tests {
             tables.roll("Quiet", LEVELS, &mut first),
             LootRoll {
                 items: vec![("Pebble".to_owned(), 1)],
+                gear_scores: plain_hints(&["Pebble"]),
                 limit_visits: Vec::new(),
             },
             "without the trigger a roll counts nothing"
@@ -1248,5 +1675,109 @@ mod tests {
             Vec::<String>::new(),
             "a trigger without a [LIM] condition names no limit"
         );
+    }
+
+    /// The retail fishing chain (`javelindata_loottables_fishing`, build 25810808), cut to two
+    /// entries per table: `FishingLoot` adds the diversion bonus to its roll, the rarity table
+    /// of the water clamps its rarity bonus at `MaxRoll`.
+    fn fishing_rows() -> Vec<LootRow> {
+        vec![
+            loot(
+                "FishingLoot",
+                &[(1, "[LTID]FishingLootRegular"), (2, "Diverted")],
+                Some("OR"),
+                Some("LootTableDiverted"),
+            ),
+            loot("FishingLoot_Qty", &[(1, "1"), (2, "1")], None, None),
+            probs("FishingLoot_Probs", &[(1, "0"), (2, "100001")], 100_000),
+            loot(
+                "FishingLootRegular",
+                &[(1, "Common"), (2, "Uncommon")],
+                Some("OR"),
+                Some("Fresh,FishRarity"),
+            ),
+            loot("FishingLootRegular_Qty", &[(1, "1"), (2, "1")], None, None),
+            probs("FishingLootRegular_Probs", &[(1, "0"), (2, "84900")], 100_000),
+        ]
+    }
+
+    #[test]
+    fn roll_bonuses_add_to_the_roll_or_clamp_it_by_the_tables_setting() {
+        let tables = LootTables::build(LootSource {
+            rows: fishing_rows(),
+            bucket_items: Vec::new(),
+        })
+        .with_roll_bonus_settings([
+            ("FishingLoot".to_owned(), RollBonusSetting::AddToRoll),
+            ("FishingLootRegular".to_owned(), RollBonusSetting::ClampMax),
+            ("NoSuchTable".to_owned(), RollBonusSetting::ClampMax),
+        ]);
+        let fresh = ["Fresh".to_owned()];
+        let context = LootContext {
+            tags: &fresh,
+            ..LEVELS
+        };
+        // A number below `n`: 50_000 on the 100_000 fishing roll, 0 when the range is one.
+        let mut middle = |n: u32| 50_000.min(n.saturating_sub(1));
+        let bonuses = |rarity, diverted| {
+            [
+                RollBonus {
+                    name: "FishRarity",
+                    value: rarity,
+                },
+                RollBonus {
+                    name: "LootTableDiverted",
+                    value: diverted,
+                },
+            ]
+        };
+        let items = |roll: LootRoll| roll.items;
+        assert_eq!(
+            items(tables.roll_with_bonuses("FishingLoot", context, &bonuses(0, 0), &mut middle)),
+            [("Common".to_owned(), 1)]
+        );
+        assert_eq!(
+            items(tables.roll_with_bonuses(
+                "FishingLoot",
+                context,
+                &bonuses(40_000, 0),
+                &mut middle
+            )),
+            [("Uncommon".to_owned(), 1)],
+            "50000 + 40000 reaches 84900"
+        );
+        assert_eq!(
+            items(tables.roll_with_bonuses(
+                "FishingLoot",
+                context,
+                &bonuses(900_000, 0),
+                &mut middle
+            )),
+            [("Uncommon".to_owned(), 1)],
+            "a clamped roll stays at MaxRoll"
+        );
+        assert_eq!(
+            items(tables.roll_with_bonuses(
+                "FishingLoot",
+                context,
+                &bonuses(0, 50_001),
+                &mut middle
+            )),
+            [("Diverted".to_owned(), 1)],
+            "an added roll passes MaxRoll"
+        );
+        assert_eq!(
+            items(tables.roll_with_bonuses("FishingLoot", LEVELS, &bonuses(0, 0), &mut middle)),
+            Vec::<(String, u32)>::new(),
+            "salt water holds no Fresh tag"
+        );
+        assert_eq!(
+            items(tables.roll("FishingLoot", context, &mut middle)),
+            Vec::<(String, u32)>::new(),
+            "without bonuses their conditions are tags the roll does not hold"
+        );
+        assert_eq!(RollBonusSetting::of(" clampmax "), Some(RollBonusSetting::ClampMax));
+        assert_eq!(RollBonusSetting::of("Other"), None);
+        assert_eq!(RollBonusSetting::AddToRoll.apply(u32::MAX, 1, 0), u32::MAX);
     }
 }

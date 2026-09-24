@@ -3168,6 +3168,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "nw-social"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "getrandom 0.3.4",
+ "hmac",
+ "metrics",
+ "nw-bus",
+ "nw-db",
+ "nw-messages",
+ "serde_json",
+ "sha2 0.11.1",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "nw-tcp-sniff"
 version = "0.1.0"
 dependencies = [
@@ -4592,6 +4609,7 @@ version = "0.1.0"
 dependencies = [
  "bevy_ecs",
  "clap",
+ "data-encoding",
  "getrandom 0.3.4",
  "hex",
  "metrics",
@@ -4607,6 +4625,7 @@ dependencies = [
  "nw-messages",
  "nw-reflect",
  "nw-sim-core",
+ "nw-social",
  "nw-world",
  "serde",
  "serde_json",
@@ -4749,6 +4768,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd538fb6910ac1099850255cf94a94df6551fbdd602454387d0adb2d1ca6dead"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "social"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "nw-bus",
+ "nw-common",
+ "nw-db",
+ "nw-formats",
+ "nw-login",
+ "nw-messages",
+ "nw-oodle",
+ "nw-social",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

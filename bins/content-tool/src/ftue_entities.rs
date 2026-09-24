@@ -14,12 +14,14 @@
 //! nearest event before it: a client message of the tutorial, a server message about a mob or
 //! new achievement bits.
 //!
-//! A member body has no length, so a group is read only when every member has a reader: the
-//! `nw-messages` readers of the classes these entities use, or [`crate::extra_members`]. A
+//! A member body has no length, so a group is read whole only when every member has a reader:
+//! the `nw-messages` readers of the classes these entities use, or [`crate::extra_members`]. A
 //! group is taken only where the payload holds a whole readable group that ends at the payload
-//! end or at the start of another group.
+//! end or at the start of another group. A spawn group (a group with a static card or an asset
+//! card) that also holds a member without a reader is read at a group start with that member
+//! left out (`spawn_group`), so the card and the following groups and cards are kept.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
@@ -77,6 +79,8 @@ const UNTARGET_MOB_AT: usize = FACET_HEADER_LEN;
 const DISABLE_COLLISION_MOB_AT: usize = 8;
 /// Achievement bits per bitset byte.
 const BITS_PER_BYTE: u32 = u8::BITS;
+/// Bytes of the shortest member body: its slot byte.
+const MIN_BODY_LEN: usize = 1;
 
 /// A failure of the tutorial entity scan.
 #[derive(Debug, thiserror::Error)]
@@ -260,12 +264,14 @@ pub struct ScanStats {
     pub repeated_changes: u64,
     /// Mob card groups read.
     pub mob_cards: u64,
-    /// Static spawn cards outside every group read: groups that hold a member without a
-    /// reader. Each is `(time, GdeRef prefix)`.
+    /// Static spawn cards outside every group read: groups that cannot be read, even with
+    /// their members without a reader left out. Each is `(time, GdeRef prefix)`.
     pub unread_cards: Vec<(u64, [u8; GDE_REF_PREFIX_LEN])>,
     /// Cards with an asset (not the player's) outside every group read. Each is
     /// `(time, asset id)`.
     pub unread_asset_cards: Vec<(u64, [u8; GDE_REF_LEN])>,
+    /// Members without a reader left out of the spawn groups taken. Each is `(time, class)`.
+    pub skipped_members: Vec<(u64, u64)>,
 }
 
 /// The table and the report of one scan.
@@ -482,32 +488,54 @@ impl Scan {
                 }
             }
         }
+        let static_card_offsets = static_cards(payload, &suffix);
+        let asset_card_offsets: Vec<(usize, [u8; GDE_REF_LEN])> = asset_cards(payload)
+            .into_iter()
+            .filter(|(_, asset)| *asset != PLAYER_SLICE_ASSET.id)
+            .collect();
+        let cards: Vec<usize> = static_card_offsets
+            .iter()
+            .copied()
+            .chain(asset_card_offsets.iter().map(|(card, _)| *card))
+            .collect();
         let mut read: Vec<Range<usize>> = Vec::new();
         let mut at = 0;
+        // The end of the last group read: the start of the next group.
+        let mut group_start = 0;
         while at < payload.len() {
-            let taken = whole_group(payload, at)
+            let group = whole_group(payload, at).or_else(|| {
+                if at == group_start && cards.iter().any(|card| *card >= at) {
+                    spawn_group(payload, at, &suffix, &cards)
+                } else {
+                    None
+                }
+            });
+            if let Some(group) = &group {
+                group_start = group.range.end;
+            }
+            let taken = group
                 .filter(|group| self.group(context, time_ms, payload, group, &player, &suffix));
             match taken {
                 Some(group) => {
                     at = group.range.end;
+                    self.stats
+                        .skipped_members
+                        .extend(group.skipped.iter().map(|class| (time_ms, *class)));
                     read.push(group.range);
                 }
                 None => at += 1,
             }
         }
         let unread = |card: &usize| !read.iter().any(|range| range.contains(card));
-        for card in static_cards(payload, &suffix)
-            .iter()
-            .filter(|card| unread(card))
-        {
+        for card in static_card_offsets.iter().filter(|card| unread(card)) {
             let start = card + STATIC_CARD_HEAD.len();
             let mut prefix = [0; GDE_REF_PREFIX_LEN];
             prefix.copy_from_slice(&payload[start..start + GDE_REF_PREFIX_LEN]);
             self.stats.unread_cards.push((time_ms, prefix));
         }
-        for (card, asset) in asset_cards(payload) {
-            if unread(&card) && asset != PLAYER_SLICE_ASSET.id {
-                self.stats.unread_asset_cards.push((time_ms, asset));
+        for (card, asset) in &asset_card_offsets {
+            if unread(card) {
+                self.stats.unread_asset_cards.push((time_ms, *asset));
             }
         }
         self.achievements(time_ms, payload);
@@ -733,11 +761,27 @@ struct WalkedMember {
     position: Option<[f32; 3]>,
 }
 
+/// What reading one member gave.
+#[derive(Debug, Clone, PartialEq)]
+enum MemberRead {
+    /// A member whose class has a reader that took its body.
+    Read(WalkedMember),
+    /// A member whose class has no reader: its body length is not on the wire.
+    NoReader {
+        class: u64,
+        /// The payload offset of its body.
+        body_start: usize,
+    },
+}
+
 /// One group read from a payload.
 #[derive(Debug, Clone, PartialEq)]
 struct WalkedGroup {
     interest: u16,
+    /// The members read, in wire order.
     members: Vec<WalkedMember>,
+    /// The classes of the members left out because they have no reader ([`spawn_group`]).
+    skipped: Vec<u64>,
     /// The payload offset of its first member.
     members_start: usize,
     /// Its bytes in the payload.
@@ -789,29 +833,132 @@ fn whole_group(payload: &[u8], at: usize) -> Option<WalkedGroup> {
     Some(later.unwrap_or(group))
 }
 
-/// Reads the group at `at`: its integer, its count and that many members.
+/// Reads the group at `at`: its integer, its count and that many members, each with a reader.
 fn read_group(payload: &[u8], at: usize) -> Option<WalkedGroup> {
-    let mut reader = Reader::new(payload.get(at..)?);
-    let interest = u16::try_from(reader.prefixed().ok()? & INTEREST_MASK).ok()?;
-    let count = reader.u8().ok()?;
-    if count == 0 {
-        return None;
-    }
-    let members_start = payload.len() - reader.remaining();
+    let (interest, count, members_start) = group_head(payload, at)?;
+    let mut reader = Reader::new(&payload[members_start..]);
     let mut members = Vec::with_capacity(usize::from(count));
     for _ in 0..count {
-        members.push(read_member(payload, &mut reader)?);
+        let MemberRead::Read(member) = read_member(payload, &mut reader)? else {
+            return None;
+        };
+        members.push(member);
     }
     Some(WalkedGroup {
         interest,
         members,
+        skipped: Vec::new(),
         members_start,
         range: at..payload.len() - reader.remaining(),
     })
 }
 
-/// Reads one member: its integer, its class and its body, when the class has a reader.
-fn read_member(payload: &[u8], reader: &mut Reader<'_>) -> Option<WalkedMember> {
+/// Reads the head of the group at `at`: its slot, its member count (never 0) and the payload
+/// offset of its first member.
+fn group_head(payload: &[u8], at: usize) -> Option<(u16, u8, usize)> {
+    let mut reader = Reader::new(payload.get(at..)?);
+    let interest = u16::try_from(reader.prefixed().ok()? & INTEREST_MASK).ok()?;
+    let count = reader.u8().ok()?;
+    (count > 0).then_some((interest, count, payload.len() - reader.remaining()))
+}
+
+/// The spawn group at `at` that [`read_group`] refuses because members have no reader. Such a
+/// member is left out of the group. Its body ends at the start of the next member, which must
+/// have a reader, or, for the last member, at its [`raw_limit`], which must be a group start or
+/// the payload end. Of the ends that let the rest of the group read to a boundary, the
+/// earliest is taken. The group must hold a static card or an asset card; `cards` are the
+/// payload offsets of the spawn card members.
+fn spawn_group(
+    payload: &[u8],
+    at: usize,
+    suffix: &[u8; GDE_REF_PREFIX_LEN],
+    cards: &[usize],
+) -> Option<WalkedGroup> {
+    let (interest, count, members_start) = group_head(payload, at)?;
+    let (read, end) = members_to_end(payload, members_start, count, cards, &mut HashSet::new())?;
+    let mut members = Vec::new();
+    let mut skipped = Vec::new();
+    for member in read {
+        match member {
+            MemberRead::Read(member) => members.push(member),
+            MemberRead::NoReader { class, .. } => skipped.push(class),
+        }
+    }
+    let group = WalkedGroup {
+        interest,
+        members,
+        skipped,
+        members_start,
+        range: at..end,
+    };
+    (group.static_card(suffix).is_some() || group.asset_card().is_some()).then_some(group)
+}
+
+/// Reads the last `left` members of a group from `at` as [`spawn_group`] says, and returns them
+/// with the group end. `dead` keeps the `(offset, members left)` from which the group cannot
+/// end.
+fn members_to_end(
+    payload: &[u8],
+    at: usize,
+    left: u8,
+    cards: &[usize],
+    dead: &mut HashSet<(usize, u8)>,
+) -> Option<(Vec<MemberRead>, usize)> {
+    let Some(rest) = left.checked_sub(1) else {
+        return is_boundary(payload, at).then_some((Vec::new(), at));
+    };
+    if dead.contains(&(at, left)) {
+        return None;
+    }
+    let found = match member_at(payload, at)? {
+        MemberRead::Read(member) => {
+            members_to_end(payload, member.body.end, rest, cards, dead).map(
+                |(mut tail, end)| {
+                    tail.insert(0, MemberRead::Read(member));
+                    (tail, end)
+                },
+            )
+        }
+        MemberRead::NoReader { class, body_start } => {
+            let limit = raw_limit(payload, body_start, cards);
+            let tail = if rest == 0 {
+                (limit >= body_start + MIN_BODY_LEN && !cards.contains(&limit))
+                    .then_some((Vec::new(), limit))
+            } else {
+                (body_start + MIN_BODY_LEN..=limit)
+                    .filter(|&end| matches!(member_at(payload, end), Some(MemberRead::Read(_))))
+                    .find_map(|end| members_to_end(payload, end, rest, cards, dead))
+            };
+            tail.map(|(mut tail, end)| {
+                tail.insert(0, MemberRead::NoReader { class, body_start });
+                (tail, end)
+            })
+        }
+    };
+    if found.is_none() {
+        dead.insert((at, left));
+    }
+    found
+}
+
+/// The furthest end of the body of a member without a reader whose body starts at
+/// `body_start`: the first later offset where a spawn card member of `cards` or a group that
+/// [`whole_group`] reads starts, else the payload end. So the body never holds a card or a
+/// whole readable group.
+fn raw_limit(payload: &[u8], body_start: usize, cards: &[usize]) -> usize {
+    (body_start + MIN_BODY_LEN..payload.len())
+        .find(|&at| cards.contains(&at) || whole_group(payload, at).is_some())
+        .unwrap_or(payload.len())
+}
+
+/// Reads the member at payload offset `at`.
+fn member_at(payload: &[u8], at: usize) -> Option<MemberRead> {
+    read_member(payload, &mut Reader::new(payload.get(at..)?))
+}
+
+/// Reads one member: its integer, its class and, when the class has a reader, its body.
+/// `None` when the header does not read or the reader refuses the body.
+fn read_member(payload: &[u8], reader: &mut Reader<'_>) -> Option<MemberRead> {
     let (component, class) = extra_members::read_member_header(reader)?;
     let start = payload.len() - reader.remaining();
     let mut card = None;
@@ -834,19 +981,27 @@ fn read_member(payload: &[u8], reader: &mut Reader<'_>) -> Option<WalkedMember> 
         VITALS_TYPE_INDEX => VitalsState::read(reader)
             .map(|state| vitals_id = state.slot_0.and_then(|slot| slot.vitals_id))
             .is_ok(),
-        _ => extra_members::read_body(class, reader).is_some(),
+        _ if extra_members::has_reader(class) => {
+            extra_members::read_body(class, reader).is_some()
+        }
+        _ => {
+            return Some(MemberRead::NoReader {
+                class,
+                body_start: start,
+            });
+        }
     };
     if !read {
         return None;
     }
-    Some(WalkedMember {
+    Some(MemberRead::Read(WalkedMember {
         component,
         class,
         body: start..payload.len() - reader.remaining(),
         card,
         vitals_id,
         position,
-    })
+    }))
 }
 
 /// Whether `at` is the payload end or the start of a group whose first member header reads.
@@ -1345,31 +1500,137 @@ mod tests {
         assert_eq!(entity.spawns[0].members.len(), 3);
     }
 
+    /// A class without a reader (`StatusEffectsComponentReplicatedState`).
+    const UNREAD_CLASS: u64 = 4236;
+    /// A body of [`UNREAD_CLASS`]: a slot byte and two bytes that read as no member.
+    const UNREAD_BODY: [u8; 3] = [1, 2, 3];
+
+    fn unread_member() -> Vec<u8> {
+        extra(EVENT_COMPONENT, UNREAD_CLASS, &UNREAD_BODY)
+    }
+
     #[test]
     fn cards_in_groups_without_readers_are_reported() {
-        const UNREAD_CLASS: u64 = 4236;
+        // Two members without a reader in a row: the first has no end that a readable member
+        // shows, so the group stays unread.
         let mut ledger = Ledger::new();
-        let unread = || extra(EVENT_COMPONENT, UNREAD_CLASS, &[1, 2, 3]);
         ledger.bundle(
             SPAWN_MS,
             Vec::new(),
-            group(INTEREST, &[card(OTHER_PREFIX), unread()]),
+            group(
+                INTEREST,
+                &[card(OTHER_PREFIX), unread_member(), unread_member()],
+            ),
         );
         ledger.bundle(
             OTHER_MS,
             Vec::new(),
             group(
                 MARKER_INTEREST,
-                &[asset_card(MARKER_ASSET, MARKER), unread()],
+                &[
+                    asset_card(MARKER_ASSET, MARKER),
+                    unread_member(),
+                    unread_member(),
+                ],
             ),
         );
         let scan = scan(&ledger);
         assert!(scan.table.entities.is_empty());
         assert!(scan.table.asset_entities.is_empty());
+        assert!(scan.stats.skipped_members.is_empty());
         assert_eq!(scan.stats.unread_cards, vec![(SPAWN_MS, OTHER_PREFIX)]);
         assert_eq!(
             scan.stats.unread_asset_cards,
             vec![(OTHER_MS, MARKER_ASSET)]
+        );
+    }
+
+    #[test]
+    fn a_member_without_a_reader_keeps_the_assets_second_card() {
+        let mut ledger = Ledger::new();
+        ledger.bundle(
+            SPAWN_MS,
+            Vec::new(),
+            group(
+                MARKER_INTEREST,
+                &[asset_card(MARKER_ASSET, MARKER), position()],
+            ),
+        );
+        ledger.bundle(STOP_MS, vec![MARKER_INTEREST], Vec::new());
+        // The second card of the marker with a member without a reader before its last member,
+        // then the card of another asset whose last member has no reader.
+        let mut payload = group(
+            MARKER_INTEREST,
+            &[
+                asset_card(MARKER_ASSET, MARKER),
+                unread_member(),
+                position(),
+            ],
+        );
+        payload.extend(group(
+            ENCOUNTER_INTEREST,
+            &[asset_card(ENCOUNTER_ASSET, ENCOUNTER), unread_member()],
+        ));
+        ledger.bundle(OTHER_MS, Vec::new(), payload);
+        let scan = scan(&ledger);
+        assert!(scan.stats.unread_asset_cards.is_empty());
+        assert_eq!(
+            scan.stats.skipped_members,
+            vec![(OTHER_MS, UNREAD_CLASS), (OTHER_MS, UNREAD_CLASS)]
+        );
+        let [marker, encounter] = scan.table.asset_entities.as_slice() else {
+            panic!("two asset entities: {:?}", scan.table.asset_entities);
+        };
+        assert_eq!(marker.asset, hex::encode(MARKER_ASSET));
+        assert_eq!(marker.timeline.despawns, vec![STOP_MS]);
+        let [first, second] = marker.timeline.spawns.as_slice() else {
+            panic!("two marker spawns: {:?}", marker.timeline.spawns);
+        };
+        assert_eq!((first.time_ms, second.time_ms), (SPAWN_MS, OTHER_MS));
+        assert_eq!(second.members, first.members);
+        assert_eq!(encounter.asset, hex::encode(ENCOUNTER_ASSET));
+        let [encounter_spawn] = encounter.timeline.spawns.as_slice() else {
+            panic!("one encounter spawn: {:?}", encounter.timeline.spawns);
+        };
+        assert_eq!(
+            (encounter_spawn.time_ms, encounter_spawn.interest),
+            (OTHER_MS, ENCOUNTER_INTEREST)
+        );
+        assert_eq!(
+            encounter_spawn
+                .members
+                .iter()
+                .map(|member| member.class)
+                .collect::<Vec<_>>(),
+            vec![GDE_METADATA_TYPE_INDEX]
+        );
+    }
+
+    #[test]
+    fn a_member_without_a_reader_makes_no_change_and_keeps_the_next_card() {
+        let mut ledger = Ledger::new();
+        ledger.bundle(SPAWN_MS, Vec::new(), spawn_payload());
+        let mut payload = group(INTEREST, &[unread_member(), interact(IN_USE)]);
+        payload.extend(group(
+            MARKER_INTEREST,
+            &[asset_card(MARKER_ASSET, MARKER)],
+        ));
+        ledger.bundle(CHANGE_MS, Vec::new(), payload);
+        let scan = scan(&ledger);
+        assert_eq!(scan.stats.changes, 0);
+        assert!(scan.stats.skipped_members.is_empty());
+        assert!(scan.table.entities[0].timeline.changes.is_empty());
+        let [marker] = scan.table.asset_entities.as_slice() else {
+            panic!("one asset entity: {:?}", scan.table.asset_entities);
+        };
+        assert_eq!(
+            marker
+                .timeline
+                .spawns
+                .iter()
+                .map(|spawn| spawn.time_ms)
+                .collect::<Vec<_>>(),
+            vec![CHANGE_MS]
         );
     }
 

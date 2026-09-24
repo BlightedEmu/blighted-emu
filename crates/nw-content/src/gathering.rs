@@ -105,6 +105,157 @@ impl Gatherables {
     }
 }
 
+/// What a gather of a gatherable asks of the gatherer besides its tool.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GatherRule {
+    /// `RequiredTradeskillLevel`: the rank its `Tradeskill` must reach (0-based, as the rank
+    /// tables count).
+    pub required_rank: u32,
+    /// `ItemRestrictionId` and `ItemRestrictionQuantity`: an item the bag must hold (a quest
+    /// item: `0402_GruelBarrel` asks for one `0402_0401_BileSoakedMeat`).
+    pub required_item: Option<(String, u32)>,
+}
+
+/// The gather rules of the gatherables that have one, by the CRC-32 of their lowercase id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GatherRules {
+    by_crc: HashMap<u32, GatherRule>,
+}
+
+impl GatherRules {
+    /// The rules of `tables`: the gatherables with a required rank or item.
+    pub fn from_tables(tables: &Tables) -> Self {
+        Self::build(
+            tables
+                .gatherable_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .map(|row| {
+                    let count = |cell: Option<i64>| {
+                        cell.and_then(|value| u32::try_from(value).ok())
+                            .unwrap_or_default()
+                    };
+                    let required_item = row
+                        .item_restriction_id
+                        .clone()
+                        .filter(|item| !item.is_empty())
+                        .map(|item| (item, count(row.item_restriction_quantity).max(1)));
+                    (
+                        row.gatherable_id.clone(),
+                        GatherRule {
+                            required_rank: count(row.required_tradeskill_level),
+                            required_item,
+                        },
+                    )
+                }),
+        )
+    }
+
+    /// The rules of `rules` (gatherable id, rule); a rule that asks nothing is left out and the
+    /// first row of an id wins.
+    pub fn build(rules: impl IntoIterator<Item = (String, GatherRule)>) -> Self {
+        let mut by_crc = HashMap::new();
+        for (id, rule) in rules {
+            if rule != GatherRule::default() {
+                by_crc.entry(lowercase_crc32(&id)).or_insert(rule);
+            }
+        }
+        Self { by_crc }
+    }
+
+    /// The rule of the gatherable whose lowercase id has the CRC-32 `crc`: none asks nothing.
+    pub fn of(&self, crc: u32) -> GatherRule {
+        self.by_crc.get(&crc).cloned().unwrap_or_default()
+    }
+}
+
+/// A gathering tool's efficiency range and the gear score range it spans.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ToolEfficiency {
+    /// `MinGatherEFF` and `MaxGatherEFF` of the tool's weapon row (`ItemStatsRef`).
+    pub efficiency: (f64, f64),
+    /// `MinGearScore` and `MaxGearScore` of the tool's item row.
+    pub gear_score: (u32, u32),
+}
+
+impl ToolEfficiency {
+    /// The efficiency of the tool at gear score `gear_score`: the minimum at the item's lowest
+    /// gear score, the maximum at its highest, and in between in proportion (Inferred: retail
+    /// gathered with the T1 skinning knife, whose range is 2 to 2, at efficiency 2.0, newchar
+    /// 2026-09-18 1792696324270).
+    pub fn at(&self, gear_score: u32) -> f64 {
+        let (low, high) = self.efficiency;
+        let (lowest, highest) = self.gear_score;
+        if highest <= lowest {
+            return high;
+        }
+        let share =
+            f64::from(gear_score.clamp(lowest, highest) - lowest) / f64::from(highest - lowest);
+        low + (high - low) * share
+    }
+}
+
+/// The gathering efficiency of every tool item, by lowercase item id.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ToolEfficiencies {
+    by_item: HashMap<String, ToolEfficiency>,
+}
+
+impl ToolEfficiencies {
+    /// The tools of `tables`: the item rows whose `ItemStatsRef` names a weapon row with a
+    /// gathering efficiency range.
+    pub fn from_tables(tables: &Tables) -> Self {
+        let ranges: HashMap<String, (f64, f64)> = tables
+            .weapon_item_definitions
+            .iter()
+            .flat_map(|table| &table.rows)
+            .filter_map(|row| {
+                Some((
+                    row.weapon_id.to_lowercase(),
+                    (row.min_gather_eff?, row.max_gather_eff?),
+                ))
+            })
+            .collect();
+        let gear_score = |cell: Option<i64>| {
+            cell.and_then(|value| u32::try_from(value).ok())
+                .unwrap_or_default()
+        };
+        Self::build(
+            tables
+                .master_item_definitions
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter_map(|row| {
+                    let efficiency = *ranges.get(&row.item_stats_ref.as_deref()?.to_lowercase())?;
+                    Some((
+                        row.item_id.clone(),
+                        ToolEfficiency {
+                            efficiency,
+                            gear_score: (
+                                gear_score(row.min_gear_score),
+                                gear_score(row.max_gear_score),
+                            ),
+                        },
+                    ))
+                }),
+        )
+    }
+
+    /// The tools of `tools` (item id, efficiency); the first row of an item wins.
+    pub fn build(tools: impl IntoIterator<Item = (String, ToolEfficiency)>) -> Self {
+        let mut by_item = HashMap::new();
+        for (item, tool) in tools {
+            by_item.entry(item.to_lowercase()).or_insert(tool);
+        }
+        Self { by_item }
+    }
+
+    /// The efficiency of tool item `item` (any case); `None` for an item that is no tool.
+    pub fn of(&self, item: &str) -> Option<&ToolEfficiency> {
+        self.by_item.get(&item.to_lowercase())
+    }
+}
+
 /// The low bits of a crate's facet entity that its capital's GUID does not give (loot note
 /// 2026-09-18: retail requests differ from the GUID key in them by 0 to 7; their meaning is
 /// Unknown).
@@ -273,6 +424,56 @@ mod tests {
         let flint = gatherables.get(0xa417_137f).cloned().expect("flint");
         assert_eq!(flint.id, "SingleStone");
         assert_eq!(ms_of(0.25), 250);
+    }
+
+    #[test]
+    fn a_gather_rule_asks_for_a_rank_or_an_item() {
+        let rules = GatherRules::build([
+            (
+                "0402_GruelBarrel".to_owned(),
+                GatherRule {
+                    required_rank: 0,
+                    required_item: Some(("0402_0401_BileSoakedMeat".to_owned(), 1)),
+                },
+            ),
+            ("FlintSmall".to_owned(), GatherRule::default()),
+        ]);
+        assert_eq!(
+            rules.of(lowercase_crc32("0402_gruelbarrel")).required_item,
+            Some(("0402_0401_BileSoakedMeat".to_owned(), 1))
+        );
+        assert_eq!(
+            rules.of(lowercase_crc32("FlintSmall")),
+            GatherRule::default()
+        );
+    }
+
+    #[test]
+    fn a_tools_efficiency_follows_its_gear_score() {
+        // Retail rows of `1hSkinningKnifeT1` (2 to 2) and `2hPickT2` (2 to 3.5).
+        let tools = ToolEfficiencies::build([
+            (
+                "1hSkinningKnifeT1".to_owned(),
+                ToolEfficiency {
+                    efficiency: (2.0, 2.0),
+                    gear_score: (100, 100),
+                },
+            ),
+            (
+                "PickaxeT2".to_owned(),
+                ToolEfficiency {
+                    efficiency: (2.0, 3.5),
+                    gear_score: (100, 200),
+                },
+            ),
+        ]);
+        let knife = tools.of("1hskinningknifet1").expect("knife");
+        assert!((knife.at(100) - 2.0).abs() < f64::EPSILON);
+        let pick = tools.of("PickaxeT2").expect("pick");
+        assert!((pick.at(100) - 2.0).abs() < f64::EPSILON);
+        assert!((pick.at(150) - 2.75).abs() < f64::EPSILON);
+        assert!((pick.at(500) - 3.5).abs() < f64::EPSILON, "above the range");
+        assert!(tools.of("WoodT1").is_none());
     }
 
     fn variant(id: &str, gatherable: &str, name: &str, table: &str) -> CrateVariant {

@@ -39,8 +39,11 @@ pub(super) const PLAYER_CAPSULE: Capsule = Capsule {
 /// be off by a metre.
 const STEP_SLACK_M: f32 = 1.0;
 
-/// Half the arc of a mob swing in front of its body (our choice: retail mob hits found the player
-/// within 18 degrees of the mob's facing on 16 of 17 hits).
+/// Half the arc of a mob swing in front of its body. Best guess (run-15 combat study): the hit
+/// test of a creature is the collider of its weapon in its attack clip, which no data the
+/// emulator reads holds (the creature animation table has names only; Server.pak's trees test
+/// only the angle to start an attack); retail mob hits found the player within 18 degrees of the
+/// mob's facing on 16 of 17 hits and further off on one, so the arc keeps a margin over both.
 pub(super) const MOB_SWING_HALF_ARC_RAD: f32 = FRAC_PI_4;
 
 /// Degrees in half a turn.

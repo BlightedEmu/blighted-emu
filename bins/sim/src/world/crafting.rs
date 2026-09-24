@@ -1,9 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Crafting at a station (beach-quests note, section 4). The player opens a station (interaction
 //! kind 20; the server answers with the station's name and the player's interactor target), sends
-//! the recipe and the ingredients it picked (2997), and 1,057 ms later the server answers with
-//! the item crafted and an idle update (2993 twice). The close of the window (2999) gets one more
-//! idle update.
+//! the recipe, how many crafts, the fee its client shows and the ingredients it picked (2997),
+//! and 1,057 ms later the server answers with the recipe and the crafts made and an idle update
+//! (2993 twice; retail: 1,022 to 1,110 ms for 1 to 85 crafts alike, 34 crafts of four crafting
+//! ledgers). The close of the window (2999) gets one more idle update.
+//!
+//! A craft needs a station of the recipe's name and tier ([`Recipe::made_at`]), its tradeskill's
+//! rank at the recipe's `RecipeLevel`, the ingredients in the bag and the fee in the wallet: the
+//! fee the client sent, at most the recipes' `CraftingFee` (retail took exactly the client's fee
+//! at 34 of 34 crafts; the tax that lowers it is Unknown here). Each craft fires the recipe's
+//! game event: its tradeskill experience ([`SimWorld::grant_event`]).
 //!
 //! The stations are the level's ([`nw_world::stations`]): a client shows a station's interaction
 //! only once it has the station's spawn group (campfire note: retail sends it when the station
@@ -12,9 +19,14 @@
 //! numbers ([`station_members`]).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
-use nw_content::crafting::{Recipe, StructureCosts};
+use nw_content::crafting::{
+    IngredientGearScore, IngredientKind, Recipe, RecipeDetails, StructureCosts,
+};
+use nw_content::perks::PERK_SLOTS;
+use nw_content::tradeskill_xp::bonus_crafts;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::items::FIRST_VERSION;
 use nw_messages::wire::RAW_ID_LEN;
@@ -29,6 +41,7 @@ use nw_world::stations::CraftingStation;
 
 use super::slots::Slot;
 use super::statics::interactor_target;
+use super::tradeskill::EventScale;
 use super::{Player, SimWorld, gather_answer, send_now};
 use crate::objectives::Event;
 
@@ -44,6 +57,12 @@ const STATION_REFUSED: u8 = 2;
 const CRAFT_MS: u64 = 1_057;
 /// The crafts one request makes when it asks for none.
 const ONE_CRAFT: u32 = 1;
+/// How far above the range this server computes a craft's gear score may be: the crafting
+/// status effects the client counts and this server does not track (best guess, the largest
+/// bonuses that can be active together in `StatusEffectData`: tradeskill food T5 15, three
+/// `HousingMinGearBonus_AllCraftingT3` trophies 3 x 5, an earring perk 5 and a tradeskill
+/// mastery 5).
+const CRAFT_STATUS_GS_ALLOWANCE: u32 = 40;
 /// The values of a built station that no data sets, as the retail campfire and town station
 /// groups have them: no foundation events, a territory whose references are set, a ruin timer
 /// that is not armed, and no guild, owner, raid or faction.
@@ -248,14 +267,57 @@ impl Stations {
     }
 }
 
-/// A craft that runs: its items are taken, its output comes at `due_ms`.
+/// A craft that runs: its items and fee are taken, its output comes at `due_ms`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PendingCraft {
     number: u64,
     recipe: String,
     item: String,
+    /// The items it makes: the recipe's output times the crafts.
     quantity: u32,
+    /// How many crafts the request asked for.
+    crafts: u32,
+    /// The sum of the recipe's ingredient quantities: each craft's game event counts them
+    /// ([`EventScale::craft`]).
+    ingredients: u32,
+    /// The recipe's game event, fired once per craft.
+    event: Option<String>,
     due_ms: u64,
+    /// What each item it makes rolls with; `None`: an item without rolls of its own.
+    roll: Option<CraftRoll>,
+}
+
+/// What the player picked for a craft besides the recipe and ingredients (2997).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct CraftChoice {
+    /// The gear score it asked for (0: none).
+    pub(super) gear_score: u32,
+    /// The CRC-32 of each perk item's lowercase item id.
+    pub(super) perk_items: Vec<u32>,
+}
+
+/// The rolls of a crafted gear item: the gear score and the perks its perk items force.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CraftRoll {
+    gear_score: u32,
+    forced: Vec<String>,
+}
+
+/// One stack a craft takes: its item, quantity, and whether it fills a `Category_Only`
+/// ingredient.
+type Taken = (String, u32, bool);
+
+/// Why a craft request is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CraftRefusal {
+    /// The player uses no station of the recipe's name and tier.
+    Station,
+    /// Its tradeskill's rank is below the recipe's `RecipeLevel`.
+    RecipeLevel,
+    /// The wallet holds less than the fee.
+    Fee,
+    /// The bag lacks an ingredient.
+    Ingredient,
 }
 
 impl SimWorld {
@@ -295,65 +357,211 @@ impl SimWorld {
     }
 
     /// Player `number` (`entity`) crafts `crafts` of the recipe whose lowercase id has the CRC-32
-    /// `recipe` at `now_ms`, from the `picked` ingredients: at a station of the recipe's type,
-    /// with every ingredient in the bag. The ingredients are taken at once; the output comes
-    /// [`CRAFT_MS`] later ([`SimWorld::crafts_due`]). A refused craft gets an idle update.
+    /// `recipe` at `now_ms`, from the `picked` ingredients, for the fee `fee` its client shows:
+    /// at a station of the recipe's name and tier, at the recipe's level, with every ingredient
+    /// in the bag and the fee in the wallet. The ingredients and the fee are taken at once; the
+    /// output comes [`CRAFT_MS`] later ([`SimWorld::crafts_due`]). A refused craft gets an idle
+    /// update. A gear item is made at the gear score of `choice` held to the craft's range,
+    /// with the perks its perk items force ([`SimWorld::craft_roll`]).
+    #[allow(clippy::too_many_arguments, reason = "the fields of one craft request")]
     pub(super) fn craft(
         &mut self,
         entity: Entity,
         number: u64,
-        recipe: u32,
+        recipe_crc: u32,
         crafts: u32,
+        fee: u32,
         picked: &[CraftIngredient],
+        choice: &CraftChoice,
         now_ms: u64,
     ) {
         let crafts = crafts.max(ONE_CRAFT);
-        let Some(recipe) = self.content.recipes.get(recipe).cloned() else {
-            tracing::debug!(player = number, recipe, "craft of an unknown recipe");
+        let Some(recipe) = self.content.recipes.get(recipe_crc).cloned() else {
+            tracing::debug!(
+                player = number,
+                recipe = recipe_crc,
+                "craft of an unknown recipe"
+            );
             self.send_idle(entity, number);
             return;
         };
-        let taken = self.take_ingredients(entity, &recipe, crafts, picked);
-        if !taken {
-            self.send_idle(entity, number);
-            return;
-        }
-        tracing::debug!(player = number, recipe = %recipe.id, crafts, "craft");
+        let details = self.content.recipes.details(recipe_crc);
+        let level_reached = details.tradeskill.as_deref().is_none_or(|tradeskill| {
+            self.tradeskill_perks(entity, tradeskill).1.recipe_level >= details.recipe_level
+        });
+        let charged = fee.min(details.fee.saturating_mul(crafts));
+        let perk_items = self.perk_items_of(entity, &recipe.item, choice, details.max_perk_items);
+        let taken = if level_reached {
+            self.take_ingredients(entity, &recipe, crafts, picked, &perk_items, charged)
+        } else {
+            Err(CraftRefusal::RecipeLevel)
+        };
+        let taken = match taken {
+            Ok(taken) => taken,
+            Err(refusal) => {
+                tracing::debug!(player = number, recipe = %recipe.id, ?refusal, "craft refused");
+                self.send_idle(entity, number);
+                return;
+            }
+        };
+        let roll = self.craft_roll(entity, &recipe, &details, &taken, &perk_items, choice);
+        let bonus = self.bonus_crafts(entity, recipe_crc, details.tradeskill.as_deref(), crafts);
+        tracing::debug!(player = number, recipe = %recipe.id, crafts, bonus, charged, "craft");
+        let ingredients = recipe
+            .ingredients
+            .iter()
+            .fold(0_u32, |sum, ingredient| sum.saturating_add(ingredient.quantity));
         self.crafts.push(PendingCraft {
             number,
             recipe: recipe.id.clone(),
             item: recipe.item,
-            quantity: recipe.quantity.saturating_mul(crafts),
+            quantity: recipe.quantity.saturating_mul(crafts.saturating_add(bonus)),
+            crafts,
+            ingredients,
+            event: details.game_event,
             due_ms: now_ms.saturating_add(CRAFT_MS),
+            roll,
         });
     }
 
-    /// Takes the ingredients of `crafts` of `recipe` out of the bag of player `entity`: for each
+    /// The perk items of `choice` that player `entity` carries and that may go on `item`: the
+    /// item ids of those whose CRC-32 the choice names and that have a perk bucket, at most
+    /// `allowed` (the recipe's `MaxPerkItemsAllowed`, else the item's perk slots).
+    fn perk_items_of(
+        &self,
+        entity: Entity,
+        item: &str,
+        choice: &CraftChoice,
+        allowed: Option<u32>,
+    ) -> Vec<String> {
+        let rolls = &self.content.item_rolls;
+        if choice.perk_items.is_empty() || !rolls.item(item).is_some_and(|row| row.rolls()) {
+            return Vec::new();
+        }
+        let Some(gear) = self
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref())
+        else {
+            return Vec::new();
+        };
+        let limit = allowed.map_or(PERK_SLOTS, |allowed| {
+            usize::try_from(allowed).unwrap_or(PERK_SLOTS)
+        });
+        let carried: Vec<String> = gear
+            .carried()
+            .into_iter()
+            .map(|carried| carried.item_id)
+            .collect();
+        choice
+            .perk_items
+            .iter()
+            .filter_map(|crc| {
+                carried
+                    .iter()
+                    .find(|item_id| lowercase_crc32(item_id) == *crc)
+                    .filter(|item_id| {
+                        rolls
+                            .item(item_id)
+                            .is_some_and(|row| row.resource_bucket.is_some())
+                    })
+                    .cloned()
+            })
+            .take(limit)
+            .collect()
+    }
+
+    /// The rolls of the gear item `recipe` makes for player `entity` from the `taken` stacks
+    /// and `perk_items`: the gear score `choice` asks for (its range's lowest for none), held
+    /// between the lowest of the craft's range and its highest plus
+    /// [`CRAFT_STATUS_GS_ALLOWANCE`] and under the item's `MaxCraftGS`, and the perk each perk
+    /// item's bucket gives the item. `None` for an item without rolls of its own.
+    fn craft_roll(
+        &mut self,
+        entity: Entity,
+        recipe: &Recipe,
+        details: &RecipeDetails,
+        taken: &[Taken],
+        perk_items: &[String],
+        choice: &CraftChoice,
+    ) -> Option<CraftRoll> {
+        let content = Arc::clone(&self.content);
+        let rolls = &content.item_rolls;
+        let row = rolls.item(&recipe.item).filter(|row| row.rolls())?;
+        let base = row.gear_score_override.unwrap_or(row.min_gear_score);
+        let rank_bonus = details.tradeskill.as_deref().map_or((0, 0), |tradeskill| {
+            self.tradeskill_perks(entity, tradeskill)
+                .1
+                .gear_score_bonus_of(details.base_tier)
+        });
+        let ingredients: Vec<IngredientGearScore> = taken
+            .iter()
+            .filter_map(|(item_id, _, category)| {
+                let ingredient = rolls.item(item_id)?;
+                Some(IngredientGearScore {
+                    base_bonus: ingredient.ingredient_base_bonus,
+                    max_bonus: ingredient.ingredient_max_bonus,
+                    category_tier: category.then_some(ingredient.tier),
+                })
+            })
+            .collect();
+        let range = details.gear_score_range(base, rank_bonus, &ingredients);
+        let wanted = if choice.gear_score == 0 {
+            range.min
+        } else {
+            choice.gear_score.clamp(
+                range.min,
+                range.max.saturating_add(CRAFT_STATUS_GS_ALLOWANCE),
+            )
+        };
+        let gear_score = row
+            .max_craft_gear_score
+            .map_or(wanted, |cap| wanted.min(cap));
+        let dice = &mut self.dice;
+        let forced = perk_items
+            .iter()
+            .filter_map(|perk_item| {
+                let bucket = rolls.item(perk_item)?.resource_bucket.as_deref()?;
+                rolls
+                    .perks
+                    .pick(bucket, &row.item_id, &row.classes, &[], &mut |below| {
+                        dice.below(below)
+                    })
+            })
+            .collect();
+        Some(CraftRoll { gear_score, forced })
+    }
+
+    /// Takes the ingredients of `crafts` of `recipe` and one of each of `perk_items` per craft
+    /// out of the bag of player `entity` and `fee` coins out of its wallet: for each
     /// ingredient, the item the player picked that fits it, else the first carried one that
-    /// fits. Whether the player stands at a station of the recipe and the bag held them all
-    /// (nothing is taken when not).
+    /// fits. Refused (nothing taken) away from a station of the recipe, without the coins, or
+    /// without an ingredient or perk item. The stacks taken.
     fn take_ingredients(
         &mut self,
         entity: Entity,
         recipe: &Recipe,
         crafts: u32,
         picked: &[CraftIngredient],
-    ) -> bool {
+        perk_items: &[String],
+        fee: u32,
+    ) -> Result<Vec<Taken>, CraftRefusal> {
         let recipes = &self.content.recipes;
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
-            return false;
+            return Err(CraftRefusal::Station);
         };
-        let number = player.number;
         if !player
             .station
             .as_deref()
             .is_some_and(|station| recipe.made_at(station))
         {
-            tracing::debug!(player = number, recipe = %recipe.id, "craft away from its station");
-            return false;
+            return Err(CraftRefusal::Station);
+        }
+        if player.coins < u64::from(fee) {
+            return Err(CraftRefusal::Fee);
         }
         let Some(gear) = player.gear.as_mut() else {
-            return false;
+            return Err(CraftRefusal::Ingredient);
         };
         let carried: Vec<String> = gear
             .carried()
@@ -369,22 +577,39 @@ impl SimWorld {
                 .filter(fits)
                 .find(|item| picked.iter().any(|pick| pick.item == lowercase_crc32(item)))
                 .or_else(|| carried.iter().find(fits));
+            let category = matches!(ingredient.kind, IngredientKind::Category(_));
             match chosen {
-                Some(item) if gear.bag_count(item) >= needed => takes.push((item.clone(), needed)),
-                _ => {
-                    tracing::debug!(player = number, recipe = %recipe.id, ?ingredient, "craft without an ingredient");
-                    return false;
+                Some(item) if gear.bag_count(item) >= needed => {
+                    takes.push((item.clone(), needed, category));
                 }
+                _ => return Err(CraftRefusal::Ingredient),
             }
         }
-        for (item, quantity) in &takes {
+        for perk_item in perk_items {
+            let needed = takes
+                .iter()
+                .filter(|(item, _, _)| item == perk_item)
+                .map(|(_, quantity, _)| quantity)
+                .sum::<u32>()
+                .saturating_add(crafts);
+            if gear.bag_count(perk_item) < needed {
+                return Err(CraftRefusal::Ingredient);
+            }
+            takes.push((perk_item.clone(), crafts, false));
+        }
+        for (item, quantity, _) in &takes {
             gear.take(item, *quantity);
         }
-        true
+        if fee > 0 {
+            player.coins -= u64::from(fee);
+            player.coins_changed = true;
+        }
+        Ok(takes)
     }
 
     /// The crafts whose time came at `now_ms` end: the output goes into the bag, the client gets
-    /// the craft and an idle update, and the player's quest takes the craft.
+    /// the crafts made and an idle update, each craft fires the recipe's game event, and the
+    /// player's quest takes the craft.
     pub(super) fn crafts_due(&mut self, now_ms: u64) {
         let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.crafts)
             .into_iter()
@@ -394,20 +619,68 @@ impl SimWorld {
             let Some(entity) = self.player_by_number(craft.number) else {
                 continue;
             };
-            self.give_loot(craft.number, vec![(craft.item, craft.quantity)], now_ms);
+            match &craft.roll {
+                Some(roll) => {
+                    let content = Arc::clone(&self.content);
+                    let dice = &mut self.dice;
+                    let rolled = (0..craft.quantity)
+                        .map(|_| {
+                            content.item_rolls.roll(
+                                &craft.item,
+                                roll.gear_score,
+                                &roll.forced,
+                                &mut |below| dice.below(below),
+                            )
+                        })
+                        .collect();
+                    self.give_rolled(craft.number, &craft.item, rolled, now_ms);
+                }
+                None => {
+                    let made = vec![(craft.item.clone(), craft.quantity)];
+                    self.give_loot(craft.number, made, now_ms);
+                }
+            }
             if let Some(player) = self.world.get::<Player>(entity) {
                 let messages = [
                     ServerMessage::CraftProgress(CraftProgressMsg::crafted(
                         craft.number,
                         &craft.recipe,
-                        craft.quantity,
+                        craft.crafts,
                     )),
                     ServerMessage::CraftProgress(CraftProgressMsg::idle(craft.number)),
                 ];
                 send_now(&mut self.combat_messages, &player.connection, &messages);
             }
+            if let Some(event) = &craft.event {
+                let scale = EventScale::craft(craft.ingredients);
+                self.grant_scaled_event(craft.number, event, craft.crafts, scale);
+            }
             self.quest_event(craft.number, Event::Crafted(&craft.recipe), now_ms);
         }
+    }
+
+    /// How many of `crafts` crafts of the recipe whose wire id is `recipe_crc` player `entity`
+    /// makes a bonus item of: each rolls the recipe's `BonusItemChance` plus the `RollBonus` of
+    /// the player's rank in `tradeskill` ([`nw_content::tradeskill_xp`]); a recipe without a
+    /// chance makes none. **Best guess:** a bonus is one more craft's output (retail's measured
+    /// recipes all make one item, so one item or `OutputQty` could not be told apart).
+    fn bonus_crafts(
+        &mut self,
+        entity: Entity,
+        recipe_crc: u32,
+        tradeskill: Option<&str>,
+        crafts: u32,
+    ) -> u32 {
+        let content = Arc::clone(&self.content);
+        let Some(chance) = content.bonus_chances.of(recipe_crc) else {
+            return 0;
+        };
+        let rank_bonus = tradeskill.map_or(0.0, |tradeskill| {
+            let (rank, _) = self.tradeskill_perks(entity, tradeskill);
+            content.tradeskill_curves.roll_bonus(tradeskill, rank)
+        });
+        let dice = &mut self.dice;
+        bonus_crafts(chance + rank_bonus, crafts, &mut |below| dice.below(below))
     }
 
     /// Player `number` (`entity`) closes the crafting window: it leaves the station and gets an
@@ -429,9 +702,20 @@ impl SimWorld {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use nw_content::crafting::{Ingredient, IngredientKind, RecipeDetails, Recipes};
+    use nw_content::item_rolls::{ItemRollRow, ItemRolls};
+    use nw_content::perks::PerkTable;
+    use nw_content::progression::{Progression, RankPerks, TradeskillRankRow, TradeskillSource};
+    use nw_content::rewards::{EventGrant, EventGrants};
+    use nw_content::tradeskill_xp::BonusChances;
     use nw_world::stations::{StationGridSide, StationSlice};
 
     use super::*;
+    use crate::player_content::PlayerContent;
+    use crate::world::gear;
+    use crate::world::tests::{NOW, SERVER_TIME, admit_at, connection, world_with_spawns};
 
     /// The retail WW campfire group (`newchar-retail-2026-09-18`, 448630 ms): its members as
     /// (component, class, body), the card naming `a761c93f095ab84d`. Retail lists them in another
@@ -560,5 +844,244 @@ mod tests {
             .expect("named by its GdeRef");
         assert_eq!(station.name, b"@ui_watcherscampfire");
         assert_eq!(station.station_type, "Camp1");
+    }
+
+    /// The player's number.
+    const NUMBER: u64 = 1;
+    /// Retail refining rows (build 25810808, cut): `IngotT2` (4 `OreT1`, `smelting2`, fee 1,
+    /// `Craft_SmeltingT2`) and `IngotT53` (recipe level 250).
+    const INGOT: &str = "IngotT2";
+    const HIGH_INGOT: &str = "IngotT53";
+    const ORE: &str = "OreT1";
+    const ORE_PER_CRAFT: u32 = 4;
+    const FEE_PER_CRAFT: u32 = 1;
+    const SMELTING_EVENT: &str = "Craft_SmeltingT2";
+    const SMELTING_REWARD: f64 = 10.0;
+    const HIGH_LEVEL: u32 = 250;
+    /// A T5 smelter's station type (a tier above the recipe's).
+    const SMELTER: &str = "smelting5";
+    const COINS: u64 = 100;
+
+    fn content() -> PlayerContent {
+        let recipe = |id: &str| Recipe {
+            id: id.to_owned(),
+            item: id.to_owned(),
+            quantity: 1,
+            ingredients: vec![Ingredient {
+                kind: IngredientKind::Item(ORE.to_owned()),
+                quantity: ORE_PER_CRAFT,
+            }],
+            stations: vec!["smelting2".to_owned()],
+        };
+        let details = |recipe_level| RecipeDetails {
+            tradeskill: Some("Smelting".to_owned()),
+            recipe_level,
+            game_event: Some(SMELTING_EVENT.to_owned()),
+            fee: FEE_PER_CRAFT,
+            ..RecipeDetails::default()
+        };
+        PlayerContent {
+            kits: gear::tests::kits_with(&[
+                (INGOT, "Resource+Ingot"),
+                (HIGH_INGOT, "Resource+Ingot"),
+                (ORE, "Resource+Ore"),
+            ]),
+            recipes: Recipes::build([recipe(INGOT), recipe(HIGH_INGOT)], []).with_details([
+                (INGOT.to_owned(), details(0)),
+                (HIGH_INGOT.to_owned(), details(HIGH_LEVEL)),
+            ]),
+            progression: Progression::default().with_tradeskills([TradeskillSource {
+                id: "Smelting".to_owned(),
+                max_levels: vec![200],
+                ranks: vec![TradeskillRankRow {
+                    rank: 0,
+                    cap: 108.0,
+                    perks: RankPerks::default(),
+                }],
+            }]),
+            event_grants: EventGrants::build([(
+                SMELTING_EVENT.to_owned(),
+                EventGrant {
+                    progression: Some(("Smelting".to_owned(), SMELTING_REWARD)),
+                    coins: (0, 0),
+                    territory_standing: 0.0,
+                },
+            )]),
+            ..PlayerContent::default()
+        }
+    }
+
+    /// A world with the test content and one player at a T5 smelter with ore and coins.
+    fn at_the_smelter(ore: u32, coins: u64) -> (SimWorld, Entity) {
+        let mut world = world_with_spawns(Vec::new());
+        world.content = Arc::new(content());
+        let mut admit = admit_at(NUMBER, 0.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let entity = world.by_connection[&connection(NUMBER)];
+        let ore_item = world.content.kits.item(ORE).cloned().expect("ore");
+        {
+            let mut player = world.world.get_mut::<Player>(entity).expect("player");
+            player.station = Some(SMELTER.to_owned());
+            player.coins = coins;
+            assert!(player.gear.as_mut().expect("gear").add(&ore_item, ore));
+        }
+        (world, entity)
+    }
+
+    fn bag_count(world: &SimWorld, entity: Entity, item: &str) -> u32 {
+        world
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref())
+            .map_or(0, |gear| gear.bag_count(item))
+    }
+
+    #[test]
+    fn a_batch_craft_takes_its_fee_and_gives_its_items_and_tradeskill_experience() {
+        const CRAFTS: u32 = 2;
+        // The client shows a fee above the recipes' own: at most the recipes' is taken.
+        const CLIENT_FEE: u32 = 18;
+        let (mut world, entity) = at_the_smelter(ORE_PER_CRAFT * CRAFTS, COINS);
+        let crc = lowercase_crc32(INGOT);
+        world.craft(entity, NUMBER, crc, CRAFTS, CLIENT_FEE, &[], &CraftChoice::default(), NOW);
+        assert_eq!(
+            bag_count(&world, entity, ORE),
+            0,
+            "the ore is taken at once"
+        );
+        let coins = world.world.get::<Player>(entity).expect("player").coins;
+        assert_eq!(coins, COINS - u64::from(FEE_PER_CRAFT * CRAFTS));
+        let [craft] = world.crafts.as_slice() else {
+            panic!("one craft runs");
+        };
+        assert_eq!((craft.crafts, craft.quantity), (CRAFTS, CRAFTS));
+        world.crafts_due(NOW + CRAFT_MS);
+        assert!(world.crafts.is_empty());
+        assert_eq!(bag_count(&world, entity, INGOT), CRAFTS);
+        let smelting = world
+            .content
+            .progression
+            .tradeskill("Smelting")
+            .expect("smelting");
+        let experience = world
+            .world
+            .get::<Player>(entity)
+            .map(|player| player.masteries.experience(smelting));
+        assert_eq!(
+            experience,
+            Some(80),
+            "10 per ingredient (4 ore) per craft under a neutral multiplier"
+        );
+    }
+
+    #[test]
+    fn a_sure_bonus_chance_makes_one_more_crafts_output_per_craft() {
+        const CRAFTS: u32 = 2;
+        let (mut world, entity) = at_the_smelter(ORE_PER_CRAFT * CRAFTS, COINS);
+        let mut content = (*world.content).clone();
+        content.bonus_chances = BonusChances::build([(INGOT, 1.0)]);
+        world.content = Arc::new(content);
+        let crc = lowercase_crc32(INGOT);
+        world.craft(entity, NUMBER, crc, CRAFTS, CRAFTS, &[], &CraftChoice::default(), NOW);
+        world.crafts_due(NOW + CRAFT_MS);
+        assert_eq!(bag_count(&world, entity, INGOT), CRAFTS * 2);
+        // A recipe without a chance makes no bonus.
+        let (mut world, entity) = at_the_smelter(ORE_PER_CRAFT, COINS);
+        world.craft(entity, NUMBER, crc, 1, 1, &[], &CraftChoice::default(), NOW);
+        world.crafts_due(NOW + CRAFT_MS);
+        assert_eq!(bag_count(&world, entity, INGOT), 1);
+    }
+
+    /// The smelter's world with the ingot made a gear item of gear score 400 to 500 (tier 4).
+    fn rolled_ingots(ore: u32) -> (SimWorld, Entity) {
+        const INGOT_TIER: u32 = 4;
+        let (mut world, entity) = at_the_smelter(ore, COINS);
+        let mut content = (*world.content).clone();
+        content.item_rolls = ItemRolls::build(
+            [ItemRollRow {
+                item_id: INGOT.to_owned(),
+                tier: INGOT_TIER,
+                min_gear_score: 400,
+                max_gear_score: 500,
+                ..ItemRollRow::default()
+            }],
+            PerkTable::default(),
+        );
+        world.content = Arc::new(content);
+        (world, entity)
+    }
+
+    /// The gear scores of the player's ingot stacks.
+    fn ingot_gear_scores(world: &SimWorld, entity: Entity) -> Vec<u32> {
+        let carried = world
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref())
+            .map(|gear| gear.carried())
+            .unwrap_or_default();
+        carried
+            .iter()
+            .filter(|item| item.item_id == INGOT)
+            .filter_map(|item| item.state.gear_score)
+            .collect()
+    }
+
+    #[test]
+    fn a_gear_craft_makes_each_item_at_the_picked_gear_score_held_to_its_range() {
+        const CRAFTS: u32 = 2;
+        const PICKED: u32 = 420;
+        let (mut world, entity) = rolled_ingots(ORE_PER_CRAFT * CRAFTS);
+        let choice = CraftChoice {
+            gear_score: PICKED,
+            perk_items: Vec::new(),
+        };
+        let crc = lowercase_crc32(INGOT);
+        world.craft(entity, NUMBER, crc, CRAFTS, FEE_PER_CRAFT * CRAFTS, &[], &choice, NOW);
+        world.crafts_due(NOW + CRAFT_MS);
+        assert_eq!(ingot_gear_scores(&world, entity), [PICKED, PICKED]);
+        // The range is the item's 400 with no bonus: a pick above it stops at the status
+        // allowance, no pick takes the lowest.
+        let (mut world, entity) = rolled_ingots(ORE_PER_CRAFT * CRAFTS);
+        let too_high = CraftChoice {
+            gear_score: 900,
+            perk_items: Vec::new(),
+        };
+        world.craft(entity, NUMBER, crc, 1, FEE_PER_CRAFT, &[], &too_high, NOW);
+        world.craft(entity, NUMBER, crc, 1, FEE_PER_CRAFT, &[], &CraftChoice::default(), NOW);
+        world.crafts_due(NOW + CRAFT_MS);
+        let mut scores = ingot_gear_scores(&world, entity);
+        scores.sort_unstable();
+        assert_eq!(scores, [400, 400 + CRAFT_STATUS_GS_ALLOWANCE]);
+    }
+
+    #[test]
+    fn a_craft_needs_its_recipe_level_its_fee_and_its_station() {
+        let (mut world, entity) = at_the_smelter(ORE_PER_CRAFT, COINS);
+        let none = CraftChoice::default();
+        world.craft(entity, NUMBER, lowercase_crc32(HIGH_INGOT), 1, 1, &[], &none, NOW);
+        assert!(
+            world.crafts.is_empty(),
+            "Smelting rank 0 is below level 250"
+        );
+        assert_eq!(
+            bag_count(&world, entity, ORE),
+            ORE_PER_CRAFT,
+            "nothing taken"
+        );
+        let (mut broke, broke_entity) = at_the_smelter(ORE_PER_CRAFT, 0);
+        broke.craft(broke_entity, NUMBER, lowercase_crc32(INGOT), 1, 1, &[], &none, NOW);
+        assert!(broke.crafts.is_empty(), "no coins for the fee");
+        assert_eq!(bag_count(&broke, broke_entity, ORE), ORE_PER_CRAFT);
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .station = Some("smelting1".to_owned());
+        world.craft(entity, NUMBER, lowercase_crc32(INGOT), 1, 1, &[], &none, NOW);
+        assert!(
+            world.crafts.is_empty(),
+            "a tier-1 station makes no tier-2 recipe"
+        );
     }
 }

@@ -16,23 +16,45 @@ use std::time::{Duration, Instant};
 use nw_bus::{
     AdminAction, AdminCommand, AdminReply, Admit, AdmitReply, Bus, BusError, BusId, CarriedItem,
     CellTable, ConnectionRef, GatewayOutput, Ghost, Ghosts, HandoffMessage, HandoffReply,
-    Heartbeat, Hit, Incoming, InputBatch, ItemPlace, OutputBatch, PlayerProgression, PlayerQuests,
+    Heartbeat, Hit, Incoming, InputBatch, ItemPlace, OutputBatch, PlayerInventory,
+    PlayerProgression, PlayerQuests,
     Point, Publisher, ScriptLog, SimHeartbeat, SimInput, SimSlot, SimSnapshot, snapshot_parts,
     split_batches, subject,
 };
+use nw_bus::{GhostAssembly, ghost_parts};
+use nw_bus::InstanceCommand;
+use nw_bus::ItemState;
+use nw_bus::{CoinTransfer, LeaveReason, SocialBatch, SocialDeliveries, SocialInput};
+use nw_messages::social::SocialCall;
 use nw_common::time::{unix_ms, unix_seconds};
 use nw_content::leaderboards::RotationCalendar;
 use nw_db::{
-    PgPool, SaveOutcome, SavedItem, SavedLootLimit, SavedPlace, SavedPosition, SavedProgression,
-    SavedQuests, StatUpdate, save_character_items, save_character_position,
-    save_character_progression, save_character_quests, submit_stats,
+    PgPool, SaveOutcome, SavedCamp, SavedHome, SavedHomeRecord, SavedHousingItem, SavedInventory, SavedItem, SavedLoadout,
+    SavedItemRolls, SavedLootLimit, SavedMount, SavedStoredItem,
+    SavedMounts, SavedPlace, SavedPosition, SavedProgression, SavedQuests, SavedTravel,
+    StatUpdate, save_character_items,
+    save_character_position, save_character_progression, save_character_quests, submit_stats,
 };
+use nw_db::{clear_new_account_titles, company_listings, earn_account_titles, stored_players};
+use nw_messages::guild_lookup::REQUEST_GET_GUILDS_TYPE_INDEX;
 use nw_messages::facet::TIME_SYNC_REQUEST_TYPE_INDEX;
 use nw_messages::{
     BodyCodec, ClientFacetMsg, ClientInputMsg, GmClientMsg, InputRecord, LookupRequest,
-    PointsClientMsg, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX,
-    RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX, SpreadshotRequestMsg,
+    MetaAchievementRequest, MountClientMsg, PointsClientMsg, SetTitleRequest, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX,
+    RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX, SpreadshotRequestMsg, TravelClientMsg,
 };
+use nw_messages::{
+    ClientOptionMsg, GuildsRequest, ItemCallMsg, ItemRepairMsg, KickClientMsg, PlayerDataRequest,
+    PlayerManagerRejectedMsg,
+    RETAIL_KICK_REASON, ServerMessage, TitleRequest,
+};
+use nw_messages::ArenaClientMsg;
+use nw_messages::{FishingClientMsg, MusicClientMsg};
+use nw_messages::TransmogClientMsg;
+use nw_messages::{GameModeClientMsg, TitlesUnlockMsg, WarClientMsg, WarSignupClientMsg};
+use nw_db::{AccountSkins, collect_account_skins};
+use crate::world::transmog::SkinJob;
+use nw_messages::EconomyCall;
 use nw_reflect::Envelope;
 use nw_sim_core::{Ground, GroundCheck, TickClock};
 use tokio::sync::mpsc;
@@ -42,12 +64,18 @@ use uuid::Uuid;
 use crate::combat::{AttackOutcome, AttackRefusal, CombatSettings, RemoteHit};
 use crate::forward::{Forward, ForwardTable};
 use crate::gateways::GatewayTracker;
+use crate::instance_link::InstanceLink;
 use crate::login::WorldIds;
 use crate::mob_ai::SpawnAi;
 use crate::mobs::{MobChanges, spawn_index};
 use crate::player_content::PlayerContent;
 use crate::saves::{ItemSave, ProgressionSave, QuestSave, SaveQueue};
+use crate::social::{
+    guilds_answers, player_data_answer, requested_characters, stored_view, titles_answer,
+};
 use crate::stats::stat_updates;
+use crate::world::economy::{EconomyResult, run_job};
+use crate::world::send_now;
 use crate::world::{
     Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
 };
@@ -102,6 +130,8 @@ pub const METRIC_FORWARDED_INPUTS: &str = "sim_forwarded_inputs_total";
 pub const METRIC_STALE_FORWARDS: &str = "sim_stale_forwards_total";
 /// Metric: failed saves.
 pub const METRIC_FAILED_SAVES: &str = "sim_failed_saves_total";
+/// Metric: database look-ups of client calls (titles, other players) that failed.
+pub const METRIC_FAILED_LOOKUPS: &str = "sim_failed_lookups_total";
 /// Prometheus counter of leaderboard stat values added.
 pub const METRIC_STAT_UPDATES: &str = "sim_stat_updates_total";
 /// Prometheus counter of leaderboard stat batches the database refused.
@@ -169,6 +199,8 @@ pub const HANDOFF_REFUSED: &str = "refused";
 /// Handoff result: the other sim did not answer in time.
 pub const HANDOFF_TIMEOUT: &str = "timeout";
 const HANDOFF_GONE: &str = "gone";
+/// The type index of a player data request, for the logs of its look-up.
+const PLAYER_DATA_CALL: u64 = nw_messages::player_data::REQUEST_GET_PLAYERS_TYPE_INDEX;
 /// Yaw of a saved position; the sim has no facing yet.
 const NO_YAW: f32 = 0.0;
 
@@ -238,6 +270,14 @@ enum SaveKind {
 
 type SaveResult = (SaveKind, Uuid, bool);
 
+/// The end of one look-up task of a client call (titles, other players): the call's type and
+/// the answer to send, if it has one.
+struct LookupAnswer {
+    connection: ConnectionRef,
+    call: u64,
+    answer: Result<Vec<ServerMessage>, nw_db::DbError>,
+}
+
 /// The answer to one handoff offer.
 struct HandoffResult {
     connection: ConnectionRef,
@@ -257,6 +297,12 @@ struct Inbox {
     tables: nw_bus::Subscription<CellTable>,
     beats: nw_bus::Subscription<Heartbeat>,
     admin: nw_bus::Subscription<AdminCommand>,
+    /// The social service's messages for this sim's players.
+    social: nw_bus::Subscription<SocialDeliveries>,
+    /// The social service's coin moves (company treasury).
+    coins: nw_bus::Subscription<CoinTransfer>,
+    /// The director's instance commands (open, close, add a member).
+    instance: nw_bus::Subscription<InstanceCommand>,
 }
 
 impl Inbox {
@@ -272,6 +318,9 @@ impl Inbox {
                 .subscribe(subject::all_gateway_heartbeats(world_id))
                 .await?,
             admin: bus.subscribe(subject::sim_admin(world_id, sim)).await?,
+            social: bus.subscribe(subject::sim_social(world_id, sim)).await?,
+            coins: bus.subscribe(subject::sim_coins(world_id, sim)).await?,
+            instance: bus.subscribe(subject::sim_instance(world_id, sim)).await?,
         };
         bus.flush().await?;
         Ok(inbox)
@@ -290,11 +339,19 @@ struct Loop {
     /// Connections with a direct input since they came here.
     direct: HashSet<ConnectionRef>,
     ghosts: Publisher<Ghosts>,
+    /// The number of the last round of ghosts this sim sent.
+    ghost_round: u64,
+    /// The parts of other sims' ghost rounds that came so far.
+    ghost_assembly: GhostAssembly,
     hits: Publisher<Hit>,
     cancels: Publisher<HandoffMessage>,
     beats: Publisher<SimHeartbeat>,
     snapshots: Publisher<SimSnapshot>,
     script_logs: Publisher<ScriptLog>,
+    /// Social calls and presence to the world's social service.
+    social: Publisher<SocialBatch>,
+    /// The social inputs of this tick, in order.
+    pending_social: Vec<SocialInput>,
     db: PgPool,
     global_db: PgPool,
     world: SimWorld,
@@ -305,6 +362,14 @@ struct Loop {
     quest_queue: SaveQueue<QuestSave>,
     progression_queue: SaveQueue<ProgressionSave>,
     saves: JoinSet<SaveResult>,
+    /// The database look-ups of client calls.
+    lookups: JoinSet<LookupAnswer>,
+    /// The trading post jobs that run (economy module).
+    economy_jobs: JoinSet<Option<EconomyResult>>,
+    /// The skin collection jobs that run (transmog module).
+    skin_jobs: JoinSet<(SkinJob, Result<AccountSkins, nw_db::DbError>)>,
+    /// The expedition requests that wait for the director.
+    instance_link: InstanceLink,
     handoff_results: mpsc::Sender<HandoffResult>,
     started: Instant,
     started_at_ms: u64,
@@ -350,11 +415,15 @@ pub async fn serve(
         pending_forwards: BTreeMap::new(),
         direct: HashSet::new(),
         ghosts: Publisher::start(bus.clone(), SIM_QUEUE),
+        ghost_round: 0,
+        ghost_assembly: GhostAssembly::default(),
         hits: Publisher::start(bus.clone(), SIM_QUEUE),
         cancels: Publisher::start(bus.clone(), SIM_QUEUE),
         beats: Publisher::start(bus.clone(), HEARTBEAT_QUEUE),
         snapshots: Publisher::start(bus.clone(), SIM_QUEUE),
         script_logs: Publisher::start(bus.clone(), SIM_QUEUE),
+        social: Publisher::start(bus.clone(), SIM_QUEUE),
+        pending_social: Vec::new(),
         settings,
         bus,
         db: databases.world,
@@ -364,6 +433,10 @@ pub async fn serve(
         quest_queue: SaveQueue::default(),
         progression_queue: SaveQueue::default(),
         saves: JoinSet::new(),
+        lookups: JoinSet::new(),
+        economy_jobs: JoinSet::new(),
+        skin_jobs: JoinSet::new(),
+        instance_link: InstanceLink::default(),
         handoff_results,
         started: Instant::now(),
         started_at_ms,
@@ -375,6 +448,9 @@ pub async fn serve(
     let mut save_timer = tokio::time::interval(state.settings.save_interval);
     let mut beat_timer = tokio::time::interval(state.settings.heartbeat_interval);
     let mut snapshot_timer = state.settings.snapshot_interval.map(tokio::time::interval);
+    let mut delivery_timer = tokio::time::interval(Duration::from_millis(
+        state.settings.content.trading_post.delivery_poll_ms,
+    ));
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
@@ -411,8 +487,30 @@ pub async fn serve(
                 Ok(beat) => state.gateway_beat(&beat.message),
                 Err(error) => tracing::warn!(%error, "bad heartbeat"),
             },
+            Some(deliveries) = inbox.social.next() => match deliveries {
+                Ok(deliveries) => state.social_deliveries(&deliveries.message),
+                Err(error) => tracing::warn!(%error, "bad social deliveries"),
+            },
+            Some(transfer) = inbox.coins.next() => match transfer {
+                Ok(transfer) => state.move_coins(transfer),
+                Err(error) => tracing::warn!(%error, "bad coin move"),
+            },
             Some(answer) = answers.recv() => state.handoff_done(answer),
             Some(saved) = state.saves.join_next() => state.saved(saved),
+            Some(answer) = state.lookups.join_next() => state.looked_up(answer),
+            Some(done) = state.economy_jobs.join_next() => state.economy_done(done),
+            Some(done) = state.skin_jobs.join_next() => state.skins_done(done),
+            _ = delivery_timer.tick() => state.world.economy_round(),
+            Some(command) = inbox.instance.next() => match command {
+                Ok(command) => {
+                    let now_ms = state.now_ms();
+                    crate::instance_link::command(&mut state.world, &state.bus, command, now_ms);
+                }
+                Err(error) => tracing::warn!(%error, "bad instance command"),
+            },
+            Some((connection, reply)) = state.instance_link.next() => {
+                state.world.instance_reply(&connection, reply);
+            }
             _ = poll.tick() => state.tick(&mut clock),
             _ = save_timer.tick() => state.save_all(),
             _ = beat_timer.tick() => state.heartbeat(),
@@ -454,6 +552,12 @@ impl Loop {
                 self.forwards.remove(&message.connection);
                 if let Some(login) = login {
                     self.send(login);
+                }
+                if let Some(player) = self
+                    .world
+                    .social_player(&message.connection, &self.settings.sim_id)
+                {
+                    self.pending_social.push(SocialInput::Joined(player));
                 }
                 AdmitReply::Admitted
             }
@@ -537,6 +641,7 @@ impl Loop {
             SimInput::Left { connection } => {
                 if let Some(departure) = self.world.leave(&connection) {
                     self.save(&departure);
+                    self.social_left(departure.character);
                 }
                 self.count_players();
             }
@@ -585,6 +690,45 @@ impl Loop {
                     }
                 }
             }
+            Some(index)
+                if let Some(request) = MetaAchievementRequest::decode(index, &envelope.body) =>
+            {
+                match request {
+                    Ok(request) => self.world.meta_achievement_call(connection, &request),
+                    Err(error) => {
+                        metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
+                        tracing::warn!(
+                            type_index = index,
+                            %error,
+                            body = %hex_of(&envelope.body),
+                            "meta achievement call does not read"
+                        );
+                    }
+                }
+            }
+            Some(index) if let Some(request) = SetTitleRequest::decode(index, &envelope.body) => {
+                match request {
+                    Ok(request) => self.world.set_title(connection, &request),
+                    Err(error) => {
+                        metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
+                        tracing::warn!(type_index = index, %error, "title choice does not read");
+                    }
+                }
+            }
+            Some(index) if let Some(call) = MountClientMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.mount_call(connection, call, self.now_ms()),
+                    Err(error) => {
+                        metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
+                        tracing::warn!(
+                            type_index = index,
+                            %error,
+                            body = %hex_of(&envelope.body),
+                            "mount call does not read"
+                        );
+                    }
+                }
+            }
             Some(index) if let Some(call) = PointsClientMsg::decode(index, &envelope.body) => {
                 match call {
                     Ok(call) => self.world.points_call(connection, call),
@@ -597,6 +741,105 @@ impl Loop {
                             "point call does not read"
                         );
                     }
+                }
+            }
+            Some(index) if let Some(call) = ItemCallMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.item_call(connection, call, self.now_ms()),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(call) = TransmogClientMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.transmog_call(connection, call),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(call) = ItemRepairMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.repair_call(connection, call),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(option) = ClientOptionMsg::decode(index, &envelope.body) => {
+                match option {
+                    Ok(option) => self.world.client_option(connection, &option),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(request) = TitleRequest::decode(index, &envelope.body) => {
+                match request {
+                    Ok(request) => self.title_call(connection, request),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(request) = PlayerDataRequest::decode(index, &envelope.body) => {
+                match request {
+                    Ok(request) => self.player_data_call(connection, request),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(request) = GuildsRequest::decode(index, &envelope.body) => {
+                match request {
+                    Ok(request) => self.guilds_call(connection, &request),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(call) = TravelClientMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.travel_call(connection, call, self.now_ms()),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(call) = FishingClientMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.fishing_call(connection, call),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(call) = MusicClientMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.music_call(connection, call, self.now_ms()),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if SocialCall::is_call(index) => {
+                if let Some(character) = self.world.character_of(connection) {
+                    self.pending_social.push(SocialInput::Call {
+                        character,
+                        type_index: index,
+                        body: envelope.body.clone(),
+                    });
+                }
+            }
+            Some(index) if let Some(call) = GameModeClientMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.game_mode_call(connection, call),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(call) = WarClientMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.war_call(connection, call),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(call) = WarSignupClientMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.war_signup_call(connection, call),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(call) = ArenaClientMsg::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.arena_call(connection, call, self.now_ms()),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index) if let Some(call) = EconomyCall::decode(index, &envelope.body) => {
+                match call {
+                    Ok(call) => self.world.economy_call(connection, call),
+                    Err(error) => bad_call(index, &error, &envelope.body),
                 }
             }
             Some(index) if let Some(facet) = ClientFacetMsg::decode(index, &envelope.body) => {
@@ -627,6 +870,10 @@ impl Loop {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
             return;
         };
+        self.world.travel_input(connection, &input.records, self.now_ms());
+        // The mount keys first: a dash or a ride changes the speeds the move takes.
+        self.world
+            .mount_input(connection, &input.records, self.now_ms());
         self.move_player(connection, &input.records);
         let now_ms = self.now_ms();
         match input.interaction() {
@@ -638,8 +885,195 @@ impl Loop {
         }
         self.world
             .swing_at_quest_objects(connection, &input.records, now_ms);
+        // With the fishing pole out the attack key casts and reels, and while performing it
+        // plays notes: no swing.
+        self.world.fishing_input(connection, &input.records, now_ms);
+        if self.world.fishing_holds_attack(connection) || self.world.music_holds_attack(connection) {
+            return;
+        }
         for result in self.world.attack_input(connection, &input.records, now_ms) {
             self.attack_result(result);
+        }
+    }
+
+    /// Answers a title call (4143 → 4147, 4144): the titles the player earned now are stored
+    /// on its account, and the account's titles go back with their new marks.
+    fn title_call(&mut self, connection: &ConnectionRef, request: TitleRequest) {
+        let call = request.type_index();
+        let db = self.db.clone();
+        match request {
+            TitleRequest::Available { header } => {
+                let Some(earned) = self.world.earned_titles(connection) else {
+                    return;
+                };
+                self.look_up(connection, call, async move {
+                    let account =
+                        earn_account_titles(&db, earned.character, &earned.account).await?;
+                    // The titles this earn made new go first as an unlock (3585).
+                    let unlocked: Vec<u32> = account
+                        .iter()
+                        .filter(|title| title.is_new && earned.account.contains(&title.title))
+                        .map(|title| title.title)
+                        .collect();
+                    let mut answers = Vec::new();
+                    if !unlocked.is_empty() {
+                        answers.push(ServerMessage::TitlesUnlock(TitlesUnlockMsg {
+                            header,
+                            titles: unlocked,
+                        }));
+                    }
+                    answers.push(titles_answer(header, &account, &earned.character_titles));
+                    Ok(answers)
+                });
+            }
+            TitleRequest::ClearNew { .. } => {
+                let Some(character) = self.world.character_of(connection) else {
+                    return;
+                };
+                self.look_up(connection, call, async move {
+                    clear_new_account_titles(&db, character).await?;
+                    Ok(Vec::new())
+                });
+            }
+        }
+    }
+
+    /// Answers a player data request (4150 → 4140): the players of this sim from their live
+    /// state, the others from the world database.
+    fn player_data_call(&mut self, connection: &ConnectionRef, request: PlayerDataRequest) {
+        if !self.world.has(connection) {
+            return;
+        }
+        let world_id = self.settings.world_id;
+        let characters = requested_characters(&request);
+        let live = self.world.live_player_views(&characters, world_id);
+        let stored: Vec<Uuid> = characters
+            .iter()
+            .filter(|character| !live.contains_key(*character))
+            .copied()
+            .collect();
+        if stored.is_empty() {
+            let answer = player_data_answer(&request, &characters, live);
+            self.send_messages(connection, &[answer]);
+            return;
+        }
+        let db = self.db.clone();
+        let content = Arc::clone(&self.settings.content);
+        self.look_up(connection, PLAYER_DATA_CALL, async move {
+            let mut found = live;
+            for player in stored_players(&db, &stored).await? {
+                found.insert(
+                    player.id,
+                    stored_view(&player, &content.progression, world_id),
+                );
+            }
+            Ok(vec![player_data_answer(&request, &characters, found)])
+        });
+    }
+
+    /// Answers a company look-up (3639 → 3610) from the companies of the world database
+    /// ([`guilds_answers`]).
+    fn guilds_call(&mut self, connection: &ConnectionRef, request: &GuildsRequest) {
+        if !self.world.has(connection) {
+            return;
+        }
+        let ids: Vec<Uuid> = request.guilds.iter().map(|id| Uuid::from_bytes(*id)).collect();
+        let request = request.clone();
+        let db = self.db.clone();
+        self.look_up(connection, REQUEST_GET_GUILDS_TYPE_INDEX, async move {
+            let listings = company_listings(&db, &ids).await?;
+            Ok(guilds_answers(&request, &listings))
+        });
+    }
+
+    /// Runs `lookup`, the database work of call `call` of the client of `connection`, as a task.
+    fn look_up(
+        &mut self,
+        connection: &ConnectionRef,
+        call: u64,
+        lookup: impl Future<Output = Result<Vec<ServerMessage>, nw_db::DbError>> + Send + 'static,
+    ) {
+        let connection = connection.clone();
+        self.lookups.spawn(async move {
+            LookupAnswer {
+                connection,
+                call,
+                answer: lookup.await,
+            }
+        });
+    }
+
+    /// Runs the economy jobs of the world, each in its own task (economy module).
+    fn run_economy_jobs(&mut self) {
+        for job in self.world.take_economy_jobs() {
+            let db = self.db.clone();
+            self.economy_jobs.spawn(async move { run_job(&db, job).await });
+        }
+    }
+
+    /// Runs the skin collection jobs of the world, each in its own task (transmog module).
+    fn run_skin_jobs(&mut self) {
+        let now_ms = self.now_ms();
+        for job in self.world.take_skin_jobs(now_ms) {
+            let db = self.db.clone();
+            self.skin_jobs.spawn(async move {
+                let collected = collect_account_skins(&db, job.character, &job.collect).await;
+                (job, collected)
+            });
+        }
+    }
+
+    /// Gives the answer of a skin collection job to the world.
+    fn skins_done(
+        &mut self,
+        done: Result<(SkinJob, Result<AccountSkins, nw_db::DbError>), tokio::task::JoinError>,
+    ) {
+        match done {
+            Ok((job, collected)) => self.world.skins_collected(&job, collected),
+            Err(error) => tracing::error!(%error, "skin job task failed"),
+        }
+    }
+
+    /// Gives the answer of an economy job to the world.
+    fn economy_done(&mut self, done: Result<Option<EconomyResult>, tokio::task::JoinError>) {
+        match done {
+            Ok(Some(result)) => self.world.economy_done(result),
+            Ok(None) => {}
+            Err(error) => tracing::error!(%error, "economy job task failed"),
+        }
+    }
+
+    /// A look-up ended: its answer goes to the client while it is still here.
+    fn looked_up(&mut self, result: Result<LookupAnswer, tokio::task::JoinError>) {
+        let LookupAnswer {
+            connection,
+            call,
+            answer,
+        } = match result {
+            Ok(answer) => answer,
+            Err(error) => {
+                tracing::error!(%error, "look-up task failed");
+                return;
+            }
+        };
+        match answer {
+            Ok(messages) if self.world.has(&connection) => {
+                self.send_messages(&connection, &messages);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                metrics::counter!(METRIC_FAILED_LOOKUPS).increment(1);
+                tracing::warn!(%error, call, "look-up failed; the call stays unanswered");
+            }
+        }
+    }
+
+    /// Sends `messages` to the client of `connection` with the next flush, reliably.
+    fn send_messages(&mut self, connection: &ConnectionRef, messages: &[ServerMessage]) {
+        let mut outgoing = Vec::new();
+        send_now(&mut outgoing, connection, messages);
+        for message in outgoing {
+            self.send(message);
         }
     }
 
@@ -754,7 +1188,11 @@ impl Loop {
         self.count_players();
     }
 
-    fn ghosts_in(&mut self, ghosts: Ghosts) {
+    fn ghosts_in(&mut self, part: Ghosts) {
+        // A round goes to the world once all its parts came.
+        let Some(ghosts) = self.ghost_assembly.take(part) else {
+            return;
+        };
         self.world.adopt_ghost_ids(&ghosts.gde_refs);
         self.world
             .set_ghosts(&ghosts.from, ghosts.entities, self.now_ms());
@@ -841,12 +1279,16 @@ impl Loop {
         }
     }
 
-    /// Saves and removes the player with entity number `entity`, and tells its gateway to close
-    /// its connection (a GM kick).
+    /// Saves and removes the player with entity number `entity`, tells its client that its
+    /// session ends (271, the retail kick) and its gateway to close its connection (a GM kick).
     fn kick(&mut self, entity: u64) -> AdminReply {
         let Some(connection) = self.world.connection_of(entity) else {
             return AdminReply::NotMine;
         };
+        let kick = ServerMessage::KickClient(KickClientMsg {
+            reason: RETAIL_KICK_REASON,
+        });
+        self.send_messages(&connection, &[kick]);
         if let Some(departure) = self.world.leave(&connection) {
             self.save(&departure);
         }
@@ -864,6 +1306,7 @@ impl Loop {
     fn drop_gateway(&mut self, gateway: &BusId) {
         for departure in self.world.leave_gateway(gateway) {
             self.save(&departure);
+            self.social_left(departure.character);
             self.publish(
                 gateway,
                 GatewayOutput::Close {
@@ -899,6 +1342,11 @@ impl Loop {
         metrics::histogram!(METRIC_TICK_SECONDS).record(started.elapsed().as_secs_f64());
         metrics::histogram!(METRIC_MOB_TICK_SECONDS).record(output.mob_seconds);
         metrics::counter!(METRIC_BUNDLE_MEMBERS).increment(output.bundle_members);
+        let timeout = Duration::from_millis(self.settings.world.instance_request_timeout_ms);
+        for (connection, request) in self.world.take_instance_requests() {
+            self.instance_link
+                .ask(&self.bus, self.settings.world_id, timeout, connection, request);
+        }
         for (state, count) in self.world.mob_counts() {
             metrics::gauge!(METRIC_MOBS, STATE_LABEL => state.label()).set(count as f64);
         }
@@ -916,6 +1364,8 @@ impl Loop {
             self.save(death);
         }
         self.add_stats();
+        self.run_economy_jobs();
+        self.run_skin_jobs();
         if !output.script_log.is_empty() {
             let subject = subject::sim_script_log(self.settings.world_id, &self.settings.sim_id);
             let log = ScriptLog {
@@ -933,16 +1383,15 @@ impl Loop {
             self.offer(start);
         }
         self.flush();
+        // One round for every receiver: its parts each fit one bus message (OPEN D3).
+        self.ghost_round = self.ghost_round.wrapping_add(1);
         for (target, entities) in output.ghosts {
             let subject = subject::sim_ghosts(self.settings.world_id, &target);
-            let gde_refs = ghost_ids(&entities);
-            let ghosts = Ghosts {
-                from: self.settings.sim_id.clone(),
-                entities,
-                gde_refs,
-            };
-            if !self.ghosts.send(subject, ghosts) {
-                metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
+            for mut part in ghost_parts(&self.settings.sim_id, self.ghost_round, entities) {
+                part.gde_refs = ghost_ids(&part.entities);
+                if !self.ghosts.send(subject.clone(), part) {
+                    metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
+                }
             }
         }
     }
@@ -1080,12 +1529,14 @@ impl Loop {
     }
 
     fn heartbeat(&mut self) {
+        let now_ms = self.now_ms();
         let beat = SimHeartbeat {
             id: self.settings.sim_id.clone(),
             started_at_ms: self.started_at_ms,
             players: u32::try_from(self.world.players()).unwrap_or(u32::MAX),
             max_players: self.settings.world.max_players,
             level: self.settings.level.clone(),
+            instance: self.world.instance_beat(now_ms),
         };
         let subject = subject::sim_heartbeat(self.settings.world_id, &self.settings.sim_id);
         if !self.beats.send(subject, beat) {
@@ -1139,6 +1590,20 @@ impl Loop {
                 }
             }
         }
+        let vitals = self.world.social_vitals();
+        self.pending_social.extend(vitals);
+        if !self.pending_social.is_empty() {
+            let batch = SocialBatch {
+                sim: self.settings.sim_id.clone(),
+                inputs: std::mem::take(&mut self.pending_social),
+            };
+            if !self
+                .social
+                .send(subject::social_input(self.settings.world_id), batch)
+            {
+                metrics::counter!(METRIC_DROPPED_OUTPUTS).increment(1);
+            }
+        }
         for (sim, inputs) in std::mem::take(&mut self.pending_forwards) {
             let subject = subject::sim_input(self.settings.world_id, &sim);
             for inputs in split_batches(inputs, SimInput::size_bytes) {
@@ -1158,6 +1623,32 @@ impl Loop {
     fn save_all(&mut self) {
         let departures = self.world.positions();
         self.save_round(&departures);
+        let players = self.world.social_players(&self.settings.sim_id);
+        self.pending_social
+            .extend(players.into_iter().map(SocialInput::Updated));
+    }
+
+    /// The player of `character` logged out: the social service hears it.
+    fn social_left(&mut self, character: Uuid) {
+        self.pending_social.push(SocialInput::Left {
+            character,
+            reason: LeaveReason::Logout,
+        });
+    }
+
+    /// Sends the social service's messages to this sim's players.
+    fn social_deliveries(&mut self, deliveries: &SocialDeliveries) {
+        for outgoing in self.world.social_outgoing(&deliveries.deliveries) {
+            self.send(outgoing);
+        }
+        self.world.apply_social_states(deliveries);
+    }
+
+    /// Moves a player's coins for the social service and answers it.
+    fn move_coins(&mut self, transfer: Incoming<CoinTransfer>) {
+        let reply = self.world.move_coins(&transfer.message);
+        tracing::info!(character = %transfer.message.character, change = transfer.message.change, ?reply, "treasury coins");
+        self.reply(transfer, reply);
     }
 
     /// Saves `departures`, and starts the waiting saves again.
@@ -1195,6 +1686,7 @@ impl Loop {
         if let Some(items) = &departure.items {
             let save = ItemSave {
                 items: items.clone(),
+                inventory: departure.inventory.clone().unwrap_or_default(),
                 taken_at_ms: unix_ms(),
             };
             if let Some(save) = self.item_queue.want(departure.character, save) {
@@ -1251,7 +1743,14 @@ impl Loop {
     fn spawn_item_save(&mut self, character: Uuid, save: ItemSave) {
         let db = self.db.clone();
         self.spawn_store(SaveKind::Items, character, async move {
-            save_character_items(&db, character, &saved_items(&save.items), save.taken_at_ms).await
+            save_character_items(
+                &db,
+                character,
+                &saved_items(&save.items),
+                &saved_inventory(&save.inventory),
+                save.taken_at_ms,
+            )
+            .await
         });
     }
 
@@ -1317,11 +1816,18 @@ impl Loop {
         }
     }
 
-    /// Sends what waits, saves every player once more, and waits at most [`SHUTDOWN_SAVE_WAIT`]
-    /// for every save.
+    /// Tells every client that the world closes (1630), sends what waits, saves every player
+    /// once more, and waits at most [`SHUTDOWN_SAVE_WAIT`] for every save.
     async fn finish(&mut self) {
-        self.flush();
         let departures = self.world.departures();
+        // Retail took its players out so at a maintenance (`MSQ5-lv25`).
+        let closing = [ServerMessage::PlayerManagerRejected(
+            PlayerManagerRejectedMsg::maintenance(),
+        )];
+        for departure in &departures {
+            self.send_messages(&departure.connection, &closing);
+        }
+        self.flush();
         self.save_round(&departures);
         let drained = tokio::time::timeout(SHUTDOWN_SAVE_WAIT, async {
             while let Some(saved) = self.saves.join_next().await {
@@ -1373,6 +1879,108 @@ fn saved_progression(progression: &PlayerProgression) -> SavedProgression {
         masteries: progression.masteries.clone(),
         attributes: progression.attributes.clone(),
         weapon_points: progression.weapon_points.clone(),
+        territory_points: progression.territory_points.clone(),
+        travel: saved_travel(&progression.travel),
+        ability_slots: progression.ability_slots.clone(),
+        meta_counters: progression.meta_counters.clone(),
+        meta_completed: progression.meta_completed.clone(),
+        title: progression.title,
+        mounts: saved_mounts(&progression.mounts),
+        arena: saved_arena(&progression.arena),
+        music: nw_db::SavedMusic {
+            next_performance_ms: progression.music.next_performance_ms,
+        },
+    }
+}
+
+/// The arena state as the database stores it.
+fn saved_arena(arena: &nw_bus::PlayerArena) -> nw_db::SavedArena {
+    nw_db::SavedArena {
+        dungeon_cooldown_since_2000_ns: arena.dungeon_cooldown_since_2000_ns,
+        solo_trial_cooldown_since_2000_ns: arena.solo_trial_cooldown_since_2000_ns,
+        ranks: arena.ranks.clone(),
+        last_dungeon: arena.last_dungeon,
+        last_mutated_dungeon: arena.last_mutated_dungeon,
+        base_entered: arena.base_entered,
+        mutated_entered: arena.mutated_entered,
+        group_trials_entered: arena.group_trials_entered,
+        next_base_refresh_ns: arena.next_base_refresh_ns,
+        next_mutated_refresh_ns: arena.next_mutated_refresh_ns,
+        next_group_trial_refresh_ns: arena.next_group_trial_refresh_ns,
+        mutation_award: arena.mutation_award,
+        last_dungeon_mutated: arena.last_dungeon_mutated,
+        stay: arena.stay.as_ref().map(|stay| nw_db::SavedStay {
+            instance: stay.instance,
+            game_mode: stay.game_mode.clone(),
+            phase: stay.phase,
+            return_level: stay.return_level.clone(),
+            return_position: stay.return_position.bits(),
+            activated_ns: stay.activated_ns,
+        }),
+    }
+}
+
+/// The mounts as the database stores them: the chosen mount and the customized ones; the ride
+/// is not kept (a login starts on foot).
+fn saved_mounts(mounts: &nw_bus::PlayerMounts) -> SavedMounts {
+    SavedMounts {
+        selected: mounts.selected,
+        customized: mounts
+            .customized
+            .iter()
+            .map(|mount| SavedMount {
+                mount_id: mount.mount_id,
+                dye: mount.dye,
+                name: mount.name.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// The travel state as the database stores it.
+fn saved_travel(travel: &nw_bus::PlayerTravel) -> SavedTravel {
+    SavedTravel {
+        waypoint: travel.waypoint.map(nw_bus::StoredPoint::bits),
+        inn: travel.inn,
+        camp: travel.camp,
+        camp_skin: travel.camp_skin,
+        unstuck_ready_ms: travel.unstuck_ready_ms,
+        homes: travel
+            .homes
+            .iter()
+            .map(|home| SavedHome {
+                plot: home.plot,
+                position: home.position.bits(),
+                purchased_ms: home.purchased_ms,
+                items: home
+                    .items
+                    .iter()
+                    .map(|item| SavedHousingItem {
+                        index: item.index,
+                        item: item.item,
+                        position: item.position.bits(),
+                        rotation: item.rotation,
+                    })
+                    .collect(),
+                record: SavedHomeRecord {
+                    plot_facet: home.record.plot_facet,
+                    plot_extra: home.record.plot_extra,
+                    house_data: home.record.house_data,
+                    house_data_facet: home.record.house_data_facet,
+                    house_type: home.record.house_type,
+                    territory: home.record.territory,
+                    taxes_due_ms: home.record.taxes_due_ms,
+                    fast_travel_ready_ms: home.record.fast_travel_ready_ms,
+                },
+            })
+            .collect(),
+        played_ms: travel.played_ms,
+        inn_recalled_ms: travel.inn_recalled_ms,
+        placed_camp: travel.placed_camp.map(|camp| SavedCamp {
+            position: camp.position.bits(),
+            tier: camp.tier,
+            placed_ms: camp.placed_ms,
+        }),
     }
 }
 
@@ -1387,8 +1995,57 @@ fn saved_items(items: &[CarriedItem]) -> Vec<SavedItem> {
                 ItemPlace::Worn(slot) => SavedPlace::Worn(slot),
                 ItemPlace::Bag(slot) => SavedPlace::Bag(slot),
             },
+            instance: item.state.instance.map(Uuid::from_bytes),
+            locked: item.state.locked,
+            rolls: saved_rolls(&item.state),
         })
         .collect()
+}
+
+/// The rolls and look of a carried item as the database stores them.
+fn saved_rolls(state: &ItemState) -> SavedItemRolls {
+    SavedItemRolls {
+        gear_score: state.gear_score,
+        durability: state.durability,
+        perks: state.perks.clone(),
+        bound: state.bound,
+        dye: state.look.dye,
+        appearance: state.look.appearance,
+        skin_dye: state.look.skin_dye,
+    }
+}
+
+/// The storage chests and loadouts as the database stores them.
+fn saved_inventory(inventory: &PlayerInventory) -> SavedInventory {
+    SavedInventory {
+        stored: inventory
+            .stored
+            .iter()
+            .map(|item| SavedStoredItem {
+                storage: Uuid::from_bytes(item.storage),
+                slot: item.slot,
+                item_id: item.item_id.clone(),
+                quantity: item.quantity,
+                instance: item.state.instance.map(Uuid::from_bytes),
+                locked: item.state.locked,
+                rolls: saved_rolls(&item.state),
+            })
+            .collect(),
+        loadouts: inventory
+            .loadouts
+            .iter()
+            .map(|loadout| SavedLoadout {
+                index: loadout.index,
+                name: loadout.name.clone(),
+                items: loadout
+                    .items
+                    .iter()
+                    .map(|(slot, instance)| (*slot, Uuid::from_bytes(*instance)))
+                    .collect(),
+                attributes: loadout.attributes.clone(),
+            })
+            .collect(),
+    }
 }
 
 /// Milliseconds since 2000-01-01. The unit of the retail `TimeSynchMsg` is Unknown.
@@ -1412,6 +2069,12 @@ fn count_mob_death(outcome: &AttackOutcome) {
 }
 
 /// `bytes` as lowercase hex, for the debug log.
+/// Counts and logs a client call of type `index` whose body does not read.
+fn bad_call(index: u64, error: &nw_messages::MessageError, body: &[u8]) {
+    metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
+    tracing::warn!(type_index = index, %error, body = %hex_of(body), "client call does not read");
+}
+
 fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -1589,7 +2252,11 @@ mod tests {
     fn settings(world_id: Uuid, name: &str) -> LoopSettings {
         let config = committed();
         let mut world = config
-            .world_settings(bounds(), TEST_OCEAN_LEVEL_M)
+            .world_settings(
+                bounds(),
+                TEST_OCEAN_LEVEL_M,
+                &nw_content::instances::InstanceCatalog::default(),
+            )
             .expect("world settings");
         // The live path under test: own player card on, other entities held until the client
         // sends movement (local-player-check note).
@@ -1960,6 +2627,7 @@ mod tests {
             look: None,
             backstory: None,
             items: None,
+            inventory: PlayerInventory::default(),
             quests: PlayerQuests::default(),
             progression: PlayerProgression::default(),
             game_master: false,
@@ -2252,7 +2920,9 @@ mod tests {
                     _ => None,
                 })
                 .await;
-            assert_eq!(login, LOGIN_MESSAGE_TYPES.len());
+            /// 4970 follows the seven login messages.
+            const LEFT_QUEUE_MESSAGE: usize = 1;
+            assert_eq!(login, LOGIN_MESSAGE_TYPES.len() + LEFT_QUEUE_MESSAGE);
             assert_eq!(
                 gateway.bundle_from(sim.id(), CONNECTION).await,
                 vec![CONNECTION]
@@ -2350,6 +3020,8 @@ mod tests {
                 masteries: BTreeMap::from([("BowAbilityTable".to_owned(), 30)]),
                 attributes: vec![(2, 15)],
                 weapon_points: Vec::new(),
+                travel: nw_bus::PlayerTravel::default(),
+                ..PlayerProgression::default()
             };
             admit(&bus, world_id, sim.id(), &first).await;
             sim.stop().await;
@@ -2612,6 +3284,107 @@ mod tests {
             tokio::time::timeout(WAIT, wait_for_x(&mut gateway, sim.id(), x + STEP_M))
                 .await
                 .expect("it moves again after its respawn");
+            tables.abort();
+            sim.stop().await;
+        })
+        .await;
+    }
+
+    /// The next answer of type `T` to the test's connection.
+    async fn next_answer<T>(
+        gateway: &mut TestGateway,
+        mut wanted: impl FnMut(ServerMessage) -> Option<T>,
+    ) -> T {
+        tokio::time::timeout(
+            WAIT,
+            gateway.until(|output| match output {
+                GatewayOutput::ServerMessages {
+                    connection: CONNECTION,
+                    envelopes,
+                    ..
+                } => envelopes.iter().find_map(|bytes| {
+                    let envelope = Envelope::decode(bytes).ok()?;
+                    wanted(ServerMessage::from_envelope(&envelope)?.ok()?)
+                }),
+                _ => None,
+            }),
+        )
+        .await
+        .expect("an answer in time")
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn social_calls_get_the_players_and_the_titles() {
+        const PLAYER_X: f32 = 1000.0;
+        const REQUEST_ID: [u8; nw_messages::RAW_ID_LEN] = [5; nw_messages::RAW_ID_LEN];
+        let header = nw_messages::FacetHeader {
+            target: 1,
+            entity: 2,
+        };
+        with_test_schema(async |db| {
+            WORLD_MIGRATOR.run(db).await.expect("migrate");
+            let ada = character(db).await;
+            let stored = character(db).await;
+            let bus = test_bus().await;
+            let world_id = Uuid::new_v4();
+            let mut gateway = TestGateway::start(&bus, world_id, true).await;
+            let sim = Running::start(&bus, settings(world_id, "sim"), db).await;
+            let tables = publish_tables(&bus, world_id, slots(&bus, world_id, &[sim.id()]).await);
+            let player = admit_at(gateway.connection(CONNECTION), ada, PLAYER_X);
+            admit(&bus, world_id, sim.id(), &player).await;
+            let text = |id: Uuid| id.hyphenated().to_string().into_bytes();
+            let request = PlayerDataRequest {
+                header,
+                request: REQUEST_ID,
+                characters: vec![text(stored.1), text(Uuid::new_v4()), text(ada.1)],
+            };
+            let call = client_message(
+                gateway.connection(CONNECTION),
+                nw_messages::player_data::REQUEST_GET_PLAYERS_TYPE_INDEX,
+                request.encode().expect("encode"),
+            );
+            input(&bus, world_id, sim.id(), &call).await;
+            let answer = next_answer(&mut gateway, |message| match message {
+                ServerMessage::PlayerData(answer) => Some(answer),
+                _ => None,
+            })
+            .await;
+            assert_eq!((answer.header, answer.request), (header, REQUEST_ID));
+            let found: Vec<Vec<u8>> = answer
+                .players
+                .iter()
+                .map(|player| player.character.clone())
+                .collect();
+            assert_eq!(
+                found,
+                [text(stored.1), text(ada.1)],
+                "the unknown id is left out"
+            );
+            assert!(
+                answer
+                    .players
+                    .iter()
+                    .all(|player| player.name == CHARACTER_NAME.as_bytes()
+                        && player.world == text(world_id))
+            );
+            let call = client_message(
+                gateway.connection(CONNECTION),
+                nw_messages::titles::SEND_AVAILABLE_TITLES_TYPE_INDEX,
+                TitleRequest::Available { header }.encode(),
+            );
+            input(&bus, world_id, sim.id(), &call).await;
+            let titles = next_answer(&mut gateway, |message| match message {
+                ServerMessage::AvailableTitles(titles) => Some(titles),
+                _ => None,
+            })
+            .await;
+            assert_eq!(titles.header, header);
+            assert!(
+                titles
+                    .new
+                    .iter()
+                    .all(|title| titles.available.contains(title))
+            );
             tables.abort();
             sim.stop().await;
         })
@@ -2932,10 +3705,12 @@ mod tests {
                 client_context: 1,
                 enter_level: false,
                 items: None,
+                inventory: PlayerInventory::default(),
                 drawn_weapon: None,
                 active_weapon: None,
                 mastery_versions: (0, 0),
                 attribute_version: 0,
+                fishing_sequence: 0,
                 game_master: false,
                 quests: PlayerQuests::default(),
                 progression: PlayerProgression::default(),

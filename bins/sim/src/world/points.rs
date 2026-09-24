@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! A player's attribute points and the client's point calls (progression note, section 6):
-//! spending attribute points (1502), assigning weapon points (1112) and applying them (2857).
+//! A player's attribute points and the client's point calls (progression note, sections 6 and
+//! 9): spending attribute points (1502) and refunding them (2409), assigning weapon points
+//! (1112), applying them (2857), mapping an ability into a slot (2701) and resetting a weapon
+//! tree (186, answered by 2858).
 //!
 //! The attribute points of a character are the `AttributePoints` of every level up to its own,
 //! less the spent ones. The client keeps them in its attribute state (type 129): whole at login
@@ -9,9 +11,12 @@
 use nw_bus::ConnectionRef;
 use nw_content::character_points::{ATTRIBUTE_COUNT, CharacterPoints};
 use nw_messages::items::FIRST_VERSION;
-use nw_messages::{AttributeState, AttributeValue, PersistentAttributes, PointsClientMsg};
+use nw_messages::{
+    AttributeState, AttributeValue, MasteryTreeRespecResponseMsg, PersistentAttributes,
+    PointsClientMsg, ServerMessage,
+};
 
-use super::{Player, SimWorld};
+use super::{Player, SimWorld, send_now};
 
 /// The `m_chosenMagnifyBehavior` retail sends (5 for the new character of newchar 2026-09-18
 /// and the level 66 character of NH-MSQ-2.1; the client sets it with 6397, which this server
@@ -32,6 +37,15 @@ pub(super) enum SpendRefusal {
     NotEnoughPoints,
     /// An attribute would go above its largest value.
     AboveMax,
+}
+
+/// Why a refund of the spent attribute points (2409) is refused; the state stays as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RefundRefusal {
+    /// No point is spent.
+    NothingSpent,
+    /// The player has fewer coins than the level's `AttributeRespecCost`.
+    NotEnoughCoins,
 }
 
 /// A player's attribute points.
@@ -116,6 +130,17 @@ impl Attributes {
         Ok(())
     }
 
+    /// Refunds every spent point (2409): the next state goes out whole (retail: all values back
+    /// to the base, no spent entry, every point unspent).
+    pub(super) fn refund(&mut self) -> Result<(), RefundRefusal> {
+        if self.spent.iter().all(|(_, points)| *points == 0) {
+            return Err(RefundRefusal::NothingSpent);
+        }
+        self.spent.clear();
+        self.spent_changed = true;
+        Ok(())
+    }
+
     /// The state for the client of a character of `level`: whole with the first card and
     /// after a spend, the points alone after a level change; `None` without a change.
     pub(super) fn take_state(
@@ -168,8 +193,9 @@ impl Attributes {
         rules.attribute_points_at(level).saturating_sub(spent)
     }
 
-    /// The final value of each attribute, highest id first (retail order).
-    fn values(&self, rules: &CharacterPoints) -> Vec<AttributeValue> {
+    /// The final value of each attribute, highest id first (retail order; a saved loadout keeps
+    /// them so, retail `Hiveloadouts`).
+    pub(super) fn values(&self, rules: &CharacterPoints) -> Vec<AttributeValue> {
         (0..ATTRIBUTE_COUNT)
             .rev()
             .filter_map(|index| {
@@ -212,9 +238,54 @@ impl SimWorld {
                 .masteries
                 .assign(progression, pool, point, points)
                 .map_err(|refusal| format!("{refusal:?}")),
+            PointsClientMsg::SpendTerritoryStandingPoint { pool, point, .. } => {
+                player.masteries.spend_territory_point(pool, point);
+                Ok(())
+            }
             PointsClientMsg::ApplyAbilityPoints { .. } => {
                 player.masteries.apply();
                 Ok(())
+            }
+            PointsClientMsg::RefundSpentPoints { .. } => {
+                let level = progression.level_of(player.experience);
+                let cost = progression.points.attribute_respec_cost(level);
+                if player.coins < cost {
+                    Err(format!("{:?}", RefundRefusal::NotEnoughCoins))
+                } else {
+                    player.attributes.refund().map_or_else(
+                        |refusal| Err(format!("{refusal:?}")),
+                        |()| {
+                            if cost > 0 {
+                                player.coins -= cost;
+                                player.coins_changed = true;
+                            }
+                            Ok(())
+                        },
+                    )
+                }
+            }
+            PointsClientMsg::ChangeMappedAbility {
+                table,
+                slot,
+                ability,
+                ..
+            } => player
+                .masteries
+                .change_mapped(progression, table, slot, ability)
+                .map_err(|refusal| format!("{refusal:?}")),
+            PointsClientMsg::MasteryTreeRespec { header, table, .. } => {
+                let done = player.masteries.respec(progression, table);
+                let answer = MasteryTreeRespecResponseMsg {
+                    header,
+                    done: done.is_ok(),
+                    table: u32::from(table),
+                };
+                send_now(
+                    &mut self.combat_messages,
+                    connection,
+                    &[ServerMessage::MasteryTreeRespecResponse(answer)],
+                );
+                done.map(|_| ()).map_err(|refusal| format!("{refusal:?}"))
             }
         };
         // The next save round finds the change: the save compares the whole progression.
@@ -370,9 +441,34 @@ mod tests {
         assert_eq!(state.persistent.expect("points").unspent, 5);
     }
 
+    #[test]
+    fn a_refund_returns_every_spent_point_and_sends_the_whole_state() {
+        let rules = rules();
+        let mut attributes = Attributes::of(&[], 0);
+        attributes.take_state(&rules, 3, true);
+        assert_eq!(attributes.refund(), Err(RefundRefusal::NothingSpent));
+        attributes
+            .spend(&rules, 3, &[STRENGTH, CONSTITUTION], &[10, 5])
+            .expect("spend");
+        attributes.take_state(&rules, 3, false);
+        assert_eq!(attributes.refund(), Ok(()));
+        // Retail 2026-08-26: every attribute back to the base, no spent entry.
+        let state = attributes.take_state(&rules, 3, false).expect("refunded");
+        assert_eq!(
+            state.attributes,
+            Some(vec![(4, 5), (3, 5), (2, 5), (1, 5), (0, 5)])
+        );
+        let persistent = state.persistent.expect("points");
+        assert_eq!(persistent.unspent, 15);
+        assert!(persistent.spent.is_empty());
+        assert!(attributes.carried().is_empty());
+    }
+
     mod world {
         use std::collections::BTreeMap;
         use std::sync::Arc;
+
+        use crate::world::tests::messages_to;
 
         use nw_content::progression::Progression;
         use nw_formats::objectstream::lowercase_crc32;
@@ -604,6 +700,83 @@ mod tests {
                 PointsClientMsg::ApplyAbilityPoints { header: HEADER },
             );
             assert_eq!(point_states(&mut world, later, STATE_TICKS), []);
+        }
+
+        /// Retail `AttributeRespecCost` of a level 59 character, here charged at level 2.
+        const REFUND_COST: i64 = 5_000;
+        /// The sword table's position in the test ability state.
+        const SWORD_TABLE_INDEX: u16 = 0;
+
+        fn coins(world: &mut SimWorld) -> u64 {
+            let entity = world.player_by_number(PLAYER).expect("player");
+            world.world.get::<Player>(entity).expect("player").coins
+        }
+
+        #[test]
+        fn a_refund_costs_the_level_coins_and_a_respec_is_answered() {
+            let mut world = world();
+            let mut content = (*world.content).clone();
+            content.progression.points = content
+                .progression
+                .points
+                .clone()
+                .with_respec_costs([(2, REFUND_COST)]);
+            world.content = Arc::new(content);
+            point_states(&mut world, NOW, CARD_TICKS);
+            let later = NOW + CARD_TICKS * TICK_MS;
+            let refund = || PointsClientMsg::RefundSpentPoints { header: HEADER };
+            world.points_call(
+                &connection(PLAYER),
+                PointsClientMsg::SpendAttributePoints {
+                    header: HEADER,
+                    attributes: vec![STRENGTH],
+                    points: vec![10],
+                },
+            );
+            world.points_call(&connection(PLAYER), refund());
+            let spent = point_states(&mut world, later, STATE_TICKS);
+            assert_eq!(spent.iter().find_map(unspent), Some(0), "too poor to refund");
+            let later = later + STATE_TICKS * TICK_MS;
+            {
+                let entity = world.player_by_number(PLAYER).expect("player");
+                let mut player = world.world.get_mut::<Player>(entity).expect("player");
+                player.coins = 7_000;
+            }
+            world.points_call(&connection(PLAYER), refund());
+            let refunded = point_states(&mut world, later, STATE_TICKS);
+            assert_eq!(refunded.iter().find_map(unspent), Some(10));
+            assert_eq!(coins(&mut world), 2_000);
+            let saved = progress(&mut world).expect("the progress changed");
+            assert!(saved.attributes.is_empty());
+            assert_eq!(saved.coins, 2_000);
+            // A respec of a tree with no rank costs nothing and is answered with its table.
+            world.points_call(
+                &connection(PLAYER),
+                PointsClientMsg::MasteryTreeRespec {
+                    header: HEADER,
+                    table: SWORD_TABLE_INDEX,
+                    flag: 0,
+                },
+            );
+            world.points_call(
+                &connection(PLAYER),
+                PointsClientMsg::MasteryTreeRespec {
+                    header: HEADER,
+                    table: 9,
+                    flag: 0,
+                },
+            );
+            let sent = world.take_messages();
+            let answers: Vec<_> = messages_to(&sent, PLAYER)
+                .into_iter()
+                .filter_map(|message| match message {
+                    ServerMessage::MasteryTreeRespecResponse(answer) => {
+                        Some((answer.done, answer.table))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(answers, [(true, 0), (false, 9)]);
         }
     }
 }

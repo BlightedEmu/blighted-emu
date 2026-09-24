@@ -46,7 +46,7 @@ pub const MAX_SPAWN_DEPTH: usize = 8;
 /// Floats of a serialized transform: 3 basis columns, then the translation.
 const TRANSFORM_FLOATS: usize = 12;
 const BASIS_FLOATS: usize = 9;
-const AXES: usize = 3;
+pub(crate) const AXES: usize = 3;
 const FLOAT_BYTES: usize = 4;
 /// Bytes of an asset GUID.
 pub const GUID_LEN: usize = 16;
@@ -54,8 +54,8 @@ pub const GUID_LEN: usize = 16;
 const DYNAMIC_SLICE_SUFFIX: &str = ".dynamicslice";
 
 /// A 3x3 basis (rotation and uniform scale) by rows.
-type Basis = [[f64; AXES]; AXES];
-const IDENTITY: Basis = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+pub(crate) type Basis = [[f64; AXES]; AXES];
+pub(crate) const IDENTITY: Basis = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
 /// A `region.slicedata` that cannot be read.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -255,11 +255,15 @@ impl SliceSpawners {
     }
 }
 
-fn spawner(entry: &Element, names: &Names) -> Result<SliceSpawner, SliceDataError> {
-    let floats = entry
-        .child(names.transform)
-        .map(|transform| transform.value.as_slice())
-        .unwrap_or_default();
+/// The basis (by rows) and translation of a serialized transform: 12 big-endian floats, the 3
+/// basis columns, then the translation.
+///
+/// # Errors
+///
+/// Returns [`SliceDataError::Transform`] when `floats` is not 12 floats.
+pub(crate) fn transform_from_bytes(
+    floats: &[u8],
+) -> Result<(Basis, [f64; AXES]), SliceDataError> {
     if floats.len() != TRANSFORM_FLOATS * FLOAT_BYTES {
         return Err(SliceDataError::Transform(floats.len()));
     }
@@ -279,6 +283,22 @@ fn spawner(entry: &Element, names: &Names) -> Result<SliceSpawner, SliceDataErro
             *cell = value(column * AXES + row);
         }
     }
+    Ok((
+        basis,
+        [
+            value(BASIS_FLOATS),
+            value(BASIS_FLOATS + 1),
+            value(BASIS_FLOATS + 2),
+        ],
+    ))
+}
+
+fn spawner(entry: &Element, names: &Names) -> Result<SliceSpawner, SliceDataError> {
+    let floats = entry
+        .child(names.transform)
+        .map(|transform| transform.value.as_slice())
+        .unwrap_or_default();
+    let (basis, translation) = transform_from_bytes(floats)?;
     let asset = entry
         .child(names.asset)
         .and_then(|asset| asset.children.first())
@@ -287,11 +307,7 @@ fn spawner(entry: &Element, names: &Names) -> Result<SliceSpawner, SliceDataErro
         .unwrap_or_default();
     Ok(SliceSpawner {
         basis,
-        translation: [
-            value(BASIS_FLOATS),
-            value(BASIS_FLOATS + 1),
-            value(BASIS_FLOATS + 2),
-        ],
+        translation,
         asset,
         slice: text(entry.child(names.slice))?,
         variant: text(entry.child(names.variation))?,
@@ -329,7 +345,7 @@ pub fn spawned_gde_id(position: [f64; AXES], yaw_degrees: f64, asset: &[u8; GUID
 }
 
 /// The basis of quaternion `[x, y, z, w]`, by rows.
-fn quaternion_basis([x, y, z, w]: [f32; 4]) -> Basis {
+pub(crate) fn quaternion_basis([x, y, z, w]: [f32; 4]) -> Basis {
     let [x, y, z, w] = [x, y, z, w].map(f64::from);
     [
         [
@@ -350,11 +366,11 @@ fn quaternion_basis([x, y, z, w]: [f32; 4]) -> Basis {
     ]
 }
 
-fn scaled(basis: &Basis, scale: f32) -> Basis {
+pub(crate) fn scaled(basis: &Basis, scale: f32) -> Basis {
     basis.map(|row| row.map(|cell| cell * f64::from(scale)))
 }
 
-fn multiply(left: &Basis, right: &Basis) -> Basis {
+pub(crate) fn multiply(left: &Basis, right: &Basis) -> Basis {
     let mut product = [[0.0; AXES]; AXES];
     for (row, values) in product.iter_mut().enumerate() {
         for (column, cell) in values.iter_mut().enumerate() {
@@ -364,7 +380,7 @@ fn multiply(left: &Basis, right: &Basis) -> Basis {
     product
 }
 
-fn apply(basis: &Basis, vector: &[f64; AXES]) -> [f64; AXES] {
+pub(crate) fn apply(basis: &Basis, vector: &[f64; AXES]) -> [f64; AXES] {
     basis.map(|row| (0..AXES).map(|k| row[k] * vector[k]).sum())
 }
 

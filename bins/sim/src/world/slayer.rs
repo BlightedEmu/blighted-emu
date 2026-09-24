@@ -1,49 +1,41 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The slayer state of a player (slayer note, 2026-09-18; movement study 2026-09-20): the action
-//! it plays, which the client and the other players see in the ALC children 13 to 18, and the time
-//! into that action's sequence (children 2 and 3). The client starts its actions itself and names
-//! each one in row 1 of its input ([`SlayerInput`]); the server echoes it in the next own state,
-//! started in the state numbered with that record's counter, then adds its own follow-up for some
-//! actions. In the retail newchar capture 73 changes came from the client and 481 from the server:
-//! the follow-ups ([`FOLLOW_UPS`]) and the movement states ([`Locomotion`]).
+//! The slayer state of a player (slayer note, 2026-09-18; movement study 2026-09-20; run-15 lock
+//! and aim study 2026-09-22): the action it plays, which the client and the other players see in
+//! the ALC children 13 to 24 and 48, and the time into that action's sequence (children 2 and 3).
+//!
+//! The client starts some actions itself and names each one in row 1 of its input
+//! ([`SlayerInput`]); the server echoes it in the next own state, started in the state numbered
+//! with that record's counter, then adds its follow-up for some of them. Every other action is
+//! the server's (Observed, retail newchar capture 2026-09-18; the client waits for them): the
+//! light attack at the release of a tap of the attack key, the charge after a hold, the dodge,
+//! the jump, the block and the aim of the right-click, the weapon draw and the movement states.
+//! Runs 13 and 15 sent none of the attack starts: their clients started no attack at all (37 and
+//! 103 taps, every one shorter than the hold; retail's server started the first attack of each
+//! chain at the release, 463 at record 0x6bd after the press at 0x6ba). The sequences come from
+//! the player sequence table ([`PlayerSequences`]) by the weapon's stance.
 //!
 //! The sequence time is the sum of the input records' frame times since the record that started
 //! the state, that record's own included ([`SequenceClock`] has the wire form).
 
-use nw_messages::{SecondSlayerState, SequenceClock, SequenceTime, SlayerInput, SlayerState};
+use nw_content::player_sequences::{
+    Direction, PlayerSequences, SlotsChange, StanceSequences, StatePlay,
+};
+use nw_messages::{
+    RemoteUpper, SecondSlayerState, SequenceClock, SequenceTime, SlayerInput, SlayerState,
+    SlotChange, UpperSlots,
+};
 use nw_sim_core::Intent;
 
 /// How many own states carry one slayer change (Observed: retail sent a follow-up in the state
 /// that started it and the next one, 15c1 and 15c2 at 206528 to 206577 ms).
 const ECHO_STATES: u8 = 2;
-/// The follow-up the server starts one own state after an action the client started: (the
-/// client's sequence, the server's). Observed in the retail newchar capture, each pair every time
-/// it came (5 to 13 times), 0 to 132 ms after the client's action: a light attack's sequences
-/// and their next part. Other sequences have no follow-up here (Unknown: more need captures of
-/// the other weapons).
-const FOLLOW_UPS: [(u64, u64); 7] = [
-    (5047, 487),
-    (5055, 4603),
-    (5051, 484),
-    (5056, 468),
-    (5050, 485),
-    (3120, 2030),
-    (1221, 463),
-];
 
-/// The follow-up sequence of the client's sequence `sequence`.
-fn follow_up_of(sequence: u64) -> Option<u64> {
-    FOLLOW_UPS
-        .iter()
-        .find(|(started, _)| *started == sequence)
-        .map(|(_, follow_up)| *follow_up)
-}
-
-/// The slayer states the server starts for the player's own movement, with the sequence each
-/// transition took most often in the retail newchar capture (the server's slayer changes against
-/// the input keys of the records before and at them). The sequence of one transition varies
-/// with what the capture does not show (the foot in front, the turn of the camera); Unknown: the
-/// client's slayer script that picks it.
+/// The slayer states the server starts for the player's own movement with the weapon sheathed,
+/// with the sequence each transition took most often in the retail newchar capture (the server's
+/// slayer changes against the input keys of the records before and at them). The sequence of one
+/// transition varies with what the capture does not show (the foot in front, the turn of the
+/// camera); Unknown: the client's slayer script that picks it. A drawn weapon and a held
+/// right-click take the stance's own ([`MoveSet::of`]).
 mod movement {
     /// `slayerStateId` of a move that starts from standing still (`13=1a`).
     pub(super) const START_STATE: u64 = 0x1a;
@@ -67,6 +59,56 @@ mod movement {
     pub(super) const STOP_RECORDS: u16 = 39;
 }
 
+/// The movement states and sequences of one moment: the sheathed ones, the stance's drawn ones,
+/// or its block and aim walk while the right-click is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MoveSet {
+    start: (u64, u64),
+    back_start: (u64, u64),
+    stop: (u64, u64),
+    restart: (u64, u64),
+    idle: (u64, u64),
+}
+
+impl MoveSet {
+    /// The sheathed movement of the newchar capture.
+    const SHEATHED: Self = Self {
+        start: (movement::START_STATE, movement::START_SEQUENCE),
+        back_start: (movement::MOVE_STATE, movement::BACK_START_SEQUENCE),
+        stop: (movement::MOVE_STATE, movement::STOP_SEQUENCE),
+        restart: (movement::MOVE_STATE, movement::RESTART_SEQUENCE),
+        idle: (movement::IDLE_STATE, movement::IDLE_SEQUENCE),
+    };
+
+    /// The movement of `stance` (the weapon `drawn` or not) with the right-click held or not.
+    /// A value the table does not have keeps the sheathed one (best guess: the table's drawn
+    /// moves are the most common non-sheathed sequence of each transition per stance).
+    fn of(stance: Option<&StanceSequences>, drawn: bool, alt: bool) -> Self {
+        let mut set = Self::SHEATHED;
+        let Some(stance) = stance.filter(|_| drawn) else {
+            return set;
+        };
+        let pair = |play: StatePlay| (play.state, play.sequence);
+        if let Some(moves) = stance.drawn_moves {
+            set.start = moves.start.map_or(set.start, pair);
+            set.back_start = moves.back_start.map_or(set.back_start, pair);
+            set.stop.1 = moves.stop.unwrap_or(set.stop.1);
+            set.restart.1 = moves.restart.unwrap_or(set.restart.1);
+            set.idle.1 = moves.idle.unwrap_or(set.idle.1);
+        }
+        if alt && let Some(walk) = stance.alt_moves {
+            if let Some(moving) = walk.moving.map(pair) {
+                set.start = moving;
+                set.back_start = moving;
+                set.stop = moving;
+                set.restart = moving;
+            }
+            set.idle = walk.idle.map_or(set.idle, pair);
+        }
+        set
+    }
+}
+
 /// Where the player's own movement is, for its movement slayer states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum Locomotion {
@@ -82,33 +124,33 @@ enum Locomotion {
 impl Locomotion {
     /// The next movement after a record with `intent`, and the slayer state and sequence the
     /// server starts in that record, when it starts one.
-    fn step(self, intent: Intent) -> (Self, Option<(u64, u64)>) {
+    fn step(self, intent: Intent, set: MoveSet) -> (Self, Option<(u64, u64)>) {
         let moving = intent.forward != 0 || intent.right != 0;
         match (self, moving) {
             (Self::Idle, true) => {
                 let start = if intent.forward < 0 {
-                    (movement::MOVE_STATE, movement::BACK_START_SEQUENCE)
+                    set.back_start
                 } else {
-                    (movement::START_STATE, movement::START_SEQUENCE)
+                    set.start
                 };
                 (Self::Moving, Some(start))
             }
-            (Self::Moving, false) => (
-                Self::Stopping(movement::STOP_RECORDS),
-                Some((movement::MOVE_STATE, movement::STOP_SEQUENCE)),
-            ),
-            (Self::Stopping(_), true) => (
-                Self::Moving,
-                Some((movement::MOVE_STATE, movement::RESTART_SEQUENCE)),
-            ),
+            (Self::Moving, false) => (Self::Stopping(movement::STOP_RECORDS), Some(set.stop)),
+            (Self::Stopping(_), true) => (Self::Moving, Some(set.restart)),
             (Self::Stopping(left), false) => match left.saturating_sub(1) {
-                0 => (
-                    Self::Idle,
-                    Some((movement::IDLE_STATE, movement::IDLE_SEQUENCE)),
-                ),
+                0 => (Self::Idle, Some(set.idle)),
                 left => (Self::Stopping(left), None),
             },
             (Self::Idle, false) | (Self::Moving, true) => (self, None),
+        }
+    }
+
+    /// The state the movement plays now in `set`: sent again when the set changes.
+    const fn current(self, set: MoveSet) -> (u64, u64) {
+        match self {
+            Self::Idle => set.idle,
+            Self::Moving => set.restart,
+            Self::Stopping(_) => set.stop,
         }
     }
 }
@@ -118,8 +160,40 @@ impl Locomotion {
 enum Pending {
     /// An action the client started.
     Client(SlayerInput),
-    /// A movement state the server started: its state and sequence.
-    Movement(u64, u64),
+    /// An attack the server started (the retail form of its starts and follow-ups: children 14,
+    /// 15 and 17, no state).
+    Attack(u64),
+    /// A state the server started: its state and sequence (movement, dodge, jump).
+    State(u64, u64),
+}
+
+/// The weapon in the player's hand.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct HeldWeapon {
+    /// Its stance key ([`nw_content::player_attacks::stance_key`]).
+    pub(super) stance: u32,
+    /// Whether it is drawn.
+    pub(super) drawn: bool,
+    /// It has shots and none is loaded ([`super::gear::Gear::held_empty`]).
+    pub(super) empty: bool,
+}
+
+/// What an attack key press changed in the upper slots ([`SlayerTrack::shot_slots`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shot {
+    /// The reload: the press fires nothing.
+    Reload(UpperSlots),
+    /// The aimed shot.
+    Aimed(UpperSlots),
+}
+
+/// The attack key in one input record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct AttackKey {
+    /// It went down in this record.
+    pub(super) pressed: bool,
+    /// It came up in this record.
+    pub(super) released: bool,
 }
 
 /// One input record for the slayer state.
@@ -131,8 +205,13 @@ pub(super) struct SlayerRecord {
     pub(super) frame_s: f32,
     /// The action its client starts in it.
     pub(super) action: Option<SlayerInput>,
-    /// Its movement keys, when the server moves the body by them.
+    /// Its movement keys, when the server moves the body by them; with them the dodge, jump and
+    /// right-click keys.
     pub(super) intent: Option<Intent>,
+    /// Its attack key.
+    pub(super) attack: AttackKey,
+    /// The weapon in the hand.
+    pub(super) weapon: Option<HeldWeapon>,
 }
 
 /// What one own state carries of the slayer state.
@@ -142,6 +221,8 @@ pub(super) struct SlayerDue {
     pub(super) state: Option<SlayerState>,
     /// The time into its sequence.
     pub(super) time: Option<SequenceTime>,
+    /// The slots past the first and the marker, when they changed or echo.
+    pub(super) slots: Option<UpperSlots>,
 }
 
 /// One player's slayer state.
@@ -152,6 +233,29 @@ pub(super) struct SlayerTrack {
     pending: Option<(Pending, u16, f32)>,
     /// The follow-up that starts in the next own state.
     follow_up: Option<u64>,
+    /// The follow-up that starts at the attack key's next release.
+    release_follow_up: Option<u64>,
+    /// The record of the attack key's press, while it is down and no action answered it.
+    press: Option<u16>,
+    /// The upper slots that changed in records no own state carried yet.
+    upper: Option<UpperSlots>,
+    /// The newest upper slot change, and how many more own states carry it.
+    upper_current: Option<UpperSlots>,
+    upper_repeats: u8,
+    /// The newest upper slot change came after the newest slayer state started.
+    upper_after_state: bool,
+    /// The upper slots of the newest tick's own state, for the players who see this one; kept
+    /// after the own state took them, until the next tick.
+    remote: Option<RemoteUpper>,
+    /// The previous record's weapon had shots and none loaded.
+    was_empty: bool,
+    /// The weapon was loaded again after it emptied and no reload played since.
+    reload_due: bool,
+    /// The previous record's keys: right-click, dodge, jump; and whether the weapon was drawn.
+    alt_held: bool,
+    dodge_held: bool,
+    jump_held: bool,
+    drawn: bool,
     /// The player's own movement.
     locomotion: Locomotion,
     /// The newest slayer state, and how many more own states carry it.
@@ -178,26 +282,192 @@ impl SlayerTrack {
         };
     }
 
-    /// Reads one input record not read before (oldest first): its frame time goes on the
-    /// sequence, an action its client starts goes out with the next own state, and so does a
-    /// change of the player's movement.
-    pub(super) fn record(&mut self, record: SlayerRecord) {
+    /// Reads one input record not read before (oldest first), with the sequences of `table`:
+    /// its frame time goes on the sequence; an action its client starts goes out with the next
+    /// own state, else a state the server starts for its keys (dodge, jump, attack, movement);
+    /// the right-click and the draw change the upper slots.
+    pub(super) fn record(&mut self, record: SlayerRecord, table: &PlayerSequences) {
         self.newest_frame_s = record.frame_s;
         self.sequence_s += record.frame_s;
-        let movement = record.intent.and_then(|intent| {
-            let (next, started) = self.locomotion.step(intent);
+        let stance = record
+            .weapon
+            .and_then(|weapon| table.stance(weapon.stance));
+        let drawn = record.weapon.is_some_and(|weapon| weapon.drawn);
+        let upper = self.upper_slots(&record, stance, drawn);
+        let alt = drawn && record.intent.is_some_and(|intent| intent.block);
+        let set = MoveSet::of(stance, drawn, alt);
+        let mut movement = record.intent.and_then(|intent| {
+            let (next, started) = self.locomotion.step(intent, set);
             self.locomotion = next;
             started
         });
+        if upper.is_some() && movement.is_none() {
+            // The walk changes with the block or aim: retail sent the new walk sequence in the
+            // state of the right-click (`15=af10` with the aim).
+            movement = Some(self.locomotion.current(set));
+        }
+        if let Some(upper) = upper {
+            self.upper = Some(merge(self.upper.unwrap_or_default(), upper));
+        }
+        let shot = self.shot_slots(&record, stance, drawn);
+        if let Some(Shot::Reload(slots) | Shot::Aimed(slots)) = shot {
+            self.upper = Some(merge(self.upper.unwrap_or_default(), slots));
+        }
+        let server = self.server_start(&record, stance, table);
+        if matches!(shot, Some(Shot::Reload(_))) {
+            // The reload's press is no tap: its release starts no attack.
+            self.press = None;
+        }
         let started = record
             .action
             .map(Pending::Client)
-            .or_else(|| movement.map(|(state, sequence)| Pending::Movement(state, sequence)));
+            .or(server)
+            .or_else(|| movement.map(|(state, sequence)| Pending::State(state, sequence)));
+        if let Some(input) = record.action {
+            self.press = None;
+            match table.follow_up(input.sequence) {
+                Some(follow_up) if follow_up.at_release && !record.attack.released => {
+                    self.release_follow_up = Some(follow_up.server);
+                }
+                Some(follow_up) => self.queue_follow_up(follow_up.server),
+                None => self.release_follow_up = None,
+            }
+        }
         if let Some(started) = started {
             self.pending = Some((started, record.counter, record.frame_s));
             self.sequence_s = record.frame_s;
-            self.follow_up = None;
+            if !matches!(started, Pending::Client(_)) {
+                self.follow_up = None;
+            }
         }
+    }
+
+    /// Queues `sequence` to start one own state after the client's action (the retail
+    /// follow-ups that came without a key, 0 to 132 ms after it).
+    fn queue_follow_up(&mut self, sequence: u64) {
+        self.follow_up = Some(sequence);
+        self.release_follow_up = None;
+    }
+
+    /// The state the server starts for the keys of `record` with the sequences of `stance`:
+    /// a dodge or a jump at its key's press (state 07 and 0e, by direction); at a release of
+    /// the attack key the follow-up of the client's last action, else the light attack of a tap
+    /// that no action answered; the charge when the key stayed down
+    /// [`PlayerSequences::hold_records`] records. No attack starts while the right-click is held
+    /// (Observed: the aimed shots of the retail newchar capture were the client's; the server
+    /// sent no start at their releases).
+    fn server_start(
+        &mut self,
+        record: &SlayerRecord,
+        stance: Option<&StanceSequences>,
+        table: &PlayerSequences,
+    ) -> Option<Pending> {
+        let intent = record.intent?;
+        let dodge = intent.dodge && !self.dodge_held;
+        let jump = intent.jump && !self.jump_held;
+        self.dodge_held = intent.dodge;
+        self.jump_held = intent.jump;
+        let direction = Direction::of_keys(
+            intent.forward > 0,
+            intent.forward < 0,
+            intent.right < 0,
+            intent.right > 0,
+        );
+        let state = |play: StatePlay| Pending::State(play.state, play.sequence);
+        let keyed = if dodge {
+            stance.and_then(|stance| stance.dodge?.of(direction)).map(state)
+        } else if jump {
+            stance.and_then(|stance| stance.jump?.of(direction)).map(state)
+        } else {
+            None
+        };
+        if record.attack.pressed {
+            self.press = Some(record.counter);
+        }
+        let aiming = intent.block;
+        let attack = if record.attack.released {
+            let tapped = self.press.take().filter(|_| !aiming);
+            self.release_follow_up.take().or_else(|| {
+                tapped?;
+                let moving = intent.forward != 0 || intent.right != 0;
+                stance?.light_of(moving)
+            })
+        } else if let Some(press) = self.press
+            && record.counter.wrapping_sub(press) == table.hold_records
+            && !aiming
+        {
+            self.press = None;
+            stance.and_then(|stance| stance.charge)
+        } else {
+            None
+        };
+        keyed.or_else(|| attack.map(Pending::Attack))
+    }
+
+    /// The upper slot change of `record`: the block or aim at the right-click's press and its
+    /// end at the release, with the weapon drawn; the draw's second slot when the weapon came
+    /// to the hand. A slot whose state or sequence goes out starts in the record (retail: the
+    /// aim's `20` is the right-click record), except the second slot without a state (retail's
+    /// block sends child 18 alone).
+    fn upper_slots(
+        &mut self,
+        record: &SlayerRecord,
+        stance: Option<&StanceSequences>,
+        drawn: bool,
+    ) -> Option<UpperSlots> {
+        let alt = drawn && record.intent.is_some_and(|intent| intent.block);
+        let was_alt = self.alt_held;
+        let was_drawn = self.drawn;
+        if record.intent.is_some() {
+            self.alt_held = alt;
+        }
+        self.drawn = drawn;
+        let stance = stance?;
+        let change = (if alt && !was_alt {
+            stance.alt_start
+        } else if !alt && was_alt && record.intent.is_some() {
+            stance.alt_end
+        } else if drawn && !was_drawn {
+            stance.draw.map(|draw| nw_content::player_sequences::SlotsChange {
+                second_state: Some(draw.state),
+                second_sequence: Some(draw.sequence),
+                ..Default::default()
+            })
+        } else {
+            None
+        })?;
+        slots_of(change, record.counter)
+    }
+
+    /// The upper slot change of an attack key press with the weapon drawn ([`Shot`]): the
+    /// stance's reload when the weapon was loaded again after it emptied and no reload played
+    /// since, else, with the right-click held and a shot loaded, its aimed shot. Retail
+    /// blunderbuss (newchar 2026-09-18): the aimed shot `18=5e 48=29` 27 ms after the press; the
+    /// presses while empty changed nothing; the first press 2.1 s after the shot sent the reload
+    /// `16=24 17=557a 18=8142`, and the next press shot again.
+    fn shot_slots(
+        &mut self,
+        record: &SlayerRecord,
+        stance: Option<&StanceSequences>,
+        drawn: bool,
+    ) -> Option<Shot> {
+        let empty = record.weapon.is_some_and(|weapon| weapon.empty);
+        if self.was_empty && !empty {
+            self.reload_due = true;
+        }
+        self.was_empty = empty;
+        if !drawn || !record.attack.pressed {
+            return None;
+        }
+        let stance = stance?;
+        if std::mem::take(&mut self.reload_due) {
+            return slots_of(stance.reload?, record.counter).map(Shot::Reload);
+        }
+        let aiming = record.intent.is_some_and(|intent| intent.block);
+        if !aiming || empty {
+            return None;
+        }
+        slots_of(stance.alt_fire?, record.counter).map(Shot::Aimed)
     }
 
     /// Moves on to the tick whose own state is numbered `number` at state time `state_ms`: its
@@ -211,7 +481,12 @@ impl SlayerTrack {
             .clock
             .as_mut()
             .map(|clock| clock.time(sequence_s, started, state_ms));
-        self.due = SlayerDue { state, time };
+        let slots = self.next_upper();
+        self.remote = slots.map(|slots| RemoteUpper {
+            slots,
+            after_state: self.upper_after_state,
+        });
+        self.due = SlayerDue { state, time, slots };
     }
 
     /// What this tick's own state carries, once.
@@ -219,16 +494,29 @@ impl SlayerTrack {
         std::mem::take(&mut self.due)
     }
 
+    /// The upper slot change of the next own state: a new one, else the last once more.
+    fn next_upper(&mut self) -> Option<UpperSlots> {
+        if let Some(upper) = self.upper.take() {
+            self.upper_current = Some(upper);
+            self.upper_repeats = ECHO_STATES - 1;
+            self.upper_after_state = true;
+            return Some(upper);
+        }
+        if self.upper_repeats == 0 {
+            return None;
+        }
+        self.upper_repeats -= 1;
+        self.upper_current
+    }
+
     /// The slayer state of the own state numbered `number`, and the frame time of the record that
     /// started it when it starts there.
     fn next(&mut self, number: u16) -> (Option<SlayerState>, Option<f32>) {
         if let Some((pending, counter, frame_s)) = self.pending.take() {
             let state = match pending {
-                Pending::Client(input) => {
-                    self.follow_up = follow_up_of(input.sequence);
-                    SlayerState::of_input(input, counter)
-                }
-                Pending::Movement(state, sequence) => SlayerState {
+                Pending::Client(input) => SlayerState::of_input(input, counter),
+                Pending::Attack(sequence) => attack_start(counter, sequence),
+                Pending::State(state, sequence) => SlayerState {
                     state: Some(state),
                     started: counter,
                     sequence,
@@ -239,16 +527,10 @@ impl SlayerTrack {
         }
         if let Some(sequence) = self.follow_up.take() {
             self.sequence_s = self.newest_frame_s;
-            let state = SlayerState {
-                state: None,
-                started: number,
-                sequence,
-                second: Some(SecondSlayerState {
-                    started: number,
-                    playing: None,
-                }),
-            };
-            return (self.start(state), Some(self.newest_frame_s));
+            return (
+                self.start(attack_start(number, sequence)),
+                Some(self.newest_frame_s),
+            );
         }
         if self.repeats == 0 {
             return (None, None);
@@ -262,26 +544,186 @@ impl SlayerTrack {
         self.current
     }
 
+    /// The upper slots of this tick's own state, for the players who see this one: retail's
+    /// remote states echoed them as the own ones (arena capture 2026-09-13, a remote aim
+    /// `16=24 18=9837 19=2e 21=9606 48=28` in 3 to 4 states, then without them).
+    pub(super) const fn remote_upper(&self) -> Option<RemoteUpper> {
+        self.remote
+    }
+
     fn start(&mut self, state: SlayerState) -> Option<SlayerState> {
+        self.upper_after_state = false;
         self.current = Some(state);
         self.repeats = ECHO_STATES - 1;
         self.current
     }
 }
 
+/// An attack the server starts in the state numbered `started`: retail's form of its starts and
+/// follow-ups (`14=06bd 15=8f07 17=06bd`: no state, the second slot started with it).
+const fn attack_start(started: u16, sequence: u64) -> SlayerState {
+    SlayerState {
+        state: None,
+        started,
+        sequence,
+        second: Some(SecondSlayerState {
+            started,
+            playing: None,
+        }),
+    }
+}
+
+/// The upper slots that `change` sends, started in record `counter`: a slot whose state or
+/// sequence goes out starts there, except the second slot without a state (retail's block sends
+/// child 18 alone). `None` when it sends nothing.
+fn slots_of(change: SlotsChange, counter: u16) -> Option<UpperSlots> {
+    let slot = |state: Option<u64>, sequence: Option<u64>, starts: bool| SlotChange {
+        state,
+        started: (starts && (state.is_some() || sequence.is_some())).then_some(counter),
+        sequence,
+    };
+    let slots = UpperSlots {
+        second: slot(
+            change.second_state,
+            change.second_sequence,
+            change.second_state.is_some(),
+        ),
+        third: slot(change.third_state, change.third_sequence, true),
+        fourth: slot(change.fourth_state, change.fourth_sequence, true),
+        marker: change.marker,
+    };
+    (slots != UpperSlots::default()).then_some(slots)
+}
+
+/// The upper slots of `older` with the children `newer` sends in their place.
+fn merge(older: UpperSlots, newer: UpperSlots) -> UpperSlots {
+    let slot = |older: SlotChange, newer: SlotChange| SlotChange {
+        state: newer.state.or(older.state),
+        started: newer.started.or(older.started),
+        sequence: newer.sequence.or(older.sequence),
+    };
+    UpperSlots {
+        second: slot(older.second, newer.second),
+        third: slot(older.third, newer.third),
+        fourth: slot(older.fourth, newer.fourth),
+        marker: newer.marker.or(older.marker),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use nw_content::player_attacks::stance_key;
+    use nw_content::player_sequences::{
+        AltMoves, Directional, DrawnMoves, FollowUp, SlotsChange,
+    };
+
     use super::*;
 
     /// The 30 Hz frame time.
     const FRAME_S: f32 = 1.0 / 30.0;
     const TICK_MS: u64 = 33;
+    /// The greatsword's tags and the mined table's values for it.
+    const GREATSWORD: &str = "2H_Melee,GreatSword";
+    const LIGHT: u64 = 4510;
+    const CHARGE: u64 = 57;
+    const HOLD_RECORDS: u16 = 19;
+    const BLOCK_SEQUENCE: u64 = 2351;
+    const BLOCK_WALK: StatePlay = StatePlay {
+        state: 27,
+        sequence: 1251,
+    };
+    const DRAWN_START: StatePlay = StatePlay {
+        state: 26,
+        sequence: 2205,
+    };
+    const DODGE_BACK: StatePlay = StatePlay {
+        state: 7,
+        sequence: 2100,
+    };
+    /// The blunderbuss's tags and its aim (retail newchar `19=2e 21=9706 48=28`).
+    const BLUNDERBUSS: &str = "2H_Ranged,Blunderbuss";
+    const AIM_STATE: u64 = 0x2e;
+    const AIM_SEQUENCE: u64 = 407;
+    const AIM_MARKER: u64 = 0x28;
+    /// The blunderbuss's aimed shot (`18=5e 48=29`) and reload (`16=24 18=8142`) of the table.
+    const SHOT_SEQUENCE: u64 = 94;
+    const SHOT_MARKER: u64 = 41;
+    const RELOAD_STATE: u64 = 36;
+    const RELOAD_SEQUENCE: u64 = 4225;
 
-    /// Retail newchar capture: record 5568 started sequence 5055; the server followed with 4603.
+    /// The retail follow-up: record 5568 started sequence 5055; the server followed with 4603.
+    fn table() -> PlayerSequences {
+        PlayerSequences::of_parts(
+            HOLD_RECORDS,
+            vec![
+                StanceSequences {
+                    tags: GREATSWORD.to_owned(),
+                    light: Some(LIGHT),
+                    charge: Some(CHARGE),
+                    alt_start: Some(SlotsChange {
+                        second_sequence: Some(BLOCK_SEQUENCE),
+                        ..SlotsChange::default()
+                    }),
+                    alt_moves: Some(AltMoves {
+                        moving: Some(BLOCK_WALK),
+                        idle: None,
+                    }),
+                    drawn_moves: Some(DrawnMoves {
+                        start: Some(DRAWN_START),
+                        ..DrawnMoves::default()
+                    }),
+                    dodge: Some(Directional {
+                        back: Some(DODGE_BACK),
+                        ..Directional::default()
+                    }),
+                    ..StanceSequences::default()
+                },
+                StanceSequences {
+                    tags: BLUNDERBUSS.to_owned(),
+                    alt_start: Some(SlotsChange {
+                        third_state: Some(AIM_STATE),
+                        third_sequence: Some(AIM_SEQUENCE),
+                        marker: Some(AIM_MARKER),
+                        ..SlotsChange::default()
+                    }),
+                    alt_end: Some(SlotsChange {
+                        third_state: Some(0),
+                        third_sequence: Some(0),
+                        marker: Some(0),
+                        ..SlotsChange::default()
+                    }),
+                    alt_fire: Some(SlotsChange {
+                        second_sequence: Some(SHOT_SEQUENCE),
+                        marker: Some(SHOT_MARKER),
+                        ..SlotsChange::default()
+                    }),
+                    reload: Some(SlotsChange {
+                        second_state: Some(RELOAD_STATE),
+                        second_sequence: Some(RELOAD_SEQUENCE),
+                        ..SlotsChange::default()
+                    }),
+                    ..StanceSequences::default()
+                },
+            ],
+            vec![FollowUp {
+                client: 5055,
+                server: 4603,
+                at_release: false,
+                seen: 13,
+            }],
+        )
+    }
+
+    fn weapon(tags: &str, drawn: bool) -> Option<HeldWeapon> {
+        Some(HeldWeapon {
+            stance: stance_key(tags),
+            drawn,
+            empty: false,
+        })
+    }
+
     fn attack_record(counter: u16) -> SlayerRecord {
         SlayerRecord {
-            counter,
-            frame_s: FRAME_S,
             action: Some(SlayerInput {
                 sequence: 5055,
                 state: 0x000a,
@@ -289,6 +731,7 @@ mod tests {
                 second_sequence: 0,
             }),
             intent: None,
+            ..quiet_record(counter, Intent::default())
         }
     }
 
@@ -298,6 +741,16 @@ mod tests {
             frame_s: FRAME_S,
             action: None,
             intent: Some(intent),
+            attack: AttackKey::default(),
+            weapon: None,
+        }
+    }
+
+    fn keyed(counter: u16, intent: Intent, attack: AttackKey, tags: &str) -> SlayerRecord {
+        SlayerRecord {
+            attack,
+            weapon: weapon(tags, true),
+            ..quiet_record(counter, intent)
         }
     }
 
@@ -313,13 +766,27 @@ mod tests {
         track
     }
 
+    const PRESS: AttackKey = AttackKey {
+        pressed: true,
+        released: false,
+    };
+    const RELEASE: AttackKey = AttackKey {
+        pressed: false,
+        released: true,
+    };
+    const HELD: AttackKey = AttackKey {
+        pressed: false,
+        released: false,
+    };
+
     #[test]
     fn an_action_goes_out_started_in_its_record_then_its_follow_up() {
         const ACTION_RECORD: u16 = 0x15c0;
         const NEWEST: u16 = ACTION_RECORD + 1;
+        let table = table();
         let mut track = spawned();
-        track.record(attack_record(ACTION_RECORD));
-        track.record(quiet_record(NEWEST, Intent::default()));
+        track.record(attack_record(ACTION_RECORD), &table);
+        track.record(quiet_record(NEWEST, Intent::default()), &table);
         let started = own_state(&mut track, NEWEST).state.expect("the action");
         assert_eq!(
             (started.state, started.started, started.sequence),
@@ -342,12 +809,263 @@ mod tests {
     }
 
     #[test]
+    fn a_tap_starts_the_light_attack_at_the_release() {
+        // Retail newchar: press at 0x6ba, release at 0x6bd, the server's `14=06bd 15=8f07
+        // 17=06bd`; runs 13 and 15 sent nothing and their clients never attacked.
+        let table = table();
+        let mut track = spawned();
+        let still = Intent::default();
+        track.record(keyed(0x6ba, still, PRESS, GREATSWORD), &table);
+        assert_eq!(own_state(&mut track, 0x6ba).state, None, "nothing at the press");
+        track.record(keyed(0x6bb, still, HELD, GREATSWORD), &table);
+        track.record(keyed(0x6bd, still, RELEASE, GREATSWORD), &table);
+        let light = own_state(&mut track, 0x6bd).state.expect("the light attack");
+        assert_eq!(
+            (light.state, light.started, light.sequence),
+            (None, 0x6bd, LIGHT)
+        );
+        assert_eq!(
+            light.second.map(|second| (second.started, second.playing)),
+            Some((0x6bd, None))
+        );
+    }
+
+    #[test]
+    fn a_hold_starts_the_charge_and_its_release_no_light() {
+        let table = table();
+        let mut track = spawned();
+        let still = Intent::default();
+        track.record(keyed(100, still, PRESS, GREATSWORD), &table);
+        for counter in 101..100 + HOLD_RECORDS {
+            track.record(keyed(counter, still, HELD, GREATSWORD), &table);
+        }
+        assert_eq!(own_state(&mut track, 100 + HOLD_RECORDS - 1).state, None);
+        own_state(&mut track, 100 + HOLD_RECORDS - 1);
+        track.record(keyed(100 + HOLD_RECORDS, still, HELD, GREATSWORD), &table);
+        let charge = own_state(&mut track, 100 + HOLD_RECORDS)
+            .state
+            .expect("the charge");
+        assert_eq!(
+            (charge.started, charge.sequence),
+            (100 + HOLD_RECORDS, CHARGE)
+        );
+        own_state(&mut track, 100 + HOLD_RECORDS);
+        track.record(
+            keyed(100 + HOLD_RECORDS + 5, still, RELEASE, GREATSWORD),
+            &table,
+        );
+        assert_eq!(
+            own_state(&mut track, 100 + HOLD_RECORDS + 5).state,
+            None,
+            "the heavy attack is the client's"
+        );
+    }
+
+    #[test]
+    fn a_tap_the_client_answered_gets_no_light_attack() {
+        let table = table();
+        let mut track = spawned();
+        let still = Intent::default();
+        track.record(keyed(10, still, PRESS, GREATSWORD), &table);
+        track.record(
+            SlayerRecord {
+                weapon: weapon(GREATSWORD, true),
+                ..attack_record(11)
+            },
+            &table,
+        );
+        track.record(keyed(12, still, RELEASE, GREATSWORD), &table);
+        let due = own_state(&mut track, 12).state.expect("the client's");
+        assert_eq!(due.sequence, 5055);
+    }
+
+    #[test]
+    fn the_right_click_blocks_and_aims_and_ends_at_the_release() {
+        let table = table();
+        let block = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let mut track = spawned();
+        track.record(keyed(20, block, HELD, GREATSWORD), &table);
+        let due = own_state(&mut track, 20);
+        let slots = due.slots.expect("the block");
+        assert_eq!(slots.second.sequence, Some(BLOCK_SEQUENCE));
+        assert_eq!(slots.second.started, None, "retail sends child 18 alone");
+        assert_eq!(own_state(&mut track, 20).slots, Some(slots), "once more");
+        assert_eq!(own_state(&mut track, 20).slots, None);
+        let mut track = spawned();
+        track.record(keyed(0x54ad, block, HELD, BLUNDERBUSS), &table);
+        let aim = own_state(&mut track, 0x54ad).slots.expect("the aim");
+        assert_eq!(
+            aim.third,
+            SlotChange {
+                state: Some(AIM_STATE),
+                started: Some(0x54ad),
+                sequence: Some(AIM_SEQUENCE),
+            }
+        );
+        assert_eq!(aim.marker, Some(AIM_MARKER));
+        track.record(keyed(0x54b0, Intent::default(), HELD, BLUNDERBUSS), &table);
+        let end = own_state(&mut track, 0x54b0).slots.expect("the end");
+        assert_eq!(
+            (end.third.state, end.third.started, end.third.sequence, end.marker),
+            (Some(0), Some(0x54b0), Some(0), Some(0))
+        );
+        let mut sheathed = spawned();
+        sheathed.record(
+            SlayerRecord {
+                weapon: weapon(BLUNDERBUSS, false),
+                ..quiet_record(5, block)
+            },
+            &table,
+        );
+        assert_eq!(own_state(&mut sheathed, 5).slots, None, "no weapon in the hand");
+    }
+
+    #[test]
+    fn the_players_who_see_one_get_its_upper_slots_while_its_state_echoes_them() {
+        let table = table();
+        let aim = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let mut track = spawned();
+        track.record(keyed(0x54ad, aim, HELD, BLUNDERBUSS), &table);
+        let own = own_state(&mut track, 0x54ad).slots.expect("the aim");
+        let remote = track.remote_upper().expect("kept after the own state took it");
+        assert_eq!(remote.slots, own);
+        assert!(remote.after_state, "the aim came after the newest state");
+        own_state(&mut track, 0x54ad);
+        assert_eq!(track.remote_upper().map(|upper| upper.slots), Some(own), "the echo");
+        own_state(&mut track, 0x54ad);
+        assert_eq!(track.remote_upper(), None, "the echo is over");
+        track.record(attack_record(0x54b0), &table);
+        own_state(&mut track, 0x54b0);
+        track.record(keyed(0x54b1, Intent::default(), HELD, BLUNDERBUSS), &table);
+        own_state(&mut track, 0x54b1);
+        assert!(
+            track.remote_upper().is_some_and(|upper| upper.after_state),
+            "the aim's end came after the attack"
+        );
+    }
+
+    #[test]
+    fn an_aimed_press_shoots_and_the_first_press_after_the_reload_time_reloads() {
+        let table = table();
+        let aim = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let gun = |counter: u16, attack: AttackKey, empty: bool| SlayerRecord {
+            weapon: Some(HeldWeapon {
+                empty,
+                ..weapon(BLUNDERBUSS, true).expect("a gun")
+            }),
+            ..keyed(counter, aim, attack, BLUNDERBUSS)
+        };
+        let mut track = spawned();
+        track.record(gun(0x5550, HELD, false), &table);
+        own_state(&mut track, 0x5550);
+        own_state(&mut track, 0x5550);
+        track.record(gun(0x5551, PRESS, false), &table);
+        let shot = own_state(&mut track, 0x5551).slots.expect("the aimed shot");
+        assert_eq!(
+            (shot.second.state, shot.second.started, shot.second.sequence, shot.marker),
+            (None, None, Some(SHOT_SEQUENCE), Some(SHOT_MARKER)),
+            "retail `18=5e 48=29`: child 18 alone in the second slot"
+        );
+        own_state(&mut track, 0x5551);
+        track.record(gun(0x5552, RELEASE, true), &table);
+        track.record(gun(0x5553, PRESS, true), &table);
+        assert_eq!(own_state(&mut track, 0x5553).slots, None, "empty: nothing");
+        track.record(gun(0x5554, RELEASE, false), &table);
+        assert_eq!(own_state(&mut track, 0x5554).slots, None, "a load is no reload");
+        track.record(gun(0x557a, PRESS, false), &table);
+        let reload = own_state(&mut track, 0x557a).slots.expect("the reload");
+        assert_eq!(
+            (reload.second.state, reload.second.started, reload.second.sequence),
+            (Some(RELOAD_STATE), Some(0x557a), Some(RELOAD_SEQUENCE))
+        );
+        own_state(&mut track, 0x557a);
+        track.record(gun(0x557b, RELEASE, false), &table);
+        assert_eq!(
+            own_state(&mut track, 0x557b).state.map(|state| state.started),
+            None,
+            "the reload's release starts no attack"
+        );
+        track.record(gun(0x5584, PRESS, false), &table);
+        let again = own_state(&mut track, 0x5584).slots.expect("shoots again");
+        assert_eq!(again.second.sequence, Some(SHOT_SEQUENCE));
+        let mut hip = spawned();
+        hip.record(keyed(0x5600, Intent::default(), PRESS, BLUNDERBUSS), &table);
+        assert_eq!(own_state(&mut hip, 0x5600).slots, None, "no aimed shot from the hip");
+    }
+
+    #[test]
+    fn no_attack_starts_while_aiming() {
+        let table = table();
+        let aim = Intent {
+            block: true,
+            ..Intent::default()
+        };
+        let mut track = spawned();
+        track.record(keyed(30, aim, PRESS, GREATSWORD), &table);
+        track.record(keyed(31, aim, RELEASE, GREATSWORD), &table);
+        let due = own_state(&mut track, 31);
+        assert_ne!(due.state.map(|state| state.sequence), Some(LIGHT));
+    }
+
+    #[test]
+    fn the_drawn_weapon_walks_and_dodges_with_its_stance() {
+        let table = table();
+        let forward = Intent::of_keys(true, false, false, false);
+        let mut track = spawned();
+        track.record(keyed(40, forward, HELD, GREATSWORD), &table);
+        let start = own_state(&mut track, 40).state.expect("a start");
+        assert_eq!(
+            (start.state, start.sequence),
+            (Some(DRAWN_START.state), DRAWN_START.sequence)
+        );
+        let dodge = Intent {
+            dodge: true,
+            ..Intent::of_keys(false, true, false, false)
+        };
+        let mut track = spawned();
+        track.record(keyed(50, dodge, HELD, GREATSWORD), &table);
+        let roll = own_state(&mut track, 50).state.expect("the dodge");
+        assert_eq!(
+            (roll.state, roll.started, roll.sequence),
+            (Some(DODGE_BACK.state), 50, DODGE_BACK.sequence)
+        );
+        track.record(keyed(51, dodge, HELD, GREATSWORD), &table);
+        own_state(&mut track, 51);
+        assert_ne!(
+            own_state(&mut track, 51).state.map(|state| state.started),
+            Some(51),
+            "a held key dodges once"
+        );
+        let block_walk = Intent {
+            block: true,
+            ..forward
+        };
+        let mut track = spawned();
+        track.record(keyed(60, block_walk, HELD, GREATSWORD), &table);
+        let walk = own_state(&mut track, 60).state.expect("the block walk");
+        assert_eq!(
+            (walk.state, walk.sequence),
+            (Some(BLOCK_WALK.state), BLOCK_WALK.sequence)
+        );
+    }
+
+    #[test]
     fn the_sequence_time_counts_the_records_since_the_action() {
         // Two records after the action's record: 3 frames in, from an absolute part of one.
+        let table = table();
         let mut track = spawned();
-        track.record(attack_record(10));
-        track.record(quiet_record(11, Intent::default()));
-        track.record(quiet_record(12, Intent::default()));
+        track.record(attack_record(10), &table);
+        track.record(quiet_record(11, Intent::default()), &table);
+        track.record(quiet_record(12, Intent::default()), &table);
         let time = own_state(&mut track, 12).time.expect("time");
         let mut clock = SequenceClock::default();
         assert_eq!(
@@ -360,11 +1078,12 @@ mod tests {
 
     #[test]
     fn no_time_goes_before_the_first_own_state() {
+        let table = table();
         let mut track = SlayerTrack::default();
-        track.record(quiet_record(1, Intent::default()));
+        track.record(quiet_record(1, Intent::default()), &table);
         assert_eq!(own_state(&mut track, 1), SlayerDue::default());
         let mut track = spawned();
-        track.record(quiet_record(3, Intent::default()));
+        track.record(quiet_record(3, Intent::default()), &table);
         assert_eq!(
             own_state(&mut track, 3).time.map(|time| time.rel),
             Some(0x83),
@@ -374,12 +1093,13 @@ mod tests {
 
     #[test]
     fn moving_starts_stops_and_comes_to_rest_with_the_retail_sequences() {
+        let table = table();
         let forward = Intent::of_keys(true, false, false, false);
         let mut track = spawned();
         let mut counter = 100;
         let mut step = |track: &mut SlayerTrack, intent: Intent| {
             counter += 1;
-            track.record(quiet_record(counter, intent));
+            track.record(quiet_record(counter, intent), &table);
             own_state(track, counter).state
         };
         let start = step(&mut track, forward).expect("a start");

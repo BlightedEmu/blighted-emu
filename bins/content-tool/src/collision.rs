@@ -857,7 +857,7 @@ fn stream_of(path: &str, bytes: &[u8]) -> Result<Element, CollisionError> {
 }
 
 /// The asset id of a capitals `sliceAssetId` text `{GUID}:subIdHex`.
-fn capital_asset(text: &str) -> Option<AssetKey> {
+pub(crate) fn capital_asset(text: &str) -> Option<AssetKey> {
     let (guid, sub) = text.strip_prefix('{')?.split_once("}:")?;
     let hex: String = guid.chars().filter(|c| *c != '-').collect();
     let bytes = (0..GUID_LEN)

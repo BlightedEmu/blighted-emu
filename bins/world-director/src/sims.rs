@@ -8,7 +8,9 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use nw_bus::{BusId, CellTable, SimHeartbeat, SimSlot, heartbeat_silence};
+use nw_bus::{
+    BusId, CellTable, InstanceBeat, RunningInstance, SimHeartbeat, SimSlot, heartbeat_silence,
+};
 use nw_sim_core::{CellGrid, CellOwners, Position};
 
 struct Live {
@@ -20,6 +22,8 @@ struct Live {
     /// Admits since the last heartbeat, which its player count does not hold yet.
     pending: u32,
     last_seen: Instant,
+    /// `Some` for a sim with the instance role, with the instance it runs.
+    instance: Option<InstanceBeat>,
 }
 
 /// The sims that beat in time.
@@ -62,6 +66,7 @@ impl SimRegistry {
             max_players: beat.max_players,
             pending: 0,
             last_seen: now,
+            instance: beat.instance.clone(),
         };
         let before = self.sims.insert(beat.id.clone(), live);
         before.is_none_or(|known| known.generation != beat.started_at_ms)
@@ -89,14 +94,54 @@ impl SimRegistry {
         silent
     }
 
-    /// The live sims of `level`, by id.
+    /// The live open-map sims of `level`, by id: the instance sims of an instanced open-world
+    /// area run the same level and own no cells.
     pub fn slots(&self, level: &str) -> Vec<SimSlot> {
-        self.slots_where(|live| live.level == level)
+        self.slots_where(|live| live.level == level && live.instance.is_none())
     }
 
-    /// The live sims of every other level than `level` (the tutorial sims), by id.
+    /// The live sims that own no cells of `level` (the tutorial and instance sims), by id.
     pub fn other_slots(&self, level: &str) -> Vec<SimSlot> {
-        self.slots_where(|live| live.level != level)
+        self.slots_where(|live| live.level != level || live.instance.is_some())
+    }
+
+    /// The live instance sims of `level` that run no instance, by id.
+    pub fn free_instance_sims(&self, level: &str) -> Vec<SimSlot> {
+        self.slots_where(|live| {
+            live.level == level
+                && live
+                    .instance
+                    .as_ref()
+                    .is_some_and(|instance| instance.running.is_none())
+        })
+    }
+
+    /// The live instance sims of `level` (free or running), by id.
+    pub fn instance_sims(&self, level: &str) -> Vec<SimSlot> {
+        self.slots_where(|live| live.level == level && live.instance.is_some())
+    }
+
+    /// Every live instance sim with the instance it runs, by id.
+    pub fn running_instances(&self) -> Vec<(SimSlot, Option<RunningInstance>)> {
+        self.sims
+            .iter()
+            .filter_map(|(id, live)| {
+                let beat = live.instance.as_ref()?;
+                Some((slot_of(id, live), beat.running.clone()))
+            })
+            .collect()
+    }
+
+    /// The level of the live sim `id`.
+    pub fn level_of(&self, id: &BusId) -> Option<String> {
+        self.sims.get(id).map(|live| live.level.clone())
+    }
+
+    /// The live sim `id` of generation `generation`.
+    pub fn is_live(&self, slot: &SimSlot) -> bool {
+        self.sims
+            .get(&slot.id)
+            .is_some_and(|live| live.generation == slot.generation)
     }
 
     fn slots_where(&self, keep: impl Fn(&Live) -> bool) -> Vec<SimSlot> {
@@ -137,10 +182,11 @@ impl SimRegistry {
     }
 
     /// Players the live sims can still take, admits in flight counted; a sim above its own limit
-    /// counts as full.
+    /// counts as full. Instance sims take no logins, so their slots do not count.
     pub fn free_slots(&self) -> u32 {
         self.sims
             .values()
+            .filter(|live| live.instance.is_none())
             .fold(0, |sum, live| sum.saturating_add(free_of(live)))
     }
 }
@@ -258,6 +304,7 @@ mod tests {
             players,
             max_players: MAX_PLAYERS,
             level: LEVEL.to_owned(),
+            instance: None,
         }
     }
 
@@ -443,5 +490,60 @@ mod tests {
             vec![(slot("sim-1"), 0.0, LEVEL_M)],
             "the tutorial sim has no columns"
         );
+    }
+
+    const DUNGEON: &str = "nw_dungeon_windsward_00";
+
+    fn instance_beat(name: &str, running: Option<RunningInstance>) -> SimHeartbeat {
+        SimHeartbeat {
+            level: DUNGEON.to_owned(),
+            instance: Some(InstanceBeat { running }),
+            ..beat(name, STARTED_AT_MS, 0)
+        }
+    }
+
+    fn running(instance: u128) -> RunningInstance {
+        RunningInstance {
+            instance: uuid::Uuid::from_u128(instance),
+            game_mode: "DungeonAmrine".to_owned(),
+            members: Vec::new(),
+            players: 1,
+            empty_for_ms: None,
+            open_for_ms: 0,
+        }
+    }
+
+    #[test]
+    fn instance_sims_own_no_cells_take_no_logins_and_report_their_instance() {
+        let now = Instant::now();
+        let mut sims = SimRegistry::new(INTERVAL, MISSES);
+        sims.beat(&beat("sim-1", STARTED_AT_MS, 0), now);
+        sims.beat(&instance_beat("inst-1", None), now);
+        sims.beat(&instance_beat("inst-2", Some(running(7))), now);
+        // An instanced open-world area runs the open map's level on an instance sim.
+        sims.beat(
+            &SimHeartbeat {
+                level: LEVEL.to_owned(),
+                ..instance_beat("inst-3", None)
+            },
+            now,
+        );
+        assert_eq!(sims.slots(LEVEL), vec![slot("sim-1")]);
+        assert_eq!(
+            sims.other_slots(LEVEL),
+            vec![slot("inst-1"), slot("inst-2"), slot("inst-3")]
+        );
+        assert_eq!(sims.free_instance_sims(DUNGEON), vec![slot("inst-1")]);
+        assert_eq!(sims.free_instance_sims(LEVEL), vec![slot("inst-3")]);
+        assert_eq!(sims.instance_sims(DUNGEON).len(), 2);
+        assert_eq!(sims.free_slots(), MAX_PLAYERS, "only the open-map sim takes logins");
+        let reported = sims.running_instances();
+        assert_eq!(reported.len(), 3);
+        assert!(reported.contains(&(slot("inst-2"), Some(running(7)))));
+        assert!(sims.is_live(&slot("inst-1")));
+        assert!(!sims.is_live(&SimSlot {
+            generation: STARTED_AT_MS + 1,
+            ..slot("inst-1")
+        }));
     }
 }

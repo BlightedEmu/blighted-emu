@@ -433,6 +433,17 @@ pub struct Stance {
     /// The stance while a status effect sets one more Mannequin tag.
     #[serde(default)]
     pub variants: Vec<StanceVariant>,
+    /// The shot an attack fires while the character aims (the right-click held with a gun or a
+    /// bow): the fragment with a ranged attack that the aim action's fragment changes to
+    /// (`Firearm_AimShoot_SubState`: `Firearm_Shoot_Primary_UpperBody`, row `MusketAttack1`;
+    /// `Bow_AimChargeShoot_SubState`: `Bow_Shoot_UpperBody`, row `BowAttack1`); `None` for a
+    /// stance that does not aim.
+    #[serde(default)]
+    pub aimed: Option<BasicAttack>,
+    /// The shot of a drawn charge while it aims, through a charge fragment of the aim
+    /// (`Bow_Charge_UpperBody` to `Bow_Shoot_Charged`, row `BowAttack2`).
+    #[serde(default)]
+    pub aimed_charged: Option<BasicAttack>,
 }
 
 /// Which basic attack a press and a hold of the attack key make.
@@ -468,6 +479,15 @@ impl Stance {
             AttackKind::Light => self.light.as_ref(),
             AttackKind::Heavy => self.heavy.as_ref(),
             AttackKind::Charged => self.charged.as_ref(),
+        }
+    }
+
+    /// The shot an attack of `kind` fires while the character aims: the charged attack fires
+    /// the drawn charge's shot when the stance has one; `None` for a stance that does not aim.
+    pub fn aimed_attack(&self, kind: AttackKind) -> Option<&BasicAttack> {
+        match kind {
+            AttackKind::Charged => self.aimed_charged.as_ref().or(self.aimed.as_ref()),
+            AttackKind::Light | AttackKind::Heavy => self.aimed.as_ref(),
         }
     }
 
@@ -651,6 +671,8 @@ mod tests {
                 charged: None,
             }],
             variants: Vec::new(),
+            aimed: None,
+            aimed_charged: None,
         }
     }
 
@@ -732,6 +754,43 @@ mod tests {
             (link.from_ms, link.starts_at_ms, link.step),
             (433, Some(700), 0)
         );
+    }
+
+    #[test]
+    fn an_aiming_stance_fires_its_aimed_shots_and_an_old_file_has_none() {
+        /// The bow's aimed rows (`player_bow.adb`: `Bow_Shoot_UpperBody`, `Bow_Shoot_Charged`).
+        const SHOT_ROW: &str = "BowAttack1";
+        const CHARGED_ROW: &str = "BowAttack2";
+        let shot = |row: &str| BasicAttack {
+            damage_row: row.to_owned(),
+            ..melee("Bow_AimChargeShoot_SubState")
+        };
+        let bow = Stance {
+            aimed: Some(shot(SHOT_ROW)),
+            aimed_charged: Some(shot(CHARGED_ROW)),
+            ..greatsword()
+        };
+        let row = |kind| bow.aimed_attack(kind).map(|attack| attack.damage_row.as_str());
+        assert_eq!(row(AttackKind::Light), Some(SHOT_ROW));
+        assert_eq!(row(AttackKind::Heavy), Some(SHOT_ROW));
+        assert_eq!(row(AttackKind::Charged), Some(CHARGED_ROW));
+        let gun = Stance {
+            aimed_charged: None,
+            ..bow.clone()
+        };
+        assert_eq!(
+            gun.aimed_attack(AttackKind::Charged)
+                .map(|attack| attack.damage_row.as_str()),
+            Some(SHOT_ROW),
+            "no charge: the charged attack fires the shot"
+        );
+        assert_eq!(greatsword().aimed_attack(AttackKind::Light), None);
+        let mut json = serde_json::to_value(greatsword()).expect("json");
+        let fields = json.as_object_mut().expect("an object");
+        fields.remove("aimed");
+        fields.remove("aimed_charged");
+        let old: Stance = serde_json::from_value(json).expect("a file from before the aim");
+        assert_eq!(old, greatsword());
     }
 
     #[test]

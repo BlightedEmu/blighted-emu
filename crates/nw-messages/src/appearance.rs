@@ -148,7 +148,7 @@ impl PlayerIconData {
         }
     }
 
-    fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
+    pub(crate) fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         let [
             gender,
             race,
@@ -170,7 +170,7 @@ impl PlayerIconData {
         })
     }
 
-    fn write(&self, writer: &mut Writer) {
+    pub(crate) fn write(&self, writer: &mut Writer) {
         writer
             .bytes(&[
                 self.gender,

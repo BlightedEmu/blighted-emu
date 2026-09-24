@@ -21,6 +21,7 @@ use nw_content::ftue_entities::FtueLevel;
 use nw_content::gameplay_config::GameplayConfig;
 use nw_content::mob_prefabs::MobPrefabs;
 use nw_content::player_attacks::PlayerAttacks;
+use nw_content::player_sequences::PlayerSequences;
 use nw_db::{DbError, GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 use nw_sim_core::{LevelGround, level_bounds};
 use nw_world::WorldFile;
@@ -28,14 +29,15 @@ use nw_world::collision::{LevelCollision, collision_file_path};
 use nw_world::collision_index::CollisionIndex;
 use nw_world::roads::{RoadMap, road_file_path};
 use nw_world::water::{WaterMap, water_file_path};
+use nw_world::dungeon_scripts::{DungeonScripts, dungeon_scripts_path};
 use nw_world::script::{DesignData, LevelDesign, design_data_path};
 use nw_world::world_file::world_file_path;
 
 use crate::asset_solids::AssetSolids;
-use crate::config::{SimConfig, SimConfigError, load_sim_config};
+use crate::config::{SimConfig, SimConfigError, SimRole, load_sim_config};
 use crate::gameplay::{GameplayError, load_gameplay};
 use crate::mob_ai::{LookAssets, MobAi, resolve_ai};
-use crate::mobs::spawns_of_level;
+use crate::mobs::{spawns_of_level, unscripted_spawns};
 use crate::player_content::{MobLooks, PlayerContent};
 use crate::server::{
     Databases, LATENCY_BUCKETS_SECONDS, LoopSettings, METRIC_HANDOFF_SECONDS,
@@ -168,10 +170,24 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
             PlayerAttacks::default()
         }
     };
+    let player_sequences = match PlayerSequences::load(&config.content_dir, &build) {
+        Ok(table) => {
+            tracing::info!(stances = table.len(), "player sequence table");
+            table
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "no player sequence table: the server starts no attack, block, aim, dodge or jump"
+            );
+            PlayerSequences::default()
+        }
+    };
     // Only the combat rows and the player content stay; the rest of the bundle is dropped here.
     let combat = Arc::new(
         CombatData::from_tables(&bundle.tables, &config.combat.rows())?
-            .with_player_attacks(player_attacks),
+            .with_player_attacks(player_attacks)
+            .with_player_sequences(player_sequences),
     );
     let (mob_looks, look_assets) = match MobPrefabs::load(&config.content_dir, &build) {
         Ok(prefabs) => {
@@ -240,6 +256,31 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
     );
     content.asset_solids =
         AssetSolids::of(&deferred_level, &collision, &content.tutorial_level.assets);
+    content.trading_post = config.trading_post.clone();
+    content.dungeon_scripts =
+        match DungeonScripts::load(&dungeon_scripts_path(&config.content_dir, &build)) {
+            Ok(scripts) => {
+                tracing::info!(game_modes = scripts.game_modes.len(), "dungeon scripts");
+                scripts
+            }
+            Err(error) => {
+                tracing::warn!(%error, "no dungeon scripts: instances run without encounters");
+                DungeonScripts::default()
+            }
+        };
+    tracing::info!(
+        tradable_items = content.trading.len(),
+        trading_tax = content.trading_post.trading_tax,
+        posting_fees = content.trading_post.posting_fees.len(),
+        shop_offers = content.shops.len(),
+        "trading post and shop rules"
+    );
+    if content.trading.is_empty() {
+        tracing::warn!("no tradable items in the content: the trading post takes no order");
+    }
+    if content.shops.is_empty() {
+        tracing::warn!("no shop offers in the content: the shops sell nothing");
+    }
     tracing::info!(
         assets = content.asset_solids.solid_assets(),
         "tutorial asset entities with solids"
@@ -294,14 +335,13 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
 fn log_gameplay(gameplay: &GameplayConfig) {
     tracing::info!(
         character_xp = gameplay.xp.character,
-        progression_xp = gameplay.xp.progression.len(),
+        progression_xp = ?gameplay.xp.progression,
         disabled_item_classes = ?gameplay.disabled_item_classes,
         wallet_cap = ?gameplay.wallet_cap,
         datatable_overrides = gameplay.datatable_overrides.len(),
         "remote config gameplay values applied"
     );
     tracing::info!(
-        progression_xp = ?gameplay.xp.progression,
         paid_loadouts = ?gameplay.paid_loadouts,
         territory_entry_requirement = ?gameplay.territory_entry_requirement,
         storage_search = ?gameplay.storage_search,
@@ -384,6 +424,7 @@ async fn serve_async(
         world: config.world_settings(
             level_bounds(&world_file.level),
             world_file.level.ocean_level,
+            &content.instances,
         )?,
         handoff_timeout: std::time::Duration::from_millis(config.handoff_timeout_ms),
         forward_ttl_ms: config.forward_ttl_ms,
@@ -393,7 +434,11 @@ async fn serve_async(
         mob_ai: resolve_ai(world_file, &mob_ai),
         combat: config.combat_settings(
             combat,
-            spawns_of_level(&config.level, &world_file.vitals),
+            unscripted_spawns(
+                spawns_of_level(&config.level, &world_file.vitals),
+                config.role == SimRole::Instance
+                    && content.dungeon_scripts.has_level(&config.level),
+            ),
             mob_ai,
         ),
         design: Arc::new(design),

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use nw_content::ids::{gatherable_ids, lore_ids, npc_ids, vitals_ids};
 use nw_content::{ContainerError, ContentBundle};
+use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, AssetCatalogError, paths_of};
 use nw_formats::azcs::{AzcsError, decode_azcs, is_azcs};
 use nw_formats::heightmap::{HeightmapError, parse_heightmap};
 use nw_formats::objectstream::{Element, ObjectStreamError, lowercase_crc32, parse_object_stream};
@@ -18,10 +19,12 @@ use nw_world::metadata::{MetadataError, MetadataRecords, SkipCounts, read_metada
 use nw_world::records::{HeightGrid, LevelInfo, RecordCounts, Region, WorldFile};
 use nw_world::slice_data::{SliceDataError, SliceSpawners, SpawnedSlice};
 use nw_world::stations::{CraftingStation, StationSlice};
+use nw_world::travel_slices::{HousingPlot, TeleporterSlice, plot_house_type};
 use nw_world::world_file::world_file_path;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+use crate::collision::{AssetKey, capital_asset};
 use crate::error::ToolError;
 use crate::source::GameSource;
 
@@ -61,6 +64,9 @@ struct Terrain {
 /// Error from building one world file. Paths are pak entry paths.
 #[derive(Debug, thiserror::Error)]
 pub enum WorldBuildError {
+    /// The asset catalog cannot be read.
+    #[error("asset catalog: {0}")]
+    Catalog(#[from] AssetCatalogError),
     /// A required level file is missing.
     #[error("level {level}: {file} is missing")]
     MissingFile {
@@ -415,8 +421,10 @@ pub fn build_level(
 }
 
 /// Builds, writes and reloads the world file of every level in `source`, and checks the spawn
-/// IDs against the content bundle at `bundle_path`. The crafting stations among each level's
-/// spawned slices come from the slices' `.dynamicslice` files.
+/// IDs against the content bundle at `bundle_path`. The crafting stations and house plots among
+/// each level's spawned slices come from the slices' `.dynamicslice` files, and the teleporters
+/// among its capitals from the capitals' slices, found by their `sliceAssetId` in the asset
+/// catalog.
 pub fn run_world(
     source: &GameSource,
     client_build: &str,
@@ -439,17 +447,32 @@ pub fn run_world(
         .map(|spawned| slice_file(&spawned.slice))
         .collect();
     let mut stations = HashMap::new();
+    let mut plots = HashMap::new();
     source.for_each_entry(
         |path| slice_files.contains(path),
         |path, bytes| {
-            if let Some(station) = StationSlice::of(&stream_of(path, &bytes)?) {
+            let root = stream_of(path, &bytes)?;
+            if let Some(station) = StationSlice::of(&root) {
                 stations.insert(path.to_owned(), station);
+            }
+            if let Some(house_type) = plot_house_type(&root) {
+                plots.insert(path.to_owned(), house_type);
             }
             Ok::<(), ToolError>(())
         },
     )?;
+    let teleporters = teleporter_slices(source, &built)?;
     for (world, _) in &mut built {
         world.stations = stations_of(&world.spawned, &stations);
+        world.plots = plots_of(&world.spawned, &plots);
+        world.teleporters = world
+            .capitals
+            .iter()
+            .filter_map(|capital| {
+                let key = capital_asset(&capital.slice_asset_id)?;
+                Some(teleporters.get(&key)?.at(capital))
+            })
+            .collect();
     }
     let known = &known;
     let reports = in_parallel(&built, |(world, skipped)| {
@@ -461,6 +484,61 @@ pub fn run_world(
 /// The pak path of the `.dynamicslice` of spawned slice `slice`.
 fn slice_file(slice: &str) -> String {
     format!("{slice}{DYNAMIC_SLICE_EXTENSION}")
+}
+
+/// The teleporter slices of the capitals of `built`, by the capitals' slice asset id.
+fn teleporter_slices(
+    source: &GameSource,
+    built: &[(WorldFile, SkipCounts)],
+) -> Result<HashMap<AssetKey, TeleporterSlice>, ToolError> {
+    let wanted: HashSet<AssetKey> = built
+        .iter()
+        .flat_map(|(world, _)| &world.capitals)
+        .filter_map(|capital| capital_asset(&capital.slice_asset_id))
+        .collect();
+    let mut catalog = None;
+    source.for_each_entry(
+        |path| path == ASSET_CATALOG_ENTRY,
+        |_, bytes| {
+            catalog = Some(bytes);
+            Ok::<(), ToolError>(())
+        },
+    )?;
+    let Some(catalog) = catalog else {
+        return Ok(HashMap::new());
+    };
+    let paths = paths_of(&catalog, &wanted).map_err(WorldBuildError::from)?;
+    let keys_by_path: HashMap<String, AssetKey> = paths
+        .into_iter()
+        .filter(|(_, path)| path.ends_with(DYNAMIC_SLICE_EXTENSION))
+        .map(|(key, path)| (path, key))
+        .collect();
+    let mut teleporters = HashMap::new();
+    source.for_each_entry(
+        |path| keys_by_path.contains_key(path),
+        |path, bytes| {
+            if let Some(teleporter) = TeleporterSlice::of(&stream_of(path, &bytes)?) {
+                teleporters.insert(keys_by_path[path], teleporter);
+            }
+            Ok::<(), ToolError>(())
+        },
+    )?;
+    Ok(teleporters)
+}
+
+/// The spawned slices whose `.dynamicslice` is a house plot of `plots` (house type by pak path).
+fn plots_of(spawned: &[SpawnedSlice], plots: &HashMap<String, String>) -> Vec<HousingPlot> {
+    spawned
+        .iter()
+        .filter_map(|slice| {
+            Some(HousingPlot {
+                id: slice.id,
+                slice: slice.slice.clone(),
+                position: slice.position,
+                house_type: plots.get(&slice_file(&slice.slice))?.clone(),
+            })
+        })
+        .collect()
 }
 
 /// The spawned slices whose `.dynamicslice` is a station of `stations` (by pak path).

@@ -20,6 +20,14 @@ edge_config = "config/edge.toml"
 content_dir = "local-data/content"
 # The open map level; the same as in config/world-director.toml.
 level = "newworld_vitaeeterna"
+# What this sim runs: "openmap" (cells of the open map, or the tutorial) or "instance" (one
+# expedition, raid or trial at a time; level is then the lower-case map name of its game mode,
+# for example "nw_dungeon_windsward_00"). The world director can start instance sims itself
+# ([instances.launch] in config/world-director.toml).
+role = "openmap"
+# Longest wait for the director's answer to an expedition request; above the director's group
+# and opening waits.
+instance_request_timeout_ms = 3000
 # Most players in this sim; the director adds the free ones to the login queue.
 max_players = 2000
 # Our own choice; the retail range is Unknown.
@@ -130,3 +138,18 @@ idle_interval_ms = 333
 # snapshot of players and awake mobs on the bus is off at 0; at least 100 ms when on.
 [admin]
 snapshot_interval_ms = 0
+
+# The trading post (economy note, run 15). Durations 1, 3, 7 and 14 days are every captured
+# order's; a 5 % trading tax was Observed at the settlements of three retail characters; at most
+# 40 open orders is the client's ContractConfigData default. The retail posting fee table is in
+# no client pak (Unknown), so no fee is listed. A settlement with its own tax is an entry of
+# `outposts` ({ outpost = <id>, trading_tax = <rate> }); a fee is an entry of `posting_fees`
+# ({ kind = "buy" | "sell", days = <days>, flat = <hundredths>, share = <rate> }). The sim
+# takes the trading post deliveries of its players every `delivery_poll_ms`.
+[trading_post]
+durations_days = [1, 3, 7, 14]
+max_open_orders = 40
+trading_tax = 0.05
+outposts = []
+posting_fees = []
+delivery_poll_ms = 2000

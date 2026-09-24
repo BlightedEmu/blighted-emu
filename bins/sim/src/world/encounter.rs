@@ -1070,6 +1070,10 @@ impl Tutorial {
                 nw_messages::facet::REQUEST_CUTSCENE_TYPE_INDEX,
                 Some(cutscene),
             ),
+            ClientFacetMsg::CutsceneStarted { cutscene, .. } => call(
+                nw_messages::facet::CUTSCENE_STARTED_TYPE_INDEX,
+                Some(cutscene),
+            ),
             ClientFacetMsg::CutsceneEnded { .. } => {
                 call(nw_messages::facet::CUTSCENE_ENDED_TYPE_INDEX, None)
             }
@@ -1102,8 +1106,27 @@ impl Tutorial {
             | ClientFacetMsg::CompleteObjective { .. }
             | ClientFacetMsg::SetCraftingDetails { .. }
             | ClientFacetMsg::CancelCrafting { .. }
+            | ClientFacetMsg::InitiateSalvage { .. }
+            | ClientFacetMsg::SalvageItems { .. }
+            | ClientFacetMsg::SalvageByClass { .. }
             | ClientFacetMsg::TerritoryEntered { .. }
-            | ClientFacetMsg::TerritoryExited { .. } => {
+            | ClientFacetMsg::TerritoryExited { .. }
+            | ClientFacetMsg::EnteredTerritoryFallback { .. }
+            | ClientFacetMsg::ExitedTerritoryFallback { .. }
+            | ClientFacetMsg::TogglePvpFlag { .. }
+            | ClientFacetMsg::UpdateTrackedObjectives { .. }
+            | ClientFacetMsg::SetInputsThrottled { .. }
+            | ClientFacetMsg::SetObjectiveAutoPin { .. } => {
+                return;
+            }
+            ClientFacetMsg::WhisperStarted { whisper, .. } => {
+                self.assets.on(
+                    Trigger::Client {
+                        message_type: nw_messages::facet::WHISPER_STARTED_TYPE_INDEX,
+                        id: Some(whisper),
+                    },
+                    now_ms,
+                );
                 return;
             }
         };

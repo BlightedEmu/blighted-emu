@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! The progression of a character besides its items and quests (world migrations 0006 to
-//! 0008): its experience, coins, achievement bits, loot limit counts, weapon masteries and spent
-//! points. `sim` saves it; the director loads it at a join.
+//! 0008, 0010 for its travel state, 0012 for its mounts and 0013 for its ability slots and meta
+//! achievements): its experience, coins, achievement bits, loot limit counts, weapon masteries,
+//! spent points, travel state, mounts, mapped ability slots and meta achievements. `sim` saves
+//! it; the director loads it at a join.
 //!
 //! Each save carries the time its state was taken; an older state never overwrites a newer one.
 
@@ -10,8 +12,13 @@ use std::collections::BTreeMap;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use crate::arena::{SavedArena, character_arena, save_character_arena};
 use crate::error::DbError;
 use crate::position::SaveOutcome;
+use crate::mounts::{SavedMounts, character_mounts, save_character_mounts};
+use crate::music::{SavedMusic, character_music, save_character_music};
+use crate::meta_achievements::{SavedMeta, SavedSlot, character_meta, save_character_meta};
+use crate::travel::{SavedTravel, character_travel, save_character_travel};
 
 /// Milliseconds per second, for the stored time.
 const MILLIS_PER_SECOND: f64 = 1000.0;
@@ -50,6 +57,27 @@ pub struct SavedProgression {
     /// The level of each weapon progression point (`ProgressionPointId`, level), in the order
     /// they were first assigned.
     pub weapon_points: Vec<(String, u16)>,
+    /// The territory standing points spent: pool and point (both CRC-32 wire ids) and the
+    /// level, in the order they were first spent (world migration 0021).
+    pub territory_points: Vec<(u32, u32, u16)>,
+    /// The travel and housing state (world migration 0010).
+    pub travel: SavedTravel,
+    /// The chosen mount and the dyed or named mounts (world migration 0012).
+    pub mounts: SavedMounts,
+    /// The mapped ability slots: the weapon mastery of the tree, the slot (0 to 2) and the
+    /// ability's `ProgressionPointId` (world migration 0013).
+    pub ability_slots: Vec<SavedSlot>,
+    /// The meta achievement counters, by lowercase key (world migration 0013).
+    pub meta_counters: BTreeMap<String, u64>,
+    /// The completed meta achievements in completion order, each with whether its reward
+    /// waits (world migration 0013).
+    pub meta_completed: Vec<(String, bool)>,
+    /// The title it shows (CRC-32 of the lowercase `TitleID`; world migration 0013).
+    pub title: Option<u32>,
+    /// The expedition, raid and trial state (world migration 0015).
+    pub arena: SavedArena,
+    /// The musical performance lockout (world migration 0018).
+    pub music: SavedMusic,
 }
 
 type ProgressionRow = (bool, i64, i64, Vec<i32>);
@@ -57,14 +85,15 @@ type LootLimitRow = (String, i64, i64, i64);
 type MasteryRow = (String, i64);
 type AttributeRow = (i16, i64);
 type WeaponPointRow = (String, i32);
+type TerritoryPointRow = (i64, i64, i32);
 
 /// A stored value as the program's type.
-fn from_column<T: TryFrom<i64>>(value: i64, field: &'static str) -> Result<T, DbError> {
+pub(crate) fn from_column<T: TryFrom<i64>>(value: i64, field: &'static str) -> Result<T, DbError> {
     T::try_from(value).map_err(|_| DbError::OutOfRange { field })
 }
 
 /// A program value as its column.
-fn to_column<T: TryInto<i64>>(value: T, field: &'static str) -> Result<i64, DbError> {
+pub(crate) fn to_column<T: TryInto<i64>>(value: T, field: &'static str) -> Result<i64, DbError> {
     value.try_into().map_err(|_| DbError::OutOfRange { field })
 }
 
@@ -121,6 +150,18 @@ pub async fn character_progression(
     .bind(character_id)
     .fetch_all(world)
     .await?;
+    let territory_points: Vec<TerritoryPointRow> = sqlx::query_as(
+        "SELECT pool_id, point_id, level FROM character_territory_point \
+         WHERE character_id = $1 ORDER BY position",
+    )
+    .bind(character_id)
+    .fetch_all(world)
+    .await?;
+    let travel = character_travel(world, character_id).await?;
+    let mounts = character_mounts(world, character_id).await?;
+    let meta = character_meta(world, character_id).await?;
+    let arena = character_arena(world, character_id).await?;
+    let music = character_music(world, character_id).await?;
     Ok(Some(SavedProgression {
         experience: from_column(experience, "experience")?,
         coins: from_column(coins, "coins")?,
@@ -156,6 +197,24 @@ pub async fn character_progression(
             .into_iter()
             .map(|(point, level)| Ok((point, from_column(i64::from(level), "weapon point")?)))
             .collect::<Result<_, DbError>>()?,
+        territory_points: territory_points
+            .into_iter()
+            .map(|(pool, point, level)| {
+                Ok((
+                    from_column(pool, "territory pool")?,
+                    from_column(point, "territory point")?,
+                    from_column(i64::from(level), "territory point level")?,
+                ))
+            })
+            .collect::<Result<_, DbError>>()?,
+        travel,
+        mounts,
+        ability_slots: meta.ability_slots,
+        meta_counters: meta.counters,
+        meta_completed: meta.completed,
+        title: meta.title,
+        arena,
+        music,
     }))
 }
 
@@ -286,6 +345,36 @@ pub async fn save_character_progression(
         .execute(&mut *transaction)
         .await?;
     }
+    sqlx::query("DELETE FROM character_territory_point WHERE character_id = $1")
+        .bind(character_id)
+        .execute(&mut *transaction)
+        .await?;
+    for (position, (pool, point, level)) in progression.territory_points.iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO character_territory_point \
+             (character_id, pool_id, point_id, level, position) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(character_id)
+        .bind(i64::from(*pool))
+        .bind(i64::from(*point))
+        .bind(i32::from(*level))
+        .bind(i32::try_from(position).map_err(|_| DbError::OutOfRange {
+            field: "territory point position",
+        })?)
+        .execute(&mut *transaction)
+        .await?;
+    }
+    save_character_travel(&mut transaction, character_id, &progression.travel).await?;
+    save_character_mounts(&mut transaction, character_id, &progression.mounts).await?;
+    let meta = SavedMeta {
+        ability_slots: progression.ability_slots.clone(),
+        counters: progression.meta_counters.clone(),
+        completed: progression.meta_completed.clone(),
+        title: progression.title,
+    };
+    save_character_meta(&mut transaction, character_id, &meta).await?;
+    save_character_arena(&mut transaction, character_id, &progression.arena).await?;
+    save_character_music(&mut transaction, character_id, &progression.music).await?;
     transaction.commit().await?;
     Ok(SaveOutcome::Saved)
 }
@@ -357,6 +446,122 @@ mod infra_tests {
                 ("Ability_Greatsword_Combo".to_owned(), 1),
                 ("Upgrade_Greatsword_Combo_1".to_owned(), 1),
             ],
+            territory_points: vec![(0xd65a_1577, 0x1234_5678, 3)],
+            travel: travel(),
+            mounts: mounts(),
+            ability_slots: vec![(
+                "GreatSwordAbilityTable".to_owned(),
+                0,
+                "Ability_Greatsword_Combo".to_owned(),
+            )],
+            meta_counters: BTreeMap::from([("pve_familykills_corrupted".to_owned(), 3)]),
+            meta_completed: vec![
+                ("SkillLevel_Fishing2".to_owned(), false),
+                ("AchievementsEarnedCount3".to_owned(), true),
+            ],
+            title: Some(0x431d_f4ea),
+            arena: arena(),
+            music: SavedMusic {
+                next_performance_ms: Some(846_118_000_000),
+            },
+        }
+    }
+
+    /// The arena state of a character inside the Amrine expedition (retail counters of one
+    /// entry, the daily and weekly refresh times of a 03:00 UTC server).
+    fn arena() -> SavedArena {
+        SavedArena {
+            dungeon_cooldown_since_2000_ns: 834_685_420_779_850_554,
+            solo_trial_cooldown_since_2000_ns: 0,
+            ranks: vec![3, 3, 3],
+            last_dungeon: Some([0x2d; crate::DUNGEON_ID_LEN]),
+            last_mutated_dungeon: Some([0x7d; crate::DUNGEON_ID_LEN]),
+            base_entered: 1,
+            mutated_entered: 0,
+            group_trials_entered: 0,
+            next_base_refresh_ns: 1_781_406_000_122_895_400,
+            next_mutated_refresh_ns: 1_781_578_800_998_609_500,
+            next_group_trial_refresh_ns: 1_781_406_000_122_932_600,
+            mutation_award: true,
+            last_dungeon_mutated: true,
+            stay: Some(crate::SavedStay {
+                instance: Uuid::from_u128(0x2d30),
+                game_mode: "DungeonAmrine".to_owned(),
+                phase: u64::MAX,
+                return_level: "newworld_vitaeeterna".to_owned(),
+                return_position: [7_700.5_f32.to_bits(), 7_300.25_f32.to_bits(), 1],
+                activated_ns: 1_781_404_200_000_000_000,
+            }),
+        }
+    }
+
+    /// A chosen mount and two customized mounts: a dye on the open channel of a basic lion
+    /// (`Mount_MTX_5_lion_basic`) and a named, dyed bear (`Mount_MTX_1_bear_Preorder`).
+    fn mounts() -> SavedMounts {
+        SavedMounts {
+            selected: Some(0x0c13_84ae),
+            customized: vec![
+                crate::SavedMount {
+                    mount_id: 0x0c13_84ae,
+                    dye: [0, 0, 0x33, 0],
+                    name: Vec::new(),
+                },
+                crate::SavedMount {
+                    mount_id: 0xde1f_a300,
+                    dye: [0x19, 0x25, 0x19, 0x25],
+                    name: b"Rex".to_vec(),
+                },
+            ],
+        }
+    }
+
+    /// A travel state with every field set: a marker, an inn and a respawn camp of the retail
+    /// captures, and one home with two pieces of furniture.
+    fn travel() -> SavedTravel {
+        let position = [6_061.9_f32.to_bits(), 9_856.0_f32.to_bits(), 324.9_f32.to_bits()];
+        let rotation = [0, 0, 0.967_457_f32.to_bits(), 0.255_766_f32.to_bits()];
+        SavedTravel {
+            waypoint: Some(position),
+            inn: Some(17_680_737_194_352_937_251),
+            camp: Some(16_695_474_225_659_806_323),
+            camp_skin: Some(0x3e89_166b),
+            unstuck_ready_ms: 1_790_860_734_747,
+            homes: vec![crate::SavedHome {
+                plot: [0xc7, 0x37, 0x66, 0xcd, 0xa0, 0x43, 0x41, 0x6a, 0, 0, 0, 0, 0, 0, 0, 0],
+                position,
+                purchased_ms: 1_782_815_151_259,
+                items: vec![
+                    crate::SavedHousingItem {
+                        index: 24,
+                        item: 0xb39e,
+                        position,
+                        rotation,
+                    },
+                    crate::SavedHousingItem {
+                        index: 25,
+                        item: 0xb39e,
+                        position,
+                        rotation,
+                    },
+                ],
+                record: crate::SavedHomeRecord {
+                    plot_facet: 0x6a41_43a0_cd66_37c7,
+                    plot_extra: 0x99ed_e7e1_d5a5_b24d,
+                    house_data: [9; crate::PLOT_ID_LEN],
+                    house_data_facet: 0xc13e_b7f0_5396_3b4c,
+                    house_type: 0xd0e4_0188,
+                    territory: 16,
+                    taxes_due_ms: 1_783_419_951_259,
+                    fast_travel_ready_ms: 1_782_829_551_259,
+                },
+            }],
+            played_ms: 448_201,
+            inn_recalled_ms: 1_790_860_000_000,
+            placed_camp: Some(crate::SavedCamp {
+                position,
+                tier: 2,
+                placed_ms: 1_790_861_000_000,
+            }),
         }
     }
 
