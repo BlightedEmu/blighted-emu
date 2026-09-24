@@ -494,6 +494,9 @@ pub struct TaskRow {
     pub poi_tag: Option<String>,
     /// `TriggerAreaType`: `Enter` or `Leave` for an area task.
     pub trigger_area_type: Option<String>,
+    /// `FailOnCondition`. On a `TaskHaveAndReturnItems` with no `ItemName`, this is the weapon
+    /// drop the task belongs to (`2hGreatSwordDropT2` on the greatsword take).
+    pub fail_on_condition: Option<String>,
 }
 
 /// Every task row with an index by lowercase task id, made once for the trees of many
@@ -550,6 +553,7 @@ pub fn task_rows(tables: &Tables) -> Vec<TaskRow> {
             item_drop_probability: row.item_drop_probability,
             poi_tag: row.poi_tag.clone(),
             trigger_area_type: row.trigger_area_type.clone(),
+            fail_on_condition: row.fail_on_condition.clone(),
         })
         .collect()
 }
@@ -576,6 +580,65 @@ fn location_of(cell: &str) -> Option<Position> {
         z: numbers.next()?.ok()?,
     };
     numbers.next().is_none().then_some(position)
+}
+
+/// The mark before a weapon id in an archetype item (`SwordsmanArchetype_2hGreatsword`).
+const ARCHETYPE_MARK: &str = "archetype_";
+/// A one-handed weapon id starts with this (`1hRapierDropT2`).
+const ONE_HAND_MARK: &str = "1h";
+/// A two-handed weapon id starts with this (`2hGreatSwordDropT2`).
+const TWO_HAND_MARK: &str = "2h";
+/// The drop-tier tail of a weapon take's `FailOnCondition` (`DropT2`).
+const DROP_TIER_MARK: &str = "dropt";
+/// The lost-tier tail of the same kind of id (`LostT2`).
+const LOST_TIER_MARK: &str = "lostt";
+
+/// The item a have-and-return task watches. A row with `ItemName` watches that item. A row with
+/// only `FailOnCondition` watches that drop id (the seven tutorial weapon takes). A row with
+/// neither is done by any container loot.
+fn have_item_of(row: &TaskRow) -> Option<String> {
+    filled_cell(&row.item_name).or_else(|| filled_cell(&row.fail_on_condition))
+}
+
+fn filled_cell(cell: &Option<String>) -> Option<String> {
+    cell.clone().filter(|text| !text.is_empty())
+}
+
+/// The weapon family of `id`, without hand, archetype, or tier (`greatsword` from
+/// `SwordsmanArchetype_2hGreatsword` and from `2hGreatSwordDropT2`). `None` when `id` is not a
+/// handed weapon id.
+fn weapon_family(id: &str) -> Option<String> {
+    let lower = id.to_ascii_lowercase();
+    let core = lower
+        .rsplit_once(ARCHETYPE_MARK)
+        .map_or(lower.as_str(), |(_, rest)| rest);
+    let core = core.trim_end_matches(|letter: char| letter.is_ascii_digit());
+    let core = core
+        .strip_suffix(DROP_TIER_MARK)
+        .or_else(|| core.strip_suffix(LOST_TIER_MARK))
+        .unwrap_or(core);
+    let family = core
+        .strip_prefix(ONE_HAND_MARK)
+        .or_else(|| core.strip_prefix(TWO_HAND_MARK))?;
+    let family = family.trim_matches('_');
+    (!family.is_empty()).then(|| family.to_owned())
+}
+
+/// Whether `task` is a simple container whose children are all weapon takes.
+fn weapon_take_group(tree: &ObjectiveTree, task: &Task) -> bool {
+    !task.children.is_empty()
+        && task
+            .children
+            .iter()
+            .all(|child| have_family(tree, *child).is_some())
+}
+
+/// The weapon family of a have-item task.
+fn have_family(tree: &ObjectiveTree, index: usize) -> Option<String> {
+    match &tree.tasks.get(index)?.kind {
+        TaskKind::HaveItem(Some(id)) => weapon_family(id),
+        _ => None,
+    }
 }
 
 /// The kind of `row`. The type cell's case varies (Observed: `TASKUNLOCKACHIEVEMENT` and
@@ -633,7 +696,7 @@ fn kind_of(row: &TaskRow) -> TaskKind {
             enemy: row.kill_enemy_type.clone().unwrap_or_default(),
             count,
         },
-        "taskhaveandreturnitems" => TaskKind::HaveItem(row.item_name.clone()),
+        "taskhaveandreturnitems" => TaskKind::HaveItem(have_item_of(row)),
         "taskhaveitems" => TaskKind::HaveItems {
             item: item(),
             count,
@@ -784,8 +847,11 @@ pub enum Event<'a> {
         /// How many.
         quantity: u32,
     },
-    /// The player took all items of a container.
-    ContainerLooted,
+    /// The player took all items of a container. `items` are the item ids that came out of it.
+    ContainerLooted {
+        /// The item ids.
+        items: &'a [&'a str],
+    },
     /// The player equipped this item.
     Equipped(&'a str),
     /// The client opened this UI screen (CRC-32 of its lowercase name).
@@ -1246,7 +1312,7 @@ impl ObjectiveRun {
                     },
                     Event::ItemGained { item, quantity },
                 ) => (wanted.eq_ignore_ascii_case(item), quantity, *count),
-                (TaskKind::HaveItem(None), Event::ContainerLooted) => (true, 1, 1),
+                (TaskKind::HaveItem(None), Event::ContainerLooted { .. }) => (true, 1, 1),
                 (TaskKind::HasAchievement(wanted), Event::AchievementSet(set)) => {
                     (wanted.eq_ignore_ascii_case(set), 1, 1)
                 }
@@ -1270,7 +1336,46 @@ impl ObjectiveRun {
                 self.list(index);
             }
         }
+        if let Event::ContainerLooted { items } = event {
+            self.complete_looted_weapon_group(items, now_ms, &mut effects);
+        }
         effects
+    }
+
+    /// Completes a simple container of weapon takes when the loot includes one weapon of that
+    /// container. Retail (newchar-retail-2026-09-18, objectives 3857 at 173.857 s): the swordsman
+    /// bag holds `SwordsmanArchetype_2hGreatsword`, and `Weapon2_container` plus its three takes
+    /// (`TakeFireStaff`, `TakeVoidGauntlet`, `TakeGreatSword`) all complete together. The other
+    /// group stays open. The fire-staff and void-gauntlet takes are not items in that bag; the
+    /// group completes as one when any of its drops matches a looted weapon.
+    fn complete_looted_weapon_group(&mut self, items: &[&str], now_ms: u64, effects: &mut Vec<Effect>) {
+        let families: Vec<String> = items.iter().filter_map(|item| weapon_family(item)).collect();
+        if families.is_empty() {
+            return;
+        }
+        let tree = Arc::clone(&self.tree);
+        let groups: Vec<usize> = tree
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(index, task)| {
+                matches!(self.states[*index], TaskState::Active { .. })
+                    && matches!(task.kind, TaskKind::Simple)
+                    && weapon_take_group(&tree, task)
+                    && task.children.iter().any(|child| {
+                        have_family(&tree, *child).is_some_and(|family| families.contains(&family))
+                    })
+            })
+            .map(|(index, _)| index)
+            .collect();
+        for group in groups {
+            let children = tree.tasks[group].children.clone();
+            for child in children {
+                if matches!(self.states[child], TaskState::Active { .. }) {
+                    self.complete(child, now_ms, effects);
+                }
+            }
+        }
     }
 
     /// The effects of the timers due at `now_ms`.
@@ -1416,6 +1521,13 @@ pub(crate) mod tests {
     fn with_item(task_id: &str, kind: &str, item: &str) -> TaskRow {
         TaskRow {
             item_name: Some(item.to_owned()),
+            ..row(task_id, kind)
+        }
+    }
+
+    fn with_condition(task_id: &str, kind: &str, condition: &str) -> TaskRow {
+        TaskRow {
+            fail_on_condition: Some(condition.to_owned()),
             ..row(task_id, kind)
         }
     }
@@ -1714,14 +1826,36 @@ pub(crate) mod tests {
                 "SimpleTaskContainer",
                 &["TakeLongsword", "TakeGreatAxe"],
             ),
-            row("TakeLongsword", "TaskHaveAndReturnItems"),
-            row("TakeGreatAxe", "TaskHaveAndReturnItems"),
+            with_condition(
+                "TakeLongsword",
+                "TaskHaveAndReturnItems",
+                "1hLongswordDropT2",
+            ),
+            with_condition(
+                "TakeGreatAxe",
+                "TaskHaveAndReturnItems",
+                "2hGreatAxeDropT2",
+            ),
             container(
                 "Weapon2_container",
                 "SimpleTaskContainer",
-                &["TakeGreatSword"],
+                &["TakeFireStaff", "TakeVoidGauntlet", "TakeGreatSword"],
             ),
-            row("TakeGreatSword", "TaskHaveAndReturnItems"),
+            with_condition(
+                "TakeFireStaff",
+                "TaskHaveAndReturnItems",
+                "2hStaffFireDropT2",
+            ),
+            with_condition(
+                "TakeVoidGauntlet",
+                "TaskHaveAndReturnItems",
+                "1hGauntletVoidDropT2",
+            ),
+            with_condition(
+                "TakeGreatSword",
+                "TaskHaveAndReturnItems",
+                "2hGreatSwordDropT2",
+            ),
             container(
                 "Equip_Tutorials",
                 "ConsecutiveTaskContainer",
@@ -1760,7 +1894,20 @@ pub(crate) mod tests {
         ];
         let tree = Arc::new(ObjectiveTree::build(&rows, "LootingRuin").expect("tree"));
         let (mut run, _) = ObjectiveRun::start(tree, NOW);
-        let effects = run.event(Event::ContainerLooted, NOW);
+        // The swordsman bag (backstory `Archetype_Swordsman`): the greatsword is the only take
+        // that matches a weapon group. Retail completes that whole group.
+        const BAG: &[&str] = &[
+            "SwordsmanArchetypeHead",
+            "SwordsmanArchetype_2hGreatsword",
+            "SwordsmanArchetype_2hBlunderbuss",
+        ];
+        let effects = run.event(Event::ContainerLooted { items: BAG }, NOW);
+        assert!(run.is_done("Weapon2_container"));
+        assert!(run.is_done("TakeFireStaff"));
+        assert!(run.is_done("TakeVoidGauntlet"));
+        assert!(run.is_done("TakeGreatSword"));
+        assert!(!run.is_done("Weapon1_container"));
+        assert!(!run.is_done("TakeLongsword"));
         assert!(run.is_done("EquipWeapon_partial"));
         assert_eq!(achievements(&effects), ["MSQ_Tutorial_Inventory"]);
         // The weapons came into the bag: not worn.
@@ -1903,7 +2050,10 @@ pub(crate) mod tests {
             Cutscene("FTUE_01_SoleSurvivor_WaterIntro_IGC"),
             at(755.87, 342.49, 20.9),
             at(725.16, 360.02, 20.0),
-            Loot,
+            Loot(&[
+                "DestroyerArchetype_2hGreataxe",
+                "DestroyerArchetype_2hWarhammer",
+            ]),
             Equip("DestroyerArchetype_2hWarhammer"),
             Equip("DestroyerArchetype_2hGreataxe"),
             at(717.65, 371.04, 23.06),
@@ -1941,7 +2091,7 @@ pub(crate) mod tests {
         Cutscene(&'static str),
         Kill(&'static str),
         Move(Position),
-        Loot,
+        Loot(&'static [&'static str]),
         Gain(&'static str),
         Equip(&'static str),
         Wait(u64),
@@ -2054,7 +2204,7 @@ pub(crate) mod tests {
                     )
                 }
                 RetailStep::Move(position) => run.event(Event::Moved(position), now),
-                RetailStep::Loot => run.event(Event::ContainerLooted, now),
+                RetailStep::Loot(items) => run.event(Event::ContainerLooted { items }, now),
                 RetailStep::Gain(item) => run.event(Event::ItemGained { item, quantity: 1 }, now),
                 RetailStep::Equip(item) => run.event(Event::Equipped(item), now),
                 RetailStep::Wait(ms) => {

@@ -10,10 +10,13 @@
 //! floor under the body (the ground's: the terrain and the level's structures, decks, roofs,
 //! stairs: [`crate::LevelGround`]), and the speed is along it (retail ran 5.50 m/s along slopes,
 //! median of 33 steady windows, and less over the ground). A body walks off an edge and falls to
-//! the floor below, and a floor too high to step onto is an obstacle it does not climb. Walls are
-//! the camera check's ([`crate::camera_check`]): a replay of the retail tutorial that stopped the
-//! body at the level's solids a step above its feet erred by a median 0.73 m against 0.22 m
-//! without (the client's capsule slides along and over what a ray at one height calls a wall).
+//! the floor below, and a floor too high to step onto is an obstacle it does not climb. A wall
+//! stops the body only where a solid still stands at the step-up's highest detection height
+//! ([`WALL_HEIGHT_M`]) and the body slides along it: a replay of the retail tutorial that stopped
+//! the body at the level's solids a step above its feet erred by a median 0.73 m against 0.22 m
+//! without (the client's capsule steps onto and slides over low rocks and rails), and with no
+//! wall at all run 15 (2026-09-22) walked the body into the 4 m block under the tutorial
+//! beach's stair landing, where its client was pushed into the solid and stuck.
 //!
 //! The movement modes (movement modes study 2026-09-20, `local-data/scratch-work/movemodes`):
 //! - The posture: the crouch and prone toggles (`playeractions_postureinput.actionlist`
@@ -22,13 +25,19 @@
 //! - The walk key, held: the slow walk.
 //!   A posture change holds the body for its transition fragment's time while it slows.
 //! - Wading: a body on a floor whose feet are deep enough under the local water (the sea, a
-//!   lake, a river: [`Ground::water_surface`]) moves at the `Wade` rows.
+//!   lake, a river: [`Ground::water_surface`]) moves at the `Wade` rows. No jump starts in water
+//!   that deep, wading or swimming (`playeractions_traversal.actionlist` `Jump`, `Jump_Diagonal`,
+//!   `Standing_Jump`: `Not IfWaterDepth GreaterThanOrEqual Shallow`; run 15: a jump key while
+//!   swimming threw the body 0.9 m out of the sea).
 //! - The road boost: sprinting on a road for long enough adds the `Traversal_RoadSprintBoost_Haste`
 //!   status's `SprintSpeedMod` to the sprint speed; combat on the road ends it.
 //! - The land dodge: a dodge press on a floor moves the body by the root motion of the dodge clip
 //!   of its equip load class ([`EquipLoad`]); an overburdened body neither dodges nor sprints.
 
+use nw_world::collision_index::FLOOR_SEARCH_ABOVE_M;
+
 use crate::equip_load::EquipLoad;
+use crate::footing::WaterDepth;
 use crate::movement::{Ground, Position};
 
 /// The forward speed by default, m/s (`playeractions_sprint.actionlist`
@@ -57,6 +66,12 @@ pub const STEP_DOWN_M: f32 = 0.282;
 /// The radius of the player's capsule, m (`slices/player.dynamicslice`: the character's capsule
 /// shape, radius 0.41).
 pub const PLAYER_RADIUS_M: f32 = 0.41;
+/// How high above the feet a solid is a wall to a walking body, m: the character controller's
+/// highest step-up detection (`slices/player.dynamicslice` `m_stepUpMaxDetectionHeight` 1.3); a
+/// solid lower than that is stepped onto or slid over. The level collision of the tutorial beach
+/// (run 15, 2026-09-22): the block under the stair landing stands 4.0 m over the sand, the rocks
+/// beside the path 1.1 to 1.2 m.
+pub const WALL_HEIGHT_M: f32 = FLOOR_SEARCH_ABOVE_M;
 /// The upward speed of a jump, m/s, and the pull down while in the air, m/s² (Observed: a least
 /// squares fit of a retail standing jump on flat ground, newchar record 24187, 22 states, root
 /// mean square 0.03 m; two more jumps gave 5.26 and 5.49 m/s, 14.8 and 15.5 m/s²).
@@ -391,6 +406,21 @@ impl Intent {
     const fn moves(self) -> bool {
         self.forward != 0 || self.right != 0
     }
+
+    /// The intent of a rider: the posture toggles, the walk toggle, the block and the dodge do
+    /// not reach the body (`playeractions_mount.actionlist`: no posture or block action while
+    /// `IsMounted`, and the dodge key is the mount's dash, input 67 held in 99 % of the retail
+    /// records while the mount stamina drained against 21 % of the others).
+    const fn mounted(self) -> Self {
+        Self {
+            walk_toggle: false,
+            block: false,
+            dodge: false,
+            crouch_toggle: false,
+            prone_toggle: false,
+            ..self
+        }
+    }
 }
 
 /// One input record for the character.
@@ -452,6 +482,90 @@ impl Pace {
             speed_mps,
             acceleration_mps2: rate_mps2,
             deceleration_mps2: rate_mps2,
+        }
+    }
+}
+
+/// A mount's speeds on one surface (a `MountMovementData` row's `<Surface>MaxSpeed`,
+/// `WalkSpeed`, `SlowWalkSpeed`, `Accel`, `Decel`, `WalkAccel` and `WalkDecel`; mounts study,
+/// run 15).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MountPace {
+    /// The run, m/s.
+    pub run_mps: f32,
+    /// With the walk key, m/s.
+    pub walk_mps: f32,
+    /// With the walk key and the slow walk setting (6271), m/s.
+    pub slow_walk_mps: f32,
+    /// How fast the run is reached, m/s².
+    pub acceleration_mps2: f32,
+    /// How fast the speed falls, m/s².
+    pub deceleration_mps2: f32,
+    /// How fast the walk is reached, m/s².
+    pub walk_acceleration_mps2: f32,
+    /// How fast the walk's speed falls, m/s².
+    pub walk_deceleration_mps2: f32,
+}
+
+/// A mount's speeds on each surface (client enum `MountMovementSurfaces`) and its dash.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MountPaces {
+    /// On a road.
+    pub on_road: MountPace,
+    /// Off the roads.
+    pub off_road: MountPace,
+    /// In very shallow water ([`WaterDepth::VeryShallow`]).
+    pub very_shallow_water: MountPace,
+    /// In shallow water ([`WaterDepth::Shallow`]).
+    pub shallow_water: MountPace,
+    /// Swimming.
+    pub deep_water: MountPace,
+    /// `DashSpeedScaler`: the dash's share of the run.
+    pub dash_speed_scale: f32,
+    /// `DashAccelScaler`: the dash's share of the acceleration.
+    pub dash_acceleration_scale: f32,
+}
+
+/// A body on a mount: the mount's speeds, the surface under it, and the rider's dash and slow
+/// walk.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Mounted {
+    paces: MountPaces,
+    /// The speeds of the surface under the mount now.
+    pace: MountPace,
+    dashing: bool,
+    slow_walk: bool,
+}
+
+impl Mounted {
+    /// The speed the keys of `intent` ask for (`playeractions_mount.actionlist` `MountWalk`:
+    /// the walk key walks, slowly with the slow walk setting; `MountDash`: the dash scales the
+    /// run).
+    fn pace(&self, intent: Intent) -> Pace {
+        let pace = self.pace;
+        if intent.walk {
+            return Pace {
+                speed_mps: if self.slow_walk {
+                    pace.slow_walk_mps
+                } else {
+                    pace.walk_mps
+                },
+                acceleration_mps2: pace.walk_acceleration_mps2,
+                deceleration_mps2: pace.walk_deceleration_mps2,
+            };
+        }
+        let (speed, acceleration) = if self.dashing {
+            (
+                pace.run_mps * self.paces.dash_speed_scale,
+                pace.acceleration_mps2 * self.paces.dash_acceleration_scale,
+            )
+        } else {
+            (pace.run_mps, pace.acceleration_mps2)
+        };
+        Pace {
+            speed_mps: speed,
+            acceleration_mps2: acceleration,
+            deceleration_mps2: pace.deceleration_mps2,
         }
     }
 }
@@ -563,6 +677,8 @@ pub struct Character {
     road_boost_on: bool,
     /// Seconds left while combat keeps the road boost off.
     combat_s: f32,
+    /// The mount it rides.
+    mount: Option<Mounted>,
 }
 
 /// The height of a swimming body's feet in the sea at `sea_level_m`.
@@ -585,6 +701,52 @@ pub fn swim_floor_at(
 pub fn yaw_axes(yaw: f32) -> ([f32; 2], [f32; 2]) {
     let (sin, cos) = yaw.sin_cos();
     ([-sin, cos], [cos, sin])
+}
+
+/// The wall of `ground` that a body at `from` meets on its way to `to` in the ground plane: the
+/// outward unit normal of the first solid it enters at [`WALL_HEIGHT_M`] over its feet, with
+/// its capsule's [`PLAYER_RADIUS_M`] ahead of it. `None` for a free way or no motion.
+pub fn wall_between(
+    ground: &(impl Ground + ?Sized),
+    from: Position,
+    to: Position,
+) -> Option<[f32; 2]> {
+    let (dx, dy) = (to.x - from.x, to.y - from.y);
+    let length = dx.hypot(dy);
+    if length <= f32::EPSILON {
+        return None;
+    }
+    let height = from.z + WALL_HEIGHT_M;
+    let reach = (length + PLAYER_RADIUS_M) / length;
+    ground.wall(
+        Position { z: height, ..from },
+        Position {
+            x: from.x + dx * reach,
+            y: from.y + dy * reach,
+            z: height,
+        },
+    )
+}
+
+/// Where a body at `from` that moves to `to` stops for the walls of `ground`: at `to` when the
+/// way is free; else slid along the wall it meets (its motion less the part into the wall), or
+/// at `from` when the slide meets a wall too. The height stays `to`'s.
+pub fn stop_at_walls(ground: &(impl Ground + ?Sized), from: Position, to: Position) -> Position {
+    let Some(normal) = wall_between(ground, from, to) else {
+        return to;
+    };
+    let step = [to.x - from.x, to.y - from.y];
+    let into = (step[0] * normal[0] + step[1] * normal[1]).min(0.0);
+    let slid = Position {
+        x: to.x - into * normal[0],
+        y: to.y - into * normal[1],
+        ..to
+    };
+    if wall_between(ground, from, slid).is_some() {
+        Position { z: to.z, ..from }
+    } else {
+        slid
+    }
 }
 
 /// The unit vector in the ground plane of the keys of `intent` with camera yaw `yaw`, when they
@@ -623,7 +785,50 @@ impl Character {
             road_haste_s: 0.0,
             road_boost_on: false,
             combat_s: 0.0,
+            mount: None,
         }
+    }
+
+    /// It gets on a mount with `paces`.
+    pub const fn mount(&mut self, paces: MountPaces) {
+        self.mount = Some(Mounted {
+            paces,
+            pace: paces.off_road,
+            dashing: false,
+            slow_walk: false,
+        });
+        self.dodge = None;
+        self.posture = Posture::Stand;
+        self.posture_change_s = 0.0;
+    }
+
+    /// It gets off its mount.
+    pub const fn dismount(&mut self) {
+        self.mount = None;
+    }
+
+    /// Whether it rides a mount.
+    pub const fn is_mounted(&self) -> bool {
+        self.mount.is_some()
+    }
+
+    /// Its mount dashes, or stops dashing.
+    pub const fn set_mount_dash(&mut self, dashing: bool) {
+        if let Some(mounted) = self.mount.as_mut() {
+            mounted.dashing = dashing;
+        }
+    }
+
+    /// The walk key gives its mount's slow walk, or its walk.
+    pub const fn set_mount_slow_walk(&mut self, slow_walk: bool) {
+        if let Some(mounted) = self.mount.as_mut() {
+            mounted.slow_walk = slow_walk;
+        }
+    }
+
+    /// Whether it swims: it ended the last record at the swim depth.
+    pub const fn is_swimming(&self) -> bool {
+        self.swimming
     }
 
     /// Where it is.
@@ -743,6 +948,11 @@ impl Character {
         sea_level_m: f32,
     ) -> [f32; 2] {
         let CharacterInput { intent, yaw, dt_s } = input;
+        let intent = if self.mount.is_some() {
+            intent.mounted()
+        } else {
+            intent
+        };
         if intent.walk_toggle {
             self.walking = !self.walking;
         }
@@ -750,6 +960,7 @@ impl Character {
         // Where no water is, no floor of water holds the body.
         let swim = surface.map_or(f32::NEG_INFINITY, swim_floor);
         let wading = self.is_wading(surface);
+        self.update_mount_pace(ground, surface);
         let posture = self.posture;
         self.change_posture(intent, wading);
         if self.posture != posture {
@@ -782,13 +993,23 @@ impl Character {
             self.key_step(intent, yaw, dt_s, dashing, wading)
         };
         self.update_road_boost(ground, dt_s);
-        self.start_jump(intent.jump);
+        self.start_jump(intent.jump, self.swimming || wading);
         let start = self.position;
-        let mut next = Position {
+        let free = Position {
             x: start.x + self.heading[0] * distance,
             y: start.y + self.heading[1] * distance,
             z: start.z,
         };
+        let mut next = stop_at_walls(ground, start, free);
+        if next != free {
+            // The wall takes the motion into it: the body goes on at the speed it kept.
+            let kept = start.horizontal_distance(next);
+            if kept > f32::EPSILON {
+                self.heading = [(next.x - start.x) / kept, (next.y - start.y) / kept];
+            }
+            self.speed_mps = kept / dt_s;
+        }
+        let distance = start.horizontal_distance(next);
         match self.vertical {
             Vertical::Grounded => self.walk(&mut next, distance, ground, swim),
             Vertical::WindUp(left) => {
@@ -931,6 +1152,9 @@ impl Character {
     /// swim dash, `wading` in shallow water. The order is the action lists' (`Wade` first, then
     /// `Block_Nav_Speed`, the walk rows, the posture rows).
     fn pace(&self, intent: Intent, dashing: bool, wading: bool) -> Pace {
+        if let Some(mounted) = &self.mount {
+            return mounted.pace(intent);
+        }
         let back = intent.forward < 0;
         // An overburdened body does not sprint (`SprintDisabled`: `Overburdened`): it runs.
         let running = self.walking || self.equip_load == EquipLoad::Overburdened;
@@ -1007,11 +1231,7 @@ impl Character {
     /// [`ROAD_HASTE_S`] from now; else it runs down.
     fn update_road_boost(&mut self, ground: &(impl Ground + ?Sized), dt_s: f32) {
         self.combat_s = (self.combat_s - dt_s).max(0.0);
-        let Position { x, y, z } = self.position;
-        let near_terrain = ground
-            .height_at(x, y)
-            .is_some_and(|terrain| (z - terrain).abs() <= ROAD_HEIGHT_THRESHOLD_M);
-        let on_road = near_terrain && ground.road_share(x, y) >= ROAD_SHARE_MIN;
+        let on_road = self.on_road(ground);
         self.road_boost_on =
             on_road && self.sprint_s >= ROAD_SPRINT_DELAY_S && self.combat_s == 0.0;
         if self.road_boost_on {
@@ -1021,11 +1241,44 @@ impl Character {
         }
     }
 
-    /// Starts a jump on a new press of the jump key while it stands on a floor.
-    fn start_jump(&mut self, held: bool) {
+    /// Whether it is on a road of `ground`: near the terrain where the road share is at least
+    /// [`ROAD_SHARE_MIN`].
+    fn on_road(&self, ground: &(impl Ground + ?Sized)) -> bool {
+        let Position { x, y, z } = self.position;
+        let near_terrain = ground
+            .height_at(x, y)
+            .is_some_and(|terrain| (z - terrain).abs() <= ROAD_HEIGHT_THRESHOLD_M);
+        near_terrain && ground.road_share(x, y) >= ROAD_SHARE_MIN
+    }
+
+    /// The speeds of the surface under its mount, with the water `surface` there: deep water
+    /// while it swims, else the depth over its feet ([`WaterDepth`]), else a road
+    /// ([`Self::on_road`], Inferred: the client's road surface, as for the sprint's road boost)
+    /// or off the roads.
+    fn update_mount_pace(&mut self, ground: &(impl Ground + ?Sized), surface: Option<f32>) {
+        let Some(mounted) = self.mount else {
+            return;
+        };
+        let depth = surface.map_or(WaterDepth::None, |surface| {
+            WaterDepth::of(surface - self.position.z)
+        });
+        let paces = mounted.paces;
+        let pace = match depth {
+            _ if self.swimming => paces.deep_water,
+            WaterDepth::Shallow => paces.shallow_water,
+            WaterDepth::VeryShallow => paces.very_shallow_water,
+            WaterDepth::None if self.on_road(ground) => paces.on_road,
+            WaterDepth::None => paces.off_road,
+        };
+        self.mount = Some(Mounted { pace, ..mounted });
+    }
+
+    /// Starts a jump on a new press of the jump key while it stands on a floor out of water
+    /// `deep_water` (wading or swimming).
+    fn start_jump(&mut self, held: bool, deep_water: bool) {
         let pressed = held && !self.jump_held;
         self.jump_held = held;
-        if pressed && self.vertical == Vertical::Grounded {
+        if pressed && self.vertical == Vertical::Grounded && !deep_water {
             self.vertical = if self.speed_mps == 0.0 {
                 Vertical::WindUp(STANDING_JUMP_WIND_UP)
             } else {
@@ -2140,5 +2393,276 @@ mod tests {
         assert!(character.position().y > DECK_HALF_M);
         assert!(character.is_grounded());
         assert!((character.position().z - SHIP_TERRAIN_M).abs() < CLOSE);
+    }
+
+    /// The jump key held for one record.
+    fn jump() -> CharacterInput {
+        CharacterInput {
+            intent: Intent {
+                jump: true,
+                ..Intent::default()
+            },
+            ..input(0, 0)
+        }
+    }
+
+    #[test]
+    fn no_jump_starts_while_swimming_or_wading() {
+        // Run 15: a jump key in the tutorial sea threw the swimming body 0.9 m out of the water.
+        let mut swimming = swimmer();
+        let swim = swimming.position().z;
+        swimming.step(jump(), &SeaBed, TUTORIAL_SEA);
+        for _ in 0..30 {
+            swimming.step(input(0, 0), &SeaBed, TUTORIAL_SEA);
+            assert!(
+                (swimming.position().z - swim).abs() < CLOSE,
+                "it stays in the water"
+            );
+        }
+        let floor = SHALLOW_FLOOR_M;
+        let mut wading = Character::new(Position {
+            z: floor,
+            ..origin()
+        });
+        wading.step(input(0, 0), &Shallows, TUTORIAL_SEA);
+        wading.step(jump(), &Shallows, TUTORIAL_SEA);
+        for _ in 0..30 {
+            wading.step(input(0, 0), &Shallows, TUTORIAL_SEA);
+            assert!(
+                (wading.position().z - floor).abs() < CLOSE,
+                "it stays on the bottom"
+            );
+        }
+        let mut dry = Character::new(origin());
+        dry.step(jump(), &Flat, SEA);
+        let mut peak: f32 = 0.0;
+        for _ in 0..30 {
+            dry.step(input(0, 0), &Flat, SEA);
+            peak = peak.max(dry.position().z);
+        }
+        assert!(peak > 0.5, "on land it jumps: {peak}");
+    }
+
+    /// Flat ground at 0 with a box `height` m high whose south face runs along y = `face_y`
+    /// over x from -5 to 5, turned by `turn` radians about the up axis at (0, `face_y`).
+    fn walled(
+        height: f32,
+        face_y: f32,
+        turn: f32,
+    ) -> crate::LevelGround<crate::test_support::FlatGround> {
+        use nw_world::collision::{Body, Geometry, LevelCollision};
+        use nw_world::collision_index::CollisionIndex;
+        const HALF_DEPTH_M: f32 = 1.0;
+        const HALF_WIDTH_M: f32 = 5.0;
+        let (sin, cos) = turn.sin_cos();
+        // The box's centre is half its depth north of the face's middle, turned with it.
+        let centre = [-sin * HALF_DEPTH_M, face_y + cos * HALF_DEPTH_M];
+        let place = [
+            [cos, -sin, 0.0, centre[0]],
+            [sin, cos, 0.0, centre[1]],
+            [0.0, 0.0, 1.0, height / 2.0],
+        ];
+        let collision = CollisionIndex::new(LevelCollision {
+            level: "ftue_v2".to_owned(),
+            geometries: vec![Geometry::Box {
+                half_extents: [HALF_WIDTH_M, HALF_DEPTH_M, height / 2.0],
+            }],
+            bodies: vec![Body { geometry: 0, place }],
+            deferred: Vec::new(),
+        });
+        crate::LevelGround::new(
+            crate::test_support::FlatGround(0.0),
+            std::sync::Arc::new(collision),
+        )
+    }
+
+    #[test]
+    fn a_solid_taller_than_a_step_up_stops_the_body_a_capsule_short_of_it() {
+        // The block under the tutorial beach's stair landing stands 4 m over the sand (run 15).
+        const BLOCK_M: f32 = 4.0;
+        const FACE_Y: f32 = 3.0;
+        let ground = walled(BLOCK_M, FACE_Y, 0.0);
+        let mut character = Character::new(origin());
+        for _ in 0..90 {
+            character.step(input(1, 0), &ground, SEA);
+            assert!(
+                character.position().y <= FACE_Y - PLAYER_RADIUS_M + CLOSE,
+                "{:?}",
+                character.position()
+            );
+        }
+        /// One record of sprint, m.
+        const RECORD_M: f32 = SPRINT_SPEED_MPS * DT;
+        assert!(
+            character.position().y > FACE_Y - PLAYER_RADIUS_M - RECORD_M,
+            "it got to the wall"
+        );
+        assert!(character.velocity()[1].abs() < CLOSE, "no speed into the wall");
+    }
+
+    #[test]
+    fn a_body_slides_along_a_slanted_wall() {
+        const BLOCK_M: f32 = 4.0;
+        const FACE_Y: f32 = 3.0;
+        /// The face turned 30 degrees.
+        const TURN: f32 = 0.523_598_8;
+        let ground = walled(BLOCK_M, FACE_Y, TURN);
+        let mut character = Character::new(origin());
+        for _ in 0..90 {
+            character.step(input(1, 0), &ground, SEA);
+        }
+        let at = character.position();
+        // The face's outward normal is (sin, -cos) of the turn. The probe reaches a capsule
+        // ahead along the motion, so the body stops a capsule short of the face along the
+        // keys' north: radius × cos(turn) off it.
+        let (sin, cos) = TURN.sin_cos();
+        let off_face = at.x * sin - (at.y - FACE_Y) * cos;
+        assert!(off_face >= PLAYER_RADIUS_M * cos - CLOSE, "{at:?}");
+        assert!(at.x > 1.0, "it slid east along the face: {at:?}");
+    }
+
+    #[test]
+    fn a_solid_lower_than_a_step_up_is_no_wall() {
+        // The rocks beside the beach path stand 1.1 to 1.2 m over the sand (run 15).
+        const ROCK_M: f32 = 1.15;
+        const FACE_Y: f32 = 3.0;
+        let ground = walled(ROCK_M, FACE_Y, 0.0);
+        let mut character = Character::new(origin());
+        for _ in 0..90 {
+            character.step(input(1, 0), &ground, SEA);
+        }
+        assert!(character.position().y > FACE_Y, "{:?}", character.position());
+    }
+
+    /// `ConfigMountRiding_0` (`javelindata_mount_movement`): the run and walk of each surface,
+    /// the slow walk, the rates and the dash scalers.
+    fn riding_paces() -> MountPaces {
+        let pace = |run_mps, walk_mps| MountPace {
+            run_mps,
+            walk_mps,
+            slow_walk_mps: 2.0,
+            acceleration_mps2: 13.5,
+            deceleration_mps2: 9.0,
+            walk_acceleration_mps2: 13.5,
+            walk_deceleration_mps2: 12.0,
+        };
+        MountPaces {
+            on_road: pace(9.25, 6.3),
+            off_road: pace(7.0, 5.5),
+            very_shallow_water: pace(6.65, 5.5),
+            shallow_water: pace(5.55, 5.0),
+            deep_water: pace(4.8, 2.5),
+            dash_speed_scale: 1.12,
+            dash_acceleration_scale: 1.15,
+        }
+    }
+
+    /// Flat ground at height 0 that is road everywhere.
+    struct WholeRoad;
+
+    impl Ground for WholeRoad {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(0.0)
+        }
+
+        fn road_share(&self, _: f32, _: f32) -> f32 {
+            1.0
+        }
+    }
+
+    fn ride(rider: &mut Character, intent: Intent, ground: &impl Ground, sea_level_m: f32) {
+        for _ in 0..60 {
+            rider.step(
+                CharacterInput {
+                    intent,
+                    yaw: 0.0,
+                    dt_s: DT,
+                },
+                ground,
+                sea_level_m,
+            );
+        }
+    }
+
+    #[test]
+    fn a_rider_moves_at_its_mount_s_speeds() {
+        let paces = riding_paces();
+        let forward = Intent {
+            forward: 1,
+            ..Intent::default()
+        };
+        let walk = Intent {
+            walk: true,
+            ..forward
+        };
+        let speed = |rider: &Character| rider.velocity()[1];
+        let mut rider = Character::new(origin());
+        rider.mount(paces);
+        assert!(rider.is_mounted());
+        ride(&mut rider, forward, &Flat, SEA);
+        assert!((speed(&rider) - paces.off_road.run_mps).abs() < CLOSE);
+        ride(&mut rider, forward, &WholeRoad, SEA);
+        assert!((speed(&rider) - paces.on_road.run_mps).abs() < CLOSE);
+        rider.set_mount_dash(true);
+        ride(&mut rider, forward, &WholeRoad, SEA);
+        let dash = paces.on_road.run_mps * paces.dash_speed_scale;
+        assert!((speed(&rider) - dash).abs() < CLOSE);
+        rider.set_mount_dash(false);
+        ride(&mut rider, walk, &WholeRoad, SEA);
+        assert!((speed(&rider) - paces.on_road.walk_mps).abs() < CLOSE);
+        rider.set_mount_slow_walk(true);
+        ride(&mut rider, walk, &WholeRoad, SEA);
+        assert!((speed(&rider) - paces.on_road.slow_walk_mps).abs() < CLOSE);
+        rider.dismount();
+        assert!(!rider.is_mounted());
+        ride(&mut rider, forward, &Flat, SEA);
+        assert!((speed(&rider) - SPRINT_SPEED_MPS).abs() < CLOSE);
+    }
+
+    #[test]
+    fn a_rider_neither_dodges_nor_changes_its_posture() {
+        let paces = riding_paces();
+        let mut rider = Character::new(origin());
+        rider.mount(paces);
+        let keys = Intent {
+            forward: 1,
+            dodge: true,
+            crouch_toggle: true,
+            prone_toggle: true,
+            ..Intent::default()
+        };
+        rider.step(
+            CharacterInput {
+                intent: keys,
+                yaw: 0.0,
+                dt_s: DT,
+            },
+            &Flat,
+            SEA,
+        );
+        assert_eq!(rider.posture(), Posture::Stand);
+        assert!(
+            (rider.velocity()[1] - paces.off_road.acceleration_mps2 * DT).abs() < CLOSE,
+            "the keys' motion, not a dodge roll"
+        );
+    }
+
+    #[test]
+    fn a_rider_in_water_takes_the_water_s_speeds() {
+        let paces = riding_paces();
+        let forward = Intent {
+            forward: 1,
+            ..Intent::default()
+        };
+        // The water 0.5 m over the feet is very shallow, 1 m shallow (the wade depth 0.895 m).
+        const VERY_SHALLOW_SEA_M: f32 = 0.5;
+        const SHALLOW_SEA_M: f32 = 1.0;
+        let mut rider = Character::new(origin());
+        rider.mount(paces);
+        ride(&mut rider, forward, &Flat, VERY_SHALLOW_SEA_M);
+        assert!((rider.velocity()[1] - paces.very_shallow_water.run_mps).abs() < CLOSE);
+        ride(&mut rider, forward, &Flat, SHALLOW_SEA_M);
+        assert!((rider.velocity()[1] - paces.shallow_water.run_mps).abs() < CLOSE);
+        assert!(!rider.is_swimming());
     }
 }

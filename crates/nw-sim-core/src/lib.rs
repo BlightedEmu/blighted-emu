@@ -8,6 +8,7 @@ pub mod cells;
 pub mod character;
 pub mod combat;
 pub mod equip_load;
+pub mod footing;
 pub mod grid;
 pub mod interest;
 pub mod level_ground;
@@ -24,12 +25,13 @@ pub use camera_check::{CameraBody, CameraCheck, CameraView};
 pub use cells::{
     CellGrid, CellGridError, CellId, CellOwners, MAX_CELLS, assign_columns, level_bounds,
 };
-pub use character::{Character, CharacterInput, Intent, Posture};
+pub use character::{Character, CharacterInput, Intent, MountPace, MountPaces, Posture};
 pub use combat::{
     Damage, Dice, Health, Hit, MIN_HIT, MobAttack, PlayerAttack, Threat, mob_hit, mob_max_health,
     player_hit,
 };
 pub use equip_load::{EquipLoad, EquipLoadLimits};
+pub use footing::{Footing, WaterDepth};
 pub use grid::SpatialGrid;
 pub use interest::{Interest, InterestChanges};
 pub use level_ground::LevelGround;

@@ -141,12 +141,23 @@ pub struct WaterMap {
 impl WaterMap {
     /// The water surface at (`x`, `y`), m: the height of the leaf there when it holds water.
     /// `None` on dry land and outside every region with a water tree.
+    pub fn surface_at(&self, x: f32, y: f32) -> Option<f32> {
+        self.water_leaf(x, y).map(|leaf| leaf.height)
+    }
+
+    /// The water flags at (`x`, `y`) where water is there (sea `0x0a`, lake or river `0x07`,
+    /// pond `0x04`); `None` on dry land and outside every region with a water tree.
+    pub fn flags_at(&self, x: f32, y: f32) -> Option<u32> {
+        self.water_leaf(x, y).map(|leaf| leaf.flags)
+    }
+
+    /// The leaf at (`x`, `y`) when it holds water.
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "region indices of a level are a few dozen, checked not negative"
     )]
-    pub fn surface_at(&self, x: f32, y: f32) -> Option<f32> {
+    fn water_leaf(&self, x: f32, y: f32) -> Option<WaterNode> {
         let size = self.region_size_m;
         if !x.is_finite() || !y.is_finite() || size <= 0.0 {
             return None;
@@ -161,7 +172,7 @@ impl WaterMap {
             .iter()
             .find(|region| region.x == index_x && region.y == index_y)?;
         let leaf = region.leaf_at(x - region_x * size, y - region_y * size, size)?;
-        (leaf.flags != 0).then_some(leaf.height)
+        (leaf.flags != 0).then_some(leaf)
     }
 
     /// Encodes the water map with its header.
@@ -244,6 +255,15 @@ mod tests {
         assert_eq!(map.surface_at(700.0, 700.0), Some(SEA_M));
         assert_eq!(map.surface_at(1100.0, 100.0), None, "no region");
         assert_eq!(map.surface_at(-1.0, 100.0), None);
+    }
+
+    #[test]
+    fn a_place_takes_the_flags_of_its_leaf() {
+        let map = map();
+        assert_eq!(map.flags_at(100.0, 100.0), Some(SEA));
+        assert_eq!(map.flags_at(300.0, 100.0), Some(POND));
+        assert_eq!(map.flags_at(100.0, 300.0), None, "dry");
+        assert_eq!(map.flags_at(1100.0, 100.0), None, "no region");
     }
 
     #[test]

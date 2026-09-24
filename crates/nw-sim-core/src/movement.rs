@@ -61,6 +61,14 @@ pub trait Ground {
         false
     }
 
+    /// The first wall that the straight line from `_from` to `_to` enters from outside: the
+    /// outward unit normal in the ground plane of the first solid surface on it that is too
+    /// steep to stand on. A line that starts inside a solid leaves it freely. No wall where the
+    /// implementation knows only the terrain.
+    fn wall(&self, _from: Position, _to: Position) -> Option<[f32; 2]> {
+        None
+    }
+
     /// How much of the ground at (`_x`, `_y`) is road, 0 to 1: the share of the road cells of the
     /// level's tract map in the bilinear blend around the point ([`nw_world::roads::RoadMap`]).
     /// No road where the implementation knows no tract map.
@@ -73,6 +81,13 @@ pub trait Ground {
     /// `sea_level_m` where the implementation knows no water map.
     fn water_surface(&self, _x: f32, _y: f32, sea_level_m: f32) -> Option<f32> {
         Some(sea_level_m)
+    }
+
+    /// The flags of the water at (`_x`, `_y`) when water is there: the kind bits of the level's
+    /// water map ([`nw_world::water::WaterMap::flags_at`]: sea `0x0a`, lake or river `0x07`,
+    /// pond `0x04`). `None` where the implementation knows no water map.
+    fn water_flags(&self, _x: f32, _y: f32) -> Option<u32> {
+        None
     }
 }
 
@@ -90,12 +105,20 @@ impl<T: Ground + ?Sized> Ground for &T {
         (**self).blocked(from, to)
     }
 
+    fn wall(&self, from: Position, to: Position) -> Option<[f32; 2]> {
+        (**self).wall(from, to)
+    }
+
     fn road_share(&self, x: f32, y: f32) -> f32 {
         (**self).road_share(x, y)
     }
 
     fn water_surface(&self, x: f32, y: f32, sea_level_m: f32) -> Option<f32> {
         (**self).water_surface(x, y, sea_level_m)
+    }
+
+    fn water_flags(&self, x: f32, y: f32) -> Option<u32> {
+        (**self).water_flags(x, y)
     }
 }
 
@@ -113,12 +136,20 @@ impl<T: Ground + ?Sized> Ground for std::sync::Arc<T> {
         (**self).blocked(from, to)
     }
 
+    fn wall(&self, from: Position, to: Position) -> Option<[f32; 2]> {
+        (**self).wall(from, to)
+    }
+
     fn road_share(&self, x: f32, y: f32) -> f32 {
         (**self).road_share(x, y)
     }
 
     fn water_surface(&self, x: f32, y: f32, sea_level_m: f32) -> Option<f32> {
         (**self).water_surface(x, y, sea_level_m)
+    }
+
+    fn water_flags(&self, x: f32, y: f32) -> Option<u32> {
+        (**self).water_flags(x, y)
     }
 }
 

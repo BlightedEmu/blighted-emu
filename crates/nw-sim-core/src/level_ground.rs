@@ -96,6 +96,21 @@ impl<T: Ground> Ground for LevelGround<T> {
                 .is_some_and(|hit| hit.normal[2] < min_up)
     }
 
+    /// The first face of the structures that the line enters from outside, when it is too
+    /// steep to stand on ([`CollisionIndex::entering_hit`]); else the terrain's wall.
+    fn wall(&self, from: Position, to: Position) -> Option<[f32; 2]> {
+        let min_up = MAX_WALKABLE_SLOPE_DEG.to_radians().cos();
+        self.collision
+            .entering_hit([from.x, from.y, from.z], [to.x, to.y, to.z])
+            .filter(|hit| hit.normal[2] < min_up)
+            .and_then(|hit| {
+                let across = hit.normal[0].hypot(hit.normal[1]);
+                (across > f32::EPSILON)
+                    .then(|| [hit.normal[0] / across, hit.normal[1] / across])
+            })
+            .or_else(|| self.terrain.wall(from, to))
+    }
+
     fn road_share(&self, x: f32, y: f32) -> f32 {
         self.roads.as_ref().map_or_else(
             || self.terrain.road_share(x, y),
@@ -107,6 +122,13 @@ impl<T: Ground> Ground for LevelGround<T> {
         self.water.as_ref().map_or_else(
             || self.terrain.water_surface(x, y, sea_level_m),
             |water| water.surface_at(x, y),
+        )
+    }
+
+    fn water_flags(&self, x: f32, y: f32) -> Option<u32> {
+        self.water.as_ref().map_or_else(
+            || self.terrain.water_flags(x, y),
+            |water| water.flags_at(x, y),
         )
     }
 }
@@ -157,6 +179,26 @@ mod tests {
         let at = |x: f32, z: f32| Position { x, y: 0.0, z };
         assert!(ground.blocked(at(-8.0, DECK_Z - 0.3), at(-2.0, DECK_Z - 0.3)));
         assert!(!ground.blocked(at(-8.0, DECK_Z + 0.3), at(-2.0, DECK_Z + 0.3)));
+    }
+
+    #[test]
+    fn the_deck_s_side_is_a_wall_entered_from_outside_only() {
+        let ground = ship();
+        let at = |x: f32, z: f32| Position { x, y: 0.0, z };
+        let normal = ground
+            .wall(at(-8.0, DECK_Z - 0.3), at(-2.0, DECK_Z - 0.3))
+            .expect("the deck's side");
+        assert!((normal[0] + 1.0).abs() < TOLERANCE && normal[1].abs() < TOLERANCE);
+        assert_eq!(
+            ground.wall(at(-2.0, DECK_Z - 0.3), at(8.0, DECK_Z - 0.3)),
+            None,
+            "a body inside leaves it"
+        );
+        assert_eq!(
+            ground.wall(at(-8.0, DECK_Z + 0.3), at(-2.0, DECK_Z + 0.3)),
+            None,
+            "the top is floor"
+        );
     }
 
     #[test]

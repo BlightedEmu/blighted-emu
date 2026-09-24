@@ -23,6 +23,12 @@
 //! on that floor once it is down at it. Only where the level has neither height data nor a
 //! structure does the body take the camera's height.
 //!
+//! The camera does not carry the body through a wall ([`wall_between`]): the client's capsule
+//! does not pass one, so a camera body beyond it is the solve's error, a boom the level shortened
+//! (run 15: by the beach stairs the camera's body stood 1.2 m from the camera and resyncs of
+//! 0.7 to 1.3 m carried the body into the solid block under the stair landing). The wall is the
+//! one at the higher body's feet, so a client that climbed onto a ledge takes the body along.
+//!
 //! A camera does not give the body's height itself: the boom is never sent, the camera check
 //! measures it from the server's own motion of the body while the view turns, and an action
 //! moves the body by its animation, which the solve reads as a change of the boom. Run 14
@@ -40,7 +46,7 @@
 //! nothing.
 
 use crate::camera_check::{CameraCheck, CameraView};
-use crate::character::{Character, CharacterInput, swim_floor_at};
+use crate::character::{Character, CharacterInput, MountPaces, swim_floor_at, wall_between};
 use crate::equip_load::EquipLoad;
 use crate::movement::{Ground, Position};
 
@@ -50,6 +56,23 @@ use crate::movement::{Ground, Position};
 /// replay of the retail keys erred by a median 0.15 m with 0.1 m, 0.16 m with 0.15 m and 0.16 m
 /// with 0.2 m in the open world, 0.35, 0.22 and 0.55 m in the tutorial).
 pub const RESYNC_M: f32 = 0.15;
+/// The larger camera-check snap on the tutorial ship deck, m
+/// (`local-data/scratch-work/run15/movement/REPORT.md`: snaps of 0.3 m to 0.57 m).
+pub const SHIP_RESYNC_M: f32 = 0.57;
+/// The ship deck height that report holds, m.
+const SHIP_DECK_LOW_M: f32 = 89.37;
+/// See [`SHIP_DECK_LOW_M`].
+const SHIP_DECK_HIGH_M: f32 = 89.45;
+
+/// The correction distance at `at`: the ship snap while the feet are on that deck, otherwise
+/// [`RESYNC_M`].
+fn resync_distance(at: Position) -> f32 {
+    if (SHIP_DECK_LOW_M..=SHIP_DECK_HIGH_M).contains(&at.z) {
+        SHIP_RESYNC_M
+    } else {
+        RESYNC_M
+    }
+}
 /// Records after the client starts an action (an attack, a dodge, an ability) while its moves may
 /// carry the body without the movement keys, so the camera check does not hold it still
 /// (Observed: after the 20 actions the newchar tutorial started without a movement key, the own
@@ -138,6 +161,42 @@ impl TrackedBody {
         self.character.enter_combat();
     }
 
+    /// It gets on a mount with `paces` ([`Character::mount`]).
+    pub const fn mount(&mut self, paces: MountPaces) {
+        self.character.mount(paces);
+    }
+
+    /// It gets off its mount ([`Character::dismount`]).
+    pub const fn dismount(&mut self) {
+        self.character.dismount();
+    }
+
+    /// Whether it rides a mount.
+    pub const fn is_mounted(&self) -> bool {
+        self.character.is_mounted()
+    }
+
+    /// Its mount dashes, or stops dashing ([`Character::set_mount_dash`]).
+    pub const fn set_mount_dash(&mut self, dashing: bool) {
+        self.character.set_mount_dash(dashing);
+    }
+
+    /// The walk key gives its mount's slow walk, or its walk.
+    pub const fn set_mount_slow_walk(&mut self, slow_walk: bool) {
+        self.character.set_mount_slow_walk(slow_walk);
+    }
+
+    /// Whether it stands on a floor: not in a jump or a fall (the landing of a fall, for its
+    /// damage).
+    pub const fn is_grounded(&self) -> bool {
+        self.character.is_grounded()
+    }
+
+    /// Whether it swims.
+    pub const fn is_swimming(&self) -> bool {
+        self.character.is_swimming()
+    }
+
     /// The camera boom it holds, once a camera fitted.
     pub const fn boom_m(&self) -> Option<f32> {
         self.camera.boom_m()
@@ -193,7 +252,14 @@ impl TrackedBody {
                 on_floor: self.character.is_grounded(),
             };
         };
-        let resynced = position.horizontal_distance(seen.at) > RESYNC_M;
+        // The wall is the one at the higher of the two bodies' feet: a client that climbed onto
+        // a ledge (a mantle, a vault) shows its body on top, and the line passes over the ledge.
+        let over = Position {
+            z: position.z.max(seen.at.z),
+            ..position
+        };
+        let resynced = position.horizontal_distance(seen.at) > resync_distance(position)
+            && wall_between(ground, over, seen.at).is_none();
         if resynced {
             let heading = self.character.heading();
             let along = |from: Position, to: Position| {
@@ -525,6 +591,132 @@ mod tests {
                 [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]]
             })
             .collect()
+    }
+
+    /// The place of the block under the tutorial beach's stair landing: body 6 of the `ftue_v2`
+    /// level collision, a box of half size 1 (4 m high from 19.39 m; retail walks onto its top
+    /// at 23.39 m from the stairs).
+    const BEACH_BLOCK: [[f32; 4]; 3] = [
+        [-8.812_316, 1.654_394, 0.0, 719.742_25],
+        [-4.726_837, -3.084_312, 0.0, 368.216_64],
+        [0.0, 0.0, 2.0, 21.390_278],
+    ];
+    /// The beach sand under run 15's own places by the block, m.
+    const BEACH_SAND_M: f32 = 19.945;
+
+    /// The block over the sand.
+    fn beach_block() -> crate::LevelGround<crate::test_support::FlatGround> {
+        use nw_world::collision::{Body, Geometry, LevelCollision};
+        use nw_world::collision_index::CollisionIndex;
+        let collision = CollisionIndex::new(LevelCollision {
+            level: "ftue_v2".to_owned(),
+            geometries: vec![Geometry::Box {
+                half_extents: [1.0; 3],
+            }],
+            bodies: vec![Body {
+                geometry: 0,
+                place: BEACH_BLOCK,
+            }],
+            deferred: Vec::new(),
+        });
+        crate::LevelGround::new(
+            crate::test_support::FlatGround(BEACH_SAND_M),
+            std::sync::Arc::new(collision),
+        )
+    }
+
+    /// Whether `at` stands in the block's ground-plane outline.
+    fn in_beach_block(at: Position) -> bool {
+        let [x_row, y_row, _] = BEACH_BLOCK;
+        let offset = [at.x - x_row[3], at.y - y_row[3]];
+        [0, 1].into_iter().all(|axis| {
+            let column = [x_row[axis], y_row[axis]];
+            let share = (offset[0] * column[0] + offset[1] * column[1])
+                / (column[0] * column[0] + column[1] * column[1]);
+            share.abs() <= 1.0
+        })
+    }
+
+    #[test]
+    fn the_run_15_camera_does_not_carry_the_body_into_the_beach_block() {
+        // Run 15 (2026-09-22, 03:49:22Z): by the beach stairs the camera's body ran north into
+        // the block, 0.7 to 1.3 m ahead of the server's, and the resyncs put the body inside it;
+        // its client was pushed into the solid and stuck. These are the server's own places of
+        // those states, from 715.55, 359.17 on; the client's capsule cannot be inside the block.
+        const RUN_15_PLACES: [[f32; 2]; 9] = [
+            [715.008, 359.864],
+            [715.729, 360.947],
+            [716.043, 361.653],
+            [715.887, 362.202],
+            [715.746, 362.924],
+            [715.966, 363.065],
+            [715.887, 364.053],
+            [716.039, 365.316],
+            [715.673, 366.556],
+        ];
+        /// Records each place shows for (the states came 33 to 65 ms apart).
+        const RECORDS_EACH: usize = 2;
+        /// Records the last place holds after the run.
+        const HOLD_RECORDS: usize = 30;
+        let start = Position {
+            x: 715.551,
+            y: 359.173,
+            z: BEACH_SAND_M,
+        };
+        let ground = beach_block();
+        assert!(in_beach_block(Position {
+            x: RUN_15_PLACES[8][0],
+            y: RUN_15_PLACES[8][1],
+            ..start
+        }));
+        assert!(!in_beach_block(start));
+        let mut body = TrackedBody::new(start);
+        let shown = RUN_15_PLACES
+            .iter()
+            .flat_map(|place| std::iter::repeat_n(*place, RECORDS_EACH))
+            .chain(std::iter::repeat_n(RUN_15_PLACES[8], HOLD_RECORDS));
+        let mut last = start;
+        for (record, [x, y]) in shown.enumerate() {
+            let client = Position { x, y, ..start };
+            let tracked = body.record(input(1, view_of(client, BOOM, [0.0; 2])), &ground, SEA);
+            assert!(!in_beach_block(tracked.position), "record {record}: {tracked:?}");
+            last = tracked.position;
+        }
+        assert!(last.y > start.y + 2.0, "it went up to the block: {last:?}");
+    }
+
+    #[test]
+    fn a_client_that_climbed_onto_the_block_takes_the_body_onto_its_top() {
+        // A mantle or a vault: the client shows its body on the block's top, past its side.
+        /// The block's top, m.
+        const TOP_M: f32 = 23.39;
+        /// Records at rest, then records on the top.
+        const REST_RECORDS: usize = 10;
+        const TOP_RECORDS: usize = 20;
+        let below = Position {
+            x: 716.043,
+            y: 361.653,
+            z: BEACH_SAND_M,
+        };
+        let on_top = Position {
+            x: 715.746,
+            y: 362.924,
+            z: TOP_M,
+        };
+        assert!(!in_beach_block(below) && in_beach_block(on_top));
+        let ground = beach_block();
+        let mut body = TrackedBody::new(below);
+        for _ in 0..REST_RECORDS {
+            body.record(input(0, view_of(below, BOOM, [0.0; 2])), &ground, SEA);
+        }
+        let mut last = below;
+        for _ in 0..TOP_RECORDS {
+            last = body
+                .record(input(1, view_of(on_top, BOOM, [0.0; 2])), &ground, SEA)
+                .position;
+        }
+        assert!(in_beach_block(last), "{last:?}");
+        assert!((last.z - TOP_M).abs() < 0.01, "on the top: {last:?}");
     }
 
     #[test]

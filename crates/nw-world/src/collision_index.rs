@@ -331,6 +331,17 @@ impl CollisionIndex {
 
     /// The first solid surface on the line from `from` to `to`, either side of it.
     pub fn raycast(&self, from: Vec3, to: Vec3) -> Option<RayHit> {
+        self.first_hit(from, to, Faces::Both)
+    }
+
+    /// The first solid surface the line from `from` to `to` enters from outside: a line that
+    /// starts inside a solid meets none of that solid's faces on its way out.
+    pub fn entering_hit(&self, from: Vec3, to: Vec3) -> Option<RayHit> {
+        self.first_hit(from, to, Faces::Entering)
+    }
+
+    /// The first surface of `faces` on the line from `from` to `to`.
+    fn first_hit(&self, from: Vec3, to: Vec3, faces: Faces) -> Option<RayHit> {
         let direction = sub(to, from);
         let length = dot(direction, direction).sqrt();
         if length <= f32::EPSILON {
@@ -361,7 +372,7 @@ impl CollisionIndex {
                     if placed.bounds.clip(from, unit, reach).is_none() {
                         continue;
                     }
-                    for (t, normal) in self.hits_in_body(placed, from, unit, reach, Faces::Both) {
+                    for (t, normal) in self.hits_in_body(placed, from, unit, reach, faces) {
                         if best.is_none_or(|(known, _)| t < known) {
                             best = Some((t, normal));
                         }
@@ -1184,6 +1195,36 @@ mod tests {
             index.raycast([0.0, 0.0, 9.0], [20.0, 0.0, 9.0]),
             None,
             "over it"
+        );
+    }
+
+    #[test]
+    fn an_entering_ray_meets_a_wall_from_outside_only() {
+        // A box 2 m thick across x from x = 9 to x = 11.
+        let index = index(
+            vec![Geometry::Box {
+                half_extents: [1.0, 5.0, 2.0],
+            }],
+            vec![Body {
+                geometry: 0,
+                place: moved(10.0, 0.0, 2.0),
+            }],
+        );
+        let hit = index
+            .entering_hit([0.0, 0.0, 1.0], [20.0, 0.0, 1.0])
+            .expect("wall");
+        assert!((hit.point[0] - 9.0).abs() < TOLERANCE, "{hit:?}");
+        assert!((hit.normal[0] + 1.0).abs() < TOLERANCE);
+        assert_eq!(
+            index.entering_hit([10.0, 0.0, 1.0], [20.0, 0.0, 1.0]),
+            None,
+            "from inside, out"
+        );
+        assert!(
+            index
+                .raycast([10.0, 0.0, 1.0], [20.0, 0.0, 1.0])
+                .is_some(),
+            "the way out is a surface either side"
         );
     }
 

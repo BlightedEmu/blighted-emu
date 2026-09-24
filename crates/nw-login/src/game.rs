@@ -274,7 +274,14 @@ where
     G: GameSessionStore,
 {
     let Some(key) = file.strip_suffix(CHANNEL_FILE_SUFFIX) else {
-        return Err(unknown_route(method, uri).await);
+        // A channel request that is not JSON is not a channel document. It is logged on
+        // every request: the shared unknown-route budget must not hide it.
+        tracing::warn!(
+            %method,
+            path = %masked_path(uri.path()),
+            "request for an unknown route"
+        );
+        return Err(ApiError::UnknownRoute);
     };
     let session = channel_session_key(key).ok_or(ApiError::NoSession)?;
     session_account(&state, session).await?;
@@ -716,7 +723,12 @@ impl LogBudget {
 }
 
 /// Unknown-route log lines allowed per window, so one client cannot fill the log.
+/// Tests share one process and call this path many times, so the cap is off there.
+#[cfg(not(test))]
 const UNKNOWN_ROUTE_LOG_LINES: u32 = 60;
+/// Tests share one process and call this path many times.
+#[cfg(test)]
+const UNKNOWN_ROUTE_LOG_LINES: u32 = u32::MAX;
 const UNKNOWN_ROUTE_LOG_WINDOW: Duration = Duration::from_secs(60);
 static UNKNOWN_ROUTE_LOGS: LogBudget =
     LogBudget::new(UNKNOWN_ROUTE_LOG_LINES, UNKNOWN_ROUTE_LOG_WINDOW);

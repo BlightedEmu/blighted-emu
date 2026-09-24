@@ -47,6 +47,10 @@ pub(super) struct QuestTracker {
     completed: Vec<u64>,
     /// The quest ended and its end states are queued.
     ended: bool,
+    /// The client still has this objective pinned (1458). The first card pins it.
+    pinned: bool,
+    /// A new accept pins this quest (2709). Off when every client flag is 0.
+    auto_pin: bool,
     /// States to send, one per bundle.
     pending: VecDeque<ObjectivesState>,
 }
@@ -61,6 +65,8 @@ impl QuestTracker {
             version: FIRST_VERSION,
             tasks: Vec::new(),
             ended: false,
+            pinned: true,
+            auto_pin: true,
             pending: VecDeque::new(),
         }
     }
@@ -128,16 +134,32 @@ impl QuestTracker {
         }
     }
 
+    /// Keeps the client's auto-pin choice (2709) for the next accept.
+    pub(super) fn set_auto_pin(&mut self, on: bool) {
+        self.auto_pin = on;
+    }
+
+    /// The same tracker with auto-pin `on`.
+    pub(super) fn with_auto_pin(mut self, on: bool) -> Self {
+        self.auto_pin = on;
+        self
+    }
+
     /// The player accepted the quest, whose task list is `tasks`: the client learns it is tracked
     /// and active, with its tasks, in [`ACCEPT_REPEATS`] bundles at one new version (retail reply
     /// to a 3772; without the active record the journal shows nothing, live 2026-09-18).
+    /// A client that turned every auto-pin flag off gets the quest active and not tracked.
     pub(super) fn accept(&mut self, tasks: Vec<TaskProgress>) {
         self.tasks = tasks;
         self.version += 1;
-        let state = ObjectivesState {
+        let mut state = ObjectivesState {
             completed: None,
             ..self.first_state()
         };
+        if !self.auto_pin {
+            self.pinned = false;
+            state.tracked = self.list(Vec::new());
+        }
         self.pending
             .extend(std::iter::repeat_n(state, ACCEPT_REPEATS));
     }
@@ -174,6 +196,29 @@ impl QuestTracker {
             tracked: self.list(Vec::new()),
             active: self.list(Vec::new()),
             tasks: self.list(Vec::new()),
+            ..ObjectivesState::default()
+        });
+    }
+
+    /// The client pinned `objectives` (1458). This quest leaves the tracker when its instance
+    /// is not in the list, and comes back when the client pins it again.
+    pub(super) fn client_pins(&mut self, objectives: &[u64]) {
+        if self.ended {
+            return;
+        }
+        let pinned = objectives.contains(&self.instance);
+        if pinned == self.pinned {
+            return;
+        }
+        self.pinned = pinned;
+        self.version += 1;
+        let tracked = if pinned {
+            vec![self.instance]
+        } else {
+            Vec::new()
+        };
+        self.pending.push_back(ObjectivesState {
+            tracked: self.list(tracked),
             ..ObjectivesState::default()
         });
     }
@@ -322,5 +367,34 @@ mod tests {
         let change = tracker.take_change().expect("change");
         let entries = change.tasks.expect("tasks").elements;
         assert_eq!(entries[0].state, TaskWireState::Inactive);
+    }
+
+    #[test]
+    fn a_pin_list_hides_the_quest_and_a_later_pin_shows_it() {
+        let mut tracker = QuestTracker::new(TUTORIAL, PLAYER);
+        tracker.client_pins(&[]);
+        let hidden = tracker.take_change().expect("unpinned");
+        assert_eq!(hidden.tracked.map(|list| list.elements), Some(Vec::new()));
+        tracker.client_pins(&[]);
+        assert_eq!(tracker.take_change(), None, "the same pin changes nothing");
+        tracker.client_pins(&[tracker.instance]);
+        let shown = tracker.take_change().expect("pinned");
+        assert_eq!(
+            shown.tracked.map(|list| list.elements),
+            Some(vec![tracker.instance])
+        );
+    }
+
+    #[test]
+    fn an_accept_with_auto_pin_off_is_not_tracked() {
+        let mut tracker = QuestTracker::new(TUTORIAL, PLAYER);
+        tracker.set_auto_pin(false);
+        tracker.accept(vec![task(1, 0, false)]);
+        let accepted = tracker.take_change().expect("accepted");
+        assert_eq!(
+            accepted.tracked.map(|list| list.elements),
+            Some(Vec::new()),
+            "every auto-pin flag off leaves the quest untracked"
+        );
     }
 }

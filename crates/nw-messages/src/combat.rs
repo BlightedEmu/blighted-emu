@@ -15,6 +15,8 @@ pub const ON_DAMAGE_TYPE_INDEX: u64 = 3601;
 pub const MELEE_HIT_TYPE_INDEX: u64 = 2218;
 /// `VitalsComponentClientFacet_ClientSyncDeathRecap`.
 pub const DEATH_RECAP_TYPE_INDEX: u64 = 4299;
+/// `VitalsComponentClientFacet_OnHealedPlayer`.
+pub const ON_HEALED_TYPE_INDEX: u64 = 4298;
 /// `PlayerComponentServerFacet_RequestRespawn` (client to server).
 pub const REQUEST_RESPAWN_TYPE_INDEX: u64 = 1938;
 /// The item tag of 86 of 93 captured training-dummy hits (`DamageTypeData` `Corruption`), and of a
@@ -61,6 +63,22 @@ const NO_CAMERA_SHAKE: u32 = 0;
 /// Flags (little-endian `u16`) of every retail 3601 of a creature's melee hit (swing note:
 /// `02 00` on all tutorial hits; the Azoth catalog names it a direct hit).
 const MELEE_HIT_FLAGS: u16 = 0x0002;
+
+/// The `DamageTypeData` `IntID` of `Falling` (run-15 fall study: the item tag of all 385
+/// retail fall hits).
+pub const FALLING_TAG: u8 = 2;
+/// Flags of a retail fall 3601 (385 of 385: `12 00`).
+const FALL_DAMAGE_FLAGS: u16 = 0x0012;
+/// Flags of the 2071 a fall sends its own player (385 of 385: `22 00`).
+const FALL_DEALT_FLAGS: u16 = 0x0022;
+/// Flags of a retail 3601 of a damage-over-time tick (`08 00`; catacombs capture: 79 ticks two
+/// seconds apart, `AI_Bleed`/`AI_Poison` `TickRate` 2).
+const OVER_TIME_FLAGS: u16 = 0x0008;
+/// No hit volume and no camera shake (retail fall 2071).
+const NO_HIT_VOLUME: u32 = 0;
+/// Hit flags: the damage came from a status effect (`IsFromStatusEffect`, the tenth name of
+/// `eDamageDealtInfo_NetworkData_Flags`; retail pairs it with the over-time 3601).
+const HIT_FLAG_FROM_STATUS_EFFECT: u16 = 0x0200;
 
 /// One damage item (`FUN_145b56640`, `FUN_145ce6260`): a tag byte and two big-endian `f32`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -289,6 +307,59 @@ impl BodyCodec for DamageDealtMsg {
     }
 }
 
+/// Type 4298: the heal number the healer sees (HiveDynastiHealer: vitals header, the healed
+/// player's facet entity, then the amount as a big-endian `f32`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OnHealedMsg {
+    /// The vitals-component target.
+    pub head_a: u64,
+    /// The vitals-component entity.
+    pub head_b: u64,
+    /// The player who received the heal.
+    pub healed: u64,
+    /// Health restored.
+    pub amount: f32,
+}
+
+impl OnHealedMsg {
+    /// Player `seer` is told that player `healed` gained `amount` health.
+    pub fn of(seer: u64, healed: u64, amount: f32) -> Self {
+        let header = FacetHeader::of_child(component::VITALS, component::STATS_CHILD, seer);
+        Self {
+            head_a: header.target,
+            head_b: header.entity,
+            healed: facet_entity(healed),
+            amount,
+        }
+    }
+}
+
+impl BodyCodec for OnHealedMsg {
+    const TYPE_INDEX: u64 = ON_HEALED_TYPE_INDEX;
+
+    fn encode(&self) -> Result<Vec<u8>, MessageError> {
+        let mut writer = Writer::new();
+        Ok(writer
+            .u64(self.head_a)
+            .u64(self.head_b)
+            .u64(self.healed)
+            .f32(self.amount)
+            .finish())
+    }
+
+    fn decode(body: &[u8]) -> Result<Self, MessageError> {
+        let mut reader = Reader::new(body);
+        let message = Self {
+            head_a: reader.u64()?,
+            head_b: reader.u64()?,
+            healed: reader.u64()?,
+            amount: reader.f32()?,
+        };
+        reader.finish()?;
+        Ok(message)
+    }
+}
+
 /// Type 3601: damage the player takes.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OnDamageMsg {
@@ -353,6 +424,81 @@ impl OnDamageMsg {
             u32_d: (total / damage.max_health).to_bits(),
             triple: damage.attacker_at.map(f32::to_bits),
             items,
+        }
+    }
+}
+
+impl OnDamageMsg {
+    /// Player `player` fell and lost `amount` of its `max_health` (run-15 fall study, 385 retail
+    /// hits): the attacker is the player itself, the fall flags, no position, one `Falling` item
+    /// of scale 1.
+    pub fn fall(player: u64, amount: f32, max_health: f32) -> Self {
+        let header = FacetHeader::of_child(component::VITALS, component::STATS_CHILD, player);
+        Self {
+            head_a: header.target,
+            head_b: header.entity,
+            u64_c: facet_entity(player),
+            raw_2: FALL_DAMAGE_FLAGS.to_le_bytes(),
+            u32_d: (amount / max_health).to_bits(),
+            triple: [0; 3],
+            items: vec![DamageItem {
+                tag: FALLING_TAG,
+                amount,
+                scale: NEUTRAL_SCALE,
+            }],
+        }
+    }
+
+    /// A tick of a damage-over-time effect of `source`, standing at `source_at`, took `item` of
+    /// the `max_health` of player `target` (retail: the over-time flags, the source's facet
+    /// entity and position).
+    pub fn over_time(
+        target: u64,
+        source: u64,
+        source_at: [f32; 3],
+        item: DamageItem,
+        max_health: f32,
+    ) -> Self {
+        let header = FacetHeader::of_child(component::VITALS, component::STATS_CHILD, target);
+        Self {
+            head_a: header.target,
+            head_b: header.entity,
+            u64_c: facet_entity(source),
+            raw_2: OVER_TIME_FLAGS.to_le_bytes(),
+            u32_d: (item.amount / max_health).to_bits(),
+            triple: source_at.map(f32::to_bits),
+            items: vec![item],
+        }
+    }
+}
+
+impl DamageDealtMsg {
+    /// The fall of player `player` that took `amount`, told to the player itself (retail 0 to 4
+    /// ms after the fall 3601: the player as the target, no hit volume, no camera shake, flags
+    /// `0x22`, one `Falling` item).
+    pub fn fall(player: u64, amount: f32) -> Self {
+        Self {
+            u32_d: NO_HIT_VOLUME,
+            u32_e: NO_CAMERA_SHAKE,
+            raw_2: FALL_DEALT_FLAGS.to_le_bytes(),
+            items: vec![DamageItem {
+                tag: FALLING_TAG,
+                amount,
+                scale: NEUTRAL_SCALE,
+            }],
+            ..Self::hit(player, player, amount, false)
+        }
+    }
+
+    /// A tick of a damage-over-time effect that player `attacker` put on `target` took `item`,
+    /// `killed` when it killed it: the status-effect flag, no hit volume, no camera shake.
+    pub fn over_time(attacker: u64, target: u64, item: DamageItem, killed: bool) -> Self {
+        Self {
+            u32_d: NO_HIT_VOLUME,
+            u32_e: NO_CAMERA_SHAKE,
+            raw_2: hit_flags(HIT_FLAG_FROM_STATUS_EFFECT, false, killed).to_le_bytes(),
+            items: vec![item],
+            ..Self::hit(attacker, target, item.amount, killed)
         }
     }
 }
@@ -718,6 +864,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_heal_number_is_the_healer_capture() {
+        // HiveDynastiHealer: vitals header, the healed player, amount 314.88867.
+        const BODY: &str = "ced4d31dedf93e30e34e14f344a974cc8f06874522d0bd3f439d71c0";
+        let body: Vec<u8> = (0..BODY.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&BODY[index..index + 2], 16).expect("hex"))
+            .collect();
+        let message = OnHealedMsg::decode(&body).expect("decode");
+        assert!((message.amount - 314.888_67).abs() < 0.001);
+        assert_eq!(OnHealedMsg::decode(&message.encode().expect("encode")).expect("back"), message);
+    }
+
+    #[test]
     fn an_absorbed_hit_is_the_retail_body() {
         // Retail Thorpe intermission (494210 of the tutorial capture): torso, camera shake
         // `664b2673`, flags `2004`, one item `06 00000000 00000000`.
@@ -1030,5 +1189,51 @@ mod tests {
         .expect("encode");
         body[16] = 2;
         assert!(RequestRespawnMsg::decode(&body).is_err());
+    }
+
+    /// A fall of a quarter of the max health.
+    const FALL_SHARE: f32 = 0.25;
+    const FALL_MAX_HEALTH: f32 = 1000.0;
+
+    #[test]
+    fn a_fall_is_the_retail_3601_and_2071() {
+        let amount = FALL_SHARE * FALL_MAX_HEALTH;
+        let fall = OnDamageMsg::fall(TARGET, amount, FALL_MAX_HEALTH);
+        assert_eq!(fall.u64_c, facet_entity(TARGET), "the player is its own attacker");
+        assert_eq!(fall.raw_2, [0x12, 0x00]);
+        assert_eq!(f32::from_bits(fall.u32_d), FALL_SHARE);
+        assert_eq!(fall.triple, [0; 3]);
+        assert_eq!(
+            fall.items,
+            vec![DamageItem {
+                tag: FALLING_TAG,
+                amount,
+                scale: NEUTRAL_SCALE,
+            }]
+        );
+        let body = fall.encode().expect("encode");
+        assert_eq!(OnDamageMsg::decode(&body), Ok(fall));
+        let dealt = DamageDealtMsg::fall(TARGET, amount);
+        assert_eq!(dealt.u64_c, facet_entity(TARGET), "the player is the target");
+        assert_eq!((dealt.u32_d, dealt.u32_e, dealt.raw_2), (0, 0, [0x22, 0x00]));
+        let body = dealt.encode().expect("encode");
+        assert_eq!(DamageDealtMsg::decode(&body), Ok(dealt));
+    }
+
+    #[test]
+    fn an_over_time_tick_names_its_source_with_the_over_time_flags() {
+        let item = DamageItem {
+            tag: HIT_TAG,
+            amount: AMOUNT,
+            scale: NEUTRAL_SCALE,
+        };
+        let tick = OnDamageMsg::over_time(TARGET, ATTACKER, [1.0, 2.0, 3.0], item, FALL_MAX_HEALTH);
+        assert_eq!(tick.raw_2, [0x08, 0x00]);
+        assert_eq!(tick.u64_c, facet_entity(ATTACKER));
+        assert_eq!(f32::from_bits(tick.u32_d), AMOUNT / FALL_MAX_HEALTH);
+        assert_eq!(tick.triple.map(f32::from_bits), [1.0, 2.0, 3.0]);
+        let dealt = DamageDealtMsg::over_time(ATTACKER, TARGET, item, true);
+        assert_eq!(dealt.raw_2, [0x08, 0x02], "status effect and kill flags");
+        assert_eq!(dealt.items, vec![item]);
     }
 }

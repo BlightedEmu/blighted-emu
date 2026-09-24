@@ -899,8 +899,8 @@ mod tests {
     const VITALS_COMPONENT: u64 = 9;
     const EXTRA_COMPONENT: u64 = 12;
     const UNREAD_COMPONENT: u64 = 13;
-    /// `Javelin::GroupDataComponentReplicatedState`: no reader here or in `extra_members`.
-    const UNREAD_CLASS: u64 = 3451;
+    /// A class with no reader here or in `extra_members`. 3451 is the group data state.
+    const UNREAD_CLASS: u64 = 65_000;
     /// Body bytes of the unread member.
     const UNREAD_BODY: [u8; 4] = [0; 4];
     /// A loot drop body: slot 0, child 0, a `u32`.
