@@ -206,6 +206,13 @@ impl TrackedBody {
         self.character.is_swimming()
     }
 
+    /// Whether it falls and is not in a jump or a swim.
+    pub const fn is_falling(&self) -> bool {
+        !self.character.is_grounded()
+            && !self.character.is_jumping()
+            && !self.character.is_swimming()
+    }
+
     /// The camera boom it holds, once a camera fitted.
     pub const fn boom_m(&self) -> Option<f32> {
         self.camera.boom_m()

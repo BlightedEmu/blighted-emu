@@ -67,6 +67,8 @@ const SWARMER_CORPSE_MS: u64 = 7_101;
 const SHIP_SINKING_VIDEO: &str = "ftue_intro3";
 /// Time from the start of that video to the move (retail 13.5 s).
 const WATER_MOVE_DELAY_MS: u64 = 13_500;
+/// The cutscene after the sink move: the body stays at [`WATER_AT`] until this ends.
+const WATER_HOLD_CUTSCENE: &str = "FTUE_S1";
 /// Where the player comes into the water (retail own position after the move).
 pub(super) const WATER_AT: Position = Position {
     x: 793.84,
@@ -669,8 +671,11 @@ pub(super) enum Order {
     /// The player's potions of this item become a new stack of this many in quick slot 1, and
     /// its cooldowns end (retail when the quest ends).
     RefillPotions(String, u32),
-    /// Move the player here, facing `facing` (yaw, radians).
-    MoveTo(Position, f32),
+    /// Put the player here and hold them until [`Order::ReleaseHold`] (the tutorial water
+    /// place: retail keeps `z` at [`WATER_AT`] until `FTUE_S1` ends).
+    HoldAt(Position, f32),
+    /// Let a held player fall from where they are.
+    ReleaseHold,
     /// The player gets the experience of a kill of a mob of this level (`RewardData`
     /// `KillExperience`, times `javelin.xp-multipliers.character`; retail: 20 per legion or
     /// corrupted kill, 120 in all, xp-potion-exit note, section 1).
@@ -1163,6 +1168,11 @@ impl Tutorial {
                 self.water_at_ms = Some(now_ms.saturating_add(WATER_MOVE_DELAY_MS));
             }
             Event::CinematicEnded(video) if video == sinking => self.move_to_water(&mut orders),
+            Event::CutsceneEnded(cutscene)
+                if cutscene == lowercase_crc32(WATER_HOLD_CUTSCENE) =>
+            {
+                orders.push(Order::ReleaseHold);
+            }
             _ => {}
         }
         let effects = self.run.event(event, now_ms);
@@ -1174,7 +1184,7 @@ impl Tutorial {
         if !std::mem::replace(&mut self.moved_to_water, true) {
             self.water_at_ms = None;
             self.respawn_at = WATER_AT;
-            orders.push(Order::MoveTo(WATER_AT, WATER_FACING));
+            orders.push(Order::HoldAt(WATER_AT, WATER_FACING));
             orders.push(Order::ShowIsland);
             self.assets.on(Trigger::WaterMove, self.now_ms);
             tracing::info!(player = self.owner, "tutorial: into the water");
@@ -1917,14 +1927,20 @@ pub(crate) mod tests {
             SHIP,
             NOW + WATER_MOVE_DELAY_MS - 1,
         );
-        assert!(!early.contains(&Order::MoveTo(WATER_AT, WATER_FACING)));
+        assert!(!early.contains(&Order::HoldAt(WATER_AT, WATER_FACING)));
         let due = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + WATER_MOVE_DELAY_MS);
-        assert!(due.contains(&Order::MoveTo(WATER_AT, WATER_FACING)));
+        assert!(due.contains(&Order::HoldAt(WATER_AT, WATER_FACING)));
         let ended = tutorial.event(Event::CinematicEnded(sinking), &mut mobs, NOW);
         assert!(
-            !ended.contains(&Order::MoveTo(WATER_AT, WATER_FACING)),
+            !ended.contains(&Order::HoldAt(WATER_AT, WATER_FACING)),
             "once only"
         );
+        let released = tutorial.event(
+            Event::CutsceneEnded(lowercase_crc32(WATER_HOLD_CUTSCENE)),
+            &mut mobs,
+            NOW + WATER_MOVE_DELAY_MS,
+        );
+        assert!(released.contains(&Order::ReleaseHold));
     }
 
     #[test]

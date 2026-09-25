@@ -547,6 +547,8 @@ struct Player {
     /// Until this server time the client camera does not carry the body: the inventory camera
     /// is open, or still gliding back. Its inputs move nothing (retail held the player still).
     camera_held_until_ms: Option<u64>,
+    /// The tutorial water hold: the body stays at [`encounter::WATER_AT`] until `FTUE_S1` ends.
+    water_held: bool,
     /// Its inventory is open (`lookingThroughLoadout` of its 3935 state), as its client said in
     /// its newest 3970.
     looking_through_loadout: bool,
@@ -1468,9 +1470,10 @@ impl SimWorld {
             Some(ground) => ground,
             None => &*self.ground,
         };
-        let held = player
-            .camera_held_until_ms
-            .is_some_and(|until| now_ms < until);
+        let held = player.water_held
+            || player
+                .camera_held_until_ms
+                .is_some_and(|until| now_ms < until);
         if let Some(load) = player.gear.as_ref().and_then(|gear| {
             self.content.equip_load(
                 EQUIP_LOAD_SLOTS
@@ -1509,6 +1512,8 @@ impl SimWorld {
             }
             player.input_counter = Some(counter);
             read_any = true;
+            let swimming = player.tracked.is_swimming();
+            let falling = player.tracked.is_falling();
             player.slayer.record(slayer::SlayerRecord {
                 counter,
                 frame_s: input.character.dt_s,
@@ -1519,6 +1524,8 @@ impl SimWorld {
                     released: !held && record.attack_released(),
                 },
                 weapon,
+                swimming,
+                falling,
             }, combat.player_sequences());
             if held {
                 continue;
@@ -2481,8 +2488,24 @@ impl SimWorld {
                 if self.mob_order(entity, number, &order, now_ms) {
                     continue;
                 }
-                if let Order::MoveTo(position, facing) = order {
-                    self.place_player(entity, position, Some(facing), Placement::Drop, now_ms);
+                if let Order::HoldAt(position, facing) = order {
+                    self.place_player(entity, position, Some(facing), Placement::Stand, now_ms);
+                    if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                        player.water_held = true;
+                    }
+                    continue;
+                }
+                if let Order::ReleaseHold = order {
+                    let at = self
+                        .world
+                        .get::<Body>(entity)
+                        .map(|body| body.motion.position());
+                    if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+                        player.water_held = false;
+                    }
+                    if let Some(at) = at {
+                        self.place_player(entity, at, None, Placement::Drop, now_ms);
+                    }
                     continue;
                 }
                 let Some(mut player) = self.world.get_mut::<Player>(entity) else {
@@ -2603,7 +2626,8 @@ impl SimWorld {
                         let blow = ServerMessage::MeleeHit(MeleeHitMsg::on(number, false));
                         send_now(&mut self.combat_messages, &player.connection, &[blow]);
                     }
-                    Order::MoveTo(..)
+                    Order::HoldAt(..)
+                    | Order::ReleaseHold
                     | Order::PlayMove { .. }
                     | Order::Swing { .. }
                     | Order::Shove { .. } => {}
@@ -2977,6 +3001,12 @@ impl SimWorld {
                     if std::mem::replace(&mut player.looking_through_loadout, *looking) != *looking
                     {
                         player.loadout_change_due = true;
+                        let started = player.input_counter.unwrap_or(0);
+                        if *looking {
+                            player.slayer.open_loadout(started, now_ms);
+                        } else {
+                            player.slayer.close_loadout(started);
+                        }
                     }
                 }
                 return Ok(());
@@ -3636,6 +3666,7 @@ impl SimWorld {
                     refused_since_ms: None,
                     last_grounded: Some(motion.position()),
                     camera_held_until_ms: None,
+                    water_held: false,
                     looking_through_loadout: false,
                     loadout_change_due: false,
                     own_spawned_ms: None,
@@ -9571,19 +9602,29 @@ mod tests {
     }
 
     #[test]
-    fn the_move_into_the_water_drops_the_player_into_the_sea() {
-        // Run 13: after the move the server's body stayed at the place 7.6 m above the sea, the
-        // client hung there with it, and the walked floor kept it there.
+    fn the_move_into_the_water_holds_until_the_cutscene_then_drops() {
+        // Retail newchar 2026-09-18: the body stays at WATER_AT until FTUE_S1 ends, then
+        // it falls to the swim floor. A drop during the video puts the client on the seabed
+        // before it has control (live 2026-09-22).
         let mut world = tutorial_world_on(Arc::new(FlatGround(WATER_SEABED_M)));
         let water = encounter::WATER_AT;
-        world.carry_out(1, vec![Order::MoveTo(water, encounter::WATER_FACING)], NOW);
+        world.carry_out(1, vec![Order::HoldAt(water, encounter::WATER_FACING)], NOW);
         assert_eq!(body_of_first(&world), water);
         let swim = nw_sim_core::character::swim_floor(OCEAN_LEVEL_M);
         let mut shown: std::collections::VecDeque<Position> =
             std::iter::repeat_n(water, CLIENT_LAG_RECORDS).collect();
         let mut body = water;
-        let mut landed = None;
         for counter in 1..=REST_RECORDS {
+            shown.push_back(body);
+            let client = shown.pop_front().expect("lagged places");
+            let record = camera_record(counter, client, TUTORIAL_VIEW, [0.0; 2], STANDING_SLOTS);
+            let next = after_record(&mut world, counter, record);
+            assert_eq!(next, water, "record {counter}: it left the hold");
+            body = next;
+        }
+        world.carry_out(1, vec![Order::ReleaseHold], NOW + 1);
+        let mut landed = None;
+        for counter in REST_RECORDS + 1..=REST_RECORDS * 2 {
             shown.push_back(body);
             let client = shown.pop_front().expect("lagged places");
             let record = camera_record(counter, client, TUTORIAL_VIEW, [0.0; 2], STANDING_SLOTS);
@@ -9601,7 +9642,6 @@ mod tests {
             None,
             "the place in the air is no floor"
         );
-        // Run 15: the client stood at the swim height until its own state said deep water.
         let entity = world.player_by_number(1).expect("player");
         let player = world.world.get::<Player>(entity).expect("player");
         assert_eq!(

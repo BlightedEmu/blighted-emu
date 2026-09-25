@@ -59,6 +59,45 @@ mod movement {
     pub(super) const STOP_RECORDS: u16 = 39;
 }
 
+/// The slayer states the server starts while the player swims or falls into the water (retail
+/// newchar 2026-09-18: own-retail `13=06 15=a021` idle, `15=b621` / `a52e` / `972e` while
+/// moving, `13=0d 15=9d3c` while falling; never `1a` / `1b` / `1f` until the beach).
+mod swim {
+    /// `slayerStateId` of swimming (`13=06`).
+    pub(super) const STATE: u64 = 0x06;
+    /// `slayerStateId` of falling (`13=0d`).
+    pub(super) const FALL_STATE: u64 = 0x0d;
+    /// Standing still in the water: `a021`.
+    pub(super) const IDLE_SEQUENCE: u64 = 2144;
+    /// A swim forward or to the side: `b621`.
+    pub(super) const MOVE_SEQUENCE: u64 = 2166;
+    /// A swim back: `a52e`.
+    pub(super) const BACK_SEQUENCE: u64 = 2981;
+    /// The keys let go: `972e`.
+    pub(super) const STOP_SEQUENCE: u64 = 2967;
+    /// Falling into the water: `9d3c`.
+    pub(super) const FALL_SEQUENCE: u64 = 3869;
+}
+
+/// The second slayer slot of the inventory open, its loop, and its close (retail newchar
+/// 2026-09-18: `16=23 18=962b` at the open, `18=890a` after [`loadout::LOOP_MS`], `18=8b2e`
+/// then `16=2d 18=00` at the close). A miss of this slot rolls the client's prediction back
+/// and closes the UI (`FUN_1421ae2c0` / `FUN_14486f2a0`).
+mod loadout {
+    /// `16=23`.
+    pub(super) const OPEN_STATE: u64 = 0x23;
+    /// `16=2d`.
+    pub(super) const CLOSED_STATE: u64 = 0x2d;
+    /// `962b`.
+    pub(super) const OPEN_SEQUENCE: u64 = 2774;
+    /// `890a`.
+    pub(super) const LOOP_SEQUENCE: u64 = 649;
+    /// `8b2e`.
+    pub(super) const CLOSE_SEQUENCE: u64 = 2955;
+    /// Time from the open to the loop sequence, ms.
+    pub(super) const LOOP_MS: u64 = 1_530;
+}
+
 /// The movement states and sequences of one moment: the sheathed ones, the stance's drawn ones,
 /// or its block and aim walk while the right-click is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,6 +117,15 @@ impl MoveSet {
         stop: (movement::MOVE_STATE, movement::STOP_SEQUENCE),
         restart: (movement::MOVE_STATE, movement::RESTART_SEQUENCE),
         idle: (movement::IDLE_STATE, movement::IDLE_SEQUENCE),
+    };
+
+    /// The swim movement of the newchar capture.
+    const SWIMMING: Self = Self {
+        start: (swim::STATE, swim::MOVE_SEQUENCE),
+        back_start: (swim::STATE, swim::BACK_SEQUENCE),
+        stop: (swim::STATE, swim::STOP_SEQUENCE),
+        restart: (swim::STATE, swim::MOVE_SEQUENCE),
+        idle: (swim::STATE, swim::IDLE_SEQUENCE),
     };
 
     /// The movement of `stance` (the weapon `drawn` or not) with the right-click held or not.
@@ -212,6 +260,10 @@ pub(super) struct SlayerRecord {
     pub(super) attack: AttackKey,
     /// The weapon in the hand.
     pub(super) weapon: Option<HeldWeapon>,
+    /// The body swims ([`nw_sim_core::TrackedBody::is_swimming`]).
+    pub(super) swimming: bool,
+    /// The body falls and is not in a jump ([`nw_sim_core::TrackedBody::is_falling`]).
+    pub(super) falling: bool,
 }
 
 /// What one own state carries of the slayer state.
@@ -223,6 +275,40 @@ pub(super) struct SlayerDue {
     pub(super) time: Option<SequenceTime>,
     /// The slots past the first and the marker, when they changed or echo.
     pub(super) slots: Option<UpperSlots>,
+}
+
+/// The inventory's second slayer slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum LoadoutPlay {
+    /// No inventory slot.
+    #[default]
+    Closed,
+    /// The open sequence, until [`loadout::LOOP_MS`].
+    Opening {
+        /// The ALC state that started it.
+        started: u16,
+        /// When the client opened it.
+        opened_ms: u64,
+    },
+    /// The loop sequence while it stays open.
+    Looping {
+        /// The ALC state that started the open.
+        started: u16,
+    },
+    /// The close sequence, echoed [`ECHO_STATES`] times.
+    Closing {
+        /// The ALC state that started the close.
+        started: u16,
+        /// Own states left that carry the close sequence.
+        left: u8,
+    },
+    /// The clear to `16=2d`, echoed [`ECHO_STATES`] times.
+    Cleared {
+        /// The ALC state that started the clear.
+        started: u16,
+        /// Own states left that carry the clear.
+        left: u8,
+    },
 }
 
 /// One player's slayer state.
@@ -258,6 +344,12 @@ pub(super) struct SlayerTrack {
     drawn: bool,
     /// The player's own movement.
     locomotion: Locomotion,
+    /// The last record was a fall the server already started.
+    in_air: bool,
+    /// The last record was a swim the server already started.
+    in_water: bool,
+    /// The inventory's second slayer slot.
+    loadout: LoadoutPlay,
     /// The newest slayer state, and how many more own states carry it.
     current: Option<SlayerState>,
     repeats: u8,
@@ -295,12 +387,29 @@ impl SlayerTrack {
         let drawn = record.weapon.is_some_and(|weapon| weapon.drawn);
         let upper = self.upper_slots(&record, stance, drawn);
         let alt = drawn && record.intent.is_some_and(|intent| intent.block);
-        let set = MoveSet::of(stance, drawn, alt);
-        let mut movement = record.intent.and_then(|intent| {
-            let (next, started) = self.locomotion.step(intent, set);
-            self.locomotion = next;
-            started
-        });
+        let set = if record.swimming {
+            MoveSet::SWIMMING
+        } else {
+            MoveSet::of(stance, drawn, alt)
+        };
+        let entered_air = record.falling && !record.swimming && !self.in_air;
+        let entered_water = record.swimming && !self.in_water;
+        self.in_air = record.falling && !record.swimming;
+        if entered_water {
+            self.locomotion = Locomotion::Idle;
+        }
+        self.in_water = record.swimming;
+        let mut movement = if entered_air {
+            Some((swim::FALL_STATE, swim::FALL_SEQUENCE))
+        } else if entered_water {
+            Some(set.idle)
+        } else {
+            record.intent.and_then(|intent| {
+                let (next, started) = self.locomotion.step(intent, set);
+                self.locomotion = next;
+                started
+            })
+        };
         if upper.is_some() && movement.is_none() {
             // The walk changes with the block or aim: retail sent the new walk sequence in the
             // state of the right-click (`15=af10` with the aim).
@@ -470,18 +579,100 @@ impl SlayerTrack {
         slots_of(stance.alt_fire?, record.counter).map(Shot::Aimed)
     }
 
+    /// Starts the inventory's second slayer slot in record `started` at `now_ms`.
+    pub(super) fn open_loadout(&mut self, started: u16, now_ms: u64) {
+        self.loadout = LoadoutPlay::Opening {
+            started,
+            opened_ms: now_ms,
+        };
+    }
+
+    /// Closes the inventory's second slayer slot, started in record `started`.
+    pub(super) fn close_loadout(&mut self, started: u16) {
+        if !matches!(self.loadout, LoadoutPlay::Closed) {
+            self.loadout = LoadoutPlay::Closing {
+                started,
+                left: ECHO_STATES,
+            };
+        }
+    }
+
+    /// Moves the inventory slot on at `state_ms`: the loop after [`loadout::LOOP_MS`], then the
+    /// close echoes, then the clear to `16=2d`.
+    fn step_loadout(&mut self, state_ms: u64) {
+        match self.loadout {
+            LoadoutPlay::Opening { started, opened_ms }
+                if state_ms.saturating_sub(opened_ms) >= loadout::LOOP_MS =>
+            {
+                self.loadout = LoadoutPlay::Looping { started };
+            }
+            LoadoutPlay::Closing { started, left } if left == 0 => {
+                self.loadout = LoadoutPlay::Cleared {
+                    started,
+                    left: ECHO_STATES,
+                };
+            }
+            LoadoutPlay::Cleared { left, .. } if left == 0 => {
+                self.loadout = LoadoutPlay::Closed;
+            }
+            _ => {}
+        }
+    }
+
+    /// The inventory's second slot for this own state, when it is open or closing.
+    fn loadout_slots(&self) -> Option<UpperSlots> {
+        let (state, started, sequence) = match self.loadout {
+            LoadoutPlay::Closed => return None,
+            LoadoutPlay::Opening { started, .. } => {
+                (Some(loadout::OPEN_STATE), started, Some(loadout::OPEN_SEQUENCE))
+            }
+            LoadoutPlay::Looping { started } => {
+                (Some(loadout::OPEN_STATE), started, Some(loadout::LOOP_SEQUENCE))
+            }
+            LoadoutPlay::Closing { started, .. } => {
+                (None, started, Some(loadout::CLOSE_SEQUENCE))
+            }
+            LoadoutPlay::Cleared { started, .. } => {
+                (Some(loadout::CLOSED_STATE), started, Some(0))
+            }
+        };
+        Some(UpperSlots {
+            second: SlotChange {
+                state,
+                started: Some(started),
+                sequence,
+            },
+            ..UpperSlots::default()
+        })
+    }
+
+    fn consume_loadout_echo(&mut self) {
+        match &mut self.loadout {
+            LoadoutPlay::Closing { left, .. } | LoadoutPlay::Cleared { left, .. } => {
+                *left = left.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
     /// Moves on to the tick whose own state is numbered `number` at state time `state_ms`: its
     /// slayer state is a newly started one, else the server's follow-up, else the last change once
     /// more ([`ECHO_STATES`]); its sequence time goes with every own state. The players who see
     /// this one get the newest state at once ([`SlayerTrack::current`]).
     pub(super) fn advance(&mut self, number: u16, state_ms: u64) {
+        self.step_loadout(state_ms);
         let (state, started) = self.next(number);
         let sequence_s = self.sequence_s;
         let time = self
             .clock
             .as_mut()
             .map(|clock| clock.time(sequence_s, started, state_ms));
-        let slots = self.next_upper();
+        let slots = match (self.next_upper(), self.loadout_slots()) {
+            (Some(upper), Some(loadout)) => Some(merge(upper, loadout)),
+            (Some(upper), None) | (None, Some(upper)) => Some(upper),
+            (None, None) => None,
+        };
+        self.consume_loadout_echo();
         self.remote = slots.map(|slots| RemoteUpper {
             slots,
             after_state: self.upper_after_state,
@@ -743,6 +934,8 @@ mod tests {
             intent: Some(intent),
             attack: AttackKey::default(),
             weapon: None,
+            swimming: false,
+            falling: false,
         }
     }
 
@@ -1150,8 +1343,93 @@ mod tests {
             (movement::STOP_SEQUENCE, [0xbd, 0x15]),
             (movement::RESTART_SEQUENCE, [0xb6, 0x25]),
             (movement::IDLE_SEQUENCE, [0xb9, 0x10]),
+            (swim::IDLE_SEQUENCE, [0xa0, 0x21]),
+            (swim::MOVE_SEQUENCE, [0xb6, 0x21]),
+            (swim::BACK_SEQUENCE, [0xa5, 0x2e]),
+            (swim::STOP_SEQUENCE, [0x97, 0x2e]),
+            (swim::FALL_SEQUENCE, [0x9d, 0x3c]),
+            (loadout::OPEN_SEQUENCE, [0x96, 0x2b]),
+            (loadout::LOOP_SEQUENCE, [0x89, 0x0a]),
+            (loadout::CLOSE_SEQUENCE, [0x8b, 0x2e]),
         ] {
             assert_eq!(bytes(sequence), retail, "{sequence}");
         }
+    }
+
+    #[test]
+    fn swimming_uses_the_retail_swim_states_and_falling_uses_the_fall_state() {
+        let table = table();
+        let forward = Intent::of_keys(true, false, false, false);
+        let mut track = spawned();
+        let mut counter = 200;
+        let mut step = |track: &mut SlayerTrack, intent: Intent, swimming, falling| {
+            counter += 1;
+            track.record(
+                SlayerRecord {
+                    swimming,
+                    falling,
+                    ..quiet_record(counter, intent)
+                },
+                &table,
+            );
+            own_state(track, counter).state
+        };
+        let fall = step(&mut track, Intent::default(), false, true).expect("a fall");
+        assert_eq!(
+            (fall.state, fall.sequence),
+            (Some(swim::FALL_STATE), swim::FALL_SEQUENCE)
+        );
+        assert_eq!(
+            step(&mut track, Intent::default(), false, true),
+            Some(fall),
+            "the fall echoes, it does not start again"
+        );
+        let idle = step(&mut track, Intent::default(), true, false).expect("a swim idle");
+        assert_eq!(
+            (idle.state, idle.sequence),
+            (Some(swim::STATE), swim::IDLE_SEQUENCE)
+        );
+        let swim = step(&mut track, forward, true, false).expect("a swim start");
+        assert_eq!(
+            (swim.state, swim.sequence),
+            (Some(swim::STATE), swim::MOVE_SEQUENCE)
+        );
+        let stop = step(&mut track, Intent::default(), true, false).expect("a swim stop");
+        assert_eq!(
+            (stop.state, stop.sequence),
+            (Some(swim::STATE), swim::STOP_SEQUENCE)
+        );
+    }
+
+    #[test]
+    fn the_inventory_slot_opens_loops_and_closes_like_retail() {
+        let mut track = spawned();
+        track.open_loadout(0x11a9, 0);
+        let open = own_state(&mut track, 1).slots.expect("the open");
+        assert_eq!(
+            (open.second.state, open.second.started, open.second.sequence),
+            (
+                Some(loadout::OPEN_STATE),
+                Some(0x11a9),
+                Some(loadout::OPEN_SEQUENCE)
+            )
+        );
+        track.advance(2, loadout::LOOP_MS);
+        let looping = track.take_due().slots.expect("the loop");
+        assert_eq!(looping.second.sequence, Some(loadout::LOOP_SEQUENCE));
+        track.close_loadout(0x1264);
+        let close = own_state(&mut track, 3).slots.expect("the close");
+        assert_eq!(close.second.sequence, Some(loadout::CLOSE_SEQUENCE));
+        assert_eq!(
+            own_state(&mut track, 4).slots.expect("the close again").second.sequence,
+            Some(loadout::CLOSE_SEQUENCE)
+        );
+        let clear = own_state(&mut track, 5).slots.expect("the clear");
+        assert_eq!(
+            (clear.second.state, clear.second.sequence),
+            (Some(loadout::CLOSED_STATE), Some(0))
+        );
+        own_state(&mut track, 6);
+        assert_eq!(own_state(&mut track, 7).slots, None, "the slot ends");
     }
 }
