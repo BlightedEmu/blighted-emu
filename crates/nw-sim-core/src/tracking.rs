@@ -5,8 +5,11 @@
 //!
 //! The rule, per input record: the character moves; the camera check solves where the client's
 //! camera puts the body; when the two are more than [`RESYNC_M`] apart on the ground plane, the
-//! body goes where the camera puts it (a wall stopped the client, a dodge or an attack moved it,
-//! the server's speed was not the client's). When that pulls the body back against its motion,
+//! body goes toward where the camera puts it, by half the distance and at most
+//! [`RESYNC_MAX_STEP_M`] in one record (a wall stopped the client, a dodge or an attack moved it,
+//! the server's speed was not the client's). It once went the whole way in one record: the place
+//! the server sends then stepped by 0.5 to 0.8 m (live 2026-09-22, the tutorial ship, whose
+//! [`SHIP_RESYNC_M`] is the largest), and the client showed each step as judder. When that pulls the body back against its motion,
 //! the character's speed drops to the camera body's own speed along it since the record before (a
 //! client held at a wall stays there instead of being pulled back record after record; replay of
 //! the newchar capture, 2026-09-20: 1,366 pull-backs instead of 1,486 in the tutorial and 1,610
@@ -59,6 +62,12 @@ pub const RESYNC_M: f32 = 0.15;
 /// The larger camera-check snap on the tutorial ship deck, m
 /// (`local-data/scratch-work/run15/movement/REPORT.md`: snaps of 0.3 m to 0.57 m).
 pub const SHIP_RESYNC_M: f32 = 0.57;
+/// The share of the distance to the camera's body that one record corrects.
+const RESYNC_SHARE: f32 = 0.5;
+/// The largest correction of one record toward the camera's body, m. Retail's own
+/// places step at most 0.36 m in the open-world walk replay, motion included; a
+/// correction above this on top of the record's own motion would pass that.
+const RESYNC_MAX_STEP_M: f32 = 0.15;
 /// The ship deck height that report holds, m.
 const SHIP_DECK_LOW_M: f32 = 89.37;
 /// See [`SHIP_DECK_LOW_M`].
@@ -258,8 +267,9 @@ impl TrackedBody {
             z: position.z.max(seen.at.z),
             ..position
         };
-        let resynced = position.horizontal_distance(seen.at) > resync_distance(position)
-            && wall_between(ground, over, seen.at).is_none();
+        let distance = position.horizontal_distance(seen.at);
+        let resynced =
+            distance > resync_distance(position) && wall_between(ground, over, seen.at).is_none();
         if resynced {
             let heading = self.character.heading();
             let along = |from: Position, to: Position| {
@@ -271,8 +281,15 @@ impl TrackedBody {
                 self.character
                     .slow_to((along(last_seen, seen.at) / input.character.dt_s).max(0.0));
             }
-            position.x = seen.at.x;
-            position.y = seen.at.y;
+            // Toward the camera's body, never onto it in one record: a full snap sent
+            // steps of 0.5 to 0.8 m to the client (live 2026-09-22, the tutorial ship),
+            // which it showed as judder. Half the distance, at most
+            // [`RESYNC_MAX_STEP_M`], converges in a few records with no step above the
+            // retail own place's own (at most 0.36 m in the walk replay).
+            let step = (distance * RESYNC_SHARE).min(RESYNC_MAX_STEP_M);
+            let share = step / distance;
+            position.x += (seen.at.x - position.x) * share;
+            position.y += (seen.at.y - position.y) * share;
         }
         let falling = !self.character.is_grounded() && !self.character.is_jumping();
         if self.character.is_jumping() {
@@ -420,6 +437,7 @@ mod tests {
         const RECORDS: u32 = 120;
         let mut resyncs = 0;
         let mut last = start();
+        let mut max_step = 0.0_f32;
         for _ in 0..RECORDS {
             if client.position().y < wall.y {
                 client.step(
@@ -443,14 +461,21 @@ mod tests {
                 SEA,
             );
             resyncs += u32::from(tracked.resynced);
+            max_step = max_step.max(tracked.position.horizontal_distance(last));
             last = tracked.position;
         }
         // The server's body stays within the threshold, the camera's trail of a running body and
         // one record of running of the wall: it never runs away into the wall. Each pull-back
-        // stops the character, so it takes records to drift past the threshold again.
+        // stops the character, so it takes records to drift past the threshold again; while it
+        // is held there the corrections run on, each capped, so no step of the body is larger
+        // than one record of running plus one correction.
         let bound = RESYNC_M + (CAMERA_LAG_S + DT) * SPRINT_SPEED_MPS;
         assert!(last.horizontal_distance(wall) <= bound, "{last:?}");
-        assert!(resyncs > 0 && resyncs * 2 <= RECORDS, "{resyncs}");
+        assert!(resyncs > 0, "{resyncs}");
+        assert!(
+            max_step <= SPRINT_SPEED_MPS * DT + RESYNC_MAX_STEP_M + 0.01,
+            "{max_step}"
+        );
     }
 
     #[test]
@@ -1066,5 +1091,35 @@ mod tests {
         let ninetieth = errors[errors.len() * 9 / 10];
         assert!(median < MEDIAN_M, "median {median} m");
         assert!(ninetieth < NINETIETH_M, "90th percentile {ninetieth} m");
+    }
+
+    #[test]
+    fn the_sent_places_of_a_retail_walk_step_like_retails_own() {
+        // The place the server sends is the body: it must step like retail's own places
+        // step (at most 0.36 m in this replay), never in one snap. With the whole-way
+        // snap this replay sent steps of 0.45 m and the live tutorial ship (threshold
+        // 0.57 m) sent 0.8 m (live 2026-09-22).
+        const OPEN_WORLD_SEA_M: f32 = 40.0;
+        /// The largest step of a retail own place in this replay, m, with headroom.
+        const RETAIL_STEP_M: f32 = 0.40;
+        const MEDIAN_M: f32 = 0.2;
+        let replay = parse_replay(include_str!("testdata/retail-open-world-walk.txt"));
+        let mut body = TrackedBody::new(replay.start);
+        let mut truth = replay.start;
+        let mut before_body = replay.start;
+        let mut body_steps: Vec<f32> = Vec::new();
+        let mut errors: Vec<f32> = Vec::new();
+        for (input, place) in &replay.records {
+            let tracked = body.record(*input, &replay, OPEN_WORLD_SEA_M);
+            truth = place.unwrap_or(truth);
+            body_steps.push(tracked.position.horizontal_distance(before_body));
+            before_body = tracked.position;
+            errors.push(tracked.position.horizontal_distance(truth));
+        }
+        let largest = body_steps.iter().copied().fold(0.0_f32, f32::max);
+        assert!(largest < RETAIL_STEP_M, "largest step {largest} m");
+        errors.sort_by(f32::total_cmp);
+        let median = errors[errors.len() / 2];
+        assert!(median < MEDIAN_M, "median {median} m");
     }
 }

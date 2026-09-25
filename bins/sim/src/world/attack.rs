@@ -4156,14 +4156,14 @@ mod tests {
     }
 
     #[test]
-    fn spawn_protection_stops_mobs_until_the_player_moves() {
+    fn spawn_protection_stops_mobs_until_the_client_spawns() {
         let hit_on_one = |outcome: &AttackOutcome| {
             matches!(outcome,
                 AttackOutcome::Hit { target, .. } | AttackOutcome::Killed { target } if *target == 1)
         };
         let mut world = world_with_spawns(vec![test_spawn(MOB_X)]);
         world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
-        // A fresh login (not a handoff): spawn-protected until its client moves.
+        // A fresh login (not a handoff): spawn-protected until its client spawns.
         world
             .admit(&admit_at(1, MOB_X + 2.0, true), NOW, SERVER_TIME)
             .expect("admit");
@@ -4181,13 +4181,10 @@ mod tests {
             TEST_PLAYER_HEALTH,
             "the protected player kept full health",
         );
-        // The first movement ends the protection, so the same mob can now hit it.
-        let next = Position {
-            x: MOB_X + 2.0,
-            y: 10.0,
-            z: 50.0,
-        };
-        let _ = world.move_to(&connection(1), next, now);
+        // The spawn (the client's first time sync request after the card) ends the
+        // protection, so the same mob can now hit it. A move would not: the client
+        // sends movement before the level has loaded (live 2026-09-22).
+        world.heard_from(&connection(1));
         loop {
             let output = tick(&mut world, now);
             if output.mob_hits.iter().any(hit_on_one) {

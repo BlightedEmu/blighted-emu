@@ -1,5 +1,6 @@
 {
     "javelin": {
+        "enable-camera-lock-kbam-pve-targeting": true,
         "use-omni-penalties": true,
         "use-persona-penalties": false,
         "leaderboard-rotation-startDate": "2023-02-07",

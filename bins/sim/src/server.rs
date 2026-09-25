@@ -2079,13 +2079,12 @@ fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// A client message of `type_index` shows that its client is in the game: an input or a time sync
-/// request (see [`SimWorld::heard_from`]). The teardown calls of a level change do not.
+/// A client message of `type_index` shows that its client is in the game: a time sync
+/// request (see [`SimWorld::heard_from`]). The teardown calls of a level change do not,
+/// and movement input does not either: the client sends it on a fresh connection before
+/// the new level has loaded (live 2026-09-22, the beach switch).
 const fn says_in_game(type_index: Option<u64>) -> bool {
-    matches!(
-        type_index,
-        Some(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX | TIME_SYNC_REQUEST_TYPE_INDEX)
-    )
+    matches!(type_index, Some(TIME_SYNC_REQUEST_TYPE_INDEX))
 }
 
 fn server_time() -> u64 {
@@ -2157,11 +2156,13 @@ mod metric_tests {
     }
 
     #[test]
-    fn only_an_input_or_a_time_sync_shows_the_client_in_the_game() {
+    fn only_a_time_sync_shows_the_client_in_the_game() {
         /// A teardown call of a level change (live 2026-09-18).
         const TEARDOWN_TYPE_INDEX: u64 = 4143;
-        assert!(says_in_game(Some(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX)));
         assert!(says_in_game(Some(TIME_SYNC_REQUEST_TYPE_INDEX)));
+        // Movement input comes on a fresh connection before the level has loaded
+        // (live 2026-09-22, the beach switch), so it shows nothing.
+        assert!(!says_in_game(Some(RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX)));
         assert!(!says_in_game(Some(TEARDOWN_TYPE_INDEX)));
         assert!(!says_in_game(None));
     }

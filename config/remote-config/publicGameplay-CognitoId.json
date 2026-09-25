@@ -1,5 +1,6 @@
 {
     "javelin": {
+        "enable-camera-lock-kbam-pve-targeting": true,
         "disabled-item-classes": [
             "Dagger"
         ],

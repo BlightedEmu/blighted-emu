@@ -189,6 +189,12 @@ const FIRST_LOGIN_BUNDLE_SEQUENCE: u64 = 2;
 /// client before it has applied `LevelInfoChanged` (channel 0), so the client drops it as a
 /// bundle "for a previous ClientContext", never loads the level, and never moves to spawn.
 const OWN_CARD_DELAY_MS: u64 = 1_000;
+/// Time between two sends of the own spawn card bundle while the client loads its level.
+/// Retail resends its first bundle about every 350 ms until the client answers with its
+/// first time sync request (Soul Survivor capture, 2026-09-27: bundle 1 at 0, 348 and
+/// 697 ms, the stream from 797 ms). One send is not enough: the client drops every bundle
+/// that reaches it while its level context is down (live 2026-09-22, the beach switch).
+const OWN_CARD_RESEND_MS: u64 = 350;
 /// How long a mob stands from the start of its alert before it moves (retail sailors: 2.0 s from
 /// sailor 1's `Alert_Turn` at 73978 to its run at 76014; 2.8-3.1 s for sailors 2 and 3).
 const ALERT_STAND_MS: u64 = 2_000;
@@ -477,6 +483,12 @@ struct Player {
     own_card_sent: bool,
     /// Earliest time the own spawn card may go out.
     own_card_due_ms: u64,
+    /// The envelopes of the own spawn card bundle, kept so the same bundle can go out again
+    /// until the client spawns ([`OWN_CARD_RESEND_MS`]); `None` before the card and after
+    /// the spawn.
+    own_card_bundle: Option<Vec<Vec<u8>>>,
+    /// When the own spawn card bundle last went out.
+    own_card_sent_ms: u64,
     /// The client-context id of the player's current level; every bundle carries it.
     client_context: u8,
     /// What the client and this server still say to each other in this level.
@@ -1291,13 +1303,18 @@ impl SimWorld {
         Ok(level_change)
     }
 
-    /// Notes that the client of `connection` is in the game: it sent a time sync request or an
-    /// input. Its first time sync request after the own spawn card comes in the same moment it
-    /// logs `player spawn succeeds, in game` (live 2026-09-10 and 2026-09-18). So that message ends
-    /// the hold on the replication stream and the spawn protection. Other messages do not: after a
-    /// level change the client sends its teardown calls (4143, 3970 and more) while it unloads the
-    /// old level, and mob cards sent then show a name plate without a model (live 2026-09-18).
-    /// Before the card it means nothing, and a player who already spawned is not changed.
+    /// Notes that the client of `connection` is in the game: it sent its first time sync
+    /// request after the own spawn card. That request comes in the same moment the client
+    /// logs `player spawn succeeds, in game` (live 2026-09-10 and 2026-09-18; retail beach
+    /// capture 2026-09-27: the request, then the bundle stream starts). So that message ends
+    /// the hold on the replication stream and the spawn protection. Other messages do not:
+    /// after a level change the client sends its teardown calls (4143, 3970 and more) while
+    /// it unloads the old level, and mob cards sent then show a name plate without a model
+    /// (live 2026-09-18). Movement input does not count either: on a fresh connection the
+    /// client sends it before the new level has loaded (live 2026-09-22, the beach switch:
+    /// the card flood it let loose reached a client with no level context, which dropped the
+    /// bundles and failed the first bundle it read after the load). Before the card the
+    /// request means nothing, and a player who already spawned is not changed.
     pub fn heard_from(&mut self, connection: &ConnectionRef) {
         let Some(&entity) = self.by_connection.get(connection) else {
             return;
@@ -1311,6 +1328,9 @@ impl SimWorld {
         }
         if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
             vitals.spawned = true;
+        }
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            player.own_card_bundle = None;
         }
     }
 
@@ -1347,11 +1367,10 @@ impl SimWorld {
         {
             return Err(MoveError::Pushed);
         }
-        // The client sends movement only once it has spawned into the world, so the first move
-        // ends the player's spawn protection (see [`attack::Vitals`]).
-        if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
-            vitals.spawned = true;
-        }
+        // A move does not end the spawn protection: on a fresh connection the client sends
+        // movement before it has loaded the level (live 2026-09-22, the beach switch), so
+        // only the time sync request after the own card marks the spawn
+        // ([`Self::heard_from`], see [`attack::Vitals`]).
         if self
             .world
             .get::<Vitals>(entity)
@@ -3590,6 +3609,8 @@ impl SimWorld {
                     slots: replication.slots,
                     own_card_sent: false,
                     own_card_due_ms: arrival.own_card_due_ms,
+                    own_card_bundle: None,
+                    own_card_sent_ms: 0,
                     client_context: arrival.client_context,
                     flow: arrival.flow,
                     leave_at_ms: None,
@@ -4069,9 +4090,11 @@ impl Neighbourhood<'_> {
             // Until its client spawned the player, the client keeps the own states in its
             // offline portrayal cache and merges every later record of the slot into the cached
             // one; such a merge crashes it (player-component note, crashes 2 and 3). So until
-            // then the own group goes out once, whole, with the card; after the spawn only the
-            // position and the changes go, every tick. Retail sent the own card again only
-            // until the client spawned and on a level change, never after the spawn
+            // then the own group goes out whole, with the card, and the same bundle goes
+            // out again on the resend interval below (a fresh build each tick would merge
+            // new records into the cached card); after the spawn only the position and the
+            // changes go, every tick. Retail sent the own card again only until the client
+            // spawned and on a level change, never after the spawn
             // (newchar-retail-2026-09-18: 27 cards in the 9 s before the spawn, 6 at the
             // tutorial exit, none in the 17.5 min after).
             let first_card = !player.own_card_sent
@@ -4464,6 +4487,7 @@ impl Neighbourhood<'_> {
                 .iter()
                 .map(|group| group.members.len() as u64)
                 .sum::<u64>();
+            let mut envelopes = Vec::new();
             for bundle in bundles(
                 player.bundles_sent,
                 player.client_context,
@@ -4471,12 +4495,39 @@ impl Neighbourhood<'_> {
                 groups,
             )? {
                 player.bundles_sent = player.bundles_sent.saturating_add(1);
+                envelopes.push(bundle);
+            }
+            // The own spawn card goes reliably, as retail's first bundle does, and is
+            // kept: until the client spawns, the same bundle goes out again every
+            // [`OWN_CARD_RESEND_MS`], because the client drops the bundles that reach
+            // it while its level context is down (live 2026-09-22, the beach switch).
+            if first_card {
+                player.own_card_bundle = Some(envelopes.clone());
+                player.own_card_sent_ms = self.now_ms;
+            }
+            let reliable = reliable_bundles() || first_card;
+            for bundle in envelopes {
                 outgoing.push(Outgoing {
                     connection: player.connection.clone(),
                     channel: REPLICATION_CHANNEL,
-                    reliable: reliable_bundles(),
+                    reliable,
                     envelopes: vec![bundle],
                 });
+            }
+            let resend_due = !vitals.spawned
+                && player.own_card_bundle.is_some()
+                && self.now_ms.saturating_sub(player.own_card_sent_ms) >= OWN_CARD_RESEND_MS;
+            if resend_due {
+                player.own_card_sent_ms = self.now_ms;
+                let card = player.own_card_bundle.clone().unwrap_or_default();
+                for bundle in card {
+                    outgoing.push(Outgoing {
+                        connection: player.connection.clone(),
+                        channel: REPLICATION_CHANNEL,
+                        reliable: true,
+                        envelopes: vec![bundle],
+                    });
+                }
             }
             if self.now_ms.saturating_sub(player.last_time_synch_ms) >= TIME_SYNCH_INTERVAL_MS {
                 player.last_time_synch_ms = self.now_ms;
@@ -4902,7 +4953,7 @@ mod tests {
             .admit(&admit_at(number, x, true), NOW, SERVER_TIME)
             .expect("admit");
         // The combat tests treat a joined player as already in the world, so end its spawn
-        // protection (a real client does this by sending its first movement).
+        // protection (a real client does this with its first time sync request).
         let entity = world.player_by_number(number).expect("player");
         world
             .world
@@ -5515,11 +5566,22 @@ mod tests {
             vec![true],
             "the whole card once the login has settled"
         );
+        // The same card bundle goes out again every OWN_CARD_RESEND_MS until the spawn
+        // (retail resends its first bundle; live 2026-09-22), and nothing else: not a
+        // fresh build, not even a card refresh.
+        let mut last_card_ms = card_at;
         for step in 1..=CARD_REFRESH_BUNDLES {
-            assert!(
-                own_groups(&mut world, card_at + 33 * step).is_empty(),
-                "nothing more for the own slot before the spawn, not even a card refresh"
-            );
+            let now = card_at + 33 * step;
+            let groups = own_groups(&mut world, now);
+            if now.saturating_sub(last_card_ms) >= OWN_CARD_RESEND_MS {
+                assert_eq!(groups, vec![true], "the card again on the resend interval");
+                last_card_ms = now;
+            } else {
+                assert!(
+                    groups.is_empty(),
+                    "nothing more for the own slot before the spawn, not even a card refresh"
+                );
+            }
         }
         let entity = world.player_by_number(1).expect("player");
         world
@@ -7515,6 +7577,61 @@ mod tests {
                 "the position every tick once the client spawned"
             );
         }
+    }
+
+    #[test]
+    fn a_move_before_the_spawn_keeps_the_hold_and_the_card_goes_again() {
+        // Live 2026-09-22 (the beach switch): the client sent movement on the new
+        // connection before the level had loaded; the move ended the hold, the mob cards
+        // reached a client with no level context, and the first bundle it read after the
+        // load failed. A move is not the spawn: the card bundle goes again until the
+        // time sync request, and no other entity goes before it.
+        let mut world = world_with_spawns(vec![test_spawn(CELL_M / 2.0 + 5.0)]);
+        world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
+        world
+            .admit(&admit_at(1, CELL_M / 2.0, true), NOW, SERVER_TIME)
+            .expect("admit");
+        let who = connection(1);
+        let card_at = NOW + OWN_CARD_DELAY_MS;
+        let first = tick(&mut world, card_at);
+        let card_bundle = bundle_of(&first.messages, &who).expect("the card bundle");
+        assert!(
+            first
+                .messages
+                .iter()
+                .filter(|out| out.connection == who && out.channel == REPLICATION_CHANNEL)
+                .all(|out| out.reliable),
+            "the card bundle goes reliably"
+        );
+        let entity = world.by_connection[&who];
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let point = nw_messages::ClientInputMsg::position(
+            InputPosition::from_metres(at.x, at.y, at.z).expect("finite"),
+        );
+        let _ = world.move_from_input(&who, &point.records, card_at + 33);
+        let held = tick(&mut world, card_at + 33);
+        assert_eq!(held.bundle_members, 0, "a move does not end the hold");
+        let resent = tick(&mut world, card_at + OWN_CARD_RESEND_MS);
+        assert_eq!(
+            bundle_of(&resent.messages, &who).expect("the card again"),
+            card_bundle,
+            "the same card bundle goes out again"
+        );
+        world.heard_from(&who);
+        let streamed = tick(&mut world, card_at + OWN_CARD_RESEND_MS + 33);
+        let carded = streamed
+            .messages
+            .iter()
+            .filter(|out| out.connection == who && out.channel == REPLICATION_CHANNEL)
+            .flat_map(|out| &out.envelopes)
+            .flat_map(|bytes| SlotRead::of(&bundle_in(bytes)).expect("read").updates)
+            .any(|update| !update.is_local_player() && update.card.is_some());
+        assert!(carded, "the mob card goes once the client spawned");
     }
 
     #[test]
@@ -10039,14 +10156,25 @@ mod tests {
     fn a_time_synch_goes_out_every_three_seconds() {
         let mut world = world();
         join(&mut world, 1, 0.0);
-        let reliable =
-            |output: TickOutput| output.messages.iter().filter(|out| out.reliable).count();
-        assert_eq!(reliable(tick(&mut world, NOW + 1)), 0);
-        assert_eq!(reliable(tick(&mut world, NOW + TIME_SYNCH_INTERVAL_MS)), 1);
-        assert_eq!(
-            reliable(tick(&mut world, NOW + TIME_SYNCH_INTERVAL_MS + 1)),
-            0
-        );
+        let synchs = |output: TickOutput| {
+            output
+                .messages
+                .iter()
+                .filter(|out| out.channel == MESSAGE_CHANNEL)
+                .flat_map(|out| &out.envelopes)
+                .filter(|bytes| {
+                    matches!(
+                        ServerMessage::from_envelope(
+                            &Envelope::decode(bytes).expect("envelope")
+                        ),
+                        Some(Ok(ServerMessage::TimeSynch(_)))
+                    )
+                })
+                .count()
+        };
+        assert_eq!(synchs(tick(&mut world, NOW + 1)), 0);
+        assert_eq!(synchs(tick(&mut world, NOW + TIME_SYNCH_INTERVAL_MS)), 1);
+        assert_eq!(synchs(tick(&mut world, NOW + TIME_SYNCH_INTERVAL_MS + 1)), 0);
     }
 
     #[test]
