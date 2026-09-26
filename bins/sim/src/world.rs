@@ -97,6 +97,7 @@ mod quest_objects;
 mod quest_tracker;
 mod repair;
 mod replica;
+mod revive;
 mod rolled_loot;
 mod salvage;
 mod scripts;
@@ -2792,6 +2793,7 @@ impl SimWorld {
                 GATHER_KIND => self.gather_open_world(entity, number, request, name, now_ms),
                 WATER_GATHER_KIND => self.gather_water(number, request, now_ms),
                 LOOT_KIND => self.take_loot_bag(entity, number, request, now_ms),
+                REVIVE_PLAYER_KIND => self.revive_player(entity, number, request, name),
                 item_calls::OPEN_STORAGE_KIND => self.open_storage(entity, number, request, name),
                 economy::TRADING_POST_KIND => {
                     self.open_trading_post(entity, number, request, name);
@@ -4923,7 +4925,7 @@ mod tests {
         )
     }
 
-    fn world() -> SimWorld {
+    pub(super) fn world() -> SimWorld {
         world_of("sim-a", settings(MANY, MAX_PLAYERS))
     }
 
