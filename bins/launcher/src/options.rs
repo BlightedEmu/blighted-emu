@@ -28,6 +28,9 @@ pub const OVERRIDE_CONFIG_ENV: &str = "NW_LAUNCHER_OVERRIDE_CONFIG";
 /// option is empty.
 pub const DEFAULT_PREFIX_DIR: &str = "prefix";
 
+/// The start of the names of GE-Proton builds, the Proton the game is run with by default.
+const GE_PROTON_PREFIX: &str = "GE-Proton";
+
 /// Value of a Proton switch variable that turns it on.
 const SWITCH_ON: &str = "1";
 /// Separator of a `NAME=value` line, and the start of a comment line.
@@ -138,9 +141,20 @@ impl LaunchOptions {
         }
     }
 
-    /// Fills the empty game copy and Steam install from a scan of this PC. The Proton build is
-    /// the player's choice, so it stays empty.
+    /// Fills the empty game copy, Steam install and Proton build from a scan of this PC. The
+    /// default Proton is the newest GE-Proton build found, else the last build by name: without
+    /// one the game cannot start at all.
     pub fn fill_from_scan(&mut self, found: &Found) {
+        if self.proton.is_empty()
+            && let Some(build) = found
+                .protons
+                .iter()
+                .rev()
+                .find(|build| build.name.starts_with(GE_PROTON_PREFIX))
+                .or_else(|| found.protons.last())
+        {
+            self.proton = build.program.display().to_string();
+        }
         for (value, path) in [
             (&mut self.game_exe, &found.game_exe),
             (&mut self.steam_install, &found.steam_install),
@@ -239,19 +253,37 @@ mod tests {
     }
 
     #[test]
-    fn a_scan_fills_the_game_and_steam_but_not_proton() {
-        let mut options = LaunchOptions::default();
-        options.fill_from_scan(&Found {
+    fn a_scan_fills_the_game_steam_and_the_newest_ge_proton() {
+        let build = |name: &str| crate::steam::ProtonBuild {
+            name: name.to_owned(),
+            program: PathBuf::from(format!("/s/{name}/proton")),
+        };
+        let found = Found {
             steam_install: Some(PathBuf::from("/s")),
             game_exe: Some(PathBuf::from("/g/BlightedNewWorld.exe")),
-            protons: vec![crate::steam::ProtonBuild {
-                name: "GE".to_owned(),
-                program: PathBuf::from("/s/GE/proton"),
-            }],
-        });
+            protons: vec![
+                build("GE-Proton10-11"),
+                build("GE-Proton10-12"),
+                build("Proton 9.0"),
+            ],
+        };
+        let mut options = LaunchOptions::default();
+        options.fill_from_scan(&found);
         assert_eq!(options.steam_install, "/s");
         assert_eq!(options.game_exe, "/g/BlightedNewWorld.exe");
-        assert_eq!(options.proton, "");
+        assert_eq!(options.proton, "/s/GE-Proton10-12/proton");
+        let mut chosen = LaunchOptions {
+            proton: "/mine/proton".to_owned(),
+            ..LaunchOptions::default()
+        };
+        chosen.fill_from_scan(&found);
+        assert_eq!(chosen.proton, "/mine/proton", "the player's pick stays");
+        let mut plain = LaunchOptions::default();
+        plain.fill_from_scan(&Found {
+            protons: vec![build("Proton 8.0"), build("Proton 9.0")],
+            ..Found::default()
+        });
+        assert_eq!(plain.proton, "/s/Proton 9.0/proton");
     }
 
     #[test]

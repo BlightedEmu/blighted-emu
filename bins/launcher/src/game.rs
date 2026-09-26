@@ -87,6 +87,15 @@ pub enum GameError {
     /// An extra environment line in Options is not `NAME=value`.
     #[error("the environment line {0:?} in Options is not NAME=value")]
     BadEnvironment(String),
+    /// The Proton prefix folder could not be made (Proton stops at once without it).
+    #[error("could not make the Proton prefix folder {}: {source}", .path.display())]
+    Prefix {
+        /// The prefix folder.
+        path: PathBuf,
+        /// The error.
+        #[source]
+        source: std::io::Error,
+    },
     /// The game program (`bwrap` running Proton) could not be started.
     #[error("could not start the game: {} failed: {source}", .program.display())]
     Start {
@@ -299,6 +308,10 @@ pub fn start_game(
     arguments: &[String],
     environment: &Environment,
 ) -> Result<(), GameError> {
+    std::fs::create_dir_all(&launch.compat_data).map_err(|source| GameError::Prefix {
+        path: launch.compat_data.clone(),
+        source,
+    })?;
     let mut command = direct_command(launch, files, arguments, environment);
     let program = PathBuf::from(command.get_program());
     command
