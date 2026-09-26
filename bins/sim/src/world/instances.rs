@@ -49,7 +49,7 @@ pub mod kind {
     /// `EnterDungeon`: activate the entrance's expedition.
     pub const ENTER_DUNGEON: u8 = 72;
     /// `ExitDungeon`: leave the instance at its exit.
-    pub const EXIT_DUNGEON: u8 = 74;
+    pub use nw_messages::client_input::EXIT_DUNGEON_KIND as EXIT_DUNGEON;
 }
 
 /// The rank of a mutated slot a player has not raised (best guess: difficulty 1 is open).
@@ -756,7 +756,7 @@ impl SimWorld {
             return;
         }
         let table = self.applied_table.clone();
-        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+        let Some(player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
         if player.arena.transfer.is_some() {

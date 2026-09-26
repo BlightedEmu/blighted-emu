@@ -193,7 +193,7 @@ pub mod test_support {
         include_str!("world/testdata/player-attacks-25810808.json");
     /// The slayer sequence table mined from the same build's ledgers.
     pub const TEST_PLAYER_SEQUENCES: &str =
-        include_str!("../../../local-data/content/player-sequences-25810808.json");
+        include_str!("world/testdata/player-sequences-25810808.json");
 
     /// The retail player attack table.
     pub fn test_player_attacks() -> PlayerAttacks {

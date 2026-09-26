@@ -38,7 +38,7 @@ use nw_sim_core::{MountPace, MountPaces, MoveLimits};
 
 use super::attack::{Vitals, counter_is_newer};
 use super::gear::{Gear, unix_ns};
-use super::level_flow::AchievementRules;
+use super::meta_achievements::has_achievement;
 use super::replica::PAPERDOLL_COMPONENT;
 use super::{MESSAGE_CHANNEL, Outgoing, Player, SimWorld, gather_answer};
 
@@ -495,15 +495,6 @@ fn riding_paperdoll(player: &mut Player, riding: bool) {
             }),
         })),
     });
-}
-
-/// Whether `player` has achievement `id`: its flow's bits, or the bits it arrived with (a player
-/// taken without a level change, whose flow holds none; the bits are ascending).
-fn has_achievement(rules: &AchievementRules, player: &Player, id: &str) -> bool {
-    player.flow.has_achievement(rules, id)
-        || rules
-            .bit(id)
-            .is_some_and(|bit| player.arrived_achievements.binary_search(&bit).is_ok())
 }
 
 /// The other players' state of a rider whose last seen mount was `seen` (none for a card) and
@@ -1502,7 +1493,8 @@ mod tests {
                 (HORSE_GIFT.to_owned(), GIFT_BIT),
             ]);
             let mut world = world_with_spawns(Vec::new());
-            world.achievement_rules = AchievementRules::of(&indexes, &[]);
+            world.achievement_rules =
+                crate::world::level_flow::AchievementRules::of(&indexes, &[]);
             world.content = Arc::new(PlayerContent {
                 mounts,
                 achievements: indexes,

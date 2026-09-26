@@ -3,7 +3,8 @@
 //! 5.2): 446, 1034, 1628, 164, 1617, 335, 4246, 4247. Message 1628
 //! (`PlayerManagerSelfIdentificationMsg`) is the one that moves the real client out of
 //! `WaitingForActorGameConnection`; this server sends its smallest accepted body (see
-//! [`PlayerManagerSelfIdentificationMsg`]). Message 3236 (still open layout) is not sent. The
+//! [`PlayerManagerSelfIdentificationMsg`]). Message 3236 is not part of the login order (the
+//! charm flow sends it, `world::charms`). The
 //! `LevelInfoChangedMsg` (1635) names the sim's level: the tutorial or the open world
 //! (new-player-start note); [`level_change_messages`] moves a player into another level. The
 //! phasing update (6310) follows the client's acknowledgement of the level (`world::level_flow`).

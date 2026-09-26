@@ -33,7 +33,7 @@ use crate::containers::{
     ItemManagementState,
 };
 use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
-use crate::game_events::GAME_EVENT_TYPE_INDEX as GAME_EVENTS_TYPE;
+use crate::game_events::GAME_EVENT_TYPE_INDEX;
 use crate::gathering::{GATHERING_TYPE_INDEX, GatheringState};
 use crate::gear::PlayerGear;
 use crate::interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
@@ -41,7 +41,9 @@ use crate::loot::{
     GLOBAL_STORAGE_TYPE_INDEX, GlobalStorageState, LOOT_TRACKER_TYPE_INDEX, LootTrackerState,
 };
 use crate::mount::{MOUNT_COMPONENT, MOUNT_TYPE_INDEX, MountState};
-use crate::objective_interactor::OBJECTIVE_INTERACTOR_TYPE_INDEX as OBJECTIVES_BOARD;
+use crate::objective_interactor::OBJECTIVE_INTERACTOR_TYPE_INDEX;
+use crate::music::PERFORMANCE_PLAYER_TYPE_INDEX as MUSICAL_PERFORMANCE_TYPE_INDEX;
+use crate::travel_states::PLAYER_HOME_TYPE_INDEX;
 use crate::objectives::{OBJECTIVES_TYPE_INDEX, ObjectivesState};
 use crate::paperdoll::PAPERDOLL_TYPE_INDEX;
 use crate::payload::{BundleMember, MemberState};
@@ -176,23 +178,15 @@ const FACTION_TYPE_INDEX: u64 = 3152;
 const CHARGE_TYPE_INDEX: u64 = 5257;
 /// Type index of `MB::AudioProxyComponentReplicatedState` (component 13).
 const AUDIO_PROXY_TYPE_INDEX: u64 = 603;
-/// Type index of `MB::ObjectiveInteractorComponentReplicatedState` (component 10).
-const OBJECTIVE_INTERACTOR_TYPE_INDEX: u64 = 3829;
 
 /// Type index of `Javelin::PointsAccumulatorComponentReplicatedState` (component 1).
 const POINTS_ACCUMULATOR_TYPE_INDEX: u64 = 6951;
 /// Type index of `MB::MagicComponentReplicatedState` (component 32).
 const MAGIC_TYPE_INDEX: u64 = 2895;
-/// Type index of `Javelin::MusicalPerformancePlayerComponentReplicatedState` (component 71).
-const MUSICAL_PERFORMANCE_TYPE_INDEX: u64 = 4878;
-/// Type index of `MB::PlayerHomeComponentReplicatedState` (component 20).
-const PLAYER_HOME_TYPE_INDEX: u64 = 3652;
 /// Type index of `Javelin::InstancedSlayerScriptReplicatedState` (component 29).
 const INSTANCED_SLAYER_SCRIPT_TYPE_INDEX: u64 = 6234;
 /// Type index of `MB::RewardTrackComponentReplicatedState` (component 34).
 const REWARD_TRACK_TYPE_INDEX: u64 = 4913;
-/// Type index of `Javelin::GameEventComponentReplicatedState` (component 68).
-const GAME_EVENT_TYPE_INDEX: u64 = 497;
 /// Type index of `MB::ItemSkinningComponentReplicatedState` (component 35).
 const ITEM_SKINNING_TYPE_INDEX: u64 = 3765;
 
@@ -850,9 +844,9 @@ fn has_own_reader(class: u64) -> bool {
             | crate::travel_states::PLAYER_TIME_TYPE_INDEX
             | crate::travel_states::PLAYER_HOUSING_TYPE_INDEX
             | crate::travel_states::CAMPING_TYPE_INDEX
-            | OBJECTIVES_BOARD
+            | OBJECTIVE_INTERACTOR_TYPE_INDEX
             | TEMPORARY_AFFILIATION_TYPE_INDEX
-            | GAME_EVENTS_TYPE
+            | GAME_EVENT_TYPE_INDEX
     )
 }
 

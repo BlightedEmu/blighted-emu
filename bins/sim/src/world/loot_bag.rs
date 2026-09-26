@@ -540,21 +540,9 @@ impl PlayerLoot {
     }
 
     /// The killer gets bag `bag`, rolled at server time `server_ms` for a mob spawned at
-    /// `spawn` (retail `m_position`: the point of the mob's spawn record, Inferred). Returns the
+    /// `spawn` (retail `m_position`: the point of the mob's spawn record, Inferred). Its items have the rarity `rarity` ([`NO_PERK_RARITY`] for none). Returns the
     /// tracker member with version `version`, with the loot limit counts under `rules` when the
     /// roll changed them (retail at the kill).
-    pub(super) fn track(
-        &mut self,
-        bag: [u8; RAW_ID_LEN],
-        spawn: Position,
-        server_ms: u64,
-        rules: Option<&LootLimitRules>,
-        version: u64,
-    ) -> BundleMember {
-        self.track_kind(bag, LOOT_CREATURE, spawn, server_ms, rules, NO_PERK_RARITY, version)
-    }
-
-    /// [`Self::track`] of a bag whose items have the rarity `rarity` ([`NO_PERK_RARITY`]).
     pub(super) fn track_rolled(
         &mut self,
         bag: [u8; RAW_ID_LEN],
@@ -1158,7 +1146,7 @@ mod tests {
             y: 2280.0605,
             z: 42.92239,
         };
-        let tracked = loot.track(id, spawn, NOW, None, 1);
+        let tracked = loot.track_rolled(id, spawn, NOW, None, NO_PERK_RARITY, 1);
         let MemberState::LootTracker(state) = &tracked.state else {
             panic!("tracker");
         };

@@ -1,0 +1,1374 @@
+{
+ "hold_records": 19,
+ "stances": [
+  {
+   "tags": "",
+   "light": 4510,
+   "light_moving": 458,
+   "charge": 57,
+   "alt_start": {
+    "second_sequence": 2351
+   },
+   "alt_end": {
+    "second_sequence": 2958,
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 1
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 1246
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 4008
+    }
+   },
+   "drawn_moves": {
+    "idle": 1015,
+    "restart": 1883,
+    "stop": 1511,
+    "start": {
+     "state": 26,
+     "sequence": 1883
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 2980
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4845
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4820
+    },
+    "left": {
+     "state": 7,
+     "sequence": 4232
+    },
+    "right": {
+     "state": 7,
+     "sequence": 3673
+    },
+    "none": {
+     "state": 7,
+     "sequence": 4821
+    }
+   },
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 1208
+    },
+    "none": {
+     "state": 14,
+     "sequence": 1208
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 2310
+   }
+  },
+  {
+   "tags": "1H_Melee,Axe,Throwable",
+   "light": 458,
+   "light_moving": 458,
+   "charge": 594,
+   "alt_start": {
+    "second_sequence": 1049,
+    "third_sequence": 389,
+    "marker": 40
+   },
+   "alt_end": {
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 2
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 3177
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 4079
+    }
+   },
+   "drawn_moves": {
+    "idle": 4079,
+    "restart": 2554,
+    "stop": 2794,
+    "start": {
+     "state": 26,
+     "sequence": 2554
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 2279
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 3520
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4487
+    },
+    "left": {
+     "state": 7,
+     "sequence": 835
+    },
+    "right": {
+     "state": 7,
+     "sequence": 4006
+    },
+    "none": {
+     "state": 7,
+     "sequence": 3520
+    }
+   },
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 3675
+    },
+    "none": {
+     "state": 14,
+     "sequence": 1208
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 3250
+   }
+  },
+  {
+   "tags": "1H_Melee,Rapier",
+   "alt_start": {
+    "second_sequence": 2563,
+    "fourth_state": 32,
+    "fourth_sequence": 3317
+   },
+   "alt_end": {
+    "fourth_state": 0,
+    "fourth_sequence": 0
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 1109
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 3987
+    }
+   },
+   "drawn_moves": {
+    "idle": 1458,
+    "restart": 1865,
+    "stop": 1387,
+    "start": {
+     "state": 27,
+     "sequence": 1522
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 1522
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4845
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4822
+    },
+    "left": {
+     "state": 7,
+     "sequence": 2149
+    },
+    "none": {
+     "state": 7,
+     "sequence": 4822
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 2574
+   }
+  },
+  {
+   "tags": "1H_Melee,Sword",
+   "light": 495,
+   "light_moving": 473,
+   "charge": 594,
+   "alt_start": {
+    "second_sequence": 4380,
+    "fourth_state": 32,
+    "fourth_sequence": 3317
+   },
+   "alt_end": {
+    "second_sequence": 4380,
+    "fourth_state": 0,
+    "fourth_sequence": 0
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 1130
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 1673
+    }
+   },
+   "drawn_moves": {
+    "idle": 612,
+    "restart": 1894,
+    "stop": 2794,
+    "start": {
+     "state": 26,
+     "sequence": 1894
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 1304
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4841
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4881
+    },
+    "left": {
+     "state": 7,
+     "sequence": 1402
+    },
+    "right": {
+     "state": 7,
+     "sequence": 4880
+    },
+    "none": {
+     "state": 7,
+     "sequence": 4721
+    }
+   },
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 1208
+    },
+    "none": {
+     "state": 14,
+     "sequence": 936
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 2310
+   }
+  },
+  {
+   "tags": "2H_Melee,GreatAxe",
+   "light_moving": 2685,
+   "charge": 586,
+   "alt_start": {
+    "second_sequence": 4380,
+    "third_sequence": 422
+   },
+   "alt_end": {
+    "second_sequence": 2958,
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 0
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 1246
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 4008
+    }
+   },
+   "drawn_moves": {
+    "idle": 4009,
+    "restart": 2086,
+    "stop": 1386,
+    "start": {
+     "state": 26,
+     "sequence": 2086
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 2747
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 3520
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4487
+    },
+    "left": {
+     "state": 7,
+     "sequence": 835
+    },
+    "right": {
+     "state": 7,
+     "sequence": 4006
+    },
+    "none": {
+     "state": 7,
+     "sequence": 3520
+    }
+   },
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 2340
+    },
+    "none": {
+     "state": 14,
+     "sequence": 2340
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 3250
+   }
+  },
+  {
+   "tags": "2H_Melee,GreatSword",
+   "light": 4510,
+   "light_moving": 4510,
+   "charge": 57,
+   "alt_start": {
+    "second_sequence": 2351
+   },
+   "alt_end": {
+    "second_sequence": 2351,
+    "fourth_state": 0,
+    "fourth_sequence": 0
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 1251
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 1673
+    }
+   },
+   "drawn_moves": {
+    "idle": 1136,
+    "restart": 2205,
+    "stop": 2254,
+    "start": {
+     "state": 26,
+     "sequence": 2205
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 1065
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4007
+    },
+    "back": {
+     "state": 7,
+     "sequence": 2100
+    },
+    "left": {
+     "state": 7,
+     "sequence": 4832
+    },
+    "right": {
+     "state": 7,
+     "sequence": 3487
+    },
+    "none": {
+     "state": 7,
+     "sequence": 2100
+    }
+   },
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 1561
+    },
+    "none": {
+     "state": 14,
+     "sequence": 1561
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 2467
+   }
+  },
+  {
+   "tags": "2H_Melee,Spear,Throwable",
+   "light": 4510,
+   "light_moving": 4510,
+   "charge": 57,
+   "alt_start": {
+    "second_sequence": 2351
+   },
+   "alt_end": {
+    "second_sequence": 2958,
+    "third_sequence": 0,
+    "marker": 0
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 1246
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 4008
+    }
+   },
+   "drawn_moves": {
+    "idle": 1136,
+    "restart": 2205,
+    "stop": 1386,
+    "start": {
+     "state": 26,
+     "sequence": 2205
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 1065
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4876
+    },
+    "back": {
+     "state": 7,
+     "sequence": 2100
+    },
+    "left": {
+     "state": 7,
+     "sequence": 4832
+    },
+    "right": {
+     "state": 7,
+     "sequence": 3487
+    },
+    "none": {
+     "state": 7,
+     "sequence": 4876
+    }
+   },
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 1208
+    },
+    "none": {
+     "state": 14,
+     "sequence": 1208
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 2011
+   }
+  },
+  {
+   "tags": "2H_Ranged,Blunderbuss",
+   "light": 461,
+   "light_moving": 461,
+   "charge": 587,
+   "alt_start": {
+    "second_sequence": 4248,
+    "third_state": 46,
+    "third_sequence": 407,
+    "marker": 40
+   },
+   "alt_end": {
+    "second_sequence": 4241,
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 0
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 1071
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 4027
+    }
+   },
+   "drawn_moves": {
+    "idle": 2350,
+    "restart": 2558,
+    "stop": 1829,
+    "start": {
+     "state": 26,
+     "sequence": 2558
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 1304
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4825
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4825
+    },
+    "left": {
+     "state": 7,
+     "sequence": 682
+    },
+    "right": {
+     "state": 7,
+     "sequence": 4834
+    },
+    "none": {
+     "state": 7,
+     "sequence": 4825
+    }
+   },
+   "jump": {
+    "none": {
+     "state": 14,
+     "sequence": 842
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 3250
+   },
+   "alt_fire": {
+    "second_sequence": 94,
+    "marker": 41
+   },
+   "reload": {
+    "second_state": 36,
+    "second_sequence": 4225
+   }
+  },
+  {
+   "tags": "2H_Ranged,Rifle",
+   "alt_start": {
+    "second_sequence": 4249,
+    "marker": 44
+   },
+   "alt_end": {
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 4
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 2097
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 4029
+    }
+   },
+   "drawn_moves": {
+    "idle": 605,
+    "restart": 1855,
+    "stop": 1467,
+    "start": {
+     "state": 26,
+     "sequence": 1855
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 1570
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4685
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4508
+    },
+    "left": {
+     "state": 7,
+     "sequence": 4879
+    },
+    "right": {
+     "state": 7,
+     "sequence": 1073
+    },
+    "none": {
+     "state": 7,
+     "sequence": 4508
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 3082
+   },
+   "alt_fire": {
+    "second_sequence": 1535,
+    "marker": 41
+   }
+  },
+  {
+   "tags": "MagicStaff,Fire",
+   "light": 1514,
+   "light_moving": 67,
+   "alt_start": {
+    "second_sequence": 4450
+   },
+   "alt_end": {
+    "second_state": 44,
+    "second_sequence": 2310,
+    "marker": 1
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 1038
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 1249
+    }
+   },
+   "drawn_moves": {
+    "idle": 1019,
+    "restart": 2554,
+    "stop": 2646,
+    "start": {
+     "state": 26,
+     "sequence": 2554
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 2646
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 1998
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4820
+    },
+    "left": {
+     "state": 7,
+     "sequence": 4232
+    },
+    "right": {
+     "state": 7,
+     "sequence": 3673
+    },
+    "none": {
+     "state": 7,
+     "sequence": 4845
+    }
+   },
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 1723
+    },
+    "none": {
+     "state": 14,
+     "sequence": 1135
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 1864
+   }
+  },
+  {
+   "tags": "MagicStaff,Heal",
+   "alt_start": {
+    "second_sequence": 4248,
+    "third_state": 46,
+    "third_sequence": 407,
+    "marker": 41
+   },
+   "alt_end": {
+    "second_sequence": 4241,
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 0
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 1071
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 4027
+    }
+   },
+   "drawn_moves": {
+    "idle": 2350,
+    "restart": 2558,
+    "stop": 1829,
+    "start": {
+     "state": 26,
+     "sequence": 2558
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 1304
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4825
+    },
+    "back": {
+     "state": 7,
+     "sequence": 1456
+    },
+    "left": {
+     "state": 7,
+     "sequence": 682
+    },
+    "right": {
+     "state": 7,
+     "sequence": 4824
+    },
+    "none": {
+     "state": 7,
+     "sequence": 4825
+    }
+   },
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 1208
+    },
+    "none": {
+     "state": 14,
+     "sequence": 1208
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 1864
+   }
+  },
+  {
+   "tags": "1H_Melee,Dagger",
+   "drawn_moves": {
+    "idle": 1136,
+    "restart": 2205,
+    "stop": 2254,
+    "start": {
+     "state": 26,
+     "sequence": 2205
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 1065
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4841
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4877
+    },
+    "right": {
+     "state": 7,
+     "sequence": 4606
+    }
+   }
+  },
+  {
+   "tags": "1H_Melee,Flail",
+   "drawn_moves": {
+    "idle": 49,
+    "restart": 2554,
+    "stop": 1370,
+    "start": {
+     "state": 26,
+     "sequence": 1880
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4728
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 3099
+   }
+  },
+  {
+   "tags": "1H_Melee,Sickle,Tool",
+   "alt_start": {
+    "second_sequence": 3527,
+    "third_state": 46,
+    "third_sequence": 405,
+    "marker": 44
+   },
+   "alt_end": {
+    "second_sequence": 3527,
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 4
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 2097
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 4029
+    }
+   },
+   "drawn_moves": {
+    "idle": 4029,
+    "restart": 3050,
+    "stop": 1370,
+    "start": {
+     "state": 26,
+     "sequence": 1855
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 1570
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4845
+    },
+    "back": {
+     "state": 7,
+     "sequence": 3586
+    },
+    "right": {
+     "state": 7,
+     "sequence": 4823
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 3173
+   }
+  },
+  {
+   "tags": "Bow,LongBow",
+   "alt_start": {
+    "second_sequence": 4249,
+    "third_sequence": 406,
+    "marker": 44
+   },
+   "alt_end": {
+    "second_sequence": 2958,
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 1
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 1246
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 4008
+    }
+   },
+   "drawn_moves": {
+    "idle": 4008,
+    "restart": 2086,
+    "stop": 1386,
+    "start": {
+     "state": 27,
+     "sequence": 1246
+    },
+    "back_start": {
+     "state": 27,
+     "sequence": 2747
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4876
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4780
+    },
+    "left": {
+     "state": 7,
+     "sequence": 2680
+    },
+    "right": {
+     "state": 7,
+     "sequence": 3817
+    },
+    "none": {
+     "state": 7,
+     "sequence": 4743
+    }
+   },
+   "jump": {
+    "forward": {
+     "state": 14,
+     "sequence": 2340
+    },
+    "none": {
+     "state": 14,
+     "sequence": 2340
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 3250
+   },
+   "alt_fire": {
+    "second_sequence": 35,
+    "marker": 41
+   },
+   "reload": {
+    "second_state": 36,
+    "second_sequence": 2225
+   }
+  },
+  {
+   "tags": "MagicGauntlet,Ice",
+   "alt_start": {
+    "second_sequence": 4450
+   },
+   "alt_end": {
+    "second_sequence": 35,
+    "third_state": 0,
+    "third_sequence": 0,
+    "marker": 1
+   },
+   "alt_moves": {
+    "moving": {
+     "state": 27,
+     "sequence": 1246
+    },
+    "idle": {
+     "state": 31,
+     "sequence": 4008
+    }
+   },
+   "drawn_moves": {
+    "idle": 4078,
+    "restart": 1867,
+    "stop": 2506,
+    "start": {
+     "state": 26,
+     "sequence": 2554
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 2655
+    },
+    "back": {
+     "state": 7,
+     "sequence": 4487
+    },
+    "none": {
+     "state": 7,
+     "sequence": 2655
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 2310
+   }
+  },
+  {
+   "tags": "MagicGauntlet,VoidGauntlet",
+   "drawn_moves": {
+    "idle": 1019,
+    "restart": 2594,
+    "stop": 1395,
+    "start": {
+     "state": 27,
+     "sequence": 2646
+    },
+    "back_start": {
+     "state": 26,
+     "sequence": 1664
+    }
+   },
+   "dodge": {
+    "forward": {
+     "state": 7,
+     "sequence": 4845
+    },
+    "left": {
+     "state": 7,
+     "sequence": 4834
+    }
+   },
+   "draw": {
+    "state": 44,
+    "sequence": 3126
+   }
+  }
+ ],
+ "follow_ups": [
+  {
+   "client": 13,
+   "server": 594,
+   "at_release": false,
+   "seen": 5
+  },
+  {
+   "client": 44,
+   "server": 461,
+   "at_release": true,
+   "seen": 6
+  },
+  {
+   "client": 55,
+   "server": 57,
+   "at_release": false,
+   "seen": 81
+  },
+  {
+   "client": 56,
+   "server": 3995,
+   "at_release": false,
+   "seen": 263
+  },
+  {
+   "client": 145,
+   "server": 3226,
+   "at_release": true,
+   "seen": 4
+  },
+  {
+   "client": 286,
+   "server": 473,
+   "at_release": true,
+   "seen": 5
+  },
+  {
+   "client": 362,
+   "server": 594,
+   "at_release": false,
+   "seen": 5
+  },
+  {
+   "client": 458,
+   "server": 458,
+   "at_release": true,
+   "seen": 14
+  },
+  {
+   "client": 473,
+   "server": 473,
+   "at_release": true,
+   "seen": 45
+  },
+  {
+   "client": 479,
+   "server": 458,
+   "at_release": true,
+   "seen": 14
+  },
+  {
+   "client": 481,
+   "server": 461,
+   "at_release": true,
+   "seen": 3
+  },
+  {
+   "client": 485,
+   "server": 1336,
+   "at_release": false,
+   "seen": 3
+  },
+  {
+   "client": 486,
+   "server": 4510,
+   "at_release": true,
+   "seen": 6
+  },
+  {
+   "client": 487,
+   "server": 2320,
+   "at_release": true,
+   "seen": 3
+  },
+  {
+   "client": 495,
+   "server": 473,
+   "at_release": true,
+   "seen": 28
+  },
+  {
+   "client": 497,
+   "server": 458,
+   "at_release": true,
+   "seen": 12
+  },
+  {
+   "client": 599,
+   "server": 458,
+   "at_release": true,
+   "seen": 33
+  },
+  {
+   "client": 801,
+   "server": 458,
+   "at_release": true,
+   "seen": 13
+  },
+  {
+   "client": 1122,
+   "server": 3492,
+   "at_release": false,
+   "seen": 174
+  },
+  {
+   "client": 1128,
+   "server": 479,
+   "at_release": true,
+   "seen": 88
+  },
+  {
+   "client": 1221,
+   "server": 463,
+   "at_release": true,
+   "seen": 5
+  },
+  {
+   "client": 1394,
+   "server": 458,
+   "at_release": true,
+   "seen": 24
+  },
+  {
+   "client": 1477,
+   "server": 580,
+   "at_release": false,
+   "seen": 3
+  },
+  {
+   "client": 1595,
+   "server": 473,
+   "at_release": true,
+   "seen": 45
+  },
+  {
+   "client": 1659,
+   "server": 3995,
+   "at_release": false,
+   "seen": 773
+  },
+  {
+   "client": 1680,
+   "server": 2670,
+   "at_release": true,
+   "seen": 5
+  },
+  {
+   "client": 1894,
+   "server": 473,
+   "at_release": true,
+   "seen": 6
+  },
+  {
+   "client": 2344,
+   "server": 461,
+   "at_release": true,
+   "seen": 3
+  },
+  {
+   "client": 2655,
+   "server": 458,
+   "at_release": true,
+   "seen": 7
+  },
+  {
+   "client": 2730,
+   "server": 57,
+   "at_release": false,
+   "seen": 14
+  },
+  {
+   "client": 3047,
+   "server": 3492,
+   "at_release": false,
+   "seen": 461
+  },
+  {
+   "client": 3120,
+   "server": 2030,
+   "at_release": true,
+   "seen": 6
+  },
+  {
+   "client": 3226,
+   "server": 473,
+   "at_release": true,
+   "seen": 26
+  },
+  {
+   "client": 3383,
+   "server": 458,
+   "at_release": true,
+   "seen": 12
+  },
+  {
+   "client": 3652,
+   "server": 461,
+   "at_release": true,
+   "seen": 11
+  },
+  {
+   "client": 3728,
+   "server": 3226,
+   "at_release": true,
+   "seen": 73
+  },
+  {
+   "client": 3931,
+   "server": 4294,
+   "at_release": true,
+   "seen": 4
+  },
+  {
+   "client": 4078,
+   "server": 458,
+   "at_release": true,
+   "seen": 18
+  },
+  {
+   "client": 4120,
+   "server": 57,
+   "at_release": false,
+   "seen": 194
+  },
+  {
+   "client": 4510,
+   "server": 57,
+   "at_release": false,
+   "seen": 11
+  },
+  {
+   "client": 4603,
+   "server": 468,
+   "at_release": true,
+   "seen": 4
+  },
+  {
+   "client": 4768,
+   "server": 458,
+   "at_release": true,
+   "seen": 9
+  },
+  {
+   "client": 4958,
+   "server": 3226,
+   "at_release": true,
+   "seen": 18
+  },
+  {
+   "client": 5033,
+   "server": 497,
+   "at_release": true,
+   "seen": 63
+  },
+  {
+   "client": 5034,
+   "server": 495,
+   "at_release": true,
+   "seen": 110
+  },
+  {
+   "client": 5039,
+   "server": 801,
+   "at_release": true,
+   "seen": 64
+  },
+  {
+   "client": 5042,
+   "server": 481,
+   "at_release": true,
+   "seen": 9
+  },
+  {
+   "client": 5047,
+   "server": 487,
+   "at_release": true,
+   "seen": 13
+  },
+  {
+   "client": 5051,
+   "server": 484,
+   "at_release": true,
+   "seen": 9
+  },
+  {
+   "client": 5055,
+   "server": 4603,
+   "at_release": true,
+   "seen": 16
+  },
+  {
+   "client": 5056,
+   "server": 468,
+   "at_release": true,
+   "seen": 5
+  }
+ ]
+}

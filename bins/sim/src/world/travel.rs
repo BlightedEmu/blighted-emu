@@ -136,8 +136,9 @@ const PLACEMENT_VALUE: u32 = 0;
 /// The status of a refused interaction (the crafting station's refusal).
 const INTERACTION_REFUSED: u8 = 2;
 /// The facet entity of a player's camp is this plus the player's number: one camp per player,
-/// above the crafting station keys (`1 << 37`) and below the loot bags.
-const CAMP_ENTITY_BASE: u64 = 1 << 38;
+/// in the upper half of the crafting station range (stations count up from `1 << 37`, far
+/// fewer than `1 << 36` of them) and below the loot bags (`1 << 38`).
+const CAMP_ENTITY_BASE: u64 = (1 << 37) | (1 << 36);
 /// The cooldown of a camp home point (1 s in all 14 retail camp elements).
 const CAMP_COOLDOWN_NS: u64 = 1_000_000_000;
 /// The name of a house home point (all 1,042 retail ones).

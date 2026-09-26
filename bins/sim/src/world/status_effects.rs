@@ -284,6 +284,26 @@ impl StatusEffects {
         true
     }
 
+    /// Adds the effect named `id` (a `StatusID`) of potency `potency`, applied by `source`, at
+    /// server time `now_ms` ([`Self::add`]); `false` for an id the data does not have.
+    pub(super) fn add_by_id(
+        &mut self,
+        rules: &StatusEffectRules,
+        id: &str,
+        potency: f64,
+        source: u64,
+        now_ms: u64,
+    ) -> bool {
+        let Some(crc) = rules.by_id(id).map(|rule| rule.crc) else {
+            return false;
+        };
+        let application = Application {
+            potency,
+            ..Application::plain(source)
+        };
+        self.add(rules, crc, application, now_ms)
+    }
+
     /// Ends effect `crc`.
     pub(super) fn remove(&mut self, crc: u32) {
         let before = self.held.len();
@@ -651,10 +671,50 @@ impl SimWorld {
             .map_or(PLAIN_POTENCY, |effects| effects.damage_scale(rules, tag))
     }
 
+    /// Puts the effects the instance's mutation queued ([`SimWorld::take_mutation_effects`]) on
+    /// their holders, players and mobs; the mutation applies them, so each is its own source.
+    fn add_mutation_effects(&mut self) {
+        let queued = self.take_mutation_effects();
+        if queued.is_empty() {
+            return;
+        }
+        let now_ms = self.server_ms;
+        let content = std::sync::Arc::clone(&self.content);
+        let rules = &content.status_effects;
+        for (number, effect) in queued {
+            let added = match self.player_by_number(number) {
+                Some(entity) => self.world.get_mut::<Player>(entity).is_some_and(|mut player| {
+                    player.status_effects.add_by_id(
+                        rules,
+                        &effect.status_id,
+                        effect.potency,
+                        number,
+                        now_ms,
+                    )
+                }),
+                None => self.mob_effects.entry(number).or_default().add_by_id(
+                    rules,
+                    &effect.status_id,
+                    effect.potency,
+                    number,
+                    now_ms,
+                ),
+            };
+            if !added {
+                tracing::warn!(
+                    number,
+                    effect = %effect.status_id,
+                    "mutation effect not added"
+                );
+            }
+        }
+    }
+
     /// The status effects of every player and mob at `now_ms`: deaths and new lives, the
     /// out-of-combat effect, the equip-load effects, the changes over time and the ends, then
     /// the owners' states.
     pub(super) fn tick_status_effects(&mut self, now_ms: u64) {
+        self.add_mutation_effects();
         let server_ms = self.server_ms;
         let content = std::sync::Arc::clone(&self.content);
         let rules = &content.status_effects;
@@ -1097,5 +1157,16 @@ mod tests {
         assert_eq!(local.elements[0].1.end_unix_ns, unix_ns(START_MS + 11_000));
         assert!(effects.take_member(false).is_none(), "sent once");
         assert!(effects.take_member(true).is_some(), "again with the first card");
+    }
+
+    #[test]
+    fn an_effect_by_its_id_is_held_and_an_unknown_id_is_not() {
+        const MUTATION_POTENCY: f64 = 2.0;
+        const SOURCE: u64 = 7;
+        let rules = rules();
+        let mut effects = StatusEffects::default();
+        assert!(effects.add_by_id(&rules, BLEED, MUTATION_POTENCY, SOURCE, 0));
+        assert!(effects.holds(crc(&rules, BLEED)));
+        assert!(!effects.add_by_id(&rules, "NotAnEffect", MUTATION_POTENCY, SOURCE, 0));
     }
 }

@@ -110,17 +110,6 @@ impl ConversationClientMsg {
 /// One board call of the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectiveInteractorClientMsg {
-    /// 3741: buy an item at the board (retail: war and outpost rush consumables such as
-    /// `PotionCleanseFTW` and `OR_FoodPvP`, 43 calls; retail answers with the item in the
-    /// inventory, 7048).
-    PurchaseItem {
-        /// The header.
-        header: FacetHeader,
-        /// CRC-32 of the lowercase item id.
-        item: u32,
-        /// How many (retail 1 to 6).
-        quantity: u32,
-    },
     /// 2461: turn in a mission (retail 15 calls; the objectives state changes within 1 s).
     CompleteObjective {
         /// The header.
@@ -157,13 +146,6 @@ impl ObjectiveInteractorClientMsg {
     /// Decodes `body` when `type_index` is a board call; `None` otherwise.
     pub fn decode(type_index: u64, body: &[u8]) -> Option<Result<Self, MessageError>> {
         Some(match type_index {
-            PURCHASE_ITEM_TYPE_INDEX => read_call(body, |header, reader| {
-                Ok(Self::PurchaseItem {
-                    header,
-                    item: reader.u32()?,
-                    quantity: reader.u32()?,
-                })
-            }),
             COMPLETE_OBJECTIVE_TYPE_INDEX => read_call(body, |header, reader| {
                 Ok(Self::CompleteObjective {
                     header,
@@ -196,7 +178,6 @@ impl ObjectiveInteractorClientMsg {
     /// The type index of the call.
     pub const fn type_index(&self) -> u64 {
         match self {
-            Self::PurchaseItem { .. } => PURCHASE_ITEM_TYPE_INDEX,
             Self::CompleteObjective { .. } => COMPLETE_OBJECTIVE_TYPE_INDEX,
             Self::SelectObjective { .. } => SELECT_OBJECTIVE_TYPE_INDEX,
             Self::SelectPvpMission { .. } => SELECT_PVP_MISSION_TYPE_INDEX,
@@ -208,14 +189,6 @@ impl ObjectiveInteractorClientMsg {
     pub fn encode(&self) -> Vec<u8> {
         let mut writer = Writer::new();
         match self {
-            Self::PurchaseItem {
-                header,
-                item,
-                quantity,
-            } => {
-                header.write(&mut writer);
-                writer.u32(*item).u32(*quantity);
-            }
             Self::CompleteObjective { header, instance } => {
                 header.write(&mut writer);
                 writer.u64(*instance);
@@ -266,8 +239,6 @@ mod tests {
     const COOKING_PROJECT: u32 = 0x2f22_9df9;
     /// CRC-32 of `cookingprojectid_1_fishingsalmonlarget1_1`.
     const COOKING_MISSION: u32 = 0x469e_c58c;
-    /// CRC-32 of `potioncleanseftw`.
-    const CLEANSE_POTION: u32 = 0x7bfb_e42b;
 
     fn header() -> FacetHeader {
         FacetHeader::read(&mut Reader::new(&HEADER)).expect("header")
@@ -313,17 +284,14 @@ mod tests {
             ),
             Some(Err(MessageError::LengthMismatch { .. }))
         ));
-        assert!(ConversationClientMsg::decode(PURCHASE_ITEM_TYPE_INDEX, &request).is_none());
+        assert!(
+            ConversationClientMsg::decode(crate::shop::PURCHASE_ITEM_TYPE_INDEX, &request).is_none()
+        );
     }
 
     #[test]
     fn the_board_calls_read_the_retail_layouts_and_write_them_back() {
         let calls = [
-            ObjectiveInteractorClientMsg::PurchaseItem {
-                header: header(),
-                item: CLEANSE_POTION,
-                quantity: 2,
-            },
             ObjectiveInteractorClientMsg::CompleteObjective {
                 header: header(),
                 instance: 0x1122_3344_5566_7788,

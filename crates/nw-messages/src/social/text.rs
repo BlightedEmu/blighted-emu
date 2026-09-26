@@ -47,33 +47,6 @@ pub(crate) fn write_count(writer: &mut Writer, count: usize) -> Result<(), Messa
     Ok(())
 }
 
-/// Reads a list of texts.
-pub(crate) fn read_texts(reader: &mut Reader<'_>) -> Result<Vec<String>, MessageError> {
-    (0..read_count(reader)?)
-        .map(|_| read_text(reader))
-        .collect()
-}
-
-/// Writes a list of texts.
-pub(crate) fn write_texts(writer: &mut Writer, texts: &[String]) -> Result<(), MessageError> {
-    write_count(writer, texts.len())?;
-    texts.iter().try_for_each(|text| write_text(writer, text))
-}
-
-/// Reads a list of 16-byte ids.
-pub(crate) fn read_ids(reader: &mut Reader<'_>) -> Result<Vec<[u8; RAW_ID_LEN]>, MessageError> {
-    (0..read_count(reader)?).map(|_| reader.raw_id()).collect()
-}
-
-/// Writes a list of 16-byte ids.
-pub(crate) fn write_ids(writer: &mut Writer, ids: &[[u8; RAW_ID_LEN]]) -> Result<(), MessageError> {
-    write_count(writer, ids.len())?;
-    for id in ids {
-        writer.bytes(id);
-    }
-    Ok(())
-}
-
 /// A character reference: the character id as 16 bytes (the UUID in text order), or none.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct CharacterRef(pub Option<[u8; RAW_ID_LEN]>);
@@ -153,13 +126,5 @@ mod tests {
     #[test]
     fn a_count_above_the_bytes_left_is_refused() {
         assert!(read_count(&mut Reader::new(&[5, 1])).is_err());
-        let mut writer = Writer::new();
-        write_texts(&mut writer, &["ab".to_owned(), String::new()]).expect("write");
-        let bytes = writer.finish();
-        assert_eq!(bytes, [2, 2, b'a', b'b', 0]);
-        assert_eq!(
-            read_texts(&mut Reader::new(&bytes)),
-            Ok(vec!["ab".to_owned(), String::new()])
-        );
     }
 }

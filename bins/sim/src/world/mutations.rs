@@ -4,7 +4,7 @@
 //!
 //! - Every player's client gets the week's mutations once it spawned, and again when the week
 //!   turns: `GameModeMutationSchedulerReplicatedState` (2201) as component 6 of entity slot 2
-//!   (Observed in 549 retail ledgers; [`SimWorld::mutation_schedule_group`]).
+//!   (Observed in 549 retail ledgers; [`schedule_group`]).
 //! - A 5037's byte is the difficulty the player asks for (best guess: 0 in every capture, all of
 //!   which were normal runs; [`difficulty_of_request`]). An activation of a mutated difficulty
 //!   is refused with `ScheduledNotAvailable` when the game mode is not mutated this week,
@@ -152,19 +152,6 @@ impl SimWorld {
     /// Unix seconds now.
     pub(super) fn unix_s(&self) -> u64 {
         unix_ns(self.server_ms) / NS_PER_SECOND
-    }
-
-    /// The slot-2 group with the week's mutations, when the client of `view` does not have this
-    /// week; `None` when it has it or no expedition is mutable.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`MessageError`] when the state cannot be encoded.
-    pub(super) fn mutation_schedule_group(
-        &self,
-        view: &mut ScheduleView,
-    ) -> Result<Option<BundleGroup>, MessageError> {
-        schedule_group(&self.content.mutations, self.unix_s(), view)
     }
 
     /// Why player `player` may not activate `mode` at mutation difficulty `difficulty`; `None`
@@ -446,7 +433,10 @@ mod tests {
     fn a_world_without_mutable_expeditions_sends_no_schedule() {
         let world = crate::world::tests::world_with_spawns(Vec::new());
         let mut view = ScheduleView::default();
-        assert_eq!(world.mutation_schedule_group(&mut view), Ok(None));
+        assert_eq!(
+            schedule_group(&world.content.mutations, world.unix_s(), &mut view),
+            Ok(None)
+        );
         assert_eq!(view, ScheduleView::default());
     }
 }
