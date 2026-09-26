@@ -1015,16 +1015,22 @@ mod infra_tests {
             .await
             .expect("join");
             assert_eq!(
-                change_treasury(pool, first.id, ann, DEPOSIT, TreasuryReason::Deposit).await,
-                Ok(Some(DEPOSIT as u64))
+                change_treasury(pool, first.id, ann, DEPOSIT, TreasuryReason::Deposit)
+                    .await
+                    .expect("treasury"),
+                Some(DEPOSIT as u64)
             );
             assert_eq!(
-                change_treasury(pool, first.id, bob, -2 * DEPOSIT, TreasuryReason::Withdraw).await,
-                Ok(None)
+                change_treasury(pool, first.id, bob, -2 * DEPOSIT, TreasuryReason::Withdraw)
+                    .await
+                    .expect("treasury"),
+                None
             );
             assert_eq!(
-                change_treasury(pool, first.id, bob, -DEPOSIT, TreasuryReason::Withdraw).await,
-                Ok(Some(0))
+                change_treasury(pool, first.id, bob, -DEPOSIT, TreasuryReason::Withdraw)
+                    .await
+                    .expect("treasury"),
+                Some(0)
             );
             let listed = company_listings(pool, &[first.id]).await.expect("listings");
             assert_eq!(listed[0].governor, Some(ann));

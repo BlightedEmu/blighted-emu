@@ -258,6 +258,7 @@ impl Stack {
             admit_timeout: ADMIT_TIMEOUT,
             heartbeat_interval: HEARTBEAT,
             heartbeat_misses: HEARTBEAT_MISSES,
+            instances: None,
         };
         tokio::spawn(serve_director(
             director,
@@ -359,14 +360,22 @@ async fn start_sim(
         world_id,
         level: LEVEL.to_owned(),
         world: config
-            .world_settings(bounds, OCEAN_LEVEL_M)
+            .world_settings(
+                bounds,
+                OCEAN_LEVEL_M,
+                &nw_content::instances::InstanceCatalog::default(),
+            )
             .expect("world settings"),
         handoff_timeout: Duration::from_millis(config.handoff_timeout_ms),
         forward_ttl_ms: config.forward_ttl_ms,
         save_interval: SAVE_INTERVAL,
         heartbeat_interval: HEARTBEAT,
         heartbeat_misses: HEARTBEAT_MISSES,
-        combat: config.combat_settings(Arc::new(test_data()), Arc::from([])),
+        combat: config.combat_settings(
+            Arc::new(test_data()),
+            Arc::from([]),
+            Arc::new(sim::mob_ai::MobAi::empty()),
+        ),
         content: Arc::default(),
         snapshot_interval: None,
         mob_ai: Arc::from([]),

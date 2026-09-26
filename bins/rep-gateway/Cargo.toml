@@ -28,6 +28,7 @@ uuid.workspace = true
 [dev-dependencies]
 axum.workspace = true
 nw-bus = { workspace = true, features = ["test-util"] }
+nw-content.workspace = true
 nw-db = { workspace = true, features = ["test-util"] }
 nw-login = { workspace = true, features = ["test-util"] }
 nw-messages.workspace = true

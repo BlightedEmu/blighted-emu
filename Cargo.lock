@@ -4176,6 +4176,7 @@ dependencies = [
  "nw-bus",
  "nw-carrier",
  "nw-common",
+ "nw-content",
  "nw-db",
  "nw-dtls",
  "nw-login",
