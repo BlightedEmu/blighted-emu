@@ -1,0 +1,29 @@
+[[task]]
+id = "t1"
+title = "Make own-player movement match retail exactly (movement option 2)"
+text = """
+The server moves the player's body from the client's keys. Our movement math differs from retail
+(replay error median 0.156 m in the open world, 0.219 m in the tutorial), so the client gets
+pulled back to the server's place: rubber-banding, walking backwards, a bad ship deck.
+
+Short-term fix (option 1): the server keeps its own body for checks and for what other players see,
+but the own player gets corrected only for a large drift, a wall, or a server move (teleport,
+ship sinking, respawn). Not by dropping the place from the own states: the client checks its
+trigger areas against that place (live 2026-09-18: with no own place while running, the tutorial's
+first cutscene never started). The client has its own correction settings (registered in
+FUN_141031800): g_localPlayer_CorrectionThreshold ("no correction if the total correction is less
+than this"), g_localPlayer_IdleHorizontalCorrectionThreshold,
+g_localPlayer_IdleVerticalCorrectionThreshold, g_localPlayer_ErrorDistanceForFullCorrection,
+g_localPlayer_FailedCorrectionsBeforeSnap. Option 1 is now the client patch's third change
+(docs/client-patch.md): the correction threshold goes from 0.01 m to 0.5 m and the full-correction
+distance from 1.0 m to 2.0 m. When option 2 is done, set them back toward the retail defaults.
+
+Option 2 (this task): find the client's exact movement rules (speeds, turn, acceleration, slopes,
+steps, water, ship deck) from the retail captures and the client decompile, and make the server body
+match them. When it matches, the large-drift correction of option 1 almost never fires. Check it
+with the movement replay against the retail captures (open world and tutorial): the error must drop
+near zero.
+"""
+kind = "other"
+state = "open"
+records = []
