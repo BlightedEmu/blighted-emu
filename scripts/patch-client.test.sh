@@ -19,6 +19,11 @@ readonly S3_LEAD_HEX="488d4c2450" S3_TAIL_HEX="904488bc24ac000000488b15"
 readonly KINESIS_LEAD_HEX="488d4df0" KINESIS_TAIL_HEX="90c6454c00c7451001000000"
 readonly STS_LEAD_HEX="488d4d10" STS_TAIL_HEX="90c6456c00488d442430"
 readonly S3_VERIFY_HEX="c684240802000001c744247001000000"
+# The local-player correction defaults: eight MOV dword ptr [RDI + field], imm32 writes (0x2F0 to
+# 0x30C), and the patched immediates of the threshold (0.5) and the full-correction distance (2.0).
+readonly CORRECTIONS_HEX="c787f00200000ad7233cc787f40200000000003fc787f80200009a99993e""c787fc020000cdcccc3ec7870003000005000000c787040300000000803f""c7870803000004000000c7870c0300000000003f"
+readonly THRESHOLD_HEX="0000003f"
+readonly FULL_CORRECTION_HEX="00000040"
 # Fake PE layout: image base, .text at RVA 0x1000 / file 0x200 (0x800 bytes), .rdata at RVA 0x2000
 # / file 0xA00.
 readonly SIG_OFFSET=$((0x200))
@@ -30,6 +35,10 @@ readonly S3_OFFSET=$((0x340))
 readonly KINESIS_OFFSET=$((0x380))
 readonly STS_OFFSET=$((0x3c0))
 readonly S3_VERIFY_OFFSET=$((0x400))
+readonly CORRECTIONS_OFFSET=$((0x440))
+# The immediates of the first and the sixth write.
+readonly THRESHOLD_OFFSET=$((CORRECTIONS_OFFSET + 6))
+readonly FULL_CORRECTION_OFFSET=$((CORRECTIONS_OFFSET + 5 * 10 + 6))
 # INT3 padding (0x500..0x800): the first cave is at file 0x500, VA 0x140001300.
 readonly CAVE_OFFSET=$((0x500))
 readonly CAVE_SLOT=$((0x50))
@@ -54,16 +63,19 @@ fail() { echo "FAIL: $1"; failures=$((failures + 1)); }
 
 # Builds a fake Bin64 with a minimal PE NewWorld.exe: the verify signature (when $2 is yes), the
 # Sonic and Steam EndSession bodies (the Steam one when $3 is yes), a vtable slot that points at
-# the Steam function, and the AWS proxy parts with INT3 padding (when $4 is yes).
+# the Steam function, the AWS proxy parts with INT3 padding (when $4 is yes), and the correction
+# defaults (when $5 is yes, the default).
 make_bin64() {
-  local dir="$1" with_sig="$2" with_steam="$3" with_proxy="$4"
+  local dir="$1" with_sig="$2" with_steam="$3" with_proxy="$4" with_corrections="${5:-yes}"
   mkdir -p "$dir"
-  python3 -I - "$dir/NewWorld.exe" "$with_sig" "$with_steam" "$with_proxy" "$SIGNATURE_HEX" \
-    "$SONIC_HEX" "$STEAM_HEX" "$STEAM_VA_HEX" "$CTOR_HEX" "$S3_LEAD_HEX" "$S3_TAIL_HEX" \
-    "$KINESIS_LEAD_HEX" "$KINESIS_TAIL_HEX" "$STS_LEAD_HEX" "$STS_TAIL_HEX" "$S3_VERIFY_HEX" <<'PY'
+  python3 -I - "$dir/NewWorld.exe" "$with_sig" "$with_steam" "$with_proxy" "$with_corrections" \
+    "$SIGNATURE_HEX" "$SONIC_HEX" "$STEAM_HEX" "$STEAM_VA_HEX" "$CTOR_HEX" "$S3_LEAD_HEX" \
+    "$S3_TAIL_HEX" "$KINESIS_LEAD_HEX" "$KINESIS_TAIL_HEX" "$STS_LEAD_HEX" "$STS_TAIL_HEX" \
+    "$S3_VERIFY_HEX" "$CORRECTIONS_HEX" <<'PY'
 import struct, sys
-(path, with_sig, with_steam, with_proxy, sig, sonic, steam, steam_va, ctor, s3_lead, s3_tail,
- kinesis_lead, kinesis_tail, sts_lead, sts_tail, s3_verify) = sys.argv[1:]
+(path, with_sig, with_steam, with_proxy, with_corrections, sig, sonic, steam, steam_va, ctor,
+ s3_lead, s3_tail, kinesis_lead, kinesis_tail, sts_lead, sts_tail, s3_verify,
+ corrections) = sys.argv[1:]
 image = bytearray(0xB00)
 image[0:2] = b"MZ"
 struct.pack_into("<I", image, 0x3C, 0x40)
@@ -101,6 +113,8 @@ if with_proxy == "yes":
         put(site, lead + "e8" + offset.hex() + tail)
     put(0x400, s3_verify)
     image[0x500:0x800] = b"\xcc" * 0x300
+if with_corrections == "yes":
+    put(0x440, corrections)
 open(path, "wb").write(image)
 PY
 }
@@ -154,6 +168,25 @@ else
   fail "patched copy keeps the Steam function body (got $got)"
 fi
 
+got="$(dd if="$bin64/BlightedNewWorld.exe" bs=1 skip="$THRESHOLD_OFFSET" count=4 2>/dev/null | xxd -p)"
+if [[ "$got" == "$THRESHOLD_HEX" ]]; then
+  pass "patched copy raises the correction threshold to 0.5 m"
+else
+  fail "patched copy raises the correction threshold to 0.5 m (got $got)"
+fi
+got="$(dd if="$bin64/BlightedNewWorld.exe" bs=1 skip="$FULL_CORRECTION_OFFSET" count=4 2>/dev/null | xxd -p)"
+if [[ "$got" == "$FULL_CORRECTION_HEX" ]]; then
+  pass "patched copy raises the full-correction distance to 2.0 m"
+else
+  fail "patched copy raises the full-correction distance to 2.0 m (got $got)"
+fi
+got="$(dd if="$bin64/BlightedNewWorld.exe" bs=1 skip="$((CORRECTIONS_OFFSET + 10))" count=40 2>/dev/null | xxd -p | tr -d '\n')"
+if [[ "$got" == "${CORRECTIONS_HEX:20:80}" ]]; then
+  pass "patched copy keeps the other correction defaults"
+else
+  fail "patched copy keeps the other correction defaults (got $got)"
+fi
+
 # 2) --verify passes on the patched copy, and fails after tampering.
 if python3 "$PATCH_SCRIPT" "$bin64" --verify >/dev/null; then
   pass "--verify passes on a correct copy"
@@ -182,6 +215,14 @@ if python3 "$PATCH_SCRIPT" "$missing" >/dev/null 2>&1; then
   fail "missing verify signature is refused"
 else
   pass "missing verify signature is refused"
+fi
+no_corrections="$work_dir/no-corrections/Bin64"
+make_bin64 "$no_corrections" yes yes yes no
+if python3 "$PATCH_SCRIPT" "$no_corrections" >/dev/null 2>&1 \
+  || [[ -e "$no_corrections/BlightedNewWorld.exe" ]]; then
+  fail "missing correction defaults are refused"
+else
+  pass "missing correction defaults are refused"
 fi
 no_steam="$work_dir/no-steam/Bin64"
 make_bin64 "$no_steam" yes no yes

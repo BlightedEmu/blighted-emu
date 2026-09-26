@@ -3,8 +3,8 @@
 """Make the patched copy of the New World client that the emulator needs.
 
 This tool writes a patched copy, ``BlightedNewWorld.exe``, next to the official
-``NewWorld.exe`` (which it never modifies). The copy has two changes, and a third
-one with ``--aws-proxy``:
+``NewWorld.exe`` (which it never modifies). The copy has three changes, and a
+fourth one with ``--aws-proxy``:
 
 1. Certificate bypass. The real client refuses the emulator's self-signed
    game-server certificate. The tool finds OpenSSL ``SSL_CTX_set_verify`` by a
@@ -20,7 +20,15 @@ one with ``--aws-proxy``:
    are found by byte signatures; the vtable slot is the single pointer to the
    Steam function.
 
-3. AWS proxy (``--aws-proxy``, for Windows). The remote-config (S3), analytics
+3. Own-movement correction. The client predicts its own movement and corrects it
+   toward the own place the server sends whenever the two differ by more than
+   0.01 m, and snaps past 1.0 m. The emulator's server-side movement is not
+   retail's to within that (a median 0.16 m off), so the client kept pulling
+   itself back. The tool finds the constructor writes of these defaults by their
+   bytes and raises the correction threshold to 0.5 m and the full-correction
+   distance to 2.0 m.
+
+4. AWS proxy (``--aws-proxy``, for Windows). The remote-config (S3), analytics
    (Kinesis) and analytics-credentials (STS) clients call fixed Amazon names
    with certificate checks on. Windows has no per-process hosts or trust file,
    so each client is sent through the launcher's loopback proxy instead. After
@@ -129,6 +137,40 @@ MOV_QWORD_RAX = bytes.fromhex("48c780")
 MOV_BYTE_RAX = bytes.fromhex("c680")
 DWORD_LEN = 4
 POINTER_LEN = 8
+
+# The local-player movement correction defaults (build 25810808: the game settings constructor
+# writes them at 0x140FEC21A; FUN_141031800 registers them as the g_localPlayer_* console
+# variables): MOV dword ptr [RDI + field], imm32 each, in this order.
+MOV_DWORD_RDI = bytes.fromhex("c787")
+MOV_IMMEDIATE_OFFSET = len(MOV_DWORD_RDI) + DWORD_LEN
+CORRECTION_THRESHOLD_FIELD = 0x2F0
+FULL_CORRECTION_FIELD = 0x304
+CORRECTION_DEFAULTS = (
+    # g_localPlayer_CorrectionThreshold: no correction below this total correction, m.
+    (CORRECTION_THRESHOLD_FIELD, struct.pack("<f", 0.01)),
+    # g_localPlayer_IdleVerticalCorrectionThreshold and IdleHorizontalCorrectionThreshold, m.
+    (0x2F4, struct.pack("<f", 0.5)),
+    (0x2F8, struct.pack("<f", 0.3)),
+    # g_localPlayer_AddedErrorDistancePerMissedServerState, m, and its MaxMissedServerStates.
+    (0x2FC, struct.pack("<f", 0.4)),
+    (0x300, struct.pack("<I", 5)),
+    # g_localPlayer_ErrorDistanceForFullCorrection: a full correction (a snap) past this, m.
+    (FULL_CORRECTION_FIELD, struct.pack("<f", 1.0)),
+    # g_localPlayer_FailedCorrectionsBeforeSnap.
+    (0x308, struct.pack("<I", 4)),
+    # g_localPlayer_RequiredPhysicalCorrectionFraction.
+    (0x30C, struct.pack("<f", 0.5)),
+)
+CORRECTION_DEFAULTS_SIGNATURE = b"".join(
+    MOV_DWORD_RDI + struct.pack("<I", field) + value for field, value in CORRECTION_DEFAULTS
+)
+MOV_IMMEDIATE_LEN = MOV_IMMEDIATE_OFFSET + DWORD_LEN
+# The patched values, m. The emulator's own place is a median 0.16 m (open world) and 0.21 m
+# (tutorial) from retail's, 75% within 0.39 m and 0.79 m, 90% within 1.45 m and 1.55 m (movement
+# replay of the newchar capture, 2026-09-24): below 0.5 m the client keeps its own prediction, and
+# only past 2.0 m does it snap to the server's place.
+CORRECTION_THRESHOLD_M = 0.5
+FULL_CORRECTION_M = 2.0
 
 OFFICIAL_NAME = "NewWorld.exe"
 BACKUP_NAME = "NewWorld.exe.orig"
@@ -270,6 +312,22 @@ def plan_aws_proxy(data: bytes) -> "list[tuple[str, int, bytes]]":
     return edits
 
 
+def plan_corrections(data: bytes) -> "list[tuple[str, int, bytes]]":
+    """The edits that raise the local-player correction threshold and full-correction distance."""
+    defaults = find_unique(data, CORRECTION_DEFAULTS_SIGNATURE, "local-player correction defaults")
+    fields = [field for field, _ in CORRECTION_DEFAULTS]
+
+    def immediate(field: int) -> int:
+        return defaults + fields.index(field) * MOV_IMMEDIATE_LEN + MOV_IMMEDIATE_OFFSET
+
+    return [
+        ("correction threshold", immediate(CORRECTION_THRESHOLD_FIELD),
+         struct.pack("<f", CORRECTION_THRESHOLD_M)),
+        ("full correction distance", immediate(FULL_CORRECTION_FIELD),
+         struct.pack("<f", FULL_CORRECTION_M)),
+    ]
+
+
 def plan_patches(data: bytes, aws_proxy: bool) -> "list[tuple[str, int, bytes]]":
     """The (name, file offset, new bytes) edits that make the patched copy from `data`; with
     `aws_proxy`, also the AWS proxy edits."""
@@ -280,6 +338,7 @@ def plan_patches(data: bytes, aws_proxy: bool) -> "list[tuple[str, int, bytes]]"
     edits = [
         ("certificate bypass", verify_site, NOPS),
         ("exit to desktop", slot, struct.pack("<Q", sonic)),
+        *plan_corrections(data),
     ]
     return edits + plan_aws_proxy(data) if aws_proxy else edits
 

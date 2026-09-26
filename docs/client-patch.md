@@ -81,7 +81,48 @@ function. Reasoning and addresses:
 
 "Exit to main menu" is a different path and is not changed by this patch.
 
-## Third change: AWS proxy (Windows only, `--aws-proxy`)
+## Third change: own-movement correction
+
+The client moves its own player at once from the keys (prediction) and then
+compares that with the own place the server sends for the same input number.
+Eight console variables steer that correction. The game settings constructor
+writes their defaults (build 25810808: `MOV dword ptr [RDI + field], imm32` at
+`0x140FEC21A`), and `FUN_141031800` registers them:
+
+| Field | Variable (`g_localPlayer_...`) | Default | Patched |
+|---|---|---|---|
+| `0x2F0` | `CorrectionThreshold` | 0.01 m | **0.5 m** |
+| `0x2F4` | `IdleVerticalCorrectionThreshold` | 0.5 m | |
+| `0x2F8` | `IdleHorizontalCorrectionThreshold` | 0.3 m | |
+| `0x2FC` | `AddedErrorDistancePerMissedServerState` | 0.4 m | |
+| `0x300` | `AddedErrorDistanceMaxMissedServerStates` | 5 | |
+| `0x304` | `ErrorDistanceForFullCorrection` | 1.0 m | **2.0 m** |
+| `0x308` | `FailedCorrectionsBeforeSnap` | 4 | |
+| `0x30C` | `RequiredPhysicalCorrectionFraction` | 0.5 | |
+
+The variable help texts: no correction is applied while the total correction
+is less than `CorrectionThreshold`; past `ErrorDistanceForFullCorrection` a
+full correction (likely a snap) happens.
+
+Why: the emulator moves the player's body on the server from the client's keys,
+and its place is not retail's to within 1 cm. In the movement replay of the
+newchar capture (2026-09-24) it was a median 0.16 m (open world) and 0.21 m
+(tutorial) from retail's own place, 90% within 1.45 m and 1.55 m. With the
+retail defaults the client corrected itself on nearly every state and snapped
+often: rubber banding, walking backward (run 16). With 0.5 m the client keeps
+its own prediction for the usual error, and it snaps only past 2.0 m.
+
+The own place is still sent in every own state: the client checks its trigger
+areas (the tutorial cutscenes) against it, and with no own place while running
+the first cutscene never started (live 2026-09-18). The server still moves the
+body that other players see and that every rule uses; these values change only
+how far the patched client lets its own picture differ from it.
+
+The tool finds the eight writes by their exact bytes and changes the two
+immediates. The values are a stop-gap until the server's movement matches
+retail's (task `t1` in `content/todo.toml`).
+
+## Fourth change: AWS proxy (Windows only, `--aws-proxy`)
 
 This change is for Windows, where there is no `bwrap` sandbox to give the game
 process a private hosts file and trust file. On Linux leave it off.
@@ -191,6 +232,12 @@ manager vtable is the one its constructor stores (build 25810808:
 `FUN_145a80510` stores `0x14844BA48`), slot `+0x130`; the Sonic vtable's slot
 `+0x130` is the function that calls the callback first. Update
 `SONIC_END_SESSION` and `STEAM_END_SESSION` in `scripts/patch-client.py`.
+
+For the correction patch, find the constructor writes of the eight fields of
+the table above: the code that registers `g_localPlayer_CorrectionThreshold`
+(`FUN_141031800`) shows the object field of each variable, and the settings
+constructor writes their defaults with immediates. Update `CORRECTION_DEFAULTS`
+in `scripts/patch-client.py`.
 
 For the AWS proxy patch, re-find the `ClientConfiguration` constructor
 (`FUN_147467a40`: writes the two 5,000 ms timeouts and `verifySSL = 1` into a
