@@ -20,6 +20,7 @@ mod meta_achievements;
 mod migrate;
 mod mounts;
 mod music;
+mod notifications;
 mod position;
 mod progression;
 mod quests;
@@ -58,6 +59,7 @@ pub use meta_achievements::SavedSlot;
 pub use migrate::{GLOBAL_MIGRATOR, WORLD_MIGRATOR, check_schema};
 pub use mounts::{DYE_LEN, SavedMount, SavedMounts};
 pub use music::SavedMusic;
+pub use notifications::SavedNotifications;
 pub use position::{SaveOutcome, SavedPosition, character_position, save_character_position};
 pub use progression::{
     SavedLootLimit, SavedProgression, character_progression, save_character_progression,

@@ -89,6 +89,7 @@ mod mob_trail;
 mod mount;
 mod music;
 mod mutations;
+mod notifications;
 mod points;
 mod progression;
 mod projectile;
@@ -187,7 +188,7 @@ const FIRST_LOGIN_BUNDLE_SEQUENCE: u64 = 2;
 /// before the client spawns (see [`Neighbourhood`]); a card sent on the login tick reaches the
 /// client before it has applied `LevelInfoChanged` (channel 0), so the client drops it as a
 /// bundle "for a previous ClientContext", never loads the level, and never moves to spawn.
-const OWN_CARD_DELAY_MS: u64 = 1_000;
+pub(crate) const OWN_CARD_DELAY_MS: u64 = 1_000;
 /// Time between two sends of the own spawn card bundle while the client loads its level.
 /// Retail resends its first bundle about every 350 ms until the client answers with its
 /// first time sync request (Soul Survivor capture, 2026-09-27: bundle 1 at 0, 348 and
@@ -640,6 +641,8 @@ struct Player {
     /// Its side of the musical performances: the one it plays in, the one it watches, its
     /// lockout and what its client got of each ([`music`]).
     music: music::PlayerMusicState,
+    /// How often each event notification was shown to it ([`notifications`]).
+    notifications: notifications::ShownNotifications,
     /// Its combat status timer.
     combat: CombatTimer,
     /// The version of its replicated lists that this server sends besides the gear.
@@ -703,6 +706,7 @@ impl Player {
             title: self.title,
             arena: self.arena.carried(),
             music: self.music.carried(),
+            notifications: self.notifications.carried(),
         }
     }
 
@@ -1134,6 +1138,14 @@ impl SimWorld {
                 server_time,
                 level_info,
             )?;
+            // Retail syncs the notification counts in the login burst, before the level info.
+            if let Some(sync) =
+                notifications::ShownNotifications::of(&admit.progression.notifications)
+                    .login_sync(admit.entity)
+            {
+                let level_info_at = envelopes.len().saturating_sub(1);
+                envelopes.insert(level_info_at, sync.envelope()?);
+            }
             if admit.login {
                 // Retail leaves the game-mode queue 24 ms after the level info (4970, value 1).
                 envelopes.push(
@@ -3728,6 +3740,9 @@ impl SimWorld {
                     mount: mount::PlayerMount::of(&arrival.progression.mounts),
                     fishing: fishing::PlayerFishing::continuing(arrival.fishing_sequence),
                     music: music::PlayerMusicState::of(&arrival.progression.music),
+                    notifications: notifications::ShownNotifications::of(
+                        &arrival.progression.notifications,
+                    ),
                     combat: CombatTimer::default(),
                     list_version: FIRST_VERSION,
                     extra_members: Vec::new(),

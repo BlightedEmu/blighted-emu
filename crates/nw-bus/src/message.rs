@@ -498,6 +498,10 @@ pub struct PlayerProgression {
     /// Its musical performance lockout (world migration 0018).
     #[serde(default)]
     pub music: PlayerMusic,
+    /// How often each event notification was shown to it: (CRC-32 of the lowercase
+    /// `NotificationID`, times shown), ascending (world migration 0022).
+    #[serde(default)]
+    pub notifications: Vec<(u32, u32)>,
 }
 
 /// A player's musical performance lockout (world migration 0018), as a join, a handoff and a save
@@ -1178,6 +1182,7 @@ mod tests {
             music: PlayerMusic {
                 next_performance_ms: Some(u64::MAX),
             },
+            notifications: vec![(u32::MAX, u32::MAX)],
         }
     }
 

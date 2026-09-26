@@ -13,13 +13,11 @@
 
 use std::sync::Arc;
 
-use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::item_calls::LOCATION_BAG;
 use nw_messages::{
-    ItemRef, NotificationCount, Replacement, SendNotificationMsg,
-    SendNotificationWithReplacementsMsg, ServerMessage, SyncNotificationsMsg,
+    ItemRef, Replacement, SendNotificationMsg, SendNotificationWithReplacementsMsg, ServerMessage,
 };
 
 use super::gear::{CharmRefusal, CharmTarget};
@@ -33,32 +31,6 @@ const CHARM_REFUSED: &str = "CharmSlotRequestsFailed";
 const PERK_NAME_KEY: &str = "perkname";
 /// The placeholder of the item's name.
 const ITEM_NAME_KEY: &str = "itemname";
-
-/// How many times each notification was shown to the player this session (3236: retail keeps
-/// the counts per character; this server counts from the session's start, best guess, as no
-/// save holds them).
-#[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct ShownNotifications {
-    counts: Vec<NotificationCount>,
-}
-
-impl ShownNotifications {
-    /// Counts one more showing of `notification`: the whole map after it.
-    fn shown(&mut self, notification: u32) -> Vec<NotificationCount> {
-        match self
-            .counts
-            .iter_mut()
-            .find(|count| count.notification == notification)
-        {
-            Some(count) => count.count = count.count.saturating_add(1),
-            None => self.counts.push(NotificationCount {
-                notification,
-                count: 1,
-            }),
-        }
-        self.counts.clone()
-    }
-}
 
 impl SimWorld {
     /// Player `number` (`entity`) puts the gem or charm `charm` into perk slot `perk_index` of
@@ -141,16 +113,13 @@ impl SimWorld {
                 )
             }
         };
-        let counts = match self.world.get_mut::<ShownNotifications>(entity) {
-            Some(mut counted) => counted.shown(notification),
-            None => {
-                let mut counted = ShownNotifications::default();
-                let counts = counted.shown(notification);
-                self.world.entity_mut(entity).insert(counted);
-                counts
-            }
+        let Some(sync) = self
+            .world
+            .get_mut::<Player>(entity)
+            .map(|mut player| player.notification_sync(notification))
+        else {
+            return;
         };
-        let sync = ServerMessage::SyncNotifications(SyncNotificationsMsg::to(number, counts));
         send_now(&mut self.combat_messages, &connection, &[shown, sync]);
     }
 }
@@ -158,27 +127,6 @@ impl SimWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_count_rises_per_showing_and_the_whole_map_goes() {
-        /// The retail CRC of `CharmSlotRequestsSucceeded` (notifications note).
-        const RETAIL_SLOTTED: u32 = 0x1e06_e356;
-        assert_eq!(lowercase_crc32(CHARM_SLOTTED), RETAIL_SLOTTED);
-        let mut shown = ShownNotifications::default();
-        assert_eq!(
-            shown.shown(RETAIL_SLOTTED),
-            [NotificationCount {
-                notification: RETAIL_SLOTTED,
-                count: 1,
-            }]
-        );
-        let other = lowercase_crc32(CHARM_REFUSED);
-        shown.shown(other);
-        let counts = shown.shown(RETAIL_SLOTTED);
-        assert_eq!(counts.len(), 2);
-        assert_eq!(counts[0].count, 2);
-        assert_eq!(counts[1].count, 1);
-    }
 
     #[test]
     fn the_placeholders_are_the_retail_keys() {

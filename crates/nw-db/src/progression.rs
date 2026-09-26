@@ -17,6 +17,9 @@ use crate::error::DbError;
 use crate::meta_achievements::{SavedMeta, SavedSlot, character_meta, save_character_meta};
 use crate::mounts::{SavedMounts, character_mounts, save_character_mounts};
 use crate::music::{SavedMusic, character_music, save_character_music};
+use crate::notifications::{
+    SavedNotifications, character_notifications, save_character_notifications,
+};
 use crate::position::SaveOutcome;
 use crate::travel::{SavedTravel, character_travel, save_character_travel};
 
@@ -78,6 +81,8 @@ pub struct SavedProgression {
     pub arena: SavedArena,
     /// The musical performance lockout (world migration 0018).
     pub music: SavedMusic,
+    /// How often each event notification was shown (world migration 0022).
+    pub notifications: SavedNotifications,
 }
 
 type ProgressionRow = (bool, i64, i64, Vec<i32>);
@@ -162,6 +167,7 @@ pub async fn character_progression(
     let meta = character_meta(world, character_id).await?;
     let arena = character_arena(world, character_id).await?;
     let music = character_music(world, character_id).await?;
+    let notifications = character_notifications(world, character_id).await?;
     Ok(Some(SavedProgression {
         experience: from_column(experience, "experience")?,
         coins: from_column(coins, "coins")?,
@@ -215,6 +221,7 @@ pub async fn character_progression(
         title: meta.title,
         arena,
         music,
+        notifications,
     }))
 }
 
@@ -375,6 +382,8 @@ pub async fn save_character_progression(
     save_character_meta(&mut transaction, character_id, &meta).await?;
     save_character_arena(&mut transaction, character_id, &progression.arena).await?;
     save_character_music(&mut transaction, character_id, &progression.music).await?;
+    save_character_notifications(&mut transaction, character_id, &progression.notifications)
+        .await?;
     transaction.commit().await?;
     Ok(SaveOutcome::Saved)
 }
@@ -463,6 +472,9 @@ mod infra_tests {
             arena: arena(),
             music: SavedMusic {
                 next_performance_ms: Some(846_118_000_000),
+            },
+            notifications: SavedNotifications {
+                shown: vec![(0x1e06_e356, 12)],
             },
         }
     }

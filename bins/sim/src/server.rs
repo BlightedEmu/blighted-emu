@@ -742,6 +742,16 @@ impl Loop {
                     }
                 }
             }
+            Some(nw_messages::notifications::NOTIFICATION_SENT_TYPE_INDEX) => {
+                match nw_messages::NotificationSentMsg::decode(&envelope.body) {
+                    Ok(sent) => self.world.notification_sent(connection, sent.notification),
+                    Err(error) => bad_call(
+                        nw_messages::notifications::NOTIFICATION_SENT_TYPE_INDEX,
+                        &error,
+                        &envelope.body,
+                    ),
+                }
+            }
             Some(index)
                 if let Some(call) = ConversationClientMsg::decode(index, &envelope.body) =>
             {
@@ -1911,6 +1921,9 @@ fn saved_progression(progression: &PlayerProgression) -> SavedProgression {
         music: nw_db::SavedMusic {
             next_performance_ms: progression.music.next_performance_ms,
         },
+        notifications: nw_db::SavedNotifications {
+            shown: progression.notifications.clone(),
+        },
     }
 }
 
@@ -2664,7 +2677,26 @@ mod tests {
         connection: ConnectionRef,
         x: f32,
     ) {
+        // The client's time sync comes after its own card, as retail's does: the sim takes a
+        // time sync before the card as nothing.
+        tokio::time::sleep(OWN_CARD_WAIT).await;
+        input(bus, world_id, sim, &time_sync(connection.clone())).await;
         input(bus, world_id, sim, &move_to(connection, x)).await;
+    }
+
+    /// How long a test client waits for its own card before it says it is in the game: the
+    /// card's delay and a few ticks.
+    const OWN_CARD_WAIT: Duration =
+        Duration::from_millis(crate::world::OWN_CARD_DELAY_MS + OWN_CARD_MARGIN_MS);
+    /// The ticks of margin after the card's delay, ms.
+    const OWN_CARD_MARGIN_MS: u64 = 200;
+
+    /// The client's time sync request (4248): the message that tells the sim its client is in
+    /// the game ([`says_in_game`]).
+    fn time_sync(connection: ConnectionRef) -> SimInput {
+        let mut writer = nw_messages::wire::Writer::new();
+        nw_messages::FacetHeader::of(nw_messages::facet::component::PLAYER, 0).write(&mut writer);
+        client_message(connection, TIME_SYNC_REQUEST_TYPE_INDEX, writer.finish())
     }
 
     /// A position-only input to `x`.

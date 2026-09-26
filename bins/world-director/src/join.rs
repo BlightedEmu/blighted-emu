@@ -376,6 +376,7 @@ fn player_progression(saved: SavedProgression) -> PlayerProgression {
         music: nw_bus::PlayerMusic {
             next_performance_ms: saved.music.next_performance_ms,
         },
+        notifications: saved.notifications.shown,
     }
 }
 
@@ -611,6 +612,9 @@ mod tests {
             music: nw_db::SavedMusic {
                 next_performance_ms: Some(846_118_000_000),
             },
+            notifications: nw_db::SavedNotifications {
+                shown: vec![(0x1e06_e356, 12)],
+            },
         };
         assert_eq!(
             player_progression(saved),
@@ -663,6 +667,7 @@ mod tests {
                 music: nw_bus::PlayerMusic {
                     next_performance_ms: Some(846_118_000_000),
                 },
+                notifications: vec![(0x1e06_e356, 12)],
             }
         );
     }
