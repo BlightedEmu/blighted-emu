@@ -416,6 +416,10 @@ enum TaskKind {
     EquipItem(String),
     /// Done when the client opens the UI screen of this id.
     OpenUiScreen(u32),
+    /// Done when the client finishes the conversation topic of this id (`TaskConversationTopic`:
+    /// the `TaskID` is the topic's `ConversationTopicID`; retail completes it at the 5397 that
+    /// names it, conversation-notify note section 1.3).
+    ConversationTopic(u32),
     /// Done while the player is in a point of interest of this `POITag` (`TaskGoToPOITag`).
     GoToPoi(String),
     /// Done while the player is out of every point of interest of this `POITag`
@@ -723,6 +727,7 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "taskgotopoitag" => filled(&row.poi_tag).map_or(TaskKind::Unsupported, TaskKind::GoToPoi),
         "taskexitpoitag" => filled(&row.poi_tag).map_or(TaskKind::Unsupported, TaskKind::ExitPoi),
         "taskequipitem" => TaskKind::EquipItem(item()),
+        "taskconversationtopic" => TaskKind::ConversationTopic(lowercase_crc32(&row.task_id)),
         "taskopenuiscreen" => {
             TaskKind::OpenUiScreen(lowercase_crc32(row.ui_screen_tag.as_deref().unwrap_or("")))
         }
@@ -856,6 +861,8 @@ pub enum Event<'a> {
     Equipped(&'a str),
     /// The client opened this UI screen (CRC-32 of its lowercase name).
     UiScreenOpened(u32),
+    /// The client finished this conversation topic (CRC-32 of its lowercase id).
+    TopicFinished(u32),
     /// The player got this achievement.
     AchievementSet(&'a str),
     /// The player crafted the recipe of this id.
@@ -1284,7 +1291,10 @@ impl ObjectiveRun {
                 (TaskKind::CinematicStart(id), Event::CinematicStarted(seen))
                 | (TaskKind::CinematicComplete(id), Event::CinematicEnded(seen))
                 | (TaskKind::CutsceneComplete(id), Event::CutsceneEnded(seen))
-                | (TaskKind::OpenUiScreen(id), Event::UiScreenOpened(seen)) => (*id == seen, 1, 1),
+                | (TaskKind::OpenUiScreen(id), Event::UiScreenOpened(seen))
+                | (TaskKind::ConversationTopic(id), Event::TopicFinished(seen)) => {
+                    (*id == seen, 1, 1)
+                }
                 (
                     TaskKind::KillContribution { enemy, count },
                     Event::Killed {
@@ -1680,6 +1690,21 @@ pub(crate) mod tests {
             "another achievement"
         );
         run.event(Event::AchievementSet("watched_igc_aelstrom_mb"), NOW);
+        assert!(run.finished());
+    }
+
+    #[test]
+    fn a_conversation_topic_task_ends_when_its_topic_is_finished() {
+        const TOPIC: &str = "12A_MSQ_17_LochnirsNotes_TalkLochnir";
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &[TOPIC]),
+            row(TOPIC, "TaskConversationTopic"),
+        ];
+        let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        run.event(Event::TopicFinished(lowercase_crc32("another_topic")), NOW);
+        assert!(!run.finished(), "another topic");
+        run.event(Event::TopicFinished(lowercase_crc32(TOPIC)), NOW);
         assert!(run.finished());
     }
 

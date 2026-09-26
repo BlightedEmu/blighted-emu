@@ -13,7 +13,7 @@ use launcher::theme;
 /// Window title.
 const APP_NAME: &str = "Blighted New World launcher";
 /// Window size at start, and the smallest size.
-const WINDOW_SIZE: [f32; 2] = [480.0, 680.0];
+const WINDOW_SIZE: [f32; 2] = [560.0, 760.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [400.0, 480.0];
 
 fn main() -> ExitCode {

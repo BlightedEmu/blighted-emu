@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! The launcher window (M2 spec section 6). Network calls run on a worker thread; the window
 //! reads their results each frame. The window shows one status line (a state bar, a
-//! state word and a detail line), then the server, account and settings sections divided by
-//! rules.
+//! state word and a detail line), then the server, account, options and settings sections
+//! divided by rules.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
@@ -12,19 +12,23 @@ use eframe::egui::{self, Color32, RichText, Sense, TextStyle, vec2};
 use nw_protocol::launcher_api::{AuthMode, DiscordPollReply, LauncherInfo, PasswordCredentials};
 
 use crate::api::{ApiError, LauncherApi, discord_login_page};
-use crate::game::{append_override_config, game_arguments};
+use crate::game::{PATCHED_EXE_NAME, append_override_config, game_arguments, is_retail_prefix};
 // Linux runs the game under Proton inside `bwrap`; Windows starts the patched exe directly behind
 // the loopback proxy ([`crate::aws_proxy`]). Each path uses only its own helpers.
 #[cfg(windows)]
 use crate::aws_proxy::AwsProxy;
 #[cfg(not(windows))]
-use crate::game::{checked_direct_launch, direct_launch_from_env, start_game};
+use crate::game::{checked_direct_launch, start_game};
 #[cfg(any(windows, test))]
-use crate::game::{checked_windows_launch, start_game_windows, windows_launch_from_env};
+use crate::game::{checked_windows_launch, start_game_windows};
 #[cfg(not(windows))]
 use crate::mirror::{NETWORK_DIR, write_network_files};
+#[cfg(any(windows, test))]
+use crate::options::LaunchOptions;
+use crate::options::{DEFAULT_PREFIX_DIR, ProtonSwitch};
 use crate::server::api_base_url;
 use crate::settings::Settings;
+use crate::steam::{self, Found};
 use crate::theme::{self, LABEL_STYLE, LINE_WIDTH, Palette, TITLE_STYLE, ThemeChoice, mix};
 
 /// Time between Discord login polls.
@@ -50,6 +54,12 @@ const LABEL_TRACKING: f32 = 0.9;
 /// Width of the fact label column, and of the server field.
 const FACT_LABEL_WIDTH: f32 = 96.0;
 const CONNECT_BUTTON_WIDTH: f32 = 88.0;
+/// Width of the state word after a path field.
+const PATH_STATE_WIDTH: f32 = 64.0;
+/// Rows of the extra environment field.
+const ENVIRONMENT_ROWS: usize = 3;
+/// Whether the Proton options apply: the game runs under Proton on every system but Windows.
+const USES_PROTON: bool = cfg!(not(windows));
 
 /// Kind of a state, which picks its colour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,6 +126,38 @@ impl Status {
     }
 }
 
+/// What a path option must point at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathCheck {
+    /// A file needed to play.
+    RequiredFile,
+    /// A folder needed to play.
+    RequiredFolder,
+    /// A file that may stay empty.
+    OptionalFile,
+    /// The Proton prefix: empty gives the default, a new folder is made by Proton, and Steam's
+    /// retail prefix is refused.
+    Prefix,
+}
+
+/// The state shown after a path field: its tone and word.
+pub fn path_state(value: &str, check: PathCheck) -> (Tone, &'static str) {
+    let path = Path::new(value);
+    match check {
+        PathCheck::Prefix if value.is_empty() => (Tone::Idle, "default"),
+        PathCheck::Prefix if is_retail_prefix(path) => (Tone::Fault, "retail"),
+        PathCheck::Prefix if path.is_dir() => (Tone::Ready, "found"),
+        PathCheck::Prefix => (Tone::Idle, "new"),
+        PathCheck::OptionalFile if value.is_empty() => (Tone::Idle, "not set"),
+        _ if value.is_empty() => (Tone::Fault, "not set"),
+        PathCheck::RequiredFolder if path.is_dir() => (Tone::Ready, "found"),
+        PathCheck::RequiredFile | PathCheck::OptionalFile if path.is_file() => {
+            (Tone::Ready, "found")
+        }
+        _ => (Tone::Fault, "missing"),
+    }
+}
+
 /// Result of a worker job.
 enum Event {
     Connected(String, LauncherApi, LauncherInfo),
@@ -137,6 +179,8 @@ pub struct LauncherApp {
     status: Status,
     status_since: Instant,
     job: Option<Receiver<Event>>,
+    /// What the last scan of this PC found, for the Proton pick list.
+    found: Found,
     /// The loopback proxy that carries the game's AWS calls to the server. It must outlive the
     /// game, so the window keeps it; dropping it stops the proxy. Windows only.
     #[cfg(windows)]
@@ -167,19 +211,28 @@ fn windows_play_job(
     api: LauncherApi,
     info: LauncherInfo,
     token: String,
+    options: LaunchOptions,
 ) -> impl FnOnce() -> Event + Send + 'static {
     move || {
-        let launch = match checked_windows_launch(windows_launch_from_env()) {
+        let launch = match checked_windows_launch(options.windows_launch()) {
             Ok(launch) => launch,
+            Err(error) => return Event::Failed(error.to_string()),
+        };
+        let environment = match options.environment(false) {
+            Ok(environment) => environment,
             Err(error) => return Event::Failed(error.to_string()),
         };
         let key = match api.play(&token) {
             Ok(reply) => reply.game_session_key,
             Err(error) => return failure(&error),
         };
-        match game_arguments(&info.launch_arguments, &key)
-            .and_then(|arguments| start_game_windows(&launch, &append_override_config(arguments)))
-        {
+        match game_arguments(&info.launch_arguments, &key).and_then(|arguments| {
+            start_game_windows(
+                &launch,
+                &append_override_config(arguments, options.override_config()),
+                &environment,
+            )
+        }) {
             Ok(()) => Event::GameStarted,
             Err(error) => Event::Failed(error.to_string()),
         }
@@ -261,6 +314,33 @@ fn primary_button(ui: &mut egui::Ui, palette: &Palette, text: &str, size: egui::
     .inner
 }
 
+/// A path option row: the label column, the field, then its state word. True when the field lost
+/// focus, so the options are saved.
+fn path_row(
+    ui: &mut egui::Ui,
+    palette: &Palette,
+    label: &str,
+    value: &mut String,
+    hint: &str,
+    check: PathCheck,
+) -> bool {
+    ui.horizontal(|ui| {
+        ui.add_sized(
+            vec2(FACT_LABEL_WIDTH, ui.spacing().interact_size.y),
+            egui::Label::new(label_text(label, palette.mute)),
+        );
+        let field_width = ui.available_width() - PATH_STATE_WIDTH - ui.spacing().item_spacing.x;
+        let field = ui.add_sized(
+            vec2(field_width, ui.spacing().interact_size.y),
+            egui::TextEdit::singleline(value).hint_text(hint),
+        );
+        let (tone, word) = path_state(value, check);
+        ui.label(label_text(word, tone.color(palette)));
+        field.lost_focus()
+    })
+    .inner
+}
+
 /// Whether Enter was pressed in the field of `response`.
 fn submitted(ui: &egui::Ui, response: &egui::Response) -> bool {
     response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
@@ -268,7 +348,7 @@ fn submitted(ui: &egui::Ui, response: &egui::Response) -> bool {
 
 impl LauncherApp {
     /// The window state from saved settings; connects at once when a server is saved.
-    pub fn new(settings_path: PathBuf, settings: Settings) -> Self {
+    pub fn new(settings_path: PathBuf, settings: Settings, found: Found) -> Self {
         let mut app = Self {
             server_input: settings.server.clone(),
             settings_path,
@@ -279,6 +359,7 @@ impl LauncherApp {
             status: Status::not_connected(),
             status_since: Instant::now(),
             job: None,
+            found,
             #[cfg(windows)]
             proxy: None,
         };
@@ -304,6 +385,14 @@ impl LauncherApp {
         if let Err(error) = self.settings.save(&self.settings_path) {
             self.set_status(Status::error(error.to_string()));
         }
+    }
+
+    /// The folder of the settings file, which also holds the default prefix.
+    fn settings_dir(&self) -> PathBuf {
+        self.settings_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default()
     }
 
     fn connect(&mut self) {
@@ -383,12 +472,18 @@ impl LauncherApp {
             "starting",
             "Getting a game session and starting the game.",
         ));
+        let options = self.settings.options.clone();
         #[cfg(not(windows))]
         {
             let network_dir = self.settings_path.with_file_name(NETWORK_DIR);
+            let settings_dir = self.settings_dir();
             self.job = Some(run_job(move || {
-                let launch = match checked_direct_launch(direct_launch_from_env()) {
+                let launch = match checked_direct_launch(options.direct_launch(&settings_dir)) {
                     Ok(launch) => launch,
+                    Err(error) => return Event::Failed(error.to_string()),
+                };
+                let environment = match options.environment(true) {
+                    Ok(environment) => environment,
                     Err(error) => return Event::Failed(error.to_string()),
                 };
                 let files = match write_network_files(&network_dir, &info.aws_mirror, api.host()) {
@@ -400,7 +495,12 @@ impl LauncherApp {
                     Err(error) => return failure(&error),
                 };
                 match game_arguments(&info.launch_arguments, &key).and_then(|arguments| {
-                    start_game(&launch, &files, &append_override_config(arguments))
+                    start_game(
+                        &launch,
+                        &files,
+                        &append_override_config(arguments, options.override_config()),
+                        &environment,
+                    )
                 }) {
                     Ok(()) => Event::GameStarted,
                     Err(error) => Event::Failed(error.to_string()),
@@ -419,7 +519,7 @@ impl LauncherApp {
                     return;
                 }
             }
-            self.job = Some(run_job(windows_play_job(api, info, token)));
+            self.job = Some(run_job(windows_play_job(api, info, token, options)));
         }
     }
 
@@ -664,6 +764,130 @@ impl LauncherApp {
         });
     }
 
+    /// Scans this PC again and fills the empty game and Steam paths.
+    fn find_paths(&mut self) {
+        self.found = steam::scan(|name| std::env::var(name).ok());
+        self.settings.options.fill_from_scan(&self.found);
+    }
+
+    /// The Proton pick list of the builds found; true when the player picked one.
+    fn draw_proton_list(&mut self, ui: &mut egui::Ui, palette: &Palette) -> bool {
+        if self.found.protons.is_empty() {
+            return false;
+        }
+        let proton = &mut self.settings.options.proton;
+        let picked_name = self
+            .found
+            .protons
+            .iter()
+            .find(|build| build.program == Path::new(proton.as_str()))
+            .map_or("Pick a Proton build", |build| build.name.as_str());
+        let mut picked = false;
+        ui.horizontal(|ui| {
+            ui.add_space(FACT_LABEL_WIDTH + ui.spacing().item_spacing.x);
+            egui::ComboBox::from_id_salt("proton build")
+                .selected_text(RichText::new(picked_name).color(palette.ink))
+                .show_ui(ui, |ui| {
+                    for build in &self.found.protons {
+                        let current = build.program == Path::new(proton.as_str());
+                        if ui.selectable_label(current, &build.name).clicked() {
+                            *proton = build.program.display().to_string();
+                            picked = true;
+                        }
+                    }
+                });
+        });
+        picked
+    }
+
+    fn draw_options(&mut self, ui: &mut egui::Ui, palette: &Palette) {
+        let default_prefix = self
+            .settings_dir()
+            .join(DEFAULT_PREFIX_DIR)
+            .display()
+            .to_string();
+        section(ui, palette, "Options", |ui| {
+            let mut save = path_row(
+                ui,
+                palette,
+                "Game",
+                &mut self.settings.options.game_exe,
+                PATCHED_EXE_NAME,
+                PathCheck::RequiredFile,
+            );
+            if USES_PROTON {
+                save |= path_row(
+                    ui,
+                    palette,
+                    "Proton",
+                    &mut self.settings.options.proton,
+                    "proton",
+                    PathCheck::RequiredFile,
+                );
+                save |= self.draw_proton_list(ui, palette);
+                let options = &mut self.settings.options;
+                save |= path_row(
+                    ui,
+                    palette,
+                    "Prefix",
+                    &mut options.prefix,
+                    &default_prefix,
+                    PathCheck::Prefix,
+                );
+                save |= path_row(
+                    ui,
+                    palette,
+                    "Steam",
+                    &mut options.steam_install,
+                    "Steam folder",
+                    PathCheck::RequiredFolder,
+                );
+            }
+            let options = &mut self.settings.options;
+            save |= path_row(
+                ui,
+                palette,
+                "Override",
+                &mut options.override_config,
+                "ClientOverride.json (optional)",
+                PathCheck::OptionalFile,
+            );
+            if USES_PROTON {
+                ui.add_space(SECTION_GAP / 2.0);
+                for switch in ProtonSwitch::ALL {
+                    let mut on = options.proton_switches.contains(&switch);
+                    if ui.checkbox(&mut on, switch.label()).changed() {
+                        if on {
+                            options.proton_switches.insert(switch);
+                        } else {
+                            options.proton_switches.remove(&switch);
+                        }
+                        save = true;
+                    }
+                }
+            }
+            ui.add_space(SECTION_GAP / 2.0);
+            ui.label(label_text("Extra environment", palette.mute));
+            ui.label(RichText::new("One NAME=value per line.").color(palette.mute));
+            save |= ui
+                .add(
+                    egui::TextEdit::multiline(&mut options.environment)
+                        .desired_rows(ENVIRONMENT_ROWS)
+                        .desired_width(f32::INFINITY)
+                        .code_editor(),
+                )
+                .lost_focus();
+            ui.add_space(SECTION_GAP / 2.0);
+            if ui.button("Find paths").clicked() {
+                self.find_paths();
+                save = true;
+            }
+            if save {
+                self.save();
+            }
+        });
+    }
+
     fn draw_settings(&mut self, ui: &mut egui::Ui, palette: &Palette) {
         let ctx = ui.ctx().clone();
         section(ui, palette, "Settings", |ui| {
@@ -704,6 +928,7 @@ impl LauncherApp {
             self.draw_server(ui, palette);
             self.draw_account(ui, palette);
         });
+        self.draw_options(ui, palette);
         self.draw_settings(ui, palette);
     }
 }
@@ -728,7 +953,7 @@ mod tests {
     fn app() -> (tempfile::TempDir, LauncherApp) {
         let dir = tempfile::tempdir().expect("dir");
         let path = dir.path().join("settings.json");
-        let app = LauncherApp::new(path, Settings::default());
+        let app = LauncherApp::new(path, Settings::default(), Found::default());
         (dir, app)
     }
 
@@ -751,7 +976,7 @@ mod tests {
         // `run_job` needs a `Send + 'static` closure.
         fn assert_send_static<T: Send + 'static>(_: &T) {}
         let api = LauncherApi::new("https://login.example.org".to_owned()).expect("api");
-        let job = windows_play_job(api, info(), "token".to_owned());
+        let job = windows_play_job(api, info(), "token".to_owned(), LaunchOptions::default());
         assert_send_static(&job);
     }
 
@@ -823,6 +1048,51 @@ mod tests {
         assert_eq!(Tone::Fault.bar_color(palette), palette.alert);
         assert_eq!(Tone::Busy.bar_color(palette), theme::SIGNAL_YELLOW);
         assert_eq!(Tone::Idle.bar_color(palette), palette.line);
+    }
+
+    #[test]
+    fn path_states_name_what_is_wrong() {
+        let dir = tempfile::tempdir().expect("dir");
+        let folder = dir.path().display().to_string();
+        let file = dir.path().join("BlightedNewWorld.exe");
+        std::fs::write(&file, "").expect("file");
+        let file = file.display().to_string();
+        let missing = dir.path().join("none").display().to_string();
+        let cases = [
+            ("", PathCheck::RequiredFile, (Tone::Fault, "not set")),
+            ("", PathCheck::OptionalFile, (Tone::Idle, "not set")),
+            ("", PathCheck::Prefix, (Tone::Idle, "default")),
+            (
+                file.as_str(),
+                PathCheck::RequiredFile,
+                (Tone::Ready, "found"),
+            ),
+            (
+                file.as_str(),
+                PathCheck::RequiredFolder,
+                (Tone::Fault, "missing"),
+            ),
+            (
+                folder.as_str(),
+                PathCheck::RequiredFolder,
+                (Tone::Ready, "found"),
+            ),
+            (
+                missing.as_str(),
+                PathCheck::OptionalFile,
+                (Tone::Fault, "missing"),
+            ),
+            (folder.as_str(), PathCheck::Prefix, (Tone::Ready, "found")),
+            (missing.as_str(), PathCheck::Prefix, (Tone::Idle, "new")),
+            (
+                "/x/steamapps/compatdata/1063730",
+                PathCheck::Prefix,
+                (Tone::Fault, "retail"),
+            ),
+        ];
+        for (value, check, state) in cases {
+            assert_eq!(path_state(value, check), state, "{value:?} {check:?}");
+        }
     }
 
     #[test]

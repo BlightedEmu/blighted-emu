@@ -7,7 +7,9 @@
 
 use bevy_ecs::entity::Entity;
 use nw_formats::objectstream::lowercase_crc32;
-use nw_messages::{GameModeSchedulerRefreshedMsg, InteractionRequest, ServerMessage};
+use nw_messages::{
+    ConversationClientMsg, GameModeSchedulerRefreshedMsg, InteractionRequest, ServerMessage,
+};
 
 use super::{Player, SimWorld, gather_answer, send_now};
 use crate::player_content::requirement_met;
@@ -98,5 +100,40 @@ impl SimWorld {
             send_now(&mut self.combat_messages, &player.connection, &[refreshed]);
         }
         self.complete_quest(number);
+    }
+}
+
+impl SimWorld {
+    /// A conversation call of the player of `connection` at `now_ms` (conversation-notify note,
+    /// section 1). Retail answers neither: a picked topic (3158) changes nothing, and each
+    /// topic the client names as finished (5397) completes a `TaskConversationTopic` of that id
+    /// in the player's quests or tutorial.
+    pub fn conversation_call(
+        &mut self,
+        connection: &nw_bus::ConnectionRef,
+        call: ConversationClientMsg,
+        now_ms: u64,
+    ) {
+        let ConversationClientMsg::FinishedTopics { topics, .. } = call else {
+            return;
+        };
+        let Some(number) = self
+            .by_connection
+            .get(connection)
+            .and_then(|entity| self.world.get::<Player>(*entity))
+            .map(|player| player.number)
+        else {
+            return;
+        };
+        for topic in topics {
+            let event = crate::objectives::Event::TopicFinished(topic);
+            match self.tutorials.get_mut(&number) {
+                Some(run) => {
+                    let orders = run.event(event, &mut self.mobs, now_ms);
+                    self.carry_out(number, orders, now_ms);
+                }
+                None => self.quest_event(number, event, now_ms),
+            }
+        }
     }
 }
