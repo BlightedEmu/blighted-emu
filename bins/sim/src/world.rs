@@ -195,6 +195,14 @@ const OWN_CARD_DELAY_MS: u64 = 1_000;
 /// 697 ms, the stream from 797 ms). One send is not enough: the client drops every bundle
 /// that reaches it while its level context is down (live 2026-09-22, the beach switch).
 const OWN_CARD_RESEND_MS: u64 = 350;
+/// Time after the client's time-sync (InGame) before other entities go out.
+/// Retail starts the stream about 797 ms after the first own bundle; dumping
+/// every nearby first-card in the same tick as InGame failed the live client's
+/// StateReplication (Game.log 2026-09-24, `stateSequence` 4585).
+const OTHER_ENTITY_SETTLE_MS: u64 = 800;
+/// Sentinel: the time-sync just ended the spawn hold; the next bundle starts
+/// the settle clock.
+const OTHER_ENTITY_SETTLE_PENDING: u64 = u64::MAX;
 /// How long a mob stands from the start of its alert before it moves (retail sailors: 2.0 s from
 /// sailor 1's `Alert_Turn` at 73978 to its run at 76014; 2.8-3.1 s for sailors 2 and 3).
 const ALERT_STAND_MS: u64 = 2_000;
@@ -216,6 +224,13 @@ const REFUSED_RESYNC_MS: u64 = 1_000;
 /// How long the client camera still glides back after the inventory closes, while its inputs
 /// do not yet carry the body (retail 2026-09-18: 663 ms, 870114 to 870777).
 const LOADOUT_CAMERA_SETTLE_MS: u64 = 700;
+/// Tutorial lock-on achievements a skip would otherwise miss. The client needs
+/// them after `ReturnToMainWorld` (retail grants them in the island fights).
+const SKIP_LOCK_ACHIEVEMENTS: [&str; 3] = [
+    "Tutorial_TargetLock1",
+    "Tutorial_TargetLock2",
+    "Tutorial_TargetLockSwitch1",
+];
 
 /// How a body the server puts somewhere lands there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -489,6 +504,10 @@ struct Player {
     own_card_bundle: Option<Vec<Vec<u8>>>,
     /// When the own spawn card bundle last went out.
     own_card_sent_ms: u64,
+    /// When other entities may go out after the time-sync spawn ([`OTHER_ENTITY_SETTLE_MS`]).
+    /// `None` until the client has spawned; `Some(0)` when this player was already in the
+    /// world (a same-level handoff).
+    others_due_ms: Option<u64>,
     /// The client-context id of the player's current level; every bundle carries it.
     client_context: u8,
     /// What the client and this server still say to each other in this level.
@@ -547,7 +566,8 @@ struct Player {
     /// Until this server time the client camera does not carry the body: the inventory camera
     /// is open, or still gliding back. Its inputs move nothing (retail held the player still).
     camera_held_until_ms: Option<u64>,
-    /// The tutorial water hold: the body stays at [`encounter::WATER_AT`] until `FTUE_S1` ends.
+    /// The tutorial water hold: the body stays at [`encounter::WATER_AT`] until
+    /// the sink cutscene ends (live: cutscene 3438592047, not CRC of `FTUE_S1`).
     water_held: bool,
     /// Its inventory is open (`lookingThroughLoadout` of its 3935 state), as its client said in
     /// its newest 3970.
@@ -1267,7 +1287,14 @@ impl SimWorld {
             )
         };
         let replication = Replication {
-            bundles_sent: offer.bundles_sent,
+            // A new client-context starts its bundle sequence as a login does.
+            // Carrying the tutorial's sequence (live 6077) onto context 2 failed
+            // StateReplication at InGame (Game.log 2026-09-24).
+            bundles_sent: if enters {
+                FIRST_LOGIN_BUNDLE_SEQUENCE
+            } else {
+                offer.bundles_sent
+            },
             slots,
         };
         self.spawn(
@@ -1328,10 +1355,17 @@ impl SimWorld {
         {
             return;
         }
+        let was_spawned = self
+            .world
+            .get::<Vitals>(entity)
+            .is_some_and(|vitals| vitals.spawned);
         if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
             vitals.spawned = true;
         }
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            if !was_spawned {
+                player.others_due_ms = Some(OTHER_ENTITY_SETTLE_PENDING);
+            }
             player.own_card_bundle = None;
         }
     }
@@ -1453,15 +1487,6 @@ impl SimWorld {
         let views = crate::camera::record_views(records);
         let combat = Arc::clone(&self.combat.data);
         let mut player = self.world.get_mut::<Player>(entity)?;
-        // The weapon in the hand picks the slayer sequences the server starts ([`slayer`]).
-        let weapon = player.gear.as_ref().and_then(|gear| {
-            let (item, _) = gear.main_weapon()?;
-            Some(slayer::HeldWeapon {
-                stance: combat.weapon_of_item(item)?.stance,
-                drawn: gear.drawn().is_some(),
-                empty: gear.held_empty(),
-            })
-        });
         let with_solids = player
             .solids
             .clone()
@@ -1474,6 +1499,24 @@ impl SimWorld {
             || player
                 .camera_held_until_ms
                 .is_some_and(|until| now_ms < until);
+        // Retail draws on the attack press, then starts the light at the release. Drawing here
+        // keeps the slayer records of this message on the drawn weapon; a draw after the tap
+        // used to replace the light with a walk.
+        if !held
+            && let Some(gear) = player.gear.as_mut()
+            && records.iter().any(InputRecord::attack_pressed)
+        {
+            let _ = gear.draw_to_attack(unix_ns(self.server_ms));
+        }
+        // The weapon in the hand picks the slayer sequences the server starts ([`slayer`]).
+        let weapon = player.gear.as_ref().and_then(|gear| {
+            let (item, _) = gear.main_weapon()?;
+            Some(slayer::HeldWeapon {
+                stance: combat.weapon_of_item(item)?.stance,
+                drawn: gear.drawn().is_some(),
+                empty: gear.held_empty(),
+            })
+        });
         if let Some(load) = player.gear.as_ref().and_then(|gear| {
             self.content.equip_load(
                 EQUIP_LOAD_SLOTS
@@ -1527,10 +1570,10 @@ impl SimWorld {
                 swimming,
                 falling,
             }, combat.player_sequences());
+            player.view = seen.view;
             if held {
                 continue;
             }
-            player.view = seen.view;
             let tracked = player
                 .tracked
                 .record(input, ground, self.settings.ocean_level_m);
@@ -3064,6 +3107,10 @@ impl SimWorld {
                 if tutorial && player.leave_at_ms.is_none() =>
             {
                 player.leave_at_ms = Some(now_ms.saturating_add(LEAVE_DELAY_MS));
+                player.water_held = false;
+                for id in SKIP_LOCK_ACHIEVEMENTS {
+                    player.flow.set_achievement(&self.achievement_rules, id);
+                }
                 player.flow.leave()
             }
             ClientFacetMsg::TimeSyncRequest { header } => time_answers(&self.ids, header).to_vec(),
@@ -3641,6 +3688,7 @@ impl SimWorld {
                     own_card_due_ms: arrival.own_card_due_ms,
                     own_card_bundle: None,
                     own_card_sent_ms: 0,
+                    others_due_ms: if arrival.spawned { Some(0) } else { None },
                     client_context: arrival.client_context,
                     flow: arrival.flow,
                     leave_at_ms: None,
@@ -4070,8 +4118,23 @@ impl Neighbourhood<'_> {
                 });
             let seen = player.interest.update(own_position, others);
             // Until the client has spawned, other entities share the offline cache with the
-            // own player (local-player-check note). Hold them until the first movement.
-            let hold_others = self.local_player_card && !vitals.spawned;
+            // own player (local-player-check note). After the time-sync they still wait
+            // [`OTHER_ENTITY_SETTLE_MS`] so the first InGame bundle is only the own group
+            // (live 2026-09-24: 20 beach first-cards 17 ms after InGame failed
+            // StateReplication 4585).
+            let just_in_game = player.others_due_ms == Some(OTHER_ENTITY_SETTLE_PENDING);
+            if just_in_game {
+                player.others_due_ms =
+                    Some(self.now_ms.saturating_add(OTHER_ENTITY_SETTLE_MS));
+            }
+            let settling = player
+                .others_due_ms
+                .is_some_and(|due| due > 0 && self.now_ms < due);
+            let hold_others = self.local_player_card && (!vitals.spawned || settling);
+            // The first InGame bundle stays own-only. Live 2026-09-24 dumped
+            // statics and nodes 33 ms after InGame and failed StateReplication
+            // 6077. Bags and nodes go on later ticks; mobs wait the settle.
+            let hold_world = self.local_player_card && (!vitals.spawned || just_in_game);
             let mut numbers: Vec<u64> = if positions_only() || hold_others {
                 Vec::new()
             } else {
@@ -4081,20 +4144,22 @@ impl Neighbourhood<'_> {
                     .filter(|number| self.cards.get(number).is_none_or(|card| card.seen_by(own)))
                     .collect()
             };
-            // The static entities come with the other entities, once the client has spawned.
-            if !(positions_only() || hold_others) {
+            if !positions_only() && vitals.spawned && !hold_world {
                 numbers.extend(player.statics.numbers());
                 numbers.extend(player.assets.numbers());
                 numbers.extend(self.nodes.numbers_near(own_position, self.view_radius_m));
                 if let Some(stations) = self.stations {
                     numbers.extend(stations.numbers_near(own_position, self.view_radius_m));
                 }
-                numbers.extend(self.bags.numbers_near(own_position, self.view_radius_m));
                 numbers.extend(player.social.group_entity_number());
                 numbers.extend(
                     self.performances
                         .numbers_near(own_position, self.view_radius_m),
                 );
+            }
+            // A bag is born at the kill. It must card on that tick (retail).
+            if !positions_only() && vitals.spawned {
+                numbers.extend(self.bags.numbers_near(own_position, self.view_radius_m));
             }
             numbers.sort_unstable();
             player.slots.keep_only(&numbers);
@@ -4332,7 +4397,9 @@ impl Neighbourhood<'_> {
                     with_position: player.refused_since_ms.is_none() || player.push.is_some(),
                     clear_throttle: plain_tick && !player.throttle_cleared && !hold_throttle,
                     slayer: player.slayer.take_due(),
-                    view: player.view.filter(|view| Some(*view) != player.view_sent),
+                    // Retail sent `rotation` and `lookDir` in most own states; the lock holds
+                    // only while the client has a current look (lock-on note, section 15.2).
+                    view: player.view,
                     // Retail's server moves carry no slot 1: a change waits for a plain state.
                     footing: if plain_tick {
                         player.footing.change_since(player.footing_sent)
@@ -5754,7 +5821,7 @@ mod tests {
     }
 
     #[test]
-    fn the_own_state_carries_back_a_new_view_once() {
+    fn the_own_state_carries_the_view_in_each_own_state() {
         /// The own `rotation` and `lookDir` children (retail sends them back in own states).
         const ROTATION_CHILD: usize = 11;
         const LOOK_DIR_CHILD: usize = 12;
@@ -5796,8 +5863,50 @@ mod tests {
         );
         let next = own_children(&mut world, card_at + 99);
         assert!(
-            !next.contains(&ROTATION_CHILD) && !next.contains(&LOOK_DIR_CHILD),
-            "an unchanged view is not sent again: {next:?}"
+            next.contains(&ROTATION_CHILD) && next.contains(&LOOK_DIR_CHILD),
+            "each own state carries the look: {next:?}"
+        );
+    }
+
+    #[test]
+    fn a_held_player_still_sends_its_view() {
+        /// The own `rotation` and `lookDir` children.
+        const ROTATION_CHILD: usize = 11;
+        const LOOK_DIR_CHILD: usize = 12;
+        let mut world = world();
+        join(&mut world, 1, 0.0);
+        let a = connection(1);
+        let entity = world.by_connection[&a];
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .water_held = true;
+        let view = LookDir {
+            yaw: 0.5,
+            pitch: 0.1,
+        };
+        let _ = world.move_from_input(
+            &a,
+            &[camera_record(1, at, view, [0.0; 2], STANDING_SLOTS)],
+            NOW,
+        );
+        let outgoing = tick(&mut world, NOW + 33);
+        let children = alc_children(&states_of(&world, &outgoing.messages, &a, 1));
+        let child = |index| {
+            children
+                .iter()
+                .any(|(found, _)| *found == index)
+        };
+        assert!(
+            child(ROTATION_CHILD) && child(LOOK_DIR_CHILD),
+            "the hold still sends the look: {children:?}"
         );
     }
 
@@ -7566,6 +7675,11 @@ mod tests {
             LOGIN_CLIENT_CONTEXT + 1,
             "bundles carry the new context"
         );
+        assert_eq!(
+            bundle.leading,
+            Some(FIRST_LOGIN_BUNDLE_SEQUENCE),
+            "a new level starts the bundle sequence as a login does"
+        );
         assert!(
             SlotRead::of(&bundle)
                 .expect("read")
@@ -7654,7 +7768,24 @@ mod tests {
             "the same card bundle goes out again"
         );
         world.heard_from(&who);
-        let streamed = tick(&mut world, card_at + OWN_CARD_RESEND_MS + 33);
+        let just_spawned = tick(&mut world, card_at + OWN_CARD_RESEND_MS + 33);
+        let carded_at_spawn = just_spawned
+            .messages
+            .iter()
+            .filter(|out| out.connection == who && out.channel == REPLICATION_CHANNEL)
+            .flat_map(|out| &out.envelopes)
+            .flat_map(|bytes| SlotRead::of(&bundle_in(bytes)).expect("read").updates)
+            .any(|update| !update.is_local_player() && update.card.is_some());
+        assert!(
+            !carded_at_spawn,
+            "other entities wait after the time sync (live 2026-09-24: \
+             statics 33 ms after InGame failed StateReplication 6077; \
+             20 first-cards failed 4585)"
+        );
+        let streamed = tick(
+            &mut world,
+            card_at + OWN_CARD_RESEND_MS + 33 + OTHER_ENTITY_SETTLE_MS,
+        );
         let carded = streamed
             .messages
             .iter()
@@ -7662,7 +7793,7 @@ mod tests {
             .flat_map(|out| &out.envelopes)
             .flat_map(|bytes| SlotRead::of(&bundle_in(bytes)).expect("read").updates)
             .any(|update| !update.is_local_player() && update.card.is_some());
-        assert!(carded, "the mob card goes once the client spawned");
+        assert!(carded, "the mob card goes after the settle");
     }
 
     #[test]
@@ -8088,6 +8219,115 @@ mod tests {
             "the server's follow-up: {followed:?}"
         );
         assert!(sequences(&world, &next.messages, &b).contains(&sequence_bytes(FOLLOW_UP)));
+    }
+
+    #[test]
+    fn a_sheathed_tap_starts_the_light_attack_and_keeps_it() {
+        /// The slayer sequence child (slayer note).
+        const SEQUENCE: usize = 15;
+        /// The standing light of `1H_Melee,Sword` in the mined table.
+        const SWORD_LIGHT: u64 = 495;
+        const PRESS_COUNTER: u16 = 0x6ba;
+        const RELEASE_COUNTER: u16 = 0x6bd;
+        const NEXT_COUNTER: u16 = 0x6be;
+        const ATTACK_SLOT: usize = 2;
+        const ATTACK_PRESS_BIT: u32 = 40;
+        const ATTACK_RELEASE_BIT: u32 = 31;
+        let mut source = crate::combat::test_support::test_source();
+        source.item_stats.push((
+            gear::tests::SWORD.to_owned(),
+            nw_content::combat::DEFAULT_WEAPON_ID.to_owned(),
+        ));
+        let data = nw_content::combat::CombatData::build(
+            source,
+            &nw_content::combat::CombatRows::default(),
+        )
+        .expect("combat")
+        .with_player_attacks(crate::combat::test_support::test_player_attacks())
+        .with_player_sequences(crate::combat::test_support::test_player_sequences());
+        let mut combat = test_combat();
+        combat.spawns = Vec::new().into();
+        combat.data = Arc::new(data);
+        let mut world = SimWorld::new(
+            settings(MANY, MAX_PLAYERS),
+            WorldIds::random(0).expect("ids"),
+            Arc::new(NoGround),
+            slot("sim-a"),
+            combat,
+            Arc::new(PlayerContent {
+                kits: gear::tests::kits(),
+                ..PlayerContent::default()
+            }),
+        );
+        world.set_table(&table(&["sim-a"])).expect("table");
+        let mut admit = admit_at(1, CELL_M / 2.0, true);
+        admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
+        world.admit(&admit, NOW, SERVER_TIME).expect("admit");
+        let a = connection(1);
+        let entity = world.by_connection[&a];
+        world
+            .world
+            .get_mut::<Vitals>(entity)
+            .expect("vitals")
+            .spawned = true;
+        tick(&mut world, NOW + OWN_CARD_DELAY_MS);
+        let at = world
+            .world
+            .get::<Body>(entity)
+            .expect("body")
+            .motion
+            .position();
+        let view = LookDir {
+            yaw: 0.0,
+            pitch: 0.3,
+        };
+        let attack_record = |counter, bit| {
+            let mut slots = STANDING_SLOTS;
+            slots[ATTACK_SLOT] |= 1_u64 << bit;
+            camera_record(counter, at, view, [0.0; 2], slots)
+        };
+        let records = [
+            attack_record(RELEASE_COUNTER, ATTACK_RELEASE_BIT),
+            attack_record(PRESS_COUNTER, ATTACK_PRESS_BIT),
+        ];
+        let _ = world.move_from_input(&a, &records, NOW + OWN_CARD_DELAY_MS + 33);
+        world.attack_input(&a, &records, NOW + OWN_CARD_DELAY_MS + 33);
+        let sequence_bytes = |sequence: u64| {
+            nw_messages::wire::Writer::new()
+                .prefixed(sequence)
+                .expect("prefix")
+                .finish()
+        };
+        let sequences = |world: &SimWorld, outgoing: &[Outgoing], who: &ConnectionRef| {
+            alc_children(&states_of(world, outgoing, who, 1))
+                .into_iter()
+                .filter(|(child, _)| *child == SEQUENCE)
+                .map(|(_, bytes)| bytes)
+                .collect::<Vec<_>>()
+        };
+        let first = tick(&mut world, NOW + OWN_CARD_DELAY_MS + 33);
+        assert!(
+            sequences(&world, &first.messages, &a).contains(&sequence_bytes(SWORD_LIGHT)),
+            "the tap starts the light attack: {:?}",
+            sequences(&world, &first.messages, &a)
+        );
+        let _ = world.move_from_input(
+            &a,
+            &[camera_record(
+                NEXT_COUNTER,
+                at,
+                view,
+                [0.0; 2],
+                STANDING_SLOTS,
+            )],
+            NOW + OWN_CARD_DELAY_MS + 66,
+        );
+        let later = tick(&mut world, NOW + OWN_CARD_DELAY_MS + 66);
+        assert!(
+            sequences(&world, &later.messages, &a).contains(&sequence_bytes(SWORD_LIGHT)),
+            "the next own state keeps the light: {:?}",
+            sequences(&world, &later.messages, &a)
+        );
     }
 
     #[test]
@@ -9650,6 +9890,27 @@ mod tests {
             "the next own state tells its client to swim"
         );
         assert_ne!(player.footing, player.footing_sent, "a change to send");
+    }
+
+    #[test]
+    fn skip_tutorial_releases_the_water_hold() {
+        let mut world = tutorial_world_on(Arc::new(FlatGround(WATER_SEABED_M)));
+        world.carry_out(1, vec![Order::HoldAt(encounter::WATER_AT, encounter::WATER_FACING)], NOW);
+        let entity = world.player_by_number(1).expect("player");
+        assert!(world.world.get::<Player>(entity).expect("player").water_held);
+        let header = nw_messages::FacetHeader::of(nw_messages::facet::component::PLAYER, 1);
+        world
+            .facet_message(
+                &connection(1),
+                ClientFacetMsg::ReturnToMainWorld { header, flag: 0 },
+                NOW + 1,
+            )
+            .expect("skip");
+        let player = world.world.get::<Player>(entity).expect("player");
+        assert!(
+            !player.water_held,
+            "skip must drop the water hold so the body can leave WATER_AT"
+        );
     }
 
     #[test]

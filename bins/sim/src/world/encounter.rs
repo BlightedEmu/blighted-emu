@@ -1168,8 +1168,11 @@ impl Tutorial {
                 self.water_at_ms = Some(now_ms.saturating_add(WATER_MOVE_DELAY_MS));
             }
             Event::CinematicEnded(video) if video == sinking => self.move_to_water(&mut orders),
+            // The live client ends the sink IGC under a different CRC than
+            // `lowercase_crc32("FTUE_S1")` (3438592047 vs 0xea5fc27a, 2026-09-24).
+            // Any cutscene end after the move drops the hold.
             Event::CutsceneEnded(cutscene)
-                if cutscene == lowercase_crc32(WATER_HOLD_CUTSCENE) =>
+                if self.moved_to_water || cutscene == lowercase_crc32(WATER_HOLD_CUTSCENE) =>
             {
                 orders.push(Order::ReleaseHold);
             }
@@ -1490,7 +1493,14 @@ impl Tutorial {
     fn apply(&mut self, effects: Vec<Effect>, mobs: &mut Mobs, orders: &mut Vec<Order>) {
         for effect in effects {
             match effect {
-                Effect::Achievement(id) => orders.push(Order::Achievement(id)),
+                Effect::Achievement(id) => {
+                    if id.eq_ignore_ascii_case("FTUE_S1_Cinematic_Watched")
+                        || id.eq_ignore_ascii_case("MSQ_Tutorial_Swimming")
+                    {
+                        orders.push(Order::ReleaseHold);
+                    }
+                    orders.push(Order::Achievement(id));
+                }
                 Effect::LockAchievement(id) => orders.push(Order::LockAchievement(id)),
                 Effect::RemoveItem(id, count) => orders.push(Order::RemoveItem(id, count)),
                 // The tutorial's tree fires no game event (build 25810808).
@@ -1941,6 +1951,29 @@ pub(crate) mod tests {
             NOW + WATER_MOVE_DELAY_MS,
         );
         assert!(released.contains(&Order::ReleaseHold));
+    }
+
+    #[test]
+    fn the_live_water_cutscene_releases_the_hold() {
+        // Live 2026-09-24: the client requested cutscene 3438592047 after the sink
+        // (`tut-1.log` RequestCutscene). That is not `lowercase_crc32("FTUE_S1")`
+        // (0xea5fc27a). The hold stayed on, and the body sat at WATER_AT (z 26.16).
+        const LIVE_WATER_CUTSCENE: u32 = 3_438_592_047;
+        let mut mobs = Mobs::new(Vec::new().into(), &sailor_combat());
+        let (mut tutorial, _) =
+            Tutorial::start(OWNER, tree(), &FtueLevel::default(), &mut mobs, NOW);
+        let sinking = lowercase_crc32(SHIP_SINKING_VIDEO);
+        tutorial.event(Event::CinematicStarted(sinking), &mut mobs, NOW);
+        let _ = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + WATER_MOVE_DELAY_MS);
+        let released = tutorial.event(
+            Event::CutsceneEnded(LIVE_WATER_CUTSCENE),
+            &mut mobs,
+            NOW + WATER_MOVE_DELAY_MS,
+        );
+        assert!(
+            released.contains(&Order::ReleaseHold),
+            "the live sink cutscene must drop the water hold"
+        );
     }
 
     #[test]

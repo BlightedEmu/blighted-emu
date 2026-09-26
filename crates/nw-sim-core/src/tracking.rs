@@ -275,8 +275,14 @@ impl TrackedBody {
             ..position
         };
         let distance = position.horizontal_distance(seen.at);
-        let resynced =
-            distance > resync_distance(position) && wall_between(ground, over, seen.at).is_none();
+        // Swim and fall keep the keys' place: a camera trail behind a swimming
+        // body (live 2026-09-24, after the ship sink) pulled the player backward
+        // each record. A jump still takes the camera on the ground plane.
+        let falling = self.is_falling();
+        let resynced = !self.is_swimming()
+            && !falling
+            && distance > resync_distance(position)
+            && wall_between(ground, over, seen.at).is_none();
         if resynced {
             let heading = self.character.heading();
             let along = |from: Position, to: Position| {
@@ -298,7 +304,6 @@ impl TrackedBody {
             position.x += (seen.at.x - position.x) * share;
             position.y += (seen.at.y - position.y) * share;
         }
-        let falling = !self.character.is_grounded() && !self.character.is_jumping();
         if self.character.is_jumping() {
             // A jump keeps its own height; the camera only moves it on the ground plane.
             self.character.place(position);
@@ -965,6 +970,45 @@ mod tests {
                 "{above} m above: {tracked:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_swimming_body_does_not_snap_back_to_a_trailing_camera() {
+        // Live 2026-09-24: after the sink the player swam forward and the camera
+        // trail pulled the body backward each record.
+        let swim = swim_floor(TUTORIAL_SEA_M);
+        let start = Position {
+            x: 793.84,
+            y: 337.42,
+            z: swim,
+        };
+        let mut body = TrackedBody::new(start);
+        body.drop_at(start);
+        let mut at = start;
+        for _ in 0..8 {
+            at = body
+                .record(input(0, view_of(at, BOOM, [0.0; 2])), &TutorialSea, TUTORIAL_SEA_M)
+                .position;
+        }
+        assert!(
+            body.is_swimming() || (at.z - swim).abs() < 1e-3,
+            "{at:?}"
+        );
+        let behind = Position {
+            y: at.y - 4.0,
+            ..at
+        };
+        let tracked = body.record(
+            input(1, view_of(behind, BOOM, [0.0; 2])),
+            &TutorialSea,
+            TUTORIAL_SEA_M,
+        );
+        assert!(!tracked.resynced, "{tracked:?}");
+        assert!(
+            tracked.position.y > at.y,
+            "the camera pulled it back: {at:?} -> {:?}",
+            tracked.position
+        );
     }
 
     /// The retail replay data: a 1 m terrain grid and input records with the retail places.

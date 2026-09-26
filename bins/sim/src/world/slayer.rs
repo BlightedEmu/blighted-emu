@@ -410,9 +410,10 @@ impl SlayerTrack {
                 started
             })
         };
-        if upper.is_some() && movement.is_none() {
+        if upper.is_some() && movement.is_none() && !self.keeps_attack() {
             // The walk changes with the block or aim: retail sent the new walk sequence in the
-            // state of the right-click (`15=af10` with the aim).
+            // state of the right-click (`15=af10` with the aim). A draw that arrives after a
+            // tap has already started the light must not replace that attack with a walk.
             movement = Some(self.locomotion.current(set));
         }
         if let Some(upper) = upper {
@@ -683,6 +684,13 @@ impl SlayerTrack {
     /// What this tick's own state carries, once.
     pub(super) fn take_due(&mut self) -> SlayerDue {
         std::mem::take(&mut self.due)
+    }
+
+    /// An attack the server started is still this state's action: a pending start, or the echo
+    /// of one (`state` empty, retail's attack form).
+    fn keeps_attack(&self) -> bool {
+        matches!(self.pending, Some((Pending::Attack(_), _, _)))
+            || (self.repeats > 0 && self.current.is_some_and(|state| state.state.is_none()))
     }
 
     /// The upper slot change of the next own state: a new one, else the last once more.
@@ -1020,6 +1028,52 @@ mod tests {
         assert_eq!(
             light.second.map(|second| (second.started, second.playing)),
             Some((0x6bd, None))
+        );
+    }
+
+    #[test]
+    fn a_late_draw_does_not_replace_the_light_attack() {
+        /// The draw the live table sends when the weapon reaches the hand.
+        const DRAW_STATE: u64 = 44;
+        const DRAW_SEQUENCE: u64 = 2310;
+        let table = PlayerSequences::of_parts(
+            HOLD_RECORDS,
+            vec![StanceSequences {
+                tags: GREATSWORD.to_owned(),
+                light: Some(LIGHT),
+                draw: Some(StatePlay {
+                    state: DRAW_STATE,
+                    sequence: DRAW_SEQUENCE,
+                }),
+                ..StanceSequences::default()
+            }],
+            vec![],
+        );
+        let mut track = spawned();
+        let still = Intent::default();
+        let sheathed = |counter, attack| SlayerRecord {
+            weapon: weapon(GREATSWORD, false),
+            ..keyed(counter, still, attack, GREATSWORD)
+        };
+        track.record(sheathed(0x6ba, PRESS), &table);
+        track.record(sheathed(0x6bd, RELEASE), &table);
+        let light = own_state(&mut track, 0x6bd)
+            .state
+            .expect("the light attack");
+        assert_eq!(light.sequence, LIGHT);
+        track.record(
+            SlayerRecord {
+                weapon: weapon(GREATSWORD, true),
+                ..quiet_record(0x6be, still)
+            },
+            &table,
+        );
+        let after = own_state(&mut track, 0x6be)
+            .state
+            .expect("the attack stays");
+        assert_eq!(
+            after.sequence, LIGHT,
+            "a draw after the tap is not a walk"
         );
     }
 
