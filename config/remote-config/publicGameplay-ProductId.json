@@ -1,6 +1,5 @@
 {
     "javelin": {
-        "enable-camera-lock-kbam-pve-targeting": true,
         "xp-multipliers": {
             "character": 2,
             "progression": [

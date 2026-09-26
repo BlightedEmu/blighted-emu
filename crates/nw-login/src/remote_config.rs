@@ -455,11 +455,7 @@ pub(crate) mod tests {
     /// less the four Amazon-only stats keys (`server-endpoint`, `ingestion-endpoint`,
     /// `stats-assume-role`, `ingestion-assume-role`), plus the switches the leaderboards study
     /// asks for (`analytics/enable` and seven `javelin` keys of the publicGameplay `RegionId`
-    /// layer; leaderboards note section 1), plus `javelin/enable-camera-lock-kbam-pve-targeting`
-    /// in the three `publicGameplay` layers that carry a `javelin` root: the client's camera
-    /// lock refuses keyboard-and-mouse PvE targets without it (run-12 lock-on note); it was
-    /// served from the old edge `[client_config.javelin]` block and lost in the move to these
-    /// layers (live 2026-09-22: target lock did nothing).
+    /// layer; leaderboards note section 1).
     const SERVED_KEY_PATHS: [(&str, Dimension, &[&str]); 8] = [
         (
             "public",
@@ -494,7 +490,6 @@ pub(crate) mod tests {
             "publicGameplay",
             Dimension::ProductId,
             &[
-                "javelin/enable-camera-lock-kbam-pve-targeting",
                 "javelin/xp-multipliers/character",
                 "javelin/xp-multipliers/progression",
             ],
@@ -504,7 +499,6 @@ pub(crate) mod tests {
             Dimension::RegionId,
             &[
                 "javelin-server/enable-twitch-system",
-                "javelin/enable-camera-lock-kbam-pve-targeting",
                 "javelin/enable-leaderboard-rotations",
                 "javelin/enable-leaderboards",
                 "javelin/enable-leaderboards-stat-queries",
@@ -526,7 +520,6 @@ pub(crate) mod tests {
             &[
                 "javelin/disabled-item-classes",
                 "javelin/dynamic-datatable-config",
-                "javelin/enable-camera-lock-kbam-pve-targeting",
                 "javelin/game-mode-matchmaking-service-enabled-modes",
                 "javelin/gamemode-activity-type-penalty-overrides",
                 "javelin/gamemode-dungeon-mutated-max-runs",

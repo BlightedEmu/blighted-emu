@@ -8,8 +8,8 @@
 //! body goes toward where the camera puts it, by half the distance and at most
 //! [`RESYNC_MAX_STEP_M`] in one record (a wall stopped the client, a dodge or an attack moved it,
 //! the server's speed was not the client's). It once went the whole way in one record: the place
-//! the server sends then stepped by 0.5 to 0.8 m (live 2026-09-22, the tutorial ship, whose
-//! [`SHIP_RESYNC_M`] is the largest), and the client showed each step as judder. When that pulls the body back against its motion,
+//! the server sends then stepped by 0.5 to 0.8 m (live 2026-09-22, the tutorial ship), and the
+//! client showed each step as judder. When that pulls the body back against its motion,
 //! the character's speed drops to the camera body's own speed along it since the record before (a
 //! client held at a wall stays there instead of being pulled back record after record; replay of
 //! the newchar capture, 2026-09-20: 1,366 pull-backs instead of 1,486 in the tutorial and 1,610
@@ -59,29 +59,12 @@ use crate::movement::{Ground, Position};
 /// replay of the retail keys erred by a median 0.15 m with 0.1 m, 0.16 m with 0.15 m and 0.16 m
 /// with 0.2 m in the open world, 0.35, 0.22 and 0.55 m in the tutorial).
 pub const RESYNC_M: f32 = 0.15;
-/// The larger camera-check snap on the tutorial ship deck, m
-/// (`local-data/scratch-work/run15/movement/REPORT.md`: snaps of 0.3 m to 0.57 m).
-pub const SHIP_RESYNC_M: f32 = 0.57;
 /// The share of the distance to the camera's body that one record corrects.
 const RESYNC_SHARE: f32 = 0.5;
 /// The largest correction of one record toward the camera's body, m. Retail's own
 /// places step at most 0.36 m in the open-world walk replay, motion included; a
 /// correction above this on top of the record's own motion would pass that.
 const RESYNC_MAX_STEP_M: f32 = 0.15;
-/// The ship deck height that report holds, m.
-const SHIP_DECK_LOW_M: f32 = 89.37;
-/// See [`SHIP_DECK_LOW_M`].
-const SHIP_DECK_HIGH_M: f32 = 89.45;
-
-/// The correction distance at `at`: the ship snap while the feet are on that deck, otherwise
-/// [`RESYNC_M`].
-fn resync_distance(at: Position) -> f32 {
-    if (SHIP_DECK_LOW_M..=SHIP_DECK_HIGH_M).contains(&at.z) {
-        SHIP_RESYNC_M
-    } else {
-        RESYNC_M
-    }
-}
 /// Records after the client starts an action (an attack, a dodge, an ability) while its moves may
 /// carry the body without the movement keys, so the camera check does not hold it still
 /// (Observed: after the 20 actions the newchar tutorial started without a movement key, the own
@@ -281,7 +264,7 @@ impl TrackedBody {
         let falling = self.is_falling();
         let resynced = !self.is_swimming()
             && !falling
-            && distance > resync_distance(position)
+            && distance > RESYNC_M
             && wall_between(ground, over, seen.at).is_none();
         if resynced {
             let heading = self.character.heading();

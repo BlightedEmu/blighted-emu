@@ -224,13 +224,6 @@ const REFUSED_RESYNC_MS: u64 = 1_000;
 /// How long the client camera still glides back after the inventory closes, while its inputs
 /// do not yet carry the body (retail 2026-09-18: 663 ms, 870114 to 870777).
 const LOADOUT_CAMERA_SETTLE_MS: u64 = 700;
-/// Tutorial lock-on achievements a skip would otherwise miss. The client needs
-/// them after `ReturnToMainWorld` (retail grants them in the island fights).
-const SKIP_LOCK_ACHIEVEMENTS: [&str; 3] = [
-    "Tutorial_TargetLock1",
-    "Tutorial_TargetLock2",
-    "Tutorial_TargetLockSwitch1",
-];
 
 /// How a body the server puts somewhere lands there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -502,6 +495,8 @@ struct Player {
     /// until the client spawns ([`OWN_CARD_RESEND_MS`]); `None` before the card and after
     /// the spawn.
     own_card_bundle: Option<Vec<Vec<u8>>>,
+    /// It came by a login ([`Arrival::login`]).
+    login: bool,
     /// When the own spawn card bundle last went out.
     own_card_sent_ms: u64,
     /// When other entities may go out after the time-sync spawn ([`OTHER_ENTITY_SETTLE_MS`]).
@@ -566,9 +561,6 @@ struct Player {
     /// Until this server time the client camera does not carry the body: the inventory camera
     /// is open, or still gliding back. Its inputs move nothing (retail held the player still).
     camera_held_until_ms: Option<u64>,
-    /// The tutorial water hold: the body stays at [`encounter::WATER_AT`] until
-    /// the sink cutscene ends (live: cutscene 3438592047, not CRC of `FTUE_S1`).
-    water_held: bool,
     /// Its inventory is open (`lookingThroughLoadout` of its 3935 state), as its client said in
     /// its newest 3970.
     looking_through_loadout: bool,
@@ -920,6 +912,10 @@ struct Arrival {
     spawned: bool,
     /// Earliest time the own spawn card may go out ([`OWN_CARD_DELAY_MS`]).
     own_card_due_ms: u64,
+    /// A login, not a handoff: only a login resends its own card ([`OWN_CARD_RESEND_MS`]) and
+    /// waits [`OTHER_ENTITY_SETTLE_MS`] after the spawn (retail newchar 2026-09-18: at the beach
+    /// level change the card went once and the other entities 2 ms after it).
+    login: bool,
     /// The client-context id of the player's current level.
     client_context: u8,
     /// The flow of the level it arrives in.
@@ -1111,6 +1107,7 @@ impl SimWorld {
             } else {
                 now_ms
             },
+            login: admit.login,
             client_context: LOGIN_CLIENT_CONTEXT,
             flow,
             items: admit.items.clone(),
@@ -1244,6 +1241,7 @@ impl SimWorld {
             } else {
                 now_ms
             },
+            login: false,
             client_context,
             flow,
             items: offer.items.clone(),
@@ -1363,7 +1361,7 @@ impl SimWorld {
             vitals.spawned = true;
         }
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            if !was_spawned {
+            if !was_spawned && player.login {
                 player.others_due_ms = Some(OTHER_ENTITY_SETTLE_PENDING);
             }
             player.own_card_bundle = None;
@@ -1495,19 +1493,9 @@ impl SimWorld {
             Some(ground) => ground,
             None => &*self.ground,
         };
-        let held = player.water_held
-            || player
-                .camera_held_until_ms
-                .is_some_and(|until| now_ms < until);
-        // Retail draws on the attack press, then starts the light at the release. Drawing here
-        // keeps the slayer records of this message on the drawn weapon; a draw after the tap
-        // used to replace the light with a walk.
-        if !held
-            && let Some(gear) = player.gear.as_mut()
-            && records.iter().any(InputRecord::attack_pressed)
-        {
-            let _ = gear.draw_to_attack(unix_ns(self.server_ms));
-        }
+        let held = player
+            .camera_held_until_ms
+            .is_some_and(|until| now_ms < until);
         // The weapon in the hand picks the slayer sequences the server starts ([`slayer`]).
         let weapon = player.gear.as_ref().and_then(|gear| {
             let (item, _) = gear.main_weapon()?;
@@ -2531,24 +2519,8 @@ impl SimWorld {
                 if self.mob_order(entity, number, &order, now_ms) {
                     continue;
                 }
-                if let Order::HoldAt(position, facing) = order {
-                    self.place_player(entity, position, Some(facing), Placement::Stand, now_ms);
-                    if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-                        player.water_held = true;
-                    }
-                    continue;
-                }
-                if let Order::ReleaseHold = order {
-                    let at = self
-                        .world
-                        .get::<Body>(entity)
-                        .map(|body| body.motion.position());
-                    if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-                        player.water_held = false;
-                    }
-                    if let Some(at) = at {
-                        self.place_player(entity, at, None, Placement::Drop, now_ms);
-                    }
+                if let Order::MoveTo(position, facing) = order {
+                    self.place_player(entity, position, Some(facing), Placement::Drop, now_ms);
                     continue;
                 }
                 let Some(mut player) = self.world.get_mut::<Player>(entity) else {
@@ -2669,8 +2641,7 @@ impl SimWorld {
                         let blow = ServerMessage::MeleeHit(MeleeHitMsg::on(number, false));
                         send_now(&mut self.combat_messages, &player.connection, &[blow]);
                     }
-                    Order::HoldAt(..)
-                    | Order::ReleaseHold
+                    Order::MoveTo(..)
                     | Order::PlayMove { .. }
                     | Order::Swing { .. }
                     | Order::Shove { .. } => {}
@@ -3044,12 +3015,6 @@ impl SimWorld {
                     if std::mem::replace(&mut player.looking_through_loadout, *looking) != *looking
                     {
                         player.loadout_change_due = true;
-                        let started = player.input_counter.unwrap_or(0);
-                        if *looking {
-                            player.slayer.open_loadout(started, now_ms);
-                        } else {
-                            player.slayer.close_loadout(started);
-                        }
                     }
                 }
                 return Ok(());
@@ -3107,10 +3072,6 @@ impl SimWorld {
                 if tutorial && player.leave_at_ms.is_none() =>
             {
                 player.leave_at_ms = Some(now_ms.saturating_add(LEAVE_DELAY_MS));
-                player.water_held = false;
-                for id in SKIP_LOCK_ACHIEVEMENTS {
-                    player.flow.set_achievement(&self.achievement_rules, id);
-                }
                 player.flow.leave()
             }
             ClientFacetMsg::TimeSyncRequest { header } => time_answers(&self.ids, header).to_vec(),
@@ -3687,6 +3648,7 @@ impl SimWorld {
                     own_card_sent: false,
                     own_card_due_ms: arrival.own_card_due_ms,
                     own_card_bundle: None,
+                    login: arrival.login,
                     own_card_sent_ms: 0,
                     others_due_ms: if arrival.spawned { Some(0) } else { None },
                     client_context: arrival.client_context,
@@ -3714,7 +3676,6 @@ impl SimWorld {
                     refused_since_ms: None,
                     last_grounded: Some(motion.position()),
                     camera_held_until_ms: None,
-                    water_held: false,
                     looking_through_loadout: false,
                     loadout_change_due: false,
                     own_spawned_ms: None,
@@ -4399,7 +4360,7 @@ impl Neighbourhood<'_> {
                     slayer: player.slayer.take_due(),
                     // Retail sent `rotation` and `lookDir` in most own states; the lock holds
                     // only while the client has a current look (lock-on note, section 15.2).
-                    view: player.view,
+                    view: player.view.filter(|view| Some(*view) != player.view_sent),
                     // Retail's server moves carry no slot 1: a change waits for a plain state.
                     footing: if plain_tick {
                         player.footing.change_since(player.footing_sent)
@@ -4612,7 +4573,8 @@ impl Neighbourhood<'_> {
                     envelopes: vec![bundle],
                 });
             }
-            let resend_due = !vitals.spawned
+            let resend_due = player.login
+                && !vitals.spawned
                 && player.own_card_bundle.is_some()
                 && self.now_ms.saturating_sub(player.own_card_sent_ms) >= OWN_CARD_RESEND_MS;
             if resend_due {
@@ -5821,7 +5783,7 @@ mod tests {
     }
 
     #[test]
-    fn the_own_state_carries_the_view_in_each_own_state() {
+    fn the_own_state_carries_back_a_new_view_once() {
         /// The own `rotation` and `lookDir` children (retail sends them back in own states).
         const ROTATION_CHILD: usize = 11;
         const LOOK_DIR_CHILD: usize = 12;
@@ -5863,8 +5825,8 @@ mod tests {
         );
         let next = own_children(&mut world, card_at + 99);
         assert!(
-            next.contains(&ROTATION_CHILD) && next.contains(&LOOK_DIR_CHILD),
-            "each own state carries the look: {next:?}"
+            !next.contains(&ROTATION_CHILD) && !next.contains(&LOOK_DIR_CHILD),
+            "an unchanged view is not sent again: {next:?}"
         );
     }
 
@@ -5887,7 +5849,7 @@ mod tests {
             .world
             .get_mut::<Player>(entity)
             .expect("player")
-            .water_held = true;
+            .camera_held_until_ms = Some(NOW + ONE_SECOND_MS);
         let view = LookDir {
             yaw: 0.5,
             pitch: 0.1,
@@ -9842,29 +9804,19 @@ mod tests {
     }
 
     #[test]
-    fn the_move_into_the_water_holds_until_the_cutscene_then_drops() {
-        // Retail newchar 2026-09-18: the body stays at WATER_AT until FTUE_S1 ends, then
-        // it falls to the swim floor. A drop during the video puts the client on the seabed
-        // before it has control (live 2026-09-22).
+    fn the_move_into_the_water_drops_the_player_into_the_sea() {
+        // Run 13: after the move the server's body stayed at the place 7.6 m above the sea, the
+        // client hung there with it, and the walked floor kept it there.
         let mut world = tutorial_world_on(Arc::new(FlatGround(WATER_SEABED_M)));
         let water = encounter::WATER_AT;
-        world.carry_out(1, vec![Order::HoldAt(water, encounter::WATER_FACING)], NOW);
+        world.carry_out(1, vec![Order::MoveTo(water, encounter::WATER_FACING)], NOW);
         assert_eq!(body_of_first(&world), water);
         let swim = nw_sim_core::character::swim_floor(OCEAN_LEVEL_M);
         let mut shown: std::collections::VecDeque<Position> =
             std::iter::repeat_n(water, CLIENT_LAG_RECORDS).collect();
         let mut body = water;
-        for counter in 1..=REST_RECORDS {
-            shown.push_back(body);
-            let client = shown.pop_front().expect("lagged places");
-            let record = camera_record(counter, client, TUTORIAL_VIEW, [0.0; 2], STANDING_SLOTS);
-            let next = after_record(&mut world, counter, record);
-            assert_eq!(next, water, "record {counter}: it left the hold");
-            body = next;
-        }
-        world.carry_out(1, vec![Order::ReleaseHold], NOW + 1);
         let mut landed = None;
-        for counter in REST_RECORDS + 1..=REST_RECORDS * 2 {
+        for counter in 1..=REST_RECORDS {
             shown.push_back(body);
             let client = shown.pop_front().expect("lagged places");
             let record = camera_record(counter, client, TUTORIAL_VIEW, [0.0; 2], STANDING_SLOTS);
@@ -9882,6 +9834,7 @@ mod tests {
             None,
             "the place in the air is no floor"
         );
+        // Run 15: the client stood at the swim height until its own state said deep water.
         let entity = world.player_by_number(1).expect("player");
         let player = world.world.get::<Player>(entity).expect("player");
         assert_eq!(
@@ -9890,27 +9843,6 @@ mod tests {
             "the next own state tells its client to swim"
         );
         assert_ne!(player.footing, player.footing_sent, "a change to send");
-    }
-
-    #[test]
-    fn skip_tutorial_releases_the_water_hold() {
-        let mut world = tutorial_world_on(Arc::new(FlatGround(WATER_SEABED_M)));
-        world.carry_out(1, vec![Order::HoldAt(encounter::WATER_AT, encounter::WATER_FACING)], NOW);
-        let entity = world.player_by_number(1).expect("player");
-        assert!(world.world.get::<Player>(entity).expect("player").water_held);
-        let header = nw_messages::FacetHeader::of(nw_messages::facet::component::PLAYER, 1);
-        world
-            .facet_message(
-                &connection(1),
-                ClientFacetMsg::ReturnToMainWorld { header, flag: 0 },
-                NOW + 1,
-            )
-            .expect("skip");
-        let player = world.world.get::<Player>(entity).expect("player");
-        assert!(
-            !player.water_held,
-            "skip must drop the water hold so the body can leave WATER_AT"
-        );
     }
 
     #[test]

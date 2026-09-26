@@ -7,7 +7,7 @@
 //! - Every player starts with the expansion and the achievement of its archetype pick. In the
 //!   tutorial, the quest's task tree sets the achievements that unlock the client's videos and
 //!   cutscenes ([`crate::objectives`]). The server allows each cutscene the client asks for
-//!   (6703 → 6707). The client ends it (6705); the server does not send 6709 after that.
+//!   (6703 → 6707) and closes it when it ends (6705 → 6709).
 //! - When the client asks to leave the tutorial (502), the server shows the loading screen (3951)
 //!   and clears the phases (an empty 6310) before the level change.
 
@@ -16,8 +16,8 @@ use std::collections::HashMap;
 use nw_content::achievements::AchievementIndexes;
 use nw_messages::facet::component;
 use nw_messages::{
-    AchievementBits, AchievementState, ByteChange, ClientFacetMsg, CutsceneGrantedMsg,
-    FacetHeader, FullList, LevelInfoChangedMsg, OPEN_WORLD_LEVEL, PhasingEntry,
+    AchievementBits, AchievementState, ByteChange, ClientFacetMsg, CutsceneEndFinalizedMsg,
+    CutsceneGrantedMsg, FacetHeader, FullList, LevelInfoChangedMsg, OPEN_WORLD_LEVEL, PhasingEntry,
     ServerMessage, TeleportWithLoadingScreenMsg, UpdatePhasingMsg,
 };
 
@@ -371,16 +371,16 @@ impl LevelFlow {
             ClientFacetMsg::RequestCutscene { cutscene, .. } => self.grant_cutscene(cutscene),
             ClientFacetMsg::CutsceneStarted { .. } => Vec::new(),
             ClientFacetMsg::CutsceneEnded { .. } => {
-                // The client already left the cutscene. EndFinalized after that
-                // logs "Ask to stop a different cutscene, skip it" with
-                // Current="" and leaves the camera in a black cinematic
-                // (Game.log 2026-09-24: FTUE crew IGC, then
-                // 12_GetOffBeach_MSQ_RevivalShoreKnight_MB_IGC).
                 self.cutscene = None;
-                match self.queued_cutscene.take() {
-                    Some(next) => self.grant_cutscene(next),
-                    None => Vec::new(),
+                let mut answers = vec![ServerMessage::CutsceneEndFinalized(
+                    CutsceneEndFinalizedMsg {
+                        header: self.header(component::PLAYER_CUTSCENE),
+                    },
+                )];
+                if let Some(next) = self.queued_cutscene.take() {
+                    answers.extend(self.grant_cutscene(next));
                 }
+                answers
             }
             ClientFacetMsg::UpdateTrackedObjectives { .. } => Vec::new(),
             ClientFacetMsg::AckLevelInfo { .. }
@@ -785,19 +785,11 @@ mod tests {
             },
             LOGIN_CLIENT_CONTEXT,
         );
-        assert!(
-            ended.is_empty(),
-            "EndFinalized after the client already stopped leaves a black \
-             cinematic (Game.log 2026-09-24)"
-        );
+        assert!(matches!(
+            ended.as_slice(),
+            [ServerMessage::CutsceneEndFinalized(_)]
+        ));
         assert_eq!(flow.cutscene(), None);
-        let again = flow.answer(
-            &ClientFacetMsg::CutsceneEnded {
-                header: header(component::PLAYER_CUTSCENE),
-            },
-            LOGIN_CLIENT_CONTEXT,
-        );
-        assert!(again.is_empty());
     }
 
     #[test]
@@ -829,8 +821,10 @@ mod tests {
         );
         assert!(matches!(
             ended.as_slice(),
-            [ServerMessage::CutsceneGranted(CutsceneGrantedMsg { cutscene, .. })]
-                if *cutscene == pccm
+            [
+                ServerMessage::CutsceneEndFinalized(_),
+                ServerMessage::CutsceneGranted(CutsceneGrantedMsg { cutscene, .. })
+            ] if *cutscene == pccm
         ));
         assert_eq!(flow.cutscene(), Some(pccm));
     }
