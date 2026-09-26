@@ -204,7 +204,10 @@ fn trigger(
 ) -> Result<SliceTrigger, SliceTriggerError> {
     let name = component
         .child(names.trigger_name)
-        .ok_or(SliceTriggerError::Missing("trigger component", "m_triggerName"))?
+        .ok_or(SliceTriggerError::Missing(
+            "trigger component",
+            "m_triggerName",
+        ))?
         .as_string()?
         .to_owned();
     let entities = match component.child(names.to_trigger) {

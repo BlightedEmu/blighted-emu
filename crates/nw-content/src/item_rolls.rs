@@ -125,7 +125,9 @@ impl ItemRolls {
                     row.resource_id.to_lowercase(),
                     (
                         Some(row.perk_bucket.clone()).filter(|bucket| !bucket.trim().is_empty()),
-                        row.socket_type.clone().filter(|socket| !socket.trim().is_empty()),
+                        row.socket_type
+                            .clone()
+                            .filter(|socket| !socket.trim().is_empty()),
                     ),
                 )
             })

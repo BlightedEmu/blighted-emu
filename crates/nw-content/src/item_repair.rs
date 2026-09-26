@@ -165,10 +165,7 @@ impl GearScoreUpgrades {
         let mut currency: Option<&str> = None;
         let mut total: u64 = 0;
         for level in from..to {
-            let (id, quantity) = self
-                .levels
-                .get(&level)
-                .ok_or(UpgradeRefusal::NoSuchLevel)?;
+            let (id, quantity) = self.levels.get(&level).ok_or(UpgradeRefusal::NoSuchLevel)?;
             match currency {
                 Some(known) if !known.eq_ignore_ascii_case(id) => {
                     return Err(UpgradeRefusal::MixedCurrency);

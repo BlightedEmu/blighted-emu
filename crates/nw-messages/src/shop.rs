@@ -76,9 +76,11 @@ mod tests {
     #[test]
     fn a_short_or_other_body_is_not_a_purchase() {
         let body = hex_bytes(PURCHASE);
-        assert!(ShopPurchaseCall::decode(PURCHASE_ITEM_TYPE_INDEX, &body[..20])
-            .expect("a purchase")
-            .is_err());
+        assert!(
+            ShopPurchaseCall::decode(PURCHASE_ITEM_TYPE_INDEX, &body[..20])
+                .expect("a purchase")
+                .is_err()
+        );
         assert!(ShopPurchaseCall::decode(PURCHASE_ITEM_TYPE_INDEX + 1, &body).is_none());
     }
 }

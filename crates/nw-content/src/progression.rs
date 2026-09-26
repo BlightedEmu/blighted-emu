@@ -767,13 +767,18 @@ pub(crate) mod tests {
                 },
             ])
             .with_respec_costs(RESPEC_COSTS);
-        let azoth = progression
-            .categorical("azoth_currency")
-            .expect("currency");
+        let azoth = progression.categorical("azoth_currency").expect("currency");
         assert_eq!(azoth.kind, MasteryKind::Currency);
-        assert!(progression.mastery(AZOTH_PROGRESSION).is_none(), "no mastery");
+        assert!(
+            progression.mastery(AZOTH_PROGRESSION).is_none(),
+            "no mastery"
+        );
         assert_eq!(azoth.rank_of(1_234), (0, 1_234));
-        assert_eq!(azoth.rank_of(u32::MAX), (0, 2_500), "the balance stops at the cap");
+        assert_eq!(
+            azoth.rank_of(u32::MAX),
+            (0, 2_500),
+            "the balance stops at the cap"
+        );
         assert_eq!(azoth.max_experience(), 2_500);
         assert_eq!(azoth.experience_for_rank(3), 0);
         let camping = progression.categorical("Camping").expect("ranked");
@@ -797,6 +802,10 @@ pub(crate) mod tests {
         assert_eq!(progression.respec_cost(9), 0);
         assert_eq!(progression.respec_cost(10), 6);
         assert_eq!(progression.respec_cost(11), 6);
-        assert_eq!(progression.respec_cost(2), 0, "a rank the table does not list");
+        assert_eq!(
+            progression.respec_cost(2),
+            0,
+            "a rank the table does not list"
+        );
     }
 }

@@ -441,7 +441,10 @@ impl SimWorld {
     /// refused before the collection is loaded.
     fn worn_for_skin(&mut self, entity: Entity, slot: u32) -> Result<WornForSkin, TransmogRefusal> {
         let content = Arc::clone(&self.content);
-        let player = self.world.get::<Player>(entity).ok_or(TransmogRefusal::NoItem)?;
+        let player = self
+            .world
+            .get::<Player>(entity)
+            .ok_or(TransmogRefusal::NoItem)?;
         let character = player.character.to_string();
         let worn = player
             .gear
@@ -482,7 +485,12 @@ impl SimWorld {
     fn set_look(&mut self, entity: Entity, slot: u32, look: ItemLook) -> bool {
         self.world
             .get_mut::<Player>(entity)
-            .and_then(|mut player| player.gear.as_mut().map(|gear| gear.set_worn_look(slot, look)))
+            .and_then(|mut player| {
+                player
+                    .gear
+                    .as_mut()
+                    .map(|gear| gear.set_worn_look(slot, look))
+            })
             .unwrap_or(false)
     }
 
@@ -592,7 +600,10 @@ impl SimWorld {
         bag_slots: &[u32],
     ) -> Result<Vec<ServerMessage>, TransmogRefusal> {
         let content = Arc::clone(&self.content);
-        let player = self.world.get::<Player>(entity).ok_or(TransmogRefusal::NoItem)?;
+        let player = self
+            .world
+            .get::<Player>(entity)
+            .ok_or(TransmogRefusal::NoItem)?;
         let gear = player.gear.as_ref().ok_or(TransmogRefusal::NoItem)?;
         let mut need: BTreeMap<u8, u32> = BTreeMap::new();
         let mut changes = Vec::new();
@@ -652,13 +663,13 @@ impl SimWorld {
             if look.appearance == 0 {
                 continue;
             }
-            let version = self
-                .world
-                .get_mut::<Wardrobe>(entity)
-                .map_or(FIRST_VERSION, |mut wardrobe| {
-                    wardrobe.version = wardrobe.version.saturating_add(1);
-                    wardrobe.version
-                });
+            let version =
+                self.world
+                    .get_mut::<Wardrobe>(entity)
+                    .map_or(FIRST_VERSION, |mut wardrobe| {
+                        wardrobe.version = wardrobe.version.saturating_add(1);
+                        wardrobe.version
+                    });
             messages.push(skin_items(
                 number,
                 &character,
@@ -703,7 +714,10 @@ mod tests {
     fn dye_items_come_from_the_listed_slots_in_order() {
         let need = BTreeMap::from([(4, 2), (9, 1)]);
         let listed = [(7, 4, 1), (3, 9, 5), (8, 4, 3)];
-        assert_eq!(dye_takes(&need, &listed), Some(vec![(7, 1), (8, 1), (3, 1)]));
+        assert_eq!(
+            dye_takes(&need, &listed),
+            Some(vec![(7, 1), (8, 1), (3, 1)])
+        );
         let short = BTreeMap::from([(4, 5)]);
         assert_eq!(dye_takes(&short, &listed), None);
         assert_eq!(dye_takes(&BTreeMap::new(), &listed), Some(Vec::new()));
@@ -844,7 +858,11 @@ mod tests {
                 skin,
             };
             world.transmog_call(&connection(1), enable.clone());
-            assert_eq!(sword_look(&world).appearance, 0, "the collection is not loaded");
+            assert_eq!(
+                sword_look(&world).appearance,
+                0,
+                "the collection is not loaded"
+            );
             let jobs = world.take_skin_jobs(NOW);
             world.skins_collected(
                 &jobs[0],

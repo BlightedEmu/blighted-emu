@@ -238,9 +238,7 @@ impl OwnedHouse {
                 limit: MAX_TROPHIES,
             });
         }
-        let trophies = (0..count)
-            .map(|_| reader.u32())
-            .collect::<Result<_, _>>()?;
+        let trophies = (0..count).map(|_| reader.u32()).collect::<Result<_, _>>()?;
         Ok(Self {
             plot,
             house_data,

@@ -434,10 +434,7 @@ impl PlayerFishing {
                 };
                 actions.push(FishingAction::PutWeaponAway);
             }
-            Phase::Unequipped
-            | Phase::Ending {
-                unequip: true, ..
-            } => {}
+            Phase::Unequipped | Phase::Ending { unequip: true, .. } => {}
             // The pole goes away; a running cast ends and its bait comes back.
             _ => {
                 self.back_out(actions, 0.0);
@@ -657,9 +654,7 @@ impl PlayerFishing {
                 active,
                 last_ms,
             } => self.reel(fight, active, last_ms, now_ms, &mut actions),
-            Phase::Ending {
-                at_ms, unequip, ..
-            } if now_ms >= at_ms => {
+            Phase::Ending { at_ms, unequip, .. } if now_ms >= at_ms => {
                 if unequip {
                     self.enter(FishingState::FishingEnded);
                     self.enter(FishingState::FishingUnequipped);
@@ -683,7 +678,11 @@ impl PlayerFishing {
         now_ms: u64,
         actions: &mut Vec<FishingAction>,
     ) {
-        fight.step(active, now_ms.saturating_sub(last_ms) as f64 / MS_PER_S, now_ms);
+        fight.step(
+            active,
+            now_ms.saturating_sub(last_ms) as f64 / MS_PER_S,
+            now_ms,
+        );
         if fight.tension >= MAX_TENSION {
             self.fail(
                 FishingState::FailedLineBreak,
@@ -775,7 +774,11 @@ fn reel_distance(ground: &dyn Ground, tip: [f32; 2], bobber: [f32; 2], sea_level
         .take_while(|walked| *walked < total)
         .find(|walked| {
             ground
-                .water_surface(bobber[0] + ux * walked, bobber[1] + uy * walked, sea_level_m)
+                .water_surface(
+                    bobber[0] + ux * walked,
+                    bobber[1] + uy * walked,
+                    sea_level_m,
+                )
                 .is_none()
         })
         .unwrap_or(total)
@@ -855,7 +858,11 @@ impl SimWorld {
         };
         let player = &mut *player;
         if call.header() != FacetHeader::of(FISHING_FACET, player.number) {
-            tracing::debug!(player = player.number, ?call, "fishing call of another target");
+            tracing::debug!(
+                player = player.number,
+                ?call,
+                "fishing call of another target"
+            );
             return;
         }
         match call {
@@ -867,13 +874,18 @@ impl SimWorld {
                     .fishing
                     .bait(bait)
                     .map(|row| row.id.clone())
-                    .filter(|id| player.gear.as_ref().is_some_and(|gear| gear.bag_count(id) > 0));
+                    .filter(|id| {
+                        player
+                            .gear
+                            .as_ref()
+                            .is_some_and(|gear| gear.bag_count(id) > 0)
+                    });
                 if carried.is_none() {
                     tracing::debug!(player = player.number, bait, "bait not carried");
                 }
-                let answer = carried
-                    .is_some()
-                    .then_some(ServerMessage::Fishing(FishingServerMsg::BaitData { header, bait }));
+                let answer = carried.is_some().then_some(ServerMessage::Fishing(
+                    FishingServerMsg::BaitData { header, bait },
+                ));
                 player.fishing.apply_bait(carried);
                 if let Some(answer) = answer {
                     send_now(&mut self.combat_messages, &player.connection, &[answer]);
@@ -967,7 +979,10 @@ impl SimWorld {
         let content = Arc::clone(&self.content);
         let sea_level_m = self.settings.ocean_level_m;
         let (rank, _) = self.tradeskill_perks(entity, FISHING_TRADESKILL);
-        let place = self.world.get::<Body>(entity).map(|body| body.motion.position());
+        let place = self
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position());
         let yaw = self
             .world
             .get::<Player>(entity)
@@ -983,13 +998,19 @@ impl SimWorld {
                 return None;
             }
             let (forward, _) = yaw_axes(yaw);
-            let distance =
-                cast_distance(pole.cast_distance, content.fishing.cast_bonus(rank), hold_ms) as f32;
+            let distance = cast_distance(
+                pole.cast_distance,
+                content.fishing.cast_bonus(rank),
+                hold_ms,
+            ) as f32;
             let tip = [
                 place.x + forward[0] * ROD_TIP_M,
                 place.y + forward[1] * ROD_TIP_M,
             ];
-            let (x, y) = (tip[0] + forward[0] * distance, tip[1] + forward[1] * distance);
+            let (x, y) = (
+                tip[0] + forward[0] * distance,
+                tip[1] + forward[1] * distance,
+            );
             let z = ground
                 .water_surface(x, y, sea_level_m)
                 .or_else(|| ground.height_at(x, y))
@@ -1113,7 +1134,10 @@ impl SimWorld {
             (
                 player.number,
                 player.territories.clone(),
-                player.fishing.hooked_bait().and_then(|item| rules.bait_of_item(item)),
+                player
+                    .fishing
+                    .hooked_bait()
+                    .and_then(|item| rules.bait_of_item(item)),
             )
         };
         let hotspot = cast.hotspot.as_deref().and_then(|id| rules.hotspot(id));
@@ -1203,7 +1227,6 @@ impl SimWorld {
             let experience = player.masteries.experience(mastery).saturating_add(gain);
             player.masteries.set(mastery, experience);
         }
-        drop(player);
         tracing::debug!(player = number, item = %fight.item, "fish caught");
         self.give_loot(number, vec![(fight.item.clone(), ONCE)], now_ms);
         self.fishing_event(number, FISHING_DATA.catch_event, now_ms);
@@ -1243,8 +1266,9 @@ impl SimWorld {
                         let reached = self.reached_loot_limits(number);
                         let context = self.loot_context(number, None, &reached);
                         let dice = &mut self.dice;
-                        let rolled =
-                            content.loot.roll(table, context, &mut |below| dice.below(below));
+                        let rolled = content
+                            .loot
+                            .roll(table, context, &mut |below| dice.below(below));
                         self.limit_loot(number, rolled)
                     }
                     None => vec![(item.clone(), *quantity)],
@@ -1314,7 +1338,10 @@ mod tests {
             toggle: true,
             ..FishingKeys::default()
         };
-        assert_eq!(fishing.keys(1, keys, true, NOW), [FishingAction::PutWeaponAway]);
+        assert_eq!(
+            fishing.keys(1, keys, true, NOW),
+            [FishingAction::PutWeaponAway]
+        );
         fishing.tick(NOW + EQUIP_MS);
         assert_eq!(
             states(&fishing),
@@ -1339,7 +1366,10 @@ mod tests {
         let (mut fishing, counter) = equipped();
         assert!(fishing.pole_out());
         assert!(fishing.keys(counter, toggle, true, NOW).is_empty());
-        assert!(states(&fishing).is_empty(), "the put-away waits for its time");
+        assert!(
+            states(&fishing).is_empty(),
+            "the put-away waits for its time"
+        );
         fishing.tick(NOW + EQUIP_MS + UNEQUIP_MS);
         assert_eq!(
             states(&fishing),
@@ -1459,9 +1489,15 @@ mod tests {
             actions.last(),
             Some(FishingAction::BaitBack { loss_chance, .. }) if loss_chance.abs() < f64::EPSILON
         ));
-        assert_eq!(states(&fishing).last(), Some(&FishingState::FailedCastHitLand));
+        assert_eq!(
+            states(&fishing).last(),
+            Some(&FishingState::FailedCastHitLand)
+        );
         fishing.tick(NOW + 2_000 + CAST_ON_LAND_END_MS);
-        assert_eq!(states(&fishing).last(), Some(&FishingState::FishingEquipped));
+        assert_eq!(
+            states(&fishing).last(),
+            Some(&FishingState::FishingEquipped)
+        );
         // A cast whose bite window closes misses too late.
         fishing.keys(counter + 3, press, true, NOW + 3_000);
         fishing.keys(counter + 4, release, true, NOW + 4_000);
@@ -1506,7 +1542,10 @@ mod tests {
             NOW,
         );
         fishing.tick(NOW + 3_000);
-        assert_eq!(states(&fishing).last(), Some(&FishingState::FailedLineBreak));
+        assert_eq!(
+            states(&fishing).last(),
+            Some(&FishingState::FailedLineBreak)
+        );
     }
 
     #[test]
@@ -1559,7 +1598,10 @@ mod tests {
         assert_eq!(bonuses[1].name, "FishRarity");
         assert_eq!(bonuses[1].value, 19_500, "retail gather_node");
         assert_eq!(
-            modifiers.iter().map(|modifier| modifier.kind).collect::<Vec<_>>(),
+            modifiers
+                .iter()
+                .map(|modifier| modifier.kind)
+                .collect::<Vec<_>>(),
             [0, 1, 2, 3]
         );
     }

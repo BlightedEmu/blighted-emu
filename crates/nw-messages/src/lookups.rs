@@ -113,9 +113,11 @@ impl LookupRequest {
     pub fn answer(&self) -> Option<ServerMessage> {
         match *self {
             Self::Contracts { .. } => None,
-            Self::SubArmies { header } => Some(ServerMessage::JoinableSubArmies(
-                JoinableSubArmiesMsg { header },
-            )),
+            Self::SubArmies { header } => {
+                Some(ServerMessage::JoinableSubArmies(JoinableSubArmiesMsg {
+                    header,
+                }))
+            }
             Self::PendingMetaAchievements { header } => Some(
                 ServerMessage::PendingMetaAchievements(PendingMetaAchievementsMsg {
                     header,
@@ -295,7 +297,12 @@ mod tests {
         let (header, query, lookup) = contracts_query(REQUEST);
         assert_eq!(query.participant.kind, 0);
         assert_eq!(
-            (query.open_filter, query.role_filter, query.page, query.page_size),
+            (
+                query.open_filter,
+                query.role_filter,
+                query.page,
+                query.page_size
+            ),
             (
                 crate::contracts::open_filter::OPEN,
                 crate::contracts::role_filter::CREATOR,
@@ -372,11 +379,17 @@ mod tests {
     fn other_types_and_short_bodies_are_not_lookups() {
         assert!(LookupRequest::decode(REQUEST_SUB_ARMIES_TYPE_INDEX + 1, &[]).is_none());
         assert!(matches!(
-            LookupRequest::decode(LOOKUP_CONTRACTS_TYPE_INDEX, &bytes("b39cd7472ccfb38e2715f9bca18fdece00")),
+            LookupRequest::decode(
+                LOOKUP_CONTRACTS_TYPE_INDEX,
+                &bytes("b39cd7472ccfb38e2715f9bca18fdece00")
+            ),
             Some(Err(_))
         ));
         assert!(matches!(
-            LookupRequest::decode(REQUEST_SUB_ARMIES_TYPE_INDEX, &bytes("b12b7008f35b090b2715f9bca18fdece00")),
+            LookupRequest::decode(
+                REQUEST_SUB_ARMIES_TYPE_INDEX,
+                &bytes("b12b7008f35b090b2715f9bca18fdece00")
+            ),
             Some(Err(_))
         ));
     }

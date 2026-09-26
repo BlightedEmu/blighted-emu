@@ -372,7 +372,10 @@ mod tests {
         else {
             panic!("an enable");
         };
-        assert_eq!((slot, skin, header.target), (0, SKIN, RETAIL_TRANSMOG_TARGET));
+        assert_eq!(
+            (slot, skin, header.target),
+            (0, SKIN, RETAIL_TRANSMOG_TARGET)
+        );
         assert!(matches!(
             decode(DISABLE_ITEM_SKIN_TYPE_INDEX, RETAIL_DISABLE),
             TransmogClientMsg::DisableItemSkin { slot: 1, .. }
@@ -383,7 +386,10 @@ mod tests {
             TransmogClientMsg::TransmogScreenOpen { open: true, .. }
         ));
         assert!(matches!(
-            decode(SET_HIDING_SKIN_ON_SLOT_TYPE_INDEX, "4ce3ed1a188f038fe34e14f344a974cc0000000200"),
+            decode(
+                SET_HIDING_SKIN_ON_SLOT_TYPE_INDEX,
+                "4ce3ed1a188f038fe34e14f344a974cc0000000200"
+            ),
             TransmogClientMsg::SetHidingSkinOnSlot {
                 slot: 2,
                 hide: false,
@@ -431,8 +437,8 @@ mod tests {
     #[test]
     fn the_unlock_answer_is_the_retail_body() {
         let bytes = hex(RETAIL_UNLOCK);
-        let answer = TransmogServerMsg::decode(UNLOCK_TRANSMOG_SKIN_TYPE_INDEX, &bytes)
-            .expect("reads");
+        let answer =
+            TransmogServerMsg::decode(UNLOCK_TRANSMOG_SKIN_TYPE_INDEX, &bytes).expect("reads");
         assert!(matches!(
             answer,
             TransmogServerMsg::UnlockTransmogSkin {

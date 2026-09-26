@@ -181,7 +181,8 @@ impl HousingRules {
             ],
             reset_cost: (
                 keys.cooldown_reset_cost.unwrap_or(DEFAULT_RESET_COST),
-                keys.cooldown_reset_cost_min.unwrap_or(DEFAULT_RESET_COST_MIN),
+                keys.cooldown_reset_cost_min
+                    .unwrap_or(DEFAULT_RESET_COST_MIN),
             ),
         }
     }
@@ -763,7 +764,11 @@ mod tests {
             .landmark(SHRINE_TYPE, SHRINE[0] + 1.0, SHRINE[1])
             .expect("the shrine");
         assert_eq!(found.landmark_type, SHRINE_TYPE);
-        assert!(rules.landmark(SHRINE_TYPE, SHRINE[0] + 7.0, SHRINE[1]).is_none());
+        assert!(
+            rules
+                .landmark(SHRINE_TYPE, SHRINE[0] + 7.0, SHRINE[1])
+                .is_none()
+        );
         assert!(rules.landmark(2, SHRINE[0], SHRINE[1]).is_none());
         assert_eq!(
             rules.discovered_achievement(20_422),
@@ -820,7 +825,11 @@ mod tests {
         // 10 steps of 5.
         assert_eq!(costs.cost(3_550.0, 95.0, false), 500 + 21 * 5 + 10 * 5);
         assert_eq!(costs.cost(1_000.0, 0.0, false), 500);
-        assert_eq!(costs.cost(1_000.0, 0.0, true), 250, "half within the territory");
+        assert_eq!(
+            costs.cost(1_000.0, 0.0, true),
+            250,
+            "half within the territory"
+        );
     }
 
     #[test]
@@ -843,10 +852,24 @@ mod tests {
         assert_eq!(rules.tax(&tier_2), 6_900);
         let day_ms = 24 * 60 * MS_PER_MINUTE;
         assert_eq!(HousingRules::first_due(0), 7 * day_ms);
-        assert_eq!(HousingRules::paid_until(7 * day_ms, day_ms), 14 * day_ms, "early");
-        assert_eq!(HousingRules::paid_until(day_ms, 3 * day_ms), 10 * day_ms, "late");
-        assert_eq!(rules.reset_cost(tier_2.cooldown_ms, tier_2.cooldown_ms), 200);
-        assert_eq!(rules.reset_cost(tier_2.cooldown_ms / 2, tier_2.cooldown_ms), 100);
+        assert_eq!(
+            HousingRules::paid_until(7 * day_ms, day_ms),
+            14 * day_ms,
+            "early"
+        );
+        assert_eq!(
+            HousingRules::paid_until(day_ms, 3 * day_ms),
+            10 * day_ms,
+            "late"
+        );
+        assert_eq!(
+            rules.reset_cost(tier_2.cooldown_ms, tier_2.cooldown_ms),
+            200
+        );
+        assert_eq!(
+            rules.reset_cost(tier_2.cooldown_ms / 2, tier_2.cooldown_ms),
+            100
+        );
         assert_eq!(rules.reset_cost(1, tier_2.cooldown_ms), 10, "the least");
         let next = HousingRules::next_recompute_ns(1_000);
         assert_eq!(next, TOP_HOUSES_PERIOD_MS * NS_PER_MS);
@@ -879,17 +902,30 @@ mod tests {
             .with_camp_territories([16])
             .with_territories([16]);
         assert_eq!(
-            rules.plot(0x6a41_43a0_cd66_37c7, [0.0; 3]).map(|plot| plot.house_type),
+            rules
+                .plot(0x6a41_43a0_cd66_37c7, [0.0; 3])
+                .map(|plot| plot.house_type),
             Some(0)
         );
-        assert!(rules.plot(1, [SHRINE[0] + 10.0, SHRINE[1], 0.0]).is_some(), "near");
-        assert!(rules.plot(1, [SHRINE[0] + 100.0, SHRINE[1], 0.0]).is_none(), "far");
+        assert!(
+            rules.plot(1, [SHRINE[0] + 10.0, SHRINE[1], 0.0]).is_some(),
+            "near"
+        );
+        assert!(
+            rules.plot(1, [SHRINE[0] + 100.0, SHRINE[1], 0.0]).is_none(),
+            "far"
+        );
         let teleporter = rules.teleporter(WATCHTOWER_ID).expect("teleporter");
-        assert_eq!(teleporter.delay_ms, OBSERVED_CHANNEL_MS, "channel 0: the fast travel's");
+        assert_eq!(
+            teleporter.delay_ms, OBSERVED_CHANNEL_MS,
+            "channel 0: the fast travel's"
+        );
         assert!(rules.can_place_camp(16) && !rules.can_place_camp(17));
         assert!(rules.is_territory(16) && !rules.is_territory(20_422));
         assert_eq!(
-            rules.house_type_of_crc(lowercase_crc32("HouseTypeTier4")).map(|t| t.cost),
+            rules
+                .house_type_of_crc(lowercase_crc32("HouseTypeTier4"))
+                .map(|t| t.cost),
             Some(2_000_000)
         );
     }

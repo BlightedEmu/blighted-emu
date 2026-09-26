@@ -38,8 +38,8 @@ use nw_messages::music::{
 use nw_messages::position::{PositionInTheWorldReplicatedState, WorldPosition};
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    BundleGroup, BundleMember, FacetHeader, GdeMetadataReplicatedState, MemberState,
-    ServerMessage, facet_entity, facet_of_raw_id,
+    BundleGroup, BundleMember, FacetHeader, GdeMetadataReplicatedState, MemberState, ServerMessage,
+    facet_entity, facet_of_raw_id,
 };
 use nw_sim_core::Position;
 use uuid::Uuid;
@@ -371,20 +371,26 @@ impl Performances {
         }) {
             let change = role.filter(performance.published.clone());
             if change.is_empty() {
-                seen.insert(number, Seen {
-                    version: performance.version,
-                    role,
-                });
+                seen.insert(
+                    number,
+                    Seen {
+                        version: performance.version,
+                        role,
+                    },
+                );
                 return None;
             }
             vec![performance.state_member(change)]
         } else {
             vec![performance.state_member(role.filter(performance.whole()))]
         };
-        seen.insert(number, Seen {
-            version: performance.version,
-            role,
-        });
+        seen.insert(
+            number,
+            Seen {
+                version: performance.version,
+                role,
+            },
+        );
         Some(BundleGroup {
             interest: u64::from(slot.interest),
             members,
@@ -440,11 +446,7 @@ impl PlayerMusicState {
 
     /// Its own state for the next bundle: the whole state with the first card (with the
     /// lockout when one runs), the changes after one, else none.
-    pub(super) fn take_own_member(
-        &mut self,
-        first: bool,
-        server_ms: u64,
-    ) -> Option<BundleMember> {
+    pub(super) fn take_own_member(&mut self, first: bool, server_ms: u64) -> Option<BundleMember> {
         let change = std::mem::take(&mut self.change);
         let state = if first {
             PerformancePlayerState {
@@ -463,7 +465,7 @@ impl PlayerMusicState {
         } else {
             change
         };
-        (!state.is_empty()).then(|| BundleMember {
+        (!state.is_empty()).then_some(BundleMember {
             component: PERFORMANCE_PLAYER_COMPONENT,
             state: MemberState::PerformancePlayer(state),
         })
@@ -479,7 +481,10 @@ impl PlayerMusicState {
 
     /// Its lockout ended by `server_ms`: the client gets 0.
     fn lockout_due(&mut self, server_ms: u64) {
-        if self.lockout_until_ms.is_some_and(|until| server_ms >= until) {
+        if self
+            .lockout_until_ms
+            .is_some_and(|until| server_ms >= until)
+        {
             self.lockout_until_ms = None;
             self.change.lockout = Some(0);
         }
@@ -546,7 +551,11 @@ impl SimWorld {
             MusicClientMsg::SetReward { reward, .. } => {
                 let (rank, _) = self.tradeskill_perks(entity, MUSIC_TRADESKILL);
                 self.with_performance(number, |performance, content| {
-                    if content.music.reward(reward).is_some_and(|row| rank >= row.rank) {
+                    if content
+                        .music
+                        .reward(reward)
+                        .is_some_and(|row| rank >= row.rank)
+                    {
                         performance.reward = Some(reward);
                         performance.pending.selected_reward = Some(reward);
                     }
@@ -566,9 +575,7 @@ impl SimWorld {
             MusicClientMsg::ClientReady { ready, .. } => {
                 let server_ms = self.server_ms;
                 self.with_performance(number, |performance, content| {
-                    let Some(song) = performance
-                        .song
-                        .and_then(|song| content.music.song(song))
+                    let Some(song) = performance.song.and_then(|song| content.music.song(song))
                     else {
                         return;
                     };
@@ -655,7 +662,11 @@ impl SimWorld {
     /// else created where it stands.
     fn create_performance(&mut self, entity: Entity, number: u64, now_ms: u64) {
         let server_ms = self.server_ms;
-        let Some(place) = self.world.get::<Body>(entity).map(|body| body.motion.position()) else {
+        let Some(place) = self
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position())
+        else {
             return;
         };
         let instrument = !self.worn_instrument_slots(entity).is_empty();
@@ -899,8 +910,7 @@ impl SimWorld {
                         };
                         if let Some(entity) = performer_entity {
                             let (rank, _) = self.tradeskill_perks(entity, MUSIC_TRADESKILL);
-                            if let Some(performance) =
-                                self.performances.by_number.get_mut(&number)
+                            if let Some(performance) = self.performances.by_number.get_mut(&number)
                             {
                                 performance.rank = rank;
                                 performance.pending.rank = Some(rank);
@@ -948,8 +958,14 @@ impl SimWorld {
             at_ms: now_ms.saturating_add(POST_SHOW_AFTER_RESULTS_MS),
         };
         let performer = performance.performer;
-        let song = performance.song.and_then(|song| content.music.song(song)).cloned();
-        let reward = performance.reward.and_then(|reward| content.music.reward(reward)).cloned();
+        let song = performance
+            .song
+            .and_then(|song| content.music.song(song))
+            .cloned();
+        let reward = performance
+            .reward
+            .and_then(|reward| content.music.reward(reward))
+            .cloned();
         let Some(song) = song else {
             return;
         };
@@ -999,7 +1015,11 @@ impl SimWorld {
         let mut events = vec![song.completion_event.clone()];
         if let Some((index, grade)) = grade {
             events.extend(grade.event.clone());
-            events.extend(reward.and_then(|reward| reward.event(index)).map(str::to_owned));
+            events.extend(
+                reward
+                    .and_then(|reward| reward.event(index))
+                    .map(str::to_owned),
+            );
         }
         for event in events {
             self.quest_event(number, Event::GameEvent(&event), now_ms);
@@ -1030,7 +1050,9 @@ impl SimWorld {
             if let Some((number, _, _)) = watched {
                 *counts.entry(*number).or_default() += 1;
             }
-            player.music.observe(watched.map(|(_, wire_id, _)| *wire_id));
+            player
+                .music
+                .observe(watched.map(|(_, wire_id, _)| *wire_id));
         }
         for (number, _, _) in zones {
             let count = counts.get(&number).copied().unwrap_or_default();
@@ -1148,7 +1170,11 @@ mod tests {
             .expect("group");
         assert_eq!(group.interest, 148);
         assert_eq!(
-            group.members.iter().map(|member| member.component).collect::<Vec<_>>(),
+            group
+                .members
+                .iter()
+                .map(|member| member.component)
+                .collect::<Vec<_>>(),
             [CARD_COMPONENT, PERFORMANCE_COMPONENT, POSITION_COMPONENT]
         );
         let MemberState::GdeMetadata(card) = &group.members[0].state else {
@@ -1165,14 +1191,26 @@ mod tests {
             ..PLACE
         };
         let outside = performances
-            .group(PERFORMANCE_ENTITY_BASE, new, OTHER, far, &mut HashMap::new())
+            .group(
+                PERFORMANCE_ENTITY_BASE,
+                new,
+                OTHER,
+                far,
+                &mut HashMap::new(),
+            )
             .expect("group");
         let state = state_of(&outside);
         assert_eq!(state.error_sync, None, "slot 0 only");
         assert_eq!(state.rank, None);
         assert!(state.performers.is_some());
         let zone = performances
-            .group(PERFORMANCE_ENTITY_BASE, new, OTHER, PLACE, &mut HashMap::new())
+            .group(
+                PERFORMANCE_ENTITY_BASE,
+                new,
+                OTHER,
+                PLACE,
+                &mut HashMap::new(),
+            )
             .expect("group");
         assert_eq!(state_of(&zone).error_sync, Some(1), "slot 1 in the zone");
         assert_eq!(state_of(&zone).rank, None);
@@ -1230,7 +1268,10 @@ mod tests {
         let whole = performances
             .group(PERFORMANCE_ENTITY_BASE, kept, PERFORMER, PLACE, &mut seen)
             .expect("whole");
-        assert!(state_of(&whole).performers.is_some(), "a missed change sends the whole");
+        assert!(
+            state_of(&whole).performers.is_some(),
+            "a missed change sends the whole"
+        );
     }
 
     #[test]
@@ -1278,7 +1319,9 @@ mod tests {
         music.lockout_due(5_000);
         music.observe(Some(9));
         assert_eq!(
-            music.take_own_member(false, 5_000).map(|member| member.state),
+            music
+                .take_own_member(false, 5_000)
+                .map(|member| member.state),
             Some(MemberState::PerformancePlayer(PerformancePlayerState {
                 lockout: Some(0),
                 observing: Some(9),

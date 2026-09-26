@@ -573,12 +573,16 @@ mod tests {
     #[test]
     fn a_station_search_finds_the_ingredients_of_its_recipes() {
         let recipes = recipes();
-        let cooking: Vec<&Ingredient> = recipes.ingredients_at(lowercase_crc32("cooking")).collect();
+        let cooking: Vec<&Ingredient> =
+            recipes.ingredients_at(lowercase_crc32("cooking")).collect();
         assert_eq!(cooking.len(), 1);
         assert!(recipes.fits(cooking[0], "PorkT1"));
         let camp: Vec<&Ingredient> = recipes.ingredients_at(lowercase_crc32("camp")).collect();
         assert_eq!(camp.len(), 3, "the knife's two and the ration's one");
-        assert_eq!(recipes.ingredients_at(lowercase_crc32("cooking2")).count(), 0);
+        assert_eq!(
+            recipes.ingredients_at(lowercase_crc32("cooking2")).count(),
+            0
+        );
     }
 
     #[test]

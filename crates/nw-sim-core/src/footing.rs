@@ -179,7 +179,12 @@ mod tests {
         assert_eq!(WaterDepth::of(0.126), WaterDepth::None);
         assert_eq!(WaterDepth::of(-1.0), WaterDepth::None);
         assert_eq!(
-            [WaterDepth::None, WaterDepth::VeryShallow, WaterDepth::Shallow].map(WaterDepth::wire),
+            [
+                WaterDepth::None,
+                WaterDepth::VeryShallow,
+                WaterDepth::Shallow
+            ]
+            .map(WaterDepth::wire),
             [0, 1, 2]
         );
     }
@@ -187,10 +192,17 @@ mod tests {
     #[test]
     fn a_body_on_its_floor_is_0_and_one_with_none_under_it_is_255() {
         let on_floor = Footing::of(&Seabed(89.38), feet(89.38), TUTORIAL_SEA_M);
-        assert_eq!(on_floor, Footing::SPAWN, "the deck: what the spawn state says");
+        assert_eq!(
+            on_floor,
+            Footing::SPAWN,
+            "the deck: what the spawn state says"
+        );
         let high = Footing::of(&Seabed(10.92), feet(26.16), TUTORIAL_SEA_M);
         assert_eq!(high.ground_distance, u8::MAX, "over 10 m");
-        assert_eq!(Footing::of(&Void, feet(5.0), TUTORIAL_SEA_M).ground_distance, u8::MAX);
+        assert_eq!(
+            Footing::of(&Void, feet(5.0), TUTORIAL_SEA_M).ground_distance,
+            u8::MAX
+        );
     }
 
     #[test]

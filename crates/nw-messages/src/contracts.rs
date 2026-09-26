@@ -720,7 +720,8 @@ impl SearchQuery {
             write_string(writer, text)?;
         }
         writer.u8(self.byte_d).u32(self.tier);
-        let outposts = u16::try_from(self.outposts.len()).map_err(|_| too_many(self.outposts.len()))?;
+        let outposts =
+            u16::try_from(self.outposts.len()).map_err(|_| too_many(self.outposts.len()))?;
         writer.u16(outposts);
         for outpost in &self.outposts {
             write_string(writer, outpost)?;
@@ -877,8 +878,8 @@ pub enum ContractCall {
     Search {
         /// The header.
         header: FacetHeader,
-        /// The query.
-        query: SearchQuery,
+        /// The query (boxed: it is far larger than the other calls).
+        query: Box<SearchQuery>,
         /// The lookup id the answer repeats.
         lookup: [u8; RAW_ID_LEN],
     },
@@ -971,7 +972,7 @@ impl ContractCall {
             match type_index {
                 SEARCH_CONTRACTS_TYPE_INDEX => Ok(Self::Search {
                     header,
-                    query: SearchQuery::read(reader)?,
+                    query: Box::new(SearchQuery::read(reader)?),
                     lookup: reader.raw_id()?,
                 }),
                 LOOKUP_CONTRACTS_TYPE_INDEX => {
@@ -1462,7 +1463,8 @@ mod tests {
     /// The lookup id of [`SEARCH`].
     const SEARCH_LOOKUP: &str = "83cd1ea1b68e42819df0414042bd537e";
     /// Retail `buy-sell-TP` 106592 ms: a throttled double search.
-    const THROTTLED: &str = "f46eb00d253f156a67e7d28299ff40aaa8021b10d7874164a9d2d798bb1e266500000007";
+    const THROTTLED: &str =
+        "f46eb00d253f156a67e7d28299ff40aaa8021b10d7874164a9d2d798bb1e266500000007";
 
     #[test]
     fn a_retail_search_answer_reads_and_writes_back() {
@@ -1479,7 +1481,10 @@ mod tests {
         assert_eq!(contract.duration_ns, 3 * 86_400 * 1_000_000_000);
         assert_eq!(contract.events.len(), 1);
         assert_eq!(contract.events[0].0, Participant::NONE);
-        assert_eq!(contract.entity_ids, [INVALID_ENTITY_ID; CONTRACT_ENTITY_IDS]);
+        assert_eq!(
+            contract.entity_ids,
+            [INVALID_ENTITY_ID; CONTRACT_ENTITY_IDS]
+        );
         assert_eq!(answer.total, 1);
         assert!(answer.next_page.is_empty());
         assert_eq!(answer.encode().expect("encode"), body);
@@ -1572,6 +1577,6 @@ mod tests {
         .expect("decodes") else {
             panic!("search");
         };
-        query
+        *query
     }
 }

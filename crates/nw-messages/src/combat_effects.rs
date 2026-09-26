@@ -103,8 +103,9 @@ impl HitScanEffects {
     }
 
     fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
-        let mut position =
-            || -> Result<[f32; 3], MessageError> { Ok([reader.f32()?, reader.f32()?, reader.f32()?]) };
+        let mut position = || -> Result<[f32; 3], MessageError> {
+            Ok([reader.f32()?, reader.f32()?, reader.f32()?])
+        };
         let from = position()?;
         let to = position()?;
         Ok(Self {
@@ -351,7 +352,11 @@ impl CombatEffectMsg {
                 second,
                 ..
             } => {
-                writer.bytes(first_id).u64(*first).bytes(second_id).u64(*second);
+                writer
+                    .bytes(first_id)
+                    .u64(*first)
+                    .bytes(second_id)
+                    .u64(*second);
             }
             Self::SendEntityEvent {
                 event,
@@ -447,7 +452,10 @@ mod tests {
 
     #[test]
     fn a_shot_builds_a_retail_shaped_body() {
-        let header = FacetHeader { target: 3, entity: 4 };
+        let header = FacetHeader {
+            target: 3,
+            entity: 4,
+        };
         let push = CombatEffectMsg::HitScanEffects {
             header,
             effects: HitScanEffects::shot(4, [1.0, 2.0, 3.0], [4.0, 5.0, 6.0]),

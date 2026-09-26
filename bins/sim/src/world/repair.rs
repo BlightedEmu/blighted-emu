@@ -23,8 +23,8 @@ use bevy_ecs::entity::Entity;
 use nw_bus::ConnectionRef;
 use nw_content::gathering::Gatherable;
 use nw_content::item_repair::{
-    GATHER_DURABILITY_COST, HIT_DURABILITY_COST, REPAIR_PARTS_PROGRESSION, RepairCost,
-    repair_cost, repair_kit,
+    GATHER_DURABILITY_COST, HIT_DURABILITY_COST, REPAIR_PARTS_PROGRESSION, RepairCost, repair_cost,
+    repair_kit,
 };
 use nw_messages::ItemRepairMsg;
 use nw_messages::item_calls::ItemRef;
@@ -62,18 +62,11 @@ impl SimWorld {
     /// Repairs the items `pick` names (of UI class `item_class` for [`RepairPick::ItemClass`])
     /// for player `entity`: with a repair kit of the item's tier when `use_kit`, else for the
     /// summed coins and repair parts.
-    fn repair(
-        &mut self,
-        entity: Entity,
-        pick: RepairPick,
-        item_class: Option<u64>,
-        use_kit: bool,
-    ) {
+    fn repair(&mut self, entity: Entity, pick: RepairPick, item_class: Option<u64>, use_kit: bool) {
         let content = Arc::clone(&self.content);
         let rolls = &content.item_rolls;
-        let in_class = |item_id: &str| {
-            item_class.is_some_and(|class| content.is_of_ui_class(item_id, class))
-        };
+        let in_class =
+            |item_id: &str| item_class.is_some_and(|class| content.is_of_ui_class(item_id, class));
         let repairable = |item_id: &str| rolls.item(item_id).is_some_and(|row| row.repairable);
         let parts_progression = content.progression.categorical(REPAIR_PARTS_PROGRESSION);
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
@@ -111,7 +104,12 @@ impl SimWorld {
             });
         let parts_held = parts_progression.map_or(0, |parts| player.masteries.experience(parts));
         if player.coins < cost.coins || parts_held < cost.parts {
-            tracing::debug!(?cost, coins = player.coins, parts_held, "repair refused: short");
+            tracing::debug!(
+                ?cost,
+                coins = player.coins,
+                parts_held,
+                "repair refused: short"
+            );
             return;
         }
         if gear.repair(pick, in_class, repairable) == 0 {
@@ -306,11 +304,13 @@ mod tests {
         assert!(gear.add(kits.item(FLINT).expect("flint"), 1));
         let entity = world.by_connection[&connection(1)];
         let content = Arc::clone(&world.content);
-        let mastery = content.progression.categorical(currency_id).expect("currency");
+        let mastery = content
+            .progression
+            .categorical(currency_id)
+            .expect("currency");
         let mut player = world.world.get_mut::<Player>(entity).expect("player");
         player.gear = Some(gear);
         player.masteries.set(mastery, currency);
-        drop(player);
         (world, entity)
     }
 
@@ -391,7 +391,11 @@ mod tests {
         assert_eq!(flint(&world, entity).2, u32::from(START) + 2);
         assert_eq!(balance(&world, entity, UMBRAL), 2, "two levels of 5");
         upgrade(&mut world, slot, instance, START + 2, START + 4);
-        assert_eq!(flint(&world, entity).2, u32::from(START) + 2, "short of currency");
+        assert_eq!(
+            flint(&world, entity).2,
+            u32::from(START) + 2,
+            "short of currency"
+        );
         assert_eq!(balance(&world, entity, UMBRAL), 2);
     }
 
@@ -400,7 +404,10 @@ mod tests {
         let (mut world, entity) = world(REPAIR_PARTS_PROGRESSION, PARTS);
         world.wear_at_death(entity, false);
         // ceil(375 × 0.12) = 45 lost.
-        assert_eq!(sword_durability(&world, entity), Some(SWORD_DURABILITY - 45));
+        assert_eq!(
+            sword_durability(&world, entity),
+            Some(SWORD_DURABILITY - 45)
+        );
         let repair_all = ItemRepairMsg::RepairAllEquipment { header: header() };
         world.repair_call(&connection(1), repair_all);
         assert_eq!(

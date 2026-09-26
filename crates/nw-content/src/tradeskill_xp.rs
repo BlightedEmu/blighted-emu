@@ -186,7 +186,11 @@ pub fn gather_reward(reward: f64, modifier: f64) -> f64 {
 pub fn bonus_crafts(chance: f64, crafts: u32, below: &mut impl FnMut(u32) -> u32) -> u32 {
     let steps = (chance.clamp(0.0, 1.0) * f64::from(CHANCE_STEPS)).round();
     // In 0..=CHANCE_STEPS: clamped above.
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "clamped")]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped"
+    )]
     let steps = steps as u32;
     (0..crafts)
         .filter(|_| below(CHANCE_STEPS) < steps)
@@ -212,7 +216,7 @@ mod tests {
             row(0, 0.0, 0),
             row(1, 1.0, 10),
             row(2, 1.05, 20),
-            row(14, 1.899_077_253_842_609_1, 140),
+            row(14, 1.899_077_253_842_609, 140),
             row(15, 1.995_522_321_081_751_4, 150),
         ])
     }

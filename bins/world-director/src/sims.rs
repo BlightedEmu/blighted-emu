@@ -536,7 +536,11 @@ mod tests {
         assert_eq!(sims.free_instance_sims(DUNGEON), vec![slot("inst-1")]);
         assert_eq!(sims.free_instance_sims(LEVEL), vec![slot("inst-3")]);
         assert_eq!(sims.instance_sims(DUNGEON).len(), 2);
-        assert_eq!(sims.free_slots(), MAX_PLAYERS, "only the open-map sim takes logins");
+        assert_eq!(
+            sims.free_slots(),
+            MAX_PLAYERS,
+            "only the open-map sim takes logins"
+        );
         let reported = sims.running_instances();
         assert_eq!(reported.len(), 3);
         assert!(reported.contains(&(slot("inst-2"), Some(running(7)))));

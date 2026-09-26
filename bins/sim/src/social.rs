@@ -9,8 +9,8 @@ use nw_content::progression::Progression;
 use nw_db::{AccountTitle, CompanyListing, StoredPlayer};
 use nw_login::look::saved_look;
 use nw_messages::appearance::PlayerIconData;
-use nw_messages::social::players::FAILURE_NO_DATA;
 use nw_messages::social::RequestFailedMsg;
+use nw_messages::social::players::FAILURE_NO_DATA;
 use nw_messages::{
     AvailableTitlesMsg, FacetHeader, GuildsRequest, NO_GUILD, NO_PLATFORM, NO_PLATFORM_PRESENCE,
     OtherGuildData, PlayerDataRequest, PlayerDataView, PlayerLook, ServerMessage,
@@ -144,7 +144,11 @@ pub fn guilds_answers(request: &GuildsRequest, listings: &[CompanyListing]) -> V
                 .map(nw_social::other_guild)
         })
         .collect();
-    let copies = if guilds.is_empty() { 1 } else { RETAIL_GUILD_ANSWER_COPIES };
+    let copies = if guilds.is_empty() {
+        1
+    } else {
+        RETAIL_GUILD_ANSWER_COPIES
+    };
     let answer = ServerMessage::UnorderedGuilds(request.answer(guilds));
     vec![answer; copies]
 }
@@ -254,9 +258,16 @@ mod tests {
         };
         assert_eq!(answer.guilds.len(), 1);
         assert_eq!(answer.guilds[0].name, b"Alpha");
-        assert_eq!(answer.guilds[0].master, ADA.hyphenated().to_string().as_bytes());
+        assert_eq!(
+            answer.guilds[0].master,
+            ADA.hyphenated().to_string().as_bytes()
+        );
         assert_eq!(answers[0], answers[1]);
-        assert_eq!(guilds_answers(&request, &[]).len(), 1, "no company: one empty answer");
+        assert_eq!(
+            guilds_answers(&request, &[]).len(),
+            1,
+            "no company: one empty answer"
+        );
     }
 
     #[test]

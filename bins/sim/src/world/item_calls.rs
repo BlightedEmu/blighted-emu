@@ -16,8 +16,8 @@ use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
 use nw_bus::ConnectionRef;
-use nw_content::item_rules::VitalsEffect;
 use nw_content::item_rolls::RolledItem;
+use nw_content::item_rules::VitalsEffect;
 use nw_content::starter::{KitItem, StarterKits};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::gear::record;
@@ -33,8 +33,8 @@ use super::gathering::{GATHER_ACCEPTED, GATHER_BUSY};
 use super::gear::{DroppedStack, ItemRefusal};
 use super::loot_bag::{bag_namespace, storage_emptied, storage_member};
 use super::stamina::Stamina;
-use super::storage_search::SearchFor;
 use super::statics::interactor_target;
+use super::storage_search::SearchFor;
 use super::{Body, Player, SimWorld, gather_answer, send_now};
 
 /// The interaction kind of a storage chest and of a bag of dropped items (`OpenStorage`).
@@ -74,7 +74,8 @@ impl ItemEffects {
         let Some(ticks) = effect.ticks else {
             return;
         };
-        self.running.retain(|running| running.effect.status_id != effect.status_id);
+        self.running
+            .retain(|running| running.effect.status_id != effect.status_id);
         self.running.push(Running {
             effect: effect.clone(),
             next_ms: now_ms.saturating_add(ticks.first_ms),
@@ -87,7 +88,8 @@ impl ItemEffects {
     /// a death ends.
     fn due(&mut self, now_ms: u64, dead: bool) -> Vec<VitalsEffect> {
         if dead {
-            self.running.retain(|running| !running.effect.remove_on_death);
+            self.running
+                .retain(|running| !running.effect.remove_on_death);
         }
         let mut due = Vec::new();
         for running in &mut self.running {
@@ -96,7 +98,8 @@ impl ItemEffects {
                 running.next_ms = running.next_ms.saturating_add(running.every_ms);
             }
         }
-        self.running.retain(|running| running.next_ms <= running.ends_ms);
+        self.running
+            .retain(|running| running.next_ms <= running.ends_ms);
         due
     }
 }
@@ -138,7 +141,9 @@ impl SimWorld {
             return;
         };
         match call {
-            ItemCallMsg::UseItem { bag_slot, .. } => self.use_item(entity, number, bag_slot, now_ms),
+            ItemCallMsg::UseItem { bag_slot, .. } => {
+                self.use_item(entity, number, bag_slot, now_ms)
+            }
             ItemCallMsg::DropInventoryItems { entries, .. } => {
                 let dropped = self.with_gear(entity, |gear, _| {
                     entries
@@ -159,12 +164,21 @@ impl SimWorld {
                         .inspect_err(|refusal| tracing::debug!(?refusal, "drop refused"))
                         .ok()
                 });
-                self.drop_items(entity, number, dropped.flatten().into_iter().collect(), now_ms);
+                self.drop_items(
+                    entity,
+                    number,
+                    dropped.flatten().into_iter().collect(),
+                    now_ms,
+                );
             }
-            ItemCallMsg::GiveItem { instance, quantity, .. } => {
+            ItemCallMsg::GiveItem {
+                instance, quantity, ..
+            } => {
                 self.refused(entity, "deposit", |gear| gear.deposit(instance, quantity));
             }
-            ItemCallMsg::TakeItem { instance, quantity, .. } => {
+            ItemCallMsg::TakeItem {
+                instance, quantity, ..
+            } => {
                 self.take_item(entity, number, instance, quantity, now_ms);
             }
             ItemCallMsg::TradeEquipItem {
@@ -174,7 +188,8 @@ impl SimWorld {
                 ..
             } => {
                 self.refused(entity, "equip from storage", |gear| {
-                    gear.equip_from_storage(slot, instance, quantity).map(|_| ())
+                    gear.equip_from_storage(slot, instance, quantity)
+                        .map(|_| ())
                 });
             }
             ItemCallMsg::TradeUnequipItem { slot, instance, .. } => {
@@ -238,7 +253,9 @@ impl SimWorld {
             ItemCallMsg::RemoveItemFromLoadout {
                 loadout, key, slot, ..
             } => {
-                self.with_gear(entity, |gear, _| gear.remove_from_loadout(loadout, key, slot));
+                self.with_gear(entity, |gear, _| {
+                    gear.remove_from_loadout(loadout, key, slot)
+                });
             }
             ItemCallMsg::SlotItemWithCharm {
                 target,
@@ -437,7 +454,11 @@ impl SimWorld {
         if effects.is_empty() {
             return;
         }
-        let Some(mut stamina) = self.world.get::<Player>(entity).map(|player| player.stamina) else {
+        let Some(mut stamina) = self
+            .world
+            .get::<Player>(entity)
+            .map(|player| player.stamina)
+        else {
             return;
         };
         if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
@@ -456,7 +477,7 @@ impl SimWorld {
         for (mut player, mut vitals) in query.iter_mut(&mut self.world) {
             let player = &mut *player;
             for effect in player.item_effects.due(now_ms, vitals.health.is_dead()) {
-                apply(&effect, &mut *vitals, &mut player.stamina);
+                apply(&effect, &mut vitals, &mut player.stamina);
             }
         }
     }
@@ -464,17 +485,15 @@ impl SimWorld {
     /// Player `number` (`entity`) dropped `dropped` at `now_ms`: a bag of them, with their
     /// rolls, lies at its feet, and its loot tracker lists the bag as dropped items. Nothing
     /// dropped drops no bag.
-    fn drop_items(
-        &mut self,
-        entity: Entity,
-        number: u64,
-        dropped: Vec<DroppedStack>,
-        now_ms: u64,
-    ) {
+    fn drop_items(&mut self, entity: Entity, number: u64, dropped: Vec<DroppedStack>, now_ms: u64) {
         if dropped.is_empty() {
             return;
         }
-        let Some(at) = self.world.get::<Body>(entity).map(|body| body.motion.position()) else {
+        let Some(at) = self
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position())
+        else {
             return;
         };
         let namespace = bag_namespace(self.me.generation);
@@ -549,7 +568,10 @@ impl SimWorld {
         else {
             return false;
         };
-        let taken = self.bags.take_rolled(&bag, number, now_ms).unwrap_or_default();
+        let taken = self
+            .bags
+            .take_rolled(&bag, number, now_ms)
+            .unwrap_or_default();
         let (items, rolls): (Vec<(String, u32)>, Vec<Option<RolledItem>>) =
             taken.into_iter().unzip();
         self.take_from_bag(entity, number, bag, &items, &rolls);
@@ -737,7 +759,10 @@ mod tests {
         let ended = NOW_US + u64::from(COOLDOWN_S) * 1_000_000 + 1;
         assert!(start_cooldown(&mut cooldowns, POTION, COOLDOWN, ended));
         assert_eq!(cooldowns.len(), 1, "the ended one went");
-        assert!(start_cooldown(&mut cooldowns, POTION, None, ended), "no cooldown");
+        assert!(
+            start_cooldown(&mut cooldowns, POTION, None, ended),
+            "no cooldown"
+        );
     }
 
     #[test]
@@ -747,26 +772,38 @@ mod tests {
         effects.start(&regen(true), START);
         assert_eq!(effects.due(START, false).len(), 1, "the first tick at once");
         assert!(effects.due(START + 999, false).is_empty());
-        assert_eq!(effects.due(START + 2_000, false).len(), 2, "two ticks caught up");
-        assert_eq!(effects.due(START + 3_000, false).len(), 1, "the last one at the end");
+        assert_eq!(
+            effects.due(START + 2_000, false).len(),
+            2,
+            "two ticks caught up"
+        );
+        assert_eq!(
+            effects.due(START + 3_000, false).len(),
+            1,
+            "the last one at the end"
+        );
         assert!(effects.running.is_empty(), "it ended");
         effects.start(&regen(true), START);
         assert!(effects.due(START, true).is_empty(), "a death ends it");
         effects.start(&regen(false), START);
-        assert_eq!(effects.due(START, true).len(), 1, "food recovery outlives a death");
+        assert_eq!(
+            effects.due(START, true).len(),
+            1,
+            "food recovery outlives a death"
+        );
     }
 
     mod in_world {
         use std::sync::Arc;
 
+        use nw_content::crafting::{Ingredient, IngredientKind, Recipe, Recipes};
+        use nw_content::item_rolls::{ItemRollRow, ItemRolls};
         use nw_content::item_rules::{
             ConsumableRow, EffectRow, ItemRuleRow, ItemRuleSource, ItemRules,
         };
-        use nw_messages::wire::RAW_ID_LEN;
-        use nw_content::crafting::{Ingredient, IngredientKind, Recipe, Recipes};
-        use nw_content::item_rolls::{ItemRollRow, ItemRolls};
         use nw_content::perks::PerkTable;
         use nw_formats::objectstream::lowercase_crc32;
+        use nw_messages::wire::RAW_ID_LEN;
         use nw_messages::{
             FacetHeader, InteractionRequest, ItemCallMsg, ServerMessage, StorageItemSimple,
             StorageSearchItemsMsg, StorageSearchResultsMsg,
@@ -774,11 +811,11 @@ mod tests {
 
         use crate::player_content::PlayerContent;
         use crate::world::attack::Vitals;
-        use crate::world::gear::tests::{BACKSTORY, CHARACTER, FLINT, POTION, kits};
         use crate::world::gear::Gear;
-        use nw_messages::item_calls::LOCATION_BAG;
+        use crate::world::gear::tests::{BACKSTORY, CHARACTER, FLINT, POTION, kits};
         use crate::world::tests::{NOW, connection, join, messages_to, tick, world_with_spawns};
         use crate::world::{Player, SimWorld, item_calls::OPEN_STORAGE_KIND};
+        use nw_messages::item_calls::LOCATION_BAG;
 
         const HEAL: f64 = 300.0;
         const HURT: u32 = 500;
@@ -873,14 +910,24 @@ mod tests {
                 .expect("vitals")
                 .health
                 .take(HURT);
-            let hurt = world.world.get::<Vitals>(entity).expect("vitals").health.current();
+            let hurt = world
+                .world
+                .get::<Vitals>(entity)
+                .expect("vitals")
+                .health
+                .current();
             let call = || ItemCallMsg::UseItem {
                 header: header(),
                 bag_slot: 0,
             };
             world.item_call(&connection(1), call(), NOW);
             assert_eq!(gear_of(&world).bag_count(POTION), POTIONS - 1);
-            let healed = world.world.get::<Vitals>(entity).expect("vitals").health.current();
+            let healed = world
+                .world
+                .get::<Vitals>(entity)
+                .expect("vitals")
+                .health
+                .current();
             assert_eq!(f64::from(healed), f64::from(hurt) + HEAL);
             let messages = tick(&mut world, NOW).messages;
             assert!(
@@ -890,7 +937,11 @@ mod tests {
                 "the heal's visual script"
             );
             world.item_call(&connection(1), call(), NOW + 1);
-            assert_eq!(gear_of(&world).bag_count(POTION), POTIONS - 1, "the cooldown runs");
+            assert_eq!(
+                gear_of(&world).bag_count(POTION),
+                POTIONS - 1,
+                "the cooldown runs"
+            );
         }
 
         #[test]
@@ -1019,7 +1070,11 @@ mod tests {
                 NOW,
             );
             assert_eq!(gear_of(&world).bag_count(FLINT), 0);
-            assert_eq!(gear_of(&world).bag_count(POTION), POTIONS, "another class stays");
+            assert_eq!(
+                gear_of(&world).bag_count(POTION),
+                POTIONS,
+                "another class stays"
+            );
             assert_eq!(gear_of(&world).stored_totals().get(FLINT), Some(&FLINTS));
             world.item_call(
                 &connection(1),
@@ -1105,7 +1160,11 @@ mod tests {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(results.len(), 2, "the search and the replicate; the refresh waits");
+            assert_eq!(
+                results.len(),
+                2,
+                "the search and the replicate; the refresh waits"
+            );
             assert_eq!(
                 results[0].items,
                 [StorageItemSimple {
@@ -1172,7 +1231,11 @@ mod tests {
                 quantity,
             };
             world.item_call(&connection(1), give(0), NOW);
-            assert_eq!(gear_of(&world).bag_count(FLINT), FLINTS, "a locked stack stays");
+            assert_eq!(
+                gear_of(&world).bag_count(FLINT),
+                FLINTS,
+                "a locked stack stays"
+            );
             world.item_call(
                 &connection(1),
                 ItemCallMsg::SetLockState {
@@ -1191,10 +1254,16 @@ mod tests {
             assert_eq!(gear_of(&world).bag_count(FLINT), 0);
             let saved = gear_of(&world).inventory();
             assert_eq!(saved.stored.len(), 1);
-            assert_eq!((saved.stored[0].storage, saved.stored[0].quantity), (STORAGE, FLINTS));
+            assert_eq!(
+                (saved.stored[0].storage, saved.stored[0].quantity),
+                (STORAGE, FLINTS)
+            );
             let entity = world.by_connection[&connection(1)];
             assert!(world.show_stored_items(entity, &STORAGE));
-            assert!(!world.show_stored_items(entity, &[1; RAW_ID_LEN]), "no such storage");
+            assert!(
+                !world.show_stored_items(entity, &[1; RAW_ID_LEN]),
+                "no such storage"
+            );
         }
     }
 }

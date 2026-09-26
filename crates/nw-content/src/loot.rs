@@ -247,13 +247,10 @@ pub enum RollBonusSetting {
 impl RollBonusSetting {
     /// The setting a cell names (any case); `None` for another text.
     pub fn of(cell: &str) -> Option<Self> {
-        [
-            (ADD_TO_ROLL, Self::AddToRoll),
-            (CLAMP_MAX, Self::ClampMax),
-        ]
-        .into_iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case(cell.trim()))
-        .map(|(_, setting)| setting)
+        [(ADD_TO_ROLL, Self::AddToRoll), (CLAMP_MAX, Self::ClampMax)]
+            .into_iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(cell.trim()))
+            .map(|(_, setting)| setting)
     }
 
     /// The roll `rolled` of a table of `MaxRoll` `max` with `bonus` added.
@@ -754,12 +751,14 @@ impl<F: FnMut(u32) -> u32> Walk<'_, '_, F> {
         match table.roll {
             Roll::Random(max) => {
                 let rolled = (self.below)(max.max(1));
-                let bonus = table.bonus_setting.zip(table.required.iter().find_map(|tag| {
-                    self.bonuses
-                        .iter()
-                        .find(|bonus| bonus.name.eq_ignore_ascii_case(tag))
-                        .map(|bonus| bonus.value)
-                }));
+                let bonus = table
+                    .bonus_setting
+                    .zip(table.required.iter().find_map(|tag| {
+                        self.bonuses
+                            .iter()
+                            .find(|bonus| bonus.name.eq_ignore_ascii_case(tag))
+                            .map(|bonus| bonus.value)
+                    }));
                 Some(bonus.map_or(rolled, |(setting, bonus)| setting.apply(rolled, bonus, max)))
             }
             Roll::Level(kind) => self.context.level(kind, self.salvage),
@@ -1129,7 +1128,9 @@ mod tests {
         rows[2].cells.insert(2, "0".to_owned());
         let mut inner = single("Inner", "1hSwordT5", "AND", None);
         inner[0].gear_score_ranges.insert(1, "650-700".to_owned());
-        inner[0].perk_overrides.insert(1, "PerkID_A, PerkID_B".to_owned());
+        inner[0]
+            .perk_overrides
+            .insert(1, "PerkID_A, PerkID_B".to_owned());
         rows.extend(inner);
         let tables = LootTables::build(LootSource {
             rows,
@@ -1697,7 +1698,11 @@ mod tests {
                 Some("Fresh,FishRarity"),
             ),
             loot("FishingLootRegular_Qty", &[(1, "1"), (2, "1")], None, None),
-            probs("FishingLootRegular_Probs", &[(1, "0"), (2, "84900")], 100_000),
+            probs(
+                "FishingLootRegular_Probs",
+                &[(1, "0"), (2, "84900")],
+                100_000,
+            ),
         ]
     }
 
@@ -1776,7 +1781,10 @@ mod tests {
             Vec::<(String, u32)>::new(),
             "without bonuses their conditions are tags the roll does not hold"
         );
-        assert_eq!(RollBonusSetting::of(" clampmax "), Some(RollBonusSetting::ClampMax));
+        assert_eq!(
+            RollBonusSetting::of(" clampmax "),
+            Some(RollBonusSetting::ClampMax)
+        );
         assert_eq!(RollBonusSetting::of("Other"), None);
         assert_eq!(RollBonusSetting::AddToRoll.apply(u32::MAX, 1, 0), u32::MAX);
     }

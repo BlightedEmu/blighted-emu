@@ -29,11 +29,11 @@ use bevy_ecs::entity::Entity;
 use nw_bus::{CarriedItem, ItemPlace};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::item_calls::SEARCH_FILTER_HOUSING;
-use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::storage_search::SEARCH_READY;
+use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    SearchedItem, ServerMessage, StorageItemSimple, StorageSearchItemsMsg,
-    StorageSearchReadyMsg, StorageSearchResultsMsg, global_storage_header,
+    SearchedItem, ServerMessage, StorageItemSimple, StorageSearchItemsMsg, StorageSearchReadyMsg,
+    StorageSearchResultsMsg, global_storage_header,
 };
 
 use super::{Player, SimWorld, send_now};
@@ -329,12 +329,21 @@ mod tests {
         after.remove(INGOT);
         let changes = search.changes(&after);
         assert_eq!(
-            changes.iter().map(|change| (change.index, change.item.quantity)).collect::<Vec<_>>(),
+            changes
+                .iter()
+                .map(|change| (change.index, change.item.quantity))
+                .collect::<Vec<_>>(),
             [(0, 0), (1, 39)]
         );
         assert!(search.changes(&after).is_empty(), "kept");
-        assert_eq!(SearchFor::of(0, 0x2294_152c), SearchFor::Station(0x2294_152c));
-        assert_eq!(SearchFor::of(SEARCH_FILTER_HOUSING, NO_STATION), SearchFor::Housing);
+        assert_eq!(
+            SearchFor::of(0, 0x2294_152c),
+            SearchFor::Station(0x2294_152c)
+        );
+        assert_eq!(
+            SearchFor::of(SEARCH_FILTER_HOUSING, NO_STATION),
+            SearchFor::Housing
+        );
         assert_eq!(SearchFor::of(1, NO_STATION), SearchFor::Unknown);
     }
 

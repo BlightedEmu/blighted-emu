@@ -210,7 +210,11 @@ impl InstanceCatalog {
             .collect::<BTreeMap<_, _>>();
         let named: BTreeSet<String> = modes
             .values()
-            .flat_map(|mode| mode.items_removed_on_exit.iter().chain(&mode.required_item_classes))
+            .flat_map(|mode| {
+                mode.items_removed_on_exit
+                    .iter()
+                    .chain(&mode.required_item_classes)
+            })
             .map(|class| class.to_lowercase())
             .collect();
         let item_classes = tables
@@ -270,7 +274,9 @@ impl InstanceCatalog {
 
     /// The modes whose level is `folder`.
     pub fn of_level<'a>(&'a self, folder: &'a str) -> impl Iterator<Item = &'a InstanceMode> {
-        self.modes.values().filter(move |mode| mode.map.folder == folder)
+        self.modes
+            .values()
+            .filter(move |mode| mode.map.folder == folder)
     }
 
     /// Every mode.
@@ -367,7 +373,9 @@ fn instance_mode(
         remote_entry: row.is_remote_entry_allowed.unwrap_or_default(),
         respawns: row.dungeon_respawns_permitted.unwrap_or_default(),
         mutable: row.is_mutable.unwrap_or_default(),
-        timeout_seconds: row.override_dungeon_timeout.and_then(|v| u64::try_from(v).ok()),
+        timeout_seconds: row
+            .override_dungeon_timeout
+            .and_then(|v| u64::try_from(v).ok()),
         victory_delay_seconds: row.victory_delay_sec.and_then(|v| u64::try_from(v).ok()),
         items_removed_on_exit: list(row.item_classes_to_remove_on_exit.as_deref()),
         required_item_classes: list(row.required_consumable_item_classes.as_deref()),
@@ -382,7 +390,10 @@ fn instance_mode(
 
 fn instance_map(map: &GameModeMapData) -> Option<InstanceMap> {
     let coatlicue = map.coatlicue_name.as_deref()?;
-    let map_name = coatlicue.rsplit(DATASHEET_PATH_SEPARATOR).next()?.to_owned();
+    let map_name = coatlicue
+        .rsplit(DATASHEET_PATH_SEPARATOR)
+        .next()?
+        .to_owned();
     let frame: [f32; FRAME_NUMBERS] = numbers(map.world_bounds.as_deref()?)?.try_into().ok()?;
     let teleports = map
         .team_teleport_data
@@ -621,18 +632,59 @@ mod tests {
 
     /// The `GameModeID` column of `javelindata_gamemodes` (build 25810808), in datasheet order.
     const RETAIL_GAME_MODE_IDS: [&str; 53] = [
-        "TestMode1", "TestMode2", "BattleRoyale", "CaptureTheFlag", "Duel", "OutpostRush",
-        "OutpostRush_NoPerks", "Arena3v3", "Dungeon", "Mutation", "DungeonAmrine",
-        "DungeonShatteredObelisk", "DungeonRestlessShores01", "DungeonEbonscale00",
-        "DungeonEdengrove00", "DungeonReekwater00", "DungeonCutlassKeys00", "DungeonGreatCleave01",
-        "DungeonShatterMtn00", "DungeonBrimstoneSands00", "DungeonFirstLight01",
-        "DungeonGreatCleave00", "DungeonDunwood02", "TrialBrimstoneSandworm", "RaidCutlassKeys00",
-        "RaidMonarchsBluffs00", "TrialSeason01", "TrialSeason04", "QuestAdiana", "QuestApophis",
-        "QuestCaerDun", "QuestEmpressZhou", "QuestIsabella", "QuestMammoth", "QuestMedusa",
-        "QuestMotherwell", "QuestMedea", "QuestNihilo", "QuestYonas", "TrialSeason02Q13",
-        "TrialSeason02Q12", "TrialSeason04Q02", "TrialSeason04Q06", "TrialSeason04Q05",
-        "QuestHeartforge", "QuestLiang", "QuestGawain", "Catacombs", "QuestDracula", "QuestWolf",
-        "QuestMorgaine", "QuestVarlaam", "QuestSeraphim",
+        "TestMode1",
+        "TestMode2",
+        "BattleRoyale",
+        "CaptureTheFlag",
+        "Duel",
+        "OutpostRush",
+        "OutpostRush_NoPerks",
+        "Arena3v3",
+        "Dungeon",
+        "Mutation",
+        "DungeonAmrine",
+        "DungeonShatteredObelisk",
+        "DungeonRestlessShores01",
+        "DungeonEbonscale00",
+        "DungeonEdengrove00",
+        "DungeonReekwater00",
+        "DungeonCutlassKeys00",
+        "DungeonGreatCleave01",
+        "DungeonShatterMtn00",
+        "DungeonBrimstoneSands00",
+        "DungeonFirstLight01",
+        "DungeonGreatCleave00",
+        "DungeonDunwood02",
+        "TrialBrimstoneSandworm",
+        "RaidCutlassKeys00",
+        "RaidMonarchsBluffs00",
+        "TrialSeason01",
+        "TrialSeason04",
+        "QuestAdiana",
+        "QuestApophis",
+        "QuestCaerDun",
+        "QuestEmpressZhou",
+        "QuestIsabella",
+        "QuestMammoth",
+        "QuestMedusa",
+        "QuestMotherwell",
+        "QuestMedea",
+        "QuestNihilo",
+        "QuestYonas",
+        "TrialSeason02Q13",
+        "TrialSeason02Q12",
+        "TrialSeason04Q02",
+        "TrialSeason04Q06",
+        "TrialSeason04Q05",
+        "QuestHeartforge",
+        "QuestLiang",
+        "QuestGawain",
+        "Catacombs",
+        "QuestDracula",
+        "QuestWolf",
+        "QuestMorgaine",
+        "QuestVarlaam",
+        "QuestSeraphim",
     ];
 
     /// `m_gameModeIdx` as retail sent it after the 6776 of each trial (17 soul trial ledgers and
@@ -671,7 +723,11 @@ mod tests {
         // Every row has its own place.
         let places: BTreeSet<u8> = indexes.values().copied().collect();
         assert_eq!(places.len(), RETAIL_GAME_MODE_IDS.len());
-        assert!(places.iter().all(|place| usize::from(*place) < RETAIL_GAME_MODE_IDS.len()));
+        assert!(
+            places
+                .iter()
+                .all(|place| usize::from(*place) < RETAIL_GAME_MODE_IDS.len())
+        );
     }
 
     #[test]
@@ -707,7 +763,13 @@ mod tests {
         }
         let catalog = InstanceCatalog::from_tables(&tables(modes, maps));
         assert_eq!(catalog.len(), 1);
-        assert_eq!(catalog.by_id("TrialSeason04Q06").expect("mode").game_mode_index, 48);
+        assert_eq!(
+            catalog
+                .by_id("TrialSeason04Q06")
+                .expect("mode")
+                .game_mode_index,
+            48
+        );
     }
 
     #[test]

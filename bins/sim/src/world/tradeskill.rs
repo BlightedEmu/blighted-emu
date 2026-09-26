@@ -186,7 +186,14 @@ impl SimWorld {
 
     /// Categorical progression `id` of player `number` gains `times` firings of `per_firing`
     /// points under its remote multiplier, for game event `event`.
-    fn gain_categorical(&mut self, number: u64, event: &str, id: &str, per_firing: f64, times: u32) {
+    fn gain_categorical(
+        &mut self,
+        number: u64,
+        event: &str,
+        id: &str,
+        per_firing: f64,
+        times: u32,
+    ) {
         let content = Arc::clone(&self.content);
         let Some(mastery) = content.progression.categorical(id) else {
             tracing::debug!(player = number, event, progression = %id, "progression of no known table");
@@ -289,9 +296,15 @@ mod tests {
         // Retail Arcana: `Craft_ArcanaT2` 18 x 5 ingredients x 2 x 1.05 gave 188.
         assert_eq!(event_gain(18.0 * 5.0, 1, 2.0 * 1.05), 188);
         // `IngotT3`: 46 x 6 ingredients, 894 crafts under 2: 493,488.
-        assert_eq!(event_gain(EventScale::craft(6).progression(46.0), 894, 2.0), 493_488);
+        assert_eq!(
+            event_gain(EventScale::craft(6).progression(46.0), 894, 2.0),
+            493_488
+        );
         // A level-3 boar: 95 x 1.1027 = 104 before Skinning's 2.
-        assert_eq!(event_gain(EventScale::gather(1.102_657_5).progression(95.0), 1, 2.0), 208);
+        assert_eq!(
+            event_gain(EventScale::gather(1.102_657_5).progression(95.0), 1, 2.0),
+            208
+        );
         assert_eq!(event_gain(4.6, 2, 2.0), 18);
         assert_eq!(event_gain(-1.0, 1, 1.0), 0);
         assert_eq!(EventScale::PLAIN.standing(1.0), 1.0);
@@ -317,7 +330,10 @@ mod tests {
             }]),
             starting_ranks: StartingRanks::build([(
                 ARCHETYPE.to_owned(),
-                vec![("Cooking".to_owned(), STARTING_RANK), ("Unknown".to_owned(), 5)],
+                vec![
+                    ("Cooking".to_owned(), STARTING_RANK),
+                    ("Unknown".to_owned(), 5),
+                ],
             )]),
             ..PlayerContent::default()
         };
@@ -348,8 +364,7 @@ mod tests {
             )]),
             ..PlayerContent::default()
         };
-        content.gameplay.xp.progression =
-            [(WINDSWARD.to_string(), STANDING_MULTIPLIER)].into();
+        content.gameplay.xp.progression = [(WINDSWARD.to_string(), STANDING_MULTIPLIER)].into();
         world.content = Arc::new(content);
         world
             .admit(&admit_at(PLAYER, 0.0, true), NOW, SERVER_TIME)

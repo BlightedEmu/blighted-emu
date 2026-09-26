@@ -242,18 +242,22 @@ impl GameModeClientMsg {
             }
             Self::MatchmakingLoginConfirmed { .. } => {}
             Self::JoinQueueForActivities { activities, .. } => {
-                let count = u8::try_from(activities.len()).map_err(|_| {
-                    MessageError::CountTooLarge {
+                let count =
+                    u8::try_from(activities.len()).map_err(|_| MessageError::CountTooLarge {
                         count: activities.len() as u64,
                         limit: u64::from(u8::MAX),
-                    }
-                })?;
+                    })?;
                 writer.u8(count);
                 for activity in activities {
-                    writer.u16(activity.activity).u16(activity.extra).u8(activity.flag);
+                    writer
+                        .u16(activity.activity)
+                        .u16(activity.extra)
+                        .u8(activity.flag);
                 }
             }
-            Self::SetReadiedUpStatus { match_id, ready, .. } => {
+            Self::SetReadiedUpStatus {
+                match_id, ready, ..
+            } => {
                 writer.u32(*match_id).boolean(*ready);
             }
         }
@@ -352,14 +356,12 @@ impl GameModeServerMsg {
         let message = match type_index {
             QUEUE_GROUP_REMOVED_TYPE_INDEX => Self::QueueGroupRemoved { header },
             MATCHMAKING_LOGIN_REQUESTED_TYPE_INDEX => Self::MatchmakingLoginRequested { header },
-            START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX => {
-                Self::StartMatchmakingRoleSelection {
-                    header,
-                    flag: reader.u8()?,
-                    activity: reader.u16()?,
-                    extra: reader.u16()?,
-                }
-            }
+            START_MATCHMAKING_ROLE_SELECTION_TYPE_INDEX => Self::StartMatchmakingRoleSelection {
+                header,
+                flag: reader.u8()?,
+                activity: reader.u16()?,
+                extra: reader.u16()?,
+            },
             GAME_MODE_PLAYER_REMOVED_TYPE_INDEX => Self::GameModePlayerRemoved {
                 header,
                 match_id: reader.u32()?,
@@ -456,9 +458,10 @@ mod tests {
             assert_eq!(call.type_index(), type_index);
             assert_eq!(call.encode().expect("writes"), hex(&body));
         }
-        let GameModeClientMsg::JoinQueueForActivities { activities, .. } =
-            client(JOIN_QUEUE_FOR_ACTIVITIES_TYPE_INDEX, &format!("{HEADER}013116000001"))
-        else {
+        let GameModeClientMsg::JoinQueueForActivities { activities, .. } = client(
+            JOIN_QUEUE_FOR_ACTIVITIES_TYPE_INDEX,
+            &format!("{HEADER}013116000001"),
+        ) else {
             panic!("a join queue");
         };
         assert_eq!(
@@ -471,7 +474,9 @@ mod tests {
         );
         let GameModeClientMsg::AcceptMatch { match_id, flag, .. } = client(
             ACCEPT_MATCHMAKING_MATCH_TYPE_INDEX,
-            &format!("{HEADER}2430313965653133342d636237302d376561302d383531312d39353163363732316662306601"),
+            &format!(
+                "{HEADER}2430313965653133342d636237302d376561302d383531312d39353163363732316662306601"
+            ),
         ) else {
             panic!("an accept");
         };
@@ -496,16 +501,22 @@ mod tests {
             assert!(GameModeServerMsg::is_type(type_index));
             assert_eq!(push.encode().expect("writes"), hex(&body));
         }
-        let GameModeServerMsg::GameModePlayerRemoved { match_id, player, .. } = server(
+        let GameModeServerMsg::GameModePlayerRemoved {
+            match_id, player, ..
+        } = server(
             GAME_MODE_PLAYER_REMOVED_TYPE_INDEX,
             &format!("{HEADER}91b99a18053478731ca555476da9a0b79343e3acbe"),
-        ) else {
+        )
+        else {
             panic!("a removal");
         };
         assert_eq!(match_id, MATCH_ID);
         assert!(player.0.is_some());
         // Retail `Hive catacomes`: stop the cutscene with an empty name.
-        let stop = server(STOP_CUTSCENE_WITH_NAME_TYPE_INDEX, "7134484c503933ace34e14f344a974cc00");
+        let stop = server(
+            STOP_CUTSCENE_WITH_NAME_TYPE_INDEX,
+            "7134484c503933ace34e14f344a974cc00",
+        );
         assert_eq!(
             stop.encode().expect("writes"),
             hex("7134484c503933ace34e14f344a974cc00")

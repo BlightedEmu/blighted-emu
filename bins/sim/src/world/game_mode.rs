@@ -30,8 +30,8 @@ use nw_bus::ConnectionRef;
 use nw_messages::social::CharacterRef;
 use nw_messages::{
     GameModeClientMsg, GameModeServerMsg, QueueActivity, SIGNUP_LIST_TRAILER, ServerMessage,
-    SignupEntry,
-    WarClientMsg, WarServerMsg, WarSignupClientMsg, WarSignupServerMsg, WarboardManifest,
+    SignupEntry, WarClientMsg, WarServerMsg, WarSignupClientMsg, WarSignupServerMsg,
+    WarboardManifest,
 };
 use uuid::Uuid;
 
@@ -190,12 +190,13 @@ impl SimWorld {
                     mode.match_id = Some((self.war_signups.next_match, Uuid::new_v4()));
                 }
             }
-            GameModeClientMsg::SetReadiedUpStatus { match_id, ready, .. } => {
+            GameModeClientMsg::SetReadiedUpStatus {
+                match_id, ready, ..
+            } => {
                 if mode.match_id.is_none() {
                     mode.match_id = Some((match_id, Uuid::new_v4()));
                 }
-                if mode.role.is_some()
-                    && mode.match_id.is_some_and(|(known, _)| known == match_id)
+                if mode.role.is_some() && mode.match_id.is_some_and(|(known, _)| known == match_id)
                 {
                     mode.ready = ready;
                 }
@@ -217,7 +218,6 @@ impl SimWorld {
                 }
             }
         }
-        drop(player);
         send_now(&mut self.combat_messages, connection, &answers);
     }
 
@@ -241,9 +241,7 @@ impl SimWorld {
                             .map(|signups| {
                                 signups
                                     .iter()
-                                    .map(|signup| {
-                                        CharacterRef(Some(*signup.character.as_bytes()))
-                                    })
+                                    .map(|signup| CharacterRef(Some(*signup.character.as_bytes())))
                                     .collect()
                             })
                             .unwrap_or_default()
@@ -260,8 +258,8 @@ impl SimWorld {
                 }
             }
             // No answer in any capture; see the module text.
-            WarClientMsg::WarboardManifestReceived { .. }
-            | WarClientMsg::StopSpectating { .. } => {}
+            WarClientMsg::WarboardManifestReceived { .. } | WarClientMsg::StopSpectating { .. } => {
+            }
         }
         send_now(&mut self.combat_messages, connection, &answers);
     }
@@ -361,7 +359,9 @@ mod tests {
     use nw_messages::FacetHeader;
 
     use super::*;
-    use crate::world::tests::{NOW, SERVER_TIME, admit_at, connection, messages_to, world_with_spawns};
+    use crate::world::tests::{
+        NOW, SERVER_TIME, admit_at, connection, messages_to, world_with_spawns,
+    };
 
     /// The player number of the test player.
     const PLAYER: u64 = 41;
@@ -474,7 +474,10 @@ mod tests {
                 ready: true,
             },
         );
-        assert!(world.take_messages().is_empty(), "no answer before the accept");
+        assert!(
+            world.take_messages().is_empty(),
+            "no answer before the accept"
+        );
         world.game_mode_call(
             &connection(PLAYER),
             GameModeClientMsg::AcceptMatch {
@@ -490,11 +493,7 @@ mod tests {
                 GameModeServerMsg::QueueGroupRemoved { header: HEADER }
             )]
         );
-        let mode = &world
-            .world
-            .get::<Player>(entity)
-            .expect("player")
-            .game_mode;
+        let mode = &world.world.get::<Player>(entity).expect("player").game_mode;
         assert!(mode.queued.is_empty() && mode.match_id.is_none());
     }
 
@@ -547,11 +546,13 @@ mod tests {
         );
         let sent = world.take_messages();
         let listed = messages_to(&sent, PLAYER);
-        let [ServerMessage::WarSignup(WarSignupServerMsg::SignupListReceived {
-            entries,
-            trailer,
-            ..
-        })] = listed.as_slice()
+        let [
+            ServerMessage::WarSignup(WarSignupServerMsg::SignupListReceived {
+                entries,
+                trailer,
+                ..
+            }),
+        ] = listed.as_slice()
         else {
             panic!("a sign-up list");
         };

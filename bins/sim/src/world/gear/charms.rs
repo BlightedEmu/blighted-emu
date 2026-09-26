@@ -256,7 +256,10 @@ mod tests {
     }
 
     fn sword_perks(gear: &Gear) -> Vec<String> {
-        gear.charm_target(sword_target()).expect("sword").perks.clone()
+        gear.charm_target(sword_target())
+            .expect("sword")
+            .perks
+            .clone()
     }
 
     /// Slots a gem of bag slot `gem_slot` into perk slot `index` of `target`.
@@ -310,7 +313,10 @@ mod tests {
         assert_eq!(gear.bag_count(GEM), GEMS, "nothing taken");
         let replaceable = rolls(true);
         let replaced = try_slot(&mut gear, &kits, &replaceable, sword_target(), gem_slot, 1);
-        assert_eq!(replaced.map(|slotted| slotted.perk_id), Ok(WEAPON_GEM.to_owned()));
+        assert_eq!(
+            replaced.map(|slotted| slotted.perk_id),
+            Ok(WEAPON_GEM.to_owned())
+        );
         assert_eq!(gear.bag_count(GEM), GEMS - 1);
         let staff = CharmTarget {
             slot: slot::MAIN_HAND_OPTION_1 + 1,

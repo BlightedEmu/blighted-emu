@@ -119,7 +119,11 @@ impl AwsProxy {
 
     /// Binds `listen` and serves tunnels to `server` using `mirror` for pinning. `start` calls this
     /// with the loopback [`AWS_PROXY_PORT`]; tests call it with an ephemeral port.
-    fn serve(mirror: &AwsMirror, server: SocketAddr, listen: SocketAddr) -> Result<Self, ProxyError> {
+    fn serve(
+        mirror: &AwsMirror,
+        server: SocketAddr,
+        listen: SocketAddr,
+    ) -> Result<Self, ProxyError> {
         crate::install_crypto_provider();
         let shared = Arc::new(Shared {
             acceptor: TlsAcceptor::from(Arc::new(game_server_config()?)),
@@ -159,8 +163,8 @@ fn game_server_config() -> Result<ServerConfig, ProxyError> {
     let certificates = CertificateDer::pem_slice_iter(PROXY_TLS_CERT.as_bytes())
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| ProxyError::Tls(error.to_string()))?;
-    let key =
-        PrivateKeyDer::from_pem_slice(PROXY_TLS_KEY.as_bytes()).map_err(|error| ProxyError::Tls(error.to_string()))?;
+    let key = PrivateKeyDer::from_pem_slice(PROXY_TLS_KEY.as_bytes())
+        .map_err(|error| ProxyError::Tls(error.to_string()))?;
     ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certificates, key)
@@ -232,7 +236,10 @@ fn requested_host(head: &[u8]) -> Result<String, &'static [u8]> {
     let text = std::str::from_utf8(head).map_err(|_| BAD_REQUEST)?;
     let request_line = text.lines().next().ok_or(BAD_REQUEST)?;
     let mut parts = request_line.split_whitespace();
-    let (method, authority) = (parts.next().ok_or(BAD_REQUEST)?, parts.next().ok_or(BAD_REQUEST)?);
+    let (method, authority) = (
+        parts.next().ok_or(BAD_REQUEST)?,
+        parts.next().ok_or(BAD_REQUEST)?,
+    );
     if method != CONNECT_METHOD {
         return Err(BAD_REQUEST);
     }
@@ -277,8 +284,12 @@ mod tests {
     /// blocking thread, not on the test's runtime.
     async fn start_proxy(server: SocketAddr) -> AwsProxy {
         tokio::task::spawn_blocking(move || {
-            AwsProxy::serve(&mirror(MIRROR_CERT), server, (Ipv4Addr::LOCALHOST, 0).into())
-                .expect("proxy")
+            AwsProxy::serve(
+                &mirror(MIRROR_CERT),
+                server,
+                (Ipv4Addr::LOCALHOST, 0).into(),
+            )
+            .expect("proxy")
         })
         .await
         .expect("join")
@@ -299,7 +310,11 @@ mod tests {
 
     #[test]
     fn a_connect_for_another_host_is_forbidden() {
-        for authority in ["steamcommunity.com:443", "s3.amazonaws.com:443", "evil.net:443"] {
+        for authority in [
+            "steamcommunity.com:443",
+            "s3.amazonaws.com:443",
+            "evil.net:443",
+        ] {
             assert_eq!(requested_host(&connect_request(authority)), Err(FORBIDDEN));
         }
     }
@@ -315,7 +330,10 @@ mod tests {
     }
 
     /// A fake server that shows `cert_pem`/`key_pem` on one TLS connection and echoes a reply.
-    async fn fake_server(cert_pem: &str, key_pem: &str) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    async fn fake_server(
+        cert_pem: &str,
+        key_pem: &str,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
         let certificates = CertificateDer::pem_slice_iter(cert_pem.as_bytes())
             .collect::<Result<Vec<_>, _>>()
             .expect("cert");
@@ -325,7 +343,9 @@ mod tests {
             .with_single_cert(certificates, key)
             .expect("server config");
         let acceptor = TlsAcceptor::from(Arc::new(config));
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.expect("bind");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind");
         let address = listener.local_addr().expect("addr");
         let handle = tokio::spawn(async move {
             if let Ok((stream, _)) = listener.accept().await

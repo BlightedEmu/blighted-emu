@@ -19,8 +19,7 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::instances::{
-    Decision, InstanceSettings, InstanceTable, Instances, Launch, LaunchSettings, Launches,
-    granted,
+    Decision, InstanceSettings, InstanceTable, Instances, Launch, LaunchSettings, Launches, granted,
 };
 use crate::sims::SimRegistry;
 
@@ -103,7 +102,11 @@ impl InstanceLoop {
 
     /// A sim's request: a solo game mode goes on at once, a group one after the group query.
     pub fn request(&mut self, request: Incoming<InstanceRequest>, sims: &SimRegistry) {
-        let Some(timeout) = self.settings.as_ref().map(|settings| settings.group_timeout) else {
+        let Some(timeout) = self
+            .settings
+            .as_ref()
+            .map(|settings| settings.group_timeout)
+        else {
             self.reply(
                 request,
                 InstanceReply::Refused {
@@ -264,7 +267,8 @@ impl InstanceLoop {
             return;
         };
         let running = sims.running_instances();
-        self.instances.adopt(&running, |slot| sims.level_of(&slot.id));
+        self.instances
+            .adopt(&running, |slot| sims.level_of(&slot.id));
         for closing in self.instances.review(&running, &settings, unix_ms()) {
             self.close(closing.sim, closing.instance);
             self.instances.closed(closing.instance);
@@ -324,10 +328,11 @@ impl InstanceLoop {
                 }
             }
         }
-        for id in self
-            .launches
-            .to_stop(settings, |level| sims.free_instance_sims(level), Instant::now())
-        {
+        for id in self.launches.to_stop(
+            settings,
+            |level| sims.free_instance_sims(level),
+            Instant::now(),
+        ) {
             if let Some(mut child) = self.children.remove(&id) {
                 tracing::info!(sim = %id, "free instance sim stopped");
                 if let Err(error) = child.start_kill() {
@@ -384,7 +389,9 @@ fn random_phase() -> u64 {
 fn unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 #[cfg(test)]
@@ -394,7 +401,10 @@ mod tests {
     #[test]
     fn phases_are_never_zero_and_refusals_have_labels() {
         assert!((0..64).all(|_| random_phase() >= MIN_PHASE));
-        assert_eq!(refusal_label(InstanceRefusal::GroupTimeout), "group_timeout");
+        assert_eq!(
+            refusal_label(InstanceRefusal::GroupTimeout),
+            "group_timeout"
+        );
         assert!(unix_ms() > 0);
     }
 }

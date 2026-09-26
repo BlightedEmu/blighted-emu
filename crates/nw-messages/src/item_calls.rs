@@ -736,7 +736,10 @@ mod tests {
             panic!("a give");
         };
         assert_eq!(quantity, 87);
-        assert_eq!(container.entity, 0xb3ac_442d_2430_908c, "the player's own entity");
+        assert_eq!(
+            container.entity, 0xb3ac_442d_2430_908c,
+            "the player's own entity"
+        );
     }
 
     #[test]
@@ -751,7 +754,10 @@ mod tests {
         else {
             panic!("an add");
         };
-        assert_eq!((item.location, item.slot, item.instance), (4, 11, [0; RAW_ID_LEN]));
+        assert_eq!(
+            (item.location, item.slot, item.instance),
+            (4, 11, [0; RAW_ID_LEN])
+        );
         assert_eq!((quantity, slot, loadouts), (1, 1, vec![LOADOUT]));
         assert_eq!(
             decode(RENAME_LOADOUT_TYPE_INDEX, RETAIL_RENAME),
@@ -769,7 +775,10 @@ mod tests {
         else {
             panic!("a lock");
         };
-        assert_eq!((item.location, item.slot, locked), (LOCATION_BAG, 402, true));
+        assert_eq!(
+            (item.location, item.slot, locked),
+            (LOCATION_BAG, 402, true)
+        );
         assert!(ItemCallMsg::decode(1, &[]).is_none());
     }
 
@@ -811,7 +820,10 @@ mod tests {
         else {
             panic!("a charm");
         };
-        assert_eq!((target.location, target.slot), (LOCATION_PAPERDOLL_SLOT, 24));
+        assert_eq!(
+            (target.location, target.slot),
+            (LOCATION_PAPERDOLL_SLOT, 24)
+        );
         assert_eq!((charm.location, charm.slot), (LOCATION_BAG, 120));
         assert_eq!((perk_index, extra), (0, 1));
         assert!(matches!(
@@ -819,7 +831,10 @@ mod tests {
             ItemCallMsg::ClearCharmRequests { .. }
         ));
         assert!(matches!(
-            decode(DROP_INVENTORY_ITEMS_BY_CLASS_TYPE_INDEX, RETAIL_DROP_BY_CLASS),
+            decode(
+                DROP_INVENTORY_ITEMS_BY_CLASS_TYPE_INDEX,
+                RETAIL_DROP_BY_CLASS
+            ),
             ItemCallMsg::DropItemsByClass {
                 class: UI_REFINING,
                 flag: true,

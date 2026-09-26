@@ -261,9 +261,7 @@ impl SliceSpawners {
 /// # Errors
 ///
 /// Returns [`SliceDataError::Transform`] when `floats` is not 12 floats.
-pub(crate) fn transform_from_bytes(
-    floats: &[u8],
-) -> Result<(Basis, [f64; AXES]), SliceDataError> {
+pub(crate) fn transform_from_bytes(floats: &[u8]) -> Result<(Basis, [f64; AXES]), SliceDataError> {
     if floats.len() != TRANSFORM_FLOATS * FLOAT_BYTES {
         return Err(SliceDataError::Transform(floats.len()));
     }

@@ -184,8 +184,10 @@ mod tests {
 
     #[test]
     fn a_mode_without_rules_is_refused() {
-        let error = check(&Tables::default(), DEFAULT_GAME_MODE, 1, |_| BTreeSet::new())
-            .expect_err("no rows");
+        let error = check(&Tables::default(), DEFAULT_GAME_MODE, 1, |_| {
+            BTreeSet::new()
+        })
+        .expect_err("no rows");
         assert!(matches!(
             error,
             CatacombCheckError::Rules(CatacombError::NotGenerated { .. })

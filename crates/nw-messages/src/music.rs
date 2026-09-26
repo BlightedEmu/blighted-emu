@@ -264,18 +264,19 @@ impl PerformancePlayerState {
             self.observing.is_some(),
         ]);
         let slot_bit = |on: bool, bit: u8| if on { bit } else { 0 };
-        writer.u8(
-            slot_bit(self.performance.is_some(), PLAYER_SLOT_0)
-                | slot_bit(owner != 0, PLAYER_SLOT_1),
-        );
+        writer.u8(slot_bit(self.performance.is_some(), PLAYER_SLOT_0)
+            | slot_bit(owner != 0, PLAYER_SLOT_1));
         if let Some(performance) = self.performance {
             write_infallible(writer, 1, PLAYER_SLOT_0_CHILDREN, |writer, _| {
                 writer.u64(performance);
             });
         }
         if owner != 0 {
-            write_infallible(writer, owner, PLAYER_SLOT_1_CHILDREN, |writer, child| {
-                match child {
+            write_infallible(
+                writer,
+                owner,
+                PLAYER_SLOT_1_CHILDREN,
+                |writer, child| match child {
                     CHILD_LOCKOUT => {
                         self.lockout.map(|lockout| writer.u16(lockout));
                     }
@@ -285,8 +286,8 @@ impl PerformancePlayerState {
                     _ => {
                         self.observing.map(|observing| writer.u64(observing));
                     }
-                }
-            });
+                },
+            );
         }
     }
 }
@@ -388,8 +389,8 @@ impl MusicalPerformanceState {
         let mut slots: u16 = 0;
         for slot in 0..PERFORMANCE_SLOTS {
             if slot % SLOTS_PER_BYTE == 0 {
-                let left = u8::try_from((PERFORMANCE_SLOTS - slot).min(SLOTS_PER_BYTE))
-                    .unwrap_or(u8::MAX);
+                let left =
+                    u8::try_from((PERFORMANCE_SLOTS - slot).min(SLOTS_PER_BYTE)).unwrap_or(u8::MAX);
                 slots |= u16::from(read_slot_byte(reader, PERFORMANCE_FIELD, left)?) << slot;
             }
             if slots & 1 << slot == 0 {
@@ -402,64 +403,79 @@ impl MusicalPerformanceState {
 
     fn read_slot(&mut self, reader: &mut Reader<'_>, slot: usize) -> Result<(), MessageError> {
         match slot {
-            0 => read_children(reader, PERFORMANCE_FIELD, SLOT_0_CHILDREN, |reader, child| {
-                match child {
-                    0 => {
-                        self.performers =
-                            Some(ReplicatedList::read(reader, PERFORMANCE_FIELD, |reader| {
-                                reader.u64()
-                            })?);
+            0 => read_children(
+                reader,
+                PERFORMANCE_FIELD,
+                SLOT_0_CHILDREN,
+                |reader, child| {
+                    match child {
+                        0 => {
+                            self.performers =
+                                Some(ReplicatedList::read(reader, PERFORMANCE_FIELD, |reader| {
+                                    reader.u64()
+                                })?);
+                        }
+                        1 => self.radius = Some(reader.f32()?),
+                        2 => self.zone_type = Some(reader.u32()?),
+                        3 => self.selected_song = Some(reader.u32()?),
+                        4 => self.sheet_indices = Some(reader.u16()?),
+                        5 => self.start_time_ns = Some(reader.u64()?),
+                        6 => self.stage = Some(reader.u8()?),
+                        _ => self.flags = Some(reader.u8()?),
                     }
-                    1 => self.radius = Some(reader.f32()?),
-                    2 => self.zone_type = Some(reader.u32()?),
-                    3 => self.selected_song = Some(reader.u32()?),
-                    4 => self.sheet_indices = Some(reader.u16()?),
-                    5 => self.start_time_ns = Some(reader.u64()?),
-                    6 => self.stage = Some(reader.u8()?),
-                    _ => self.flags = Some(reader.u8()?),
-                }
-                Ok(())
-            })
+                    Ok(())
+                },
+            )
             .map(drop),
-            1 => read_children(reader, PERFORMANCE_FIELD, SLOT_1_CHILDREN, |reader, child| {
-                match child {
-                    0 => self.leader_index = Some(reader.u8()?),
-                    1 => self.error_sync = Some(reader.u32()?),
-                    2 => self.selected_reward = Some(reader.u32()?),
-                    3 => {
-                        self.performer_scores =
-                            Some(ReplicatedList::read(reader, PERFORMANCE_FIELD, |reader| {
-                                reader.u32()
-                            })?);
+            1 => read_children(
+                reader,
+                PERFORMANCE_FIELD,
+                SLOT_1_CHILDREN,
+                |reader, child| {
+                    match child {
+                        0 => self.leader_index = Some(reader.u8()?),
+                        1 => self.error_sync = Some(reader.u32()?),
+                        2 => self.selected_reward = Some(reader.u32()?),
+                        3 => {
+                            self.performer_scores =
+                                Some(ReplicatedList::read(reader, PERFORMANCE_FIELD, |reader| {
+                                    reader.u32()
+                                })?);
+                        }
+                        _ => self.performance_score = Some(reader.f32()?),
                     }
-                    _ => self.performance_score = Some(reader.f32()?),
-                }
-                Ok(())
-            })
+                    Ok(())
+                },
+            )
             .map(drop),
-            2 => read_children(reader, PERFORMANCE_FIELD, SLOT_2_CHILDREN, |reader, child| {
-                match child {
-                    0 => {
-                        self.pages =
-                            Some(ReplicatedList::read(reader, PERFORMANCE_FIELD, |reader| {
-                                reader.u16()
-                            })?);
+            2 => read_children(
+                reader,
+                PERFORMANCE_FIELD,
+                SLOT_2_CHILDREN,
+                |reader, child| {
+                    match child {
+                        0 => {
+                            self.pages =
+                                Some(ReplicatedList::read(reader, PERFORMANCE_FIELD, |reader| {
+                                    reader.u16()
+                                })?);
+                        }
+                        1 => self.song_book_filter = Some(reader.u8()?),
+                        2 => self.song_book_filter_id = Some(reader.u32()?),
+                        4 => self.reward_filter = Some(reader.u8()?),
+                        5 => self.reward_filter_id = Some(reader.u32()?),
+                        7 => self.rank = Some(reader.u16()?),
+                        8 => self.end_reason = Some(reader.u8()?),
+                        unsized_child => {
+                            return Err(MessageError::Unsized {
+                                field: PERFORMANCE_FIELD,
+                                byte: unsized_child,
+                            });
+                        }
                     }
-                    1 => self.song_book_filter = Some(reader.u8()?),
-                    2 => self.song_book_filter_id = Some(reader.u32()?),
-                    4 => self.reward_filter = Some(reader.u8()?),
-                    5 => self.reward_filter_id = Some(reader.u32()?),
-                    7 => self.rank = Some(reader.u16()?),
-                    8 => self.end_reason = Some(reader.u8()?),
-                    unsized_child => {
-                        return Err(MessageError::Unsized {
-                            field: PERFORMANCE_FIELD,
-                            byte: unsized_child,
-                        });
-                    }
-                }
-                Ok(())
-            })
+                    Ok(())
+                },
+            )
             .map(drop),
             EMPTY_SLOT => Err(MessageError::Unsized {
                 field: PERFORMANCE_FIELD,
@@ -1096,7 +1112,10 @@ mod tests {
             leader_index: Some(0),
             error_sync: Some(1),
             selected_reward: Some(POUND_HAMMER),
-            performer_scores: Some(ReplicatedList::Full(FullList::first(vec![0; MAX_PERFORMERS]))),
+            performer_scores: Some(ReplicatedList::Full(FullList::first(vec![
+                0;
+                MAX_PERFORMERS
+            ]))),
             performance_score: Some(0.0),
             pages: Some(ReplicatedList::Full(FullList::first(vec![4514, 4661]))),
             song_book_filter: Some(2),
@@ -1113,7 +1132,10 @@ mod tests {
         assert_eq!(bytes[0], 0b0001_0111, "slots 0, 1, 2 and 4");
         assert_eq!(bytes.last(), Some(&7), "the last seed");
         assert!(MusicalPerformanceState::default().is_empty());
-        assert_eq!(performance_bytes(&MusicalPerformanceState::default()), [0x00, 0x00]);
+        assert_eq!(
+            performance_bytes(&MusicalPerformanceState::default()),
+            [0x00, 0x00]
+        );
         assert!(
             MusicalPerformanceState::read(&mut Reader::new(&[0x08])).is_err(),
             "slot 3 has no children"
@@ -1125,7 +1147,10 @@ mod tests {
         let input = MusicClientMsg::decode(VALIDATE_INPUT_TYPE_INDEX, &body(&RETAIL_INPUT))
             .expect("a music call")
             .expect("reads");
-        let MusicClientMsg::ValidateInput { note, key, time_s, .. } = input else {
+        let MusicClientMsg::ValidateInput {
+            note, key, time_s, ..
+        } = input
+        else {
             panic!("an input");
         };
         assert_eq!((note, key), (0, 6));
@@ -1143,10 +1168,22 @@ mod tests {
         );
         assert_eq!(song.type_index(), SET_SONG_TYPE_INDEX);
         for (type_index, empty) in [
-            (CREATE_PERFORMANCE_TYPE_INDEX, MusicClientMsg::CreatePerformance { header: header() }),
-            (LEAVE_PERFORMANCE_TYPE_INDEX, MusicClientMsg::LeavePerformance { header: header() }),
-            (END_POST_SHOW_TYPE_INDEX, MusicClientMsg::EndPostShow { header: header() }),
-            (ABORT_SONG_TYPE_INDEX, MusicClientMsg::AbortSong { header: header() }),
+            (
+                CREATE_PERFORMANCE_TYPE_INDEX,
+                MusicClientMsg::CreatePerformance { header: header() },
+            ),
+            (
+                LEAVE_PERFORMANCE_TYPE_INDEX,
+                MusicClientMsg::LeavePerformance { header: header() },
+            ),
+            (
+                END_POST_SHOW_TYPE_INDEX,
+                MusicClientMsg::EndPostShow { header: header() },
+            ),
+            (
+                ABORT_SONG_TYPE_INDEX,
+                MusicClientMsg::AbortSong { header: header() },
+            ),
         ] {
             let decoded = MusicClientMsg::decode(type_index, &HEADER)
                 .expect("a music call")

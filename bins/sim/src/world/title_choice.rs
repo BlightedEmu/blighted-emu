@@ -74,7 +74,11 @@ mod tests {
                     TitleScope::Account,
                     TitleRequirement::PlayerLevel(0),
                 ),
-                (GRANTED_TITLE, TitleScope::Account, TitleRequirement::Granted),
+                (
+                    GRANTED_TITLE,
+                    TitleScope::Account,
+                    TitleRequirement::Granted,
+                ),
             ]),
             ..PlayerContent::default()
         });
@@ -87,9 +91,16 @@ mod tests {
             title,
         };
         world.set_title(&connection(PLAYER), &ask(lowercase_crc32(GRANTED_TITLE)));
-        assert_eq!(shown(&mut world), (None, false), "a grant this server never stored");
+        assert_eq!(
+            shown(&mut world),
+            (None, false),
+            "a grant this server never stored"
+        );
         world.set_title(&connection(PLAYER), &ask(lowercase_crc32(LEVEL_TITLE)));
-        assert_eq!(shown(&mut world), (Some(lowercase_crc32(LEVEL_TITLE)), true));
+        assert_eq!(
+            shown(&mut world),
+            (Some(lowercase_crc32(LEVEL_TITLE)), true)
+        );
         let saved = world
             .positions()
             .into_iter()

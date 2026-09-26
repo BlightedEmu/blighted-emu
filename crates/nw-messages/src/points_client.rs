@@ -160,9 +160,7 @@ impl PointsClientMsg {
             Self::ApplyAbilityPoints { .. } => APPLY_ABILITY_POINTS_TYPE_INDEX,
             Self::RefundSpentPoints { .. } => REFUND_SPENT_POINTS_TYPE_INDEX,
             Self::ChangeMappedAbility { .. } => CHANGE_MAPPED_ABILITY_TYPE_INDEX,
-            Self::SpendTerritoryStandingPoint { .. } => {
-                SPEND_TERRITORY_STANDING_POINT_TYPE_INDEX
-            }
+            Self::SpendTerritoryStandingPoint { .. } => SPEND_TERRITORY_STANDING_POINT_TYPE_INDEX,
             Self::MasteryTreeRespec { .. } => MASTERY_TREE_RESPEC_TYPE_INDEX,
         }
     }
@@ -201,7 +199,11 @@ impl PointsClientMsg {
                 header.write(&mut writer);
                 writer.u16(*table).u32(*slot).u32(*ability);
             }
-            Self::SpendTerritoryStandingPoint { header, pool, point } => {
+            Self::SpendTerritoryStandingPoint {
+                header,
+                pool,
+                point,
+            } => {
                 header.write(&mut writer);
                 writer.u32(*pool).u32(*point);
             }
@@ -321,10 +323,9 @@ mod tests {
             }
         );
         assert_eq!(map.encode(), body(&RETAIL_MAP));
-        let respec =
-            PointsClientMsg::decode(MASTERY_TREE_RESPEC_TYPE_INDEX, &body(&RETAIL_RESPEC))
-                .expect("a point call")
-                .expect("reads");
+        let respec = PointsClientMsg::decode(MASTERY_TREE_RESPEC_TYPE_INDEX, &body(&RETAIL_RESPEC))
+            .expect("a point call")
+            .expect("reads");
         assert_eq!(
             respec,
             PointsClientMsg::MasteryTreeRespec {
@@ -338,7 +339,10 @@ mod tests {
         let refund = PointsClientMsg::decode(REFUND_SPENT_POINTS_TYPE_INDEX, &HEADER)
             .expect("a point call")
             .expect("reads");
-        assert_eq!(refund, PointsClientMsg::RefundSpentPoints { header: header() });
+        assert_eq!(
+            refund,
+            PointsClientMsg::RefundSpentPoints { header: header() }
+        );
         assert_eq!(refund.encode(), HEADER);
         assert!(matches!(
             PointsClientMsg::decode(REFUND_SPENT_POINTS_TYPE_INDEX, &body(&[0])),

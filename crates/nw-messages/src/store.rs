@@ -206,14 +206,26 @@ mod tests {
     /// Retail calls: `unlock_store_content` 12633 ms (4908), 23700 ms (898), `ExternalRewards`
     /// 66150 ms (5107), `pvp_track_unlocked` 31868 ms (4932) and 56565 ms (4910).
     const CALLS: [(u64, &str); 5] = [
-        (SET_IS_IN_STORE_TYPE_INDEX, "07a3b18acf378b0b2896c8c14210296e01"),
+        (
+            SET_IS_IN_STORE_TYPE_INDEX,
+            "07a3b18acf378b0b2896c8c14210296e01",
+        ),
         (
             INITIALIZE_TRANSACTION_TYPE_INDEX,
             "eb5c1ce8c5cdbff72896c8c14210296e05656e2d55530345555202495400000001e58f4711d7e74ac483462fb23806808c16366745374b715a53724251564c31724c4c42785a6e4116366745374b715a53724251564c31724c4c42785a6e4100104d61726b73206f6620466f7274756e650000000001",
         ),
-        (CLAIM_ENTITLEMENT_TYPE_INDEX, "a3f72a79438587bbe131d651bfc7f132f938e156"),
-        (PURCHASE_REWARD_TYPE_INDEX, "67e3d016f476590a2896c8c14210296e07fe1498030000c350"),
-        (RESET_REWARD_TRACK_TYPE_INDEX, "67e3d016f476590a2896c8c14210296e"),
+        (
+            CLAIM_ENTITLEMENT_TYPE_INDEX,
+            "a3f72a79438587bbe131d651bfc7f132f938e156",
+        ),
+        (
+            PURCHASE_REWARD_TYPE_INDEX,
+            "67e3d016f476590a2896c8c14210296e07fe1498030000c350",
+        ),
+        (
+            RESET_REWARD_TRACK_TYPE_INDEX,
+            "67e3d016f476590a2896c8c14210296e",
+        ),
     ];
 
     #[test]
@@ -222,7 +234,11 @@ mod tests {
             let call = StoreCall::decode(type_index, &hex_bytes(hex))
                 .expect("a call")
                 .expect("decodes");
-            assert_eq!(call.encode().expect("encode"), hex_bytes(hex), "{type_index}");
+            assert_eq!(
+                call.encode().expect("encode"),
+                hex_bytes(hex),
+                "{type_index}"
+            );
         }
         let Some(Ok(StoreCall::Purchase { purchase, .. })) =
             StoreCall::decode(CALLS[1].0, &hex_bytes(CALLS[1].1))

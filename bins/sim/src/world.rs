@@ -21,13 +21,12 @@ use bevy_ecs::change_detection::Mut;
 use bevy_ecs::component::Component;
 use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
-use nw_content::mutations::MutationCatalog;
 use nw_bus::{
     Admit, BusId, CarriedItem, CellTable, ConnectionRef, Ghost, HandoffOffer, ItemPlace,
-    PlayerInventory,
-    MOB_STATES, MobGhost, PlayerGhost, PlayerProgression, PlayerQuests, Point, QuestRun,
-    ScriptLogLine, SimSlot, SnapMob, SnapPlayer,
+    MOB_STATES, MobGhost, PlayerGhost, PlayerInventory, PlayerProgression, PlayerQuests, Point,
+    QuestRun, ScriptLogLine, SimSlot, SnapMob, SnapPlayer,
 };
+use nw_content::mutations::MutationCatalog;
 use nw_messages::client_input::{
     CRAFTING_STATION_KIND, GATHER_KIND, LOOT_KIND, LORE_KIND, REVIVE_PLAYER_KIND, TALK_KIND,
     TRIGGER_KIND, WATER_GATHER_KIND,
@@ -42,10 +41,10 @@ use nw_messages::{
     ABILITY_COMPONENT, ATTRIBUTE_COMPONENT, Adopted, BundleGroup, BundleMember, ClientFacetMsg,
     ConsumableCooldown, CooldownsState, CurrencyState, DisableCollisionMsg,
     GatheringInterruptedMsg, Hands, HealthChange, InputRecord, InteractionEndedMsg,
-    InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT,
-    LevelSpec, LookDir, LookupRequest, MeleeHitMsg, MemberState, MessageError, PlayerLook,
-    PlayerSeenByAiMsg, PlayerStates, ProgressionState, SelectedAsTargetMsg, ServerMessage,
-    ShownItem, StorageSearchItemsMsg, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg,
+    InteractionRequest, InteractionValidatedMsg, LOGIN_CLIENT_CONTEXT, LevelSpec, LookDir,
+    LookupRequest, MeleeHitMsg, MemberState, MessageError, PlayerLook, PlayerSeenByAiMsg,
+    PlayerStates, ProgressionState, SelectedAsTargetMsg, ServerMessage, ShownItem,
+    StorageSearchItemsMsg, TUTORIAL_LEVEL, TargetMsg, TeleportStep, TimeSynchMsg,
     UnselectedAsTargetMsg, VitalsData, WorldPosition, facet_entity, put_looking_through_loadout,
     put_member,
 };
@@ -69,9 +68,10 @@ mod dungeon_script;
 pub mod economy;
 mod encounter;
 mod events;
-mod gathering;
 mod fall_damage;
+mod fishing;
 mod game_mode;
+mod gathering;
 mod gear;
 mod gm_client;
 mod hit_shape;
@@ -84,12 +84,11 @@ mod level_flow;
 mod loot_bag;
 mod members;
 mod meta_achievements;
-mod fishing;
-mod music;
-mod mutations;
 mod mob_timeline;
 mod mob_trail;
 mod mount;
+mod music;
+mod mutations;
 mod points;
 mod progression;
 mod projectile;
@@ -106,8 +105,8 @@ pub mod social;
 mod social_bus;
 mod social_states;
 mod stamina;
-mod status_effects;
 mod statics;
+mod status_effects;
 mod storage_search;
 mod title_choice;
 mod tradeskill;
@@ -1067,7 +1066,11 @@ impl SimWorld {
         }
         let level = self.arrival_level();
         let level_info = if admit.login {
-            Some(login_level_info(level, server_time, self.entry_phase(level)?))
+            Some(login_level_info(
+                level,
+                server_time,
+                self.entry_phase(level)?,
+            ))
         } else {
             None
         };
@@ -1419,13 +1422,8 @@ impl SimWorld {
                 .get_mut::<Body>(entity)
                 .ok_or(MoveError::NotInWorld)?;
             (
-                body.motion.try_move(
-                    &limits,
-                    &*self.ground,
-                    &self.settings.bounds,
-                    next,
-                    now_ms,
-                ),
+                body.motion
+                    .try_move(&limits, &*self.ground, &self.settings.bounds, next, now_ms),
                 body.motion.position(),
             )
         };
@@ -1545,19 +1543,22 @@ impl SimWorld {
             read_any = true;
             let swimming = player.tracked.is_swimming();
             let falling = player.tracked.is_falling();
-            player.slayer.record(slayer::SlayerRecord {
-                counter,
-                frame_s: input.character.dt_s,
-                action: record.slayer_input(),
-                intent: (!held).then_some(input.character.intent),
-                attack: slayer::AttackKey {
-                    pressed: !held && record.attack_pressed(),
-                    released: !held && record.attack_released(),
+            player.slayer.record(
+                slayer::SlayerRecord {
+                    counter,
+                    frame_s: input.character.dt_s,
+                    action: record.slayer_input(),
+                    intent: (!held).then_some(input.character.intent),
+                    attack: slayer::AttackKey {
+                        pressed: !held && record.attack_pressed(),
+                        released: !held && record.attack_released(),
+                    },
+                    weapon,
+                    swimming,
+                    falling,
                 },
-                weapon,
-                swimming,
-                falling,
-            }, combat.player_sequences());
+                combat.player_sequences(),
+            );
             player.view = seen.view;
             if held {
                 continue;
@@ -1602,11 +1603,7 @@ impl SimWorld {
         let solids = self.world.get::<Player>(entity)?.solids.clone();
         let sea_level_m = self.settings.ocean_level_m;
         Some(match solids {
-            Some(solids) => Footing::of(
-                &LevelGround::new(&*self.ground, solids),
-                at,
-                sea_level_m,
-            ),
+            Some(solids) => Footing::of(&LevelGround::new(&*self.ground, solids), at, sea_level_m),
             None => Footing::of(&*self.ground, at, sea_level_m),
         })
     }
@@ -3140,13 +3137,8 @@ impl SimWorld {
                     .iter()
                     .map(|item| Order::GiveItem(item.item_id.clone(), 1))
                     .collect();
-                let item_ids: Vec<&str> =
-                    items.iter().map(|item| item.item_id.as_str()).collect();
-                orders.extend(run.event(
-                    Event::ContainerLooted { items: &item_ids },
-                    mobs,
-                    now_ms,
-                ));
+                let item_ids: Vec<&str> = items.iter().map(|item| item.item_id.as_str()).collect();
+                orders.extend(run.event(Event::ContainerLooted { items: &item_ids }, mobs, now_ms));
                 orders
             }
             _ => Vec::new(),
@@ -4085,8 +4077,7 @@ impl Neighbourhood<'_> {
             // StateReplication 4585).
             let just_in_game = player.others_due_ms == Some(OTHER_ENTITY_SETTLE_PENDING);
             if just_in_game {
-                player.others_due_ms =
-                    Some(self.now_ms.saturating_add(OTHER_ENTITY_SETTLE_MS));
+                player.others_due_ms = Some(self.now_ms.saturating_add(OTHER_ENTITY_SETTLE_MS));
             }
             let settling = player
                 .others_due_ms
@@ -5861,11 +5852,7 @@ mod tests {
         );
         let outgoing = tick(&mut world, NOW + 33);
         let children = alc_children(&states_of(&world, &outgoing.messages, &a, 1));
-        let child = |index| {
-            children
-                .iter()
-                .any(|(found, _)| *found == index)
-        };
+        let child = |index| children.iter().any(|(found, _)| *found == index);
         assert!(
             child(ROTATION_CHILD) && child(LOOK_DIR_CHILD),
             "the hold still sends the look: {children:?}"
@@ -6430,7 +6417,6 @@ mod tests {
         world.interaction_over(&who, NOW);
         let mut player = world.world.get_mut::<Player>(entity).expect("player");
         assert!(player.gear.as_mut().expect("gear").put_away(0, None));
-        drop(player);
         // The inventory: put away while open, back when it closes.
         draw(&mut world);
         let loadout = |looking| ClientFacetMsg::LookingThroughLoadout {
@@ -10397,9 +10383,7 @@ mod tests {
                 .flat_map(|out| &out.envelopes)
                 .filter(|bytes| {
                     matches!(
-                        ServerMessage::from_envelope(
-                            &Envelope::decode(bytes).expect("envelope")
-                        ),
+                        ServerMessage::from_envelope(&Envelope::decode(bytes).expect("envelope")),
                         Some(Ok(ServerMessage::TimeSynch(_)))
                     )
                 })
@@ -10407,7 +10391,10 @@ mod tests {
         };
         assert_eq!(synchs(tick(&mut world, NOW + 1)), 0);
         assert_eq!(synchs(tick(&mut world, NOW + TIME_SYNCH_INTERVAL_MS)), 1);
-        assert_eq!(synchs(tick(&mut world, NOW + TIME_SYNCH_INTERVAL_MS + 1)), 0);
+        assert_eq!(
+            synchs(tick(&mut world, NOW + TIME_SYNCH_INTERVAL_MS + 1)),
+            0
+        );
     }
 
     #[test]

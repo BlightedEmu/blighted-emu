@@ -140,12 +140,11 @@ impl WarboardManifest {
     ///
     /// Returns [`MessageError::CountTooLarge`] for more participants than a `u16` holds.
     pub fn encode_payload(&self) -> Result<Vec<u8>, MessageError> {
-        let count = u16::try_from(self.participants.len()).map_err(|_| {
-            MessageError::CountTooLarge {
+        let count =
+            u16::try_from(self.participants.len()).map_err(|_| MessageError::CountTooLarge {
                 count: self.participants.len() as u64,
                 limit: u64::from(u16::MAX),
-            }
-        })?;
+            })?;
         let mut writer = Writer::new();
         writer.u16(count).u16(MANIFEST_SECOND);
         for participant in &self.participants {
@@ -230,7 +229,10 @@ impl WarServerMsg {
     }
 
     /// A 3530 of `manifest` to the player of `header`.
-    pub fn full_manifest(header: FacetHeader, manifest: &WarboardManifest) -> Result<Self, MessageError> {
+    pub fn full_manifest(
+        header: FacetHeader,
+        manifest: &WarboardManifest,
+    ) -> Result<Self, MessageError> {
         Ok(Self::UpdateFullWarboardManifest {
             header,
             payload: manifest.encode_payload()?,
@@ -336,7 +338,10 @@ mod tests {
 
     #[test]
     fn a_full_manifest_lists_its_participants() {
-        let header = FacetHeader { target: 1, entity: 2 };
+        let header = FacetHeader {
+            target: 1,
+            entity: 2,
+        };
         let id = [7; 16];
         let manifest = WarboardManifest::of_participants(vec![CharacterRef(Some(id))]);
         let push = WarServerMsg::full_manifest(header, &manifest).expect("builds");

@@ -770,7 +770,10 @@ mod tests {
             aimed_charged: Some(shot(CHARGED_ROW)),
             ..greatsword()
         };
-        let row = |kind| bow.aimed_attack(kind).map(|attack| attack.damage_row.as_str());
+        let row = |kind| {
+            bow.aimed_attack(kind)
+                .map(|attack| attack.damage_row.as_str())
+        };
         assert_eq!(row(AttackKind::Light), Some(SHOT_ROW));
         assert_eq!(row(AttackKind::Heavy), Some(SHOT_ROW));
         assert_eq!(row(AttackKind::Charged), Some(CHARGED_ROW));

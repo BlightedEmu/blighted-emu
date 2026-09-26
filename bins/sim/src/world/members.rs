@@ -1217,7 +1217,10 @@ mod tests {
         };
         let plain = AlcState::own_step(SPAWN_CLOCK.stamp(), None, None, true, None, None, None)
             .expect("step");
-        assert_eq!(alc(None), plain.with_footing(SWIM_FOOTING.0, SWIM_FOOTING.1));
+        assert_eq!(
+            alc(None),
+            plain.with_footing(SWIM_FOOTING.0, SWIM_FOOTING.1)
+        );
         let teleport = OwnTeleport::of(1, SPAWN_CLOCK, None, TeleportStep::Place);
         let moved = alc(Some(teleport));
         assert_eq!(

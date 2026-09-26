@@ -1,53 +1,52 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Every server message of M4 with a known layout (M4 spec section 5.2), by type index.
 
+use crate::abilities::MasteryTreeRespecResponseMsg;
+use crate::arena::ArenaServerMsg;
 use crate::bundle::ReplicatedStateBundle;
 use crate::client_add_entry::ClientAddEntryMsg;
 use crate::combat::{DamageDealtMsg, DeathRecapMsg, MeleeHitMsg, OnDamageMsg, OnHealedMsg};
+use crate::combat_effects::CombatEffectMsg;
 use crate::connected::{CalendarConnectedMsg, TimingConfigurationConnectedMsg};
 use crate::day_phase::SyncDayPhaseMsg;
 use crate::economy::EconomyMessage;
 use crate::facet::{
     AdjustFxScriptsMsg, CraftProgressMsg, CutsceneEndFinalizedMsg, CutsceneGrantedMsg,
-    DisableCollisionMsg, GameModeSchedulerRefreshedMsg, GatheringInterruptedMsg,
-    HomingOverrideMsg, LeftGameModeQueueMsg,
-    InteractionEndedMsg, InteractionValidatedMsg, PlayerSeenByAiMsg, SelectedAsTargetMsg,
-    StartWhisperMsg, StorageSearchItemsMsg, TeleportWithLoadingScreenMsg, UnselectedAsTargetMsg,
-    UpdatePhasingMsg,
+    DisableCollisionMsg, GameModeSchedulerRefreshedMsg, GatheringInterruptedMsg, HomingOverrideMsg,
+    InteractionEndedMsg, InteractionValidatedMsg, LeftGameModeQueueMsg, PlayerSeenByAiMsg,
+    SelectedAsTargetMsg, StartWhisperMsg, StorageSearchItemsMsg, TeleportWithLoadingScreenMsg,
+    UnselectedAsTargetMsg, UpdatePhasingMsg,
 };
+use crate::fishing::FishingServerMsg;
+use crate::game_mode::GameModeServerMsg;
 use crate::guild_lookup::UnorderedGuildsMsg;
+use crate::inventories::InventoriesMsg;
 use crate::item_calls::LoadoutStatusMsg;
-use crate::storage_search::StorageSearchResultsMsg;
-use crate::abilities::MasteryTreeRespecResponseMsg;
 use crate::kick::{KickClientMsg, PlayerManagerRejectedMsg};
+use crate::level_info::LevelInfoChangedMsg;
+use crate::lookups::{JoinableSubArmiesMsg, LobbyCountsMsg, PendingMetaAchievementsMsg};
 use crate::meta_achievements::{
     MetaAchievementProgressMsg, MetaAchievementSummaryMsg, MetaProgressChangedMsg,
 };
-use crate::level_info::LevelInfoChangedMsg;
-use crate::lookups::{JoinableSubArmiesMsg, LobbyCountsMsg, PendingMetaAchievementsMsg};
+use crate::music::MusicServerMsg;
 use crate::notifications::{
     SendNotificationMsg, SendNotificationWithReplacementsMsg, SyncNotificationsMsg,
 };
 use crate::player_data::PlayerDataResponseMsg;
-use crate::social::RequestFailedMsg;
 use crate::self_ident::PlayerManagerSelfIdentificationMsg;
+use crate::social::RequestFailedMsg;
 use crate::spawn_point::ReceivePlayerSpawnPointMsg;
 use crate::spreadshot::SpreadshotProcessedMsg;
+use crate::storage_search::StorageSearchReadyMsg;
+use crate::storage_search::StorageSearchResultsMsg;
 use crate::time_change::SyncTimeChangeMsg;
 use crate::time_synch::TimeSynchMsg;
-use crate::travel::TravelServerMsg;
-use crate::arena::ArenaServerMsg;
-use crate::fishing::FishingServerMsg;
-use crate::music::MusicServerMsg;
-use crate::inventories::InventoriesMsg;
-use crate::transmog::TransmogServerMsg;
 use crate::titles::{AvailableTitlesMsg, TitlesUnlockMsg};
-use crate::combat_effects::CombatEffectMsg;
-use crate::game_mode::GameModeServerMsg;
-use crate::storage_search::StorageSearchReadyMsg;
+use crate::transmog::TransmogServerMsg;
+use crate::travel::TravelServerMsg;
+use crate::trigger_entity::SyncExecuteEntitiesMsg;
 use crate::war::WarServerMsg;
 use crate::war_signup::WarSignupServerMsg;
-use crate::trigger_entity::SyncExecuteEntitiesMsg;
 use nw_reflect::{Envelope, TypeId};
 
 use crate::wire::{BodyCodec, MessageError};
@@ -275,9 +274,7 @@ impl ServerMessage {
             StorageSearchResultsMsg::TYPE_INDEX => {
                 StorageSearchResultsMsg::decode(body).map(Self::StorageSearchResults)
             }
-            LoadoutStatusMsg::TYPE_INDEX => {
-                LoadoutStatusMsg::decode(body).map(Self::LoadoutStatus)
-            }
+            LoadoutStatusMsg::TYPE_INDEX => LoadoutStatusMsg::decode(body).map(Self::LoadoutStatus),
             InteractionValidatedMsg::TYPE_INDEX => {
                 InteractionValidatedMsg::decode(body).map(Self::InteractionValidated)
             }

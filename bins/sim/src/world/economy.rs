@@ -36,14 +36,14 @@ use nw_messages::contracts::{
     CONTRACT_CANCELED_TYPE_INDEX, CONTRACT_CREATED_TYPE_INDEX, CONTRACT_EXPIRED_TYPE_INDEX,
     CONTRACT_RESOLVED_TYPE_INDEX, CONTRACTS_COMPONENT, ContractActionFailedMsg, ContractCall,
     ContractKind, ContractListMsg, ContractMessage, ContractNoticeMsg, ContractsFoundMsg,
-    ContractsLookedUpMsg, CreateOrder, FullyCompletedMsg, NO_LIMIT, ParticipantQuery,
-    SearchQuery, SearchResultsMsg, failure, open_filter, reason, role_filter,
+    ContractsLookedUpMsg, CreateOrder, FullyCompletedMsg, NO_LIMIT, ParticipantQuery, SearchQuery,
+    SearchResultsMsg, failure, open_filter, reason, role_filter,
 };
 use nw_messages::gear::record;
 use nw_messages::items::{FullList, ItemRecord, SYNC_OWNED};
 use nw_messages::p2p_trade::{
-    OfferedStack, P2P_TRADE_COMPONENT, P2P_TRADE_STATE_KEY, P2PTradeState, TradeCall,
-    TradeMessage, failure as trade_failure,
+    OfferedStack, P2P_TRADE_COMPONENT, P2P_TRADE_STATE_KEY, P2PTradeState, TradeCall, TradeMessage,
+    failure as trade_failure,
 };
 use nw_messages::seasons::{SeasonsCall, response};
 use nw_messages::shop::ShopPurchaseCall;
@@ -527,7 +527,7 @@ fn economy(message: EconomyMessage) -> ServerMessage {
 }
 
 fn contract_message(message: ContractMessage) -> ServerMessage {
-    economy(EconomyMessage::Contract(message))
+    economy(EconomyMessage::Contract(Box::new(message)))
 }
 
 fn trade_message(message: TradeMessage) -> ServerMessage {
@@ -1086,8 +1086,7 @@ impl SimWorld {
                 refund,
             } => match completed {
                 Ok(Ok(completed)) => {
-                    let resolved =
-                        notice(CONTRACT_RESOLVED_TYPE_INDEX, &caller, &completed.order);
+                    let resolved = notice(CONTRACT_RESOLVED_TYPE_INDEX, &caller, &completed.order);
                     self.reply(&caller, &[resolved]);
                     self.take_deliveries(vec![caller.character]);
                 }
@@ -1273,12 +1272,14 @@ impl SimWorld {
                     ]
                 }
                 (Some(order), DeliveryNotice::Expired) => {
-                    vec![contract_message(ContractMessage::Notice(ContractNoticeMsg {
-                        type_index: CONTRACT_EXPIRED_TYPE_INDEX,
-                        header,
-                        request: expiry_batch,
-                        contract: contract_of(order, character),
-                    }))]
+                    vec![contract_message(ContractMessage::Notice(
+                        ContractNoticeMsg {
+                            type_index: CONTRACT_EXPIRED_TYPE_INDEX,
+                            header,
+                            request: expiry_batch,
+                            contract: contract_of(order, character),
+                        },
+                    ))]
                 }
                 _ => Vec::new(),
             };
@@ -1326,7 +1327,10 @@ impl SimWorld {
             StoreCall::ClaimEntitlement { entitlement, .. } => {
                 // No entitlement is granted on this server, so none can be claimed.
                 count_call("claim_entitlement", false);
-                tracing::info!(entitlement, "entitlement claim refused: none is granted here");
+                tracing::info!(
+                    entitlement,
+                    "entitlement claim refused: none is granted here"
+                );
             }
             StoreCall::PurchaseReward { item, cost, .. } => {
                 // The reward track state of every player is empty: no reward is offered.
@@ -1447,7 +1451,9 @@ impl SimWorld {
             return Err(ShopRefusal::RankTooLow);
         }
         if let Some(achievement) = &offer.achievement
-            && player.flow.has_achievement(&self.achievement_rules, achievement)
+            && player
+                .flow
+                .has_achievement(&self.achievement_rules, achievement)
         {
             return Err(ShopRefusal::AlreadyOwned);
         }
@@ -1613,7 +1619,10 @@ impl SimWorld {
     fn trade_of(&self, number: u64) -> Option<(u64, usize)> {
         let id = *self.economy.trades.get(&number)?;
         let session = self.economy.sessions.get(&id)?;
-        let side = session.sides.iter().position(|side| side.number == number)?;
+        let side = session
+            .sides
+            .iter()
+            .position(|side| side.number == number)?;
         Some((id, side))
     }
 
@@ -1626,12 +1635,7 @@ impl SimWorld {
             if let TradeCall::Cancel { .. } = call {
                 return;
             }
-            return self.trade_response(
-                entity,
-                call,
-                header,
-                trade_failure::TRADE_STATE_MISMATCH,
-            );
+            return self.trade_response(entity, call, header, trade_failure::TRADE_STATE_MISMATCH);
         };
         let failure_value = match call {
             TradeCall::UpdateItems { stacks, .. } => self.offer_items(id, side, stacks),
@@ -1679,11 +1683,7 @@ impl SimWorld {
 
     /// The records of `stacks` in the bag of player `entity`; `None` when one is not there,
     /// holds fewer, or is bound.
-    fn offered_records(
-        &self,
-        entity: Entity,
-        stacks: &[OfferedStack],
-    ) -> Option<Vec<ItemRecord>> {
+    fn offered_records(&self, entity: Entity, stacks: &[OfferedStack]) -> Option<Vec<ItemRecord>> {
         let gear = self.world.get::<Player>(entity)?.gear.as_ref()?;
         let mut seen = HashSet::new();
         stacks
@@ -2119,8 +2119,7 @@ mod tests {
         reset_state().write(&mut writer).expect("write");
         let bytes = writer.finish();
         assert_eq!(&bytes[..2], &[0x01, 0x2f]);
-        let state =
-            P2PTradeState::read(&mut nw_messages::wire::Reader::new(&bytes)).expect("read");
+        let state = P2PTradeState::read(&mut nw_messages::wire::Reader::new(&bytes)).expect("read");
         assert_eq!(state, reset_state());
     }
 
@@ -2213,7 +2212,11 @@ mod tests {
 
     /// The buyer's coins and tokens.
     fn wallet(world: &SimWorld, entity: Entity) -> (u64, u32) {
-        let tokens = world.content.progression.categorical(TOKENS).expect("tokens");
+        let tokens = world
+            .content
+            .progression
+            .categorical(TOKENS)
+            .expect("tokens");
         let player = world.world.get::<Player>(entity).expect("player");
         (player.coins, player.masteries.experience(tokens))
     }
@@ -2224,11 +2227,18 @@ mod tests {
         world.shop_purchase(entity, &purchase("PotionCleanseFTW", 2), NOW);
         assert_eq!(wallet(&world, entity), (400, 10));
         world.shop_purchase(entity, &purchase("PotionCleanseFTW", 1), NOW);
-        assert_eq!(wallet(&world, entity), (400, 10), "too few tokens: nothing changes");
+        assert_eq!(
+            wallet(&world, entity),
+            (400, 10),
+            "too few tokens: nothing changes"
+        );
         world.shop_purchase(entity, &purchase("NoSuchOffer", 1), NOW);
         world.shop_purchase(entity, &purchase("PotionCleanseFTW", 0), NOW);
         assert_eq!(wallet(&world, entity), (400, 10));
-        assert!(world.take_economy_jobs().is_empty(), "no cooldown, no claim");
+        assert!(
+            world.take_economy_jobs().is_empty(),
+            "no cooldown, no claim"
+        );
     }
 
     #[test]
@@ -2257,7 +2267,11 @@ mod tests {
         }];
         let (mut world, entity) = shop_world(&rows);
         world.shop_purchase(entity, &purchase("Daily", 1), NOW);
-        assert_eq!(wallet(&world, entity), (COINS, TOKENS_HELD), "nothing before the claim");
+        assert_eq!(
+            wallet(&world, entity),
+            (COINS, TOKENS_HELD),
+            "nothing before the claim"
+        );
         let jobs = world.take_economy_jobs();
         let [EconomyJob::ClaimShop { claim }] = jobs.as_slice() else {
             panic!("one claim: {jobs:?}");
@@ -2265,14 +2279,14 @@ mod tests {
         assert_eq!(claim.cooldown_ms, 86_400_000);
         assert_eq!(claim.conversion_id, "Daily");
         world.shop_claimed(claim.clone(), Ok(None));
-        assert_eq!(wallet(&world, entity), (COINS, TOKENS_HELD), "the cooldown runs");
+        assert_eq!(
+            wallet(&world, entity),
+            (COINS, TOKENS_HELD),
+            "the cooldown runs"
+        );
         world.shop_claimed(claim.clone(), Ok(Some(None)));
         assert_eq!(wallet(&world, entity), (700, 30));
-        world
-            .world
-            .get_mut::<Player>(entity)
-            .expect("player")
-            .coins = 0;
+        world.world.get_mut::<Player>(entity).expect("player").coins = 0;
         world.shop_claimed(claim.clone(), Ok(Some(Some(PREVIOUS_MS))));
         assert_eq!(
             world.take_economy_jobs(),
@@ -2313,14 +2327,30 @@ mod tests {
                 coin: OFFERED_COINS,
             },
         );
-        trade(&mut world, buyer, BUYER, |header| TradeCall::Confirm { header });
-        assert!(world.trading(BUYER), "a confirm before both locked changes nothing");
-        trade(&mut world, buyer, BUYER, |header| TradeCall::LockIn { header });
-        trade(&mut world, seller, SELLER, |header| TradeCall::LockIn { header });
-        trade(&mut world, buyer, BUYER, |header| TradeCall::Confirm { header });
+        trade(&mut world, buyer, BUYER, |header| TradeCall::Confirm {
+            header,
+        });
+        assert!(
+            world.trading(BUYER),
+            "a confirm before both locked changes nothing"
+        );
+        trade(&mut world, buyer, BUYER, |header| TradeCall::LockIn {
+            header,
+        });
+        trade(&mut world, seller, SELLER, |header| TradeCall::LockIn {
+            header,
+        });
+        trade(&mut world, buyer, BUYER, |header| TradeCall::Confirm {
+            header,
+        });
         assert_eq!(wallet(&world, buyer).0, COINS, "one confirm moves nothing");
-        trade(&mut world, seller, SELLER, |header| TradeCall::Confirm { header });
-        assert!(!world.trading(BUYER) && !world.trading(SELLER), "the trade ended");
+        trade(&mut world, seller, SELLER, |header| TradeCall::Confirm {
+            header,
+        });
+        assert!(
+            !world.trading(BUYER) && !world.trading(SELLER),
+            "the trade ended"
+        );
         assert_eq!(wallet(&world, buyer).0, COINS - OFFERED_COINS);
         let seller_coins = world.world.get::<Player>(seller).expect("seller").coins;
         assert_eq!(seller_coins, OFFERED_COINS);

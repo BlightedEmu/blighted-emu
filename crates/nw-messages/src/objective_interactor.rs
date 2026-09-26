@@ -233,7 +233,8 @@ impl ObjectiveInteractorState {
                 PROVIDER_CHILD => state.provider = Some(reader.array()?),
                 EXPIRATION_CHILD => state.expiration_time = Some(reader.u64()?),
                 MISSIONS_CHILD => {
-                    state.missions = Some(ReplicatedList::read(reader, FIELD, MissionParams::read)?);
+                    state.missions =
+                        Some(ReplicatedList::read(reader, FIELD, MissionParams::read)?);
                 }
                 _ => state.community_goals = Some(read_goals(reader)?),
             }
@@ -334,7 +335,10 @@ mod tests {
         state.write(&mut writer).expect("write");
         let bytes = writer.finish();
         let mut reader = Reader::new(&bytes);
-        assert_eq!(&ObjectiveInteractorState::read(&mut reader).expect("read"), state);
+        assert_eq!(
+            &ObjectiveInteractorState::read(&mut reader).expect("read"),
+            state
+        );
         reader.finish().expect("whole body");
         bytes
     }
@@ -385,7 +389,10 @@ mod tests {
         };
         let bytes = round_trip(&state);
         // Slot, child 2, count 1, mask 1, index 2, version flag, version `81 1a`.
-        assert_eq!(&bytes[..9], [0x01, 0x04, 0x01, 0x01, 0x02, 0x01, 0x81, 0x1a, 0x11]);
+        assert_eq!(
+            &bytes[..9],
+            [0x01, 0x04, 0x01, 0x01, 0x02, 0x01, 0x81, 0x1a, 0x11]
+        );
     }
 
     #[test]

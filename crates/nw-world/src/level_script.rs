@@ -424,7 +424,9 @@ impl SliceScript {
 
     /// The vitals row of the slice's mob, when the slice is a spawner slice.
     pub fn variant(&self) -> Option<&VitalsVariant> {
-        self.entities.iter().find_map(|entity| entity.variant.as_ref())
+        self.entities
+            .iter()
+            .find_map(|entity| entity.variant.as_ref())
     }
 
     /// The loot table of the slice's loot container, when it is one.
@@ -561,7 +563,9 @@ fn find(element: &Element, name_crc: u32, depth: usize) -> Option<&Element> {
 
 /// The pak path of hint `hint`: lower case, `/`, an editor slice as its dynamic slice.
 pub fn pak_path(hint: &str) -> String {
-    let path = hint.to_lowercase().replace(WINDOWS_SEPARATOR, &PAK_SEPARATOR.to_string());
+    let path = hint
+        .to_lowercase()
+        .replace(WINDOWS_SEPARATOR, &PAK_SEPARATOR.to_string());
     match path.strip_suffix(EDITOR_SLICE_SUFFIX) {
         Some(bare) => format!("{bare}{DYNAMIC_SLICE_SUFFIX}"),
         None => path,
@@ -620,7 +624,10 @@ fn reference(element: &Element, names: &Names) -> Result<Option<u64>, LevelScrip
 /// The ids of the entity references of list `list`.
 fn references(list: Option<&Element>, names: &Names) -> Result<Vec<u64>, LevelScriptError> {
     let mut ids = Vec::new();
-    for entry in list.map(|list| list.children.as_slice()).unwrap_or_default() {
+    for entry in list
+        .map(|list| list.children.as_slice())
+        .unwrap_or_default()
+    {
         ids.extend(reference(entry, names)?);
     }
     Ok(ids)
@@ -677,7 +684,10 @@ fn action(class: &Element, names: &Names) -> Result<Option<Action>, LevelScriptE
         action_type::ENTITY_EVENT => {
             let data = class
                 .child(names.event_data)
-                .ok_or(LevelScriptError::Missing("entity event action", "m_eventData"))?;
+                .ok_or(LevelScriptError::Missing(
+                    "entity event action",
+                    "m_eventData",
+                ))?;
             let Some(entity) = data
                 .child(names.entity_ref)
                 .map(|holder| reference(holder, names))
@@ -870,9 +880,7 @@ pub fn alias_slices(root: &Element) -> Result<Vec<AliasSlice>, LevelScriptError>
         if element.name_crc == Some(slices_crc) {
             for entry in &element.children {
                 if let Some(slice) = asset(entry.child(slice_crc))? {
-                    let percent = entry
-                        .child(percent_crc)
-                        .map_or(Ok(0), Element::as_u32)?;
+                    let percent = entry.child(percent_crc).map_or(Ok(0), Element::as_u32)?;
                     found.push(AliasSlice { slice, percent });
                 }
             }
@@ -927,14 +935,23 @@ mod tests {
     fn asset_value(name: &str, guid: [u8; GUID_LEN], hint: &str) -> Element {
         let mut bytes = guid.to_vec();
         bytes.resize(ASSET_HINT_LENGTH_AT, 0);
-        bytes.extend(u64::try_from(hint.len()).expect("hint length").to_be_bytes());
+        bytes.extend(
+            u64::try_from(hint.len())
+                .expect("hint length")
+                .to_be_bytes(),
+        );
         bytes.extend(hint.as_bytes());
         value(name, &bytes)
     }
 
     fn transform(parent: u64, translation: [f32; 3]) -> Element {
         let mut floats = Vec::new();
-        for column in [[1.0_f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], translation] {
+        for column in [
+            [1.0_f32, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            translation,
+        ] {
             for cell in column {
                 floats.extend(cell.to_be_bytes());
             }
@@ -1073,7 +1090,10 @@ mod tests {
                         vec![pointer(typed(
                             named(
                                 "element",
-                                vec![base(TIME_LIMIT_S, true), value("m_eventId", EVENT.as_bytes())],
+                                vec![
+                                    base(TIME_LIMIT_S, true),
+                                    value("m_eventId", EVENT.as_bytes()),
+                                ],
                             ),
                             objective_type::ENCOUNTER_EVENT,
                         ))],
@@ -1108,7 +1128,11 @@ mod tests {
                 vec![transform(NO_ENTITY, [0.0; 3]), manager, volume],
             ),
             entity(WAVE, "Wave_01", vec![transform(ENCOUNTER, [0.0; 3]), wave]),
-            entity(PHASE, "Phase 1 Intro", vec![transform(WAVE, [0.0; 3]), phase]),
+            entity(
+                PHASE,
+                "Phase 1 Intro",
+                vec![transform(WAVE, [0.0; 3]), phase],
+            ),
             entity(LOCATION, "Location", vec![transform(ENCOUNTER, OFFSET)]),
         ])
     }
@@ -1129,7 +1153,10 @@ mod tests {
                 stages: vec![WAVE],
             }
         );
-        let wave = script.entity(WAVE).and_then(|e| e.stage.clone()).expect("wave");
+        let wave = script
+            .entity(WAVE)
+            .and_then(|e| e.stage.clone())
+            .expect("wave");
         assert!(wave.child_stages_optional && !wave.user_wave);
         assert_eq!(wave.stages, [PHASE]);
         let boss = AssetRef {
@@ -1160,7 +1187,10 @@ mod tests {
             }]
         );
         assert_eq!(wave.end_actions, [Action::KillSpawns]);
-        let phase = script.entity(PHASE).and_then(|e| e.stage.clone()).expect("phase");
+        let phase = script
+            .entity(PHASE)
+            .and_then(|e| e.stage.clone())
+            .expect("phase");
         assert_eq!(
             phase.objectives[0],
             Objective {
@@ -1221,8 +1251,8 @@ mod tests {
             ),
             GATHERABLE_CONTROLLER_TYPE,
         );
-        let script = slice_script(&slice(vec![entity(1, "Spawner", vec![variant, chest])]))
-            .expect("script");
+        let script =
+            slice_script(&slice(vec![entity(1, "Spawner", vec![variant, chest])])).expect("script");
         assert_eq!(
             script.variant(),
             Some(&VitalsVariant {
@@ -1266,7 +1296,10 @@ mod tests {
             "root",
             vec![named(
                 "list",
-                vec![named("element", vec![named("slices", vec![entry(1, 100), entry(2, 50)])])],
+                vec![named(
+                    "element",
+                    vec![named("slices", vec![entry(1, 100), entry(2, 50)])],
+                )],
             )],
         );
         let slices = alias_slices(&root).expect("alias");

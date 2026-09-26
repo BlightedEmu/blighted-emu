@@ -71,10 +71,12 @@ impl StartingRanks {
                 .iter()
                 .flat_map(|table| &table.rows)
                 .map(|row| {
-                    let columns = tradeskill_columns(row).into_iter().filter_map(|(id, rank)| {
-                        let rank = u16::try_from(rank?).ok().filter(|rank| *rank > 0)?;
-                        Some((id.to_owned(), rank))
-                    });
+                    let columns = tradeskill_columns(row)
+                        .into_iter()
+                        .filter_map(|(id, rank)| {
+                            let rank = u16::try_from(rank?).ok().filter(|rank| *rank > 0)?;
+                            Some((id.to_owned(), rank))
+                        });
                     let ranks = columns
                         .chain(pairs(row.categorical_progression.as_deref()))
                         .chain(pairs(row.weapon_masteries.as_deref()))

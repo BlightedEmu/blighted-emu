@@ -295,7 +295,10 @@ impl SummonCancelReason {
 
     /// The reason of byte `value`.
     pub fn of(value: u8) -> Option<Self> {
-        Self::ALL.iter().copied().find(|reason| *reason as u8 == value)
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|reason| *reason as u8 == value)
     }
 }
 
@@ -505,37 +508,33 @@ impl MountState {
         let owner = self.owner_children();
         let remote = self.remote_children();
         let bit = |on: bool, bit: u8| if on { bit } else { 0 };
-        writer.u8(
-            bit(owner != 0, SLOT_1_BIT)
-                | bit(self.mount_id.is_some(), SLOT_2_BIT)
-                | bit(remote != 0, SLOT_3_BIT),
-        );
+        writer.u8(bit(owner != 0, SLOT_1_BIT)
+            | bit(self.mount_id.is_some(), SLOT_2_BIT)
+            | bit(remote != 0, SLOT_3_BIT));
         if owner != 0 {
             write_children(writer, owner, SLOT_1_CHILDREN, |writer, child| {
                 self.write_owner_child(writer, child)
             })?;
         }
         if let Some(mount_id) = self.mount_id {
-            write_known_children(
-                writer,
-                1 << CHILD_MOUNT_ID,
-                SLOT_2_CHILDREN,
-                |writer, _| {
-                    writer.u32(mount_id);
-                },
-            );
+            write_known_children(writer, 1 << CHILD_MOUNT_ID, SLOT_2_CHILDREN, |writer, _| {
+                writer.u32(mount_id);
+            });
         }
         if remote != 0 {
-            write_known_children(writer, remote, SLOT_3_CHILDREN, |writer, child| {
-                match child {
+            write_known_children(
+                writer,
+                remote,
+                SLOT_3_CHILDREN,
+                |writer, child| match child {
                     CHILD_REMOTE_FLAGS => {
                         self.remote_flags.map(|flags| writer.u8(flags.0));
                     }
                     CHILD_REMOTE_DYE..=u8::MAX => {
                         self.remote_dye.map(|dye| writer.bytes(&dye));
                     }
-                }
-            });
+                },
+            );
         }
         Ok(())
     }
@@ -555,7 +554,8 @@ impl MountState {
                 self.server_forcing_walk.map(|walk| writer.boolean(walk));
             }
             CHILD_EXCLUSION_VOLUME => {
-                self.in_exclusion_volume.map(|inside| writer.boolean(inside));
+                self.in_exclusion_volume
+                    .map(|inside| writer.boolean(inside));
             }
             CHILD_AUTHORIZATION => {
                 self.summon_authorization.map(|authorization| {
@@ -1171,7 +1171,10 @@ mod tests {
         ];
         let read = state(&card);
         assert_eq!(read.mounted, Some(false));
-        assert_eq!(read.summon_authorization, Some(SummonAuthorization::default()));
+        assert_eq!(
+            read.summon_authorization,
+            Some(SummonAuthorization::default())
+        );
         assert_eq!(read.persistent, None);
         assert_eq!(read.stamina, Some(100.0));
         assert_eq!(read.regen_delay, Some(0.0));
@@ -1188,7 +1191,9 @@ mod tests {
         card.extend([0x00, 0x00, 0x01]);
         card.extend((TIME_NS + 1).to_be_bytes());
         card.extend([0x42, 0xc8, 0x00, 0x00, 0x3f, 0x42, 0xc8, 0x00, 0x00]);
-        card.extend([0x00, 0x00, 0x00, 0x00, 0x41, 0x20, 0x00, 0x00, 0x41, 0xa0, 0x00, 0x00]);
+        card.extend([
+            0x00, 0x00, 0x00, 0x00, 0x41, 0x20, 0x00, 0x00, 0x41, 0xa0, 0x00, 0x00,
+        ]);
         card.extend([0x3f, 0x80, 0x00, 0x00, 0x3f, 0x80, 0x00, 0x00, 0x01]);
         card.extend(LION_BASIC.to_be_bytes());
         let read = state(&card);
@@ -1210,7 +1215,10 @@ mod tests {
     fn the_retail_deltas_read() {
         // Stamina alone (a dash), the regen delay alone (a continued child byte), the mount up,
         // the dismount, and another player's card and flags.
-        assert_eq!(state(&[0x02, 0x40, 0x42, 0xc6, 0x00, 0x00]).stamina, Some(99.0));
+        assert_eq!(
+            state(&[0x02, 0x40, 0x42, 0xc6, 0x00, 0x00]).stamina,
+            Some(99.0)
+        );
         assert_eq!(
             state(&[0x02, 0x80, 0x02, 0x3f, 0x80, 0x00, 0x00]).regen_delay,
             Some(1.0)
@@ -1227,14 +1235,23 @@ mod tests {
         down.extend([0x00; 9]);
         let down = state(&down);
         assert_eq!(down.mounted, Some(false));
-        assert_eq!(down.summon_authorization, Some(SummonAuthorization::default()));
+        assert_eq!(
+            down.summon_authorization,
+            Some(SummonAuthorization::default())
+        );
         let remote = state(&[
             0x0c, 0x01, 0xde, 0x1f, 0xa3, 0x00, 0x03, 0x04, 0x19, 0x25, 0x19, 0x25,
         ]);
         assert_eq!(remote.mount_id, Some(BEAR_PREORDER));
-        assert_eq!(remote.remote_flags, Some(RemoteFlags(RemoteFlags::STAMINA_FULL)));
+        assert_eq!(
+            remote.remote_flags,
+            Some(RemoteFlags(RemoteFlags::STAMINA_FULL))
+        );
         assert_eq!(remote.remote_dye, Some([0x19, 0x25, 0x19, 0x25]));
-        assert_eq!(state(&[0x08, 0x01, 0x09]).remote_flags, Some(RemoteFlags(0x09)));
+        assert_eq!(
+            state(&[0x08, 0x01, 0x09]).remote_flags,
+            Some(RemoteFlags(0x09))
+        );
     }
 
     #[test]
@@ -1409,7 +1426,10 @@ mod tests {
             assert_eq!(expected.encode(), bytes);
             assert_eq!(expected.type_index(), type_index);
         }
-        assert_eq!(MountClientMsg::decode(SUMMON_PENDING_TYPE_INDEX, &HEADER), None);
+        assert_eq!(
+            MountClientMsg::decode(SUMMON_PENDING_TYPE_INDEX, &HEADER),
+            None
+        );
         assert!(matches!(
             MountClientMsg::decode(DISMISS_MOUNT_TYPE_INDEX, &body(&[0x40, 0x00])),
             Some(Err(_))
@@ -1460,7 +1480,10 @@ mod tests {
                 },
                 [&TIME_NS.to_be_bytes()[..], &[0x01, 0x01][..]].concat(),
             ),
-            (MountServerMsg::CancelScheduledDismount { header }, Vec::new()),
+            (
+                MountServerMsg::CancelScheduledDismount { header },
+                Vec::new(),
+            ),
             (MountServerMsg::TrampleNotification { header }, Vec::new()),
             (
                 MountServerMsg::RenameNotification {
@@ -1505,8 +1528,14 @@ mod tests {
         assert_eq!(DismountReason::of(18), None);
         assert!(DismountReason::Voluntary.is_voluntary());
         assert!(!DismountReason::DeepWater.is_voluntary());
-        assert_eq!(SummonCancelReason::of(1), Some(SummonCancelReason::PlayerCancelled));
-        assert_eq!(SummonCancelReason::of(25), Some(SummonCancelReason::Swimming));
+        assert_eq!(
+            SummonCancelReason::of(1),
+            Some(SummonCancelReason::PlayerCancelled)
+        );
+        assert_eq!(
+            SummonCancelReason::of(25),
+            Some(SummonCancelReason::Swimming)
+        );
         assert_eq!(SummonCancelReason::of(10), None);
     }
 

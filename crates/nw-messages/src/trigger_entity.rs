@@ -89,7 +89,11 @@ mod tests {
     const BODY_LEN: usize = 16;
 
     fn spearbearer() -> TriggerAddress {
-        TriggerAddress::in_slice(SPEARBEARER_MAIN, SPEARBEARER_TRIGGERS, DEACTIVATE_VISIBILITY)
+        TriggerAddress::in_slice(
+            SPEARBEARER_MAIN,
+            SPEARBEARER_TRIGGERS,
+            DEACTIVATE_VISIBILITY,
+        )
     }
 
     #[test]

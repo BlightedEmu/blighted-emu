@@ -238,13 +238,7 @@ impl SimWorld {
     /// object in reach whose game event its quest counts takes the hits, and a broken one is
     /// that game event for the quest. The client is not told: the server does not know the
     /// object's entity id (Unknown; retail sent 2071 and 2724 to it).
-    fn strike_quest_objects(
-        &mut self,
-        entity: Entity,
-        strike: Strike,
-        reach_m: f32,
-        now_ms: u64,
-    ) {
+    fn strike_quest_objects(&mut self, entity: Entity, strike: Strike, reach_m: f32, now_ms: u64) {
         let Some(at) = self
             .world
             .get::<Body>(entity)

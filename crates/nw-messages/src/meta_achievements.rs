@@ -332,7 +332,8 @@ mod tests {
     /// Retail 1679 of claim_achievement_titles, after the header: latest
     /// `FirstDiscoverableRecipeFound` and `Quest_Windsward_Mercy`, nearest `CharacterProgression3`
     /// at 25 and `POIVisitedCount2` at 41, and the first 2 of the 27 completed.
-    const RETAIL_SUMMARY: &str = "0293052da65c14093d02fedc041f00000019a0ab72bd00000029025c14093dd8d60a49";
+    const RETAIL_SUMMARY: &str =
+        "0293052da65c14093d02fedc041f00000019a0ab72bd00000029025c14093dd8d60a49";
     /// Retail 3800 of `Places_Discovered` cut to its first two entries, and the 331 of the S8
     /// ledger with its last field zero (as five other characters sent it).
     const RETAIL_PROGRESS: &str = "0217d4ba960000000039a2230700000014013ecfe71e";
@@ -404,7 +405,10 @@ mod tests {
         };
         let bytes = notice.encode().expect("encode");
         assert_eq!(bytes, with_header(&hex(RETAIL_NOTICE)));
-        assert_eq!(MetaProgressChangedMsg::decode(&bytes).expect("decode"), notice);
+        assert_eq!(
+            MetaProgressChangedMsg::decode(&bytes).expect("decode"),
+            notice
+        );
         let of = MetaProgressChangedMsg::of(7, notice.entry);
         assert_eq!(
             of.header.target.wrapping_sub(of.header.entity),
@@ -419,10 +423,9 @@ mod tests {
             .expect("reads");
         assert_eq!(summary, MetaAchievementRequest::Summary { header: HEADER });
         let tab = with_header(&[0xa5, 0xaa, 0x3c, 0x61]);
-        let category =
-            MetaAchievementRequest::decode(REQUEST_CATEGORY_PROGRESS_TYPE_INDEX, &tab)
-                .expect("a call")
-                .expect("reads");
+        let category = MetaAchievementRequest::decode(REQUEST_CATEGORY_PROGRESS_TYPE_INDEX, &tab)
+            .expect("a call")
+            .expect("reads");
         assert_eq!(
             category,
             MetaAchievementRequest::CategoryProgress {

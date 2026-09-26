@@ -136,9 +136,9 @@ impl TitleRules {
                     (progress.rank)(progression.as_str()) >= *rank
                 }
                 TitleRequirement::Achievement(id) => (progress.achievement)(id.as_str()),
-                TitleRequirement::MetaAchievement(ids) => {
-                    ids.iter().any(|id| (progress.meta_achievement)(id.as_str()))
-                }
+                TitleRequirement::MetaAchievement(ids) => ids
+                    .iter()
+                    .any(|id| (progress.meta_achievement)(id.as_str())),
                 TitleRequirement::Granted => false,
             })
     }

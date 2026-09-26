@@ -241,9 +241,7 @@ impl ItemRules {
             .iter()
             .map(|row| {
                 let potency = row.potency.unwrap_or(PLAIN_POTENCY);
-                let duration_override = row
-                    .duration_override_s
-                    .filter(|seconds| *seconds > 0.0);
+                let duration_override = row.duration_override_s.filter(|seconds| *seconds > 0.0);
                 let effects = row
                     .add_status_effects
                     .as_deref()
@@ -296,7 +294,10 @@ impl ItemRules {
                 .items
                 .iter()
                 .filter_map(|row| {
-                    Some((row.item_id.to_lowercase(), row.stats_ref.as_ref()?.to_lowercase()))
+                    Some((
+                        row.item_id.to_lowercase(),
+                        row.stats_ref.as_ref()?.to_lowercase(),
+                    ))
                 })
                 .collect(),
             consumables,
@@ -496,7 +497,10 @@ mod tests {
             ],
             "the attribute effect too"
         );
-        assert_eq!((food.potency, food.duration_override_ms), (PLAIN_POTENCY, None));
+        assert_eq!(
+            (food.potency, food.duration_override_ms),
+            (PLAIN_POTENCY, None)
+        );
         let serum = rules.consumable(SERUM).expect("serum");
         assert_eq!(serum.duration_override_ms, Some(25_000));
     }
@@ -515,7 +519,11 @@ mod tests {
         );
         assert_eq!(serum.stamina, SERUM_STAMINA);
         let food = rules.consumable(FOOD).expect("food by its stats");
-        assert_eq!(food.effects.len(), 1, "the attribute effect changes no vital");
+        assert_eq!(
+            food.effects.len(),
+            1,
+            "the attribute effect changes no vital"
+        );
         assert_eq!(
             food.effects[0].ticks,
             Some(Ticks {

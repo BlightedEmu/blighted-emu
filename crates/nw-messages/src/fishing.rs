@@ -576,9 +576,14 @@ mod tests {
         assert_eq!(FishingState::FishingEnded.value(), 20);
         assert_eq!(FishingState::of(21), None);
         for value in 0..21 {
-            assert_eq!(FishingState::of(value).map(FishingState::value), Some(value));
+            assert_eq!(
+                FishingState::of(value).map(FishingState::value),
+                Some(value)
+            );
         }
-        let unknown = [0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16];
+        let unknown = [
+            0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16,
+        ];
         assert!(FishingComponentState::read(&mut Reader::new(&unknown)).is_err());
     }
 
@@ -615,8 +620,8 @@ mod tests {
 
     #[test]
     fn the_retail_server_calls_read_and_write_back() {
-        let catch = FishingServerMsg::decode(CATCH_DATA_TYPE_INDEX, &body(&RETAIL_CATCH))
-            .expect("reads");
+        let catch =
+            FishingServerMsg::decode(CATCH_DATA_TYPE_INDEX, &body(&RETAIL_CATCH)).expect("reads");
         let FishingServerMsg::CatchData { catch: fish, .. } = &catch else {
             panic!("a catch");
         };

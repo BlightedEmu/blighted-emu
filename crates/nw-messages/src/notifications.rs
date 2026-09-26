@@ -344,7 +344,10 @@ mod tests {
         // The retail 63-byte body of these two texts.
         assert_eq!(body.len(), 63);
         assert_eq!(&body[20..26], [0x02, 0xc7, 0x93, 0x66, 0x37, 0x0c]);
-        assert_eq!(SendNotificationWithReplacementsMsg::decode(&body), Ok(message));
+        assert_eq!(
+            SendNotificationWithReplacementsMsg::decode(&body),
+            Ok(message)
+        );
         let mut long = body;
         long.push(0);
         assert!(SendNotificationWithReplacementsMsg::decode(&long).is_err());
@@ -367,6 +370,9 @@ mod tests {
             NotificationSentMsg::decode(&sent.encode().expect("encode")),
             Ok(sent)
         );
-        assert_eq!(SendNotificationMsg::to(5, PLACE_CAMP).header, notification_header(5));
+        assert_eq!(
+            SendNotificationMsg::to(5, PLACE_CAMP).header,
+            notification_header(5)
+        );
     }
 }

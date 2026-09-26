@@ -197,12 +197,21 @@ pub(crate) async fn save_character_arena(
     .bind(character_id)
     .bind(id_column(arena.dungeon_cooldown_since_2000_ns))
     .bind(id_column(arena.solo_trial_cooldown_since_2000_ns))
-    .bind(arena.ranks.iter().map(|rank| i16::from(*rank)).collect::<Vec<_>>())
+    .bind(
+        arena
+            .ranks
+            .iter()
+            .map(|rank| i16::from(*rank))
+            .collect::<Vec<_>>(),
+    )
     .bind(arena.last_dungeon.map(|id| id.to_vec()))
     .bind(arena.last_mutated_dungeon.map(|id| id.to_vec()))
     .bind(to_column(arena.base_entered, "base_entered")?)
     .bind(to_column(arena.mutated_entered, "mutated_entered")?)
-    .bind(to_column(arena.group_trials_entered, "group_trials_entered")?)
+    .bind(to_column(
+        arena.group_trials_entered,
+        "group_trials_entered",
+    )?)
     .bind(id_column(arena.next_base_refresh_ns))
     .bind(id_column(arena.next_mutated_refresh_ns))
     .bind(id_column(arena.next_group_trial_refresh_ns))
@@ -250,7 +259,11 @@ mod tests {
 
     #[test]
     fn a_row_reads_every_value_and_its_stay() {
-        let bits = [7_700.5_f32.to_bits(), 7_300.25_f32.to_bits(), 120.0_f32.to_bits()];
+        let bits = [
+            7_700.5_f32.to_bits(),
+            7_300.25_f32.to_bits(),
+            120.0_f32.to_bits(),
+        ];
         let instance = Uuid::from_u128(9);
         let arena = arena_of(ArenaColumns {
             stay_instance: Some(instance),

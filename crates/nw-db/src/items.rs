@@ -290,24 +290,26 @@ pub async fn character_items(
     }
     let rows: Vec<(ItemRow, RollColumns)> =
         sqlx::query_as::<_, ItemRowWithRolls>(SELECT_CHARACTER_ITEMS)
-    .bind(character_id)
-    .fetch_all(world)
-    .await?
-    .into_iter()
-    .map(split_item_row)
-    .collect();
+            .bind(character_id)
+            .fetch_all(world)
+            .await?
+            .into_iter()
+            .map(split_item_row)
+            .collect();
     Ok(Some(
         rows.into_iter()
-            .filter_map(|((place, slot, item_id, quantity, instance, locked), rolls)| {
-                Some(SavedItem {
-                    item_id,
-                    quantity: u32::try_from(quantity).ok()?,
-                    place: SavedPlace::of_columns(place, slot)?,
-                    instance,
-                    locked,
-                    rolls: SavedItemRolls::of_columns(rolls),
-                })
-            })
+            .filter_map(
+                |((place, slot, item_id, quantity, instance, locked), rolls)| {
+                    Some(SavedItem {
+                        item_id,
+                        quantity: u32::try_from(quantity).ok()?,
+                        place: SavedPlace::of_columns(place, slot)?,
+                        instance,
+                        locked,
+                        rolls: SavedItemRolls::of_columns(rolls),
+                    })
+                },
+            )
             .collect(),
     ))
 }
@@ -324,12 +326,12 @@ pub async fn character_inventory(
 ) -> Result<SavedInventory, DbError> {
     let stored: Vec<(StoredRow, RollColumns)> =
         sqlx::query_as::<_, StoredRowWithRolls>(SELECT_STORAGE_ITEMS)
-    .bind(character_id)
-    .fetch_all(world)
-    .await?
-    .into_iter()
-    .map(split_stored_row)
-    .collect();
+            .bind(character_id)
+            .fetch_all(world)
+            .await?
+            .into_iter()
+            .map(split_stored_row)
+            .collect();
     let loadouts: Vec<LoadoutRow> = sqlx::query_as(
         "SELECT loadout_index, name, attributes FROM character_loadout WHERE character_id = $1 \
          ORDER BY loadout_index",
@@ -347,17 +349,19 @@ pub async fn character_inventory(
     Ok(SavedInventory {
         stored: stored
             .into_iter()
-            .filter_map(|((storage, slot, item_id, quantity, instance, locked), rolls)| {
-                Some(SavedStoredItem {
-                    storage,
-                    slot: u16::try_from(slot).ok()?,
-                    item_id,
-                    quantity: u32::try_from(quantity).ok()?,
-                    instance,
-                    locked,
-                    rolls: SavedItemRolls::of_columns(rolls),
-                })
-            })
+            .filter_map(
+                |((storage, slot, item_id, quantity, instance, locked), rolls)| {
+                    Some(SavedStoredItem {
+                        storage,
+                        slot: u16::try_from(slot).ok()?,
+                        item_id,
+                        quantity: u32::try_from(quantity).ok()?,
+                        instance,
+                        locked,
+                        rolls: SavedItemRolls::of_columns(rolls),
+                    })
+                },
+            )
             .collect(),
         loadouts: loadouts
             .into_iter()
@@ -429,22 +433,22 @@ pub async fn save_character_items(
         let (place, slot) = item.place.columns();
         let (gear_score, durability) = item.rolls.numbers();
         sqlx::query(INSERT_CHARACTER_ITEM)
-        .bind(character_id)
-        .bind(place)
-        .bind(slot)
-        .bind(&item.item_id)
-        .bind(i64::from(item.quantity))
-        .bind(item.instance)
-        .bind(item.locked)
-        .bind(gear_score)
-        .bind(durability)
-        .bind(&item.rolls.perks)
-        .bind(item.rolls.bound)
-        .bind(dye_column(item.rolls.dye))
-        .bind(i64::from(item.rolls.appearance))
-        .bind(dye_column(item.rolls.skin_dye))
-        .execute(&mut *transaction)
-        .await?;
+            .bind(character_id)
+            .bind(place)
+            .bind(slot)
+            .bind(&item.item_id)
+            .bind(i64::from(item.quantity))
+            .bind(item.instance)
+            .bind(item.locked)
+            .bind(gear_score)
+            .bind(durability)
+            .bind(&item.rolls.perks)
+            .bind(item.rolls.bound)
+            .bind(dye_column(item.rolls.dye))
+            .bind(i64::from(item.rolls.appearance))
+            .bind(dye_column(item.rolls.skin_dye))
+            .execute(&mut *transaction)
+            .await?;
     }
     save_inventory(&mut transaction, character_id, inventory).await?;
     transaction.commit().await?;
@@ -460,22 +464,22 @@ async fn save_inventory(
     for item in &inventory.stored {
         let (gear_score, durability) = item.rolls.numbers();
         sqlx::query(INSERT_STORAGE_ITEM)
-        .bind(character_id)
-        .bind(item.storage)
-        .bind(i64::from(item.slot))
-        .bind(&item.item_id)
-        .bind(i64::from(item.quantity))
-        .bind(item.instance)
-        .bind(item.locked)
-        .bind(gear_score)
-        .bind(durability)
-        .bind(&item.rolls.perks)
-        .bind(item.rolls.bound)
-        .bind(dye_column(item.rolls.dye))
-        .bind(i64::from(item.rolls.appearance))
-        .bind(dye_column(item.rolls.skin_dye))
-        .execute(&mut **transaction)
-        .await?;
+            .bind(character_id)
+            .bind(item.storage)
+            .bind(i64::from(item.slot))
+            .bind(&item.item_id)
+            .bind(i64::from(item.quantity))
+            .bind(item.instance)
+            .bind(item.locked)
+            .bind(gear_score)
+            .bind(durability)
+            .bind(&item.rolls.perks)
+            .bind(item.rolls.bound)
+            .bind(dye_column(item.rolls.dye))
+            .bind(i64::from(item.rolls.appearance))
+            .bind(dye_column(item.rolls.skin_dye))
+            .execute(&mut **transaction)
+            .await?;
     }
     for loadout in &inventory.loadouts {
         sqlx::query(
@@ -702,10 +706,15 @@ mod tests {
             save_character_items(pool, character, &kit(), &inventory(), TAKEN_AT_MS)
                 .await
                 .expect("save");
-            let older =
-                save_character_items(pool, character, &[], &SavedInventory::default(), TAKEN_AT_MS)
-                    .await
-                    .expect("save");
+            let older = save_character_items(
+                pool,
+                character,
+                &[],
+                &SavedInventory::default(),
+                TAKEN_AT_MS,
+            )
+            .await
+            .expect("save");
             let emptied = save_character_items(
                 pool,
                 character,

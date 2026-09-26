@@ -312,9 +312,7 @@ impl SlayerTrack {
     pub(super) fn record(&mut self, record: SlayerRecord, table: &PlayerSequences) {
         self.newest_frame_s = record.frame_s;
         self.sequence_s += record.frame_s;
-        let stance = record
-            .weapon
-            .and_then(|weapon| table.stance(weapon.stance));
+        let stance = record.weapon.and_then(|weapon| table.stance(weapon.stance));
         let drawn = record.weapon.is_some_and(|weapon| weapon.drawn);
         let upper = self.upper_slots(&record, stance, drawn);
         let alt = drawn && record.intent.is_some_and(|intent| intent.block);
@@ -414,9 +412,13 @@ impl SlayerTrack {
         );
         let state = |play: StatePlay| Pending::State(play.state, play.sequence);
         let keyed = if dodge {
-            stance.and_then(|stance| stance.dodge?.of(direction)).map(state)
+            stance
+                .and_then(|stance| stance.dodge?.of(direction))
+                .map(state)
         } else if jump {
-            stance.and_then(|stance| stance.jump?.of(direction)).map(state)
+            stance
+                .and_then(|stance| stance.jump?.of(direction))
+                .map(state)
         } else {
             None
         };
@@ -467,11 +469,13 @@ impl SlayerTrack {
         } else if !alt && was_alt && record.intent.is_some() {
             stance.alt_end
         } else if drawn && !was_drawn {
-            stance.draw.map(|draw| nw_content::player_sequences::SlotsChange {
-                second_state: Some(draw.state),
-                second_sequence: Some(draw.sequence),
-                ..Default::default()
-            })
+            stance
+                .draw
+                .map(|draw| nw_content::player_sequences::SlotsChange {
+                    second_state: Some(draw.state),
+                    second_sequence: Some(draw.sequence),
+                    ..Default::default()
+                })
         } else {
             None
         })?;
@@ -508,7 +512,6 @@ impl SlayerTrack {
         }
         slots_of(stance.alt_fire?, record.counter).map(Shot::Aimed)
     }
-
 
     /// Moves on to the tick whose own state is numbered `number` at state time `state_ms`: its
     /// slayer state is a newly started one, else the server's follow-up, else the last change once
@@ -660,9 +663,7 @@ fn merge(older: UpperSlots, newer: UpperSlots) -> UpperSlots {
 #[cfg(test)]
 mod tests {
     use nw_content::player_attacks::stance_key;
-    use nw_content::player_sequences::{
-        AltMoves, Directional, DrawnMoves, FollowUp, SlotsChange,
-    };
+    use nw_content::player_sequences::{AltMoves, Directional, DrawnMoves, FollowUp, SlotsChange};
 
     use super::*;
 
@@ -865,10 +866,16 @@ mod tests {
         let mut track = spawned();
         let still = Intent::default();
         track.record(keyed(0x6ba, still, PRESS, GREATSWORD), &table);
-        assert_eq!(own_state(&mut track, 0x6ba).state, None, "nothing at the press");
+        assert_eq!(
+            own_state(&mut track, 0x6ba).state,
+            None,
+            "nothing at the press"
+        );
         track.record(keyed(0x6bb, still, HELD, GREATSWORD), &table);
         track.record(keyed(0x6bd, still, RELEASE, GREATSWORD), &table);
-        let light = own_state(&mut track, 0x6bd).state.expect("the light attack");
+        let light = own_state(&mut track, 0x6bd)
+            .state
+            .expect("the light attack");
         assert_eq!(
             (light.state, light.started, light.sequence),
             (None, 0x6bd, LIGHT)
@@ -919,10 +926,7 @@ mod tests {
         let after = own_state(&mut track, 0x6be)
             .state
             .expect("the attack stays");
-        assert_eq!(
-            after.sequence, LIGHT,
-            "a draw after the tap is not a walk"
-        );
+        assert_eq!(after.sequence, LIGHT, "a draw after the tap is not a walk");
     }
 
     #[test]
@@ -1004,7 +1008,12 @@ mod tests {
         track.record(keyed(0x54b0, Intent::default(), HELD, BLUNDERBUSS), &table);
         let end = own_state(&mut track, 0x54b0).slots.expect("the end");
         assert_eq!(
-            (end.third.state, end.third.started, end.third.sequence, end.marker),
+            (
+                end.third.state,
+                end.third.started,
+                end.third.sequence,
+                end.marker
+            ),
             (Some(0), Some(0x54b0), Some(0), Some(0))
         );
         let mut sheathed = spawned();
@@ -1015,7 +1024,11 @@ mod tests {
             },
             &table,
         );
-        assert_eq!(own_state(&mut sheathed, 5).slots, None, "no weapon in the hand");
+        assert_eq!(
+            own_state(&mut sheathed, 5).slots,
+            None,
+            "no weapon in the hand"
+        );
     }
 
     #[test]
@@ -1028,11 +1041,17 @@ mod tests {
         let mut track = spawned();
         track.record(keyed(0x54ad, aim, HELD, BLUNDERBUSS), &table);
         let own = own_state(&mut track, 0x54ad).slots.expect("the aim");
-        let remote = track.remote_upper().expect("kept after the own state took it");
+        let remote = track
+            .remote_upper()
+            .expect("kept after the own state took it");
         assert_eq!(remote.slots, own);
         assert!(remote.after_state, "the aim came after the newest state");
         own_state(&mut track, 0x54ad);
-        assert_eq!(track.remote_upper().map(|upper| upper.slots), Some(own), "the echo");
+        assert_eq!(
+            track.remote_upper().map(|upper| upper.slots),
+            Some(own),
+            "the echo"
+        );
         own_state(&mut track, 0x54ad);
         assert_eq!(track.remote_upper(), None, "the echo is over");
         track.record(attack_record(0x54b0), &table);
@@ -1066,7 +1085,12 @@ mod tests {
         track.record(gun(0x5551, PRESS, false), &table);
         let shot = own_state(&mut track, 0x5551).slots.expect("the aimed shot");
         assert_eq!(
-            (shot.second.state, shot.second.started, shot.second.sequence, shot.marker),
+            (
+                shot.second.state,
+                shot.second.started,
+                shot.second.sequence,
+                shot.marker
+            ),
             (None, None, Some(SHOT_SEQUENCE), Some(SHOT_MARKER)),
             "retail `18=5e 48=29`: child 18 alone in the second slot"
         );
@@ -1075,17 +1099,27 @@ mod tests {
         track.record(gun(0x5553, PRESS, true), &table);
         assert_eq!(own_state(&mut track, 0x5553).slots, None, "empty: nothing");
         track.record(gun(0x5554, RELEASE, false), &table);
-        assert_eq!(own_state(&mut track, 0x5554).slots, None, "a load is no reload");
+        assert_eq!(
+            own_state(&mut track, 0x5554).slots,
+            None,
+            "a load is no reload"
+        );
         track.record(gun(0x557a, PRESS, false), &table);
         let reload = own_state(&mut track, 0x557a).slots.expect("the reload");
         assert_eq!(
-            (reload.second.state, reload.second.started, reload.second.sequence),
+            (
+                reload.second.state,
+                reload.second.started,
+                reload.second.sequence
+            ),
             (Some(RELOAD_STATE), Some(0x557a), Some(RELOAD_SEQUENCE))
         );
         own_state(&mut track, 0x557a);
         track.record(gun(0x557b, RELEASE, false), &table);
         assert_eq!(
-            own_state(&mut track, 0x557b).state.map(|state| state.started),
+            own_state(&mut track, 0x557b)
+                .state
+                .map(|state| state.started),
             None,
             "the reload's release starts no attack"
         );
@@ -1094,7 +1128,11 @@ mod tests {
         assert_eq!(again.second.sequence, Some(SHOT_SEQUENCE));
         let mut hip = spawned();
         hip.record(keyed(0x5600, Intent::default(), PRESS, BLUNDERBUSS), &table);
-        assert_eq!(own_state(&mut hip, 0x5600).slots, None, "no aimed shot from the hip");
+        assert_eq!(
+            own_state(&mut hip, 0x5600).slots,
+            None,
+            "no aimed shot from the hip"
+        );
     }
 
     #[test]

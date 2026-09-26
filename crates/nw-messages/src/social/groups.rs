@@ -408,7 +408,10 @@ mod tests {
     fn the_retail_raid_calls_and_pushes_read() {
         let member = text_bytes("561138d6-1b4f-4d0a-a0f0-eb0d09e02782");
         assert_eq!(
-            call(MOVE_RAID_MEMBER_TYPE_INDEX, &[member.clone(), vec![1]].concat()),
+            call(
+                MOVE_RAID_MEMBER_TYPE_INDEX,
+                &[member.clone(), vec![1]].concat()
+            ),
             GroupCall::MoveRaidMember {
                 character: "561138d6-1b4f-4d0a-a0f0-eb0d09e02782".to_owned(),
                 group: 1,
@@ -425,7 +428,9 @@ mod tests {
         ));
         assert_eq!(
             call(GROUP_PING_TYPE_INDEX, &[0; PING_DATA_LEN]),
-            GroupCall::Ping { data: [0; PING_DATA_LEN] }
+            GroupCall::Ping {
+                data: [0; PING_DATA_LEN]
+            }
         );
         let raid = [9; RAW_ID_LEN];
         for (push, expected) in [
@@ -448,7 +453,10 @@ mod tests {
             let push = SocialPush::Group(push);
             let args = push.encode_args().expect("encode");
             assert_eq!(args, hex(&expected), "{push:?}");
-            assert_eq!(SocialPush::decode_args(push.type_index(), &args), Some(Ok(push)));
+            assert_eq!(
+                SocialPush::decode_args(push.type_index(), &args),
+                Some(Ok(push))
+            );
         }
     }
 

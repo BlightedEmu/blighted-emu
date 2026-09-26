@@ -132,7 +132,10 @@ impl StatusEffectRule {
 
     /// Whether it changes the vitals at its changes.
     pub fn changes_vitals(&self) -> bool {
-        self.health != 0.0 || self.health_share != 0.0 || self.hit_share != 0.0 || self.stamina != 0.0
+        self.health != 0.0
+            || self.health_share != 0.0
+            || self.hit_share != 0.0
+            || self.stamina != 0.0
     }
 }
 
@@ -586,7 +589,10 @@ mod tests {
                     ..row("Sanctuary")
                 },
             ],
-            damage_types: vec![("Slash".to_owned(), SLASH), ("Standard".to_owned(), STANDARD)],
+            damage_types: vec![
+                ("Slash".to_owned(), SLASH),
+                ("Standard".to_owned(), STANDARD),
+            ],
             hit_effects: vec![HitEffectRow {
                 table: "WolfDamageTable".to_owned(),
                 damage_id: "Bite".to_owned(),
@@ -606,7 +612,10 @@ mod tests {
         crcs.sort_unstable();
         for id in ["AI_Bleed_9", "Sanctuary", "Status_OutOfCombat_PassiveRegen"] {
             let rule = rules.by_id(id).expect("rule");
-            let first = crcs.iter().position(|crc| *crc == rule.crc).expect("listed");
+            let first = crcs
+                .iter()
+                .position(|crc| *crc == rule.crc)
+                .expect("listed");
             assert_eq!(usize::from(rule.key), first, "{id}");
         }
         assert_eq!(rules.len(), 4, "a repeated id is one effect");
@@ -637,16 +646,25 @@ mod tests {
                 ("slow".to_owned(), -0.2)
             ]
         );
-        let regen = rules.by_id("Status_OutOfCombat_PassiveRegen").expect("regen");
+        let regen = rules
+            .by_id("Status_OutOfCombat_PassiveRegen")
+            .expect("regen");
         assert_eq!(regen.first_tick_ms, 1_000);
         assert_eq!(regen.stop_on_hits_taken, Some(1));
-        assert_eq!(regen.potency_mods, vec![("passivefoodregen".to_owned(), 2.0)]);
+        assert_eq!(
+            regen.potency_mods,
+            vec![("passivefoodregen".to_owned(), 2.0)]
+        );
         assert_eq!(regen.absorption, vec![(SLASH, 0.5)]);
         assert_eq!(
             rules.on_hit(RowKey::of("wolfdamagetable", "BITE")),
             [bleed.crc, bleed.crc].as_slice(),
             "each repeat is one stack"
         );
-        assert!(rules.on_hit(RowKey::of("WolfDamageTable", "Claw")).is_empty());
+        assert!(
+            rules
+                .on_hit(RowKey::of("WolfDamageTable", "Claw"))
+                .is_empty()
+        );
     }
 }

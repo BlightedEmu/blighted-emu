@@ -282,7 +282,10 @@ mod tests {
         let mut gear = gear();
         assert!(gear.wear_slot(slot::MAIN_HAND_OPTION_1, SWORD_DURABILITY * 2));
         assert_eq!(sword(&gear).item.durability, 0);
-        assert!(!gear.wear_slot(slot::MAIN_HAND_OPTION_1, 1), "already broken");
+        assert!(
+            !gear.wear_slot(slot::MAIN_HAND_OPTION_1, 1),
+            "already broken"
+        );
         assert!(!gear.wear_slot(slot::HEAD, 1), "an empty slot");
     }
 
@@ -290,8 +293,15 @@ mod tests {
     fn a_class_repair_takes_only_its_class() {
         let mut gear = gear();
         gear.wear_at_death(&rolls(), true);
-        assert!(gear.damaged(RepairPick::ItemClass, |item| item == FLINT).is_empty());
-        assert_eq!(gear.damaged(RepairPick::ItemClass, |item| item == SWORD).len(), 1);
+        assert!(
+            gear.damaged(RepairPick::ItemClass, |item| item == FLINT)
+                .is_empty()
+        );
+        assert_eq!(
+            gear.damaged(RepairPick::ItemClass, |item| item == SWORD)
+                .len(),
+            1
+        );
     }
 
     #[test]

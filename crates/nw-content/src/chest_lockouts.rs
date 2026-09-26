@@ -99,7 +99,11 @@ impl ChestLockouts {
                 Lockout::DailyReset
             } else if row.max_respawn_s > 0.0 {
                 // Respawn rates of hours at most.
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "positive")]
+                #[allow(
+                    clippy::cast_possible_truncation,
+                    clippy::cast_sign_loss,
+                    reason = "positive"
+                )]
                 let duration_ms = (row.max_respawn_s * MS_PER_SECOND).round() as u64;
                 Lockout::For(duration_ms)
             } else {
@@ -130,7 +134,10 @@ mod tests {
         assert_eq!(Lockout::DailyReset.ends_at(MIDNIGHT), reset);
         assert_eq!(Lockout::DailyReset.ends_at(reset - 1), reset);
         assert_eq!(Lockout::DailyReset.ends_at(reset), reset + DAY_MS);
-        assert_eq!(Lockout::For(CONTAINER_LOCKOUT_MS).ends_at(MIDNIGHT), MIDNIGHT + HOUR_MS);
+        assert_eq!(
+            Lockout::For(CONTAINER_LOCKOUT_MS).ends_at(MIDNIGHT),
+            MIDNIGHT + HOUR_MS
+        );
     }
 
     #[test]

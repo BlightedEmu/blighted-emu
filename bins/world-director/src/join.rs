@@ -6,18 +6,16 @@
 use std::time::Duration;
 
 use nw_bus::{
-    Admit, AdmitReply, Bus, CarriedItem, CarriedMount, HomeRecord, HousingItem, InstanceStay, ItemLookState,
-    ItemPlace, ItemState, Join, PlayerArena,
-    LootLimitCount, MOB_ENTITY_BASE, OwnedHome, PlacedCamp, PlayerInventory, PlayerMounts, PlayerProgression,
-    PlayerQuests, PlayerTravel, Point, QuestRun, SavedLoadout, SimSlot, StoredItem, StoredPoint,
-    subject,
+    Admit, AdmitReply, Bus, CarriedItem, CarriedMount, HomeRecord, HousingItem, InstanceStay,
+    ItemLookState, ItemPlace, ItemState, Join, LootLimitCount, MOB_ENTITY_BASE, OwnedHome,
+    PlacedCamp, PlayerArena, PlayerInventory, PlayerMounts, PlayerProgression, PlayerQuests,
+    PlayerTravel, Point, QuestRun, SavedLoadout, SimSlot, StoredItem, StoredPoint, subject,
 };
 use nw_db::{
     AdminRank, PgPool, SavedArena, SavedInventory, SavedItem, SavedItemRolls, SavedMounts,
-    SavedPlace,
-    SavedPosition, SavedProgression, SavedQuests, SavedTravel, admin_rank, character_by_id,
-    character_inventory, character_items, character_position, character_progression,
-    character_quests, next_entity_number,
+    SavedPlace, SavedPosition, SavedProgression, SavedQuests, SavedTravel, admin_rank,
+    character_by_id, character_inventory, character_items, character_position,
+    character_progression, character_quests, next_entity_number,
 };
 use nw_login::look::{saved_backstory, saved_look};
 use nw_sim_core::{Position, TUTORIAL_FOLDER, TUTORIAL_START};
@@ -242,7 +240,13 @@ pub async fn route_join(
     };
     let game_master = is_game_master(context.ranks.as_ref(), join.account).await;
     let stay = progression.arena.stay.as_ref().and_then(|stay| {
-        stay_route(stay, saved.as_ref(), instances, join.character, &context.level)
+        stay_route(
+            stay,
+            saved.as_ref(),
+            instances,
+            join.character,
+            &context.level,
+        )
     });
     let (sim, position) = match (tutorial, stay) {
         (Some(tutorial), _) => (tutorial.clone(), TUTORIAL_START),
@@ -630,10 +634,7 @@ mod tests {
                     0,
                     "Ability_Greatsword_Combo".to_owned(),
                 )],
-                meta_counters: std::collections::BTreeMap::from([(
-                    "pve_totalkills".to_owned(),
-                    4
-                )]),
+                meta_counters: std::collections::BTreeMap::from([("pve_totalkills".to_owned(), 4)]),
                 meta_completed: vec![("CharacterProgression1".to_owned(), false)],
                 title: Some(0x431d_f4ea),
                 arena: PlayerArena {
@@ -668,9 +669,15 @@ mod tests {
 
     #[test]
     fn a_saved_travel_state_keeps_its_homes_furniture_and_bits() {
-        let position = [6_061.9_f32.to_bits(), 9_856.0_f32.to_bits(), 324.9_f32.to_bits()];
+        let position = [
+            6_061.9_f32.to_bits(),
+            9_856.0_f32.to_bits(),
+            324.9_f32.to_bits(),
+        ];
         let rotation = [0, 0, 0.967_457_f32.to_bits(), 0.255_766_f32.to_bits()];
-        let plot = [0xc7, 0x37, 0x66, 0xcd, 0xa0, 0x43, 0x41, 0x6a, 0, 0, 0, 0, 0, 0, 0, 0];
+        let plot = [
+            0xc7, 0x37, 0x66, 0xcd, 0xa0, 0x43, 0x41, 0x6a, 0, 0, 0, 0, 0, 0, 0, 0,
+        ];
         let saved = SavedTravel {
             waypoint: Some(position),
             inn: Some(17_680_737_194_352_937_251),
@@ -705,7 +712,12 @@ mod tests {
         let travel = player_travel(saved);
         assert_eq!(travel.waypoint.map(StoredPoint::bits), Some(position));
         assert_eq!(
-            (travel.inn, travel.camp, travel.camp_skin, travel.unstuck_ready_ms),
+            (
+                travel.inn,
+                travel.camp,
+                travel.camp_skin,
+                travel.unstuck_ready_ms
+            ),
             (
                 Some(17_680_737_194_352_937_251),
                 Some(16_695_474_225_659_806_323),
@@ -828,7 +840,10 @@ mod tests {
             }],
         });
         assert_eq!(inventory.stored[0].storage, STORAGE.into_bytes());
-        assert_eq!(inventory.stored[0].state.instance, Some(INSTANCE.into_bytes()));
+        assert_eq!(
+            inventory.stored[0].state.instance,
+            Some(INSTANCE.into_bytes())
+        );
         assert_eq!(inventory.stored[0].state.durability, Some(0));
         assert_eq!(inventory.loadouts[0].items, [(24, INSTANCE.into_bytes())]);
         assert_eq!(inventory.loadouts[0].attributes, [(0, 150)]);
@@ -954,7 +969,10 @@ mod tests {
         }));
         let empty = InstanceTable::default();
         let inside = saved_at(DUNGEON, 600.0);
-        assert_eq!(stay_route(&stay, Some(&inside), &empty, member, LEVEL), back);
+        assert_eq!(
+            stay_route(&stay, Some(&inside), &empty, member, LEVEL),
+            back
+        );
         let mut instances = Instances::default();
         let sim = SimSlot {
             id: nw_bus::BusId::try_from("inst-1".to_owned()).expect("id"),
@@ -992,7 +1010,10 @@ mod tests {
         );
         // Saved on the open map (it left before the save), or not a member: the return spot.
         let outside = saved_at(LEVEL, 7.0);
-        assert_eq!(stay_route(&stay, Some(&outside), &table, member, LEVEL), back);
+        assert_eq!(
+            stay_route(&stay, Some(&outside), &table, member, LEVEL),
+            back
+        );
         assert_eq!(
             stay_route(&stay, Some(&inside), &table, Uuid::from_u128(2), LEVEL),
             back

@@ -79,7 +79,10 @@ impl ShopOffer {
             })
         })
         .collect();
-        let item_cost = match (&row.buy_currency_item_name, points(row.buy_currency_item_cost)) {
+        let item_cost = match (
+            &row.buy_currency_item_name,
+            points(row.buy_currency_item_cost),
+        ) {
             (Some(item), Some(quantity)) if quantity > 0 => Some((item.clone(), quantity)),
             _ => None,
         };
@@ -242,7 +245,10 @@ mod tests {
         assert_eq!(catalog.len(), 4);
         let horse = catalog.by_crc(0x87c0_53c5).expect("the stable's horse");
         assert_eq!(horse.coins, 1_000_000);
-        assert_eq!(horse.achievement.as_deref(), Some("AwardAchievement_Mount_Horse_2"));
+        assert_eq!(
+            horse.achievement.as_deref(),
+            Some("AwardAchievement_Mount_Horse_2")
+        );
         assert!(horse.item.is_none() && horse.progression_costs.is_empty());
         let potion = catalog
             .by_crc(lowercase_crc32("PotionCleanseFTW"))
@@ -259,9 +265,17 @@ mod tests {
         let food = catalog
             .by_crc(lowercase_crc32("OR_FoodPvP"))
             .expect("an outpost rush food");
-        assert_eq!(food.item_cost, Some(("OutpostRushAzothEssence".to_owned(), 25)));
-        assert!(food.progression_costs.is_empty(), "no progression cost without a number");
-        let paid = catalog.by_crc(lowercase_crc32("PaidRow")).expect("a paid row");
+        assert_eq!(
+            food.item_cost,
+            Some(("OutpostRushAzothEssence".to_owned(), 25))
+        );
+        assert!(
+            food.progression_costs.is_empty(),
+            "no progression cost without a number"
+        );
+        let paid = catalog
+            .by_crc(lowercase_crc32("PaidRow"))
+            .expect("a paid row");
         assert!(paid.needs_entitlement);
         assert_eq!(paid.required_rank, Some(("Syndicate".to_owned(), 2)));
         assert_eq!(paid.cooldown_ms, Some(86_400_000));

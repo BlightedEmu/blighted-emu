@@ -480,6 +480,9 @@ pub async fn load_social(world: &PgPool) -> Result<SocialRecords, DbError> {
     })
 }
 
+/// One row of [`company_listings`]: id, name, governor, faction, crest, members, siege hour.
+type CompanyListingRow = (Uuid, String, Option<Uuid>, i16, Vec<u8>, i64, f32);
+
 /// The companies of `ids` that the world has, in no set order.
 ///
 /// # Errors
@@ -490,7 +493,7 @@ pub async fn company_listings(
     world: &PgPool,
     ids: &[Uuid],
 ) -> Result<Vec<CompanyListing>, DbError> {
-    let rows: Vec<(Uuid, String, Option<Uuid>, i16, Vec<u8>, i64, f32)> = sqlx::query_as(
+    let rows: Vec<CompanyListingRow> = sqlx::query_as(
         "SELECT c.company_id, c.name, \
          (SELECT m.character_id FROM company_member m WHERE m.company_id = c.company_id \
           AND m.rank = 0 ORDER BY m.joined_at LIMIT 1), \

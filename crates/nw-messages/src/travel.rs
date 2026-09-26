@@ -234,7 +234,10 @@ fn read_anchor(reader: &mut Reader<'_>) -> Result<Option<ItemAnchor>, MessageErr
 
 fn write_anchor(writer: &mut Writer, anchor: Option<ItemAnchor>) {
     match anchor {
-        Some(anchor) => writer.u8(ANCHOR_PRESENT).u16(anchor.parent).u8(anchor.extra),
+        Some(anchor) => writer
+            .u8(ANCHOR_PRESENT)
+            .u16(anchor.parent)
+            .u8(anchor.extra),
         None => writer.u8(ANCHOR_ABSENT),
     };
 }
@@ -751,7 +754,9 @@ impl UnstuckDenial {
 
     /// The reason of number `number`.
     pub fn of_number(number: u32) -> Option<Self> {
-        Self::ALL.into_iter().find(|reason| reason.number() == number)
+        Self::ALL
+            .into_iter()
+            .find(|reason| reason.number() == number)
     }
 }
 
@@ -1071,7 +1076,9 @@ impl TravelServerMsg {
                 cooldown_ns,
                 ..
             } => {
-                writer.u32(reason.number()).bytes(&cooldown_ns.to_be_bytes());
+                writer
+                    .u32(reason.number())
+                    .bytes(&cooldown_ns.to_be_bytes());
             }
             Self::CampReconnectFailure { flag, .. } => {
                 writer.u8(*flag);
@@ -1568,11 +1575,17 @@ mod tests {
             panic!("resident data");
         };
         assert_eq!(
-            territories.iter().map(|(territory, _)| *territory).collect::<Vec<_>>(),
+            territories
+                .iter()
+                .map(|(territory, _)| *territory)
+                .collect::<Vec<_>>(),
             [8, 16]
         );
         assert_eq!(territories[1].1.status_effects.len(), 1);
-        assert_eq!(server(RESIDENT_DATA_TYPE_INDEX, &[0x00, 0x00]).header(), &header());
+        assert_eq!(
+            server(RESIDENT_DATA_TYPE_INDEX, &[0x00, 0x00]).header(),
+            &header()
+        );
         // The retail 2236 shape (73 bytes): position, rotation, skin, two ids, two numbers, a
         // flag; and its answer 441 (result 0, 0).
         let mut place = Vec::new();
@@ -1590,6 +1603,9 @@ mod tests {
         };
         assert_eq!((placement.skin, placement.value), (0xbff6_8c5c, 50));
         client(CANCEL_PLACING_STRUCTURE_TYPE_INDEX, &[]);
-        server(PLACEMENT_RESULTS_TYPE_INDEX, &[0x00, 0x00, 0x00, 0x00, 0x00]);
+        server(
+            PLACEMENT_RESULTS_TYPE_INDEX,
+            &[0x00, 0x00, 0x00, 0x00, 0x00],
+        );
     }
 }

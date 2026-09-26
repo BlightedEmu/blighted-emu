@@ -100,7 +100,7 @@ fn descendants(root: &Element) -> Vec<&Element> {
     found
 }
 
-fn find<'a>(root: &'a Element, name: u32) -> Option<&'a Element> {
+fn find(root: &Element, name: u32) -> Option<&Element> {
     descendants(root)
         .into_iter()
         .find(|element| element.name_crc == Some(name))
@@ -143,11 +143,7 @@ fn compose(outer: &Transform, inner: &Transform) -> Transform {
     let mut composed = [0.0; TRANSFORM_FLOATS];
     for column in 0..AXES {
         let at = column * AXES;
-        composed[at..at + AXES].copy_from_slice(&linear([
-            inner[at],
-            inner[at + 1],
-            inner[at + 2],
-        ]));
+        composed[at..at + AXES].copy_from_slice(&linear([inner[at], inner[at + 1], inner[at + 2]]));
     }
     let translation = apply(
         outer,
@@ -328,7 +324,10 @@ mod tests {
             )],
         );
         assert_eq!(plot_house_type(&root).as_deref(), Some("HouseTypeTier2"));
-        assert_eq!(plot_house_type(&Element::with_children(0, Vec::new())), None);
+        assert_eq!(
+            plot_house_type(&Element::with_children(0, Vec::new())),
+            None
+        );
     }
 
     #[test]
@@ -373,8 +372,8 @@ mod tests {
             6_000.0 + 10.0 + offset[0],
             100.0 + offset[2],
         ];
-        for axis in 0..AXES {
-            assert!((teleporter.destination[axis] - expected[axis]).abs() < EPSILON);
+        for (found, wanted) in teleporter.destination.iter().zip(expected) {
+            assert!((found - wanted).abs() < EPSILON);
         }
         assert!((teleporter.yaw_rad - std::f32::consts::FRAC_PI_2).abs() < EPSILON);
         assert_eq!(teleporter.capital, capital.id);

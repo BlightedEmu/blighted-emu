@@ -17,9 +17,9 @@
 use std::collections::HashMap;
 
 use bevy_ecs::entity::Entity;
+use nw_content::chest_lockouts::Lockout;
 use nw_content::gathering::Gatherable;
 use nw_content::loot::{LootContext, loot_level};
-use nw_content::chest_lockouts::Lockout;
 use nw_content::tradeskill_xp::NEUTRAL_MODIFIER;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::wire::RAW_ID_LEN;
@@ -36,8 +36,8 @@ use super::statics::{GatherRun, chest_gather_ended, gather_started};
 use super::tradeskill::EventScale;
 use super::{Body, Player, SimWorld, gather_answer, gather_interrupted, send_now};
 use crate::mobs::spawn_index;
-use crate::server::SERVER_EPOCH_UNIX_MS;
 use crate::objectives::Event;
+use crate::server::SERVER_EPOCH_UNIX_MS;
 
 /// First slot key of a gather node: its index is added. Keys are never sent; they stay above
 /// every player and mob number and below the tutorial's static entities.
@@ -487,13 +487,21 @@ impl SimWorld {
         if let Some((reset_ms, at)) = opened {
             player.list_version += 1;
             let version = player.list_version;
-            let tracked = player
-                .loot
-                .track_opened(gather.request.target, at, self.server_ms, reset_ms, version);
+            let tracked = player.loot.track_opened(
+                gather.request.target,
+                at,
+                self.server_ms,
+                reset_ms,
+                version,
+            );
             player.extra_members.push(tracked);
         }
         let (items, rolls) = self.roll_drops(gather.number, gather.mob, loot, &hints);
-        self.give_drops(gather.number, items.into_iter().zip(rolls).collect(), now_ms);
+        self.give_drops(
+            gather.number,
+            items.into_iter().zip(rolls).collect(),
+            now_ms,
+        );
         self.wear_tool(entity, &gather.gatherable);
         if let Some(event) = &gather.gatherable.game_event {
             let scale = self.gather_scale(gather);
@@ -1140,7 +1148,11 @@ mod tests {
         }]);
         world.content = Arc::new(content);
         world.gather_open_world(entity, NUMBER, request(1, 0x15, CHEST), &[], NOW);
-        let end_ms = world.open_gathers.first().expect("the chest is opened").end_ms;
+        let end_ms = world
+            .open_gathers
+            .first()
+            .expect("the chest is opened")
+            .end_ms;
         world.gathers_due(end_ms);
         let target = [0x15; RAW_ID_LEN];
         let player = world.world.get::<Player>(entity).expect("player");

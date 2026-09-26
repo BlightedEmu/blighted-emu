@@ -92,7 +92,8 @@ impl ContainerState {
             |reader, child| {
                 match child {
                     0 => {
-                        let items = ReplicatedList::read(reader, CONTAINER_FIELD, ItemRecord::read)?;
+                        let items =
+                            ReplicatedList::read(reader, CONTAINER_FIELD, ItemRecord::read)?;
                         let count = match &items {
                             ReplicatedList::Full(list) => list.elements.len(),
                             ReplicatedList::Changes(changes) => changes.len(),
@@ -219,7 +220,10 @@ impl OwnedItems {
             }));
         };
         let item_of = |items: &[OwnedItem], key: u16| {
-            items.iter().find(|owned| owned.key == key).map(|owned| owned.item)
+            items
+                .iter()
+                .find(|owned| owned.key == key)
+                .map(|owned| owned.item)
         };
         let removed = before
             .iter()
@@ -436,11 +440,10 @@ mod tests {
     #[test]
     fn an_owned_change_removes_first_then_sets_as_retail() {
         let bytes = hex(RETAIL_REMOVE_AND_SET);
-        let Some(OwnedItems::Changes(changes)) = ItemManagementState::read(&mut Reader::new(
-            &bytes,
-        ))
-        .expect("read")
-        .owned
+        let Some(OwnedItems::Changes(changes)) =
+            ItemManagementState::read(&mut Reader::new(&bytes))
+                .expect("read")
+                .owned
         else {
             panic!("a change");
         };

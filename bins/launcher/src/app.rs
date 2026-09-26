@@ -15,14 +15,14 @@ use crate::api::{ApiError, LauncherApi, discord_login_page};
 use crate::game::{append_override_config, game_arguments};
 // Linux runs the game under Proton inside `bwrap`; Windows starts the patched exe directly behind
 // the loopback proxy ([`crate::aws_proxy`]). Each path uses only its own helpers.
-#[cfg(not(windows))]
-use crate::game::{checked_direct_launch, direct_launch_from_env, start_game};
-#[cfg(not(windows))]
-use crate::mirror::{NETWORK_DIR, write_network_files};
-#[cfg(any(windows, test))]
-use crate::game::{checked_windows_launch, start_game_windows, windows_launch_from_env};
 #[cfg(windows)]
 use crate::aws_proxy::AwsProxy;
+#[cfg(not(windows))]
+use crate::game::{checked_direct_launch, direct_launch_from_env, start_game};
+#[cfg(any(windows, test))]
+use crate::game::{checked_windows_launch, start_game_windows, windows_launch_from_env};
+#[cfg(not(windows))]
+use crate::mirror::{NETWORK_DIR, write_network_files};
 use crate::server::api_base_url;
 use crate::settings::Settings;
 use crate::theme::{self, LABEL_STYLE, LINE_WIDTH, Palette, TITLE_STYLE, ThemeChoice, mix};

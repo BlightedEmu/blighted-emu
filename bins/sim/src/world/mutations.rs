@@ -50,11 +50,7 @@ const ONE: u32 = 1;
 
 /// The difficulty a 5037 asks for: `None` for a normal run.
 pub(super) const fn difficulty_of_request(byte: u8) -> Option<u8> {
-    if byte == NORMAL_RUN {
-        None
-    } else {
-        Some(byte)
-    }
+    if byte == NORMAL_RUN { None } else { Some(byte) }
 }
 
 /// What a player's client has of the weekly mutations.
@@ -176,7 +172,11 @@ impl SimWorld {
         if shown_level < rules.min_level {
             return Some(ActivateResponse::MutationLevelReq);
         }
-        let rank = player.arena.rank(slot).unwrap_or(FIRST_RANK).max(FIRST_RANK);
+        let rank = player
+            .arena
+            .rank(slot)
+            .unwrap_or(FIRST_RANK)
+            .max(FIRST_RANK);
         (difficulty > rank).then_some(ActivateResponse::MutationDifficultyReq)
     }
 
@@ -200,10 +200,9 @@ impl SimWorld {
             return;
         };
         if run.mutation().is_none() {
-            let Some(context) =
-                content
-                    .mutations
-                    .context(&stay.game_mode, activated_s, difficulty)
+            let Some(context) = content
+                .mutations
+                .context(&stay.game_mode, activated_s, difficulty)
             else {
                 tracing::warn!(game_mode = %stay.game_mode, difficulty, "no mutation this week");
                 return;
@@ -276,7 +275,11 @@ impl SimWorld {
             mob.health = Health::full(scaled_max);
             mob.attack.damage_mod *= change.damage_factor;
         }
-        if let Some(mutation) = self.instance_run.as_mut().and_then(|run| run.mutation_mut()) {
+        if let Some(mutation) = self
+            .instance_run
+            .as_mut()
+            .and_then(|run| run.mutation_mut())
+        {
             mutation.mutated.insert(entity, scaled_max);
             mutation
                 .effects

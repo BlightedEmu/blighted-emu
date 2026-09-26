@@ -547,15 +547,21 @@ mod tests {
             (Uuid::from_u128(8), 1),
             NOW_MS,
         );
-        assert_eq!(again, Decision::Reply(granted(&open_confirmed(&open), false)));
+        assert_eq!(
+            again,
+            Decision::Reply(granted(&open_confirmed(&open), false))
+        );
         // A member who joined the group later is added.
-        let Decision::AddMember { character: added, .. } = instances.decide(
+        let Decision::AddMember {
+            character: added, ..
+        } = instances.decide(
             &request(4),
             &group(&[1, 2, 3, 4]),
             &free,
             (Uuid::from_u128(9), 1),
             NOW_MS,
-        ) else {
+        )
+        else {
             panic!("adds");
         };
         assert_eq!(added, character(4));
@@ -566,8 +572,13 @@ mod tests {
             game_mode: "DungeonShatteredObelisk".to_owned(),
             ..request(1)
         };
-        let other_mode =
-            instances.decide(&other, &group(&[1, 2, 3]), &free, (Uuid::from_u128(10), 1), NOW_MS);
+        let other_mode = instances.decide(
+            &other,
+            &group(&[1, 2, 3]),
+            &free,
+            (Uuid::from_u128(10), 1),
+            NOW_MS,
+        );
         assert_eq!(other_mode, refuse(InstanceRefusal::GroupInOtherInstance));
     }
 
@@ -639,7 +650,10 @@ mod tests {
         ) else {
             panic!("opens");
         };
-        assert_eq!(open.ends_at_ms, Some(NOW_MS + TRIAL_SECONDS * MS_PER_SECOND));
+        assert_eq!(
+            open.ends_at_ms,
+            Some(NOW_MS + TRIAL_SECONDS * MS_PER_SECOND)
+        );
         instances.opened(open.id, true);
         let report = |empty_for_ms: Option<u64>| {
             vec![(
@@ -654,7 +668,11 @@ mod tests {
                 }),
             )]
         };
-        assert!(instances.review(&report(None), &settings(), NOW_MS).is_empty());
+        assert!(
+            instances
+                .review(&report(None), &settings(), NOW_MS)
+                .is_empty()
+        );
         let close = Closing {
             sim: slot("inst-1"),
             instance: open.id,
@@ -711,16 +729,26 @@ mod tests {
     fn wanted_levels_get_their_spare_sims_within_the_limit_and_lose_the_rest() {
         let mut launches = Launches::default();
         let start = Instant::now();
-        assert!(launches.to_start(&launch_settings(), |_| 0, |_| false).is_empty());
+        assert!(
+            launches
+                .to_start(&launch_settings(), |_| 0, |_| false)
+                .is_empty()
+        );
         launches.wanted(LEVEL, start);
         let started = launches.to_start(&launch_settings(), |_| 0, |_| false);
         assert_eq!(started.len(), 2);
         assert!(started.iter().all(|launch| launch.level == LEVEL));
         // Not beating yet: they count as ready, so nothing more starts.
-        assert!(launches.to_start(&launch_settings(), |_| 0, |_| false).is_empty());
+        assert!(
+            launches
+                .to_start(&launch_settings(), |_| 0, |_| false)
+                .is_empty()
+        );
         launches.wanted("nw_dungeon_everfall_00", start);
         assert_eq!(
-            launches.to_start(&launch_settings(), |_| 0, |_| false).len(),
+            launches
+                .to_start(&launch_settings(), |_| 0, |_| false)
+                .len(),
             1,
             "the total limit"
         );

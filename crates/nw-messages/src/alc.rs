@@ -1108,11 +1108,13 @@ impl AlcState {
     /// when the body sends no `pos10`.
     pub fn mob_spawn_card(&self, at: InputPosition) -> Option<Self> {
         let walked = walk(&mut Reader::new(&self.bytes)).ok()?;
-        if walked.pos10.is_none() {
-            return None;
-        }
+        walked.pos10?;
         let mut values: Vec<(usize, Vec<u8>)> = position_children(at).into();
-        values.extend(FRESH_CARD_VALUES.iter().map(|(child, bytes)| (*child, bytes.to_vec())));
+        values.extend(
+            FRESH_CARD_VALUES
+                .iter()
+                .map(|(child, bytes)| (*child, bytes.to_vec())),
+        );
         Some(Self {
             bytes: self.with_children(walked, &values),
             pos10: Some(at),
@@ -1943,7 +1945,9 @@ mod tests {
         assert_eq!(child(THIRD_SLAYER_SEQUENCE_CHILD), Some(vec![0x97, 0x06]));
         assert_eq!(child(SLAYER_MARKER_CHILD), Some(vec![0x28]));
         assert_eq!(
-            plain().with_upper_slots(UpperSlots::default()).expect("none"),
+            plain()
+                .with_upper_slots(UpperSlots::default())
+                .expect("none"),
             plain(),
             "no change"
         );
@@ -2009,10 +2013,7 @@ mod tests {
             look: None,
             slayer: Some(attack),
             sequence_time: None,
-            upper: Some(RemoteUpper {
-                slots,
-                after_state,
-            }),
+            upper: Some(RemoteUpper { slots, after_state }),
         };
         let child_of = |state: &AlcState, index: usize| {
             state
@@ -2028,7 +2029,10 @@ mod tests {
             Some(ATTACK_STARTED.to_be_bytes().to_vec()),
             "the newer attack keeps its second slot"
         );
-        assert_eq!(child_of(&older, THIRD_SLAYER_SEQUENCE_CHILD), Some(vec![0x96, 0x06]));
+        assert_eq!(
+            child_of(&older, THIRD_SLAYER_SEQUENCE_CHILD),
+            Some(vec![0x96, 0x06])
+        );
         assert_eq!(child_of(&older, SLAYER_MARKER_CHILD), Some(vec![0x28]));
         assert_eq!(
             child_of(&older, SECOND_SLAYER_STATE_CHILD),
@@ -2633,8 +2637,7 @@ mod tests {
     #[test]
     fn a_fresh_spawn_card_has_no_number_clock_or_scope() {
         let template = AlcState::read(&mut Reader::new(&hex(RETAIL_SAILOR))).expect("read");
-        let fresh =
-            AlcState::read(&mut Reader::new(&hex(RETAIL_FRESH_SAILOR_CARD))).expect("read");
+        let fresh = AlcState::read(&mut Reader::new(&hex(RETAIL_FRESH_SAILOR_CARD))).expect("read");
         let at = InputPosition::from_metres(467.617, 846.008, 89.42).expect("position");
         let card = template.mob_spawn_card(at).expect("a card");
         assert_eq!(

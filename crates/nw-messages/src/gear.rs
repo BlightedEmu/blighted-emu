@@ -168,7 +168,6 @@ pub fn record(item: &GearItem, sync_reason: u8, container_slot: Option<u16>) -> 
         flags: flag(item.bound, ITEM_BOUND) | flag(item.locked, ITEM_LOCKED),
         transmog: item.look.appearance,
         transmog_dye: item.look.skin_dye,
-        ..ItemRecord::EMPTY_SLOT
     }
 }
 
@@ -358,9 +357,8 @@ impl PlayerGear {
         hands: Hands,
         extras: &GearExtras,
     ) -> Self {
-        let (visible, hidden): (Vec<&EquippedItem>, Vec<&EquippedItem>) = equipped
-            .iter()
-            .partition(|worn| is_visible_slot(worn.slot));
+        let (visible, hidden): (Vec<&EquippedItem>, Vec<&EquippedItem>) =
+            equipped.iter().partition(|worn| is_visible_slot(worn.slot));
         let records = |items: &[&EquippedItem]| -> Vec<ItemRecord> {
             items
                 .iter()
@@ -475,12 +473,16 @@ impl PlayerGear {
         let previous_owner = before.and_then(|gear| gear.paperdoll.owner.as_ref());
         let previous_public = before.and_then(|gear| gear.paperdoll.public.as_ref());
         let paperdoll = PaperdollState {
-            owner: now.paperdoll.owner.as_ref().map(|now| {
-                PaperdollOwner::change(previous_owner, now, version)
-            }),
-            public: now.paperdoll.public.as_ref().map(|now| {
-                PaperdollPublic::change(previous_public, now, version)
-            }),
+            owner: now
+                .paperdoll
+                .owner
+                .as_ref()
+                .map(|now| PaperdollOwner::change(previous_owner, now, version)),
+            public: now
+                .paperdoll
+                .public
+                .as_ref()
+                .map(|now| PaperdollPublic::change(previous_public, now, version)),
         };
         Self {
             paperdoll,
@@ -496,7 +498,9 @@ impl PlayerGear {
                         .and_then(|gear| gear.owned.owned.as_ref())
                         .and_then(OwnedItems::full)
                         .map(|list| list.elements.as_slice());
-                    let now = owned.full().map_or(&[][..], |list| list.elements.as_slice());
+                    let now = owned
+                        .full()
+                        .map_or(&[][..], |list| list.elements.as_slice());
                     OwnedItems::change(before, now, version)
                 }),
             },
@@ -703,7 +707,10 @@ pub(crate) mod tests {
 
     /// The full elements of a list child.
     fn full<T>(list: Option<&ReplicatedList<T>>) -> &[T] {
-        &list.and_then(ReplicatedList::full).expect("a full list").elements
+        &list
+            .and_then(ReplicatedList::full)
+            .expect("a full list")
+            .elements
     }
 
     /// The bytes of hex text.
@@ -882,11 +889,7 @@ pub(crate) mod tests {
         /// The public child 4 of the change: the look of index 4, item 40263, no dye.
         const RETAIL_LOOK_CHILD: &str = "041001010401";
         const RETAIL_LOOK_VALUE: &str = "9049c7ea04000000000000000000";
-        let greatsword = item(
-            GREATSWORD_INDEX,
-            ARMOR_GEAR_SCORE,
-            GREATSWORD_DURABILITY,
-        );
+        let greatsword = item(GREATSWORD_INDEX, ARMOR_GEAR_SCORE, GREATSWORD_DURABILITY);
         let other = item(CAPTURE_CHEST_INDEX, ARMOR_GEAR_SCORE, ARMOR_DURABILITY);
         let mut worn = wanderer();
         worn[4].item = None;

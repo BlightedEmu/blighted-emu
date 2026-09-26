@@ -18,8 +18,8 @@ use nw_content::Tables;
 use nw_db::{Order, OrderEnd, OrderItem, OrderKind, OrderStatus};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::contracts::{
-    CONTRACT_ENTITY_IDS, Contract, ContractItemData, ContractKind, INVALID_ENTITY_ID,
-    Participant, ParticipantEvent, reason, status,
+    CONTRACT_ENTITY_IDS, Contract, ContractItemData, ContractKind, INVALID_ENTITY_ID, Participant,
+    ParticipantEvent, reason, status,
 };
 use nw_messages::item_descriptor::ItemDescriptor;
 use serde::Deserialize;
@@ -135,7 +135,10 @@ impl TradingPostConfig {
             return invalid("trading_post.trading_tax", "must be at least 0 and below 1");
         }
         if self.posting_fees.iter().any(|fee| !rate(fee.share)) {
-            return invalid("trading_post.posting_fees", "shares must be at least 0 and below 1");
+            return invalid(
+                "trading_post.posting_fees",
+                "shares must be at least 0 and below 1",
+            );
         }
         if self.delivery_poll_ms == 0 {
             return invalid("trading_post.delivery_poll_ms", "must be above 0");
@@ -225,7 +228,10 @@ impl TradingCatalog {
             .flat_map(|table| &table.rows)
             .filter(|row| row.bind_on_pickup != Some(BINDS_ON_PICKUP))
             .filter_map(|row| {
-                let category = row.trading_category.clone().filter(|text| !text.is_empty())?;
+                let category = row
+                    .trading_category
+                    .clone()
+                    .filter(|text| !text.is_empty())?;
                 Some((
                     lowercase_crc32(&row.item_id),
                     TradeItem {
@@ -383,7 +389,10 @@ pub fn next_page_token(last: &Order) -> Vec<u8> {
 pub fn completion_cost(order: &Order, units: u32) -> Option<(u64, Option<(String, u32)>)> {
     let total = order.price.checked_mul(u64::from(units))?;
     Some(match order.kind {
-        OrderKind::Sell => (total.checked_add(nw_db::tax_of(total, order.tax_rate))?, None),
+        OrderKind::Sell => (
+            total.checked_add(nw_db::tax_of(total, order.tax_rate))?,
+            None,
+        ),
         OrderKind::Buy => (0, Some((order.item.item_id.clone(), units))),
     })
 }
@@ -431,7 +440,10 @@ mod tests {
     /// player sees it: the same fields this server sends, from the item data and the order.
     #[test]
     fn an_order_is_the_retail_contract_form() {
-        let contract = contract_of(&order(OrderKind::Buy, Uuid::from_u128(1)), Uuid::from_u128(2));
+        let contract = contract_of(
+            &order(OrderKind::Buy, Uuid::from_u128(1)),
+            Uuid::from_u128(2),
+        );
         assert_eq!(contract.kind, ContractKind::Buy);
         assert!(!contract.local_creator);
         assert_eq!(contract.duration_ns, 3 * MS_PER_DAY * NS_PER_MS);
@@ -518,7 +530,9 @@ mod tests {
     fn the_catalog_finds_an_item_by_its_crc() {
         let catalog = TradingCatalog::of([beeswax()]);
         assert_eq!(
-            catalog.by_crc(0xd0a8_26e7).map(|item| item.item_id.as_str()),
+            catalog
+                .by_crc(0xd0a8_26e7)
+                .map(|item| item.item_id.as_str()),
             Some("BeeswaxT1")
         );
         assert!(catalog.by_id("beeswaxt1").is_some());

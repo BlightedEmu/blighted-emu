@@ -1387,7 +1387,10 @@ mod tests {
         );
         let mut timelines = MobTimelines::default();
         let card = timelines.advance(MOB, START, &pose(1.0, false), Some(&boar));
-        assert!(card.fresh && card.animation.is_none(), "a fresh card shows no scope");
+        assert!(
+            card.fresh && card.animation.is_none(),
+            "a fresh card shows no scope"
+        );
         let first = timelines
             .advance(
                 MOB,
@@ -1548,11 +1551,17 @@ mod tests {
         let sailor = sailor();
         let mut timelines = MobTimelines::default();
         let card = timelines.advance(MOB, START, &pose(1.0, false), Some(&sailor));
-        assert!(card.fresh, "retail: the card of a fresh spawn carries no state");
+        assert!(
+            card.fresh,
+            "retail: the card of a fresh spawn carries no state"
+        );
         assert_eq!(card.stamp.id, CARD_STATE_ID);
         assert_eq!((card.step, card.animation), (None, None));
         let early = timelines.advance(MOB, START + TICK_MS, &pose(1.0, false), Some(&sailor));
-        assert_eq!(early.step, None, "standing still, it waits for its first state");
+        assert_eq!(
+            early.step, None,
+            "standing still, it waits for its first state"
+        );
         let at = START + FIRST_STATE_DELAY_MS;
         let frame = timelines.advance(MOB, at, &pose(1.0, false), Some(&sailor));
         assert!(!frame.fresh && frame.drawing);
@@ -1585,7 +1594,10 @@ mod tests {
         );
         let later = at + IDLE_STATE_MS + 3 * TICK_MS;
         let idle = timelines.advance(MOB, later, &pose(1.0, false), Some(&sailor));
-        assert!(idle.step.is_some() && !idle.drawing, "then the idle period, no draw");
+        assert!(
+            idle.step.is_some() && !idle.drawing,
+            "then the idle period, no draw"
+        );
     }
 
     #[test]

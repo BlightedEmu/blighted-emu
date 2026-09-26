@@ -105,8 +105,7 @@ impl<T: Ground> Ground for LevelGround<T> {
             .filter(|hit| hit.normal[2] < min_up)
             .and_then(|hit| {
                 let across = hit.normal[0].hypot(hit.normal[1]);
-                (across > f32::EPSILON)
-                    .then(|| [hit.normal[0] / across, hit.normal[1] / across])
+                (across > f32::EPSILON).then(|| [hit.normal[0] / across, hit.normal[1] / across])
             })
             .or_else(|| self.terrain.wall(from, to))
     }

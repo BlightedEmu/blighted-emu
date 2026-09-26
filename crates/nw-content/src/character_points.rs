@@ -374,7 +374,11 @@ pub(crate) mod tests {
         let rules = rules().with_respec_costs(RESPEC_COSTS);
         assert_eq!(rules.attribute_respec_cost(59), 5_000);
         assert_eq!(rules.attribute_respec_cost(58), 0);
-        assert_eq!(rules.attribute_respec_cost(60), 0, "a level the table does not list");
+        assert_eq!(
+            rules.attribute_respec_cost(60),
+            0,
+            "a level the table does not list"
+        );
         assert_eq!(rules.attribute_points_at(2), 10, "the other rules stay");
     }
 

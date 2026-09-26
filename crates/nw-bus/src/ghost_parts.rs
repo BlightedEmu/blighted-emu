@@ -153,10 +153,13 @@ mod tests {
         })
         .expect("encode");
         assert!(header.len() <= GHOST_PART_HEADER_BYTES);
-        assert!(
-            GHOST_PART_ENTITIES * (MAX_GHOST_BYTES + MAX_GHOST_REF_BYTES) + GHOST_PART_HEADER_BYTES
-                <= MAX_BUS_MESSAGE_BYTES
-        );
+        const {
+            assert!(
+                GHOST_PART_ENTITIES * (MAX_GHOST_BYTES + MAX_GHOST_REF_BYTES)
+                    + GHOST_PART_HEADER_BYTES
+                    <= MAX_BUS_MESSAGE_BYTES
+            );
+        }
     }
 
     #[test]

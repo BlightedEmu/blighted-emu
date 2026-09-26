@@ -25,11 +25,11 @@ use nw_world::dungeon_scripts::{
     Chest, DungeonScripts, DungeonScriptsError, Encounter, LevelScript, ObjectiveSpec, Spawn,
     Stage, StageAction, StageObjective, Target, TargetMob, TargetSlice, dungeon_scripts_path,
 };
-use nw_world::metadata::{MetadataRecords, SkipCounts, read_metadata};
 use nw_world::level_script::{
     Action, AliasSlice, AssetRef, DYNAMIC_SLICE_SUFFIX, LevelScriptError, ObjectiveKind,
     SliceScript, Transform, alias_slices, pak_path, slice_script,
 };
+use nw_world::metadata::{MetadataRecords, SkipCounts, read_metadata};
 
 use crate::collision::PakIndex;
 use crate::roads::without_azcs;
@@ -400,8 +400,14 @@ pub fn build_dungeon_scripts(
                 report.skipped_modes.extend(modes.iter().cloned());
                 continue;
             };
-            let Some(mut level) =
-                build_level(&mut slices, script, *placement, &levels, &points, &mut report)?
+            let Some(mut level) = build_level(
+                &mut slices,
+                script,
+                *placement,
+                &levels,
+                &points,
+                &mut report,
+            )?
             else {
                 report.skipped_modes.extend(modes.iter().cloned());
                 continue;
@@ -444,7 +450,10 @@ pub fn build_level(
         ..LevelScript::default()
     };
     for entity in &level_script.entities {
-        let Some(spawned) = entity.spawner.as_ref().and_then(|spawner| spawner.slice.as_ref())
+        let Some(spawned) = entity
+            .spawner
+            .as_ref()
+            .and_then(|spawner| spawner.slice.as_ref())
         else {
             continue;
         };
@@ -459,7 +468,11 @@ pub fn build_level(
             assign_creatures(&mut encounter, points);
             report.encounters += 1;
             report.stages += encounter.stages.len();
-            report.spawns += encounter.stages.iter().map(|stage| stage.spawns.len()).sum::<usize>();
+            report.spawns += encounter
+                .stages
+                .iter()
+                .map(|stage| stage.spawns.len())
+                .sum::<usize>();
             level.encounters.push(encounter);
         } else if let Some(table) = spawned_script.loot_table() {
             report.chests += 1;
@@ -544,7 +557,11 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
             .collect();
         let index_of = |id: &u64| stage_ids.iter().position(|known| known == id);
         let mut stages = Vec::with_capacity(stage_ids.len());
-        for entity in script.entities.iter().filter(|entity| entity.stage.is_some()) {
+        for entity in script
+            .entities
+            .iter()
+            .filter(|entity| entity.stage.is_some())
+        {
             let Some(stage) = &entity.stage else {
                 continue;
             };
@@ -636,7 +653,10 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
         })
     }
 
-    fn actions(&mut self, actions: &[Action]) -> Result<Vec<StageAction>, DungeonScriptsBuildError> {
+    fn actions(
+        &mut self,
+        actions: &[Action],
+    ) -> Result<Vec<StageAction>, DungeonScriptsBuildError> {
         let mut built = Vec::with_capacity(actions.len());
         for action in actions {
             built.push(match action {
@@ -677,7 +697,11 @@ impl<'a, S: SliceSource> EncounterBuilder<'a, S> {
             return Ok(Some(*index));
         }
         let mut target = Target {
-            name: if key.0.is_empty() { key.1.clone() } else { key.0.clone() },
+            name: if key.0.is_empty() {
+                key.1.clone()
+            } else {
+                key.0.clone()
+            },
             slices: Vec::new(),
         };
         if let Some(slice) = slice {
@@ -826,7 +850,12 @@ mod tests {
 
     fn transform(parent: u64, translation: [f32; 3]) -> Element {
         let mut floats = Vec::new();
-        for column in [[1.0_f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], translation] {
+        for column in [
+            [1.0_f32, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            translation,
+        ] {
             for cell in column {
                 floats.extend(cell.to_be_bytes());
             }
@@ -859,7 +888,10 @@ mod tests {
     }
 
     fn spawner(path: &str) -> Element {
-        typed(named("element", vec![asset("m_sliceAsset", 1, path)]), PREFAB_SPAWNER_TYPE)
+        typed(
+            named("element", vec![asset("m_sliceAsset", 1, path)]),
+            PREFAB_SPAWNER_TYPE,
+        )
     }
 
     fn level() -> Slices {
@@ -870,14 +902,21 @@ mod tests {
                 "EncounterBoss",
                 vec![transform(1, ENCOUNTER_OFFSET), spawner(ENCOUNTER)],
             ),
-            entity(3, "LockedChest", vec![transform(1, [1.0; 3]), spawner(CHEST)]),
+            entity(
+                3,
+                "LockedChest",
+                vec![transform(1, [1.0; 3]), spawner(CHEST)],
+            ),
         ]);
         let manager = typed(
             named(
                 "element",
                 vec![
                     value("m_autoActivate", &[1]),
-                    named("m_stages", vec![named("element", vec![id_holder("EntityId", 11)])]),
+                    named(
+                        "m_stages",
+                        vec![named("element", vec![id_holder("EntityId", 11)])],
+                    ),
                 ],
             ),
             ENCOUNTER_MANAGER_TYPE,
@@ -924,7 +963,11 @@ mod tests {
             ENCOUNTER_STAGE_TYPE,
         );
         let encounter = slice(vec![
-            entity(10, "DG_Enc_Test_Boss", vec![transform(NO_PARENT, [0.0; 3]), manager]),
+            entity(
+                10,
+                "DG_Enc_Test_Boss",
+                vec![transform(NO_PARENT, [0.0; 3]), manager],
+            ),
             entity(11, "Wave_01", vec![transform(10, [0.0; 3]), wave]),
             entity(12, "Location", vec![transform(10, LOCATION_OFFSET)]),
         ]);
@@ -947,7 +990,10 @@ mod tests {
                 "slices",
                 vec![named(
                     "element",
-                    vec![asset("slice", 4, CREATURE), value("Percent", &100_u32.to_be_bytes())],
+                    vec![
+                        asset("slice", 4, CREATURE),
+                        value("Percent", &100_u32.to_be_bytes()),
+                    ],
                 )],
             )],
         );
@@ -984,9 +1030,16 @@ mod tests {
                 PLACE[2] + ENCOUNTER_OFFSET[2],
             ],
         }];
-        let level = build_level(&mut source, SCRIPT, placement, &levels, &points, &mut report)
-            .expect("build")
-            .expect("level");
+        let level = build_level(
+            &mut source,
+            SCRIPT,
+            placement,
+            &levels,
+            &points,
+            &mut report,
+        )
+        .expect("build")
+        .expect("level");
         assert_eq!(level.encounters.len(), 1);
         let encounter = &level.encounters[0];
         assert_eq!(encounter.name, "EncounterBoss");
@@ -1004,7 +1057,10 @@ mod tests {
         assert_eq!(encounter.top_stages, [0]);
         let stage = &encounter.stages[0];
         assert_eq!(stage.name, "Wave_01");
-        assert_eq!(stage.spawns[0].locations, [at(&[ENCOUNTER_OFFSET, LOCATION_OFFSET])]);
+        assert_eq!(
+            stage.spawns[0].locations,
+            [at(&[ENCOUNTER_OFFSET, LOCATION_OFFSET])]
+        );
         let boss = &encounter.targets[stage.spawns[0].target];
         assert_eq!(
             boss.slices[0].mob,
@@ -1064,9 +1120,18 @@ mod tests {
             "sharedassets/coatlicue/nw_dungeon_windsward_00/regions/r_+00_+00/capitals/dungeon_script/dungeon_script.capitals.json",
             "nw_dungeon_windsward_00"
         ));
-        assert!(!is_capitals_of("sharedassets/coatlicue/other/x.capitals.json", "nw_dungeon"));
-        assert!(is_creature("slices/characters/undead_brute_boss.dynamicslice"));
-        assert!(!is_creature("slices/characters/spellslices/typhon/wall.dynamicslice"));
-        assert!(!is_creature("slices/dungeon/raids/typhon_pillar.dynamicslice"));
+        assert!(!is_capitals_of(
+            "sharedassets/coatlicue/other/x.capitals.json",
+            "nw_dungeon"
+        ));
+        assert!(is_creature(
+            "slices/characters/undead_brute_boss.dynamicslice"
+        ));
+        assert!(!is_creature(
+            "slices/characters/spellslices/typhon/wall.dynamicslice"
+        ));
+        assert!(!is_creature(
+            "slices/dungeon/raids/typhon_pillar.dynamicslice"
+        ));
     }
 }

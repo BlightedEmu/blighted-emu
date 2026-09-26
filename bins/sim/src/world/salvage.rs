@@ -112,7 +112,13 @@ impl SimWorld {
                     .collect()
             })
             .unwrap_or_default();
-        tracing::debug!(player = number, class, rarities, items = targets.len(), "salvage by class");
+        tracing::debug!(
+            player = number,
+            class,
+            rarities,
+            items = targets.len(),
+            "salvage by class"
+        );
         self.salvage(entity, number, &targets, now_ms);
     }
 

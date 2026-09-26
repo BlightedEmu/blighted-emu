@@ -4,9 +4,9 @@
 pub mod achievements;
 pub mod bundle;
 pub mod catacombs;
+pub mod character_points;
 pub mod charms;
 pub mod chest_lockouts;
-pub mod character_points;
 pub mod client_build;
 pub mod combat;
 pub mod container;
@@ -20,21 +20,24 @@ pub mod fill;
 // The generator writes prettyplease output, which rustfmt would format differently.
 #[rustfmt::skip]
 pub mod generated;
+pub mod fishing;
 pub mod ftue_entities;
 pub mod gameplay_config;
 pub mod gathering;
 pub mod ids;
 pub mod instances;
-pub mod kill_rewards;
 pub mod item_repair;
-pub mod item_rules;
 pub mod item_rolls;
+pub mod item_rules;
+pub mod kill_rewards;
 pub mod leaderboards;
 pub mod loot;
 pub mod loot_limits;
 pub mod meta_achievements;
 pub mod mob_prefabs;
 pub mod mounts;
+pub mod music;
+pub mod mutations;
 pub mod perks;
 pub mod player_attacks;
 pub mod player_sequences;
@@ -52,9 +55,6 @@ pub mod table;
 pub mod titles;
 pub mod tradeskill_xp;
 pub mod ui_item_class;
-pub mod fishing;
-pub mod music;
-pub mod mutations;
 
 pub use bundle::ContentBundle;
 pub use container::ContainerError;

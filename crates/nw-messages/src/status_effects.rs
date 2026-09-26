@@ -319,7 +319,11 @@ impl StatusEffectsState {
     pub fn write(&self, writer: &mut Writer) -> Result<(), MessageError> {
         let owner = self.local.is_some() || self.lightweight.is_some();
         let owner_bit = if owner { OWNER_GROUP } else { 0 };
-        let remote_bit = if self.remote.is_some() { REMOTE_GROUP } else { 0 };
+        let remote_bit = if self.remote.is_some() {
+            REMOTE_GROUP
+        } else {
+            0
+        };
         writer.u8(owner_bit | remote_bit);
         let mut result = Ok(());
         if owner {
@@ -462,7 +466,12 @@ mod tests {
         let body = round(&state);
         let mut version = Writer::new();
         version.wide_prefixed(1005);
-        let mut expected = vec![REMOTE_GROUP, 1 << REMOTE_EFFECTS_CHILD, 0x00, VERSION_PRESENT];
+        let mut expected = vec![
+            REMOTE_GROUP,
+            1 << REMOTE_EFFECTS_CHILD,
+            0x00,
+            VERSION_PRESENT,
+        ];
         expected.extend(version.finish());
         expected.push(0);
         assert_eq!(body, expected);
@@ -471,7 +480,10 @@ mod tests {
     #[test]
     fn a_remote_entry_keeps_the_stacks_and_whether_it_has_potency() {
         let entry = RemoteEffect::of(3, 2.5);
-        assert_eq!((entry.stacks, entry.potent, entry.potency()), (3, true, 1.0));
+        assert_eq!(
+            (entry.stacks, entry.potent, entry.potency()),
+            (3, true, 1.0)
+        );
         assert!(!RemoteEffect::of(1, 0.0).potent);
         let mut writer = Writer::new();
         entry.write(&mut writer);

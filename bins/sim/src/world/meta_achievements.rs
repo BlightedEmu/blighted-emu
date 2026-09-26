@@ -160,7 +160,7 @@ impl SimWorld {
             if player.meta.checked == Some(fingerprint) {
                 continue;
             }
-            for entry in check(&content, &self.achievement_rules, &mut *player, rules) {
+            for entry in check(&content, &self.achievement_rules, &mut player, rules) {
                 notices.push((
                     player.connection.clone(),
                     ServerMessage::MetaProgressChanged(MetaProgressChangedMsg::of(
@@ -200,7 +200,12 @@ impl SimWorld {
                     .iter()
                     .map(|rule| MetaProgress {
                         id: rule.crc,
-                        progress: clamp(progress_of(&content, &self.achievement_rules, &player, rule)),
+                        progress: clamp(progress_of(
+                            &content,
+                            &self.achievement_rules,
+                            &player,
+                            rule,
+                        )),
                     })
                     .collect();
                 let completed = tab
@@ -561,10 +566,18 @@ mod tests {
         kill(&mut world);
         assert!(notices(&mut world).is_empty(), "1 of 2");
         kill(&mut world);
-        assert_eq!(notices(&mut world), [(first, 2)], "the first tier completes");
+        assert_eq!(
+            notices(&mut world),
+            [(first, 2)],
+            "the first tier completes"
+        );
         assert!(notices(&mut world).is_empty(), "noticed once");
         kill(&mut world);
-        assert_eq!(notices(&mut world), [(second, 3)], "75 % of the second tier");
+        assert_eq!(
+            notices(&mut world),
+            [(second, 3)],
+            "75 % of the second tier"
+        );
         world.meta_achievement_call(
             &connection(PLAYER),
             &MetaAchievementRequest::Summary { header: HEADER },

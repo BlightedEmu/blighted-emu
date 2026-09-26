@@ -45,12 +45,11 @@ pub(crate) async fn character_meta(
     .bind(character_id)
     .fetch_all(world)
     .await?;
-    let counters: Vec<CounterRow> = sqlx::query_as(
-        "SELECT counter, value FROM character_meta_counter WHERE character_id = $1",
-    )
-    .bind(character_id)
-    .fetch_all(world)
-    .await?;
+    let counters: Vec<CounterRow> =
+        sqlx::query_as("SELECT counter, value FROM character_meta_counter WHERE character_id = $1")
+            .bind(character_id)
+            .fetch_all(world)
+            .await?;
     let title: Option<i64> =
         sqlx::query_scalar("SELECT shown_title FROM player_character WHERE character_id = $1")
             .bind(character_id)
@@ -68,7 +67,11 @@ pub(crate) async fn character_meta(
         ability_slots: slots
             .into_iter()
             .map(|(mastery, slot, ability)| {
-                Ok((mastery, from_column(i64::from(slot), "ability slot")?, ability))
+                Ok((
+                    mastery,
+                    from_column(i64::from(slot), "ability slot")?,
+                    ability,
+                ))
             })
             .collect::<Result<_, DbError>>()?,
         counters: counters

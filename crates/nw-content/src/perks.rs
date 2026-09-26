@@ -451,7 +451,11 @@ impl PerkTable {
             ..Self::default()
         };
         for sheet in &source.sheets {
-            let ids: Vec<&str> = sheet.perks.iter().map(|perk| perk.perk_id.as_str()).collect();
+            let ids: Vec<&str> = sheet
+                .perks
+                .iter()
+                .map(|perk| perk.perk_id.as_str())
+                .collect();
             for perk_id in sheet_order(&ids) {
                 let index = u32::try_from(table.wire.len()).unwrap_or(u32::MAX);
                 table.indexes.entry(perk_id.to_lowercase()).or_insert(index);
@@ -773,7 +777,12 @@ mod tests {
                 },
                 PerkBucketRow {
                     id: "Generated_Weights".to_owned(),
-                    entries: vec!["0".to_owned(), "3".to_owned(), "5".to_owned(), "0".to_owned()],
+                    entries: vec![
+                        "0".to_owned(),
+                        "3".to_owned(),
+                        "5".to_owned(),
+                        "0".to_owned(),
+                    ],
                     ..PerkBucketRow::default()
                 },
                 PerkBucketRow {
@@ -861,7 +870,10 @@ mod tests {
         let picked = table.pick("generated", ITEM, &classes(), &[], &mut zero);
         assert_eq!(picked.as_deref(), Some("PerkID_Weapon_DmgCrit"));
         let held = ["PerkID_Weapon_DmgBasic".to_owned()];
-        assert_eq!(table.pick("Generated", ITEM, &classes(), &held, &mut zero), None);
+        assert_eq!(
+            table.pick("Generated", ITEM, &classes(), &held, &mut zero),
+            None
+        );
         let attribute = table.pick("Attributes", ITEM, &classes(), &[], &mut zero);
         assert_eq!(attribute.as_deref(), Some(BASE_DAMAGE));
         assert!((table.bucket("GENERATED").expect("bucket").chance - 0.5).abs() < f64::EPSILON);

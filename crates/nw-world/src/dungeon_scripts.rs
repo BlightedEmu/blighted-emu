@@ -300,7 +300,9 @@ impl DungeonScripts {
 
     /// Whether a game mode on level `folder` has a script.
     pub fn has_level(&self, folder: &str) -> bool {
-        self.game_modes.values().any(|script| script.level == folder)
+        self.game_modes
+            .values()
+            .any(|script| script.level == folder)
     }
 }
 
@@ -383,7 +385,10 @@ mod tests {
         written.write(&path).expect("write");
         let read = DungeonScripts::load(&path).expect("load");
         assert_eq!(read, written);
-        assert_eq!(read.game_mode(MODE).map(|script| script.encounters.len()), Some(1));
+        assert_eq!(
+            read.game_mode(MODE).map(|script| script.encounters.len()),
+            Some(1)
+        );
         assert!(read.game_mode("QuestCaerDun").is_none());
         assert!(read.has_level(LEVEL) && !read.has_level("newworld_vitaeeterna"));
     }
@@ -392,7 +397,10 @@ mod tests {
     fn a_missing_file_has_no_scripts_and_a_bad_one_is_an_error() {
         let dir = tempfile::tempdir().expect("dir");
         let path = dungeon_scripts_path(dir.path(), BUILD);
-        assert_eq!(DungeonScripts::load(&path).expect("missing"), DungeonScripts::default());
+        assert_eq!(
+            DungeonScripts::load(&path).expect("missing"),
+            DungeonScripts::default()
+        );
         std::fs::write(&path, "not json").expect("write");
         assert!(matches!(
             DungeonScripts::load(&path),

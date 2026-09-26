@@ -32,23 +32,23 @@ use crate::containers::{
     CONTAINER_TYPE_INDEX, ContainerState, ITEM_MANAGEMENT_TYPE_INDEX, ItemManagementState,
 };
 use crate::cooldowns::{COOLDOWNS_TYPE_INDEX, CooldownsState};
-use crate::gathering::{GATHERING_TYPE_INDEX, GatheringState};
+use crate::fishing::{FISHING_TYPE_INDEX, FishingComponentState};
 use crate::game_events::{GAME_EVENT_TYPE_INDEX, GameEventState};
+use crate::gathering::{GATHERING_TYPE_INDEX, GatheringState};
 use crate::gde::{GDE_METADATA_TYPE_INDEX, GdeMetadataReplicatedState};
+use crate::generic_invite::{GENERIC_INVITE_STATE_TYPE_INDEX, GenericInviteState};
 use crate::interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
 use crate::loot::{
     GLOBAL_STORAGE_TYPE_INDEX, GlobalStorageState, LOOT_TRACKER_TYPE_INDEX, LootTrackerState,
 };
 use crate::mount::{MOUNT_TYPE_INDEX, MountState};
-use crate::p2p_trade::{P2P_TRADE_STATE_TYPE_INDEX, P2PTradeState};
-use crate::generic_invite::{GENERIC_INVITE_STATE_TYPE_INDEX, GenericInviteState};
-use crate::fishing::{FISHING_TYPE_INDEX, FishingComponentState};
 use crate::music::{
     MusicalPerformanceState, PERFORMANCE_PLAYER_TYPE_INDEX, PERFORMANCE_TYPE_INDEX,
     PerformancePlayerState,
 };
-use crate::objectives::{OBJECTIVES_TYPE_INDEX, ObjectivesState};
 use crate::objective_interactor::{OBJECTIVE_INTERACTOR_TYPE_INDEX, ObjectiveInteractorState};
+use crate::objectives::{OBJECTIVES_TYPE_INDEX, ObjectivesState};
+use crate::p2p_trade::{P2P_TRADE_STATE_TYPE_INDEX, P2PTradeState};
 use crate::paperdoll::{PAPERDOLL_TYPE_INDEX, PaperdollState};
 use crate::player_components::{EmptyState, PLAYER_COMPONENT_TYPE_INDEX, PlayerComponentState};
 use crate::position::{POSITION_IN_THE_WORLD_TYPE_INDEX, PositionInTheWorldReplicatedState};

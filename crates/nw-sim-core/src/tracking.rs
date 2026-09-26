@@ -699,7 +699,10 @@ mod tests {
         for (record, [x, y]) in shown.enumerate() {
             let client = Position { x, y, ..start };
             let tracked = body.record(input(1, view_of(client, BOOM, [0.0; 2])), &ground, SEA);
-            assert!(!in_beach_block(tracked.position), "record {record}: {tracked:?}");
+            assert!(
+                !in_beach_block(tracked.position),
+                "record {record}: {tracked:?}"
+            );
             last = tracked.position;
         }
         assert!(last.y > start.y + 2.0, "it went up to the block: {last:?}");
@@ -970,13 +973,14 @@ mod tests {
         let mut at = start;
         for _ in 0..8 {
             at = body
-                .record(input(0, view_of(at, BOOM, [0.0; 2])), &TutorialSea, TUTORIAL_SEA_M)
+                .record(
+                    input(0, view_of(at, BOOM, [0.0; 2])),
+                    &TutorialSea,
+                    TUTORIAL_SEA_M,
+                )
                 .position;
         }
-        assert!(
-            body.is_swimming() || (at.z - swim).abs() < 1e-3,
-            "{at:?}"
-        );
+        assert!(body.is_swimming() || (at.z - swim).abs() < 1e-3, "{at:?}");
         let behind = Position {
             y: at.y - 4.0,
             ..at

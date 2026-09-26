@@ -13,48 +13,47 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::world::transmog::SkinJob;
+use nw_bus::InstanceCommand;
+use nw_bus::ItemState;
 use nw_bus::{
     AdminAction, AdminCommand, AdminReply, Admit, AdmitReply, Bus, BusError, BusId, CarriedItem,
     CellTable, ConnectionRef, GatewayOutput, Ghost, Ghosts, HandoffMessage, HandoffReply,
     Heartbeat, Hit, Incoming, InputBatch, ItemPlace, OutputBatch, PlayerInventory,
-    PlayerProgression, PlayerQuests,
-    Point, Publisher, ScriptLog, SimHeartbeat, SimInput, SimSlot, SimSnapshot, snapshot_parts,
-    split_batches, subject,
+    PlayerProgression, PlayerQuests, Point, Publisher, ScriptLog, SimHeartbeat, SimInput, SimSlot,
+    SimSnapshot, snapshot_parts, split_batches, subject,
 };
-use nw_bus::{GhostAssembly, ghost_parts};
-use nw_bus::InstanceCommand;
-use nw_bus::ItemState;
 use nw_bus::{CoinTransfer, LeaveReason, SocialBatch, SocialDeliveries, SocialInput};
-use nw_messages::social::SocialCall;
+use nw_bus::{GhostAssembly, ghost_parts};
 use nw_common::time::{unix_ms, unix_seconds};
 use nw_content::leaderboards::RotationCalendar;
+use nw_db::{AccountSkins, collect_account_skins};
 use nw_db::{
-    PgPool, SaveOutcome, SavedCamp, SavedHome, SavedHomeRecord, SavedHousingItem, SavedInventory, SavedItem, SavedLoadout,
-    SavedItemRolls, SavedLootLimit, SavedMount, SavedStoredItem,
-    SavedMounts, SavedPlace, SavedPosition, SavedProgression, SavedQuests, SavedTravel,
-    StatUpdate, save_character_items,
-    save_character_position, save_character_progression, save_character_quests, submit_stats,
+    PgPool, SaveOutcome, SavedCamp, SavedHome, SavedHomeRecord, SavedHousingItem, SavedInventory,
+    SavedItem, SavedItemRolls, SavedLoadout, SavedLootLimit, SavedMount, SavedMounts, SavedPlace,
+    SavedPosition, SavedProgression, SavedQuests, SavedStoredItem, SavedTravel, StatUpdate,
+    save_character_items, save_character_position, save_character_progression,
+    save_character_quests, submit_stats,
 };
 use nw_db::{clear_new_account_titles, company_listings, earn_account_titles, stored_players};
-use nw_messages::guild_lookup::REQUEST_GET_GUILDS_TYPE_INDEX;
+use nw_messages::ArenaClientMsg;
+use nw_messages::EconomyCall;
+use nw_messages::TransmogClientMsg;
 use nw_messages::facet::TIME_SYNC_REQUEST_TYPE_INDEX;
+use nw_messages::guild_lookup::REQUEST_GET_GUILDS_TYPE_INDEX;
+use nw_messages::social::SocialCall;
 use nw_messages::{
     BodyCodec, ClientFacetMsg, ClientInputMsg, GmClientMsg, InputRecord, LookupRequest,
-    MetaAchievementRequest, MountClientMsg, PointsClientMsg, SetTitleRequest, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX,
-    RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX, SpreadshotRequestMsg, TravelClientMsg,
+    MetaAchievementRequest, MountClientMsg, PointsClientMsg, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX,
+    REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX, SetTitleRequest,
+    SpreadshotRequestMsg, TravelClientMsg,
 };
 use nw_messages::{
     ClientOptionMsg, GuildsRequest, ItemCallMsg, ItemRepairMsg, KickClientMsg, PlayerDataRequest,
-    PlayerManagerRejectedMsg,
-    RETAIL_KICK_REASON, ServerMessage, TitleRequest,
+    PlayerManagerRejectedMsg, RETAIL_KICK_REASON, ServerMessage, TitleRequest,
 };
-use nw_messages::ArenaClientMsg;
 use nw_messages::{FishingClientMsg, MusicClientMsg};
-use nw_messages::TransmogClientMsg;
 use nw_messages::{GameModeClientMsg, TitlesUnlockMsg, WarClientMsg, WarSignupClientMsg};
-use nw_db::{AccountSkins, collect_account_skins};
-use crate::world::transmog::SkinJob;
-use nw_messages::EconomyCall;
 use nw_reflect::Envelope;
 use nw_sim_core::{Ground, GroundCheck, TickClock};
 use tokio::sync::mpsc;
@@ -870,7 +869,8 @@ impl Loop {
             metrics::counter!(METRIC_BAD_MESSAGES).increment(1);
             return;
         };
-        self.world.travel_input(connection, &input.records, self.now_ms());
+        self.world
+            .travel_input(connection, &input.records, self.now_ms());
         // The mount keys first: a dash or a ride changes the speeds the move takes.
         self.world
             .mount_input(connection, &input.records, self.now_ms());
@@ -888,7 +888,8 @@ impl Loop {
         // With the fishing pole out the attack key casts and reels, and while performing it
         // plays notes: no swing.
         self.world.fishing_input(connection, &input.records, now_ms);
-        if self.world.fishing_holds_attack(connection) || self.world.music_holds_attack(connection) {
+        if self.world.fishing_holds_attack(connection) || self.world.music_holds_attack(connection)
+        {
             return;
         }
         for result in self.world.attack_input(connection, &input.records, now_ms) {
@@ -977,7 +978,11 @@ impl Loop {
         if !self.world.has(connection) {
             return;
         }
-        let ids: Vec<Uuid> = request.guilds.iter().map(|id| Uuid::from_bytes(*id)).collect();
+        let ids: Vec<Uuid> = request
+            .guilds
+            .iter()
+            .map(|id| Uuid::from_bytes(*id))
+            .collect();
         let request = request.clone();
         let db = self.db.clone();
         self.look_up(connection, REQUEST_GET_GUILDS_TYPE_INDEX, async move {
@@ -1007,7 +1012,8 @@ impl Loop {
     fn run_economy_jobs(&mut self) {
         for job in self.world.take_economy_jobs() {
             let db = self.db.clone();
-            self.economy_jobs.spawn(async move { run_job(&db, job).await });
+            self.economy_jobs
+                .spawn(async move { run_job(&db, job).await });
         }
     }
 
@@ -1344,8 +1350,13 @@ impl Loop {
         metrics::counter!(METRIC_BUNDLE_MEMBERS).increment(output.bundle_members);
         let timeout = Duration::from_millis(self.settings.world.instance_request_timeout_ms);
         for (connection, request) in self.world.take_instance_requests() {
-            self.instance_link
-                .ask(&self.bus, self.settings.world_id, timeout, connection, request);
+            self.instance_link.ask(
+                &self.bus,
+                self.settings.world_id,
+                timeout,
+                connection,
+                request,
+            );
         }
         for (state, count) in self.world.mob_counts() {
             metrics::gauge!(METRIC_MOBS, STATE_LABEL => state.label()).set(count as f64);

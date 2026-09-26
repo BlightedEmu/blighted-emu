@@ -911,14 +911,11 @@ fn members_to_end(
         return None;
     }
     let found = match member_at(payload, at)? {
-        MemberRead::Read(member) => {
-            members_to_end(payload, member.body.end, rest, cards, dead).map(
-                |(mut tail, end)| {
-                    tail.insert(0, MemberRead::Read(member));
-                    (tail, end)
-                },
-            )
-        }
+        MemberRead::Read(member) => members_to_end(payload, member.body.end, rest, cards, dead)
+            .map(|(mut tail, end)| {
+                tail.insert(0, MemberRead::Read(member));
+                (tail, end)
+            }),
         MemberRead::NoReader { class, body_start } => {
             let limit = raw_limit(payload, body_start, cards);
             let tail = if rest == 0 {
@@ -981,9 +978,7 @@ fn read_member(payload: &[u8], reader: &mut Reader<'_>) -> Option<MemberRead> {
         VITALS_TYPE_INDEX => VitalsState::read(reader)
             .map(|state| vitals_id = state.slot_0.and_then(|slot| slot.vitals_id))
             .is_ok(),
-        _ if extra_members::has_reader(class) => {
-            extra_members::read_body(class, reader).is_some()
-        }
+        _ if extra_members::has_reader(class) => extra_members::read_body(class, reader).is_some(),
         _ => {
             return Some(MemberRead::NoReader {
                 class,
@@ -1611,10 +1606,7 @@ mod tests {
         let mut ledger = Ledger::new();
         ledger.bundle(SPAWN_MS, Vec::new(), spawn_payload());
         let mut payload = group(INTEREST, &[unread_member(), interact(IN_USE)]);
-        payload.extend(group(
-            MARKER_INTEREST,
-            &[asset_card(MARKER_ASSET, MARKER)],
-        ));
+        payload.extend(group(MARKER_INTEREST, &[asset_card(MARKER_ASSET, MARKER)]));
         ledger.bundle(CHANGE_MS, Vec::new(), payload);
         let scan = scan(&ledger);
         assert_eq!(scan.stats.changes, 0);

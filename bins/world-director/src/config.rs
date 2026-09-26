@@ -182,7 +182,10 @@ impl DirectorConfig {
                 return invalid("instances", "timeouts must be above 0");
             }
             if instances.open_timeout_ms >= self.admit_timeout_ms {
-                return invalid("instances.open_timeout_ms", "must be below admit_timeout_ms");
+                return invalid(
+                    "instances.open_timeout_ms",
+                    "must be below admit_timeout_ms",
+                );
             }
             if let Some(launch) = &instances.launch
                 && (launch.program.is_empty()

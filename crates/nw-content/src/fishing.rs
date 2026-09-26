@@ -209,7 +209,10 @@ impl WaterType {
 
     /// Whether it is salt water.
     pub const fn is_salt(self) -> bool {
-        matches!(self, Self::SaltVeryShallow | Self::SaltShallow | Self::SaltDeep)
+        matches!(
+            self,
+            Self::SaltVeryShallow | Self::SaltShallow | Self::SaltDeep
+        )
     }
 
     /// Whether it is deep: nobody may cast from it (`CastStartAction`: "can't cast from here").
@@ -617,8 +620,7 @@ impl FishingRules {
                         },
                         loot_table: row.loot_table_id.clone(),
                         loot_tag: row.loot_tag.clone(),
-                        required_rank: u16::try_from(row.required_level.max(0))
-                            .unwrap_or(u16::MAX),
+                        required_rank: u16::try_from(row.required_level.max(0)).unwrap_or(u16::MAX),
                         waits: WaitRanges {
                             nibble_s: Range::of(&row.time_to_nibble_seconds_range)?,
                             bite_s: Range::of(&row.time_to_bite_seconds_range)?,
@@ -632,7 +634,12 @@ impl FishingRules {
             .iter()
             .filter(|table| table.unique_id.eq_ignore_ascii_case(FISHING_TRADESKILL))
             .flat_map(|table| &table.rows)
-            .map(|row| (row.level, row.fishing_max_cast_distance_bonus.unwrap_or_default()))
+            .map(|row| {
+                (
+                    row.level,
+                    row.fishing_max_cast_distance_bonus.unwrap_or_default(),
+                )
+            })
             .collect();
         ranks.sort_by_key(|(rank, _)| *rank);
         let territory_tags = tables
@@ -674,7 +681,9 @@ impl FishingRules {
                     return None;
                 }
                 let hotspot = stem.strip_prefix(HOTSPOT_SLICE_PREFIX)?.to_owned();
-                self.hotspots.contains_key(&hotspot).then_some(HotspotPlace { hotspot, position })
+                self.hotspots
+                    .contains_key(&hotspot)
+                    .then_some(HotspotPlace { hotspot, position })
             })
             .collect();
         self
@@ -889,10 +898,7 @@ mod tests {
                     time_to_nibble_seconds_range: "3-6".to_owned(),
                 }],
             ),
-            tradeskill_rank_data: table(
-                FISHING_TRADESKILL,
-                vec![rank(1, 0.05), rank(0, 0.0)],
-            ),
+            tradeskill_rank_data: table(FISHING_TRADESKILL, vec![rank(1, 0.05), rank(0, 0.0)]),
             ..Tables::default()
         }
     }
@@ -900,18 +906,38 @@ mod tests {
     #[test]
     fn an_item_finds_its_pole_through_its_stats_and_the_rows_read() {
         let rules = FishingRules::from_tables(&tables());
-        let pole = rules.pole("2HFISHINGPOLET52").expect("the T52 uses the T5 stats");
+        let pole = rules
+            .pole("2HFISHINGPOLET52")
+            .expect("the T52 uses the T5 stats");
         assert_eq!(pole.id, "2hFishingPoleT5");
-        assert_eq!(pole.cast_distance, Range { low: 5.0, high: 20.0 });
-        assert!(rules.pole("FishingSalmonMediumT1").is_none(), "no pole class");
+        assert_eq!(
+            pole.cast_distance,
+            Range {
+                low: 5.0,
+                high: 20.0
+            }
+        );
+        assert!(
+            rules.pole("FishingSalmonMediumT1").is_none(),
+            "no pole class"
+        );
         let bait = rules.bait_of_item("BaitFreshFireflyT3").expect("bait");
         assert_eq!(bait.crc, 0xa9d9_f243, "retail 2309");
         assert!(bait.works(WaterType::FreshShallow, DayPhase::Day));
-        assert!(!bait.works(WaterType::SaltShallow, DayPhase::Day), "fresh only");
+        assert!(
+            !bait.works(WaterType::SaltShallow, DayPhase::Day),
+            "fresh only"
+        );
         assert!(!bait.works(WaterType::FreshShallow, DayPhase::Night));
         let salmon = rules.catchable("fishingsalmonmediumt1").expect("salmon");
         assert_eq!(salmon.behaviors, ["Lazy", "SporadicEasy"]);
-        assert_eq!(salmon.length, Range { low: 9.0, high: 15.0 });
+        assert_eq!(
+            salmon.length,
+            Range {
+                low: 9.0,
+                high: 15.0
+            }
+        );
         let sporadic = rules.behavior("sporadiceasy").expect("behavior");
         assert_eq!(sporadic.bits, 0x92, "retail 3172 bits of 01001001");
         assert_eq!(sporadic.crc, 0xd26d_ad61);
@@ -919,10 +945,19 @@ mod tests {
         assert!(!sporadic.fighting(9), "tired after the pattern");
         assert_eq!(rules.behavior("Lazy").map(|lazy| lazy.bits), Some(0));
         let waits = rules.waits(WaterType::FreshShallow).expect("waits");
-        assert_eq!(waits.nibble_s, Range { low: 10.0, high: 20.0 });
+        assert_eq!(
+            waits.nibble_s,
+            Range {
+                low: 10.0,
+                high: 20.0
+            }
+        );
         assert_eq!(rules.waits(WaterType::SaltDeep), None);
         assert!((rules.cast_bonus(1) - 0.05).abs() < f64::EPSILON);
-        assert!((rules.cast_bonus(200) - 0.05).abs() < f64::EPSILON, "the top rank's");
+        assert!(
+            (rules.cast_bonus(200) - 0.05).abs() < f64::EPSILON,
+            "the top rank's"
+        );
     }
 
     #[test]
@@ -932,7 +967,10 @@ mod tests {
                 "slices/coatgen/fishing/fishing_hotspot_broad_4.dynamicslice",
                 [100.0, 200.0, 40.0],
             ),
-            ("slices/coatgen/fishing/fishing_hotspot_broad_99.dynamicslice", [0.0, 0.0, 0.0]),
+            (
+                "slices/coatgen/fishing/fishing_hotspot_broad_99.dynamicslice",
+                [0.0, 0.0, 0.0],
+            ),
             ("slices/pois/other.dynamicslice", [100.0, 200.0, 40.0]),
         ]);
         let hotspot = rules.hotspot_at(101.0, 201.0, 2).expect("inside its 2 m");
@@ -941,7 +979,10 @@ mod tests {
         assert_eq!(hotspot.loot_tag, "Broad");
         assert!(rules.hotspot_at(101.0, 201.0, 1).is_none(), "rank too low");
         assert!(rules.hotspot_at(103.0, 200.0, 2).is_none(), "outside");
-        assert!(rules.hotspot_at(0.0, 0.0, 9).is_none(), "an unknown hotspot is not placed");
+        assert!(
+            rules.hotspot_at(0.0, 0.0, 9).is_none(),
+            "an unknown hotspot is not placed"
+        );
     }
 
     #[test]
@@ -961,11 +1002,41 @@ mod tests {
 
     #[test]
     fn ranges_read_both_forms() {
-        assert_eq!(Range::of("1-1.5"), Some(Range { low: 1.0, high: 1.5 }));
-        assert_eq!(Range::of(" 25 "), Some(Range { low: 25.0, high: 25.0 }));
+        assert_eq!(
+            Range::of("1-1.5"),
+            Some(Range {
+                low: 1.0,
+                high: 1.5
+            })
+        );
+        assert_eq!(
+            Range::of(" 25 "),
+            Some(Range {
+                low: 25.0,
+                high: 25.0
+            })
+        );
         assert_eq!(Range::of("x"), None);
-        assert!((Range { low: 5.0, high: 20.0 }.at(0.5) - 12.5).abs() < f64::EPSILON);
-        assert!((Range { low: 5.0, high: 20.0 }.at(2.0) - 20.0).abs() < f64::EPSILON);
+        assert!(
+            (Range {
+                low: 5.0,
+                high: 20.0
+            }
+            .at(0.5)
+                - 12.5)
+                .abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (Range {
+                low: 5.0,
+                high: 20.0
+            }
+            .at(2.0)
+                - 20.0)
+                .abs()
+                < f64::EPSILON
+        );
         assert_eq!(DayPhase::of(2), Some(DayPhase::Day));
         assert_eq!(DayPhase::of(4), None);
     }

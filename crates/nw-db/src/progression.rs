@@ -14,10 +14,10 @@ use uuid::Uuid;
 
 use crate::arena::{SavedArena, character_arena, save_character_arena};
 use crate::error::DbError;
-use crate::position::SaveOutcome;
+use crate::meta_achievements::{SavedMeta, SavedSlot, character_meta, save_character_meta};
 use crate::mounts::{SavedMounts, character_mounts, save_character_mounts};
 use crate::music::{SavedMusic, character_music, save_character_music};
-use crate::meta_achievements::{SavedMeta, SavedSlot, character_meta, save_character_meta};
+use crate::position::SaveOutcome;
 use crate::travel::{SavedTravel, character_travel, save_character_travel};
 
 /// Milliseconds per second, for the stored time.
@@ -518,7 +518,11 @@ mod infra_tests {
     /// A travel state with every field set: a marker, an inn and a respawn camp of the retail
     /// captures, and one home with two pieces of furniture.
     fn travel() -> SavedTravel {
-        let position = [6_061.9_f32.to_bits(), 9_856.0_f32.to_bits(), 324.9_f32.to_bits()];
+        let position = [
+            6_061.9_f32.to_bits(),
+            9_856.0_f32.to_bits(),
+            324.9_f32.to_bits(),
+        ];
         let rotation = [0, 0, 0.967_457_f32.to_bits(), 0.255_766_f32.to_bits()];
         SavedTravel {
             waypoint: Some(position),
@@ -527,7 +531,9 @@ mod infra_tests {
             camp_skin: Some(0x3e89_166b),
             unstuck_ready_ms: 1_790_860_734_747,
             homes: vec![crate::SavedHome {
-                plot: [0xc7, 0x37, 0x66, 0xcd, 0xa0, 0x43, 0x41, 0x6a, 0, 0, 0, 0, 0, 0, 0, 0],
+                plot: [
+                    0xc7, 0x37, 0x66, 0xcd, 0xa0, 0x43, 0x41, 0x6a, 0, 0, 0, 0, 0, 0, 0, 0,
+                ],
                 position,
                 purchased_ms: 1_782_815_151_259,
                 items: vec![

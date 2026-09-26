@@ -285,7 +285,8 @@ mod tests {
             Some(Err(MessageError::LengthMismatch { .. }))
         ));
         assert!(
-            ConversationClientMsg::decode(crate::shop::PURCHASE_ITEM_TYPE_INDEX, &request).is_none()
+            ConversationClientMsg::decode(crate::shop::PURCHASE_ITEM_TYPE_INDEX, &request)
+                .is_none()
         );
     }
 
@@ -310,8 +311,8 @@ mod tests {
                 project: COOKING_PROJECT,
             },
         ];
-        // Retail body lengths: 24, 24, 17, 20 and 24 bytes.
-        let lengths = [24, 24, 17, 20, 24];
+        // Retail body lengths: 24, 17, 20 and 24 bytes.
+        let lengths = [24, 17, 20, 24];
         for (call, length) in calls.into_iter().zip(lengths) {
             let bytes = call.encode();
             assert_eq!(bytes.len(), length);

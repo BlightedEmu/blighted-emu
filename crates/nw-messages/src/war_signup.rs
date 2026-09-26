@@ -285,8 +285,7 @@ impl WarSignupServerMsg {
                         Ok(SignupEntry {
                             character: String::from_utf8_lossy(&read_string(&mut reader)?)
                                 .into_owned(),
-                            name: String::from_utf8_lossy(&read_string(&mut reader)?)
-                                .into_owned(),
+                            name: String::from_utf8_lossy(&read_string(&mut reader)?).into_owned(),
                             flag: reader.u8()?,
                             id: reader.raw_id()?,
                         })
@@ -337,12 +336,11 @@ impl WarSignupServerMsg {
                 trailer,
                 ..
             } => {
-                let count = u8::try_from(entries.len()).map_err(|_| {
-                    MessageError::CountTooLarge {
+                let count =
+                    u8::try_from(entries.len()).map_err(|_| MessageError::CountTooLarge {
                         count: entries.len() as u64,
                         limit: u64::from(u8::MAX),
-                    }
-                })?;
+                    })?;
                 writer.u32(*war).u32(*extra).u8(count);
                 for entry in entries {
                     write_string(&mut writer, entry.character.as_bytes())?;

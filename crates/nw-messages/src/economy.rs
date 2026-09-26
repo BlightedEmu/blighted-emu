@@ -54,8 +54,8 @@ impl EconomyCall {
 /// One economy message of the server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EconomyMessage {
-    /// A trading post answer or notice.
-    Contract(ContractMessage),
+    /// A trading post answer or notice (boxed: it is far larger than the other messages).
+    Contract(Box<ContractMessage>),
     /// A trade message.
     Trade(TradeMessage),
     /// A season answer.
@@ -68,7 +68,7 @@ impl EconomyMessage {
     /// Decodes `body` when `type_index` is an economy message; `None` otherwise.
     pub fn decode(type_index: u64, body: &[u8]) -> Option<Result<Self, MessageError>> {
         if let Some(message) = ContractMessage::decode(type_index, body) {
-            return Some(message.map(Self::Contract));
+            return Some(message.map(|message| Self::Contract(Box::new(message))));
         }
         if let Some(message) = TradeMessage::decode(type_index, body) {
             return Some(message.map(Self::Trade));

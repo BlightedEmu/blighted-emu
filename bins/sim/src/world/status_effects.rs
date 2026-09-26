@@ -175,7 +175,10 @@ impl StatusEffects {
     }
 
     /// The rules of the effects it holds.
-    fn rules<'a>(&'a self, rules: &'a StatusEffectRules) -> impl Iterator<Item = &'a StatusEffectRule> {
+    fn rules<'a>(
+        &'a self,
+        rules: &'a StatusEffectRules,
+    ) -> impl Iterator<Item = &'a StatusEffectRule> {
         self.held.iter().filter_map(move |held| rules.get(held.crc))
     }
 
@@ -312,7 +315,11 @@ impl StatusEffects {
     }
 
     /// Ends the held effects whose rule `ends` picks.
-    fn remove_where(&mut self, rules: &StatusEffectRules, ends: impl Fn(&StatusEffectRule) -> bool) {
+    fn remove_where(
+        &mut self,
+        rules: &StatusEffectRules,
+        ends: impl Fn(&StatusEffectRule) -> bool,
+    ) {
         let before = self.held.len();
         self.held
             .retain(|held| !rules.get(held.crc).is_some_and(&ends));
@@ -639,13 +646,11 @@ impl SimWorld {
     /// through.
     pub(super) fn player_absorbs(&self, entity: Entity, tag: u8, amount: u32) -> u32 {
         let rules = &self.content.status_effects;
-        self.world
-            .get::<Player>(entity)
-            .map_or(amount, |player| {
-                let through = 1.0 - player.status_effects.absorption(rules, tag);
-                // A hit of a few thousand points.
-                (f64::from(amount) * through).round() as u32
-            })
+        self.world.get::<Player>(entity).map_or(amount, |player| {
+            let through = 1.0 - player.status_effects.absorption(rules, tag);
+            // A hit of a few thousand points.
+            (f64::from(amount) * through).round() as u32
+        })
     }
 
     /// The multiple the effects of player `entity` give its hits of damage type `tag`, times the
@@ -655,11 +660,12 @@ impl SimWorld {
         let own = self
             .world
             .get::<Player>(entity)
-            .map_or(PLAIN_POTENCY, |player| player.status_effects.damage_scale(rules, tag));
-        let through = self
-            .mob_effects
-            .get(&mob)
-            .map_or(PLAIN_POTENCY, |effects| 1.0 - effects.absorption(rules, tag));
+            .map_or(PLAIN_POTENCY, |player| {
+                player.status_effects.damage_scale(rules, tag)
+            });
+        let through = self.mob_effects.get(&mob).map_or(PLAIN_POTENCY, |effects| {
+            1.0 - effects.absorption(rules, tag)
+        });
         own * through
     }
 
@@ -683,15 +689,18 @@ impl SimWorld {
         let rules = &content.status_effects;
         for (number, effect) in queued {
             let added = match self.player_by_number(number) {
-                Some(entity) => self.world.get_mut::<Player>(entity).is_some_and(|mut player| {
-                    player.status_effects.add_by_id(
-                        rules,
-                        &effect.status_id,
-                        effect.potency,
-                        number,
-                        now_ms,
-                    )
-                }),
+                Some(entity) => self
+                    .world
+                    .get_mut::<Player>(entity)
+                    .is_some_and(|mut player| {
+                        player.status_effects.add_by_id(
+                            rules,
+                            &effect.status_id,
+                            effect.potency,
+                            number,
+                            now_ms,
+                        )
+                    }),
                 None => self.mob_effects.entry(number).or_default().add_by_id(
                     rules,
                     &effect.status_id,
@@ -775,10 +784,9 @@ impl SimWorld {
     /// and a stamina gain at once; damage as an over-time 3601 (retail flags `08 00`), or as a
     /// hit when it kills, which runs the death.
     fn player_vitals_tick(&mut self, entity: Entity, number: u64, tick: VitalsTick, now_ms: u64) {
-        let source_at = self
-            .mobs
-            .get(tick.source)
-            .map_or([0.0; 3], |mob| [mob.position.x, mob.position.y, mob.position.z]);
+        let source_at = self.mobs.get(tick.source).map_or([0.0; 3], |mob| {
+            [mob.position.x, mob.position.y, mob.position.z]
+        });
         let Some(connection) = self.world.get_mut::<Player>(entity).map(|mut player| {
             // Stamina values of a few dozen.
             player.stamina.gain(tick.stamina as f32);
@@ -1045,9 +1053,17 @@ mod tests {
         let mut effects = StatusEffects::default();
         let stun = crc(&rules, STUN);
         assert!(effects.add(&rules, stun, hit_by(MOB), START_MS));
-        assert!(effects.add(&rules, crc(&rules, IMMUNE), Application::plain(PLAYER), START_MS));
+        assert!(effects.add(
+            &rules,
+            crc(&rules, IMMUNE),
+            Application::plain(PLAYER),
+            START_MS
+        ));
         assert!(!effects.holds(stun), "RemoveStatusEffectCategories Stun");
-        assert!(!effects.add(&rules, stun, hit_by(MOB), START_MS), "AntirequisiteEffectCategories");
+        assert!(
+            !effects.add(&rules, stun, hit_by(MOB), START_MS),
+            "AntirequisiteEffectCategories"
+        );
     }
 
     #[test]
@@ -1071,7 +1087,12 @@ mod tests {
         let food = crc(&rules, FOOD);
         effects.add(&rules, food, Application::plain(PLAYER), START_MS);
         let alone = effects.potency(&rules, &effects.held[0], rules.get(food).expect("food"));
-        effects.add(&rules, crc(&rules, REGEN), Application::plain(PLAYER), START_MS);
+        effects.add(
+            &rules,
+            crc(&rules, REGEN),
+            Application::plain(PLAYER),
+            START_MS,
+        );
         let with_regen = effects.potency(&rules, &effects.held[0], rules.get(food).expect("food"));
         assert_eq!((alone, with_regen), (1.0, 3.0), "PassiveFoodRegen=2");
         effects.hit_taken(&rules);
@@ -1088,7 +1109,11 @@ mod tests {
             ..Application::plain(PLAYER)
         };
         effects.add(&rules, crc(&rules, FOOD), application, START_MS);
-        assert!(effects.tick(&rules, START_MS + 10_000, MAX_HEALTH).is_empty());
+        assert!(
+            effects
+                .tick(&rules, START_MS + 10_000, MAX_HEALTH)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1096,18 +1121,31 @@ mod tests {
         let rules = rules();
         let mut effects = StatusEffects::default();
         effects.add(&rules, crc(&rules, BLEED), hit_by(MOB), START_MS);
-        effects.add(&rules, crc(&rules, FOOD), Application::plain(PLAYER), START_MS);
+        effects.add(
+            &rules,
+            crc(&rules, FOOD),
+            Application::plain(PLAYER),
+            START_MS,
+        );
         effects.set_dead(&rules, true);
         assert!(!effects.holds(crc(&rules, BLEED)));
         assert!(effects.holds(crc(&rules, FOOD)), "no RemoveOnDeath");
-        assert!(!effects.add(&rules, crc(&rules, BLEED), hit_by(MOB), START_MS), "dead");
+        assert!(
+            !effects.add(&rules, crc(&rules, BLEED), hit_by(MOB), START_MS),
+            "dead"
+        );
     }
 
     #[test]
     fn the_equip_load_shortens_a_stun_by_its_duration_mod() {
         let rules = rules();
         let mut effects = StatusEffects::default();
-        effects.add(&rules, crc(&rules, LOAD), Application::plain(PLAYER), START_MS);
+        effects.add(
+            &rules,
+            crc(&rules, LOAD),
+            Application::plain(PLAYER),
+            START_MS,
+        );
         effects.add(&rules, crc(&rules, STUN), hit_by(MOB), START_MS);
         let stun = &effects.held[effects.index(crc(&rules, STUN)).expect("stun")];
         assert_eq!(stun.ends_ms, Some(START_MS + 1_600), "2 s x (1 - 0.2)");
@@ -1120,20 +1158,36 @@ mod tests {
         let clock = EffectClock {
             spawned_ms: Some(START_MS),
         };
-        effects.add(&rules, crc(&rules, LOAD), Application::plain(PLAYER), START_MS);
+        effects.add(
+            &rules,
+            crc(&rules, LOAD),
+            Application::plain(PLAYER),
+            START_MS,
+        );
         let mut version = 0;
         effects.refresh_state(&rules, &mut version, clock);
         let member = effects.take_member(false).expect("due");
         let MemberState::StatusEffects(state) = member.state else {
             panic!("status effects member");
         };
-        assert_eq!(state.local, None, "only the lightweight map, as retail at the spawn");
+        assert_eq!(
+            state.local, None,
+            "only the lightweight map, as retail at the spawn"
+        );
         assert_eq!(
             state.lightweight,
-            Some(EffectMap::full(1, vec![(rules.by_id(LOAD).expect("load").key, 65_507)])),
+            Some(EffectMap::full(
+                1,
+                vec![(rules.by_id(LOAD).expect("load").key, 65_507)]
+            )),
             "retail: tick 1 less 30"
         );
-        effects.add(&rules, crc(&rules, SPRINT), Application::plain(PLAYER), START_MS + 1_000);
+        effects.add(
+            &rules,
+            crc(&rules, SPRINT),
+            Application::plain(PLAYER),
+            START_MS + 1_000,
+        );
         effects.add(&rules, crc(&rules, BLEED), hit_by(MOB), START_MS + 1_000);
         effects.refresh_state(&rules, &mut version, clock);
         let MemberState::StatusEffects(state) = effects.take_member(false).expect("due").state
@@ -1145,9 +1199,10 @@ mod tests {
         };
         let sprint_key = rules.by_id(SPRINT).expect("sprint").key;
         assert!(
-            lightweight
-                .elements
-                .contains(&(sprint_key, SPAWN_TICK + 1_850 * TICKS_PER_SECOND / MS_PER_SECOND)),
+            lightweight.elements.contains(&(
+                sprint_key,
+                SPAWN_TICK + 1_850 * TICKS_PER_SECOND / MS_PER_SECOND
+            )),
             "the end tick"
         );
         let Some(EffectMap::Full(local)) = state.local else {
@@ -1156,7 +1211,10 @@ mod tests {
         assert_eq!(local.elements.len(), 1);
         assert_eq!(local.elements[0].1.end_unix_ns, unix_ns(START_MS + 11_000));
         assert!(effects.take_member(false).is_none(), "sent once");
-        assert!(effects.take_member(true).is_some(), "again with the first card");
+        assert!(
+            effects.take_member(true).is_some(),
+            "again with the first card"
+        );
     }
 
     #[test]

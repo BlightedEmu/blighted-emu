@@ -719,7 +719,11 @@ pub(super) mod tests {
         };
         assert_eq!(child(19), Some(vec![0x2e]), "the third slot's state");
         assert_eq!(child(20), Some(AIM_STARTED.to_be_bytes().to_vec()));
-        assert_eq!(child(21), Some(vec![0x96, 0x06]), "the retail sequence bytes");
+        assert_eq!(
+            child(21),
+            Some(vec![0x96, 0x06]),
+            "the retail sequence bytes"
+        );
         assert_eq!(child(48), Some(vec![0x28]), "the marker");
         let (quiet, _) = Replica::new(source(), AT, Some(seen), SPAWNED_MS + 30);
         assert!(!quiet.changed(), "the echo is over");

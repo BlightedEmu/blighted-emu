@@ -40,7 +40,8 @@ impl SimWorld {
             let player = &mut *player;
             let player_level = content.progression.level_of(player.experience);
             let base = content.kill_experience.of(mob_level).unwrap_or_default();
-            let raw = f64::from(base) * content.kill_rewards.factor(vitals, mob_level, player_level);
+            let raw =
+                f64::from(base) * content.kill_rewards.factor(vitals, mob_level, player_level);
             if !tutorial_mob {
                 gain_experience(player, whole_down(raw), &content.gameplay.xp);
             }
@@ -49,9 +50,10 @@ impl SimWorld {
                     continue;
                 };
                 let multiplier = content.gameplay.xp.progression(&mastery_id);
-                player
-                    .masteries
-                    .gain(mastery, progression_gain(f64::from(points), ONCE, multiplier));
+                player.masteries.gain(
+                    mastery,
+                    progression_gain(f64::from(points), ONCE, multiplier),
+                );
             }
         }
         let categories = content
@@ -59,9 +61,12 @@ impl SimWorld {
             .of(vitals)
             .map(|(_, categories)| categories.to_vec())
             .unwrap_or_default();
-        self.meta_event(entity, MetaEvent::Kill {
-            categories: &categories,
-        });
+        self.meta_event(
+            entity,
+            MetaEvent::Kill {
+                categories: &categories,
+            },
+        );
     }
 }
 
@@ -214,6 +219,9 @@ mod tests {
         assert!(gained == [20, 4] || gained == [4, 20], "{gained:?}");
         world.reward_kill(mob, PLAYER + 1);
         let player = world.world.get::<Player>(entity).expect("player");
-        assert_eq!(player.experience, 20, "a killer that is not here gets nothing");
+        assert_eq!(
+            player.experience, 20,
+            "a killer that is not here gets nothing"
+        );
     }
 }

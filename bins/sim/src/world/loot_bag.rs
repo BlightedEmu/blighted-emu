@@ -20,15 +20,15 @@ use bevy_ecs::entity::Entity;
 use nw_bus::LootLimitCount;
 use nw_content::item_rolls::RolledItem;
 use nw_content::loot::LootRoll;
-use nw_content::perks::rarity;
 use nw_content::loot_limits::{LimitCount, LootLimitCounts, LootLimitRules};
+use nw_content::perks::rarity;
 use nw_content::starter::KitItem;
 use nw_messages::gde::AssetId;
 use nw_messages::items::{ITEM_BOUND, SYNC_OWNED};
 use nw_messages::loot::{
     GLOBAL_STORAGE_COMPONENT, GlobalStorageState, LOOT_CREATURE, LOOT_DROPPED, LOOT_POI,
-    LOOT_ROLLED, LOOT_TAKEN,
-    LOOT_TRACKER_COMPONENT, LootLimitEntry, LootTrackerState, StoredItems, TrackedLoot,
+    LOOT_ROLLED, LOOT_TAKEN, LOOT_TRACKER_COMPONENT, LootLimitEntry, LootTrackerState, StoredItems,
+    TrackedLoot,
 };
 use nw_messages::position::{PositionInTheWorldReplicatedState, WorldPosition};
 use nw_messages::wire::RAW_ID_LEN;
@@ -230,6 +230,9 @@ pub(super) struct Takeable {
     pub(super) rolls: Vec<Option<RolledItem>>,
 }
 
+/// One item stack taken from a bag: (item id, count) and its roll, when it was rolled.
+type TakenItem = ((String, u32), Option<RolledItem>);
+
 impl LootBags {
     /// Drops a bag of `items` for `owner` at `position` at `now_ms`, with the `rolls` of each
     /// entry (`None`: the item's data values; a missing entry is `None`); a bag without items is
@@ -302,7 +305,7 @@ impl LootBags {
         id: &[u8; RAW_ID_LEN],
         player: u64,
         now_ms: u64,
-    ) -> Option<Vec<((String, u32), Option<RolledItem>)>> {
+    ) -> Option<Vec<TakenItem>> {
         let rolls = self
             .bags
             .values()
@@ -353,7 +356,8 @@ impl LootBags {
         bag.rolls.resize(bag.items.len(), None);
         let kept: Vec<bool> = bag.items.iter().map(|(_, left)| *left > 0).collect();
         let mut keep = kept.iter();
-        bag.rolls.retain(|_| keep.next().copied().unwrap_or_default());
+        bag.rolls
+            .retain(|_| keep.next().copied().unwrap_or_default());
         bag.items.retain(|(_, left)| *left > 0);
         if bag.items.is_empty() {
             bag.enter(Stage::Taken, now_ms);
@@ -565,7 +569,15 @@ impl PlayerLoot {
         server_ms: u64,
         version: u64,
     ) -> BundleMember {
-        self.track_kind(bag, LOOT_DROPPED, at, server_ms, None, NO_PERK_RARITY, version)
+        self.track_kind(
+            bag,
+            LOOT_DROPPED,
+            at,
+            server_ms,
+            None,
+            NO_PERK_RARITY,
+            version,
+        )
     }
 
     /// The player opened loot container `container` at `at` at server time `server_ms`: the
@@ -1034,7 +1046,11 @@ mod tests {
             perks: vec!["PerkID_A".to_owned()],
         };
         let mut bags = LootBags::default();
-        let items = vec![(SWORD.to_owned(), 1), ("PorkT1".to_owned(), 2), (SWORD.to_owned(), 1)];
+        let items = vec![
+            (SWORD.to_owned(), 1),
+            ("PorkT1".to_owned(), 2),
+            (SWORD.to_owned(), 1),
+        ];
         let rolls = vec![Some(sword.clone()), None, Some(sword.clone())];
         let id = bags.drop_rolled_bag(bag_namespace(1), AT, KILLER, items, rolls, NOW);
         assert_eq!(

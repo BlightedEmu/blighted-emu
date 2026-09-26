@@ -589,8 +589,14 @@ mod tests {
                 })
             })
             .collect();
-        assert_eq!(envs.get("SteamAppId").map(String::as_str), Some(STEAM_APP_ID));
-        assert_eq!(envs.get("SteamGameId").map(String::as_str), Some(STEAM_APP_ID));
+        assert_eq!(
+            envs.get("SteamAppId").map(String::as_str),
+            Some(STEAM_APP_ID)
+        );
+        assert_eq!(
+            envs.get("SteamGameId").map(String::as_str),
+            Some(STEAM_APP_ID)
+        );
     }
 
     #[test]

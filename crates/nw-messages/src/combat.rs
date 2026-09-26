@@ -873,7 +873,10 @@ mod tests {
             .collect();
         let message = OnHealedMsg::decode(&body).expect("decode");
         assert!((message.amount - 314.888_67).abs() < 0.001);
-        assert_eq!(OnHealedMsg::decode(&message.encode().expect("encode")).expect("back"), message);
+        assert_eq!(
+            OnHealedMsg::decode(&message.encode().expect("encode")).expect("back"),
+            message
+        );
     }
 
     #[test]
@@ -1199,7 +1202,11 @@ mod tests {
     fn a_fall_is_the_retail_3601_and_2071() {
         let amount = FALL_SHARE * FALL_MAX_HEALTH;
         let fall = OnDamageMsg::fall(TARGET, amount, FALL_MAX_HEALTH);
-        assert_eq!(fall.u64_c, facet_entity(TARGET), "the player is its own attacker");
+        assert_eq!(
+            fall.u64_c,
+            facet_entity(TARGET),
+            "the player is its own attacker"
+        );
         assert_eq!(fall.raw_2, [0x12, 0x00]);
         assert_eq!(f32::from_bits(fall.u32_d), FALL_SHARE);
         assert_eq!(fall.triple, [0; 3]);
@@ -1214,8 +1221,15 @@ mod tests {
         let body = fall.encode().expect("encode");
         assert_eq!(OnDamageMsg::decode(&body), Ok(fall));
         let dealt = DamageDealtMsg::fall(TARGET, amount);
-        assert_eq!(dealt.u64_c, facet_entity(TARGET), "the player is the target");
-        assert_eq!((dealt.u32_d, dealt.u32_e, dealt.raw_2), (0, 0, [0x22, 0x00]));
+        assert_eq!(
+            dealt.u64_c,
+            facet_entity(TARGET),
+            "the player is the target"
+        );
+        assert_eq!(
+            (dealt.u32_d, dealt.u32_e, dealt.raw_2),
+            (0, 0, [0x22, 0x00])
+        );
         let body = dealt.encode().expect("encode");
         assert_eq!(DamageDealtMsg::decode(&body), Ok(dealt));
     }

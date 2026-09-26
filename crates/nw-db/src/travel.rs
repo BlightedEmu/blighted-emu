@@ -105,7 +105,19 @@ pub struct SavedTravel {
 
 type TravelRow = (Option<Vec<i32>>, Option<i64>, Option<i64>, Option<i64>, i64);
 type TimeRow = (i64, i64, Option<Vec<i32>>, Option<i16>, Option<i64>);
-type HomeRow = (Vec<u8>, Vec<i32>, i64, i64, i64, Vec<u8>, i64, i64, i32, i64, i64);
+type HomeRow = (
+    Vec<u8>,
+    Vec<i32>,
+    i64,
+    i64,
+    i64,
+    Vec<u8>,
+    i64,
+    i64,
+    i32,
+    i64,
+    i64,
+);
 type ItemRow = (Vec<u8>, i32, i64, Vec<i32>, Vec<i32>);
 
 /// A `u32` as the `INTEGER` with the same bits.
@@ -134,9 +146,7 @@ pub(crate) fn bits_array<const N: usize>(
     field: &'static str,
 ) -> Result<[u32; N], DbError> {
     let values: Vec<u32> = column.iter().map(|value| bits_value(*value)).collect();
-    values
-        .try_into()
-        .map_err(|_| DbError::OutOfRange { field })
+    values.try_into().map_err(|_| DbError::OutOfRange { field })
 }
 
 /// The array column of bit patterns.
@@ -156,8 +166,7 @@ pub(crate) async fn character_travel(
     .bind(character_id)
     .fetch_optional(world)
     .await?;
-    let (waypoint, inn, camp, camp_skin, unstuck_ready_ms) =
-        row.ok_or(DbError::NoSuchCharacter)?;
+    let (waypoint, inn, camp, camp_skin, unstuck_ready_ms) = row.ok_or(DbError::NoSuchCharacter)?;
     let times: Option<TimeRow> = sqlx::query_as(
         "SELECT played_ms, inn_recalled_ms, camp_position_bits, camp_tier, camp_placed_ms \
          FROM player_character WHERE character_id = $1",
@@ -216,9 +225,9 @@ pub(crate) async fn character_travel(
                     record: SavedHomeRecord {
                         plot_facet: id_value(plot_facet),
                         plot_extra: id_value(plot_extra),
-                        house_data: house_data
-                            .try_into()
-                            .map_err(|_| DbError::OutOfRange { field: "house_data" })?,
+                        house_data: house_data.try_into().map_err(|_| DbError::OutOfRange {
+                            field: "house_data",
+                        })?,
                         house_data_facet: id_value(house_data_facet),
                         house_type: from_column(house_type, "house_type")?,
                         territory: from_column(i64::from(territory), "territory")?,
@@ -323,7 +332,10 @@ pub(crate) async fn save_character_travel(
         .bind(i64::from(record.house_type))
         .bind(i32::from(record.territory))
         .bind(to_column(record.taxes_due_ms, "taxes_due_ms")?)
-        .bind(to_column(record.fast_travel_ready_ms, "fast_travel_ready_ms")?)
+        .bind(to_column(
+            record.fast_travel_ready_ms,
+            "fast_travel_ready_ms",
+        )?)
         .execute(&mut **transaction)
         .await?;
         for item in &home.items {
@@ -356,7 +368,11 @@ mod tests {
         for bits in [0, u32::MAX, (-0.0_f32).to_bits(), 6_061.9_f32.to_bits()] {
             assert_eq!(bits_value(bits_column(bits)), bits);
         }
-        let position = [1.5_f32.to_bits(), (-2.0_f32).to_bits(), 300.25_f32.to_bits()];
+        let position = [
+            1.5_f32.to_bits(),
+            (-2.0_f32).to_bits(),
+            300.25_f32.to_bits(),
+        ];
         assert_eq!(
             bits_array::<POSITION_LEN>(&bits_list(&position), "test").ok(),
             Some(position)

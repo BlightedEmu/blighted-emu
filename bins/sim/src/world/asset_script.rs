@@ -221,7 +221,11 @@ impl AssetScript {
             // leaving and coming back into view, not a step of the level (retail: the Thorpe
             // encounter, asset 14, stopped at 303772 and was carded again at 309357; its change
             // at bit 15206 + 2316 ms is what makes the client ask for the boss cutscene).
-            let last_change_ms = entity.changes.iter().map(|change| change.group.time_ms).max();
+            let last_change_ms = entity
+                .changes
+                .iter()
+                .map(|change| change.group.time_ms)
+                .max();
             let level_stop = entity.despawns.last().filter(|gone| {
                 **gone > last_spawn_ms && last_change_ms.is_none_or(|change| change <= **gone)
             });
@@ -529,7 +533,10 @@ mod tests {
         });
         script.on(Trigger::Achievement(CLIMB_BIT), 0);
         assert_eq!(script.take_due(5_433), [(0, Step::Show)]);
-        assert!(script.take_due(60_000).is_empty(), "no hide at the view exit");
+        assert!(
+            script.take_due(60_000).is_empty(),
+            "no hide at the view exit"
+        );
         script.on(Trigger::Achievement(TF_BIT), 100_000);
         assert_eq!(script.take_due(102_316), [(0, Step::Change(0))]);
         assert!(script.take_due(u64::MAX).is_empty());

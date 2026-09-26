@@ -196,9 +196,10 @@ impl KillRewards {
     /// The `KillExpModifier` of level gap `gap`, clamped to the table's rows; 0 between rows
     /// or without a table.
     fn gap_modifier(&self, gap: i64) -> f64 {
-        let (Some((low, _)), Some((high, _))) =
-            (self.disparity.first_key_value(), self.disparity.last_key_value())
-        else {
+        let (Some((low, _)), Some((high, _))) = (
+            self.disparity.first_key_value(),
+            self.disparity.last_key_value(),
+        ) else {
             return 0.0;
         };
         let gap = gap.clamp(*low, *high);
@@ -286,27 +287,42 @@ mod tests {
     #[test]
     fn the_creature_type_and_the_level_gap_scale_a_kill() {
         let rewards = rewards();
-        assert!(close(rewards.factor(lowercase_crc32(LEGION), 1, 0), SOLO_MOD));
+        assert!(close(
+            rewards.factor(lowercase_crc32(LEGION), 1, 0),
+            SOLO_MOD
+        ));
         assert!(close(
             rewards.factor(lowercase_crc32(VARIANT), 3, 2),
             SOLO_MOD
         ));
-        assert!(close(rewards.factor(lowercase_crc32(ELITE), 5, 5), ELITE_MOD));
+        assert!(close(
+            rewards.factor(lowercase_crc32(ELITE), 5, 5),
+            ELITE_MOD
+        ));
         // Retail: the ship's sailors give nothing.
         assert!(close(rewards.factor(lowercase_crc32(SAILOR), 1, 0), 0.0));
-        assert!(close(rewards.factor(lowercase_crc32("Unmodified"), 1, 1), 0.0));
+        assert!(close(
+            rewards.factor(lowercase_crc32("Unmodified"), 1, 1),
+            0.0
+        ));
         assert!(close(rewards.factor(lowercase_crc32("Orphan"), 1, 1), 0.0));
         // A mob 10 levels below the player gives 60 %, 30 below (clamped to -20) 20 %.
         assert!(close(rewards.factor(lowercase_crc32(LEGION), 1, 11), 0.6));
         assert!(close(rewards.factor(lowercase_crc32(LEGION), 1, 31), 0.2));
-        assert!(close(rewards.factor(lowercase_crc32(LEGION), 40, 1), SOLO_MOD));
+        assert!(close(
+            rewards.factor(lowercase_crc32(LEGION), 40, 1),
+            SOLO_MOD
+        ));
     }
 
     #[test]
     fn a_mob_type_and_its_level_variant_name_their_creature_type() {
         let rewards = rewards();
         assert_eq!(rewards.creature_type(lowercase_crc32(ELITE)), Some("Elite"));
-        assert_eq!(rewards.creature_type(lowercase_crc32(VARIANT)), Some("Solo"));
+        assert_eq!(
+            rewards.creature_type(lowercase_crc32(VARIANT)),
+            Some("Solo")
+        );
         assert_eq!(rewards.creature_type(lowercase_crc32("Orphan")), None);
     }
 

@@ -20,10 +20,10 @@ mod holdings;
 mod look;
 mod rolls;
 
-use holdings::Holdings;
 pub(super) use charms::{CharmRefusal, CharmTarget};
-pub(super) use holdings::{DroppedStack, ItemRefusal, MAX_CONTAINER_SLOTS};
 pub(super) use durability::RepairPick;
+use holdings::Holdings;
+pub(super) use holdings::{DroppedStack, ItemRefusal, MAX_CONTAINER_SLOTS};
 
 /// The version of the first gear states (retail value).
 const FIRST_GEAR_VERSION: u64 = 3;
@@ -323,7 +323,10 @@ impl Gear {
             .iter()
             .map(|(slot_id, stack)| EquippedItem {
                 slot: *slot_id,
-                key: stack.as_ref().and_then(|stack| stack.key).unwrap_or_default(),
+                key: stack
+                    .as_ref()
+                    .and_then(|stack| stack.key)
+                    .unwrap_or_default(),
                 item: stack.as_ref().map(|stack| stack.item),
             })
             .collect();
@@ -332,13 +335,7 @@ impl Gear {
             .iter()
             .map(|stack| stack.as_ref().map(|stack| stack.item))
             .collect();
-        PlayerGear::with_extras(
-            &equipped,
-            &bag,
-            self.version,
-            self.hands(),
-            &self.extras(),
-        )
+        PlayerGear::with_extras(&equipped, &bag, self.version, self.hands(), &self.extras())
     }
 
     /// Every stack of `item` becomes one new stack of `quantity` worn in paperdoll slot
@@ -704,7 +701,10 @@ impl Gear {
             .filter(|(slot_id, _)| is_visible_slot(*slot_id))
             .map(|(slot_id, stack)| EquippedItem {
                 slot: *slot_id,
-                key: stack.as_ref().and_then(|stack| stack.key).unwrap_or_default(),
+                key: stack
+                    .as_ref()
+                    .and_then(|stack| stack.key)
+                    .unwrap_or_default(),
                 item: stack.as_ref().map(|stack| stack.item),
             })
             .collect()

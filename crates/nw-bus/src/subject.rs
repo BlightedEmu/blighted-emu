@@ -177,7 +177,10 @@ mod tests {
         let sim = BusId::try_from("sim-1".to_owned()).expect("id");
         let prefix = "nw.00000000-0000-0000-0000-000000000000";
         assert_eq!(social_input(world), format!("{prefix}.social.input"));
-        assert_eq!(sim_social(world, &sim), format!("{prefix}.sim.sim-1.social"));
+        assert_eq!(
+            sim_social(world, &sim),
+            format!("{prefix}.sim.sim-1.social")
+        );
         assert_eq!(sim_coins(world, &sim), format!("{prefix}.sim.sim-1.coins"));
     }
 
@@ -186,7 +189,10 @@ mod tests {
         let world = Uuid::nil();
         let sim = BusId::try_from("inst-1".to_owned()).expect("id");
         let prefix = "nw.00000000-0000-0000-0000-000000000000";
-        assert_eq!(director_instance(world), format!("{prefix}.director.instance"));
+        assert_eq!(
+            director_instance(world),
+            format!("{prefix}.director.instance")
+        );
         assert_eq!(
             sim_instance(world, &sim),
             format!("{prefix}.sim.inst-1.instance")

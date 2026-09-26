@@ -194,9 +194,8 @@ impl ArenaPlayer {
             next_group_trial_refresh_ns: non_zero(record.next_group_trial_refresh_ns),
             mutation_award: record.mutation_award.then_some(true),
             single_player_state,
-            single_player_time_ns: single_player_state.and(
-                trial_time.or(record.stay.as_ref().map(|stay| stay.activated_ns)),
-            ),
+            single_player_time_ns: single_player_state
+                .and(trial_time.or(record.stay.as_ref().map(|stay| stay.activated_ns))),
             game_mode_index: single_player_state.and(mode.map(|mode| mode.game_mode_index)),
         }
     }
@@ -523,7 +522,9 @@ impl SimWorld {
             return false;
         }
         if let Some(achievement) = &mode.entry_achievement
-            && !player.flow.has_achievement(&self.achievement_rules, achievement)
+            && !player
+                .flow
+                .has_achievement(&self.achievement_rules, achievement)
         {
             return false;
         }
@@ -569,7 +570,11 @@ impl SimWorld {
         if player.arena.waiting || player.arena.reservation.is_some() || self.instance_sim {
             return;
         }
-        let Some(mode) = player.arena.selected.and_then(|crc| content.instances.by_crc(crc)) else {
+        let Some(mode) = player
+            .arena
+            .selected
+            .and_then(|crc| content.instances.by_crc(crc))
+        else {
             return;
         };
         let (number, character, connection) =
@@ -674,7 +679,10 @@ impl SimWorld {
         let now_ns = unix_ns(self.server_ms);
         let clock = content.loot_limits.as_ref().map(|rules| rules.clock);
         let level = self.settings.level.folder.to_owned();
-        let Some(position) = self.world.get::<Body>(entity).map(|body| body.motion.position())
+        let Some(position) = self
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position())
         else {
             return;
         };
@@ -765,7 +773,6 @@ impl SimWorld {
         let Some(stay) = player.arena.record.stay.clone() else {
             return;
         };
-        drop(player);
         // The game mode takes back its items (`ItemClassesToRemoveOnExit`).
         self.remove_instance_items(entity);
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
@@ -1039,9 +1046,7 @@ impl SimWorld {
                 game_mode: run.game_mode.clone(),
                 members: run.members.clone(),
                 players,
-                empty_for_ms: run
-                    .empty_since_ms
-                    .map(|since| now_ms.saturating_sub(since)),
+                empty_for_ms: run.empty_since_ms.map(|since| now_ms.saturating_sub(since)),
                 open_for_ms: now_ms.saturating_sub(run.opened_ms),
             }),
         })
@@ -1071,7 +1076,11 @@ impl SimWorld {
             .carried()
             .into_iter()
             .map(|item| item.item_id)
-            .filter(|item| content.instances.item_has_class(item, &mode.items_removed_on_exit))
+            .filter(|item| {
+                content
+                    .instances
+                    .item_has_class(item, &mode.items_removed_on_exit)
+            })
             .collect();
         for item in removed {
             gear.remove(&item, time_ns);
@@ -1150,17 +1159,41 @@ mod tests {
 
     fn modes() -> Vec<InstanceMode> {
         vec![
-            mode("DungeonAmrine", "NW_Dungeon_Windsward_00", InstanceKind::Expedition),
+            mode(
+                "DungeonAmrine",
+                "NW_Dungeon_Windsward_00",
+                InstanceKind::Expedition,
+            ),
             mode(
                 "DungeonShatteredObelisk",
                 "NW_Dungeon_Everfall_00",
                 InstanceKind::Expedition,
             ),
-            mode("QuestMorgaine", "NewWorld_VitaeEterna", InstanceKind::SoloTrial),
-            mode("TrialSeason04Q02", "NW_Trial_Season_04_DaichiDojo", InstanceKind::SoloTrial),
-            mode("TrialSeason01", "NW_Trial_Season_02", InstanceKind::RaidTrial),
-            mode("TrialSeason04", "NW_Trial_Season_04", InstanceKind::RaidTrial),
-            mode("TrialSeason04Q05", "NW_Trial_Season_04", InstanceKind::SoloTrial),
+            mode(
+                "QuestMorgaine",
+                "NewWorld_VitaeEterna",
+                InstanceKind::SoloTrial,
+            ),
+            mode(
+                "TrialSeason04Q02",
+                "NW_Trial_Season_04_DaichiDojo",
+                InstanceKind::SoloTrial,
+            ),
+            mode(
+                "TrialSeason01",
+                "NW_Trial_Season_02",
+                InstanceKind::RaidTrial,
+            ),
+            mode(
+                "TrialSeason04",
+                "NW_Trial_Season_04",
+                InstanceKind::RaidTrial,
+            ),
+            mode(
+                "TrialSeason04Q05",
+                "NW_Trial_Season_04",
+                InstanceKind::SoloTrial,
+            ),
         ]
     }
 
@@ -1194,7 +1227,10 @@ mod tests {
             Some("TrialSeason01")
         );
         // Two modes share the map NW_Trial_Season_04: no game mode.
-        assert_eq!(found("Dungeon/Entrance/DungeonEntranceTrial_Season_04"), None);
+        assert_eq!(
+            found("Dungeon/Entrance/DungeonEntranceTrial_Season_04"),
+            None
+        );
         assert_eq!(found("Dungeon/Entrance/DungeonEntrance_FirstLight02"), None);
         assert_eq!(found("POIs/Settlement/Townboard"), None);
     }
@@ -1218,14 +1254,27 @@ mod tests {
         let mut record = PlayerArena::default();
         refresh(&mut record, clock(), NOW_NS);
         let sub_second = NOW_NS % NS_PER_SECOND;
-        assert_eq!(record.next_base_refresh_ns, NEXT_DAILY_S * NS_PER_SECOND + sub_second);
-        assert_eq!(record.next_group_trial_refresh_ns, record.next_base_refresh_ns);
-        assert_eq!(record.next_mutated_refresh_ns, NEXT_WEEKLY_S * NS_PER_SECOND + sub_second);
+        assert_eq!(
+            record.next_base_refresh_ns,
+            NEXT_DAILY_S * NS_PER_SECOND + sub_second
+        );
+        assert_eq!(
+            record.next_group_trial_refresh_ns,
+            record.next_base_refresh_ns
+        );
+        assert_eq!(
+            record.next_mutated_refresh_ns,
+            NEXT_WEEKLY_S * NS_PER_SECOND + sub_second
+        );
         record.base_entered = 2;
         record.group_trials_entered = 1;
         refresh(&mut record, clock(), NOW_NS + NS_PER_SECOND);
         assert_eq!(record.base_entered, 2, "before the refresh");
-        refresh(&mut record, clock(), NEXT_DAILY_S * NS_PER_SECOND + sub_second);
+        refresh(
+            &mut record,
+            clock(),
+            NEXT_DAILY_S * NS_PER_SECOND + sub_second,
+        );
         assert_eq!((record.base_entered, record.group_trials_entered), (0, 0));
     }
 
@@ -1309,7 +1358,10 @@ mod tests {
             response_of(InstanceRefusal::GroupInOtherInstance),
             ActivateResponse::GroupAlreadyInDungeon
         );
-        assert_eq!(response_of(InstanceRefusal::NoInstanceSim), ActivateResponse::EntranceBusy);
+        assert_eq!(
+            response_of(InstanceRefusal::NoInstanceSim),
+            ActivateResponse::EntranceBusy
+        );
     }
 
     /// The solo trial of the end-to-end test: one player, its level and teleport spot.
@@ -1367,14 +1419,20 @@ mod tests {
             },
             NOW,
         );
-        assert!(arena_messages(&mut open, NOW).contains(&ServerMessage::Arena(
-            ArenaServerMsg::RemoteInteractResult {
-                header,
-                game_mode: mode.crc,
-                allowed: true,
-            }
-        )));
-        open.arena_call(&who, ArenaClientMsg::RequestRemoteEnterDungeon { header, flag: 0 }, NOW);
+        assert!(
+            arena_messages(&mut open, NOW).contains(&ServerMessage::Arena(
+                ArenaServerMsg::RemoteInteractResult {
+                    header,
+                    game_mode: mode.crc,
+                    allowed: true,
+                }
+            ))
+        );
+        open.arena_call(
+            &who,
+            ArenaClientMsg::RequestRemoteEnterDungeon { header, flag: 0 },
+            NOW,
+        );
         let requests = open.take_instance_requests();
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].1.game_mode, mode.id);
@@ -1392,12 +1450,14 @@ mod tests {
                 opened: true,
             }),
         );
-        assert!(arena_messages(&mut open, NOW).contains(&ServerMessage::Arena(
-            ArenaServerMsg::ActivateResult {
-                header,
-                response: ActivateResponse::Success,
-            }
-        )));
+        assert!(
+            arena_messages(&mut open, NOW).contains(&ServerMessage::Arena(
+                ArenaServerMsg::ActivateResult {
+                    header,
+                    response: ActivateResponse::Success,
+                }
+            ))
+        );
         // The 946: the loading screen, then the empty phasing, then the handoff.
         open.arena_call(&who, ArenaClientMsg::TeleportIntoDungeon { header }, NOW);
         let first = crate::world::tests::tick(&mut open, NOW + 1);
@@ -1407,11 +1467,25 @@ mod tests {
         let start = later.handoffs[0].clone();
         assert_eq!(start.target, crate::world::tests::slot("inst-1"));
         assert!(start.offer.enter_level);
-        assert_eq!(start.offer.position, Point { x: 1.0, y: 2.0, z: 3.0 });
+        assert_eq!(
+            start.offer.position,
+            Point {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0
+            }
+        );
         let stay = start.offer.progression.arena.stay.clone().expect("stay");
         assert_eq!((stay.instance, stay.phase), (instance, PHASE));
         assert_eq!(stay.return_position.point().x, ENTRY_X);
-        assert_ne!(start.offer.progression.arena.solo_trial_cooldown_since_2000_ns, 0);
+        assert_ne!(
+            start
+                .offer
+                .progression
+                .arena
+                .solo_trial_cooldown_since_2000_ns,
+            0
+        );
         assert_eq!(
             open.handoff_done(&who, true, NOW + 2 + PHASING_BEFORE_HANDOFF_MS),
             super::super::HandoffEnd::Moved
@@ -1460,7 +1534,11 @@ mod tests {
         inside.arena_call(&who, ArenaClientMsg::ForfeitArena { header, flag: 0 }, NOW);
         // After the taker's retry wait of the handoff that brought the player in.
         let exit_ms = NOW + AFTER_RETRY_MS;
-        assert!(crate::world::tests::tick(&mut inside, exit_ms).handoffs.is_empty());
+        assert!(
+            crate::world::tests::tick(&mut inside, exit_ms)
+                .handoffs
+                .is_empty()
+        );
         let back = crate::world::tests::tick(&mut inside, exit_ms + PHASING_BEFORE_HANDOFF_MS);
         assert_eq!(back.handoffs.len(), 1);
         let home = back.handoffs[0].clone();

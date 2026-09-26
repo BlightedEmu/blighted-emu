@@ -112,9 +112,8 @@ impl Test {
     /// Whether it holds for a character with the tags `tags` and a sheathed weapon of the tags
     /// `weapon` (any case).
     fn holds(&self, tags: &[String], weapon: &[String]) -> bool {
-        let has = |list: &[String], wanted: &str| {
-            list.iter().any(|own| own.eq_ignore_ascii_case(wanted))
-        };
+        let has =
+            |list: &[String], wanted: &str| list.iter().any(|own| own.eq_ignore_ascii_case(wanted));
         match self {
             Self::All(parts) => parts.iter().all(|part| part.holds(tags, weapon)),
             Self::Any(parts) => parts.iter().any(|part| part.holds(tags, weapon)),
@@ -253,7 +252,10 @@ impl SheatheAction {
                     let conditionals = entries()
                         .filter(|entry| entry.name == CONDITIONAL_ELEMENT)
                         .filter_map(|entry| {
-                            Some((entry.attribute(NAME_ATTRIBUTE)?.to_owned(), OnEnter::of(entry)))
+                            Some((
+                                entry.attribute(NAME_ATTRIBUTE)?.to_owned(),
+                                OnEnter::of(entry),
+                            ))
                         })
                         .collect();
                     Some(TagChange::Set {
@@ -511,7 +513,11 @@ mod tests {
 
     #[test]
     fn the_put_away_comes_at_the_marker_of_the_picked_entry() {
-        assert_eq!(marker_ms("1H_Melee,Sword"), Some(400), "not the crouched entry");
+        assert_eq!(
+            marker_ms("1H_Melee,Sword"),
+            Some(400),
+            "not the crouched entry"
+        );
         assert_eq!(marker_ms("1H_Melee,Rapier"), Some(300));
         assert_eq!(marker_ms("2H_Melee,GreatSword"), Some(833));
         assert_eq!(marker_ms("2H_Melee,Warhammer"), Some(733));

@@ -268,7 +268,10 @@ mod tests {
         let mut expected = writer.finish();
         expected.extend_from_slice(&RETAIL_RESPEC_ANSWER);
         assert_eq!(bytes, expected);
-        assert_eq!(MasteryTreeRespecResponseMsg::decode(&bytes).expect("decode"), answer);
+        assert_eq!(
+            MasteryTreeRespecResponseMsg::decode(&bytes).expect("decode"),
+            answer
+        );
     }
 
     #[test]

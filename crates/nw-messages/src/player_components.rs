@@ -41,9 +41,8 @@ use crate::loot::{
     GLOBAL_STORAGE_TYPE_INDEX, GlobalStorageState, LOOT_TRACKER_TYPE_INDEX, LootTrackerState,
 };
 use crate::mount::{MOUNT_COMPONENT, MOUNT_TYPE_INDEX, MountState};
-use crate::objective_interactor::OBJECTIVE_INTERACTOR_TYPE_INDEX;
 use crate::music::PERFORMANCE_PLAYER_TYPE_INDEX as MUSICAL_PERFORMANCE_TYPE_INDEX;
-use crate::travel_states::PLAYER_HOME_TYPE_INDEX;
+use crate::objective_interactor::OBJECTIVE_INTERACTOR_TYPE_INDEX;
 use crate::objectives::{OBJECTIVES_TYPE_INDEX, ObjectivesState};
 use crate::paperdoll::PAPERDOLL_TYPE_INDEX;
 use crate::payload::{BundleMember, MemberState};
@@ -60,6 +59,7 @@ use crate::social::states::{
 use crate::status_effects::{STATUS_EFFECTS_TYPE_INDEX, StatusEffectsState};
 use crate::temporary_affiliation::TEMPORARY_AFFILIATION_TYPE_INDEX;
 use crate::title_choice::{SOCIAL_COMPONENT, SOCIAL_TYPE_INDEX};
+use crate::travel_states::PLAYER_HOME_TYPE_INDEX;
 use crate::vitals::{VITALS_TYPE_INDEX, VitalsData, VitalsState};
 use crate::wire::{MessageError, RAW_ID_LEN, Reader, Writer};
 
@@ -199,39 +199,46 @@ const NEW_CHARACTER_FIRST_BODIES: [(u64, &[u8]); 8] = [
     (
         POINTS_ACCUMULATOR_TYPE_INDEX,
         &[
-            0x01, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x01, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
         ],
     ),
     // `state` and `channel` 0 (473 of 482).
-    (MAGIC_TYPE_INDEX, &[0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+    (
+        MAGIC_TYPE_INDEX,
+        &[0x01, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+    ),
     // No performance (476 of 479).
     (
         MUSICAL_PERFORMANCE_TYPE_INDEX,
         &[
-            0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x06, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
+            0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x06, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0xff, 0xff, 0xff, 0xff,
         ],
     ),
     // Slot 0 child 0: an empty list.
-    (PLAYER_HOME_TYPE_INDEX, &[0x01, 0x01, 0x00, 0x01, 0x03, 0x00]),
+    (
+        PLAYER_HOME_TYPE_INDEX,
+        &[0x01, 0x01, 0x00, 0x01, 0x03, 0x00],
+    ),
     // Slot 0 children 2 and 3: two empty lists.
     (
         INSTANCED_SLAYER_SCRIPT_TYPE_INDEX,
-        &[
-            0x01, 0x0c, 0x00, 0x01, 0x03, 0x00, 0x00, 0x01, 0x03, 0x00,
-        ],
+        &[0x01, 0x0c, 0x00, 0x01, 0x03, 0x00, 0x00, 0x01, 0x03, 0x00],
     ),
     // Slot 2 child 0 `m_rolledRewards`: an empty list.
-    (REWARD_TRACK_TYPE_INDEX, &[0x04, 0x01, 0x00, 0x01, 0x03, 0x00]),
+    (
+        REWARD_TRACK_TYPE_INDEX,
+        &[0x04, 0x01, 0x00, 0x01, 0x03, 0x00],
+    ),
     // Slot 0 child 1 `dailyBonusesUsed`: an empty list.
     (GAME_EVENT_TYPE_INDEX, &[0x01, 0x02, 0x00, 0x01, 0x03, 0x00]),
     // Slot 1: `m_enabledItemSkins` with one 0, `m_skinDyeData` empty.
     (
         ITEM_SKINNING_TYPE_INDEX,
         &[
-            0x02, 0x03, 0x00, 0x01, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x01, 0x03, 0x00,
+            0x02, 0x03, 0x00, 0x01, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01, 0x03, 0x00,
         ],
     ),
 ];
@@ -942,14 +949,26 @@ mod tests {
     /// The first bodies of the new character of newchar-retail-2026-09-18 (open-world card,
     /// 451700 ms), whose list versions are `8c bf` (12236).
     const NEW_CHARACTER_RETAIL: [(u64, &str); 8] = [
-        (POINTS_ACCUMULATOR_TYPE_INDEX, "010700000000000000000000000000000000"),
+        (
+            POINTS_ACCUMULATOR_TYPE_INDEX,
+            "010700000000000000000000000000000000",
+        ),
         (MAGIC_TYPE_INDEX, "01030000000000000000"),
-        (MUSICAL_PERFORMANCE_TYPE_INDEX, "030100000000ffffffff060000000000ffffffff"),
+        (
+            MUSICAL_PERFORMANCE_TYPE_INDEX,
+            "030100000000ffffffff060000000000ffffffff",
+        ),
         (PLAYER_HOME_TYPE_INDEX, "010100018cbf00"),
-        (INSTANCED_SLAYER_SCRIPT_TYPE_INDEX, "010c00018cbf0000018cbf00"),
+        (
+            INSTANCED_SLAYER_SCRIPT_TYPE_INDEX,
+            "010c00018cbf0000018cbf00",
+        ),
         (REWARD_TRACK_TYPE_INDEX, "040100018cbf00"),
         (GAME_EVENT_TYPE_INDEX, "010200018cbf00"),
-        (ITEM_SKINNING_TYPE_INDEX, "020300018cbf01000000000000000000018cbf00"),
+        (
+            ITEM_SKINNING_TYPE_INDEX,
+            "020300018cbf01000000000000000000018cbf00",
+        ),
     ];
 
     #[test]
@@ -983,7 +1002,11 @@ mod tests {
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
                 .collect();
-            assert_eq!(ours, retail.replace(RETAIL_VERSION, OUR_VERSION), "class {class}");
+            assert_eq!(
+                ours,
+                retail.replace(RETAIL_VERSION, OUR_VERSION),
+                "class {class}"
+            );
             let mut reader = Reader::new(first_body(class));
             assert_eq!(
                 EmptyState::read(class, &mut reader),

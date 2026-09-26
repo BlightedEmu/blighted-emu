@@ -1221,9 +1221,7 @@ mod tests {
             "from inside, out"
         );
         assert!(
-            index
-                .raycast([10.0, 0.0, 1.0], [20.0, 0.0, 1.0])
-                .is_some(),
+            index.raycast([10.0, 0.0, 1.0], [20.0, 0.0, 1.0]).is_some(),
             "the way out is a surface either side"
         );
     }

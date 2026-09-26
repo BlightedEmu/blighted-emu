@@ -386,18 +386,24 @@ fn kind_of(row: &MetaRow<'_>) -> MetaKind {
                 .map(str::to_owned),
         },
         types::CHARACTER_LEVEL => MetaKind::CharacterLevel,
-        types::CATEGORICAL_PROGRESSION => text(row.progression)
-            .map_or_else(|| untracked(row), MetaKind::Progression),
-        types::RANK_TABLE_ANY => text(row.rank_table)
-            .map_or_else(|| untracked(row), MetaKind::RankTableAny),
+        types::CATEGORICAL_PROGRESSION => {
+            text(row.progression).map_or_else(|| untracked(row), MetaKind::Progression)
+        }
+        types::RANK_TABLE_ANY => {
+            text(row.rank_table).map_or_else(|| untracked(row), MetaKind::RankTableAny)
+        }
         types::META_ACHIEVEMENT_COUNT => MetaKind::MetaAchievementCount,
         types::TITLE_COUNT => MetaKind::TitleCount,
         types::BINARY_ACHIEVEMENT => MetaKind::Achievements(list(row.achievements)),
         types::ACHIEVEMENT_CATEGORY_COUNT => text(row.achievement_category)
             .map_or_else(|| untracked(row), MetaKind::AchievementCategory),
         types::QUEST_TOTAL => MetaKind::QuestTotal,
-        types::QUEST_ARC => text(row.quest_group).map_or_else(|| untracked(row), MetaKind::QuestArc),
-        types::GATHERING => text(row.tradeskill).map_or_else(|| untracked(row), MetaKind::Gathering),
+        types::QUEST_ARC => {
+            text(row.quest_group).map_or_else(|| untracked(row), MetaKind::QuestArc)
+        }
+        types::GATHERING => {
+            text(row.tradeskill).map_or_else(|| untracked(row), MetaKind::Gathering)
+        }
         types::PLAYER_DEATH => MetaKind::Deaths,
         _ => untracked(row),
     }
@@ -531,10 +537,21 @@ mod tests {
         assert_eq!(second.counter, "pve_familykills_corrupted");
         assert_eq!(second.total, 1_000);
         assert!(second.notify_three_quarters);
-        let named_corrupted = ["Hostile".to_owned(), "Named".to_owned(), "Corrupted".to_owned()];
+        let named_corrupted = [
+            "Hostile".to_owned(),
+            "Named".to_owned(),
+            "Corrupted".to_owned(),
+        ];
         assert!(second.kind.counts_kill(&named_corrupted));
-        assert!(second.kind.counts_kill(&["CORRUPTED".to_owned(), "named".to_owned()]));
-        assert!(!second.kind.counts_kill(&["Corrupted".to_owned()]), "not named");
+        assert!(
+            second
+                .kind
+                .counts_kill(&["CORRUPTED".to_owned(), "named".to_owned()])
+        );
+        assert!(
+            !second.kind.counts_kill(&["Corrupted".to_owned()]),
+            "not named"
+        );
         assert!(second.kind.counted());
         let grouped = rules.rule("PvE_KillsWhileInGroup1").expect("group");
         assert!(
@@ -542,11 +559,15 @@ mod tests {
             "a solo kill is no kill in a group"
         );
         assert_eq!(
-            rules.rule("CharacterProgression2").map(|rule| &rule.predecessors),
+            rules
+                .rule("CharacterProgression2")
+                .map(|rule| &rule.predecessors),
             Some(&vec!["CharacterProgression1".to_owned()])
         );
         assert_eq!(
-            rules.rule("CharacterProgression2").map(|rule| &rule.counter),
+            rules
+                .rule("CharacterProgression2")
+                .map(|rule| &rule.counter),
             Some(&"characterprogression2".to_owned())
         );
     }
@@ -566,7 +587,10 @@ mod tests {
             MetaKind::Achievements(vec!["Lore_A".to_owned(), "Lore_B".to_owned()])
         );
         assert_eq!(rules.arc_objectives("fishingquestsarc").len(), 2);
-        assert_eq!(rules.category_achievements("RECIPE"), ["Recipe_A".to_owned()]);
+        assert_eq!(
+            rules.category_achievements("RECIPE"),
+            ["Recipe_A".to_owned()]
+        );
         assert!(rules.category_achievements("none").is_empty());
         assert_eq!(
             rules.rule("QuestArc_FishTraining").map(|rule| &rule.kind),

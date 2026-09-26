@@ -60,8 +60,11 @@ mod tests {
             .filter(|stack| stack.item_id == FLINT)
             .collect();
         assert_eq!(stacks.len(), 2, "rolled items do not stack");
-        assert!(stacks.iter().all(|stack| stack.item.gear_score == ROLLED_GEAR_SCORE
-            && stack.perks == [PERK]));
+        assert!(
+            stacks
+                .iter()
+                .all(|stack| stack.item.gear_score == ROLLED_GEAR_SCORE && stack.perks == [PERK])
+        );
         assert_ne!(stacks[0].item.instance, stacks[1].item.instance);
         assert_eq!(gear.take_unsaved().map(|items| items.len() > 1), Some(true));
     }

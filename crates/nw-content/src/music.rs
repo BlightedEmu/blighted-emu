@@ -202,7 +202,10 @@ impl MusicRules {
             .map(|row| Grade {
                 name: row.grade.clone(),
                 minimum_score: row.minimum_score,
-                event: row.rank_game_event_id.clone().filter(|event| !event.is_empty()),
+                event: row
+                    .rank_game_event_id
+                    .clone()
+                    .filter(|event| !event.is_empty()),
                 score_multiplier: row.musical_score_mult,
             })
             .collect();
@@ -213,7 +216,9 @@ impl MusicRules {
                 .iter()
                 .flat_map(|table| &table.rows)
                 .find(|row| row.input_type.eq_ignore_ascii_case(name))
-                .map_or(0, |row| u32::try_from(row.points.max(0)).unwrap_or(u32::MAX))
+                .map_or(0, |row| {
+                    u32::try_from(row.points.max(0)).unwrap_or(u32::MAX)
+                })
         };
         let instruments = tables
             .musical_instrument_slot
@@ -262,7 +267,7 @@ impl MusicRules {
             .iter()
             .enumerate()
             .find(|(_, grade)| score >= grade.minimum_score)
-            .or_else(|| self.grades.iter().enumerate().last())
+            .or_else(|| self.grades.iter().enumerate().next_back())
     }
 
     /// The paperdoll slot of the instrument slot row `instrument`.
@@ -360,7 +365,12 @@ mod tests {
             }]),
             musical_ranking: table(vec![
                 ranking("Bad", 0.0, None, 1.0),
-                ranking("Amazing", 0.95, Some("MusicPerformance_Amazing_Result"), 2.0),
+                ranking(
+                    "Amazing",
+                    0.95,
+                    Some("MusicPerformance_Amazing_Result"),
+                    2.0,
+                ),
                 ranking("Great", 0.75, None, 1.6),
             ]),
             musical_scoring: table(vec![
@@ -385,7 +395,9 @@ mod tests {
     #[test]
     fn the_rows_read_by_their_wire_ids() {
         let rules = MusicRules::from_tables(&tables());
-        let song = rules.song(0x16d9_564e).expect("retail 4867 PoundHammerEasy");
+        let song = rules
+            .song(0x16d9_564e)
+            .expect("retail 4867 PoundHammerEasy");
         assert_eq!(song.completion_event, "SongCompletedEasy");
         assert!((song.duration_s - 56.536).abs() < f64::EPSILON);
         assert_eq!(song.sheet_column("poundhammer_guitar_part2_easy"), Some(2));
@@ -419,7 +431,10 @@ mod tests {
         assert_eq!((index, amazing.name.as_str()), (0, "Amazing"));
         assert!((amazing.score_multiplier - 2.0).abs() < f64::EPSILON);
         assert_eq!(rules.grade(0.8).map(|(index, _)| index), Some(1));
-        assert_eq!(rules.grade(0.1).map(|(_, grade)| grade.name.as_str()), Some("Bad"));
+        assert_eq!(
+            rules.grade(0.1).map(|(_, grade)| grade.name.as_str()),
+            Some("Bad")
+        );
         assert_eq!(MusicRules::default().grade(1.0), None);
     }
 }

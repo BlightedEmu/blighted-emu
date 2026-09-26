@@ -167,9 +167,7 @@ pub fn housing_rows(tables: &Tables) -> Vec<(String, Option<u32>)> {
         .into_iter()
         .flat_map(|table| &table.rows)
         .filter_map(|row| {
-            let max_stack = row
-                .max_stack_size
-                .and_then(|size| u32::try_from(size).ok());
+            let max_stack = row.max_stack_size.and_then(|size| u32::try_from(size).ok());
             Some((row.house_item_id.clone()?, max_stack))
         })
         .collect()
@@ -510,8 +508,17 @@ mod tests {
             ("PotionHealthT1".to_owned(), None),
         ]);
         let bed = kits.item(BED).expect("bed");
-        assert_eq!((bed.item_index, bed.slot, bed.max_stack), (last + 2, None, Some(1)));
-        assert_eq!(kits.item_at(last + 2).map(|item| item.item_id.as_str()), Some(BED));
-        assert_eq!(kits.item("PotionHealthT1").map(|item| item.item_index), Some(1));
+        assert_eq!(
+            (bed.item_index, bed.slot, bed.max_stack),
+            (last + 2, None, Some(1))
+        );
+        assert_eq!(
+            kits.item_at(last + 2).map(|item| item.item_id.as_str()),
+            Some(BED)
+        );
+        assert_eq!(
+            kits.item("PotionHealthT1").map(|item| item.item_index),
+            Some(1)
+        );
     }
 }

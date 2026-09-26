@@ -407,10 +407,9 @@ impl SimWorld {
         let roll = self.craft_roll(entity, &recipe, &details, &taken, &perk_items, choice);
         let bonus = self.bonus_crafts(entity, recipe_crc, details.tradeskill.as_deref(), crafts);
         tracing::debug!(player = number, recipe = %recipe.id, crafts, bonus, charged, "craft");
-        let ingredients = recipe
-            .ingredients
-            .iter()
-            .fold(0_u32, |sum, ingredient| sum.saturating_add(ingredient.quantity));
+        let ingredients = recipe.ingredients.iter().fold(0_u32, |sum, ingredient| {
+            sum.saturating_add(ingredient.quantity)
+        });
         self.crafts.push(PendingCraft {
             number,
             recipe: recipe.id.clone(),
@@ -944,7 +943,16 @@ mod tests {
         const CLIENT_FEE: u32 = 18;
         let (mut world, entity) = at_the_smelter(ORE_PER_CRAFT * CRAFTS, COINS);
         let crc = lowercase_crc32(INGOT);
-        world.craft(entity, NUMBER, crc, CRAFTS, CLIENT_FEE, &[], &CraftChoice::default(), NOW);
+        world.craft(
+            entity,
+            NUMBER,
+            crc,
+            CRAFTS,
+            CLIENT_FEE,
+            &[],
+            &CraftChoice::default(),
+            NOW,
+        );
         assert_eq!(
             bag_count(&world, entity, ORE),
             0,
@@ -983,7 +991,16 @@ mod tests {
         content.bonus_chances = BonusChances::build([(INGOT, 1.0)]);
         world.content = Arc::new(content);
         let crc = lowercase_crc32(INGOT);
-        world.craft(entity, NUMBER, crc, CRAFTS, CRAFTS, &[], &CraftChoice::default(), NOW);
+        world.craft(
+            entity,
+            NUMBER,
+            crc,
+            CRAFTS,
+            CRAFTS,
+            &[],
+            &CraftChoice::default(),
+            NOW,
+        );
         world.crafts_due(NOW + CRAFT_MS);
         assert_eq!(bag_count(&world, entity, INGOT), CRAFTS * 2);
         // A recipe without a chance makes no bonus.
@@ -1037,7 +1054,16 @@ mod tests {
             perk_items: Vec::new(),
         };
         let crc = lowercase_crc32(INGOT);
-        world.craft(entity, NUMBER, crc, CRAFTS, FEE_PER_CRAFT * CRAFTS, &[], &choice, NOW);
+        world.craft(
+            entity,
+            NUMBER,
+            crc,
+            CRAFTS,
+            FEE_PER_CRAFT * CRAFTS,
+            &[],
+            &choice,
+            NOW,
+        );
         world.crafts_due(NOW + CRAFT_MS);
         assert_eq!(ingot_gear_scores(&world, entity), [PICKED, PICKED]);
         // The range is the item's 400 with no bonus: a pick above it stops at the status
@@ -1048,7 +1074,16 @@ mod tests {
             perk_items: Vec::new(),
         };
         world.craft(entity, NUMBER, crc, 1, FEE_PER_CRAFT, &[], &too_high, NOW);
-        world.craft(entity, NUMBER, crc, 1, FEE_PER_CRAFT, &[], &CraftChoice::default(), NOW);
+        world.craft(
+            entity,
+            NUMBER,
+            crc,
+            1,
+            FEE_PER_CRAFT,
+            &[],
+            &CraftChoice::default(),
+            NOW,
+        );
         world.crafts_due(NOW + CRAFT_MS);
         let mut scores = ingot_gear_scores(&world, entity);
         scores.sort_unstable();
@@ -1059,7 +1094,16 @@ mod tests {
     fn a_craft_needs_its_recipe_level_its_fee_and_its_station() {
         let (mut world, entity) = at_the_smelter(ORE_PER_CRAFT, COINS);
         let none = CraftChoice::default();
-        world.craft(entity, NUMBER, lowercase_crc32(HIGH_INGOT), 1, 1, &[], &none, NOW);
+        world.craft(
+            entity,
+            NUMBER,
+            lowercase_crc32(HIGH_INGOT),
+            1,
+            1,
+            &[],
+            &none,
+            NOW,
+        );
         assert!(
             world.crafts.is_empty(),
             "Smelting rank 0 is below level 250"
@@ -1070,7 +1114,16 @@ mod tests {
             "nothing taken"
         );
         let (mut broke, broke_entity) = at_the_smelter(ORE_PER_CRAFT, 0);
-        broke.craft(broke_entity, NUMBER, lowercase_crc32(INGOT), 1, 1, &[], &none, NOW);
+        broke.craft(
+            broke_entity,
+            NUMBER,
+            lowercase_crc32(INGOT),
+            1,
+            1,
+            &[],
+            &none,
+            NOW,
+        );
         assert!(broke.crafts.is_empty(), "no coins for the fee");
         assert_eq!(bag_count(&broke, broke_entity, ORE), ORE_PER_CRAFT);
         world
@@ -1078,7 +1131,16 @@ mod tests {
             .get_mut::<Player>(entity)
             .expect("player")
             .station = Some("smelting1".to_owned());
-        world.craft(entity, NUMBER, lowercase_crc32(INGOT), 1, 1, &[], &none, NOW);
+        world.craft(
+            entity,
+            NUMBER,
+            lowercase_crc32(INGOT),
+            1,
+            1,
+            &[],
+            &none,
+            NOW,
+        );
         assert!(
             world.crafts.is_empty(),
             "a tier-1 station makes no tier-2 recipe"

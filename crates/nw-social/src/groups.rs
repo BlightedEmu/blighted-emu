@@ -64,7 +64,10 @@ impl SocialWorld {
                 metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
             }
             GroupCall::Ping { data } => self.group_ping(character, data),
-            GroupCall::MoveRaidMember { character: member, group } => {
+            GroupCall::MoveRaidMember {
+                character: member,
+                group,
+            } => {
                 self.move_raid_member(character, &member, group);
             }
             GroupCall::SwapRaidMembers { first, second } => {
@@ -74,7 +77,11 @@ impl SocialWorld {
     }
 
     /// A ping of `character` goes to every other member of its group, as it came.
-    fn group_ping(&mut self, character: Uuid, data: [u8; nw_messages::social::groups::PING_DATA_LEN]) {
+    fn group_ping(
+        &mut self,
+        character: Uuid,
+        data: [u8; nw_messages::social::groups::PING_DATA_LEN],
+    ) {
         let Some(others) = self.other_members(character) else {
             return;
         };
@@ -106,11 +113,7 @@ impl SocialWorld {
             metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
             return;
         };
-        let Some(group_id) = self
-            .people
-            .get(&character)
-            .and_then(|person| person.group)
-        else {
+        let Some(group_id) = self.people.get(&character).and_then(|person| person.group) else {
             metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
             return;
         };
@@ -149,11 +152,7 @@ impl SocialWorld {
             metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
             return;
         };
-        let Some(group_id) = self
-            .people
-            .get(&character)
-            .and_then(|person| person.group)
-        else {
+        let Some(group_id) = self.people.get(&character).and_then(|person| person.group) else {
             metrics::counter!(METRIC_CALLS, RESULT_LABEL => REFUSED).increment(1);
             return;
         };
@@ -568,7 +567,9 @@ mod tests {
         assert_eq!(pings[0].0, [character(2), character(3)]);
         assert_eq!(
             pings[0].1,
-            SocialPush::Group(GroupPush::Ping { data: [0; PING_DATA_LEN] })
+            SocialPush::Group(GroupPush::Ping {
+                data: [0; PING_DATA_LEN]
+            })
         );
         let swap = [
             text(&character(2).hyphenated().to_string()),

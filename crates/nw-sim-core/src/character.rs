@@ -2497,7 +2497,10 @@ mod tests {
             character.position().y > FACE_Y - PLAYER_RADIUS_M - RECORD_M,
             "it got to the wall"
         );
-        assert!(character.velocity()[1].abs() < CLOSE, "no speed into the wall");
+        assert!(
+            character.velocity()[1].abs() < CLOSE,
+            "no speed into the wall"
+        );
     }
 
     #[test]
@@ -2505,7 +2508,7 @@ mod tests {
         const BLOCK_M: f32 = 4.0;
         const FACE_Y: f32 = 3.0;
         /// The face turned 30 degrees.
-        const TURN: f32 = 0.523_598_8;
+        const TURN: f32 = std::f32::consts::FRAC_PI_6;
         let ground = walled(BLOCK_M, FACE_Y, TURN);
         let mut character = Character::new(origin());
         for _ in 0..90 {
@@ -2531,7 +2534,11 @@ mod tests {
         for _ in 0..90 {
             character.step(input(1, 0), &ground, SEA);
         }
-        assert!(character.position().y > FACE_Y, "{:?}", character.position());
+        assert!(
+            character.position().y > FACE_Y,
+            "{:?}",
+            character.position()
+        );
     }
 
     /// `ConfigMountRiding_0` (`javelindata_mount_movement`): the run and walk of each surface,

@@ -735,7 +735,11 @@ mod tests {
             );
             world.points_call(&connection(PLAYER), refund());
             let spent = point_states(&mut world, later, STATE_TICKS);
-            assert_eq!(spent.iter().find_map(unspent), Some(0), "too poor to refund");
+            assert_eq!(
+                spent.iter().find_map(unspent),
+                Some(0),
+                "too poor to refund"
+            );
             let later = later + STATE_TICKS * TICK_MS;
             {
                 let entity = world.player_by_number(PLAYER).expect("player");

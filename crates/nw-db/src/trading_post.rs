@@ -569,8 +569,7 @@ impl DeliveryRow {
         Ok(Delivery {
             character: self.character_id,
             order: self.contract_id,
-            notice: DeliveryNotice::of_column(self.notice)
-                .ok_or_else(|| out_of_range("notice"))?,
+            notice: DeliveryNotice::of_column(self.notice).ok_or_else(|| out_of_range("notice"))?,
             coins: unsigned(self.coins, "coins")?,
             item: self.item_id.map(|item| (item, quantity)),
             completed_count: unsigned(i64::from(self.completed_count), "completed_count")?,
@@ -654,7 +653,10 @@ async fn deliver(
     .bind(delivery.notice.column())
     .bind(signed(delivery.coins, "coins")?)
     .bind(delivery.item.as_ref().map(|(item, _)| item.as_str()))
-    .bind(int(delivery.item.as_ref().map_or(0, |(_, quantity)| *quantity), "quantity")?)
+    .bind(int(
+        delivery.item.as_ref().map_or(0, |(_, quantity)| *quantity),
+        "quantity",
+    )?)
     .bind(int(delivery.completed_count, "completed_count")?)
     .bind(delivery.request)
     .execute(&mut **transaction)
@@ -792,9 +794,9 @@ async fn try_post_order(
         None,
         Some(order.id),
         -signed(paid, "coins")?,
-        items.as_ref().map(|(item, quantity)| {
-            (item.as_str(), -i32::try_from(*quantity).unwrap_or(i32::MAX))
-        }),
+        items
+            .as_ref()
+            .map(|(item, quantity)| (item.as_str(), -i32::try_from(*quantity).unwrap_or(i32::MAX))),
     )
     .await?;
     transaction.commit().await?;
@@ -896,7 +898,9 @@ async fn try_complete_order(
                 request: Some(request),
             },
             -signed(
-                total.checked_add(tax).ok_or_else(|| out_of_range("coins"))?,
+                total
+                    .checked_add(tax)
+                    .ok_or_else(|| out_of_range("coins"))?,
                 "coins",
             )?,
             AUDIT_BUY,
@@ -1372,9 +1376,7 @@ pub async fn claim_shop_purchase(
     .fetch_optional(world)
     .await?;
     claimed
-        .map(|(previous,)| {
-            previous.map(|ms| unsigned(ms, "bought_at")).transpose()
-        })
+        .map(|(previous,)| previous.map(|ms| unsigned(ms, "bought_at")).transpose())
         .transpose()
 }
 
@@ -1568,8 +1570,14 @@ mod infra_tests {
         assert_eq!(completed.completer_tax, tax_of(2 * PRICE, RATE));
         assert_eq!(completed.order.status, OrderStatus::Completed);
         assert_eq!(seller_gets.len(), 1);
-        assert_eq!(seller_gets[0].delivery.coins, 2 * PRICE - tax_of(2 * PRICE, RATE));
-        assert_eq!(seller_gets[0].delivery.notice, DeliveryNotice::FullyCompleted);
+        assert_eq!(
+            seller_gets[0].delivery.coins,
+            2 * PRICE - tax_of(2 * PRICE, RATE)
+        );
+        assert_eq!(
+            seller_gets[0].delivery.notice,
+            DeliveryNotice::FullyCompleted
+        );
         assert_eq!(
             seller_gets[0].order.as_ref().map(|order| order.status),
             Some(OrderStatus::Resolved)
@@ -1591,7 +1599,9 @@ mod infra_tests {
                 .await
                 .expect("post")
                 .expect("posted");
-            let refused = cancel_order(pool, buy.id, other, NOW_MS).await.expect("cancel");
+            let refused = cancel_order(pool, buy.id, other, NOW_MS)
+                .await
+                .expect("cancel");
             let canceled = cancel_order(pool, buy.id, creator, NOW_MS)
                 .await
                 .expect("cancel")
@@ -1613,10 +1623,7 @@ mod infra_tests {
         assert_eq!(refund[0].delivery.coins, 3 * PRICE);
         assert_eq!(expired, 1);
         assert_eq!(returned[0].delivery.notice, DeliveryNotice::Expired);
-        assert_eq!(
-            returned[0].delivery.item,
-            Some(("BeeswaxT1".to_owned(), 4))
-        );
+        assert_eq!(returned[0].delivery.item, Some(("BeeswaxT1".to_owned(), 4)));
     }
 
     #[tokio::test]
@@ -1626,7 +1633,10 @@ mod infra_tests {
             let creator = character(pool, "Busy").await;
             let mut first = order(OrderKind::Sell, creator, 1);
             first.max_open = 1;
-            post_order(pool, &first).await.expect("post").expect("posted");
+            post_order(pool, &first)
+                .await
+                .expect("post")
+                .expect("posted");
             let mut second = order(OrderKind::Sell, creator, 1);
             second.max_open = 1;
             post_order(pool, &second).await.expect("post")
@@ -1665,10 +1675,21 @@ mod infra_tests {
             (first, early, later, after_release, after_delete)
         })
         .await;
-        assert_eq!(results.0, Some(None), "the first purchase has none before it");
+        assert_eq!(
+            results.0,
+            Some(None),
+            "the first purchase has none before it"
+        );
         assert_eq!(results.1, None, "the cooldown runs");
         assert_eq!(results.2, Some(Some(NOW_MS)));
-        assert_eq!(results.3, None, "the released claim put the first purchase back");
-        assert_eq!(results.4, Some(None), "a released first purchase leaves no row");
+        assert_eq!(
+            results.3, None,
+            "the released claim put the first purchase back"
+        );
+        assert_eq!(
+            results.4,
+            Some(None),
+            "a released first purchase leaves no row"
+        );
     }
 }

@@ -92,8 +92,7 @@ pub mod keys {
     /// The server's Twitch system.
     pub const TWITCH_SYSTEM: &str = "javelin-server.enable-twitch-system";
     /// Seconds a fast travel channels before the move.
-    pub const FAST_TRAVEL_CHANNELING_LENGTH: &str =
-        "javelin.housing.fast-travel-channeling-length";
+    pub const FAST_TRAVEL_CHANNELING_LENGTH: &str = "javelin.housing.fast-travel-channeling-length";
     /// Seconds from an accepted unstuck request to its move.
     pub const UNSTUCK_TELEPORT_DELAY: &str = "javelin-server.unstuck-teleport-delay-seconds";
     /// Seconds between two unstuck requests.

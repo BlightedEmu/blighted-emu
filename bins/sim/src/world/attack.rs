@@ -635,10 +635,7 @@ impl SimWorld {
             self.send_reliable(
                 attacker.clone(),
                 &ServerMessage::CombatEffect(CombatEffectMsg::DisplayImmuneText {
-                    header: FacetHeader::of(
-                        nw_messages::facet::component::DAMAGE_RECEIVER,
-                        target,
-                    ),
+                    header: FacetHeader::of(nw_messages::facet::component::DAMAGE_RECEIVER, target),
                     attacker: facet_entity(number),
                 }),
             );
@@ -1463,7 +1460,11 @@ impl SimWorld {
             && let Some(gear) = player.gear.as_mut()
             && gear.sheathe(now_ms, after_ms)
         {
-            tracing::debug!(player = player.number, after_ms, "weapon sheathed in deep water");
+            tracing::debug!(
+                player = player.number,
+                after_ms,
+                "weapon sheathed in deep water"
+            );
         }
     }
 
@@ -2880,18 +2881,13 @@ mod tests {
             .spawn_personal(test_spawn(MOB_X), 1, false, None, None, NOW)
             .expect("rows");
         world.mobs.absorb(mob, NOW + ABSORB_MS);
-        world
-            .attack(&connection(1), mob, LIGHT, NOW)
-            .expect("hit");
+        world.attack(&connection(1), mob, LIGHT, NOW).expect("hit");
         assert_eq!(
             messages_to(&world.take_messages(), 1),
             vec![
                 ServerMessage::DamageDealt(DamageDealtMsg::absorbed(1, mob)),
                 ServerMessage::CombatEffect(CombatEffectMsg::DisplayImmuneText {
-                    header: FacetHeader::of(
-                        nw_messages::facet::component::DAMAGE_RECEIVER,
-                        mob,
-                    ),
+                    header: FacetHeader::of(nw_messages::facet::component::DAMAGE_RECEIVER, mob,),
                     attacker: nw_messages::facet_entity(1),
                 }),
             ]
@@ -4360,7 +4356,14 @@ mod tests {
             .motion
             .position();
         let swim = swim_floor(world.settings.ocean_level_m);
-        world.sheathe_in_deep_water(entity, Position { z: swim + WADE_M, ..at }, NOW);
+        world.sheathe_in_deep_water(
+            entity,
+            Position {
+                z: swim + WADE_M,
+                ..at
+            },
+            NOW,
+        );
         world.tick_hands(NOW + marker_ms, SERVER_TIME);
         assert_eq!(drawn(&world), Some(slot::MAIN_HAND_OPTION_1), "not deep");
         let later = NOW + marker_ms;

@@ -1157,7 +1157,9 @@ impl MutationCatalog {
         bucket: &'a Bucket,
         below: &mut impl FnMut(u32) -> u32,
     ) -> Option<&'a BucketEntry> {
-        let count = u32::try_from(bucket.entries.len()).ok().filter(|n| *n > 0)?;
+        let count = u32::try_from(bucket.entries.len())
+            .ok()
+            .filter(|n| *n > 0)?;
         if let Some((thresholds, max)) = &bucket.thresholds
             && *max > 0
         {
@@ -1281,7 +1283,11 @@ impl MutationCatalog {
             .map(|mode| mode.loot_tags.clone())
             .unwrap_or_default();
         tags.extend(difficulty.loot_tags.iter().cloned());
-        tags.extend(perks.iter().flat_map(|perks| perks.loot_tags.iter().cloned()));
+        tags.extend(
+            perks
+                .iter()
+                .flat_map(|perks| perks.loot_tags.iter().cloned()),
+        );
         MutatedLoot {
             tags,
             creature_tables: difficulty
@@ -1298,7 +1304,9 @@ impl MutationCatalog {
                 .collect(),
             gear_score_range: difficulty.gear_score_range,
             perk_roll_mults: difficulty.perk_roll_mults,
-            perk_buckets: perks.map(|perks| perks.perk_buckets.clone()).unwrap_or_default(),
+            perk_buckets: perks
+                .map(|perks| perks.perk_buckets.clone())
+                .unwrap_or_default(),
         }
     }
 
@@ -1420,6 +1428,10 @@ mod tests {
     }
 
     /// The retail rows of the ice week (build 25810808) that the tests read.
+    #[allow(
+        clippy::field_reassign_with_default,
+        reason = "Tables has hundreds of sheets; the test sets only the ones it reads"
+    )]
     fn catalog() -> MutationCatalog {
         let mut tables = Tables::default();
         tables.mutation_difficulty_static_data = table(vec![difficulty_three()]);
@@ -1447,10 +1459,30 @@ mod tests {
         );
         tables.promotion_mutation_static_data = table(
             [
-                ("Savage", "Mut_Disease_1_Buff", "Mut_Disease_2_Buff", "Mut_RotatingBeam_Buff"),
-                ("Barbaric", "Mut_StaminaDamage_1_Buff", "Mut_StaminaDamage_2_Buff", "Mut_Enrage_Buff"),
-                ("Oppressive", "Mut_ManaThorns_1_Buff", "Mut_ManaThorns_2_Buff", "Mut_SilenceArea_Buff"),
-                ("Indomitable", "Mut_LifeSteal_1_Buff", "Mut_LifeSteal_2_Buff", "Mut_ProjectileShield_Buff"),
+                (
+                    "Savage",
+                    "Mut_Disease_1_Buff",
+                    "Mut_Disease_2_Buff",
+                    "Mut_RotatingBeam_Buff",
+                ),
+                (
+                    "Barbaric",
+                    "Mut_StaminaDamage_1_Buff",
+                    "Mut_StaminaDamage_2_Buff",
+                    "Mut_Enrage_Buff",
+                ),
+                (
+                    "Oppressive",
+                    "Mut_ManaThorns_1_Buff",
+                    "Mut_ManaThorns_2_Buff",
+                    "Mut_SilenceArea_Buff",
+                ),
+                (
+                    "Indomitable",
+                    "Mut_LifeSteal_1_Buff",
+                    "Mut_LifeSteal_2_Buff",
+                    "Mut_ProjectileShield_Buff",
+                ),
             ]
             .into_iter()
             .map(|(id, one, two, three)| -> PromotionMutationStaticData {
@@ -1470,27 +1502,49 @@ mod tests {
         );
         tables.curse_mutation_static_data = table(
             [
-                ("Frenzied", "Mut_Curse1_Wildcard_Minor_Buff", "Mut_Curse1_Wildcard_Major_Buff", None),
-                ("Fiendish", "Mut_Curse2_Minor_Buff", "Mut_Curse2_Wildcard_Major_Buff", Some("AfflictionCurse2")),
-                ("Desiccated", "Mut_Wildcard_Curse3_Minor_Buff", "Mut_Wildcard_Curse3_Major_Buff", Some("AfflictionCurse3")),
-                ("Censored", "Mut_Wildcard_Curse4_Minor_Buff", "Mut_Curse4_Major_Buff", Some("AfflictionCurse4")),
+                (
+                    "Frenzied",
+                    "Mut_Curse1_Wildcard_Minor_Buff",
+                    "Mut_Curse1_Wildcard_Major_Buff",
+                    None,
+                ),
+                (
+                    "Fiendish",
+                    "Mut_Curse2_Minor_Buff",
+                    "Mut_Curse2_Wildcard_Major_Buff",
+                    Some("AfflictionCurse2"),
+                ),
+                (
+                    "Desiccated",
+                    "Mut_Wildcard_Curse3_Minor_Buff",
+                    "Mut_Wildcard_Curse3_Major_Buff",
+                    Some("AfflictionCurse3"),
+                ),
+                (
+                    "Censored",
+                    "Mut_Wildcard_Curse4_Minor_Buff",
+                    "Mut_Curse4_Major_Buff",
+                    Some("AfflictionCurse4"),
+                ),
             ]
             .into_iter()
-            .map(|(id, minor, major, affliction)| -> CurseMutationStaticData {
-                row(serde_json::json!({
-                    "curse_major": major,
-                    "curse_minor": minor,
-                    "curse_mutation_id": id,
-                    "description": "",
-                    "global_affliction": affliction,
-                    "icon_path": "",
-                    "name": ""
-                }))
-            })
+            .map(
+                |(id, minor, major, affliction)| -> CurseMutationStaticData {
+                    row(serde_json::json!({
+                        "curse_major": major,
+                        "curse_minor": minor,
+                        "curse_mutation_id": id,
+                        "description": "",
+                        "global_affliction": affliction,
+                        "icon_path": "",
+                        "name": ""
+                    }))
+                },
+            )
             .collect(),
         );
-        tables.mutation_perks_static_data = table(vec![row::<MutationPerksStaticData>(
-            serde_json::json!({
+        tables.mutation_perks_static_data =
+            table(vec![row::<MutationPerksStaticData>(serde_json::json!({
                 "description": "",
                 "elemental_mutation_type_id": "Ice",
                 "injected_container_loot": "MutatorLoot_Ice",
@@ -1498,8 +1552,7 @@ mod tests {
                 "injected_loot_tags": "Ice",
                 "injected_perk_bucket2": "PerkBucket_MutatorIce",
                 "name": ""
-            }),
-        )]);
+            }))]);
         tables.buff_bucket_data = table(vec![
             row::<BuffBucketData>(serde_json::json!({
                 "buff1": "Mut_Ice_Damage_Buff",
@@ -1529,7 +1582,10 @@ mod tests {
             })),
         ]);
         tables.status_effect_data = table(vec![
-            status("Mut_HealthScale", serde_json::json!({ "max_health_mod": 0.01 })),
+            status(
+                "Mut_HealthScale",
+                serde_json::json!({ "max_health_mod": 0.01 }),
+            ),
             status(
                 "Mut_DamageScale",
                 serde_json::json!({ "dmg_standard": 0.01, "dmg_fire": 0.01 }),
@@ -1569,7 +1625,11 @@ mod tests {
         assert_eq!(week.start_ns(), 1_792_479_600_000_000_000);
         let set = week.set_of("DungeonCutlassKeys00").expect("set");
         assert_eq!(
-            (set.elemental.as_str(), set.promotion.as_str(), set.curse.as_str()),
+            (
+                set.elemental.as_str(),
+                set.promotion.as_str(),
+                set.curse.as_str()
+            ),
             ("Ice", "Barbaric", "Fiendish")
         );
         // The wire entry of the retail newchar state (`mutation_scheduler` sample).
@@ -1583,7 +1643,10 @@ mod tests {
     #[test]
     fn every_observed_week_starts_on_a_whole_week() {
         for week in OBSERVED_WEEKS {
-            assert_eq!((week.start_unix_s - CADENCE_ANCHOR_UNIX_S) % WEEK_SECONDS, 0);
+            assert_eq!(
+                (week.start_unix_s - CADENCE_ANCHOR_UNIX_S) % WEEK_SECONDS,
+                0
+            );
         }
     }
 
@@ -1602,7 +1665,11 @@ mod tests {
             let mut modes: Vec<&str> = week.sets.iter().map(|set| set.game_mode.as_str()).collect();
             modes.dedup();
             assert_eq!(modes.len(), SETS_PER_WEEK);
-            assert!(week.sets.iter().all(|other| other.elemental == set.elemental));
+            assert!(
+                week.sets
+                    .iter()
+                    .all(|other| other.elemental == set.elemental)
+            );
             // The same week again is the same pick.
             assert_eq!(
                 catalog.week_at(LAST_OBSERVED_DAY + weeks * WEEK_SECONDS),
@@ -1628,7 +1695,11 @@ mod tests {
         // parts (the major with its wildcard replaced) are.
         assert_eq!(
             ids,
-            ["Mut_Enrage_Buff", "Mut_Curse2_Minor_Buff", "Mut_Curse2_Ice_Major_Buff"]
+            [
+                "Mut_Enrage_Buff",
+                "Mut_Curse2_Minor_Buff",
+                "Mut_Curse2_Ice_Major_Buff"
+            ]
         );
         assert!((mutation.effects[1].potency - 2.0).abs() < 1e-9);
     }
@@ -1642,10 +1713,7 @@ mod tests {
             .iter()
             .map(|effect| effect.status_id.as_str())
             .collect();
-        assert_eq!(
-            ids[..2],
-            ["Mut_Ice_Damage_Buff", "Mut_Ice_Promo2"]
-        );
+        assert_eq!(ids[..2], ["Mut_Ice_Damage_Buff", "Mut_Ice_Promo2"]);
         assert!((mutation.health_factor - 3.5).abs() < 1e-9);
     }
 
@@ -1660,8 +1728,16 @@ mod tests {
             catalog.mob_mutation(&context(3), None, &mut first),
             MobMutation::default()
         );
-        assert!(catalog.context("DungeonCutlassKeys00", LAST_OBSERVED_DAY, 9).is_none());
-        assert!(catalog.context("DungeonEdengrove00", LAST_OBSERVED_DAY, 3).is_none());
+        assert!(
+            catalog
+                .context("DungeonCutlassKeys00", LAST_OBSERVED_DAY, 9)
+                .is_none()
+        );
+        assert!(
+            catalog
+                .context("DungeonEdengrove00", LAST_OBSERVED_DAY, 3)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1680,11 +1756,17 @@ mod tests {
                 "Ice"
             ]
         );
-        assert_eq!(loot.creature_tables, ["MutatorLoot_Difficulty", "MutatorLoot_Ice"]);
+        assert_eq!(
+            loot.creature_tables,
+            ["MutatorLoot_Difficulty", "MutatorLoot_Ice"]
+        );
         assert_eq!(loot.gear_score_range, Some((730, 730)));
         assert_eq!(loot.perk_buckets, ["PerkBucket_MutatorIce"]);
         assert_eq!(catalog.completion_event(&context(3)), Some("MutDiff3T1"));
-        assert_eq!(catalog.player_affliction(&context(3)), Some("AfflictionCurse2"));
+        assert_eq!(
+            catalog.player_affliction(&context(3)),
+            Some("AfflictionCurse2")
+        );
         assert!(catalog.is_mutable("dungeonshattermtn00"));
         assert_eq!(catalog.highest_difficulty(), Some(3));
     }

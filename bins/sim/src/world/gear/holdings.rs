@@ -80,7 +80,10 @@ struct SavedSet {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Opened {
     /// A storage chest, and whether the player stands at it.
-    Storage { storage: [u8; RAW_ID_LEN], near: bool },
+    Storage {
+        storage: [u8; RAW_ID_LEN],
+        near: bool,
+    },
     /// A bag of dropped items and what it holds.
     Dropped {
         bag: [u8; RAW_ID_LEN],
@@ -622,7 +625,10 @@ impl Gear {
     }
 
     /// The items of storage chest `storage`; `None` for a storage the player never used.
-    pub(in crate::world) fn stored_items(&self, storage: &[u8; RAW_ID_LEN]) -> Option<Vec<GearItem>> {
+    pub(in crate::world) fn stored_items(
+        &self,
+        storage: &[u8; RAW_ID_LEN],
+    ) -> Option<Vec<GearItem>> {
         let slots = self.holdings.storages.get(storage)?;
         Some(slots.iter().flatten().map(|stack| stack.item).collect())
     }
@@ -853,7 +859,8 @@ impl Gear {
         slot: u32,
         instance: [u8; RAW_ID_LEN],
     ) -> Result<&mut Stack, ItemRefusal> {
-        let matches = |stack: &Stack| instance == [0; RAW_ID_LEN] || stack.item.instance == instance;
+        let matches =
+            |stack: &Stack| instance == [0; RAW_ID_LEN] || stack.item.instance == instance;
         let found = if location == LOCATION_BAG {
             usize::try_from(slot)
                 .ok()
@@ -870,7 +877,9 @@ impl Gear {
         } else {
             None
         };
-        found.filter(|stack| matches(stack)).ok_or(ItemRefusal::NoSuchItem)
+        found
+            .filter(|stack| matches(stack))
+            .ok_or(ItemRefusal::NoSuchItem)
     }
 
     /// Opens or closes the loadout panel (5578).
@@ -897,16 +906,15 @@ impl Gear {
             .iter()
             .map(|index| {
                 let status = match found {
-                    Ok((instance, kind)) if fits(kind, slot_id) => {
-                        match self.loadout_mut(*index) {
-                            Some(set) => {
-                                set.items.retain(|(worn, named)| *worn != slot_id && *named != instance);
-                                set.items.push((slot_id, instance));
-                                loadout_status::EQUIP_UPDATE_SUCCESS
-                            }
-                            None => loadout_status::EQUIP_UPDATE_FAIL,
+                    Ok((instance, kind)) if fits(kind, slot_id) => match self.loadout_mut(*index) {
+                        Some(set) => {
+                            set.items
+                                .retain(|(worn, named)| *worn != slot_id && *named != instance);
+                            set.items.push((slot_id, instance));
+                            loadout_status::EQUIP_UPDATE_SUCCESS
                         }
-                    }
+                        None => loadout_status::EQUIP_UPDATE_FAIL,
+                    },
                     _ => loadout_status::EQUIP_UPDATE_FAIL,
                 };
                 (*index, status)
@@ -1007,7 +1015,10 @@ impl Gear {
         let mut all = true;
         for (slot_id, instance) in wanted {
             let worn = self.worn.iter().any(|(worn, stack)| {
-                *worn == slot_id && stack.as_ref().is_some_and(|stack| stack.item.instance == instance)
+                *worn == slot_id
+                    && stack
+                        .as_ref()
+                        .is_some_and(|stack| stack.item.instance == instance)
             });
             if worn {
                 continue;
@@ -1015,7 +1026,11 @@ impl Gear {
             let bag_slot = self
                 .bag
                 .iter()
-                .position(|entry| entry.as_ref().is_some_and(|stack| stack.item.instance == instance))
+                .position(|entry| {
+                    entry
+                        .as_ref()
+                        .is_some_and(|stack| stack.item.instance == instance)
+                })
                 .and_then(|index| u32::try_from(index).ok());
             let equipped = bag_slot.is_some_and(|bag_slot| {
                 self.equip(bag_slot, slot_id, MAX_STACK_QUANTITY, instance, &disabled)
@@ -1087,14 +1102,21 @@ mod tests {
         let kits = kits();
         let mut gear = gear();
         assert_eq!(
-            (worn_key(&gear, slot::CHEST), worn_key(&gear, slot::MAIN_HAND_OPTION_1)),
+            (
+                worn_key(&gear, slot::CHEST),
+                worn_key(&gear, slot::MAIN_HAND_OPTION_1)
+            ),
             (Some(0), Some(1))
         );
         assert!(gear.add(kits.item(NEW_CHEST).expect("chest"), 1));
         let bag_slot = gear
             .bag
             .iter()
-            .position(|entry| entry.as_ref().is_some_and(|stack| stack.item_id == NEW_CHEST))
+            .position(|entry| {
+                entry
+                    .as_ref()
+                    .is_some_and(|stack| stack.item_id == NEW_CHEST)
+            })
             .and_then(|index| u32::try_from(index).ok())
             .expect("slot");
         let instance = bag_instance(&gear, NEW_CHEST);
@@ -1144,7 +1166,10 @@ mod tests {
         // The rest of it keeps its id.
         assert_eq!(gear.deposit(flint, 0), Ok(()));
         let rest = gear.holdings.storages[&STORAGE][1].clone().expect("stored");
-        assert_eq!((rest.item.instance, rest.item.quantity), (flint, FLINTS - 2));
+        assert_eq!(
+            (rest.item.instance, rest.item.quantity),
+            (flint, FLINTS - 2)
+        );
         assert_eq!(gear.bag_count(FLINT), 0);
         let saved = gear.inventory();
         assert_eq!(saved.stored.len(), 2);
@@ -1220,7 +1245,10 @@ mod tests {
             gear.drop_from_bag(bag_slot, flint, 1),
             Err(ItemRefusal::Locked)
         );
-        assert_eq!(gear.set_locked(LOCATION_BAG, bag_slot, flint, false), Ok(()));
+        assert_eq!(
+            gear.set_locked(LOCATION_BAG, bag_slot, flint, false),
+            Ok(())
+        );
         let dropped = |item_id: &str, quantity, rolled| DroppedStack {
             item_id: item_id.to_owned(),
             quantity,
@@ -1244,7 +1272,9 @@ mod tests {
             Ok(dropped(FLINT, FLINTS - 5, flint_rolls)),
             "0: the whole stack"
         );
-        let sword = gear.drop_worn(slot::MAIN_HAND_OPTION_1, 0, 0).expect("sword");
+        let sword = gear
+            .drop_worn(slot::MAIN_HAND_OPTION_1, 0, 0)
+            .expect("sword");
         assert_eq!((sword.item_id.as_str(), sword.quantity), (SWORD, 1));
         assert_eq!(gear.worn_item(slot::MAIN_HAND_OPTION_1), None);
     }
@@ -1253,7 +1283,8 @@ mod tests {
     fn loadouts_name_their_items_by_key_and_switch_them_on() {
         let mut gear = gear();
         let staff = bag_instance(&gear, STAFF);
-        let statuses = gear.add_to_loadouts(LOCATION_BAG, 0, staff, slot::MAIN_HAND_OPTION_1, &[LOADOUT]);
+        let statuses =
+            gear.add_to_loadouts(LOCATION_BAG, 0, staff, slot::MAIN_HAND_OPTION_1, &[LOADOUT]);
         assert_eq!(statuses, [(LOADOUT, loadout_status::EQUIP_UPDATE_SUCCESS)]);
         let extras = gear.extras();
         assert_eq!(extras.loadouts.len(), usize::from(LOADOUT));
@@ -1300,7 +1331,8 @@ mod tests {
         let before = gear.bag.len();
         assert!(gear.add(kits.item(NEW_CHEST).expect("chest"), 1));
         assert_eq!(gear.bag.len(), before + 1);
-        let ids: BTreeSet<[u8; RAW_ID_LEN]> = gear.stacks().map(|stack| stack.item.instance).collect();
+        let ids: BTreeSet<[u8; RAW_ID_LEN]> =
+            gear.stacks().map(|stack| stack.item.instance).collect();
         assert_eq!(ids.len(), gear.stacks().count(), "one id per stack");
     }
 }

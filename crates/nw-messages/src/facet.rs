@@ -825,7 +825,9 @@ impl ClientFacetMsg {
                     territory: reader.u16()?,
                 })
             }),
-            TOGGLE_PVP_FLAG_TYPE_INDEX => read(|header, _reader| Ok(Self::TogglePvpFlag { header })),
+            TOGGLE_PVP_FLAG_TYPE_INDEX => {
+                read(|header, _reader| Ok(Self::TogglePvpFlag { header }))
+            }
             TERRITORY_EXITED_TYPE_INDEX => read(|header, reader| {
                 Ok(Self::TerritoryExited {
                     header,
@@ -1975,16 +1977,25 @@ mod tests {
         let homing = HomingOverrideMsg::decode(&hex(HOMING)).expect("homing");
         assert_eq!(homing.target, [0; RAW_ID_LEN]);
         assert_eq!(homing.override_target, NO_HOMING_OVERRIDE);
-        assert_eq!(HomingOverrideMsg::decode(&homing.encode().expect("encode")), Ok(homing));
+        assert_eq!(
+            HomingOverrideMsg::decode(&homing.encode().expect("encode")),
+            Ok(homing)
+        );
         let left = LeftGameModeQueueMsg::decode(&hex(LEFT)).expect("left");
         assert_eq!(left.left, LEFT_QUEUE_ONCE);
-        assert_eq!(LeftGameModeQueueMsg::decode(&left.encode().expect("encode")), Ok(left));
+        assert_eq!(
+            LeftGameModeQueueMsg::decode(&left.encode().expect("encode")),
+            Ok(left)
+        );
         let throttled = ClientFacetMsg::decode(SET_INPUTS_THROTTLED_TYPE_INDEX, &hex(THROTTLE))
             .expect("type")
             .expect("body");
         assert!(matches!(
             throttled,
-            ClientFacetMsg::SetInputsThrottled { throttled: true, .. }
+            ClientFacetMsg::SetInputsThrottled {
+                throttled: true,
+                ..
+            }
         ));
         let whisper = ClientFacetMsg::decode(WHISPER_STARTED_TYPE_INDEX, &hex(WHISPER))
             .expect("type")

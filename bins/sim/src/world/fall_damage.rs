@@ -127,13 +127,17 @@ impl SimWorld {
         send_now(
             &mut self.combat_messages,
             &connection,
-            &[ServerMessage::OnDamage(OnDamageMsg::fall(number, amount, max_health))],
+            &[ServerMessage::OnDamage(OnDamageMsg::fall(
+                number, amount, max_health,
+            ))],
         );
         let dismounted = self.mount_fall(entity, share, now_ms);
         send_now(
             &mut self.combat_messages,
             &connection,
-            &[ServerMessage::DamageDealt(DamageDealtMsg::fall(number, amount))],
+            &[ServerMessage::DamageDealt(DamageDealtMsg::fall(
+                number, amount,
+            ))],
         );
         if dismounted {
             self.fall_dismount_notification(entity);
@@ -152,7 +156,11 @@ mod tests {
     fn landing(height_m: f32) -> Option<f32> {
         let mut track = FallTrack::default();
         assert_eq!(track.step(GROUND_Z, true, false), None, "standing");
-        assert_eq!(track.step(GROUND_Z + height_m, false, false), None, "the top");
+        assert_eq!(
+            track.step(GROUND_Z + height_m, false, false),
+            None,
+            "the top"
+        );
         assert_eq!(track.step(GROUND_Z + 1.0, false, false), None, "falling");
         track.step(GROUND_Z, true, false)
     }
@@ -162,7 +170,11 @@ mod tests {
         assert_eq!(landing(20.0), Some(20.0));
         let mut track = FallTrack::default();
         track.step(GROUND_Z + 30.0, false, false);
-        assert_eq!(track.step(GROUND_Z - 2.0, false, true), None, "water ends it");
+        assert_eq!(
+            track.step(GROUND_Z - 2.0, false, true),
+            None,
+            "water ends it"
+        );
         assert_eq!(track.step(GROUND_Z, true, false), None);
     }
 

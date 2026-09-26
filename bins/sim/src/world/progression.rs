@@ -340,10 +340,9 @@ impl Masteries {
             .filter(|slot| *slot < MAX_MAPPED_SLOTS)
             .ok_or(MapRefusal::UnknownSlot)?;
         let unlocked = ability == 0
-            || self
-                .points
-                .iter()
-                .any(|point| point.crc == ability && point.pool == pool && point.active && point.level > 0);
+            || self.points.iter().any(|point| {
+                point.crc == ability && point.pool == pool && point.active && point.level > 0
+            });
         if !unlocked {
             return Err(MapRefusal::NotUnlocked);
         }
@@ -362,7 +361,11 @@ impl Masteries {
     /// (186): every point of its pool goes back to 0 (retail kept the entries with level 0),
     /// its slots empty, and the respec's `AzothRespecCost` at the weapon's rank leaves the
     /// azoth. Returns the table's id (its pool).
-    pub(super) fn respec(&mut self, progression: &Progression, table: u16) -> Result<u32, RespecRefusal> {
+    pub(super) fn respec(
+        &mut self,
+        progression: &Progression,
+        table: u16,
+    ) -> Result<u32, RespecRefusal> {
         let pool = Self::weapon_table(progression, table).ok_or(RespecRefusal::UnknownTable)?;
         let rank = progression
             .mastery_by_crc(pool)
@@ -391,7 +394,10 @@ impl Masteries {
 
     /// The pool of the weapon tree at position `table` of the ability state the client has.
     fn weapon_table(progression: &Progression, table: u16) -> Option<u32> {
-        let crc = *progression.points.ability_tables().get(usize::from(table))?;
+        let crc = *progression
+            .points
+            .ability_tables()
+            .get(usize::from(table))?;
         progression.mastery_by_crc(crc).map(|mastery| mastery.crc)
     }
 
@@ -412,7 +418,11 @@ impl Masteries {
     }
 
     /// The highest rank among the progressions it has whose id `on_table` takes.
-    pub(super) fn highest_rank(&self, progression: &Progression, on_table: impl Fn(&str) -> bool) -> u16 {
+    pub(super) fn highest_rank(
+        &self,
+        progression: &Progression,
+        on_table: impl Fn(&str) -> bool,
+    ) -> u16 {
         (0..self.entries.len())
             .filter(|index| on_table(&self.entries[*index].0))
             .filter_map(|index| self.wire_entry(progression, index))
@@ -894,11 +904,15 @@ mod tests {
         let pools = pools.expect("a point change");
         assert_eq!(
             pools.point_entries,
-            ProgressionPointState::full(1, &[], &[PointEntry {
-                pool: POOL,
-                point: POINT,
-                level: 1,
-            }])
+            ProgressionPointState::full(
+                1,
+                &[],
+                &[PointEntry {
+                    pool: POOL,
+                    point: POINT,
+                    level: 1,
+                }]
+            )
             .point_entries
         );
         assert_eq!(masteries.take_change(&progression), (None, None));
@@ -911,9 +925,12 @@ mod tests {
             masteries.carried_territory_points(),
             [(POOL, POINT, TERRITORY_POINT_MAX)]
         );
-        let mut restored = Masteries::default()
-            .with_territory_points(&masteries.carried_territory_points());
-        assert_eq!(restored.carried_territory_points(), [(POOL, POINT, TERRITORY_POINT_MAX)]);
+        let mut restored =
+            Masteries::default().with_territory_points(&masteries.carried_territory_points());
+        assert_eq!(
+            restored.carried_territory_points(),
+            [(POOL, POINT, TERRITORY_POINT_MAX)]
+        );
         let (_, first) = restored.first_states(&progression);
         assert_eq!(
             first.point_entries,
@@ -1382,7 +1399,11 @@ mod tests {
             Err(RespecRefusal::NotEnoughAzoth)
         );
         masteries.gain(&azoth, u32::MAX);
-        assert_eq!(masteries.experience(&azoth), 2_500, "the balance stops at the cap");
+        assert_eq!(
+            masteries.experience(&azoth),
+            2_500,
+            "the balance stops at the cap"
+        );
         masteries.take_change(&progression);
         assert_eq!(
             masteries.respec(&progression, 1),

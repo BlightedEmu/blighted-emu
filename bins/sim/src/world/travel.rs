@@ -49,8 +49,7 @@ use std::collections::VecDeque;
 
 use bevy_ecs::entity::Entity;
 use nw_bus::{
-    ConnectionRef, HomeRecord, HousingItem, OwnedHome, PlacedCamp, PlayerTravel, Point,
-    StoredPoint,
+    ConnectionRef, HomeRecord, HousingItem, OwnedHome, PlacedCamp, PlayerTravel, Point, StoredPoint,
 };
 use nw_content::progression::AZOTH_PROGRESSION;
 use nw_messages::facet::component as player_component;
@@ -60,15 +59,14 @@ use nw_messages::travel::{
     UnstuckDenial, WAYPOINTS_COMPONENT, WAYPOINTS_TYPE_INDEX, WaypointsState, component,
 };
 use nw_messages::travel_states::{
-    CAMPING_COMPONENT, CAMPING_TYPE_INDEX, CampingState, HomePoint, HouseDataRef,
-    NO_PHASED_ENTITY, OwnedHouse, PLAYER_HOME_COMPONENT, PLAYER_HOME_TYPE_INDEX,
-    PLAYER_HOUSING_COMPONENT, PLAYER_HOUSING_TYPE_INDEX, PLAYER_TIME_COMPONENT,
-    PLAYER_TIME_TYPE_INDEX, PlayerHomeState, PlayerHousingState, PlayerTimeState, home_point_id,
-    home_point_kind,
+    CAMPING_COMPONENT, CAMPING_TYPE_INDEX, CampingState, HomePoint, HouseDataRef, NO_PHASED_ENTITY,
+    OwnedHouse, PLAYER_HOME_COMPONENT, PLAYER_HOME_TYPE_INDEX, PLAYER_HOUSING_COMPONENT,
+    PLAYER_HOUSING_TYPE_INDEX, PLAYER_TIME_COMPONENT, PLAYER_TIME_TYPE_INDEX, PlayerHomeState,
+    PlayerHousingState, PlayerTimeState, home_point_id, home_point_kind,
 };
 use nw_messages::{
-    BundleMember, FacetHeader, InputRecord, InteractionRequest, MemberState, NS_PER_MS,
-    RAW_ID_LEN, ServerMessage, TeleportWithLoadingScreenMsg, TravelClientMsg, TravelServerMsg,
+    BundleMember, FacetHeader, InputRecord, InteractionRequest, MemberState, NS_PER_MS, RAW_ID_LEN,
+    ServerMessage, TeleportWithLoadingScreenMsg, TravelClientMsg, TravelServerMsg,
 };
 use nw_sim_core::Position;
 
@@ -435,7 +433,13 @@ impl SimWorld {
                 });
                 match home {
                     Some((to, true)) => {
-                        self.start_channel(entity, number, to, now_ms, Purpose::Home { plot: plot.id });
+                        self.start_channel(
+                            entity,
+                            number,
+                            to,
+                            now_ms,
+                            Purpose::Home { plot: plot.id },
+                        );
                     }
                     found => {
                         tracing::info!(
@@ -478,7 +482,9 @@ impl SimWorld {
             TravelClientMsg::ExitPlot { plot, .. } => self.exit_plot(entity, number, &plot),
             TravelClientMsg::BuyHome { .. } => self.buy_home(entity, number),
             TravelClientMsg::AbandonHome { .. } => self.abandon_home(entity, number),
-            TravelClientMsg::ResetCooldown { plot, .. } => self.reset_cooldown(entity, number, &plot),
+            TravelClientMsg::ResetCooldown { plot, .. } => {
+                self.reset_cooldown(entity, number, &plot)
+            }
             TravelClientMsg::PayTaxes { plot, .. } => self.pay_taxes(entity, number, &plot),
             TravelClientMsg::TaxesDue { plot, .. } => self.taxes_due(entity, number, &plot),
             TravelClientMsg::PlotInfo { .. } => self.plot_info(entity, number),
@@ -503,7 +509,11 @@ impl SimWorld {
             | TravelClientMsg::HousingItemInteractionEnded { .. }) => {
                 // Retail answers none of these (the build mode cancel, the use of a piece of
                 // furniture and its end): the client plays them on its own.
-                tracing::debug!(player = number, type_index = call.type_index(), "travel call");
+                tracing::debug!(
+                    player = number,
+                    type_index = call.type_index(),
+                    "travel call"
+                );
             }
         }
     }
@@ -541,7 +551,10 @@ impl SimWorld {
                 self.start_channel(entity, number, Position { x, y, z }, now_ms, Purpose::Inn);
             }
             None => {
-                tracing::info!(player = number, "inn recall refused (no inn or its cooldown runs)");
+                tracing::info!(
+                    player = number,
+                    "inn recall refused (no inn or its cooldown runs)"
+                );
                 self.send_travel(entity, &[housing(number, fast_travel_failed)]);
             }
         }
@@ -558,7 +571,14 @@ impl SimWorld {
         purpose: Purpose,
     ) {
         let delay_ms = self.content.travel.channel_ms;
-        self.start_channel_after(entity, number, to, None, now_ms.saturating_add(delay_ms), purpose);
+        self.start_channel_after(
+            entity,
+            number,
+            to,
+            None,
+            now_ms.saturating_add(delay_ms),
+            purpose,
+        );
     }
 
     /// [`Self::start_channel`] facing `facing` at the end, due at `due_ms`.
@@ -586,10 +606,8 @@ impl SimWorld {
             .world
             .get_mut::<Player>(entity)
             .is_some_and(|mut player| {
-                let free = !dead
-                    && !encumbered
-                    && !player.frozen
-                    && player.travel.channel.is_none();
+                let free =
+                    !dead && !encumbered && !player.frozen && player.travel.channel.is_none();
                 if free {
                     player.travel.channel = Some(channel);
                     player.travel.due.housing = true;
@@ -597,13 +615,21 @@ impl SimWorld {
                 free
             });
         if started {
-            tracing::info!(player = number, x = to.x, y = to.y, ?purpose, "fast travel channels");
+            tracing::info!(
+                player = number,
+                x = to.x,
+                y = to.y,
+                ?purpose,
+                "fast travel channels"
+            );
         } else {
             tracing::info!(player = number, dead, encumbered, "fast travel refused");
             let failed = match purpose {
-                Purpose::Teleporter => ServerMessage::Travel(TravelServerMsg::TeleportFailedOrCancelled {
-                    header: header(player_component::PLAYER, number),
-                }),
+                Purpose::Teleporter => {
+                    ServerMessage::Travel(TravelServerMsg::TeleportFailedOrCancelled {
+                        header: header(player_component::PLAYER, number),
+                    })
+                }
                 _ => housing(number, fast_travel_failed),
             };
             self.send_travel(entity, &[failed]);
@@ -694,7 +720,11 @@ impl SimWorld {
         let Some(newest) = records.iter().find_map(|record| record.bit_7) else {
             return;
         };
-        let Some(at) = self.world.get::<Body>(entity).map(|body| body.motion.position()) else {
+        let Some(at) = self
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position())
+        else {
             return;
         };
         let to = Position {
@@ -835,8 +865,9 @@ impl SimWorld {
         for mut player in query.iter_mut(&mut self.world) {
             let number = player.number;
             let travel = &mut player.travel;
-            let (start_ms, played_at_start_ms) =
-                *travel.session.get_or_insert((server_ms, travel.saved.played_ms));
+            let (start_ms, played_at_start_ms) = *travel
+                .session
+                .get_or_insert((server_ms, travel.saved.played_ms));
             travel.saved.played_ms =
                 played_at_start_ms.saturating_add(server_ms.saturating_sub(start_ms));
             if !player.own_card_sent || player.travel.due == StatesDue::default() {
@@ -943,7 +974,12 @@ impl SimWorld {
         if azoth == 0 {
             return true;
         }
-        let Some(currency) = self.content.progression.categorical(AZOTH_PROGRESSION).cloned() else {
+        let Some(currency) = self
+            .content
+            .progression
+            .categorical(AZOTH_PROGRESSION)
+            .cloned()
+        else {
             return false;
         };
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
@@ -1007,7 +1043,9 @@ impl SimWorld {
             return;
         };
         if let Some(mut player) = self.world.get_mut::<Player>(entity)
-            && !player.flow.has_achievement(&self.achievement_rules, achievement)
+            && !player
+                .flow
+                .has_achievement(&self.achievement_rules, achievement)
         {
             player
                 .flow
@@ -1052,7 +1090,12 @@ impl SimWorld {
                 self.send_travel(entity, &[accepted]);
             }
             kind::TELEPORTER => {
-                match self.content.travel.teleporter(request.target_entity).copied() {
+                match self
+                    .content
+                    .travel
+                    .teleporter(request.target_entity)
+                    .copied()
+                {
                     Some(teleporter) => {
                         self.send_travel(entity, &[accepted]);
                         let [x, y, z] = teleporter.destination;
@@ -1147,7 +1190,11 @@ impl SimWorld {
     /// The purchase of [`Self::buy_home`]: whether it went through.
     fn purchase_home(&mut self, entity: Entity, number: u64) -> bool {
         let unix_ms = self.unix_ms();
-        let Some(at) = self.world.get::<Body>(entity).map(|body| body.motion.position()) else {
+        let Some(at) = self
+            .world
+            .get::<Body>(entity)
+            .map(|body| body.motion.position())
+        else {
             return false;
         };
         let rules = &self.content.travel;
@@ -1160,7 +1207,10 @@ impl SimWorld {
             return false;
         };
         let Some(plot) = rules.plot(id_of_raw(&plot_raw), [at.x, at.y, at.z]) else {
-            tracing::info!(player = number, "home bought on a plot the level does not have");
+            tracing::info!(
+                player = number,
+                "home bought on a plot the level does not have"
+            );
             return false;
         };
         let Some(house_type) = rules.house_type(plot.house_type) else {
@@ -1230,7 +1280,12 @@ impl SimWorld {
     fn abandon_home(&mut self, entity: Entity, number: u64) {
         let Some(home) = self.world.get_mut::<Player>(entity).and_then(|mut player| {
             let plot = player.travel.plot?;
-            let at = player.travel.saved.homes.iter().position(|home| home.plot == plot)?;
+            let at = player
+                .travel
+                .saved
+                .homes
+                .iter()
+                .position(|home| home.plot == plot)?;
             if player.travel.inside == Some(plot) {
                 player.travel.inside = None;
             }
@@ -1249,26 +1304,30 @@ impl SimWorld {
     fn pay_taxes(&mut self, entity: Entity, number: u64, plot: &PlotRef) {
         let unix_ms = self.unix_ms();
         let rules = &self.content.travel;
-        let paid = self.world.get_mut::<Player>(entity).is_some_and(|mut player| {
-            let Some(house_type) = player
-                .travel
-                .home(&plot.id)
-                .and_then(|home| rules.house_type_of_crc(home.record.house_type))
-            else {
-                return false;
-            };
-            let tax = u64::from(rules.housing.tax(house_type));
-            if player.coins < tax {
-                return false;
-            }
-            player.coins -= tax;
-            player.coins_changed = true;
-            player.travel.due.housing = true;
-            player.travel.named_home(plot).is_some_and(|home| {
-                home.record.taxes_due_ms = HousingRules::paid_until(home.record.taxes_due_ms, unix_ms);
-                true
-            })
-        });
+        let paid = self
+            .world
+            .get_mut::<Player>(entity)
+            .is_some_and(|mut player| {
+                let Some(house_type) = player
+                    .travel
+                    .home(&plot.id)
+                    .and_then(|home| rules.house_type_of_crc(home.record.house_type))
+                else {
+                    return false;
+                };
+                let tax = u64::from(rules.housing.tax(house_type));
+                if player.coins < tax {
+                    return false;
+                }
+                player.coins -= tax;
+                player.coins_changed = true;
+                player.travel.due.housing = true;
+                player.travel.named_home(plot).is_some_and(|home| {
+                    home.record.taxes_due_ms =
+                        HousingRules::paid_until(home.record.taxes_due_ms, unix_ms);
+                    true
+                })
+            });
         tracing::info!(player = number, paid, "taxes paid");
         self.send_travel(
             entity,
@@ -1373,11 +1432,16 @@ impl SimWorld {
     fn reset_cooldown(&mut self, entity: Entity, number: u64, plot: &PlotRef) {
         let unix_ms = self.unix_ms();
         let rules = &self.content.travel;
-        let Some((left_ms, cooldown_ms)) = self.world.get_mut::<Player>(entity).and_then(|mut player| {
-            let home = player.travel.named_home(plot)?;
-            let cooldown_ms = rules.house_type_of_crc(home.record.house_type)?.cooldown_ms;
-            Some((home.record.fast_travel_ready_ms.saturating_sub(unix_ms), cooldown_ms))
-        }) else {
+        let Some((left_ms, cooldown_ms)) =
+            self.world.get_mut::<Player>(entity).and_then(|mut player| {
+                let home = player.travel.named_home(plot)?;
+                let cooldown_ms = rules.house_type_of_crc(home.record.house_type)?.cooldown_ms;
+                Some((
+                    home.record.fast_travel_ready_ms.saturating_sub(unix_ms),
+                    cooldown_ms,
+                ))
+            })
+        else {
             return;
         };
         if left_ms == 0 {
@@ -1385,7 +1449,11 @@ impl SimWorld {
         }
         let azoth = rules.housing.reset_cost(left_ms, cooldown_ms);
         if !self.spend_azoth(entity, azoth) {
-            tracing::info!(player = number, azoth, "home cooldown reset refused: too little azoth");
+            tracing::info!(
+                player = number,
+                azoth,
+                "home cooldown reset refused: too little azoth"
+            );
             return;
         }
         if let Some(mut player) = self.world.get_mut::<Player>(entity)
@@ -1518,7 +1586,14 @@ impl SimWorld {
                 player.travel.due.camping = true;
                 player.travel.due.homes = true;
             }
-            tracing::info!(player = number, placed, tier, allowed, dead, "camp placement");
+            tracing::info!(
+                player = number,
+                placed,
+                tier,
+                allowed,
+                dead,
+                "camp placement"
+            );
             (placed, had_camp)
         }) else {
             return;
@@ -1664,7 +1739,7 @@ fn housing_state(travel: &TravelState) -> PlayerHousingState {
         .map(|home| (home_ref(home).facet, home.record.house_data_facet));
     PlayerHousingState {
         has_purchased_house: owned.then_some(true),
-        owned_houses: owned.then(|| FullList {
+        owned_houses: owned.then_some(FullList {
             version: Some(travel.houses_version),
             elements: houses,
         }),
@@ -1684,8 +1759,8 @@ fn housing_state(travel: &TravelState) -> PlayerHousingState {
 /// the bound inn's id as the chosen point.
 fn home_state(travel: &TravelState, rules: &TravelRules, number: u64) -> PlayerHomeState {
     let saved = &travel.saved;
-    let point = |entity: u64, name: Vec<u8>, position: [f32; 3], cooldown_ns, used_ns, kind| {
-        HomePoint {
+    let point =
+        |entity: u64, name: Vec<u8>, position: [f32; 3], cooldown_ns, used_ns, kind| HomePoint {
             entity: entity_ref(entity),
             name,
             position,
@@ -1696,8 +1771,7 @@ fn home_state(travel: &TravelState, rules: &TravelRules, number: u64) -> PlayerH
             extra: 0,
             id: home_point_id(entity, SINGLE_POINT),
             index: SINGLE_POINT,
-        }
-    };
+        };
     let inn = saved.inn.and_then(|inn| {
         // An inn's name (`@NN_InnName`) is its slice's, which the level data does not carry
         // here; retail sends shrines with an empty name too.
@@ -1986,7 +2060,9 @@ mod tests {
             .iter()
             .filter_map(|message| match message {
                 ServerMessage::InteractionValidated(InteractionValidatedMsg {
-                    kind, status, ..
+                    kind,
+                    status,
+                    ..
                 }) => Some((*kind, *status)),
                 _ => None,
             })
@@ -1998,7 +2074,10 @@ mod tests {
         let mut world = world();
         call(&mut world, landmark(SHRINE_TERRITORY, SHRINE[0] + 1.0), NOW);
         assert!(travel_answers(&mut world, NOW + CHANNEL_MS - 1).is_empty());
-        assert!((body(&mut world).x - START_X).abs() < f32::EPSILON, "still channels");
+        assert!(
+            (body(&mut world).x - START_X).abs() < f32::EPSILON,
+            "still channels"
+        );
         let messages = answers(&mut world, NOW + CHANNEL_MS);
         assert!(matches!(
             messages.as_slice(),
@@ -2028,7 +2107,11 @@ mod tests {
             [TravelServerMsg::FastTravelFailed { .. }]
         ));
         assert!(travel_answers(&mut world, NOW + CHANNEL_MS).is_empty());
-        call(&mut world, landmark(SHRINE_TERRITORY, SHRINE[0]), NOW + CHANNEL_MS);
+        call(
+            &mut world,
+            landmark(SHRINE_TERRITORY, SHRINE[0]),
+            NOW + CHANNEL_MS,
+        );
         call(
             &mut world,
             TravelClientMsg::CancelFastTravel {
@@ -2045,7 +2128,11 @@ mod tests {
     #[test]
     fn an_unknown_landmark_or_an_undiscovered_territory_is_refused_until_discovered() {
         let mut world = world();
-        call(&mut world, landmark(SHRINE_TERRITORY, SHRINE[0] + 20.0), NOW);
+        call(
+            &mut world,
+            landmark(SHRINE_TERRITORY, SHRINE[0] + 20.0),
+            NOW,
+        );
         assert!(matches!(
             travel_answers(&mut world, NOW + 1).as_slice(),
             [TravelServerMsg::FastTravelFailed { .. }]
@@ -2088,7 +2175,11 @@ mod tests {
             ..first
         };
         for (at, now_ms) in [(first, NOW + 2), (later, NOW + 3)] {
-            world.world.get_mut::<Player>(entity).expect("player").last_grounded = Some(at);
+            world
+                .world
+                .get_mut::<Player>(entity)
+                .expect("player")
+                .last_grounded = Some(at);
             tick(&mut world, now_ms);
         }
         call(&mut world, unstuck(), NOW + 4);
@@ -2145,7 +2236,11 @@ mod tests {
             NOW,
         );
         let entity = entity(&mut world);
-        world.world.get_mut::<Player>(entity).expect("player").own_card_sent = false;
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .own_card_sent = false;
         world.tick_travel(NOW + 1);
         assert!(
             world
@@ -2156,7 +2251,11 @@ mod tests {
                 .waypoint_due,
             "it waits for the card"
         );
-        world.world.get_mut::<Player>(entity).expect("player").own_card_sent = true;
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .own_card_sent = true;
         world.tick_travel(NOW + 2);
         let player = world.world.get::<Player>(entity).expect("player");
         assert!(player.extra_members.iter().any(|member| {
@@ -2171,7 +2270,10 @@ mod tests {
                     }
         }));
         let saved = player.travel.carried().waypoint.map(|point| point.point());
-        assert_eq!(saved.map(|point| [point.x, point.y]), Some([marker[0], marker[1]]));
+        assert_eq!(
+            saved.map(|point| [point.x, point.y]),
+            Some([marker[0], marker[1]])
+        );
     }
 
     #[test]
@@ -2207,9 +2309,16 @@ mod tests {
         ));
         assert_eq!(
             validated(&answers(&mut world, NOW + 2)),
-            [(kind::OPEN_INN, ACCEPTED), (kind::SET_SPAWN_POINT, ACCEPTED)]
+            [
+                (kind::OPEN_INN, ACCEPTED),
+                (kind::SET_SPAWN_POINT, ACCEPTED)
+            ]
         );
-        let travel = world.departures()[0].progression.clone().expect("saved").travel;
+        let travel = world.departures()[0]
+            .progression
+            .clone()
+            .expect("saved")
+            .travel;
         assert_eq!((travel.camp, travel.inn), (Some(CAMP), Some(INN)));
         assert!(!world.travel_interaction(entity, PLAYER, request(1, 0), b"", NOW));
     }
@@ -2220,19 +2329,26 @@ mod tests {
         let entity = entity(&mut world);
         let short = START_X + 1.0;
         let through = START_X + 5.0;
-        assert!(world.travel_interaction(
-            entity,
-            PLAYER,
-            request(kind::DOOR, 0),
-            b"@door",
-            NOW
-        ));
-        assert_eq!(validated(&answers(&mut world, NOW + 1)), [(kind::DOOR, ACCEPTED)]);
+        assert!(world.travel_interaction(entity, PLAYER, request(kind::DOOR, 0), b"@door", NOW));
+        assert_eq!(
+            validated(&answers(&mut world, NOW + 1)),
+            [(kind::DOOR, ACCEPTED)]
+        );
         world.travel_input(&connection(PLAYER), &[position_record(short)], NOW + 2);
-        assert!((body(&mut world).x - START_X).abs() < f32::EPSILON, "a step is no pass");
+        assert!(
+            (body(&mut world).x - START_X).abs() < f32::EPSILON,
+            "a step is no pass"
+        );
         world.travel_input(&connection(PLAYER), &[position_record(through)], NOW + 3);
-        assert!((body(&mut world).x - through).abs() < 0.01, "through the door");
-        world.travel_input(&connection(PLAYER), &[position_record(through + 5.0)], NOW + 4);
+        assert!(
+            (body(&mut world).x - through).abs() < 0.01,
+            "through the door"
+        );
+        world.travel_input(
+            &connection(PLAYER),
+            &[position_record(through + 5.0)],
+            NOW + 4,
+        );
         assert!((body(&mut world).x - through).abs() < 0.01, "one pass only");
     }
 
@@ -2273,7 +2389,11 @@ mod tests {
             b"@ui_housing",
             NOW
         ));
-        housing_call(&mut world, |header| TravelClientMsg::BuyHome { header }, NOW + 1);
+        housing_call(
+            &mut world,
+            |header| TravelClientMsg::BuyHome { header },
+            NOW + 1,
+        );
         (world, entity)
     }
 
@@ -2329,15 +2449,17 @@ mod tests {
             },
             NOW + 4,
         );
-        housing_call(&mut world, |header| TravelClientMsg::ResidentData { header }, NOW + 5);
-        let answers = travel_answers(&mut world, NOW + 6);
-        let tax = world.content.travel.housing.tax(
-            world
-                .content
-                .travel
-                .house_type(0)
-                .expect("house type"),
+        housing_call(
+            &mut world,
+            |header| TravelClientMsg::ResidentData { header },
+            NOW + 5,
         );
+        let answers = travel_answers(&mut world, NOW + 6);
+        let tax = world
+            .content
+            .travel
+            .housing
+            .tax(world.content.travel.house_type(0).expect("house type"));
         assert!(matches!(
             answers.as_slice(),
             [
@@ -2346,8 +2468,16 @@ mod tests {
                 TravelServerMsg::ResidentData { territories, .. },
             ] if *amount == tax && territories.len() == 1 && territories[0].0 == TERRITORY
         ));
-        let saved = world.departures()[0].progression.clone().expect("saved").travel;
-        assert_eq!(saved.homes[0].record.plot_extra, plot_ref().extra, "the ids were learnt");
+        let saved = world.departures()[0]
+            .progression
+            .clone()
+            .expect("saved")
+            .travel;
+        assert_eq!(
+            saved.homes[0].record.plot_extra,
+            plot_ref().extra,
+            "the ids were learnt"
+        );
     }
 
     #[test]
@@ -2410,7 +2540,13 @@ mod tests {
         };
         call(&mut world, home(), NOW + 6);
         answers(&mut world, NOW + 6 + CHANNEL_MS);
-        let ready = world.world.get::<Player>(entity).expect("player").travel.saved.homes[0]
+        let ready = world
+            .world
+            .get::<Player>(entity)
+            .expect("player")
+            .travel
+            .saved
+            .homes[0]
             .record
             .fast_travel_ready_ms;
         assert!(ready > 0, "the cooldown runs");
@@ -2428,13 +2564,23 @@ mod tests {
             NOW + 9 + CHANNEL_MS,
         );
         assert_eq!(
-            world.world.get::<Player>(entity).expect("player").travel.saved.homes[0]
+            world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .travel
+                .saved
+                .homes[0]
                 .record
                 .fast_travel_ready_ms,
             ready,
             "no azoth, no reset"
         );
-        housing_call(&mut world, |header| TravelClientMsg::AbandonHome { header }, NOW + 10 + CHANNEL_MS);
+        housing_call(
+            &mut world,
+            |header| TravelClientMsg::AbandonHome { header },
+            NOW + 10 + CHANNEL_MS,
+        );
         assert!(
             world
                 .world
@@ -2483,7 +2629,11 @@ mod tests {
             travel_answers(&mut world, NOW + 5 + CHANNEL_MS).as_slice(),
             [TravelServerMsg::FastTravelFailed { .. }]
         ));
-        let saved = world.departures()[0].progression.clone().expect("saved").travel;
+        let saved = world.departures()[0]
+            .progression
+            .clone()
+            .expect("saved")
+            .travel;
         assert!(saved.inn_recalled_ms > 0);
         assert_eq!(world.content.travel.inn_cooldown_ms, INN_COOLDOWN_MS);
     }
@@ -2499,7 +2649,10 @@ mod tests {
             b"@dungeon_reekwater_interact_teleporter",
             NOW
         ));
-        assert_eq!(validated(&answers(&mut world, NOW + 1)), [(kind::TELEPORTER, ACCEPTED)]);
+        assert_eq!(
+            validated(&answers(&mut world, NOW + 1)),
+            [(kind::TELEPORTER, ACCEPTED)]
+        );
         let messages = answers(&mut world, NOW + TELEPORTER_DELAY_MS);
         assert!(matches!(
             messages.as_slice(),
@@ -2527,7 +2680,11 @@ mod tests {
     fn a_camp_needs_the_camping_rank_and_answers_with_441() {
         let mut world = world();
         let entity = entity(&mut world);
-        world.world.get_mut::<Player>(entity).expect("player").territories = vec![TERRITORY];
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .territories = vec![TERRITORY];
         let placement = StructurePlacement {
             position: HERE,
             rotation: [0.0, 0.0, -0.512, 0.859],
@@ -2568,8 +2725,18 @@ mod tests {
     fn the_travel_states_go_out_after_the_card_and_list_the_home_points() {
         let mut world = world();
         let entity = entity(&mut world);
-        world.world.get_mut::<Player>(entity).expect("player").own_card_sent = true;
-        world.world.get_mut::<Player>(entity).expect("player").travel.saved.inn = Some(INN);
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .own_card_sent = true;
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .travel
+            .saved
+            .inn = Some(INN);
         world.tick_travel(NOW + 1);
         let player = world.world.get::<Player>(entity).expect("player");
         let classes: Vec<u64> = player
@@ -2593,7 +2760,11 @@ mod tests {
         assert_eq!(points.len(), 1);
         assert_eq!(
             (points[0].kind, points[0].position, points[0].id.clone()),
-            (home_point_kind::INN, INN_AT, home_point_id(INN, SINGLE_POINT))
+            (
+                home_point_kind::INN,
+                INN_AT,
+                home_point_id(INN, SINGLE_POINT)
+            )
         );
         assert_eq!(homes.home_point_id, Some(home_point_id(INN, SINGLE_POINT)));
         assert_eq!(

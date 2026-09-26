@@ -225,10 +225,11 @@ impl TradeCall {
         self.header().write(&mut writer);
         match self {
             Self::UpdateItems { stacks, .. } => {
-                let count = u8::try_from(stacks.len()).map_err(|_| MessageError::CountTooLarge {
-                    count: u64::try_from(stacks.len()).unwrap_or(u64::MAX),
-                    limit: u64::from(MAX_OFFERED_STACKS),
-                })?;
+                let count =
+                    u8::try_from(stacks.len()).map_err(|_| MessageError::CountTooLarge {
+                        count: u64::try_from(stacks.len()).unwrap_or(u64::MAX),
+                        limit: u64::from(MAX_OFFERED_STACKS),
+                    })?;
                 writer.u8(count);
                 for stack in stacks {
                     writer.bytes(&stack.instance).u64(stack.quantity);
@@ -483,7 +484,8 @@ mod tests {
     use crate::test_support::hex_bytes;
 
     /// Retail `trading_between_players` 107327 ms and 108309 ms: one stack, then two.
-    const ONE_STACK: &str = "65cd42195901da562896c8c14210296e0146d9854bdd624cc9b1a92854bcd1b0ee000000000000000b";
+    const ONE_STACK: &str =
+        "65cd42195901da562896c8c14210296e0146d9854bdd624cc9b1a92854bcd1b0ee000000000000000b";
     const TWO_STACKS: &str = "65cd42195901da562896c8c14210296e0246d9854bdd624cc9b1a92854bcd1b0ee000000000000000bac2cd0ecbac449d384a214879e5422ce0000000000000009";
     /// Retail `trading_between_players_3` 37194 ms: a cancel.
     const CANCEL: &str = "65cd42195901da562896c8c14210296e00000011";
@@ -515,7 +517,10 @@ mod tests {
             panic!("items");
         };
         assert_eq!(
-            stacks.iter().map(|stack| stack.quantity).collect::<Vec<_>>(),
+            stacks
+                .iter()
+                .map(|stack| stack.quantity)
+                .collect::<Vec<_>>(),
             [11, 9]
         );
     }

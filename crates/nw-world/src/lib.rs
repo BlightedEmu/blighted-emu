@@ -12,11 +12,11 @@ pub mod map_tiles;
 pub mod metadata;
 pub mod records;
 pub mod roads;
-pub mod water;
 pub mod script;
 pub mod slice_data;
 pub mod stations;
 pub mod travel_slices;
+pub mod water;
 pub mod world_file;
 
 pub use records::WorldFile;

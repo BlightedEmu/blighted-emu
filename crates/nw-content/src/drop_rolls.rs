@@ -136,7 +136,10 @@ impl DropRolls {
         let ceiling = mob_level
             .and_then(|level| self.mob(level))
             .map_or(top, |mob| mob.ceiling);
-        (item.min_gear_score, top.min(ceiling).max(item.min_gear_score))
+        (
+            item.min_gear_score,
+            top.min(ceiling).max(item.min_gear_score),
+        )
     }
 
     /// The gear score of a drop of `item` with `hint` (module notes); `below(n)` is a random

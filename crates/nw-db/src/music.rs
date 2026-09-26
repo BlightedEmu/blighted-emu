@@ -23,12 +23,11 @@ pub(crate) async fn character_music(
     world: &PgPool,
     character_id: Uuid,
 ) -> Result<SavedMusic, DbError> {
-    let row: Option<(Option<i64>,)> = sqlx::query_as(
-        "SELECT next_performance_ms FROM player_character WHERE character_id = $1",
-    )
-    .bind(character_id)
-    .fetch_optional(world)
-    .await?;
+    let row: Option<(Option<i64>,)> =
+        sqlx::query_as("SELECT next_performance_ms FROM player_character WHERE character_id = $1")
+            .bind(character_id)
+            .fetch_optional(world)
+            .await?;
     let (next,) = row.ok_or(DbError::NoSuchCharacter)?;
     Ok(SavedMusic {
         next_performance_ms: next

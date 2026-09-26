@@ -1509,7 +1509,10 @@ mod tests {
             actions: vec![ActionList::parse(AIM_ACTION_LIST).expect("actions")],
             sheathe: None,
             ranged: HashMap::from([
-                (("Musket".to_owned(), "Basic".to_owned()), (RANGE_M, 0.0, true)),
+                (
+                    ("Musket".to_owned(), "Basic".to_owned()),
+                    (RANGE_M, 0.0, true),
+                ),
                 (("Bow".to_owned(), "Basic".to_owned()), (RANGE_M, 0.0, true)),
             ]),
             flights: HashMap::new(),

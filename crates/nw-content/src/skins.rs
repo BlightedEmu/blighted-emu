@@ -50,7 +50,10 @@ pub fn skin_kind(classes: &[String]) -> Option<String> {
         .iter()
         .position(|part| part.starts_with(EQUIPPABLE_PREFIX))?;
     let slot = &classes[at];
-    if ARMOR_SLOTS.iter().any(|armor| armor.eq_ignore_ascii_case(slot)) {
+    if ARMOR_SLOTS
+        .iter()
+        .any(|armor| armor.eq_ignore_ascii_case(slot))
+    {
         return Some(slot.to_lowercase());
     }
     Some(classes.get(at + 1).unwrap_or(slot).to_lowercase())
@@ -280,8 +283,18 @@ mod tests {
                     Some("2hBowT3"),
                 ),
                 row("2hBowT4", "Weapon+EquippableTwoHand+Bow+Ranged", None, None),
-                row("2hGreatSwordT2", "Weapon+EquippableTwoHand+GreatSword+Melee", None, None),
-                row("Skin_Head_HideHelmet", "EquippableHead+Skin", Some("HideHelmet"), None),
+                row(
+                    "2hGreatSwordT2",
+                    "Weapon+EquippableTwoHand+GreatSword+Melee",
+                    None,
+                    None,
+                ),
+                row(
+                    "Skin_Head_HideHelmet",
+                    "EquippableHead+Skin",
+                    Some("HideHelmet"),
+                    None,
+                ),
                 row("PotionHealthT1", "Consumable+Potion", None, None),
             ],
             armor_appearances: vec![(
@@ -303,7 +316,10 @@ mod tests {
             catalog.skin_of("LightChestT1"),
             Some(lowercase_crc32("Cloth_Shirt_T1"))
         );
-        assert_eq!(catalog.skin_of("2hBowMonarchsBluffT3"), Some(lowercase_crc32("2hBowT3")));
+        assert_eq!(
+            catalog.skin_of("2hBowMonarchsBluffT3"),
+            Some(lowercase_crc32("2hBowT3"))
+        );
         assert_eq!(catalog.skin_of("2hBowT4"), Some(lowercase_crc32("2hBowT4")));
         assert_eq!(catalog.skin_of("PotionHealthT1"), None);
         assert_eq!(catalog.free(), [lowercase_crc32("HideHelmet")]);
@@ -317,7 +333,10 @@ mod tests {
         assert!(catalog.fits(chest, &parts(Some("EquippableChest+Armor+Light"))));
         assert!(!catalog.fits(chest, &parts(Some("EquippableLegs+Armor+Heavy"))));
         assert!(catalog.fits(bow, &parts(Some("Weapon+EquippableTwoHand+Bow+Ranged"))));
-        assert!(!catalog.fits(bow, &parts(Some("Weapon+EquippableTwoHand+GreatSword+Melee"))));
+        assert!(!catalog.fits(
+            bow,
+            &parts(Some("Weapon+EquippableTwoHand+GreatSword+Melee"))
+        ));
         assert!(!catalog.fits(0, &parts(Some("EquippableChest"))));
     }
 

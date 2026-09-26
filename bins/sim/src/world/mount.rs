@@ -559,7 +559,12 @@ impl SimWorld {
     /// dash key dashes, and an attack or a posture change cancels a summon
     /// (`playeractions_mount.actionlist` `MountSummoning`: `AttackAction`, `Crouch_Desired`,
     /// `Prone_Desired`).
-    pub fn mount_input(&mut self, connection: &ConnectionRef, records: &[InputRecord], now_ms: u64) {
+    pub fn mount_input(
+        &mut self,
+        connection: &ConnectionRef,
+        records: &[InputRecord],
+        now_ms: u64,
+    ) {
         let Some(&entity) = self.by_connection.get(connection) else {
             return;
         };
@@ -618,12 +623,15 @@ impl SimWorld {
                     header: FacetHeader::of(MOUNT_FACET, player.number),
                     enabled: true,
                 };
-                push_mount_message(&mut self.combat_messages, player.connection.clone(), &enable);
+                push_mount_message(
+                    &mut self.combat_messages,
+                    player.connection.clone(),
+                    &enable,
+                );
             }
-            let dt_s = player
-                .mount
-                .last_tick_ms
-                .map_or(0.0, |last| now_ms.saturating_sub(last) as f32 / MS_PER_SECOND);
+            let dt_s = player.mount.last_tick_ms.map_or(0.0, |last| {
+                now_ms.saturating_sub(last) as f32 / MS_PER_SECOND
+            });
             player.mount.last_tick_ms = Some(now_ms);
             let [vx, vy] = player.tracked.velocity();
             if player.mount.tick(dt_s, vx.hypot(vy) > 0.0) {
@@ -854,7 +862,11 @@ impl SimWorld {
         notify: bool,
         now_ms: u64,
     ) {
-        match self.world.get::<Player>(entity).map(|player| player.mount.phase) {
+        match self
+            .world
+            .get::<Player>(entity)
+            .map(|player| player.mount.phase)
+        {
             Some(Phase::Summoning { .. }) => self.cancel_summon(entity, cancel, now_ms),
             Some(Phase::Mounted { .. }) => self.dismount(entity, dismount, notify, now_ms),
             Some(Phase::Idle) | None => {}
@@ -1139,9 +1151,7 @@ impl SimWorld {
             return;
         };
         let named = name.clone();
-        player
-            .mount
-            .customize(mount_id, |mount| mount.name = named);
+        player.mount.customize(mount_id, |mount| mount.name = named);
         let message = MountServerMsg::RenameNotification {
             header: FacetHeader::of(MOUNT_FACET, player.number),
             result: RENAME_TAKEN,
@@ -1327,7 +1337,10 @@ mod tests {
         let down = state_of(&mount.take_own_member(false).expect("change"));
         assert_eq!(down.mounted, Some(false));
         assert_eq!(down.summon_cooldown_end_ns, Some(END_NS));
-        assert_eq!(down.summon_authorization, Some(SummonAuthorization::default()));
+        assert_eq!(
+            down.summon_authorization,
+            Some(SummonAuthorization::default())
+        );
         assert_eq!(mount.remote().mount_id, 0);
     }
 
@@ -1361,7 +1374,10 @@ mod tests {
         };
         let card = state_of(&remote_member(None, riding).expect("card"));
         assert_eq!(card.mount_id, Some(LION_BASIC));
-        assert_eq!(card.remote_flags, Some(RemoteFlags(RemoteFlags::STAMINA_FULL)));
+        assert_eq!(
+            card.remote_flags,
+            Some(RemoteFlags(RemoteFlags::STAMINA_FULL))
+        );
         assert_eq!(card.mounted, None, "the owner's slot stays the owner's");
         let dashing = GhostMount {
             flags: RemoteFlags::DASHING | RemoteFlags::STAMINA_FULL,
@@ -1429,7 +1445,9 @@ mod tests {
         use nw_reflect::Envelope;
 
         use super::super::super::Outgoing;
-        use super::super::super::tests::{NOW, SERVER_TIME, admit_at, connection, world_with_spawns};
+        use super::super::super::tests::{
+            NOW, SERVER_TIME, admit_at, connection, world_with_spawns,
+        };
         use super::*;
         use crate::player_content::PlayerContent;
 
@@ -1485,7 +1503,10 @@ mod tests {
                     tradeskill: "Riding".to_owned(),
                 }],
                 [("ConfigMountRiding_0".to_owned(), movement())],
-                HashMap::from([("riding".to_owned(), vec![(0, "ConfigMountRiding_0".to_owned())])]),
+                HashMap::from([(
+                    "riding".to_owned(),
+                    vec![(0, "ConfigMountRiding_0".to_owned())],
+                )]),
                 [25],
             );
             let indexes = AchievementIndexes::build([
@@ -1493,8 +1514,7 @@ mod tests {
                 (HORSE_GIFT.to_owned(), GIFT_BIT),
             ]);
             let mut world = world_with_spawns(Vec::new());
-            world.achievement_rules =
-                crate::world::level_flow::AchievementRules::of(&indexes, &[]);
+            world.achievement_rules = crate::world::level_flow::AchievementRules::of(&indexes, &[]);
             world.content = Arc::new(PlayerContent {
                 mounts,
                 achievements: indexes,
@@ -1524,11 +1544,20 @@ mod tests {
 
         fn mount_of(world: &mut SimWorld) -> PlayerMount {
             let entity = world.player_by_number(PLAYER).expect("player");
-            world.world.get::<Player>(entity).expect("player").mount.clone()
+            world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .mount
+                .clone()
         }
 
         fn press(world: &mut SimWorld, counter: u16, now_ms: u64) -> Vec<MountServerMsg> {
-            world.mount_input(&connection(PLAYER), &[record(counter, vec![SUMMON_KEY])], now_ms);
+            world.mount_input(
+                &connection(PLAYER),
+                &[record(counter, vec![SUMMON_KEY])],
+                now_ms,
+            );
             ticked(world, now_ms)
         }
 
@@ -1538,13 +1567,22 @@ mod tests {
             assert!(ticked(&mut world, NOW).is_empty(), "the card goes first");
             let enable = ticked(&mut world, NOW + TICK_MS);
             assert!(
-                matches!(enable[..], [MountServerMsg::EnableMounts { enabled: true, .. }]),
+                matches!(
+                    enable[..],
+                    [MountServerMsg::EnableMounts { enabled: true, .. }]
+                ),
                 "{enable:?}"
             );
             let start = NOW + 2 * TICK_MS;
             let pending = press(&mut world, 1, start);
             assert!(
-                matches!(pending[..], [MountServerMsg::SummonPending { summon_ms: SUMMON_MS, .. }]),
+                matches!(
+                    pending[..],
+                    [MountServerMsg::SummonPending {
+                        summon_ms: SUMMON_MS,
+                        ..
+                    }]
+                ),
                 "{pending:?}"
             );
             let mount = mount_of(&mut world);
@@ -1559,7 +1597,14 @@ mod tests {
                 start + u64::from(SUMMON_MS) + TICK_MS,
             );
             let entity = world.player_by_number(PLAYER).expect("player");
-            assert!(world.world.get::<Player>(entity).expect("player").tracked.is_mounted());
+            assert!(
+                world
+                    .world
+                    .get::<Player>(entity)
+                    .expect("player")
+                    .tracked
+                    .is_mounted()
+            );
             assert_eq!(mount_of(&mut world).regen_rate, 10.0);
             let limit = world.move_limits_of(entity).max_speed_mps;
             assert!(
@@ -1578,7 +1623,14 @@ mod tests {
                 ),
                 "{off:?}"
             );
-            assert!(!world.world.get::<Player>(entity).expect("player").tracked.is_mounted());
+            assert!(
+                !world
+                    .world
+                    .get::<Player>(entity)
+                    .expect("player")
+                    .tracked
+                    .is_mounted()
+            );
             let early = press(&mut world, 3, off_ms + TICK_MS);
             assert!(
                 matches!(

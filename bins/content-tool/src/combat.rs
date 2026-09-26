@@ -160,13 +160,16 @@ fn same_health(ours: u32, nwdb: u64) -> bool {
 /// Whether our health of the type at some other level is `nwdb`'s.
 fn at_other_level(data: &CombatData, vitals_crc: u32, nwdb: u64) -> bool {
     data.mob_type(vitals_crc).is_some_and(|kind| {
-        data.levels()
-            .any(|(_, row)| {
-                same_health(
-                    mob_max_health(row.base_max_health, kind.health_mod, kind.category_health_mod),
-                    nwdb,
-                )
-            })
+        data.levels().any(|(_, row)| {
+            same_health(
+                mob_max_health(
+                    row.base_max_health,
+                    kind.health_mod,
+                    kind.category_health_mod,
+                ),
+                nwdb,
+            )
+        })
     })
 }
 

@@ -583,9 +583,11 @@ fn is_of(encounter: &Encounter, mob: &EncounterMob, target: usize) -> bool {
     encounter.targets.get(target).is_some_and(|wanted| {
         wanted.slices.iter().any(|slice| {
             slice.path == own.path
-                || slice.mob.as_ref().zip(own.mob.as_ref()).is_some_and(|(a, b)| {
-                    a.vitals_id.eq_ignore_ascii_case(&b.vitals_id)
-                })
+                || slice
+                    .mob
+                    .as_ref()
+                    .zip(own.mob.as_ref())
+                    .is_some_and(|(a, b)| a.vitals_id.eq_ignore_ascii_case(&b.vitals_id))
         })
     })
 }
@@ -682,7 +684,8 @@ fn objective_met(
         ObjectiveSpec::WaitForParent => false,
         ObjectiveSpec::InvasionWave => {
             let spawned_all = run.stages[stage].due.is_empty();
-            let own: Vec<&EncounterMob> = run.mobs.iter().filter(|mob| mob.stage == stage).collect();
+            let own: Vec<&EncounterMob> =
+                run.mobs.iter().filter(|mob| mob.stage == stage).collect();
             spawned_all && !own.is_empty() && own.iter().all(|mob| mob.died_ms.is_some())
         }
     }
@@ -704,7 +707,8 @@ fn run_actions(
             }
             StageAction::DestroySlice { target } => {
                 for index in 0..run.mobs.len() {
-                    let matches = target.is_none_or(|target| is_of(encounter, &run.mobs[index], target));
+                    let matches =
+                        target.is_none_or(|target| is_of(encounter, &run.mobs[index], target));
                     if matches && !run.mobs[index].gone {
                         host.remove(run.mobs[index].entity);
                         run.mobs[index].gone = true;
@@ -761,9 +765,19 @@ impl ScriptHost for SimHost<'_> {
             return Some(*phase);
         }
         let key = self.world.mobs.ai().data().key(BOSS_PHASE_KEY)?;
-        let value = self.world.mobs.tree(entity)?.brain().fact(key)?.as_number()?;
+        let value = self
+            .world
+            .mobs
+            .tree(entity)?
+            .brain()
+            .fact(key)?
+            .as_number()?;
         // A phase is a small whole number.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "a phase")]
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a phase"
+        )]
         Some(value.max(0.0) as u32)
     }
 
@@ -846,7 +860,10 @@ impl SimWorld {
         let content = std::sync::Arc::clone(&self.content);
         let numbers: Vec<u64> = {
             let mut query = self.world.query::<&Player>();
-            query.iter(&self.world).map(|player| player.number).collect()
+            query
+                .iter(&self.world)
+                .map(|player| player.number)
+                .collect()
         };
         for number in numbers {
             let reached = self.reached_loot_limits(number);
@@ -1061,7 +1078,11 @@ mod tests {
         run.tick(&mut host, &view(&[far]), T0);
         run.tick(&mut host, &view(&[far]), T0 + 1);
         assert_eq!(host.spawned, [(BOSS_VITALS.to_owned(), PLACE)]);
-        assert_eq!(stage_status(&run, 1), StageStatus::Running, "waits for a player");
+        assert_eq!(
+            stage_status(&run, 1),
+            StageStatus::Running,
+            "waits for a player"
+        );
         run.tick(&mut host, &view(&[PLACE]), T0 + 2);
         assert_eq!(stage_status(&run, 1), StageStatus::Done);
         assert_eq!(stage_status(&run, 2), StageStatus::Running, "the intro");
@@ -1094,7 +1115,11 @@ mod tests {
         assert_eq!(stage_status(&run, 2), StageStatus::Done);
         host.phase.insert(1, 3);
         run.tick(&mut host, &view(&[PLACE]), T0 + 3 + limit);
-        assert_eq!(stage_status(&run, 3), StageStatus::Done, "phase 3 ends the fight");
+        assert_eq!(
+            stage_status(&run, 3),
+            StageStatus::Done,
+            "phase 3 ends the fight"
+        );
     }
 
     #[test]
@@ -1148,7 +1173,11 @@ mod tests {
         let mut run = DungeonRun::new(Uuid::nil(), script(vec![encounter]));
         let mut host = Host::default();
         run.tick(&mut host, &view(&[[0.0; 3]]), T0);
-        assert_eq!(run.encounters[0].status, EncounterStatus::Idle, "no player near");
+        assert_eq!(
+            run.encounters[0].status,
+            EncounterStatus::Idle,
+            "no player near"
+        );
         run.tick(&mut host, &view(&[PLACE]), T0 + 1);
         run.tick(&mut host, &view(&[PLACE]), T0 + 2);
         assert!(host.spawned.is_empty(), "the spawn waits for its delay");

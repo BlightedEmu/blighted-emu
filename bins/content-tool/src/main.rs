@@ -21,8 +21,7 @@ use content_tool::build::{
 use content_tool::capture::CaptureReport;
 use content_tool::catacombs::{
     CatacombCheck, DEFAULT_GAME_MODE as DEFAULT_CATACOMB_MODE,
-    DEFAULT_RUNS as DEFAULT_CATACOMB_RUNS, check as catacomb_check,
-    map_rows as catacomb_map_rows,
+    DEFAULT_RUNS as DEFAULT_CATACOMB_RUNS, check as catacomb_check, map_rows as catacomb_map_rows,
 };
 use content_tool::codegen::run_codegen;
 use content_tool::collision::{CollisionError, CollisionReport, PakIndex, build_level_collision};
@@ -38,8 +37,8 @@ use content_tool::mob_prefabs::{
 };
 use content_tool::player_attacks::{BundleRows, PlayerAttacksReport, build_stances, read_sources};
 use content_tool::roads::{RoadsError, RoadsReport, build_level_roads};
-use content_tool::water::{WaterError, build_level_water};
 use content_tool::source::GameSource;
+use content_tool::water::{WaterError, build_level_water};
 use content_tool::world::{LevelReport, UnmatchedIds, run_world, world_totals};
 use nw_capture::{CLIENT_TO_SERVER, CaptureError, SERVER_TO_CLIENT, TypeNames};
 use nw_content::ContentBundle;
@@ -660,7 +659,10 @@ fn print_dungeon_scripts(report: &DungeonScriptsReport) {
         report.spawner_mobs, report.levelless_mobs, report.other_slices
     );
     if !report.skipped_modes.is_empty() {
-        println!("game modes without a script: {}", report.skipped_modes.join(", "));
+        println!(
+            "game modes without a script: {}",
+            report.skipped_modes.join(", ")
+        );
     }
     for path in report.missing_slices.iter().take(SHOWN_FAILURES) {
         println!("not in the paks: {path}");

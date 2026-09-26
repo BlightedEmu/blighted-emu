@@ -303,7 +303,11 @@ impl PlayerSequences {
     /// Returns [`PlayerSequencesError::Json`] when the text is not the table.
     pub fn parse(text: &str) -> Result<Self, PlayerSequencesError> {
         let file: TableFile = serde_json::from_str(text)?;
-        Ok(Self::of_parts(file.hold_records, file.stances, file.follow_ups))
+        Ok(Self::of_parts(
+            file.hold_records,
+            file.stances,
+            file.follow_ups,
+        ))
     }
 
     /// The table of `stances` and `follow_ups`, with the charge after `hold_records`.
@@ -387,7 +391,11 @@ mod tests {
         let gun = table
             .stance(stance_key("2H_Ranged,Blunderbuss"))
             .expect("blunderbuss");
-        assert_eq!(gun.light_of(true), Some(461), "standing value when moving is unknown");
+        assert_eq!(
+            gun.light_of(true),
+            Some(461),
+            "standing value when moving is unknown"
+        );
         let aim = gun.alt_start.expect("aim");
         assert_eq!((aim.third_state, aim.third_sequence), (Some(46), Some(407)));
         assert!(!aim.is_empty());
@@ -418,13 +426,22 @@ mod tests {
             .stance(stance_key("2H_Melee,GreatSword"))
             .and_then(|stance| stance.dodge)
             .expect("dodge");
-        assert_eq!(dodge.of(Direction::Back).map(|play| play.sequence), Some(2100));
-        assert_eq!(dodge.of(Direction::Left).map(|play| play.sequence), Some(4007));
+        assert_eq!(
+            dodge.of(Direction::Back).map(|play| play.sequence),
+            Some(2100)
+        );
+        assert_eq!(
+            dodge.of(Direction::Left).map(|play| play.sequence),
+            Some(4007)
+        );
         assert_eq!(
             Direction::of_keys(true, false, true, false),
             Direction::Forward
         );
-        assert_eq!(Direction::of_keys(false, false, false, true), Direction::Right);
+        assert_eq!(
+            Direction::of_keys(false, false, false, true),
+            Direction::Right
+        );
     }
 
     #[test]

@@ -38,8 +38,7 @@ use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::{
     ALC_TYPE_INDEX, AssetId, BodyCodec, BundleMember, BundlePayload, GDE_METADATA_COMPONENT,
     GDE_METADATA_TYPE_INDEX, MemberState, PAPERDOLL_TYPE_INDEX, PLAYER_SLICE_ASSET,
-    REPLICATED_STATE_BUNDLE_TYPE_INDEX,
-    Reader, ReplicatedStateBundle, VITALS_TYPE_INDEX, Writer,
+    REPLICATED_STATE_BUNDLE_TYPE_INDEX, Reader, ReplicatedStateBundle, VITALS_TYPE_INDEX, Writer,
 };
 use nw_reflect::{TypeId, decode_type_id};
 use serde::{Deserialize, Serialize};
@@ -588,8 +587,9 @@ impl LedgerScan {
             mob.drawn = true;
             if self.now_ms.saturating_sub(mob.card_ms) <= DRAW_WINDOW_MS {
                 let key = mob.key;
-                let (form, bodies) =
-                    other_members(group, payload, |member| member.class != PAPERDOLL_TYPE_INDEX);
+                let (form, bodies) = other_members(group, payload, |member| {
+                    member.class != PAPERDOLL_TYPE_INDEX
+                });
                 if !form.members.is_empty() {
                     let counts = self.tally.prefabs.entry(key).or_default();
                     counts.drawn.entry(form).or_default().add(bodies);

@@ -167,7 +167,9 @@ impl PlayerArenaState {
     /// one child per call for the queue, four at the teleport).
     pub fn changes_from(&self, before: &Self) -> Self {
         fn changed<T: Clone + PartialEq>(now: &Option<T>, before: &Option<T>) -> Option<T> {
-            now.as_ref().filter(|now| before.as_ref() != Some(*now)).cloned()
+            now.as_ref()
+                .filter(|now| before.as_ref() != Some(*now))
+                .cloned()
         }
         Self {
             in_arena: changed(&self.in_arena, &before.in_arena),
@@ -760,11 +762,17 @@ mod tests {
         let body = state.encode().expect("encode");
         // Slot 0, children 0 to 6, then the ranks list `00 01 <version ac 26> 03 03 03 03`.
         assert_eq!(&body[..4], &[0x01, 0xff, 0x01, 0x00]);
-        assert_eq!(&body[20..28], &[0x00, 0x01, 0xac, 0x26, 0x03, 0x03, 0x03, 0x03]);
+        assert_eq!(
+            &body[20..28],
+            &[0x00, 0x01, 0xac, 0x26, 0x03, 0x03, 0x03, 0x03]
+        );
         assert_eq!(PlayerArenaState::decode(&body).expect("decode"), state);
         assert!(!state.is_empty());
         assert!(PlayerArenaState::default().is_empty());
-        assert_eq!(PlayerArenaState::default().encode().expect("encode"), [NO_SLOT]);
+        assert_eq!(
+            PlayerArenaState::default().encode().expect("encode"),
+            [NO_SLOT]
+        );
     }
 
     #[test]
@@ -820,7 +828,10 @@ mod tests {
         enter.push(0);
         assert_eq!(
             ArenaClientMsg::decode(REQUEST_REMOTE_ENTER_DUNGEON_TYPE_INDEX, &enter),
-            Some(Ok(ArenaClientMsg::RequestRemoteEnterDungeon { header, flag: 0 }))
+            Some(Ok(ArenaClientMsg::RequestRemoteEnterDungeon {
+                header,
+                flag: 0
+            }))
         );
         assert_eq!(
             ArenaClientMsg::decode(FORFEIT_ARENA_TYPE_INDEX, &enter),
@@ -834,7 +845,10 @@ mod tests {
             ArenaClientMsg::decode(TELEPORT_INTO_DUNGEON_TYPE_INDEX, &enter),
             Some(Err(_))
         ));
-        assert_eq!(ArenaClientMsg::decode(ACK_UNRELATED_TYPE_INDEX, &enter), None);
+        assert_eq!(
+            ArenaClientMsg::decode(ACK_UNRELATED_TYPE_INDEX, &enter),
+            None
+        );
         for call in [
             ArenaClientMsg::TeleportIntoDungeon { header },
             ArenaClientMsg::ForfeitArena { header, flag: 0 },
@@ -890,7 +904,10 @@ mod tests {
         assert_eq!(ActivateResponse::TooManyMembers.number(), 5);
         assert_eq!(ActivateResponse::EntranceBusy.number(), 17);
         for response in ActivateResponse::ALL {
-            assert_eq!(ActivateResponse::of_number(response.number()), Some(response));
+            assert_eq!(
+                ActivateResponse::of_number(response.number()),
+                Some(response)
+            );
         }
         assert_eq!(ActivateResponse::of_number(18), None);
     }

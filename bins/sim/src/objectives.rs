@@ -1348,8 +1348,16 @@ impl ObjectiveRun {
     /// (`TakeFireStaff`, `TakeVoidGauntlet`, `TakeGreatSword`) all complete together. The other
     /// group stays open. The fire-staff and void-gauntlet takes are not items in that bag; the
     /// group completes as one when any of its drops matches a looted weapon.
-    fn complete_looted_weapon_group(&mut self, items: &[&str], now_ms: u64, effects: &mut Vec<Effect>) {
-        let families: Vec<String> = items.iter().filter_map(|item| weapon_family(item)).collect();
+    fn complete_looted_weapon_group(
+        &mut self,
+        items: &[&str],
+        now_ms: u64,
+        effects: &mut Vec<Effect>,
+    ) {
+        let families: Vec<String> = items
+            .iter()
+            .filter_map(|item| weapon_family(item))
+            .collect();
         if families.is_empty() {
             return;
         }
@@ -1831,11 +1839,7 @@ pub(crate) mod tests {
                 "TaskHaveAndReturnItems",
                 "1hLongswordDropT2",
             ),
-            with_condition(
-                "TakeGreatAxe",
-                "TaskHaveAndReturnItems",
-                "2hGreatAxeDropT2",
-            ),
+            with_condition("TakeGreatAxe", "TaskHaveAndReturnItems", "2hGreatAxeDropT2"),
             container(
                 "Weapon2_container",
                 "SimpleTaskContainer",

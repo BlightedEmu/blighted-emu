@@ -79,8 +79,7 @@ impl SimWorld {
                 target,
                 ..
             } => {
-                if let Err(reason) = self.send_invite(entity, number, *activity, *forward, target)
-                {
+                if let Err(reason) = self.send_invite(entity, number, *activity, *forward, target) {
                     tracing::info!(player = number, reason, "invite refused");
                     self.invite_failed(entity, number, *activity, reason);
                 }
@@ -160,7 +159,11 @@ impl SimWorld {
         };
         self.put_invite_state(entity, state.clone());
         self.put_invite_state(invitee, state);
-        tracing::debug!(inviter = number, invitee = invitee_number, "trade invite sent");
+        tracing::debug!(
+            inviter = number,
+            invitee = invitee_number,
+            "trade invite sent"
+        );
         Ok(())
     }
 
@@ -369,9 +372,7 @@ mod tests {
         messages_to(&world.take_messages(), number)
             .into_iter()
             .filter_map(|message| match message {
-                ServerMessage::Economy(EconomyMessage::InviteFailed(failed)) => {
-                    Some(failed.reason)
-                }
+                ServerMessage::Economy(EconomyMessage::InviteFailed(failed)) => Some(failed.reason),
                 _ => None,
             })
             .collect()
@@ -385,14 +386,22 @@ mod tests {
         let details = sent[0].details.clone().expect("the invite");
         assert_eq!(details.activity, TRADE);
         assert_eq!(details.forward, FORWARD);
-        let inviter_id = world.world.get::<Player>(inviter).expect("player").character;
+        let inviter_id = world
+            .world
+            .get::<Player>(inviter)
+            .expect("player")
+            .character;
         assert_eq!(details.participants[0].character, *inviter_id.as_bytes());
         assert_eq!(details.participants[0].platform, NO_PLATFORM);
         assert_eq!(
             details.expiry.since_2000_ns,
             (world.server_ms + TRADE_SECONDS_MS) * NS_PER_MS
         );
-        assert_eq!(invite_states(&world, inviter), sent, "both states hold the invite");
+        assert_eq!(
+            invite_states(&world, inviter),
+            sent,
+            "both states hold the invite"
+        );
         reply(&mut world, invitee, true);
         assert_eq!(
             invite_states(&world, invitee).last(),

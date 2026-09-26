@@ -720,7 +720,11 @@ impl CatacombRules {
     ///
     /// Returns [`CatacombError`] when a symbol has no room and no grammar, a cell has no tile, or
     /// no layout fits the grid in [`MAX_ATTEMPTS`] tries.
-    pub fn generate(&self, seed: u64, start_cell: [i32; 2]) -> Result<CatacombLayout, CatacombError> {
+    pub fn generate(
+        &self,
+        seed: u64,
+        start_cell: [i32; 2],
+    ) -> Result<CatacombLayout, CatacombError> {
         let mut draw = Draw::new(seed);
         let clusters: Vec<&ClusterRule> = self.clusters.iter().collect();
         let cluster = draw
@@ -822,7 +826,11 @@ impl CatacombRules {
                     || theme.is_some_and(|theme| rule.themes.iter().any(|own| own == theme))
             })
             .collect();
-        let pool = if of_theme.is_empty() { of_symbol } else { of_theme };
+        let pool = if of_theme.is_empty() {
+            of_symbol
+        } else {
+            of_theme
+        };
         draw.weighted(&pool, |rule| rule.weight)
     }
 
@@ -877,7 +885,9 @@ impl CatacombRules {
                             symbol: node.symbol.clone(),
                         }
                     })?;
-                    let link = node.lock_link.and_then(|link| position_of.get(&link).copied());
+                    let link = node
+                        .lock_link
+                        .and_then(|link| position_of.get(&link).copied());
                     (room, node.locked, link)
                 }
                 Fill::Connector => (connector, false, None),
@@ -948,7 +958,9 @@ impl CatacombRules {
 fn room_graph(work: &WorkGraph) -> RoomGraph {
     // The entry first, so it is room 0.
     let mut alive: Vec<usize> = vec![work.entry];
-    alive.extend((0..work.nodes.len()).filter(|index| *index != work.entry && work.nodes[*index].alive));
+    alive.extend(
+        (0..work.nodes.len()).filter(|index| *index != work.entry && work.nodes[*index].alive),
+    );
     let new_index: HashMap<usize, usize> = alive
         .iter()
         .enumerate()
@@ -958,7 +970,9 @@ fn room_graph(work: &WorkGraph) -> RoomGraph {
         .iter()
         .map(|old| {
             let mut node = work.nodes[*old].clone();
-            node.lock_link = node.lock_link.and_then(|link| new_index.get(&link).copied());
+            node.lock_link = node
+                .lock_link
+                .and_then(|link| new_index.get(&link).copied());
             node
         })
         .collect();
@@ -973,13 +987,19 @@ fn room_graph(work: &WorkGraph) -> RoomGraph {
     }
     RoomGraph {
         rooms,
-        links: links.into_iter().map(|set| set.into_iter().collect()).collect(),
+        links: links
+            .into_iter()
+            .map(|set| set.into_iter().collect())
+            .collect(),
     }
 }
 
 /// Whether `cell` is on the grid.
 const fn on_grid(cell: [i32; 2]) -> bool {
-    cell[0] >= FIRST_CELL && cell[0] <= LAST_CELL_X && cell[1] >= FIRST_CELL && cell[1] <= LAST_CELL_Y
+    cell[0] >= FIRST_CELL
+        && cell[0] <= LAST_CELL_X
+        && cell[1] >= FIRST_CELL
+        && cell[1] <= LAST_CELL_Y
 }
 
 fn neighbour(cell: [i32; 2], step: [i32; 2]) -> [i32; 2] {
@@ -990,6 +1010,11 @@ fn link_key(a: [i32; 2], b: [i32; 2]) -> ([i32; 2], [i32; 2]) {
     if a <= b { (a, b) } else { (b, a) }
 }
 
+/// The fill of each grid cell a layout uses.
+type CellFills = BTreeMap<[i32; 2], Fill>;
+/// The links between grid cells, each pair once.
+type CellLinks = BTreeSet<([i32; 2], [i32; 2])>;
+
 /// The rooms of `graph` on the grid from `start_cell`: each room beside the first placed room it
 /// links to (the free neighbour with the most free neighbours, ties drawn), then every other link
 /// a path of connectors through free cells. `None` when a room or a link finds no room.
@@ -997,7 +1022,7 @@ fn place(
     graph: &RoomGraph,
     start_cell: [i32; 2],
     draw: &mut Draw,
-) -> Option<(BTreeMap<[i32; 2], Fill>, BTreeSet<([i32; 2], [i32; 2])>)> {
+) -> Option<(CellFills, CellLinks)> {
     if graph.rooms.is_empty() || !on_grid(start_cell) {
         return None;
     }
@@ -1137,7 +1162,10 @@ fn cluster_rule(row: &DungeonClusterStaticData) -> Result<ClusterRule, CatacombE
     })
 }
 
-fn grammar_rule(row: &DungeonGrammarStaticData, feature: &str) -> Result<GrammarRule, CatacombError> {
+fn grammar_rule(
+    row: &DungeonGrammarStaticData,
+    feature: &str,
+) -> Result<GrammarRule, CatacombError> {
     Ok(GrammarRule {
         id: row.gramma_replacement_id.clone(),
         replaces: row.grammar_replacements.clone(),
@@ -1167,16 +1195,16 @@ fn room_rule(row: &DungeonRoomStaticData) -> RoomRule {
 
 fn tile_rule(row: &DungeonTileStaticData) -> TileRule {
     // `FUN_14334bcb0`: each letter sets its side, any case; other characters are skipped.
-    let sides = row
-        .connections
-        .chars()
-        .fold(0, |sides, letter| match letter.to_ascii_uppercase() {
-            'N' => sides | NORTH,
-            'E' => sides | EAST,
-            'S' => sides | SOUTH,
-            'W' => sides | WEST,
-            _ => sides,
-        });
+    let sides =
+        row.connections
+            .chars()
+            .fold(0, |sides, letter| match letter.to_ascii_uppercase() {
+                'N' => sides | NORTH,
+                'E' => sides | EAST,
+                'S' => sides | SOUTH,
+                'W' => sides | WEST,
+                _ => sides,
+            });
     TileRule {
         id: row.dungeon_tile_id.clone(),
         sides,
@@ -1210,6 +1238,10 @@ mod tests {
     }
 
     /// The retail Catacombs rows of build 25810808 (the four procedural generation datasheets).
+    #[allow(
+        clippy::field_reassign_with_default,
+        reason = "Tables has hundreds of sheets; the test sets only the ones it reads"
+    )]
     fn tables() -> Tables {
         let mut tables = Tables::default();
         tables.dungeon_cluster_static_data = table(vec![from_json(serde_json::json!({
@@ -1243,7 +1275,12 @@ mod tests {
                 "ParkourRoom_1-NamedRoom_1-RewardRoom_1-GateBoss_1-HallwayRoom_1:ParkourRoom_1",
                 None,
             ),
-            grammar("HazardBoss", "HazardBoss", "HazardRoom_1-#BossRoom_1(HazardRoom_1)", None),
+            grammar(
+                "HazardBoss",
+                "HazardBoss",
+                "HazardRoom_1-#BossRoom_1(HazardRoom_1)",
+                None,
+            ),
             grammar(
                 "GateBoss",
                 "GateBoss",
@@ -1251,7 +1288,16 @@ mod tests {
                 None,
             ),
         ];
-        for theme in ["Lost", "Corrupted", "Human", "Beast", "Ancient", "Angry", "Hercyne", "Upyr"] {
+        for theme in [
+            "Lost",
+            "Corrupted",
+            "Human",
+            "Beast",
+            "Ancient",
+            "Angry",
+            "Hercyne",
+            "Upyr",
+        ] {
             let tags = format!("{theme},{FEATURE}");
             for (cycle, room) in [("CycleA", "LoopA_1"), ("CycleB", "LoopB_1")] {
                 grammars.push(grammar(
@@ -1284,7 +1330,8 @@ mod tests {
             room("ParkourRoom", "Parkour"),
             room("RewardRoom", "Reward"),
         ]);
-        let rooms = "EncounterStart,EncounterBoss,EncounterNamedEnemy,EncounterGate,EncounterHazard,Reward";
+        let rooms =
+            "EncounterStart,EncounterBoss,EncounterNamedEnemy,EncounterGate,EncounterHazard,Reward";
         let tile = |id: &str, sides: &str, rotations: i64, types: &str, paths: &str| {
             from_json::<DungeonTileStaticData>(serde_json::json!({
                 "connections": sides,
@@ -1339,15 +1386,19 @@ mod tests {
 
     #[test]
     fn a_gate_boss_graph_reads_its_lock_and_its_key_room() {
-        let graph =
-            SeedGraph::parse("GateRoom_1-#BossRoom_1(GateRoom_1),KeyRoom_1(GateRoom_1)").expect("graph");
+        let graph = SeedGraph::parse("GateRoom_1-#BossRoom_1(GateRoom_1),KeyRoom_1(GateRoom_1)")
+            .expect("graph");
         let labels: Vec<&str> = graph.nodes.iter().map(|node| node.label.as_str()).collect();
         assert_eq!(labels, ["GateRoom_1", "BossRoom_1", "KeyRoom_1"]);
         assert_eq!(graph.nodes[1].symbol, "BossRoom");
         assert!(graph.nodes[1].locked && !graph.nodes[2].locked);
         assert_eq!(graph.nodes[1].lock_link.as_deref(), Some("GateRoom_1"));
         assert_eq!(graph.nodes[2].lock_link.as_deref(), Some("GateRoom_1"));
-        assert_eq!(graph.edges, [(0, 1), (0, 2)], "the key room hangs from the entry");
+        assert_eq!(
+            graph.edges,
+            [(0, 1), (0, 2)],
+            "the key room hangs from the entry"
+        );
         assert_eq!((graph.entry, graph.exit), (0, 1));
     }
 
@@ -1363,7 +1414,10 @@ mod tests {
         let puzzle = SeedGraph::parse("T-K-P-L;L-T").expect("puzzle");
         assert_eq!(puzzle.nodes.len(), 4);
         assert_eq!(puzzle.edges, [(0, 1), (1, 2), (2, 3), (3, 0)]);
-        assert_eq!(puzzle.nodes[0].symbol, "T", "a label without a number is its symbol");
+        assert_eq!(
+            puzzle.nodes[0].symbol, "T",
+            "a label without a number is its symbol"
+        );
     }
 
     #[test]
@@ -1389,7 +1443,11 @@ mod tests {
         assert_eq!(rules.clusters[0].replacement_count, 5);
         assert_eq!(rules.clusters[0].weight, DEFAULT_WEIGHT);
         assert_eq!(rules.tile_size_m, TILE_SIZE);
-        let corner = rules.tiles.iter().find(|tile| tile.id == "CornerRoom").expect("corner");
+        let corner = rules
+            .tiles
+            .iter()
+            .find(|tile| tile.id == "CornerRoom")
+            .expect("corner");
         assert_eq!((corner.sides, corner.rotations), (EAST | SOUTH, 3));
         assert_eq!(rules.themes().len(), 8);
         let cycle = rules
@@ -1420,9 +1478,20 @@ mod tests {
         };
         assert_eq!(count("StartRoom"), 1);
         assert_eq!(count("BossRoom"), 6, "one boss per loop");
-        assert_eq!((count("GateRoom"), count("KeyRoom")), (3, 3), "the three B loops");
+        assert_eq!(
+            (count("GateRoom"), count("KeyRoom")),
+            (3, 3),
+            "the three B loops"
+        );
         assert_eq!(count("HazardRoom"), 3, "the three A loops");
-        assert_eq!((count("NamedRoom"), count("RewardRoom"), count("ParkourRoom")), (12, 6, 6));
+        assert_eq!(
+            (
+                count("NamedRoom"),
+                count("RewardRoom"),
+                count("ParkourRoom")
+            ),
+            (12, 6, 6)
+        );
         assert_eq!(count("HallwayRoom"), 12);
         assert!(layout.theme.is_some());
         let bosses: Vec<&PlacedRoom> = layout
@@ -1444,13 +1513,20 @@ mod tests {
             let start = cell_of(TELEPORT, TILE_SIZE);
             let layout = rules.generate(seed, start).expect("layout");
             let start_room = &layout.rooms[0];
-            assert_eq!((start_room.room_id.as_str(), start_room.cell), ("StartRoom", start));
+            assert_eq!(
+                (start_room.room_id.as_str(), start_room.cell),
+                ("StartRoom", start)
+            );
             assert_eq!(start_room.position, [512.0, 768.0, TILE_HEIGHT_M]);
             let cells: BTreeSet<[i32; 2]> = layout.rooms.iter().map(|room| room.cell).collect();
             assert_eq!(cells.len(), layout.rooms.len(), "one tile per cell");
             for room in &layout.rooms {
                 assert!(on_grid(room.cell));
-                let tile = rules.tiles.iter().find(|tile| tile.id == room.tile_id).expect("tile");
+                let tile = rules
+                    .tiles
+                    .iter()
+                    .find(|tile| tile.id == room.tile_id)
+                    .expect("tile");
                 assert_eq!(turned(tile.sides, room.turns), room.sides);
                 assert!(room.turns <= tile.rotations);
                 assert!(tile.room_types.contains(&room.room_type));
@@ -1476,18 +1552,35 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(seen.len(), layout.rooms.len(), "every tile is reached from the start");
+            assert_eq!(
+                seen.len(),
+                layout.rooms.len(),
+                "every tile is reached from the start"
+            );
         }
     }
 
     #[test]
     fn the_frame_ends_one_tile_past_the_largest_cell() {
-        let layout = rules().generate(11, cell_of(TELEPORT, TILE_SIZE)).expect("layout");
+        let layout = rules()
+            .generate(11, cell_of(TELEPORT, TILE_SIZE))
+            .expect("layout");
         let [x, y, width, height] = layout.frame();
         assert_eq!((x, y), (0.0, 0.0));
-        let largest_x = layout.rooms.iter().map(|room| room.position[0]).fold(0.0, f32::max);
-        let largest_y = layout.rooms.iter().map(|room| room.position[1]).fold(0.0, f32::max);
-        assert_eq!((width, height), (largest_x + TILE_SIZE, largest_y + TILE_SIZE));
+        let largest_x = layout
+            .rooms
+            .iter()
+            .map(|room| room.position[0])
+            .fold(0.0, f32::max);
+        let largest_y = layout
+            .rooms
+            .iter()
+            .map(|room| room.position[1])
+            .fold(0.0, f32::max);
+        assert_eq!(
+            (width, height),
+            (largest_x + TILE_SIZE, largest_y + TILE_SIZE)
+        );
         assert!(width <= (LAST_CELL_X + 1) as f32 * TILE_SIZE);
     }
 
@@ -1505,7 +1598,10 @@ mod tests {
             .generate(5, cell_of(TELEPORT, TILE_SIZE))
             .expect("layout");
         for room in layout.rooms.iter().filter(|room| room.connector) {
-            assert_eq!((room.room_id.as_str(), room.room_type.as_str()), ("HallwayRoom", "Hallway"));
+            assert_eq!(
+                (room.room_id.as_str(), room.room_type.as_str()),
+                ("HallwayRoom", "Hallway")
+            );
         }
         assert_eq!(
             rules.generate(5, [0, 0]),

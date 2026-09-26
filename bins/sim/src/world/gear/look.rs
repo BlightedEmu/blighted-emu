@@ -55,7 +55,12 @@ impl Gear {
     pub(in crate::world) fn held_item_ids(&self) -> impl Iterator<Item = &str> {
         self.worn_stacks()
             .map(|(_, stack)| stack.item_id.as_str())
-            .chain(self.bag.iter().flatten().map(|stack| stack.item_id.as_str()))
+            .chain(
+                self.bag
+                    .iter()
+                    .flatten()
+                    .map(|stack| stack.item_id.as_str()),
+            )
     }
 }
 
@@ -81,7 +86,8 @@ mod tests {
         assert!(!gear.set_worn_look(slot::MAIN_HAND_OPTION_1, look));
         assert!(!gear.set_worn_look(slot::HEAD, look), "no helmet is worn");
         assert_eq!(
-            gear.worn_look(slot::MAIN_HAND_OPTION_1).map(|worn| worn.look),
+            gear.worn_look(slot::MAIN_HAND_OPTION_1)
+                .map(|worn| worn.look),
             Some(look)
         );
         assert!(gear.take_unsaved().is_some());
