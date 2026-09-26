@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use nw_formats::objectstream::lowercase_crc32;
 
 use crate::Tables;
+use crate::gameplay_config::ITEM_CLASS_SEPARATOR;
 use crate::generated::{GameModeData, GameModeMapData};
 
 /// The `ActivityType` of a catacombs run.
@@ -41,8 +42,6 @@ const NUMBER_SEPARATOR: char = ',';
 const ENTRY_SEPARATOR: char = '+';
 /// The separator of the item class lists of a game mode.
 const LIST_SEPARATOR: char = ',';
-/// The separator of an item's `ItemClass` list (`DungeonItem+CatacombsOnly`).
-const ITEM_CLASS_SEPARATOR: char = '+';
 /// Numbers of a `WorldBounds`: x, y, width, height.
 const FRAME_NUMBERS: usize = 4;
 /// Numbers of a teleport entry: x, y, z, yaw in degrees.

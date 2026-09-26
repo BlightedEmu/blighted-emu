@@ -15,6 +15,7 @@
 use std::collections::HashMap;
 
 use crate::Tables;
+use crate::gameplay_config::ITEM_CLASS_SEPARATOR;
 use crate::perks::{PERK_SLOTS, PerkTable, parts};
 
 /// The item type whose rows the client leaves out of its item index.
@@ -23,8 +24,6 @@ const HOUSING_ITEM_TYPE: &str = "HousingItem";
 const KIT_PAIR_SEPARATOR: char = ',';
 /// Separates an item id from its quantity in one pair.
 const KIT_QUANTITY_SEPARATOR: char = ':';
-/// Separates the parts of an `ItemClass` cell.
-const ITEM_CLASS_SEPARATOR: char = '+';
 /// A kit item of at least this quantity is equipped at login; one of less is in the beach bag.
 const EQUIPPED_AT_LOGIN: u32 = 1;
 

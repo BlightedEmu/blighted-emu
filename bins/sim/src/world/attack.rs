@@ -369,6 +369,26 @@ pub(super) const fn counter_is_newer(counter: u16, last: u16) -> bool {
     ahead > 0 || ahead < -COUNTER_RESTART_GAP
 }
 
+/// One attack of a player on another player.
+struct PvpStrike<'a> {
+    /// The attacker's entity and number.
+    entity: Entity,
+    number: u64,
+    /// The attacker's connection.
+    attacker: &'a ConnectionRef,
+    /// Where the attacker stands.
+    from: Position,
+    /// The target's number.
+    target: u64,
+    /// The attack's row.
+    row: &'a AttackRow,
+    /// The most distance the hit may reach (`None`: the attack's homing or shot checked it).
+    reach_m: Option<f32>,
+}
+
+/// The factor of a hit that no balance or style changes.
+const PLAIN_DAMAGE_FACTOR: f64 = 1.0;
+
 /// One hit a player lands: who, on what, with which weapon and attack row.
 struct Strike<'a> {
     entity: Entity,
@@ -423,54 +443,37 @@ impl SimWorld {
         self.hit_paced(attacker, target, damage_id, reach_m, true, now_ms)
     }
 
-    /// The least health a PvP hit takes. Retail 2525 carries no damage number; a coefficient
-    /// below 1 still hurts.
-    const MIN_PVP_HIT: u32 = 1;
-
-    /// Health a flagged player loses from an attack of `coefficient`.
-    fn pvp_hit_amount(coefficient: f64) -> u32 {
-        let whole = coefficient.floor();
-        if whole >= f64::from(Self::MIN_PVP_HIT) {
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "a damage coefficient floors into a health count"
-            )]
-            let amount = whole as u32;
-            amount
-        } else {
-            Self::MIN_PVP_HIT
-        }
-    }
-
-    /// A hit on another player. Retail `PvP_Flag` toggles 2525 with a header and no argument.
-    /// Both players must be flagged. A player who is not flagged is not a target.
-    fn pvp_hit(
-        &mut self,
-        attacker: Entity,
-        from: Position,
-        target: u64,
-        damage_id: &str,
-        reach_m: Option<f32>,
-    ) -> Result<AttackOutcome, AttackRefusal> {
-        let attacker_flagged = self
-            .world
-            .get::<Player>(attacker)
-            .is_some_and(|player| player.pvp_flagged);
-        if !attacker_flagged {
-            return Err(AttackRefusal::UnknownTarget);
-        }
-        let Some(target_entity) = self.player_by_number(target) else {
-            return Err(AttackRefusal::UnknownTarget);
+    /// A hit on another player (`PvP_Flag` toggles 2525; both players must be flagged, a player
+    /// who is not is no target). The damage rolls as a hit on a mob does ([`player_hit`]: the
+    /// weapon's base damage, the row's coefficient and the crit), times the open-world PvP
+    /// balance of the weapon's class ([`nw_content::combat::CombatData::pvp_damage_factor`]) and
+    /// the attacker's status effects; the target's armor takes the share it takes of a mob's hit
+    /// ([`crate::combat::CombatSettings::player_armor_share`]), its status effects their share.
+    /// It lands as any hit on a player does ([`SimWorld::apply_hit_with`]: 3601 to the target,
+    /// its death and recap), and the attacker gets its 2071.
+    fn pvp_hit(&mut self, pvp: PvpStrike<'_>, now_ms: u64) -> Result<AttackOutcome, AttackRefusal> {
+        let PvpStrike {
+            entity,
+            number,
+            attacker,
+            from,
+            target,
+            row,
+            reach_m,
+        } = pvp;
+        let flagged = |world: &Self, entity: Entity| {
+            world
+                .world
+                .get::<Player>(entity)
+                .is_some_and(|player| player.pvp_flagged)
         };
-        if target_entity == attacker {
+        if !flagged(self, entity) {
             return Err(AttackRefusal::UnknownTarget);
         }
-        let flagged = self
-            .world
-            .get::<Player>(target_entity)
-            .is_some_and(|player| player.pvp_flagged);
-        if !flagged {
+        let target_entity = self
+            .player_by_number(target)
+            .ok_or(AttackRefusal::UnknownTarget)?;
+        if target_entity == entity || !flagged(self, target_entity) {
             return Err(AttackRefusal::UnknownTarget);
         }
         let at = self
@@ -482,24 +485,77 @@ impl SimWorld {
         if reach_m.is_some_and(|reach_m| at.horizontal_distance(from) > reach_m) {
             return Err(AttackRefusal::OutOfReach);
         }
-        let row = self
-            .combat
-            .data
-            .attack(damage_id)
-            .ok_or(AttackRefusal::NotWeaponAttack)?;
-        let amount = Self::pvp_hit_amount(row.coefficient);
-        let mut vitals = self
+        if self
             .world
-            .get_mut::<Vitals>(target_entity)
-            .ok_or(AttackRefusal::UnknownTarget)?;
-        if vitals.health.is_dead() {
+            .get::<Vitals>(target_entity)
+            .is_none_or(|vitals| vitals.health.is_dead())
+        {
             return Err(AttackRefusal::TargetDead);
         }
-        match vitals.health.take(amount) {
-            Damage::AlreadyDead => Err(AttackRefusal::TargetDead),
-            Damage::Killed => Ok(AttackOutcome::Killed { target }),
-            Damage::Hurt => Ok(AttackOutcome::Hit { target, amount }),
+        let (weapon, pvp_factor) = self
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| {
+                player
+                    .gear
+                    .as_ref()?
+                    .main_weapon()
+                    .map(|(item, _)| item.to_owned())
+            })
+            .and_then(|item| {
+                let data = &self.combat.data;
+                Some((*data.weapon_of_item(&item)?, data.pvp_damage_factor(&item)))
+            })
+            .unwrap_or((*self.combat.data.weapon(), PLAIN_DAMAGE_FACTOR));
+        let attack = PlayerAttack {
+            base_damage: weapon.base_damage,
+            coefficient: row.coefficient,
+            can_crit: row.can_crit,
+            crit_chance: weapon.crit_chance,
+            crit_multiplier: weapon.crit_multiplier,
+        };
+        if let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) {
+            vitals.last_attack_ms = Some(now_ms);
         }
+        let armor_share = self.combat.player_armor_share;
+        let tag = row.damage_type.unwrap_or(HIT_TAG);
+        let mut hit = player_hit(&attack, armor_share, &mut self.dice);
+        let scale = pvp_factor * self.player_hit_scale(entity, target, tag);
+        // A hit of a few thousand points.
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "a scaled hit stays a few thousand points"
+        )]
+        {
+            hit.amount = (f64::from(hit.amount) * scale).round() as u32;
+        }
+        let style = MobHitStyle {
+            tag,
+            affix: row.affix,
+            damage_scale: PLAIN_DAMAGE_FACTOR,
+            block_stamina: 0.0,
+            row: Some(RowKey::of(&row.table, &row.damage_id)),
+        };
+        let outcome = self
+            .apply_hit_with(target, number, hit.amount, 0, now_ms, Some(&style))
+            .ok_or(AttackRefusal::TargetDead)?;
+        let killed = matches!(outcome, AttackOutcome::Killed { .. });
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            player.combat.hit(now_ms, killed);
+        }
+        let item = DamageItem {
+            tag,
+            amount: amount_of(hit.amount),
+            scale: (1.0 - armor_share) as f32,
+        };
+        self.send_reliable(
+            attacker.clone(),
+            &ServerMessage::DamageDealt(DamageDealtMsg::melee(
+                number, target, item, hit.crit, killed,
+            )),
+        );
+        Ok(outcome)
     }
 
     /// As [`SimWorld::hit`]; the attack interval applies only when `paced` (a second target of
@@ -536,7 +592,25 @@ impl SimWorld {
             return Err(AttackRefusal::Dead);
         }
         if spawn_index(target).is_none() {
-            return self.pvp_hit(entity, position, target, damage_id, reach_m);
+            let row = self
+                .combat
+                .data
+                .attack(damage_id)
+                .ok_or(AttackRefusal::NotWeaponAttack)?
+                .clone();
+            if paced && self.too_fast(&vitals, now_ms) {
+                return Err(AttackRefusal::TooFast);
+            }
+            let pvp = PvpStrike {
+                entity,
+                number,
+                attacker,
+                from: position,
+                target,
+                row: &row,
+                reach_m,
+            };
+            return self.pvp_hit(pvp, now_ms);
         }
         let view = self
             .target_view(target)
@@ -555,11 +629,7 @@ impl SimWorld {
         if reach_m.is_some_and(|reach_m| view.position.horizontal_distance(position) > reach_m) {
             return Err(AttackRefusal::OutOfReach);
         }
-        let too_fast = paced
-            && vitals.last_attack_ms.is_some_and(|last| {
-                now_ms.saturating_sub(last) < self.combat.min_attack_interval_ms
-            });
-        if too_fast {
+        if paced && self.too_fast(&vitals, now_ms) {
             return Err(AttackRefusal::TooFast);
         }
         // The weapon in the hand, else the config's; its gear score sets the armor share.
@@ -586,6 +656,14 @@ impl SimWorld {
             },
         )?;
         Ok(outcome)
+    }
+
+    /// Whether an attack at `now_ms` comes sooner than the attack interval after the last one
+    /// of `vitals`.
+    fn too_fast(&self, vitals: &Vitals, now_ms: u64) -> bool {
+        vitals
+            .last_attack_ms
+            .is_some_and(|last| now_ms.saturating_sub(last) < self.combat.min_attack_interval_ms)
     }
 
     /// Lands one hit of `strike` at `now_ms`: rolls the damage of its weapon (else the config's)
@@ -4430,6 +4508,59 @@ mod tests {
             health_of(&mut world, 1).current(),
             TEST_PLAYER_HEALTH - SWORD_HIT,
             "no refill"
+        );
+    }
+
+    fn flag(world: &mut SimWorld, number: u64) {
+        let entity = world.player_by_number(number).expect("player");
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .pvp_flagged = true;
+    }
+
+    #[test]
+    fn a_flagged_player_hurts_another_flagged_player_with_the_rolled_hit() {
+        const PLAYER_2: u64 = 2;
+        let mut world = fight();
+        join(&mut world, PLAYER_2, MOB_X + 3.0);
+        assert_eq!(
+            world.attack(&connection(1), PLAYER_2, LIGHT, NOW),
+            Err(AttackRefusal::UnknownTarget),
+            "no PvP without the flag"
+        );
+        flag(&mut world, 1);
+        assert_eq!(
+            world.attack(&connection(1), PLAYER_2, LIGHT, NOW),
+            Err(AttackRefusal::UnknownTarget),
+            "an unflagged target is no target"
+        );
+        flag(&mut world, PLAYER_2);
+        let outcome = world
+            .attack(&connection(1), PLAYER_2, LIGHT, NOW)
+            .expect("a PvP hit");
+        let AttackOutcome::Hit { amount, .. } = outcome else {
+            panic!("a hit: {outcome:?}");
+        };
+        assert!(amount > 1, "the weapon's damage, not one point: {amount}");
+        assert_eq!(
+            health_of(&mut world, PLAYER_2).current(),
+            TEST_PLAYER_HEALTH - amount
+        );
+        let messages = world.take_messages();
+        let to = |who: u64| {
+            messages
+                .iter()
+                .filter(|out| out.connection == connection(who))
+                .count()
+        };
+        assert_eq!(to(1), 1, "the attacker gets its 2071");
+        assert_eq!(to(PLAYER_2), 1, "the target gets its 3601");
+        assert_eq!(
+            world.attack(&connection(1), PLAYER_2, LIGHT, NOW + 1),
+            Err(AttackRefusal::TooFast),
+            "the attack interval applies"
         );
     }
 

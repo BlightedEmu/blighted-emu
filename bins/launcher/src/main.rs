@@ -7,6 +7,7 @@ use eframe::egui;
 use launcher::app::LauncherApp;
 use launcher::install_crypto_provider;
 use launcher::settings::{Settings, default_settings_path};
+use launcher::steam;
 use launcher::theme;
 
 /// Window title.
@@ -24,13 +25,17 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let settings = match Settings::load(&path) {
+    let mut settings = match Settings::load(&path) {
         Ok(settings) => settings,
         Err(error) => {
             eprintln!("error: {error}");
             return ExitCode::FAILURE;
         }
     };
+    let lookup = |name: &str| std::env::var(name).ok();
+    settings.options.fill_from_env(lookup);
+    let found = steam::scan(lookup);
+    settings.options.fill_from_scan(&found);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(APP_NAME)
@@ -43,7 +48,7 @@ fn main() -> ExitCode {
         options,
         Box::new(move |creation| {
             theme::install(&creation.egui_ctx, settings.theme);
-            Ok(Box::new(LauncherApp::new(path, settings)))
+            Ok(Box::new(LauncherApp::new(path, settings, found)))
         }),
     );
     match result {

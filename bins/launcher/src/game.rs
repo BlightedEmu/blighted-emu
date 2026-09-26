@@ -6,7 +6,6 @@
 //! would call Amazon's remote-config, analytics and STS hosts.
 
 use std::collections::HashSet;
-use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -35,10 +34,6 @@ const RETAIL_PREFIX_PARTS: [&str; 3] = ["steamapps", "compatdata", STEAM_APP_ID]
 /// Launch argument that points the client at an absolute override-config file, bypassing the
 /// packed `@assets@` lookup.
 pub const OVERRIDE_CONFIG_ARG: &str = "-OverrideConfigPath";
-/// Environment variable that, when set to a non-empty value, makes the launcher pass
-/// [`OVERRIDE_CONFIG_ARG`] with that value, so the client reads an absolute override-config file
-/// instead of the packed `@assets@/ClientOverride.json` that a retail client does not read.
-pub const OVERRIDE_CONFIG_ENV: &str = "NW_LAUNCHER_OVERRIDE_CONFIG";
 /// A value must not start with these, so that it cannot act as an argument name.
 const ARGUMENT_SIGILS: [char; 2] = ['-', '+'];
 /// Characters that could change how the game or Steam splits the arguments.
@@ -68,11 +63,10 @@ pub enum GameError {
     /// An argument value points to an Amazon or CloudFront host.
     #[error("the server asked for the Amazon or CloudFront address {0}")]
     Forbidden(String),
-    /// The four direct-launch variables are not all set.
+    /// The game copy, Proton or Steam install option is empty.
     #[error(
-        "set NW_LAUNCHER_PROTON, NW_LAUNCHER_GAME_EXE, NW_LAUNCHER_STEAM_COMPAT_DATA and \
-         NW_LAUNCHER_STEAM_CLIENT_INSTALL: the game runs directly under Proton, never through \
-         Steam's launcher"
+        "set the game, Proton and Steam paths in Options: the game runs directly under Proton, \
+         never through Steam's launcher"
     )]
     NoDirectLaunch,
     /// The direct-launch prefix is Steam's retail prefix of New World.
@@ -81,15 +75,18 @@ pub enum GameError {
         .0.display()
     )]
     RetailPrefix(PathBuf),
-    /// The Windows game executable is not set.
+    /// The Windows game executable option is empty.
     #[error(
-        "set {DIRECT_EXE_ENV} to the patched {PATCHED_EXE_NAME}: on Windows the launcher starts it \
-         directly, never Steam's launcher"
+        "set the game path in Options to the patched {PATCHED_EXE_NAME}: on Windows the launcher \
+         starts it directly, never Steam's launcher"
     )]
     NoWindowsLaunch,
     /// The Windows game executable is not the patched copy.
     #[error("{} is not the patched {PATCHED_EXE_NAME}; start the patched copy, never the retail exe", .0.display())]
     NotPatchedExe(PathBuf),
+    /// An extra environment line in Options is not `NAME=value`.
+    #[error("the environment line {0:?} in Options is not NAME=value")]
+    BadEnvironment(String),
     /// The game program (`bwrap` running Proton) could not be started.
     #[error("could not start the game: {} failed: {source}", .program.display())]
     Start {
@@ -102,8 +99,8 @@ pub enum GameError {
 }
 
 /// A direct Proton launch of a game executable, bypassing Steam's own game launcher (and so
-/// Easy Anti-Cheat). Set by the four [`DIRECT_EXE_ENV`] family variables. The prefix must be the
-/// launcher's own, never Steam's retail prefix ([`is_retail_prefix`]).
+/// Easy Anti-Cheat). Made from the launch options ([`crate::options::LaunchOptions`]). The prefix
+/// must be the launcher's own, never Steam's retail prefix ([`is_retail_prefix`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectLaunch {
     /// The Proton program.
@@ -116,15 +113,6 @@ pub struct DirectLaunch {
     pub client_install: PathBuf,
 }
 
-/// The game executable to run directly under Proton.
-pub const DIRECT_EXE_ENV: &str = "NW_LAUNCHER_GAME_EXE";
-/// The Proton program used for a direct launch.
-pub const DIRECT_PROTON_ENV: &str = "NW_LAUNCHER_PROTON";
-/// The game's Proton prefix for a direct launch.
-pub const DIRECT_COMPAT_DATA_ENV: &str = "NW_LAUNCHER_STEAM_COMPAT_DATA";
-/// The Steam install directory for a direct launch.
-pub const DIRECT_CLIENT_INSTALL_ENV: &str = "NW_LAUNCHER_STEAM_CLIENT_INSTALL";
-
 /// The Proton verb that runs a program in the prefix.
 const PROTON_VERB: &str = "run";
 /// Steam app-id environment variables the game reads to find its Steam context.
@@ -133,29 +121,23 @@ const STEAM_GAME_ID_ENV: &str = "SteamGameId";
 const STEAM_COMPAT_DATA_PATH_ENV: &str = "STEAM_COMPAT_DATA_PATH";
 const STEAM_COMPAT_CLIENT_INSTALL_PATH_ENV: &str = "STEAM_COMPAT_CLIENT_INSTALL_PATH";
 
-/// A [`DirectLaunch`] from the environment, or none when any of the four variables is missing.
-pub fn direct_launch_from_env() -> Option<DirectLaunch> {
-    Some(DirectLaunch {
-        proton: std::env::var_os(DIRECT_PROTON_ENV)?.into(),
-        exe: std::env::var_os(DIRECT_EXE_ENV)?.into(),
-        compat_data: std::env::var_os(DIRECT_COMPAT_DATA_ENV)?.into(),
-        client_install: std::env::var_os(DIRECT_CLIENT_INSTALL_ENV)?.into(),
-    })
-}
-
 /// Whether `prefix` ends in `steamapps/compatdata/1063730`: Steam's retail prefix of New World.
 pub fn is_retail_prefix(prefix: &Path) -> bool {
     let parts: Vec<_> = prefix.components().map(|part| part.as_os_str()).collect();
     parts.ends_with(&RETAIL_PREFIX_PARTS.map(std::ffi::OsStr::new))
 }
 
-/// `bwrap <private files> -- <proton> run <exe> <arguments>` with the Steam compatibility
-/// environment, so a patched game executable runs under Proton without Steam's own launcher and
-/// without Easy Anti-Cheat, and sees the private network files.
+/// The player's extra variables, set before the launcher's own so they cannot replace them.
+pub type Environment = [(String, String)];
+
+/// `bwrap <private files> -- <proton> run <exe> <arguments>` with the player's `environment` and
+/// the Steam compatibility environment, so a patched game executable runs under Proton without
+/// Steam's own launcher and without Easy Anti-Cheat, and sees the private network files.
 pub fn direct_command(
     launch: &DirectLaunch,
     files: &NetworkFiles,
     arguments: &[String],
+    environment: &Environment,
 ) -> Command {
     let mut command = Command::new(BWRAP_PROGRAM);
     command
@@ -164,6 +146,7 @@ pub fn direct_command(
         .arg(PROTON_VERB)
         .arg(&launch.exe)
         .args(arguments)
+        .envs(environment.iter().map(|(name, value)| (name, value)))
         .env(STEAM_COMPAT_DATA_PATH_ENV, &launch.compat_data)
         .env(STEAM_COMPAT_CLIENT_INSTALL_PATH_ENV, &launch.client_install)
         .env(STEAM_APP_ID_ENV, STEAM_APP_ID)
@@ -230,28 +213,18 @@ pub fn game_arguments(template: &[String], session_key: &str) -> Result<Vec<Stri
     }
 }
 
-/// The `-OverrideConfigPath <path>` pair for a path value, or none when it is absent or empty.
-fn override_config_pair(path: Option<&str>) -> Option<(String, String)> {
-    match path {
-        Some(value) if !value.is_empty() => {
-            Some((OVERRIDE_CONFIG_ARG.to_owned(), value.to_owned()))
-        }
-        _ => None,
-    }
-}
-
-/// Appends `-OverrideConfigPath <path>` when [`OVERRIDE_CONFIG_ENV`] holds a non-empty value, so
-/// the client reads that absolute override-config file. Returns `arguments` unchanged otherwise.
-pub fn append_override_config(mut arguments: Vec<String>) -> Vec<String> {
-    if let Some((name, value)) = override_config_pair(env::var(OVERRIDE_CONFIG_ENV).ok().as_deref())
-    {
-        arguments.push(name);
-        arguments.push(value);
+/// Appends `-OverrideConfigPath <path>` when `path` is set and not empty, so the client reads that
+/// absolute override-config file instead of the packed `@assets@/ClientOverride.json` that a
+/// retail client does not read. Returns `arguments` unchanged otherwise.
+pub fn append_override_config(mut arguments: Vec<String>, path: Option<&str>) -> Vec<String> {
+    if let Some(path) = path.filter(|path| !path.is_empty()) {
+        arguments.push(OVERRIDE_CONFIG_ARG.to_owned());
+        arguments.push(path.to_owned());
     }
     arguments
 }
 
-/// The direct launch from the environment, refused when it is missing or uses the retail prefix.
+/// The direct launch from the options, refused when it is missing or uses the retail prefix.
 pub fn checked_direct_launch(launch: Option<DirectLaunch>) -> Result<DirectLaunch, GameError> {
     let launch = launch.ok_or(GameError::NoDirectLaunch)?;
     if is_retail_prefix(&launch.compat_data) {
@@ -266,7 +239,8 @@ pub const PATCHED_EXE_NAME: &str = "BlightedNewWorld.exe";
 
 /// A native Windows launch: the patched game executable started directly, with no `bwrap`, no
 /// Proton and no Easy Anti-Cheat. The private network view there is the launcher's loopback proxy
-/// ([`crate::aws_proxy`]), not the private files of [`crate::mirror`]. Set by [`DIRECT_EXE_ENV`].
+/// ([`crate::aws_proxy`]), not the private files of [`crate::mirror`]. Made from the launch
+/// options.
 #[cfg(any(windows, test))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowsLaunch {
@@ -274,15 +248,7 @@ pub struct WindowsLaunch {
     pub exe: PathBuf,
 }
 
-/// A [`WindowsLaunch`] from [`DIRECT_EXE_ENV`], or none when it is unset.
-#[cfg(any(windows, test))]
-pub fn windows_launch_from_env() -> Option<WindowsLaunch> {
-    Some(WindowsLaunch {
-        exe: std::env::var_os(DIRECT_EXE_ENV)?.into(),
-    })
-}
-
-/// The launch from the environment, refused when it is missing or is not the patched copy.
+/// The launch from the options, refused when it is missing or is not the patched copy.
 #[cfg(any(windows, test))]
 pub fn checked_windows_launch(launch: Option<WindowsLaunch>) -> Result<WindowsLaunch, GameError> {
     let launch = launch.ok_or(GameError::NoWindowsLaunch)?;
@@ -292,14 +258,19 @@ pub fn checked_windows_launch(launch: Option<WindowsLaunch>) -> Result<WindowsLa
     Ok(launch)
 }
 
-/// `BlightedNewWorld.exe <arguments>` with the Steam context, so the patched game runs directly
-/// without Steam's own launcher and without Easy Anti-Cheat. Steam must run for the Steam ticket,
-/// as on Linux.
+/// `BlightedNewWorld.exe <arguments>` with the player's `environment` and the Steam context, so
+/// the patched game runs directly without Steam's own launcher and without Easy Anti-Cheat. Steam
+/// must run for the Steam ticket, as on Linux.
 #[cfg(any(windows, test))]
-pub fn windows_command(launch: &WindowsLaunch, arguments: &[String]) -> Command {
+pub fn windows_command(
+    launch: &WindowsLaunch,
+    arguments: &[String],
+    environment: &Environment,
+) -> Command {
     let mut command = Command::new(&launch.exe);
     command
         .args(arguments)
+        .envs(environment.iter().map(|(name, value)| (name, value)))
         .env(STEAM_APP_ID_ENV, STEAM_APP_ID)
         .env(STEAM_GAME_ID_ENV, STEAM_APP_ID);
     command
@@ -308,8 +279,12 @@ pub fn windows_command(launch: &WindowsLaunch, arguments: &[String]) -> Command 
 /// Starts the patched game on Windows and returns at once. The caller starts
 /// [`crate::aws_proxy::AwsProxy`] first, so the game's AWS calls reach the server.
 #[cfg(any(windows, test))]
-pub fn start_game_windows(launch: &WindowsLaunch, arguments: &[String]) -> Result<(), GameError> {
-    let mut command = windows_command(launch, arguments);
+pub fn start_game_windows(
+    launch: &WindowsLaunch,
+    arguments: &[String],
+    environment: &Environment,
+) -> Result<(), GameError> {
+    let mut command = windows_command(launch, arguments, environment);
     let program = launch.exe.clone();
     command
         .spawn()
@@ -322,8 +297,9 @@ pub fn start_game(
     launch: &DirectLaunch,
     files: &NetworkFiles,
     arguments: &[String],
+    environment: &Environment,
 ) -> Result<(), GameError> {
-    let mut command = direct_command(launch, files, arguments);
+    let mut command = direct_command(launch, files, arguments, environment);
     let program = PathBuf::from(command.get_program());
     command
         .spawn()
@@ -445,23 +421,42 @@ mod tests {
     }
 
     #[test]
-    fn override_config_pair_is_added_only_for_a_non_empty_path() {
+    fn the_override_config_pair_is_added_after_the_arguments_only_for_a_non_empty_path() {
+        let base = template(&["-LoginChannelOverride", KEY]);
         assert_eq!(
-            override_config_pair(Some("Z:/x/ClientOverride.json")),
-            Some((
-                "-OverrideConfigPath".to_owned(),
-                "Z:/x/ClientOverride.json".to_owned()
-            ))
+            append_override_config(base.clone(), Some("Z:/x/ClientOverride.json")),
+            template(&[
+                "-LoginChannelOverride",
+                KEY,
+                "-OverrideConfigPath",
+                "Z:/x/ClientOverride.json"
+            ])
         );
-        assert_eq!(override_config_pair(Some("")), None);
-        assert_eq!(override_config_pair(None), None);
+        assert_eq!(append_override_config(base.clone(), Some("")), base);
+        assert_eq!(append_override_config(base.clone(), None), base);
     }
 
-    #[test]
-    fn append_override_config_keeps_the_original_arguments_first() {
-        let base = template(&["-LoginChannelOverride", KEY]);
-        let result = append_override_config(base.clone());
-        assert_eq!(result[..base.len()], base[..]);
+    /// The variables a command sets, by name.
+    fn command_envs(command: &Command) -> std::collections::HashMap<String, String> {
+        command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    /// Extra variables of the player, one of which tries to replace the Steam app id.
+    fn player_environment() -> Vec<(String, String)> {
+        vec![
+            ("PROTON_LOG".to_owned(), "1".to_owned()),
+            ("SteamAppId".to_owned(), "0".to_owned()),
+        ]
     }
 
     fn launch(compat_data: &str) -> DirectLaunch {
@@ -488,6 +483,7 @@ mod tests {
             &launch(OWN_PREFIX),
             &files(),
             &template(&["-LoginChannelOverride", KEY]),
+            &player_environment(),
         );
         assert_eq!(command.get_program(), OsStr::new(BWRAP_PROGRAM));
         let args: Vec<_> = command
@@ -509,17 +505,8 @@ mod tests {
                 KEY
             ]
         );
-        let envs: std::collections::HashMap<String, String> = command
-            .get_envs()
-            .filter_map(|(key, value)| {
-                value.map(|value| {
-                    (
-                        key.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
-                })
-            })
-            .collect();
+        let envs = command_envs(&command);
+        assert_eq!(envs.get("PROTON_LOG").map(String::as_str), Some("1"));
         assert_eq!(
             envs.get("SteamAppId").map(String::as_str),
             Some(STEAM_APP_ID)
@@ -571,24 +558,19 @@ mod tests {
     #[test]
     fn the_windows_command_starts_the_exe_directly_with_steam_env() {
         let launch = windows_launch("C:/games/New World/Bin64/BlightedNewWorld.exe");
-        let command = windows_command(&launch, &template(&["-LoginChannelOverride", KEY]));
+        let command = windows_command(
+            &launch,
+            &template(&["-LoginChannelOverride", KEY]),
+            &player_environment(),
+        );
         assert_eq!(command.get_program(), launch.exe.as_os_str());
         let args: Vec<_> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         assert_eq!(args, ["-LoginChannelOverride", KEY]);
-        let envs: std::collections::HashMap<String, String> = command
-            .get_envs()
-            .filter_map(|(key, value)| {
-                value.map(|value| {
-                    (
-                        key.to_string_lossy().into_owned(),
-                        value.to_string_lossy().into_owned(),
-                    )
-                })
-            })
-            .collect();
+        let envs = command_envs(&command);
+        assert_eq!(envs.get("PROTON_LOG").map(String::as_str), Some("1"));
         assert_eq!(
             envs.get("SteamAppId").map(String::as_str),
             Some(STEAM_APP_ID)

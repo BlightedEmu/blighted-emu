@@ -13,6 +13,7 @@ use nw_formats::objectstream::lowercase_crc32;
 use thiserror::Error;
 
 use crate::Tables;
+use crate::gameplay_config::ITEM_CLASS_SEPARATOR;
 use crate::player_attacks::{PlayerAttacks, Stance, stance_key};
 use crate::player_sequences::PlayerSequences;
 
@@ -35,6 +36,9 @@ pub const DEFAULT_PLAYER_DAMAGE_TABLE: &str = "DamageTable";
 const AFFIX_SEPARATOR: char = ',';
 /// A block stability is a percentage.
 const PERCENT: f64 = 100.0;
+/// The `BalanceCategory` of the open-world PvP balance rows that adjust a weapon class
+/// (`javelindata_pvpbalance_openworld`).
+const PVP_BALANCE_ITEM_CLASS: &str = "ItemClass";
 
 /// The config rows a `sim` needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -225,6 +229,11 @@ pub struct CombatSource {
     pub player_health: Vec<(String, u32)>,
     /// `VitalsModifierData` by category (creature type).
     pub categories: Vec<(String, CategoryMods)>,
+    /// `MasterItemDefinitions`: (item id, `ItemClass` cell) of the items that have classes.
+    pub item_classes: Vec<(String, String)>,
+    /// The open-world PvP balance: (item class, `WeaponBaseDamageAdjustment`) of each weapon
+    /// class row.
+    pub pvp_weapon_adjustments: Vec<(String, f64)>,
 }
 
 impl CombatSource {
@@ -422,6 +431,24 @@ impl CombatSource {
                     ))
                 })
                 .collect(),
+            item_classes: tables
+                .master_item_definitions
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter_map(|row| Some((row.item_id.clone(), row.item_class.clone()?)))
+                .collect(),
+            pvp_weapon_adjustments: tables
+                .open_world_balance_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter(|row| row.balance_category == PVP_BALANCE_ITEM_CLASS)
+                .filter_map(|row| {
+                    Some((
+                        row.balance_target.clone(),
+                        row.weapon_base_damage_adjustment?,
+                    ))
+                })
+                .collect(),
         }
     }
 }
@@ -447,6 +474,9 @@ pub struct CombatData {
     item_weapons: HashMap<String, WeaponRow>,
     /// The healing consumable of each item that is one, by lower-case item id.
     item_heals: HashMap<String, HealingConsumable>,
+    /// The open-world PvP damage factor of each weapon item whose class the balance table
+    /// adjusts (1 + `WeaponBaseDamageAdjustment`), by lower-case item id.
+    item_pvp_damage: HashMap<String, f64>,
     /// Every attack row, by lower-case table unique id and row id.
     table_attacks: HashMap<(String, String), AttackRow>,
     /// The player's damage table (lower-case unique id).
@@ -502,6 +532,21 @@ impl CombatData {
             .weapons
             .iter()
             .map(|(id, weapon)| (id.to_lowercase(), *weapon))
+            .collect();
+        let pvp_adjustments: HashMap<String, f64> = source
+            .pvp_weapon_adjustments
+            .iter()
+            .map(|(class, adjustment)| (class.to_lowercase(), *adjustment))
+            .collect();
+        let item_pvp_damage = source
+            .item_classes
+            .iter()
+            .filter_map(|(item, classes)| {
+                let adjustment = classes
+                    .split(ITEM_CLASS_SEPARATOR)
+                    .find_map(|class| pvp_adjustments.get(&class.trim().to_lowercase()))?;
+                Some((item.to_lowercase(), PLAIN_MOD + adjustment))
+            })
             .collect();
         let item_weapons = source
             .item_stats
@@ -584,6 +629,7 @@ impl CombatData {
             weapon,
             item_weapons,
             item_heals,
+            item_pvp_damage,
             table_attacks,
             player_table,
             player_attacks: PlayerAttacks::default(),
@@ -602,6 +648,16 @@ impl CombatData {
     /// weapon. Case does not matter.
     pub fn weapon_of_item(&self, item_id: &str) -> Option<&WeaponRow> {
         self.item_weapons.get(&item_id.to_lowercase())
+    }
+
+    /// The open-world PvP damage factor of weapon item `item_id`: 1 plus its class's
+    /// `WeaponBaseDamageAdjustment`, 1 for a class the balance table does not adjust. Case does
+    /// not matter.
+    pub fn pvp_damage_factor(&self, item_id: &str) -> f64 {
+        self.item_pvp_damage
+            .get(&item_id.to_lowercase())
+            .copied()
+            .unwrap_or(PLAIN_MOD)
     }
 
     /// The healing consumable of item `item_id`; `None` for an item that is none. Case does not
@@ -825,6 +881,10 @@ mod tests {
     const LEVEL_DAMAGE: f64 = 686.1;
     const LEVEL_ARMOR: f64 = 109.336;
     const SWORD_ITEM: &str = "1hSwordT1";
+    /// A sword's open-world PvP adjustment in the test table.
+    const SWORD_PVP_ADJUSTMENT: f64 = -0.1;
+    /// The bow's (retail -0.253); no test item is a bow.
+    const BOW_PVP_ADJUSTMENT: f64 = -0.253;
     const POTION_COOLDOWN_S: u32 = 25;
     const POTION_HEAL: f64 = 400.0;
     const POTION_SHARE: f64 = 0.1;
@@ -906,6 +966,14 @@ mod tests {
             }],
             heals: vec![("PotionHeal".to_owned(), POTION_HEAL, POTION_SHARE)],
             // As in the retail tables: the potion has no stats row.
+            item_classes: vec![(
+                SWORD_ITEM.to_owned(),
+                "EquippableMainHand+Sword+Melee".to_owned(),
+            )],
+            pvp_weapon_adjustments: vec![
+                ("Sword".to_owned(), SWORD_PVP_ADJUSTMENT),
+                ("Bow".to_owned(), BOW_PVP_ADJUSTMENT),
+            ],
             item_stats: vec![
                 (SWORD_ITEM.to_owned(), "SwordT1".to_owned()),
                 ("Shield".to_owned(), "NoWeaponRow".to_owned()),
@@ -1112,5 +1180,13 @@ mod tests {
         assert_eq!(data.vision_offset(Some("Beast")), VISION_OFFSET);
         assert_eq!(data.vision_offset(Some("Dragon")), 0.0);
         assert_eq!(data.vision_offset(None), 0.0);
+    }
+
+    #[test]
+    fn a_weapon_class_in_the_pvp_balance_scales_its_pvp_damage() {
+        let data = CombatData::build(source(), &rows()).expect("data");
+        assert!((data.pvp_damage_factor("1HSWORDT1") - (1.0 + SWORD_PVP_ADJUSTMENT)).abs() < 1e-9);
+        assert!((data.pvp_damage_factor(ICE_GAUNTLET_ITEM) - 1.0).abs() < 1e-9);
+        assert!((data.pvp_damage_factor("NoSuchItem") - 1.0).abs() < 1e-9);
     }
 }
