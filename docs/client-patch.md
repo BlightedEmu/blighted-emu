@@ -203,28 +203,47 @@ read them from the WinHTTP client `FUN_147491570` (it reads `proxyHost +0xA0`,
 
 ## Launching the patched client (no EAC)
 
-The project `launcher` runs the patched exe directly under Proton. It needs
-these environment variables (Linux/Proton):
+The project `launcher` runs the patched exe directly under Proton. Set the
+paths in the launcher's **Options** section. The launcher saves them with its
+other settings in `<user config folder>/blighted-launcher/settings.json`
+(`$XDG_CONFIG_HOME` or `~/.config` on Linux, `%APPDATA%` on Windows). The
+Settings section shows the exact file.
 
-```bash
-NW_LAUNCHER_GAME_EXE="<Bin64>/BlightedNewWorld.exe"
-NW_LAUNCHER_PROTON="<Steam>/compatibilitytools.d/<Proton>/proton"
-NW_LAUNCHER_STEAM_COMPAT_DATA="<a folder of its own, for example <drive>/Blighted/prefix>"
-NW_LAUNCHER_STEAM_CLIENT_INSTALL="<Steam install dir>"
-```
+| Option | What it is | Linux | Windows |
+|---|---|---|---|
+| Game | `<Bin64>/BlightedNewWorld.exe` | yes | yes |
+| Proton | `<Proton build>/proton`; pick a found build from the list | yes | no |
+| Prefix | the launcher's own Proton prefix; empty uses `<settings folder>/prefix` | yes | no |
+| Steam | the Steam install folder | yes | no |
+| Override | an absolute override-config file (`-OverrideConfigPath`); optional | yes | yes |
+| Proton switches | `PROTON_LOG`, `PROTON_USE_WINED3D`, `PROTON_NO_ESYNC`, `PROTON_NO_FSYNC`, `PROTON_ENABLE_NVAPI` | yes | no |
+| Extra environment | `NAME=value` lines for the game process; `#` starts a comment | yes | yes |
+
+At start the launcher finds the Steam install, its libraries
+(`steamapps/libraryfolders.vdf`), the patched copy in
+`steamapps/common/New World/Bin64` and the Proton builds in
+`compatibilitytools.d` and `steamapps/common`. It fills an empty Game or Steam
+option from what it finds. **Find paths** scans again. Each path shows a state
+word: `found`, `missing` or `not set`; the prefix shows `default`, `new` or
+`retail`.
+
+The older environment variables still fill an option that is empty:
+`NW_LAUNCHER_GAME_EXE`, `NW_LAUNCHER_PROTON`, `NW_LAUNCHER_STEAM_COMPAT_DATA`,
+`NW_LAUNCHER_STEAM_CLIENT_INSTALL` and `NW_LAUNCHER_OVERRIDE_CONFIG`.
 
 The prefix must be the launcher's own folder. The launcher refuses Steam's
 retail prefix (`<SteamLibrary>/steamapps/compatdata/1063730`), so retail play
 through Steam keeps its prefix untouched. Proton makes a new prefix in an empty
-folder on the first start.
+folder on the first start. Extra variables cannot replace the Steam variables
+the launcher sets.
 
 The launcher logs in as usual and starts `BlightedNewWorld.exe` through Proton
 inside `bwrap`, skipping `NewWorldLauncher.exe` and so Easy Anti-Cheat. `bwrap`
 binds two private files for the game process only: a hosts file that leads the
 server's `[aws_mirror]` names (remote-config bucket, Kinesis, STS) to the
 server, and a trust file with the server's mirror certificate added
-(`docs/re/2026-09-18-remote-config-layers.md`). Without the four variables the
-launcher does not start the game: the Steam launch path ran the stock client in
+(`docs/re/2026-09-18-remote-config-layers.md`). Without the Game, Proton and
+Steam options the launcher does not start the game: the Steam launch path ran the stock client in
 the retail prefix, where it called Amazon's remote-config, analytics and STS
 hosts.
 
@@ -237,11 +256,9 @@ patched client sends its three AWS calls there; the proxy checks the server's
 mirror certificate and relays them to the server.
 
 The launcher starts the patched exe directly (no Proton, no `bwrap`). It needs
-only the game exe path:
-
-```bat
-set NW_LAUNCHER_GAME_EXE=<Bin64>\BlightedNewWorld.exe
-```
+only the **Game** option: the path of `<Bin64>\BlightedNewWorld.exe`. The
+launcher finds it in the Steam libraries when the copy exists. The Proton
+options are not shown on Windows.
 
 Steam must be running for the Steam ticket, as on Linux. The launcher sets
 `SteamAppId` and `SteamGameId` to `1063730` for the game process and refuses any
@@ -263,12 +280,9 @@ built (`cargo build -p launcher --release`):
    Expect `patched copy: OK`. This writes `NewWorld.exe.orig` and
    `BlightedNewWorld.exe`; it never changes `NewWorld.exe`.
 2. Start Steam and log in.
-3. Set `NW_LAUNCHER_GAME_EXE` to the patched exe and start the launcher:
-
-   ```bat
-   set NW_LAUNCHER_GAME_EXE=<Bin64>\BlightedNewWorld.exe
-   launcher.exe
-   ```
+3. Start `launcher.exe`. In **Options**, check that **Game** shows `found`
+   for `<Bin64>\BlightedNewWorld.exe`. If not, type the path, or press
+   **Find paths**.
 
 4. Log in to the community server in the launcher and press play.
 5. **What passes:** the game reaches character select with the server's
@@ -284,7 +298,7 @@ built (`cargo build -p launcher --release`):
      that is not a non-CA certificate valid for exactly the three names).
    - A TLS error toward the proxy: the `--aws-proxy` patch did not clear
      `verifySSL`; re-run the patch and `--verify --aws-proxy`.
-   - The retail `NewWorld.exe` starts, or anti-cheat runs: `NW_LAUNCHER_GAME_EXE`
+   - The retail `NewWorld.exe` starts, or anti-cheat runs: the **Game** option
      does not point at `BlightedNewWorld.exe`.
 
 ## Files
