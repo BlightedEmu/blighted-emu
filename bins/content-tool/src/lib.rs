@@ -21,6 +21,8 @@ pub mod ftue_entities;
 pub mod map_tiles;
 pub mod melee_shapes;
 pub mod mob_prefabs;
+#[cfg(all(test, feature = "own-replay"))]
+mod own_replay;
 pub mod player_attacks;
 pub mod roads;
 pub mod source;
