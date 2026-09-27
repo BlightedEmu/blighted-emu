@@ -90,9 +90,11 @@ world-director = { path = "bins/world-director", version = "0.1.0" }
 unsafe_code = "forbid"
 missing_docs = "warn"
 
-# Build size rules (spec 10.6): file and line numbers in our code, no debug info for dependencies.
+# Build size rules (spec 10.6): file and line numbers in our code, no debug info for dependencies,
+# and no incremental cache (it grew to 14 GB of target/debug).
 [profile.dev]
 debug = "line-tables-only"
+incremental = false
 
 [profile.dev.package."*"]
 debug = false
