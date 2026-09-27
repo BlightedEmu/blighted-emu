@@ -1572,10 +1572,16 @@ impl SimWorld {
                 },
                 combat.player_sequences(),
             );
-            player.view = seen.view;
             if held {
+                // The inventory camera swings round to the front of the body: its view is not
+                // the player's look. Its look in the next own state turned the player at once,
+                // and the client closed the inventory or the loot 40 to 60 ms after it opened
+                // (run 17). Retail's first own states after an open kept the rotation; it turned
+                // only from 200 ms on, in small steps (newchar 2026-09-18, the open at
+                // 1792695864606: `rotation` 46e4, 46de, 46d5, ... 4603 over 450 ms).
                 continue;
             }
+            player.view = seen.view;
             let tracked = player
                 .tracked
                 .record(input, ground, self.settings.ocean_level_m);
@@ -5839,7 +5845,9 @@ mod tests {
     }
 
     #[test]
-    fn a_held_player_still_sends_its_view() {
+    fn a_held_player_sends_no_new_view() {
+        // Run 17: the inventory camera's look turned the player at once and the client closed
+        // its inventory; retail kept the rotation after an open.
         /// The own `rotation` and `lookDir` children.
         const ROTATION_CHILD: usize = 11;
         const LOOK_DIR_CHILD: usize = 12;
@@ -5871,8 +5879,8 @@ mod tests {
         let children = alc_children(&states_of(&world, &outgoing.messages, &a, 1));
         let child = |index| children.iter().any(|(found, _)| *found == index);
         assert!(
-            child(ROTATION_CHILD) && child(LOOK_DIR_CHILD),
-            "the hold still sends the look: {children:?}"
+            !child(ROTATION_CHILD) && !child(LOOK_DIR_CHILD),
+            "the hold sends no look: {children:?}"
         );
     }
 
