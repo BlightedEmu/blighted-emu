@@ -4,12 +4,16 @@
 //! plane.
 //!
 //! The rule, per input record: the character moves; the camera check solves where the client's
-//! camera puts the body; when the two are more than [`RESYNC_M`] apart on the ground plane, the
-//! body goes toward where the camera puts it, by half the distance and at most
-//! [`RESYNC_MAX_STEP_M`] in one record (a wall stopped the client, a dodge or an attack moved it,
-//! the server's speed was not the client's). It once went the whole way in one record: the place
-//! the server sends then stepped by 0.5 to 0.8 m (live 2026-09-22, the tutorial ship), and the
-//! client showed each step as judder. When that pulls the body back against its motion,
+//! camera puts the body; on the ground plane the body goes toward where the camera puts it, at
+//! most [`FOLLOW_STEP_M`] in one record (a wall stopped the client, a dodge or an attack moved
+//! it, the server's speed was not the client's). The client moves its own player, and every
+//! difference the server keeps pulls the client back. The replay of the retail tutorial captures
+//! against retail's own places (`content-tool` test `own_replay`, 2026-09-24) measured it: with a
+//! pull past 0.15 m by half the distance and at most 0.15 m a record, the client would have been
+//! corrected (past 0.5 m) in 40% of the open-world states, with this follow in 36%, and the open
+//! world's errors were 0.31 and 2.51 m (median, 90th percentile) against 0.25 and 1.71 m. A full
+//! snap in one record stepped the sent place by 0.5 to 0.8 m (live 2026-09-22, the tutorial
+//! ship), which the client showed as judder. When that pulls the body back against its motion,
 //! the character's speed drops to the camera body's own speed along it since the record before (a
 //! client held at a wall stays there instead of being pulled back record after record; replay of
 //! the newchar capture, 2026-09-20: 1,366 pull-backs instead of 1,486 in the tutorial and 1,610
@@ -34,11 +38,18 @@
 //! its own height there, as the camera's height is off in an action. A body the server dropped
 //! (a move into the air) falls by the physics until it lands.
 //!
-//! The camera does not carry the body through a wall ([`wall_between`]): the client's capsule
-//! does not pass one, so a camera body beyond it is the solve's error, a boom the level shortened
-//! (run 15: by the beach stairs the camera's body stood 1.2 m from the camera and resyncs of
-//! 0.7 to 1.3 m carried the body into the solid block under the stair landing). The wall is the
-//! one at the higher body's feet, so a client that climbed onto a ledge takes the body along.
+//! The camera does not carry the body through a wall ([`wall_between`]) from close by: the
+//! client's capsule does not pass one, so a camera body just beyond it is the solve's error, a
+//! boom the level shortened (run 15: by the beach stairs the camera's body stood 1.2 m from the
+//! camera and resyncs of 0.7 to 1.3 m carried the body into the solid block under the stair
+//! landing). The wall is the one at the higher body's feet, so a client that climbed onto a ledge
+//! takes the body along. From farther than [`WALL_HOLD_M`], a camera's body that stands in the
+//! open on the far side (the way back to the body meets the wall too) shows a client that went
+//! around or over the wall where the level's collision differs from the client's, and the camera
+//! carries the body again: in the tutorial replay a wall held the body behind the beach block for
+//! the rest of the run, 127 m from retail's place (median); with this limit 0.40 m (1.5 m and 3 m
+//! gave the same within 0.03 m). A camera's body inside a solid (the way back enters no wall)
+//! never carries it, from any distance (run 15's stayed in the block for a second).
 //!
 //! A camera does not give the body's height itself: the boom is never sent, the camera check
 //! measures it from the server's own motion of the body while the view turns, and an action
@@ -64,18 +75,15 @@ use crate::equip_load::EquipLoad;
 use crate::movement::{Ground, Position};
 use nw_world::collision_index::MAX_WALKABLE_SLOPE_DEG;
 
-/// How far the server's body may be from the camera's body before it goes there, m (Observed:
-/// replayed with the retail motion itself, the camera body was within 0.164 m of the retail own
-/// place in 75% of the moving records of the newchar open world, 0.267 m in the tutorial; a
-/// replay of the retail keys erred by a median 0.15 m with 0.1 m, 0.16 m with 0.15 m and 0.16 m
-/// with 0.2 m in the open world, 0.35, 0.22 and 0.55 m in the tutorial).
-pub const RESYNC_M: f32 = 0.15;
-/// The share of the distance to the camera's body that one record corrects.
-const RESYNC_SHARE: f32 = 0.5;
-/// The largest correction of one record toward the camera's body, m. Retail's own
-/// places step at most 0.36 m in the open-world walk replay, motion included; a
-/// correction above this on top of the record's own motion would pass that.
-const RESYNC_MAX_STEP_M: f32 = 0.15;
+/// How far the server's body may be from the camera's body and stay, m: the own place's step on
+/// the wire (4/255 m), below which the client cannot see the difference.
+pub const FOLLOW_FROM_M: f32 = 4.0 / 255.0;
+/// The longest step toward the camera's body in one record, m (Observed: retail's own places step
+/// at most 0.36 m from one record to the next in the open-world walk replay, motion included).
+pub const FOLLOW_STEP_M: f32 = 0.36;
+/// How far the camera's body may be from the server's body and a wall between them still hold the
+/// body, m (the patched client's full-correction distance; see the module notes).
+pub const WALL_HOLD_M: f32 = 2.0;
 /// Records after the client starts an action (an attack, a dodge, an ability) while its moves may
 /// carry the body without the movement keys, so the camera check does not hold it still
 /// (Observed: after the 20 actions the newchar tutorial started without a movement key, the own
@@ -260,6 +268,7 @@ impl TrackedBody {
             self.acting_records = ACTION_RECORDS;
             self.character.enter_combat();
         }
+        let before = self.character.position();
         let moved = self.character.step(input.character, ground, sea_level_m);
         let mut position = self.character.position();
         let resting = self.is_resting();
@@ -291,16 +300,22 @@ impl TrackedBody {
             ..position
         };
         let distance = position.horizontal_distance(seen.at);
-        // Swim and fall keep the keys' place: a camera trail behind a swimming
-        // body (live 2026-09-24, after the ship sink) pulled the player backward
-        // each record. A jump still takes the camera on the ground plane.
+        // A fall keeps the keys' place: the server's physics brings it down. A swim and a jump
+        // follow the camera on the ground plane (the tutorial replay: a swim that kept the keys
+        // erred by 3.21 m at the 90th percentile in the sea, one that followed by 2.27 m).
         let falling = self.is_falling();
         // A body on a floor the level lacks has no floor under it in the physics, but its
         // client walks: the camera still carries it.
-        let resynced = !self.is_swimming()
-            && (!falling || self.on_lacking_floor)
-            && distance > RESYNC_M
-            && wall_between(ground, over, seen.at).is_none();
+        let walled = wall_between(ground, over, seen.at).is_some() && {
+            // From far, a camera's body on the open far side of the wall carries the body; one
+            // inside a solid (the way back to the body enters no wall) does not.
+            let back = Position {
+                z: over.z,
+                ..seen.at
+            };
+            distance <= WALL_HOLD_M || wall_between(ground, back, position).is_none()
+        };
+        let resynced = (!falling || self.on_lacking_floor) && distance > FOLLOW_FROM_M && !walled;
         if resynced {
             let heading = self.character.heading();
             let along = |from: Position, to: Position| {
@@ -312,15 +327,14 @@ impl TrackedBody {
                 self.character
                     .slow_to((along(last_seen, seen.at) / input.character.dt_s).max(0.0));
             }
-            // Toward the camera's body, never onto it in one record: a full snap sent
-            // steps of 0.5 to 0.8 m to the client (live 2026-09-22, the tutorial ship),
-            // which it showed as judder. Half the distance, at most
-            // [`RESYNC_MAX_STEP_M`], converges in a few records with no step above the
-            // retail own place's own (at most 0.36 m in the walk replay).
-            let step = (distance * RESYNC_SHARE).min(RESYNC_MAX_STEP_M);
-            let share = step / distance;
-            position.x += (seen.at.x - position.x) * share;
-            position.y += (seen.at.y - position.y) * share;
+            // Toward the camera's body, the record's whole step at most a retail step from where
+            // the body was: a camera that jumps (a new boom, the stop of its trail) does not throw
+            // the body the others see, and the step stays inside the sim's speed limit (10.8 m/s
+            // against 13 m/s).
+            let (dx, dy) = (seen.at.x - before.x, seen.at.y - before.y);
+            let share = (FOLLOW_STEP_M / dx.hypot(dy)).min(1.0);
+            position.x = before.x + dx * share;
+            position.y = before.y + dy * share;
         }
         if self.character.is_jumping() {
             // A jump keeps its own height; the camera only moves it on the ground plane.
@@ -526,11 +540,11 @@ mod tests {
         // stops the character, so it takes records to drift past the threshold again; while it
         // is held there the corrections run on, each capped, so no step of the body is larger
         // than one record of running plus one correction.
-        let bound = RESYNC_M + (CAMERA_LAG_S + DT) * SPRINT_SPEED_MPS;
+        let bound = FOLLOW_FROM_M + (CAMERA_LAG_S + DT) * SPRINT_SPEED_MPS;
         assert!(last.horizontal_distance(wall) <= bound, "{last:?}");
         assert!(resyncs > 0, "{resyncs}");
         assert!(
-            max_step <= SPRINT_SPEED_MPS * DT + RESYNC_MAX_STEP_M + 0.01,
+            max_step <= SPRINT_SPEED_MPS * DT + FOLLOW_STEP_M + 0.01,
             "{max_step}"
         );
     }
@@ -559,7 +573,7 @@ mod tests {
             );
         }
         let wall_y = client.position().y + 1.0;
-        let bound = RESYNC_M + (CAMERA_LAG_S + DT) * SPRINT_SPEED_MPS;
+        let bound = FOLLOW_FROM_M + (CAMERA_LAG_S + DT) * SPRINT_SPEED_MPS;
         let mut highest: f32 = GROUND_Z;
         for record in 0..15 {
             if client.position().y < wall_y {
