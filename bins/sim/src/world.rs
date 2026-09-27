@@ -4421,7 +4421,12 @@ impl Neighbourhood<'_> {
                             player.looking_through_loadout,
                         );
                     }
-                    group.members.append(&mut player.extra_members);
+                    // Before the position, one member per component: appended after it, a
+                    // second arena state (2406) followed the own ALC of the open-world arrival
+                    // and the client failed to read the bundle (run 17, beach: stateSequence 9).
+                    for member in player.extra_members.drain(..) {
+                        put_member(&mut group.members, member);
+                    }
                     groups.push(group);
                 }
                 // The weekly mutations (slot 2), once the client spawned and at each new week.
@@ -5600,13 +5605,12 @@ mod tests {
         for number in 1..=3 {
             join(&mut world, number, CELL_M / 2.0 + number as f32);
         }
-        /// One mutation-scheduler member for each spawned player.
-        const SCHEDULE_MEMBERS: u64 = 3;
+        // The world has no weekly mutations, so no scheduler group; the arrival's arena state
+        // takes the place of the card's own.
         assert_eq!(
             tick(&mut world, NOW + OWN_CARD_DELAY_MS).bundle_members,
-            9 * (2 + PLAYER_EMPTY_COMPONENTS.len() as u64) + SCHEDULE_MEMBERS,
-            "3 bundles of 3 groups, each a card, the empty player components and a position, \
-             plus one scheduler member per player"
+            9 * (2 + PLAYER_EMPTY_COMPONENTS.len() as u64),
+            "3 bundles of 3 groups, each a card, the empty player components and a position"
         );
     }
 
@@ -5838,6 +5842,51 @@ mod tests {
         assert!(
             !next.contains(&ROTATION_CHILD) && !next.contains(&LOOK_DIR_CHILD),
             "an unchanged view is not sent again: {next:?}"
+        );
+    }
+
+    #[test]
+    fn an_extra_member_goes_before_the_own_position_once_per_component() {
+        // Run 17, the beach: the arrival's arena state followed the own ALC as a second 2406
+        // member of the card, and the client failed to read the bundle.
+        let mut world = world();
+        join(&mut world, 1, 0.0);
+        let a = connection(1);
+        let entity = world.by_connection[&a];
+        let arena = nw_messages::PlayerArenaState::default()
+            .member()
+            .expect("arena state");
+        let arena_component = arena.component;
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .extra_members
+            .push(arena);
+        let outgoing = tick(&mut world, NOW + OWN_CARD_DELAY_MS);
+        let bundle = bundle_of(&outgoing.messages, &a).expect("the own card");
+        let known = nw_messages::BundlePayload::decode_known(&bundle.payload).expect("payload");
+        assert_eq!(
+            (&known.stopped_at, &known.failed),
+            (&None, &None),
+            "every member reads"
+        );
+        let own_alc = known
+            .members
+            .iter()
+            .position(|(member, _)| member.state.type_index() == ALC_TYPE_INDEX)
+            .expect("the own ALC");
+        let arenas: Vec<usize> = known
+            .members
+            .iter()
+            .enumerate()
+            .filter(|(_, (member, _))| member.component == arena_component)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(arenas.len(), 1, "one arena state: {arenas:?}");
+        assert!(
+            arenas[0] < own_alc,
+            "before the own ALC: {arenas:?} {own_alc}"
         );
     }
 
