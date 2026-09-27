@@ -20,7 +20,9 @@
 //! terrain and the structures of the level collision file (`crate::LevelGround`; the tutorial deck
 //! at the retail own place, 89.38 m at the start). Out of a jump, the camera's height only picks
 //! which floor under the body the client stands on: the highest one at most a step-up detection
-//! height above the camera's body ([`nw_world::collision_index::FLOOR_SEARCH_ABOVE_M`]); the
+//! height above the higher of the camera's body and the body
+//! ([`nw_world::collision_index::FLOOR_SEARCH_ABOVE_M`]; in an action the camera's body went
+//! 1.5 m under the tutorial deck, run 19, and a search from it missed the deck); the
 //! deck and not the sea under it, a building's upper floor and not its cellar. A camera's height
 //! errs by up to half a metre, the floors of one place lie metres apart. A body that falls lands
 //! on that floor once it is down at it. Where the level has neither height data nor a structure
@@ -28,7 +30,8 @@
 //! [`CAMERA_FLOOR_SPREAD_M`] above the highest floor the level knows there while it sinks no
 //! faster than a walk down the steepest walkable slope: it stands on a floor the level lacks (the
 //! steps of the tutorial cave, run 17: the level collision has no surface between 23.13 m and
-//! 33 m there, and the body stayed at the foot while the client climbed). A body the server dropped
+//! 33 m there, and the body stayed at the foot while the client climbed); in an action it keeps
+//! its own height there, as the camera's height is off in an action. A body the server dropped
 //! (a move into the air) falls by the physics until it lands.
 //!
 //! The camera does not carry the body through a wall ([`wall_between`]): the client's capsule
@@ -260,6 +263,7 @@ impl TrackedBody {
         let moved = self.character.step(input.character, ground, sea_level_m);
         let mut position = self.character.position();
         let resting = self.is_resting();
+        let acting = self.acting_records > 0;
         self.acting_records = self.acting_records.saturating_sub(1);
         let seen = input.view.and_then(|view| {
             self.camera.observe(
@@ -329,16 +333,28 @@ impl TrackedBody {
             let walking_height = last_seen.is_none_or(|last| {
                 (last.z - seen.at.z) / input.character.dt_s <= walking_descent_mps()
             });
-            self.on_lacking_floor = false;
-            match floor_under(ground, seen_at, sea_level_m) {
+            // An action moves the camera's body off the body's height (run 14: 0.55 m under
+            // the deck; run 19: 1.5 m, past the step-up search, and the body went down through
+            // the deck to the sea). The floor is searched from the higher of the two bodies'
+            // feet, and a body on a floor the level lacks keeps its own height in an action.
+            let held = std::mem::take(&mut self.on_lacking_floor) && acting;
+            let height = if held { position.z } else { seen.at.z };
+            let search_at = Position {
+                z: position.z.max(seen.at.z),
+                ..position
+            };
+            match floor_under(ground, search_at, sea_level_m) {
                 // A floor the level lacks.
                 Some(floor)
                     if !self.dropping
                         && !self.is_swimming()
-                        && walking_height
-                        && seen.at.z - floor > CAMERA_FLOOR_SPREAD_M =>
+                        && (held || walking_height)
+                        && height - floor > CAMERA_FLOOR_SPREAD_M =>
                 {
-                    self.character.land_at(seen_at);
+                    self.character.land_at(Position {
+                        z: height,
+                        ..position
+                    });
                     self.on_lacking_floor = true;
                 }
                 Some(floor) if !falling || position.z <= floor => {
@@ -877,14 +893,15 @@ mod tests {
         assert!((tracked.position.z - place.z).abs() < 0.01, "{tracked:?}");
     }
 
+    /// The tutorial start: retail's own place before any key.
+    const RETAIL_START: Position = Position {
+        x: 478.5,
+        y: 849.7,
+        z: 89.382,
+    };
+
     #[test]
     fn the_retail_start_stands_on_the_galleon_deck() {
-        // The tutorial start: retail's own place 89.382 m at (478.5, 849.7) before any key.
-        const RETAIL_START: Position = Position {
-            x: 478.5,
-            y: 849.7,
-            z: 89.382,
-        };
         /// The own place's step: 4/255 m.
         const PLACE_STEP_M: f32 = 4.0 / 255.0;
         let deck = galleon()
@@ -913,6 +930,66 @@ mod tests {
             assert!(
                 (tracked.position.z - deck).abs() < 1e-3 && deck >= DECK_LOW_M,
                 "record {record}: {tracked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_run_19_attack_camera_under_the_deck_keeps_the_body_on_the_deck() {
+        // Run 19 (2026-09-24), the second sailor fight: while the player attacked, the camera's
+        // body went 1.5 m under the deck, past the step-up search from it; the body took the
+        // floor under the deck and went down to the sea (89.46 to 50 m in 14 s).
+        const TUTORIAL_SEA_M: f32 = 20.0;
+        const CAMERA_UNDER_DECK_M: f32 = 1.5;
+        const WALK_RECORDS: u32 = 15;
+        const ATTACK_RECORDS: u32 = 30;
+        /// The back key: south from the start, as run 19 went, where the deck reaches 13 m.
+        const BACK: i8 = -1;
+        let ground = galleon();
+        let start = Position {
+            z: ground
+                .floor_at(RETAIL_START.x, RETAIL_START.y, RETAIL_START.z)
+                .expect("deck"),
+            ..RETAIL_START
+        };
+        let mut body = TrackedBody::new(start);
+        let mut client = Character::new(start);
+        for record in 0..WALK_RECORDS + ATTACK_RECORDS {
+            let attacking = record >= WALK_RECORDS;
+            client.step(
+                CharacterInput {
+                    intent: Intent {
+                        forward: BACK,
+                        ..Intent::default()
+                    },
+                    yaw: 0.0,
+                    dt_s: DT,
+                },
+                &ground,
+                TUTORIAL_SEA_M,
+            );
+            let on_deck = client.position();
+            assert_eq!(
+                ground.floor_at(on_deck.x, on_deck.y, on_deck.z),
+                Some(on_deck.z),
+                "record {record}: the client walks on the deck"
+            );
+            let mut seen = on_deck;
+            if attacking {
+                seen.z -= CAMERA_UNDER_DECK_M;
+            }
+            let tracked = body.record(
+                TrackInput {
+                    action_started: record == WALK_RECORDS,
+                    ..input(BACK, view_of(seen, BOOM, client.velocity()))
+                },
+                &ground,
+                TUTORIAL_SEA_M,
+            );
+            assert!(
+                (tracked.position.z - client.position().z).abs() < 1e-3,
+                "record {record}: {tracked:?} client {:?}",
+                client.position()
             );
         }
     }
