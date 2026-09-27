@@ -3025,10 +3025,19 @@ impl SimWorld {
                     });
                     // The server answers the open and the close with the new
                     // `lookingThroughLoadout`; a repeated close changes nothing (retail newchar
-                    // 2026-09-18: one 3935 per change, none for the closes that follow).
-                    if std::mem::replace(&mut player.looking_through_loadout, *looking) != *looking
-                    {
+                    // 2026-09-18: one 3935 per change, none for the closes that follow). The
+                    // inventory's slayer slot starts in the newest input record (retail child 17)
+                    // and its clear waits for the second close ([`slayer`]).
+                    let started = player.input_counter.unwrap_or(0);
+                    let changed = std::mem::replace(&mut player.looking_through_loadout, *looking)
+                        != *looking;
+                    if changed {
                         player.loadout_change_due = true;
+                    }
+                    if !*looking {
+                        player.slayer.close_loadout(started);
+                    } else if changed {
+                        player.slayer.open_loadout(started, now_ms);
                     }
                 }
                 return Ok(());
@@ -8440,7 +8449,7 @@ mod tests {
                 look: Some(SAVED_LOOK),
                 action: Some(nw_bus::GhostSlayer {
                     state: Some(0x1a),
-                    started: 0x28c5,
+                    started: Some(0x28c5),
                     sequence: 2794,
                     second_started: None,
                     second_playing: None,

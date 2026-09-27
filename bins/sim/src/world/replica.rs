@@ -251,7 +251,7 @@ pub(super) struct ReplicaMemory {
     looking_through_loadout: bool,
     mount: GhostMount,
     /// The start and sequence of its action.
-    action: Option<(u16, u64)>,
+    action: Option<(Option<u16>, u64)>,
     /// The server time of its last new life (ms since 2000-01-01).
     life_ms: u64,
     /// The `pos10` every viewer places it from: its states move it by offsets from it (Observed:

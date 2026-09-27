@@ -860,8 +860,9 @@ pub struct GhostMount {
 pub struct GhostSlayer {
     /// `slayerStateId`, when it changed with the action.
     pub state: Option<u64>,
-    /// The ALC state number in which the action started.
-    pub started: u16,
+    /// The ALC state number in which the action started; `None` for a sequence change in a
+    /// state that goes on.
+    pub started: Option<u16>,
     /// `slayerSequenceId`.
     pub sequence: u64,
     /// The second slot's start, when it goes with the action.
@@ -1549,7 +1550,7 @@ mod tests {
                 items: [Some(item); GHOST_VISIBLE_ITEMS],
                 action: Some(GhostSlayer {
                     state: Some(u64::MAX),
-                    started: u16::MAX,
+                    started: Some(u16::MAX),
                     sequence: u64::MAX,
                     second_started: Some(u16::MAX),
                     second_playing: Some((u64::MAX, u64::MAX)),

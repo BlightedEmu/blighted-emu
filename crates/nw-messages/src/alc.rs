@@ -509,8 +509,10 @@ pub struct MobStep {
 pub struct SlayerState {
     /// `slayerStateId`; `None` when it goes on unchanged (retail leaves child 13 out then).
     pub state: Option<u64>,
-    /// `slayerStateIdStarted`.
-    pub started: u16,
+    /// `slayerStateIdStarted`; `None` when only the sequence changes in a state that goes on
+    /// (retail leaves child 14 out then: the swim sequences of the newchar capture 2026-09-18,
+    /// `15=a52e` alone at 1792695840527).
+    pub started: Option<u16>,
     /// `slayerSequenceId`.
     pub sequence: u64,
     /// The second slot, when it goes with the state.
@@ -538,7 +540,7 @@ impl SlayerState {
         let second_plays = input.second_sequence != 0;
         Self {
             state: second_plays.then_some(u64::from(input.state)),
-            started,
+            started: Some(started),
             sequence: input.sequence,
             second: Some(SecondSlayerState {
                 started,
@@ -553,10 +555,10 @@ impl SlayerState {
     }
 
     fn children(self) -> Result<Vec<(usize, Vec<u8>)>, MessageError> {
-        let mut children = vec![
-            (SLAYER_STARTED_CHILD, self.started.to_be_bytes().to_vec()),
-            (SLAYER_SEQUENCE_CHILD, prefixed_bytes(self.sequence)?),
-        ];
+        let mut children = vec![(SLAYER_SEQUENCE_CHILD, prefixed_bytes(self.sequence)?)];
+        if let Some(started) = self.started {
+            children.push((SLAYER_STARTED_CHILD, started.to_be_bytes().to_vec()));
+        }
         if let Some(state) = self.state {
             children.push((SLAYER_STATE_CHILD, prefixed_bytes(state)?));
         }
@@ -1985,7 +1987,7 @@ mod tests {
         };
         let attack = SlayerState {
             state: None,
-            started: ATTACK_STARTED,
+            started: Some(ATTACK_STARTED),
             sequence: 2205,
             second: Some(SecondSlayerState {
                 started: ATTACK_STARTED,
@@ -3067,7 +3069,7 @@ mod tests {
         let prefix_of = |bytes: Vec<u8>| Reader::new(&bytes).prefixed().expect("prefix");
         let slayer = SlayerState {
             state: Some(prefix_of(retail_child(SLAYER_STATE_CHILD))),
-            started: u16::from_be_bytes([0x28, 0xc5]),
+            started: Some(u16::from_be_bytes([0x28, 0xc5])),
             sequence: prefix_of(retail_child(SLAYER_SEQUENCE_CHILD)),
             second: None,
         };

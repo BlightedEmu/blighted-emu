@@ -2741,7 +2741,7 @@ mod tests {
         player.slayer.advance(press_counter, NOW);
         let due = player.slayer.take_due().state.expect("the action goes out");
         assert_eq!(due.sequence, LIGHT_SEQUENCE);
-        assert_eq!(due.started, press_counter);
+        assert_eq!(due.started, Some(press_counter));
         assert!(player.stamina.take_change().is_none(), "no stamina spent");
     }
 
