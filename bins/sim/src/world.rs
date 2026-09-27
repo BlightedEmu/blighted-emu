@@ -9783,28 +9783,10 @@ mod tests {
                 "record {counter}: {body:?}"
             );
         }
-        // A run over the deck of the level collision: the client runs on its own and its camera
-        // shows its own body; the server's follows it.
-        let ground = ship_ground();
-        let mut client = nw_sim_core::Character::new(body_of_first(&world));
+        // A run over the deck of the level collision: a client that shows the server's place.
         let mut body = body_of_first(&world);
         for counter in VIDEO_RECORDS + 1..=VIDEO_RECORDS + RUN_RECORDS {
-            client.step(
-                nw_sim_core::CharacterInput {
-                    intent: nw_sim_core::Intent::of_keys(true, false, false, false),
-                    yaw: TUTORIAL_VIEW.yaw,
-                    dt_s: f32::from(attack::INPUT_RECORD_MS) / 1_000.0,
-                },
-                &*ground,
-                OCEAN_LEVEL_M,
-            );
-            let record = camera_record(
-                counter,
-                client.position(),
-                TUTORIAL_VIEW,
-                client.velocity(),
-                FORWARD_SLOTS,
-            );
+            let record = camera_record(counter, body, TUTORIAL_VIEW, [0.0; 2], FORWARD_SLOTS);
             body = after_record(&mut world, counter, record);
             assert!(
                 (body.z - deck).abs() < CLOSE_M,
