@@ -3005,14 +3005,11 @@ impl SimWorld {
                 return Ok(());
             }
             ClientFacetMsg::WhisperStarted { .. } => {}
-            ClientFacetMsg::UpdateTrackedObjectives { objectives, .. } => {
-                if let Some(mut player) = self.world.get_mut::<Player>(entity)
-                    && let Some(quest) = player.quest.as_mut()
-                {
-                    quest.client_pins(objectives);
-                }
-                return Ok(());
-            }
+            // The pins are the client's own: it sends a clear and the new list in the same
+            // millisecond at the spawn and at each new quest (retail newchar 2026-09-18: `00`,
+            // `00`, `01` and the instance at 9291 ms and at 450543 ms). An untrack at the clear
+            // emptied the tracked list, and the tutorial lost its markers (runs 16 and 17).
+            ClientFacetMsg::UpdateTrackedObjectives { .. } => return Ok(()),
             ClientFacetMsg::LookingThroughLoadout { looking, .. } => {
                 if *looking {
                     self.mount_inventory_opened(entity, now_ms);

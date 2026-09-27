@@ -47,8 +47,6 @@ pub(super) struct QuestTracker {
     completed: Vec<u64>,
     /// The quest ended and its end states are queued.
     ended: bool,
-    /// The client still has this objective pinned (1458). The first card pins it.
-    pinned: bool,
     /// A new accept pins this quest (2709). Off when every client flag is 0.
     auto_pin: bool,
     /// States to send, one per bundle.
@@ -65,7 +63,6 @@ impl QuestTracker {
             version: FIRST_VERSION,
             tasks: Vec::new(),
             ended: false,
-            pinned: true,
             auto_pin: true,
             pending: VecDeque::new(),
         }
@@ -157,7 +154,6 @@ impl QuestTracker {
             ..self.first_state()
         };
         if !self.auto_pin {
-            self.pinned = false;
             state.tracked = self.list(Vec::new());
         }
         self.pending
@@ -196,29 +192,6 @@ impl QuestTracker {
             tracked: self.list(Vec::new()),
             active: self.list(Vec::new()),
             tasks: self.list(Vec::new()),
-            ..ObjectivesState::default()
-        });
-    }
-
-    /// The client pinned `objectives` (1458). This quest leaves the tracker when its instance
-    /// is not in the list, and comes back when the client pins it again.
-    pub(super) fn client_pins(&mut self, objectives: &[u64]) {
-        if self.ended {
-            return;
-        }
-        let pinned = objectives.contains(&self.instance);
-        if pinned == self.pinned {
-            return;
-        }
-        self.pinned = pinned;
-        self.version += 1;
-        let tracked = if pinned {
-            vec![self.instance]
-        } else {
-            Vec::new()
-        };
-        self.pending.push_back(ObjectivesState {
-            tracked: self.list(tracked),
             ..ObjectivesState::default()
         });
     }
@@ -367,22 +340,6 @@ mod tests {
         let change = tracker.take_change().expect("change");
         let entries = change.tasks.expect("tasks").elements;
         assert_eq!(entries[0].state, TaskWireState::Inactive);
-    }
-
-    #[test]
-    fn a_pin_list_hides_the_quest_and_a_later_pin_shows_it() {
-        let mut tracker = QuestTracker::new(TUTORIAL, PLAYER);
-        tracker.client_pins(&[]);
-        let hidden = tracker.take_change().expect("unpinned");
-        assert_eq!(hidden.tracked.map(|list| list.elements), Some(Vec::new()));
-        tracker.client_pins(&[]);
-        assert_eq!(tracker.take_change(), None, "the same pin changes nothing");
-        tracker.client_pins(&[tracker.instance]);
-        let shown = tracker.take_change().expect("pinned");
-        assert_eq!(
-            shown.tracked.map(|list| list.elements),
-            Some(vec![tracker.instance])
-        );
     }
 
     #[test]
