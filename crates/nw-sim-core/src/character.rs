@@ -907,13 +907,6 @@ impl Character {
         self.vertical = Vertical::Grounded;
     }
 
-    /// Lowers its speed to at most `speed_mps` (the client's body went slower than the keys).
-    pub const fn slow_to(&mut self, speed_mps: f32) {
-        if speed_mps < self.speed_mps {
-            self.speed_mps = speed_mps;
-        }
-    }
-
     /// Puts it at `at` standing on its floor (a server move: a spawn, a teleport, a push).
     pub const fn stand_at(&mut self, at: Position) {
         self.position = at;

@@ -1,30 +1,35 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! A player's body as the server keeps it: moved by its keys ([`crate::character`]) over the
-//! level's floors, and held to the client's own view ([`crate::camera_check`]) on the ground
-//! plane.
+//! A player's body as the server keeps it: where the client's own view puts it
+//! ([`crate::camera_check`]), over the level's floors; its keys ([`crate::character`]) move it only
+//! where no camera shows it.
 //!
-//! The rule, per input record: the character moves; the camera check solves where the client's
-//! camera puts the body; when the two are more than [`RESYNC_M`] apart on the ground plane, the
-//! body goes toward where the camera puts it, by half the distance and at most
-//! [`RESYNC_MAX_STEP_M`] in one record (a wall stopped the client, a dodge or an attack moved it,
-//! the server's speed was not the client's). It once went the whole way in one record: the place
-//! the server sends then stepped by 0.5 to 0.8 m (live 2026-09-22, the tutorial ship), and the
-//! client showed each step as judder. When that pulls the body back against its motion,
-//! the character's speed drops to the camera body's own speed along it since the record before (a
-//! client held at a wall stays there instead of being pulled back record after record; replay of
-//! the newchar capture, 2026-09-20: 1,366 pull-backs instead of 1,486 in the tutorial and 1,610
-//! instead of 1,945 in the open world, a median of 0.34 m instead of 0.29 m in the tutorial and
-//! 0.16 m instead of 0.14 m in the open world).
+//! The rule, per input record: the character moves by the keys; the camera check solves where the
+//! client's camera puts the body, and on the ground plane the body goes there. The client moves its
+//! own player and the server follows it: the server's own movement of the keys was not the client's
+//! (run 17, 2026-09-24: the body walked through the tutorial cave's steps the client climbed, and
+//! the own places pulled the client backward). The body steps toward the camera's body by at most
+//! [`FOLLOW_STEP_M`] a record, so a camera that jumps does not throw it. Replay of the newchar
+//! open-world records against the retail own places (28,611 records): the followed body erred by a
+//! median 0.136 m, 1.11 m at the 90th percentile and 2.74 m at the 99th, against 0.160, 1.24 and
+//! 2.86 m for the keys pulled toward the camera.
 //!
-//! The height is the level's floor, not the camera's. The ground knows the level's floors: the
+//! Two bodies keep the keys' place: a swimming body (a camera trail behind it pulled the player
+//! backward each record, live 2026-09-24, after the ship sink) and a body the server dropped
+//! (a server move into the air falls by the server's physics until it lands).
+//!
+//! The height is the level's floor where the level knows one near the camera's height. The ground knows the level's floors: the
 //! terrain and the structures of the level collision file (`crate::LevelGround`; the tutorial deck
 //! at the retail own place, 89.38 m at the start). Out of a jump, the camera's height only picks
 //! which floor under the body the client stands on: the highest one at most a step-up detection
 //! height above the camera's body ([`nw_world::collision_index::FLOOR_SEARCH_ABOVE_M`]); the
 //! deck and not the sea under it, a building's upper floor and not its cellar. A camera's height
-//! errs by up to half a metre, the floors of one place lie metres apart. A body that falls lands
-//! on that floor once it is down at it. Only where the level has neither height data nor a
-//! structure does the body take the camera's height.
+//! errs by up to half a metre, the floors of one place lie metres apart. A camera's body more than
+//! [`CAMERA_FLOOR_SPREAD_M`] above the highest floor the level knows there stands on a floor the
+//! level lacks, or falls: the body takes the camera's height, in the air (the cave steps of run 17;
+//! the open-world replay's height erred by 0.52 m at the 90th percentile with this, 4.97 m
+//! without). A body the server dropped falls by the physics and lands on that floor once it is
+//! down at it. Where the level has neither height data nor a structure the body stands at the
+//! camera's height.
 //!
 //! The camera does not carry the body through a wall ([`wall_between`]): the client's capsule
 //! does not pass one, so a camera body beyond it is the solve's error, a boom the level shortened
@@ -53,18 +58,13 @@ use crate::character::{Character, CharacterInput, MountPaces, swim_floor_at, wal
 use crate::equip_load::EquipLoad;
 use crate::movement::{Ground, Position};
 
-/// How far the server's body may be from the camera's body before it goes there, m (Observed:
-/// replayed with the retail motion itself, the camera body was within 0.164 m of the retail own
-/// place in 75% of the moving records of the newchar open world, 0.267 m in the tutorial; a
-/// replay of the retail keys erred by a median 0.15 m with 0.1 m, 0.16 m with 0.15 m and 0.16 m
-/// with 0.2 m in the open world, 0.35, 0.22 and 0.55 m in the tutorial).
-pub const RESYNC_M: f32 = 0.15;
-/// The share of the distance to the camera's body that one record corrects.
-const RESYNC_SHARE: f32 = 0.5;
-/// The largest correction of one record toward the camera's body, m. Retail's own
-/// places step at most 0.36 m in the open-world walk replay, motion included; a
-/// correction above this on top of the record's own motion would pass that.
-const RESYNC_MAX_STEP_M: f32 = 0.15;
+/// How far above the highest known floor the camera's body may stand and still stand on it, m
+/// (Observed: on the retail tutorial deck the camera's body stood 0.48 m below to 0.73 m above the
+/// retail own place while moving, 5% to 95%).
+pub const CAMERA_FLOOR_SPREAD_M: f32 = 1.0;
+/// The longest step the followed body makes in one record, m (Observed: retail's own places step
+/// at most 0.36 m from one record to the next in the open-world walk replay, motion included).
+pub const FOLLOW_STEP_M: f32 = 0.36;
 /// Records after the client starts an action (an attack, a dodge, an ability) while its moves may
 /// carry the body without the movement keys, so the camera check does not hold it still
 /// (Observed: after the 20 actions the newchar tutorial started without a movement key, the own
@@ -91,8 +91,6 @@ pub struct TrackInput {
 pub struct Tracked {
     /// Where the body is.
     pub position: Position,
-    /// The camera put the body elsewhere than the keys.
-    pub resynced: bool,
     /// The camera followed the body.
     pub consistent: bool,
     /// The body stands on a floor: not in a jump or a fall.
@@ -104,8 +102,8 @@ pub struct Tracked {
 pub struct TrackedBody {
     character: Character,
     camera: CameraCheck,
-    /// Where the camera put the body in the record before, when it did.
-    last_seen: Option<Position>,
+    /// The server dropped it and it has not landed yet.
+    dropping: bool,
     /// Records left while an action the client started may move the body.
     acting_records: u8,
 }
@@ -116,7 +114,7 @@ impl TrackedBody {
         Self {
             character: Character::new(at),
             camera: CameraCheck::default(),
-            last_seen: None,
+            dropping: false,
             acting_records: 0,
         }
     }
@@ -206,7 +204,7 @@ impl TrackedBody {
     pub fn stand_at(&mut self, at: Position) {
         self.character.stand_at(at);
         self.camera.forget();
-        self.last_seen = None;
+        self.dropping = false;
     }
 
     /// The server puts it at `at` in the air (a teleport, a respawn): it falls from there to the
@@ -214,7 +212,7 @@ impl TrackedBody {
     pub fn drop_at(&mut self, at: Position) {
         self.character.drop_at(at);
         self.camera.forget();
-        self.last_seen = None;
+        self.dropping = true;
     }
 
     /// Moves it by one input record over `ground`, with the sea at `sea_level_m`.
@@ -228,6 +226,7 @@ impl TrackedBody {
             self.acting_records = ACTION_RECORDS;
             self.character.enter_combat();
         }
+        let before = self.character.position();
         let moved = self.character.step(input.character, ground, sea_level_m);
         let mut position = self.character.position();
         let resting = self.is_resting();
@@ -242,11 +241,10 @@ impl TrackedBody {
                 input.boom_key,
             )
         });
-        let last_seen = std::mem::replace(&mut self.last_seen, seen.map(|seen| seen.at));
         let Some(seen) = seen else {
+            self.dropping &= !self.character.is_grounded();
             return Tracked {
                 position,
-                resynced: false,
                 consistent: false,
                 on_floor: self.character.is_grounded(),
             };
@@ -257,35 +255,18 @@ impl TrackedBody {
             z: position.z.max(seen.at.z),
             ..position
         };
-        let distance = position.horizontal_distance(seen.at);
-        // Swim and fall keep the keys' place: a camera trail behind a swimming
-        // body (live 2026-09-24, after the ship sink) pulled the player backward
-        // each record. A jump still takes the camera on the ground plane.
-        let falling = self.is_falling();
-        let resynced = !self.is_swimming()
-            && !falling
-            && distance > RESYNC_M
-            && wall_between(ground, over, seen.at).is_none();
-        if resynced {
-            let heading = self.character.heading();
-            let along = |from: Position, to: Position| {
-                (to.x - from.x) * heading[0] + (to.y - from.y) * heading[1]
+        if !self.is_swimming() && !self.dropping && wall_between(ground, over, seen.at).is_none() {
+            // Toward the camera's body by at most a retail step: a camera that jumps (a new
+            // boom, the stop of its trail) does not throw the body the others see.
+            let (dx, dy) = (seen.at.x - before.x, seen.at.y - before.y);
+            let length = dx.hypot(dy);
+            let share = if length > FOLLOW_STEP_M {
+                FOLLOW_STEP_M / length
+            } else {
+                1.0
             };
-            if along(position, seen.at) < 0.0
-                && let Some(last_seen) = last_seen
-            {
-                self.character
-                    .slow_to((along(last_seen, seen.at) / input.character.dt_s).max(0.0));
-            }
-            // Toward the camera's body, never onto it in one record: a full snap sent
-            // steps of 0.5 to 0.8 m to the client (live 2026-09-22, the tutorial ship),
-            // which it showed as judder. Half the distance, at most
-            // [`RESYNC_MAX_STEP_M`], converges in a few records with no step above the
-            // retail own place's own (at most 0.36 m in the walk replay).
-            let step = (distance * RESYNC_SHARE).min(RESYNC_MAX_STEP_M);
-            let share = step / distance;
-            position.x += (seen.at.x - position.x) * share;
-            position.y += (seen.at.y - position.y) * share;
+            position.x = before.x + dx * share;
+            position.y = before.y + dy * share;
         }
         if self.character.is_jumping() {
             // A jump keeps its own height; the camera only moves it on the ground plane.
@@ -296,18 +277,26 @@ impl TrackedBody {
                 ..position
             };
             match floor_under(ground, seen_at, sea_level_m) {
-                Some(floor) if !falling || position.z <= floor => {
+                Some(floor) if self.dropping && position.z > floor => {
+                    self.character.place(position);
+                }
+                // A swimming body stays on the water: a camera trailing above it is not a floor.
+                Some(floor)
+                    if self.dropping
+                        || self.is_swimming()
+                        || seen.at.z - floor <= CAMERA_FLOOR_SPREAD_M =>
+                {
                     position.z = floor;
                     self.character.land_at(position);
                 }
-                Some(_) => self.character.place(position),
+                Some(_) => self.character.place(seen_at),
                 // No height data and no structure here: only the camera gives a height.
                 None => self.character.land_at(seen_at),
             }
         }
+        self.dropping &= !self.character.is_grounded();
         Tracked {
             position: self.character.position(),
-            resynced,
             consistent: true,
             on_floor: self.character.is_grounded(),
         }
@@ -335,6 +324,8 @@ mod tests {
     const SEA: f32 = -100.0;
     const BOOM: f32 = 4.0;
     const PITCH: f32 = 0.2;
+    /// How far the camera check's body may be from the body its camera shows, m.
+    const SOLVE_TOLERANCE_M: f32 = 0.05;
     /// The height of the flat ground.
     const GROUND_Z: f32 = 10.0;
 
@@ -410,7 +401,6 @@ mod tests {
                 &Flat,
                 SEA,
             );
-            assert!(!tracked.resynced, "{tracked:?}");
             assert!(tracked.position.horizontal_distance(client.position()) < 0.05);
             assert!(
                 (tracked.position.z - GROUND_Z).abs() < 1e-3,
@@ -430,7 +420,6 @@ mod tests {
         };
         let mut client = Character::new(start());
         const RECORDS: u32 = 120;
-        let mut resyncs = 0;
         let mut last = start();
         let mut max_step = 0.0_f32;
         for _ in 0..RECORDS {
@@ -455,22 +444,15 @@ mod tests {
                 &Flat,
                 SEA,
             );
-            resyncs += u32::from(tracked.resynced);
             max_step = max_step.max(tracked.position.horizontal_distance(last));
             last = tracked.position;
         }
-        // The server's body stays within the threshold, the camera's trail of a running body and
-        // one record of running of the wall: it never runs away into the wall. Each pull-back
-        // stops the character, so it takes records to drift past the threshold again; while it
-        // is held there the corrections run on, each capped, so no step of the body is larger
-        // than one record of running plus one correction.
-        let bound = RESYNC_M + (CAMERA_LAG_S + DT) * SPRINT_SPEED_MPS;
+        // The server's body is where the camera shows the client's: at the wall, within the
+        // camera's trail of a running body and one record of running; the camera's jump when
+        // its trail stops at the wall moves it by at most one follow step.
+        let bound = SOLVE_TOLERANCE_M + (CAMERA_LAG_S + DT) * SPRINT_SPEED_MPS;
         assert!(last.horizontal_distance(wall) <= bound, "{last:?}");
-        assert!(resyncs > 0, "{resyncs}");
-        assert!(
-            max_step <= SPRINT_SPEED_MPS * DT + RESYNC_MAX_STEP_M + 0.01,
-            "{max_step}"
-        );
+        assert!(max_step <= FOLLOW_STEP_M + SOLVE_TOLERANCE_M, "{max_step}");
     }
 
     #[test]
@@ -497,7 +479,7 @@ mod tests {
             );
         }
         let wall_y = client.position().y + 1.0;
-        let bound = RESYNC_M + (CAMERA_LAG_S + DT) * SPRINT_SPEED_MPS;
+        let bound = SOLVE_TOLERANCE_M + (CAMERA_LAG_S + DT) * SPRINT_SPEED_MPS;
         let mut highest: f32 = GROUND_Z;
         for record in 0..15 {
             if client.position().y < wall_y {
@@ -824,7 +806,7 @@ mod tests {
         let mut cutscene = view_of(far, BOOM, [0.0; 2]);
         cutscene.yaw = 2.0;
         let tracked = body.record(input(1, cutscene), &Flat, SEA);
-        assert!(!tracked.consistent && !tracked.resynced);
+        assert!(!tracked.consistent);
         assert!((tracked.position.y - start().y - ACCELERATION_MPS2 * DT * DT).abs() < 1e-4);
     }
 
@@ -839,7 +821,7 @@ mod tests {
         body.stand_at(moved);
         assert_eq!(body.boom_m(), None);
         let tracked = body.record(input(0, view_of(moved, 6.0, [0.0; 2])), &Flat, SEA);
-        assert!(tracked.consistent && !tracked.resynced);
+        assert!(tracked.consistent);
         assert!(tracked.position.horizontal_distance(moved) < 0.01);
     }
 
@@ -990,7 +972,6 @@ mod tests {
             &TutorialSea,
             TUTORIAL_SEA_M,
         );
-        assert!(!tracked.resynced, "{tracked:?}");
         assert!(
             tracked.position.y > at.y,
             "the camera pulled it back: {at:?} -> {:?}",
