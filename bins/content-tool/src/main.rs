@@ -331,7 +331,7 @@ fn print_roads(report: &RoadsReport) {
 
 fn print_collision(report: &CollisionReport, took: std::time::Duration) {
     println!(
-        "collision {}: {} placements ({} variant capitals, {} of an unknown variant), {} slices, {} solid entities as the level loads (no shape named {}, query shape kind not read {}, mesh without physics geometry {}, mesh with physics geometry but no .rnr {}, asset missing {}), {} physics assets ({} shapes of kinds not read), {} shapes, {} bodies, {} deferred slices with {} bodies, {} placed triangles, {} file bytes, {} index bytes, {:.1} s -> {}",
+        "collision {}: {} placements ({} variant capitals, {} of an unknown variant), {} slices, {} solid entities as the level loads (no shape named {}, query shape kind not read {}, inactive {}, mesh without physics geometry {}, mesh with physics geometry but no .rnr {}, asset missing {}), {} physics assets ({} shapes of kinds not read), {} shapes, {} bodies, {} deferred slices with {} bodies, {} placed triangles, {} file bytes, {} index bytes, {:.1} s -> {}",
         report.level,
         report.placements,
         report.variant_placements,
@@ -340,6 +340,7 @@ fn print_collision(report: &CollisionReport, took: std::time::Duration) {
         report.solid_entities,
         report.shapeless_entities,
         report.unread_entities,
+        report.inactive_entities,
         report.meshes_without_physics,
         report.meshes_with_physics_without_rnr,
         report.missing_assets,

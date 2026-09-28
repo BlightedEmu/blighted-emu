@@ -14,7 +14,10 @@
 //! physics asset of its `MeshComponent`'s mesh (the `.rnr` at the mesh's path, see
 //! [`nw_formats::rnr`]; Observed: the tutorial galleon's `galleon_body.cgf` has none in its rigid
 //! body and its `galleon_body.rnr` puts the deck at the retail own place, 89.38 m at the
-//! tutorial start).
+//! tutorial start). An entity whose `IsRuntimeActive` is false does not activate as the level
+//! loads: it has no solid, and its spawner spawns nothing then (Observed: the tutorial's
+//! `ftue_v2_corruptedwall` slice, whose inactive `mainvfxwall` box stands 82 m wide across the
+//! path at 480, 296, which the retail player walked through in both newchar captures).
 //!
 //! A capital with a `variantName` places its slice as that variant shows it: the slice's
 //! `VariationDataComponent` names a variation table (a `VariationData` datasheet) and binds
@@ -348,6 +351,8 @@ struct SliceSolids {
     /// Solid entities whose query shape is of a kind no slice of the build uses with a rigid
     /// body (`QueryShapePoint`, `QueryShapePolygonPrismTEMP`).
     unread: usize,
+    /// Entities with a rigid body that do not activate as the level loads.
+    inactive: usize,
     /// The slice's variation data component, when it has one.
     variation: Option<Variation>,
 }
@@ -377,6 +382,8 @@ type VariationTables = HashMap<String, HashMap<String, HashMap<String, String>>>
 struct SliceEntity {
     id: Option<u64>,
     name: String,
+    /// Its `IsRuntimeActive` is false: it does not activate as the level loads.
+    inactive: bool,
     parent: Option<u64>,
     place: Option<Affine>,
     body: Option<RigidBody>,
@@ -413,6 +420,7 @@ struct Names {
     static_mesh: u32,
     slice_asset: u32,
     spawn_on_initialize: u32,
+    is_runtime_active: u32,
     id: u32,
     entity_name: u32,
     parent_id: u32,
@@ -441,6 +449,7 @@ impl Names {
             static_mesh: lowercase_crc32("Static Mesh"),
             slice_asset: lowercase_crc32("m_sliceAsset"),
             spawn_on_initialize: lowercase_crc32("m_spawnOnInitialize"),
+            is_runtime_active: lowercase_crc32("IsRuntimeActive"),
             id: lowercase_crc32("Id"),
             entity_name: lowercase_crc32("name"),
             parent_id: lowercase_crc32("m_parentId"),
@@ -512,6 +521,10 @@ fn slice_entities(root: &Element, names: &Names) -> Vec<SliceEntity> {
                     .and_then(|name| name.as_string().ok())
                     .unwrap_or_default()
                     .to_owned(),
+                inactive: entity
+                    .child(names.is_runtime_active)
+                    .and_then(|active| active.as_bool().ok())
+                    == Some(false),
                 ..SliceEntity::default()
             };
             let components = entity
@@ -612,12 +625,16 @@ fn slice_solids(root: &Element, names: &Names, solid_filters: &HashSet<String>) 
             solids.spawns.push(Spawn {
                 place,
                 slice,
-                on_initialize,
+                on_initialize: on_initialize && !entity.inactive,
             });
         }
         let Some(body) = &entity.body else {
             continue;
         };
+        if entity.inactive {
+            solids.inactive += 1;
+            continue;
+        }
         if !solid_filters.contains(&body.filter) {
             continue;
         }
@@ -982,6 +999,8 @@ pub struct CollisionReport {
     pub shapeless_entities: usize,
     /// Solid entities whose query shape is of a kind the server does not read.
     pub unread_entities: usize,
+    /// Entities with a rigid body that do not activate as the level loads (no solid).
+    pub inactive_entities: usize,
     /// Solid entities whose mesh carries no physics geometry (no `.rnr` either).
     pub meshes_without_physics: usize,
     /// Solid entities whose mesh carries physics geometry but has no `.rnr`.
@@ -1079,6 +1098,7 @@ pub fn build_level_collision(
         for pending in std::mem::take(&mut placements.pending) {
             let solids = &solids_by_slice[&pending.slice];
             report.unread_entities += solids.unread;
+            report.inactive_entities += solids.inactive;
             let row = pending.variant.as_ref().map(|variant| {
                 report.variant_placements += 1;
                 let row = solids
@@ -1646,6 +1666,23 @@ mod tests {
         assert!(solids.spawns[0].on_initialize);
         let none = slice_solids(&slice("Empty"), &names, &filters);
         assert!(none.bodies.is_empty(), "a filter that does not block");
+    }
+
+    #[test]
+    fn an_inactive_entity_has_no_solid_and_spawns_nothing_as_the_level_loads() {
+        let names = Names::new();
+        let filters: HashSet<String> = ["Structure".to_owned()].into();
+        let mut root = slice("Structure");
+        for entity in &mut root.children[0].children[0].children[0].children {
+            entity
+                .children
+                .push(element("IsRuntimeActive", [0; 16], vec![0], Vec::new()));
+        }
+        let solids = slice_solids(&root, &names, &filters);
+        assert!(solids.bodies.is_empty(), "{:?}", solids.bodies);
+        assert_eq!(solids.inactive, 1);
+        assert_eq!(solids.spawns.len(), 1);
+        assert!(!solids.spawns[0].on_initialize, "spawns once it activates");
     }
 
     /// An element named by its name CRC.
