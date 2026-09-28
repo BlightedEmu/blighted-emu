@@ -18,6 +18,8 @@ use crate::mob_prefabs::ASSET_ID_LEN;
 
 const FILE_PREFIX: &str = "creature-animations-";
 const FILE_SUFFIX: &str = ".json";
+/// Millimetres per metre.
+const MM_PER_M: f32 = 1_000.0;
 
 /// The path of the table of `client_build` in `dir`.
 pub fn creature_animations_path(dir: &Path, client_build: &str) -> PathBuf {
@@ -69,6 +71,11 @@ pub struct CreatureRow {
     /// without an option of known length is left out; a table from before this field has none.
     #[serde(default)]
     pub fragment_ticks: BTreeMap<String, Vec<Option<u32>>>,
+    /// The radius of its body's capsule, mm: the query shape of its slice's component whose
+    /// filter is an `AICharacterCollider` one (a filter that blocks the player's,
+    /// `default.collisionfilters`); `None` when its slice has none, or the table is older.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collider_radius_mm: Option<u32>,
 }
 
 /// One creature's animation names.
@@ -82,6 +89,7 @@ pub struct CreatureAnimation {
     tags: TagDefinition,
     default_tags: Vec<String>,
     fragment_ticks: BTreeMap<String, Vec<Option<u32>>>,
+    collider_radius_mm: Option<u32>,
 }
 
 /// The 1-based number of `name` in `names`.
@@ -91,6 +99,13 @@ fn number_of(names: &[String], name: &str) -> Option<u16> {
 }
 
 impl CreatureAnimation {
+    /// The radius of its body's capsule, m ([`CreatureRow::collider_radius_mm`]).
+    pub fn collider_radius_m(&self) -> Option<f32> {
+        // A radius of a few metres in millimetres is exact in an f32.
+        #[allow(clippy::cast_precision_loss)]
+        self.collider_radius_mm.map(|mm| mm as f32 / MM_PER_M)
+    }
+
     /// The number of fragment `name` (its index + 1 in the controller definitions).
     pub fn fragment(&self, name: &str) -> Option<u16> {
         number_of(&self.fragments, name)
@@ -198,6 +213,7 @@ impl CreatureAnimations {
                         tags,
                         default_tags: row.default_tags,
                         fragment_ticks: row.fragment_ticks,
+                        collider_radius_mm: row.collider_radius_mm,
                     },
                 ))
             })
@@ -273,6 +289,7 @@ mod tests {
                 ("r_Death".to_owned(), vec![Some(88)]),
                 ("Alert".to_owned(), vec![Some(56), Some(73), None]),
             ]),
+            collider_radius_mm: Some(500),
         }
     }
 
@@ -298,6 +315,7 @@ mod tests {
         assert_eq!(boar.fragment_ticks("Alert", 3), Some(56));
         assert_eq!(boar.fragment_ticks("Alert", 4), Some(73));
         assert_eq!(boar.fragment_ticks("Alert", 0x8f), None, "a looping option");
+        assert_eq!(boar.collider_radius_m(), Some(0.5));
     }
 
     #[test]
@@ -305,10 +323,9 @@ mod tests {
         let text = r#"[{"asset":"db96d765b50459d98c9e04adaa9c9485","slice":"s","fragments":["r_Death"],"scopes":[],"actions":[],"tags":{},"default_tags":[]}]"#;
         let table = CreatureAnimations::parse(text).expect("table");
         let asset = <[u8; ASSET_ID_LEN]>::try_from(hex::decode(BOAR).expect("hex")).expect("len");
-        assert_eq!(
-            table.get(&asset).expect("row").fragment_ticks("r_Death", 0),
-            None
-        );
+        let row = table.get(&asset).expect("row");
+        assert_eq!(row.fragment_ticks("r_Death", 0), None);
+        assert_eq!(row.collider_radius_m(), None, "no collider radius either");
     }
 
     #[test]

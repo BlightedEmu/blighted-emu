@@ -93,10 +93,8 @@ pub(super) struct Vitals {
     /// `true`.
     pub(super) spawned: bool,
     last_attack_ms: Option<u64>,
-    /// The combo step whose charge waits for the attack key's release.
-    charge: Option<Charge>,
-    /// The last basic attack, for the press that continues its combo.
-    combo: Option<ComboState>,
+    /// The attack key as the server reads it.
+    keys: AttackKeys,
     /// The counter (`u16` after the mask) of the newest input record read.
     input_counter: Option<u16>,
     /// The mob the player locked on in its newest input.
@@ -140,8 +138,7 @@ impl Vitals {
             dead_since_ms: None,
             spawned,
             last_attack_ms: None,
-            charge: None,
-            combo: None,
+            keys: AttackKeys::NONE,
             input_counter: None,
             lock_target: None,
             last_shot_frame: None,
@@ -174,6 +171,112 @@ struct ComboState {
     step: usize,
     kind: AttackKind,
     started_ms: u64,
+}
+
+/// One attack the attack key starts: its combo step and kind, its start, and the press it came
+/// from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyAttack {
+    /// The combo step: 0 for the stance's own.
+    pub step: usize,
+    /// Light, heavy or charged.
+    pub kind: AttackKind,
+    /// When it starts.
+    pub started_ms: u64,
+    /// When its attack key was pressed.
+    pub pressed_ms: u64,
+}
+
+/// One player's attack key as the server reads it: the combo step whose charge waits for the
+/// key's release, and the last basic attack, for the press that continues its combo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttackKeys {
+    charge: Option<Charge>,
+    combo: Option<ComboState>,
+}
+
+impl AttackKeys {
+    /// No press read yet.
+    pub const NONE: Self = Self {
+        charge: None,
+        combo: None,
+    };
+
+    /// Reads `record` at `record_ms` with `stance`, the stance of the weapon the attack key uses
+    /// (`None`: no attack): a press starts its step's charge ([`next_charge`]), a release picks
+    /// the light or heavy attack by the hold, a hold to the charge starts the charged attack
+    /// ([`Stance::released`]). Gives the attack it starts; that attack continues the combo when
+    /// `continues_combo` (the first attack of an input message: the others of it cannot hit).
+    pub fn record(
+        &mut self,
+        stance: Option<&Stance>,
+        record: &InputRecord,
+        record_ms: u64,
+        continues_combo: bool,
+    ) -> Option<KeyAttack> {
+        let counter = record.u16_after_mask;
+        let Some(stance) = stance else {
+            if record.attack_released() {
+                self.charge = None;
+            }
+            return None;
+        };
+        if record.attack_pressed() {
+            self.charge = next_charge(stance, self.combo, counter, record_ms);
+        }
+        let charge = self.charge?;
+        let Some(schedule) = stance.schedule(charge.step) else {
+            self.charge = None;
+            return None;
+        };
+        // The hold counts from the step's start, in records since the press.
+        let since_press_ms = u64::from(
+            counter
+                .wrapping_sub(charge.pressed_at)
+                .saturating_mul(INPUT_RECORD_MS),
+        );
+        let held_ms = since_press_ms.saturating_sub(charge.from_ms);
+        let pressed_ms = record_ms.saturating_sub(since_press_ms);
+        // A buffered step starts after the press, maybe after this record.
+        let step_ms = pressed_ms.saturating_add(charge.from_ms);
+        let (kind, after_ms) = if record.attack_released() {
+            self.charge = None;
+            if charge.charged {
+                return None;
+            }
+            schedule.released(held_ms)?
+        } else if let Some(charged_at_ms) = schedule.charged_at_ms
+            && !charge.charged
+            && since_press_ms >= charge.from_ms
+            && held_ms >= charged_at_ms
+            && schedule.charged.is_some()
+        {
+            // The charged attack starts while the key is held (retail newchar capture: the
+            // greatsword's 2071 came 998 and 1110 ms after the press, before the releases at
+            // 1181 and 1633 ms).
+            self.charge = Some(Charge {
+                charged: true,
+                ..charge
+            });
+            (AttackKind::Charged, charged_at_ms)
+        } else {
+            return None;
+        };
+        let started_ms = step_ms.saturating_add(after_ms);
+        if continues_combo {
+            self.combo = Some(ComboState {
+                step: charge.step,
+                kind,
+                started_ms,
+            });
+        }
+        Some(KeyAttack {
+            step: charge.step,
+            kind,
+            started_ms,
+            pressed_ms,
+        })
+    }
 }
 
 /// The charge a press of the attack key in the record `pressed_at`, at `pressed_ms`, starts in
@@ -352,7 +455,7 @@ enum Landing {
 }
 
 /// Milliseconds per client input record (retail: 34 ms apart, median; input note).
-pub(super) const INPUT_RECORD_MS: u16 = 33;
+pub const INPUT_RECORD_MS: u16 = 33;
 
 /// How far behind the last record a record may come and still be an older copy; a record
 /// further behind is the client's new count. The client starts its record counter again at 1
@@ -1115,7 +1218,7 @@ impl SimWorld {
         // note: counters 7290, 7289, 7288); each record counts once, oldest first, at its own
         // time: one record time before the newer one. An attack is a press and its release, or a
         // hold to the charge, of a combo step.
-        let mut attacks: Vec<(usize, AttackKind, u64, u64)> = Vec::new();
+        let mut attacks: Vec<KeyAttack> = Vec::new();
         let mut weapon_key = None;
         // A new press of the attack key, which draws a sheathed weapon (`Gear::draw_to_attack`).
         let mut attack_pressed = false;
@@ -1137,64 +1240,11 @@ impl SimWorld {
             let behind = newest_counter.map_or(0, |newest| newest.wrapping_sub(counter));
             let record_ms =
                 now_ms.saturating_sub(u64::from(behind.saturating_mul(INPUT_RECORD_MS)));
-            let Some(stance) = stance else {
-                if record.attack_released() {
-                    vitals.charge = None;
-                }
-                continue;
-            };
-            if record.attack_pressed() {
-                vitals.charge = next_charge(stance, vitals.combo, counter, record_ms);
-            }
-            let Some(charge) = vitals.charge else {
-                continue;
-            };
-            let Some(schedule) = stance.schedule(charge.step) else {
-                vitals.charge = None;
-                continue;
-            };
-            // The hold counts from the step's start, in records since the press.
-            let since_press_ms = u64::from(
-                counter
-                    .wrapping_sub(charge.pressed_at)
-                    .saturating_mul(INPUT_RECORD_MS),
-            );
-            let held_ms = since_press_ms.saturating_sub(charge.from_ms);
-            let pressed_ms = record_ms.saturating_sub(since_press_ms);
-            // A buffered step starts after the press, maybe after this record.
-            let step_ms = pressed_ms.saturating_add(charge.from_ms);
-            let mut start = |vitals: &mut Vitals, kind: AttackKind, after_ms: u64| {
-                let started_ms = step_ms.saturating_add(after_ms);
-                if attacks.is_empty() {
-                    vitals.combo = Some(ComboState {
-                        step: charge.step,
-                        kind,
-                        started_ms,
-                    });
-                }
-                attacks.push((charge.step, kind, started_ms, pressed_ms));
-            };
-            if record.attack_released() {
-                vitals.charge = None;
-                if !charge.charged
-                    && let Some((kind, after_ms)) = schedule.released(held_ms)
-                {
-                    start(&mut vitals, kind, after_ms);
-                }
-            } else if let Some(charged_at_ms) = schedule.charged_at_ms
-                && !charge.charged
-                && since_press_ms >= charge.from_ms
-                && held_ms >= charged_at_ms
-                && schedule.charged.is_some()
+            if let Some(attack) = vitals
+                .keys
+                .record(stance, record, record_ms, attacks.is_empty())
             {
-                // The charged attack starts while the key is held (retail newchar capture: the
-                // greatsword's 2071 came 998 and 1110 ms after the press, before the releases at
-                // 1181 and 1633 ms).
-                vitals.charge = Some(Charge {
-                    charged: true,
-                    ..charge
-                });
-                start(&mut vitals, AttackKind::Charged, charged_at_ms);
+                attacks.push(attack);
             }
         }
         let lock_target = records.first().and_then(InputRecord::lock_target);
@@ -1231,7 +1281,13 @@ impl SimWorld {
         }
         // Every attack of one message has the same receive time, so only the first can hit: the
         // others are too fast, and a client cannot make the loop search for targets per record.
-        let Some(&(step, kind, started_ms, pressed_ms)) = attacks.first() else {
+        let Some(&KeyAttack {
+            step,
+            kind,
+            started_ms,
+            pressed_ms,
+        }) = attacks.first()
+        else {
             return Vec::new();
         };
         if spread {

@@ -29,24 +29,29 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use nw_content::Tables;
 use nw_content::player_attacks::{
-    AttackHit, BasicAttack, ChargeStep, ComboLink, Flight, Homing, ItemUse, Stance, StanceVariant,
-    stance_tags,
+    AttackHit, AttackMotion, BasicAttack, ChargeStep, ComboLink, Flight, Homing, ItemUse, Stance,
+    StanceVariant, stance_tags,
 };
 use nw_content::sheathe::SheatheAction;
 use nw_formats::azcs::{decode_azcs, is_azcs};
 use nw_formats::caf::Caf;
 use nw_formats::character::CharacterDefinition;
-use nw_formats::mannequin::{Action, ActionList, AnimDatabase, Fragment, ProcClip};
+use nw_formats::mannequin::{
+    Action, ActionList, AnimClip, AnimDatabase, DrivenMotion, Fragment, ProcClip,
+};
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
 use nw_formats::skeleton::Skeleton;
 
 use crate::error::ToolError;
 use crate::melee_shapes::{
-    Bodies, CLIP_FOLDERS, CLIP_SUFFIX, ClipContext, DEFINITION_SUFFIX, EQUIP_TYPES,
+    Bodies, CLIP_FOLDERS, CLIP_SUFFIX, ClipContext, DEFINITION_SUFFIX, EQUIP_TYPES, MS_PER_SECOND,
     PLAYER_DEFINITION, PLAYER_SKELETON, WeaponBody, equip_attachments, melee_shape, ms, normalized,
+    root_path,
 };
 use crate::source::GameSource;
 
+/// The root motion multiplier where no row of an attack's motion sets one.
+const DEFAULT_MOTION_MULTIPLIER: f32 = 1.0;
 /// The player animation databases.
 const PLAYER_ADB_PREFIX: &str = "animations/mannequin/adb/player/";
 const ADB_SUFFIX: &str = ".adb";
@@ -536,6 +541,18 @@ fn fragment_attack(
         })
     };
     let can_transition_ms = marker_start(CAN_TRANSITION_MARKER).map(ms);
+    let motion = match (
+        sources
+            .action(action)
+            .and_then(|action| action.driven_motion.as_ref()),
+        player.and_then(Fragment::main_animation),
+    ) {
+        (Some(driven), Some(body_clip)) => Some(
+            attack_motion(sources, driven, body_clip, &fragments, tags, length_ms)
+                .map_err(|why| format!("{fragment_name}: {why}"))?,
+        ),
+        _ => None,
+    };
     let attack = |damage_row: &str, hit| BasicAttack {
         action: action.to_owned(),
         fragment: fragment_name.to_owned(),
@@ -544,6 +561,7 @@ fn fragment_attack(
         length_ms,
         links: Vec::new(),
         can_transition_ms,
+        motion: motion.clone(),
     };
     let (melee, context) = playing_in(DAMAGE_CLIP);
     if let Some(first) = melee.first() {
@@ -668,6 +686,63 @@ fn fragment_attack(
         return Err(format!("{fragment_name}: no entry for the stance"));
     }
     Err(format!("{fragment_name}: no damage, ranged or cast clip"))
+}
+
+/// How an attack of the action motion `driven` moves its player for `tags` ([`AttackMotion`]):
+/// the root path of `body_clip` over the fragment's `length_ms`, each step times the multiplier
+/// of the row that the markers of `fragments` on at the step's start pick (1 where no row sets
+/// one); the velocity it keeps as the row at the start says (no fall where no row sets one).
+///
+/// # Errors
+///
+/// Returns why when the body's clip file is missing or has no frame time.
+fn attack_motion(
+    sources: &AnimationSources,
+    driven: &DrivenMotion,
+    body_clip: &AnimClip,
+    fragments: &[(&Fragment, ClipContext)],
+    tags: &[&str],
+    length_ms: u64,
+) -> Result<AttackMotion, String> {
+    let condition = |name: &str| sources.actions.iter().find_map(|list| list.condition(name));
+    let row_at = |time_s: f64| {
+        let markers: Vec<&str> = fragments
+            .iter()
+            .flat_map(|(fragment, _)| fragment.clips_of(NAMED_CLIP))
+            .filter(|clip| clip.start_s <= time_s && clip.end_s.is_none_or(|end| time_s < end))
+            .filter_map(|clip| clip.param(NAMED_CLIP_NAME))
+            .collect();
+        driven.row(condition, tags, &markers)
+    };
+    // A fragment is a few seconds long.
+    #[allow(clippy::cast_precision_loss)]
+    let length_s = length_ms as f64 / MS_PER_SECOND;
+    let (step_s, path) = root_path(&sources.bodies, body_clip, length_s)?;
+    let mut offsets = Vec::with_capacity(path.len());
+    let mut offset = [0.0_f32; 2];
+    let mut last = [0.0_f32; 2];
+    for &(time_s, root) in &path {
+        let multiplier = row_at(time_s - step_s)
+            .multiplier
+            .unwrap_or(DEFAULT_MOTION_MULTIPLIER);
+        offset = [
+            offset[0] + (root[0] - last[0]) * multiplier,
+            offset[1] + (root[1] - last[1]) * multiplier,
+        ];
+        last = root;
+        offsets.push(offset);
+    }
+    let start = row_at(0.0);
+    // A frame time is a few tens of milliseconds.
+    #[allow(clippy::cast_possible_truncation)]
+    let step_ms = (step_s * MS_PER_SECOND) as f32;
+    Ok(AttackMotion {
+        step_ms,
+        offsets,
+        inherit_velocity: start.inherit_velocity.unwrap_or(false),
+        inherit_max_mps: start.inherit_max_mps,
+        decel_mps2: start.decel_mps2.unwrap_or([0.0; 2]),
+    })
 }
 
 /// The fragments that the instant transitions of `fragment` change to.
@@ -1198,7 +1273,8 @@ mod tests {
     /// A player database cut: the sword's charge, light and heavy fragments, the dodge and the
     /// uses (`player_sword.adb` and `player.adb`, build 25810808), with a perk-only clip, the
     /// combo links of the light attacks (`Attack_Primary` to `Attack_Start_Charge_C2`, buffered
-    /// from 333 ms to the instant clip at 533 ms) and a stance whose `GenericTagA` charges sooner.
+    /// from 333 ms to the instant clip at 533 ms), the light attack's translation marker for
+    /// its first half second, and a stance whose `GenericTagA` charges sooner.
     const PLAYER_ADB: &str = r#"<AnimDB><FragmentList>
  <Attack_Start_Charge><Fragment Tags="1H_Melee+Sword"><ProcLayer>
   <Blend ExitTime="0"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Condition value="Attack_Heavy_NotHeld"/><NewAction value="Attack_Primary_C1"/></ProceduralParams></Procedural>
@@ -1221,6 +1297,9 @@ mod tests {
   <Blend ExitTime="0.3"/><Procedural type=""/>
  </ProcLayer><ProcLayer>
   <Blend ExitTime="0.76666665"/><Procedural type="CAGE-Named"><ProceduralParams><Name value="CanTransition"/></ProceduralParams></Procedural>
+ </ProcLayer><ProcLayer>
+  <Blend ExitTime="0"/><Procedural type="CAGE-Named"><ProceduralParams><Name value="Attack_Translation"/></ProceduralParams></Procedural>
+  <Blend ExitTime="0.5"/><Procedural type=""/>
  </ProcLayer><ProcLayer>
   <Blend ExitTime="0.33333334"/><Procedural type="CAGE-TransitionBuffered"><ProceduralParams><Condition value="CanAttack_Heavy"/><NewAction value="Attack_Start_Charge_C2"/></ProceduralParams></Procedural>
   <Blend ExitTime="0.2"/><Procedural type="CAGE-TransitionInstant"><ProceduralParams><Condition value="CanAttack_Heavy"/><NewAction value="Attack_Start_Charge_C2"/></ProceduralParams></Procedural>
@@ -1270,7 +1349,10 @@ mod tests {
     const ACTIONS: &str = r#"<ActionList><Actions>
  <Action Name="Attack_Start_Charge" FragmentName="Attack_Start_Charge"/>
  <Action Name="Attack_Start_Charge_C2" FragmentName="Attack_Start_Charge_C2"/>
- <Action Name="Attack_Primary_C1" FragmentName="Attack_Primary"/>
+ <Action Name="Attack_Primary_C1" FragmentName="Attack_Primary"><Activities><AnimationDrivenMotion>
+  <Default MotionMultiplier="1.00" Decel="9,9,9" InheritVelocity="false"/>
+  <Conditional Name="Attack_Translation_Sword" MotionMultiplier="2.0" InheritVelocity="true" InheritVelocityMaxSpeed="6"/>
+ </AnimationDrivenMotion></Activities></Action>
  <Action Name="Attack_Primary_C2" FragmentName="Attack_Primary_Strike2"/>
  <Action Name="Attack_Heavy" FragmentName="Attack_Heavy"/>
  <Action Name="Attack_Heavy_Charged" FragmentName="Attack_Heavy_Charged"/>
@@ -1291,7 +1373,8 @@ mod tests {
   <Activities><SetMannequinTag><Default TagName="GenericTagB" OnEnter="Set" OnExit="Unset"/></SetMannequinTag></Activities>
  </Action>
 </Actions>
-<Conditions><And Name="1H_Melee_Sword"><IfMannequinTag TagName="1H_Melee"/><IfMannequinTag TagName="Sword"/></And></Conditions>
+<Conditions><And Name="1H_Melee_Sword"><IfMannequinTag TagName="1H_Melee"/><IfMannequinTag TagName="Sword"/></And>
+<And Name="Attack_Translation_Sword"><IfMannequinMarker MarkerName="Attack_Translation"/><IfMannequinTag TagName="Sword"/></And></Conditions>
 </ActionList>"#;
 
     const ATTACH: &str = "animations/mannequin/adb/playermaleanims_1h_meleeattach.adb";
@@ -1335,6 +1418,39 @@ mod tests {
             .iter()
             .find(|stance| stance.tags == SWORD)
             .expect("sword")
+    }
+
+    #[test]
+    fn an_attack_moves_by_its_root_times_the_multiplier_of_its_markers() {
+        const CLOSE: f32 = 1e-4;
+        let (stances, _) = build_stances(&sources(), &rows());
+        let sword = sword(&stances);
+        let motion = sword
+            .light
+            .as_ref()
+            .and_then(|light| light.motion.clone())
+            .expect("the light attack's driven motion");
+        // The root goes 1 m forward over the clip's 30 frames; the marker doubles its first
+        // half second.
+        assert!((motion.step_ms - 1_000.0 / 30.0).abs() < CLOSE);
+        assert_eq!(motion.offsets.len(), 31, "from the start to the end");
+        let [right, forward] = motion.offset_at(1_000.0);
+        assert!(
+            right.abs() < CLOSE && (forward - 1.5).abs() < CLOSE,
+            "{forward}"
+        );
+        assert!((motion.offset_at(500.0)[1] - 1.0).abs() < CLOSE);
+        assert!(motion.inherit_velocity, "the marker's row at the start");
+        assert_eq!(motion.inherit_max_mps, Some(6.0));
+        assert_eq!(motion.decel_mps2, [9.0, 9.0], "the default's");
+        let second = sword
+            .schedule(1)
+            .and_then(|step| step.attack(nw_content::player_attacks::AttackKind::Light));
+        assert_eq!(
+            second.map(|attack| attack.motion.is_some()),
+            Some(false),
+            "an action without a driven motion"
+        );
     }
 
     #[test]

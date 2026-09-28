@@ -1230,6 +1230,7 @@ mod tests {
             tags: std::collections::BTreeMap::new(),
             default_tags: Vec::new(),
             fragment_ticks: std::collections::BTreeMap::new(),
+            collider_radius_mm: None,
         };
         let table = CreatureAnimations::of_rows(vec![row]).expect("table");
         Animations::of(&ASSET, table.get(&ASSET).expect("row")).expect("animations")

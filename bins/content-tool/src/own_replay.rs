@@ -13,18 +13,22 @@
 //! places) puts the body at retail's new place, as the sim does with its own moves.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use nw_capture::{CLIENT_TO_SERVER, Decoder, ledger_records};
 use nw_content::client_build::load_client_build;
+use nw_content::creature_animations::CreatureAnimations;
+use nw_content::mob_prefabs::ASSET_ID_LEN;
+use nw_content::player_attacks::{AttackMotion, Stance};
 use nw_messages::{BodyCodec, ClientInputMsg, InputRecord, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX};
-use nw_sim_core::{Ground, LevelGround, Position, TrackedBody};
+use nw_sim_core::{AmongCharacters, CharacterBody, Ground, LevelGround, Position, TrackedBody};
 use nw_world::WorldFile;
 use nw_world::collision::{LevelCollision, collision_file_path};
 use nw_world::collision_index::CollisionIndex;
 use nw_world::water::{WaterMap, water_file_path};
 use nw_world::world_file::world_file_path;
 
-use crate::ai_trace::{PlayerSample, trace_ledger};
+use crate::ai_trace::{MobTrace, PlayerSample, trace_ledger};
 use crate::ftue_entities::read_ledger;
 
 /// The client's correction threshold, m (patched client).
@@ -129,9 +133,13 @@ pub fn input_records(bytes: &[u8]) -> Vec<(u64, InputRecord, sim::camera::Record
 pub fn replay(
     records: &[(u64, InputRecord, sim::camera::RecordView)],
     retail: &[PlayerSample],
+    attacks: &[AttackStart],
+    mobs: &MobBodies,
     ground: &(impl Ground + ?Sized),
     sea_level_m: f32,
 ) -> (Vec<Compared>, usize) {
+    let times = record_times(records);
+    let mut next_attack = 0;
     let place = |sample: &PlayerSample| Position {
         x: sample.position[0],
         y: sample.position[1],
@@ -145,7 +153,28 @@ pub fn replay(
     let mut last_retail = place(first);
     let mut compared = Vec::new();
     let mut server_moves = 0;
-    for (time_ms, record, view) in records {
+    for ((time_ms, record, view), &record_ms) in records.iter().zip(&times) {
+        let characters = mobs.at(*time_ms);
+        let ground = &AmongCharacters {
+            ground,
+            characters: &characters,
+        };
+        while let Some(attack) = attacks
+            .get(next_attack)
+            .filter(|attack| attack.at_ms <= record_ms)
+        {
+            // An attack is a few seconds of milliseconds.
+            #[allow(clippy::cast_precision_loss)]
+            let since_ms = (record_ms - attack.at_ms) as f32;
+            body.start_attack(
+                Arc::clone(&attack.motion),
+                attack.keys_from_ms,
+                since_ms,
+                ground,
+                sea_level_m,
+            );
+            next_attack += 1;
+        }
         // Retail's places up to this input: a server move puts the body there.
         while next < retail.len() && retail[next].time_ms <= *time_ms {
             let at = place(&retail[next]);
@@ -294,6 +323,280 @@ pub fn closed_loop(
     summary
 }
 
+/// What the client did in a keys-only window ([`key_windows`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Motion {
+    /// No movement key and no action.
+    Still,
+    /// Movement keys, no action.
+    Walking,
+    /// An action (an attack, a dodge, an ability) started in the window.
+    Acting,
+    /// The body swam.
+    Swimming,
+}
+
+/// One keys-only window: how the server's character moved by retail's keys alone, against how
+/// retail's own place moved.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KeyWindow {
+    /// Its start, ms from the first ledger record.
+    pub start_ms: u64,
+    /// What the client did in it.
+    pub motion: Motion,
+    /// Retail's own place's motion in the window (end less start), m.
+    pub retail: [f32; 3],
+    /// The character's motion in the window, m.
+    pub body: [f32; 3],
+}
+
+impl KeyWindow {
+    /// The distance between the two motions on the ground plane, m.
+    pub fn error_m(&self) -> f32 {
+        (self.body[0] - self.retail[0]).hypot(self.body[1] - self.retail[1])
+    }
+}
+
+/// The time of each of `records` (from [`input_records`]): a message's newest record at the
+/// message's time, each older one [`sim::world::INPUT_RECORD_MS`] per counter step before it, as
+/// the sim reads them.
+pub fn record_times(records: &[(u64, InputRecord, sim::camera::RecordView)]) -> Vec<u64> {
+    let mut times = vec![0; records.len()];
+    let mut end = records.len();
+    while end > 0 {
+        let message_ms = records[end - 1].0;
+        let newest = records[end - 1].1.u16_after_mask;
+        let mut index = end;
+        while index > 0 && records[index - 1].0 == message_ms {
+            index -= 1;
+            let behind = newest.wrapping_sub(records[index].1.u16_after_mask);
+            times[index] = message_ms.saturating_sub(u64::from(
+                behind.saturating_mul(sim::world::INPUT_RECORD_MS),
+            ));
+        }
+        end = index;
+    }
+    times
+}
+
+/// An attack the server starts by the attack key, whose animation moves its player.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttackStart {
+    /// When it starts, ms from the first ledger record.
+    pub at_ms: u64,
+    /// How it moves its player.
+    pub motion: Arc<AttackMotion>,
+    /// From this long after its start a movement key ends it (its next attack's start), ms.
+    pub keys_from_ms: f32,
+}
+
+/// The attacks that a server reading the attack key of `records` at `times` with the weapon
+/// stance `stance` starts ([`sim::world::AttackKeys`]), those whose animation moves the player.
+pub fn attack_starts(
+    records: &[(u64, InputRecord, sim::camera::RecordView)],
+    times: &[u64],
+    stance: &Stance,
+) -> Vec<AttackStart> {
+    let mut keys = sim::world::AttackKeys::NONE;
+    records
+        .iter()
+        .zip(times)
+        .filter_map(|((_, record, _), &time_ms)| {
+            let attack = keys.record(Some(stance), record, time_ms, true)?;
+            let basic = stance.schedule(attack.step)?.attack(attack.kind)?;
+            // An attack's time is a few seconds of milliseconds.
+            #[allow(clippy::cast_precision_loss)]
+            let keys_from_ms = basic.next_attack_from_ms() as f32;
+            Some(AttackStart {
+                at_ms: attack.started_ms,
+                motion: Arc::new(basic.motion.clone()?),
+                keys_from_ms,
+            })
+        })
+        .collect()
+}
+
+/// The mobs of a ledger as bodies on the ground ([`AmongCharacters`]): each one's places until
+/// its death (its first `Death` fragment) or its last state, with its creature's capsule radius;
+/// a mob whose creature has no radius is left out.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MobBodies {
+    mobs: Vec<(f32, MobPlaces)>,
+}
+
+/// One mob's places on the ground plane, by time (ms from the first ledger record).
+type MobPlaces = Vec<(u64, [f32; 2])>;
+
+/// The fragment names of a creature's deaths hold this.
+const DEATH_FRAGMENT: &str = "Death";
+
+impl MobBodies {
+    /// The bodies of the mobs of `trace`, with the radii of `creatures`.
+    pub fn of(trace: &[MobTrace], creatures: &CreatureAnimations) -> Self {
+        let mobs = trace
+            .iter()
+            .filter_map(|mob| {
+                let asset: [u8; ASSET_ID_LEN] = hex::decode(&mob.asset).ok()?.try_into().ok()?;
+                let radius_m = creatures.get(&asset)?.collider_radius_m()?;
+                let places = mob
+                    .samples
+                    .iter()
+                    .take_while(|sample| {
+                        !sample.full_body.as_ref().is_some_and(|entry| {
+                            entry
+                                .fragment_name
+                                .as_deref()
+                                .is_some_and(|name| name.contains(DEATH_FRAGMENT))
+                        })
+                    })
+                    .filter_map(|sample| sample.position.map(|at| (sample.time_ms, [at[0], at[1]])))
+                    .collect();
+                Some((radius_m, places))
+            })
+            .collect();
+        Self { mobs }
+    }
+
+    /// The bodies standing at `time_ms`: each mob's newest place not after it, while it lives.
+    pub fn at(&self, time_ms: u64) -> Vec<CharacterBody> {
+        self.mobs
+            .iter()
+            .filter_map(|(radius_m, places)| {
+                let last = places.last()?;
+                if time_ms > last.0 {
+                    return None;
+                }
+                let index = places.partition_point(|(at_ms, _)| *at_ms <= time_ms);
+                let (_, [x, y]) = places.get(index.checked_sub(1)?)?;
+                Some(CharacterBody {
+                    x: *x,
+                    y: *y,
+                    radius_m: *radius_m,
+                })
+            })
+            .collect()
+    }
+}
+
+/// The server's character against retail's own controller. Each window starts `window_ms` of
+/// warm-up earlier at retail's own place, so the character is at speed when the window opens;
+/// then the window compares the character's motion with retail's, both by retail's input records
+/// alone (no camera), the attacks of `attacks` moving it by their animations. Retail's server ran
+/// the client's own controller, so a controller that is the client's moves as retail's place
+/// did. Windows with a server move are left out.
+pub fn key_windows(
+    records: &[(u64, InputRecord, sim::camera::RecordView)],
+    retail: &[PlayerSample],
+    attacks: &[AttackStart],
+    mobs: &MobBodies,
+    ground: &(impl Ground + ?Sized),
+    sea_level_m: f32,
+    window_ms: u64,
+) -> Vec<KeyWindow> {
+    let times = record_times(records);
+    let place = |sample: &PlayerSample| Position {
+        x: sample.position[0],
+        y: sample.position[1],
+        z: sample.position[2],
+    };
+    // Retail's place at `time_ms`: the newest sample not after it.
+    let at = |time_ms: u64| {
+        let index = retail.partition_point(|sample| sample.time_ms <= time_ms);
+        index.checked_sub(1).map(|index| place(&retail[index]))
+    };
+    let motion_of = |from: Position, to: Position| [to.x - from.x, to.y - from.y, to.z - from.z];
+    let mut windows = Vec::new();
+    let (Some(first_ms), Some(last_ms)) = (
+        records.first().map(|(time_ms, ..)| *time_ms),
+        records.last().map(|(time_ms, ..)| *time_ms),
+    ) else {
+        return windows;
+    };
+    let mut warm_ms = first_ms;
+    while warm_ms + 2 * window_ms <= last_ms {
+        let (start_ms, end_ms) = (warm_ms + window_ms, warm_ms + 2 * window_ms);
+        let span = (at(warm_ms), at(start_ms), at(end_ms));
+        let moved = retail
+            .iter()
+            .filter(|sample| (warm_ms..=end_ms).contains(&sample.time_ms))
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|pair| place(pair[0]).horizontal_distance(place(pair[1])) > SERVER_MOVE_M);
+        let (Some(warm_at), Some(begin), Some(end)) = span else {
+            warm_ms = start_ms;
+            continue;
+        };
+        let first = records.partition_point(|(time_ms, ..)| *time_ms < warm_ms);
+        let mut body = TrackedBody::new(warm_at);
+        let mut body_begin = warm_at;
+        let (mut keys, mut acted, mut swam) = (false, false, false);
+        let mut next_attack = attacks.partition_point(|attack| attack.at_ms < warm_ms);
+        for ((time_ms, record, view), &record_ms) in records[first..]
+            .iter()
+            .zip(&times[first..])
+            .take_while(|((time_ms, ..), _)| *time_ms < end_ms)
+        {
+            let Some(mut input) = sim::camera::track_input(record, *view) else {
+                continue;
+            };
+            input.view = None;
+            let characters = mobs.at(*time_ms);
+            let ground = AmongCharacters {
+                ground,
+                characters: &characters,
+            };
+            let ground = &ground;
+            let mut attacked = false;
+            while let Some(attack) = attacks
+                .get(next_attack)
+                .filter(|attack| attack.at_ms <= record_ms)
+            {
+                // An attack is a few seconds of milliseconds.
+                #[allow(clippy::cast_precision_loss)]
+                let since_ms = (record_ms - attack.at_ms) as f32;
+                body.start_attack(
+                    Arc::clone(&attack.motion),
+                    attack.keys_from_ms,
+                    since_ms,
+                    ground,
+                    sea_level_m,
+                );
+                attacked = true;
+                next_attack += 1;
+            }
+            if *time_ms >= start_ms {
+                let intent = input.character.intent;
+                keys |= intent.forward != 0 || intent.right != 0;
+                acted |= input.action_started || intent.dodge || attacked;
+            } else {
+                body_begin = body.position();
+            }
+            body.record(input, ground, sea_level_m);
+            if *time_ms >= start_ms {
+                swam |= body.is_swimming();
+            } else {
+                body_begin = body.position();
+            }
+        }
+        if !moved {
+            let motion = match (swam, acted, keys) {
+                (true, ..) => Motion::Swimming,
+                (false, true, _) => Motion::Acting,
+                (false, false, true) => Motion::Walking,
+                (false, false, false) => Motion::Still,
+            };
+            windows.push(KeyWindow {
+                start_ms,
+                motion,
+                retail: motion_of(begin, end),
+                body: motion_of(body_begin, body.position()),
+            });
+        }
+        warm_ms = start_ms;
+    }
+    windows
+}
+
 /// The summary of `compared`.
 pub fn summarize(compared: &[Compared], server_moves: usize) -> ReplaySummary {
     let percentiles = |mut values: Vec<f32>| {
@@ -369,9 +672,66 @@ pub fn repo() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use nw_content::player_attacks::{PlayerAttacks, stance_key};
+
     use super::*;
 
     const CLIENT_BUILD_CONFIG: &str = "config/client-build.toml";
+    /// The weapon the tutorial gives (`1hSwordT2_FTUE`).
+    const TUTORIAL_SWORD: &str = "1H_Melee,Sword";
+    /// Until when each of [`LEDGERS`] holds the tutorial sword, ms from its first record
+    /// (Observed: the own paperdoll's main hand, `run15/lockaim2/seqmine.py`: the blunderbuss from
+    /// 448.2 s in the retail run, the great axe from 654.1 s in the Linux run).
+    const SWORD_UNTIL_MS: [u64; 2] = [448_200, 654_100];
+    const MEDIAN: f32 = 0.5;
+    const NINETIETH: f32 = 0.9;
+
+    /// One ledger as the replays read it: retail's own places, the input records, the attacks
+    /// the server starts with the tutorial sword, and the mobs' bodies.
+    struct Run {
+        retail: Vec<PlayerSample>,
+        records: Vec<(u64, InputRecord, sim::camera::RecordView)>,
+        attacks: Vec<AttackStart>,
+        mobs: MobBodies,
+    }
+
+    /// The run of `ledger`, whose player holds the tutorial sword until `sword_until_ms`.
+    fn run_of(ledger: &str, sword_until_ms: u64) -> Run {
+        let content = repo().join("local-data/content");
+        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
+        let table =
+            PlayerAttacks::load(&content, &build).expect("run `content-tool player-attacks` first");
+        let sword = table
+            .stance(stance_key(TUTORIAL_SWORD))
+            .expect("the sword's stance");
+        let creatures = CreatureAnimations::load(&content, &build)
+            .expect("run `content-tool creature-animations` first");
+        let bytes = read_ledger(&repo().join(ledger)).expect("ledger");
+        let trace = trace_ledger(&bytes, &[]);
+        let records = input_records(&bytes);
+        let attacks = attack_starts(&records, &record_times(&records), sword)
+            .into_iter()
+            .filter(|attack| attack.at_ms < sword_until_ms)
+            .collect();
+        Run {
+            mobs: MobBodies::of(&trace.mobs, &creatures),
+            retail: trace.player,
+            records,
+            attacks,
+        }
+    }
+
+    /// The value at `share` of the sorted `values`; NaN without values.
+    fn quantile(values: &[f32], share: f32) -> f32 {
+        #[allow(
+            clippy::cast_precision_loss,
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "an index into a few thousand values"
+        )]
+        let index = (values.len().saturating_sub(1) as f32 * share) as usize;
+        values.get(index).copied().unwrap_or(f32::NAN)
+    }
     const TUTORIAL_LEVEL: &str = "ftue_v2";
     /// The report's time windows, ms.
     const WINDOW_MS: u64 = 10_000;
@@ -409,6 +769,78 @@ mod tests {
     ];
 
     #[test]
+    fn the_server_character_follows_retail_keys_like_the_client_controller() {
+        /// One second of keys, after one second of warm-up: short enough that the camera is not
+        /// needed, long enough to show speed, acceleration and turning.
+        const WINDOW_MS: u64 = 1_000;
+        let (ground, sea) = level_ground(
+            &repo().join("local-data/content"),
+            &repo().join(CLIENT_BUILD_CONFIG),
+            TUTORIAL_LEVEL,
+        );
+        for ((ledger, _), sword_until_ms) in LEDGERS.into_iter().zip(SWORD_UNTIL_MS) {
+            let Run {
+                retail,
+                records,
+                attacks,
+                mobs,
+            } = run_of(ledger, sword_until_ms);
+            let none = MobBodies::default();
+            let keys_only = key_windows(&records, &retail, &[], &none, &ground, sea, WINDOW_MS);
+            let windows = key_windows(&records, &retail, &attacks, &mobs, &ground, sea, WINDOW_MS);
+            println!(
+                "{ledger}: {} windows, {} attacks",
+                windows.len(),
+                attacks.len()
+            );
+            let acting = |set: &[KeyWindow]| {
+                let starts: Vec<u64> = windows
+                    .iter()
+                    .filter(|window| window.motion == Motion::Acting)
+                    .map(|window| window.start_ms)
+                    .collect();
+                let mut errors: Vec<f32> = set
+                    .iter()
+                    .filter(|window| starts.contains(&window.start_ms))
+                    .map(KeyWindow::error_m)
+                    .collect();
+                errors.sort_by(f32::total_cmp);
+                errors
+            };
+            for (name, errors) in [
+                ("keys only", acting(&keys_only)),
+                ("attacks", acting(&windows)),
+            ] {
+                println!(
+                    "  the attack windows by {name}: median {:.2} m, 90% {:.2} m",
+                    quantile(&errors, MEDIAN),
+                    quantile(&errors, NINETIETH)
+                );
+            }
+            for motion in [
+                Motion::Still,
+                Motion::Walking,
+                Motion::Acting,
+                Motion::Swimming,
+            ] {
+                let mut horizontal: Vec<f32> = windows
+                    .iter()
+                    .filter(|window| window.motion == motion)
+                    .map(KeyWindow::error_m)
+                    .collect();
+                horizontal.sort_by(f32::total_cmp);
+                println!(
+                    "  {motion:?}: {} windows, error after 1 s median {:.2} m, 90% {:.2} m",
+                    horizontal.len(),
+                    quantile(&horizontal, MEDIAN),
+                    quantile(&horizontal, NINETIETH)
+                );
+            }
+            assert!(!windows.is_empty(), "{ledger}: no windows");
+        }
+    }
+
+    #[test]
     fn the_patched_client_is_not_pulled_by_the_own_places_in_a_closed_loop() {
         let (ground, sea) = level_ground(
             &repo().join("local-data/content"),
@@ -442,11 +874,14 @@ mod tests {
             &repo().join(CLIENT_BUILD_CONFIG),
             TUTORIAL_LEVEL,
         );
-        for (ledger, most_corrected) in LEDGERS {
-            let bytes = read_ledger(&repo().join(ledger)).expect("ledger");
-            let retail = trace_ledger(&bytes, &[]).player;
-            let records = input_records(&bytes);
-            let (compared, moves) = replay(&records, &retail, &ground, sea);
+        for ((ledger, most_corrected), sword_until_ms) in LEDGERS.into_iter().zip(SWORD_UNTIL_MS) {
+            let Run {
+                retail, records, ..
+            } = run_of(ledger, sword_until_ms);
+            // The sim moves the body by the keys and the camera: not by the attacks' animations,
+            // not among the mobs' bodies (the measure of both: the key windows).
+            let (compared, moves) =
+                replay(&records, &retail, &[], &MobBodies::default(), &ground, sea);
             let summary = summarize(&compared, moves);
             println!("{ledger}: {summary:?}");
             for window in compared.chunk_by(|a, b| a.time_ms / WINDOW_MS == b.time_ms / WINDOW_MS) {

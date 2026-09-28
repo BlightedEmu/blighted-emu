@@ -403,7 +403,7 @@ impl Intent {
     }
 
     /// Whether a direction key is held.
-    const fn moves(self) -> bool {
+    pub(crate) const fn moves(self) -> bool {
         self.forward != 0 || self.right != 0
     }
 
@@ -751,7 +751,7 @@ pub fn stop_at_walls(ground: &(impl Ground + ?Sized), from: Position, to: Positi
 
 /// The unit vector in the ground plane of the keys of `intent` with camera yaw `yaw`, when they
 /// ask for a direction.
-fn key_direction(intent: Intent, yaw: f32) -> Option<[f32; 2]> {
+pub(crate) fn key_direction(intent: Intent, yaw: f32) -> Option<[f32; 2]> {
     if !intent.moves() {
         return None;
     }
@@ -947,6 +947,30 @@ impl Character {
         ground: &(impl Ground + ?Sized),
         sea_level_m: f32,
     ) -> [f32; 2] {
+        self.advance(input, None, ground, sea_level_m)
+    }
+
+    /// Moves it by one input record whose motion an action's animation drives (an attack's root
+    /// motion: `AnimationDrivenMotion`), `driven` m on the ground plane, over the walls and floors
+    /// of `ground` as a key step goes; the keys start no dodge and no jump. Gives its motion.
+    pub fn step_driven(
+        &mut self,
+        input: CharacterInput,
+        driven: [f32; 2],
+        ground: &(impl Ground + ?Sized),
+        sea_level_m: f32,
+    ) -> [f32; 2] {
+        self.advance(input, Some(driven), ground, sea_level_m)
+    }
+
+    /// One input record: by the keys, or by `driven` when an action's animation drives it.
+    fn advance(
+        &mut self,
+        input: CharacterInput,
+        driven: Option<[f32; 2]>,
+        ground: &(impl Ground + ?Sized),
+        sea_level_m: f32,
+    ) -> [f32; 2] {
         let CharacterInput { intent, yaw, dt_s } = input;
         let intent = if self.mount.is_some() {
             intent.mounted()
@@ -981,19 +1005,21 @@ impl Character {
             && self.is_grounded()
             && !self.swimming
             && !wading;
-        if dodge_pressed && self.dodge.is_none() && can_dodge {
+        if driven.is_none() && dodge_pressed && self.dodge.is_none() && can_dodge {
             self.dodge = Some(self.dodge_of(intent, yaw));
         }
         // A record is in the dash when its middle is.
         let dashing = self.swimming && self.dash_s > dt_s / 2.0;
         self.dash_s = (self.dash_s - dt_s).max(0.0);
-        let distance = if let Some(dodge) = self.dodge {
-            self.dodge_step(dodge, intent, dt_s)
-        } else {
-            self.key_step(intent, yaw, dt_s, dashing, wading)
+        let distance = match (driven, self.dodge) {
+            (Some(motion), _) => self.driven_step(motion, dt_s),
+            (None, Some(dodge)) => self.dodge_step(dodge, intent, dt_s),
+            (None, None) => self.key_step(intent, yaw, dt_s, dashing, wading),
         };
         self.update_road_boost(ground, dt_s);
-        self.start_jump(intent.jump, self.swimming || wading);
+        if driven.is_none() {
+            self.start_jump(intent.jump, self.swimming || wading);
+        }
         let start = self.position;
         let free = Position {
             x: start.x + self.heading[0] * distance,
@@ -1001,7 +1027,12 @@ impl Character {
             z: start.z,
         };
         let mut next = stop_at_walls(ground, start, free);
-        if next != free {
+        if driven.is_some() && next != free {
+            // An attack's motion halts on what it meets (`SetHaltMotionOnCollision`, the attack
+            // actions of `playeractions_attack.actionlist`: `MaxAngleToHaltMotion` 170).
+            next = Position { z: free.z, ..start };
+            self.speed_mps = 0.0;
+        } else if next != free {
             // The wall takes the motion into it: the body goes on at the speed it kept.
             let kept = start.horizontal_distance(next);
             if kept > f32::EPSILON {
@@ -1099,6 +1130,18 @@ impl Character {
             at_s: end_s,
             ..dodge
         });
+        distance
+    }
+
+    /// One record of an animation's motion `motion` (m on the ground plane): its heading and
+    /// speed; gives the distance.
+    fn driven_step(&mut self, motion: [f32; 2], dt_s: f32) -> f32 {
+        let distance = motion[0].hypot(motion[1]);
+        if distance > f32::EPSILON {
+            self.heading = [motion[0] / distance, motion[1] / distance];
+        }
+        self.speed_mps = distance / dt_s;
+        self.sprint_s = 0.0;
         distance
     }
 

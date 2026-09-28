@@ -98,7 +98,7 @@ const TRUE_VALUES: [&str; 2] = ["1", "true"];
 
 /// ObjectStream type UUIDs of the components read here (raw stream order; names from the
 /// install's XML ObjectStreams, `mission0.entities_xml`).
-mod types {
+pub(crate) mod types {
     pub const GAME_TRANSFORM: [u8; 16] =
         *b"\x48\x4a\xe6\x7d\xab\xd0\x4d\x9c\xb2\xc8\x9b\xb0\xee\xc9\x00\xe0";
     pub const GAME_RIGID_BODY: [u8; 16] =

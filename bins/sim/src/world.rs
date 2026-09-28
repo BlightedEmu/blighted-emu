@@ -137,6 +137,8 @@ use statics::{
     chest_gather_started, facet_of, interactor_target,
 };
 
+pub use attack::{AttackKeys, INPUT_RECORD_MS, KeyAttack};
+
 use attack::{PendingMobSwing, PlayerSwing, Vitals};
 
 use crate::combat::{AttackOutcome, AttackRefusal, CombatSettings};

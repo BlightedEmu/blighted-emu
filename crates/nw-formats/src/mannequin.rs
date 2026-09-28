@@ -80,6 +80,16 @@ const STATUS_EFFECT_TEST_ELEMENT: &str = "IfHasStatusEffect";
 const STATUS_EFFECT_ATTRIBUTE: &str = "StatusEffect";
 const ACTIVATION_CONDITION_ELEMENT: &str = "ActivationCondition";
 const SET_TAG_ELEMENT: &str = "SetMannequinTag";
+const ACTIVITIES_ELEMENT: &str = "Activities";
+const DRIVEN_MOTION_ELEMENT: &str = "AnimationDrivenMotion";
+const CONDITIONAL_ELEMENT: &str = "Conditional";
+const MOTION_MULTIPLIER_ATTRIBUTE: &str = "MotionMultiplier";
+const DECEL_ATTRIBUTE: &str = "Decel";
+const INHERIT_VELOCITY_ATTRIBUTE: &str = "InheritVelocity";
+const INHERIT_MAX_SPEED_ATTRIBUTE: &str = "InheritVelocityMaxSpeed";
+const TRUE_VALUE: &str = "true";
+/// The separator of a vector attribute's parts (`Decel="9,9,9"`).
+const VECTOR_SEPARATOR: char = ',';
 /// The separator of a fragment's tags (`1H_Melee+Sword`).
 const TAG_SEPARATOR: char = '+';
 
@@ -836,8 +846,96 @@ impl Condition {
     }
 }
 
+/// One row of an `AnimationDrivenMotion` activity: what it sets, each `None` where the row
+/// leaves it out.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MotionRow {
+    /// `MotionMultiplier`: the factor on the animation's root motion.
+    pub multiplier: Option<f32>,
+    /// `Decel` on the ground plane (the character's x and y), m/s².
+    pub decel_mps2: Option<[f32; 2]>,
+    /// `InheritVelocity`: the motion keeps the character's velocity at the start.
+    pub inherit_velocity: Option<bool>,
+    /// `InheritVelocityMaxSpeed`, m/s.
+    pub inherit_max_mps: Option<f32>,
+}
+
+impl MotionRow {
+    fn of(node: &Node) -> Self {
+        let number = |key| node.attribute(key)?.trim().parse::<f32>().ok();
+        Self {
+            multiplier: number(MOTION_MULTIPLIER_ATTRIBUTE),
+            decel_mps2: node.attribute(DECEL_ATTRIBUTE).and_then(|text| {
+                let mut parts = text
+                    .split(VECTOR_SEPARATOR)
+                    .map(|part| part.trim().parse().ok());
+                Some([parts.next()??, parts.next()??])
+            }),
+            inherit_velocity: node
+                .attribute(INHERIT_VELOCITY_ATTRIBUTE)
+                .map(|value| value.eq_ignore_ascii_case(TRUE_VALUE)),
+            inherit_max_mps: number(INHERIT_MAX_SPEED_ATTRIBUTE),
+        }
+    }
+
+    /// The row with each value it leaves out taken from `base`.
+    #[must_use]
+    pub fn or(self, base: Self) -> Self {
+        Self {
+            multiplier: self.multiplier.or(base.multiplier),
+            decel_mps2: self.decel_mps2.or(base.decel_mps2),
+            inherit_velocity: self.inherit_velocity.or(base.inherit_velocity),
+            inherit_max_mps: self.inherit_max_mps.or(base.inherit_max_mps),
+        }
+    }
+}
+
+/// An action's `AnimationDrivenMotion` activity: the animation's root motion moves the
+/// character, not its movement input.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DrivenMotion {
+    /// The `Default` row.
+    pub default: MotionRow,
+    /// The `Conditional` rows: the named condition and the row, in file order.
+    pub conditionals: Vec<(String, MotionRow)>,
+}
+
+impl DrivenMotion {
+    fn of(node: &Node) -> Self {
+        let mut motion = Self::default();
+        for row in &node.children {
+            if row.name == DEFAULT_ELEMENT {
+                motion.default = MotionRow::of(row);
+            } else if row.name == CONDITIONAL_ELEMENT
+                && let Some(name) = row.attribute(ACTION_LIST_NAME_ATTRIBUTE)
+            {
+                motion
+                    .conditionals
+                    .push((name.to_owned(), MotionRow::of(row)));
+            }
+        }
+        motion
+    }
+
+    /// The row for a character with the tags `tags` whose fragment sets the markers `markers`:
+    /// the first conditional whose condition (by `condition`) holds, its left-out values the
+    /// default's, else the default (Inferred: the rows of the build's attacks read in file
+    /// order).
+    pub fn row<'a>(
+        &self,
+        condition: impl Fn(&str) -> Option<&'a Condition>,
+        tags: &[&str],
+        markers: &[&str],
+    ) -> MotionRow {
+        self.conditionals
+            .iter()
+            .find(|(name, _)| condition(name).is_some_and(|test| test.holds(tags, markers)))
+            .map_or(self.default, |(_, row)| row.or(self.default))
+    }
+}
+
 /// One action of an action list.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Action {
     /// `Name`.
     pub name: String,
@@ -851,6 +949,19 @@ pub struct Action {
     pub on_status_effect: Option<(String, Condition)>,
     /// The Mannequin tags its `SetMannequinTag` activities set while it is active, in file order.
     pub sets_tags: Vec<String>,
+    /// Its `AnimationDrivenMotion` activity, when one is among its activities (not under a
+    /// branch).
+    pub driven_motion: Option<DrivenMotion>,
+}
+
+fn driven_motion(action: &Node) -> Option<DrivenMotion> {
+    action
+        .children
+        .iter()
+        .filter(|child| child.name == ACTIVITIES_ELEMENT)
+        .flat_map(|activities| &activities.children)
+        .find(|activity| activity.name == DRIVEN_MOTION_ELEMENT)
+        .map(DrivenMotion::of)
 }
 
 /// The parts of the `And` elements from `node` down, `And` inside `And` flattened.
@@ -922,7 +1033,7 @@ fn casts(action: &Node) -> Vec<(Condition, String)> {
 }
 
 /// A CAGE action list (`*.actionlist`): its actions and its named conditions.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ActionList {
     /// Every `<Action>` with a `Name`, in file order (an action without a `FragmentName`, such
     /// as one that only sets a tag, has an empty fragment).
@@ -966,6 +1077,7 @@ impl ActionList {
                         casts: casts(action),
                         on_status_effect: on_status_effect(action),
                         sets_tags: sets_tags(action),
+                        driven_motion: driven_motion(action),
                     })
                 })
                 .collect(),
@@ -1315,6 +1427,52 @@ mod tests {
             list.condition("Attack_Heavy_NotHeld"),
             Some(&Condition::All(Vec::new()))
         );
+    }
+
+    #[test]
+    fn an_attack_moves_by_its_animation_with_the_row_of_its_markers() {
+        // `playeractions_attack.actionlist`: the light attack's motion rows.
+        let text = r#"<ActionList><Actions>
+ <Action Name="Attack_Primary_C1" FragmentName="Attack_Primary"><Activities>
+  <IfThenElse><ThenActivity><AnimationDrivenMotion><Default MotionMultiplier="3.0"/></AnimationDrivenMotion></ThenActivity></IfThenElse>
+  <AnimationDrivenMotion>
+   <Default MotionMultiplier="1.00" Decel="9,9,9" InheritVelocity="false"/>
+   <Conditional Name="Attack_Translation_Sword" MotionMultiplier="1.5" Decel="1.0,2.0,1.0"/>
+   <Conditional Name="Attack_Translation_Sword_FirstAttack" InheritVelocity="true" InheritVelocityMaxSpeed="6"/>
+  </AnimationDrivenMotion>
+ </Activities></Action>
+ <Action Name="Dodge" FragmentName="Dodge_Roll"/>
+</Actions><Conditions>
+ <And Name="Attack_Translation_Sword"><IfMannequinMarker MarkerName="Attack_Translation"/><IfMannequinTag TagName="Sword"/></And>
+ <And Name="Attack_Translation_Sword_FirstAttack"><IfMannequinMarker MarkerName="Attack_Translation_FirstAttack"/><IfMannequinTag TagName="Sword"/></And>
+</Conditions></ActionList>"#;
+        let list = ActionList::parse(text).expect("list");
+        let motion = list
+            .action("Attack_Primary_C1")
+            .and_then(|action| action.driven_motion.clone())
+            .expect("the top activity, not the branch's");
+        assert_eq!(list.action("Dodge").expect("dodge").driven_motion, None);
+        let row = |tags: &[&str], markers: &[&str]| {
+            motion.row(|name| list.condition(name), tags, markers)
+        };
+        let sword = ["1H_Melee", "Sword"];
+        assert_eq!(
+            row(&sword, &[]),
+            MotionRow {
+                multiplier: Some(1.0),
+                decel_mps2: Some([9.0, 9.0]),
+                inherit_velocity: Some(false),
+                inherit_max_mps: None,
+            }
+        );
+        let translation = row(&sword, &["Attack_Translation"]);
+        assert_eq!(translation.multiplier, Some(1.5));
+        assert_eq!(translation.decel_mps2, Some([1.0, 2.0]));
+        let first = row(&sword, &["Attack_Translation_FirstAttack"]);
+        assert_eq!(first.inherit_velocity, Some(true));
+        assert_eq!(first.inherit_max_mps, Some(6.0));
+        assert_eq!(first.multiplier, Some(1.0), "left out: the default's");
+        assert_eq!(row(&["Axe"], &["Attack_Translation"]), row(&sword, &[]));
     }
 
     #[test]

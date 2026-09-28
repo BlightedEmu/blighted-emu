@@ -84,7 +84,7 @@ const TRUE_TEXT: &str = "true";
 /// Half, for half extents and half lengths.
 const HALF: f32 = 0.5;
 /// Milliseconds per second.
-const MS_PER_SECOND: f64 = 1_000.0;
+pub const MS_PER_SECOND: f64 = 1_000.0;
 
 /// Where a damage clip plays.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,6 +305,51 @@ fn weapon_joint(skeletons: &[&Skeleton], name: &str) -> Result<Option<usize>, St
         ));
     }
     Ok(skeletons.first().and_then(|skeleton| skeleton.joint(name)))
+}
+
+/// A root path: per step, the fragment time, s, and the root's ground-plane offset, m.
+pub type RootPath = Vec<(f64, [f32; 2])>;
+
+/// The root path of an attack whose body plays `body_clip` over a fragment of `length_s`: the
+/// seconds between two steps (one frame of the clip at its speed) and, per step from the
+/// fragment's start to its end, the fragment time and the ground-plane offset of the skeleton's
+/// root (`Xform`, which carries the clip's root motion) from where it stood at the start, in the
+/// character's space (x right, y forward).
+///
+/// # Errors
+///
+/// Returns why when the clip file is missing or has no frame time.
+pub fn root_path(
+    bodies: &Bodies,
+    body_clip: &AnimClip,
+    length_s: f64,
+) -> Result<(f64, RootPath), String> {
+    let body = bodies.clip(&body_clip.name)?;
+    let step_s = f64::from(body.frame_seconds()) / body_clip.speed;
+    if step_s <= 0.0 {
+        return Err(format!("animation {}: no frame time", body_clip.name));
+    }
+    let root_at = |time_s: f64| {
+        bodies
+            .player
+            .pose(body, frame_of(body_clip, body, time_s))
+            .first()
+            .copied()
+            .unwrap_or_default()
+            .translation
+    };
+    let start = root_at(0.0);
+    let mut path = Vec::new();
+    let mut time_s = 0.0;
+    loop {
+        let at = root_at(time_s);
+        path.push((time_s, [at[0] - start[0], at[1] - start[1]]));
+        if time_s >= length_s {
+            break;
+        }
+        time_s += step_s;
+    }
+    Ok((step_s, path))
 }
 
 /// Seconds as whole milliseconds.

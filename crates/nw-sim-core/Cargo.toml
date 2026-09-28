@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+nw-content.workspace = true
 nw-world.workspace = true
 thiserror.workspace = true
 

@@ -23,6 +23,7 @@ use nw_formats::mannequin::{
 use nw_formats::objectstream::{Element, lowercase_crc32, parse_object_stream};
 
 use crate::ai_data::{AdbEntry, ClipLengths, adb_entries, fragment_length};
+use crate::collision::types::QUERY_SHAPE_CAPSULE;
 use crate::error::ToolError;
 use crate::source::GameSource;
 
@@ -46,6 +47,16 @@ const ITEM_SLOT_FIELD_CRC: u32 = 0x5cdb_aa46;
 const MAIN_HAND_SLOT: u32 = 24;
 /// The separator of a `MannequinTag` cell (retail `1H_Melee,Club`).
 const MANNEQUIN_TAG_SEPARATOR: char = ',';
+/// A creature's body collider component's fields: the filter and the radius by name (their CRCs
+/// are those of these names), the shape list by CRC (name Unknown, CRC Observed in every such
+/// component).
+const FILTER_FIELD: &str = "m_strFilter";
+const SHAPES_FIELD_CRC: u32 = 0x91c7_40bc;
+const RADIUS_FIELD: &str = "m_radius";
+/// The prefix of the body collider filters (`AICharacterCollider_Lost`, ...).
+const CHARACTER_COLLIDER_FILTER: &str = "AICharacterCollider";
+/// Millimetres per metre.
+const MM_PER_M: f32 = 1_000.0;
 /// Scope time ticks per second (`DAT_14807f948` = 1/30 s).
 const SCOPE_TICKS_PER_SECOND: f64 = 30.0;
 /// The slack of a length counted in ticks: a length is a sum of f32 frame times, so a length
@@ -93,6 +104,8 @@ pub struct SliceMannequin {
     pub default_tags: Vec<String>,
     /// The item in its main hand, when it has one.
     pub main_hand: Option<String>,
+    /// The radius of its body's capsule, mm ([`collider_radius_mm`]).
+    pub collider_radius_mm: Option<u32>,
 }
 
 fn descendants<'a>(element: &'a Element, found: &mut Vec<&'a Element>) {
@@ -150,7 +163,39 @@ pub fn slice_mannequin(bytes: &[u8]) -> Option<SliceMannequin> {
         animation_database,
         default_tags,
         main_hand: main_hand_in(&all),
+        collider_radius_mm: collider_radius_mm(&all),
     })
+}
+
+/// The radius of the body's capsule among the slice elements `all`, mm: the capsule query shape
+/// of the component whose filter is an `AICharacterCollider` one (Observed in the build's
+/// creature slices: one such component each, a capsule of 0.5 m for the Lost, 0.7 m for an
+/// Ancient Guardian, 1.5 m for a large Angry Earth; the filters block the player's,
+/// `default.collisionfilters`).
+fn collider_radius_mm(all: &[&Element]) -> Option<u32> {
+    let filter_crc = lowercase_crc32(FILTER_FIELD);
+    let radius_crc = lowercase_crc32(RADIUS_FIELD);
+    let component = all.iter().find(|element| {
+        element.children.iter().any(|child| {
+            child.name_crc == Some(filter_crc)
+                && child
+                    .as_string()
+                    .is_ok_and(|filter| filter.starts_with(CHARACTER_COLLIDER_FILTER))
+        })
+    })?;
+    let radius = component
+        .children
+        .iter()
+        .filter(|child| child.name_crc == Some(SHAPES_FIELD_CRC))
+        .flat_map(|shape| &shape.children)
+        .filter(|shape| shape.type_id == QUERY_SHAPE_CAPSULE)
+        .flat_map(|shape| &shape.children)
+        .find(|field| field.name_crc == Some(radius_crc))
+        .and_then(|field| field.as_f32().ok())?;
+    // A capsule radius is a few metres.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let mm = (radius * MM_PER_M).round().max(0.0) as u32;
+    Some(mm)
 }
 
 /// The `AssetPath` (lowercase) below the asset field `field`.
@@ -496,6 +541,7 @@ pub fn build_rows(
                 .collect::<BTreeMap<_, _>>(),
             default_tags,
             fragment_ticks,
+            collider_radius_mm: mannequin.collider_radius_mm,
         });
     }
     rows.sort_by(|left, right| left.asset.cmp(&right.asset));
@@ -525,7 +571,29 @@ mod tests {
         Element::with_value(GRID_FIELD_CRC, value)
     }
 
-    /// A slice with the boar's Mannequin component and a paperdoll of a main-hand item.
+    /// A collider component of filter `filter` whose shape is a capsule of `radius` m.
+    fn collider(filter: &str, radius: f32) -> Element {
+        let capsule = Element {
+            type_id: QUERY_SHAPE_CAPSULE,
+            ..named(
+                "element",
+                vec![Element::with_value(
+                    lowercase_crc32(RADIUS_FIELD),
+                    radius.to_be_bytes().to_vec(),
+                )],
+            )
+        };
+        Element::with_children(
+            0,
+            vec![
+                text(FILTER_FIELD, filter),
+                Element::with_children(SHAPES_FIELD_CRC, vec![capsule]),
+            ],
+        )
+    }
+
+    /// A slice with the boar's Mannequin component, a paperdoll of a main-hand item, a hit
+    /// volume and its body collider.
     fn boar_slice() -> Vec<u8> {
         let component = Element::with_children(
             0,
@@ -552,8 +620,17 @@ mod tests {
                 text(ITEM_NAME_FIELD, "Wolf_Teeth"),
             ],
         );
-        write_object_stream(&Element::with_children(0, vec![component, database, item]))
-            .expect("stream")
+        write_object_stream(&Element::with_children(
+            0,
+            vec![
+                component,
+                database,
+                item,
+                collider("HitVolume", 0.1),
+                collider("AICharacterCollider_Predator", 0.6),
+            ],
+        ))
+        .expect("stream")
     }
 
     #[test]
@@ -566,6 +643,11 @@ mod tests {
         );
         assert_eq!(mannequin.default_tags, ["Boar"]);
         assert_eq!(mannequin.main_hand.as_deref(), Some("Wolf_Teeth"));
+        assert_eq!(
+            mannequin.collider_radius_mm,
+            Some(600),
+            "the body, not the hit volume"
+        );
         assert_eq!(
             mannequin.animation_database.as_deref(),
             Some("animations/mannequin/adb/npc_boar_anims.adb")

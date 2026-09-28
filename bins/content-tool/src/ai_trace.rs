@@ -957,6 +957,7 @@ mod tests {
             tags: BTreeMap::new(),
             default_tags: Vec::new(),
             fragment_ticks: BTreeMap::new(),
+            collider_radius_mm: None,
         }]
     }
 

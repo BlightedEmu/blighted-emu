@@ -2,6 +2,7 @@
 //! World simulation rules of M4 (M4 spec section 7), with no I/O and no clock reads: the caller
 //! passes positions and times in. `sim` runs them.
 
+pub mod among;
 pub mod brain;
 pub mod camera_check;
 pub mod cells;
@@ -20,6 +21,7 @@ pub mod test_support;
 pub mod tick;
 pub mod tracking;
 
+pub use among::{AmongCharacters, CharacterBody};
 pub use brain::{BrainAction, ChaseBrain, ChaseSettings, Gait, MobState, Seen, walk_within};
 pub use camera_check::{CameraBody, CameraCheck, CameraView};
 pub use cells::{

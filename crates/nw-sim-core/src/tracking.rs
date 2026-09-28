@@ -66,10 +66,26 @@
 //! it only on the ground plane (a jump that dropped the camera's pull-back went on 0.58 m beside
 //! retail's place over the Fury Bay ledge gap, open-world replay records 25,304 to 25,321). A record whose camera does not follow the body changes
 //! nothing.
+//!
+//! An attack whose action's animation drives the motion (`AnimationDrivenMotion`,
+//! [`AttackMotion`]) moves the body by the animation's root, not by the keys: toward the keys of
+//! the record it starts in, else the camera's forward (Observed, retail newchar tutorial: the
+//! first attacks after a pause without a movement key went 1 to 24 degrees from the camera's
+//! forward; with a key held the place kept 0.84 to 0.97 m/s from 0.5 to 1 s after the start,
+//! against 3.5 to 5 m/s free), with the velocity it keeps, until a movement key ends it from its
+//! `CanTransition` marker on, a dodge or a block ends it, or its motion is over. The sim learns
+//! of an attack after the records of its message moved the body: those records are taken again
+//! with the attack's motion ([`TrackedBody::start_attack`]).
+
+use std::collections::VecDeque;
+use std::sync::Arc;
+
+use nw_content::player_attacks::AttackMotion;
 
 use crate::camera_check::{CameraCheck, CameraView};
 use crate::character::{
-    Character, CharacterInput, MountPaces, SPRINT_SPEED_MPS, swim_floor_at, wall_between,
+    Character, CharacterInput, MountPaces, SPRINT_SPEED_MPS, key_direction, swim_floor_at,
+    wall_between, yaw_axes,
 };
 use crate::equip_load::EquipLoad;
 use crate::movement::{Ground, Position};
@@ -94,6 +110,12 @@ pub const ACTION_RECORDS: u8 = 52;
 /// (Observed: on the retail tutorial deck the camera's body stood 0.48 m below to 0.73 m above the
 /// retail own place while moving, 5% to 95%).
 pub const CAMERA_FLOOR_SPREAD_M: f32 = 1.0;
+
+/// The records a body remembers, to take them again with the motion of an attack that started
+/// in them (our choice: an input message holds three records, a resent one up to six).
+pub const ATTACK_REWIND_RECORDS: usize = 8;
+/// Milliseconds per second.
+const MS_PER_SECOND: f32 = 1_000.0;
 
 /// The fastest a walking body comes down, m/s: a sprint down the steepest walkable slope. A
 /// camera that sinks faster shows a fall.
@@ -128,11 +150,37 @@ pub struct Tracked {
     pub on_floor: bool,
 }
 
+/// An attack whose animation moves the body.
+#[derive(Debug, Clone, PartialEq)]
+struct AttackPlay {
+    motion: Arc<AttackMotion>,
+    /// Its forward on the ground plane, once it started (a unit vector).
+    forward: Option<[f32; 2]>,
+    /// Ms since it started (below 0: it starts that much later).
+    at_ms: f32,
+    /// From this long after its start a movement key ends it, ms.
+    keys_from_ms: f32,
+    /// The velocity it keeps, along its right and its forward, m/s.
+    kept_mps: [f32; 2],
+}
+
+/// One record the body took: where it stood before it, the record's input and its velocity then.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TakenRecord {
+    before: Position,
+    input: CharacterInput,
+    velocity: [f32; 2],
+}
+
 /// A player's body.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackedBody {
     character: Character,
     camera: CameraCheck,
+    /// The attack whose animation moves it.
+    attack: Option<AttackPlay>,
+    /// Its last records, oldest first ([`ATTACK_REWIND_RECORDS`]).
+    taken: VecDeque<TakenRecord>,
     /// Where the camera put the body in the record before, when it did.
     last_seen: Option<Position>,
     /// Records left while an action the client started may move the body.
@@ -150,6 +198,8 @@ impl TrackedBody {
         Self {
             character: Character::new(at),
             camera: CameraCheck::default(),
+            attack: None,
+            taken: VecDeque::with_capacity(ATTACK_REWIND_RECORDS),
             last_seen: None,
             acting_records: 0,
             dropping: false,
@@ -170,7 +220,122 @@ impl TrackedBody {
     /// Whether it stands still: no speed on the ground plane, not in a jump, and no action of
     /// the client moving it.
     pub fn is_resting(&self) -> bool {
-        self.character.is_resting() && self.acting_records == 0
+        self.character.is_resting() && self.acting_records == 0 && self.attack.is_none()
+    }
+
+    /// The server started an attack of motion `motion` `since_ms` ago (below 0: it starts that
+    /// much later), whose movement keys may end it from `keys_from_ms` after its start: its
+    /// animation moves the body from then on. The records the body took since its start are
+    /// taken again with its motion, over `ground` with the sea at `sea_level_m`.
+    pub fn start_attack(
+        &mut self,
+        motion: Arc<AttackMotion>,
+        keys_from_ms: f32,
+        since_ms: f32,
+        ground: &(impl Ground + ?Sized),
+        sea_level_m: f32,
+    ) {
+        let mut rewind = 0;
+        let mut rewound_ms = 0.0;
+        for record in self.taken.iter().rev() {
+            if rewound_ms >= since_ms {
+                break;
+            }
+            rewound_ms += record.input.dt_s * MS_PER_SECOND;
+            rewind += 1;
+        }
+        let again: Vec<TakenRecord> = self.taken.drain(self.taken.len() - rewind..).collect();
+        self.attack = Some(AttackPlay {
+            motion,
+            forward: None,
+            at_ms: since_ms - rewound_ms,
+            keys_from_ms,
+            kept_mps: [0.0; 2],
+        });
+        let Some(first) = again.first() else {
+            return;
+        };
+        self.character.land_at(first.before);
+        for record in again {
+            let driven = self.attack_motion(record.input, record.velocity);
+            self.remember(record.input);
+            match driven {
+                Some(driven) => {
+                    self.character
+                        .step_driven(record.input, driven, ground, sea_level_m);
+                }
+                None => {
+                    self.character.step(record.input, ground, sea_level_m);
+                }
+            }
+        }
+    }
+
+    /// Keeps `input` among the records it took, with where it stands and its velocity now.
+    fn remember(&mut self, input: CharacterInput) {
+        if self.taken.len() == ATTACK_REWIND_RECORDS {
+            self.taken.pop_front();
+        }
+        self.taken.push_back(TakenRecord {
+            before: self.character.position(),
+            input,
+            velocity: self.character.velocity(),
+        });
+    }
+
+    /// The motion of the attack under way in the record of `input` (m on the ground plane),
+    /// when its animation moves the body; a body of velocity `velocity` that starts it keeps
+    /// what its motion keeps of that. `None` when no attack moves it (a dodge, a block, a
+    /// movement key past its marker or the motion's end ends it).
+    fn attack_motion(&mut self, input: CharacterInput, velocity: [f32; 2]) -> Option<[f32; 2]> {
+        let play = self.attack.as_mut()?;
+        let CharacterInput { intent, yaw, dt_s } = input;
+        let dt_ms = dt_s * MS_PER_SECOND;
+        let over = play.at_ms >= play.motion.length_ms()
+            || (play.at_ms >= play.keys_from_ms && intent.moves());
+        if intent.dodge || intent.block || over {
+            self.attack = None;
+            return None;
+        }
+        let to_ms = play.at_ms + dt_ms;
+        if to_ms <= 0.0 {
+            play.at_ms = to_ms;
+            return None;
+        }
+        let forward = *play.forward.get_or_insert_with(|| {
+            let forward = key_direction(intent, yaw).unwrap_or_else(|| yaw_axes(yaw).0);
+            let right = [forward[1], -forward[0]];
+            let along = |axis: [f32; 2]| velocity[0] * axis[0] + velocity[1] * axis[1];
+            let kept = [along(right), along(forward)];
+            let speed = kept[0].hypot(kept[1]);
+            let limit = play.motion.inherit_max_mps.unwrap_or(f32::INFINITY);
+            let share = if play.motion.inherit_velocity && speed > f32::EPSILON {
+                (limit / speed).min(1.0)
+            } else {
+                0.0
+            };
+            play.kept_mps = [kept[0] * share, kept[1] * share];
+            forward
+        });
+        let right = [forward[1], -forward[0]];
+        let from_ms = play.at_ms.max(0.0);
+        let (from, to) = (play.motion.offset_at(from_ms), play.motion.offset_at(to_ms));
+        let run_s = (to_ms - from_ms) / MS_PER_SECOND;
+        let mut local = [0.0; 2];
+        for axis in 0..2 {
+            local[axis] = to[axis] - from[axis] + play.kept_mps[axis] * run_s;
+            let fall = play.motion.decel_mps2[axis] * run_s;
+            play.kept_mps[axis] = if play.kept_mps[axis] > 0.0 {
+                (play.kept_mps[axis] - fall).max(0.0)
+            } else {
+                (play.kept_mps[axis] + fall).min(0.0)
+            };
+        }
+        play.at_ms = to_ms;
+        Some([
+            right[0] * local[0] + forward[0] * local[1],
+            right[1] * local[0] + forward[1] * local[1],
+        ])
     }
 
     /// Its equip load category changes to `load` ([`Character::set_equip_load`]).
@@ -241,6 +406,8 @@ impl TrackedBody {
     /// that follows it starts again.
     pub fn stand_at(&mut self, at: Position) {
         self.character.stand_at(at);
+        self.attack = None;
+        self.taken.clear();
         self.camera.forget();
         self.last_seen = None;
         self.dropping = false;
@@ -251,6 +418,8 @@ impl TrackedBody {
     /// floor it finds, and the camera that follows it starts again.
     pub fn drop_at(&mut self, at: Position) {
         self.character.drop_at(at);
+        self.attack = None;
+        self.taken.clear();
         self.camera.forget();
         self.last_seen = None;
         self.dropping = true;
@@ -269,7 +438,15 @@ impl TrackedBody {
             self.character.enter_combat();
         }
         let before = self.character.position();
-        let moved = self.character.step(input.character, ground, sea_level_m);
+        let driven = self.attack_motion(input.character, self.character.velocity());
+        self.remember(input.character);
+        let moved = match driven {
+            Some(driven) => {
+                self.character
+                    .step_driven(input.character, driven, ground, sea_level_m)
+            }
+            None => self.character.step(input.character, ground, sea_level_m),
+        };
         let mut position = self.character.position();
         let resting = self.is_resting();
         let acting = self.acting_records > 0;
@@ -461,6 +638,165 @@ mod tests {
             y: 100.0,
             z: GROUND_Z,
         }
+    }
+
+    /// An attack whose animation moves its player 1 m forward over 300 ms.
+    fn lunge() -> Arc<AttackMotion> {
+        Arc::new(AttackMotion {
+            step_ms: 100.0,
+            offsets: vec![[0.0, 0.0], [0.0, 0.2], [0.0, 0.6], [0.0, 1.0]],
+            inherit_velocity: false,
+            inherit_max_mps: None,
+            decel_mps2: [0.0; 2],
+        })
+    }
+
+    /// A record of keys alone (no camera) with camera yaw `yaw`.
+    fn keys(forward: i8, yaw: f32) -> TrackInput {
+        TrackInput {
+            character: CharacterInput {
+                intent: Intent {
+                    forward,
+                    ..Intent::default()
+                },
+                yaw,
+                dt_s: DT,
+            },
+            view: None,
+            boom_key: false,
+            action_started: false,
+        }
+    }
+
+    /// How close two places count as the same, m.
+    const CLOSE: f32 = 1e-3;
+    /// Records of 1/30 s in the lunge's 300 ms.
+    const LUNGE_RECORDS: usize = 9;
+    /// Records of 1/30 s in its first 100 ms.
+    const FIRST_STEP_RECORDS: usize = 3;
+    /// How long an attack may run before a movement key ends it, ms: longer than the lunge.
+    const NO_KEYS_MS: f32 = 1_000.0;
+
+    #[test]
+    fn an_attack_moves_the_body_by_its_animation_toward_the_camera_not_by_the_keys() {
+        // A quarter turn: the camera looks along -x.
+        let yaw = std::f32::consts::FRAC_PI_2;
+        let mut body = TrackedBody::new(start());
+        body.start_attack(lunge(), NO_KEYS_MS, 0.0, &Flat, SEA);
+        for _ in 0..LUNGE_RECORDS {
+            body.record(keys(0, yaw), &Flat, SEA);
+        }
+        let at = body.position();
+        assert!(
+            (at.x - (start().x - 1.0)).abs() < CLOSE && (at.y - start().y).abs() < CLOSE,
+            "{at:?}"
+        );
+        body.stand_at(start());
+        body.record(keys(0, yaw), &Flat, SEA);
+        assert_eq!(body.position(), start(), "a server move ends the attack");
+    }
+
+    #[test]
+    fn a_movement_key_takes_the_body_back_from_the_attack_s_marker_on() {
+        let mut keyed = TrackedBody::new(start());
+        let mut still = TrackedBody::new(start());
+        keyed.start_attack(lunge(), 100.0, 0.0, &Flat, SEA);
+        still.start_attack(lunge(), 100.0, 0.0, &Flat, SEA);
+        for _ in 0..FIRST_STEP_RECORDS {
+            keyed.record(keys(1, 0.0), &Flat, SEA);
+            still.record(keys(0, 0.0), &Flat, SEA);
+        }
+        assert!(
+            (keyed.position().y - (start().y + 0.2)).abs() < CLOSE,
+            "the animation, not the keys, before the marker: {:?}",
+            keyed.position()
+        );
+        for _ in FIRST_STEP_RECORDS..LUNGE_RECORDS {
+            keyed.record(keys(1, 0.0), &Flat, SEA);
+            still.record(keys(0, 0.0), &Flat, SEA);
+        }
+        assert!((still.position().y - (start().y + 1.0)).abs() < CLOSE);
+        assert!(
+            (keyed.position().y - still.position().y).abs() > CLOSE,
+            "the keys moved the body from the marker on"
+        );
+    }
+
+    #[test]
+    fn an_attack_halts_at_the_capsule_of_the_character_it_meets() {
+        // The camera looks along +y; a character's 0.4 m capsule stands 1.2 m ahead.
+        let characters = [crate::CharacterBody {
+            x: start().x,
+            y: start().y + 1.2,
+            radius_m: 0.4,
+        }];
+        let ground = crate::AmongCharacters {
+            ground: &Flat,
+            characters: &characters,
+        };
+        let mut body = TrackedBody::new(start());
+        body.start_attack(lunge(), NO_KEYS_MS, 0.0, &ground, SEA);
+        for _ in 0..LUNGE_RECORDS {
+            body.record(keys(0, 0.0), &ground, SEA);
+        }
+        let gone = body.position().y - start().y;
+        assert!(
+            gone < 1.2 - 0.4 - crate::character::PLAYER_RADIUS_M + CLOSE && gone > 0.0,
+            "the capsules touch, the body goes no further: {gone}"
+        );
+    }
+
+    #[test]
+    fn an_attack_older_than_the_body_s_records_goes_on_from_where_it_is() {
+        // Started 200 ms ago, before any record the body took: 0.6 m of its 1 m are behind it.
+        let mut body = TrackedBody::new(start());
+        body.start_attack(lunge(), NO_KEYS_MS, 200.0, &Flat, SEA);
+        for _ in 0..FIRST_STEP_RECORDS {
+            body.record(keys(0, 0.0), &Flat, SEA);
+        }
+        assert!(
+            (body.position().y - (start().y + 0.4)).abs() < CLOSE,
+            "{:?}",
+            body.position()
+        );
+    }
+
+    #[test]
+    fn an_attack_that_starts_later_waits_for_its_start() {
+        let mut body = TrackedBody::new(start());
+        body.start_attack(lunge(), NO_KEYS_MS, -100.0, &Flat, SEA);
+        for _ in 0..FIRST_STEP_RECORDS {
+            body.record(keys(0, 0.0), &Flat, SEA);
+        }
+        assert_eq!(body.position(), start(), "not yet started");
+        for _ in 0..FIRST_STEP_RECORDS {
+            body.record(keys(0, 0.0), &Flat, SEA);
+        }
+        assert!(
+            (body.position().y - (start().y + 0.2)).abs() < CLOSE,
+            "{:?}",
+            body.position()
+        );
+    }
+
+    #[test]
+    fn an_attack_the_server_learns_late_takes_its_records_again() {
+        let mut late = TrackedBody::new(start());
+        for _ in 0..FIRST_STEP_RECORDS {
+            late.record(keys(1, 0.0), &Flat, SEA);
+        }
+        late.start_attack(lunge(), NO_KEYS_MS, 100.0, &Flat, SEA);
+        let mut early = TrackedBody::new(start());
+        early.start_attack(lunge(), NO_KEYS_MS, 0.0, &Flat, SEA);
+        for _ in 0..FIRST_STEP_RECORDS {
+            early.record(keys(1, 0.0), &Flat, SEA);
+        }
+        assert!(
+            late.position().horizontal_distance(early.position()) < CLOSE,
+            "{:?} against {:?}",
+            late.position(),
+            early.position()
+        );
     }
 
     #[test]

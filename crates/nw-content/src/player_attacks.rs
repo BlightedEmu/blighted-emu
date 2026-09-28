@@ -20,6 +20,9 @@
 //! pressed), start the next step of the stance's chain ([`ComboLink`], [`ChargeStep`]). A stance
 //! tag that a status effect sets (`SetMannequinTag` of an action active while the effect is on,
 //! `GenericTagA` for `Greatsword_Stance_Offense`) gives a variant of the stance ([`Stance::variants`]).
+//!
+//! Motion: an attack action with an `AnimationDrivenMotion` activity moves the player by its
+//! animation's root motion, not by the movement keys ([`AttackMotion`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -210,6 +213,64 @@ pub struct BasicAttack {
     /// `Firearm_Shoot_HipFire_FullBody`). `None`: the fragment has no such clip.
     #[serde(default)]
     pub can_transition_ms: Option<u64>,
+    /// How it moves the player; `None`: its action leaves the motion to the movement keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion: Option<AttackMotion>,
+}
+
+/// How an attack moves its player (its action's `AnimationDrivenMotion`): the root motion of its
+/// animation (the fragment's first shown clip, the `Xform` joint), times the multiplier of the
+/// row its markers pick, and the velocity it keeps from the attack's start.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AttackMotion {
+    /// The time between two offsets, ms: one frame of the animation at its speed.
+    pub step_ms: f32,
+    /// The player's offset from its place at the attack's start, in its frame then (right and
+    /// forward, m), one per step from the start to the fragment's end.
+    pub offsets: Vec<[f32; 2]>,
+    /// It keeps the player's velocity at the start (`InheritVelocity`).
+    #[serde(default)]
+    pub inherit_velocity: bool,
+    /// The most speed it keeps, m/s (`InheritVelocityMaxSpeed`); `None`: no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inherit_max_mps: Option<f32>,
+    /// How fast the kept velocity falls, right and forward, m/s² (`Decel`).
+    pub decel_mps2: [f32; 2],
+}
+
+impl AttackMotion {
+    /// The offset `since_start_ms` after the attack starts, between the two offsets around it;
+    /// the last after them, none without them.
+    pub fn offset_at(&self, since_start_ms: f32) -> [f32; 2] {
+        let Some(last) = self.offsets.last() else {
+            return [0.0; 2];
+        };
+        if self.step_ms <= 0.0 {
+            return *last;
+        }
+        let steps = (since_start_ms / self.step_ms).max(0.0);
+        // `steps` is at least 0 and an offset count is small.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let index = steps.floor() as usize;
+        match (self.offsets.get(index), self.offsets.get(index + 1)) {
+            (Some(from), Some(to)) => {
+                let share = steps - steps.floor();
+                [
+                    from[0] + (to[0] - from[0]) * share,
+                    from[1] + (to[1] - from[1]) * share,
+                ]
+            }
+            _ => *last,
+        }
+    }
+
+    /// How long its offsets run, ms.
+    pub fn length_ms(&self) -> f32 {
+        // An offset count is small.
+        #[allow(clippy::cast_precision_loss)]
+        let steps = self.offsets.len().saturating_sub(1) as f32;
+        steps * self.step_ms
+    }
 }
 
 impl BasicAttack {
@@ -618,6 +679,7 @@ mod tests {
             length_ms: 0,
             links: Vec::new(),
             can_transition_ms: None,
+            motion: None,
         }
     }
 
@@ -861,6 +923,30 @@ mod tests {
         assert_eq!(
             light.can_transition_ms, None,
             "an older table has no marker"
+        );
+    }
+
+    #[test]
+    fn an_attack_moves_its_player_between_its_offsets_and_stops_at_the_last() {
+        let motion = AttackMotion {
+            step_ms: 100.0,
+            offsets: vec![[0.0, 0.0], [0.0, 0.4], [0.2, 1.0]],
+            inherit_velocity: false,
+            inherit_max_mps: None,
+            decel_mps2: [9.0, 9.0],
+        };
+        let close = |at: [f32; 2], expected: [f32; 2]| {
+            (at[0] - expected[0]).abs() < CLOSE && (at[1] - expected[1]).abs() < CLOSE
+        };
+        assert!(close(motion.offset_at(0.0), [0.0, 0.0]));
+        assert!(close(motion.offset_at(50.0), [0.0, 0.2]));
+        assert!(close(motion.offset_at(150.0), [0.1, 0.7]));
+        assert!(close(motion.offset_at(900.0), [0.2, 1.0]), "the last");
+        assert!((motion.length_ms() - 200.0).abs() < CLOSE);
+        let file = serde_json::to_string(&melee("Attack_Primary_C1")).expect("json");
+        assert!(
+            !file.contains("motion"),
+            "an attack without motion leaves it out"
         );
     }
 
