@@ -81,7 +81,69 @@ function. Reasoning and addresses:
 
 "Exit to main menu" is a different path and is not changed by this patch.
 
-## Third change: own-movement correction
+## Third change: offline Steam ticket
+
+Without it, the game cannot log in while the Steam client is offline (for
+example after the PC slept and Steam lost its connection). `Game.log` stops at
+`[SteamAuth] Getting steam auth session ticket.` and the game stays at "press
+any button". With Steam online the ticket comes in about 1 s and the log goes
+on with `OnAuthSessionTicket: Authenticating using steam auth session ticket
+handle: ...` and `OnAuthSessionTicket: Calling Auth stack!`.
+
+The Steam auth manager's `GetTicket` (build 25810808: `FUN_145aa0d10`; its
+handler is `FUN_145a94820`) does this after the log line:
+
+```text
+CMP  dword ptr [RBX+0x2F0], 0           ; an old ticket handle?
+...  ISteamUser::CancelAuthTicket(old)  ; vtable +0x88, then clear the old ticket
+...  ISteamUser::GetAuthTicketForWebApi(NULL)   ; vtable +0x70
+MOV  dword ptr [RBX+0x2F0], EAX         ; the new handle
+```
+
+The ticket itself comes later in the Steam callback
+`GetTicketForWebApiResponse_t` (handle, result, length, 2,560 ticket bytes).
+The Steam callback object at manager `+0x1A8` enters the handler through the
+thunk at `0x145A9F750` (`ADD RCX,-0x1A8` / `JMP 0x145A94820`), so the handler
+gets the manager in `RCX` and the response in `RDX`. The handler ignores a
+response whose handle is not the stored one, reports a Steam error for a result
+other than OK, copies the ticket to `this+0x38C`, and in the `nw` backend posts
+`{"steamAuthTicket":"<hex>","steamAppId":"...","branch":"..."}` to our
+`/steam` route. While the Steam client is offline Steam never sends the
+callback.
+
+Our `/steam` route (`crates/nw-login/src/game.rs`, `steam_auth`) does not read
+the body: the account comes from the launcher session in the path. So the
+ticket has no use for us. The patch replaces the request (106 bytes, from the
+`CMP` after the log call to the `RET`) with a direct handler call:
+
+```text
+MOV  dword ptr [RBX+0x2F0], 0     ; handle 0 (k_HAuthTicketInvalid)
+MOV  dword ptr [RSP+0x30], 0      ; response.handle = 0
+MOV  dword ptr [RSP+0x34], 1      ; response.result = k_EResultOK
+MOV  dword ptr [RSP+0x38], 0      ; response.ticket length = 0
+LEA  RDX, [RSP+0x30]
+MOV  RCX, RBX
+CALL OnAuthSessionTicket          ; FUN_145a94820
+ADD  RSP, 0x20 / POP RBX / RET
+INT3 ...                          ; to the end of the replaced bytes
+```
+
+The response sits in `GetTicket`'s home space; the handler saves registers only
+in its own home space, below it. With length 0 the handler copies no bytes and
+sends the ticket `""` (the log shows `ticket: steam|`). The game no longer asks
+Steam for a ticket at all, so the login is the same whether Steam is online or
+offline.
+
+Limit: the Steam client must still run with a user logged in (online or
+offline). The game calls `SteamAPI_Init` at start and shows "Steam must be
+running to play this game." when it fails; it also asks Steam for the app ID
+(`ISteamUtils`, local) for the `/steam` body. This patch does not change that.
+
+The tool finds `GetTicket` and the handler by byte signatures (with wildcards
+for RIP-relative and call offsets) and writes the handler's address into the
+`CALL`.
+
+## Fourth change: own-movement correction
 
 The client moves its own player at once from the keys (prediction) and then
 compares that with the own place the server sends for the same input number.
@@ -126,7 +188,7 @@ The tool finds the eight writes by their exact bytes and changes the two
 immediates. Re-make the copy after a change of these values
 (`python3 scripts/patch-client.py "<game>/Bin64"`).
 
-## Fourth change: AWS proxy (Windows only, `--aws-proxy`)
+## Fifth change: AWS proxy (Windows only, `--aws-proxy`)
 
 This change is for Windows, where there is no `bwrap` sandbox to give the game
 process a private hosts file and trust file. On Linux leave it off.
@@ -237,6 +299,13 @@ manager vtable is the one its constructor stores (build 25810808:
 `+0x130` is the function that calls the callback first. Update
 `SONIC_END_SESSION` and `STEAM_END_SESSION` in `scripts/patch-client.py`.
 
+For the offline ticket patch, find the function that logs `Getting steam auth
+session ticket.` (build 25810808: `FUN_145aa0d10`) and the handler that logs
+`OnAuthSessionTicket: Authenticating using steam auth session ticket handle:
+%d` (`FUN_145a94820`). Update `STEAM_GET_TICKET` and `ON_AUTH_SESSION_TICKET`
+in `scripts/patch-client.py`, and `TICKET_HANDLE_FIELD` /
+`TICKET_LENGTH_FIELD` if the handle (`+0x2F0`) or length (`+0x388`) moved.
+
 For the correction patch, find the constructor writes of the eight fields of
 the table above: the code that registers `g_localPlayer_CorrectionThreshold`
 (`FUN_141031800`) shows the object field of each variable, and the settings
@@ -311,7 +380,8 @@ only the **Game** option: the path of `<Bin64>\BlightedNewWorld.exe`. The
 launcher finds it in the Steam libraries when the copy exists. The Proton
 options are not shown on Windows.
 
-Steam must be running for the Steam ticket, as on Linux. The launcher sets
+Steam must be running with a user logged in, as on Linux (it may be offline:
+see the offline Steam ticket change). The launcher sets
 `SteamAppId` and `SteamGameId` to `1063730` for the game process and refuses any
 exe whose file name is not `BlightedNewWorld.exe`, so it never starts the retail
 client.
