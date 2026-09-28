@@ -176,6 +176,113 @@ pub fn replay(
     (compared, server_moves)
 }
 
+/// The share of a correction one own place applies in the client
+/// (`g_localPlayer_RequiredPhysicalCorrectionFraction` 0.5, `scripts/patch-client.py`).
+pub const CORRECTION_SHARE: f32 = 0.5;
+
+/// When the server sends the own place in a closed-loop replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaceRule {
+    /// In every own state: the sim's rule until 2026-09-26.
+    EveryState,
+    /// Only with a server move: the sim's rule since 2026-09-26 (`bins/sim/src/world.rs`, the
+    /// own tick's `with_position`).
+    ServerMovesOnly,
+}
+
+/// What the client went through in a closed-loop replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LoopSummary {
+    /// Own places the server sent.
+    pub places_sent: usize,
+    /// Places that pulled the client (past [`CORRECTION_M`]).
+    pub pulls: usize,
+    /// Of those, the pulls against the client's own motion: it went backward.
+    pub backward_pulls: usize,
+    /// Places that snapped it (past [`FULL_CORRECTION_M`]).
+    pub snaps: usize,
+}
+
+/// Replays `records` in a closed loop: the client walks retail's own path plus the corrections
+/// the server's own places gave it (the patched client's rule: past [`CORRECTION_M`] it moves
+/// [`CORRECTION_SHARE`] of the way, past [`FULL_CORRECTION_M`] all of it), its camera moves with
+/// it, and the server follows that camera. Each pull moves the camera the server follows: the
+/// loop of live run 21 (2026-09-26), which the open-loop [`replay`] cannot show.
+pub fn closed_loop(
+    records: &[(u64, InputRecord, sim::camera::RecordView)],
+    retail: &[PlayerSample],
+    ground: &(impl Ground + ?Sized),
+    sea_level_m: f32,
+    rule: PlaceRule,
+) -> LoopSummary {
+    let place = |sample: &PlayerSample| Position {
+        x: sample.position[0],
+        y: sample.position[1],
+        z: sample.position[2],
+    };
+    let mut summary = LoopSummary::default();
+    let Some(first) = retail.first() else {
+        return summary;
+    };
+    let mut body = TrackedBody::new(place(first));
+    let mut next = 0;
+    let mut last_retail = place(first);
+    // The client's place less retail's: what the corrections moved it by.
+    let mut offset = [0.0_f32; 3];
+    for (time_ms, record, view) in records {
+        let before = last_retail;
+        while next < retail.len() && retail[next].time_ms <= *time_ms {
+            let at = place(&retail[next]);
+            if at.horizontal_distance(last_retail) > SERVER_MOVE_M {
+                // A server move puts the client where the server puts it.
+                body.stand_at(at);
+                offset = [0.0; 3];
+            }
+            last_retail = at;
+            next += 1;
+        }
+        let shifted = sim::camera::RecordView {
+            camera: view.camera.map(|camera| Position {
+                x: camera.x + offset[0],
+                y: camera.y + offset[1],
+                z: camera.z + offset[2],
+            }),
+            ..*view
+        };
+        let Some(input) = sim::camera::track_input(record, shifted) else {
+            continue;
+        };
+        let tracked = body.record(input, ground, sea_level_m);
+        if rule != PlaceRule::EveryState {
+            continue;
+        }
+        summary.places_sent += 1;
+        let gap = [
+            tracked.position.x - (last_retail.x + offset[0]),
+            tracked.position.y - (last_retail.y + offset[1]),
+            tracked.position.z - (last_retail.z + offset[2]),
+        ];
+        let distance = gap.iter().map(|axis| axis * axis).sum::<f32>().sqrt();
+        let share = if distance > FULL_CORRECTION_M {
+            summary.snaps += 1;
+            1.0
+        } else if distance > CORRECTION_M {
+            summary.pulls += 1;
+            let motion = [last_retail.x - before.x, last_retail.y - before.y];
+            if gap[0] * motion[0] + gap[1] * motion[1] < 0.0 {
+                summary.backward_pulls += 1;
+            }
+            CORRECTION_SHARE
+        } else {
+            continue;
+        };
+        for (axis, step) in offset.iter_mut().zip(gap) {
+            *axis += step * share;
+        }
+    }
+    summary
+}
+
 /// The summary of `compared`.
 pub fn summarize(compared: &[Compared], server_moves: usize) -> ReplaySummary {
     let percentiles = |mut values: Vec<f32>| {
@@ -289,6 +396,33 @@ mod tests {
             [Some(0.41), Some(0.54), None],
         ),
     ];
+
+    #[test]
+    fn the_own_places_no_longer_pull_the_client_in_a_closed_loop() {
+        let (ground, sea) = level_ground(
+            &repo().join("local-data/content"),
+            &repo().join(CLIENT_BUILD_CONFIG),
+            TUTORIAL_LEVEL,
+        );
+        for (ledger, _) in LEDGERS {
+            let bytes = read_ledger(&repo().join(ledger)).expect("ledger");
+            let retail = trace_ledger(&bytes, &[]).player;
+            let records = input_records(&bytes);
+            let old = closed_loop(&records, &retail, &ground, sea, PlaceRule::EveryState);
+            let now = closed_loop(&records, &retail, &ground, sea, PlaceRule::ServerMovesOnly);
+            println!("{ledger}: every state {old:?}; server moves only {now:?}");
+            // The check sees the loop: the old rule pulled the client, also backward.
+            assert!(
+                old.pulls + old.snaps > 0 && old.backward_pulls > 0,
+                "{old:?}"
+            );
+            assert_eq!(
+                (now.pulls, now.snaps),
+                (0, 0),
+                "{ledger}: the client moved itself and was pulled"
+            );
+        }
+    }
 
     #[test]
     fn the_tutorial_own_movement_replays_against_retail() {
