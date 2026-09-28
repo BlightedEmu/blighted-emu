@@ -4367,22 +4367,20 @@ impl Neighbourhood<'_> {
                     stamina,
                     combat_status,
                 };
-                // Every own state carries the own clock; the place only while the server moves the
-                // player (a push; a spawn and a teleport carry theirs). Retail's server runs the
-                // client's own character controller, so its place is the client's and the client
-                // keeps it. This server only estimates the body from the camera, and the client
-                // corrects itself toward every own place it gets: sent while the client moved
-                // itself, the estimate's errors pulled it back and sideways, and each pull moved
-                // the camera the estimate follows (live 2026-09-16 at the beach bag; 2026-09-24;
-                // 2026-09-26, run 21: steps of 0.24 m forward and back in the water and on the
-                // beach). The client owns its own movement; the estimate stays the server's (mobs,
-                // hits, areas). The tutorial's boss cutscene, once blamed on a missing place,
-                // starts on a component change of its encounter (tutorial-quest note, section 12).
+                // Every own state carries the own clock, and the place whenever it changed, moving
+                // or not, as retail's ([`OwnPlaces`]); not
+                // while its moves are refused: that body is the last good one, behind the client
+                // (live 2026-09-18: 529 refused moves while running and dodging). The client
+                // needs the place: without it (run 22, 2026-09-26) it could not move on the ship and
+                // hung in the air after the drop into the sea. The place is only this server's
+                // estimate of the body, so the patched client does not correct itself toward it
+                // (`scripts/patch-client.py`, own-movement correction): every correction pulled the
+                // client and moved the camera the estimate follows (run 21).
                 let plain_tick = own_card != OwnCard::Spawn && teleport.is_none();
                 let hold_throttle = std::mem::take(&mut player.defer_throttle_clear);
                 let tick = OwnTick {
                     clock,
-                    with_position: player.push.is_some(),
+                    with_position: player.refused_since_ms.is_none() || player.push.is_some(),
                     clear_throttle: plain_tick && !player.throttle_cleared && !hold_throttle,
                     slayer: player.slayer.take_due(),
                     // Retail sent `rotation` and `lookDir` in most own states; the lock holds
@@ -5282,13 +5280,6 @@ mod tests {
         outgoing: &[Outgoing],
         who: &ConnectionRef,
     ) -> Vec<(u64, f32)> {
-        // The own player's states carry no place while it moves itself: its group says it is
-        // seen, the server's body where.
-        let own = world.by_connection.get(who).and_then(|entity| {
-            let number = world.world.get::<Player>(*entity)?.number;
-            let body = world.world.get::<Body>(*entity)?.motion.position();
-            Some((number, body.x))
-        });
         outgoing
             .iter()
             .filter(|out| out.connection == *who && out.channel == REPLICATION_CHANNEL)
@@ -5296,10 +5287,7 @@ mod tests {
                 out.envelopes.iter().flat_map(|bytes| {
                     groups_in(world, who, &bundle_in(bytes))
                         .into_iter()
-                        .filter_map(|(entity, update)| {
-                            let own_x = own.filter(|(number, _)| *number == entity).map(|(_, x)| x);
-                            Some((entity, update.position.map(|at| at.x).or(own_x)?))
-                        })
+                        .filter_map(|(entity, update)| Some((entity, update.position?.x)))
                 })
             })
             .collect()
@@ -6019,9 +6007,7 @@ mod tests {
     }
 
     #[test]
-    fn the_own_states_carry_no_place_while_the_client_moves_itself() {
-        // Run 21 (2026-09-26): the own places of the server's estimate pulled the client back and
-        // sideways. The client owns its movement: a refused move and a taken one send no place.
+    fn a_refused_move_holds_the_own_position_until_a_move_is_taken() {
         let mut world = world_with_spawns(Vec::new());
         world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
         world
@@ -6071,7 +6057,7 @@ mod tests {
             ..start
         };
         assert!(world.move_to(&connection(1), near, card_at + 300).is_ok());
-        assert_eq!(own_positions(&mut world, card_at + 333), vec![false]);
+        assert_eq!(own_positions(&mut world, card_at + 333), vec![true]);
     }
 
     #[test]
@@ -7979,11 +7965,11 @@ mod tests {
                 .combat
                 .hit(NOW + 1, false);
         }
-        // The nearer player 2 leaves the one slot for the one it fights; the own player stays.
+        // The own player's later places are offsets: only the others carry a pos10 now.
         let fight = tick(&mut world, NOW + 33);
         assert_eq!(
             seen_by(&world, &fight.messages, &connection(1)),
-            [1, 3],
+            [3],
             "the one it fights"
         );
     }
@@ -9634,12 +9620,9 @@ mod tests {
     }
 
     #[test]
-    fn a_running_player_gets_no_place_in_its_own_states() {
-        // The client owns its own movement: neither a run nor a stand sends the server's estimate
-        // of its place back to it (run 21, 2026-09-26: those places pulled it back and sideways).
-        // Retail sends its place in every state of a run because its server runs the client's own
-        // controller; the tutorial's boss cutscene starts on an encounter component change, not
-        // on the place (tutorial-quest note, section 12).
+    fn a_running_player_gets_its_place_in_every_own_state_and_a_still_one_none() {
+        // Live 2026-09-18: with no own place while running, Thorpe's intro never started (no
+        // 6703); retail sends the place in every state of a run (clean running capture).
         const NORTH: LookDir = LookDir {
             yaw: 0.0,
             pitch: 0.2,
@@ -9684,12 +9667,16 @@ mod tests {
             let outgoing = tick(&mut world, now);
             placed.push(has_place(&states_of(&world, &outgoing.messages, &a, 1)));
         }
-        assert_eq!(
-            placed.len(),
-            usize::from(RUN_STATES + STILL_STATES),
-            "an own state each tick"
+        assert!(
+            placed[..usize::from(RUN_STATES)]
+                .iter()
+                .all(|placed| *placed),
+            "every state of the run: {placed:?}"
         );
-        assert!(placed.iter().all(|placed| !placed), "{placed:?}");
+        assert!(
+            placed[placed.len() - 10..].iter().all(|placed| !placed),
+            "none once it stands: {placed:?}"
+        );
     }
 
     /// The `ftue_v2` terrain under the tutorial ship (the deck is in no height map), m.
@@ -9968,13 +9955,9 @@ mod tests {
         );
         let outgoing = tick(&mut world, later).messages;
         assert!(
-            outgoing
+            positions_seen_by(&world, &outgoing, &a)
                 .iter()
-                .filter(|out| out.connection == a && out.channel == REPLICATION_CHANNEL)
-                .flat_map(|out| &out.envelopes)
-                .flat_map(|bytes| groups_in(&world, &a, &bundle_in(bytes)))
-                .filter(|(entity, _)| *entity == 1)
-                .all(|(_, update)| update.position.is_none()),
+                .all(|(entity, _)| *entity != 1),
             "no own position while its moves are refused"
         );
         let seen_by_b: Vec<_> = outgoing
