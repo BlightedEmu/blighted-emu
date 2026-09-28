@@ -125,7 +125,8 @@ use level_assets::{ASSET_ENTITY_BASE, AssetViews, asset_gde_ref, spell_gde_ref};
 use level_flow::{AchievementRules, LevelFlow};
 use members::{
     CARD_REFRESH_BUNDLES, EntityKind, MobCard, OwnCard, OwnClock, OwnPlaces, OwnTeleport, OwnTick,
-    StateNumber, bundles, card_of, log_mob_group, mob_group, own_group, remote_group,
+    StateNumber, bundles, card_of, log_mob_group, mob_group, own_group, own_state_counter,
+    remote_group,
 };
 use mob_timeline::{Animations, MobPose, MobTimelines, TreeEntry, TreePose, animations_of};
 use quest_tracker::QuestTracker;
@@ -1560,7 +1561,7 @@ impl SimWorld {
             let falling = player.tracked.is_falling();
             player.slayer.record(
                 slayer::SlayerRecord {
-                    counter,
+                    counter: own_state_counter(counter),
                     frame_s: input.character.dt_s,
                     action: record.slayer_input(),
                     intent: (!held).then_some(input.character.intent),
@@ -3030,7 +3031,7 @@ impl SimWorld {
                     // 2026-09-18: one 3935 per change, none for the closes that follow). The
                     // inventory's slayer slot starts in the newest input record (retail child 17)
                     // and its clear waits for the second close ([`slayer`]).
-                    let started = player.input_counter.unwrap_or(0);
+                    let started = own_state_counter(player.input_counter.unwrap_or(0));
                     let changed = std::mem::replace(&mut player.looking_through_loadout, *looking)
                         != *looking;
                     if changed {
@@ -3387,7 +3388,7 @@ impl SimWorld {
             if let Some(counter) = player.input_counter {
                 player.state_number = Some(StateNumber::after(
                     player.state_number,
-                    counter,
+                    own_state_counter(counter),
                     server_time,
                 ));
             }
@@ -8037,12 +8038,12 @@ mod tests {
     }
 
     #[test]
-    fn own_states_take_the_number_of_the_newest_input_record_as_retail() {
+    fn own_states_take_the_number_of_the_newest_input_record_ahead_of_the_client() {
         // Retail newchar capture (243164 to 243197 ms): records 6497 and 6498 went together, and
         // the next own state was `0=62` (6498), skipping 6497; it repeated unchanged until the
-        // next record.
+        // next record. Ours is that record's number [`OWN_STATE_LEAD`] ahead.
         const RECORDS: [u16; 2] = [6497, 6498];
-        const RETAIL_ID: [u8; 2] = [0x19, 0x62];
+        let own_id = own_state_counter(RECORDS[1]).to_be_bytes();
         /// The ALC children of the number and time (sailor-movement note).
         const ID_REL: usize = 0;
         const TIME_REL: usize = 1;
@@ -8082,7 +8083,7 @@ mod tests {
         };
         let first = tick(&mut world, NOW + 33);
         let (id, time) = stamp_of(&world, &first);
-        assert_eq!(id, RETAIL_ID, "the newest record's counter");
+        assert_eq!(id, own_id, "the newest record's number");
         let again = tick(&mut world, NOW + 66);
         assert_eq!(
             stamp_of(&world, &again),
@@ -8094,7 +8095,7 @@ mod tests {
         let later = tick(&mut world, NOW + 99);
         assert_eq!(
             stamp_of(&world, &later).0,
-            (RECORDS[1] + 1).to_be_bytes(),
+            own_state_counter(RECORDS[1] + 1).to_be_bytes(),
             "the next record's"
         );
     }
@@ -8171,13 +8172,18 @@ mod tests {
         let spawned = NOW + OWN_CARD_DELAY_MS;
         let card = tick(&mut world, spawned);
         let first = alc_children(&states_of(&world, &card.messages, &a, 1));
-        assert!(first.contains(&(ID_REL, vec![41])), "{first:?}");
-        assert!(first.contains(&(STARTED_IN, 40_u16.to_be_bytes().to_vec())));
+        let [_, newest] = own_state_counter(BEFORE_SPAWN[0]).to_be_bytes();
+        assert!(first.contains(&(ID_REL, vec![newest])), "{first:?}");
+        assert!(first.contains(&(
+            STARTED_IN,
+            own_state_counter(BEFORE_SPAWN[1]).to_be_bytes().to_vec()
+        )));
         let next = camera_record(NEXT, at, view, [0.0; 2], STANDING_SLOTS);
         let _ = world.move_from_input(&a, &[next], spawned + 33);
         let later = tick(&mut world, spawned + 33);
         let own = alc_children(&states_of(&world, &later.messages, &a, 1));
-        assert!(own.contains(&(ID_REL, vec![42])), "{own:?}");
+        let [_, next_id] = own_state_counter(NEXT).to_be_bytes();
+        assert!(own.contains(&(ID_REL, vec![next_id])), "{own:?}");
         assert!(
             own.contains(&(SEQUENCE_TIME_REL, vec![0x83])),
             "the first state's two steps and one record more: {own:?}"
@@ -8240,7 +8246,7 @@ mod tests {
         );
         let own = alc_children(&states_of(&world, &first.messages, &a, 1));
         assert!(
-            own.contains(&(STARTED_IN, RECORD.to_be_bytes().to_vec())),
+            own.contains(&(STARTED_IN, own_state_counter(RECORD).to_be_bytes().to_vec())),
             "started in the state of its record: {own:?}"
         );
         assert!(

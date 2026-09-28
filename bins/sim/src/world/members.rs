@@ -499,6 +499,21 @@ const NO_CLOCK_STAMP: AlcStamp = AlcStamp {
     offset_ms: SPAWN_STATE_MS,
 };
 
+/// How far the own state numbers run ahead of the client's input counter, records (our choice:
+/// the middle of the 110 to 148 records our clock-numbered states ran ahead in run 12). Retail
+/// numbers each own state with the client's newest record, and its client corrects its own
+/// player to an own place so numbered and runs its newer records again from there: every gap
+/// between the server's movement and the client's own shows as a jump. Numbered with the
+/// counter (`f7c2ad6`), ours rubber banded (live 2026-09-24 and 26); numbered ahead, before
+/// `f7c2ad6` (live 2026-09-18) and with this lead (live 2026-09-26), the client moved freely. The
+/// slayer starts take the same numbers.
+pub(super) const OWN_STATE_LEAD: u16 = 128;
+
+/// The own state number of the client's input record `counter` ([`OWN_STATE_LEAD`]).
+pub(super) const fn own_state_counter(counter: u16) -> u16 {
+    counter.wrapping_add(OWN_STATE_LEAD)
+}
+
 /// The number of a player's ALC states while its client numbers its input records: the counter
 /// of the newest record the server moved the body by, and the server time of the first state
 /// with it. Retail numbers every own state so (Observed: all 39,955 own state numbers of the

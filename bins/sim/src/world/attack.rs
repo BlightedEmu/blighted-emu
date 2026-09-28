@@ -2794,10 +2794,11 @@ mod tests {
             vec![Ok(AttackOutcome::Missed)]
         );
         let mut player = world.world.get_mut::<Player>(entity).expect("player");
-        player.slayer.advance(press_counter, NOW);
+        let pressed_in = crate::world::members::own_state_counter(press_counter);
+        player.slayer.advance(pressed_in, NOW);
         let due = player.slayer.take_due().state.expect("the action goes out");
         assert_eq!(due.sequence, LIGHT_SEQUENCE);
-        assert_eq!(due.started, Some(press_counter));
+        assert_eq!(due.started, Some(pressed_in));
         assert!(player.stamina.take_change().is_none(), "no stamina spent");
     }
 
