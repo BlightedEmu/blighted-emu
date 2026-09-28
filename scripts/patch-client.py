@@ -22,11 +22,11 @@ fourth one with ``--aws-proxy``:
 
 3. Own-movement correction. The client predicts its own movement and corrects it
    toward the own place the server sends whenever the two differ by more than
-   0.01 m, and snaps past 1.0 m. The emulator's server-side movement is not
-   retail's to within that (a median 0.16 m off), so the client kept pulling
-   itself back. The tool finds the constructor writes of these defaults by their
-   bytes and raises the correction threshold to 0.5 m and the full-correction
-   distance to 2.0 m.
+   0.01 m, and snaps past 1.0 m. The emulator's server only estimates the body,
+   so every correction pulled the client back or sideways. The tool finds the
+   constructor writes of these defaults by their bytes and raises the correction
+   threshold and the full-correction distance past any level's size: the client
+   owns its own movement, and the server's teleports still move it.
 
 4. AWS proxy (``--aws-proxy``, for Windows). The remote-config (S3), analytics
    (Kinesis) and analytics-credentials (STS) clients call fixed Amazon names
@@ -165,12 +165,17 @@ CORRECTION_DEFAULTS_SIGNATURE = b"".join(
     MOV_DWORD_RDI + struct.pack("<I", field) + value for field, value in CORRECTION_DEFAULTS
 )
 MOV_IMMEDIATE_LEN = MOV_IMMEDIATE_OFFSET + DWORD_LEN
-# The patched values, m. The emulator's own place is a median 0.16 m (open world) and 0.21 m
-# (tutorial) from retail's, 75% within 0.39 m and 0.79 m, 90% within 1.45 m and 1.55 m (movement
-# replay of the newchar capture, 2026-09-24): below 0.5 m the client keeps its own prediction, and
-# only past 2.0 m does it snap to the server's place.
-CORRECTION_THRESHOLD_M = 0.5
-FULL_CORRECTION_M = 2.0
+# The patched values, m: past any distance in a level, so the client never corrects its own
+# movement toward the own place the server sends. Retail's server runs the client's character
+# controller and its place is the client's; the emulator's place is an estimate of the body from
+# the camera. With 0.5 m and 2.0 m, every correction pulled the client and moved the camera the
+# estimate follows: in the closed-loop replay of the retail tutorial 5,811 pulls (1,499 against
+# the client's motion), live the player stepped forward and back each frame (run 21, 2026-09-26).
+# The client still needs the place in each state (run 22: without it, it could not move). Server
+# moves are teleports, which the client takes by their own step (the drop into the sea of run 22
+# moved it while the states carried no place).
+CORRECTION_THRESHOLD_M = 100_000.0
+FULL_CORRECTION_M = 100_000.0
 
 OFFICIAL_NAME = "NewWorld.exe"
 BACKUP_NAME = "NewWorld.exe.orig"

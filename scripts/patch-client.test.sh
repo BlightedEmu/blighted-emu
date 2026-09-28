@@ -20,10 +20,10 @@ readonly KINESIS_LEAD_HEX="488d4df0" KINESIS_TAIL_HEX="90c6454c00c7451001000000"
 readonly STS_LEAD_HEX="488d4d10" STS_TAIL_HEX="90c6456c00488d442430"
 readonly S3_VERIFY_HEX="c684240802000001c744247001000000"
 # The local-player correction defaults: eight MOV dword ptr [RDI + field], imm32 writes (0x2F0 to
-# 0x30C), and the patched immediates of the threshold (0.5) and the full-correction distance (2.0).
+# 0x30C), and the patched immediates of the threshold and the full-correction distance (100,000).
 readonly CORRECTIONS_HEX="c787f00200000ad7233cc787f40200000000003fc787f80200009a99993e""c787fc020000cdcccc3ec7870003000005000000c787040300000000803f""c7870803000004000000c7870c0300000000003f"
-readonly THRESHOLD_HEX="0000003f"
-readonly FULL_CORRECTION_HEX="00000040"
+readonly THRESHOLD_HEX="0050c347"
+readonly FULL_CORRECTION_HEX="0050c347"
 # Fake PE layout: image base, .text at RVA 0x1000 / file 0x200 (0x800 bytes), .rdata at RVA 0x2000
 # / file 0xA00.
 readonly SIG_OFFSET=$((0x200))

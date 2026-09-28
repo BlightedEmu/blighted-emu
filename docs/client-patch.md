@@ -91,12 +91,12 @@ writes their defaults (build 25810808: `MOV dword ptr [RDI + field], imm32` at
 
 | Field | Variable (`g_localPlayer_...`) | Default | Patched |
 |---|---|---|---|
-| `0x2F0` | `CorrectionThreshold` | 0.01 m | **0.5 m** |
+| `0x2F0` | `CorrectionThreshold` | 0.01 m | **100,000 m** |
 | `0x2F4` | `IdleVerticalCorrectionThreshold` | 0.5 m | |
 | `0x2F8` | `IdleHorizontalCorrectionThreshold` | 0.3 m | |
 | `0x2FC` | `AddedErrorDistancePerMissedServerState` | 0.4 m | |
 | `0x300` | `AddedErrorDistanceMaxMissedServerStates` | 5 | |
-| `0x304` | `ErrorDistanceForFullCorrection` | 1.0 m | **2.0 m** |
+| `0x304` | `ErrorDistanceForFullCorrection` | 1.0 m | **100,000 m** |
 | `0x308` | `FailedCorrectionsBeforeSnap` | 4 | |
 | `0x30C` | `RequiredPhysicalCorrectionFraction` | 0.5 | |
 
@@ -104,23 +104,27 @@ The variable help texts: no correction is applied while the total correction
 is less than `CorrectionThreshold`; past `ErrorDistanceForFullCorrection` a
 full correction (likely a snap) happens.
 
-Why: the emulator moves the player's body on the server from the client's keys,
-and its place is not retail's to within 1 cm. In the movement replay of the
-newchar capture (2026-09-24) it was a median 0.16 m (open world) and 0.21 m
-(tutorial) from retail's own place, 90% within 1.45 m and 1.55 m. With the
-retail defaults the client corrected itself on nearly every state and snapped
-often: rubber banding, walking backward (run 16). With 0.5 m the client keeps
-its own prediction for the usual error, and it snaps only past 2.0 m.
+Why: retail's server runs the client's own character controller, so its own
+place is where the client stands. The emulator only estimates the body from
+the client's camera. With the retail defaults the client corrected itself on
+nearly every state (run 16); with 0.5 m and 2.0 m it still did, and each
+correction moved the camera the estimate follows, so the loop pulled the
+player back and sideways (run 21, 2026-09-26: steps of 0.24 m forward and back
+each frame). The closed-loop replay of the retail tutorial (`content-tool`
+test `own_replay`, feature `own-replay`) counts 5,811 pulls with 0.5 m and
+2.0 m, 1,499 of them against the player's motion, and none with these values.
+Past any level's size, the client never corrects its own movement: it owns it.
 
-The own place is still sent in every own state: the client checks its trigger
-areas (the tutorial cutscenes) against it, and with no own place while running
-the first cutscene never started (live 2026-09-18). The server still moves the
-body that other players see and that every rule uses; these values change only
-how far the patched client lets its own picture differ from it.
+The own place is still sent in every own state: without it (run 22) the client
+could not move on the ship and hung in the air after the drop into the sea.
+Server moves are teleports, which the client takes by their own step, not by
+this correction (the drop of run 22 moved it while the states carried no
+place). The server still keeps the body that other players see and that every
+rule uses.
 
 The tool finds the eight writes by their exact bytes and changes the two
-immediates. The values are a stop-gap until the server's movement matches
-retail's (task `t1` in `content/todo.toml`).
+immediates. Re-make the copy after a change of these values
+(`python3 scripts/patch-client.py "<game>/Bin64"`).
 
 ## Fourth change: AWS proxy (Windows only, `--aws-proxy`)
 

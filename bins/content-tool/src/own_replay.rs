@@ -180,40 +180,54 @@ pub fn replay(
 /// (`g_localPlayer_RequiredPhysicalCorrectionFraction` 0.5, `scripts/patch-client.py`).
 pub const CORRECTION_SHARE: f32 = 0.5;
 
-/// When the server sends the own place in a closed-loop replay.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlaceRule {
-    /// In every own state: the sim's rule until 2026-09-26.
-    EveryState,
-    /// Only with a server move: the sim's rule since 2026-09-26 (`bins/sim/src/world.rs`, the
-    /// own tick's `with_position`).
-    ServerMovesOnly,
+/// How far the client lets its own movement differ from the own place before it corrects itself
+/// (`scripts/patch-client.py`, own-movement correction).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClientCorrection {
+    /// `g_localPlayer_CorrectionThreshold`, m: no correction below it.
+    pub threshold_m: f32,
+    /// `g_localPlayer_ErrorDistanceForFullCorrection`, m: all of the way past it.
+    pub full_m: f32,
 }
+
+/// The patched client until 2026-09-26.
+pub const CORRECTION_UNTIL_2026_09_26: ClientCorrection = ClientCorrection {
+    threshold_m: CORRECTION_M,
+    full_m: FULL_CORRECTION_M,
+};
+
+/// The patched client (`CORRECTION_THRESHOLD_M` and `FULL_CORRECTION_M` of
+/// `scripts/patch-client.py`).
+pub const PATCHED_CORRECTION: ClientCorrection = ClientCorrection {
+    threshold_m: 100_000.0,
+    full_m: 100_000.0,
+};
 
 /// What the client went through in a closed-loop replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct LoopSummary {
     /// Own places the server sent.
     pub places_sent: usize,
-    /// Places that pulled the client (past [`CORRECTION_M`]).
+    /// Places that pulled the client (past the correction threshold).
     pub pulls: usize,
     /// Of those, the pulls against the client's own motion: it went backward.
     pub backward_pulls: usize,
-    /// Places that snapped it (past [`FULL_CORRECTION_M`]).
+    /// Places that snapped it (past the full-correction distance).
     pub snaps: usize,
 }
 
-/// Replays `records` in a closed loop: the client walks retail's own path plus the corrections
-/// the server's own places gave it (the patched client's rule: past [`CORRECTION_M`] it moves
-/// [`CORRECTION_SHARE`] of the way, past [`FULL_CORRECTION_M`] all of it), its camera moves with
-/// it, and the server follows that camera. Each pull moves the camera the server follows: the
-/// loop of live run 21 (2026-09-26), which the open-loop [`replay`] cannot show.
+/// Replays `records` in a closed loop: the server sends its own place in every state (as the sim
+/// does), the client walks retail's own path plus the corrections those places gave it under
+/// `correction` (past the threshold it moves [`CORRECTION_SHARE`] of the way, past the full
+/// distance all of it), its camera moves with it, and the server follows that camera. Each pull
+/// moves the camera the server follows: the loop of live run 21 (2026-09-26), which the open-loop
+/// [`replay`] cannot show.
 pub fn closed_loop(
     records: &[(u64, InputRecord, sim::camera::RecordView)],
     retail: &[PlayerSample],
     ground: &(impl Ground + ?Sized),
     sea_level_m: f32,
-    rule: PlaceRule,
+    correction: ClientCorrection,
 ) -> LoopSummary {
     let place = |sample: &PlayerSample| Position {
         x: sample.position[0],
@@ -253,9 +267,6 @@ pub fn closed_loop(
             continue;
         };
         let tracked = body.record(input, ground, sea_level_m);
-        if rule != PlaceRule::EveryState {
-            continue;
-        }
         summary.places_sent += 1;
         let gap = [
             tracked.position.x - (last_retail.x + offset[0]),
@@ -263,10 +274,10 @@ pub fn closed_loop(
             tracked.position.z - (last_retail.z + offset[2]),
         ];
         let distance = gap.iter().map(|axis| axis * axis).sum::<f32>().sqrt();
-        let share = if distance > FULL_CORRECTION_M {
+        let share = if distance > correction.full_m {
             summary.snaps += 1;
             1.0
-        } else if distance > CORRECTION_M {
+        } else if distance > correction.threshold_m {
             summary.pulls += 1;
             let motion = [last_retail.x - before.x, last_retail.y - before.y];
             if gap[0] * motion[0] + gap[1] * motion[1] < 0.0 {
@@ -398,7 +409,7 @@ mod tests {
     ];
 
     #[test]
-    fn the_own_places_no_longer_pull_the_client_in_a_closed_loop() {
+    fn the_patched_client_is_not_pulled_by_the_own_places_in_a_closed_loop() {
         let (ground, sea) = level_ground(
             &repo().join("local-data/content"),
             &repo().join(CLIENT_BUILD_CONFIG),
@@ -408,10 +419,10 @@ mod tests {
             let bytes = read_ledger(&repo().join(ledger)).expect("ledger");
             let retail = trace_ledger(&bytes, &[]).player;
             let records = input_records(&bytes);
-            let old = closed_loop(&records, &retail, &ground, sea, PlaceRule::EveryState);
-            let now = closed_loop(&records, &retail, &ground, sea, PlaceRule::ServerMovesOnly);
-            println!("{ledger}: every state {old:?}; server moves only {now:?}");
-            // The check sees the loop: the old rule pulled the client, also backward.
+            let old = closed_loop(&records, &retail, &ground, sea, CORRECTION_UNTIL_2026_09_26);
+            let now = closed_loop(&records, &retail, &ground, sea, PATCHED_CORRECTION);
+            println!("{ledger}: 0.5 and 2.0 m {old:?}; patched {now:?}");
+            // The check sees the loop: the old values pulled the client, also backward.
             assert!(
                 old.pulls + old.snaps > 0 && old.backward_pulls > 0,
                 "{old:?}"
