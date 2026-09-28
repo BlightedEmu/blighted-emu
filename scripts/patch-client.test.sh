@@ -22,6 +22,14 @@ readonly S3_VERIFY_HEX="c684240802000001c744247001000000"
 # The local-player correction defaults: eight MOV dword ptr [RDI + field], imm32 writes (0x2F0 to
 # 0x30C), and the patched immediates of the threshold (0.5) and the full-correction distance (2.0).
 readonly CORRECTIONS_HEX="c787f00200000ad7233cc787f40200000000003fc787f80200009a99993e""c787fc020000cdcccc3ec7870003000005000000c787040300000000803f""c7870803000004000000c7870c0300000000003f"
+# The Steam GetTicket function and the start of its ticket handler (stand-in RIP and call offsets).
+readonly GET_TICKET_HEX="40534883ec20488bd9c681e802000001488d0d11111111488d1511111111e811111111""83bbf002000000743d488d0d11111111ff15111111118b93f0020000488b08488b01ff9088000000""488d8b8c03000033d241b8000a0000e811111111c7838803000000000000488d0d11111111""ff151111111133d2488b08488b01ff50708983f00200004883c4205bc3"
+readonly HANDLER_HEX="48895c2410488974241848897c2420554154415541564157488dac2450faffff4881ecb0060000""488bf2488bd94533ff4489bde0050000448b328b7a044488bde0050000488d0511111111""488944244044897c24480f28442440660f7f4424504c8d0511111111488d542450""488d8de0050000e811111111b8020000004438bde00500000f45f8488d0d11111111""443bb3f00200007411"
+# The patched ticket request (from the CMP after the log call): store handle 0, build the response
+# (handle 0, result OK, length 0) at [RSP+0x30], call the handler at VA 0x140001400, return, and
+# INT3 to the end of the replaced bytes.
+readonly OFFLINE_TICKET_HEX="c783f002000000000000c744243000000000c744243401000000c744243800000000""488d542430488bcbe8fefeffff4883c4205bc3"
+readonly OFFLINE_TICKET_FILL=53
 readonly THRESHOLD_HEX="0000003f"
 readonly FULL_CORRECTION_HEX="00000040"
 # Fake PE layout: image base, .text at RVA 0x1000 / file 0x200 (0x800 bytes), .rdata at RVA 0x2000
@@ -36,6 +44,10 @@ readonly KINESIS_OFFSET=$((0x380))
 readonly STS_OFFSET=$((0x3c0))
 readonly S3_VERIFY_OFFSET=$((0x400))
 readonly CORRECTIONS_OFFSET=$((0x440))
+# The ticket handler and GetTicket sit past the INT3 run the caves use.
+readonly HANDLER_OFFSET=$((0x600))
+readonly GET_TICKET_OFFSET=$((0x6b0))
+readonly TICKET_REQUEST_OFFSET=$((GET_TICKET_OFFSET + 0x23))
 # The immediates of the first and the sixth write.
 readonly THRESHOLD_OFFSET=$((CORRECTIONS_OFFSET + 6))
 readonly FULL_CORRECTION_OFFSET=$((CORRECTIONS_OFFSET + 5 * 10 + 6))
@@ -61,19 +73,37 @@ failures=0
 pass() { echo "PASS: $1"; }
 fail() { echo "FAIL: $1"; failures=$((failures + 1)); }
 
+# Prints $3 bytes of file $1 at offset $2 as hex.
+bytes_at() {
+  dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | xxd -p | tr -d '\n'
+}
+
+# Checks that the patched copy ($patched) has the hex $3 at offset $2.
+check_bytes() {
+  local what="$1" offset="$2" want="$3" got
+  got="$(bytes_at "$patched" "$offset" $((${#want} / 2)))"
+  if [[ "$got" == "$want" ]]; then
+    pass "$what"
+  else
+    fail "$what (got $got)"
+  fi
+}
+
 # Builds a fake Bin64 with a minimal PE NewWorld.exe: the verify signature (when $2 is yes), the
 # Sonic and Steam EndSession bodies (the Steam one when $3 is yes), a vtable slot that points at
 # the Steam function, the AWS proxy parts with INT3 padding (when $4 is yes), and the correction
-# defaults (when $5 is yes, the default).
+# defaults (when $5 is yes, the default), and the Steam GetTicket function and its ticket handler
+# (when $6 is yes, the default).
 make_bin64() {
   local dir="$1" with_sig="$2" with_steam="$3" with_proxy="$4" with_corrections="${5:-yes}"
+  local with_ticket="${6:-yes}"
   mkdir -p "$dir"
   python3 -I - "$dir/NewWorld.exe" "$with_sig" "$with_steam" "$with_proxy" "$with_corrections" \
-    "$SIGNATURE_HEX" "$SONIC_HEX" "$STEAM_HEX" "$STEAM_VA_HEX" "$CTOR_HEX" "$S3_LEAD_HEX" \
+    "$with_ticket" "$GET_TICKET_HEX" "$HANDLER_HEX" "$SIGNATURE_HEX" "$SONIC_HEX" "$STEAM_HEX" "$STEAM_VA_HEX" "$CTOR_HEX" "$S3_LEAD_HEX" \
     "$S3_TAIL_HEX" "$KINESIS_LEAD_HEX" "$KINESIS_TAIL_HEX" "$STS_LEAD_HEX" "$STS_TAIL_HEX" \
     "$S3_VERIFY_HEX" "$CORRECTIONS_HEX" <<'PY'
 import struct, sys
-(path, with_sig, with_steam, with_proxy, with_corrections, sig, sonic, steam, steam_va, ctor,
+(path, with_sig, with_steam, with_proxy, with_corrections, with_ticket, get_ticket, handler, sig, sonic, steam, steam_va, ctor,
  s3_lead, s3_tail, kinesis_lead, kinesis_tail, sts_lead, sts_tail, s3_verify,
  corrections) = sys.argv[1:]
 image = bytearray(0xB00)
@@ -115,12 +145,16 @@ if with_proxy == "yes":
     image[0x500:0x800] = b"\xcc" * 0x300
 if with_corrections == "yes":
     put(0x440, corrections)
+if with_ticket == "yes":
+    put(0x600, handler)
+    put(0x6B0, get_ticket)
 open(path, "wb").write(image)
 PY
 }
 
 # 1) Patch creates the copy and the backup, and leaves the official unchanged.
 bin64="$work_dir/good/Bin64"
+patched="$bin64/BlightedNewWorld.exe"
 make_bin64 "$bin64" yes yes yes
 cp "$bin64/NewWorld.exe" "$work_dir/official.before"
 python3 "$PATCH_SCRIPT" "$bin64" >/dev/null
@@ -187,6 +221,13 @@ else
   fail "patched copy keeps the other correction defaults (got $got)"
 fi
 
+check_bytes "patched GetTicket calls the ticket handler with an empty ticket" \
+  "$TICKET_REQUEST_OFFSET" "$OFFLINE_TICKET_HEX"
+check_bytes "patched GetTicket fills the rest of the request with INT3" \
+  $((TICKET_REQUEST_OFFSET + ${#OFFLINE_TICKET_HEX} / 2)) "$(printf 'cc%.0s' $(seq "$OFFLINE_TICKET_FILL"))"
+check_bytes "patched GetTicket keeps the flag write and the log call" "$GET_TICKET_OFFSET" "${GET_TICKET_HEX:0:70}"
+check_bytes "the ticket handler is unchanged" "$HANDLER_OFFSET" "$HANDLER_HEX"
+
 # 2) --verify passes on the patched copy, and fails after tampering.
 if python3 "$PATCH_SCRIPT" "$bin64" --verify >/dev/null; then
   pass "--verify passes on a correct copy"
@@ -232,6 +273,14 @@ else
   pass "missing Steam EndSession signature is refused"
 fi
 
+no_ticket="$work_dir/no-ticket/Bin64"
+make_bin64 "$no_ticket" yes yes yes yes no
+if python3 "$PATCH_SCRIPT" "$no_ticket" >/dev/null 2>&1 || [[ -e "$no_ticket/BlightedNewWorld.exe" ]]; then
+  fail "missing Steam GetTicket signature is refused"
+else
+  pass "missing Steam GetTicket signature is refused"
+fi
+
 # 5) Re-running is idempotent: a second patch rebuilds the same copy from the official.
 python3 "$PATCH_SCRIPT" "$bin64" >/dev/null
 python3 "$PATCH_SCRIPT" "$bin64" >/dev/null
@@ -240,11 +289,6 @@ if python3 "$PATCH_SCRIPT" "$bin64" --verify >/dev/null; then
 else
   fail "re-running stays correct"
 fi
-
-# Prints $3 bytes of file $1 at offset $2 as hex.
-bytes_at() {
-  dd if="$1" bs=1 skip="$2" count="$3" 2>/dev/null | xxd -p | tr -d '\n'
-}
 
 # 6) Without --aws-proxy the AWS client set-ups stay as they are.
 got="$(bytes_at "$bin64/BlightedNewWorld.exe" "$CAVE_OFFSET" 4)"
@@ -257,16 +301,6 @@ fi
 
 # 7) --aws-proxy adds a jump and a cave per AWS client, and turns off the S3 verifySSL write.
 python3 "$PATCH_SCRIPT" "$bin64" --aws-proxy >/dev/null
-patched="$bin64/BlightedNewWorld.exe"
-check_bytes() {
-  local what="$1" offset="$2" want="$3" got
-  got="$(bytes_at "$patched" "$offset" $((${#want} / 2)))"
-  if [[ "$got" == "$want" ]]; then
-    pass "$what"
-  else
-    fail "$what (got $got)"
-  fi
-}
 check_bytes "S3 call returns into a jump to its cave" $((S3_OFFSET + 10)) "$S3_JUMP_HEX"
 check_bytes "Kinesis call returns into a jump to its cave" $((KINESIS_OFFSET + 9)) "$KINESIS_JUMP_HEX"
 check_bytes "STS call returns into a jump to its cave" $((STS_OFFSET + 9)) "$STS_JUMP_HEX"

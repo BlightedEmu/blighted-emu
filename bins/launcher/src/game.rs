@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //! Starting New World (M2 spec section 6): the game executable runs directly under Proton,
-//! inside `bwrap` with the private network files of [`crate::mirror`]. Steam must run, because the
-//! game asks it for a Steam ticket. The launcher never starts the game through Steam's own
+//! inside `bwrap` with the private network files of [`crate::mirror`]. Steam must run with a user logged
+//! in (online or offline), because the game starts the Steam API. The launcher never starts the game through Steam's own
 //! launcher: that path runs the retail executable in Steam's retail prefix, and there the game
 //! would call Amazon's remote-config, analytics and STS hosts.
 
@@ -269,7 +269,7 @@ pub fn checked_windows_launch(launch: Option<WindowsLaunch>) -> Result<WindowsLa
 
 /// `BlightedNewWorld.exe <arguments>` with the player's `environment` and the Steam context, so
 /// the patched game runs directly without Steam's own launcher and without Easy Anti-Cheat. Steam
-/// must run for the Steam ticket, as on Linux.
+/// must run with a user logged in, as on Linux.
 #[cfg(any(windows, test))]
 pub fn windows_command(
     launch: &WindowsLaunch,

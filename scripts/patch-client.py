@@ -3,8 +3,8 @@
 """Make the patched copy of the New World client that the emulator needs.
 
 This tool writes a patched copy, ``BlightedNewWorld.exe``, next to the official
-``NewWorld.exe`` (which it never modifies). The copy has three changes, and a
-fourth one with ``--aws-proxy``:
+``NewWorld.exe`` (which it never modifies). The copy has four changes, and a
+fifth one with ``--aws-proxy``:
 
 1. Certificate bypass. The real client refuses the emulator's self-signed
    game-server certificate. The tool finds OpenSSL ``SSL_CTX_set_verify`` by a
@@ -20,7 +20,15 @@ fourth one with ``--aws-proxy``:
    are found by byte signatures; the vtable slot is the single pointer to the
    Steam function.
 
-3. Own-movement correction. The client predicts its own movement and corrects it
+3. Offline Steam ticket. The Steam auth manager asks the Steam client for a
+   web API auth ticket and waits for a Steam callback. While the Steam client is
+   offline that callback never comes, and the game stays at "press any button".
+   Our ``/steam`` route does not read the ticket. The tool replaces the request
+   in ``GetTicket`` with a direct call of the ticket handler with an empty ticket
+   (handle 0, result OK, length 0), so the login goes on at once whether Steam is
+   online or not. Both functions are found by byte signatures.
+
+4. Own-movement correction. The client predicts its own movement and corrects it
    toward the own place the server sends whenever the two differ by more than
    0.01 m, and snaps past 1.0 m. The emulator's server-side movement is not
    retail's to within that (a median 0.16 m off), so the client kept pulling
@@ -28,7 +36,7 @@ fourth one with ``--aws-proxy``:
    bytes and raises the correction threshold to 0.5 m and the full-correction
    distance to 2.0 m.
 
-4. AWS proxy (``--aws-proxy``, for Windows). The remote-config (S3), analytics
+5. AWS proxy (``--aws-proxy``, for Windows). The remote-config (S3), analytics
    (Kinesis) and analytics-credentials (STS) clients call fixed Amazon names
    with certificate checks on. Windows has no per-process hosts or trust file,
    so each client is sent through the launcher's loopback proxy instead. After
@@ -82,6 +90,83 @@ STEAM_END_SESSION = re.compile(
     + re.escape(bytes.fromhex("488b8b28020000" "4885c9" "7407" "488b01" "ff5030")),
     re.DOTALL,
 )
+
+# Offline Steam ticket patch. Four wildcard bytes are a RIP-relative or call offset.
+REL32 = b".{4}"
+# The Steam auth manager's ticket handle (HAuthTicket) and ticket length fields.
+TICKET_HANDLE_FIELD = 0x2F0
+TICKET_LENGTH_FIELD = 0x388
+# The response the patched GetTicket hands to the handler at once (steam_api.h):
+# k_HAuthTicketInvalid, k_EResultOK and an empty ticket. Our /steam route does not read the ticket.
+NO_TICKET_HANDLE = 0
+STEAM_RESULT_OK = 1
+EMPTY_TICKET_LENGTH = 0
+# GetTicket's epilogue: ADD RSP,0x20 / POP RBX / RET.
+GET_TICKET_EPILOGUE = bytes.fromhex("4883c420" "5b" "c3")
+# Steam auth manager GetTicket (build 25810808: FUN_145aa0d10). After it logs "Getting steam auth
+# session ticket." (the request group) it cancels the old ticket (ISteamUser vtable +0x88,
+# CancelAuthTicket), clears the old ticket, calls ISteamUser::GetAuthTicketForWebApi(NULL) (vtable
+# +0x70) and stores the handle. The ticket comes later in a Steam callback, and only while the
+# Steam client is connected to Steam.
+STEAM_GET_TICKET = re.compile(
+    re.escape(bytes.fromhex("4053" "4883ec20" "488bd9" "c681e802000001" "488d0d"))
+    + REL32
+    + re.escape(bytes.fromhex("488d15"))
+    + REL32
+    + b"\xe8"
+    + REL32
+    + b"(?P<request>"
+    + re.escape(bytes.fromhex("83bb") + struct.pack("<I", TICKET_HANDLE_FIELD) + bytes.fromhex("00" "743d" "488d0d"))
+    + REL32
+    + re.escape(bytes.fromhex("ff15"))
+    + REL32
+    + re.escape(
+        bytes.fromhex("8b93") + struct.pack("<I", TICKET_HANDLE_FIELD)
+        + bytes.fromhex("488b08" "488b01" "ff9088000000" "488d8b8c030000" "33d2" "41b8000a0000" "e8")
+    )
+    + REL32
+    + re.escape(bytes.fromhex("c783") + struct.pack("<II", TICKET_LENGTH_FIELD, EMPTY_TICKET_LENGTH) + bytes.fromhex("488d0d"))
+    + REL32
+    + re.escape(bytes.fromhex("ff15"))
+    + REL32
+    + re.escape(
+        bytes.fromhex("33d2" "488b08" "488b01" "ff5070" "8983") + struct.pack("<I", TICKET_HANDLE_FIELD)
+        + GET_TICKET_EPILOGUE
+    )
+    + b")",
+    re.DOTALL,
+)
+# The Steam auth manager's GetTicketForWebApiResponse_t handler (build 25810808: FUN_145a94820,
+# "OnAuthSessionTicket"; the Steam callback object at this+0x1A8 enters it through the thunk at
+# 0x145A9F750). RCX is the manager, RDX the response. It reads the handle (+0), the result (+4)
+# and the ticket length (+8), and copies that many ticket bytes from +12. A handle other than the
+# stored one is ignored; a result other than OK reports a Steam error; then it calls our /steam
+# route with the hex ticket.
+ON_AUTH_SESSION_TICKET = re.compile(
+    re.escape(
+        bytes.fromhex(
+            "48895c2410" "4889742418" "48897c2420" "55" "4154" "4155" "4156" "4157"
+            "488dac2450faffff" "4881ecb0060000" "488bf2" "488bd9" "4533ff" "4489bde0050000"
+            "448b32" "8b7a04" "4488bde0050000" "488d05"
+        )
+    )
+    + REL32
+    + re.escape(bytes.fromhex("4889442440" "44897c2448" "0f28442440" "660f7f442450" "4c8d05"))
+    + REL32
+    + re.escape(bytes.fromhex("488d542450" "488d8de0050000" "e8"))
+    + REL32
+    + re.escape(bytes.fromhex("b802000000" "4438bde0050000" "0f45f8" "488d0d"))
+    + REL32
+    + re.escape(bytes.fromhex("443bb3") + struct.pack("<I", TICKET_HANDLE_FIELD) + bytes.fromhex("7411")),
+    re.DOTALL,
+)
+# The response goes in GetTicket's home space: after PUSH RBX / SUB RSP,0x20 it is [RSP+0x30], which
+# the handler (it saves registers in its own home space, [RSP+0x08] to [RSP+0x20] here) never uses.
+TICKET_RESPONSE_STACK = 0x30
+MOV_DWORD_RBX = bytes.fromhex("c783")
+MOV_DWORD_RSP8 = bytes.fromhex("c74424")
+LEA_RDX_RSP8 = bytes.fromhex("488d5424")
+MOV_RCX_RBX = bytes.fromhex("488bcb")
 
 # AWS proxy patch (docs/re/2026-09-20-windows-launcher-network.md). The launcher's loopback proxy
 # listens here; bins/launcher/src/aws_proxy.rs holds the same port.
@@ -194,16 +279,21 @@ def fail(message: str) -> NoReturn:
     sys.exit(f"error: {message} ({SEE_DOC})")
 
 
-def find_unique(data: bytes, pattern: "bytes | re.Pattern[bytes]", what: str) -> int:
-    """Offset of the single match of `pattern`, or exit with an error."""
+def find_unique_match(data: bytes, pattern: "bytes | re.Pattern[bytes]", what: str) -> "re.Match[bytes]":
+    """The single match of `pattern`, or exit with an error."""
     if isinstance(pattern, bytes):
         pattern = re.compile(re.escape(pattern), re.DOTALL)
-    matches = [match.start() for match in pattern.finditer(data)]
+    matches = list(pattern.finditer(data))
     if not matches:
         fail(f"{what} signature not found; the client build may have changed")
     if len(matches) > 1:
         fail(f"{what} signature found more than once; aborting")
     return matches[0]
+
+
+def find_unique(data: bytes, pattern: "bytes | re.Pattern[bytes]", what: str) -> int:
+    """Offset of the single match of `pattern`, or exit with an error."""
+    return find_unique_match(data, pattern, what).start()
 
 
 def sections(data: bytes) -> "list[tuple[int, int, int, int, int]]":
@@ -328,6 +418,26 @@ def plan_corrections(data: bytes) -> "list[tuple[str, int, bytes]]":
     ]
 
 
+def plan_offline_ticket(data: bytes) -> "list[tuple[str, int, bytes]]":
+    """The edit that makes GetTicket hand an empty ticket to its handler at once, instead of
+    asking the Steam client and waiting for a callback that never comes while Steam is offline."""
+    request = find_unique_match(data, STEAM_GET_TICKET, "Steam GetTicket")
+    handler = virtual_address(data, find_unique(data, ON_AUTH_SESSION_TICKET, "Steam OnAuthSessionTicket"))
+    site = request.start("request")
+    length = request.end("request") - site
+    code = MOV_DWORD_RBX + struct.pack("<II", TICKET_HANDLE_FIELD, NO_TICKET_HANDLE)
+    response = (NO_TICKET_HANDLE, STEAM_RESULT_OK, EMPTY_TICKET_LENGTH)
+    for index, value in enumerate(response):
+        code += MOV_DWORD_RSP8 + bytes([TICKET_RESPONSE_STACK + index * DWORD_LEN])
+        code += struct.pack("<I", value)
+    code += LEA_RDX_RSP8 + bytes([TICKET_RESPONSE_STACK]) + MOV_RCX_RBX
+    call = virtual_address(data, site) + len(code)
+    code += bytes([CALL_OPCODE]) + rel32(call, CALL_LEN, handler) + GET_TICKET_EPILOGUE
+    if len(code) > length:
+        fail("the offline Steam ticket code is larger than the request it replaces")
+    return [("offline Steam ticket", site, code + bytes([INT3]) * (length - len(code)))]
+
+
 def plan_patches(data: bytes, aws_proxy: bool) -> "list[tuple[str, int, bytes]]":
     """The (name, file offset, new bytes) edits that make the patched copy from `data`; with
     `aws_proxy`, also the AWS proxy edits."""
@@ -338,6 +448,7 @@ def plan_patches(data: bytes, aws_proxy: bool) -> "list[tuple[str, int, bytes]]"
     edits = [
         ("certificate bypass", verify_site, NOPS),
         ("exit to desktop", slot, struct.pack("<Q", sonic)),
+        *plan_offline_ticket(data),
         *plan_corrections(data),
     ]
     return edits + plan_aws_proxy(data) if aws_proxy else edits
