@@ -58,10 +58,11 @@ use nw_capture::{Decoder, SERVER_TO_CLIENT, ledger_records};
 use nw_content::creature_animations::CreatureRow;
 use nw_content::ftue_entities::{FACET_LEN, GDE_REF_LEN, facet_of};
 use nw_messages::{
-    AlcState, BodyCodec, BundleMember, BundlePayload, GdeMetadataReplicatedState, InputPosition,
-    LEVEL_INFO_CHANGED_MSG_TYPE_INDEX, LOCAL_PLAYER_INTEREST, MemberState, ON_DAMAGE_TYPE_INDEX,
-    OnDamageMsg, PLAYER_SLICE_ASSET, POS_REL_CHILD, REPLICATED_STATE_BUNDLE_TYPE_INDEX, Reader,
-    ReplicatedStateBundle, ScopeEntry, Writer,
+    AlcState, BodyCodec, BundleMember, BundlePayload, DEPLETED_GATHERABLE,
+    GdeMetadataReplicatedState, InputPosition, LEVEL_INFO_CHANGED_MSG_TYPE_INDEX,
+    LOCAL_PLAYER_INTEREST, MemberState, ON_DAMAGE_TYPE_INDEX, OnDamageMsg, PLAYER_SLICE_ASSET,
+    POS_REL_CHILD, REPLICATED_STATE_BUNDLE_TYPE_INDEX, Reader, ReplicatedStateBundle, ScopeEntry,
+    Writer,
 };
 use nw_reflect::decode_type_id;
 use serde::Serialize;
@@ -160,6 +161,10 @@ pub struct MobTrace {
     pub first_ms: u64,
     /// Time of its last group, in ms from the first ledger record.
     pub last_ms: u64,
+    /// Time of the first group whose gatherable controller is Depleted (a skinned corpse), in ms
+    /// from the first ledger record.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub depleted_ms: Option<u64>,
     /// Its ALC states, in time order.
     pub samples: Vec<MobSample>,
 }
@@ -587,6 +592,13 @@ impl<'a> Tracer<'a> {
         let entry = &mut self.trace.mobs[mob.index];
         entry.last_ms = time_ms;
         let creature = self.creatures.get(&entry.asset).copied();
+        let depleted = group.members.iter().any(|member| {
+            matches!(&member.state, MemberState::GatherableController(state)
+                if state.gatherable_state == Some(DEPLETED_GATHERABLE))
+        });
+        if depleted {
+            entry.depleted_ms.get_or_insert(time_ms);
+        }
         for member in &group.members {
             let MemberState::Alc(state) = &member.state else {
                 continue;
@@ -646,6 +658,7 @@ impl<'a> Tracer<'a> {
             gde_ref: hex::encode(gde_ref),
             first_ms: time_ms,
             last_ms: time_ms,
+            depleted_ms: None,
             samples: Vec::new(),
         });
         self.facets.insert(facet_of(&gde_ref), index);
@@ -958,6 +971,7 @@ mod tests {
             default_tags: Vec::new(),
             fragment_ticks: BTreeMap::new(),
             collider_radius_mm: None,
+            skinnable: false,
         }]
     }
 

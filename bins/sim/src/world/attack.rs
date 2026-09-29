@@ -1778,10 +1778,15 @@ impl SimWorld {
             attacker = ?swing.attacker,
             x = position.x,
             y = position.y,
+            z = position.z,
             facing,
             kind = ?swing.kind,
             action = swing.attack.action,
             ?touched,
+            targets = ?places
+                .iter()
+                .map(|(mob, at, _)| (*mob, at.x, at.y, at.z))
+                .collect::<Vec<_>>(),
             "player swing"
         );
         let damage_id = swing.attack.damage_row.clone();

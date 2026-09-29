@@ -115,6 +115,8 @@ pub struct Mob {
     /// (live login-world-entry-01: a boar spawned 1.42 m under the terrain stayed in it until
     /// it moved).
     grounded: bool,
+    /// Its corpse went (`SimWorld::bury_corpses`): it is not shown until its respawn.
+    buried: bool,
 }
 
 impl Mob {
@@ -615,6 +617,7 @@ impl Mobs {
             awake: false,
             near_ms: 0,
             grounded: false,
+            buried: false,
         })
     }
 
@@ -1351,6 +1354,24 @@ impl Mobs {
         counts
     }
 
+    /// The dead world and GM mobs whose corpse is still shown, with when they died.
+    pub fn corpses(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.live.iter().filter_map(|(index, mob)| {
+            let died_ms = mob.dead_since_ms.filter(|_| !mob.buried)?;
+            (!self.personal.contains_key(index)).then(|| (mob_entity(*index), died_ms))
+        })
+    }
+
+    /// The corpse of dead mob `entity` goes: it is not shown again until its respawn.
+    pub fn bury(&mut self, entity: u64) {
+        if let Some(mob) = spawn_index(entity)
+            .and_then(|index| self.live.get_mut(&index))
+            .filter(|mob| mob.dead_since_ms.is_some())
+        {
+            mob.buried = true;
+        }
+    }
+
     /// Mob `entity` died at `now_ms`: it waits for its respawn (a personal mob waits for its
     /// encounter to remove it).
     pub fn died(&mut self, entity: u64, now_ms: u64) {
@@ -1414,7 +1435,7 @@ impl Mobs {
     /// section 5); the ghosts for other sims and the mobs of the bundles both come from here.
     pub fn awake_states(&self) -> impl Iterator<Item = (u64, Position, MobGhost)> + '_ {
         self.awake.iter().filter_map(|index| {
-            let mob = self.live.get(index)?;
+            let mob = self.live.get(index).filter(|mob| !mob.buried)?;
             let spawn = self.spawn_of(*index)?;
             Some((
                 mob_entity(*index),
@@ -1746,6 +1767,23 @@ mod tests {
         mobs.set_cells(every);
         run(&mut mobs, &[player_at(SPAWN_X + 10.0)], 0, 0);
         assert_eq!(at(&mobs, 0).z, HEIGHT);
+    }
+
+    #[test]
+    fn a_buried_corpse_is_not_shown_until_its_respawn() {
+        let mut mobs = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
+        mobs.set_cells(every);
+        let entity = mob_entity(0);
+        run(&mut mobs, &[player_at(SPAWN_X + 10.0)], 0, 0);
+        assert_eq!(mobs.corpses().count(), 0, "it lives");
+        let mob = mobs.get_mut(entity).expect("mob");
+        mob.health.take(mob.health.max());
+        mobs.died(entity, 1);
+        assert_eq!(mobs.corpses().collect::<Vec<_>>(), [(entity, 1)]);
+        assert!(mobs.awake_states().any(|(mob, ..)| mob == entity));
+        mobs.bury(entity);
+        assert_eq!(mobs.corpses().count(), 0);
+        assert!(!mobs.awake_states().any(|(mob, ..)| mob == entity));
     }
 
     #[test]

@@ -57,6 +57,17 @@ const RADIUS_FIELD: &str = "m_radius";
 const CHARACTER_COLLIDER_FILTER: &str = "AICharacterCollider";
 /// Millimetres per metre.
 const MM_PER_M: f32 = 1_000.0;
+/// The entity name field, and the name of the entity that holds a skinnable corpse's gatherable
+/// states (Observed: in the boar, wolf, turkey, alligator and rat slices, not in the sailor and
+/// risen ones).
+const ENTITY_NAME_FIELD: &str = "Name";
+const GATHERABLE_STATES_ENTITY: &str = "Gatherable_States";
+/// The type of the component that makes the remains gatherable (type id
+/// `{B52D0D52-99CD-41BE-B6F7-D2519C15BF14}`, a client type, `FUN_142d1b4b0`; Observed: missing
+/// from the `disabledgatherablevariants` rat, present on every other creature slice read).
+const GATHERABLE_REMAINS_TYPE: [u8; 16] = [
+    0xb5, 0x2d, 0x0d, 0x52, 0x99, 0xcd, 0x41, 0xbe, 0xb6, 0xf7, 0xd2, 0x51, 0x9c, 0x15, 0xbf, 0x14,
+];
 /// Scope time ticks per second (`DAT_14807f948` = 1/30 s).
 const SCOPE_TICKS_PER_SECOND: f64 = 30.0;
 /// The slack of a length counted in ticks: a length is a sum of f32 frame times, so a length
@@ -106,6 +117,8 @@ pub struct SliceMannequin {
     pub main_hand: Option<String>,
     /// The radius of its body's capsule, mm ([`collider_radius_mm`]).
     pub collider_radius_mm: Option<u32>,
+    /// Its corpse can be skinned ([`skinnable`]).
+    pub skinnable: bool,
 }
 
 fn descendants<'a>(element: &'a Element, found: &mut Vec<&'a Element>) {
@@ -164,7 +177,26 @@ pub fn slice_mannequin(bytes: &[u8]) -> Option<SliceMannequin> {
         default_tags,
         main_hand: main_hand_in(&all),
         collider_radius_mm: collider_radius_mm(&all),
+        skinnable: skinnable(&all),
     })
+}
+
+/// Whether the corpse of the creature among the slice elements `all` can be skinned: the slice has
+/// the gatherable states entity and the gatherable remains component (Observed over the 155
+/// creature slices of 150 retail ledgers whose dead stayed at least 5 times: the 18 of them with
+/// both stayed until skinned or 1.7 to 96 s, every other but one a fixed time per creature).
+fn skinnable(all: &[&Element]) -> bool {
+    let name_crc = lowercase_crc32(ENTITY_NAME_FIELD);
+    let states = all.iter().any(|element| {
+        element.name_crc == Some(name_crc)
+            && element
+                .as_string()
+                .is_ok_and(|name| name == GATHERABLE_STATES_ENTITY)
+    });
+    states
+        && all
+            .iter()
+            .any(|element| element.type_id == GATHERABLE_REMAINS_TYPE)
 }
 
 /// The radius of the body's capsule among the slice elements `all`, mm: the capsule query shape
@@ -542,6 +574,7 @@ pub fn build_rows(
             default_tags,
             fragment_ticks,
             collider_radius_mm: mannequin.collider_radius_mm,
+            skinnable: mannequin.skinnable,
         });
     }
     rows.sort_by(|left, right| left.asset.cmp(&right.asset));
@@ -628,9 +661,34 @@ mod tests {
                 item,
                 collider("HitVolume", 0.1),
                 collider("AICharacterCollider_Predator", 0.6),
+                text(ENTITY_NAME_FIELD, GATHERABLE_STATES_ENTITY),
+                gatherable_remains(),
             ],
         ))
         .expect("stream")
+    }
+
+    /// The component that makes a creature's remains gatherable.
+    fn gatherable_remains() -> Element {
+        Element {
+            type_id: GATHERABLE_REMAINS_TYPE,
+            ..named("element", Vec::new())
+        }
+    }
+
+    #[test]
+    fn a_corpse_is_skinnable_with_its_gatherable_states_and_remains() {
+        let skinnable = |elements: Vec<Element>| {
+            let root = Element::with_children(0, elements);
+            let mut all = Vec::new();
+            descendants(&root, &mut all);
+            skinnable(&all)
+        };
+        let states = || text(ENTITY_NAME_FIELD, GATHERABLE_STATES_ENTITY);
+        assert!(skinnable(vec![states(), gatherable_remains()]), "a boar");
+        assert!(!skinnable(vec![gatherable_remains()]), "a sailor");
+        assert!(!skinnable(vec![states()]), "the rat without gatherable");
+        assert!(slice_mannequin(&boar_slice()).expect("mannequin").skinnable);
     }
 
     #[test]

@@ -852,7 +852,7 @@ pub struct SimWorld {
     /// The crafts that run.
     crafts: Vec<crafting::PendingCraft>,
     /// The dead mobs that were skinned, and those whose corpse state the bundles sent.
-    skinned: HashSet<u64>,
+    skinned: HashMap<u64, u64>,
     skinned_shown: HashSet<u64>,
     dice: Dice,
     deaths: Vec<Departure>,
@@ -990,7 +990,7 @@ impl SimWorld {
             performances: music::Performances::default(),
             open_gathers: Vec::new(),
             crafts: Vec::new(),
-            skinned: HashSet::new(),
+            skinned: HashMap::new(),
             skinned_shown: HashSet::new(),
             content,
             mobs: Mobs::new(Arc::clone(&combat.spawns), &combat),
@@ -2038,6 +2038,7 @@ impl SimWorld {
         self.tick_hands(now_ms, server_time);
         self.tick_pushes(now_ms);
         self.gathers_due(now_ms);
+        self.bury_corpses(now_ms);
         self.bags.tick(now_ms);
         self.loot_rights_due(server_time);
         self.crafts_due(now_ms);
@@ -3521,7 +3522,7 @@ impl SimWorld {
                 card.boss_phase = Some(phase);
                 card.boss_phase_changed = shown != Some(phase);
             }
-            card.skinned = self.skinned.contains(&entity);
+            card.skinned = self.skinned.contains_key(&entity);
             card.skinned_changed = card.skinned && self.skinned_shown.insert(entity);
             let unseen = owner.is_some_and(|owner| !spawned.contains(&owner));
             if let Some(look) = content
@@ -3574,9 +3575,10 @@ impl SimWorld {
             .retain(|entity, _| mobs.health(*entity).is_some());
         // A corpse leaves the skinned ones when its mob lives again or is gone.
         self.skinned
-            .retain(|entity| mobs.health(*entity) == Some(0));
+            .retain(|entity, _| mobs.health(*entity) == Some(0));
         let skinned = &self.skinned;
-        self.skinned_shown.retain(|entity| skinned.contains(entity));
+        self.skinned_shown
+            .retain(|entity| skinned.contains_key(entity));
         // The radius is checked at start to be a finite number above 0.
         let Some(mut grid) = SpatialGrid::new(self.settings.interest_radius_m) else {
             return Ok(Bundled::default());
@@ -7316,6 +7318,14 @@ mod tests {
         assert_eq!(answers(&accepted), [(gather, 1, Vec::new())]);
         step(&mut world, &mut now, SKIN_MS);
         assert_eq!(holds(&world, PORK), 1, "the quest drop");
+        let shown = |world: &SimWorld| world.mobs.corpses().any(|(mob, _)| mob == boar);
+        assert!(shown(&world), "a skinned corpse stays a while");
+        step(
+            &mut world,
+            &mut now,
+            nw_content::corpse_times::SKINNED_CORPSE_MS,
+        );
+        assert!(!shown(&world), "then it goes");
 
         // The Light Ration at the campfire, then the turn-in at Aelstrom.
         world.interact(&who, request(CAMPFIRE, station, 5), &[], now);

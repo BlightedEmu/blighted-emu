@@ -139,7 +139,7 @@ pub use combat_effects::{CombatEffectMsg, HitScanEffects};
 pub use components::{
     BOSS_PHASE_TYPE_INDEX, COMBAT_STATUS_TYPE_INDEX, CURRENCY_COMPONENT, CURRENCY_TYPE_INDEX,
     CombatStatusState, CurrencyState, DAMAGE_RECEIVER_TYPE_INDEX, DELAYED_EVENT_TYPE_INDEX,
-    DamageReceiverState, DelayedEventState, GATHERABLE_CONTROLLER_TYPE_INDEX,
+    DEPLETED_GATHERABLE, DamageReceiverState, DelayedEventState, GATHERABLE_CONTROLLER_TYPE_INDEX,
     GatherableControllerState, INTERACT_TYPE_INDEX, InteractState, LOOK_TARGETING_TYPE_INDEX,
     LookTargetingState, MANA_TYPE_INDEX, ManaState, STAMINA_TYPE_INDEX, StaminaState,
     boss_phase_change,

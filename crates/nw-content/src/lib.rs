@@ -10,6 +10,7 @@ pub mod chest_lockouts;
 pub mod client_build;
 pub mod combat;
 pub mod container;
+pub mod corpse_times;
 pub mod crafting;
 pub mod creature_animations;
 pub mod datatable_overrides;

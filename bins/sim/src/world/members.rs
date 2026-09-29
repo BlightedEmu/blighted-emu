@@ -17,13 +17,13 @@ use nw_bus::MobGhost;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
 use nw_messages::{
     AlcStamp, AlcState, AssetId, BOSS_PHASE_TYPE_INDEX, BundleGroup, BundleMember, BundlePayload,
-    CardPlace, DATA_BITS_ACTIVE, DYNAMIC_SLICE_SUB_ID, GATHERABLE_CONTROLLER_TYPE_INDEX,
-    GDE_METADATA_COMPONENT, GatherableControllerState, GdeMetadataReplicatedState, InputPosition,
-    LOCAL_PLAYER_INTEREST, LookDir, LookTargetingState, MAX_BUNDLE_INDEXES, MemberState,
-    MessageError, PLAYER_SLICE_ASSET, POS3_LEN, PlayerStates, ReplicatedStateBundle,
-    SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, ServerMessage, StepPlace, TeleportStep,
-    VitalsData, VitalsState, boss_phase_change, change_members, offset_from, player_members,
-    raw_id_of_entity,
+    CardPlace, DATA_BITS_ACTIVE, DEPLETED_GATHERABLE, DYNAMIC_SLICE_SUB_ID,
+    GATHERABLE_CONTROLLER_TYPE_INDEX, GDE_METADATA_COMPONENT, GatherableControllerState,
+    GdeMetadataReplicatedState, InputPosition, LOCAL_PLAYER_INTEREST, LookDir, LookTargetingState,
+    MAX_BUNDLE_INDEXES, MemberState, MessageError, PLAYER_SLICE_ASSET, POS3_LEN, PlayerStates,
+    ReplicatedStateBundle, SPAWN_STATE_ID, SPAWN_STATE_MS, SPAWN_TELEPORT, ServerMessage,
+    StepPlace, TeleportStep, VitalsData, VitalsState, boss_phase_change, change_members,
+    offset_from, player_members, raw_id_of_entity,
 };
 use nw_sim_core::Position;
 
@@ -464,9 +464,6 @@ pub(super) fn log_mob_group(mob: u64, carded: bool, group: &BundleGroup) {
         "mob group"
     );
 }
-
-/// `gatherableState` Depleted (client enum): a skinned corpse.
-const DEPLETED_GATHERABLE: u8 = 8;
 
 /// Milliseconds per own state number of a client that does not number its input records (the
 /// test client, the load-test bots): one per 33 ms, retail's pace (live capture 117010 to 117112

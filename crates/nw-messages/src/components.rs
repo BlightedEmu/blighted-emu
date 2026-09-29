@@ -361,6 +361,9 @@ impl DamageReceiverState {
     }
 }
 
+/// `gatherableState` Depleted (client enum): a skinned corpse.
+pub const DEPLETED_GATHERABLE: u8 = 8;
+
 /// `MB::GatherableControllerReplicatedState`: the state of a gatherable or of a creature's
 /// gatherable remains (4 on every living mob of the captures).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

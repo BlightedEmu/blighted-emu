@@ -76,6 +76,11 @@ pub struct CreatureRow {
     /// `default.collisionfilters`); `None` when its slice has none, or the table is older.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collider_radius_mm: Option<u32>,
+    /// Its corpse can be skinned: it stays until it is skinned, then
+    /// [`crate::corpse_times::SKINNED_CORPSE_MS`]; else it goes after its corpse time
+    /// ([`crate::corpse_times::corpse_ms`]). `false` in a table from before this field.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skinnable: bool,
 }
 
 /// One creature's animation names.
@@ -90,6 +95,7 @@ pub struct CreatureAnimation {
     default_tags: Vec<String>,
     fragment_ticks: BTreeMap<String, Vec<Option<u32>>>,
     collider_radius_mm: Option<u32>,
+    skinnable: bool,
 }
 
 /// The 1-based number of `name` in `names`.
@@ -99,6 +105,11 @@ fn number_of(names: &[String], name: &str) -> Option<u16> {
 }
 
 impl CreatureAnimation {
+    /// Its corpse can be skinned ([`CreatureRow::skinnable`]).
+    pub const fn skinnable(&self) -> bool {
+        self.skinnable
+    }
+
     /// The radius of its body's capsule, m ([`CreatureRow::collider_radius_mm`]).
     pub fn collider_radius_m(&self) -> Option<f32> {
         // A radius of a few metres in millimetres is exact in an f32.
@@ -214,6 +225,7 @@ impl CreatureAnimations {
                         default_tags: row.default_tags,
                         fragment_ticks: row.fragment_ticks,
                         collider_radius_mm: row.collider_radius_mm,
+                        skinnable: row.skinnable,
                     },
                 ))
             })
@@ -290,6 +302,7 @@ mod tests {
                 ("Alert".to_owned(), vec![Some(56), Some(73), None]),
             ]),
             collider_radius_mm: Some(500),
+            skinnable: true,
         }
     }
 

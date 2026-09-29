@@ -18,6 +18,7 @@ use std::collections::HashMap;
 
 use bevy_ecs::entity::Entity;
 use nw_content::chest_lockouts::Lockout;
+use nw_content::corpse_times::{DEFAULT_CORPSE_MS, SKINNED_CORPSE_MS, corpse_ms};
 use nw_content::gathering::Gatherable;
 use nw_content::loot::{LootContext, loot_level};
 use nw_content::tradeskill_xp::NEUTRAL_MODIFIER;
@@ -388,7 +389,7 @@ impl SimWorld {
     /// Player `number` starts to skin `mob`: only a dead mob that nobody skinned or skins.
     fn start_skinning(&self, mob: u64, number: u64) -> Result<(), ()> {
         let dead = self.mobs.health(mob) == Some(0);
-        let taken = self.skinned.contains(&mob)
+        let taken = self.skinned.contains_key(&mob)
             || self
                 .open_gathers
                 .iter()
@@ -418,6 +419,38 @@ impl SimWorld {
         }
     }
 
+    /// The corpses whose time came at `now_ms` go (`nw_content::corpse_times`): a
+    /// skinned one [`SKINNED_CORPSE_MS`] after its skinning, one that can be skinned stays until
+    /// then, any other after its creature's corpse time.
+    pub(super) fn bury_corpses(&mut self, now_ms: u64) {
+        let content = std::sync::Arc::clone(&self.content);
+        let due: Vec<u64> = self
+            .mobs
+            .corpses()
+            .filter(|&(mob, died_ms)| {
+                let gone_at_ms = if let Some(&skinned_ms) = self.skinned.get(&mob) {
+                    Some(skinned_ms + SKINNED_CORPSE_MS)
+                } else {
+                    let creature = self
+                        .mobs
+                        .vitals_of(mob)
+                        .and_then(|vitals| content.mob_looks.look(vitals, self.mobs.asset(mob)))
+                        .and_then(|look| content.creature_animations.get(&look.asset.id));
+                    match creature {
+                        Some(creature) if creature.skinnable() => None,
+                        Some(creature) => Some(died_ms + corpse_ms(&creature.slice)),
+                        None => Some(died_ms + DEFAULT_CORPSE_MS),
+                    }
+                };
+                gone_at_ms.is_some_and(|gone_at_ms| now_ms >= gone_at_ms)
+            })
+            .map(|(mob, _)| mob)
+            .collect();
+        for mob in due {
+            self.mobs.bury(mob);
+        }
+    }
+
     fn end_gather(&mut self, gather: &OpenGather, now_ms: u64) {
         let content = std::sync::Arc::clone(&self.content);
         let tags = gather
@@ -443,7 +476,7 @@ impl SimWorld {
         loot.extend(self.quest_drops(gather.number, gather.mob, &gather.gatherable.id));
         match gather.mob {
             Some(mob) => {
-                self.skinned.insert(mob);
+                self.skinned.insert(mob, now_ms);
             }
             None if gather.water => {}
             // A container stays for everyone else: only its opener's tracker locks it.
