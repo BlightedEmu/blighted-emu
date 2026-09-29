@@ -235,9 +235,6 @@ enum Command {
         #[arg(long)]
         bundle: Option<PathBuf>,
     },
-    /// Writes what the retail mobs of a capture ledger did (ALC states, FullBody animations),
-    /// the own player's positions and the hits on the player, as JSON (run it under a memory
-    /// limit, for example `ulimit -v 4000000`).
     /// Builds the AI data file (every Server.pak behavior tree, the AI of every creature slice
     /// and the CAGE task resolution of their grids) from Server.pak and the game paks, for the
     /// creatures of the creature animation table.
@@ -249,7 +246,9 @@ enum Command {
         #[arg(long, default_value = DEFAULT_CONTENT_DIR)]
         out_dir: PathBuf,
     },
-    /// Writes the mob trace of a capture ledger.
+    /// Writes what the retail mobs of a capture ledger did (ALC states, FullBody animations),
+    /// the own player's positions and the hits on the player, as JSON (run it under a memory
+    /// limit, for example `ulimit -v 4000000`).
     AiTrace {
         /// The `ledger.bin` file.
         ledger: PathBuf,
