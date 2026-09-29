@@ -994,12 +994,16 @@ impl Mobs {
         changes
     }
 
-    /// Whether the spawn `index` has a patrol route.
+    /// Whether the spawn `index` has a design patrol route: a path drawn in a design file, which
+    /// may lead far from the spawn. A spawner's waypoints (a route with tasks) stay by the spawn
+    /// (Observed: within 7 m on the beach graze and patrol spawners), inside the reach of the
+    /// wake scan at the spawn, so such a mob sleeps as the others do.
     fn patrols(&self, index: u32) -> bool {
         self.overrides
             .get(index as usize)
             .and_then(Option::as_ref)
-            .is_some_and(|overrides| overrides.route.is_some())
+            .and_then(|overrides| overrides.route.as_ref())
+            .is_some_and(|route| route.tasks.is_empty())
     }
 
     /// One tick at `now_ms` with the living players and player ghosts near this sim's mobs, on
@@ -1677,6 +1681,36 @@ mod tests {
         mobs.set_ai(resolve_ai(&world, mobs.ai()));
         mobs.set_cells(every);
         mobs
+    }
+
+    #[test]
+    fn only_a_design_route_keeps_its_mob_awake() {
+        use crate::mob_ai::{Route, RouteTask, SpawnAi};
+        let routed = |tasks| {
+            Some(SpawnAi {
+                route: Some(Arc::new(Route {
+                    points: vec![position_of(&spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL))],
+                    tasks,
+                    ..Route::default()
+                })),
+                ..SpawnAi::default()
+            })
+        };
+        let graze = RouteTask {
+            task: 0,
+            duration_s: [-1.0, -1.0],
+            align: false,
+        };
+        let mut mobs = mobs(vec![
+            spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL),
+            spawn_at(SPAWN_X + 1.0, TEST_MOB, TEST_LEVEL),
+        ]);
+        mobs.set_ai(Arc::from([routed(Vec::new()), routed(vec![Some(graze)])]));
+        assert!(
+            mobs.patrols(0),
+            "a design patrol may walk far from its spawn"
+        );
+        assert!(!mobs.patrols(1), "a spawner's waypoints stay by the spawn");
     }
 
     #[test]
