@@ -25,6 +25,8 @@ Each crate states its licence in its `Cargo.toml`. `cargo deny check` enforces t
 
 - Rust (the version in `rust-toolchain.toml` is installed automatically by rustup)
 - Docker with Compose v2
+- Node.js (`just test-web` uses its built-in test runner; no npm packages)
+- Python 3 (`scripts/patch-client.py` and its test)
 - `cargo install --locked cargo-deny cargo-sweep just`
 
 ## Quick start
@@ -45,7 +47,9 @@ just infra-test
 
 | Command | What it does |
 |---|---|
-| `just check` | Format, lint, test, dependency policy, script tests |
+| `just check` | Game-data guard, format, lint, test, dependency policy, script tests, web tests |
+| `just test-scripts` | Tests of the shell and Python scripts in `scripts/` |
+| `just test-web` | Tests of the admin page code (`bins/blighted-admin/web/*.test.mjs`) |
 | `just size` | Prints the build folder size; fails above 10 GiB |
 | `just clean-old` | Deletes build files older than 7 days |
 | `just infra-up` / `just infra-down` | Starts / stops PostgreSQL, Valkey, NATS, Prometheus, Grafana |
@@ -57,6 +61,8 @@ just infra-test
 | `just world` | Builds one retail world file per level into `local-data/content/retail/` (run `just bundle` first) |
 | `just design` | Merges the design files of `content/` over the retail files into `local-data/content/` (run `just bundle` and `just world` first) |
 | `just check-design` | Checks the design files against the retail files; writes nothing |
+| `just collision` | Builds the collision files of the tutorial and the open world into `local-data/content/` |
+| `just live <sims>` | Starts a local test world and the live panel (see "Live panel") |
 | `just capture-check` | Decodes every capture ledger under `local-data/captures/` and prints counts |
 | `just map-tiles` | Writes the open world map tiles into `local-data/content/map/` from your install |
 
@@ -79,6 +85,22 @@ just collision
 `just design` reads the retail files, merges the team's design files from `content/` over them (see [content/README.md](content/README.md)), and writes `local-data/content/bundle-<build>.bin` and `local-data/content/world-<build>-<level>.bin`: the files the servers and the admin tools read. It does not read the game install. With no design files, the merged files are equal to the retail files. When a design file has a problem, it prints each one and writes nothing.
 
 `just collision` writes the level collision files `local-data/content/collision-<build>-<level>.bin` of the tutorial and the open world (about 104 MB in all): the solid shapes of each level's placed slices (variant capitals as their variation data shows them, and the slices encounters spawn later), read from the game's physics assets (`.rnr`), which the sims stand the players and mobs on. A sim does not start without the collision file of its level. See `docs/re/2026-09-20-level-collision.md`.
+
+A sim needs only the bundle, the world file and the collision file of its level. It also reads the files below from `content_dir` when they exist. When one is missing, the sim logs a warning and runs without that part.
+
+| File | Made by | Without it |
+|---|---|---|
+| `roads-<build>-<level>.bin` | `cargo run --release -p content-tool -- roads [levels]` (default `newworld_vitaeeterna`) | No road sprint boost |
+| `water-<build>-<level>.bin` | `cargo run --release -p content-tool -- water [levels]` (default `ftue_v2` and `newworld_vitaeeterna`) | The sea level is the only water |
+| `player-attacks-<build>.json` | `cargo run --release -p content-tool -- player-attacks` | Players cannot attack |
+| `player-sequences-<build>.json` | No tool. It was mined from capture ledgers; a copy of the pinned build's table is `bins/sim/src/world/testdata/player-sequences-25810808.json` | The server starts no attack, block, aim, dodge or jump |
+| `mob-prefabs-<build>.json` | `cargo run --release -p content-tool -- mob-prefabs [folders]` (reads the ledgers in `local-data/captures` and `local-data/open world captures`) | Mobs are not shown to clients |
+| `creature-animations-<build>.json` | `cargo run --release -p content-tool -- creature-animations` (needs the mob prefab table) | Mobs move without animations |
+| `ai-data-<build>.bin` | `cargo run --release -p content-tool -- ai-data` (reads `local-data/server-pak/Server.pak`; needs the creature animation table) | Every mob stands at its spawn |
+| `ftue-entities-<build>.json` | `cargo run --release -p content-tool -- ftue-entities <ledger.bin>` (a capture of a new character's tutorial) | The tutorial's level entities are not sent |
+| `dungeon-scripts-<build>.json` | `cargo run --release -p content-tool -- dungeon-scripts` | Instances run without encounters |
+
+The tools that take a bundle read the merged bundle `local-data/content/bundle-<build>.bin`, so run `just design` first. The tools that read ledgers (`mob-prefabs`, `ftue-entities`) use a lot of memory; run them under a limit, for example `ulimit -v 4000000`. `cargo run -p content-tool -- --help` lists every subcommand.
 
 ### Recovery
 
@@ -105,6 +127,8 @@ just capture-check
 
 To print class names next to type indexes, add `--names local-data/Aeternum-World-main/Catalog/uuid_to_class.json` (Aeternum-World, AGPL-3.0); the tool joins it to `typeindex.json` in your install by UUID.
 
+`nw-tcp-sniff` records the raw bytes that a client sends over TCP, to learn the transport framing. It listens on `127.0.0.1:33435` (the client's `rep-default-port`) and writes dump files to `local-data/tcp-sniff/` (`--listen` and `--out-dir` change them). See `docs/re/2026-09-06-tcp-sniff-run.md`.
+
 ## Login server and launcher
 
 `edge-http` is the HTTPS login server. Players log in with the `launcher` program, by username and password or with Discord (one mode per server, `[auth] mode` in `config/edge.toml`).
@@ -115,6 +139,18 @@ The server needs a domain name of your own with two host names that point to the
 - `game.<domain>`: the game routes. Every game request carries the game session key in its path (`/s/<session>/...`).
 
 Get one normal public certificate that covers both names (for example from Let's Encrypt with `certbot` or `lego`). The DNS challenge works also when the names point to a LAN address. Put the PEM files where `[tls]` points. The game always uses port 443, so `https_listen` must use port 443. On Linux, give the program that right once after each build: `sudo setcap 'cap_net_bind_service=+ep' target/debug/edge-http`.
+
+Every server reads its file in `config/` (`--config <file>` picks another). An environment variable can override any key: the program's prefix, then the key, with nested keys joined by `__` (for example `NW_EDGE_AUTH__LOGIN_FAIL_LIMIT=5000`).
+
+| Program | Config file | Prefix |
+|---|---|---|
+| `edge-http` | `config/edge.toml` | `NW_EDGE_` |
+| `rep-gateway` | `config/rep-gateway.toml` | `NW_GATEWAY_` |
+| `world-director` | `config/world-director.toml` | `NW_DIRECTOR_` |
+| `sim` | `config/sim.toml` | `NW_SIM_` |
+| `social` | `config/social.toml` | `NW_SOCIAL_` |
+| `nw-testclient` | `config/nw-testclient.toml` | `NW_TESTCLIENT_` |
+| `blighted-admin` | `config/blighted-admin.toml` | `BLIGHTED_ADMIN_` |
 
 Secrets come from environment variables, never from the config file:
 
@@ -130,6 +166,10 @@ cargo run -p edge-http -- migrate   # creates missing databases and applies migr
 cargo run -p edge-http -- serve
 cargo run -p launcher
 ```
+
+`edge-http aws-mirror-certificate` makes the self-signed certificate of the `[aws_mirror]` hosts in `config/edge.toml` once. It never replaces a file. The launcher maps those Amazon host names to this server for the game process only (see [docs/client-patch.md](docs/client-patch.md)).
+
+For a release build, `setcap` takes `target/release/edge-http`. Run `setcap` again after each build, because a new file loses the right.
 
 In Discord mode, add `https://login.<domain>/launcher/discord/callback` as a redirect URL of your Discord application.
 
@@ -218,10 +258,11 @@ Secrets:
 | `NW_SECRET_TESTCLIENT_PASSWORD_B` | Password of the second test account (`nw-testclient pair` only) |
 | `NW_SECRET_TESTCLIENT_SWARM_PASSWORD` | Password of every bot account (`nw-testclient swarm` and `hunt` only) |
 
-Start the director, then the `sim` processes, then the gateway. Each `sim` needs its own `sim_id` and `metrics_listen`; override them with environment variables:
+Start the director and the social service, then the `sim` processes, then the gateway. Each `sim` needs its own `sim_id` and `metrics_listen`; override them with environment variables:
 
 ```bash
 cargo run -p world-director
+NW_SOCIAL_GAME_DIR="$NW_GAME_DIR" cargo run -p social
 NW_SIM_SIM_ID=sim-1 NW_SIM_METRICS_LISTEN=127.0.0.1:9102 cargo run -p sim
 NW_SIM_SIM_ID=sim-2 NW_SIM_METRICS_LISTEN=127.0.0.1:9104 cargo run -p sim
 cargo run -p rep-gateway -- serve
@@ -239,6 +280,16 @@ For many players on one PC (M5 load spec): give the gateway one `workers` per co
 The bots register their accounts on the first run. `edge-http` counts every registration per IP address against `auth.login_fail_limit`, so raise it for that run, for example `NW_EDGE_AUTH__LOGIN_FAIL_LIMIT=5000`. The gateway counts new connections per IP address too: raise `limits.handshakes_per_ip_per_second` (for example `NW_GATEWAY_LIMITS__HANDSHAKES_PER_IP_PER_SECOND=200`).
 
 The director serves Prometheus metrics on `metrics_listen` (`director_*`), each `sim` on its own (`sim_*`, among them `sim_bundle_members_total`: the members put in bundles). Keep those addresses internal. With `[admin] snapshot_interval_ms` above 0 (at least 100; 0 is off and the committed value), each `sim` publishes a snapshot of its players and awake mobs on `sim.<id>.snapshot` for the admin live panel, and times it in `sim_snapshot_seconds`.
+
+### Social service
+
+`social` runs once per world. It keeps the world's social state (chat, friends, blocks, groups, companies, voice setup), takes the social calls and the presence that the sims send, and sends each sim the messages for its players. It reads `config/social.toml`: `world_id`, `nats_url`, the world database, and `game_dir` (the game install; the profanity lists come from its paks). It serves metrics on `metrics_listen` (`127.0.0.1:9111`).
+
+```bash
+NW_SOCIAL_GAME_DIR="$NW_GAME_DIR" cargo run -p social
+```
+
+Voice chat needs a Vivox-compatible voice service and the `[voice]` section. Its token key comes from the variable named by `voice.key_env` (`NW_SECRET_VOICE_KEY` in the example). Without that section, the client keeps its voice chat off.
 
 Known gaps:
 
@@ -299,7 +350,7 @@ just map-tiles
 
 ### blighted-admin
 
-`blighted-admin serve` serves the admin pages on `http://127.0.0.1:9180/` (`config/blighted-admin.toml`, overrides `BLIGHTED_ADMIN_<KEY>`). It reads the world file and the content bundle from `just world` and `just bundle`, and the map tiles from `just map-tiles` when they exist; without them the map shows only the height relief. It listens on a loopback address only, because the tools have no login. A request other than `GET` needs the header `X-Blighted-Admin: 1` and, when the browser sends an `Origin`, the origin of the admin pages; so another web site in your browser cannot use it.
+`blighted-admin serve` serves the admin pages on `http://127.0.0.1:9180/` (`config/blighted-admin.toml`, overrides `BLIGHTED_ADMIN_<KEY>`, nested keys joined by `__`). It reads the world file and the content bundle from `just world` and `just bundle`, and the map tiles from `just map-tiles` when they exist; without them the map shows only the height relief. It listens on a loopback address only, because the tools have no login. A request other than `GET` needs the header `X-Blighted-Admin: 1` and, when the browser sends an `Origin`, the origin of the admin pages; so another web site in your browser cannot use it.
 
 ```bash
 cargo run --release -p blighted-admin -- serve
@@ -317,7 +368,16 @@ The world map page (`/web/map.html`) shows the map tiles, the relief, or the rel
 
 The live page (`/live`) shows the running servers: tiles (sims, players, bots, CPU per program, tick time per sim, packets and bandwidth of the gateway, bundle members, awake and asleep mobs), the map with the sim cells, the players and the awake mobs, the player list, the selected entity, the event log, and buttons that start bot batches of 1, 10, 100 or 1,000 (`nw-testclient swarm` until stopped, one batch after another) and stop them. It reads the bus (`[live] nats_url`, the heartbeats, the cell table and the sim snapshots), the metrics pages in `[live] metrics_urls`, and `/proc` for CPU (Linux only). Bot batches take the `NW_SECRET_*` lines of `[live] testclient_env_file`; the page sends only a size and a batch number. A sim publishes snapshots only with `[admin] snapshot_interval_ms` above 0.
 
-`just live <sims>` starts a whole local test world for it (edge-http on port 8443, the director, 1 to 8 sims with snapshots every 250 ms, the gateway) and then the panel; Ctrl-C stops all of them. Build with `cargo build --release` and set `NW_GAME_DIR` first. `LIVE_STACK_SNAPSHOT_MS=0 just live 8` runs it with snapshots off, to compare tick times. The exit test is in `docs/re/2026-09-06-admin-live-panel.md`.
+`just live <sims>` starts a whole local test world for it (edge-http on port 8443, the director, the social service, 1 to 8 sims with snapshots every 250 ms, the gateway) and then the panel; Ctrl-C stops all of them. The default is 4 sims. Before you start it:
+
+1. Run `cargo build --release`. The script runs the programs in `target/release/`.
+2. Set `NW_GAME_DIR`.
+3. Make the three git-ignored local files. The script stops and names each file that is missing:
+   - `local-data/m3-test.env`: the `NW_SECRET_*` lines that the servers get.
+   - `local-data/edge-http/edge.toml`: the edge-http config of the test world.
+   - `local-data/world-director.toml`: the director config of the test world.
+
+Logs go to `local-data/logs/live/`. `LIVE_STACK_SNAPSHOT_MS=0 just live 8` runs it with snapshots off, to compare tick times. The exit test is in `docs/re/2026-09-06-admin-live-panel.md`.
 
 ### Studio
 
@@ -352,7 +412,7 @@ blighted-admin revoke-rank ada
 
 Five wrong passwords in 10 minutes lock a name for 15 minutes. The session cookie is `HttpOnly`, `Secure` and `SameSite=Strict`, and lasts 12 hours. In server mode the design routes (Check, Apply) and bot batches are refused: design work happens on a team member's own PC and reaches the server through git.
 
-GM commands go to the sim that owns the target, found from the sim snapshots and the cell table, and wait up to 5 s for its answer. Every command (and every login) writes a row to the audit log. On the live page, select a player or bot for: **Teleport** to a point or to another player, **Heal**, **Kill**, **God on/off**, **Kick**, **Give/Take** an item, **Set level** and **Give XP**, **Weapon mastery** (set the rank of one weapon or of all, or give one weapon mastery experience; levels and ranks are the ones the game shows), and **Set coins**. Experience and coins are saved with the progression (world migration 0006), weapon masteries too (0007), and the attribute and weapon points a player spends in the game (0008). The **GM mobs** form spawns up to 50 mobs of a vitals id at a point (right-click the map to fill x and y); they stay awake and respawn until a GM despawns them. The GM page (`/gm`) shows the audit log (a head admin sees all rows, others their own), bans and unbans by login name, and, for head admins, the ranks. Kick needs the CSR rank, rank changes the head admin rank, everything else the game master rank. There is no chat or mute command yet: the server has no chat.
+GM commands go to the sim that owns the target, found from the sim snapshots and the cell table, and wait up to 5 s for its answer. Every command (and every login) writes a row to the audit log. On the live page, select a player or bot for: **Teleport** to a point or to another player, **Heal**, **Kill**, **God on/off**, **Kick**, **Give/Take** an item, **Set level** and **Give XP**, **Weapon mastery** (set the rank of one weapon or of all, or give one weapon mastery experience; levels and ranks are the ones the game shows), and **Set coins**. Experience and coins are saved with the progression (world migration 0006), weapon masteries too (0007), and the attribute and weapon points a player spends in the game (0008). The **GM mobs** form spawns up to 50 mobs of a vitals id at a point (right-click the map to fill x and y); they stay awake and respawn until a GM despawns them. The GM page (`/gm`) shows the audit log (a head admin sees all rows, others their own), bans and unbans by login name, and, for head admins, the ranks. Kick needs the CSR rank, rank changes the head admin rank, everything else the game master rank. There is no chat command or mute command in the admin tools yet.
 
 **GM mode in the game client.** An account with the `game_master` rank (or higher) gets the client's own GM mode at login: `world-director` reads the rank from the `[global_database]` of `config/world-director.toml` (leave the section out to give no account GM rights), and `rep-gateway` sets flag byte 1 of the registration response. With `r_DisplayInfo 1` the client shows "GM Client Enabled". The sim then takes the client's GM calls (set level, set coins, change or set a weapon mastery rank, debug teleport) from that account only, and logs and refuses them from every other account. See `docs/re/2026-09-18-progression-and-gm-mode.md`.
 
