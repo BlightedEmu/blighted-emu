@@ -14,11 +14,20 @@ use nw_content::player_attacks::{AttackHit, AttackKind};
 use nw_content::poi_tags::PoiTags;
 use nw_content::rewards::Reward;
 use nw_formats::objectstream::lowercase_crc32;
-use nw_messages::{InputRecord, InteractionRequest, ServerMessage, StartWhisperMsg};
+use nw_messages::facet::component;
+use nw_messages::{
+    BundleGroup, BundleMember, DamageDealtMsg, DamageReceiverState, FacetHeader,
+    GatheringInterruptedMsg, GdeMetadataReplicatedState, InputRecord, InteractionRequest,
+    MemberState, ServerMessage, StartWhisperMsg,
+};
+use nw_sim_core::Position;
 
 use super::attack::counter_is_newer;
+use super::crafting::{CARD_COMPONENT, gde_ref_of};
+use super::slots::Slot;
 use super::{Body, Player, SimWorld, gather_answer, send_now};
 use crate::objectives::Event;
+use crate::player_content::QuestObjects;
 use crate::stats::{GAME_EVENT_STAT, ONE_COMPLETION, StatEvent};
 use nw_bus::ConnectionRef;
 
@@ -38,6 +47,47 @@ const HITS_TO_BREAK: u32 = 2;
 /// How far from the player a swing breaks a quest object (Inferred: about a greatsword's reach
 /// plus the object's size; the client's hit shapes are Unknown here).
 const SWING_REACH_M: f32 = 4.0;
+
+/// First slot key of a quest object: its index in the level's objects is added. Keys are never
+/// sent; they stay above every other entity range.
+pub(super) const QUEST_OBJECT_ENTITY_BASE: u64 = 1 << 42;
+/// The quest object's `DamageReceiverComponent` (Observed: component 1 of the retail nodule
+/// groups, not blocking, block weapon slot alias 0x20, the values of a player's).
+const OBJECT_DAMAGE_RECEIVER_COMPONENT: u64 = 1;
+
+/// The slot keys of the quest objects with a GDE id within `radius_m` of `at`.
+pub(super) fn numbers_near(
+    objects: &QuestObjects,
+    at: Position,
+    radius_m: f32,
+) -> impl Iterator<Item = u64> + '_ {
+    objects
+        .known_near(at, radius_m)
+        .map(|index| QUEST_OBJECT_ENTITY_BASE + index as u64)
+}
+
+/// The spawn group of the quest object of slot key `number` in `slot` when the slot is new (it
+/// came into view): its card and its damage receiver (retail nodule groups).
+pub(super) fn group(objects: &QuestObjects, number: u64, slot: Slot) -> Option<BundleGroup> {
+    let index = usize::try_from(number.checked_sub(QUEST_OBJECT_ENTITY_BASE)?).ok()?;
+    let id = objects.get(index)?.id?;
+    slot.new.then(|| BundleGroup {
+        interest: u64::from(slot.interest),
+        members: vec![
+            BundleMember {
+                component: CARD_COMPONENT,
+                state: MemberState::GdeMetadata(GdeMetadataReplicatedState {
+                    asset: None,
+                    gde_ref: Some(gde_ref_of(id)),
+                }),
+            },
+            BundleMember {
+                component: OBJECT_DAMAGE_RECEIVER_COMPONENT,
+                state: MemberState::DamageReceiver(DamageReceiverState::player()),
+            },
+        ],
+    })
+}
 
 /// A weapon attack that can break quest objects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,13 +315,37 @@ impl SimWorld {
                     .is_some_and(|until| now_ms < until);
                 !broken && quest.run.counts_game_event(&object.event)
             })
-            .map(|(index, object)| (index, object.event.clone(), object.respawn_ms));
-        let Some((index, event, respawn_ms)) = target else {
+            .map(|(index, object)| {
+                let known = object.id.zip(object.loot_tag);
+                (index, object.event.clone(), object.respawn_ms, known)
+            });
+        let Some((index, event, respawn_ms, known)) = target else {
             return;
         };
+        let server_ms = self.server_ms;
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
         };
+        // Retail answers each hit with a 2071 on the object and a 2724 to its gatherable
+        // controller (newchar 2026-09-18, every nodule hit).
+        if let Some((id, _)) = known {
+            let hit =
+                DamageDealtMsg::on_level_object(number, gde_ref_of(id), id, strike == Strike::Shot);
+            let ended = GatheringInterruptedMsg {
+                header: FacetHeader {
+                    target: id.wrapping_add(component::NODULE_GATHERABLE_CONTROLLER),
+                    entity: id,
+                },
+            };
+            send_now(
+                &mut self.combat_messages,
+                &player.connection,
+                &[
+                    ServerMessage::DamageDealt(hit),
+                    ServerMessage::GatheringInterrupted(ended),
+                ],
+            );
+        }
         let (hits, until) = player.strikes.objects.entry(index).or_default();
         *hits = if until.is_some() { 0 } else { *hits } + strike.hits();
         *until = None;
@@ -279,7 +353,22 @@ impl SimWorld {
             return;
         }
         *hits = 0;
-        *until = Some(now_ms.saturating_add(respawn_ms));
+        let reset_ms = now_ms.saturating_add(respawn_ms);
+        *until = Some(reset_ms);
+        // The broken entry in the player's loot tracker (retail: with the break's 2724).
+        if let Some((id, tag)) = known {
+            player.list_version += 1;
+            let version = player.list_version;
+            let tracked = player.loot.track_broken(
+                gde_ref_of(id),
+                tag,
+                at,
+                server_ms,
+                server_ms.saturating_add(respawn_ms),
+                version,
+            );
+            player.extra_members.push(tracked);
+        }
         tracing::info!(player = number, object = index, %event, "quest object broken");
         self.quest_event(number, Event::GameEvent(&event), now_ms);
     }

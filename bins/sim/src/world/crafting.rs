@@ -51,7 +51,7 @@ use crate::objectives::Event;
 /// above every player and mob number and below the loot bags.
 pub(super) const STATION_ENTITY_BASE: u64 = 1 << 37;
 /// The component of a spawn card.
-const CARD_COMPONENT: u64 = 0;
+pub(super) const CARD_COMPONENT: u64 = 0;
 /// The status of an accepted and of a refused station interaction.
 const STATION_ACCEPTED: u8 = 1;
 const STATION_REFUSED: u8 = 2;
@@ -102,7 +102,7 @@ pub(super) struct Stations {
 
 /// The `GdeRef` of a level entity with GDE id `id`: the id's little-endian bytes, then the
 /// open world's zero phase.
-fn gde_ref_of(id: u64) -> [u8; RAW_ID_LEN] {
+pub(super) fn gde_ref_of(id: u64) -> [u8; RAW_ID_LEN] {
     let mut gde_ref = [0; RAW_ID_LEN];
     gde_ref[..size_of::<u64>()].copy_from_slice(&id.to_le_bytes());
     gde_ref

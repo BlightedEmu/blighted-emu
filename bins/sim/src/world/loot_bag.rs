@@ -27,8 +27,8 @@ use nw_messages::gde::AssetId;
 use nw_messages::items::{ITEM_BOUND, SYNC_OWNED};
 use nw_messages::loot::{
     GLOBAL_STORAGE_COMPONENT, GlobalStorageState, LOOT_CREATURE, LOOT_DROPPED, LOOT_POI,
-    LOOT_ROLLED, LOOT_TAKEN, LOOT_TRACKER_COMPONENT, LootLimitEntry, LootTrackerState, StoredItems,
-    TrackedLoot,
+    LOOT_QUEST_OBJECT, LOOT_ROLLED, LOOT_TAKEN, LOOT_TRACKER_COMPONENT, LootLimitEntry,
+    LootTrackerState, StoredItems, TrackedLoot,
 };
 use nw_messages::position::{PositionInTheWorldReplicatedState, WorldPosition};
 use nw_messages::wire::RAW_ID_LEN;
@@ -592,19 +592,66 @@ impl PlayerLoot {
         reset_ms: u64,
         version: u64,
     ) -> BundleMember {
-        self.tracked.retain(|loot| loot.bag != container);
-        self.tracked.push(TrackedLoot {
-            bag: container,
-            state: LOOT_TAKEN,
-            kind: LOOT_POI,
-            reset_ns: unix_ns(reset_ms),
-            looted_ns: unix_ns(server_ms),
-            privileged: true,
-            position: [at.x, at.y, at.z],
-            interact_tag: NO_INTERACT_TAG,
-            rarity: NO_PERK_RARITY,
-        });
+        self.track_looted(
+            TrackedLoot {
+                bag: container,
+                state: LOOT_TAKEN,
+                kind: LOOT_POI,
+                reset_ns: unix_ns(reset_ms),
+                looted_ns: unix_ns(server_ms),
+                privileged: true,
+                position: [at.x, at.y, at.z],
+                interact_tag: NO_INTERACT_TAG,
+                rarity: NO_PERK_RARITY,
+            },
+            version,
+        )
+    }
+
+    /// The player broke quest object `object` (interact tag `tag`) from `at` at server time
+    /// `server_ms`: the tracker lists it as looted until server time `reset_ms` (Observed: retail
+    /// nodules, state 2, type 4, not privileged, the reset 33 s after, the place the player stood
+    /// as its position). Returns the tracker member with version `version`.
+    pub(super) fn track_broken(
+        &mut self,
+        object: [u8; RAW_ID_LEN],
+        tag: u32,
+        at: Position,
+        server_ms: u64,
+        reset_ms: u64,
+        version: u64,
+    ) -> BundleMember {
+        self.track_looted(
+            TrackedLoot {
+                bag: object,
+                state: LOOT_TAKEN,
+                kind: LOOT_QUEST_OBJECT,
+                reset_ns: unix_ns(reset_ms),
+                looted_ns: unix_ns(server_ms),
+                privileged: false,
+                position: [at.x, at.y, at.z],
+                interact_tag: tag,
+                rarity: NO_PERK_RARITY,
+            },
+            version,
+        )
+    }
+
+    /// Lists `entry` in place of any entry of the same bag; the tracker member with version
+    /// `version`.
+    fn track_looted(&mut self, entry: TrackedLoot, version: u64) -> BundleMember {
+        self.tracked.retain(|loot| loot.bag != entry.bag);
+        self.tracked.push(entry);
         self.tracker(version)
+    }
+
+    /// The loot type and interact tag of the tracker's entry of `bag`, when it lists one.
+    #[cfg(test)]
+    pub(super) fn opened_kind(&self, bag: &[u8; RAW_ID_LEN]) -> Option<(u32, u32)> {
+        self.tracked
+            .iter()
+            .find(|loot| loot.bag == *bag)
+            .map(|loot| (loot.kind, loot.interact_tag))
     }
 
     /// Whether the tracker holds loot container `container` as opened: the player may not

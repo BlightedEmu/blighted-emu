@@ -210,6 +210,35 @@ impl DamageDealtMsg {
     }
 }
 
+impl DamageDealtMsg {
+    /// A hit by player `attacker` on the level object of `GdeRef` `gde_ref` and GDE id `id` (a
+    /// quest nodule): no hit volume, no damage items, the kill flag on every hit (Observed:
+    /// retail newchar 2026-09-18, the 8 hits of 4 nodules: 51 bytes, `u32_d` 0, a small shake
+    /// and flags `0x28` from a melee swing; no shake and flags `0x29` from a spread shot).
+    pub fn on_level_object(attacker: u64, gde_ref: [u8; 16], id: u64, shot: bool) -> Self {
+        let header = FacetHeader::of(component::DAMAGE_RECEIVER, attacker);
+        let base = if shot {
+            HIT_FLAG_CAN_CRIT | HIT_FLAG_PELLET
+        } else {
+            HIT_FLAG_CAN_CRIT
+        };
+        Self {
+            head_a: header.target,
+            head_b: header.entity,
+            raw_16: gde_ref,
+            u64_c: id,
+            u32_d: NO_HIT_VOLUME,
+            u32_e: if shot {
+                NO_CAMERA_SHAKE
+            } else {
+                CAMERA_SHAKE_SMALL
+            },
+            raw_2: hit_flags(base, false, true).to_le_bytes(),
+            items: Vec::new(),
+        }
+    }
+}
+
 /// The hit flags of a hit with the flags `base`: with the crit and the kill flags when so.
 const fn hit_flags(base: u16, crit: bool, killed: bool) -> u16 {
     let crit = if crit { HIT_FLAG_CRIT } else { 0 };

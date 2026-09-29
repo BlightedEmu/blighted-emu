@@ -200,8 +200,8 @@ pub use lookups::{
 };
 pub use loot::{
     GLOBAL_STORAGE_COMPONENT, GLOBAL_STORAGE_TYPE_INDEX, GlobalStorageState, LOOT_CREATURE,
-    LOOT_DROPPED, LOOT_ROLLED, LOOT_TAKEN, LOOT_TRACKER_COMPONENT, LOOT_TRACKER_TYPE_INDEX,
-    LootTrackerState, StoredItems, TrackedLoot,
+    LOOT_DROPPED, LOOT_QUEST_OBJECT, LOOT_ROLLED, LOOT_TAKEN, LOOT_TRACKER_COMPONENT,
+    LOOT_TRACKER_TYPE_INDEX, LootTrackerState, StoredItems, TrackedLoot,
 };
 pub use meta_achievements::{
     MetaAchievementProgressMsg, MetaAchievementRequest, MetaAchievementSummaryMsg, MetaProgress,

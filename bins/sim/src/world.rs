@@ -150,7 +150,8 @@ use crate::mob_ai::SpawnAi;
 use crate::mobs::{MobAttackIntent, MobChanges, Mobs};
 use crate::objectives::{Effect, Event, Facts, ObjectiveRun};
 use crate::player_content::{
-    MobLooks, OPEN_WORLD_OBJECTIVE, PlayerContent, QuestDef, TUTORIAL_OBJECTIVE, TUTORIAL_SWORD,
+    MobLooks, OPEN_WORLD_OBJECTIVE, PlayerContent, QuestDef, QuestObjects, TUTORIAL_OBJECTIVE,
+    TUTORIAL_SWORD,
 };
 use crate::stats::StatEvent;
 use nw_content::creature_animations::CreatureAnimations;
@@ -3594,6 +3595,7 @@ impl SimWorld {
             level: &content.tutorial_level,
             nodes: &self.nodes,
             stations: (!self.is_tutorial()).then_some(&self.stations),
+            quest_objects: &content.quest_objects,
             view_radius_m: self.settings.interest_radius_m,
             bags: &self.bags,
             performances: &self.performances,
@@ -4103,6 +4105,8 @@ struct Neighbourhood<'a> {
     nodes: &'a Nodes,
     /// The level's crafting stations; none in the tutorial.
     stations: Option<&'a crafting::Stations>,
+    /// The level's quest objects that the client knows by GDE id.
+    quest_objects: &'a QuestObjects,
     /// How near a player a node, station or loot bag is shown: the interest radius.
     view_radius_m: f32,
     /// The loot bags.
@@ -4181,6 +4185,11 @@ impl Neighbourhood<'_> {
                 if let Some(stations) = self.stations {
                     numbers.extend(stations.numbers_near(own_position, self.view_radius_m));
                 }
+                numbers.extend(quest_objects::numbers_near(
+                    self.quest_objects,
+                    own_position,
+                    self.view_radius_m,
+                ));
                 numbers.extend(player.social.group_entity_number());
                 numbers.extend(
                     self.performances
@@ -4580,6 +4589,14 @@ impl Neighbourhood<'_> {
                         let player = &mut **player;
                         groups.extend(self.nodes.group(number, slot, &mut player.node_versions));
                     }
+                    continue;
+                }
+                if number >= quest_objects::QUEST_OBJECT_ENTITY_BASE {
+                    groups.extend(
+                        player.slots.slot(number).and_then(|slot| {
+                            quest_objects::group(self.quest_objects, number, slot)
+                        }),
+                    );
                     continue;
                 }
                 if number >= STATIC_ENTITY_BASE {
@@ -7355,7 +7372,7 @@ mod tests {
             MANIFEST_LORE, NODULE_EVENT, TREASURE, TREASURE_GATHERABLE, WHISPER_EVENT, WRECK_POI,
             WRECK_ROOT, wreck_rows,
         };
-        use crate::player_content::{ObjectiveRow, QuestBook, QuestObjects};
+        use crate::player_content::{ObjectiveRow, QuestBook};
         use nw_content::achievements::AchievementIndexes;
         use nw_content::poi_tags::PoiTags;
         use nw_content::rewards::{Reward, Rewards};
@@ -7367,6 +7384,10 @@ mod tests {
         const WRECK_TERRITORY: u16 = 30_129;
         const WHISPER: &str = "01_IsabellasFirstWhisper_Isabella_01";
         const NODULE: &str = "MSQ_Grace_CorruptedNodule_1";
+        const NODULE_LOOT: &str = "IO_MSQ_Grace_CorruptedNodule_1";
+        /// Retail nodule A: its capital and GDE id (newchar 2026-09-18).
+        const NODULE_CAPITAL: &str = "64f2702e-9c3b-a5a5-1dae-1b0d80c5666b";
+        const NODULE_ID: u64 = 0x795c_6b23_1cfe_c3cb;
         const MANIFEST: &[u8] = b"@00_Aeternum_Title_31_01";
         const TREASURE_GATHER_MS: u64 = 1_000;
         const NODULE_RESPAWN_MS: u64 = 33_000;
@@ -7396,7 +7417,10 @@ mod tests {
                 TREASURE_GATHER_MS,
                 0,
             ),
-            gatherable(NODULE, NODULE_EVENT, 0, NODULE_RESPAWN_MS),
+            Gatherable {
+                loot_table: Some(NODULE_LOOT.to_owned()),
+                ..gatherable(NODULE, NODULE_EVENT, 0, NODULE_RESPAWN_MS)
+            },
         ]);
         // The nodule stands where the player stands.
         let nodule = GatherablePoint {
@@ -7404,10 +7428,16 @@ mod tests {
             position: [X, 10.0, 50.0],
             ..GatherablePoint::default()
         };
+        let capital = nw_world::records::Capital {
+            id: NODULE_CAPITAL.to_owned(),
+            position: nodule.position,
+            ..nw_world::records::Capital::default()
+        };
         let quest_objects = QuestObjects::build(
             &[nodule],
             &gatherables,
             &crate::objectives::counted_game_events(&wreck_rows()),
+            &[capital],
         );
         // The kit sword shoots as the retail blunderbuss: its stance's hit scan reaches 14 m.
         let mut source = crate::combat::test_support::test_source();
@@ -7559,8 +7589,33 @@ mod tests {
         world.swing_at_quest_objects(&who, &press(FIRST_PRESS), at + TICK_MS);
         assert!(world.quests[&1].run.counts_game_event(NODULE_EVENT));
         assert!(!done(&world, "Nodules"), "one swing so far");
-        let (_, at) = step(&mut world, SWING_GAP_MS);
+        let (hit, at) = step(&mut world, SWING_GAP_MS);
+        let hit = messages_to(&hit, 1);
+        assert!(
+            hit.iter().any(|message| matches!(message,
+                ServerMessage::DamageDealt(dealt) if dealt.u64_c == NODULE_ID)),
+            "the swing's 2071 names the nodule: {hit:?}"
+        );
+        assert!(
+            hit.iter().any(|message| matches!(message,
+            ServerMessage::GatheringInterrupted(ended) if ended.header
+                == FacetHeader {
+                    target: 0x21a8_8912_921f_9348,
+                    entity: NODULE_ID,
+                })),
+            "the retail 2724 of nodule A: {hit:?}"
+        );
         world.swing_at_quest_objects(&who, &press(SECOND_PRESS), at);
+        let tracked = world
+            .world
+            .get::<Player>(entity)
+            .map(|player| player.loot.opened_kind(&crafting::gde_ref_of(NODULE_ID)))
+            .expect("player");
+        assert_eq!(
+            tracked,
+            Some((nw_messages::LOOT_QUEST_OBJECT, lowercase_crc32(NODULE_LOOT))),
+            "the break lists it in the loot tracker"
+        );
         let (_, at) = step(&mut world, SWING_GAP_MS);
         world.shoot_at_quest_objects(&who, at);
         assert!(!done(&world, "Nodules"), "broken until it grows back");

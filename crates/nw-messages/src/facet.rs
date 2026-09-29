@@ -38,6 +38,10 @@ pub mod component {
     /// `GatherableControllerComponent` of the tutorial's ruin chest (live-tutorial note,
     /// section 7).
     pub const CHEST_GATHERABLE_CONTROLLER: u64 = 0x45d5_7d32_25aa_2566;
+    /// `GatherableControllerComponent` of Grace's corruption nodules
+    /// (`IO_Custom_MSQ_CorruptedNodule_A` to `_D`): the 2724 target less the nodule's id on all
+    /// four nodules of the retail newchar run of 2026-09-18.
+    pub const NODULE_GATHERABLE_CONTROLLER: u64 = 0xa84c_1def_7520_cf7d;
     /// `AITargetableComponent` of the player.
     pub const AI_TARGETABLE: u64 = 0x5207_d209_ba7d_7dd8;
     /// `TutorialAIComponent` of a tutorial sailor, on its child [`TUTORIAL_AI_CHILD`].

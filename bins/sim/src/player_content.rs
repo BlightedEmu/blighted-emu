@@ -35,7 +35,7 @@ use nw_content::tradeskill_xp::{BonusChances, TradeskillCurves};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_sim_core::{EquipLoad, EquipLoadLimits, Position};
 use nw_world::dungeon_scripts::DungeonScripts;
-use nw_world::records::{GatherablePoint, WorldFile};
+use nw_world::records::{Capital, GatherablePoint, WorldFile};
 use nw_world::stations::CraftingStation;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -574,7 +574,19 @@ pub struct QuestObject {
     pub position: Position,
     /// How long it stays broken: its gatherable's `MinRespawnRate`.
     pub respawn_ms: u64,
+    /// The GDE id of the level capital that stands on its point, when one does: the client knows
+    /// the object by it (Observed: retail newchar 2026-09-18 carded Grace's four nodules, the
+    /// capitals `IO_Custom_MSQ_CorruptedNodule_A` to `_D` on their points, by these ids).
+    pub id: Option<u64>,
+    /// The lowercase CRC-32 of its gatherable's `FinalLootTable`: the interact tag of its broken
+    /// entry in the player's loot tracker (Observed: `io_msq_grace_corruptednodule_1`,
+    /// `0x8d40_a880`, on the retail nodules' entries).
+    pub loot_tag: Option<u32>,
 }
+
+/// The largest difference on each axis between a quest object's point and the capital on it, m
+/// (Observed: 0 on the four nodules; a float's rounding).
+const CAPITAL_ON_POINT_M: f32 = 0.01;
 
 /// The quest objects of a level.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -584,11 +596,13 @@ pub struct QuestObjects {
 
 impl QuestObjects {
     /// The quest objects among the level's gatherable `points`: those of a gatherable in
-    /// `gatherables` whose game event is one of `counted` (lowercase ids).
+    /// `gatherables` whose game event is one of `counted` (lowercase ids), each with the GDE id
+    /// of the capital of `capitals` on its point.
     pub fn build(
         points: &[GatherablePoint],
         gatherables: &Gatherables,
         counted: &HashSet<String>,
+        capitals: &[Capital],
     ) -> Self {
         Self {
             objects: points
@@ -598,10 +612,23 @@ impl QuestObjects {
                     let event = gatherable.game_event.clone()?;
                     counted.contains(&event.to_lowercase()).then(|| {
                         let [x, y, z] = point.position;
+                        let position = Position { x, y, z };
+                        let id = capitals
+                            .iter()
+                            .find(|capital| {
+                                capital
+                                    .position
+                                    .iter()
+                                    .zip(point.position)
+                                    .all(|(a, b)| (a - b).abs() <= CAPITAL_ON_POINT_M)
+                            })
+                            .and_then(|capital| capital_id(&capital.id));
                         QuestObject {
                             event,
-                            position: Position { x, y, z },
+                            position,
                             respawn_ms: gatherable.respawn_ms.0,
+                            id,
+                            loot_tag: gatherable.loot_table.as_deref().map(lowercase_crc32),
                         }
                     })
                 })
@@ -623,6 +650,22 @@ impl QuestObjects {
             .filter(|(index, object, distance)| *distance <= reach_m && wanted(*index, object))
             .min_by(|(_, _, a), (_, _, b)| a.total_cmp(b))
             .map(|(index, object, _)| (index, object))
+    }
+
+    /// The object of index `index`.
+    pub fn get(&self, index: usize) -> Option<&QuestObject> {
+        self.objects.get(index)
+    }
+
+    /// The indexes of the objects with a GDE id within `radius_m` of `at`.
+    pub fn known_near(&self, at: Position, radius_m: f32) -> impl Iterator<Item = usize> + '_ {
+        self.objects
+            .iter()
+            .enumerate()
+            .filter(move |(_, object)| {
+                object.id.is_some() && object.position.horizontal_distance(at) <= radius_m
+            })
+            .map(|(index, _)| index)
     }
 
     /// Objects in the level.
@@ -654,8 +697,12 @@ impl PlayerContent {
         let level_gatherables = &level.gatherables;
         let rows = task_rows(tables);
         let gatherables = Gatherables::from_tables(tables);
-        let quest_objects =
-            QuestObjects::build(level_gatherables, &gatherables, &counted_game_events(&rows));
+        let quest_objects = QuestObjects::build(
+            level_gatherables,
+            &gatherables,
+            &counted_game_events(&rows),
+            &level.capitals,
+        );
         let kits = StarterKits::from_tables(tables);
         let travel = TravelRules::of(tables, level, &gameplay, &kits);
         let charting = ChartRules::of(tables, level);

@@ -53,6 +53,8 @@ pub const LOOT_CREATURE: u32 = 1;
 /// `m_lootType` of a bag of items its owner dropped (retail 5 at each drop, open-world
 /// `item_actions`).
 pub const LOOT_DROPPED: u32 = 5;
+/// `m_lootType` of a broken quest object (Observed: Grace's nodules, retail newchar 2026-09-18).
+pub const LOOT_QUEST_OBJECT: u32 = 4;
 
 /// One bag of the loot tracker: `InstancedLootData` (`FUN_14376b520`) keyed by the bag id.
 #[derive(Debug, Clone, Copy, PartialEq)]
