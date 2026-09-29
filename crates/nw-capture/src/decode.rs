@@ -360,8 +360,8 @@ mod tests {
     use crate::{CLIENT_TO_SERVER, SERVER_TO_CLIENT, parse_ledger};
 
     const PING_BODY: [u8; 8] = [0, 0, 0, 0, 0, 0, 0, 1];
-    /// A class without a reader.
-    const UNREAD_CLASS: u64 = 14;
+    /// A class without a reader or a wire layout (a message class, never a member).
+    const UNREAD_CLASS: u64 = 1;
 
     fn outputs(ledger: &[u8]) -> Vec<RecordOutput> {
         let mut decoder = Decoder::new();

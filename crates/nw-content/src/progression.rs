@@ -109,6 +109,10 @@ pub struct Mastery {
     pub kind: MasteryKind,
     /// What each rank gives, rank 0 first; empty for a weapon mastery.
     perks: Vec<RankPerks>,
+    /// The character experience reaching each rank gives (`XPReward`), rank 0 first; empty
+    /// for a progression whose rank table has none (only the territory standing table has
+    /// them in content bundle 25810808: 0, 100, 150, 200, ...).
+    rank_rewards: Vec<u32>,
 }
 
 impl Mastery {
@@ -149,6 +153,15 @@ impl Mastery {
             .get(usize::from(rank))
             .copied()
             .unwrap_or(u32::MAX)
+    }
+
+    /// The character experience reaching rank `rank` gives (`XPReward`); 0 for a rank
+    /// without one.
+    pub fn rank_reward(&self, rank: u16) -> u32 {
+        self.rank_rewards
+            .get(usize::from(rank))
+            .copied()
+            .unwrap_or_default()
     }
 
     /// What the rank of a total of `experience` gives; the default for a mastery without
@@ -265,6 +278,35 @@ impl Progression {
         .with_tradeskills(tradeskill_sources(tables))
         .with_progressions(progression_sources(tables))
         .with_respec_costs(respec_costs)
+        .with_rank_rewards(rank_reward_sources(tables))
+    }
+
+    /// This progression with the rank rewards `rewards` (progression id, rank, `XPReward`):
+    /// a reward of a progression it does not know, or of a negative rank, is left out.
+    #[must_use]
+    pub fn with_rank_rewards(
+        mut self,
+        rewards: impl IntoIterator<Item = (String, i64, i64)>,
+    ) -> Self {
+        for (id, rank, reward) in rewards {
+            let Some(rank) = usize::try_from(rank).ok() else {
+                continue;
+            };
+            let Some(mastery) = self
+                .masteries
+                .iter_mut()
+                .chain(&mut self.tradeskills)
+                .chain(&mut self.others)
+                .find(|mastery| mastery.id.eq_ignore_ascii_case(&id))
+            else {
+                continue;
+            };
+            if mastery.rank_rewards.len() <= rank {
+                mastery.rank_rewards.resize(rank + 1, 0);
+            }
+            mastery.rank_rewards[rank] = clamp(reward);
+        }
+        self
     }
 
     /// This progression with the other ranked progressions and currencies of `sources`; a
@@ -295,6 +337,7 @@ impl Progression {
                     },
                     kind,
                     perks: Vec::new(),
+                    rank_rewards: Vec::new(),
                 }
             })
             .collect();
@@ -368,6 +411,7 @@ impl Progression {
                     max_rank: u16::try_from(max_level.max(0)).unwrap_or(u16::MAX),
                     kind: MasteryKind::Tradeskill,
                     perks: source.ranks.iter().map(|row| row.perks).collect(),
+                    rank_rewards: Vec::new(),
                 }
             })
             .collect();
@@ -397,6 +441,7 @@ impl Progression {
                     max_rank: u16::try_from(max_level.max(0)).unwrap_or(u16::MAX),
                     kind: MasteryKind::Weapon,
                     perks: Vec::new(),
+                    rank_rewards: Vec::new(),
                 })
                 .collect(),
             tradeskills: Vec::new(),
@@ -527,6 +572,36 @@ fn tradeskill_sources(tables: &Tables) -> Vec<TradeskillSource> {
 /// The other categorical progressions of `tables`: the `CategoricalProgressionData` rows whose
 /// `RankTableId` names a `CategoricalProgressionRankData` table other than `WeaponMastery`,
 /// with that table's rows.
+/// The `XPReward` of every rank of every categorical progression's rank table (progression
+/// id, rank, reward); a rank without one is left out.
+fn rank_reward_sources(tables: &Tables) -> Vec<(String, i64, i64)> {
+    let rank_tables: HashMap<String, Vec<(i64, i64)>> = tables
+        .categorical_progression_rank_data
+        .iter()
+        .map(|table| {
+            let rows = table
+                .rows
+                .iter()
+                .filter_map(|row| Some((row.rank, row.xp_reward.filter(|xp| *xp > 0)?)))
+                .collect();
+            (table.unique_id.to_lowercase(), rows)
+        })
+        .collect();
+    tables
+        .categorical_progression_data
+        .iter()
+        .flat_map(|table| &table.rows)
+        .filter_map(|row| {
+            let rows = rank_tables.get(&row.rank_table_id.as_deref()?.to_lowercase())?;
+            Some((row.categorical_progression_id.clone(), rows))
+        })
+        .flat_map(|(id, rows)| {
+            rows.iter()
+                .map(move |(rank, reward)| (id.clone(), *rank, *reward))
+        })
+        .collect()
+}
+
 fn progression_sources(tables: &Tables) -> Vec<ProgressionSource> {
     let rank_tables: HashMap<String, Vec<(i64, i64)>> = tables
         .categorical_progression_rank_data
@@ -734,6 +809,8 @@ pub(crate) mod tests {
     /// `Camping` (`AutoRankUp` true, `MaxLevel` 5) and the first caps of its rank table.
     const CAMPING_CAPS: [(i64, i64); 2] = [(0, 100), (1, 200)];
     const CAMPING_TOP: i64 = 5;
+    /// `XPReward` of territory standing rank 1 (content bundle 25810808).
+    const CAMPING_RANK_ONE_REWARD: i64 = 100;
     /// `AzothRespecCost` of the weapon ranks 9 to 11 (content bundle 25810808).
     const RESPEC_COSTS: [(i64, i64); 3] = [(11, 6), (9, 0), (10, 6)];
 
@@ -766,7 +843,12 @@ pub(crate) mod tests {
                     ranks: Vec::new(),
                 },
             ])
-            .with_respec_costs(RESPEC_COSTS);
+            .with_respec_costs(RESPEC_COSTS)
+            .with_rank_rewards([
+                ("camping".to_owned(), 1, CAMPING_RANK_ONE_REWARD),
+                ("Unknown".to_owned(), 1, CAMPING_RANK_ONE_REWARD),
+                ("Camping".to_owned(), -1, CAMPING_RANK_ONE_REWARD),
+            ]);
         let azoth = progression.categorical("azoth_currency").expect("currency");
         assert_eq!(azoth.kind, MasteryKind::Currency);
         assert!(
@@ -784,6 +866,9 @@ pub(crate) mod tests {
         let camping = progression.categorical("Camping").expect("ranked");
         assert_eq!(camping.kind, MasteryKind::Ranked);
         assert_eq!(camping.rank_of(150), (1, 50));
+        assert_eq!(camping.rank_reward(0), 0);
+        assert_eq!(camping.rank_reward(1), 100);
+        assert_eq!(camping.rank_reward(2), 0, "a rank the table gives nothing");
         assert_eq!(
             progression
                 .categorical(GREATSWORD)

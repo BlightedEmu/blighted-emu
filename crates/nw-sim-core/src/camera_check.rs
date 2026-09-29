@@ -11,10 +11,15 @@
 //! short boom, shorter where the camera meets a wall) and is never sent, so each camera gives the
 //! body only up to the boom. The check keeps the boom:
 //!
-//! - While the body rests, the camera moves around a still body (a zoom, a turn of the view): the
-//!   boom is the distance of the body along the view. When the body comes to rest, a boom within
-//!   half a zoom step of a zoom length is that length, and the body is where it puts it (retail's
-//!   resting booms are the zoom lengths to 0.01 m unless a wall shortens them).
+//! - While the body rests, the camera moves around a still body (a zoom, a turn of the view). When
+//!   the last records' views turn by at least [`ORBIT_TURN_RAD`], their cameras alone give the
+//!   body and the boom (weighted least squares): the camera turns around the client's body, not
+//!   the server's (live run fishing-01, 2026-09-26: the camera orbited a body 7.4 m along the
+//!   view, 1.2 m from the risen it hit, while the server's body, held at its own place, stood
+//!   3 m nearer the camera and every swing missed). Otherwise the boom is the distance of the
+//!   body along the view. When the body comes to rest, a boom within half a zoom step of a zoom
+//!   length is that length, and the body is where it puts it (retail's resting booms are the zoom
+//!   lengths to 0.01 m unless a wall shortens them).
 //! - While the body moves, the boom keeps its length unless a boom key was pressed: the boom is
 //!   solved by weighted least squares over the last records' cameras and the server's own motion
 //!   between them, with a prior on the boom and a weak one on the server's body (a turning view
@@ -66,6 +71,14 @@ const BODY_MOVING_SIGMA_M: f32 = 1.0;
 const BOOM_FREE_RECORDS: u8 = 20;
 /// The newest camera is within this of the solve, m, or the camera does not follow the body.
 const CAMERA_FIT_M: f32 = 1.0;
+/// How far the views of the window must turn for their cameras alone to place a resting body,
+/// radians (**Inferred**: with the camera's spread of [`CAMERA_SIGMA_M`] and its trail of up to
+/// 0.25 m while the view turns, a turn of 0.3 rad puts the body within about 0.8 m along the
+/// view; fishing-01 turned 0.8 rad in 8 records). Own-movement replay, median and 90th
+/// percentile error: retail newchar 0.32/1.52 m before and 0.32/1.52 m with it (open world
+/// 0.24/1.35 to 0.25/1.38 m), the Linux newchar 0.53/3.84 to 0.43/3.50 m; 0.6 rad pulled the
+/// retail beach past its bound.
+const ORBIT_TURN_RAD: f32 = 0.3;
 /// The boom of a camera that follows the body, m (Observed: retail resting booms from 0.1 m,
 /// against a wall, to 7.0 m, the longest zoom; moving booms up to 8.4 m with the trail).
 const BOOM_RANGE_M: std::ops::Range<f32> = 0.0..9.0;
@@ -142,6 +155,9 @@ pub struct CameraBody {
 pub struct CameraCheck {
     seen: VecDeque<Seen>,
     boom_m: Option<f32>,
+    /// The last boom the camera had, kept when a server move starts the window again: the
+    /// client's zoom does not change with it.
+    last_boom_m: Option<f32>,
     free_records: u8,
     /// The body rested in the record before; a body the server just placed rests where it put it.
     was_resting: bool,
@@ -152,6 +168,7 @@ impl Default for CameraCheck {
         Self {
             seen: VecDeque::with_capacity(WINDOW_RECORDS),
             boom_m: None,
+            last_boom_m: None,
             free_records: 0,
             was_resting: true,
         }
@@ -213,9 +230,13 @@ fn zoom_length(boom: f32) -> Option<f32> {
 }
 
 impl CameraCheck {
-    /// Forgets the cameras: after a server move the camera jumps with the body.
+    /// Forgets the cameras: after a server move the camera jumps with the body. The last boom
+    /// stays for [`Self::body_at_last_boom`]: the client's zoom does not change with the move.
     pub fn forget(&mut self) {
-        *self = Self::default();
+        *self = Self {
+            last_boom_m: self.last_boom_m,
+            ..Self::default()
+        };
     }
 
     /// The boom the check holds, once a camera fitted.
@@ -253,40 +274,93 @@ impl CameraCheck {
         let came_to_rest = resting && !self.was_resting;
         self.was_resting = resting;
         let found = if resting {
-            Self::resting(view, body, came_to_rest)
+            self.orbit(view)
+                .or_else(|| Self::resting(view, body))
+                .map(|found| Self::settled(view, found, came_to_rest))
         } else {
             self.moving(view, body, velocity)
         };
         self.free_records = self.free_records.saturating_sub(1);
         let found = found.filter(|found| BOOM_RANGE_M.contains(&found.boom_m))?;
         self.boom_m = Some(found.boom_m);
+        self.last_boom_m = Some(found.boom_m);
         Some(found)
     }
 
-    /// The body and boom of a resting body: the body stays, the boom is its distance along the
-    /// view, or the zoom length near it as the body comes to rest. A camera whose view passes
-    /// more than [`CAMERA_FIT_M`] beside the body does not look at it: a cutscene or video camera,
-    /// or one that has not followed a server move yet (replay of the newchar tutorial: after the
-    /// move into the water the video's camera, 601 m beside the new place, put the body 62 m up
-    /// for three records).
-    fn resting(view: CameraView, body: Position, came_to_rest: bool) -> Option<CameraBody> {
-        let boom = view.boom_to(body, [0.0; 2]);
-        if view.body(boom, [0.0; 2]).horizontal_distance(body) > CAMERA_FIT_M {
-            return None;
-        }
-        let zoom = zoom_length(boom).filter(|_| came_to_rest);
-        Some(match zoom {
+    /// Where the camera `view` puts the body at the boom the camera last had; `None` before it
+    /// had one.
+    pub fn body_at_last_boom(&self, view: CameraView) -> Option<CameraBody> {
+        let boom_m = self.last_boom_m?;
+        Some(CameraBody {
+            at: view.body(boom_m, [0.0; 2]),
+            boom_m,
+        })
+    }
+
+    /// The resting body `found` of the camera `view`, or the zoom length near its boom as the body
+    /// comes to rest (`came_to_rest`).
+    fn settled(view: CameraView, found: CameraBody, came_to_rest: bool) -> CameraBody {
+        match zoom_length(found.boom_m).filter(|_| came_to_rest) {
             Some(zoom) => CameraBody {
                 at: view.body(zoom, [0.0; 2]),
                 boom_m: zoom,
             },
-            None => CameraBody {
-                at: Position {
-                    z: view.body(boom, [0.0; 2]).z,
-                    ..body
-                },
-                boom_m: boom,
+            None => found,
+        }
+    }
+
+    /// The body and boom that the window's cameras turning around a resting body give: `None`
+    /// when their views turn less than [`ORBIT_TURN_RAD`], or a camera of the window lies more
+    /// than [`CAMERA_FIT_M`] from the solve (it does not look at the same body). The boom held so
+    /// far is a weak prior.
+    fn orbit(&self, view: CameraView) -> Option<CameraBody> {
+        let newest = self.seen.back()?;
+        let turned = self.seen.iter().any(|seen| {
+            let cross = seen.ray[0] * newest.ray[1] - seen.ray[1] * newest.ray[0];
+            let dot = seen.ray[0] * newest.ray[0] + seen.ray[1] * newest.ray[1];
+            cross.atan2(dot).abs() >= ORBIT_TURN_RAD
+        });
+        if !turned {
+            return None;
+        }
+        let mut normal = Normal::default();
+        let camera = weight(CAMERA_SIGMA_M);
+        let placed = |seen: &Seen| [seen.base[0] + seen.moved[0], seen.base[1] + seen.moved[1]];
+        for seen in &self.seen {
+            let [x, y] = placed(seen);
+            normal.add([1.0, 0.0, -seen.ray[0]], x, camera);
+            normal.add([0.0, 1.0, -seen.ray[1]], y, camera);
+        }
+        if let Some(boom) = self.boom_m {
+            normal.add([0.0, 0.0, 1.0], boom, weight(BOOM_FREE_SIGMA_M));
+        }
+        let [x, y, boom] = normal.solve()?;
+        let fits = self.seen.iter().all(|seen| {
+            let [seen_x, seen_y] = placed(seen);
+            (x - boom * seen.ray[0] - seen_x).hypot(y - boom * seen.ray[1] - seen_y) < CAMERA_FIT_M
+        });
+        fits.then(|| CameraBody {
+            at: view.body(boom, [0.0; 2]),
+            boom_m: boom,
+        })
+    }
+
+    /// The body and boom of a resting body whose cameras do not turn: the body stays, the boom is
+    /// its distance along the view. A camera whose view passes more than [`CAMERA_FIT_M`] beside
+    /// the body does not look at it: a cutscene or video camera, or one that has not followed a
+    /// server move yet (replay of the newchar tutorial: after the move into the water the video's
+    /// camera, 601 m beside the new place, put the body 62 m up for three records).
+    fn resting(view: CameraView, body: Position) -> Option<CameraBody> {
+        let boom = view.boom_to(body, [0.0; 2]);
+        if view.body(boom, [0.0; 2]).horizontal_distance(body) > CAMERA_FIT_M {
+            return None;
+        }
+        Some(CameraBody {
+            at: Position {
+                z: view.body(boom, [0.0; 2]).z,
+                ..body
             },
+            boom_m: boom,
         })
     }
 
@@ -344,6 +418,30 @@ mod tests {
 
     fn at(x: f32, y: f32) -> Position {
         Position { x, y, z: 10.0 }
+    }
+
+    #[test]
+    fn a_camera_turning_around_the_clients_resting_body_moves_the_servers_body_there() {
+        // Live run fishing-01 (2026-09-26, 15:55:12): the camera circled the client's body on a
+        // 7.4 m boom (the far zoom) while the server's body stood 3 m nearer the camera, where
+        // the boom of its distance put it; the view turned 0.8 rad in 8 records.
+        const FAR_BOOM: f32 = 7.4;
+        const SERVER_SHORT_M: f32 = 3.0;
+        const TURN_PER_RECORD: f32 = 0.1;
+        let client = at(578.5, 381.5);
+        let mut check = CameraCheck::default();
+        let mut last = None;
+        for record in 0..WINDOW_RECORDS {
+            // A window of a few records is a small count.
+            #[allow(clippy::cast_precision_loss)]
+            let yaw = -1.0 + TURN_PER_RECORD * record as f32;
+            let view = camera_of(client, yaw, FAR_BOOM, [0.0; 2]);
+            let server = view.body(FAR_BOOM - SERVER_SHORT_M, [0.0; 2]);
+            last = check.observe(view, server, [0.0; 2], [0.0; 2], true, false);
+        }
+        let seen = last.expect("fits");
+        assert!(seen.at.horizontal_distance(client) < CLOSE_M, "{seen:?}");
+        assert!((seen.boom_m - FAR_BOOM).abs() < CLOSE_M);
     }
 
     #[test]

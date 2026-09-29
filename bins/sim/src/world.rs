@@ -150,7 +150,7 @@ use crate::mob_ai::SpawnAi;
 use crate::mobs::{MobAttackIntent, MobChanges, Mobs};
 use crate::objectives::{Effect, Event, Facts, ObjectiveRun};
 use crate::player_content::{
-    MobLooks, OPEN_WORLD_OBJECTIVE, PlayerContent, QuestDef, TUTORIAL_OBJECTIVE,
+    MobLooks, OPEN_WORLD_OBJECTIVE, PlayerContent, QuestDef, TUTORIAL_OBJECTIVE, TUTORIAL_SWORD,
 };
 use crate::stats::StatEvent;
 use nw_content::creature_animations::CreatureAnimations;
@@ -1383,6 +1383,9 @@ impl SimWorld {
             if !was_spawned && player.login {
                 player.others_due_ms = Some(OTHER_ENTITY_SETTLE_PENDING);
             }
+            if !was_spawned && let Some(quest) = player.quest.as_mut() {
+                quest.in_game();
+            }
             player.own_card_bundle = None;
         }
     }
@@ -1536,7 +1539,7 @@ impl SimWorld {
         let mut walked = Vec::new();
         let mut read_any = false;
         for (record, seen) in records.iter().zip(views).rev() {
-            let Some(input) = crate::camera::track_input(record, seen) else {
+            let Some(mut input) = crate::camera::track_input(record, seen) else {
                 // No view angles: the test client's point, with no counter (0 in every record).
                 if let Some(camera) = seen.camera {
                     read_any = true;
@@ -1557,6 +1560,10 @@ impl SimWorld {
             }
             player.input_counter = Some(counter);
             read_any = true;
+            // A cutscene's or a video's camera shows the scene, not the player: it carries nothing.
+            if player.flow.camera_in_scene() {
+                input.view = None;
+            }
             let swimming = player.tracked.is_swimming();
             let falling = player.tracked.is_falling();
             player.slayer.record(
@@ -2262,7 +2269,8 @@ impl SimWorld {
             let done: Vec<&str> = player.done_quests.iter().map(String::as_str).collect();
             let mut tracker = QuestTracker::new(&id, number)
                 .after(&done, number)
-                .above(player.tracker_shown());
+                .above(player.tracker_shown())
+                .with_auto_pin(player.auto_pin);
             tracker.update(tasks, false);
             // The first own card on this sim sends the whole quest; nothing more is due.
             while tracker.take_change().is_some() {}
@@ -2465,6 +2473,9 @@ impl SimWorld {
                     && to != from
                     && let Some(mut player) = self.world.get_mut::<Player>(entity)
                 {
+                    if matches!(shove, Shove::To(_)) {
+                        player.slayer.pulled(now_ms);
+                    }
                     player.push = Some(Push {
                         from,
                         to,
@@ -2783,6 +2794,13 @@ impl SimWorld {
         else {
             return;
         };
+        tracing::debug!(
+            player = number,
+            kind = request.kind,
+            interaction = request.interaction,
+            target = ?request.target,
+            "interaction request"
+        );
         self.stow_for_interaction(connection, &request);
         let Some(tutorial) = self.tutorials.get_mut(&number) else {
             let Some(&entity) = self.by_connection.get(connection) else {
@@ -2899,6 +2917,7 @@ impl SimWorld {
                 return Ok(());
             }
             ClientFacetMsg::SetCraftingDetails {
+                header,
                 recipe,
                 quantity,
                 fee,
@@ -2910,6 +2929,7 @@ impl SimWorld {
                 let choice = crafting::CraftChoice {
                     gear_score: u32::from(*gear_score),
                     perk_items: perk_items.clone(),
+                    header: Some(*header),
                 };
                 self.craft(
                     entity,
@@ -2923,8 +2943,8 @@ impl SimWorld {
                 );
                 return Ok(());
             }
-            ClientFacetMsg::CancelCrafting { .. } => {
-                self.close_station(entity, number);
+            ClientFacetMsg::CancelCrafting { header } => {
+                self.close_station(entity, number, *header);
                 return Ok(());
             }
             ClientFacetMsg::InitiateSalvage {
@@ -2962,6 +2982,7 @@ impl SimWorld {
             ClientFacetMsg::TerritoryEntered { territory, .. } => {
                 self.territory_changed(entity, *territory, true);
                 self.discover_territory(entity, *territory);
+                self.chart_area(entity, number, *territory, now_ms);
                 return Ok(());
             }
             ClientFacetMsg::TerritoryExited { territory, .. } => {
@@ -3224,6 +3245,8 @@ impl SimWorld {
             return Vec::new();
         };
         let tutorials = &self.tutorials;
+        let kits = &self.content.kits;
+        let time_ns = unix_ns(self.server_ms);
         let mut query = self.world.query::<(&mut Player, &Body, &Vitals)>();
         let mut starts = Vec::new();
         for (mut player, body, vitals) in query.iter_mut(&mut self.world) {
@@ -3265,6 +3288,27 @@ impl SimWorld {
                 }
             }
             player.frozen = true;
+            // The player leaves without the tutorial's sword, with its class's bag gear: a run
+            // that skipped the beach bag (a skip of the tutorial) gets it here.
+            let bag_taken = tutorials
+                .get(&player.number)
+                .is_some_and(encounter::Tutorial::bag_taken);
+            let backstory = player.backstory.clone();
+            let number = player.number;
+            if let Some(gear) = player.gear.as_mut() {
+                gear.remove(TUTORIAL_SWORD, time_ns);
+                if !bag_taken {
+                    for item in backstory
+                        .as_deref()
+                        .map(|backstory| kits.bag(backstory))
+                        .unwrap_or_default()
+                    {
+                        if !gear.add(item, 1) {
+                            tracing::warn!(player = number, item = %item.item_id, "bag item not given");
+                        }
+                    }
+                }
+            }
             starts.push(HandoffStart {
                 target: target.clone(),
                 offer: handoff_offer(
@@ -4256,7 +4300,7 @@ impl Neighbourhood<'_> {
                 // The quest tracker: the whole quest with the first card, then its changes.
                 let objectives = player.quest.as_mut().and_then(|quest| {
                     if first {
-                        Some(quest.first_state())
+                        Some(quest.take_first_state())
                     } else {
                         quest.take_change()
                     }
@@ -4354,6 +4398,19 @@ impl Neighbourhood<'_> {
                 let stamina = player.stamina.take_change();
                 player.combat.tick(self.now_ms);
                 let combat_status = player.combat.take_change(self.now_ms, self.server_time);
+                if let Some(state) = objectives.as_ref() {
+                    tracing::debug!(
+                        player = player.number,
+                        first,
+                        tracked = ?state.tracked.as_ref().map(|list| (list.version, list.elements.len())),
+                        active = ?state.active.as_ref().map(|list| (list.version, list.elements.len())),
+                        tasks = ?state.tasks.as_ref().map(|list| (list.version, list.elements.len())),
+                        "objectives sent"
+                    );
+                }
+                if let Some(state) = progression.as_ref() {
+                    tracing::debug!(player = player.number, first, ?state, "progression sent");
+                }
                 let states = PlayerStates {
                     character_id: *player.character.as_bytes(),
                     look: player.look,
@@ -4503,6 +4560,9 @@ impl Neighbourhood<'_> {
                         .stations
                         .zip(player.slots.slot(number))
                         .and_then(|(stations, slot)| stations.group(number, slot));
+                    if group.is_some() {
+                        tracing::debug!(player = player.number, station = number, "station shown");
+                    }
                     groups.extend(group);
                     continue;
                 }
@@ -6200,7 +6260,7 @@ mod tests {
     }
 
     /// The messages of `outgoing` for `who` on the message channel.
-    fn messages_for(outgoing: &[Outgoing], who: &ConnectionRef) -> Vec<ServerMessage> {
+    pub(super) fn messages_for(outgoing: &[Outgoing], who: &ConnectionRef) -> Vec<ServerMessage> {
         outgoing
             .iter()
             .filter(|out| out.connection == *who && out.channel == MESSAGE_CHANNEL)
@@ -7171,11 +7231,16 @@ mod tests {
         facet(&mut world, craft(KNIFE, &[gear::tests::FLINT, WOOD]), now);
         assert_eq!(
             holds(&world, gear::tests::FLINT),
-            0,
-            "the ingredients are taken"
+            1,
+            "the request takes nothing (retail: the bag changes with the result)"
         );
         assert_eq!(holds(&world, KNIFE), 0, "not yet made");
         let made = step(&mut world, &mut now, CRAFT_MS);
+        assert_eq!(
+            holds(&world, gear::tests::FLINT),
+            0,
+            "taken with the result"
+        );
         assert_eq!(
             crafted(&made),
             [(KNIFE.as_bytes().to_vec(), 1), (Vec::new(), 0)],
@@ -7255,8 +7320,8 @@ mod tests {
         // The Light Ration at the campfire, then the turn-in at Aelstrom.
         world.interact(&who, request(CAMPFIRE, station, 5), &[], now);
         facet(&mut world, craft(RATION_RECIPE, &[PORK]), now);
-        assert_eq!(holds(&world, PORK), 0, "the pork is cooked");
         step(&mut world, &mut now, CRAFT_MS);
+        assert_eq!(holds(&world, PORK), 0, "the pork is cooked");
         assert_eq!(holds(&world, RATION), 1);
         step(&mut world, &mut now, TICK_MS);
         facet(&mut world, complete(BOAR_FEAST_MYSTIC), now);
@@ -8466,6 +8531,7 @@ mod tests {
                     sequence: 2794,
                     second_started: None,
                     second_playing: None,
+                    second_stopped: false,
                 }),
                 ..replica::tests::source().ghost()
             }),
@@ -8586,6 +8652,11 @@ mod tests {
 
     /// A world of `level` with the test kits and one player wearing its starter kit.
     fn world_with_kit_player(level: LevelSpec, x: f32) -> SimWorld {
+        kit_world_with(level, admit_at(1, x, true))
+    }
+
+    /// A world of `level` with the test kits and the player of `admit`, of [`gear::tests::BACKSTORY`].
+    fn kit_world_with(level: LevelSpec, mut admit: Admit) -> SimWorld {
         let mut combat = test_combat();
         combat.spawns = Vec::new().into();
         let mut level_settings = settings(MANY, MAX_PLAYERS);
@@ -8602,10 +8673,53 @@ mod tests {
             }),
         );
         world.set_table(&table(&["sim-a", "sim-b"])).expect("table");
-        let mut admit = admit_at(1, x, true);
         admit.backstory = Some(gear::tests::BACKSTORY.to_owned());
         world.admit(&admit, NOW, SERVER_TIME).expect("admit");
         world
+    }
+
+    #[test]
+    fn a_player_leaves_the_tutorial_without_the_sword_and_with_its_class_bag() {
+        let mut at_exit = admit_at(1, TUTORIAL_EXIT.x, true);
+        at_exit.position = Point::from(TUTORIAL_EXIT);
+        let mut world = kit_world_with(TUTORIAL_LEVEL, at_exit);
+        let carries = |world: &mut SimWorld, item_id: &str| {
+            world
+                .world
+                .query::<&Player>()
+                .iter(&world.world)
+                .next()
+                .and_then(|player| player.gear.as_ref())
+                .expect("gear")
+                .carried()
+                .iter()
+                .filter(|item| item.item_id == item_id)
+                .count()
+        };
+        assert_eq!(
+            carries(&mut world, gear::tests::SWORD),
+            1,
+            "the login kit's sword"
+        );
+        assert_eq!(carries(&mut world, gear::tests::STAFF), 0);
+        let card_at = NOW + OWN_CARD_DELAY_MS;
+        tick(&mut world, card_at);
+        world.heard_from(&connection(1));
+        assert_eq!(
+            tick(&mut world, card_at + 33).handoffs.len(),
+            1,
+            "a player at the exit without the tutorial quest (a skip) leaves"
+        );
+        assert_eq!(
+            carries(&mut world, gear::tests::SWORD),
+            0,
+            "the sword stays behind"
+        );
+        assert_eq!(
+            carries(&mut world, gear::tests::STAFF),
+            1,
+            "the beach bag it never opened gives the class weapon"
+        );
     }
 
     fn give_flint(world: &mut SimWorld) {
@@ -8673,6 +8787,11 @@ mod tests {
     /// A world whose test mob type drops loot table `loot_table` of `tables`, with player 1 (the
     /// test kits) at the mob.
     fn loot_world(loot_table: &str, tables: LootTables) -> SimWorld {
+        loot_world_at(loot_table, tables, None)
+    }
+
+    /// [`loot_world`] with the test mob type's `LootDropChance` `chance`.
+    fn loot_world_at(loot_table: &str, tables: LootTables, chance: Option<f64>) -> SimWorld {
         let mut combat = test_combat();
         combat.spawns = vec![test_spawn(CELL_M / 2.0)].into();
         let mut world = SimWorld::new(
@@ -8688,6 +8807,7 @@ mod tests {
                     vitals_id: TEST_MOB.to_owned(),
                     table: Some(loot_table.to_owned()),
                     tags: None,
+                    chance,
                 }]),
                 ..PlayerContent::default()
             }),
@@ -8983,6 +9103,31 @@ mod tests {
             .count();
         assert_eq!(owned, simulated, "the kills roll as the simulator does");
         assert!((kill_rate - POTION_CHANCE).abs() <= MAX_GAP, "{kill_rate}");
+    }
+
+    #[test]
+    fn a_kill_rolls_its_table_at_its_types_loot_drop_chance() {
+        const KILLS: u32 = 10_000;
+        const TABLE: &str = "SailorLoot";
+        /// The corrupted sailors' `LootDropChance` (retail: 11.1 % of 3,020 kills rolled loot).
+        const DROP_CHANCE: f64 = 0.1;
+        const MAX_GAP: f64 = 0.01;
+        let tables = LootTables::build(LootSource {
+            rows: loot_rows(TABLE, &[(gear::tests::POTION, "0")]),
+            bucket_items: Vec::new(),
+        });
+        let mut world = loot_world_at(TABLE, tables, Some(DROP_CHANCE));
+        let entity = world.by_connection[&connection(1)];
+        for _ in 0..KILLS {
+            world.drop_loot(crate::mobs::mob_entity(0), 1, NOW);
+            if let Some(mut player) = world.world.get_mut::<Player>(entity) {
+                player.extra_members.clear();
+            }
+        }
+        let (bags, owned) = world.bags.counts();
+        assert_eq!(bags, KILLS as usize, "every kill still drops a bag");
+        let rate = owned as f64 / f64::from(KILLS);
+        assert!((rate - DROP_CHANCE).abs() <= MAX_GAP, "{rate}");
     }
 
     #[test]

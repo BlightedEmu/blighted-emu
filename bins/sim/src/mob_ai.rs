@@ -66,6 +66,9 @@ pub const MAX_STEP_DOWN_M: f32 = 3.0;
 const MAX_STEP_MS: u64 = 1_000;
 /// The step of a floor check along a line (our engineering limit: half a body).
 const FLOOR_STEP_M: f32 = 0.5;
+/// A body this near the floor under it stands on that floor (our engineering limit: a floor
+/// check's step).
+const ON_FLOOR_M: f32 = 0.5;
 /// `Target_Vitals_State` and `Vitals_State` of a living entity (see the module notes).
 const ALIVE_VITALS_STATE: i64 = 4;
 /// `Health_Percent` is 0 to 100 (module notes).
@@ -547,7 +550,10 @@ pub fn height_after_move(ground: &dyn Ground, to: Position) -> f32 {
 /// level has no height or its ground lies far below, it keeps its height), and the rise between
 /// two steps must stay within
 /// `max_slope_deg` (the slice's `m_maxSlope`; no limit without one). `None` when the line is too
-/// steep. The server has no navigation mesh (the level `.bai` files are not read, their format
+/// steep, or when a body standing on a floor would step off an edge more than
+/// [`MAX_STEP_DOWN_M`] high: kept at its height it walked on in the air (live
+/// login-world-entry-01: boars off the wreck's deck 3.7 to 12.1 m above the floor for up to 84
+/// s; retail newchar: no body more than 3 m over the floor for longer than a jump). The server has no navigation mesh (the level `.bai` files are not read, their format
 /// is Unknown): the level's floors (the terrain and the level collision's structures) stand in
 /// for it (Inferred).
 pub fn floor_line(
@@ -575,6 +581,13 @@ pub fn floor_line(
         let share = step as f32 / steps as f32;
         let x = from.x + (to.x - from.x) * share;
         let y = from.y + (to.y - from.y) * share;
+        let on_floor = ground
+            .floor_at(last.x, last.y, last.z)
+            .is_some_and(|floor| (last.z - floor).abs() <= ON_FLOOR_M);
+        let below = ground.floor_at(x, y, last.z);
+        if on_floor && below.is_some_and(|floor| last.z - floor > MAX_STEP_DOWN_M) {
+            return None;
+        }
         let z = height_after_move(ground, Position { x, y, z: last.z });
         let run = last.horizontal_distance(Position { x, y, z });
         if max_rise.is_some_and(|rise| run > 0.0 && (z - last.z).abs() / run > rise) {
@@ -2233,6 +2246,45 @@ mod tests {
             on_deck,
             Some(deck.z),
             "a deck above the height map keeps its height"
+        );
+    }
+
+    /// A deck the floor holds east of `START` up to [`DECK_END_M`], [`DECK_HEIGHT_M`] above the
+    /// ground; the ground lies under it.
+    struct Deck;
+
+    const DECK_END_M: f32 = 3.0;
+    const DECK_HEIGHT_M: f32 = MAX_STEP_DOWN_M + 4.0;
+
+    impl Ground for Deck {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(GROUND_Z)
+        }
+
+        fn floor_at(&self, x: f32, _: f32, z: f32) -> Option<f32> {
+            let deck = GROUND_Z + DECK_HEIGHT_M;
+            Some(if x - START.x <= DECK_END_M && z >= deck - ON_FLOOR_M {
+                deck
+            } else {
+                GROUND_Z
+            })
+        }
+    }
+
+    #[test]
+    fn a_mob_on_a_floor_does_not_walk_off_a_high_edge() {
+        let on_deck = Position {
+            z: GROUND_Z + DECK_HEIGHT_M,
+            ..START
+        };
+        assert!(
+            floor_line(&Deck, on_deck, east(DECK_END_M - 1.0), None).is_some(),
+            "along the deck"
+        );
+        assert_eq!(
+            floor_line(&Deck, on_deck, east(DECK_END_M + 2.0), None),
+            None,
+            "off its edge, 7 m above the ground"
         );
     }
 

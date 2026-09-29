@@ -4,6 +4,7 @@
 
 pub mod asset_solids;
 pub mod camera;
+pub mod charting;
 pub mod combat;
 pub mod config;
 pub mod forward;

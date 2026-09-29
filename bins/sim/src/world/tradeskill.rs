@@ -29,8 +29,9 @@ use nw_content::progression::RankPerks;
 use nw_content::rewards::Reward;
 use nw_content::tradeskill_xp::{NEUTRAL_MODIFIER, gather_reward};
 
-use super::quest_objects::grant;
+use super::quest_objects::{gain_experience, grant};
 use super::{Player, SimWorld};
+use crate::charting::{NEUTRAL_STANDING_MODIFIER, RANK_UP_EVENT};
 use crate::player_content::PlayerContent;
 
 /// How the reward of one firing scales.
@@ -206,18 +207,46 @@ impl SimWorld {
             return;
         };
         let gain = event_gain(per_firing, times, content.gameplay.xp.progression(id));
+        let (rank_before, _) = mastery.rank_of(player.masteries.experience(mastery));
         player.masteries.gain(mastery, gain);
+        let (rank_after, _) = mastery.rank_of(player.masteries.experience(mastery));
         tracing::debug!(player = number, event, progression = %id, gain, "progression gained");
+        // Each rank reached is a rank up event: its `XPReward`, times the territory's standing
+        // modifier for a territory's standing ([`crate::charting`]: 100 x 1.25 = 125 at
+        // Windsward's rank 1), is the event's amount.
+        let standing_modifier = id
+            .parse()
+            .ok()
+            .and_then(|territory| content.charting.experience(territory))
+            .map_or(NEUTRAL_STANDING_MODIFIER, |territory| {
+                territory.standing_modifier
+            });
+        let per_amount = content
+            .rewards
+            .get(RANK_UP_EVENT)
+            .map_or(0, |reward| reward.experience);
+        for rank in rank_before.saturating_add(1)..=rank_after {
+            let amount = f64::from(mastery.rank_reward(rank)) * standing_modifier;
+            let points = progression_gain(amount, ONE_FIRING, f64::from(per_amount));
+            gain_experience(&mut player, points, &content.gameplay.xp);
+            tracing::debug!(player = number, progression = %id, rank, points, "rank up");
+        }
     }
 
-    /// The territory player `number` is in: the latest territory area it entered (2297) whose
-    /// id is a categorical progression (a territory's standing); `None` outside every one.
+    /// The territory player `number` is in: the latest territory it entered whose id is a
+    /// categorical progression (a territory's standing), or the territory of the latest area it
+    /// entered (2297 names an area, not its territory: [`crate::charting`]); `None` outside
+    /// every one.
     pub(super) fn current_territory(&mut self, number: u64) -> Option<String> {
         let entity = self.player_by_number(number)?;
         let territories = self.world.get::<Player>(entity)?.territories.clone();
         territories
             .into_iter()
             .rev()
+            .map(|id| {
+                let id = u32::from(id);
+                self.content.charting.territory_of(id).unwrap_or(id)
+            })
             .map(|id| id.to_string())
             .find(|id| self.content.progression.categorical(id).is_some())
     }

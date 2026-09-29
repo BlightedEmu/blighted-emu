@@ -48,6 +48,7 @@ use nw_content::starter::StarterKits;
 use nw_messages::{AlcState, AssetId, BundleMember, MemberState, VitalsState};
 
 use crate::asset_solids::AssetSolids;
+use crate::charting::ChartRules;
 use crate::invite_rules::InviteRules;
 use crate::objectives::{
     KillTypes, ObjectiveTree, TaskBook, TaskRow, counted_game_events, task_rows,
@@ -58,6 +59,10 @@ use crate::travel_rules::{TravelRules, capital_id};
 
 /// The tutorial quest's objective id (`Objectives`).
 pub const TUTORIAL_OBJECTIVE: &str = "01_SoleSurvivor2";
+/// The tutorial's sword (the login kit's weapon; `01_SoleSurvivor2_Tutorial_RemoveLongsword`
+/// takes it after the S1 scene): no player keeps it past the tutorial (retail newchar
+/// 2026-09-18: the class weapons from 448 s on, the sword gone).
+pub const TUTORIAL_SWORD: &str = "1hSwordT2_FTUE";
 /// The first open-world quest, which a player gets when it leaves the tutorial (retail: in the
 /// first open-world state, xp-potion-exit note, section 3.3).
 pub const OPEN_WORLD_OBJECTIVE: &str = "12_GetOffBeach";
@@ -481,6 +486,9 @@ pub struct PlayerContent {
     pub mounts: MountRules,
     /// The landmarks, discoverable territories, spawn points and timings of travel.
     pub travel: TravelRules,
+    /// The chartable areas, the territory of each area and what a chart and a standing rank
+    /// give.
+    pub charting: ChartRules,
     /// The categorical progression and coins of each game event, for the tradeskill experience
     /// of gathers and crafts and the coins of salvages.
     pub event_grants: EventGrants,
@@ -650,6 +658,7 @@ impl PlayerContent {
             QuestObjects::build(level_gatherables, &gatherables, &counted_game_events(&rows));
         let kits = StarterKits::from_tables(tables);
         let travel = TravelRules::of(tables, level, &gameplay, &kits);
+        let charting = ChartRules::of(tables, level);
         Self {
             kits,
             achievements: AchievementIndexes::from_tables(tables),
@@ -722,6 +731,7 @@ impl PlayerContent {
             shops: ShopCatalog::from_tables(tables),
             invites: InviteRules::from_tables(tables),
             travel,
+            charting,
             event_grants: EventGrants::from_tables(tables),
             tradeskill_curves: TradeskillCurves::from_tables(tables),
             bonus_chances: BonusChances::from_tables(tables),

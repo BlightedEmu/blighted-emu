@@ -39,7 +39,9 @@ use nw_sim_core::{
 pub use nw_world::records::VitalsSpawn;
 
 use crate::combat::CombatSettings;
-use crate::mob_ai::{COMBAT_LEASH_KEY, MobAi, Shown, SpawnAi, Strike, Surroundings, TreeMind};
+use crate::mob_ai::{
+    COMBAT_LEASH_KEY, MobAi, Shown, SpawnAi, Strike, Surroundings, TreeMind, height_after_move,
+};
 
 /// A player scans for mobs to wake again after moving this far (about 2 s of running); far less
 /// than the wake radius, so a mob wakes before the player can reach it.
@@ -109,6 +111,10 @@ pub struct Mob {
     awake: bool,
     /// When a player was last near it.
     near_ms: u64,
+    /// It stands on the floor under its spawn: the world file's spawn heights are not on it
+    /// (live login-world-entry-01: a boar spawned 1.42 m under the terrain stayed in it until
+    /// it moved).
+    grounded: bool,
 }
 
 impl Mob {
@@ -489,6 +495,10 @@ impl TickView<'_> {
             #[allow(clippy::cast_precision_loss, reason = "a share of a health bar")]
             health_share: mob.health.current() as f32 / mob.health.max().max(1) as f32,
         };
+        if !mob.grounded {
+            mob.position.z = height_after_move(self.ground, mob.position);
+            mob.grounded = true;
+        }
         let thought = mind.step(self.ai, &mut mob.position, &around);
         step.sleeps &= mind.target().is_none();
         if thought.healed {
@@ -604,6 +614,7 @@ impl Mobs {
             dead_since_ms: None,
             awake: false,
             near_ms: 0,
+            grounded: false,
         })
     }
 
@@ -1723,6 +1734,18 @@ mod tests {
         );
         assert_eq!(at(&mobs, 0).z, HEIGHT, "it stands on the ground");
         assert!(at(&mobs, 0).horizontal_distance(player.position) <= TEST_REACH_M);
+    }
+
+    #[test]
+    fn a_mob_spawned_under_the_floor_stands_on_it_at_its_first_step() {
+        // Live login-world-entry-01: a boar spawn 1.42 m under the terrain.
+        const UNDER_M: f32 = 1.42;
+        let mut spawn = spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL);
+        spawn.position[2] = HEIGHT - UNDER_M;
+        let mut mobs = mobs(vec![spawn]);
+        mobs.set_cells(every);
+        run(&mut mobs, &[player_at(SPAWN_X + 10.0)], 0, 0);
+        assert_eq!(at(&mobs, 0).z, HEIGHT);
     }
 
     #[test]

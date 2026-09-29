@@ -869,6 +869,8 @@ pub struct GhostSlayer {
     pub second_started: Option<u16>,
     /// The second slot's state (as on the wire) and sequence, when it plays one.
     pub second_playing: Option<(u64, u64)>,
+    /// The second slot's action stops ([`nw_messages`]' `SecondSlayerState::stopped`).
+    pub second_stopped: bool,
 }
 
 /// The state of a mob ghost (M6-A spec section 6.3).
@@ -1554,6 +1556,7 @@ mod tests {
                     sequence: u64::MAX,
                     second_started: Some(u16::MAX),
                     second_playing: Some((u64::MAX, u64::MAX)),
+                    second_stopped: true,
                 }),
                 upper: Some(GhostUpperSlots {
                     second: largest_slot,

@@ -21,7 +21,7 @@ use nw_bus::LootLimitCount;
 use nw_content::item_rolls::RolledItem;
 use nw_content::loot::LootRoll;
 use nw_content::loot_limits::{LimitCount, LootLimitCounts, LootLimitRules};
-use nw_content::perks::rarity;
+use nw_content::perks::{chance_hit, rarity};
 use nw_content::starter::KitItem;
 use nw_messages::gde::AssetId;
 use nw_messages::items::{ITEM_BOUND, SYNC_OWNED};
@@ -811,10 +811,10 @@ impl SimWorld {
     }
 
     /// Mob `mob`, killed by player `killer` at `now_ms`, drops its loot bag at its corpse: the
-    /// roll of its loot table (every kill of a mob type with a table drops one, loot note) for
-    /// the killer, less the items its loot limits hold back, which its loot tracker lists when
-    /// the roll gave items. A killer on another sim, a mob type without a table and the tutorial
-    /// drop nothing.
+    /// roll of its loot table at its type's `LootDropChance` ([`nw_content::loot::MobLoot`];
+    /// every kill of a mob type with a table drops a bag, loot note) for the killer, less the
+    /// items its loot limits hold back, which its loot tracker lists when the roll gave items.
+    /// A killer on another sim, a mob type without a table and the tutorial drop nothing.
     pub(super) fn drop_loot(&mut self, mob: u64, killer: u64, now_ms: u64) {
         if self.is_tutorial() || self.player_by_number(killer).is_none() {
             return;
@@ -835,9 +835,15 @@ impl SimWorld {
         let tags = self.mutation_loot_tags(&drop.tags);
         let context = self.loot_context(killer, Some((mob, &tags)), &reached);
         let dice = &mut self.dice;
-        let rolled = content
-            .loot
-            .roll(&drop.table, context, &mut |below| dice.below(below));
+        let mut below = |below| dice.below(below);
+        let rolls_table = drop
+            .chance
+            .is_none_or(|chance| chance_hit(chance, &mut below));
+        let rolled = if rolls_table {
+            content.loot.roll(&drop.table, context, &mut below)
+        } else {
+            LootRoll::default()
+        };
         let hints = rolled.gear_scores.clone();
         let mut items = self.limit_loot(killer, rolled);
         items.extend(self.mutation_kill_loot(killer, mob));

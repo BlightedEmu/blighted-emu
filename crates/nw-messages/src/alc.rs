@@ -57,6 +57,8 @@ const SLAYER_SEQUENCE_CHILD: usize = 15;
 const SECOND_SLAYER_STATE_CHILD: usize = 16;
 const SECOND_SLAYER_STARTED_CHILD: usize = 17;
 const SECOND_SLAYER_SEQUENCE_CHILD: usize = 18;
+/// The second slot's state of a slot whose action stops (child 16 = 0).
+const SECOND_SLOT_STOPPED: u64 = 0;
 /// Slot 0 children of the time into the first slayer slot's sequence: `slayerSeqTimeRel`, one
 /// byte of [`SEQUENCE_TIME_STEP_S`] steps from [`SEQUENCE_TIME_REL_ZERO`], and
 /// `slayerSeqTimeAbs`, a `half` in seconds that the steps count from ([`SequenceClock`]).
@@ -527,6 +529,9 @@ pub struct SecondSlayerState {
     pub started: u16,
     /// Its state (child 16, on the wire) and sequence (child 18), when it plays one.
     pub playing: Option<(u64, u64)>,
+    /// With no `playing`: the slot's action stops, child 16 = 0 without a sequence (retail
+    /// newchar 2026-09-12, Thorpe's grab pull: `13=04 14=3163 15=8a37 16=00 17=3163`).
+    pub stopped: bool,
 }
 
 impl SlayerState {
@@ -550,6 +555,7 @@ impl SlayerState {
                         input.second_sequence,
                     )
                 }),
+                stopped: false,
             }),
         }
     }
@@ -570,6 +576,11 @@ impl SlayerState {
             if let Some((state, sequence)) = second.playing {
                 children.push((SECOND_SLAYER_STATE_CHILD, prefixed_bytes(state)?));
                 children.push((SECOND_SLAYER_SEQUENCE_CHILD, prefixed_bytes(sequence)?));
+            } else if second.stopped {
+                children.push((
+                    SECOND_SLAYER_STATE_CHILD,
+                    prefixed_bytes(SECOND_SLOT_STOPPED)?,
+                ));
             }
         }
         Ok(children)
@@ -1992,6 +2003,7 @@ mod tests {
             second: Some(SecondSlayerState {
                 started: ATTACK_STARTED,
                 playing: None,
+                stopped: false,
             }),
         };
         let slots = UpperSlots {
@@ -2793,6 +2805,34 @@ mod tests {
         // 1 + 2^-11 is half-way between two halves: ties go to the even one.
         assert_eq!(half_bits(1.0 + 2.0_f32.powi(-11)), 0x3c00);
         assert_eq!(half_bits(1.0 + 3.0 * 2.0_f32.powi(-11)), 0x3c02);
+    }
+
+    #[test]
+    fn a_stopped_second_slot_writes_retails_pull_children() {
+        // Retail newchar 2026-09-12, Thorpe's grab pull: `13=04 14=3163 15=8a37 16=00 17=3163`.
+        const STARTED: u16 = 0x3163;
+        let pulled = SlayerState {
+            state: Some(4),
+            started: Some(STARTED),
+            sequence: 3530,
+            second: Some(SecondSlayerState {
+                started: STARTED,
+                playing: None,
+                stopped: true,
+            }),
+        };
+        let mut children = pulled.children().expect("children");
+        children.sort();
+        assert_eq!(
+            children,
+            [
+                (SLAYER_STATE_CHILD, vec![0x04]),
+                (SLAYER_STARTED_CHILD, vec![0x31, 0x63]),
+                (SLAYER_SEQUENCE_CHILD, vec![0x8a, 0x37]),
+                (SECOND_SLAYER_STATE_CHILD, vec![0x00]),
+                (SECOND_SLAYER_STARTED_CHILD, vec![0x31, 0x63]),
+            ]
+        );
     }
 
     #[test]

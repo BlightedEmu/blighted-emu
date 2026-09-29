@@ -910,12 +910,14 @@ impl PlayerLootLevels {
 }
 
 /// What a killed mob type rolls.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MobDrop {
     /// `LootTableId`.
     pub table: String,
     /// `LootTags`: the conditions of the tables this mob's loot rolls.
     pub tags: Vec<String>,
+    /// `LootDropChance`: the share of kills whose table rolls (0 to 1); `None`: every kill.
+    pub chance: Option<f64>,
 }
 
 /// One mob type's loot cells.
@@ -927,15 +929,19 @@ pub struct MobLootRow {
     pub table: Option<String>,
     /// `LootTags`.
     pub tags: Option<String>,
+    /// `LootDropChance`.
+    pub chance: Option<f64>,
 }
 
 /// The drop of every mob type by the CRC-32 of its lowercase `VitalsID`.
 ///
-/// Retail rolls the table of every kill (loot note 2026-09-18, 695 ledgers): own kills of mob
-/// types with `CreatureLootMaster` left a loot bag for 1,211 of 1,712 at `LootDropChance` 0.1, 232
-/// of 311 at 0.05 and 26 of 46 at 1, so the chance does not gate the drop; types with
-/// `CanDropLoot` false and a table left bags too (51 of 74), and types without a table none (0 of
-/// 80). What `LootDropChance` and `CanDropLoot` do is Unknown; neither is read.
+/// Retail leaves a loot bag at most kills (loot note 2026-09-18, 695 ledgers: own kills of mob
+/// types with `CreatureLootMaster` left one for 1,211 of 1,712 at `LootDropChance` 0.1), but the
+/// bag holds rolled loot only at the type's `LootDropChance` (Observed, 300 retail ledgers: the
+/// loot tracker listed a rolled creature bag for 335 of 3,020 own kills, 11.1 %, where most
+/// types have 0.1; the new character's start beach, boars at 0.05 and sailors at 0.1, gave 1 in
+/// 25 kills). A type without a chance rolls at every kill. What `CanDropLoot` does is Unknown;
+/// it is not read.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MobLoot {
     by_crc: HashMap<u32, MobDrop>,
@@ -953,6 +959,10 @@ impl MobLoot {
                 vitals_id: row.vitals_id.clone(),
                 table: row.loot_table_id.clone(),
                 tags: row.loot_tags.clone(),
+                chance: row
+                    .loot_drop_chance
+                    .as_deref()
+                    .and_then(|cell| cell.trim().parse().ok()),
             });
         let other = tables
             .vitals_data
@@ -962,6 +972,9 @@ impl MobLoot {
                 vitals_id: row.vitals_id.clone(),
                 table: row.loot_table_id.clone(),
                 tags: None,
+                // A whole number in this sheet: 1 every kill, 0 none.
+                #[allow(clippy::cast_precision_loss, reason = "0 or 1")]
+                chance: row.loot_drop_chance.map(|chance| chance as f64),
             });
         Self::build(base.chain(other))
     }
@@ -977,7 +990,11 @@ impl MobLoot {
             let tags = names(row.tags.as_deref()).map(str::to_owned).collect();
             by_crc
                 .entry(lowercase_crc32(&row.vitals_id))
-                .or_insert(MobDrop { table, tags });
+                .or_insert(MobDrop {
+                    table,
+                    tags,
+                    chance: row.chance,
+                });
         }
         Self { by_crc }
     }
@@ -1535,11 +1552,12 @@ mod tests {
         let row = |id: &str, table: Option<&str>| MobLootRow {
             vitals_id: id.to_owned(),
             table: table.map(str::to_owned),
-            tags: None,
+            ..MobLootRow::default()
         };
         let loot = MobLoot::build([
             MobLootRow {
                 tags: Some("Common, Wolf,".to_owned()),
+                chance: Some(0.1),
                 ..row("Wolf_Alpha", Some("WolfLoot"))
             },
             row("Boar", Some("BoarLoot")),
@@ -1553,6 +1571,7 @@ mod tests {
             Some(MobDrop {
                 table: "WolfLoot".to_owned(),
                 tags: vec!["Common".to_owned(), "Wolf".to_owned()],
+                chance: Some(0.1),
             })
         );
         assert_eq!(

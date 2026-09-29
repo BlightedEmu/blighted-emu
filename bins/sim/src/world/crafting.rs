@@ -28,13 +28,15 @@ use nw_content::crafting::{
 use nw_content::perks::PERK_SLOTS;
 use nw_content::tradeskill_xp::bonus_crafts;
 use nw_formats::objectstream::lowercase_crc32;
+use nw_messages::facet::component;
 use nw_messages::items::FIRST_VERSION;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     BuildableControllerState, BuildableGridState, BundleGroup, BundleMember, CommittedResource,
-    CraftIngredient, CraftProgressMsg, DelayedEventState, FullList, GdeMetadataReplicatedState,
-    GridSide, GuildCrest, InteractionRequest, MemberState, OwnerIdentification, OwnershipState,
-    PlacementObstructionState, ServerMessage, TerritoryInterfaceState,
+    CraftIngredient, CraftProgressMsg, DelayedEventState, FacetHeader, FullList,
+    GdeMetadataReplicatedState, GridSide, GuildCrest, InteractionRequest, MemberState,
+    OwnerIdentification, OwnershipState, PlacementObstructionState, ServerMessage,
+    TerritoryInterfaceState,
 };
 use nw_sim_core::Position;
 use nw_world::stations::CraftingStation;
@@ -206,6 +208,12 @@ fn station_members(
     members
 }
 
+/// The header crafting answers go to: the request's, else player `number`'s entity plus
+/// [`component::CRAFTING`].
+fn answer_header(request: Option<FacetHeader>, number: u64) -> FacetHeader {
+    request.unwrap_or_else(|| FacetHeader::of(component::CRAFTING, number))
+}
+
 /// A replicated list of `elements` at `version`.
 const fn list_at<T>(version: u64, elements: Vec<T>) -> FullList<T> {
     FullList {
@@ -267,10 +275,14 @@ impl Stations {
     }
 }
 
-/// A craft that runs: its items and fee are taken, its output comes at `due_ms`.
+/// A craft that runs: at `due_ms` its items and fee are taken and its output comes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct PendingCraft {
     number: u64,
+    /// The stacks it takes at its end.
+    taken: Vec<Taken>,
+    /// The coins it takes at its end.
+    fee: u32,
     recipe: String,
     item: String,
     /// The items it makes: the recipe's output times the crafts.
@@ -285,6 +297,8 @@ pub(super) struct PendingCraft {
     due_ms: u64,
     /// What each item it makes rolls with; `None`: an item without rolls of its own.
     roll: Option<CraftRoll>,
+    /// The header the answers go to.
+    header: FacetHeader,
 }
 
 /// What the player picked for a craft besides the recipe and ingredients (2997).
@@ -294,6 +308,9 @@ pub(super) struct CraftChoice {
     pub(super) gear_score: u32,
     /// The CRC-32 of each perk item's lowercase item id.
     pub(super) perk_items: Vec<u32>,
+    /// The header of the request: the answers go to it ([`CraftProgressMsg::crafted`]); `None`
+    /// answers the player's entity plus [`component::CRAFTING`].
+    pub(super) header: Option<FacetHeader>,
 }
 
 /// The rolls of a crafted gear item: the gear score and the perks its perk items force.
@@ -359,9 +376,11 @@ impl SimWorld {
     /// Player `number` (`entity`) crafts `crafts` of the recipe whose lowercase id has the CRC-32
     /// `recipe` at `now_ms`, from the `picked` ingredients, for the fee `fee` its client shows:
     /// at a station of the recipe's name and tier, at the recipe's level, with every ingredient
-    /// in the bag and the fee in the wallet. The ingredients and the fee are taken at once; the
-    /// output comes [`CRAFT_MS`] later ([`SimWorld::crafts_due`]). A refused craft gets an idle
-    /// update. A gear item is made at the gear score of `choice` held to the craft's range,
+    /// in the bag and the fee in the wallet. The ingredients and the fee are taken with the
+    /// output, [`CRAFT_MS`] later ([`SimWorld::crafts_due`]): retail newchar 2026-09-18 changed
+    /// the bag (1755) only after the result (2993) at 535.01 s, the request at 533.94 s took
+    /// nothing; taking them at the request made the live client say the craft attempt failed
+    /// (login-world-entry-01). A refused craft gets an idle update. A gear item is made at the gear score of `choice` held to the craft's range,
     /// with the perks its perk items force ([`SimWorld::craft_roll`]).
     #[allow(clippy::too_many_arguments, reason = "the fields of one craft request")]
     pub(super) fn craft(
@@ -376,13 +395,14 @@ impl SimWorld {
         now_ms: u64,
     ) {
         let crafts = crafts.max(ONE_CRAFT);
+        let header = answer_header(choice.header, number);
         let Some(recipe) = self.content.recipes.get(recipe_crc).cloned() else {
             tracing::debug!(
                 player = number,
                 recipe = recipe_crc,
                 "craft of an unknown recipe"
             );
-            self.send_idle(entity, number);
+            self.send_idle(entity, header);
             return;
         };
         let details = self.content.recipes.details(recipe_crc);
@@ -392,7 +412,7 @@ impl SimWorld {
         let charged = fee.min(details.fee.saturating_mul(crafts));
         let perk_items = self.perk_items_of(entity, &recipe.item, choice, details.max_perk_items);
         let taken = if level_reached {
-            self.take_ingredients(entity, &recipe, crafts, picked, &perk_items, charged)
+            self.ingredients_of(entity, &recipe, crafts, picked, &perk_items, charged)
         } else {
             Err(CraftRefusal::RecipeLevel)
         };
@@ -400,7 +420,7 @@ impl SimWorld {
             Ok(taken) => taken,
             Err(refusal) => {
                 tracing::debug!(player = number, recipe = %recipe.id, ?refusal, "craft refused");
-                self.send_idle(entity, number);
+                self.send_idle(entity, header);
                 return;
             }
         };
@@ -411,7 +431,10 @@ impl SimWorld {
             sum.saturating_add(ingredient.quantity)
         });
         self.crafts.push(PendingCraft {
+            header,
             number,
+            taken,
+            fee: charged,
             recipe: recipe.id.clone(),
             item: recipe.item,
             quantity: recipe.quantity.saturating_mul(crafts.saturating_add(bonus)),
@@ -531,13 +554,13 @@ impl SimWorld {
         Some(CraftRoll { gear_score, forced })
     }
 
-    /// Takes the ingredients of `crafts` of `recipe` and one of each of `perk_items` per craft
-    /// out of the bag of player `entity` and `fee` coins out of its wallet: for each
-    /// ingredient, the item the player picked that fits it, else the first carried one that
-    /// fits. Refused (nothing taken) away from a station of the recipe, without the coins, or
-    /// without an ingredient or perk item. The stacks taken.
-    fn take_ingredients(
-        &mut self,
+    /// The stacks `crafts` of `recipe` take from the bag of player `entity`, with one of each
+    /// of `perk_items` per craft, and `fee` coins from its wallet: for each ingredient, the item
+    /// the player picked that fits it, else the first carried one that fits. Refused away from
+    /// a station of the recipe, without the coins, or without an ingredient or perk item.
+    /// Nothing is taken here ([`SimWorld::take_stacks`]).
+    fn ingredients_of(
+        &self,
         entity: Entity,
         recipe: &Recipe,
         crafts: u32,
@@ -546,7 +569,7 @@ impl SimWorld {
         fee: u32,
     ) -> Result<Vec<Taken>, CraftRefusal> {
         let recipes = &self.content.recipes;
-        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+        let Some(player) = self.world.get::<Player>(entity) else {
             return Err(CraftRefusal::Station);
         };
         if !player
@@ -559,7 +582,7 @@ impl SimWorld {
         if player.coins < u64::from(fee) {
             return Err(CraftRefusal::Fee);
         }
-        let Some(gear) = player.gear.as_mut() else {
+        let Some(gear) = player.gear.as_ref() else {
             return Err(CraftRefusal::Ingredient);
         };
         let carried: Vec<String> = gear
@@ -596,19 +619,53 @@ impl SimWorld {
             }
             takes.push((perk_item.clone(), crafts, false));
         }
-        for (item, quantity, _) in &takes {
+        Ok(takes)
+    }
+
+    /// Takes the stacks `taken` out of the bag of player `entity` and `fee` coins out of its
+    /// wallet; refused (nothing taken) when the bag or the wallet no longer holds them.
+    fn take_stacks(
+        &mut self,
+        entity: Entity,
+        taken: &[Taken],
+        fee: u32,
+    ) -> Result<(), CraftRefusal> {
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return Err(CraftRefusal::Ingredient);
+        };
+        if player.coins < u64::from(fee) {
+            return Err(CraftRefusal::Fee);
+        }
+        let Some(gear) = player.gear.as_mut() else {
+            return Err(CraftRefusal::Ingredient);
+        };
+        let mut needed: Vec<(&str, u32)> = Vec::new();
+        for (item, quantity, _) in taken {
+            match needed.iter_mut().find(|(known, _)| *known == item.as_str()) {
+                Some((_, sum)) => *sum = sum.saturating_add(*quantity),
+                None => needed.push((item.as_str(), *quantity)),
+            }
+        }
+        if needed
+            .iter()
+            .any(|(item, quantity)| gear.bag_count(item) < *quantity)
+        {
+            return Err(CraftRefusal::Ingredient);
+        }
+        for (item, quantity, _) in taken {
             gear.take(item, *quantity);
         }
         if fee > 0 {
             player.coins -= u64::from(fee);
             player.coins_changed = true;
         }
-        Ok(takes)
+        Ok(())
     }
 
-    /// The crafts whose time came at `now_ms` end: the output goes into the bag, the client gets
-    /// the crafts made and an idle update, each craft fires the recipe's game event, and the
-    /// player's quest takes the craft.
+    /// The crafts whose time came at `now_ms` end: their stacks and fee are taken, the output
+    /// goes into the bag, the client gets the crafts made and an idle update, each craft fires
+    /// the recipe's game event, and the player's quest takes the craft. A craft whose stacks or
+    /// coins are gone by then makes nothing and gets an idle update.
     pub(super) fn crafts_due(&mut self, now_ms: u64) {
         let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.crafts)
             .into_iter()
@@ -618,6 +675,11 @@ impl SimWorld {
             let Some(entity) = self.player_by_number(craft.number) else {
                 continue;
             };
+            if let Err(refusal) = self.take_stacks(entity, &craft.taken, craft.fee) {
+                tracing::debug!(player = craft.number, recipe = %craft.recipe, ?refusal, "craft failed at its end");
+                self.send_idle(entity, craft.header);
+                continue;
+            }
             match &craft.roll {
                 Some(roll) => {
                     let content = Arc::clone(&self.content);
@@ -642,11 +704,11 @@ impl SimWorld {
             if let Some(player) = self.world.get::<Player>(entity) {
                 let messages = [
                     ServerMessage::CraftProgress(CraftProgressMsg::crafted(
-                        craft.number,
-                        &craft.recipe,
+                        craft.header,
+                        craft.recipe.as_bytes().to_vec(),
                         craft.crafts,
                     )),
-                    ServerMessage::CraftProgress(CraftProgressMsg::idle(craft.number)),
+                    ServerMessage::CraftProgress(CraftProgressMsg::idle(craft.header)),
                 ];
                 send_now(&mut self.combat_messages, &player.connection, &messages);
             }
@@ -682,18 +744,18 @@ impl SimWorld {
         bonus_crafts(chance + rank_bonus, crafts, &mut |below| dice.below(below))
     }
 
-    /// Player `number` (`entity`) closes the crafting window: it leaves the station and gets an
-    /// idle update.
-    pub(super) fn close_station(&mut self, entity: Entity, number: u64) {
+    /// Player `number` (`entity`) closes the crafting window with a request of header `header`
+    /// (2999): it leaves the station and gets an idle update.
+    pub(super) fn close_station(&mut self, entity: Entity, number: u64, header: FacetHeader) {
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
             player.station = None;
         }
-        self.send_idle(entity, number);
+        self.send_idle(entity, answer_header(Some(header), number));
     }
 
-    fn send_idle(&mut self, entity: Entity, number: u64) {
+    fn send_idle(&mut self, entity: Entity, header: FacetHeader) {
         if let Some(player) = self.world.get::<Player>(entity) {
-            let idle = ServerMessage::CraftProgress(CraftProgressMsg::idle(number));
+            let idle = ServerMessage::CraftProgress(CraftProgressMsg::idle(header));
             send_now(&mut self.combat_messages, &player.connection, &[idle]);
         }
     }
@@ -714,7 +776,9 @@ mod tests {
     use super::*;
     use crate::player_content::PlayerContent;
     use crate::world::gear;
-    use crate::world::tests::{NOW, SERVER_TIME, admit_at, connection, world_with_spawns};
+    use crate::world::tests::{
+        NOW, SERVER_TIME, admit_at, connection, messages_for, world_with_spawns,
+    };
 
     /// The retail WW campfire group (`newchar-retail-2026-09-18`, 448630 ms): its members as
     /// (component, class, body), the card naming `a761c93f095ab84d`. Retail lists them in another
@@ -732,10 +796,12 @@ mod tests {
         (8, 2187, "010101"),
         (
             9,
-            3218,
+            3217,
             "01ff000000000000000000000000000000000000003f8000003f8000003f8000003f80000000003f8000003f8000003f8000003f800000000002010000000000000000000f00000000",
         ),
     ];
+    /// The component and class bytes of the WW group's ownership member, as retail sent them.
+    const RETAIL_OWNERSHIP_HEAD: &str = "099132";
     /// The WW group's list version (`ac10`): the retail server's counter.
     const WW_LIST_VERSION: u64 = 1068;
     const WW_CAMPFIRE: u64 = 0x4db8_5a09_3fc9_61a7;
@@ -802,6 +868,12 @@ mod tests {
                 .collect()
         };
         assert_eq!(encoded(&members), encoded(&retail));
+        // The retail wire bytes of member 9: component, class `91 32` (3217), body.
+        let ownership = members.last().expect("ownership").encode().expect("encode");
+        assert_eq!(
+            hex::encode(ownership),
+            format!("{RETAIL_OWNERSHIP_HEAD}{}", WW_MEMBERS[6].2)
+        );
         let served = station_members(&campfire(), &costs(), FIRST_VERSION);
         let MemberState::BuildableController(controller) = &served[1].state else {
             panic!("controller");
@@ -953,19 +1025,20 @@ mod tests {
             &CraftChoice::default(),
             NOW,
         );
+        let coins = |world: &SimWorld| world.world.get::<Player>(entity).expect("player").coins;
         assert_eq!(
-            bag_count(&world, entity, ORE),
-            0,
-            "the ore is taken at once"
+            (bag_count(&world, entity, ORE), coins(&world)),
+            (ORE_PER_CRAFT * CRAFTS, COINS),
+            "the request takes nothing (retail: the bag changes after the result)"
         );
-        let coins = world.world.get::<Player>(entity).expect("player").coins;
-        assert_eq!(coins, COINS - u64::from(FEE_PER_CRAFT * CRAFTS));
         let [craft] = world.crafts.as_slice() else {
             panic!("one craft runs");
         };
         assert_eq!((craft.crafts, craft.quantity), (CRAFTS, CRAFTS));
         world.crafts_due(NOW + CRAFT_MS);
         assert!(world.crafts.is_empty());
+        assert_eq!(bag_count(&world, entity, ORE), 0, "taken at the end");
+        assert_eq!(coins(&world), COINS - u64::from(FEE_PER_CRAFT * CRAFTS));
         assert_eq!(bag_count(&world, entity, INGOT), CRAFTS);
         let smelting = world
             .content
@@ -980,6 +1053,87 @@ mod tests {
             experience,
             Some(80),
             "10 per ingredient (4 ore) per craft under a neutral multiplier"
+        );
+    }
+
+    #[test]
+    fn a_craft_whose_ingredients_are_gone_at_its_end_makes_nothing() {
+        let (mut world, entity) = at_the_smelter(ORE_PER_CRAFT, COINS);
+        world.craft(
+            entity,
+            NUMBER,
+            lowercase_crc32(INGOT),
+            1,
+            FEE_PER_CRAFT,
+            &[],
+            &CraftChoice::default(),
+            NOW,
+        );
+        assert_eq!(world.crafts.len(), 1);
+        {
+            let mut player = world.world.get_mut::<Player>(entity).expect("player");
+            player.gear.as_mut().expect("gear").take(ORE, 1);
+        }
+        world.take_messages();
+        world.crafts_due(NOW + CRAFT_MS);
+        assert_eq!(bag_count(&world, entity, INGOT), 0);
+        assert_eq!(
+            bag_count(&world, entity, ORE),
+            ORE_PER_CRAFT - 1,
+            "nothing more taken"
+        );
+        let coins = world.world.get::<Player>(entity).expect("player").coins;
+        assert_eq!(coins, COINS);
+        let answers = craft_answers(&mut world);
+        assert!(
+            answers.iter().all(|answer| answer.recipe.is_empty()),
+            "idle only"
+        );
+    }
+
+    /// The craft answers of `world`'s player since the last call.
+    fn craft_answers(world: &mut SimWorld) -> Vec<CraftProgressMsg> {
+        messages_for(&world.take_messages(), &connection(NUMBER))
+            .into_iter()
+            .filter_map(|message| match message {
+                ServerMessage::CraftProgress(answer) => Some(answer),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_craft_answers_go_to_the_header_of_the_clients_request() {
+        // Retail newchar 2026-09-18: the request (2997) and its answers (2993) share the target
+        // `1ad9661ac8b0dca8`, which is not the entity plus the crafting component.
+        const REQUEST: FacetHeader = FacetHeader {
+            target: 0x1ad9_661a_c8b0_dca8,
+            entity: 0x0013_ccd3_47e7_3f49,
+        };
+        let (mut world, entity) = at_the_smelter(ORE_PER_CRAFT, COINS);
+        let choice = CraftChoice {
+            header: Some(REQUEST),
+            ..CraftChoice::default()
+        };
+        world.craft(
+            entity,
+            NUMBER,
+            lowercase_crc32(INGOT),
+            1,
+            FEE_PER_CRAFT,
+            &[],
+            &choice,
+            NOW,
+        );
+        world.crafts_due(NOW + CRAFT_MS);
+        let answers = craft_answers(&mut world);
+        assert_eq!(answers.len(), 2, "crafted, then idle");
+        assert!(answers.iter().all(|answer| answer.header == REQUEST));
+        world.close_station(entity, NUMBER, REQUEST);
+        assert_eq!(
+            craft_answers(&mut world),
+            [CraftProgressMsg::idle(REQUEST)],
+            "the close (2999) is answered at its own header"
         );
     }
 
@@ -1052,6 +1206,7 @@ mod tests {
         let choice = CraftChoice {
             gear_score: PICKED,
             perk_items: Vec::new(),
+            header: None,
         };
         let crc = lowercase_crc32(INGOT);
         world.craft(
@@ -1072,6 +1227,7 @@ mod tests {
         let too_high = CraftChoice {
             gear_score: 900,
             perk_items: Vec::new(),
+            header: None,
         };
         world.craft(entity, NUMBER, crc, 1, FEE_PER_CRAFT, &[], &too_high, NOW);
         world.craft(

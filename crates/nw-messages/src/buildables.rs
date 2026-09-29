@@ -8,7 +8,10 @@
 //! - `MB::PlacementObstructionComponentReplicatedState` (type 2187, `FUN_1429a7eb0`).
 //! - `MB::TerritoryInterfaceComponentReplicatedState` (type 1746, `FUN_1429e4ea0`): slot 0 only.
 //! - `MB::BuildableGridComponentReplicatedState` (type 2134, `FUN_142981120`).
-//! - The ownership state (type 3218, `FUN_14360c430`; the type map has no name for its class).
+//! - `MB::OwnershipComponentReplicatedState` (type 3217, `FUN_14360c430`): the class bytes
+//!   `91 32` of every retail campfire group. This server sent 3218, an index without a class,
+//!   and the beach campfire showed no prompt (live 2026-09-26; Inferred: the client drops the
+//!   group at the unknown class).
 //!
 //! Each child's width is its reader at virtual `+0x30` of the child's vtable (the GDE id note
 //! lists them). The lists are the replicated list form ([`FullList`]).
@@ -27,8 +30,8 @@ pub const PLACEMENT_OBSTRUCTION_TYPE_INDEX: u64 = 2187;
 pub const TERRITORY_INTERFACE_TYPE_INDEX: u64 = 1746;
 /// Type index of `MB::BuildableGridComponentReplicatedState`.
 pub const BUILDABLE_GRID_TYPE_INDEX: u64 = 2134;
-/// Type index of the ownership state.
-pub const OWNERSHIP_TYPE_INDEX: u64 = 3218;
+/// Type index of `MB::OwnershipComponentReplicatedState`.
+pub const OWNERSHIP_TYPE_INDEX: u64 = 3217;
 
 /// Children of the buildable controller: `currentState`, `checkFoundationEvents`,
 /// `commitedResources`, `ruinDamageType`, `territoryOwnerGuildId`, `upgradeTimePoint`,
@@ -448,7 +451,7 @@ impl OwnerIdentification {
     }
 }
 
-/// The ownership state (type 3218).
+/// The ownership state (type 3217).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct OwnershipState {
     /// `guildID` (16 bytes).

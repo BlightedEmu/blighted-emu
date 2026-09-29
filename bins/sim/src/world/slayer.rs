@@ -59,6 +59,20 @@ mod movement {
     pub(super) const STOP_RECORDS: u16 = 39;
 }
 
+/// The slayer state of a player that a mob pulls (retail newchar 2026-09-12, Thorpe's first
+/// grab pull at 456719 ms: `13=04 14=3163 15=8a37 16=00 17=3163` in the state numbered `3163`,
+/// the pull's places in the next states, then `13=1f 15=b910`, standing still, at 457852 ms).
+/// Without it the client kept moving by its own keys and dropped the pull (live 2026-09-26: the
+/// body stood 7 m from its client after the first pull).
+mod pull {
+    /// `slayerStateId` of being pulled (`13=04`).
+    pub(super) const STATE: u64 = 0x04;
+    /// Its sequence: `8a37`.
+    pub(super) const SEQUENCE: u64 = 3530;
+    /// From the pull's state to the state that stands the player still again.
+    pub(super) const LENGTH_MS: u64 = 1_133;
+}
+
 /// The slayer states the server sends when the player falls or swims (retail newchar 2026-09-18,
 /// capture check 2026-09-24): `13=0d 15=9d3c` at the fall, `13=06 15=a021` once at the water
 /// entry, then only the sequence (child 15, no 13 and no 14) while the player swims: `b621`
@@ -413,6 +427,10 @@ pub(super) struct SlayerTrack {
     swim: Swim,
     /// The inventory's second slayer slot.
     loadout: LoadoutPlay,
+    /// A mob pulls the player: the pull state starts in the next own state.
+    pull_due: bool,
+    /// When the pull ends and the player stands still again, while it is pulled.
+    pull_ends_ms: Option<u64>,
     /// The newest slayer state, and how many more own states carry it.
     current: Option<SlayerState>,
     repeats: u8,
@@ -657,6 +675,13 @@ impl SlayerTrack {
         slots_of(stance.alt_fire?, record.counter).map(Shot::Aimed)
     }
 
+    /// A mob pulls the player at `now_ms`: the next own state starts the pull state, and the
+    /// player stands still again [`pull::LENGTH_MS`] later.
+    pub(super) fn pulled(&mut self, now_ms: u64) {
+        self.pull_due = true;
+        self.pull_ends_ms = Some(now_ms.saturating_add(pull::LENGTH_MS));
+    }
+
     /// The client opened its inventory in record `started` at `now_ms`: the second slot plays the
     /// open sequence ([`loadout`]).
     pub(super) fn open_loadout(&mut self, started: u16, now_ms: u64) {
@@ -744,6 +769,15 @@ impl SlayerTrack {
     /// this one get the newest state at once ([`SlayerTrack::current`]).
     pub(super) fn advance(&mut self, number: u16, state_ms: u64) {
         self.step_loadout(state_ms);
+        if self.pull_ends_ms.is_some_and(|ends_ms| state_ms >= ends_ms) {
+            self.pull_ends_ms = None;
+            self.locomotion = Locomotion::Idle;
+            self.pending = Some((
+                Pending::State(movement::IDLE_STATE, movement::IDLE_SEQUENCE),
+                number,
+                self.newest_frame_s,
+            ));
+        }
         let (state, started) = self.next(number);
         let sequence_s = self.sequence_s;
         let time = self
@@ -796,6 +830,10 @@ impl SlayerTrack {
     /// The slayer state of the own state numbered `number`, and the frame time of the record that
     /// started it when it starts there.
     fn next(&mut self, number: u16) -> (Option<SlayerState>, Option<f32>) {
+        if std::mem::take(&mut self.pull_due) {
+            self.sequence_s = self.newest_frame_s;
+            return (self.start(pulled_state(number)), Some(self.newest_frame_s));
+        }
         if let Some((pending, counter, frame_s)) = self.pending.take() {
             let state = match pending {
                 Pending::Client(input) => SlayerState::of_input(input, counter),
@@ -862,6 +900,21 @@ const fn attack_start(started: u16, sequence: u64) -> SlayerState {
         second: Some(SecondSlayerState {
             started,
             playing: None,
+            stopped: false,
+        }),
+    }
+}
+
+/// The pull state in the own state numbered `started`: the second slot's action stops with it.
+const fn pulled_state(started: u16) -> SlayerState {
+    SlayerState {
+        state: Some(pull::STATE),
+        started: Some(started),
+        sequence: pull::SEQUENCE,
+        second: Some(SecondSlayerState {
+            started,
+            playing: None,
+            stopped: true,
         }),
     }
 }
@@ -1616,6 +1669,32 @@ mod tests {
         assert!(
             out.state.is_some(),
             "on land the movement states come back: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_pull_plays_the_pulled_state_then_stands_the_player_still() {
+        /// The retail pull's own state number (`14=3163`), as this test's tick number.
+        const PULLED_IN: u16 = 0x3163;
+        let mut track = spawned();
+        let pulled_at_ms = u64::from(PULLED_IN - 1) * TICK_MS;
+        track.pulled(pulled_at_ms);
+        let state = own_state(&mut track, PULLED_IN).state;
+        assert_eq!(state, Some(pulled_state(PULLED_IN)));
+        assert_eq!(
+            own_state(&mut track, PULLED_IN + 1).state,
+            state,
+            "it echoes once"
+        );
+        let ends_at = PULLED_IN - 1 + u16::try_from(pull::LENGTH_MS / TICK_MS).expect("ticks") + 1;
+        let mut idle = None;
+        for number in PULLED_IN + 2..=ends_at {
+            idle = idle.or(own_state(&mut track, number).state);
+        }
+        assert_eq!(
+            idle.map(|idle| (idle.state, idle.sequence)),
+            Some((Some(movement::IDLE_STATE), movement::IDLE_SEQUENCE)),
+            "standing still once the pull is over"
         );
     }
 

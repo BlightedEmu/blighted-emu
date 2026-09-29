@@ -41,6 +41,7 @@ use crate::interactor::{INTERACTOR_TYPE_INDEX, InteractorState};
 use crate::loot::{
     GLOBAL_STORAGE_TYPE_INDEX, GlobalStorageState, LOOT_TRACKER_TYPE_INDEX, LootTrackerState,
 };
+use crate::member_layouts;
 use crate::mount::{MOUNT_TYPE_INDEX, MountState};
 use crate::music::{
     MusicalPerformanceState, PERFORMANCE_PLAYER_TYPE_INDEX, PERFORMANCE_TYPE_INDEX,
@@ -128,7 +129,7 @@ pub enum MemberState {
     TerritoryInterface(TerritoryInterfaceState),
     /// `MB::BuildableGridComponentReplicatedState`.
     BuildableGrid(BuildableGridState),
-    /// The ownership state (type 3218).
+    /// The ownership state (type 3217).
     Ownership(OwnershipState),
     /// `CategoricalProgressionReplicatedState`.
     CategoricalProgression(CategoricalProgressionState),
@@ -609,6 +610,19 @@ impl BundleMember {
         self.state.write(&mut writer)?;
         Ok(writer.finish())
     }
+
+    /// Reads the member at the start of `bytes` (the integer, the class type id and the state)
+    /// and how many bytes it takes; the bytes after it are not read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MessageError::UnknownMemberClass`] for a class without a reader, and another
+    /// [`MessageError`] when the bytes do not match the layout.
+    pub fn read_from(bytes: &[u8]) -> Result<(Self, usize), MessageError> {
+        let mut reader = Reader::new(bytes);
+        let member = read_member(&mut reader)?;
+        Ok((member, bytes.len() - reader.remaining()))
+    }
 }
 
 /// One group of members.
@@ -718,21 +732,47 @@ impl BundlePayload {
     }
 }
 
-/// One member: the integer, the class type id, and the state of that class.
+/// One member: the integer, the class type id, and the state of that class. A class without a
+/// reader here, or a body its reader cannot size (a slot or child it does not know), is passed
+/// by the class's wire layout ([`member_layouts`]) and kept as its recorded bytes; a class
+/// without a layout stops the walk. Any other failure names the member's class.
 fn read_member(reader: &mut Reader<'_>) -> Result<BundleMember, MessageError> {
     let component = reader.prefixed()?;
     let class = read_class(reader)?;
-    // A slot whose children are not sized cannot be passed: the walk stops there, as at a class
-    // without a reader. Any other failure names the member's class.
-    let state = MemberState::read(class, reader).map_err(|error| match error {
-        MessageError::Unsized { .. } => MessageError::UnknownMemberClass { class },
-        unknown @ MessageError::UnknownMemberClass { .. } => unknown,
-        other => MessageError::InMember {
-            class,
-            source: Box::new(other),
-        },
-    })?;
+    let body = reader.rest();
+    let mut own = Reader::new(body);
+    let state = match MemberState::read(class, &mut own) {
+        Ok(state) => state,
+        Err(MessageError::Unsized { .. } | MessageError::UnknownMemberClass { .. }) => {
+            own = Reader::new(body);
+            recorded(class, &mut own)?
+        }
+        Err(other) => {
+            return Err(MessageError::InMember {
+                class,
+                source: Box::new(other),
+            });
+        }
+    };
+    reader.bytes(body.len() - own.remaining())?;
     Ok(BundleMember { component, state })
+}
+
+/// The state of class `class` passed by its wire layout from `reader`, as its recorded bytes.
+fn recorded(class: TypeId, reader: &mut Reader<'_>) -> Result<MemberState, MessageError> {
+    let TypeId::FileSlot(index) = class else {
+        return Err(MessageError::UnknownMemberClass { class });
+    };
+    let layout = member_layouts::layout(index).ok_or(MessageError::UnknownMemberClass { class })?;
+    let body = reader.rest();
+    member_layouts::skip_body(layout, reader).map_err(|error| MessageError::InMember {
+        class,
+        source: Box::new(error),
+    })?;
+    Ok(MemberState::Recorded {
+        class: index,
+        body: body[..body.len() - reader.remaining()].to_vec(),
+    })
 }
 
 fn read_class(reader: &mut Reader<'_>) -> Result<TypeId, MessageError> {
@@ -753,8 +793,8 @@ mod tests {
 
     const ENTITY: u64 = 300;
     const LEADING: u64 = 7;
-    /// A class without a reader here.
-    const OTHER_CLASS: u64 = 14;
+    /// A class without a reader or a layout here (a message class, never a member).
+    const OTHER_CLASS: u64 = 1;
     /// An entity integer that fits one prefix byte.
     const SMALL_ENTITY: u8 = 5;
 
@@ -817,6 +857,15 @@ mod tests {
     }
 
     #[test]
+    fn a_member_reads_alone_with_its_length_and_leaves_the_rest() {
+        let member = position_member(1.0);
+        let mut bytes = member.encode().expect("encode");
+        let length = bytes.len();
+        bytes.extend([0xff, 0xff]);
+        assert_eq!(BundleMember::read_from(&bytes), Ok((member, length)));
+    }
+
+    #[test]
     fn a_recorded_member_writes_its_bytes_as_they_are() {
         const FTUE_ISLAND_TYPE_INDEX: u64 = 3194;
         let body = vec![0x01, 0x0f, 0xaa];
@@ -833,7 +882,35 @@ mod tests {
     }
 
     #[test]
-    fn a_vitals_member_on_a_slot_above_1_stops_the_walk() {
+    fn a_member_of_a_class_without_a_reader_is_passed_by_its_layout() {
+        // `MB::TransformLinkComponentReplicatedState` (5980) has no reader here; its layout
+        // passes it: slot 0, child 0 `m_childGDEVector`, the full form of an empty list.
+        const TRANSFORM_LINK: u64 = 5980;
+        let mut bytes = Writer::new();
+        bytes.prefixed(LEADING).expect("leading").u8(3);
+        bytes.bytes(&position_member(1.0).encode().expect("member"));
+        bytes.prefixed(ENTITY).expect("entity");
+        bytes.bytes(&nw_reflect::encode_type_id(&TypeId::FileSlot(TRANSFORM_LINK)).expect("class"));
+        let body = [0x01, 0x01, 0x00, 0x00, 0x00];
+        bytes.bytes(&body);
+        bytes.bytes(&position_member(2.0).encode().expect("member"));
+        let payload = bytes.finish();
+        let known = BundlePayload::decode_known(&payload).expect("known");
+        assert_eq!((known.stopped_at, known.failed), (None, None));
+        assert_eq!(known.members.len(), 3);
+        assert_eq!(
+            known.members[1].0.state,
+            MemberState::Recorded {
+                class: TRANSFORM_LINK,
+                body: body.to_vec()
+            }
+        );
+        let decoded = BundlePayload::decode(&payload).expect("decode");
+        assert_eq!(decoded.encode().expect("encode"), payload);
+    }
+
+    #[test]
+    fn a_vitals_member_on_a_slot_its_class_lacks_fails_the_walk() {
         let mut bytes = Writer::new();
         bytes.prefixed(LEADING).expect("leading").u8(2);
         let first = position_member(1.0).encode().expect("member");
@@ -846,13 +923,15 @@ mod tests {
         let payload = bytes.finish();
         let known = BundlePayload::decode_known(&payload).expect("known");
         assert_eq!(known.members.len(), 1);
-        assert_eq!(known.stopped_at, Some(TypeId::FileSlot(VITALS_TYPE_INDEX)));
+        assert_eq!(known.stopped_at, None);
+        let (class, _) = known.failed.expect("no such slot");
+        assert_eq!(class, TypeId::FileSlot(VITALS_TYPE_INDEX));
     }
 
     #[test]
-    fn a_vitals_member_with_an_empty_last_child_byte_stops_the_walk() {
+    fn a_vitals_member_with_an_empty_last_child_byte_fails_the_walk() {
         // The client reads an empty last child byte as "no more children"; the writer never
-        // makes that form, so the walk stops there.
+        // makes that form, so neither the reader nor the layout passes it.
         let mut bytes = Writer::new();
         bytes.prefixed(LEADING).expect("leading").u8(2);
         bytes.bytes(&position_member(1.0).encode().expect("member"));
@@ -864,7 +943,9 @@ mod tests {
         let payload = bytes.finish();
         let known = BundlePayload::decode_known(&payload).expect("known");
         assert_eq!(known.members.len(), 1);
-        assert_eq!(known.stopped_at, Some(TypeId::FileSlot(VITALS_TYPE_INDEX)));
+        assert_eq!(known.stopped_at, None);
+        let (class, _) = known.failed.expect("an empty last child byte");
+        assert_eq!(class, TypeId::FileSlot(VITALS_TYPE_INDEX));
     }
 
     #[test]

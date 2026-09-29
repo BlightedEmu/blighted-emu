@@ -197,6 +197,8 @@ pub(super) struct LevelFlow {
     /// skips a grant of a different cutscene (`FUN_142f09470`: "Ask to stop a different
     /// cutscene, skip it."). It is granted when the current one ends.
     queued_cutscene: Option<u32>,
+    /// The cinematic video the client plays, from its start (6606) to its end (6542).
+    cinematic: Option<u32>,
     /// `None` for a player taken without a level change (its client has them).
     achievements: Option<Achievements>,
 }
@@ -245,6 +247,7 @@ impl LevelFlow {
             phasing_entries: None,
             cutscene: None,
             queued_cutscene: None,
+            cinematic: None,
             achievements: Some(achievements),
         }
     }
@@ -286,6 +289,7 @@ impl LevelFlow {
             phasing_entries: Some(Vec::new()),
             cutscene: None,
             queued_cutscene: None,
+            cinematic: None,
             achievements: None,
         }
     }
@@ -326,6 +330,12 @@ impl LevelFlow {
     /// The cutscene the client plays, when one was allowed.
     pub(super) const fn cutscene(&self) -> Option<u32> {
         self.cutscene
+    }
+
+    /// Whether a cutscene or a cinematic video drives the client's camera: its camera then
+    /// shows the scene, not the player.
+    pub(super) const fn camera_in_scene(&self) -> bool {
+        self.cutscene.is_some() || self.cinematic.is_some()
     }
 
     /// Grants `cutscene` when none is playing. A different one waits until the current one
@@ -383,9 +393,17 @@ impl LevelFlow {
                 answers
             }
             ClientFacetMsg::UpdateTrackedObjectives { .. } => Vec::new(),
+            ClientFacetMsg::CinematicStarted { cinematic, .. } => {
+                self.cinematic = Some(cinematic);
+                Vec::new()
+            }
+            ClientFacetMsg::CinematicEnded { cinematic, .. } => {
+                if self.cinematic == Some(cinematic) {
+                    self.cinematic = None;
+                }
+                Vec::new()
+            }
             ClientFacetMsg::AckLevelInfo { .. }
-            | ClientFacetMsg::CinematicStarted { .. }
-            | ClientFacetMsg::CinematicEnded { .. }
             | ClientFacetMsg::QteCompleted { .. }
             | ClientFacetMsg::UiScreenOpened { .. }
             | ClientFacetMsg::TimeSyncRequest { .. }

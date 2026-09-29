@@ -1155,20 +1155,24 @@ pub struct CraftProgressMsg {
 }
 
 impl CraftProgressMsg {
-    /// Player `player` crafted `crafts` crafts of recipe `recipe`.
-    pub fn crafted(player: u64, recipe: &str, crafts: u32) -> Self {
+    /// The crafting component of header `header` crafted `crafts` crafts of recipe `recipe`.
+    /// Retail answers with the header of the client's request (2997): newchar 2026-09-18, target
+    /// `1ad9661ac8b0dca8` in both; the target less the entity differed between characters, and
+    /// a header of the player's entity plus [`component::CRAFTING`] left the live client's craft
+    /// window open (2026-09-26: it closed 31 s later, retail's 10 ms after the answer).
+    pub const fn crafted(header: FacetHeader, recipe: Vec<u8>, crafts: u32) -> Self {
         Self {
-            header: FacetHeader::of(component::CRAFTING, player),
-            recipe: recipe.as_bytes().to_vec(),
+            header,
+            recipe,
             quantity: crafts,
             completed: crafts,
         }
     }
 
-    /// Player `player`'s station is idle.
-    pub fn idle(player: u64) -> Self {
+    /// The crafting component of header `header` is idle.
+    pub const fn idle(header: FacetHeader) -> Self {
         Self {
-            header: FacetHeader::of(component::CRAFTING, player),
+            header,
             recipe: Vec::new(),
             quantity: 0,
             completed: 0,
@@ -1779,8 +1783,7 @@ mod tests {
             "00000028",
             "00000028"
         );
-        let player = crate::entity_ids::number_of_facet(SOUL_ENTITY);
-        let crafted = CraftProgressMsg::crafted(player, "ClothT2", 40);
+        let crafted = CraftProgressMsg::crafted(soul(component::CRAFTING), b"ClothT2".to_vec(), 40);
         assert_eq!(crafted.encode().expect("encode"), hex(CRAFTED));
         assert_eq!(
             CraftProgressMsg::decode(&hex(CRAFTED)).expect("decode"),
@@ -1837,11 +1840,10 @@ mod tests {
             ClientFacetMsg::decode(CANCEL_CRAFTING_TYPE_INDEX, &hex(&IDLE[..32])),
             Some(Ok(ClientFacetMsg::CancelCrafting { header }))
         );
-        let player = crate::entity_ids::number_of_facet(SOUL_ENTITY);
-        let crafted = CraftProgressMsg::crafted(player, "1hSkinningKnifeT1", 1);
+        let crafted = CraftProgressMsg::crafted(header, b"1hSkinningKnifeT1".to_vec(), 1);
         assert_eq!(crafted.encode().expect("encode"), hex(CRAFTED));
         assert_eq!(
-            CraftProgressMsg::idle(player).encode().expect("encode"),
+            CraftProgressMsg::idle(header).encode().expect("encode"),
             hex(IDLE)
         );
         assert_eq!(

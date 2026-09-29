@@ -700,13 +700,18 @@ impl WalkedMember {
     }
 
     /// The body (after the component and class): for an `nw-messages` class, when it decodes
-    /// alone with the reader of its class and the member encodes to the same bytes.
+    /// alone with the reader of its class and the member encodes to the same bytes; a member
+    /// passed by its class's wire layout keeps its bytes as they are.
     fn body<'a>(&self, payload: &'a [u8]) -> Option<&'a [u8]> {
         let bytes = &payload[self.range.clone()];
         let mut reader = Reader::new(bytes);
         extra_members::read_member_header(&mut reader)?;
         let body = reader.rest();
-        let Some(state) = &self.state else {
+        let Some(state) = self
+            .state
+            .as_ref()
+            .filter(|state| !matches!(state, MemberState::Recorded { .. }))
+        else {
             return Some(body);
         };
         let again = BundleMember {

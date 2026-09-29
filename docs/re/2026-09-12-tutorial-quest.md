@@ -480,3 +480,25 @@ Source: the newchar ledger of 2026-09-12 (`local-data/captures/own/newchar-linux
   player still looks along the stale replicated look. Own states now carry both from the newest
   input's view when it changed. Unknown: the client line that reads them; the effect of child 2,
   the own state rate (retail about 60/s, ours 30/s) and our `idAbs`/`timeOffsetAbs` in every state.
+
+### 15.3 The lock gates in order, and live run fishing-01 (2026-09-26)
+
+- **Observed (fishing-01, our server, 2026-09-26 15:50).** 74 lock-key presses, no lock. The
+  same ledger file starts with a retail session (2026-09-24 17:40) that locked 15 times; count by
+  time, not by file. Our older lock-test ledgers (2026-09-18/23) locked only the signifier
+  (`87a335e7…`), 2 to 7 s at up to 20 m; sailors, the legionnaire and the swarmers never locked
+  at 3 to 21 m. Retail locks all of them.
+- **Observed.** A tutorial sailor's spawn group carries the same 13 member classes in retail
+  and ours (10, 11, 12, 15, 1528, 3139 × 7, 3183); the card differs only by its random GdeRef,
+  the vitals time and the position.
+- **Observed (client decompile).** Key `FUN_142c95e20` (camera-lock enable flags from the weapon
+  combat profile) → press `FUN_142c93e60` (disable counter 0, UI state "hud",
+  `FUN_142541190`) → scan `FUN_142c8bbd0` → per target `FUN_142c866e0`: transform, targetable
+  byte (`+0x249`), dead / death's door, `CannotBeTargeted` (query 26), relation flags
+  (`FUN_14171b010`), hostility (`FUN_142a9b4a0`), range 50 m (`m_maxLockRange`), line of sight
+  `FUN_142c95000` (required: the player slice sets `m_requireAllTargetsVisible`). The ray tests
+  the "static" and "Terrain" layers and passes when it hits nothing or the target itself.
+- **Inferred.** The signifier's slice names no character model; the others do. The best lead is
+  the line of sight: the ray hits the mob's own body and the hit does not resolve to the target.
+  The relation flags are the second lead. **Unknown**: which gate fails; a breakpoint on the
+  return paths of `FUN_142c866e0` while pressing on a sailor will show it.

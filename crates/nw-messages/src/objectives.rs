@@ -9,6 +9,7 @@
 //! data for the ids.
 
 use crate::items::FullList;
+use crate::list_delta::ReplicatedList;
 use crate::slots::{read_children, read_slot_byte, write_children};
 use crate::wire::{MessageError, Reader, Writer};
 
@@ -38,21 +39,31 @@ pub enum TaskWireState {
     Active,
     /// It is done.
     Complete,
+    /// It is done and still runs (`CompleteActive`).
+    CompleteActive,
     /// It stopped undone: a branch of a partial container that another branch finished
     /// (beach-quests note: `SwapTimerNeverComplete_container` of `12_skinningknife`, progress 2).
     Inactive,
+    /// It failed (`Failed`).
+    Failed,
 }
 
 impl TaskWireState {
+    // The values of the client's `EObjectiveTaskState` (Observed: its reflection in
+    // `FUN_143aa5810` names them in this order).
     const ACTIVE: u8 = 1;
     const COMPLETE: u8 = 2;
+    const COMPLETE_ACTIVE: u8 = 3;
     const INACTIVE: u8 = 4;
+    const FAILED: u8 = 5;
 
     const fn byte(self) -> u8 {
         match self {
             Self::Active => Self::ACTIVE,
             Self::Complete => Self::COMPLETE,
+            Self::CompleteActive => Self::COMPLETE_ACTIVE,
             Self::Inactive => Self::INACTIVE,
+            Self::Failed => Self::FAILED,
         }
     }
 
@@ -60,7 +71,9 @@ impl TaskWireState {
         match byte {
             Self::ACTIVE => Ok(Self::Active),
             Self::COMPLETE => Ok(Self::Complete),
+            Self::COMPLETE_ACTIVE => Ok(Self::CompleteActive),
             Self::INACTIVE => Ok(Self::Inactive),
+            Self::FAILED => Ok(Self::Failed),
             byte => Err(MessageError::Unsized { field: FIELD, byte }),
         }
     }
@@ -204,8 +217,10 @@ impl ObjectiveRecord {
 pub struct ObjectivesState {
     /// Child 1: the tracked objective instances.
     pub tracked: Option<FullList<u64>>,
-    /// Child 2: the completed objective instances.
-    pub completed: Option<FullList<u64>>,
+    /// Child 2: the completed objective instances, whole or as changes: retail adds a quest that
+    /// ends as one change (newchar 2026-09-18, 492.95 s: index 1, the tutorial's instance, in
+    /// four bundles, then every other list empty in three).
+    pub completed: Option<ReplicatedList<u64>>,
     /// Child 3: the active objectives.
     pub active: Option<FullList<ObjectiveRecord>>,
     /// Child 4: the task states.
@@ -230,7 +245,8 @@ impl ObjectivesState {
     /// # Errors
     ///
     /// Returns [`MessageError`] when the body ends early, sets slot 0 or a child other than 1
-    /// to 4, sends a list in the delta form, or a task state is not 1, 2 or 4.
+    /// to 4, sends a list other than the completed one in the delta form, or a task state is not
+    /// 1 to 5.
     pub fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         let slots = read_slot_byte(reader, FIELD, SLOTS)?;
         let mut state = Self::default();
@@ -249,7 +265,8 @@ impl ObjectivesState {
                     state.tracked = Some(FullList::read(reader, |reader| reader.u64())?)
                 }
                 COMPLETED_CHILD => {
-                    state.completed = Some(FullList::read(reader, |reader| reader.u64())?)
+                    state.completed =
+                        Some(ReplicatedList::read(reader, FIELD, |reader| reader.u64())?);
                 }
                 ACTIVE_CHILD => {
                     state.active = Some(FullList::read(reader, |reader| {
@@ -336,6 +353,49 @@ mod tests {
            4a41a9251454158b 07 2a36e8c7 00000001 01";
     const INSTANCE: u64 = 0x4a41_a925_1454_158b;
     const TUTORIAL: u32 = 0xeea9_40b3;
+
+    #[test]
+    fn a_retail_quest_end_adds_its_instance_to_the_completed_list_as_a_change() {
+        // Newchar 2026-09-18, 492.95 s: child 2 (completed) as one delta entry, index 1 (the list
+        // held the tutorial's earlier quest), the ended quest's instance.
+        const ENDED: u64 = 0xb741_6b22_fdfc_9500;
+        let bytes = hex("02 04 01 01 01 01 94d0 b7416b22fdfc9500");
+        let mut reader = Reader::new(&bytes);
+        let state = ObjectivesState::read(&mut reader).expect("read");
+        reader.finish().expect("whole body");
+        let Some(ReplicatedList::Changes(changes)) = &state.completed else {
+            panic!("a change: {state:?}");
+        };
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| (change.index, change.value))
+                .collect::<Vec<_>>(),
+            [(1, ENDED)]
+        );
+        assert_eq!(
+            (&state.tracked, &state.active, &state.tasks),
+            (&None, &None, &None)
+        );
+        let mut writer = Writer::new();
+        state.write(&mut writer).expect("write");
+        assert_eq!(writer.finish(), bytes);
+    }
+
+    #[test]
+    fn a_task_state_reads_every_value_of_the_clients_enum() {
+        for (byte, state) in [
+            (1, TaskWireState::Active),
+            (2, TaskWireState::Complete),
+            (3, TaskWireState::CompleteActive),
+            (4, TaskWireState::Inactive),
+            (5, TaskWireState::Failed),
+        ] {
+            assert_eq!(TaskWireState::of(byte), Ok(state));
+            assert_eq!(state.byte(), byte);
+        }
+        assert!(TaskWireState::of(6).is_err());
+    }
 
     #[test]
     fn the_first_retail_state_reads_and_writes_the_same_bytes() {

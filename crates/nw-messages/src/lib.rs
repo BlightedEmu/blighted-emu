@@ -48,6 +48,7 @@ pub mod level_info;
 pub mod list_delta;
 pub mod lookups;
 pub mod loot;
+mod member_layouts;
 pub mod meta_achievements;
 pub mod mount;
 pub mod objectives;

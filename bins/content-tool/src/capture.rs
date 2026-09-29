@@ -475,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn a_vitals_member_on_another_slot_is_skipped_not_failed() {
+    fn a_vitals_member_on_a_slot_its_class_lacks_is_a_failure() {
         let mut payload = Writer::new();
         payload
             .prefixed(1)
@@ -486,7 +486,7 @@ mod tests {
         payload.bytes(
             &nw_reflect::encode_type_id(&TypeId::FileSlot(VITALS_TYPE_INDEX)).expect("class"),
         );
-        // Vitals has slots 0 and 1; slot 2 is not sized.
+        // Vitals has slots 0 and 1 (its wire layout): a slot 2 is a misread body.
         payload.u8(0b100).u8(0);
         let bundle = ReplicatedStateBundle {
             leading: None,
@@ -508,7 +508,8 @@ mod tests {
                 ),
             )
             .expect("check");
-        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
+        assert!(report.failures[0].reason.contains("not sized"));
         assert_eq!(report.complete_payloads, 0);
     }
 

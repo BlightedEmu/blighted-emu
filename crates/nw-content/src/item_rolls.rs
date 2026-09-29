@@ -204,16 +204,17 @@ impl ItemRolls {
         self.items.get(&item_id.to_lowercase())
     }
 
-    /// The gear score `wanted` held to `item_id`'s range: its override when it has one, else
-    /// between its minimum and maximum gear score; `wanted` for an unknown item.
+    /// The gear score `wanted` held to `item_id`'s range: its override when it has one, else at
+    /// most its maximum gear score; `wanted` for an unknown item. The minimum is no floor
+    /// (Observed: 1,060 retail item records of 300 ledgers lie below their item's
+    /// `MinGearScore`, `MediumLegs_UndeadBerserkerT5` at 100 of 500, `MediumHead_RescuerT5` at
+    /// 123; a drop takes the player level's `GSLimitT{tier}` of a `UseLevelGS` table, 100 for a
+    /// tier 2 item at level 1, where the floor made the start beach drop 200 to 250).
     pub fn clamp_gear_score(&self, item_id: &str, wanted: u32) -> u32 {
         match self.item(item_id) {
-            Some(row) => row.gear_score_override.unwrap_or_else(|| {
-                wanted.clamp(
-                    row.min_gear_score,
-                    row.max_gear_score.max(row.min_gear_score),
-                )
-            }),
+            Some(row) => row
+                .gear_score_override
+                .unwrap_or_else(|| wanted.min(row.max_gear_score.max(row.min_gear_score))),
             None => wanted,
         }
     }
@@ -381,9 +382,13 @@ mod tests {
     }
 
     #[test]
-    fn the_gear_score_is_held_to_the_item_range() {
+    fn the_gear_score_is_held_under_the_item_maximum_not_over_its_minimum() {
         let rolls = rolls(true);
-        assert_eq!(rolls.clamp_gear_score(SWORD, 300), 400);
+        assert_eq!(
+            rolls.clamp_gear_score(SWORD, 300),
+            300,
+            "below the minimum stays"
+        );
         assert_eq!(rolls.clamp_gear_score(SWORD, 450), 450);
         assert_eq!(rolls.clamp_gear_score(SWORD, 900), 500);
         assert_eq!(rolls.clamp_gear_score("Unknown", 900), 900);

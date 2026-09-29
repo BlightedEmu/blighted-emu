@@ -46,6 +46,7 @@
 //!   second placement) needs the `Camping` rank (its tier) and a territory with `CanPlaceCamp`.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 use bevy_ecs::entity::Entity;
 use nw_bus::{
@@ -70,8 +71,11 @@ use nw_messages::{
 };
 use nw_sim_core::Position;
 
+use crate::charting::CHART_EVENT;
+use crate::objectives::Event;
 use crate::travel_rules::{HousingRules, TravelRules};
 
+use super::quest_objects::gain_experience;
 use super::{
     Body, Placement, Player, REFUSED_RESYNC_MS, SimWorld, Vitals, gather_answer, send_now, unix_ns,
 };
@@ -1052,6 +1056,48 @@ impl SimWorld {
                 .set_achievement(&self.achievement_rules, achievement);
             tracing::info!(player = player.number, territory, achievement, "discovered");
         }
+    }
+
+    /// Player `number` (`entity`) came into area `area` at `now_ms`: a chartable one it has not
+    /// charted is charted ([`crate::charting`]): its `ChartedAchievement` is set, and the
+    /// `Chart_Location` game event gives its experience (the event's `UniversalExpAmount`
+    /// times the territory's `POIDiscoveryXPModifier`) and its standing to the territory.
+    pub(super) fn chart_area(&mut self, entity: Entity, number: u64, area: u16, now_ms: u64) {
+        let content = Arc::clone(&self.content);
+        let charting = &content.charting;
+        let Some(achievement) = charting.charted_achievement(u32::from(area)) else {
+            return;
+        };
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        if player
+            .flow
+            .has_achievement(&self.achievement_rules, achievement)
+        {
+            return;
+        }
+        player
+            .flow
+            .set_achievement(&self.achievement_rules, achievement);
+        let amount = charting
+            .territory_of(u32::from(area))
+            .and_then(|territory| charting.experience(territory))
+            .map_or(0, |territory| territory.chart_amount);
+        let per_amount = content
+            .rewards
+            .get(CHART_EVENT)
+            .map_or(0, |reward| reward.experience);
+        gain_experience(
+            &mut player,
+            per_amount.saturating_mul(amount),
+            &content.gameplay.xp,
+        );
+        tracing::info!(player = number, area, achievement, amount, "charted");
+        self.grant_event_standing(number, CHART_EVENT);
+        self.mark_quests_unsaved(number);
+        self.quest_event(number, Event::AchievementSet(achievement), now_ms);
+        self.quest_event(number, Event::GameEvent(CHART_EVENT), now_ms);
     }
 
     /// A travel interaction (`kind`) of player `number` (`entity`): `false` for another kind.
@@ -2148,6 +2194,115 @@ mod tests {
         assert!(travel_answers(&mut world, NOW + 5).is_empty(), "channels");
         let progression = world.departures()[0].progression.clone().expect("saved");
         assert!(progression.achievements.contains(&DISCOVERED_BIT));
+    }
+
+    #[test]
+    fn the_first_entry_into_a_chartable_area_gives_retails_550_experience() {
+        use nw_content::progression::{Progression, ProgressionSource};
+        use nw_content::rewards::{EventGrant, EventGrants, Reward, Rewards};
+
+        use crate::charting::{ChartRules, RANK_UP_EVENT, TerritoryExperience};
+
+        /// Retail Windsward, its start beach and the chart's achievement and bit.
+        const WINDSWARD: u16 = 6;
+        const BEACH: u16 = 9011;
+        const BEACH_CHARTED: &str = "starterbeach_9011_charted";
+        const CHARTED_BIT: u32 = 842;
+        /// Content bundle 25810808: standing rank 0 and 1 caps, rank 1's `XPReward`, the
+        /// events' `UniversalExpAmount`, `Chart_Location`'s standing, Windsward's modifiers.
+        const STANDING_CAPS: [(i64, i64); 2] = [(0, 150), (1, 375)];
+        const RANK_ONE_REWARD: i64 = 100;
+        const CHART_PER_AMOUNT: u32 = 2;
+        const RANK_UP_PER_AMOUNT: u32 = 1;
+        const CHART_STANDING: f64 = 50.0;
+        const WINDSWARD_EXPERIENCE: TerritoryExperience = TerritoryExperience {
+            chart_amount: 75,
+            standing_modifier: 1.25,
+        };
+        /// The retail remote config's multipliers.
+        const CHARACTER_MULTIPLIER: f64 = 2.0;
+        const STANDING_MULTIPLIER: f64 = 3.0;
+        /// Retail newchar 2026-09-18: 120 after the tutorial, 670 after the chart.
+        const TUTORIAL_EXPERIENCE: u32 = 120;
+        const CHART_GAIN: u32 = 550;
+
+        let mut world = world_with_spawns(Vec::new());
+        let standing_id = WINDSWARD.to_string();
+        let lists = [vec![WINDSWARD, BEACH]];
+        let mut content = PlayerContent {
+            charting: ChartRules::build(
+                [(u32::from(BEACH), BEACH_CHARTED.to_owned())],
+                [(u32::from(WINDSWARD), WINDSWARD_EXPERIENCE)],
+                &lists,
+            ),
+            progression: Progression::default()
+                .with_progressions([ProgressionSource {
+                    id: standing_id.clone(),
+                    max_level: 300,
+                    auto_rank_up: true,
+                    ranks: STANDING_CAPS.to_vec(),
+                }])
+                .with_rank_rewards([(standing_id.clone(), 1, RANK_ONE_REWARD)]),
+            rewards: Rewards::build([
+                (
+                    CHART_EVENT.to_owned(),
+                    Reward {
+                        experience: CHART_PER_AMOUNT,
+                        ..Reward::default()
+                    },
+                ),
+                (
+                    RANK_UP_EVENT.to_owned(),
+                    Reward {
+                        experience: RANK_UP_PER_AMOUNT,
+                        ..Reward::default()
+                    },
+                ),
+            ]),
+            event_grants: EventGrants::build([(
+                CHART_EVENT.to_owned(),
+                EventGrant {
+                    territory_standing: CHART_STANDING,
+                    ..EventGrant::default()
+                },
+            )]),
+            ..PlayerContent::default()
+        };
+        content.gameplay.xp.character = CHARACTER_MULTIPLIER;
+        content.gameplay.xp.progression = [(standing_id.clone(), STANDING_MULTIPLIER)].into();
+        world.content = Arc::new(content);
+        world.achievement_rules = AchievementRules::of(
+            &AchievementIndexes::build([(BEACH_CHARTED.to_owned(), CHARTED_BIT)]),
+            &[],
+        );
+        join(&mut world, PLAYER, START_X);
+        let entity = entity(&mut world);
+        world
+            .world
+            .get_mut::<Player>(entity)
+            .expect("player")
+            .experience = TUTORIAL_EXPERIENCE;
+        let state = |world: &SimWorld| {
+            let player = world.world.get::<Player>(entity).expect("player");
+            let standing = world
+                .content
+                .progression
+                .categorical(&standing_id)
+                .map(|mastery| player.masteries.experience(mastery));
+            let charted = player
+                .flow
+                .has_achievement(&world.achievement_rules, BEACH_CHARTED);
+            (player.experience, standing, charted)
+        };
+        for at in [NOW, NOW + 1] {
+            world.territory_changed(entity, BEACH, true);
+            world.chart_area(entity, PLAYER, BEACH, at);
+            assert_eq!(
+                state(&world),
+                (TUTORIAL_EXPERIENCE + CHART_GAIN, Some(150), true),
+                "(75 x 2 + 100 x 1.25 x 1) x 2, standing rank 1; the second entry gives nothing"
+            );
+        }
     }
 
     #[test]

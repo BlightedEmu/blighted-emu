@@ -417,8 +417,11 @@ enum TaskKind {
     /// Done when the client opens the UI screen of this id.
     OpenUiScreen(u32),
     /// Done when the client finishes the conversation topic of this id (`TaskConversationTopic`:
-    /// the `TaskID` is the topic's `ConversationTopicID`; retail completes it at the 5397 that
-    /// names it, conversation-notify note section 1.3).
+    /// the `UIScreenTag` is the topic's `ConversationTopicID`, else the `TaskID` is; retail
+    /// completes it at the 5397 that names it, conversation-notify note section 1.3). Observed:
+    /// the tag is a `ConversationTopicID` in 418 of the 433 rows, the `TaskID` in 2; the live
+    /// client's 5397 for `12_demonstorm_02_TalkTo_Grace` named `0308314e`, the CRC-32 of its tag
+    /// `01_Grace_Goodbye_MB` (login-world-entry-01).
     ConversationTopic(u32),
     /// Done while the player is in a point of interest of this `POITag` (`TaskGoToPOITag`).
     GoToPoi(String),
@@ -727,7 +730,10 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "taskgotopoitag" => filled(&row.poi_tag).map_or(TaskKind::Unsupported, TaskKind::GoToPoi),
         "taskexitpoitag" => filled(&row.poi_tag).map_or(TaskKind::Unsupported, TaskKind::ExitPoi),
         "taskequipitem" => TaskKind::EquipItem(item()),
-        "taskconversationtopic" => TaskKind::ConversationTopic(lowercase_crc32(&row.task_id)),
+        "taskconversationtopic" => {
+            let topic = filled(&row.ui_screen_tag).unwrap_or_else(|| row.task_id.clone());
+            TaskKind::ConversationTopic(lowercase_crc32(&topic))
+        }
         "taskopenuiscreen" => {
             TaskKind::OpenUiScreen(lowercase_crc32(row.ui_screen_tag.as_deref().unwrap_or("")))
         }
@@ -1705,6 +1711,29 @@ pub(crate) mod tests {
         run.event(Event::TopicFinished(lowercase_crc32("another_topic")), NOW);
         assert!(!run.finished(), "another topic");
         run.event(Event::TopicFinished(lowercase_crc32(TOPIC)), NOW);
+        assert!(run.finished());
+    }
+
+    #[test]
+    fn a_conversation_topic_task_with_a_screen_tag_ends_at_the_tags_topic() {
+        // Retail data: `12_demonstorm_02_TalkTo_Grace`, `UIScreenTag` `01_Grace_Goodbye_MB`; the
+        // live client finished topic `0308314e`, the CRC-32 of the tag.
+        const TASK: &str = "12_demonstorm_02_TalkTo_Grace";
+        const TAG: &str = "01_Grace_Goodbye_MB";
+        const CLIENT_TOPIC: u32 = 0x0308_314e;
+        assert_eq!(lowercase_crc32(TAG), CLIENT_TOPIC);
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &[TASK]),
+            TaskRow {
+                ui_screen_tag: Some(TAG.to_owned()),
+                ..row(TASK, "TaskConversationTopic")
+            },
+        ];
+        let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        run.event(Event::TopicFinished(lowercase_crc32(TASK)), NOW);
+        assert!(!run.finished(), "the task id is not the topic");
+        run.event(Event::TopicFinished(CLIENT_TOPIC), NOW);
         assert!(run.finished());
     }
 

@@ -106,6 +106,14 @@ pub const WALL_HOLD_M: f32 = 2.0;
 /// place last moved 25 to 60 records later, median 52, by up to 8.5 m; each new action starts
 /// the count again).
 pub const ACTION_RECORDS: u8 = 52;
+/// Records in a row whose game camera does not look at the body after which the body goes to
+/// where the camera puts it at its last boom (our choice: about one second). The camera check
+/// takes no camera that passes more than 1 m (`CAMERA_FIT_M`) beside the body,
+/// so a body that got that far from its client (a server move the client did not take, a client
+/// move the server did not see) was never found again: live 2026-09-26, Thorpe's first grab pull
+/// left the body 7 m from the client and it drifted to 21 m for the rest of the fight, where
+/// Thorpe fought it. Cutscene and video cameras never come here (the sim drops their views).
+pub const RECOVER_AFTER_RECORDS: u16 = 30;
 /// How far above the highest known floor the camera's body may stand and still stand on it, m
 /// (Observed: on the retail tutorial deck the camera's body stood 0.48 m below to 0.73 m above the
 /// retail own place while moving, 5% to 95%).
@@ -190,6 +198,8 @@ pub struct TrackedBody {
     /// The last record stood it on a floor the level lacks, at its camera's height: the physics
     /// finds no floor under it, but it does not fall.
     on_lacking_floor: bool,
+    /// Records in a row whose camera did not look at it.
+    unfit_records: u16,
 }
 
 impl TrackedBody {
@@ -204,6 +214,7 @@ impl TrackedBody {
             acting_records: 0,
             dropping: false,
             on_lacking_floor: false,
+            unfit_records: 0,
         }
     }
 
@@ -461,6 +472,22 @@ impl TrackedBody {
                 input.boom_key,
             )
         });
+        // A camera that has not looked at the body for [`RECOVER_AFTER_RECORDS`] shows where
+        // the client is: the body goes there.
+        let recovering = seen.is_none() && input.view.is_some() && {
+            self.unfit_records = self.unfit_records.saturating_add(1);
+            self.unfit_records >= RECOVER_AFTER_RECORDS
+        };
+        let seen = if recovering {
+            input
+                .view
+                .and_then(|view| self.camera.body_at_last_boom(view))
+        } else {
+            seen
+        };
+        if seen.is_some() {
+            self.unfit_records = 0;
+        }
         let last_seen = std::mem::replace(&mut self.last_seen, seen.map(|seen| seen.at));
         let Some(seen) = seen else {
             return Tracked {
@@ -492,7 +519,8 @@ impl TrackedBody {
             };
             distance <= WALL_HOLD_M || wall_between(ground, back, position).is_none()
         };
-        let resynced = (!falling || self.on_lacking_floor) && distance > FOLLOW_FROM_M && !walled;
+        let resynced = recovering
+            || ((!falling || self.on_lacking_floor) && distance > FOLLOW_FROM_M && !walled);
         if resynced {
             let heading = self.character.heading();
             let along = |from: Position, to: Position| {
@@ -509,7 +537,12 @@ impl TrackedBody {
             // the body the others see, and the step stays inside the sim's speed limit (10.8 m/s
             // against 13 m/s).
             let (dx, dy) = (seen.at.x - before.x, seen.at.y - before.y);
-            let share = (FOLLOW_STEP_M / dx.hypot(dy)).min(1.0);
+            // A recovery goes the whole way at once.
+            let share = if recovering {
+                1.0
+            } else {
+                (FOLLOW_STEP_M / dx.hypot(dy)).min(1.0)
+            };
             position.x = before.x + dx * share;
             position.y = before.y + dy * share;
         }
@@ -638,6 +671,38 @@ mod tests {
             y: 100.0,
             z: GROUND_Z,
         }
+    }
+
+    #[test]
+    fn a_body_its_camera_lost_goes_back_to_the_camera_after_a_second() {
+        // The client's body: 7 m to the side of the server's (live 2026-09-26 after Thorpe's
+        // first grab pull), standing still.
+        const GAP_M: f32 = 7.0;
+        let client = Position {
+            x: start().x + GAP_M,
+            ..start()
+        };
+        let mut body = TrackedBody::new(start());
+        // The camera learns its boom while it looks at the body.
+        for _ in 0..10 {
+            body.record(input(0, view_of(start(), BOOM, [0.0; 2])), &Flat, SEA);
+        }
+        body.stand_at(start());
+        let away = view_of(client, BOOM, [0.0; 2]);
+        for record in 1..RECOVER_AFTER_RECORDS {
+            let tracked = body.record(input(0, away), &Flat, SEA);
+            assert!(
+                tracked.position.horizontal_distance(start()) < 0.1,
+                "record {record}: a camera that does not look at the body moves nothing yet"
+            );
+        }
+        let tracked = body.record(input(0, away), &Flat, SEA);
+        assert!(tracked.resynced);
+        assert!(
+            tracked.position.horizontal_distance(client) < 0.1,
+            "{:?}: the body goes to its client",
+            tracked.position
+        );
     }
 
     /// An attack whose animation moves its player 1 m forward over 300 ms.

@@ -126,6 +126,7 @@ impl ReplicaSource {
                 sequence: action.sequence,
                 second_started: action.second.map(|second| second.started),
                 second_playing: action.second.and_then(|second| second.playing),
+                second_stopped: action.second.is_some_and(|second| second.stopped),
             }),
             upper: self.upper.map(|upper| GhostUpperSlots {
                 second: ghost_slot(upper.slots.second),
@@ -158,6 +159,7 @@ impl ReplicaSource {
                 second: action.second_started.map(|started| SecondSlayerState {
                     started,
                     playing: action.second_playing,
+                    stopped: action.second_stopped,
                 }),
             }),
             upper: ghost.upper.map(|upper| RemoteUpper {

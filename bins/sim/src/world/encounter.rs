@@ -75,6 +75,25 @@ pub(super) const WATER_AT: Position = Position {
 };
 /// Where the player faces in the water (retail own state 118546: rotation `66f6`, yaw 1.434 rad).
 pub(super) const WATER_FACING: f32 = 1.434;
+/// Thorpe's intro cutscene (6703 and 6706 `c723c42d`): the client asks for it as it comes
+/// into his arena.
+const THORPE_INTRO_CUTSCENE: u32 = 0xc723_c42d;
+/// Time from the client's start of that cutscene (6706) to the server's move of the player into
+/// the arena (retail: 1,730 ms in newchar-linux 2026-09-12, 1,810 ms in newchar-retail
+/// 2026-09-18; their middle). The client does not move its player in the cutscene: without the
+/// move the server kept the player on the ledge 8.85 m away, where Thorpe then fought (live
+/// 2026-09-26).
+const ARENA_MOVE_DELAY_MS: u64 = 1_770;
+/// Where the move puts the player: `TeleDest01` of `ftue_v2_teleportplayer_thorpe01` (the
+/// encounter's `FTUE_V2_TeleportPlayer_Thorpe01__spawner`), the retail own position of both
+/// runs (pos10 `43eff6644364b2a11ca4`).
+pub(super) const ARENA_AT: Position = Position {
+    x: 479.92,
+    y: 228.70,
+    z: 23.07,
+};
+/// Where the player faces after the move (retail rotation `407f7f54`, both runs).
+pub(super) const ARENA_FACING: f32 = -2.654;
 /// Thorpe's intermission starts when his health falls to this part of his maximum (retail
 /// `Boss_Phase` entry: health 60 %; he stopped at 59.5 %).
 const CAPTAIN_INTERMISSION_FRACTION: f64 = 0.6;
@@ -1054,8 +1073,19 @@ impl Tutorial {
         ]
     }
 
-    /// The client sent `message` at `now_ms`: the level's asset entities that wait for it.
+    /// The client sent `message` at `now_ms`: the level's asset entities that wait for it, and
+    /// the move into Thorpe's arena after his intro cutscene started.
     pub(super) fn client_message(&mut self, message: &ClientFacetMsg, now_ms: u64) {
+        if let ClientFacetMsg::CutsceneStarted {
+            cutscene: THORPE_INTRO_CUTSCENE,
+            ..
+        } = *message
+        {
+            self.later.push((
+                now_ms.saturating_add(ARENA_MOVE_DELAY_MS),
+                Order::MoveTo(ARENA_AT, ARENA_FACING),
+            ));
+        }
         let call = |message_type, id| Trigger::Client { message_type, id };
         let trigger = match *message {
             ClientFacetMsg::CinematicStarted { cinematic, .. } => call(
@@ -1511,6 +1541,11 @@ impl Tutorial {
     }
 
     /// The quest's task list for the quest tracker.
+    /// Whether the player took the beach bag's items.
+    pub(super) const fn bag_taken(&self) -> bool {
+        self.bag_taken
+    }
+
     pub(super) fn progress(&self) -> Vec<TaskProgress> {
         self.run.progress()
     }
@@ -1901,6 +1936,42 @@ pub(crate) mod tests {
         assert!(
             tutorial.fighters.iter().all(|fighter| fighter.batch == 0),
             "one batch"
+        );
+    }
+
+    #[test]
+    fn the_player_moves_into_thorpes_arena_after_his_cutscene_starts() {
+        let mut mobs = Mobs::new(Vec::new().into(), &sailor_combat());
+        let (mut tutorial, _) =
+            Tutorial::start(OWNER, tree(), &FtueLevel::default(), &mut mobs, NOW);
+        let started = |cutscene| ClientFacetMsg::CutsceneStarted {
+            header: nw_messages::FacetHeader {
+                target: 0,
+                entity: 0,
+            },
+            cutscene,
+        };
+        let arena_move = Order::MoveTo(ARENA_AT, ARENA_FACING);
+        tutorial.client_message(&started(THORPE_INTRO_CUTSCENE.wrapping_add(1)), NOW);
+        tutorial.client_message(&started(THORPE_INTRO_CUTSCENE), NOW);
+        let early = tutorial.tick(
+            &mut mobs,
+            &kill_types(),
+            SHIP,
+            NOW + ARENA_MOVE_DELAY_MS - 1,
+        );
+        assert!(!early.contains(&arena_move));
+        let due = tutorial.tick(&mut mobs, &kill_types(), SHIP, NOW + ARENA_MOVE_DELAY_MS);
+        assert_eq!(
+            due.iter().filter(|order| **order == arena_move).count(),
+            1,
+            "once, for Thorpe's cutscene only"
+        );
+        // The retail rotation `407f7f54` is the same turn as the facing's encoding.
+        assert_eq!(
+            nw_messages::alc::rotation_bytes(ARENA_FACING),
+            [0x47, 0xab],
+            "q = (0, 0, -0.9705, 0.2412)"
         );
     }
 
