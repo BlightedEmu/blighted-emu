@@ -763,6 +763,31 @@ fn query_shape(shape: &Element, centre: [f32; AXES], names: &Names) -> Option<Sh
     Some(ShapeSource::Own(geometry, place))
 }
 
+/// `place` with each axis column brought to unit length: its rotation and translation, no scale.
+///
+/// A rigid body's own query shape does not take its entity's scale: the client's query shapes
+/// carry one scale factor of their own (`+0xc`), which the copy that makes the shape
+/// (`FUN_141686f50` for a box) sets to 1.0 and no method of the shape's vtable (`0x148030298`)
+/// changes; the physics shape is that factor times the read sizes (`FUN_14169e770`). The retail
+/// tutorial run stands inside the Thorpe arena's gate boxes (`ftue_v2_enc_thorpe_gate_fogwall`,
+/// half size 7 x 1 x 10, entity scales 7.6 x 13.2 x 5 and 2.2 x 80 x 5) at 6,652 places when
+/// they are scaled and at none when they are not.
+fn without_scale(place: &Affine) -> Affine {
+    let mut unit = *place;
+    for column in 0..AXES {
+        let length = (0..AXES)
+            .map(|row| place[row][column] * place[row][column])
+            .sum::<f32>()
+            .sqrt();
+        if length > 0.0 {
+            for row in unit.iter_mut() {
+                row[column] /= length;
+            }
+        }
+    }
+    unit
+}
+
 /// The physics capsule of a `QueryShapeCapsule` (see [`query_shape`]).
 fn capsule(height: f32, radius: f32, axis: [f32; AXES]) -> Geometry {
     const UP: [f32; AXES] = [0.0, 0.0, 1.0];
@@ -1476,7 +1501,7 @@ fn place_solids(
             });
             target.push(Body {
                 geometry,
-                place: compose(place, local),
+                place: compose(&without_scale(place), local),
             });
             continue;
         }
@@ -1977,6 +2002,26 @@ mod tests {
         );
         let other = element("element", [9; 16], Vec::new(), Vec::new());
         assert_eq!(query_shape(&other, up, &names), None);
+    }
+
+    #[test]
+    fn an_own_query_shape_keeps_its_entity_s_turn_and_place_but_not_its_scale() {
+        // The Thorpe gate's first box entity: scales 7.6 x 13.2 x 5, a quarter turn about z.
+        let place = [
+            [0.0, -13.2, 0.0, 466.0],
+            [7.6, 0.0, 0.0, 233.0],
+            [0.0, 0.0, 5.0, 23.0],
+        ];
+        let unit = without_scale(&place);
+        assert_eq!(
+            unit,
+            [
+                [0.0, -1.0, 0.0, 466.0],
+                [1.0, 0.0, 0.0, 233.0],
+                [0.0, 0.0, 1.0, 23.0],
+            ]
+        );
+        assert_eq!(without_scale(&IDENTITY_AFFINE), IDENTITY_AFFINE);
     }
 
     #[test]
