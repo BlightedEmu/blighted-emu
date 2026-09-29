@@ -361,6 +361,35 @@ pub struct Route {
     pub waits_ms: Vec<u64>,
     /// What comes after the last point.
     pub mode: RouteMode,
+    /// The task at each point (missing: none).
+    pub tasks: Vec<Option<RouteTask>>,
+}
+
+/// What a mob does at a point of its route: a spawner waypoint's `AIWaypointComponent`
+/// ([`nw_world::records::WaypointTask`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RouteTask {
+    /// `Waypoint_Task`: the fragment it plays there.
+    pub task: NameId,
+    /// `Waypoint_Duration_Min` and `Waypoint_Duration_Max`, seconds (negative: none).
+    pub duration_s: [f32; 2],
+    /// `Waypoint_Align`.
+    pub align: bool,
+}
+
+impl RouteTask {
+    /// The `Waypoint_Duration` of one visit for the random draw `unit` in `[0, 1)`: uniform
+    /// between the minimum and the maximum (Inferred: the engine's rule is Unknown; retail boars
+    /// grazed for times between them), the minimum as it is when that is not above 0 (the
+    /// Patrol sub-tree then plays the task once, `POI_Waypoint`).
+    fn duration_s(&self, unit: f32) -> f32 {
+        let [min, max] = self.duration_s;
+        if min <= 0.0 {
+            min
+        } else {
+            min + unit * (max - min).max(0.0)
+        }
+    }
 }
 
 /// Where a mob is on its route.
@@ -369,6 +398,8 @@ struct RouteWalk {
     route: Arc<Route>,
     next: usize,
     backwards: bool,
+    /// The `Waypoint_Duration` of this visit of a point with a task.
+    task_s: f32,
 }
 
 impl RouteWalk {
@@ -376,11 +407,23 @@ impl RouteWalk {
         self.route.points.get(self.next).copied()
     }
 
+    fn task(&self) -> Option<&RouteTask> {
+        self.route.tasks.get(self.next)?.as_ref()
+    }
+
     fn wait_s(&self) -> f32 {
+        if self.task().is_some() {
+            return self.task_s;
+        }
         // A wait of minutes at most.
         #[allow(clippy::cast_precision_loss, reason = "a wait of minutes")]
         let ms = self.route.waits_ms.get(self.next).copied().unwrap_or(0) as f32;
         ms / MS_PER_S
+    }
+
+    /// Draws the duration of the visit of its point from `unit`.
+    fn visit(&mut self, unit: f32) {
+        self.task_s = self.task().map_or(0.0, |task| task.duration_s(unit));
     }
 
     /// Goes on to the point after `next`, as the mode says.
@@ -463,7 +506,7 @@ pub fn resolve_ai(world: &WorldFile, ai: &MobAi) -> Arc<[Option<SpawnAi>]> {
                 .path
                 .as_ref()
                 .and_then(|id| world.paths.get(id))
-                .map(|path| Arc::new(route_of(path)));
+                .map(|path| Arc::new(route_of(path, ai)));
             let mut facts = Vec::new();
             let mut set = |key: Option<KeyId>, value: Value| {
                 if let Some(key) = key {
@@ -520,7 +563,7 @@ fn warn_unmapped(id: &str, profile: &AiProfile) {
     }
 }
 
-fn route_of(path: &PatrolPath) -> Route {
+fn route_of(path: &PatrolPath, ai: &MobAi) -> Route {
     Route {
         points: path
             .points
@@ -533,6 +576,18 @@ fn route_of(path: &PatrolPath) -> Route {
             PathMode::BackAndForth => RouteMode::BackAndForth,
             PathMode::Once => RouteMode::Once,
         },
+        tasks: path
+            .tasks
+            .iter()
+            .map(|task| {
+                let task = task.as_ref()?;
+                Some(RouteTask {
+                    task: ai.data().name_id(&task.task)?,
+                    duration_s: task.duration_s,
+                    align: task.align,
+                })
+            })
+            .collect(),
     }
 }
 
@@ -1212,10 +1267,15 @@ impl TreeMind {
                 route: spawn_ai
                     .and_then(|overrides| overrides.route.clone())
                     .filter(|route| !route.points.is_empty())
-                    .map(|route| RouteWalk {
-                        route,
-                        next: 0,
-                        backwards: false,
+                    .map(|route| {
+                        let mut walk = RouteWalk {
+                            route,
+                            next: 0,
+                            backwards: false,
+                            task_s: 0.0,
+                        };
+                        walk.visit(Rng48::new(seed).unit());
+                        walk
                     }),
                 next_tick_ms: 0,
                 last_step_ms: None,
@@ -1250,6 +1310,11 @@ impl TreeMind {
     /// The action it plays.
     pub const fn shown(&self) -> Option<Shown> {
         self.state.shown
+    }
+
+    /// The task of the route point it is at, when the point has one.
+    pub fn waypoint_task(&self) -> Option<NameId> {
+        Some(self.state.route.as_ref()?.task()?.task)
     }
 
     /// Its Mannequin tags.
@@ -1606,6 +1671,7 @@ impl TreeMind {
                     NodeKind::SelectWaypoint => {
                         if let Some(route) = &mut self.state.route {
                             route.advance();
+                            route.visit(self.state.picks.unit());
                         }
                     }
                     ref other => tracing::debug!(
@@ -1791,6 +1857,14 @@ impl World for View<'_> {
             EngineKey::Passive => Value::Int(i64::from(self.passive)),
             EngineKey::WaypointPos => vec3(state.route.as_ref()?.point()?),
             EngineKey::WaypointDuration => Value::Float(state.route.as_ref()?.wait_s()),
+            EngineKey::WaypointTask => Value::Text(state.route.as_ref()?.task()?.task),
+            EngineKey::WaypointDurationMin => {
+                Value::Float(state.route.as_ref()?.task()?.duration_s[0])
+            }
+            EngineKey::WaypointDurationMax => {
+                Value::Float(state.route.as_ref()?.task()?.duration_s[1])
+            }
+            EngineKey::WaypointAlign => Value::Bool(state.route.as_ref()?.task()?.align),
             _ => return None,
         })
     }
@@ -2314,6 +2388,7 @@ mod tests {
                     points: vec![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
                     waits_ms: vec![1_500],
                     mode: PathMode::BackAndForth,
+                    tasks: Vec::new(),
                 },
             )]),
             vitals_ai: vec![
@@ -2369,9 +2444,11 @@ mod tests {
                 points: vec![START, east(1.0), east(2.0)],
                 waits_ms: vec![2_000],
                 mode,
+                tasks: Vec::new(),
             }),
             next: 0,
             backwards: false,
+            task_s: 0.0,
         };
         let visits = |mut walk: RouteWalk| {
             (0..5)
@@ -2385,6 +2462,38 @@ mod tests {
         assert_eq!(visits(walk(RouteMode::BackAndForth)), [1, 2, 1, 0, 1]);
         assert_eq!(visits(walk(RouteMode::Once)), [1, 2, 2, 2, 2]);
         assert!((walk(RouteMode::Loop).wait_s() - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_waypoint_task_stays_its_drawn_time_or_plays_once_without_one() {
+        // The retail beach patrol spawner's graze waypoint (15 to 45 s) and the graze
+        // spawner's (-1: no duration).
+        const GRAZE: NameId = 7;
+        let task = |duration_s| RouteTask {
+            task: GRAZE,
+            duration_s,
+            align: false,
+        };
+        let mut walk = RouteWalk {
+            route: Arc::new(Route {
+                points: vec![START, east(1.0)],
+                waits_ms: vec![2_000, 2_000],
+                mode: RouteMode::Loop,
+                tasks: vec![Some(task([15.0, 45.0])), Some(task([-1.0, -1.0]))],
+            }),
+            next: 0,
+            backwards: false,
+            task_s: 0.0,
+        };
+        walk.visit(0.5);
+        assert!(
+            (walk.wait_s() - 30.0).abs() < 1e-4,
+            "the task's time, not the wait"
+        );
+        assert_eq!(walk.task().map(|task| task.task), Some(GRAZE));
+        walk.advance();
+        walk.visit(0.5);
+        assert!(walk.wait_s() < 0.0, "no duration: the single task");
     }
 
     #[test]

@@ -94,6 +94,11 @@ enum Mind {
     Still,
 }
 
+/// The grid actions of the Patrol sub-tree's waypoint tasks (`POI_Waypoint_Loop_CAGE_Task`,
+/// `POI_Waypoint_CAGE_Task`): they play the waypoint's task as their fragment (Observed: retail
+/// boars sent fragment `POI_Graze_LOOP` with action `POI_Waypoint_Loop`, newchar 2026-09-18).
+const WAYPOINT_TASK_ACTIONS: [&str; 2] = ["POI_Waypoint_Loop", "POI_Waypoint"];
+
 /// One mob.
 #[derive(Debug, Clone)]
 pub struct Mob {
@@ -785,13 +790,15 @@ impl Mobs {
     /// What mob `entity` plays, with the names of its action and fragment, when it runs a tree
     /// and plays an action.
     pub fn shown(&self, entity: u64) -> Option<(Shown, &str, &str)> {
-        let shown = self.tree(entity)?.shown()?;
+        let mind = self.tree(entity)?;
+        let shown = mind.shown()?;
         let action = self.ai.cage_action(shown.action)?;
-        Some((
-            shown,
-            self.ai.name(action.action),
-            self.ai.name(action.fragment),
-        ))
+        let action_name = self.ai.name(action.action);
+        let fragment = mind
+            .waypoint_task()
+            .filter(|_| WAYPOINT_TASK_ACTIONS.contains(&action_name))
+            .unwrap_or(action.fragment);
+        Some((shown, action_name, self.ai.name(fragment)))
     }
 
     /// Hits on personal mob `entity` do no damage until `until_ms`.

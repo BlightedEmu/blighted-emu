@@ -21,21 +21,21 @@ const HOUSING_PLOT: [u8; UUID_LEN] = uuid(0xd578_bbb4_7e11_4c5a_8352_a95b_f5a6_c
 /// `Javelin::InteractTeleportComponent`.
 const INTERACT_TELEPORT: [u8; UUID_LEN] = uuid(0xa149_ec6d_cf0f_4051_a244_3e07_d7c4_b605);
 /// `AZ::Entity`.
-const ENTITY: [u8; UUID_LEN] = uuid(0x7565_1658_8663_478d_9090_2432_dfca_fa44);
+pub(crate) const ENTITY: [u8; UUID_LEN] = uuid(0x7565_1658_8663_478d_9090_2432_dfca_fa44);
 /// Floats of a `m_localTM`: three basis columns, then the translation.
 const TRANSFORM_FLOATS: usize = 12;
 /// Bytes of one float.
 const FLOAT_LEN: usize = 4;
 /// The first float of the translation in a `m_localTM`.
-const TRANSLATION_AT: usize = 9;
+pub(crate) const TRANSLATION_AT: usize = 9;
 /// The first float of the +Y basis column (the facing).
 const FORWARD_AT: usize = 3;
 /// Most parents followed up a destination's chain (a slice is far shallower).
 const MAX_CHAIN: usize = 64;
-const UUID_LEN: usize = 16;
-const AXES: usize = 3;
+pub(crate) const UUID_LEN: usize = 16;
+pub(crate) const AXES: usize = 3;
 
-const fn uuid(value: u128) -> [u8; UUID_LEN] {
+pub(crate) const fn uuid(value: u128) -> [u8; UUID_LEN] {
     value.to_be_bytes()
 }
 
@@ -90,7 +90,7 @@ impl Names {
 }
 
 /// Every element under `root` (itself first), depth first.
-fn descendants(root: &Element) -> Vec<&Element> {
+pub(crate) fn descendants(root: &Element) -> Vec<&Element> {
     let mut found = Vec::new();
     let mut stack = vec![root];
     while let Some(element) = stack.pop() {
@@ -117,9 +117,9 @@ pub fn plot_house_type(root: &Element) -> Option<String> {
 }
 
 /// A 3x4 transform: three basis columns, then the translation.
-type Transform = [f32; TRANSFORM_FLOATS];
+pub(crate) type Transform = [f32; TRANSFORM_FLOATS];
 
-const IDENTITY: Transform = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+pub(crate) const IDENTITY: Transform = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
 
 /// `transform` applied to point `point`.
 fn apply(transform: &Transform, point: [f32; AXES]) -> [f32; AXES] {
@@ -132,7 +132,7 @@ fn apply(transform: &Transform, point: [f32; AXES]) -> [f32; AXES] {
 }
 
 /// `outer` after `inner`.
-fn compose(outer: &Transform, inner: &Transform) -> Transform {
+pub(crate) fn compose(outer: &Transform, inner: &Transform) -> Transform {
     let linear = |column: [f32; AXES]| {
         let mut moved = apply(outer, column);
         for (axis, value) in moved.iter_mut().enumerate() {
@@ -175,6 +175,64 @@ fn local_transform(entity: &Element, names: &Names) -> Option<(Transform, Option
     })
 }
 
+/// The entities of a slice by their id.
+pub(crate) struct SliceEntities<'a> {
+    entities: Vec<(u64, &'a Element)>,
+    names: Names,
+}
+
+impl<'a> SliceEntities<'a> {
+    /// The `AZ::Entity` elements among `all`.
+    pub(crate) fn of(all: &[&'a Element]) -> Self {
+        let names = Names::new();
+        let entities = all
+            .iter()
+            .copied()
+            .filter(|element| element.type_id == ENTITY)
+            .filter_map(|entity| Some((entity_id(entity.child(names.id), &names)?, entity)))
+            .collect();
+        Self { entities, names }
+    }
+
+    /// The entity of id `id`.
+    pub(crate) fn get(&self, id: u64) -> Option<&'a Element> {
+        self.entities
+            .iter()
+            .find(|(entity_id, _)| *entity_id == id)
+            .map(|(_, entity)| *entity)
+    }
+
+    /// Every entity with its id.
+    pub(crate) fn all(&self) -> impl Iterator<Item = (u64, &'a Element)> + '_ {
+        self.entities.iter().copied()
+    }
+
+    /// The transform of entity `id` in the slice's frame: its `m_localTM` up its `m_parentId`
+    /// chain.
+    pub(crate) fn placed(&self, id: u64) -> Transform {
+        let mut placed = IDENTITY;
+        let mut next = Some(id);
+        for _ in 0..MAX_CHAIN {
+            let Some((transform, parent)) = next
+                .and_then(|id| self.get(id))
+                .and_then(|entity| local_transform(entity, &self.names))
+            else {
+                break;
+            };
+            placed = compose(&transform, &placed);
+            next = parent.filter(|parent| Some(*parent) != next);
+        }
+        placed
+    }
+}
+
+/// The point `local` of a slice placed at `capital` (its scale, rotation and position).
+pub(crate) fn capital_point(capital: &Capital, local: [f32; AXES]) -> [f32; AXES] {
+    let scale = capital.scale.unwrap_or(1.0);
+    let moved = rotate(capital.rotation, local.map(|value| value * scale));
+    std::array::from_fn(|axis| capital.position[axis] + moved[axis])
+}
+
 /// What a teleporter's dynamic slice gives: its channel and its destination in the slice's
 /// frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -199,46 +257,24 @@ impl TeleporterSlice {
             .and_then(|channel| channel.as_u32().ok())
             .unwrap_or_default();
         let target = entity_id(find(component, names.destination), &names)?;
-        let entities: Vec<(u64, &Element)> = all
-            .iter()
-            .copied()
-            .filter(|element| element.type_id == ENTITY)
-            .filter_map(|entity| Some((entity_id(entity.child(names.id), &names)?, entity)))
-            .collect();
-        let entity = |id: u64| {
-            entities
-                .iter()
-                .find(|(entity_id, _)| *entity_id == id)
-                .map(|(_, entity)| *entity)
-        };
-        let mut destination = IDENTITY;
-        let mut next = Some(target);
-        for _ in 0..MAX_CHAIN {
-            let Some((transform, parent)) = next
-                .and_then(entity)
-                .and_then(|entity| local_transform(entity, &names))
-            else {
-                break;
-            };
-            destination = compose(&transform, &destination);
-            next = parent.filter(|parent| Some(*parent) != next);
-        }
-        entity(target)?;
+        let entities = SliceEntities::of(&all);
+        entities.get(target)?;
         Some(Self {
             channel,
-            destination,
+            destination: entities.placed(target),
         })
     }
 
     /// The teleporter this slice makes at `capital`.
     pub fn at(&self, capital: &Capital) -> Teleporter {
-        let scale = capital.scale.unwrap_or(1.0);
-        let local = [
-            self.destination[TRANSLATION_AT] * scale,
-            self.destination[TRANSLATION_AT + 1] * scale,
-            self.destination[TRANSLATION_AT + 2] * scale,
-        ];
-        let moved = rotate(capital.rotation, local);
+        let destination = capital_point(
+            capital,
+            [
+                self.destination[TRANSLATION_AT],
+                self.destination[TRANSLATION_AT + 1],
+                self.destination[TRANSLATION_AT + 2],
+            ],
+        );
         let forward = rotate(
             capital.rotation,
             [
@@ -249,7 +285,7 @@ impl TeleporterSlice {
         );
         Teleporter {
             capital: capital.id.clone(),
-            destination: std::array::from_fn(|axis| capital.position[axis] + moved[axis]),
+            destination,
             yaw_rad: (-forward[0]).atan2(forward[1]),
             channel: self.channel,
         }
@@ -257,7 +293,7 @@ impl TeleporterSlice {
 }
 
 /// `vector` rotated by the unit quaternion `rotation` (x, y, z, w).
-fn rotate(rotation: [f32; 4], vector: [f32; AXES]) -> [f32; AXES] {
+pub(crate) fn rotate(rotation: [f32; 4], vector: [f32; AXES]) -> [f32; AXES] {
     let [x, y, z, w] = rotation;
     let [ux, uy, uz] = vector;
     let (tx, ty, tz) = (

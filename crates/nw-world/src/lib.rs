@@ -14,6 +14,7 @@ pub mod records;
 pub mod roads;
 pub mod script;
 pub mod slice_data;
+pub mod spawner_slices;
 pub mod stations;
 pub mod travel_slices;
 pub mod water;

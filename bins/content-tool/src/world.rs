@@ -16,8 +16,11 @@ use nw_formats::objectstream::{Element, ObjectStreamError, lowercase_crc32, pars
 use nw_world::capitals::parse_capitals;
 use nw_world::height::{VERIFIED_MOUNTAIN_HEIGHTS, rescaled_sample};
 use nw_world::metadata::{MetadataError, MetadataRecords, SkipCounts, read_metadata};
-use nw_world::records::{HeightGrid, LevelInfo, RecordCounts, Region, WorldFile};
+use nw_world::records::{
+    HeightGrid, LevelInfo, PatrolPath, RecordCounts, Region, SpawnAi, WorldFile,
+};
 use nw_world::slice_data::{SliceDataError, SliceSpawners, SpawnedSlice};
+use nw_world::spawner_slices::SpawnerSlice;
 use nw_world::stations::{CraftingStation, StationSlice};
 use nw_world::travel_slices::{HousingPlot, TeleporterSlice, plot_house_type};
 use nw_world::world_file::world_file_path;
@@ -461,8 +464,12 @@ pub fn run_world(
             Ok::<(), ToolError>(())
         },
     )?;
-    let teleporters = teleporter_slices(source, &built)?;
+    let CapitalSlices {
+        teleporters,
+        spawners,
+    } = capital_slices(source, &built)?;
     for (world, _) in &mut built {
+        add_spawner_paths(world, &spawners);
         world.stations = stations_of(&world.spawned, &stations);
         world.plots = plots_of(&world.spawned, &plots);
         world.teleporters = world
@@ -486,11 +493,60 @@ fn slice_file(slice: &str) -> String {
     format!("{slice}{DYNAMIC_SLICE_EXTENSION}")
 }
 
-/// The teleporter slices of the capitals of `built`, by the capitals' slice asset id.
-fn teleporter_slices(
+/// What the capitals' own slices give, by the capitals' slice asset id.
+#[derive(Debug, Default)]
+struct CapitalSlices {
+    /// The teleporter slices.
+    teleporters: HashMap<AssetKey, TeleporterSlice>,
+    /// The spawner slices with waypoints.
+    spawners: HashMap<AssetKey, SpawnerSlice>,
+}
+
+/// The largest difference on each axis between a spawner capital and its level vitals spawn, m
+/// (Observed: 0 on the beach's graze and patrol spawners; a float's rounding).
+const SPAWN_ON_CAPITAL_M: f32 = 0.01;
+/// The id of the path of a spawner capital: this prefix, then the capital's GUID.
+const SPAWNER_PATH_PREFIX: &str = "spawner:";
+
+/// Gives each vitals spawn of `world` that stands on a spawner capital of `spawners` the path of
+/// its waypoints.
+fn add_spawner_paths(world: &mut WorldFile, spawners: &HashMap<AssetKey, SpawnerSlice>) {
+    let paths: Vec<(String, [f32; 3], PatrolPath)> = world
+        .capitals
+        .iter()
+        .filter_map(|capital| {
+            let slice = spawners.get(&capital_asset(&capital.slice_asset_id)?)?;
+            Some((
+                format!("{SPAWNER_PATH_PREFIX}{}", capital.id),
+                capital.position,
+                slice.at(capital),
+            ))
+        })
+        .collect();
+    for (id, at, path) in paths {
+        let Some(index) = world.vitals.iter().position(|spawn| {
+            spawn
+                .position
+                .iter()
+                .zip(at)
+                .all(|(a, b)| (a - b).abs() <= SPAWN_ON_CAPITAL_M)
+        }) else {
+            continue;
+        };
+        world
+            .vitals_ai
+            .resize(world.vitals.len(), SpawnAi::default());
+        world.vitals_ai[index].path = Some(id.clone());
+        world.paths.insert(id, path);
+    }
+}
+
+/// The teleporter and spawner slices of the capitals of `built`, by the capitals' slice asset
+/// id.
+fn capital_slices(
     source: &GameSource,
     built: &[(WorldFile, SkipCounts)],
-) -> Result<HashMap<AssetKey, TeleporterSlice>, ToolError> {
+) -> Result<CapitalSlices, ToolError> {
     let wanted: HashSet<AssetKey> = built
         .iter()
         .flat_map(|(world, _)| &world.capitals)
@@ -505,7 +561,7 @@ fn teleporter_slices(
         },
     )?;
     let Some(catalog) = catalog else {
-        return Ok(HashMap::new());
+        return Ok(CapitalSlices::default());
     };
     let paths = paths_of(&catalog, &wanted).map_err(WorldBuildError::from)?;
     let keys_by_path: HashMap<String, AssetKey> = paths
@@ -513,17 +569,21 @@ fn teleporter_slices(
         .filter(|(_, path)| path.ends_with(DYNAMIC_SLICE_EXTENSION))
         .map(|(key, path)| (path, key))
         .collect();
-    let mut teleporters = HashMap::new();
+    let mut slices = CapitalSlices::default();
     source.for_each_entry(
         |path| keys_by_path.contains_key(path),
         |path, bytes| {
-            if let Some(teleporter) = TeleporterSlice::of(&stream_of(path, &bytes)?) {
-                teleporters.insert(keys_by_path[path], teleporter);
+            let root = stream_of(path, &bytes)?;
+            if let Some(teleporter) = TeleporterSlice::of(&root) {
+                slices.teleporters.insert(keys_by_path[path], teleporter);
+            }
+            if let Some(spawner) = SpawnerSlice::of(&root) {
+                slices.spawners.insert(keys_by_path[path], spawner);
             }
             Ok::<(), ToolError>(())
         },
     )?;
-    Ok(teleporters)
+    Ok(slices)
 }
 
 /// The spawned slices whose `.dynamicslice` is a house plot of `plots` (house type by pak path).
@@ -849,6 +909,79 @@ mod tests {
             ..Element::default()
         })
         .unwrap()
+    }
+
+    #[test]
+    fn a_spawn_on_a_spawner_capital_walks_the_spawners_waypoints() {
+        const GUID: &str = "64f2702e-9c3b-a5a5-1dae-1b0d80c5666b";
+        let named = |name: &str, value: Vec<u8>| {
+            Element::with_value(nw_formats::objectstream::lowercase_crc32(name), value)
+        };
+        let mut local = [0.0_f32; 12];
+        local[0] = 1.0;
+        local[4] = 1.0;
+        local[8] = 1.0;
+        local[9] = 2.0;
+        let waypoint = Element {
+            type_id: 0x7565_1658_8663_478d_9090_2432_dfca_fa44_u128.to_be_bytes(),
+            ..Element::with_children(
+                0,
+                vec![
+                    Element::with_children(
+                        nw_formats::objectstream::lowercase_crc32("Id"),
+                        vec![named("Id", 1_u64.to_be_bytes().to_vec())],
+                    ),
+                    named("Name", b"wp1".to_vec()),
+                    Element::with_children(
+                        0,
+                        vec![named(
+                            "m_localTM",
+                            local.iter().flat_map(|value| value.to_be_bytes()).collect(),
+                        )],
+                    ),
+                    Element::with_children(
+                        0,
+                        vec![
+                            named("m_taskName", b"POI_Graze_LOOP".to_vec()),
+                            named("m_minDuration", (-1.0_f32).to_be_bytes().to_vec()),
+                            named("m_maxDuration", (-1.0_f32).to_be_bytes().to_vec()),
+                        ],
+                    ),
+                ],
+            )
+        };
+        let slice = SpawnerSlice::of(&Element::with_children(0, vec![waypoint])).expect("slice");
+        let asset = "{3D51B368-7E53-5FF9-AF51-58FD8602F34B}:2";
+        let at = [7305.945, 3117.7996, 44.19863];
+        let mut world = WorldFile {
+            capitals: vec![nw_world::records::Capital {
+                id: GUID.to_owned(),
+                position: at,
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                slice_asset_id: asset.to_owned(),
+                ..nw_world::records::Capital::default()
+            }],
+            vitals: vec![
+                nw_world::records::VitalsSpawn::default(),
+                nw_world::records::VitalsSpawn {
+                    position: at,
+                    ..nw_world::records::VitalsSpawn::default()
+                },
+            ],
+            ..WorldFile::default()
+        };
+        let spawners = HashMap::from([(capital_asset(asset).expect("asset"), slice)]);
+        add_spawner_paths(&mut world, &spawners);
+        let id = format!("{SPAWNER_PATH_PREFIX}{GUID}");
+        assert_eq!(world.vitals_ai.len(), 2);
+        assert_eq!(world.vitals_ai[0], SpawnAi::default());
+        assert_eq!(world.vitals_ai[1].path.as_deref(), Some(id.as_str()));
+        let path = &world.paths[&id];
+        assert_eq!(path.points, [[7307.945, 3117.7996, 44.19863]]);
+        assert_eq!(
+            path.tasks[0].as_ref().map(|task| task.task.as_str()),
+            Some("POI_Graze_LOOP")
+        );
     }
 
     #[test]

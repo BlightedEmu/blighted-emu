@@ -114,6 +114,21 @@ pub struct PatrolPath {
     pub waits_ms: Vec<u64>,
     /// What comes after the last point.
     pub mode: PathMode,
+    /// The task at each point, from a spawner slice's waypoints (missing: no task).
+    pub tasks: Vec<Option<WaypointTask>>,
+}
+
+/// What a mob does at a waypoint (`AIWaypointComponent`): the `Waypoint_Task`,
+/// `Waypoint_Duration_Min`, `Waypoint_Duration_Max` and `Waypoint_Align` its tree's Patrol
+/// sub-tree reads.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WaypointTask {
+    /// `m_taskName`: the fragment it plays (`POI_Graze_LOOP`).
+    pub task: String,
+    /// `m_minDuration` and `m_maxDuration`, seconds; negative in a waypoint without a duration.
+    pub duration_s: [f32; 2],
+    /// `m_matchAlignment`: it turns to the waypoint's facing.
+    pub align: bool,
 }
 
 /// The AI profile and path ids of one spawn.

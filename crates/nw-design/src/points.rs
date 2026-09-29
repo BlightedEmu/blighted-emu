@@ -233,6 +233,7 @@ fn path_of(file: &DesignFile) -> PatrolPath {
             .map(|waits| waits.iter().filter_map(as_u64).collect())
             .unwrap_or_default(),
         mode,
+        tasks: Vec::new(),
     }
 }
 
