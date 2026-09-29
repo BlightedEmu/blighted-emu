@@ -63,6 +63,26 @@ const GROUP_AGGRO_DISTANCE: &str = "m_groupAggroDistance";
 const GROUP_AGGRO_CAP: &str = "m_groupAggroShareCap";
 const TARGETING_PROFILE: &str = "m_targetingProfile";
 const OVERRIDE_AGGRO_DELAY: &str = "m_overrideAggroDelay";
+/// Trees that neither Server.pak nor the client holds, each with the tree that stands in for it
+/// (Inferred, chosen by the user 2026-09-26):
+///
+/// - `damned_firstmate_2h_anchor_basebehavior` (First Mate Janszoon,
+///   `Corrupted_Sailor_StarterBeach_Named_00`): the damned great axeman's
+///   `damned_2h_melee_basebehavior`. In the retail new-character run Janszoon attacks with
+///   `Attack_Far_2H_Axe_01`, `Attack_Close_2H_Axe_04` and `Officer_AnchorToss`; that tree's
+///   great axeman attacks hold the first two, no held tree holds all three.
+const STAND_IN_TREES: &[(&str, &str)] = &[(
+    "sharedassets/ai/behaviortrees/damned/damned_firstmate_2h_anchor_basebehavior.behaviortree",
+    "sharedassets/ai/behaviortrees/damned/damned_2h_melee_basebehavior.behaviortree",
+)];
+
+/// The tree that stands in for the missing tree `path` ([`STAND_IN_TREES`]).
+fn stand_in_tree(path: &str) -> Option<&'static str> {
+    STAND_IN_TREES
+        .iter()
+        .find(|(missing, _)| *missing == path)
+        .map(|(_, stand_in)| *stand_in)
+}
 const AGGRO_DELAY: &str = "m_aggroDelayOverrideSec";
 const NAV_CONFIGS: &str = "m_navConfigs";
 const NAV_CONFIG_TYPE: &str = "m_navConfigType";
@@ -1342,9 +1362,18 @@ pub fn build_ai_data(
         .enumerate()
         .map(|(index, tree)| (tree.path, u32::try_from(index).unwrap_or(u32::MAX)))
         .collect();
+    let tree_named = |path: &str| {
+        trees
+            .names
+            .iter()
+            .position(|name| name == path)
+            .and_then(|name| tree_of.get(&NameId::try_from(name).ok()?).copied())
+    };
     for archetype in &mut archetypes {
         for reference in &mut archetype.trees {
-            reference.tree = tree_of.get(&reference.path).copied();
+            reference.tree = tree_of.get(&reference.path).copied().or_else(|| {
+                stand_in_tree(&trees.names[reference.path as usize]).and_then(tree_named)
+            });
             if reference.tree.is_none() {
                 report
                     .missing_trees
@@ -1567,6 +1596,20 @@ impl CageBuilder<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn janszoon_s_missing_tree_has_the_great_axeman_s_tree_as_stand_in() {
+        assert_eq!(
+            stand_in_tree(
+                "sharedassets/ai/behaviortrees/damned/damned_firstmate_2h_anchor_basebehavior.behaviortree"
+            ),
+            Some("sharedassets/ai/behaviortrees/damned/damned_2h_melee_basebehavior.behaviortree")
+        );
+        assert_eq!(
+            stand_in_tree("sharedassets/ai/behaviortrees/other.behaviortree"),
+            None
+        );
+    }
+
     use nw_ai::classes::{CLASSES, Class};
 
     use super::*;
