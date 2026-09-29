@@ -19,9 +19,6 @@ readonly S3_LEAD_HEX="488d4c2450" S3_TAIL_HEX="904488bc24ac000000488b15"
 readonly KINESIS_LEAD_HEX="488d4df0" KINESIS_TAIL_HEX="90c6454c00c7451001000000"
 readonly STS_LEAD_HEX="488d4d10" STS_TAIL_HEX="90c6456c00488d442430"
 readonly S3_VERIFY_HEX="c684240802000001c744247001000000"
-# The local-player correction defaults: eight MOV dword ptr [RDI + field], imm32 writes (0x2F0 to
-# 0x30C), and the patched immediates of the threshold and the full-correction distance (100,000).
-readonly CORRECTIONS_HEX="c787f00200000ad7233cc787f40200000000003fc787f80200009a99993e""c787fc020000cdcccc3ec7870003000005000000c787040300000000803f""c7870803000004000000c7870c0300000000003f"
 # The Steam GetTicket function and the start of its ticket handler (stand-in RIP and call offsets).
 readonly GET_TICKET_HEX="40534883ec20488bd9c681e802000001488d0d11111111488d1511111111e811111111""83bbf002000000743d488d0d11111111ff15111111118b93f0020000488b08488b01ff9088000000""488d8b8c03000033d241b8000a0000e811111111c7838803000000000000488d0d11111111""ff151111111133d2488b08488b01ff50708983f00200004883c4205bc3"
 readonly HANDLER_HEX="48895c2410488974241848897c2420554154415541564157488dac2450faffff4881ecb0060000""488bf2488bd94533ff4489bde0050000448b328b7a044488bde0050000488d0511111111""488944244044897c24480f28442440660f7f4424504c8d0511111111488d542450""488d8de0050000e811111111b8020000004438bde00500000f45f8488d0d11111111""443bb3f00200007411"
@@ -30,8 +27,6 @@ readonly HANDLER_HEX="48895c2410488974241848897c2420554154415541564157488dac2450
 # INT3 to the end of the replaced bytes.
 readonly OFFLINE_TICKET_HEX="c783f002000000000000c744243000000000c744243401000000c744243800000000""488d542430488bcbe8fefeffff4883c4205bc3"
 readonly OFFLINE_TICKET_FILL=53
-readonly THRESHOLD_HEX="0050c347"
-readonly FULL_CORRECTION_HEX="0050c347"
 # Fake PE layout: image base, .text at RVA 0x1000 / file 0x200 (0x800 bytes), .rdata at RVA 0x2000
 # / file 0xA00.
 readonly SIG_OFFSET=$((0x200))
@@ -43,14 +38,10 @@ readonly S3_OFFSET=$((0x340))
 readonly KINESIS_OFFSET=$((0x380))
 readonly STS_OFFSET=$((0x3c0))
 readonly S3_VERIFY_OFFSET=$((0x400))
-readonly CORRECTIONS_OFFSET=$((0x440))
 # The ticket handler and GetTicket sit past the INT3 run the caves use.
 readonly HANDLER_OFFSET=$((0x600))
 readonly GET_TICKET_OFFSET=$((0x6b0))
 readonly TICKET_REQUEST_OFFSET=$((GET_TICKET_OFFSET + 0x23))
-# The immediates of the first and the sixth write.
-readonly THRESHOLD_OFFSET=$((CORRECTIONS_OFFSET + 6))
-readonly FULL_CORRECTION_OFFSET=$((CORRECTIONS_OFFSET + 5 * 10 + 6))
 # INT3 padding (0x500..0x800): the first cave is at file 0x500, VA 0x140001300.
 readonly CAVE_OFFSET=$((0x500))
 readonly CAVE_SLOT=$((0x50))
@@ -91,21 +82,18 @@ check_bytes() {
 
 # Builds a fake Bin64 with a minimal PE NewWorld.exe: the verify signature (when $2 is yes), the
 # Sonic and Steam EndSession bodies (the Steam one when $3 is yes), a vtable slot that points at
-# the Steam function, the AWS proxy parts with INT3 padding (when $4 is yes), and the correction
-# defaults (when $5 is yes, the default), and the Steam GetTicket function and its ticket handler
-# (when $6 is yes, the default).
+# the Steam function, the AWS proxy parts with INT3 padding (when $4 is yes), and the Steam
+# GetTicket function and its ticket handler (when $5 is yes, the default).
 make_bin64() {
-  local dir="$1" with_sig="$2" with_steam="$3" with_proxy="$4" with_corrections="${5:-yes}"
-  local with_ticket="${6:-yes}"
+  local dir="$1" with_sig="$2" with_steam="$3" with_proxy="$4" with_ticket="${5:-yes}"
   mkdir -p "$dir"
-  python3 -I - "$dir/NewWorld.exe" "$with_sig" "$with_steam" "$with_proxy" "$with_corrections" \
+  python3 -I - "$dir/NewWorld.exe" "$with_sig" "$with_steam" "$with_proxy" \
     "$with_ticket" "$GET_TICKET_HEX" "$HANDLER_HEX" "$SIGNATURE_HEX" "$SONIC_HEX" "$STEAM_HEX" "$STEAM_VA_HEX" "$CTOR_HEX" "$S3_LEAD_HEX" \
     "$S3_TAIL_HEX" "$KINESIS_LEAD_HEX" "$KINESIS_TAIL_HEX" "$STS_LEAD_HEX" "$STS_TAIL_HEX" \
-    "$S3_VERIFY_HEX" "$CORRECTIONS_HEX" <<'PY'
+    "$S3_VERIFY_HEX" <<'PY'
 import struct, sys
-(path, with_sig, with_steam, with_proxy, with_corrections, with_ticket, get_ticket, handler, sig, sonic, steam, steam_va, ctor,
- s3_lead, s3_tail, kinesis_lead, kinesis_tail, sts_lead, sts_tail, s3_verify,
- corrections) = sys.argv[1:]
+(path, with_sig, with_steam, with_proxy, with_ticket, get_ticket, handler, sig, sonic, steam, steam_va, ctor,
+ s3_lead, s3_tail, kinesis_lead, kinesis_tail, sts_lead, sts_tail, s3_verify) = sys.argv[1:]
 image = bytearray(0xB00)
 image[0:2] = b"MZ"
 struct.pack_into("<I", image, 0x3C, 0x40)
@@ -143,8 +131,6 @@ if with_proxy == "yes":
         put(site, lead + "e8" + offset.hex() + tail)
     put(0x400, s3_verify)
     image[0x500:0x800] = b"\xcc" * 0x300
-if with_corrections == "yes":
-    put(0x440, corrections)
 if with_ticket == "yes":
     put(0x600, handler)
     put(0x6B0, get_ticket)
@@ -202,25 +188,6 @@ else
   fail "patched copy keeps the Steam function body (got $got)"
 fi
 
-got="$(dd if="$bin64/BlightedNewWorld.exe" bs=1 skip="$THRESHOLD_OFFSET" count=4 2>/dev/null | xxd -p)"
-if [[ "$got" == "$THRESHOLD_HEX" ]]; then
-  pass "patched copy raises the correction threshold to 0.5 m"
-else
-  fail "patched copy raises the correction threshold to 0.5 m (got $got)"
-fi
-got="$(dd if="$bin64/BlightedNewWorld.exe" bs=1 skip="$FULL_CORRECTION_OFFSET" count=4 2>/dev/null | xxd -p)"
-if [[ "$got" == "$FULL_CORRECTION_HEX" ]]; then
-  pass "patched copy raises the full-correction distance to 2.0 m"
-else
-  fail "patched copy raises the full-correction distance to 2.0 m (got $got)"
-fi
-got="$(dd if="$bin64/BlightedNewWorld.exe" bs=1 skip="$((CORRECTIONS_OFFSET + 10))" count=40 2>/dev/null | xxd -p | tr -d '\n')"
-if [[ "$got" == "${CORRECTIONS_HEX:20:80}" ]]; then
-  pass "patched copy keeps the other correction defaults"
-else
-  fail "patched copy keeps the other correction defaults (got $got)"
-fi
-
 check_bytes "patched GetTicket calls the ticket handler with an empty ticket" \
   "$TICKET_REQUEST_OFFSET" "$OFFLINE_TICKET_HEX"
 check_bytes "patched GetTicket fills the rest of the request with INT3" \
@@ -257,14 +224,6 @@ if python3 "$PATCH_SCRIPT" "$missing" >/dev/null 2>&1; then
 else
   pass "missing verify signature is refused"
 fi
-no_corrections="$work_dir/no-corrections/Bin64"
-make_bin64 "$no_corrections" yes yes yes no
-if python3 "$PATCH_SCRIPT" "$no_corrections" >/dev/null 2>&1 \
-  || [[ -e "$no_corrections/BlightedNewWorld.exe" ]]; then
-  fail "missing correction defaults are refused"
-else
-  pass "missing correction defaults are refused"
-fi
 no_steam="$work_dir/no-steam/Bin64"
 make_bin64 "$no_steam" yes no yes
 if python3 "$PATCH_SCRIPT" "$no_steam" >/dev/null 2>&1 || [[ -e "$no_steam/BlightedNewWorld.exe" ]]; then
@@ -274,7 +233,7 @@ else
 fi
 
 no_ticket="$work_dir/no-ticket/Bin64"
-make_bin64 "$no_ticket" yes yes yes yes no
+make_bin64 "$no_ticket" yes yes yes no
 if python3 "$PATCH_SCRIPT" "$no_ticket" >/dev/null 2>&1 || [[ -e "$no_ticket/BlightedNewWorld.exe" ]]; then
   fail "missing Steam GetTicket signature is refused"
 else

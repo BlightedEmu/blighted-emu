@@ -3,8 +3,8 @@
 """Make the patched copy of the New World client that the emulator needs.
 
 This tool writes a patched copy, ``BlightedNewWorld.exe``, next to the official
-``NewWorld.exe`` (which it never modifies). The copy has four changes, and a
-fifth one with ``--aws-proxy``:
+``NewWorld.exe`` (which it never modifies). The copy has three changes, and a
+fourth one with ``--aws-proxy``:
 
 1. Certificate bypass. The real client refuses the emulator's self-signed
    game-server certificate. The tool finds OpenSSL ``SSL_CTX_set_verify`` by a
@@ -28,15 +28,7 @@ fifth one with ``--aws-proxy``:
    (handle 0, result OK, length 0), so the login goes on at once whether Steam is
    online or not. Both functions are found by byte signatures.
 
-4. Own-movement correction. The client predicts its own movement and corrects it
-   toward the own place the server sends whenever the two differ by more than
-   0.01 m, and snaps past 1.0 m. The emulator's server only estimates the body,
-   so every correction pulled the client back or sideways. The tool finds the
-   constructor writes of these defaults by their bytes and raises the correction
-   threshold and the full-correction distance past any level's size: the client
-   owns its own movement, and the server's teleports still move it.
-
-5. AWS proxy (``--aws-proxy``, for Windows). The remote-config (S3), analytics
+4. AWS proxy (``--aws-proxy``, for Windows). The remote-config (S3), analytics
    (Kinesis) and analytics-credentials (STS) clients call fixed Amazon names
    with certificate checks on. Windows has no per-process hosts or trust file,
    so each client is sent through the launcher's loopback proxy instead. After
@@ -223,45 +215,6 @@ MOV_BYTE_RAX = bytes.fromhex("c680")
 DWORD_LEN = 4
 POINTER_LEN = 8
 
-# The local-player movement correction defaults (build 25810808: the game settings constructor
-# writes them at 0x140FEC21A; FUN_141031800 registers them as the g_localPlayer_* console
-# variables): MOV dword ptr [RDI + field], imm32 each, in this order.
-MOV_DWORD_RDI = bytes.fromhex("c787")
-MOV_IMMEDIATE_OFFSET = len(MOV_DWORD_RDI) + DWORD_LEN
-CORRECTION_THRESHOLD_FIELD = 0x2F0
-FULL_CORRECTION_FIELD = 0x304
-CORRECTION_DEFAULTS = (
-    # g_localPlayer_CorrectionThreshold: no correction below this total correction, m.
-    (CORRECTION_THRESHOLD_FIELD, struct.pack("<f", 0.01)),
-    # g_localPlayer_IdleVerticalCorrectionThreshold and IdleHorizontalCorrectionThreshold, m.
-    (0x2F4, struct.pack("<f", 0.5)),
-    (0x2F8, struct.pack("<f", 0.3)),
-    # g_localPlayer_AddedErrorDistancePerMissedServerState, m, and its MaxMissedServerStates.
-    (0x2FC, struct.pack("<f", 0.4)),
-    (0x300, struct.pack("<I", 5)),
-    # g_localPlayer_ErrorDistanceForFullCorrection: a full correction (a snap) past this, m.
-    (FULL_CORRECTION_FIELD, struct.pack("<f", 1.0)),
-    # g_localPlayer_FailedCorrectionsBeforeSnap.
-    (0x308, struct.pack("<I", 4)),
-    # g_localPlayer_RequiredPhysicalCorrectionFraction.
-    (0x30C, struct.pack("<f", 0.5)),
-)
-CORRECTION_DEFAULTS_SIGNATURE = b"".join(
-    MOV_DWORD_RDI + struct.pack("<I", field) + value for field, value in CORRECTION_DEFAULTS
-)
-MOV_IMMEDIATE_LEN = MOV_IMMEDIATE_OFFSET + DWORD_LEN
-# The patched values, m: past any distance in a level, so the client never corrects its own
-# movement toward the own place the server sends. Retail's server runs the client's character
-# controller and its place is the client's; the emulator's place is an estimate of the body from
-# the camera. With 0.5 m and 2.0 m, every correction pulled the client and moved the camera the
-# estimate follows: in the closed-loop replay of the retail tutorial 5,811 pulls (1,499 against
-# the client's motion), live the player stepped forward and back each frame (run 21, 2026-09-26).
-# The client still needs the place in each state (run 22: without it, it could not move). Server
-# moves are teleports, which the client takes by their own step (the drop into the sea of run 22
-# moved it while the states carried no place).
-CORRECTION_THRESHOLD_M = 100_000.0
-FULL_CORRECTION_M = 100_000.0
-
 OFFICIAL_NAME = "NewWorld.exe"
 BACKUP_NAME = "NewWorld.exe.orig"
 PATCHED_NAME = "BlightedNewWorld.exe"
@@ -407,22 +360,6 @@ def plan_aws_proxy(data: bytes) -> "list[tuple[str, int, bytes]]":
     return edits
 
 
-def plan_corrections(data: bytes) -> "list[tuple[str, int, bytes]]":
-    """The edits that raise the local-player correction threshold and full-correction distance."""
-    defaults = find_unique(data, CORRECTION_DEFAULTS_SIGNATURE, "local-player correction defaults")
-    fields = [field for field, _ in CORRECTION_DEFAULTS]
-
-    def immediate(field: int) -> int:
-        return defaults + fields.index(field) * MOV_IMMEDIATE_LEN + MOV_IMMEDIATE_OFFSET
-
-    return [
-        ("correction threshold", immediate(CORRECTION_THRESHOLD_FIELD),
-         struct.pack("<f", CORRECTION_THRESHOLD_M)),
-        ("full correction distance", immediate(FULL_CORRECTION_FIELD),
-         struct.pack("<f", FULL_CORRECTION_M)),
-    ]
-
-
 def plan_offline_ticket(data: bytes) -> "list[tuple[str, int, bytes]]":
     """The edit that makes GetTicket hand an empty ticket to its handler at once, instead of
     asking the Steam client and waiting for a callback that never comes while Steam is offline."""
@@ -454,7 +391,6 @@ def plan_patches(data: bytes, aws_proxy: bool) -> "list[tuple[str, int, bytes]]"
         ("certificate bypass", verify_site, NOPS),
         ("exit to desktop", slot, struct.pack("<Q", sonic)),
         *plan_offline_ticket(data),
-        *plan_corrections(data),
     ]
     return edits + plan_aws_proxy(data) if aws_proxy else edits
 
