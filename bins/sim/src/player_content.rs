@@ -587,6 +587,12 @@ pub struct QuestObject {
 /// The largest difference on each axis between a quest object's point and the capital on it, m
 /// (Observed: 0 on the four nodules; a float's rounding).
 const CAPITAL_ON_POINT_M: f32 = 0.01;
+/// The folder of the generated spawn masters (`CoatGen\\<hash>\\WorldEvent_SpawnGroup_…_Master_…`,
+/// `Master_Plants_…`). Such a capital spawns the object on its point as an entity of its own; it
+/// is a spawner, not the object (Observed: the tutorial's spawn group at (484.5, 218.9); carding
+/// it by its id crashed the client in its spawner facet, `FUN_143c13cd0`, live 2026-09-29
+/// twice at 99.7 m. The nodules' capitals are placed slices, `IO_Custom_MSQ_CorruptedNodule_A`).
+const SPAWN_MASTER_FOLDER: &str = "CoatGen\\";
 
 /// The quest objects of a level.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -616,11 +622,12 @@ impl QuestObjects {
                         let id = capitals
                             .iter()
                             .find(|capital| {
-                                capital
-                                    .position
-                                    .iter()
-                                    .zip(point.position)
-                                    .all(|(a, b)| (a - b).abs() <= CAPITAL_ON_POINT_M)
+                                !capital.slice_name.starts_with(SPAWN_MASTER_FOLDER)
+                                    && capital
+                                        .position
+                                        .iter()
+                                        .zip(point.position)
+                                        .all(|(a, b)| (a - b).abs() <= CAPITAL_ON_POINT_M)
                             })
                             .and_then(|capital| capital_id(&capital.id));
                         QuestObject {
@@ -850,6 +857,55 @@ fn disabled_items<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quest_object_takes_the_id_of_a_placed_capital_not_of_a_spawn_master() {
+        const NODULE: &str = "IO_MSQ_Nodule";
+        const EVENT: &str = "MSQ_CorruptedNodule_1_interact";
+        const PLACED: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+        const MASTER: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+        let gatherables = Gatherables::build([nw_content::gathering::Gatherable {
+            id: NODULE.to_owned(),
+            gather_ms: 0,
+            respawn_ms: (0, 0),
+            loot_table: None,
+            loot_container: false,
+            tradeskill: None,
+            tool_required: false,
+            by_hand: true,
+            game_event: Some(EVENT.to_owned()),
+        }]);
+        let point = |x| GatherablePoint {
+            gatherable_id: lowercase_crc32(NODULE),
+            position: [x, 0.0, 0.0],
+            ..GatherablePoint::default()
+        };
+        let capital = |id: &str, slice: &str, x| Capital {
+            id: id.to_owned(),
+            slice_name: slice.to_owned(),
+            position: [x, 0.0, 0.0],
+            ..Capital::default()
+        };
+        let objects = QuestObjects::build(
+            &[point(0.0), point(10.0)],
+            &gatherables,
+            &HashSet::from([EVENT.to_lowercase()]),
+            &[
+                capital(PLACED, "slices/IO_Custom_MSQ_CorruptedNodule_A", 0.0),
+                capital(
+                    MASTER,
+                    "CoatGen\\831a57a1\\WorldEvent_SpawnGroup_Single_Master_bbbbbbbb",
+                    10.0,
+                ),
+            ],
+        );
+        assert_eq!(objects.get(0).and_then(|object| object.id), capital_id(PLACED));
+        assert_eq!(
+            objects.get(1).and_then(|object| object.id),
+            None,
+            "a spawn master is not the object"
+        );
+    }
 
     #[test]
     fn the_tutorial_swordsman_s_gear_is_a_slow_equip_load() {
