@@ -195,3 +195,9 @@ desktop.ini
 # =============================================================================
 
 *_files/
+
+# Crash dumps from gdb and the kernel (core.<pid>), and minidumps.
+core
+core.[0-9]*
+*.dmp
+*.mdmp
