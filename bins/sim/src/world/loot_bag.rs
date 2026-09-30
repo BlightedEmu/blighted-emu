@@ -583,13 +583,15 @@ impl PlayerLoot {
     /// The player opened loot container `container` at `at` at server time `server_ms`: the
     /// tracker lists it as looted point-of-interest loot until server time `reset_ms`, and the
     /// player may not open it again before (craft2 report: retail state 2, type 0, the reset of
-    /// [`nw_content::chest_lockouts`]). Returns the tracker member with version `version`.
+    /// [`nw_content::chest_lockouts`]; an open-world chest is `privileged`, the tutorial chest is
+    /// not). Returns the tracker member with version `version`.
     pub(super) fn track_opened(
         &mut self,
         container: [u8; RAW_ID_LEN],
         at: Position,
         server_ms: u64,
         reset_ms: u64,
+        privileged: bool,
         version: u64,
     ) -> BundleMember {
         self.track_looted(
@@ -599,7 +601,7 @@ impl PlayerLoot {
                 kind: LOOT_POI,
                 reset_ns: unix_ns(reset_ms),
                 looted_ns: unix_ns(server_ms),
-                privileged: true,
+                privileged,
                 position: [at.x, at.y, at.z],
                 interact_tag: NO_INTERACT_TAG,
                 rarity: NO_PERK_RARITY,
@@ -1242,7 +1244,7 @@ mod tests {
         const RESET_MS: u64 = NOW + 3_600_000;
         let mut loot = PlayerLoot::default();
         assert!(!loot.opened(&CHEST));
-        loot.track_opened(CHEST, AT, NOW, RESET_MS, 1);
+        loot.track_opened(CHEST, AT, NOW, RESET_MS, true, 1);
         assert!(loot.opened(&CHEST));
         assert!(!loot.holds(&CHEST), "looted, not waiting for a take");
         assert_eq!(loot.expire(RESET_MS - 1, 2), None);

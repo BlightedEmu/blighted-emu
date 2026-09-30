@@ -525,6 +525,7 @@ impl SimWorld {
                 at,
                 self.server_ms,
                 reset_ms,
+                true,
                 version,
             );
             player.extra_members.push(tracked);

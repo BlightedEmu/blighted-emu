@@ -128,6 +128,11 @@ const CHEST_BUSY_CHANGE: usize = 0;
 const CHEST_FREE_CHANGE: usize = 1;
 /// Retail time from the server's accept to the end of the gather.
 const CHEST_GATHER_MS: u64 = 2023;
+/// The place the loot tracker gives the looted chest (retail newchar 2026-09-18, at 216.82 s).
+pub(super) const CHEST_AT: Position = point(663.0765, 414.5738, 26.66415);
+/// How long the loot tracker keeps the chest looted (retail newchar: reset 3,600 s after the
+/// loot).
+pub(super) const CHEST_LOCKOUT_MS: u64 = 3_600_000;
 /// The lore the player learns when the quest ends (retail achievement bits 21-25, 27-31 and
 /// 54-60 at 653960; xp-potion-exit note, section 3.2).
 const LEAVING_LORE: [&str; 17] = [

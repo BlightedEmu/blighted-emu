@@ -2652,6 +2652,20 @@ impl SimWorld {
                         let ended = chest_gather_ended(request.target_entity, player.gathers);
                         player.extra_members.push(ended);
                         player.gathers = player.gathers.saturating_add(1);
+                        // The looted chest goes in the loot tracker, so the client offers it no
+                        // more; without it the client opened it again with no answer and its
+                        // player stayed in the open animation (live 2026-09-29).
+                        player.list_version += 1;
+                        let version = player.list_version;
+                        let tracked = player.loot.track_opened(
+                            request.target,
+                            encounter::CHEST_AT,
+                            self.server_ms,
+                            self.server_ms.saturating_add(encounter::CHEST_LOCKOUT_MS),
+                            false,
+                            version,
+                        );
+                        player.extra_members.push(tracked);
                     }
                     Order::Targeted { mob, tutorial_ai } => {
                         let messages = targeted(number, mob, tutorial_ai);
@@ -6490,9 +6504,30 @@ mod tests {
             "the accept names the chest: {started:?}"
         );
         assert!(gathering(&started, true), "and runs the gather");
-        let ended = (2..GATHER_LIMIT_MS / 33)
-            .any(|step| gathering(&own_states(&mut world, pressed_at + 33 * step), false));
-        assert!(ended, "the end sends the done gather state");
+        assert!(
+            started.contains(&nw_messages::seasons::seasons_rewards_initialized().state),
+            "the client in game gets the season rewards state that starts its quest pins"
+        );
+        let after: Vec<MemberState> = (2..GATHER_LIMIT_MS / 33)
+            .flat_map(|step| own_states(&mut world, pressed_at + 33 * step))
+            .collect();
+        assert!(gathering(&after, false), "the end sends the done gather state");
+        let looted = after.iter().find_map(|state| match state {
+            MemberState::LootTracker(tracker) => tracker
+                .loot
+                .as_ref()?
+                .elements
+                .iter()
+                .find(|loot| loot.bag == request.target)
+                .cloned(),
+            _ => None,
+        });
+        let looted = looted.expect("the loot tracker lists the looted chest");
+        assert_eq!(
+            (looted.state, looted.kind, looted.privileged),
+            (2, 0, false),
+            "retail: taken, point-of-interest loot, not privileged"
+        );
         let entity = world.by_connection[&who];
         let player = world.world.get::<Player>(entity).expect("player");
         assert_eq!(player.gathers, 1, "one gather made");
