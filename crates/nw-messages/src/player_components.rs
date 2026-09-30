@@ -160,7 +160,7 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 57] = [
     (68, 497),
     (70, 899),
     (71, 4878),
-    (72, 5485),
+    (crate::seasons::SEASONS_REWARDS_COMPONENT, crate::seasons::SEASONS_REWARDS_TYPE_INDEX),
     (73, 5606),
     (74, 5691),
     (76, 1755),

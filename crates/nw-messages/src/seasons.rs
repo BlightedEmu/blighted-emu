@@ -14,6 +14,7 @@
 //! `Success`, on all 14).
 
 use crate::facet::FacetHeader;
+use crate::payload::{BundleMember, MemberState};
 use crate::wire::{MessageError, Reader, Writer};
 
 /// `SeasonsRewardsComponentServerFacet_ActivitiesRequestStampSquare`.
@@ -224,6 +225,55 @@ impl SeasonsMessage {
     }
 }
 
+/// The component of the player's `Javelin::SeasonsRewardsReplicatedState`.
+pub const SEASONS_REWARDS_COMPONENT: u64 = 72;
+/// Type index of `Javelin::SeasonsRewardsReplicatedState`.
+pub const SEASONS_REWARDS_TYPE_INDEX: u64 = 5485;
+/// The first full season rewards state of a new character: retail's (newchar-retail-2026-09-18
+/// at 9.06 s and newchar-linux-2026-09-12: the same bytes but for the list versions, a counter of
+/// the retail session, and 4 bytes of one 8-byte field, Inferred `wildStampAwardBound`), with
+/// our list version [`crate::items::FIRST_VERSION`] and the 2026-09-18 field. It sets
+/// `IsInitialized` and the season data (season ids, bitmasks, XP).
+const NEW_CHARACTER_SEASONS_REWARDS: [u8; 248] = [
+            0x01, 0xff, 0x01, 0x00, 0x01, 0x03, 0x01, 0x00, 0x01, 0x00, 0x01, 0x03, 0x01, 0x00,
+            0x02, 0x00, 0x01, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x15, 0xab, 0xb9, 0x1f, 0xb7,
+            0x35, 0xdd, 0x8a, 0x14, 0x69, 0x93, 0x16, 0x0a, 0x64, 0xea, 0xe9, 0x8b, 0x19, 0x9d,
+            0x1d, 0xce, 0xf3, 0x38, 0x30, 0x03, 0x94, 0x75, 0xc5, 0xd2, 0x94, 0x92, 0x7d, 0xff,
+            0xe3, 0x72, 0xf5, 0x44, 0xac, 0xd4, 0xdb, 0xae, 0x4f, 0xc7, 0xba, 0x48, 0x17, 0x22,
+            0x6a, 0xb7, 0x51, 0xb1, 0x4f, 0x10, 0x84, 0x3f, 0x00, 0x95, 0xe4, 0xf8, 0x89, 0x70,
+            0x8e, 0x2b, 0x3b, 0x0d, 0x0d, 0x7c, 0x94, 0x68, 0x6e, 0x9a, 0x2d, 0x58, 0x38, 0xc0,
+            0x8a, 0xde, 0xdb, 0xd3, 0xeb, 0x38, 0xf9, 0x2c, 0x0b, 0x9b, 0xff, 0x00, 0x0a, 0x00,
+            0x03, 0x18, 0xe0, 0xff, 0x85, 0x60, 0x03, 0x00, 0x00, 0xff, 0x00, 0x01, 0x01, 0x00,
+            0x01, 0x03, 0x02, 0x22, 0x21, 0x5a, 0xd9, 0xc2, 0x28, 0x71, 0x8c, 0x37, 0x00, 0x01,
+            0x03, 0x06, 0x04, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x01, 0x03, 0x02, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x01, 0xa4, 0xa3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x01, 0x03, 0x04, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xe0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xff,
+            0x00, 0x00, 0x11, 0x00, 0xdf, 0x00, 0x6e, 0x00, 0x00, 0x01, 0x03, 0x04, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x18, 0x70, 0x3e, 0xe3, 0x52, 0x00, 0x88, 0x84,
+];
+
+/// The player's first full season rewards state ([`NEW_CHARACTER_SEASONS_REWARDS`]).
+///
+/// **Observed** (retail newchar 2026-09-18): the server sends it 9.06 s after the own card, and
+/// the client pins its tracked quest (1458) 4 ms later. Client build 25810808: the season
+/// rewards client facet (`FUN_143dbcdf0`) starts the objectives facet's sync of the server's
+/// tracked list with its own pins (`FUN_143a58de0`, the flag at `+0x5b8`) for the local player.
+/// Without it no tracked quest is pinned on its own (live 2026-09-29 under gdb: the tracked list
+/// arrived and the sync never ran). A body with only `IsInitialized` did not start it: the
+/// facet's state handler (`FUN_143db8ad0`) also reads the season lists.
+pub fn seasons_rewards_initialized() -> BundleMember {
+    BundleMember {
+        component: SEASONS_REWARDS_COMPONENT,
+        state: MemberState::Recorded {
+            class: SEASONS_REWARDS_TYPE_INDEX,
+            body: NEW_CHARACTER_SEASONS_REWARDS.to_vec(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +329,27 @@ mod tests {
                 Some(Err(_))
             ));
         }
+    }
+
+    #[test]
+    fn the_first_season_rewards_state_is_retails_with_our_list_version() {
+        /// Retail newchar 2026-09-18's body at 9.06 s, and the list version in it.
+        const RETAIL: &str = "01ff01000106010001000106010002000106010000000015abb91fb735dd8a146993160a64eae98b199d1dcef33830039475c5d294927dffe372f544acd4dbae4fc7ba4817226ab751b14f10843f0095e4f889708e2b3b0d0d7c94686e9a2d5838c08adedbd3eb38f92c0b9bff000a000318e0ff8560030000ff0001010001060222215ad9c228718c370001060604000400000000010602000000000001a4a3000000000000000000010604000000ffffffffffffffffe0000000000000000000000fff00001100df006e0000010604000000000000000000000000000000000000000000000000000000000000000018703ee352008884";
+        const RETAIL_VERSION: u8 = 6;
+        const VERSION_AT: [usize; 8] = [5, 11, 17, 127, 140, 150, 170, 206];
+        let mut expected = hex_bytes(RETAIL);
+        for at in VERSION_AT {
+            assert_eq!(expected[at], RETAIL_VERSION);
+            expected[at] = u8::try_from(crate::items::FIRST_VERSION).expect("one byte");
+        }
+        let member = seasons_rewards_initialized();
+        assert_eq!(member.component, SEASONS_REWARDS_COMPONENT);
+        assert_eq!(
+            member.state,
+            MemberState::Recorded {
+                class: SEASONS_REWARDS_TYPE_INDEX,
+                body: expected,
+            }
+        );
     }
 }

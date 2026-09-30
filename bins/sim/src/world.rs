@@ -1387,6 +1387,12 @@ impl SimWorld {
             if !was_spawned && let Some(quest) = player.quest.as_mut() {
                 quest.in_game();
             }
+            // The season rewards state starts the client's pin of the tracked quest.
+            if !was_spawned {
+                player
+                    .extra_members
+                    .push(nw_messages::seasons::seasons_rewards_initialized());
+            }
             player.own_card_bundle = None;
         }
     }
