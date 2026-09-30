@@ -17,10 +17,16 @@ use crate::wire::{BodyCodec, MessageError, RAW_ID_LEN, Reader, Writer, raw_id_of
 /// File slot of `PlayerManagerSelfIdentificationMsg`.
 pub const PLAYER_MANAGER_SELF_IDENTIFICATION_MSG_TYPE_INDEX: u64 = 1628;
 
-/// The flag byte of a presence block (`FUN_14087ac50`). Bit 0 set makes the reader take the
-/// fixed 16-byte path instead of the variable sub-reader path; bits 1 to 3 only pick a text
-/// format and read no stream bytes.
+/// The bit of a presence-block flag byte (`FUN_14087ac50`) that makes the reader take the fixed
+/// 16-byte path instead of the variable sub-reader path. Bits 1 to 3 only pick a text format and
+/// read no stream bytes, so the reader ignores them on the fixed path. [`decode`](PlayerManagerSelfIdentificationMsg::decode)
+/// checks this bit; it does not require the other bits to match.
 const PRESENCE_FLAG_FIXED: u8 = 0x01;
+
+/// The whole flag byte this server writes for a presence block: the official server sends `5`
+/// (bit 0, the fixed path, plus bit 2, whose effect is not known and which reads no stream bytes
+/// on the fixed path). We send the same value to match the official body exactly.
+const PRESENCE_FLAG_SENT: u8 = 0x05;
 
 /// Count of `FUN_1415acc30` blocks between the two presence blocks (unmarshal reads three).
 const MIDDLE_BLOCK_COUNT: usize = 3;
@@ -52,7 +58,7 @@ impl BodyCodec for PlayerManagerSelfIdentificationMsg {
     fn encode(&self) -> Result<Vec<u8>, MessageError> {
         let mut writer = Writer::new();
         // Presence block one (`FUN_14087ac50`): flag, then the character id.
-        writer.u8(PRESENCE_FLAG_FIXED).bytes(&self.character_id);
+        writer.u8(PRESENCE_FLAG_SENT).bytes(&self.character_id);
         // Three `FUN_1415acc30` blocks: a big-endian u32 and two 16-byte ids each.
         for _ in 0..MIDDLE_BLOCK_COUNT {
             writer
@@ -66,7 +72,7 @@ impl BodyCodec for PlayerManagerSelfIdentificationMsg {
         writer.prefixed(0)?;
         writer.boolean(false).boolean(false).u32(0).u32(0);
         // Presence block two: flag, then a 16-byte id.
-        writer.u8(PRESENCE_FLAG_FIXED).bytes(&[0; RAW_ID_LEN]);
+        writer.u8(PRESENCE_FLAG_SENT).bytes(&[0; RAW_ID_LEN]);
         Ok(writer.finish())
     }
 
