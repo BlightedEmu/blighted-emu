@@ -98,7 +98,7 @@
 <body>
 <main>
   <h1>Blighted New World Emulator: Progress</h1>
-  <p class="sub">Status on 2026-10-01. Client build 25810808. Last commit <code>110ccc0</code>.</p>
+  <p class="sub">Status on 2026-10-02. Client build 25810808. Last commit <code>9140366</code>.</p>
 
   <div class="cards" id="summary"></div>
 
@@ -141,6 +141,8 @@
       <div class="why">These need many players and the captures from step 2.</div></li>
     <li><strong>Trading post and full economy.</strong>
       <div class="why">Needs a real player base to test. The code exists, but it is not checked.</div></li>
+    <li><strong>Build a public server status page.</strong>
+      <div class="why">Players need to see if the server is up before they start the game. Show players online per world, the round trip time of the players, and healthy or unhealthy (unhealthy when the round trip time is over 2000 ms or a server part does not answer). The client's own canary metrics are off in retail, so the page uses the server's numbers. Notes: <code>docs/re/2026-10-02-client-metrics-and-canary.md</code>.</div></li>
     <li><strong>Systems with no code: housing, artifacts, heartrunes, town projects, trophies.</strong>
       <div class="why">Start these last. They are not on the path of a new player.</div></li>
   </ol>
@@ -200,6 +202,7 @@ const AREAS = [
       ["Many sims and handoff (M5)", 90, "bots", "1,000 bots cross cell borders.", "Real clients crossing cell borders: Unknown."],
       ["Database saves", 80, "tests", "Accounts, characters, items, progression, quests, notifications.", "Saves of the systems below that are not done."],
       ["Admin tools", 85, "tests", "Live panel, studio, GM commands, drop simulator, script editor.", "Pages for systems that are not done."],
+      ["Server status page", 10, "code", "The admin live panel reads the metrics of every server (admins only).", "A public page: players online per world, round trip time per player, healthy or unhealthy (over 2000 ms or a server part that does not answer). Same checks as the client's canary metrics (docs/re/2026-10-02-client-metrics-and-canary.md)."],
     ],
   },
   {
@@ -281,6 +284,7 @@ const AREAS = [
       ["Game modes (queues, arenas, Outpost Rush)", 30, "code", "Queues and matches.", "Mode rules, live test."],
       ["Wars, sieges, invasions", 15, "code", "Codecs and sign-ups only.", "No capture shows the war flow."],
       ["Seasons and season pass", 15, "code", "Only the state the journal needs.", "Season pass rewards and progress."],
+      ["Leaderboards and analytics", 50, "tests", "Stats service with the retail reply shapes, boards counted by the sims, client analytics events stored (Kinesis and STS answered).", "Live check of the leaderboard screen. Only HercyneRaid_Reward boards count so far (docs/re/2026-09-18-leaderboards-and-analytics.md)."],
       ["Music instruments", 50, "code", "Music code exists.", "Not checked live."],
     ],
   },
