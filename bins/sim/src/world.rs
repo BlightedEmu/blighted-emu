@@ -1387,11 +1387,13 @@ impl SimWorld {
             if !was_spawned && let Some(quest) = player.quest.as_mut() {
                 quest.in_game();
             }
-            // The season rewards state starts the client's pin of the tracked quest.
+            // The season states (retail sends both in one bundle) start the client's pin of the
+            // tracked quest.
             if !was_spawned {
-                player
-                    .extra_members
-                    .push(nw_messages::seasons::seasons_rewards_initialized());
+                player.extra_members.extend([
+                    nw_messages::seasons::seasons_rewards_initialized(),
+                    nw_messages::seasons::seasons_tracked_stats_initialized(),
+                ]);
             }
             player.own_card_bundle = None;
         }
@@ -6504,14 +6506,22 @@ mod tests {
             "the accept names the chest: {started:?}"
         );
         assert!(gathering(&started, true), "and runs the gather");
-        assert!(
-            started.contains(&nw_messages::seasons::seasons_rewards_initialized().state),
-            "the client in game gets the season rewards state that starts its quest pins"
-        );
+        for season in [
+            nw_messages::seasons::seasons_rewards_initialized(),
+            nw_messages::seasons::seasons_tracked_stats_initialized(),
+        ] {
+            assert!(
+                started.contains(&season.state),
+                "the client in game gets the season states that start its quest pins"
+            );
+        }
         let after: Vec<MemberState> = (2..GATHER_LIMIT_MS / 33)
             .flat_map(|step| own_states(&mut world, pressed_at + 33 * step))
             .collect();
-        assert!(gathering(&after, false), "the end sends the done gather state");
+        assert!(
+            gathering(&after, false),
+            "the end sends the done gather state"
+        );
         let looted = after.iter().find_map(|state| match state {
             MemberState::LootTracker(tracker) => tracker
                 .loot

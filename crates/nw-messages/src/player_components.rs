@@ -160,8 +160,14 @@ pub const PLAYER_EMPTY_COMPONENTS: [(u64, u64); 57] = [
     (68, 497),
     (70, 899),
     (71, 4878),
-    (crate::seasons::SEASONS_REWARDS_COMPONENT, crate::seasons::SEASONS_REWARDS_TYPE_INDEX),
-    (73, 5606),
+    (
+        crate::seasons::SEASONS_REWARDS_COMPONENT,
+        crate::seasons::SEASONS_REWARDS_TYPE_INDEX,
+    ),
+    (
+        crate::seasons::SEASONS_TRACKED_STATS_COMPONENT,
+        crate::seasons::SEASONS_TRACKED_STATS_TYPE_INDEX,
+    ),
     (74, 5691),
     (76, 1755),
     (
