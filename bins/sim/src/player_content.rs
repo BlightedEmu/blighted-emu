@@ -899,7 +899,10 @@ mod tests {
                 ),
             ],
         );
-        assert_eq!(objects.get(0).and_then(|object| object.id), capital_id(PLACED));
+        assert_eq!(
+            objects.get(0).and_then(|object| object.id),
+            capital_id(PLACED)
+        );
         assert_eq!(
             objects.get(1).and_then(|object| object.id),
             None,
