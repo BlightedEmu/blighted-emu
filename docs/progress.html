@@ -125,8 +125,10 @@
       <div class="why">On our server the first lock takes the nearest mob inside a small circle around the crosshair, not the mob under the crosshair. The client code works that way (<code>FUN_142c8b350</code>), so it is likely normal. To check on retail: stand near 2 mobs close together, aim at the farther one, lock. Also check: after a reconnect, does lock still work (flag 4, weapon swap range 0 were seen after gdb reconnects)? Notes: <code>local-data/findings/2026-10-01-client-lock-and-actor-state-map.md</code>.</div></li>
     <li><strong>Record retail captures of the systems that have none.</strong>
       <div class="why">Wars, sieges, invasions, expeditions, Outpost Rush, trading post, housing, companies. This must happen before 2027-01-31. After that, the facts are lost.</div></li>
+    <li><strong>Live check of the 2026-10-01 fixes (not committed).</strong>
+      <div class="why">Demon Storm blocker: walk to the watchtower, then turn in at Al Storm; then go on to Prydwen, the inn and Grace at the tavern. Craft: the "Crafting attempt failed" message should be gone. Notes: <code>local-data/findings/2026-10-01-beach-playtest-notes.md</code>.</div></li>
     <li><strong>Close the new player bugs (tutorial and starting beach).</strong>
-      <div class="why">Every new player goes through both. The tutorial is the <code>ftue_v2</code> level (ship, quick time event, sailors, legionnaires, corruption, Damned Commander). The starting beach is open world. Open on the beach: boar hits that miss (cause Unknown), Janszoon anchor toss. Open, level not yet checked: temple door wall, growth explode, deck boar sleep.</div></li>
+      <div class="why">Every new player goes through both. The tutorial is the <code>ftue_v2</code> level (ship, quick time event, sailors, legionnaires, corruption, Damned Commander). The starting beach is open world. Open on the beach (play test 2026-10-01, 18 issues): player hits that miss (boars, Janszoon, mariners), bosses whose melee does no damage, mobs that swing from 3 to 4.5 m, mobs sunk in the ground or stuck in walls (Janszoon, the cave), a mob back to full health, debuffs shown as 10,957 days, no food buff, no fall damage, the watchtower crate gives nothing, growths with no break effect, deck boars not asleep, Janszoon anchor toss. Level not yet checked: temple door wall.</div></li>
     <li><strong>Make own movement match retail (to-do <code>t1</code>).</strong>
       <div class="why">The server body is still off from the client: median 0.156 m in the open world, 0.219 m in the tutorial. Small drifts cause missed hits and bad walls.</div></li>
     <li><strong>Make the first open world hours work.</strong>
@@ -237,7 +239,7 @@ const AREAS = [
     name: "New player: tutorial and starting beach",
     features: [
       ["Tutorial flow (ftue_v2 level)", 80, "live", "Ship, quick time event, sailors, legionnaires, corruption, Thorpe, journal.", "Temple door and growth explode (level not yet checked)."],
-      ["Starting beach (open world)", 70, "live", "Boars, campfire, chest.", "Boar misses, Janszoon anchor toss."],
+      ["Starting beach (open world)", 70, "live", "Beach quests 12-1 to 12-9 played live up to the Demon Storm turn-in; lock, skinning, crafting, crates, cutscenes, journal auto pin.", "18 issues of the 2026-10-01 play test (misses, boss damage, sunk mobs, buffs, crates); the Demon Storm fix needs a live check."],
       ["Journal auto pin", 100, "live", "You confirmed it live (c21828b).", "Nothing."],
       ["Tutorial skip and class gear", 85, "tests", "Skip completes Soul Survivor, gives class bag.", "Live check."],
     ],
@@ -245,7 +247,7 @@ const AREAS = [
   {
     name: "Quests and progression",
     features: [
-      ["Quest engine", 70, "tests", "Task types from task sheets, turn-in, rewards.", "Task types not used in the beach quests."],
+      ["Quest engine", 72, "tests", "Task types from task sheets, turn-in, rewards. Open-world areas without a location now use the retail place (2 of 65 so far).", "63 more areas without a location; TaskInteract, TaskGiveItem, TaskGameMode are skipped."],
       ["Beach and wreck quests", 70, "tests", "Start beach chain and wreck quests 4 to 7.", "Full live run."],
       ["Main story and side quests", 20, "code", "The engine runs them from game data.", "Nobody played them live."],
       ["XP, levels, attribute points", 80, "tests", "Kill XP, level up, attribute and weapon points.", "Live check after the tutorial."],
@@ -260,7 +262,7 @@ const AREAS = [
       ["Inventory, gear, paperdoll", 75, "live", "Inventory, slots, gear versions.", "Gear score rules, some item calls."],
       ["Loot drops", 75, "tests", "Retail loot tables, drop chance, one bag per kill.", "Live check outside the tutorial."],
       ["Gathering and skinning", 65, "live", "Skinning, nodules, gatherables.", "Tool levels and node respawn, live."],
-      ["Crafting", 65, "live", "Campfire, recipes, craft answers.", "Higher stations and refining, live."],
+      ["Crafting", 65, "live", "Campfire, recipes, craft answers (now after the item change, as retail).", "Live check of the craft message fix; higher stations and refining."],
       ["Fishing", 50, "tests", "Fishing code, one live run.", "Result of the live run: Unknown."],
       ["Repair, salvage, transmog, dyes", 40, "code", "Code exists.", "Not checked."],
       ["Shops and coins", 50, "code", "Coins state, shop code.", "Not checked live."],
