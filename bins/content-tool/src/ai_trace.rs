@@ -1014,6 +1014,7 @@ mod tests {
             position: place,
             facing: place.map(|_| YAW),
             scope,
+            awake: false,
         };
         BundleMember {
             component,

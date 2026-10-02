@@ -1613,6 +1613,7 @@ mod tests {
             position: InputPosition::from_metres(at().x, at().y, at().z).map(StepPlace::Anchor),
             facing: None,
             scope: None,
+            awake: false,
         };
         let moving = MobCard {
             alc: Some(frame(Some(step))),

@@ -1018,6 +1018,7 @@ impl MobTimeline {
             position,
             facing: turn,
             scope,
+            awake: first,
         }
     }
 }

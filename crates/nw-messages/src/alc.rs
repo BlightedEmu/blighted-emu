@@ -105,13 +105,32 @@ const TIME_ANCHOR_CHILD: usize = 40;
 /// to 20 Hz (clear: 30 Hz); the client sends 998 `SetInputsThrottled` when the bit changes
 /// (network note: all 27 retail toggles followed the server's value).
 const DATA_BITS_CHILD: usize = 41;
+/// Slot 0 child after `dataBits`: the high byte of the client's state flag word (`+0x450`), whose
+/// low byte is `dataBits`.
+const DATA_BITS_HIGH_CHILD: usize = 42;
+/// The high flag byte of a retail mob after its card (newchar-retail-2026-09-18: `13` in 373 mob
+/// states, `33` in 94; a fresh card sends `10`).
+const MOB_DATA_BITS_HIGH: u8 = 0x13;
 /// Slot 1 children of the height of the feet over the floor (`distGround`, a byte over 0 to
 /// 10 m) and of the depth of the water at them (`waterDepth`) (ALC constructor `FUN_142a36d50`:
 /// the first two names of the slot-1 list; run-15 movement study).
 const DIST_GROUND_CHILD: usize = 0;
 const WATER_DEPTH_CHILD: usize = 1;
-/// `dataBits` of a retail own state without the throttle bit (40583 ms, then 998 `00`).
+/// `dataBits` of a retail own state without the throttle bit (40583 ms, then 998 `00`), and of a
+/// retail mob after its card (1,023 of 1,733 mob states that send it; the rest `c3`, `db`, `cb`).
 pub const DATA_BITS_ACTIVE: u8 = 211;
+/// The flag bytes of a mob past its spawn card (children 41 and 42): bit 0 of `dataBits` makes it
+/// targetable (see [`MobStep::awake`]). Retail sends them in the first state after a fresh card
+/// and in the card of a mob that is already alive (newchar-retail-2026-09-18: `d3` in 196 cards,
+/// `10` only in the 167 fresh cards). 980 of the 2,808 recorded first states are fresh cards
+/// (`10 10`, among them the tutorial `Boar_StarterBeach`), so [`AlcState::mob_first`] writes these
+/// over them.
+fn awake_data_bits() -> [(usize, Vec<u8>); 2] {
+    [
+        (DATA_BITS_CHILD, vec![DATA_BITS_ACTIVE]),
+        (DATA_BITS_HIGH_CHILD, vec![MOB_DATA_BITS_HIGH]),
+    ]
+}
 /// A `worldPosRel` that puts the entity at its `pos10`.
 const AT_ANCHOR: [u8; POS3_LEN] = [0xff; POS3_LEN];
 /// The `worldPosRel` byte of no step on an axis.
@@ -502,6 +521,12 @@ pub struct MobStep {
     pub facing: Option<f32>,
     /// Its animation, for a mob whose animations are known.
     pub scope: Option<StepScope>,
+    /// The first state after the card: it sends the retail flag bytes. Bit 0 of `dataBits` makes
+    /// the mob targetable: the client copies the state over its own (`0x144871be2` calls
+    /// `FUN_144858c70`), and the lock test `FUN_142c866e0` reads the bit (live gdb 2026-10-01;
+    /// the card's `10` kept every mob out of the lock). Retail sends `c3` or `d3` about 100 ms
+    /// after the card (16,319 ms card, 16,421 ms state).
+    pub awake: bool,
 }
 
 /// The slayer state of a character (children 13 to 18): the slayer script state it is in, the
@@ -1108,6 +1133,7 @@ impl AlcState {
         if let Some(animation) = animation {
             values.extend(animation.children()?);
         }
+        values.extend(awake_data_bits());
         Ok(Some(Self {
             bytes: self.with_children(walked, &values),
             pos10: Some(pos10),
@@ -1198,6 +1224,9 @@ impl AlcState {
                 TIME_ANCHOR_CHILD,
                 step.stamp.anchor_us.to_be_bytes().to_vec(),
             ));
+        }
+        if step.awake {
+            children.extend(awake_data_bits());
         }
         Ok(Self::of_slot0(
             children,
@@ -2649,6 +2678,39 @@ mod tests {
     );
 
     #[test]
+    fn the_card_of_a_living_mob_makes_it_targetable_as_retail() {
+        // A recorded first state that is a fresh card (`10 10`, as the tutorial boar's) becomes
+        // the card of a mob that is already alive: retail sends `d3 13` there (196 cards).
+        const TARGETABLE_BIT: u8 = 1;
+        let fresh = AlcState::read(&mut Reader::new(&hex(RETAIL_FRESH_SAILOR_CARD))).expect("read");
+        assert_eq!(child(&fresh, DATA_BITS_CHILD), Some(vec![0x10]));
+        let to = InputPosition::from_metres(468.734, 847.221, 89.99).expect("position");
+        let card = fresh
+            .mob_first(
+                STAMP,
+                CardPlace {
+                    anchor: None,
+                    at: to,
+                },
+                None,
+                None,
+            )
+            .expect("encode")
+            .expect("card");
+        assert_eq!(
+            AlcState::read(&mut Reader::new(&card.bytes)).expect("read"),
+            card
+        );
+        let data_bits = child(&card, DATA_BITS_CHILD).expect("dataBits");
+        assert_eq!(data_bits, [DATA_BITS_ACTIVE]);
+        assert_eq!(data_bits[0] & TARGETABLE_BIT, TARGETABLE_BIT);
+        assert_eq!(
+            child(&card, DATA_BITS_HIGH_CHILD),
+            Some(vec![MOB_DATA_BITS_HIGH])
+        );
+    }
+
+    #[test]
     fn a_fresh_spawn_card_has_no_number_clock_or_scope() {
         let template = AlcState::read(&mut Reader::new(&hex(RETAIL_SAILOR))).expect("read");
         let fresh = AlcState::read(&mut Reader::new(&hex(RETAIL_FRESH_SAILOR_CARD))).expect("read");
@@ -2768,6 +2830,7 @@ mod tests {
             position: None,
             facing: None,
             scope: Some(StepScope::Changed(alert)),
+            awake: false,
         })
         .expect("step");
         assert_eq!(child(&state, SCOPE_TIME_EX_CHILD), Some(hex("023556")));
@@ -2787,6 +2850,7 @@ mod tests {
                 high_changed: false,
                 look_pose_seconds: Some(0.367),
             }),
+            awake: false,
         })
         .expect("step");
         assert_eq!(child(&later, SCOPE_TIME_EX_CHILD), Some(hex("0235df")));
@@ -2887,6 +2951,7 @@ mod tests {
                 high_changed: false,
                 look_pose_seconds: None,
             }),
+            awake: false,
         })
         .expect("step");
         assert_eq!(
@@ -2907,6 +2972,7 @@ mod tests {
                 look_pose: None,
                 facing_gap: None,
             })),
+            awake: false,
         })
         .expect("step");
         let present: Vec<usize> = children_of(&changed).into_iter().map(|(c, _)| c).collect();
@@ -2918,10 +2984,42 @@ mod tests {
             position: None,
             facing: None,
             scope: None,
+            awake: false,
         })
         .expect("step");
         let present: Vec<usize> = children_of(&idle).into_iter().map(|(c, _)| c).collect();
         assert_eq!(present, [0, 1, 25, 26]);
+    }
+
+    #[test]
+    fn the_first_mob_step_makes_the_mob_targetable_as_retail() {
+        // Retail 16,421 ms after the 16,319 ms card: `dataBits` with bit 0 (targetable) and `13`.
+        const TARGETABLE_BIT: u8 = 1;
+        let awake = AlcState::mob_step(&MobStep {
+            stamp: STAMP,
+            anchored: false,
+            position: None,
+            facing: None,
+            scope: None,
+            awake: true,
+        })
+        .expect("step");
+        assert_eq!(
+            AlcState::read(&mut Reader::new(&awake.bytes)).expect("read"),
+            awake
+        );
+        let data_bits = child(&awake, DATA_BITS_CHILD).expect("dataBits");
+        assert_eq!(data_bits, [DATA_BITS_ACTIVE]);
+        assert_eq!(data_bits[0] & TARGETABLE_BIT, TARGETABLE_BIT);
+        assert_eq!(
+            child(&awake, DATA_BITS_HIGH_CHILD),
+            Some(vec![MOB_DATA_BITS_HIGH])
+        );
+        let fresh_card_bits = FRESH_CARD_VALUES
+            .iter()
+            .find(|(child, _)| *child == DATA_BITS_CHILD)
+            .map(|(_, bytes)| bytes[0]);
+        assert_eq!(fresh_card_bits.map(|bits| bits & TARGETABLE_BIT), Some(0));
     }
 
     #[test]
