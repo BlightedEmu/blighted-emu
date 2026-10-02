@@ -308,6 +308,34 @@ const TRIGGER_VOLUMES: [TriggerVolume; 27] = [
     ),
 ];
 
+/// Open-world quest volumes whose task rows carry no `OverrideLocation`, at the retail player's
+/// place when the step after them began (no pak holds these server volumes, see
+/// [`TRIGGER_RADIUS_M`]). Without a place such a task never ended: live 2026-10-01, the
+/// `12_demonstorm2` quest stopped before its turn-in at `TriggerVol_12_Whisper6`.
+const OPEN_WORLD_AREAS: [(&str, Position); 2] = [
+    // Retail `12-9_demonstorm2` (2026-09-27): the client asked for the next whisper
+    // (`01_Whisper_Beach_06`, 5235) here 169.8 s in, after the cave; `POITag` `watchtower`.
+    (
+        "TriggerVol_12_Whisper6",
+        Position {
+            x: 7299.863,
+            y: 2952.437,
+            z: 70.25296,
+        },
+    ),
+    // Retail `12a_msq_02_inntutorial`: the client asked for the inn whisper that follows this
+    // area (5235) here 70.9 s in, at the accept by the town gate; 6.6 m from the
+    // `Intro_Prydwen_IGC_Trigger` location that `12_raisealarm` gives as the other way in.
+    (
+        "12A_LeaveLochnir",
+        Position {
+            x: 7422.975,
+            y: 3624.002,
+            z: 104.22217,
+        },
+    ),
+];
+
 /// Where a trigger area task waits for the player.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum TriggerArea {
@@ -318,7 +346,9 @@ enum TriggerArea {
 }
 
 impl TriggerArea {
-    /// The area of a task of tag `tag` and `OverrideLocation` `location`; `None` without either.
+    /// The area of a task of tag `tag` and `OverrideLocation` `location`: the tag's volume, else
+    /// around the location, else around the tag's retail place ([`OPEN_WORLD_AREAS`]); `None`
+    /// without any.
     fn of(tag: Option<&str>, location: Option<Position>) -> Option<Self> {
         tag.and_then(|tag| {
             TRIGGER_VOLUMES
@@ -327,6 +357,14 @@ impl TriggerArea {
         })
         .map(|volume| Self::Volume(*volume))
         .or_else(|| location.map(Self::Around))
+        .or_else(|| {
+            tag.and_then(|tag| {
+                OPEN_WORLD_AREAS
+                    .iter()
+                    .find(|(known, _)| known.eq_ignore_ascii_case(tag))
+            })
+            .map(|(_, at)| Self::Around(*at))
+        })
     }
 
     /// Whether `position` is in the area.
@@ -2016,6 +2054,51 @@ pub(crate) mod tests {
             assert!(!run.is_done("Area"), "{tag}: not in it yet");
             run.event(Event::Moved(inside), NOW);
             assert!(run.is_done("Area"), "{tag}: in it");
+        }
+    }
+
+    #[test]
+    fn an_open_world_area_without_a_location_waits_at_its_retail_place() {
+        // `12_demonstorm2_03_05_container3`: the area of `TriggerVol_12_Whisper6` has no
+        // `OverrideLocation`, and its whisper follows it. Retail `12-9_demonstorm2`: the player
+        // was at the campsite turn-in 3,093 m north and at the watchtower for the whisper.
+        const WHISPER: &str = "01_Whisper_Beach_06_event";
+        let place = |x, y, z| Position { x, y, z };
+        let cases = [
+            (
+                "TriggerVol_12_Whisper6",
+                place(7306.5674, 3093.327, 44.940018),
+                place(7299.863, 2952.437, 70.25296),
+            ),
+            (
+                "12A_LeaveLochnir",
+                place(7381.4175, 3732.41, 112.64821),
+                place(7422.975, 3624.002, 104.22217),
+            ),
+        ];
+        for (tag, away, at) in cases {
+            let rows = vec![
+                container("Root", "ConsecutiveTaskContainer", &["Area", "Whisper"]),
+                TaskRow {
+                    target_tag: Some(tag.to_owned()),
+                    trigger_area_type: Some("Enter".to_owned()),
+                    ..row("Area", "TaskTriggerArea")
+                },
+                TaskRow {
+                    kill_enemy_type: Some(WHISPER.to_owned()),
+                    ..row("Whisper", "TaskTriggerGameEvent")
+                },
+            ];
+            let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+            let (mut run, _) = ObjectiveRun::start(tree, NOW);
+            assert!(run.event(Event::Moved(away), NOW).is_empty(), "{tag}: away");
+            assert!(!run.is_done("Area"), "{tag}: not there yet");
+            let effects = run.event(Event::Moved(at), NOW);
+            assert!(run.is_done("Area"), "{tag}: at its retail place");
+            assert!(
+                effects.contains(&Effect::GameEvent(WHISPER.to_owned())),
+                "{tag}: the whisper after it fires"
+            );
         }
     }
 
