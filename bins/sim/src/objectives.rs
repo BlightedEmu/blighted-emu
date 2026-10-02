@@ -429,6 +429,11 @@ enum TaskKind {
         area: Option<TriggerArea>,
         /// It waits for the player to leave the volume (`TriggerAreaType` Leave).
         leave: bool,
+        /// The `POITag` of an area whose row has no `OverrideLocation` and whose volume is not
+        /// known: the area is also done while the player is in that point of interest. Live
+        /// 2026-10-01: `TriggerVol_12_Whisper6` (POI `watchtower`, the campsite of Aelstrom and
+        /// Urda) was entered by another path than retail's, away from its retail place.
+        place: Option<String>,
     },
     /// Done after `count` kills of mobs of the type.
     KillContribution { enemy: String, count: u32 },
@@ -727,16 +732,22 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "taskcinematicstart" => TaskKind::CinematicStart(crc()),
         "taskcinematiccomplete" => TaskKind::CinematicComplete(crc()),
         "taskcutscenecomplete" => TaskKind::CutsceneComplete(crc()),
-        "tasktriggerarea" => TaskKind::TriggerArea {
-            area: TriggerArea::of(
-                row.target_tag.as_deref(),
-                row.override_location.as_deref().and_then(location_of),
-            ),
-            leave: row
+        "tasktriggerarea" => {
+            let location = row.override_location.as_deref().and_then(location_of);
+            let area = TriggerArea::of(row.target_tag.as_deref(), location);
+            let leave = row
                 .trigger_area_type
                 .as_deref()
-                .is_some_and(|kind| kind.eq_ignore_ascii_case(LEAVE_AREA_TYPE)),
-        },
+                .is_some_and(|kind| kind.eq_ignore_ascii_case(LEAVE_AREA_TYPE));
+            let known_volume = matches!(area, Some(TriggerArea::Volume(_)));
+            TaskKind::TriggerArea {
+                area,
+                leave,
+                place: (location.is_none() && !known_volume && !leave)
+                    .then(|| filled(&row.poi_tag))
+                    .flatten(),
+            }
+        }
         "taskkillcontribution" => TaskKind::KillContribution {
             enemy: row.kill_enemy_type.clone().unwrap_or_default(),
             count,
@@ -1267,7 +1278,10 @@ impl ObjectiveRun {
                     .held
                     .iter()
                     .any(|(id, _, worn)| *worn && id.eq_ignore_ascii_case(item)),
-                TaskKind::GoToPoi(tag) => inside(tag) == Some(true),
+                TaskKind::GoToPoi(tag)
+                | TaskKind::TriggerArea {
+                    place: Some(tag), ..
+                } => inside(tag) == Some(true),
                 TaskKind::ExitPoi(tag) => inside(tag) == Some(false),
                 TaskKind::HasAchievement(achievement) => {
                     facts.achieved.is_some_and(|achieved| achieved(achievement))
@@ -1350,6 +1364,7 @@ impl ObjectiveRun {
                     TaskKind::TriggerArea {
                         area: Some(area),
                         leave,
+                        ..
                     },
                     Event::Moved(position),
                 ) => (area.contains(position) != *leave, 1, 1),
@@ -2100,6 +2115,58 @@ pub(crate) mod tests {
                 "{tag}: the whisper after it fires"
             );
         }
+    }
+
+    #[test]
+    fn an_area_without_a_location_is_done_in_its_point_of_interest() {
+        // Live 2026-10-01: the player came back to the campsite of Aelstrom and Urda (POI
+        // `watchtower`, territory 30117) by a path away from the retail place of
+        // `TriggerVol_12_Whisper6`, and the quest waited there for ever.
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["Area"]),
+            TaskRow {
+                target_tag: Some("TriggerVol_12_Whisper6".to_owned()),
+                poi_tag: Some("watchtower".to_owned()),
+                trigger_area_type: Some("Enter".to_owned()),
+                ..row("Area", "TaskTriggerArea")
+            },
+        ];
+        let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        let facts = |places| Facts {
+            held: &[],
+            places: Some(places),
+            achieved: None,
+        };
+        run.sync(&facts(&["drowned_cavern_30122"]), NOW);
+        assert!(!run.is_done("Area"), "elsewhere");
+        run.sync(&facts(&["watchtower"]), NOW);
+        assert!(run.is_done("Area"), "in its point of interest");
+    }
+
+    #[test]
+    fn an_area_with_a_location_waits_for_its_place_not_its_point_of_interest() {
+        // `12_demonstorm2_03_01_TaskTriggerArea_whisper`: a location and the POI of the cave.
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["Area"]),
+            TaskRow {
+                target_tag: Some("TriggerVol_12_CaveWhisper".to_owned()),
+                override_location: Some("7290.2793 2900.3755 51.2266".to_owned()),
+                poi_tag: Some("drowned_cavern_30122".to_owned()),
+                ..row("Area", "TaskTriggerArea")
+            },
+        ];
+        let tree = Arc::new(ObjectiveTree::build(&rows, "Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, NOW);
+        run.sync(
+            &Facts {
+                held: &[],
+                places: Some(&["drowned_cavern_30122"]),
+                achieved: None,
+            },
+            NOW,
+        );
+        assert!(!run.is_done("Area"), "its location decides");
     }
 
     #[test]
