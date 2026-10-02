@@ -859,6 +859,9 @@ pub struct SimWorld {
     deaths: Vec<Departure>,
     /// Hit, death and facet messages since the last [`SimWorld::take_messages`].
     combat_messages: Vec<Outgoing>,
+    /// Messages that go out after the bundles of this tick: an answer that must reach the client
+    /// after the states it names (the craft progress after its items, crafting module).
+    after_bundles: Vec<Outgoing>,
     /// Potions pressed: the player number and when the drink works.
     drinks: Vec<(u64, u64)>,
     /// Mob swings that have not hit yet: the time they hit, the server time they started, and
@@ -1004,6 +1007,7 @@ impl SimWorld {
             replica_memory: HashMap::new(),
             mob_trails: mob_trail::MobTrails::default(),
             combat_messages: Vec::new(),
+            after_bundles: Vec::new(),
             drinks: Vec::new(),
             swings: Vec::new(),
             player_swings: Vec::new(),
@@ -2059,6 +2063,7 @@ impl SimWorld {
         let mut messages = self.take_messages();
         let bundled = self.bundles(now_ms, server_time)?;
         messages.extend(bundled.outgoing);
+        messages.append(&mut self.after_bundles);
         Ok(TickOutput {
             messages,
             handoffs,

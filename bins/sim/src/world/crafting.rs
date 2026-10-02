@@ -701,6 +701,10 @@ impl SimWorld {
                     self.give_loot(craft.number, made, now_ms);
                 }
             }
+            // Retail sends the item change (7048) and the bundle of the made items before these
+            // (Basic Needs and Campfire Feast, 2026-09-27: 7048, then both 2993 in one tick);
+            // sent before the bundle, the live client said "Crafting attempt failed" on every
+            // good craft (2026-10-01).
             if let Some(player) = self.world.get::<Player>(entity) {
                 let messages = [
                     ServerMessage::CraftProgress(CraftProgressMsg::crafted(
@@ -710,7 +714,7 @@ impl SimWorld {
                     )),
                     ServerMessage::CraftProgress(CraftProgressMsg::idle(craft.header)),
                 ];
-                send_now(&mut self.combat_messages, &player.connection, &messages);
+                send_now(&mut self.after_bundles, &player.connection, &messages);
             }
             if let Some(event) = &craft.event {
                 let scale = EventScale::craft(craft.ingredients);
@@ -1091,9 +1095,12 @@ mod tests {
         );
     }
 
-    /// The craft answers of `world`'s player since the last call.
+    /// The craft answers of `world`'s player since the last call, also those waiting for the
+    /// bundles of the tick.
     fn craft_answers(world: &mut SimWorld) -> Vec<CraftProgressMsg> {
-        messages_for(&world.take_messages(), &connection(NUMBER))
+        let mut sent = world.take_messages();
+        sent.append(&mut world.after_bundles);
+        messages_for(&sent, &connection(NUMBER))
             .into_iter()
             .filter_map(|message| match message {
                 ServerMessage::CraftProgress(answer) => Some(answer),
@@ -1135,6 +1142,37 @@ mod tests {
             [CraftProgressMsg::idle(REQUEST)],
             "the close (2999) is answered at its own header"
         );
+    }
+
+    #[test]
+    fn the_craft_answers_go_out_after_the_items_they_made() {
+        // Retail Basic Needs and Campfire Feast (2026-09-27): the item change (7048) and the
+        // bundle came before the two 2993 of the craft, in one tick.
+        let (mut world, entity) = at_the_smelter(ORE_PER_CRAFT, COINS);
+        world.craft(
+            entity,
+            NUMBER,
+            lowercase_crc32(INGOT),
+            1,
+            FEE_PER_CRAFT,
+            &[],
+            &CraftChoice::default(),
+            NOW,
+        );
+        world.take_messages();
+        let sent = world
+            .tick(NOW + CRAFT_MS, NOW + CRAFT_MS)
+            .expect("tick")
+            .messages;
+        let own = connection(NUMBER);
+        let at =
+            |wanted: fn(&ServerMessage) -> bool| messages_for(&sent, &own).iter().position(wanted);
+        let item_change = at(|message| matches!(message, ServerMessage::StorageSearchItems(_)))
+            .expect("the item change");
+        let crafted = at(|message| matches!(message, ServerMessage::CraftProgress(_)))
+            .expect("the craft answer");
+        assert!(item_change < crafted, "the items first, then the answer");
+        assert!(world.after_bundles.is_empty(), "sent with the tick");
     }
 
     #[test]
