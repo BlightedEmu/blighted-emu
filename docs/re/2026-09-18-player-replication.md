@@ -109,6 +109,8 @@ decoded fields of input 1589 against the own ALC slot-0 children, scratch scanne
 - Observed: child 2 (`slayerSeqTimeRel`) is one raw byte. It went `0x80`, `0x83`, `0x86`, and so on,
   about 3 per 33 ms state after an action, and was `0x7f` or `0x7d` in other echo states.
   Its unit and meaning: Unknown; the sim does not send it.
+  **Later finding.** The unit is a step of 4/255 s (`SEQUENCE_TIME_STEP_S` in
+  `crates/nw-messages/src/alc.rs`). The sim sends child 2 in the own states (`SequenceClock`).
 - Inferred from the client code: neither lock-on gate reads the own slayer state.
   `FUN_142c95760` sends bus query 26 to the candidate target entity (its own handlers answer),
   and `FUN_14171b010` tests relation flag bits 2 and 4 (`+0x34`) of both sides. So echoing the

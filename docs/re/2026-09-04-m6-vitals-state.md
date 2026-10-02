@@ -320,6 +320,8 @@ A failed helper returns failure for the child. It does not return success after 
 
 **Open after round 5.** One vitals rule that clears all 89 and still ends the 2,399,847 slot-0 bodies. The static readers have one success length each. The 36 encoded differences are a prefix form, not a child width. The position-bit ignore rule clears 30 of the 40 position failures and leaves 10. The count failures are the client limits on 11 of the 12. No shorter child is shared by the rest.
 
+**Later finding.** This item is solved. The child bytes and the child data alternate: one child byte, then the data of the children it sets, then the next child byte. With that order a decoder ends every type-15 body. **Inferred.** This explains the 89 failures. See `2026-09-10-player-appearance-and-vitals.md` section 1. The code is `crates/nw-messages/src/slots.rs`.
+
 ### Round 5 files
 
 - `<re-scratch>/scratch-m6/round5/src/main.rs`, summary `probe-summary.txt`

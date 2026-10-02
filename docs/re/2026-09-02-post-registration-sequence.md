@@ -205,6 +205,8 @@ A file title is often not a class name. The file integer is the type index. The 
 
 **Observed.** 2,163 packet files. Index range 1 through 7,049. Status counts: `solved` 31, `captured` 229, `wanted` 1,903. `packets/574.json` is absent.
 
+**Later finding.** The status counts changed. The same 2,163 files in `local-data/azoth-catalog/packets/` now give `solved` 139, `captured` 454, `wanted` 1,570. The status and purpose texts come from Azoth, another emulator. They are not retail data.
+
 The sequence messages below use our type index from section 1. Purpose text is the first sentence of `what`, except where a later sentence is the whole field in section 1's solved rows.
 
 ### Solved

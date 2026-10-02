@@ -2,6 +2,11 @@
 
 Date: 2026-09-06.
 
+**Status.** The TCP route was dropped. The client does not read a transport override
+([memory-hook fallback](2026-09-06-memory-hook-fallback.md)), and the project uses the on-disk
+client patch ([docs/client-patch.md](../client-patch.md)). The dump folder
+`local-data/tcp-sniff` (not kept) does not exist now.
+
 Goal: learn the TCP transport body-boundary rule by reading the real
 client's first bytes. The tool is `bins/nw-tcp-sniff`. It accepts TCP
 connections, writes every received byte to a dump file, and logs a hex
@@ -15,7 +20,7 @@ cargo run -p nw-tcp-sniff -- --listen 127.0.0.1:33435 --out-dir local-data/tcp-s
 ```
 
 `33435` is the client `rep-default-port`. Dumps land in
-`local-data/tcp-sniff/conn-0000-*.bin`.
+`local-data/tcp-sniff/conn-0000-*.bin` (not kept).
 
 ## 2. Make the client pick the TCP transport
 
@@ -55,7 +60,7 @@ yet set up and is the user's step.
 
 ## 5. Read the result
 
-Open the newest dump in `local-data/tcp-sniff/`. The first bytes are the
+Open the newest dump in `local-data/tcp-sniff/` (not kept). The first bytes are the
 client's opening carrier body on TCP. Compare them against the carrier
 frame header in
 [crates/nw-carrier/src/frame.rs](../../crates/nw-carrier/src/frame.rs):

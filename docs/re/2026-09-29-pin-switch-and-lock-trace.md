@@ -1,5 +1,13 @@
 # RE trace 2026-09-29: journal auto-pin switch and target-lock gates
 
+**Status.** Both blockers are solved. Journal auto-pin: commit `c21828b` sends class 5606
+(season tracked stats) with `initialized = 1`. `FUN_143dbcdf0` is the season rewards facet's
+handler of the TrackedStat-ready event, not a facet activation
+(`crates/nw-messages/src/seasons.rs`). Target lock: commit `110ccc0` sends the mob ALC
+`dataBits` (child 41 bit 0 = targetable; child 42 = high byte of the flag word at `+0x450`,
+mob value `0x13`; `awake_data_bits` in `crates/nw-messages/src/alc.rs`). The "Open" items
+below are history.
+
 Static reverse-engineering trace of two open blockers, done from the whole-client Ghidra
 sweep. This complements `local-data/findings/2026-09-29-journal-chest-crash.md` (the live/gdb
 findings) with the function-level call chains behind the two Unknowns, so neither has to be
@@ -20,6 +28,11 @@ re-derived.
   any journal or lock function below: the lock gate `FUN_142c866e0` is `0x142C866E0..0x142C8752B`
   and the season activation `FUN_143dbcdf0` is `0x143DBCDF0..0x143DBCFD9`, both far below the first
   patched byte. So the patched client is **cleared** — it is not the cause of either bug.
+  **Later finding.** The patch is not an EAC or anti-tamper stub. `docs/client-patch.md` names
+  its parts: the certificate-verify `NOP`, the Exit-to-desktop vtable pointer (the one `.rdata`
+  byte), the offline Steam ticket change (`FUN_145aa0d10`, which holds `0x145AA0D33`), and the
+  own-movement correction values. The current patch also writes at `0x140FEC21A`, below the
+  range above. That address is also outside the lock and journal functions.
 - **Ghidra project with the sweep's analysis:** `~/nw-re/ghidra-25810808/` (build
   25810808).
 - Labels follow the project rule: **Observed** (seen in the binary/sweep), **Inferred**,
@@ -50,6 +63,12 @@ callers: `FUN_143dbcdf0` (the activation path) and `FUN_143dba7b0` (an "off"/tea
 of those have **no static caller** — they are reached only through the season facet's vtable, so
 Ghidra cannot name who invokes them. That is the whole reason "which client event turns the switch
 on" reads as Unknown: it is a virtual dispatch by the component framework.
+
+**Later finding.** `FUN_143dbcdf0` is not a season facet activation. It is the season rewards
+facet's handler of the TrackedStat-ready bus event. The tracked stat facet's state handler
+`FUN_143ddbd50` sends that event (`FUN_143dcbfa0`) when class 5606 gets `initialized = 1` on
+the local player. Commit `c21828b` sends that body, and auto-pin works
+(`crates/nw-messages/src/seasons.rs`, `seasons_tracked_stats_initialized`).
 
 ### The two gates inside FUN_143dbcdf0 (Observed)
 
@@ -96,6 +115,9 @@ beyond merely sending the state. The separate replicated-state **handler** is `F
 list `+0x1278` — it does **not** call `FUN_143a58de0`, so receiving the state is not by itself what
 pins.
 
+**Later finding.** The trigger was not the 5485 body. `FUN_143dbcdf0` runs on the class 5606
+`initialized = 1` event (commit `c21828b`).
+
 ### Next step to close it (needs the live client; cannot be done from static alone)
 
 With Fix 2 (full retail body) applied, run gdb on our server and break on:
@@ -127,10 +149,14 @@ The `this+0x200` component (gate 1, re-used at gate 7 for the transform) and the
 `+0x1f1` (gate 2) are the cheapest things to get wrong from the server side. The relation filter
 (gate 5) and line of sight (gate 8) are the two leads already recorded in
 `docs/re/2026-09-12-tutorial-quest.md` §15.3.
+**Later finding.** Neither lead was the cause. The lock test reads bit 0 of the mob's state flag
+word. Our mobs kept the fresh card's `10 10` in ALC children 41 and 42, so no mob was targetable.
+Commit `110ccc0` sends retail's `d3 13` (`awake_data_bits` in `crates/nw-messages/src/alc.rs`).
 
 **Unknown:** which gate our server trips. Static analysis gives the order but not the live verdict.
 Break on `0x142c866e0` and log which of the return lines above fires while the user presses lock on
 a tutorial sailor; the first one reached is the failing gate.
+**Later finding.** Solved: the mob `dataBits` gate (commit `110ccc0`).
 
 ## 2b. Capture evidence (content-tool `capture-check`, 2026-09-29)
 
@@ -194,7 +220,7 @@ New captures decoded 2026-09-29 (second scan of `local-data/captures/own` and th
 ### 2c. 1628 diff (our server vs retail) — clears 1628 as the auto-pin blocker
 
 Diff done 2026-09-29 from our codec (`crates/nw-messages/src/self_ident.rs`), our send site
-(`bins/sim/src/login.rs:140`), the retail spec (`local-data/azoth-catalog/packets/1628.json`,
+(`bins/sim/src/login.rs:140`), the Azoth spec (`local-data/azoth-catalog/packets/1628.json`,
 marked solved/verified), and the local-player note (`docs/re/2026-09-10-local-player-check.md`).
 
 Our `PlayerManagerSelfIdentificationMsg::encode` writes the retail body's **exact positional layout**
@@ -216,7 +242,7 @@ with the optional parts empty (157 bytes), field for field:
 
 - **Observed.** The only value differences are the two flag bytes (1 vs 5), the zeroed
   `identifierB`, the empty list, and `extra.value` 0 vs 56. Every one of those is documented as
-  accepted by the client (retail spec: a minimal all-zero body "is enough for the client to carry
+  accepted by the client (Azoth spec: a minimal all-zero body "is enough for the client to carry
   on"). The one field the local-player check reads — `identifierA` = the character id — our server
   sets correctly (`for_entity`). So the body bytes of 1628 are **not** the auto-pin blocker.
 - **Observed (`docs/re/2026-09-10-local-player-check.md`).** The PlayerRegistry local-player entry
@@ -252,8 +278,13 @@ with the optional parts empty (157 bytes), field for field:
 - **Open (journal):** whether Fix 2's full season body makes the facet activation `FUN_143dbcdf0`
   run and gate A (`facet+0x540 → +0x80`) populate — one live gdb run (run 5, `seasonsync.gdb`)
   decides it. This is now the single remaining journal question.
+  **Later finding.** Solved by commit `c21828b`: class 5606 with `initialized = 1` makes
+  `FUN_143dbcdf0` (the TrackedStat-ready handler) run.
 - **Confirmed (lock):** the full gate chain and the exact reject points in `FUN_142c866e0`.
 - **Open (lock):** which gate our server trips — one live gdb run on a sailor decides it.
+  **Later finding.** Solved by commit `110ccc0`: the mob ALC `dataBits` (children 41 and 42).
 - **Closed (both):** the patched-vs-official byte diff — the 108 patched bytes are all at
   `0x145AA0D33`+ (an EAC bypass stub), none inside the lock or journal functions. The patch is not
   the cause.
+  **Later finding.** The 108 bytes are the certificate, exit, and Steam ticket changes of
+  `docs/client-patch.md`, not an EAC stub. The current patch also writes at `0x140FEC21A`.

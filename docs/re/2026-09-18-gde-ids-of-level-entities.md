@@ -95,6 +95,9 @@ would get the same id.
 
 **Unknown.** How the client gives entity ids to the entities inside a GDE's slice (the lock-on
 question). This note covers only the GDE id.
+**Later finding.** The lock-on did not depend on these entity ids. Commit `110ccc0` solved it with
+the mob ALC `dataBits` (`awake_data_bits` in `crates/nw-messages/src/alc.rs`). How the client
+gives entity ids inside a slice is still **Unknown**.
 
 ## 5. Dynamic entities
 

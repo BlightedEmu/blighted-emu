@@ -2,6 +2,11 @@
 
 Date: 2026-09-06.
 
+**Status.** The main conclusion is wrong. The retail client does not read
+`ClientOverride.json` (live test in
+[memory-hook fallback](2026-09-06-memory-hook-fallback.md)). The project uses the on-disk
+client patch instead ([docs/client-patch.md](../client-patch.md)).
+
 Offline decompile of the user's own client. The game was not run and no
 file was changed. Build 25810808 (`Bin64/NewWorld.exe`).
 
@@ -20,6 +25,10 @@ So the TCP path is reachable by setting `transport-type` to any value that
 is not `gridmate-udp` or `gridmate-udp-bsd`. This can be set from
 `@assets@/ClientOverride.json`, one of the `client-connection.*` keys.
 The client already looks for that override file (Game.log search entry).
+
+**Later finding.** This is wrong. The live test in
+[memory-hook fallback](2026-09-06-memory-hook-fallback.md) shows that the retail client does not
+read that file from any path tried. The transport cannot be set by config.
 
 ## Evidence
 

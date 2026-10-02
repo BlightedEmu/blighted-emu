@@ -58,4 +58,4 @@ Steps S6 and S9 of the admin studio spec. Commits ea5c08f..5700148 on main.
 
 - Import of `https://github.com/rust-lang/rust/issues/1` made task `t1` with the issue title, text
   and address; the page showed it; "Changed design files" showed none (the list itself is left
-  out). The test `todo.toml` was moved to `local-data/design-tests/s9/`.
+  out). The test `todo.toml` was moved to `local-data/design-tests/s9/` (not kept).

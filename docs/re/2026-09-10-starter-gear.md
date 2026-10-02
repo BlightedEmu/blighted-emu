@@ -84,6 +84,9 @@ Each login and handoff takes the backstory from the saved character and sends th
 its archetype in the own spawn card. Instance ids are a name-based UUID of the character and the
 item id, so they stay the same. There is no item store: every login wears the kit.
 
+**Later finding.** There is an item store now. `bins/sim/src/saves.rs` saves the item stacks,
+storage chests and loadouts of each character (`ItemSave`).
+
 ## 6. Unknown
 
 - The live check of the item index rule (section 3).

@@ -76,5 +76,8 @@ Spots with more than 60 such spawns (up to 1,180 within 40 m) are stacks of spaw
 ## What this does not prove
 
 - That the real game client accepts our spawn card, vitals block and message heads: their ids and heads are our own values (spec F9). The game client cannot connect to this server.
+
+  **Later finding.** A patched copy of the client now connects and enters the world (`2026-09-06-cert-bypass-patch-plan.md`, `scripts/patch-client.py`).
+
 - Scale with combat: the hunt had 90 bots. The swarm run sends positions only: every mob sleeps, and no card, vitals or combat message is sent. It is a regression check, not a scale result.
 - The live game's numbers: damage per weapon, mob health per type, and a mob's respawn time are still Unknown; the run used a 5 s mob respawn.

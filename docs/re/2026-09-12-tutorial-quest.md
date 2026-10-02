@@ -168,6 +168,10 @@ with its time in every state, child 35 with the alert and 0 at the next fragment
 **Not done:** the additive reactions; child 42 (`0x33` in both retail alerts, meaning
 **Unknown**); retail drops the look pose during the sailor's and the risen's attacks.
 
+**Later finding.** `crates/nw-messages/src/alc.rs` names child 42: the high byte of the client's
+state flag word (`+0x450`), whose low byte is `dataBits` (child 41). The meaning of each bit of
+`0x33` is still **Unknown**.
+
 ## 7. Sailor damage, pace and block
 
 **Observed** (live capture). In the whole ship fight only two sailor hits did damage (3601 at
@@ -309,6 +313,7 @@ Times are ms from the first record of the retail tutorial capture.
   health above 0). Slots +0xc0/+0xc8 are dead / deaths door by the flag names; the exact field
   each slot reads is **Unknown** (the vitals handler vtable has no RTTI symbol).
 - **Unknown.** Whether the three states above fix lock-on; only a live test can tell.
+  **Later finding.** They did not. The cause was the mob ALC `dataBits` (child 41 bit 0 = targetable; child 42 = high byte of the client flag word at `+0x450`). Commit `110ccc0` sends retail's `d3 13` (`awake_data_bits` in `crates/nw-messages/src/alc.rs`).
 - **Observed** (ship-mobs note). Retail sailors started swings at 0.89-1.81 m, ran only to close
   gaps of 4-12 m, walked or stood nearer, wandered at 0.6 m/s, and stood about 2.0 s after the
   alert. Each tutorial kind now has a gait (swing start, run distance, walk and wander speed)
@@ -374,6 +379,8 @@ Live run 19:16-19:25Z (tutorial to the boss cave). Retail source: the tutorial l
   vitals bits from `vitalsData` head (1 dead, 2 deaths door), game-mode flag 26
   `CannotBeTargeted`, hostility (an AI target is an enemy). **Unknown:** which player-side,
   line-of-sight or score gate fails; one instrumented run must show it.
+  **Later finding.** This was wrong. The test also reads bit 0 of the mob's state flag word, and
+  our mobs kept the fresh card's `10 10`. The cause was the mob ALC `dataBits` (child 41 bit 0 = targetable; child 42 = high byte of the client flag word at `+0x450`). Commit `110ccc0` sends retail's `d3 13` (`awake_data_bits` in `crates/nw-messages/src/alc.rs`).
 
 ## 13. Combat and boss work of 2026-09-16 (after the second live video)
 
@@ -394,6 +401,7 @@ the creature slices) and Server.pak behavior trees. Not live-tested yet.
 - **Observed.** The 1589 target row (row 3) holds the locked target. Retail locked on only from
   the first legionnaire (202 s), never on the ship. Logged (`lock target`) and used to aim the
   swing. **Unknown:** why our client did not lock on.
+  **Later finding.** Solved by commit `110ccc0` (mob `dataBits`, §15.3).
 - **Observed.** Creatures lunge in their swing until the bodies touch; all 17 retail mob hits
   landed 0.79 to 1.65 m from the player. Implemented per creature (capsules: sailor 0.4, island
   foes 0.5, Thorpe 0.7, player 0.4 m).
@@ -416,6 +424,7 @@ the creature slices) and Server.pak behavior trees. Not live-tested yet.
 - The 250 to 280 ms wait before regen after a water dash (cause **Unknown**).
 - The general formula of the stamina a blocked hit takes.
 - The additive reactions, child 42 of the alert state.
+  **Later finding.** `crates/nw-messages/src/alc.rs` names child 42 (the high flag byte, §6).
 - The body part of a player hit (2071 bytes 40-43, CRC-32 of the bone name): we always send the
   torso, which retail sent on 25 of 70 hits.
 
@@ -437,9 +446,12 @@ Source: the newchar ledger of 2026-09-12 (`local-data/captures/own/newchar-linux
   message. Own changes were stamina, the interactor slot-1 flag, vitals, objectives, paperdoll
   and achievements. The retail own ALC carries `slayerSeqTimeRel` (child 2) in almost every
   state and the slayer children 13-24 when they change; ours sends neither.
+  **Later finding.** `crates/nw-messages/src/alc.rs` now sends child 2 (`SEQUENCE_TIME_REL_CHILD`)
+  and the slayer children 13 to 24.
 - **Unknown.** Which client gate rejects our targets. The lock test is a virtual of each
   `CameraLockTargetComponent`; its gates read client data that the ledger cannot show. A
   runtime probe must show it.
+  **Later finding.** Solved: the mob ALC `dataBits` (child 41 bit 0 = targetable; child 42 = high byte of the client flag word at `+0x450`). Commit `110ccc0` sends retail's `d3 13` (`awake_data_bits` in `crates/nw-messages/src/alc.rs`).
 
 ### 15.1 The lock gates, named (2026-09-18)
 
@@ -464,6 +476,7 @@ Source: the newchar ledger of 2026-09-12 (`local-data/captures/own/newchar-linux
 - **Unknown.** The gate that rejects our targets is still not found from static data. Remaining
   candidates are client state the ledger cannot show (the relation registry of `FUN_14171b010`,
   `m_notTargetableOnInit` per prefab, the stealth/ownership requests).
+  **Later finding.** None of these was the gate. It was the mob `dataBits` (commit `110ccc0`, §15.3).
 
 ### 15.2 Our ledger against retail (2026-09-18, live run 8)
 
@@ -502,3 +515,5 @@ Source: the newchar ledger of 2026-09-12 (`local-data/captures/own/newchar-linux
   the line of sight: the ray hits the mob's own body and the hit does not resolve to the target.
   The relation flags are the second lead. **Unknown**: which gate fails; a breakpoint on the
   return paths of `FUN_142c866e0` while pressing on a sailor will show it.
+- **Later finding.** Neither lead was the cause. A live gdb run showed that the client copies the
+  mob state over its own, and the lock test reads bit 0 of the flag word. The cause was the mob ALC `dataBits` (child 41 bit 0 = targetable; child 42 = high byte of the client flag word at `+0x450`). Commit `110ccc0` sends retail's `d3 13` (`awake_data_bits` in `crates/nw-messages/src/alc.rs`).

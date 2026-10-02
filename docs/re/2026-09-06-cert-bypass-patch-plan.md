@@ -3,6 +3,8 @@
 Date: 2026-09-06. Build: Steam `25810808`, `Bin64/NewWorld.exe`
 (SHA size 179,214,008 bytes). Offline analysis of the user's own client.
 
+**Status.** The plan is done. The patch is applied to a separate copy, `Bin64/BlightedNewWorld.exe` (see "Live result" below). `scripts/patch-client.py` applies it. The launcher starts that copy (`bins/launcher/src/game.rs`).
+
 ## Why
 
 Everything up to world entry works: login, character list, character
@@ -109,6 +111,8 @@ private local client to this emulator only.
    `NewWorld.exe`, only if the current bytes are `89 91 58 01 00 00`.
 3. Re-check the bytes after writing.
 
+**Later finding.** This step is done. The patch is not written into `NewWorld.exe`. `scripts/patch-client.py` writes it into a separate copy, `Bin64/BlightedNewWorld.exe`, and keeps the official file (see "Live result" above).
+
 ## Launch and Easy Anti-Cheat
 
 A patched `NewWorld.exe` fails Easy Anti-Cheat integrity checks. The game
@@ -117,6 +121,10 @@ arguments, bypassing `NewWorldLauncher.exe` (which starts EAC). The project
 `launcher` currently starts the game through Steam's `NewWorldLauncher.exe`,
 so an EAC-free launch path is a dependency to settle before the test. This
 is an open item.
+
+**Later finding.** This item is closed. The launcher now starts the patched
+copy `BlightedNewWorld.exe` directly, without `NewWorldLauncher.exe`
+(`PATCHED_EXE_NAME` in `bins/launcher/src/game.rs`).
 
 ## How to test
 

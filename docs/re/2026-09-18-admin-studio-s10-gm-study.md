@@ -1,7 +1,7 @@
 # Admin Studio S10: in-game GM study (2026-09-18)
 
 Step S10 of the admin studio spec: how the client asks for GM rights and sends GM commands.
-Sources: the client decompile (`<re-scratch>/re-sweep`: `network.md`, `names.tsv`, the C text),
+Sources: the client decompile (`local-data/re-sweep`: `network.md`, `names.tsv`, the C text),
 the facet code of this repo. No capture holds a GM message. Labels: **Observed** (seen in code or
 data), **Inferred** (a reading of it), **Unknown**.
 

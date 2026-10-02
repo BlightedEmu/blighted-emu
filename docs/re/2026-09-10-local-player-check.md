@@ -237,11 +237,16 @@ Still missing for a playable spawn, once `InGame` holds:
 - Client input 1589 is already answered with the own ALC each tick. Fall and
   snap-back are Unknown until a live InGame session.
 
+**Later finding.** The start position and the gear are done. The client starts at the sim
+position ([own player position](2026-09-10-own-player-position.md), `AlcState::spawn`). The own
+spawn card sends the archetype kit in the paperdoll
+([starter gear](2026-09-10-starter-gear.md)).
+
 ## Files read
 
-- `local-data/handoff-world-entry-complete.md`
-- `local-data/handoff-player-components-re.md` (index)
-- `local-data/handoff-local-player-check-re.md`
+- `local-data/handoff-world-entry-complete.md` (not kept)
+- `local-data/handoff-player-components-re.md` (index) (not kept)
+- `local-data/handoff-local-player-check-re.md` (not kept)
 - `docs/re/2026-09-10-local-player-merge-crash.md`
 - `docs/re/2026-09-10-player-component-slots.md`
 - `docs/re/2026-09-08-world-entry-live.md`

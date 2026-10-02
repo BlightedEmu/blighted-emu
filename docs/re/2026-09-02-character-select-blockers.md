@@ -81,6 +81,8 @@ Status: Resolved.
 
 Status: The wait is named. The call that would finish it is a static limit.
 
+**Later finding.** The hang is fixed by a client patch. The patch points the Steam `EndSession` vtable slot at the Sonic function, which calls the quit callback at once (`2026-09-10-exit-to-desktop-patch.md`). `scripts/patch-client.py` applies it.
+
 **Observed.** The log string `Calling IAuthManager::GetInstance()->EndSession()` is at `0x147fc8e08`, in `FUN_141004100` (`0x141004100`). `GetInstance` is `FUN_145a8dce0` (`0x145a8dce0`) and returns `DAT_14a3f8378`. The Steam constructor `FUN_145a7f3e0` stores vtable `0x14844a718`. Slot `+0x130` is `FUN_145a8c250` (`0x145a8c250`). The Sonic vtable `0x14844a418` has a different slot `+0x130`, `FUN_145a8c1e0`, which calls the quit callback immediately.
 
 **Observed.** Steam `EndSession` copies the quit callback to the auth object at `+0x30` and returns. If the persona client at Steam `+0x228` is null, it posts no job and the quit callback is never called. If that pointer is set, it posts a thread-pool job. The job calls Omni `Session::EndSession` (`FUN_1479b4950`, `0x1479b4950`), which clears the SDK session, then queues `OnEndSessionComplete`.
@@ -155,6 +157,8 @@ Status: Resolved. The client reaches the REP connection.
 **Live test.** After that fix the client logs `Received a login ticket`, loads the remote config classes, and then logs `start REP connection RepAddress = 127.0.0.1:33435, worldId = <configured world id>`. No REP server listens there (M3). After about 15 seconds the client logs `Errors::connection_rep_registration_timeout` and shows "Unable to connect to the server".
 
 **Live test.** `Exit to desktop` still does not close the client (section 4).
+
+**Later finding.** A client patch fixes this hang (section 4, `2026-09-10-exit-to-desktop-patch.md`, `scripts/patch-client.py`). That note records no live test of the patch.
 
 ## Evidence
 

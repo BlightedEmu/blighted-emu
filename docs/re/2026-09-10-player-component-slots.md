@@ -300,7 +300,7 @@ are real snapshots, never `0x00`.
 
 ## Files read
 
-- `local-data/handoff-player-components-re.md`
+- `local-data/handoff-player-components-re.md` (not kept)
 - `docs/re/2026-09-06-build-25810808-address-map.md`, `docs/re/2026-09-04-m6-alc-state.md`,
   `docs/re/2026-09-06-m6-component-tables.md`, `docs/re/2026-09-04-m6-vitals-state.md`,
   `docs/re/2026-09-08-world-entry-live.md`
@@ -310,8 +310,8 @@ are real snapshots, never `0x00`.
   (counts, sizes, decoder RVAs only)
 - `crates/nw-messages/src/{alc.rs,wire.rs,player_components.rs,slots.rs}`
 - `~/steam-1063730.crash1.log`, `~/steam-1063730.crash2.log`, `~/steam-1063730.log`
-- Ghidra old-build project `<re-scratch>/scratch-pc/proj-old` (copy of
-  `<re-scratch>/ghidra`), current-build project copies under `<re-scratch>/`;
+- Ghidra old-build project `<re-scratch>/ghidra`, current-build project
+  `<re-scratch>/ghidra-25810808`;
   scripts `PcCtors.java`, `PcCount.java`, `PcVt90.java`, `PcVref.java`, `PcDump.java`,
   `PcRec.java` in `<re-scratch>/scripts/`; decompiles in
   `<re-scratch>/scratch-pc/ctors-old/` and `<re-scratch>/scratch-pc/crash/`.

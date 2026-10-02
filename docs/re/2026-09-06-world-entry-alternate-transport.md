@@ -109,6 +109,9 @@ state and may have distinct message framing.
 - Check for security wrappers or other checks above TCP.
 - Verify that OverrideConfigPath can select the transport without editing
   the executable or game archives.
+  **Later finding.** Answered: it cannot. The live test in
+  [memory-hook fallback](2026-09-06-memory-hook-fallback.md) shows that the client rejects the
+  file. The project uses the on-disk client patch ([docs/client-patch.md](../client-patch.md)).
 - Test only against the local emulator after those checks.
 
 ## Work files

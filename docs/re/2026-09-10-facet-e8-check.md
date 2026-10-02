@@ -204,7 +204,7 @@ non-null on the true path. It was not traced in this pass.
 ## Files read
 
 - `docs/re/2026-09-10-local-player-check.md`
-- `local-data/morning-test-plan.md`
+- `local-data/morning-test-plan.md` (not kept)
 - `crates/nw-messages/src/{player_components.rs,self_ident.rs,slots.rs}`
 - `bins/sim/src/world/members.rs`
 - `crates/nw-reflect/src/registration/token.rs`

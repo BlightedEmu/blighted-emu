@@ -130,8 +130,8 @@ r8 = [rax + child_offset + 8]
 
 ## Files read
 
-- `local-data/handoff-merge-crash-re.md`
-- `local-data/handoff-player-components-re.md` (reference index)
+- `local-data/handoff-merge-crash-re.md` (not kept)
+- `local-data/handoff-player-components-re.md` (reference index) (not kept)
 - `docs/re/2026-09-10-player-component-slots.md`
 - `docs/re/2026-09-08-world-entry-live.md`
 - `crates/nw-messages/src/player_components.rs` (index list only)

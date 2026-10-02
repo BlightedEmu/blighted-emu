@@ -80,3 +80,6 @@ renders, and the player walks. The network-warning icon is gone (carrier fix).
   for all ledgers in one process ran the machine out of memory on 2026-09-10).
 - The local-player correction settings (`g_localPlayer_*Correction*`) are registered in
   `FUN_141031800` at settings offsets `0x2f0`-`0x308`; their readers are not traced yet.
+  **Later finding.** `docs/client-patch.md` (fourth change) lists eight variables at `0x2F0` to
+  `0x30C`. The patch sets `CorrectionThreshold` and `ErrorDistanceForFullCorrection` to
+  100,000 m, so the client does not correct its own movement.

@@ -22,6 +22,8 @@ The game was not run. No new traffic was recorded. Easy Anti-Cheat was not analy
 
 **Observed.** `FUN_14087b5c0` (`0x14087b5c0`) and `FUN_14087b770` (`0x14087b770`) read the same prefix code as the envelope type index. A first byte at or below `0x7F` is the value. Larger first bytes add 1, 2, 3, or 4 extra bytes. This is not a LEB128 varint.
 
+**Later finding.** That width is wrong for `FUN_14087b770`. It also reads 6-, 7-, 8- and 9-byte forms (first byte `0xF8` and above). `FUN_14087b5c0` keeps the 1- to 5-byte forms. See `2026-09-04-movement-message.md` section 1.
+
 **Observed.** `FUN_14087a1c0` (`0x14087a1c0`) reads a `u16` and byte-swaps it.
 
 ## 446 and 1034

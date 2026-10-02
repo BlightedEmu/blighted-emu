@@ -157,6 +157,8 @@ The 550 other named stops are the 9-byte child 267, the flag byte 122, base data
 
 **Open after round 5.** A table that ends at least 99.9% of the reached bodies. The slot byte, the child-byte rule, and the fixed lengths above are known. The house list, the game-mode child, and the ping success path do not end the bodies in the table. Methods: decompile of every registration constructor and of virtual `+0x30`; the 56-byte long form; the empty-list path; an extra child byte when bit 7 stays set after the last child. The fit numbers are the log.
 
+**Later finding.** The layout is known now. `crates/nw-messages/src/social/group_data.rs` has slot 0 with 49 children and slots 1 to 5 with 9 children each. That layout was checked on retail bodies. Positions, pings, waypoints and houses are still unsized in that file.
+
 ## Files
 
 - `<re-scratch>/scratch-m6/round4/scan_round4.py`, log `scan-round4.log`

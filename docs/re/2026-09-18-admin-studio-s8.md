@@ -49,7 +49,7 @@ Commits 6394810..e98852b on main.
 | GM start `test_invasion` at (8360, 8150) | running on sim-2: 3 mobs, then 5 after 10 s; the `event_starts` script ran |
 | GM stop | stopped on sim-2; no event runs |
 
-The test files were moved to `local-data/design-tests/s8/` and Apply ran again (0 scripts,
+The test files were moved to `local-data/design-tests/s8/` (not kept) and Apply ran again (0 scripts,
 0 events, no mobs).
 
 ## Unknown and not built

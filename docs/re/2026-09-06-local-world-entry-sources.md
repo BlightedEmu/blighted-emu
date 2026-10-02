@@ -2,6 +2,8 @@
 
 Date: 2026-09-06.
 
+**Status.** The open items of this note are done. See the **Later finding** lines below.
+
 This is a read-only source review. No client or server was changed.
 No packet capture was replayed. No packet bodies or private ids are included.
 
@@ -37,6 +39,8 @@ contexts, and a partly decoded constant tail. Finish the reader tree;
 do not copy a captured character's identity or session bytes into the
 emulator.
 
+**Later finding.** Type 1628 is done. `crates/nw-messages/src/self_ident.rs` sends the smallest body that the native reader accepts. The live client then leaves `WaitingForActorGameConnection` (`2026-09-08-world-entry-live.md`).
+
 ## First Light archive
 
 `local-data/first-light-main/server/javelin/self_ident.py` explicitly
@@ -61,6 +65,8 @@ Read the archive for leads, not as a working server implementation.
 3. Finish 1628 from its native reader and identity handler.
 4. Check context and entity ids across both messages and state bundles.
 5. Test actual client state transitions through map load and player spawn.
+
+**Later finding.** Steps 1 to 3 are done. A client patch removes the certificate block (`2026-09-06-cert-bypass-patch-plan.md`). `crates/nw-messages/src/level_info.rs` sends type 1635 and `crates/nw-messages/src/self_ident.rs` sends type 1628. `2026-09-08-world-entry-live.md` records the live state transitions. The patched client now enters the world.
 
 Source paths above are git-ignored local resources and may not exist on
 another checkout. No outside source code was copied.

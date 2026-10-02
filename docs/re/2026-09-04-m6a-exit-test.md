@@ -23,6 +23,8 @@ This note records the exit test of spec `2026-09-04-m6a-combat-engine-design.md`
 - nwdb.info: 8,650 creature records read (23 files unreadable). 7,188 match our max health within 0.1 % (at least 1). 1,403 more match it at the level of their `VitalsLevelVariantData` row: nwdb computes a variant mob's health at that row's own `level` column, while its `Level` field and the emulator use the spawn level. The other 59 differ by 2 to 3 points (nwdb's rounding).
 - The first run of the check found the category mods: a mob type's mods include the `VitalsModifierData` mods of its creature type (for example `Solo+`: health 2, damage 1.2). Without them every `Solo+` mob had half of nwdb's health.
 
+**Later finding.** The build 22469132 world file is deleted. `local-data/content/` now holds build 25810808 files only. This check cannot be re-run as written.
+
 **Unknown.** Whether the live game builds a variant mob at its spawn level or at the variant row's level. The captures do not show a mob's max health per type (`docs/re/2026-09-04-m6-combat-reference-values.md` section 2).
 
 ## 3. Server tests

@@ -20,6 +20,9 @@ walls are cleared; one remains.
 | `WaitingForSpawnPoint` -> `WaitingForPlayerSpawn` | Reached ("spawn point found"). |
 | `WaitingForPlayerSpawn` -> `InGame` | **Not reached.** Still stuck here. |
 
+**Later finding.** The client now gets in game. With the `AlcState::spawn` fix, the world renders
+and the player walks ([own player position](2026-09-10-own-player-position.md)).
+
 ## What the two fixes did
 
 ### Type 1628: PlayerManagerSelfIdentificationMsg

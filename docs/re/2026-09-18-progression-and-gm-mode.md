@@ -7,7 +7,7 @@ data), **Inferred** (a reading of it), **Unknown**.
 Sources: retail captures `local-data/captures/own/newchar-retail-2026-09-18/` (N: a new
 character, tutorial, greatsword and blunderbuss) and
 `local-data/captures/open-world/NH-MSQ-2.1-3acc9ebbecdfc753/` (M: a level 67 character); the
-tables of `local-data/content/bundle-<build>.bin`; the client decompile `<re-scratch>/re-sweep`;
+tables of `local-data/content/bundle-<build>.bin`; the client decompile `local-data/re-sweep`;
 field names from the Azoth catalog `packets/{911,899,3681,129}.json` (facts only). Scratch tools and
 the full GM sender list: `local-data/gm-research/` (git-ignored).
 

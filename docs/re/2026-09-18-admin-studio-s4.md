@@ -19,7 +19,7 @@ Commits 96c5b3b..c0c64ff on main.
 | Apply | done, "2 of 2 sims back", no problems |
 | Live view, every 3 s | both mobs walk from point 1 to point 3 at about 2.5 m/s, wait, and walk back |
 
-The test files were moved to `local-data/design-tests/s4/` and Apply ran again; the two mobs are
+The test files were moved to `local-data/design-tests/s4/` (not kept) and Apply ran again; the two mobs are
 gone and the merged content is the retail content again.
 
 ## Found and fixed

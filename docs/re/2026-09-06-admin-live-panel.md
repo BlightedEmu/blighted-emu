@@ -1,6 +1,6 @@
 # Admin tools part B: live panel exit test
 
-Date: 2026-09-06. Code: the commits on `main` after `0782951`, to the commit that adds this record.
+Date: 2026-09-06. Code: the commits on `main` after `13167855`, to the commit that adds this record.
 
 This note records the exit test of spec `2026-09-04-admin-tools-design.md` section 1.3, part B. It gives counts only: no ids, names, positions, tokens or addresses.
 

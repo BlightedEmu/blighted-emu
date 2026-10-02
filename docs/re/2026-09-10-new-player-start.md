@@ -45,8 +45,15 @@ tutorial start; own-player-position note). The client's first input is 0, 0, 0 b
 `world-25810808-climaxftue_02.bin` exist. Each sim and director runs one level
 (`level` in `config/sim.toml` and `local-data/world-director.toml`).
 
+**Later finding.** The current `local-data/content/world-25810808-ftue_v2.bin` is 2,122,178 bytes.
+The map tool now reads the 1024 x 1024 FTUE heightmaps, so the tutorial world file has terrain
+([tutorial quest](2026-09-12-tutorial-quest.md) §12).
+
 ## Unknown
 
 - What ends the tutorial on the server side (the quest chain; we have no quest system).
 - Whether `climaxftue_02` is a separate level step between `FTUE_V2` and the open world.
 - The terrain heights of `FTUE_V2` in our world file (24 KB may hold no heightmap).
+
+**Later finding.** The sim now has a quest system: `bins/sim/src/objectives.rs` runs the
+objective task trees. The old 24 KB file had no terrain; the current file has it (see Our data).

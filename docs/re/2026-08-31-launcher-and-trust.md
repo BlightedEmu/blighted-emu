@@ -153,6 +153,8 @@ Game server:
 - The private key is not in the client executable and is not in this repo.
 - Do not replace that trust anchor with a new CA. Do not patch the client. No launch argument selects a different game-server certificate.
 
+**Later finding.** The project now patches a copy of the client. `scripts/patch-client.py` writes a separate patched executable and keeps the official file. `docs/client-patch.md` gives the procedure.
+
 ## Server config in this repo
 
 `nw-common` loads a TOML file and applies environment overrides. It does not define edge listen addresses. The workspace members line is `crates/*`, so `crates/nw-edge-config` is already a member.
@@ -168,6 +170,8 @@ Game server:
 - `udp_listen`: the `rep-gateway` UDP socket. The example uses port `33435` (`rep-default-port` in the endpoint note).
 - `rep_address`: the string placed in `Token.RepAddress`. The example text is `127.0.0.1:33435`. That spelling is the example value. This note does not claim the client splits that string on `:`.
 - `[trust]`: the cipher name and the certificate subject fields. Load fails when they differ from the embedded certificate. The file has no PEM.
+
+**Later finding.** The crate `crates/nw-edge-config` is gone. The config code is now in `crates/nw-common/src/config.rs` and `crates/nw-login/src/config.rs`. `config/edge.toml` has `https_listen` and `rep_address` (in `[[world]]`). It has `[tls]` and `[auth]` sections, not `[trust]`. `udp_listen` is in `config/rep-gateway.toml`.
 
 The channel parser reads `apiEndpoint`, `awsRegion`, `clientTag`, and `omniTokenUrl`. It also reads `nwTokenUrl` and `personaHostV2` when those keys are present on `platformMetadata`. It counts `JavelinGatewayService-CF` objects and does not invent a host field for them. It finds `clientTag` objects at any depth outside `platformMetadata` because the parent key is Unknown. That walk is a parser rule, not an observed client loop.
 

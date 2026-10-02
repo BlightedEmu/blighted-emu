@@ -90,6 +90,8 @@ Body length is 40 when the count is 22, and 41 when the count is 23. 16 + 1 + 1 
 
 **Observed.** World files under `local-data/content/` hold 118,706 vitals spawn points (115,937 of them in the open world). Catacomb `nw_catacomb_00` contributes 0 vitals spawns. Dungeon points in these files are mostly absent from the vitals section.
 
+**Later finding.** Those counts came from the build 22469132 world files. Those files are deleted. `local-data/content/` now holds build 25810808 files only.
+
 **Observed.** Child 0 of slot 0 (`HealthAmount`) went from above 5 to at most 0.5 on 100 samples that also had a recent position. 73 of those positions were within 20 m of a vitals spawn. 27 were not.
 
 **Observed.** Type 10 cards seen while the walk was aligned: 39,475. A position on the same replication key, in the same bundle or within 5 s, was missing for 39,475 of them. On one catacombs ledger the same check is 365 card events, 1 distinct card key, 7 distinct position keys, overlap 0. The card key and the position key are not the same key in the members this walk reaches.

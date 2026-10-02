@@ -128,6 +128,9 @@ The own spawn card (`bins/sim/src/world/members.rs`, `nw_messages::player_member
   `0x5100`), `vitalsId` `0x98197a65`, `maxHealth`; slot 1 mana 100 of 100, tick rate 0.
   `vitalsData`, `healthChangeFlags`, and the affliction lists are not sent (meaning or empty form
   **Unknown**).
+  **Later finding.** `crates/nw-messages/src/vitals.rs` now sends `vitalsData` for a dead
+  creature (head 1) and for a player's death or new life (`player_life`). The head byte is 0 for
+  a live creature and 1 for a dead one. The meaning of the two `u64` values is still **Unknown**.
 - 4297: 100, 100, 0, 0, 1, 1. 1652: 100, 100, 0, 1.
 - 3935: unchanged (connected, login `characterId`).
 
@@ -142,6 +145,11 @@ empty 1195 body.
   the paperdoll is sent, the player keeps the default clothes mesh.
 - Other players. A remote player's card still has an empty look and vitals (sims share no
   look in ghosts yet).
+
+**Later finding.** Both are done. The own spawn card sends the starter kit in the paperdoll
+([starter gear](2026-09-10-starter-gear.md), `bins/sim/src/world/gear.rs`). A remote player's
+card carries its look, public paperdoll and health
+([player replication](2026-09-18-player-replication.md), `bins/sim/src/world/replica.rs`).
 
 ## Files read
 

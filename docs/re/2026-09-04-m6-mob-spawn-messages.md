@@ -43,6 +43,8 @@ Captures checked for an exact read of type 10 and type 11, with the reliable-fra
 
 **Inferred.** The `AssetId` sub-id is 2. The few other values are walk-boundary artifacts of the extended walk, because they vanish under clean alignment. This matches the Azoth field note.
 
+**Later finding.** Azoth is another emulator. Its notes are not retail data. That match is corroboration only.
+
 **Observed.** The same reader was run on all 695 ledgers. It accepts a type 10 member when that member is reached before any class the walk cannot read. Reached bodies: 66,223. Failures: 0. A failure means the reader ran off the end of the payload. The three fight sessions inside that total: training dummy 16, cave 52, catacombs 55.
 
 **Observed.** An extended walk also passes the classes the replication-rate note already reads: type 13, slot-0 type 15, slot-0 types 4297, 3139, and 2913, and slot-0 type 1528 (widths 1, 4, 4, from the damage note). Reached type 10 bodies: 116,953. Bodies reached only after passing one of those classes in the same bundle: 50,730, which equals 116,953 minus 66,223. Type 10 members that fail the (20, 16) reader: 4,031. The walk still stops at types 5620, 4236, 3451, and 3935, whose slots are not constants, and at multi-slot members.

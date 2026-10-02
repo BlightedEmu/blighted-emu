@@ -2,6 +2,9 @@
 
 Date: 2026-09-06.
 
+**Status.** The hook was not built. The project uses the on-disk patched copy
+`BlightedNewWorld.exe` ([docs/client-patch.md](../client-patch.md)).
+
 ## Live result: the config route failed; this hook is now the plan
 
 Tested against the live retail client (build 25810808, GE-Proton, world
@@ -85,3 +88,7 @@ The existing gateway certificate code is
 
 Backup only. The chosen path is the TCP transport. Build the hook only if
 the TCP transport path cannot be made to work.
+
+**Later finding.** Neither the TCP transport nor the hook is used. The project uses the on-disk
+patched copy `BlightedNewWorld.exe` (certificate-verify `NOP` and other changes), see
+[docs/client-patch.md](../client-patch.md).

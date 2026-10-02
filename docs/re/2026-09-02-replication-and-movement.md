@@ -189,6 +189,8 @@ Each record starts with 3 raw mask bytes and one `u16` big-endian. Later fields 
 
 **Inferred.** The bit 7 floats are not the world position as such. They can be relative to a region or another base. A size before bit 7 is also still wrong for some records.
 
+**Later finding.** This check used the short prefix. With the wide prefix of `FUN_14087b770`, bit 7 x and y reach above 8,192. The client stores them with no added base. **Inferred.** The bit 7 floats are world x and world y. See `2026-09-04-movement-message.md` sections 1 and 4.
+
 **Unknown.** The meaning of the bit 7 floats, and the cause of the 78,394 values that are not on the map.
 
 ## Files read
