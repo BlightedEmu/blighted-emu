@@ -98,7 +98,7 @@
 <body>
 <main>
   <h1>Blighted New World Emulator: Progress</h1>
-  <p class="sub">Status on 2026-10-01. Client build 25810808. Last commit <code>4651b3b</code>.</p>
+  <p class="sub">Status on 2026-10-01. Client build 25810808. Last commit <code>110ccc0</code>.</p>
 
   <div class="cards" id="summary"></div>
 
@@ -121,8 +121,8 @@
 
   <h2>What to do next (in order)</h2>
   <ol class="next">
-    <li><strong>Commit and test the target lock fix.</strong>
-      <div class="why">The fix is in the tree now (<code>crates/nw-messages/src/alc.rs</code>), not committed. A live test with the fix is not done yet. Every fight needs lock.</div></li>
+    <li><strong>Check the target lock pick on retail.</strong>
+      <div class="why">On our server the first lock takes the nearest mob inside a small circle around the crosshair, not the mob under the crosshair. The client code works that way (<code>FUN_142c8b350</code>), so it is likely normal. To check on retail: stand near 2 mobs close together, aim at the farther one, lock. Also check: after a reconnect, does lock still work (flag 4, weapon swap range 0 were seen after gdb reconnects)? Notes: <code>local-data/findings/2026-10-01-client-lock-and-actor-state-map.md</code>.</div></li>
     <li><strong>Record retail captures of the systems that have none.</strong>
       <div class="why">Wars, sieges, invasions, expeditions, Outpost Rush, trading post, housing, companies. This must happen before 2027-01-31. After that, the facts are lost.</div></li>
     <li><strong>Close the tutorial bugs.</strong>
@@ -162,6 +162,7 @@
     <li>✅ Corpses go at retail times (<code>20200c8</code>, 2026-09-26).</li>
     <li>✅ Tutorial chest marked looted (<code>04dd5d4</code>, 2026-09-29).</li>
     <li>✅ Journal auto pin works, you confirmed it live (<code>c21828b</code>, 2026-10-01).</li>
+    <li>✅ Target lock works on mobs: lock, release, wheel cycling, you confirmed it live (<code>110ccc0</code>, 2026-10-01).</li>
   </ul>
 
   <footer>
@@ -213,7 +214,7 @@ const AREAS = [
     name: "Combat",
     features: [
       ["Melee hits", 75, "live", "Homing, lag help, retail damage messages.", "Boar hits miss sometimes. Cause: Unknown."],
-      ["Target lock", 75, "live", "Cause found with gdb (mob flag byte).", "Fix not committed. Live test with fix: not done."],
+      ["Target lock", 90, "live", "Lock, release and wheel cycling work live (110ccc0).", "Retail check of the nearest-in-circle pick; lock after a reconnect."],
       ["Dodge and stamina", 90, "tests", "Match retail (review 2026-10-01).", "Live check."],
       ["Block", 50, "tests", "Block works.", "No facing check, no guard break, no ranged block. On hold."],
       ["Ranged and magic", 45, "tests", "Staffs, gauntlets, bows, muskets cast along the aim.", "Abilities, mana use, full projectile rules."],
