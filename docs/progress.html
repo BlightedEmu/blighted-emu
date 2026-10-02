@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Emulator Progress</title>
+<style>
+  :root {
+    --bg: #f6f5f1;
+    --card: #ffffff;
+    --text: #1d1d1b;
+    --muted: #6b6a64;
+    --line: #e3e1da;
+    --track: #ebe9e2;
+    --done: #23733d;
+    --good: #3f7a24;
+    --part: #8f5f00;
+    --low: #a8401f;
+    --none: #6f6e67;
+    --accent: #3b5bb5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #151614;
+      --card: #1f201d;
+      --text: #ecebe6;
+      --muted: #a09f98;
+      --line: #33342f;
+      --track: #2d2e2a;
+      --done: #4fb86d;
+      --good: #8cc45f;
+      --part: #e0a83a;
+      --low: #e47552;
+      --none: #8f8e86;
+      --accent: #8aa4f0;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #151614;
+    --card: #1f201d;
+    --text: #ecebe6;
+    --muted: #a09f98;
+    --line: #33342f;
+    --track: #2d2e2a;
+    --done: #4fb86d;
+    --good: #8cc45f;
+    --part: #e0a83a;
+    --low: #e47552;
+    --none: #8f8e86;
+    --accent: #8aa4f0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1100px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 2rem; margin: 0 0 4px; }
+  h2 { font-size: 1.35rem; margin: 40px 0 12px; }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
+  .card .big { font-size: 2rem; font-weight: 700; line-height: 1.1; }
+  .card .label { color: var(--muted); font-size: 0.9rem; }
+  .note { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin: 12px 0; }
+  .note.warn { border-color: var(--low); }
+  ol.next { padding-left: 0; list-style: none; counter-reset: step; }
+  ol.next li { counter-increment: step; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px 12px 56px; margin: 8px 0; position: relative; }
+  ol.next li::before { content: counter(step); position: absolute; left: 14px; top: 12px; width: 28px; height: 28px; border-radius: 50%; background: var(--accent); color: var(--card); font-weight: 700; display: grid; place-items: center; }
+  ol.next .why { color: var(--muted); font-size: 0.92rem; }
+  .table-wrap { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
+  table { width: 100%; border-collapse: collapse; min-width: 720px; }
+  th, td { text-align: left; vertical-align: top; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+  th { font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+  tr:last-child td { border-bottom: 0; }
+  td.name { font-weight: 600; width: 22%; }
+  td.bar { width: 18%; }
+  .meter { height: 10px; background: var(--track); border-radius: 5px; overflow: hidden; margin-top: 7px; }
+  .meter span { display: block; height: 100%; border-radius: 5px; }
+  .pct { font-weight: 700; font-variant-numeric: tabular-nums; }
+  .badge { display: inline-block; font-size: 0.78rem; font-weight: 600; padding: 2px 8px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+  .p-live { color: var(--done); }
+  .p-bots { color: var(--good); }
+  .p-tests { color: var(--part); }
+  .p-code { color: var(--low); }
+  .p-none { color: var(--none); }
+  .works { color: var(--text); }
+  .missing { color: var(--muted); }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 8px 0 0; font-size: 0.92rem; }
+  ul.done { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 16px 12px 40px; margin: 0; }
+  ul.done li { margin: 4px 0; }
+  code { font-family: ui-monospace, "Cascadia Code", Menlo, monospace; font-size: 0.88em; }
+  footer { color: var(--muted); font-size: 0.9rem; margin-top: 40px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Blighted New World Emulator: Progress</h1>
+  <p class="sub">Status on 2026-10-01. Client build 25810808. Last commit <code>4651b3b</code>.</p>
+
+  <div class="cards" id="summary"></div>
+
+  <div class="note warn">
+    <strong>Deadline:</strong> the retail servers shut down on 2027-01-31.
+    After that day, nobody can record a new retail capture. Systems with no retail capture must be recorded before then.
+  </div>
+
+  <div class="note">
+    <strong>How to read the percent.</strong> The percent is an estimate. It tells how much of the retail feature works with the real game client on our server.
+    It is not a count of lines of code.
+    <div class="legend">
+      <span class="badge p-live">Live</span> seen to work with the real client
+      <span class="badge p-bots">Bots</span> seen to work with test bots
+      <span class="badge p-tests">Tests</span> only automatic tests
+      <span class="badge p-code">Code</span> code exists, not checked
+      <span class="badge p-none">None</span> no code found
+    </div>
+  </div>
+
+  <h2>What to do next (in order)</h2>
+  <ol class="next">
+    <li><strong>Commit and test the target lock fix.</strong>
+      <div class="why">The fix is in the tree now (<code>crates/nw-messages/src/alc.rs</code>), not committed. A live test with the fix is not done yet. Every fight needs lock.</div></li>
+    <li><strong>Record retail captures of the systems that have none.</strong>
+      <div class="why">Wars, sieges, invasions, expeditions, Outpost Rush, trading post, housing, companies. This must happen before 2027-01-31. After that, the facts are lost.</div></li>
+    <li><strong>Close the tutorial bugs.</strong>
+      <div class="why">Every new player plays the tutorial. Open: boar hits that miss (cause Unknown), Janszoon anchor toss, temple door wall, growth explode, deck boar sleep.</div></li>
+    <li><strong>Make own movement match retail (to-do <code>t1</code>).</strong>
+      <div class="why">The server body is still off from the client: median 0.156 m in the open world, 0.219 m in the tutorial. Small drifts cause missed hits and bad walls.</div></li>
+    <li><strong>Make the first open world hours work.</strong>
+      <div class="why">After the beach: main story quests, gathering, crafting, shops, fast travel. The code exists, but nobody played it live.</div></li>
+    <li><strong>Finish combat: ranged, magic, block, status effects.</strong>
+      <div class="why">Block has gaps (no facing check, no guard break, no ranged block). You put these on hold on 2026-10-01.</div></li>
+    <li><strong>Expeditions (dungeons) and instances.</strong>
+      <div class="why">The group content of the game. Instance code exists, but it is not tested live.</div></li>
+    <li><strong>Companies, territories, wars, invasions.</strong>
+      <div class="why">These need many players and the captures from step 2.</div></li>
+    <li><strong>Trading post and full economy.</strong>
+      <div class="why">Needs a real player base to test. The code exists, but it is not checked.</div></li>
+    <li><strong>Systems with no code: housing, artifacts, heartrunes, town projects, trophies.</strong>
+      <div class="why">Start these last. They are not on the path of a new player.</div></li>
+  </ol>
+
+  <div id="areas"></div>
+
+  <h2>Done list</h2>
+  <ul class="done">
+    <li>✅ <strong>M0</strong> Project setup, licences, checks, Docker infrastructure.</li>
+    <li>✅ <strong>M1</strong> Game data pipeline: all 2,250 datasheets and 285,031 rows load back.</li>
+    <li>✅ <strong>M1b</strong> World data: 41 checked world files.</li>
+    <li>✅ <strong>M2</strong> Login server and launcher: the real client reaches character select.</li>
+    <li>✅ <strong>M3</strong> Gateway: the client completes DTLS and registration (exit test 2026-09-02).</li>
+    <li>✅ <strong>M4</strong> Sim: two clients see each other move (exit test 2026-09-04).</li>
+    <li>✅ <strong>M5</strong> World director: 1,000 bots cross cell borders with handoff (exit test 2026-09-04).</li>
+    <li>✅ <strong>M6-A</strong> Combat engine: 8 sims with every mob, 5,000 bots (exit test 2026-09-04).</li>
+    <li>✅ <strong>M6-B</strong> Combat on the wire: 0 codec differences on 695 ledgers, 90 bots (exit test 2026-09-04).</li>
+    <li>✅ Rubber banding root cause fixed: own state numbers run 128 ahead (<code>6d508fc</code>, 2026-09-26).</li>
+    <li>✅ Thorpe fight: arena teleport, grab pull, collision scale fix (2026-09-26).</li>
+    <li>✅ Capture decoders read 99.993% of 25.3 million bundles (2026-09-26).</li>
+    <li>✅ Corpses go at retail times (<code>20200c8</code>, 2026-09-26).</li>
+    <li>✅ Tutorial chest marked looted (<code>04dd5d4</code>, 2026-09-29).</li>
+    <li>✅ Journal auto pin works, you confirmed it live (<code>c21828b</code>, 2026-10-01).</li>
+  </ul>
+
+  <footer>
+    To change this page, edit the <code>AREAS</code> list in the script at the end of <code>docs/progress.html</code>. The cards and bars update from that list.
+  </footer>
+</main>
+
+<script>
+const PROOF = {
+  live: { label: "Live", css: "p-live" },
+  bots: { label: "Bots", css: "p-bots" },
+  tests: { label: "Tests", css: "p-tests" },
+  code: { label: "Code", css: "p-code" },
+  none: { label: "None", css: "p-none" },
+};
+
+const DONE_PERCENT = 100;
+const GOOD_PERCENT = 70;
+const PART_PERCENT = 40;
+const NOT_STARTED_PERCENT = 0;
+
+const AREAS = [
+  {
+    name: "Foundation",
+    features: [
+      ["Project setup and checks (M0)", 100, "live", "Build, lint, tests, licence policy, Docker infrastructure.", "Nothing."],
+      ["Game data pipeline (M1, M1b)", 100, "tests", "All datasheets, text and 41 world files from your own install.", "Nothing."],
+      ["Collision, roads, water", 85, "live", "Tutorial and open world collision files. Bodies stand on decks, stairs, roofs.", "Temple door wall opens by a quest trigger: not done."],
+      ["Capture decoders", 95, "tests", "99.993% of 25.3 million bundles read.", "Raid group data, a few classes."],
+      ["Client patch", 100, "live", "Cert bypass, Steam offline login.", "Nothing."],
+      ["Login server and launcher (M2)", 90, "live", "Password or Discord login, Linux Proton start, two worlds.", "Windows start is built. A live test on Windows: Unknown."],
+      ["Gateway and registration (M3)", 100, "live", "DTLS and registration with the real client.", "Nothing."],
+      ["Many sims and handoff (M5)", 90, "bots", "1,000 bots cross cell borders.", "Real clients crossing cell borders: Unknown."],
+      ["Database saves", 80, "tests", "Accounts, characters, items, progression, quests, notifications.", "Saves of the systems below that are not done."],
+      ["Admin tools", 85, "tests", "Live panel, studio, GM commands, drop simulator, script editor.", "Pages for systems that are not done."],
+    ],
+  },
+  {
+    name: "Player in the world",
+    features: [
+      ["Create, select, enter world", 95, "live", "New character goes in game.", "Small login burst gaps."],
+      ["Own movement", 65, "live", "No more rubber banding (6d508fc).", "Server body is still off: median 0.156 m open world, 0.219 m tutorial (to-do t1)."],
+      ["See other players", 70, "live", "Look, gear, health, facing, attacks.", "Full live test with many players: not done."],
+      ["Swim, water, falls", 70, "live", "Swim strokes, water hold, fall damage.", "Some swim states not checked."],
+      ["Ship deck", 75, "live", "Bodies stay on the deck, also in fights.", "Fight camera does not fit the model."],
+    ],
+  },
+  {
+    name: "Combat",
+    features: [
+      ["Melee hits", 75, "live", "Homing, lag help, retail damage messages.", "Boar hits miss sometimes. Cause: Unknown."],
+      ["Target lock", 75, "live", "Cause found with gdb (mob flag byte).", "Fix not committed. Live test with fix: not done."],
+      ["Dodge and stamina", 90, "tests", "Match retail (review 2026-10-01).", "Live check."],
+      ["Block", 50, "tests", "Block works.", "No facing check, no guard break, no ranged block. On hold."],
+      ["Ranged and magic", 45, "tests", "Staffs, gauntlets, bows, muskets cast along the aim.", "Abilities, mana use, full projectile rules."],
+      ["Status effects", 50, "code", "Effects from game data.", "Live check of most effects."],
+      ["Death, respawn, revive", 85, "live", "Death screen, 38 respawn points, revive at 1 health.", "Some respawn points."],
+      ["PvP", 35, "tests", "PvP hits roll like retail.", "Flag rules, PvP zones, rewards: not checked."],
+    ],
+  },
+  {
+    name: "Mobs",
+    features: [
+      ["Spawns and health", 90, "tests", "99.3% of creature records explained.", "A few odd records."],
+      ["Mob AI", 65, "live", "1,075 behavior trees from Server.pak. Thorpe fight fixed.", "Janszoon tree is a stand-in. Anchor toss missing."],
+      ["Mob animations", 85, "tests", "736 of 747 creature assets.", "11 assets."],
+      ["Patrols and waypoints", 70, "tests", "12,858 spawns get waypoint paths.", "Live check."],
+      ["Corpses", 85, "tests", "Retail times per creature. Skinned corpses go after 5.5 s.", "Boar times vary in retail."],
+    ],
+  },
+  {
+    name: "Tutorial",
+    features: [
+      ["Tutorial flow", 80, "live", "Ship, beach, Thorpe, campfire, chest, journal.", "Boar misses, anchor toss, temple door, growth explode."],
+      ["Journal auto pin", 100, "live", "You confirmed it live (c21828b).", "Nothing."],
+      ["Tutorial skip and class gear", 85, "tests", "Skip completes Soul Survivor, gives class bag.", "Live check."],
+    ],
+  },
+  {
+    name: "Quests and progression",
+    features: [
+      ["Quest engine", 70, "tests", "Task types from task sheets, turn-in, rewards.", "Task types not used in the beach quests."],
+      ["Beach and wreck quests", 70, "tests", "Start beach chain and wreck quests 4 to 7.", "Full live run."],
+      ["Main story and side quests", 20, "code", "The engine runs them from game data.", "Nobody played them live."],
+      ["XP, levels, attribute points", 80, "tests", "Kill XP, level up, attribute and weapon points.", "Live check after the tutorial."],
+      ["Weapon mastery", 70, "tests", "Mastery XP and saves.", "Live check."],
+      ["Area charting, territory standing", 60, "tests", "Charting XP, standing rank 1.", "Higher ranks and their rewards."],
+      ["Achievements", 60, "code", "Achievement and meta achievement states.", "Live check."],
+    ],
+  },
+  {
+    name: "Items and economy",
+    features: [
+      ["Inventory, gear, paperdoll", 75, "live", "Inventory, slots, gear versions.", "Gear score rules, some item calls."],
+      ["Loot drops", 75, "tests", "Retail loot tables, drop chance, one bag per kill.", "Live check outside the tutorial."],
+      ["Gathering and skinning", 65, "live", "Skinning, nodules, gatherables.", "Tool levels and node respawn, live."],
+      ["Crafting", 65, "live", "Campfire, recipes, craft answers.", "Higher stations and refining, live."],
+      ["Fishing", 50, "tests", "Fishing code, one live run.", "Result of the live run: Unknown."],
+      ["Repair, salvage, transmog, dyes", 40, "code", "Code exists.", "Not checked."],
+      ["Shops and coins", 50, "code", "Coins state, shop code.", "Not checked live."],
+      ["Storage", 40, "code", "Storage search code.", "Not checked."],
+      ["Trading post", 35, "code", "Code and database tables exist.", "No capture check, no live test."],
+    ],
+  },
+  {
+    name: "World systems",
+    features: [
+      ["Fast travel, inns, recall", 40, "code", "Travel rules and saves.", "Not checked live."],
+      ["Mounts", 40, "code", "Mount code and saves.", "Not checked live."],
+      ["Social: chat, friends, groups, voice", 50, "tests", "Chat, friends, groups, raids, voice option.", "Live test with many players."],
+      ["Companies and territories", 30, "code", "Company code, standing.", "Ownership, taxes, upkeep."],
+      ["Expeditions and instances", 30, "code", "Instances, dungeon scripts, mutations.", "No live run of a dungeon."],
+      ["Game modes (queues, arenas, Outpost Rush)", 30, "code", "Queues and matches.", "Mode rules, live test."],
+      ["Wars, sieges, invasions", 15, "code", "Codecs and sign-ups only.", "No capture shows the war flow."],
+      ["Seasons and season pass", 15, "code", "Only the state the journal needs.", "Season pass rewards and progress."],
+      ["Music instruments", 50, "code", "Music code exists.", "Not checked live."],
+    ],
+  },
+  {
+    name: "Not started",
+    features: [
+      ["Housing", 0, "none", "Only the house teleport in travel.", "Houses, furniture, buying."],
+      ["Artifacts", 0, "none", "No code found.", "All."],
+      ["Heartrunes", 0, "none", "No code found.", "All."],
+      ["Town projects", 0, "none", "No code found.", "All."],
+      ["Trophies", 0, "none", "No code found.", "All."],
+    ],
+  },
+];
+
+function barColor(percent) {
+  if (percent >= DONE_PERCENT) return "var(--done)";
+  if (percent >= GOOD_PERCENT) return "var(--good)";
+  if (percent >= PART_PERCENT) return "var(--part)";
+  if (percent > NOT_STARTED_PERCENT) return "var(--low)";
+  return "var(--none)";
+}
+
+function element(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+function meter(percent) {
+  const track = element("div", "meter");
+  const fill = element("span");
+  fill.style.width = `${percent}%`;
+  fill.style.background = barColor(percent);
+  track.append(fill);
+  return track;
+}
+
+function average(values) {
+  return Math.round(values.reduce((sum, value) => sum + value, 0) / values.length);
+}
+
+function featureRow([name, percent, proof, works, missing]) {
+  const row = element("tr");
+  row.append(element("td", "name", name));
+  const bar = element("td", "bar");
+  bar.append(element("span", "pct", `${percent}%`), meter(percent));
+  row.append(bar);
+  const proofCell = element("td");
+  proofCell.append(element("span", `badge ${PROOF[proof].css}`, PROOF[proof].label));
+  row.append(proofCell);
+  row.append(element("td", "works", works));
+  row.append(element("td", "missing", missing));
+  return row;
+}
+
+function areaSection(area) {
+  const section = element("section");
+  const percent = average(area.features.map(([, value]) => value));
+  section.append(element("h2", "", `${area.name}: ${percent}%`));
+  const wrap = element("div", "table-wrap");
+  const table = element("table");
+  const head = element("tr");
+  ["Feature", "Percent", "Proof", "What works", "What is missing"].forEach((title) => head.append(element("th", "", title)));
+  table.append(head);
+  area.features.forEach((feature) => table.append(featureRow(feature)));
+  wrap.append(table);
+  section.append(wrap);
+  return section;
+}
+
+function summaryCard(big, label) {
+  const card = element("div", "card");
+  card.append(element("div", "big", big), element("div", "label", label));
+  return card;
+}
+
+function render() {
+  const all = AREAS.flatMap((area) => area.features);
+  const percents = all.map(([, value]) => value);
+  const done = percents.filter((value) => value >= DONE_PERCENT).length;
+  const notStarted = percents.filter((value) => value === NOT_STARTED_PERCENT).length;
+  const partial = all.length - done - notStarted;
+  const summary = document.getElementById("summary");
+  summary.append(
+    summaryCard(`${average(percents)}%`, "Overall (simple average)"),
+    summaryCard(String(done), "Features done"),
+    summaryCard(String(partial), "Features in progress"),
+    summaryCard(String(notStarted), "Features not started"),
+  );
+  const areas = document.getElementById("areas");
+  AREAS.forEach((area) => areas.append(areaSection(area)));
+}
+
+render();
+</script>
+</body>
+</html>

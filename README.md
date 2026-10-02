@@ -8,6 +8,7 @@ A preservation server emulator for New World: Aeternum. The official servers shu
 
 Design: the architecture spec is kept locally (not in git).
 Research: [docs/NEW_WORLD_EMULATOR_RESEARCH.md](docs/NEW_WORLD_EMULATOR_RESEARCH.md)
+Progress: [docs/progress.html](docs/progress.html): what is done, what is missing, and what comes next. Open it in a browser.
 Client patch: [docs/client-patch.md](docs/client-patch.md): how to make `BlightedNewWorld.exe` (cert bypass) so the real client can enter the emulator, and how to re-make it after a game update.
 
 ## Licences
