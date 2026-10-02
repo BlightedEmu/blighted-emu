@@ -444,3 +444,7 @@ Those remain the property of their respective owners and are used here only for 
 ### Not affiliated
 
 Blighted Emu is not affiliated with, endorsed by, or connected to Amazon Games or Amazon.com, Inc. New World and New World: Aeternum are trademarks of their respective owners. This is an independent, community-built implementation based on reverse engineering and the work of the New World emulation and preservation community. It is provided for educational and game-preservation purposes only.
+
+---
+
+<sub>This project was moved from a private repository to GitHub. During the move, some of the commit history was changed, so some commit dates and the order of some commits are not exact.</sub>
