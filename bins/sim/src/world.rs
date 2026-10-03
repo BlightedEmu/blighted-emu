@@ -2600,10 +2600,29 @@ impl SimWorld {
                 );
                 let rules = &self.achievement_rules;
                 let achieved = |id: &str| player.flow.has_achievement(rules, id);
+                let content = &self.content;
+                let level = |progression: Option<&str>, points: bool| match progression {
+                    None => Some(
+                        content
+                            .progression
+                            .level_of(player.experience)
+                            .saturating_add(1),
+                    ),
+                    Some(id) => {
+                        let mastery = content.progression.mastery(id)?;
+                        let experience = player.masteries.experience(mastery);
+                        Some(if points {
+                            experience
+                        } else {
+                            u32::from(mastery.rank_of(experience).0)
+                        })
+                    }
+                };
                 let facts = Facts {
                     held: &held,
                     places: Some(&places),
                     achieved: Some(&achieved),
+                    level: Some(&level),
                 };
                 for quest in quests.iter_mut() {
                     effects.extend(quest.run.sync(&facts, now_ms));
@@ -3043,7 +3062,7 @@ impl SimWorld {
                 (!tags.is_empty()).then(|| (request.interaction, tags.to_vec()));
             self.mount_interaction(entity, now_ms);
             match request.kind {
-                TALK_KIND => self.talk(entity, number, request),
+                TALK_KIND => self.talk(entity, number, request, name, now_ms),
                 TOWN_BOARD_KIND => self.open_board(entity, number, request, name),
                 CRAFTING_STATION_KIND => self.open_station(entity, number, request),
                 LORE_KIND => self.read_lore(entity, number, request, name, now_ms),

@@ -376,6 +376,9 @@ impl TriggerArea {
     }
 }
 
+/// Joins an NPC id to the state number in a conversation state id without its NPC
+/// (`NPC_16195_State_3`).
+const CONVERSATION_STATE_MARK: &str = "_State_";
 /// Separates the numbers of an `OverrideLocation` cell.
 const LOCATION_SEPARATOR: char = ' ';
 /// Milliseconds per second of a `TaskTimer` duration.
@@ -496,6 +499,21 @@ enum TaskKind {
     /// string, we will increment progress"). Retail: the vault step of `12A_MSQ_03` was done 49
     /// ms after the storage interaction ended (vault capture 2026-09-27, 57.548 s and 57.597 s).
     Interact { tag: String, count: u32 },
+    /// Done when the player starts a talk with NPC `npc` (`TaskConversationState`; client: "Task
+    /// that completes when the player enters a particular conversation state"). Retail
+    /// (`12a_side_07_forgering`): the talk with `@12_JeongIseul` started at 220.660 s, the server
+    /// accepted it at 220.684 s and the step was done at 220.696 s.
+    ConversationState(String),
+    /// Done while the player's level is at least `target` (`TaskHaveLevel`; client: "Succeeds if
+    /// player is/achieves target level. If ItemName is provided for target Categorical
+    /// Progression Id, then target level within that progression succeeds"): the character's
+    /// level without a `progression`, else that progression's rank, or its points with
+    /// `points` (`ShouldCheckPoints`).
+    HaveLevel {
+        progression: Option<String>,
+        target: u32,
+        points: bool,
+    },
     /// Done once the player stayed `duration_ms` in its `POITag` (`PatrolTask`; client: "Variant of
     /// TaskGoTo that completes once the player is in the location of a given duration"). A
     /// leave starts the stay again (Inferred: "is in the location" for the whole time).
@@ -596,6 +614,8 @@ pub struct TaskRow {
     pub interact_tag: Option<String>,
     /// `GameModeId`.
     pub game_mode_id: Option<String>,
+    /// `ShouldCheckPoints`.
+    pub should_check_points: bool,
     /// A mission's task whose items go back at the turn-in (`MissionData` overrides; retail: two
     /// item changes 31 to 35 ms after each 2461 turn-in, board capture 2026-06-13).
     pub returned_on_turn_in: bool,
@@ -692,6 +712,7 @@ pub fn task_rows(tables: &Tables) -> Vec<TaskRow> {
             fail_on_condition: row.fail_on_condition.clone(),
             interact_tag: row.interact_tag.clone(),
             game_mode_id: row.game_mode_id.clone(),
+            should_check_points: row.should_check_points.unwrap_or_default(),
             returned_on_turn_in: false,
             chest_drop_probability: row.chest_drop_probability,
             enforce_location: row.enforce_location_requirement.unwrap_or_default(),
@@ -903,6 +924,23 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "taskgamemode" => {
             filled(&row.game_mode_id).map_or(TaskKind::Unsupported, TaskKind::GameMode)
         }
+        "taskconversationstate" => filled(&row.item_name)
+            .or_else(|| {
+                filled(&row.ui_screen_tag).and_then(|state| {
+                    state
+                        .rsplit_once(CONVERSATION_STATE_MARK)
+                        .map(|(npc, _)| npc.to_owned())
+                })
+            })
+            .map_or(TaskKind::Unsupported, TaskKind::ConversationState),
+        "taskhavelevel" => TaskKind::HaveLevel {
+            progression: filled(&row.item_name),
+            target: row
+                .target_qty
+                .and_then(|target| u32::try_from(target).ok())
+                .unwrap_or_default(),
+            points: row.should_check_points,
+        },
         "patroltask" => filled(&row.poi_tag).map_or(TaskKind::Unsupported, |place| {
             TaskKind::Patrol {
                 place,
@@ -1098,7 +1136,12 @@ pub enum Event<'a> {
     Interacted(&'a str),
     /// The player entered the game mode of this id (an instance of an expedition or a quest).
     GameModeEntered(&'a str),
+    /// The player started a talk with the NPC of this id.
+    Talked(&'a str),
 }
+
+/// The player's level of a progression id (`None`: the character), as its rank or its points.
+pub type LevelOf<'a> = dyn Fn(Option<&str>, bool) -> Option<u32> + 'a;
 
 /// What the player is now, for the tasks done while it is so.
 #[derive(Clone, Copy)]
@@ -1110,6 +1153,9 @@ pub struct Facts<'a> {
     pub places: Option<&'a [&'a str]>,
     /// Whether it has an achievement; `None` when the server does not know.
     pub achieved: Option<&'a dyn Fn(&str) -> bool>,
+    /// Its level: the character's (counted from 1) without a progression id, else that
+    /// progression's rank, or its points when asked; `None` when the server does not know it.
+    pub level: Option<&'a LevelOf<'a>>,
 }
 
 /// Where a task the quest tracker shows stands.
@@ -1410,6 +1456,7 @@ impl ObjectiveRun {
                 held,
                 places: None,
                 achieved: None,
+                level: None,
             },
             now_ms,
         )
@@ -1474,6 +1521,14 @@ impl ObjectiveRun {
                 TaskKind::HasAchievement(achievement) => {
                     facts.achieved.is_some_and(|achieved| achieved(achievement))
                 }
+                TaskKind::HaveLevel {
+                    progression,
+                    target,
+                    points,
+                } => facts
+                    .level
+                    .and_then(|level| level(progression.as_deref(), *points))
+                    .is_some_and(|level| level >= *target),
                 _ => false,
             };
             if met {
@@ -1648,7 +1703,8 @@ impl ObjectiveRun {
                 (TaskKind::Interact { tag, count }, Event::Interacted(seen)) => {
                     (tag.eq_ignore_ascii_case(seen), 1, *count)
                 }
-                (TaskKind::GameMode(mode), Event::GameModeEntered(seen)) => {
+                (TaskKind::GameMode(mode), Event::GameModeEntered(seen))
+                | (TaskKind::ConversationState(mode), Event::Talked(seen)) => {
                     (mode.eq_ignore_ascii_case(seen), 1, 1)
                 }
                 _ => (false, 1, 1),
@@ -1945,6 +2001,7 @@ pub(crate) mod tests {
             held: &[],
             places: Some(places),
             achieved: None,
+            level: None,
         };
         run.sync(&facts(&inside), 0);
         run.sync(&facts(&outside), STAY_MS / 2);
@@ -1977,6 +2034,7 @@ pub(crate) mod tests {
             held: &[],
             places: Some(places),
             achieved: None,
+            level: None,
         };
         run.sync(&facts(&["12a_leavelochnir"]), 0);
         assert!(!run.is_done("Enter"), "not in the causeway volume");
@@ -1988,6 +2046,68 @@ pub(crate) mod tests {
         assert!(!run.is_done("Leave"), "still in Lochnir");
         run.sync(&facts(&[]), 0);
         assert!(run.finished(), "out of Lochnir");
+    }
+
+    #[test]
+    fn a_have_level_task_waits_for_the_character_or_progression_level() {
+        let rows = vec![
+            container("Root", "SimpleTaskContainer", &["Level", "Fishing"]),
+            TaskRow {
+                target_qty: Some(25),
+                ..row("Level", "TaskHaveLevel")
+            },
+            TaskRow {
+                target_qty: Some(100),
+                ..with_item("Fishing", "TaskHaveLevel", "Fishing")
+            },
+        ];
+        let tree = Arc::new(TaskBook::new(rows).tree("Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        let levels = |character: u32, fishing: u32| {
+            move |progression: Option<&str>, _points: bool| match progression {
+                None => Some(character),
+                Some(_) => Some(fishing),
+            }
+        };
+        let low = levels(24, 100);
+        let facts = Facts {
+            held: &[],
+            places: None,
+            achieved: None,
+            level: Some(&low),
+        };
+        run.sync(&facts, 0);
+        assert!(!run.is_done("Level") && run.is_done("Fishing"));
+        let high = levels(25, 100);
+        let facts = Facts {
+            level: Some(&high),
+            ..facts
+        };
+        run.sync(&facts, 0);
+        assert!(run.finished(), "level 25 is reached");
+    }
+
+    #[test]
+    fn a_conversation_state_task_is_done_by_a_talk_with_its_npc() {
+        let rows = vec![
+            container("Root", "SimpleTaskContainer", &["Iseul", "Npc"]),
+            TaskRow {
+                ui_screen_tag: Some("12_01_JeongIseul".to_owned()),
+                ..with_item("Iseul", "TaskConversationState", "12_JeongIseul")
+            },
+            TaskRow {
+                ui_screen_tag: Some("NPC_16195_State_3".to_owned()),
+                ..row("Npc", "TASKCONVERSATIONSTATE")
+            },
+        ];
+        let tree = Arc::new(TaskBook::new(rows).tree("Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        run.event(Event::Talked("12_Grace"), 0);
+        assert!(!run.is_done("Iseul"));
+        run.event(Event::Talked("12_JeongIseul"), 0);
+        assert!(run.is_done("Iseul"));
+        run.event(Event::Talked("NPC_16195"), 0);
+        assert!(run.finished());
     }
 
     /// A mission's tasks at its place: a kill and an item from containers there.
@@ -2026,6 +2146,7 @@ pub(crate) mod tests {
             held: &[],
             places: Some(places),
             achieved: None,
+            level: None,
         };
         run.sync(&facts(&outside), 0);
         run.event(wolf, 0);
@@ -2562,6 +2683,7 @@ pub(crate) mod tests {
             held: &[],
             places: Some(places),
             achieved: None,
+            level: None,
         };
         run.sync(&facts(&["drowned_cavern_30122"]), NOW);
         assert!(!run.is_done("Area"), "elsewhere");
@@ -2588,6 +2710,7 @@ pub(crate) mod tests {
                 held: &[],
                 places: Some(&["drowned_cavern_30122"]),
                 achieved: None,
+                level: None,
             },
             NOW,
         );
@@ -2901,6 +3024,7 @@ pub(crate) mod tests {
                         held: &[],
                         places: Some(places),
                         achieved: Some(&achieved),
+                        level: None,
                     },
                     now,
                 ));
@@ -3298,6 +3422,7 @@ pub(crate) mod tests {
                     held: &nothing,
                     places: Some(places),
                     achieved: Some(&achieved),
+                    level: None,
                 },
                 NOW,
             )

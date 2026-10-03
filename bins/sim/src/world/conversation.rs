@@ -20,18 +20,35 @@ const TALK_ACCEPTED: u8 = 1;
 /// (Inferred: the client takes the NPC from its own level data and does not read it, so one name
 /// serves every NPC).
 const TALK_NAME: &[u8] = b"@01_Reese";
+/// The mark before an NPC id in a talk request's name (`@12_JeongIseul`).
+const NPC_NAME_MARK: char = '@';
 
 impl SimWorld {
-    /// Player `number` (`entity`) talks to an NPC: the talk is accepted at once (3743 kind 63
-    /// status 1). The client opens the conversation from its own data and ends it with its cancel
-    /// (2473); retail sends no 3746.
-    pub(super) fn talk(&mut self, entity: Entity, number: u64, request: InteractionRequest) {
+    /// Player `number` (`entity`) talks to an NPC that the request names `name` (`@` and the
+    /// NPC id: `@12_JeongIseul`) at `now_ms`: the talk is accepted at once (3743 kind 63 status
+    /// 1), and it is a talk with that NPC for the player's quests (`TaskConversationState`). The
+    /// client opens the conversation from its own data and ends it with its cancel (2473);
+    /// retail sends no 3746.
+    pub(super) fn talk(
+        &mut self,
+        entity: Entity,
+        number: u64,
+        request: InteractionRequest,
+        name: &[u8],
+        now_ms: u64,
+    ) {
         let Some(player) = self.world.get::<Player>(entity) else {
             return;
         };
         tracing::debug!(player = number, target = ?request.target, "talk");
         let answer = gather_answer(number, request, TALK_ACCEPTED, TALK_NAME);
         send_now(&mut self.combat_messages, &player.connection, &[answer]);
+        let npc = String::from_utf8_lossy(name);
+        let npc = npc.trim_start_matches(NPC_NAME_MARK).trim_end_matches('\0');
+        if !npc.is_empty() {
+            self.quest_event(number, crate::objectives::Event::Talked(npc), now_ms);
+            self.update_quest_tracker(number);
+        }
     }
 
     /// Player `number` (`entity`) accepts the quest whose lowercase id has the CRC-32
