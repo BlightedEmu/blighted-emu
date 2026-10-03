@@ -526,6 +526,10 @@ enum TaskKind {
         state: u32,
         count: u32,
     },
+    /// Starts the objective of this id and is done when it ends (`TaskObjective`; client: "adds
+    /// an additional objective to the player, and tracks it through until completion"): the
+    /// steps of the weapon quest chains and the faction hand-offs.
+    Objective(String),
     /// Done when the player starts a talk with NPC `npc` (`TaskConversationState`; client: "Task
     /// that completes when the player enters a particular conversation state"). Retail
     /// (`12a_side_07_forgering`): the talk with `@12_JeongIseul` started at 220.660 s, the server
@@ -968,6 +972,9 @@ fn kind_of(row: &TaskRow) -> TaskKind {
                 })
             })
             .map_or(TaskKind::Unsupported, TaskKind::ConversationState),
+        "taskobjective" => {
+            filled(&row.item_name).map_or(TaskKind::Unsupported, TaskKind::Objective)
+        }
         "taskrequiregatheritems" => TaskKind::RequireGather {
             item: item(),
             count,
@@ -1188,6 +1195,8 @@ pub enum Event<'a> {
     GameModeEntered(&'a str),
     /// The player started a talk with the NPC of this id.
     Talked(&'a str),
+    /// The player's objective of this id ended (now, or before it was asked for).
+    ObjectiveDone(&'a str),
     /// The player got this many of this item from a gather.
     Gathered {
         /// The item id.
@@ -1264,6 +1273,8 @@ pub enum Effect {
     GiveItem(String, u32),
     /// Fire this game event: its whisper plays and its reward goes to the player.
     GameEvent(String),
+    /// Start the objective of this id for the player, as a chain step.
+    StartObjective(String),
     /// This task is done.
     Done(String),
 }
@@ -1816,7 +1827,8 @@ impl ObjectiveRun {
                     *count,
                 ),
                 (TaskKind::GameMode(mode), Event::GameModeEntered(seen))
-                | (TaskKind::ConversationState(mode), Event::Talked(seen)) => {
+                | (TaskKind::ConversationState(mode), Event::Talked(seen))
+                | (TaskKind::Objective(mode), Event::ObjectiveDone(seen)) => {
                     (mode.eq_ignore_ascii_case(seen), 1, 1)
                 }
                 _ => (false, 1, 1),
@@ -1940,6 +1952,9 @@ impl ObjectiveRun {
             TaskKind::TriggerGameEvent(event) => {
                 effects.push(Effect::GameEvent(event.clone()));
                 self.complete(index, now_ms, effects);
+            }
+            TaskKind::Objective(objective) => {
+                effects.push(Effect::StartObjective(objective.clone()));
             }
             TaskKind::GiveItem { item, count, .. } => {
                 effects.push(Effect::GiveItem(item.clone(), *count));

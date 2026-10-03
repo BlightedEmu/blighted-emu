@@ -2415,10 +2415,24 @@ impl SimWorld {
         }
     }
 
+    /// Starts objective `objective` for player `number` for a quest's `TaskObjective`, as a chain
+    /// step; one done before (and not repeatable) is done for the task at once.
+    fn start_tracked_objective(&mut self, number: u64, objective: &str, now_ms: u64) {
+        match self.start_quest(number, objective, now_ms) {
+            Ok(()) => {}
+            Err(QuestRefusal::Done) => {
+                self.quest_event(number, Event::ObjectiveDone(objective), now_ms);
+            }
+            Err(refusal) => {
+                tracing::debug!(player = number, objective, %refusal, "tracked objective not started");
+            }
+        }
+    }
+
     /// Ends the finished quest `objective` of player `number`: it joins the done list, its
-    /// achievement is set, the achievements of its temporary unlocks are cleared, and its
-    /// rewards go to the player: the coins and experience of its
-    /// success game event, and its items into the bag.
+    /// achievement is set, the achievements of its temporary unlocks are cleared, its rewards go
+    /// to the player (the coins and experience of its success game event, and its items into the
+    /// bag), and the quests that track it hear of its end.
     fn complete_quest(&mut self, number: u64, objective: &str) {
         let Some(quests) = self.quests.get_mut(&number) else {
             return;
@@ -2479,6 +2493,11 @@ impl SimWorld {
         }
         let items: Vec<(String, u32)> = quest.def.reward.into_iter().chain(reward.item).collect();
         self.give_loot(number, items, self.last_now_ms);
+        self.quest_event(
+            number,
+            Event::ObjectiveDone(&quest.def.id),
+            self.last_now_ms,
+        );
     }
 
     /// Feeds game event `event` to the quests of player `number`.
@@ -2535,6 +2554,7 @@ impl SimWorld {
             let mut set = Vec::new();
             let mut fired = Vec::new();
             let mut given = Vec::new();
+            let mut started = Vec::new();
             if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                 for effect in pending.drain(..) {
                     match effect {
@@ -2552,6 +2572,7 @@ impl SimWorld {
                         }
                         Effect::GameEvent(id) => fired.push(id),
                         Effect::GiveItem(id, count) => given.push((id, count)),
+                        Effect::StartObjective(id) => started.push(id),
                         Effect::Done(_) => {}
                     }
                 }
@@ -2561,6 +2582,9 @@ impl SimWorld {
             }
             if !given.is_empty() {
                 self.give_loot(number, given, now_ms);
+            }
+            for objective in started {
+                self.start_tracked_objective(number, &objective, now_ms);
             }
             let Some(quests) = self.quests.get_mut(&number) else {
                 return;
@@ -9677,6 +9701,8 @@ mod tests {
     const JOURNEY: &str = "Journey";
     /// A quest whose only task is a storage interact (the vault step of `12A_MSQ_03`).
     const VAULT_QUEST: &str = "Q_Vault";
+    /// A quest whose one step tracks [`QUEST`] (`TaskObjective`, as the weapon quest chains).
+    const TRACKER_QUEST: &str = "Q_Tracker";
     const STORAGE_TAG: &str = "SettlementStorage";
     /// The retail Monarch's Bluffs settlement capital and the facet entity its storage
     /// interaction names (vault capture 2026-09-27).
@@ -9739,6 +9765,7 @@ mod tests {
                 side(SIDE_QUEST),
                 side(OTHER_SIDE_QUEST),
                 objective(VAULT_QUEST, "q_vault_root", false),
+                objective(TRACKER_QUEST, "q_track_root", false),
                 ObjectiveRow {
                     id: MISSION_TEMPLATE.to_owned(),
                     root: "m_root".to_owned(),
@@ -9750,6 +9777,11 @@ mod tests {
                 task("q_root", "ConsecutiveTaskContainer", &["q_wait"]),
                 task("q_wait", "TaskTimer", &[]),
                 task("q_vault_root", "ConsecutiveTaskContainer", &["q_vault"]),
+                task("q_track_root", "ConsecutiveTaskContainer", &["q_track"]),
+                TaskRow {
+                    item_name: Some(QUEST.to_owned()),
+                    ..task("q_track", "TaskObjective", &[])
+                },
                 TaskRow {
                     interact_tag: Some(STORAGE_TAG.to_owned()),
                     ..task("q_vault", "TaskInteract", &[])
@@ -9842,6 +9874,38 @@ mod tests {
         assert_eq!(done.done, [QUEST]);
         assert_eq!(world.start_quest(1, QUEST, NOW), Err(QuestRefusal::Done));
         assert_eq!(world.start_quest(1, REPEATABLE_QUEST, NOW), Ok(()));
+    }
+
+    #[test]
+    fn an_objective_task_starts_its_quest_and_ends_with_it() {
+        let mut world = quest_world();
+        world.start_quest(1, TRACKER_QUEST, NOW).expect("tracker");
+        let saved = world.positions()[0].quests.clone().expect("saved");
+        let running: Vec<&str> = saved.active.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            running,
+            [TRACKER_QUEST, QUEST],
+            "the step started its quest"
+        );
+        world.tick_quests(NOW + QUEST_TIMER_MS);
+        world.tick_quests(NOW + QUEST_TIMER_MS + 1);
+        let done = world.positions()[0].quests.clone().expect("the ends");
+        assert!(done.active.is_empty(), "both ended: {:?}", done.active);
+        assert_eq!(done.done, [QUEST, TRACKER_QUEST]);
+    }
+
+    #[test]
+    fn an_objective_task_of_a_quest_done_before_is_done_at_once() {
+        let mut world = quest_world();
+        world.start_quest(1, QUEST, NOW).expect("main");
+        world.tick_quests(NOW + QUEST_TIMER_MS);
+        world
+            .start_quest(1, TRACKER_QUEST, NOW + QUEST_TIMER_MS)
+            .expect("tracker");
+        world.tick_quests(NOW + QUEST_TIMER_MS + 1);
+        let done = world.positions()[0].quests.clone().expect("the ends");
+        assert!(done.active.is_empty(), "{:?}", done.active);
+        assert_eq!(done.done, [QUEST, TRACKER_QUEST]);
     }
 
     #[test]

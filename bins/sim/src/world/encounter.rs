@@ -1523,6 +1523,10 @@ impl Tutorial {
                 Effect::GameEvent(event) => {
                     tracing::debug!(player = self.owner, %event, "tutorial game event");
                 }
+                // The tutorial's tree starts no objective (build 25810808).
+                Effect::StartObjective(objective) => {
+                    tracing::debug!(player = self.owner, %objective, "tutorial objective start");
+                }
                 Effect::Done(task) => {
                     let fights = FIGHTS_AFTER
                         .iter()
