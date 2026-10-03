@@ -533,6 +533,10 @@ enum TaskKind {
     /// an additional objective to the player, and tracks it through until completion"): the
     /// steps of the weapon quest chains and the faction hand-offs.
     Objective(String),
+    /// Done while the player is in territory `territory` (`TaskGoToTerritory`; client: "Variant
+    /// of TaskGoTo that sends a player to a territory"), and in the point of interest `poi` when
+    /// it has one (`TaskGoToPOITagOnTerritory`: "a poi on a specific territory").
+    GoToTerritory { territory: u32, poi: Option<String> },
     /// Done when the player starts a talk with NPC `npc` (`TaskConversationState`; client: "Task
     /// that completes when the player enters a particular conversation state"). Retail
     /// (`12a_side_07_forgering`): the talk with `@12_JeongIseul` started at 220.660 s, the server
@@ -660,6 +664,8 @@ pub struct TaskRow {
     pub enforce_location: bool,
     /// `StayActive`: the task runs on when it is done.
     pub stay_active: bool,
+    /// `TerritoryID`: the territory of a go-to-territory task (`0` names none).
+    pub territory_id: Option<u32>,
 }
 
 /// Every task row with an index by lowercase task id, made once for the trees of many
@@ -753,6 +759,11 @@ pub fn task_rows(tables: &Tables) -> Vec<TaskRow> {
             returned_on_turn_in: false,
             chest_drop_probability: row.chest_drop_probability,
             enforce_location: row.enforce_location_requirement.unwrap_or_default(),
+            territory_id: row
+                .territory_id
+                .as_deref()
+                .and_then(|cell| cell.trim().parse().ok())
+                .filter(|territory| *territory != 0),
             stay_active: row
                 .stay_active
                 .as_deref()
@@ -975,6 +986,20 @@ fn kind_of(row: &TaskRow) -> TaskKind {
                 })
             })
             .map_or(TaskKind::Unsupported, TaskKind::ConversationState),
+        "taskgototerritory" => {
+            row.territory_id
+                .map_or(TaskKind::Unsupported, |territory| TaskKind::GoToTerritory {
+                    territory,
+                    poi: None,
+                })
+        }
+        "taskgotopoitagonterritory" => match (row.territory_id, filled(&row.poi_tag)) {
+            (Some(territory), Some(poi)) => TaskKind::GoToTerritory {
+                territory,
+                poi: Some(poi),
+            },
+            _ => TaskKind::Unsupported,
+        },
         "taskuseitems" => filled(&row.item_name).map_or(TaskKind::Unsupported, |item| {
             TaskKind::UseItems { item, count }
         }),
@@ -1237,6 +1262,8 @@ pub struct Facts<'a> {
     /// Its level: the character's (counted from 1) without a progression id, else that
     /// progression's rank, or its points when asked; `None` when the server does not know it.
     pub level: Option<&'a LevelOf<'a>>,
+    /// The territories (zones) it is in; `None` when the server does not know them.
+    pub territories: Option<&'a [u32]>,
 }
 
 /// Where a task the quest tracker shows stands.
@@ -1563,6 +1590,7 @@ impl ObjectiveRun {
                 places: None,
                 achieved: None,
                 level: None,
+                territories: None,
             },
             now_ms,
         )
@@ -1618,6 +1646,12 @@ impl ObjectiveRun {
                     .iter()
                     .any(|(id, _, worn)| *worn && id.eq_ignore_ascii_case(item)),
                 TaskKind::GoToPoi(tag) => inside(tag) == Some(true),
+                TaskKind::GoToTerritory { territory, poi } => {
+                    facts
+                        .territories
+                        .is_some_and(|territories| territories.contains(territory))
+                        && poi.as_deref().is_none_or(|tag| inside(tag) == Some(true))
+                }
                 TaskKind::TriggerArea {
                     place: Some(tag),
                     leave,
@@ -2145,6 +2179,7 @@ pub(crate) mod tests {
             places: Some(places),
             achieved: None,
             level: None,
+            territories: None,
         };
         run.sync(&facts(&inside), 0);
         run.sync(&facts(&outside), STAY_MS / 2);
@@ -2178,6 +2213,7 @@ pub(crate) mod tests {
             places: Some(places),
             achieved: None,
             level: None,
+            territories: None,
         };
         run.sync(&facts(&["12a_leavelochnir"]), 0);
         assert!(!run.is_done("Enter"), "not in the causeway volume");
@@ -2218,12 +2254,14 @@ pub(crate) mod tests {
             places: None,
             achieved: None,
             level: Some(&low),
+            territories: None,
         };
         run.sync(&facts, 0);
         assert!(!run.is_done("Level") && run.is_done("Fishing"));
         let high = levels(25, 100);
         let facts = Facts {
             level: Some(&high),
+            territories: None,
             ..facts
         };
         run.sync(&facts, 0);
@@ -2314,6 +2352,35 @@ pub(crate) mod tests {
         );
         assert!(!run.finished(), "the talk waits");
         assert_eq!(run.temporary_unlocks(), [SWAP, "SwapActive_Later"]);
+    }
+
+    #[test]
+    fn a_territory_task_waits_for_its_territory_and_its_point_of_interest() {
+        // Client row `Quest_03190_Task_8`: Windsward's settlement on territory 12.
+        const SETTLEMENT: &str = "Windsward_Settlement_01";
+        let rows = vec![TaskRow {
+            territory_id: Some(12),
+            poi_tag: Some(SETTLEMENT.to_owned()),
+            ..row("Go", "TASKGOTOPOITAGONTERRITORY")
+        }];
+        let tree = Arc::new(TaskBook::new(rows).tree("Go").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        let mut sync = |territories: &[u32], places: &[&str]| {
+            run.sync(
+                &Facts {
+                    held: &[],
+                    places: Some(places),
+                    achieved: None,
+                    level: None,
+                    territories: Some(territories),
+                },
+                0,
+            );
+            run.finished()
+        };
+        assert!(!sync(&[6], &[SETTLEMENT]), "another territory");
+        assert!(!sync(&[12], &[]), "not at the settlement");
+        assert!(sync(&[12], &[SETTLEMENT]));
     }
 
     #[test]
@@ -2422,6 +2489,7 @@ pub(crate) mod tests {
             places: Some(places),
             achieved: None,
             level: None,
+            territories: None,
         };
         run.sync(&facts(&outside), 0);
         run.event(wolf, 0);
@@ -2959,6 +3027,7 @@ pub(crate) mod tests {
             places: Some(places),
             achieved: None,
             level: None,
+            territories: None,
         };
         run.sync(&facts(&["drowned_cavern_30122"]), NOW);
         assert!(!run.is_done("Area"), "elsewhere");
@@ -2986,6 +3055,7 @@ pub(crate) mod tests {
                 places: Some(&["drowned_cavern_30122"]),
                 achieved: None,
                 level: None,
+                territories: None,
             },
             NOW,
         );
@@ -3300,6 +3370,7 @@ pub(crate) mod tests {
                         places: Some(places),
                         achieved: Some(&achieved),
                         level: None,
+                        territories: None,
                     },
                     now,
                 ));
@@ -3698,6 +3769,7 @@ pub(crate) mod tests {
                     places: Some(places),
                     achieved: Some(&achieved),
                     level: None,
+                    territories: None,
                 },
                 NOW,
             )

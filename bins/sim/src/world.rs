@@ -2653,11 +2653,20 @@ impl SimWorld {
                         })
                     }
                 };
+                // The territory of each area or point of interest the client named.
+                let mut territories: Vec<u32> = player
+                    .territories
+                    .iter()
+                    .filter_map(|id| content.charting.territory_of(u32::from(*id)))
+                    .collect();
+                territories.sort_unstable();
+                territories.dedup();
                 let facts = Facts {
                     held: &held,
                     places: Some(&places),
                     achieved: Some(&achieved),
                     level: Some(&level),
+                    territories: Some(&territories),
                 };
                 for quest in quests.iter_mut() {
                     effects.extend(quest.run.sync(&facts, now_ms));
