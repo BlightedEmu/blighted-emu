@@ -496,6 +496,10 @@ enum TaskKind {
     /// string, we will increment progress"). Retail: the vault step of `12A_MSQ_03` was done 49
     /// ms after the storage interaction ended (vault capture 2026-09-27, 57.548 s and 57.597 s).
     Interact { tag: String, count: u32 },
+    /// Done once the player stayed `duration_ms` in its `POITag` (`PatrolTask`; client: "Variant of
+    /// TaskGoTo that completes once the player is in the location of a given duration"). A
+    /// leave starts the stay again (Inferred: "is in the location" for the whole time).
+    Patrol { place: String, duration_ms: u64 },
     /// Done when the player enters the game mode of this id (`TaskGameMode`; client: "Task that
     /// progresses when the player enters the target Game Mode").
     GameMode(String),
@@ -895,6 +899,13 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "taskgamemode" => {
             filled(&row.game_mode_id).map_or(TaskKind::Unsupported, TaskKind::GameMode)
         }
+        "patroltask" => filled(&row.poi_tag).map_or(TaskKind::Unsupported, |place| {
+            TaskKind::Patrol {
+                place,
+                // Durations are whole minutes or less: the cast cannot overflow.
+                duration_ms: (row.duration.unwrap_or_default().max(0.0) * MS_PER_SECOND) as u64,
+            }
+        }),
         "taskgiveitem" => {
             filled(&row.item_name).map_or(TaskKind::Unsupported, |item| TaskKind::GiveItem {
                 item,
@@ -1412,6 +1423,7 @@ impl ObjectiveRun {
         if let Some(places) = facts.places {
             self.places = Some(places.iter().map(|place| place.to_lowercase()).collect());
         }
+        self.sync_patrols(now_ms);
         let mut effects = Vec::new();
         for index in 0..self.states.len() {
             let TaskState::Active { progress, due_ms } = self.states[index] else {
@@ -1509,6 +1521,27 @@ impl ObjectiveRun {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Starts the stay of each running patrol task whose place the player is in, and ends it
+    /// for each one it left: [`ObjectiveRun::tick`] ends a stay that lasted.
+    fn sync_patrols(&mut self, now_ms: u64) {
+        let tree = Arc::clone(&self.tree);
+        for (index, task) in tree.tasks.iter().enumerate() {
+            let TaskKind::Patrol { place, duration_ms } = &task.kind else {
+                continue;
+            };
+            let TaskState::Active { progress, due_ms } = self.states[index] else {
+                continue;
+            };
+            let inside = self.is_in(Some(place));
+            let due_ms = match (inside, due_ms) {
+                (true, None) => Some(now_ms.saturating_add(*duration_ms)),
+                (true, due) => due,
+                (false, _) => None,
+            };
+            self.states[index] = TaskState::Active { progress, due_ms };
+        }
     }
 
     /// The kinds of the tasks that run.
@@ -1888,6 +1921,34 @@ pub(crate) mod tests {
                 ("1605_0301_BlessedRelic".to_owned(), 1)
             ]
         );
+    }
+
+    #[test]
+    fn a_patrol_task_needs_a_whole_stay_in_its_place() {
+        const STAY_MS: u64 = 90_000;
+        let rows = vec![TaskRow {
+            poi_tag: Some("poi_30037_factionarea".to_owned()),
+            duration: Some(90.0),
+            ..row("Patrol", "PatrolTask")
+        }];
+        let tree = Arc::new(TaskBook::new(rows).tree("Patrol").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        let inside = ["poi_30037_factionarea"];
+        let outside: [&str; 0] = [];
+        let facts = |places| Facts {
+            held: &[],
+            places: Some(places),
+            achieved: None,
+        };
+        run.sync(&facts(&inside), 0);
+        run.sync(&facts(&outside), STAY_MS / 2);
+        run.tick(STAY_MS);
+        assert!(!run.finished(), "a leave starts the stay again");
+        run.sync(&facts(&inside), STAY_MS);
+        run.tick(2 * STAY_MS - 1);
+        assert!(!run.finished());
+        run.tick(2 * STAY_MS);
+        assert!(run.finished(), "a whole stay ends it");
     }
 
     /// A mission's tasks at its place: a kill and an item from containers there.
