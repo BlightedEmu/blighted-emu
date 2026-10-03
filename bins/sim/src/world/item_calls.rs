@@ -36,6 +36,7 @@ use super::stamina::Stamina;
 use super::statics::interactor_target;
 use super::storage_search::SearchFor;
 use super::{Body, Player, SimWorld, gather_answer, send_now};
+use crate::objectives::Event;
 
 /// The interaction kind of a storage chest and of a bag of dropped items (`OpenStorage`).
 pub(super) const OPEN_STORAGE_KIND: u8 = 26;
@@ -446,6 +447,7 @@ impl SimWorld {
             })
             .collect();
         send_now(&mut self.combat_messages, &connection, &scripts);
+        self.quest_event(number, Event::ItemUsed(&item_id), now_ms);
         tracing::debug!(player = number, item = %item_id, "used");
     }
 

@@ -526,6 +526,9 @@ enum TaskKind {
         state: u32,
         count: u32,
     },
+    /// Done after `count` uses of this item (`TaskUseItems`; client: "The player needs to use the
+    /// specific item"): a quest potion (`09A_S0_SporeElixir`).
+    UseItems { item: String, count: u32 },
     /// Starts the objective of this id and is done when it ends (`TaskObjective`; client: "adds
     /// an additional objective to the player, and tracks it through until completion"): the
     /// steps of the weapon quest chains and the faction hand-offs.
@@ -972,6 +975,9 @@ fn kind_of(row: &TaskRow) -> TaskKind {
                 })
             })
             .map_or(TaskKind::Unsupported, TaskKind::ConversationState),
+        "taskuseitems" => filled(&row.item_name).map_or(TaskKind::Unsupported, |item| {
+            TaskKind::UseItems { item, count }
+        }),
         "taskobjective" => {
             filled(&row.item_name).map_or(TaskKind::Unsupported, TaskKind::Objective)
         }
@@ -1195,6 +1201,8 @@ pub enum Event<'a> {
     GameModeEntered(&'a str),
     /// The player started a talk with the NPC of this id.
     Talked(&'a str),
+    /// The player used one of this item.
+    ItemUsed(&'a str),
     /// The player's objective of this id ended (now, or before it was asked for).
     ObjectiveDone(&'a str),
     /// The player got this many of this item from a gather.
@@ -1529,7 +1537,8 @@ impl ObjectiveRun {
                         | TaskKind::Interact { count, .. }
                         | TaskKind::RequireGather { count, .. }
                         | TaskKind::CyclicState { count, .. }
-                        | TaskKind::CraftAnyRecipe { count, .. },
+                        | TaskKind::CraftAnyRecipe { count, .. }
+                        | TaskKind::UseItems { count, .. },
                         TaskState::Done,
                     ) => *count,
                     (_, TaskState::Active { progress, .. }) => progress,
@@ -1819,6 +1828,13 @@ impl ObjectiveRun {
                     1,
                     *count,
                 ),
+                (
+                    TaskKind::UseItems {
+                        item: wanted,
+                        count,
+                    },
+                    Event::ItemUsed(item),
+                ) => (wanted.eq_ignore_ascii_case(item), 1, *count),
                 (TaskKind::CraftAnyRecipe { recipes, count }, Event::Crafted(recipe)) => (
                     recipes
                         .iter()
@@ -2298,6 +2314,22 @@ pub(crate) mod tests {
         );
         assert!(!run.finished(), "the talk waits");
         assert_eq!(run.temporary_unlocks(), [SWAP, "SwapActive_Later"]);
+    }
+
+    #[test]
+    fn a_use_items_task_counts_uses_of_its_item() {
+        // Client row `09A_S0_UsePotion`.
+        let rows = vec![TaskRow {
+            target_qty: Some(2),
+            ..with_item("Use", "TaskUseItems", "09A_S0_SporeElixir")
+        }];
+        let tree = Arc::new(TaskBook::new(rows).tree("Use").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        run.event(Event::ItemUsed("09A_S0_SporeElixir"), 0);
+        run.event(Event::ItemUsed("FoodT1"), 0);
+        assert!(!run.finished(), "food is another item");
+        run.event(Event::ItemUsed("09a_s0_sporeelixir"), 0);
+        assert!(run.finished(), "two uses");
     }
 
     #[test]
