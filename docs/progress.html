@@ -98,7 +98,7 @@
 <body>
 <main>
   <h1>Blighted New World Emulator: Progress</h1>
-  <p class="sub">Status on 2026-10-02. Client build 25810808. Last commit <code>70f2533c</code>.</p>
+  <p class="sub">Status on 2026-10-03. Client build 25810808. Last commit <code>70f2533c</code>.</p>
 
   <div class="cards" id="summary"></div>
 
@@ -126,7 +126,7 @@
     <li><strong>Record retail captures of the systems that have none.</strong>
       <div class="why">Wars, sieges, invasions, expeditions, Outpost Rush, trading post, housing, companies. This must happen before 2027-01-31. After that, the facts are lost.</div></li>
     <li><strong>Live check of many quests at once.</strong>
-      <div class="why">A player now runs many quests. Each quest type has the client's own journal limit (side quests 30, town board and faction missions 30, main story 20, community goals 50, and more; proven from the client code). A quest the game starts by itself, the next step of a chain, has no limit. Check live: accept Truffle Fever (Hapless Howe) while the main story quest runs. Notes: <code>local-data/findings/2026-10-02-quest-journal-limits.md</code>.</div></li>
+      <div class="why">A player now runs many quests. Each quest type has the client's own journal limit (side quests 30, town board and faction missions 30, main story 20, community goals 50, and more; proven from the client code). A quest the game starts by itself, the next step of a chain, has no limit. Check live: accept Truffle Fever (Hapless Howe) while the main story quest runs, and gather its herbs and berries (they count only when gathered). Also check the new steps live: the stones of Bridge into the Past (Weaver's Fen) and the staff ritual of Arcana Aligned (Elysian Wilds). Notes: <code>local-data/findings/2026-10-02-quest-journal-limits.md</code>.</div></li>
     <li><strong>Bring in the quests of the captures: quest step types.</strong>
       <div class="why">695 of 2,147 quests used only step types the server ran. Done: <code>TaskInteract</code> for quest objects and town buildings (an interact with a matching tag, counted when the interaction ends, as the retail vault step); main story quests with only known steps went from 238 to 263. Done: the town board (take, the mission's own items, kills and place, turn-in; proven from a retail capture). Faction boards (and <code>TaskDie</code>, used only by PvP faction missions) need the faction join first. Done: <code>TaskGameMode</code> (on entry), <code>TaskGiveItem</code>, <code>TaskGiveAndTakeItem</code>. Fully supported now: side quests 508 of 528, main story 349 of 358, housing quests 14 of 22, town projects 12 of 12. Done: <code>PatrolTask</code>, and the level's quest trigger volumes (772 from the level data, sized as retail). Done: <code>TaskHaveLevel</code>, <code>TaskConversationState</code> (a talk with its NPC, proven from a retail capture), <code>TaskRequireGatherItems</code> (only a real gather counts, as Truffle Fever), <code>TaskGatherCyclicState</code> (turned stones and staff rituals, proven from two retail captures; done <code>StayActive</code> steps now show as retail), <code>TaskTemporaryUnlockAchievement</code> (on while the quest runs), <code>TaskCraftMultipleRecipes</code>. Fixed: map pins with no game event ended their step group at once and skipped the real step (enter a trial, a portal); they now wait. Done: <code>TaskObjective</code> (starts and tracks another quest: weapon quest chains), <code>TaskUseItems</code>, <code>TaskGoToTerritory</code> and its point-of-interest form. Next: <code>TaskQuickCourse</code> (39, mount races and time trials), trigger areas of other levels (20), fishing steps (4 quests), then songs and slayer scripts (3 each). List: <code>local-data/findings/2026-10-02-quest-gaps.tsv</code>; notes: <code>local-data/findings/2026-10-02-task-interact.md</code>.</div></li>
     <li><strong>Live check of the craft message fix.</strong>
@@ -147,7 +147,7 @@
       <div class="why">Needs a real player base to test. The code exists, but it is not checked.</div></li>
     <li><strong>Build a public server status page.</strong>
       <div class="why">Players need to see if the server is up before they start the game. Show players online per world, the round trip time of the players, and healthy or unhealthy (unhealthy when the round trip time is over 2000 ms or a server part does not answer). The client's own canary metrics are off in retail, so the page uses the server's numbers. Notes: <code>docs/re/2026-10-02-client-metrics-and-canary.md</code>.</div></li>
-    <li><strong>Systems with no code: housing, artifacts, heartrunes, town projects, trophies.</strong>
+    <li><strong>Systems with no code: housing, artifacts, heartrunes, trophies.</strong>
       <div class="why">Start these last. They are not on the path of a new player.</div></li>
   </ol>
 
@@ -268,7 +268,7 @@ const AREAS = [
   {
     name: "Quests and progression",
     features: [
-      ["Quest engine", 84, "tests", "Task types from task sheets, turn-in, rewards. Many quests at once, with the client's journal limit per quest type. Interact steps (quest objects, town buildings). Town board missions. Open-world areas without a location now use the retail place (2 of 65 so far).", "Live check of many quests; pin limit Unknown. 63 more areas without a location; TaskInteract, TaskGiveItem, TaskGameMode are skipped."],
+      ["Quest engine", 88, "tests", "Task types from task sheets, turn-in, rewards. Many quests at once, with the client's journal limit per quest type. Interact, game mode, give item, patrol, level, talk, gather, cyclic object, temporary unlock, craft, objective, use item and territory steps. Town board missions. 772 quest trigger volumes from the level data. Done StayActive steps show as retail.", "Live check of the new steps; pin limit Unknown. Mount races, faction steps (TaskDie, control points), fishing steps, trigger areas of instance levels (20)."],
       ["Beach and wreck quests", 70, "tests", "Start beach chain and wreck quests 4 to 7.", "Full live run."],
       ["Main story and side quests", 45, "tests", "The engine runs them from game data. Side quests with only supported steps: 508 of 528; main story: 349 of 358.", "Nobody played them live. Faction missions need the faction join."],
       ["XP, levels, attribute points", 80, "tests", "Kill XP, level up, attribute and weapon points.", "Live check after the tutorial."],
@@ -312,7 +312,7 @@ const AREAS = [
       ["Housing", 0, "none", "Only the house teleport in travel.", "Houses, furniture, buying."],
       ["Artifacts", 0, "none", "No code found.", "All."],
       ["Heartrunes", 0, "none", "No code found.", "All."],
-      ["Town projects", 0, "none", "No code found.", "All."],
+      ["Town projects", 10, "tests", "Town board missions: take, the mission's items, kills and place, turn-in.", "Project progress, upgrades and the board's offer rules."],
       ["Trophies", 0, "none", "No code found.", "All."],
     ],
   },
