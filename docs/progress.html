@@ -98,7 +98,7 @@
 <body>
 <main>
   <h1>Blighted New World Emulator: Progress</h1>
-  <p class="sub">Status on 2026-10-02. Client build 25810808. Last commit <code>35f8b1cd</code>.</p>
+  <p class="sub">Status on 2026-10-02. Client build 25810808. Last commit <code>fe9f10c0</code>.</p>
 
   <div class="cards" id="summary"></div>
 
@@ -128,7 +128,7 @@
     <li><strong>Live check of many quests at once.</strong>
       <div class="why">A player now runs many quests. Each quest type has the client's own journal limit (side quests 30, town board and faction missions 30, main story 20, community goals 50, and more; proven from the client code). A quest the game starts by itself, the next step of a chain, has no limit. Check live: accept Truffle Fever (Hapless Howe) while the main story quest runs. Notes: <code>local-data/findings/2026-10-02-quest-journal-limits.md</code>.</div></li>
     <li><strong>Bring in the quests of the captures: quest step types.</strong>
-      <div class="why">695 of 2,147 quests used only step types the server ran. Done: <code>TaskInteract</code> for quest objects and town buildings (an interact with a matching tag, counted when the interaction ends, as the retail vault step); main story quests with only known steps went from 238 to 263. Done: the town board (take, the mission's own items, kills and place, turn-in; proven from a retail capture). Faction boards (and <code>TaskDie</code>, used only by PvP faction missions) need the faction join first. Done: <code>TaskGameMode</code> (on entry), <code>TaskGiveItem</code>, <code>TaskGiveAndTakeItem</code>. Fully supported now: side quests 498 of 528, main story 329 of 358. Done: <code>PatrolTask</code>, and the level's quest trigger volumes (772 from the level data, sized as retail). Done: <code>TaskHaveLevel</code>, <code>TaskConversationState</code> (a talk with its NPC, proven from a retail capture). Next: <code>TaskQuickCourse</code> (39, mount races and time trials), trigger areas of other levels (20), <code>TaskGatherCyclicState</code> (12), <code>TaskRequireGatherItems</code> (11). List: <code>local-data/findings/2026-10-02-quest-gaps.tsv</code>; notes: <code>local-data/findings/2026-10-02-task-interact.md</code>.</div></li>
+      <div class="why">695 of 2,147 quests used only step types the server ran. Done: <code>TaskInteract</code> for quest objects and town buildings (an interact with a matching tag, counted when the interaction ends, as the retail vault step); main story quests with only known steps went from 238 to 263. Done: the town board (take, the mission's own items, kills and place, turn-in; proven from a retail capture). Faction boards (and <code>TaskDie</code>, used only by PvP faction missions) need the faction join first. Done: <code>TaskGameMode</code> (on entry), <code>TaskGiveItem</code>, <code>TaskGiveAndTakeItem</code>. Fully supported now: side quests 501 of 528, main story 330 of 358. Done: <code>PatrolTask</code>, and the level's quest trigger volumes (772 from the level data, sized as retail). Done: <code>TaskHaveLevel</code>, <code>TaskConversationState</code> (a talk with its NPC, proven from a retail capture), <code>TaskRequireGatherItems</code> (only a real gather counts, as Truffle Fever). Next: <code>TaskQuickCourse</code> (39, mount races and time trials), trigger areas of other levels (20), <code>TaskGatherCyclicState</code> (12), <code>TaskTemporaryUnlockAchievement</code> (9). List: <code>local-data/findings/2026-10-02-quest-gaps.tsv</code>; notes: <code>local-data/findings/2026-10-02-task-interact.md</code>.</div></li>
     <li><strong>Live check of the craft message fix.</strong>
       <div class="why">The Demon Storm turn-in works live. Craft: the "Crafting attempt failed" message should be gone. Notes: <code>local-data/findings/2026-10-01-beach-playtest-notes.md</code>.</div></li>
     <li><strong>Close the new player bugs (tutorial and starting beach).</strong>
@@ -179,6 +179,7 @@
     <li>✅ Game mode, give item and carried item steps (<code>a55ff4c</code>, 2026-10-02); patrol steps (<code>c88b42c</code>).</li>
     <li>✅ Quest trigger volumes from the level data: 772 in the open world (<code>9a158be</code>, 2026-10-02).</li>
     <li>✅ Level steps and talk steps (<code>35f8b1cd</code>, 2026-10-02).</li>
+    <li>✅ Gather steps that count only real gathers (<code>fe9f10c0</code>, 2026-10-03).</li>
   </ul>
 
   <footer>
@@ -264,7 +265,7 @@ const AREAS = [
     features: [
       ["Quest engine", 84, "tests", "Task types from task sheets, turn-in, rewards. Many quests at once, with the client's journal limit per quest type. Interact steps (quest objects, town buildings). Town board missions. Open-world areas without a location now use the retail place (2 of 65 so far).", "Live check of many quests; pin limit Unknown. 63 more areas without a location; TaskInteract, TaskGiveItem, TaskGameMode are skipped."],
       ["Beach and wreck quests", 70, "tests", "Start beach chain and wreck quests 4 to 7.", "Full live run."],
-      ["Main story and side quests", 45, "tests", "The engine runs them from game data. Side quests with only supported steps: 498 of 528; main story: 329 of 358.", "Nobody played them live. Faction missions need the faction join."],
+      ["Main story and side quests", 45, "tests", "The engine runs them from game data. Side quests with only supported steps: 501 of 528; main story: 330 of 358.", "Nobody played them live. Faction missions need the faction join."],
       ["XP, levels, attribute points", 80, "tests", "Kill XP, level up, attribute and weapon points.", "Live check after the tutorial."],
       ["Weapon mastery", 70, "tests", "Mastery XP and saves.", "Live check."],
       ["Area charting, territory standing", 60, "tests", "Charting XP, standing rank 1.", "Higher ranks and their rewards."],
