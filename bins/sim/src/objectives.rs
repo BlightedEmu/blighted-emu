@@ -478,6 +478,10 @@ enum TaskKind {
     },
     /// Done when the player crafts the recipe of this id (`TaskCraftRecipe`).
     CraftRecipe(String),
+    /// Done after `count` crafts of any of these recipe ids (`TASKCRAFTMULTIPLERECIPES`: its
+    /// `ItemDropVC` lists them, the season 8 boxes `WeaponsBoxT4,ArmorBoxT4,...`). Each craft
+    /// counts once; whether a batch counts its quantity is Unknown.
+    CraftAnyRecipe { recipes: Vec<String>, count: u32 },
     /// Never done: a `TaskGameEvent` on [`NEVER_TRUE_TAG`].
     Never,
     /// Done when the player equips the item.
@@ -935,6 +939,14 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "taskcraftrecipe" => {
             TaskKind::CraftRecipe(row.crafting_recipe_id.clone().unwrap_or_default())
         }
+        "taskcraftmultiplerecipes" => {
+            let recipes = categories_of(row.item_drop_vc.as_deref().unwrap_or_default());
+            if recipes.is_empty() {
+                TaskKind::Unsupported
+            } else {
+                TaskKind::CraftAnyRecipe { recipes, count }
+            }
+        }
         "taskgameevent"
             if row
                 .ui_screen_tag
@@ -1302,7 +1314,7 @@ fn kills_count(enemy: &str, vitals_id: &str, categories: &[String]) -> bool {
     names(vitals_id) || categories.iter().any(|category| names(category))
 }
 
-/// The categories of a `VitalsCategories` cell.
+/// The categories of a `VitalsCategories` cell (also the recipe list of a multiple recipe task).
 pub fn categories_of(cell: &str) -> Vec<String> {
     cell.split(CATEGORY_SEPARATOR)
         .map(str::trim)
@@ -1513,7 +1525,8 @@ impl ObjectiveRun {
                         | TaskKind::GameEvent { count, .. }
                         | TaskKind::Interact { count, .. }
                         | TaskKind::RequireGather { count, .. }
-                        | TaskKind::CyclicState { count, .. },
+                        | TaskKind::CyclicState { count, .. }
+                        | TaskKind::CraftAnyRecipe { count, .. },
                         TaskState::Done,
                     ) => *count,
                     (_, TaskState::Active { progress, .. }) => progress,
@@ -1800,6 +1813,13 @@ impl ObjectiveRun {
                     Event::CyclicGathered { cyclic, state },
                 ) => (
                     wanted.eq_ignore_ascii_case(cyclic) && *wanted_state == state,
+                    1,
+                    *count,
+                ),
+                (TaskKind::CraftAnyRecipe { recipes, count }, Event::Crafted(recipe)) => (
+                    recipes
+                        .iter()
+                        .any(|wanted| wanted.eq_ignore_ascii_case(recipe)),
                     1,
                     *count,
                 ),
@@ -2271,6 +2291,23 @@ pub(crate) mod tests {
         );
         assert!(!run.finished(), "the talk waits");
         assert_eq!(run.temporary_unlocks(), [SWAP, "SwapActive_Later"]);
+    }
+
+    #[test]
+    fn a_multiple_recipe_task_counts_crafts_of_any_of_its_recipes() {
+        // Client row `Quest_03194_Task_18`: 5 crafts of the T3 boxes.
+        let rows = vec![TaskRow {
+            item_drop_vc: Some("WeaponsBoxT3,ArmorBoxT3,JewelryBoxT3".to_owned()),
+            target_qty: Some(2),
+            ..row("Boxes", "TASKCRAFTMULTIPLERECIPES")
+        }];
+        let tree = Arc::new(TaskBook::new(rows).tree("Boxes").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        run.event(Event::Crafted("WeaponsBoxT3"), 0);
+        run.event(Event::Crafted("IngotT3"), 0);
+        assert!(!run.finished(), "an ingot is not a box");
+        run.event(Event::Crafted("armorboxt3"), 0);
+        assert!(run.finished(), "two boxes");
     }
 
     #[test]
