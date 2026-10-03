@@ -388,10 +388,6 @@ const CATEGORY_SEPARATOR: char = ',';
 /// Joins a kill type to the rest of a longer vitals id (`Legion_Legionnaire` names
 /// `Legion_Legionnaire_FTUE`).
 const ID_PART_SEPARATOR: char = '_';
-/// The `UIScreenTag` of a `TaskGameEvent` that designers made to never end (beach-quests note:
-/// the slice-swap timer branch of `12_skinningknife` waits on it, so the knife ends its partial
-/// container).
-const NEVER_TRUE_TAG: &str = "neverbetrue";
 /// The chance of a quest drop when its task names none, in percent.
 const ALWAYS_PERCENT: u32 = 100;
 /// The lowercase `StayActive` cells of a task that runs on when done (the sheets write `1` or
@@ -482,7 +478,11 @@ enum TaskKind {
     /// `ItemDropVC` lists them, the season 8 boxes `WeaponsBoxT4,ArmorBoxT4,...`). Each craft
     /// counts once; whether a batch counts its quantity is Unknown.
     CraftAnyRecipe { recipes: Vec<String>, count: u32 },
-    /// Never done: a `TaskGameEvent` on [`NEVER_TRUE_TAG`].
+    /// Never done: a `TaskGameEvent` with no game event (`KillEnemyType`), which nothing fires.
+    /// Designers use it as a map pin or a never-true wait beside the real step in a partial
+    /// container (`95A_S02_T1_RiseoftheBeast_PinTask`, `99F_MSQ_ER_ReuniteFamily_UsePortal_IMPOSSIBLE`;
+    /// beach-quests note: the slice-swap timer branch of `12_skinningknife` waits on
+    /// `neverbetrue`, so the knife ends its partial container).
     Never,
     /// Done when the player equips the item.
     EquipItem(String),
@@ -947,15 +947,7 @@ fn kind_of(row: &TaskRow) -> TaskKind {
                 TaskKind::CraftAnyRecipe { recipes, count }
             }
         }
-        "taskgameevent"
-            if row
-                .ui_screen_tag
-                .as_deref()
-                .is_some_and(|tag| tag.eq_ignore_ascii_case(NEVER_TRUE_TAG)) =>
-        {
-            TaskKind::Never
-        }
-        "taskgameevent" => filled(&row.kill_enemy_type).map_or(TaskKind::Unsupported, |event| {
+        "taskgameevent" => filled(&row.kill_enemy_type).map_or(TaskKind::Never, |event| {
             TaskKind::GameEvent { event, count }
         }),
         "tasktriggergameevent" => {
@@ -3716,18 +3708,18 @@ pub(crate) mod tests {
 
     #[test]
     fn a_place_or_event_task_without_its_cell_is_not_run() {
-        for kind in [
-            "TaskGoToPOITag",
-            "TaskExitPOITag",
-            "TaskTriggerGameEvent",
-            "TaskGameEvent",
-        ] {
+        for kind in ["TaskGoToPOITag", "TaskExitPOITag", "TaskTriggerGameEvent"] {
             assert_eq!(
                 kind_of(&row("Empty", kind)),
                 TaskKind::Unsupported,
                 "{kind}"
             );
         }
+        assert_eq!(
+            kind_of(&row("Pin", "TaskGameEvent")),
+            TaskKind::Never,
+            "a map pin beside the real step of a partial container never ends"
+        );
         assert_eq!(
             counted_game_events(&wreck_rows()),
             HashSet::from([NODULE_EVENT.to_lowercase()])
