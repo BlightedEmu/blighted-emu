@@ -654,13 +654,18 @@ impl SimWorld {
                     .flat_map(|quest| quest.run.quest_drops(vitals_id, categories))
                     .collect()
             }
-            None if gatherable.loot_container => quests
-                .iter()
-                .flat_map(|quest| quest.run.chest_drops())
-                .collect(),
+            // A quest object is most often a loot container too (346 of the 381 steps that drop
+            // from a gatherable, `1225_Truffle` of Truffle Fever among them): it gives its own
+            // drops and the drops of any container in a mission's place.
             None => quests
                 .iter()
-                .flat_map(|quest| quest.run.gather_drops(&gatherable.id))
+                .flat_map(|quest| {
+                    let mut drops = quest.run.gather_drops(&gatherable.id);
+                    if gatherable.loot_container {
+                        drops.extend(quest.run.chest_drops());
+                    }
+                    drops
+                })
                 .collect(),
         };
         drops
@@ -1193,6 +1198,63 @@ mod tests {
             NOW + VEIN_MS.div_ceil(GATHER_TICK_MS) * GATHER_TICK_MS + GATHER_TICK_MS,
             "by hand: the tick after its time"
         );
+    }
+
+    #[test]
+    fn a_quest_object_that_is_a_loot_container_gives_its_quest_drop() {
+        // Live play test 2026-10-29: Truffle Fever's truffle (`1225_Truffle`, `IsLootContainer`)
+        // gave no `1225_0101_Truffle`. Client rows of the quest's gather step.
+        use crate::objectives::{TaskBook, TaskRow};
+        use crate::player_content::{ObjectiveRow, QuestBook};
+        const TRUFFLE: &str = "1225_Truffle";
+        const QUEST_TRUFFLE: &str = "1225_0101_Truffle";
+        const QUEST: &str = "1225_0101_truffles";
+        let (mut world, entity) = admitted();
+        let mut content = (*world.content).clone();
+        content.gatherables = Gatherables::build([Gatherable {
+            loot_container: true,
+            ..gatherable(TRUFFLE, true)
+        }]);
+        content.kits = gear::tests::kits_with(&[
+            (PICK, "EquippableTool+Axe+PickAxe"),
+            (QUEST_TRUFFLE, "Resource+Quest"),
+        ]);
+        content.quests = QuestBook::build(
+            [ObjectiveRow {
+                id: QUEST.to_owned(),
+                root: "Truffles".to_owned(),
+                ..ObjectiveRow::default()
+            }],
+            TaskBook::new(vec![TaskRow {
+                task_id: "Truffles".to_owned(),
+                kind: "TaskGatherAndReturnItems".to_owned(),
+                item_name: Some(QUEST_TRUFFLE.to_owned()),
+                item_drop_vc: Some(TRUFFLE.to_owned()),
+                item_drop_probability: Some(100),
+                target_qty: Some(5),
+                ..TaskRow::default()
+            }]),
+        );
+        world.content = Arc::new(content);
+        world.start_quest(NUMBER, QUEST, NOW).expect("quest");
+        world.gather_open_world(entity, NUMBER, request(1, 0x16, TRUFFLE), &[], NOW);
+        let end_ms = world
+            .open_gathers
+            .first()
+            .expect("the truffle is gathered")
+            .end_ms;
+        world.gathers_due(end_ms);
+        let truffles: u32 = world
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref())
+            .map(super::super::Gear::carried)
+            .unwrap_or_default()
+            .iter()
+            .filter(|item| item.item_id == QUEST_TRUFFLE)
+            .map(|item| item.quantity)
+            .sum();
+        assert_eq!(truffles, 1, "the quest truffle is in the bag");
     }
 
     #[test]
