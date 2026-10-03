@@ -7,25 +7,30 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::{DbError, is_unique_violation};
+use crate::social_graph::{LEVEL_FIELD, narrow};
 use crate::{Character, NewCharacter};
 
 const CHARACTER_NAME_PKEY: &str = "character_name_pkey";
 
-type CharacterRow = (Uuid, Uuid, String, serde_json::Value, i64);
+type CharacterRow = (Uuid, Uuid, String, serde_json::Value, i64, i64);
 
+/// The level is the one the social save keeps from the character's last time online.
 const CHARACTER_COLUMNS: &str = "character_id, account_id, name, appearance, \
-     CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT)";
+     CAST(EXTRACT(EPOCH FROM created_at) AS BIGINT), \
+     COALESCE((SELECT social.level FROM character_social social \
+               WHERE social.character_id = player_character.character_id), 0)";
 
 fn character_from_row(
-    (id, account_id, name, appearance, created_at_unix): CharacterRow,
-) -> Character {
-    Character {
+    (id, account_id, name, appearance, created_at_unix, level): CharacterRow,
+) -> Result<Character, DbError> {
+    Ok(Character {
         id,
         account_id,
         name,
         appearance,
         created_at_unix,
-    }
+        level: narrow(level, LEVEL_FIELD)?,
+    })
 }
 
 /// Reserves `name` (compared in lower case) for a character in `world_id`.
@@ -83,7 +88,7 @@ pub async fn insert_character(world: &PgPool, new: &NewCharacter) -> Result<Char
     .bind(&new.appearance)
     .fetch_one(world)
     .await?;
-    Ok(character_from_row(row))
+    character_from_row(row)
 }
 
 /// Deletes the character `character_id` of `account_id` from a world database, with its saved
@@ -114,7 +119,7 @@ pub async fn characters_for_account(
     .bind(account_id)
     .fetch_all(world)
     .await?;
-    Ok(rows.into_iter().map(character_from_row).collect())
+    rows.into_iter().map(character_from_row).collect()
 }
 
 /// One character of a world database.
@@ -128,7 +133,7 @@ pub async fn character_by_id(
     .bind(character_id)
     .fetch_optional(world)
     .await?;
-    Ok(row.map(character_from_row))
+    row.map(character_from_row).transpose()
 }
 
 #[cfg(all(test, feature = "infra"))]
@@ -189,9 +194,34 @@ mod tests {
         })
         .await;
         assert_eq!(inserted.name, NAME);
+        assert_eq!(inserted.level, 0, "a new character has no saved level");
         assert_eq!(inserted.appearance, serde_json::json!({"face": 3}));
         assert_eq!(listed, vec![inserted.clone()]);
         assert!(other.is_empty());
         assert_eq!(loaded, Some(inserted));
+    }
+
+    #[tokio::test]
+    async fn the_level_is_the_one_saved_when_last_online() {
+        const SAVED_LEVEL: u32 = 7;
+        let (listed, loaded) = with_test_schema(async |pool| {
+            WORLD_MIGRATOR.run(pool).await.expect("migrate");
+            let account = Uuid::new_v4();
+            let inserted = insert_character(pool, &new_character(account))
+                .await
+                .expect("insert");
+            sqlx::query("INSERT INTO character_social (character_id, level) VALUES ($1, $2)")
+                .bind(inserted.id)
+                .bind(i64::from(SAVED_LEVEL))
+                .execute(pool)
+                .await
+                .expect("social");
+            let listed = characters_for_account(pool, account).await.expect("list");
+            let loaded = character_by_id(pool, inserted.id).await.expect("load");
+            (listed, loaded)
+        })
+        .await;
+        assert_eq!(listed[0].level, SAVED_LEVEL);
+        assert_eq!(loaded.map(|character| character.level), Some(SAVED_LEVEL));
     }
 }

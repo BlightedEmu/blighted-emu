@@ -25,7 +25,7 @@ const MS_PER_SECOND: f64 = 1000.0;
 /// The unique index of company names.
 const COMPANY_NAME_INDEX: &str = "company_name_idx";
 const LANGUAGE_FIELD: &str = "language";
-const LEVEL_FIELD: &str = "level";
+pub(crate) const LEVEL_FIELD: &str = "level";
 const FACTION_FIELD: &str = "faction";
 const RANK_FIELD: &str = "rank";
 const ICON_FIELD: &str = "icon";
@@ -309,7 +309,7 @@ fn fixed<const N: usize>(bytes: Vec<u8>, field: &'static str) -> Result<[u8; N],
     bytes.try_into().map_err(|_| DbError::OutOfRange { field })
 }
 
-fn narrow<T: TryFrom<i64>>(value: i64, field: &'static str) -> Result<T, DbError> {
+pub(crate) fn narrow<T: TryFrom<i64>>(value: i64, field: &'static str) -> Result<T, DbError> {
     T::try_from(value).map_err(|_| DbError::OutOfRange { field })
 }
 

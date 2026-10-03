@@ -209,7 +209,7 @@ fn visuals(params: &str) -> Option<Element> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use nw_formats::objectstream::write_object_stream;
 
     use super::*;
@@ -275,12 +275,22 @@ mod tests {
         serde_json::json!({ "Name": "Test", CREATION_PARAMS_KEY: params })
     }
 
+    /// The stored create request of the live test character.
+    pub(crate) fn saved_appearance() -> serde_json::Value {
+        appearance(params(&names(&MALE_NAMES)))
+    }
+
+    /// The JSON text of `published` data.
+    pub(crate) fn published_text(published: &str) -> Vec<u8> {
+        inflated(published).expect("inflate")
+    }
+
     #[test]
     fn published_data_is_the_saved_settings_at_the_level() {
         const LEVEL: u32 = 1;
-        let saved = appearance(params(&names(&MALE_NAMES)));
+        let saved = saved_appearance();
         let published = published_data(&saved, LEVEL).expect("published");
-        let text = inflated(&published).expect("inflate");
+        let text = published_text(&published);
         let level = br#""currentLevel":1}"#;
         assert!(text.ends_with(level), "the level is written in");
         let again = appearance(published);

@@ -120,6 +120,8 @@ pub struct Character {
     pub appearance: serde_json::Value,
     /// Unix time of creation, seconds.
     pub created_at_unix: i64,
+    /// The level (zero-based) when it was last online; 0 before its first time in game.
+    pub level: u32,
 }
 
 /// A character to insert.

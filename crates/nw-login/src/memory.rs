@@ -24,6 +24,9 @@ use crate::store::{
 use crate::time::MILLIS_PER_SECOND;
 use nw_common::time::{unix_ms, unix_seconds};
 
+/// The level (zero-based) of a character that was never in game.
+const NEW_CHARACTER_LEVEL: u32 = 0;
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -262,6 +265,7 @@ impl CharacterStore for MemoryCharacters {
             name: new.name.clone(),
             appearance: new.appearance.clone(),
             created_at_unix: unix_seconds(),
+            level: NEW_CHARACTER_LEVEL,
         };
         characters.names.insert(name_key, new.id);
         characters

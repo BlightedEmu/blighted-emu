@@ -332,14 +332,11 @@ fn world_models(config: &EdgeConfig) -> Vec<WorldModel> {
     config.worlds.iter().map(world_model).collect()
 }
 
-/// The level a character shows on the select screen: every character is a new one until levels
-/// are saved.
-const SELECT_SCREEN_LEVEL: u32 = 1;
-
-/// The character summary the client shows (JSON note section 5.1.1).
+/// The character summary the client shows (JSON note section 5.1.1). Its `currentLevel` is
+/// zero-based, as the client's own create request (`"currentLevel":0`) and the saved level are.
 pub(crate) fn character_summary(world_id: Uuid, character: &Character) -> CharacterSummary {
     CharacterSummary {
-        published_data: look::published_data(&character.appearance, SELECT_SCREEN_LEVEL),
+        published_data: look::published_data(&character.appearance, character.level),
         character_id: character.id.to_string(),
         created_date: http_date(character.created_at_unix),
         name: character.name.clone(),
@@ -1048,6 +1045,24 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn the_select_screen_shows_the_saved_level() {
+        const SAVED_LEVEL: u32 = 7;
+        let character = Character {
+            id: Uuid::new_v4(),
+            account_id: Uuid::new_v4(),
+            name: NAME.to_owned(),
+            appearance: crate::look::tests::saved_appearance(),
+            created_at_unix: 0,
+            level: SAVED_LEVEL,
+        };
+        let summary = character_summary(Uuid::new_v4(), &character);
+        let published = summary.published_data.expect("published");
+        let text = crate::look::tests::published_text(&published);
+        let level = format!(r#""currentLevel":{SAVED_LEVEL}}}"#);
+        assert!(text.ends_with(level.as_bytes()), "the saved level is shown");
     }
 
     #[tokio::test]
