@@ -414,6 +414,11 @@ enum TaskKind {
     UnlockAchievement(String),
     /// Clears an achievement and is done.
     LockAchievement(String),
+    /// Sets an achievement and is done; the achievement is cleared when the objective ends
+    /// (`TaskTemporaryUnlockAchievement`; client: "unlocks an achievement when task is added, and
+    /// locks it when the task is removed (progress begins completed, nothing progresses this
+    /// task)").
+    TemporaryUnlock(String),
     /// Done when the player has the achievement.
     HasAchievement(String),
     /// Removes `TargetQty` of an item from the player and is done (all 104 `TaskRemoveItem`
@@ -870,6 +875,7 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "simpletaskcontainer" => TaskKind::Simple,
         "taskunlockachievement" => TaskKind::UnlockAchievement(item()),
         "tasklockachievement" => TaskKind::LockAchievement(item()),
+        "tasktemporaryunlockachievement" => TaskKind::TemporaryUnlock(item()),
         "taskachievement" => TaskKind::HasAchievement(item()),
         "taskremoveitem" => TaskKind::RemoveItem {
             item: item(),
@@ -1432,6 +1438,21 @@ impl ObjectiveRun {
         self.states.first() == Some(&TaskState::Done)
     }
 
+    /// The achievements its started temporary unlock tasks set, which its end clears.
+    pub fn temporary_unlocks(&self) -> Vec<String> {
+        self.tree
+            .tasks
+            .iter()
+            .zip(&self.states)
+            .filter_map(|(task, state)| match &task.kind {
+                TaskKind::TemporaryUnlock(achievement) if *state == TaskState::Done => {
+                    Some(achievement.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Whether task `id` is done.
     pub fn is_done(&self, id: &str) -> bool {
         self.tree
@@ -1892,7 +1913,7 @@ impl ObjectiveRun {
                     }
                 }
             }
-            TaskKind::UnlockAchievement(achievement) => {
+            TaskKind::UnlockAchievement(achievement) | TaskKind::TemporaryUnlock(achievement) => {
                 effects.push(Effect::Achievement(achievement.clone()));
                 self.complete(index, now_ms, effects);
             }
@@ -2221,6 +2242,35 @@ pub(crate) mod tests {
             0,
         );
         assert!(run.finished(), "two gathered");
+    }
+
+    #[test]
+    fn a_temporary_unlock_sets_its_achievement_at_once_and_names_it_for_the_end() {
+        // Client rows of `1225_0101a` (Truffle Fever's down payment): a slice swap, then a talk.
+        const SWAP: &str = "SwapActive_1225_CampfirePropsMB_On";
+        let rows = vec![
+            container(
+                "Root",
+                "ConsecutiveTaskContainer",
+                &["Swap", "Later", "Talk"],
+            ),
+            with_item("Swap", "TaskTemporaryUnlockAchievement", SWAP),
+            with_item(
+                "Later",
+                "TaskTemporaryUnlockAchievement",
+                "SwapActive_Later",
+            ),
+            with_item("Talk", "TaskConversationState", "1225_Npc"),
+        ];
+        let tree = Arc::new(TaskBook::new(rows).tree("Root").expect("tree"));
+        let (run, effects) = ObjectiveRun::start(tree, 0);
+        assert_eq!(
+            achievements(&effects),
+            [SWAP, "SwapActive_Later"],
+            "set when added, done at once"
+        );
+        assert!(!run.finished(), "the talk waits");
+        assert_eq!(run.temporary_unlocks(), [SWAP, "SwapActive_Later"]);
     }
 
     #[test]

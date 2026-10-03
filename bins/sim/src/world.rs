@@ -2416,7 +2416,8 @@ impl SimWorld {
     }
 
     /// Ends the finished quest `objective` of player `number`: it joins the done list, its
-    /// achievement is set, and its rewards go to the player: the coins and experience of its
+    /// achievement is set, the achievements of its temporary unlocks are cleared, and its
+    /// rewards go to the player: the coins and experience of its
     /// success game event, and its items into the bag.
     fn complete_quest(&mut self, number: u64, objective: &str) {
         let Some(quests) = self.quests.get_mut(&number) else {
@@ -2459,6 +2460,11 @@ impl SimWorld {
                 player
                     .flow
                     .set_achievement(&self.achievement_rules, achievement);
+            }
+            for achievement in quest.run.temporary_unlocks() {
+                player
+                    .flow
+                    .clear_achievement(&self.achievement_rules, &achievement);
             }
             quest_objects::grant(&mut player, &reward, &self.content.gameplay);
             // The turn-in takes back the items the quest had the player bring.
