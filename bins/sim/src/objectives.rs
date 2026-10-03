@@ -394,6 +394,9 @@ const ID_PART_SEPARATOR: char = '_';
 const NEVER_TRUE_TAG: &str = "neverbetrue";
 /// The chance of a quest drop when its task names none, in percent.
 const ALWAYS_PERCENT: u32 = 100;
+/// The lowercase `StayActive` cells of a task that runs on when done (the sheets write `1` or
+/// `true`).
+const STAY_ACTIVE_CELLS: [&str; 2] = ["1", "true"];
 /// The `TriggerAreaType` of an area task done when the player leaves its volume (retail sheets:
 /// `Enter` or `Leave`; an empty cell is `Enter`).
 const LEAVE_AREA_TYPE: &str = "Leave";
@@ -503,6 +506,17 @@ enum TaskKind {
     /// client: "only increments progress when the player actually gathers something, not just
     /// when they already have the items in their inventory").
     RequireGather { item: String, count: u32 },
+    /// Done after `count` gathers of the cyclic gatherable `cyclic` (a `VariantID`) in its state
+    /// `state` (`TaskGatherCyclicState`, `ItemDropProbability` the state; client: "increments
+    /// progress when the player gathers the specified cyclic gatherable state"). Retail
+    /// (`09a_m13_attunestaff`): the gather of `09A_M13_ArcaneRitual_0` (state 0) began at
+    /// 159.051 s and its step was done at 160.135 s, the gather of state 1 at 166.851 s and its
+    /// step at 167.919 s.
+    CyclicState {
+        cyclic: String,
+        state: u32,
+        count: u32,
+    },
     /// Done when the player starts a talk with NPC `npc` (`TaskConversationState`; client: "Task
     /// that completes when the player enters a particular conversation state"). Retail
     /// (`12a_side_07_forgering`): the talk with `@12_JeongIseul` started at 220.660 s, the server
@@ -564,6 +578,7 @@ struct QuestDrop {
 struct Task {
     id: String,
     kind: TaskKind,
+    stay_active: bool,
     parent: Option<usize>,
     children: Vec<usize>,
 }
@@ -627,6 +642,8 @@ pub struct TaskRow {
     pub chest_drop_probability: Option<i64>,
     /// `EnforceLocationRequirement`: the task counts only in its `POITag`.
     pub enforce_location: bool,
+    /// `StayActive`: the task runs on when it is done.
+    pub stay_active: bool,
 }
 
 /// Every task row with an index by lowercase task id, made once for the trees of many
@@ -720,6 +737,10 @@ pub fn task_rows(tables: &Tables) -> Vec<TaskRow> {
             returned_on_turn_in: false,
             chest_drop_probability: row.chest_drop_probability,
             enforce_location: row.enforce_location_requirement.unwrap_or_default(),
+            stay_active: row
+                .stay_active
+                .as_deref()
+                .is_some_and(|cell| STAY_ACTIVE_CELLS.contains(&cell.to_lowercase().as_str())),
         })
         .collect()
 }
@@ -941,6 +962,16 @@ fn kind_of(row: &TaskRow) -> TaskKind {
             item: item(),
             count,
         },
+        "taskgathercyclicstate" => {
+            filled(&row.item_name).map_or(TaskKind::Unsupported, |cyclic| TaskKind::CyclicState {
+                cyclic,
+                state: row
+                    .item_drop_probability
+                    .and_then(|state| u32::try_from(state).ok())
+                    .unwrap_or_default(),
+                count,
+            })
+        }
         "taskhavelevel" => TaskKind::HaveLevel {
             progression: filled(&row.item_name),
             target: row
@@ -1045,6 +1076,7 @@ impl ObjectiveTree {
         self.tasks.push(Task {
             id: row.task_id.clone(),
             kind: kind_of(row),
+            stay_active: row.stay_active,
             parent,
             children: Vec::new(),
         });
@@ -1153,6 +1185,13 @@ pub enum Event<'a> {
         /// How many.
         quantity: u32,
     },
+    /// The player gathered the cyclic gatherable of this variant id in this state.
+    CyclicGathered {
+        /// The cyclic gatherable's `VariantID`.
+        cyclic: &'a str,
+        /// Its state at the gather, from 0.
+        state: u32,
+    },
 }
 
 /// The player's level of a progression id (`None`: the character), as its rank or its points.
@@ -1180,6 +1219,9 @@ pub enum TaskStatus {
     Running,
     /// It is done.
     Done,
+    /// It is done and runs on (`StayActive`). Retail sent `CompleteActive` for each of 738 done
+    /// `StayActive` tasks and `Complete` for none (40 open-world captures).
+    DoneActive,
     /// It stopped undone: a branch of a partial container that another branch finished.
     Stopped,
 }
@@ -1431,6 +1473,7 @@ impl ObjectiveRun {
                 let task = &self.tree.tasks[*index];
                 // A listed task that is idle had progress, then its partial container stopped it.
                 let status = match self.states[*index] {
+                    TaskState::Done if task.stay_active => TaskStatus::DoneActive,
                     TaskState::Done => TaskStatus::Done,
                     TaskState::Active { .. } => TaskStatus::Running,
                     TaskState::Idle => TaskStatus::Stopped,
@@ -1448,7 +1491,8 @@ impl ObjectiveRun {
                         | TaskKind::GatherItems { count, .. }
                         | TaskKind::GameEvent { count, .. }
                         | TaskKind::Interact { count, .. }
-                        | TaskKind::RequireGather { count, .. },
+                        | TaskKind::RequireGather { count, .. }
+                        | TaskKind::CyclicState { count, .. },
                         TaskState::Done,
                     ) => *count,
                     (_, TaskState::Active { progress, .. }) => progress,
@@ -1726,6 +1770,18 @@ impl ObjectiveRun {
                     },
                     Event::Gathered { item, quantity },
                 ) => (wanted.eq_ignore_ascii_case(item), quantity, *count),
+                (
+                    TaskKind::CyclicState {
+                        cyclic: wanted,
+                        state: wanted_state,
+                        count,
+                    },
+                    Event::CyclicGathered { cyclic, state },
+                ) => (
+                    wanted.eq_ignore_ascii_case(cyclic) && *wanted_state == state,
+                    1,
+                    *count,
+                ),
                 (TaskKind::GameMode(mode), Event::GameModeEntered(seen))
                 | (TaskKind::ConversationState(mode), Event::Talked(seen)) => {
                     (mode.eq_ignore_ascii_case(seen), 1, 1)
@@ -2165,6 +2221,42 @@ pub(crate) mod tests {
             0,
         );
         assert!(run.finished(), "two gathered");
+    }
+
+    #[test]
+    fn a_cyclic_state_task_counts_a_gather_in_its_state_and_stays_active() {
+        // Client row `99C_MSQ_03_AncientBridge_interact_puzzle1_stone2`: state 2, StayActive.
+        const STONE: &str = "Cyclic_99C_MSQ_puzzle1_stone2";
+        let rows = vec![TaskRow {
+            item_drop_probability: Some(2),
+            stay_active: true,
+            ..with_item("Stone", "TaskGatherCyclicState", STONE)
+        }];
+        let tree = Arc::new(TaskBook::new(rows).tree("Stone").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        for state in [0, 1] {
+            run.event(
+                Event::CyclicGathered {
+                    cyclic: STONE,
+                    state,
+                },
+                0,
+            );
+        }
+        assert!(!run.finished(), "states 0 and 1 are not the target");
+        run.event(
+            Event::CyclicGathered {
+                cyclic: "cyclic_99c_msq_puzzle1_stone2",
+                state: 2,
+            },
+            0,
+        );
+        assert!(run.finished(), "the third turn is state 2");
+        assert_eq!(
+            run.progress().first().map(|task| task.status),
+            Some(TaskStatus::DoneActive),
+            "retail: CompleteActive"
+        );
     }
 
     /// A mission's tasks at its place: a kill and an item from containers there.

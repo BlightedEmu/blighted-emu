@@ -11,7 +11,9 @@ use nw_content::drop_rolls::DropRolls;
 use nw_content::equip_load::EquipLoads;
 use nw_content::fishing::FishingRules;
 use nw_content::gameplay_config::GameplayConfig;
-use nw_content::gathering::{CrateLoot, CrateVariant, GatherRules, Gatherables, ToolEfficiencies};
+use nw_content::gathering::{
+    CrateLoot, CrateVariant, CyclicGatherables, GatherRules, Gatherables, ToolEfficiencies,
+};
 use nw_content::instances::InstanceCatalog;
 use nw_content::interact_tags::{InteractTags, variant_tags};
 use nw_content::item_repair::GearScoreUpgrades;
@@ -691,6 +693,8 @@ pub struct PlayerContent {
     pub chest_lockouts: ChestLockouts,
     /// The tradeskill ranks and items that gatherables ask for.
     pub gather_rules: GatherRules,
+    /// The cyclic states each gatherable shows.
+    pub cyclic_gatherables: CyclicGatherables,
     /// The gathering efficiency of each tool item.
     pub tools: ToolEfficiencies,
     /// What the salvage of each item gives.
@@ -1042,6 +1046,7 @@ impl PlayerContent {
             starting_ranks: StartingRanks::from_tables(tables),
             chest_lockouts: ChestLockouts::from_tables(tables),
             gather_rules: GatherRules::from_tables(tables),
+            cyclic_gatherables: CyclicGatherables::from_tables(tables),
             tools: ToolEfficiencies::from_tables(tables),
             salvage: Salvage::from_tables(tables),
             asset_solids: AssetSolids::default(),

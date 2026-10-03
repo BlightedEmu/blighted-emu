@@ -189,6 +189,7 @@ impl QuestTracker {
                     state: match task.status {
                         TaskStatus::Running => TaskWireState::Active,
                         TaskStatus::Done => TaskWireState::Complete,
+                        TaskStatus::DoneActive => TaskWireState::CompleteActive,
                         TaskStatus::Stopped => TaskWireState::Inactive,
                     },
                 })

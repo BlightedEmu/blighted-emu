@@ -668,6 +668,11 @@ struct Player {
     social: social_states::PlayerSocial,
     /// Gathers this player made, for the counters of the gather state.
     gathers: u32,
+    /// Its turns of each cyclic gatherable whose gatherable shows in many states (a puzzle
+    /// stone), by lowercase variant id: the state it sees is the turns modulo its states, from 0
+    /// (retail `99c_msq_03_ancientbridge`: the first turn of a stone was its state 0, the third
+    /// its state 2).
+    cyclic_turns: HashMap<String, u32>,
     /// The version of each gather node its client has, by slot key.
     node_versions: HashMap<u64, u32>,
     /// The version of each loot bag its client has, by slot key.
@@ -4064,6 +4069,7 @@ impl SimWorld {
                     extra_members: Vec::new(),
                     social: social_states::PlayerSocial::default(),
                     gathers: 0,
+                    cyclic_turns: HashMap::new(),
                     node_versions: HashMap::new(),
                     bag_versions: HashMap::new(),
                     ended_gather: None,

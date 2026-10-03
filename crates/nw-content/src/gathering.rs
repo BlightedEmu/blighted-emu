@@ -169,6 +169,108 @@ impl GatherRules {
     }
 }
 
+/// A state of a cyclic gatherable that a gatherable shows (finding "cyclic gatherables",
+/// 2026-10-03). A `javelindata_variations` row with `NumCyclicStates` shows the variant
+/// `Gatherable_<n>_Variant` in its state n, from 0; a gather of that variant's gatherable turns
+/// it to the next state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CyclicState {
+    /// `VariantID` of the cyclic gatherable.
+    pub cyclic: String,
+    /// The state this gatherable shows; `None` when it shows in more than one state (a turned
+    /// stone shows in all of them), so the gatherer's turns give the state.
+    pub state: Option<u32>,
+    /// `NumCyclicStates`.
+    pub states: u32,
+}
+
+/// The cyclic states of each gatherable, by the CRC-32 of its lowercase id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CyclicGatherables {
+    by_crc: HashMap<u32, Vec<CyclicState>>,
+}
+
+impl CyclicGatherables {
+    /// The cyclic gatherables of `tables`: each state's variant row names its gatherable
+    /// (`GatherableEntryID`, else `GatherableEntryId`).
+    pub fn from_tables(tables: &Tables) -> Self {
+        let rows: Vec<_> = tables
+            .variation_data
+            .iter()
+            .flat_map(|table| &table.rows)
+            .collect();
+        let gatherable_of: HashMap<String, &str> = rows
+            .iter()
+            .filter_map(|row| {
+                let gatherable = row
+                    .gatherable_entry_id
+                    .as_deref()
+                    .or(row.gatherable_entry_id_2.as_deref())
+                    .filter(|id| !id.is_empty())?;
+                Some((row.variant_id.as_deref()?.to_lowercase(), gatherable))
+            })
+            .collect();
+        Self::build(rows.iter().filter_map(|row| {
+            let states = row
+                .num_cyclic_states
+                .and_then(|states| usize::try_from(states).ok())
+                .filter(|states| *states > 0)?;
+            let variants = [
+                &row.gatherable_0_variant,
+                &row.gatherable_1_variant,
+                &row.gatherable_2_variant,
+                &row.gatherable_3_variant,
+                &row.gatherable_4_variant,
+            ];
+            let gatherables = variants
+                .into_iter()
+                .take(states)
+                .map(|variant| {
+                    variant
+                        .as_deref()
+                        .and_then(|variant| gatherable_of.get(&variant.to_lowercase()))
+                        .map(|gatherable| (*gatherable).to_owned())
+                })
+                .collect();
+            Some((row.variant_id.clone()?, gatherables))
+        }))
+    }
+
+    /// The cyclic gatherables of `cyclics` (variant id, the gatherable of each state).
+    pub fn build(cyclics: impl IntoIterator<Item = (String, Vec<Option<String>>)>) -> Self {
+        let mut by_crc: HashMap<u32, Vec<CyclicState>> = HashMap::new();
+        for (cyclic, gatherables) in cyclics {
+            let states = u32::try_from(gatherables.len()).unwrap_or(u32::MAX);
+            let mut shown: HashMap<u32, Vec<u32>> = HashMap::new();
+            for (state, gatherable) in (0..states).zip(&gatherables) {
+                if let Some(gatherable) = gatherable {
+                    shown
+                        .entry(lowercase_crc32(gatherable))
+                        .or_default()
+                        .push(state);
+                }
+            }
+            for (crc, in_states) in shown {
+                let state = match in_states.as_slice() {
+                    [state] => Some(*state),
+                    _ => None,
+                };
+                by_crc.entry(crc).or_default().push(CyclicState {
+                    cyclic: cyclic.clone(),
+                    state,
+                    states,
+                });
+            }
+        }
+        Self { by_crc }
+    }
+
+    /// The cyclic states the gatherable whose lowercase id has the CRC-32 `crc` shows.
+    pub fn of(&self, crc: u32) -> &[CyclicState] {
+        self.by_crc.get(&crc).map_or(&[], Vec::as_slice)
+    }
+}
+
 /// A gathering tool's efficiency range and the gear score range it spans.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ToolEfficiency {
@@ -445,6 +547,48 @@ mod tests {
         assert_eq!(
             rules.of(lowercase_crc32("FlintSmall")),
             GatherRule::default()
+        );
+    }
+
+    #[test]
+    fn a_cyclic_gatherable_names_the_state_of_each_gatherable() {
+        // Client rows: the staff ritual shows one gatherable per state, a puzzle stone one
+        // gatherable in all four.
+        let cyclic = CyclicGatherables::build([
+            (
+                "Cyclic_09A_M13_ArcaneRitual".to_owned(),
+                vec![
+                    Some("09A_M13_ArcaneRitual_0".to_owned()),
+                    Some("09A_M13_ArcaneRitual_1".to_owned()),
+                    Some("09A_M13_ArcaneRitual_2".to_owned()),
+                ],
+            ),
+            (
+                "Cyclic_99C_MSQ_puzzle1_stone1".to_owned(),
+                vec![Some("Cyclic_99C_MSQ_puzzle1_stone1".to_owned()); 4],
+            ),
+            ("Cyclic_13_Summer_Carpenter".to_owned(), vec![None, None]),
+        ]);
+        assert_eq!(
+            cyclic.of(lowercase_crc32("09a_m13_arcaneritual_1")),
+            [CyclicState {
+                cyclic: "Cyclic_09A_M13_ArcaneRitual".to_owned(),
+                state: Some(1),
+                states: 3,
+            }]
+        );
+        assert_eq!(
+            cyclic.of(lowercase_crc32("cyclic_99c_msq_puzzle1_stone1")),
+            [CyclicState {
+                cyclic: "Cyclic_99C_MSQ_puzzle1_stone1".to_owned(),
+                state: None,
+                states: 4,
+            }]
+        );
+        assert!(
+            cyclic
+                .of(lowercase_crc32("13_summer_carpenter1"))
+                .is_empty()
         );
     }
 

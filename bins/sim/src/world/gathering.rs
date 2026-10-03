@@ -547,6 +547,18 @@ impl SimWorld {
                 now_ms,
             );
         }
+        if let Some(crc) = gather.request.gatherable {
+            for (cyclic, state) in self.cyclic_gathers(entity, crc) {
+                self.quest_event(
+                    gather.number,
+                    Event::CyclicGathered {
+                        cyclic: &cyclic,
+                        state,
+                    },
+                    now_ms,
+                );
+            }
+        }
         self.wear_tool(entity, &gather.gatherable);
         if let Some(event) = &gather.gatherable.game_event {
             let scale = self.gather_scale(gather);
@@ -559,6 +571,31 @@ impl SimWorld {
                 super::meta_achievements::MetaEvent::Gathered { tradeskill },
             );
         }
+    }
+
+    /// The cyclic gatherables (variant id) and their states that player `entity` gathers with a
+    /// gather of the gatherable whose lowercase id has the CRC-32 `crc`: the state the
+    /// gatherable shows, else the player's turns of it so far (which this gather adds to).
+    fn cyclic_gathers(&mut self, entity: Entity, crc: u32) -> Vec<(String, u32)> {
+        let shown = self.content.cyclic_gatherables.of(crc).to_vec();
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return Vec::new();
+        };
+        shown
+            .into_iter()
+            .map(|shown| {
+                let state = shown.state.unwrap_or_else(|| {
+                    let turns = player
+                        .cyclic_turns
+                        .entry(shown.cyclic.to_lowercase())
+                        .or_default();
+                    let state = *turns % shown.states;
+                    *turns = turns.wrapping_add(1);
+                    state
+                });
+                (shown.cyclic, state)
+            })
+            .collect()
     }
 
     /// The lockout of the loot container `gather` opens; `None` for a gather of another kind
@@ -902,7 +939,7 @@ mod tests {
     use std::sync::Arc;
 
     use nw_content::gathering::{
-        GatherRule, GatherRules, Gatherables, ToolEfficiencies, ToolEfficiency,
+        CyclicGatherables, GatherRule, GatherRules, Gatherables, ToolEfficiencies, ToolEfficiency,
     };
     use nw_content::progression::{Progression, RankPerks, TradeskillRankRow, TradeskillSource};
     use nw_content::rewards::{EventGrant, EventGrants};
@@ -1155,6 +1192,46 @@ mod tests {
             gather.end_ms,
             NOW + VEIN_MS.div_ceil(GATHER_TICK_MS) * GATHER_TICK_MS + GATHER_TICK_MS,
             "by hand: the tick after its time"
+        );
+    }
+
+    #[test]
+    fn a_cyclic_gather_names_its_state_from_its_gatherable_or_the_turns() {
+        // Client rows: a puzzle stone shows one gatherable in its 4 states, the staff ritual one
+        // gatherable per state; retail `99c_msq_03_ancientbridge` turned a stone from state 0.
+        const STONE: &str = "Cyclic_99C_MSQ_puzzle1_stone2";
+        const RITUAL: &str = "Cyclic_09A_M13_ArcaneRitual";
+        const RITUAL_1: &str = "09A_M13_ArcaneRitual_1";
+        let (mut world, entity) = admitted();
+        let mut content = (*world.content).clone();
+        content.gatherables = Gatherables::build([gatherable(STONE, true)]);
+        content.cyclic_gatherables = CyclicGatherables::build([
+            (STONE.to_owned(), vec![Some(STONE.to_owned()); 4]),
+            (
+                RITUAL.to_owned(),
+                vec![None, Some(RITUAL_1.to_owned()), None],
+            ),
+        ]);
+        world.content = Arc::new(content);
+        world.gather_open_world(entity, NUMBER, request(1, 0x15, STONE), &[], NOW);
+        let end_ms = world.open_gathers.first().expect("the stone turns").end_ms;
+        world.gathers_due(end_ms);
+        let turns = |world: &SimWorld| {
+            world
+                .world
+                .get::<Player>(entity)
+                .expect("player")
+                .cyclic_turns[&STONE.to_lowercase()]
+        };
+        assert_eq!(turns(&world), 1, "the gather end turned it");
+        let states: Vec<u32> = (0..4)
+            .flat_map(|_| world.cyclic_gathers(entity, lowercase_crc32(STONE)))
+            .map(|(_, state)| state)
+            .collect();
+        assert_eq!(states, [1, 2, 3, 0], "the turns go round its 4 states");
+        assert_eq!(
+            world.cyclic_gathers(entity, lowercase_crc32(RITUAL_1)),
+            [(RITUAL.to_owned(), 1)]
         );
     }
 
