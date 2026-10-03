@@ -1377,6 +1377,15 @@ impl SimWorld {
                 self.resume_quest(offer.entity, objective, run, now_ms);
             }
         }
+        // A player that comes into a running instance enters its game mode (`TaskGameMode`).
+        if let Some(mode) = self
+            .instance_run
+            .as_ref()
+            .map(|run| run.game_mode().to_owned())
+        {
+            self.quest_event(offer.entity, Event::GameModeEntered(&mode), now_ms);
+            self.update_quest_tracker(offer.entity);
+        }
         Ok(level_change)
     }
 
@@ -2504,8 +2513,8 @@ impl SimWorld {
     }
 
     /// Carries out the `effects` of player `number`'s quests: achievements are set or cleared (a
-    /// set one is an event of every quest of the player again), items removed, game events
-    /// fired.
+    /// set one is an event of every quest of the player again), items given or removed, game
+    /// events fired.
     fn quest_effects(&mut self, number: u64, effects: Vec<Effect>, now_ms: u64) {
         let Some(entity) = self.player_by_number(number) else {
             return;
@@ -2514,6 +2523,7 @@ impl SimWorld {
         while !pending.is_empty() {
             let mut set = Vec::new();
             let mut fired = Vec::new();
+            let mut given = Vec::new();
             if let Some(mut player) = self.world.get_mut::<Player>(entity) {
                 for effect in pending.drain(..) {
                     match effect {
@@ -2530,12 +2540,16 @@ impl SimWorld {
                             }
                         }
                         Effect::GameEvent(id) => fired.push(id),
+                        Effect::GiveItem(id, count) => given.push((id, count)),
                         Effect::Done(_) => {}
                     }
                 }
             }
             for event in fired {
                 self.fire_game_event(number, &event, now_ms);
+            }
+            if !given.is_empty() {
+                self.give_loot(number, given, now_ms);
             }
             let Some(quests) = self.quests.get_mut(&number) else {
                 return;

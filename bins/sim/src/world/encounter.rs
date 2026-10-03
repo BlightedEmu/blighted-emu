@@ -1518,6 +1518,7 @@ impl Tutorial {
                 Effect::Achievement(id) => orders.push(Order::Achievement(id)),
                 Effect::LockAchievement(id) => orders.push(Order::LockAchievement(id)),
                 Effect::RemoveItem(id, count) => orders.push(Order::RemoveItem(id, count)),
+                Effect::GiveItem(id, count) => orders.push(Order::GiveItem(id, count)),
                 // The tutorial's tree fires no game event (build 25810808).
                 Effect::GameEvent(event) => {
                     tracing::debug!(player = self.owner, %event, "tutorial game event");

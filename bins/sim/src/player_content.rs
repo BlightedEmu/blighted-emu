@@ -159,12 +159,15 @@ pub struct MissionRow {
     /// `TaskHaveAndReturnChestDropProbabilityOverride`: the chance a container in its place
     /// drops its items.
     pub chest_percent: Option<i64>,
+    /// `TaskGiveAndTakeItemOverride`: the item its give task gives (a work order).
+    pub given_item: Option<String>,
 }
 
 impl MissionRow {
     /// The mission's value of template task `row`; `None` when the mission changes nothing in
     /// it. Item tasks take its items, count, drops and container chance; kill tasks its enemy
-    /// and count; a task that enforces its location takes the mission's place.
+    /// and count; give tasks its work order item; a task that enforces its location takes the
+    /// mission's place.
     fn override_of(&self, row: &TaskRow) -> Option<TaskRow> {
         let placed = TaskRow {
             poi_tag: if row.enforce_location {
@@ -188,6 +191,10 @@ impl MissionRow {
                     ..row.clone()
                 })
             }
+            "taskgiveitem" => Some(TaskRow {
+                item_name: Some(self.given_item.clone()?),
+                ..row.clone()
+            }),
             "taskkillcontribution" => Some(TaskRow {
                 kill_enemy_type: Some(self.kill.clone()?),
                 target_qty: self.kill_count.or(row.target_qty),
@@ -227,6 +234,7 @@ fn mission_rows(tables: &Tables) -> Vec<MissionRow> {
             kill_count: row.task_kill_contribution_qty_override,
             place: cell(row.poi_tag_override.as_ref()),
             chest_percent: row.task_have_and_return_chest_drop_probability_override,
+            given_item: cell(row.task_give_and_take_item_override.as_ref()),
         })
         .collect()
 }

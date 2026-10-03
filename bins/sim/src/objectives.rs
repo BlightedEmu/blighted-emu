@@ -496,6 +496,18 @@ enum TaskKind {
     /// string, we will increment progress"). Retail: the vault step of `12A_MSQ_03` was done 49
     /// ms after the storage interaction ended (vault capture 2026-09-27, 57.548 s and 57.597 s).
     Interact { tag: String, count: u32 },
+    /// Done when the player enters the game mode of this id (`TaskGameMode`; client: "Task that
+    /// progresses when the player enters the target Game Mode").
+    GameMode(String),
+    /// Gives the player `count` of the item when it starts, and is done (`TaskGiveItem`;
+    /// client: "Gives the player an item and may remove it"). `taken`: the item goes back when
+    /// the quest ends (`TaskGiveAndTakeItem`; client: "Is removed upon completion"; Inferred: at
+    /// the quest's end, since the task itself ends when it gives).
+    GiveItem {
+        item: String,
+        count: u32,
+        taken: bool,
+    },
     /// A task type this server does not run: done at once, so the tree goes on.
     Unsupported,
 }
@@ -578,6 +590,8 @@ pub struct TaskRow {
     pub fail_on_condition: Option<String>,
     /// `InteractTag`.
     pub interact_tag: Option<String>,
+    /// `GameModeId`.
+    pub game_mode_id: Option<String>,
     /// A mission's task whose items go back at the turn-in (`MissionData` overrides; retail: two
     /// item changes 31 to 35 ms after each 2461 turn-in, board capture 2026-06-13).
     pub returned_on_turn_in: bool,
@@ -673,6 +687,7 @@ pub fn task_rows(tables: &Tables) -> Vec<TaskRow> {
             trigger_area_type: row.trigger_area_type.clone(),
             fail_on_condition: row.fail_on_condition.clone(),
             interact_tag: row.interact_tag.clone(),
+            game_mode_id: row.game_mode_id.clone(),
             returned_on_turn_in: false,
             chest_drop_probability: row.chest_drop_probability,
             enforce_location: row.enforce_location_requirement.unwrap_or_default(),
@@ -784,6 +799,15 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         })
     };
     let place = || row.enforce_location.then(|| filled(&row.poi_tag)).flatten();
+    let chest = || {
+        row.chest_drop_probability
+            .and_then(|percent| u32::try_from(percent).ok())
+            .filter(|percent| *percent > 0)
+            .map(|percent| ChestDrop {
+                percent,
+                place: place(),
+            })
+    };
     let gather = |returned| TaskKind::GatherItems {
         item: item(),
         count,
@@ -835,14 +859,7 @@ fn kind_of(row: &TaskRow) -> TaskKind {
                 count,
                 returned: true,
                 drop: drop(),
-                chest: row
-                    .chest_drop_probability
-                    .and_then(|percent| u32::try_from(percent).ok())
-                    .filter(|percent| *percent > 0)
-                    .map(|percent| ChestDrop {
-                        percent,
-                        place: place(),
-                    }),
+                chest: chest(),
             })
         }
         "taskhaveandreturnitems" => TaskKind::HaveItem(have_item_of(row)),
@@ -875,6 +892,33 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "taskgotopoitag" => filled(&row.poi_tag).map_or(TaskKind::Unsupported, TaskKind::GoToPoi),
         "taskexitpoitag" => filled(&row.poi_tag).map_or(TaskKind::Unsupported, TaskKind::ExitPoi),
         "taskequipitem" => TaskKind::EquipItem(item()),
+        "taskgamemode" => {
+            filled(&row.game_mode_id).map_or(TaskKind::Unsupported, TaskKind::GameMode)
+        }
+        "taskgiveitem" => {
+            filled(&row.item_name).map_or(TaskKind::Unsupported, |item| TaskKind::GiveItem {
+                item,
+                count,
+                taken: false,
+            })
+        }
+        // A carried item that a container or a mob drops is waited for as an item task; one
+        // without a drop is given at the start. Both go back when the quest ends.
+        "taskgiveandtakeitem" => match filled(&row.item_name) {
+            None => TaskKind::Unsupported,
+            Some(item) if chest().is_some() || drop().is_some() => TaskKind::HaveItems {
+                item,
+                count,
+                returned: true,
+                drop: drop(),
+                chest: chest(),
+            },
+            Some(item) => TaskKind::GiveItem {
+                item,
+                count,
+                taken: true,
+            },
+        },
         "taskinteract" => filled(&row.interact_tag).map_or(TaskKind::Unsupported, |tag| {
             TaskKind::Interact { tag, count }
         }),
@@ -980,6 +1024,11 @@ impl ObjectiveTree {
                     count,
                     returned: true,
                     ..
+                }
+                | TaskKind::GiveItem {
+                    item,
+                    count,
+                    taken: true,
                 } => Some((item.clone(), *count)),
                 _ => None,
             })
@@ -1032,6 +1081,8 @@ pub enum Event<'a> {
     GameEvent(&'a str),
     /// The player ended an interact with an object that has this interact tag.
     Interacted(&'a str),
+    /// The player entered the game mode of this id (an instance of an expedition or a quest).
+    GameModeEntered(&'a str),
 }
 
 /// What the player is now, for the tasks done while it is so.
@@ -1081,6 +1132,8 @@ pub enum Effect {
     LockAchievement(String),
     /// Remove this many of this item from the player.
     RemoveItem(String, u32),
+    /// Give the player this many of this item.
+    GiveItem(String, u32),
     /// Fire this game event: its whisper plays and its reward goes to the player.
     GameEvent(String),
     /// This task is done.
@@ -1556,6 +1609,9 @@ impl ObjectiveRun {
                 (TaskKind::Interact { tag, count }, Event::Interacted(seen)) => {
                     (tag.eq_ignore_ascii_case(seen), 1, *count)
                 }
+                (TaskKind::GameMode(mode), Event::GameModeEntered(seen)) => {
+                    (mode.eq_ignore_ascii_case(seen), 1, 1)
+                }
                 _ => (false, 1, 1),
             };
             if !matches {
@@ -1678,6 +1734,10 @@ impl ObjectiveRun {
                 effects.push(Effect::GameEvent(event.clone()));
                 self.complete(index, now_ms, effects);
             }
+            TaskKind::GiveItem { item, count, .. } => {
+                effects.push(Effect::GiveItem(item.clone(), *count));
+                self.complete(index, now_ms, effects);
+            }
             TaskKind::Unsupported => self.complete(index, now_ms, effects),
             _ => {}
         }
@@ -1778,6 +1838,56 @@ pub(crate) mod tests {
             sub_tasks: children.iter().map(|child| (*child).to_owned()).collect(),
             ..row(task_id, kind)
         }
+    }
+
+    #[test]
+    fn a_game_mode_task_counts_its_entry_and_a_give_task_gives_its_item() {
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["Give", "Enter"]),
+            TaskRow {
+                target_qty: Some(2),
+                ..with_item("Give", "TaskGiveItem", "WorkOrder_T1")
+            },
+            TaskRow {
+                game_mode_id: Some("DungeonAmrine".to_owned()),
+                ..row("Enter", "TaskGameMode")
+            },
+        ];
+        let tree = Arc::new(TaskBook::new(rows).tree("Root").expect("tree"));
+        let (mut run, effects) = ObjectiveRun::start(tree, 0);
+        assert!(effects.contains(&Effect::GiveItem("WorkOrder_T1".to_owned(), 2)));
+        assert!(run.is_done("Give"), "a give task is done once it gave");
+        run.event(Event::GameModeEntered("DungeonEbonscale00"), 0);
+        assert!(!run.is_done("Enter"), "another game mode");
+        run.event(Event::GameModeEntered("dungeonamrine"), 0);
+        assert!(run.finished(), "entering its game mode ends it");
+    }
+
+    #[test]
+    fn a_carried_item_is_given_or_dropped_and_goes_back_at_the_end() {
+        let rows = vec![
+            container("Root", "SimpleTaskContainer", &["Letter", "Relic"]),
+            with_item("Letter", "TaskGiveAndTakeItem", "1612_0201_MalatestaLetter"),
+            TaskRow {
+                item_drop_vc: Some("Bandit".to_owned()),
+                item_drop_probability: Some(100),
+                ..with_item("Relic", "TaskGiveAndTakeItem", "1605_0301_BlessedRelic")
+            },
+        ];
+        let tree = Arc::new(TaskBook::new(rows).tree("Root").expect("tree"));
+        let (run, effects) = ObjectiveRun::start(Arc::clone(&tree), 0);
+        assert!(effects.contains(&Effect::GiveItem("1612_0201_MalatestaLetter".to_owned(), 1)));
+        assert_eq!(
+            run.quest_drops("Bandit_Thug", &[]),
+            [("1605_0301_BlessedRelic".to_owned(), 100)]
+        );
+        assert_eq!(
+            tree.returned_items(),
+            [
+                ("1612_0201_MalatestaLetter".to_owned(), 1),
+                ("1605_0301_BlessedRelic".to_owned(), 1)
+            ]
+        );
     }
 
     /// A mission's tasks at its place: a kill and an item from containers there.
