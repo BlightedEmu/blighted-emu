@@ -125,8 +125,12 @@
       <div class="why">On our server the first lock takes the nearest mob inside a small circle around the crosshair, not the mob under the crosshair. The client code works that way (<code>FUN_142c8b350</code>), so it is likely normal. To check on retail: stand near 2 mobs close together, aim at the farther one, lock. Also check: after a reconnect, does lock still work (flag 4, weapon swap range 0 were seen after gdb reconnects)? Notes: <code>local-data/findings/2026-10-01-client-lock-and-actor-state-map.md</code>.</div></li>
     <li><strong>Record retail captures of the systems that have none.</strong>
       <div class="why">Wars, sieges, invasions, expeditions, Outpost Rush, trading post, housing, companies. This must happen before 2027-01-31. After that, the facts are lost.</div></li>
-    <li><strong>Live check of the 2026-10-01 fixes (not committed).</strong>
-      <div class="why">Demon Storm blocker: walk to the watchtower, then turn in at Al Storm; then go on to Prydwen, the inn and Grace at the tavern. Craft: the "Crafting attempt failed" message should be gone. Notes: <code>local-data/findings/2026-10-01-beach-playtest-notes.md</code>.</div></li>
+    <li><strong>Live check of many quests at once.</strong>
+      <div class="why">A player now runs many quests. Each quest type has the client's own journal limit (side quests 30, town board and faction missions 30, main story 20, community goals 50, and more; proven from the client code). A quest the game starts by itself, the next step of a chain, has no limit. Check live: accept Truffle Fever (Hapless Howe) while the main story quest runs. Notes: <code>local-data/findings/2026-10-02-quest-journal-limits.md</code>.</div></li>
+    <li><strong>Bring in the quests of the captures: quest step types.</strong>
+      <div class="why">695 of 2,147 quests used only step types the server ran. Done: <code>TaskInteract</code> for quest objects and town buildings (an interact with a matching tag, counted when the interaction ends, as the retail vault step); main story quests with only known steps went from 238 to 263. Next: the town board and faction mission board (1,115 quests), then <code>TaskDie</code> (143), <code>TaskGameMode</code> (93), <code>TaskGiveItem</code> (55). List: <code>local-data/findings/2026-10-02-quest-gaps.tsv</code>; notes: <code>local-data/findings/2026-10-02-task-interact.md</code>.</div></li>
+    <li><strong>Live check of the craft message fix.</strong>
+      <div class="why">The Demon Storm turn-in works live. Craft: the "Crafting attempt failed" message should be gone. Notes: <code>local-data/findings/2026-10-01-beach-playtest-notes.md</code>.</div></li>
     <li><strong>Close the new player bugs (tutorial and starting beach).</strong>
       <div class="why">Every new player goes through both. The tutorial is the <code>ftue_v2</code> level (ship, quick time event, sailors, legionnaires, corruption, Damned Commander). The starting beach is open world. Open on the beach (play test 2026-10-01, 18 issues): player hits that miss (boars, Janszoon, mariners), bosses whose melee does no damage, mobs that swing from 3 to 4.5 m, mobs sunk in the ground or stuck in walls (Janszoon, the cave), a mob back to full health, debuffs shown as 10,957 days, no food buff, no fall damage, the watchtower crate gives nothing, growths with no break effect, deck boars not asleep, Janszoon anchor toss. Level not yet checked: temple door wall.</div></li>
     <li><strong>Make own movement match retail (to-do <code>t1</code>).</strong>
@@ -208,7 +212,7 @@ const AREAS = [
   {
     name: "Player in the world",
     features: [
-      ["Create, select, enter world", 95, "live", "New character goes in game.", "Small login burst gaps."],
+      ["Create, select, enter world", 95, "live", "New character goes in game. The select screen shows the saved level (not live-checked).", "Small login burst gaps."],
       ["Own movement", 65, "live", "No more rubber banding (6d508fc).", "Server body is still off: median 0.156 m open world, 0.219 m tutorial (to-do t1)."],
       ["See other players", 70, "live", "Look, gear, health, facing, attacks.", "Full live test with many players: not done."],
       ["Swim, water, falls", 70, "live", "Swim strokes, water hold, fall damage.", "Some swim states not checked."],
@@ -250,7 +254,7 @@ const AREAS = [
   {
     name: "Quests and progression",
     features: [
-      ["Quest engine", 72, "tests", "Task types from task sheets, turn-in, rewards. Open-world areas without a location now use the retail place (2 of 65 so far).", "63 more areas without a location; TaskInteract, TaskGiveItem, TaskGameMode are skipped."],
+      ["Quest engine", 78, "tests", "Task types from task sheets, turn-in, rewards. Many quests at once, with the client's journal limit per quest type. Interact steps (quest objects, town buildings). Open-world areas without a location now use the retail place (2 of 65 so far).", "Live check of many quests; pin limit Unknown. 63 more areas without a location; TaskInteract, TaskGiveItem, TaskGameMode are skipped."],
       ["Beach and wreck quests", 70, "tests", "Start beach chain and wreck quests 4 to 7.", "Full live run."],
       ["Main story and side quests", 20, "code", "The engine runs them from game data.", "Nobody played them live."],
       ["XP, levels, attribute points", 80, "tests", "Kill XP, level up, attribute and weapon points.", "Live check after the tutorial."],
