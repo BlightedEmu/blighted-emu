@@ -98,7 +98,7 @@
 <body>
 <main>
   <h1>Blighted New World Emulator: Progress</h1>
-  <p class="sub">Status on 2026-10-02. Client build 25810808. Last commit <code>9140366</code>.</p>
+  <p class="sub">Status on 2026-10-02. Client build 25810808. Last commit <code>db23d9c</code>.</p>
 
   <div class="cards" id="summary"></div>
 
@@ -171,6 +171,13 @@
     <li>✅ Tutorial chest marked looted (<code>04dd5d4</code>, 2026-09-29).</li>
     <li>✅ Journal auto pin works, you confirmed it live (<code>c21828b</code>, 2026-10-01).</li>
     <li>✅ Target lock works on mobs: lock, release, wheel cycling, you confirmed it live (<code>110ccc0</code>, 2026-10-01).</li>
+    <li>✅ Demon Storm turn-in works live: the watchtower area ends in its point of interest (<code>d1ea27a</code>, 2026-10-02).</li>
+    <li>✅ Select screen shows the saved level (<code>1073a00</code>, 2026-10-02).</li>
+    <li>✅ Many quests at once, with the client's journal limit per quest type (<code>a9ea5a2</code>, 2026-10-02).</li>
+    <li>✅ Interact steps: quest objects and town buildings (<code>a9ea5a2</code>, 2026-10-02).</li>
+    <li>✅ Town board missions: take, the mission's items, kills and place, turn-in (<code>a07ebd0</code>, 2026-10-02).</li>
+    <li>✅ Game mode, give item and carried item steps (<code>a55ff4c</code>, 2026-10-02); patrol steps (<code>c88b42c</code>).</li>
+    <li>✅ Quest trigger volumes from the level data: 772 in the open world (<code>9a158be</code>, 2026-10-02).</li>
   </ul>
 
   <footer>
@@ -254,9 +261,9 @@ const AREAS = [
   {
     name: "Quests and progression",
     features: [
-      ["Quest engine", 78, "tests", "Task types from task sheets, turn-in, rewards. Many quests at once, with the client's journal limit per quest type. Interact steps (quest objects, town buildings). Town board missions. Open-world areas without a location now use the retail place (2 of 65 so far).", "Live check of many quests; pin limit Unknown. 63 more areas without a location; TaskInteract, TaskGiveItem, TaskGameMode are skipped."],
+      ["Quest engine", 84, "tests", "Task types from task sheets, turn-in, rewards. Many quests at once, with the client's journal limit per quest type. Interact steps (quest objects, town buildings). Town board missions. Open-world areas without a location now use the retail place (2 of 65 so far).", "Live check of many quests; pin limit Unknown. 63 more areas without a location; TaskInteract, TaskGiveItem, TaskGameMode are skipped."],
       ["Beach and wreck quests", 70, "tests", "Start beach chain and wreck quests 4 to 7.", "Full live run."],
-      ["Main story and side quests", 20, "code", "The engine runs them from game data.", "Nobody played them live."],
+      ["Main story and side quests", 45, "tests", "The engine runs them from game data. Side quests with only supported steps: 486 of 528; main story: 309 of 358.", "Nobody played them live. Faction missions need the faction join."],
       ["XP, levels, attribute points", 80, "tests", "Kill XP, level up, attribute and weapon points.", "Live check after the tutorial."],
       ["Weapon mastery", 70, "tests", "Mastery XP and saves.", "Live check."],
       ["Area charting, territory standing", 60, "tests", "Charting XP, standing rank 1.", "Higher ranks and their rewards."],
