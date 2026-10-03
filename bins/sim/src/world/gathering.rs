@@ -531,11 +531,22 @@ impl SimWorld {
             player.extra_members.push(tracked);
         }
         let (items, rolls) = self.roll_drops(gather.number, gather.mob, loot, &hints);
+        let gathered = items.clone();
         self.give_drops(
             gather.number,
             items.into_iter().zip(rolls).collect(),
             now_ms,
         );
+        for (item, quantity) in &gathered {
+            self.quest_event(
+                gather.number,
+                Event::Gathered {
+                    item,
+                    quantity: *quantity,
+                },
+                now_ms,
+            );
+        }
         self.wear_tool(entity, &gather.gatherable);
         if let Some(event) = &gather.gatherable.game_event {
             let scale = self.gather_scale(gather);

@@ -499,6 +499,10 @@ enum TaskKind {
     /// string, we will increment progress"). Retail: the vault step of `12A_MSQ_03` was done 49
     /// ms after the storage interaction ended (vault capture 2026-09-27, 57.548 s and 57.597 s).
     Interact { tag: String, count: u32 },
+    /// Done after the player gathered `count` of the item from gatherables (`TaskRequireGatherItems`;
+    /// client: "only increments progress when the player actually gathers something, not just
+    /// when they already have the items in their inventory").
+    RequireGather { item: String, count: u32 },
     /// Done when the player starts a talk with NPC `npc` (`TaskConversationState`; client: "Task
     /// that completes when the player enters a particular conversation state"). Retail
     /// (`12a_side_07_forgering`): the talk with `@12_JeongIseul` started at 220.660 s, the server
@@ -933,6 +937,10 @@ fn kind_of(row: &TaskRow) -> TaskKind {
                 })
             })
             .map_or(TaskKind::Unsupported, TaskKind::ConversationState),
+        "taskrequiregatheritems" => TaskKind::RequireGather {
+            item: item(),
+            count,
+        },
         "taskhavelevel" => TaskKind::HaveLevel {
             progression: filled(&row.item_name),
             target: row
@@ -1138,6 +1146,13 @@ pub enum Event<'a> {
     GameModeEntered(&'a str),
     /// The player started a talk with the NPC of this id.
     Talked(&'a str),
+    /// The player got this many of this item from a gather.
+    Gathered {
+        /// The item id.
+        item: &'a str,
+        /// How many.
+        quantity: u32,
+    },
 }
 
 /// The player's level of a progression id (`None`: the character), as its rank or its points.
@@ -1432,7 +1447,8 @@ impl ObjectiveRun {
                         | TaskKind::HaveItems { count, .. }
                         | TaskKind::GatherItems { count, .. }
                         | TaskKind::GameEvent { count, .. }
-                        | TaskKind::Interact { count, .. },
+                        | TaskKind::Interact { count, .. }
+                        | TaskKind::RequireGather { count, .. },
                         TaskState::Done,
                     ) => *count,
                     (_, TaskState::Active { progress, .. }) => progress,
@@ -1703,6 +1719,13 @@ impl ObjectiveRun {
                 (TaskKind::Interact { tag, count }, Event::Interacted(seen)) => {
                     (tag.eq_ignore_ascii_case(seen), 1, *count)
                 }
+                (
+                    TaskKind::RequireGather {
+                        item: wanted,
+                        count,
+                    },
+                    Event::Gathered { item, quantity },
+                ) => (wanted.eq_ignore_ascii_case(item), quantity, *count),
                 (TaskKind::GameMode(mode), Event::GameModeEntered(seen))
                 | (TaskKind::ConversationState(mode), Event::Talked(seen)) => {
                     (mode.eq_ignore_ascii_case(seen), 1, 1)
@@ -2108,6 +2131,40 @@ pub(crate) mod tests {
         assert!(run.is_done("Iseul"));
         run.event(Event::Talked("NPC_16195"), 0);
         assert!(run.finished());
+    }
+
+    #[test]
+    fn a_require_gather_task_counts_gathers_only() {
+        let rows = vec![TaskRow {
+            target_qty: Some(2),
+            ..with_item("Herbs", "TaskRequireGatherItems", "HerbT1")
+        }];
+        let tree = Arc::new(TaskBook::new(rows).tree("Herbs").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        run.event(
+            Event::ItemGained {
+                item: "HerbT1",
+                quantity: 5,
+            },
+            0,
+        );
+        assert!(!run.finished(), "a loot or a trade is no gather");
+        run.event(
+            Event::Gathered {
+                item: "HerbT1",
+                quantity: 1,
+            },
+            0,
+        );
+        assert!(!run.finished());
+        run.event(
+            Event::Gathered {
+                item: "herbt1",
+                quantity: 1,
+            },
+            0,
+        );
+        assert!(run.finished(), "two gathered");
     }
 
     /// A mission's tasks at its place: a kill and an item from containers there.
