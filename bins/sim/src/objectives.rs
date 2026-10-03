@@ -1192,6 +1192,8 @@ pub enum Event<'a> {
         vitals_id: &'a str,
         /// Its `VitalsCategories`.
         categories: &'a [String],
+        /// Its spawner's category and that category's groups (CRC-32s of the lowercase ids).
+        spawn_categories: &'a [u32],
     },
     /// The player is here.
     Moved(Position),
@@ -1338,10 +1340,17 @@ pub struct ObjectiveRun {
     places: Option<Vec<String>>,
 }
 
-/// Whether `enemy` names a mob of `vitals_id` and `categories`: one of its categories or its
-/// vitals id, or the start of its vitals id (live-tutorial note: `Legion_Legionnaire` counts
-/// `Legion_Legionnaire_FTUE`). Case does not matter.
-fn kills_count(enemy: &str, vitals_id: &str, categories: &[String]) -> bool {
+/// Whether `enemy` names a mob of `vitals_id`, `categories` and spawn categories
+/// `spawn_categories` (CRC-32s of the lowercase ids, [`KillTypes::spawn_categories`]): one of
+/// its categories or its vitals id, or the start of its vitals id (live-tutorial note:
+/// `Legion_Legionnaire` counts `Legion_Legionnaire_FTUE`), or its spawner's category or that
+/// category's group (`Barbary_Lion_16BS12`, `Periville`). Case does not matter.
+fn kills_count(
+    enemy: &str,
+    vitals_id: &str,
+    categories: &[String],
+    spawn_categories: &[u32],
+) -> bool {
     let names = |name: &str| {
         name.eq_ignore_ascii_case(enemy)
             || name.len() > enemy.len()
@@ -1349,7 +1358,9 @@ fn kills_count(enemy: &str, vitals_id: &str, categories: &[String]) -> bool {
                 && name[..enemy.len()].eq_ignore_ascii_case(enemy)
                 && name[enemy.len()..].starts_with(ID_PART_SEPARATOR)
     };
-    names(vitals_id) || categories.iter().any(|category| names(category))
+    names(vitals_id)
+        || categories.iter().any(|category| names(category))
+        || spawn_categories.contains(&lowercase_crc32(enemy))
 }
 
 /// The categories of a `VitalsCategories` cell (also the recipe list of a multiple recipe task).
@@ -1366,10 +1377,14 @@ pub fn categories_of(cell: &str) -> Vec<String> {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KillTypes {
     by_vitals: HashMap<u32, (String, Vec<String>)>,
+    /// The group of each vitals category (`GroupVitalsCategoryID`), by CRC-32 of the lowercase
+    /// ids.
+    groups: HashMap<u32, u32>,
 }
 
 impl KillTypes {
-    /// The kill types of `VitalsBaseData` in `tables`.
+    /// The kill types of `VitalsBaseData` in `tables`, with the category groups of
+    /// `VitalsCategoryData`.
     pub fn from_tables(tables: &Tables) -> Self {
         Self::build(
             tables
@@ -1381,6 +1396,40 @@ impl KillTypes {
                     (row.vitals_id.clone(), categories)
                 }),
         )
+        .with_groups(
+            tables
+                .vitals_category_data
+                .iter()
+                .flat_map(|table| &table.rows)
+                .filter_map(|row| {
+                    let group = row
+                        .group_vitals_category_id
+                        .clone()
+                        .filter(|group| !group.is_empty())?;
+                    Some((row.vitals_category_id.clone(), group))
+                }),
+        )
+    }
+
+    /// These kill types with the category groups `groups` (category id, group id).
+    pub fn with_groups(mut self, groups: impl IntoIterator<Item = (String, String)>) -> Self {
+        self.groups = groups
+            .into_iter()
+            .map(|(category, group)| (lowercase_crc32(&category), lowercase_crc32(&group)))
+            .collect();
+        self
+    }
+
+    /// The CRC-32s of spawn category `spawn_category` and of its groups, the group's group and
+    /// on; empty without one.
+    pub fn spawn_categories(&self, spawn_category: Option<u32>) -> Vec<u32> {
+        let mut found = Vec::new();
+        let mut next = spawn_category;
+        while let Some(category) = next.filter(|category| !found.contains(category)) {
+            found.push(category);
+            next = self.groups.get(&category).copied();
+        }
+        found
     }
 
     /// The kill types of `rows`: (vitals id, `VitalsCategories` cell).
@@ -1393,6 +1442,7 @@ impl KillTypes {
                     (lowercase_crc32(&vitals_id), (vitals_id, categories))
                 })
                 .collect(),
+            groups: HashMap::new(),
         }
     }
 
@@ -1680,8 +1730,13 @@ impl ObjectiveRun {
 
     /// The items the waiting gather tasks drop for a corpse of `vitals_id` and `categories`
     /// that the player skins: each item and its chance in percent.
-    pub fn quest_drops(&self, vitals_id: &str, categories: &[String]) -> Vec<(String, u32)> {
-        self.drops(|drop| kills_count(&drop.enemy, vitals_id, categories))
+    pub fn quest_drops(
+        &self,
+        vitals_id: &str,
+        categories: &[String],
+        spawn_categories: &[u32],
+    ) -> Vec<(String, u32)> {
+        self.drops(|drop| kills_count(&drop.enemy, vitals_id, categories, spawn_categories))
     }
 
     /// The items the waiting gather tasks drop for a quest object of gatherable `gatherable`
@@ -1802,9 +1857,11 @@ impl ObjectiveRun {
                     Event::Killed {
                         vitals_id,
                         categories,
+                        spawn_categories,
                     },
                 ) => (
-                    kills_count(enemy, vitals_id, categories) && self.is_in(place.as_deref()),
+                    kills_count(enemy, vitals_id, categories, spawn_categories)
+                        && self.is_in(place.as_deref()),
                     1,
                     *count,
                 ),
@@ -2150,7 +2207,7 @@ pub(crate) mod tests {
         let (run, effects) = ObjectiveRun::start(Arc::clone(&tree), 0);
         assert!(effects.contains(&Effect::GiveItem("1612_0201_MalatestaLetter".to_owned(), 1)));
         assert_eq!(
-            run.quest_drops("Bandit_Thug", &[]),
+            run.quest_drops("Bandit_Thug", &[], &[]),
             [("1605_0301_BlessedRelic".to_owned(), 100)]
         );
         assert_eq!(
@@ -2482,6 +2539,7 @@ pub(crate) mod tests {
         let wolf = Event::Killed {
             vitals_id: "Wolf_Grey",
             categories: &[],
+            spawn_categories: &[],
         };
         let outside: [&str; 0] = [];
         let facts = |places| Facts {
@@ -2592,6 +2650,7 @@ pub(crate) mod tests {
             Event::Killed {
                 vitals_id: "Legion_Legionnaire_FTUE",
                 categories: &categories,
+                spawn_categories: &[],
             },
             NOW,
         );
@@ -2696,6 +2755,7 @@ pub(crate) mod tests {
         let kill = Event::Killed {
             vitals_id: "Legion_Legionnaire_FTUE",
             categories: &categories,
+            spawn_categories: &[],
         };
         run.event(kill, NOW);
         assert!(!run.is_done("Kills"));
@@ -3101,23 +3161,58 @@ pub(crate) mod tests {
         assert!(kills_count(
             "corrupted",
             "Corrupted_Sailor_1H_Club_FTUE",
-            &categories
+            &categories,
+            &[]
         ));
         assert!(kills_count(
             "Legion_Legionnaire",
             "Legion_Legionnaire_FTUE",
+            &[],
             &[]
         ));
         assert!(!kills_count(
             "Legion_Legion",
             "Legion_Legionnaire_FTUE",
+            &[],
             &[]
         ));
         assert!(!kills_count(
             "Damned_Commander_FTUE",
             "Corruption_Entity",
-            &categories
+            &categories,
+            &[]
         ));
+    }
+
+    #[test]
+    fn a_kill_counts_by_its_spawners_category_and_its_group() {
+        // Client row `16_Side_20_d_03_gather_heart` drops from `Barbary_Lion_16BS12`, the
+        // category 9 of the level's point spawners give their `Barbary_Lion` mobs.
+        let spawner = [lowercase_crc32("barbary_lion_16bs12")];
+        assert!(kills_count(
+            "Barbary_Lion_16BS12",
+            "Barbary_Lion",
+            &[],
+            &spawner
+        ));
+        assert!(!kills_count(
+            "Barbary_Lion_16BS12",
+            "Barbary_Lion",
+            &[],
+            &[]
+        ));
+        assert!(!kills_count(
+            "Barbary_Lion_16BS12",
+            "Barbary_Lion",
+            &[],
+            &[lowercase_crc32("barbary_lion_16bs05")]
+        ));
+        // `VitalsCategoryData`: `Bloated_Corpse_13WF08a` is in the group `Periville`.
+        let types = KillTypes::default()
+            .with_groups([("Bloated_Corpse_13WF08a".to_owned(), "Periville".to_owned())]);
+        let corpse = types.spawn_categories(Some(lowercase_crc32("bloated_corpse_13wf08a")));
+        assert!(kills_count("Periville", "Bloated_Corpse", &[], &corpse));
+        assert!(types.spawn_categories(None).is_empty());
     }
 
     #[test]
@@ -3300,6 +3395,7 @@ pub(crate) mod tests {
                         Event::Killed {
                             vitals_id,
                             categories,
+                            spawn_categories: &[],
                         },
                         now,
                     )
@@ -3391,6 +3487,7 @@ pub(crate) mod tests {
         let kill = Event::Killed {
             vitals_id: mariner,
             categories,
+            spawn_categories: &[],
         };
         let watchtower: &[&str] = &["watchtower"];
         let wreck_2: &[&str] = &["drowned_shipwreck_2_30125"];
@@ -3644,19 +3741,26 @@ pub(crate) mod tests {
         let (mut run, _) = ObjectiveRun::start(tree, NOW);
         let boar = categories_of("Boar,Hostile");
         assert!(
-            run.quest_drops("Boar", &boar).is_empty(),
+            run.quest_drops("Boar", &boar, &[]).is_empty(),
             "no drop before its task"
         );
         run.event(
             Event::Killed {
                 vitals_id: "Boar",
                 categories: &boar,
+                spawn_categories: &[],
             },
             NOW,
         );
         run.event(Event::Equipped("1hSkinningKnifeT1"), NOW);
-        assert_eq!(run.quest_drops("Boar", &boar), [("PorkT1".to_owned(), 100)]);
-        assert!(run.quest_drops("Wolf", &[]).is_empty(), "another enemy");
+        assert_eq!(
+            run.quest_drops("Boar", &boar, &[]),
+            [("PorkT1".to_owned(), 100)]
+        );
+        assert!(
+            run.quest_drops("Wolf", &[], &[]).is_empty(),
+            "another enemy"
+        );
         run.event(
             Event::ItemGained {
                 item: "PorkT1",

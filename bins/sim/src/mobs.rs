@@ -52,6 +52,8 @@ pub const WAKE_RESCAN_M: f32 = 10.0;
 /// mob (`MOB_ENTITY_BASE` itself, the tutorial's sailor 1) stayed invisible while it fought,
 /// and the mobs after it, with the same card bytes, showed (2026-09-14).
 const FIRST_MOB_OFFSET: u64 = 1;
+/// The category CRC of a spawn whose spawner names none (the CRC-32 of the empty id).
+const NO_SPAWN_CATEGORY: u32 = 0;
 
 /// Mobs per thread below which the minds run on fewer threads (our engineering limit: a thread
 /// costs about as much to start as a few hundred mind steps).
@@ -915,6 +917,14 @@ impl Mobs {
     pub fn vitals_of(&self, entity: u64) -> Option<u32> {
         self.spawn_of(spawn_index(entity)?)
             .map(|spawn| spawn.vitals_id)
+    }
+
+    /// The spawn category of mob `entity` (CRC-32 of the lowercase id its spawner names,
+    /// `Barbary_Lion_16BS12`); `None` for a spawn with none.
+    pub fn category_of(&self, entity: u64) -> Option<u32> {
+        self.spawn_of(spawn_index(entity)?)
+            .map(|spawn| spawn.category_id)
+            .filter(|category| *category != NO_SPAWN_CATEGORY)
     }
 
     /// The entity mob `entity` chases or hits, when it lives here.

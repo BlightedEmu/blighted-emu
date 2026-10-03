@@ -1287,6 +1287,8 @@ impl Tutorial {
                     Event::Killed {
                         vitals_id,
                         categories,
+                        // The tutorial's fighters come from its script, not from point spawners.
+                        spawn_categories: &[],
                     },
                     now_ms,
                 );

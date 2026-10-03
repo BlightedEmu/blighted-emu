@@ -1894,11 +1894,15 @@ impl SimWorld {
         else {
             return;
         };
+        let spawn_categories = content
+            .kill_types
+            .spawn_categories(self.mobs.category_of(mob));
         self.quest_event(
             killer,
             Event::Killed {
                 vitals_id,
                 categories,
+                spawn_categories: &spawn_categories,
             },
             now_ms,
         );

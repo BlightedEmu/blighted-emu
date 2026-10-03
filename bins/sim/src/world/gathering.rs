@@ -649,9 +649,17 @@ impl SimWorld {
                 else {
                     return Vec::new();
                 };
+                let spawn_categories = self
+                    .content
+                    .kill_types
+                    .spawn_categories(self.mobs.category_of(mob));
                 quests
                     .iter()
-                    .flat_map(|quest| quest.run.quest_drops(vitals_id, categories))
+                    .flat_map(|quest| {
+                        quest
+                            .run
+                            .quest_drops(vitals_id, categories, &spawn_categories)
+                    })
                     .collect()
             }
             // A quest object is most often a loot container too (346 of the 381 steps that drop
