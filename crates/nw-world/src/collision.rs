@@ -27,7 +27,7 @@ pub const COLLISION_MAGIC: [u8; 4] = *b"NWCO";
 pub const COLLISION_FORMAT_VERSION: u16 = 1;
 /// Version of the record types. Raise it when a type in this module changes; the golden test
 /// fails until it is raised.
-pub const COLLISION_SCHEMA_VERSION: u32 = 2;
+pub const COLLISION_SCHEMA_VERSION: u32 = 3;
 /// Header fields of the collision file.
 pub const COLLISION_CONTAINER: ContainerSpec = ContainerSpec {
     magic: COLLISION_MAGIC,
@@ -56,6 +56,43 @@ pub struct LevelCollision {
     pub bodies: Vec<Body>,
     /// The solids of the slices that spawners place later, each where its spawner places it.
     pub deferred: Vec<DeferredSlice>,
+    /// The quest trigger volumes of the level as it loads.
+    pub volumes: Vec<QuestVolume>,
+}
+
+/// A quest trigger volume (finding "trigger volumes"): an entity with an
+/// `ObjectiveDetectionVolumeComponent` (`m_targetTag`, the `TargetTag` a `TaskTriggerArea` names)
+/// and a `DetectionVolumeComponent` (its query shape, `m_shape`), placed in the world with its
+/// entity's scale, unlike a rigid body's query shape. Observed: retail ended
+/// `99F_MSQ_ER_StealBoat_GoToCausewayAlt` (capture `99f_msq_er_stealboat`, 150.248 s) with the
+/// player 5.27 m from the centre of its volume's 5 m half box, inside it only at its entity's
+/// scale of 5; `TriggerVol_12_Whisper6`'s 144 m sphere has the retail whisper point on its edge.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuestVolume {
+    /// Its `m_targetTag`.
+    pub tag: String,
+    /// Its shape in its own space: a box or a sphere.
+    pub shape: Geometry,
+    /// World from the shape's space.
+    pub place: Affine,
+}
+
+impl QuestVolume {
+    /// Whether the world point `point` is inside the volume.
+    pub fn contains(&self, point: Vec3) -> bool {
+        let Some(inverse) = invert(&self.place) else {
+            return false;
+        };
+        let local = transform_point(&inverse, point);
+        match &self.shape {
+            Geometry::Box { half_extents } => local
+                .iter()
+                .zip(half_extents)
+                .all(|(value, half)| value.abs() <= *half),
+            Geometry::Sphere { radius } => dot(local, local) <= radius * radius,
+            _ => false,
+        }
+    }
 }
 
 /// The solids of one slice that a spawner places after the level loads.
@@ -330,7 +367,11 @@ mod tests {
         0, 0, 0, 128, 63, 0, 0, 0, 0, 1, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129, 129,
         129, 129, 129, 129, 129, 200, 1, 0, 0, 128, 63, 0, 0, 0, 64, 0, 0, 64, 64, 1, 2, 0, 0, 128,
         63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0, 1, 25, 84, 114, 105, 103, 103, 101, 114,
+        86, 111, 108, 95, 49, 54, 95, 83, 101, 97, 114, 99, 104, 86, 97, 117, 108, 116, 1, 0, 0,
+        64, 64, 0, 0, 128, 64, 0, 0, 0, 63, 0, 0, 0, 0, 0, 0, 128, 191, 0, 0, 0, 0, 0, 0, 200, 66,
+        0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 72, 67, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 128, 63,
+        0, 0, 240, 65,
     ];
 
     /// One geometry of every kind and one body.
@@ -378,7 +419,33 @@ mod tests {
                     place: IDENTITY_AFFINE,
                 }],
             }],
+            volumes: vec![QuestVolume {
+                tag: "TriggerVol_16_SearchVault".to_owned(),
+                shape: Geometry::Box {
+                    half_extents: [3.0, 4.0, 0.5],
+                },
+                place: [
+                    [0.0, -1.0, 0.0, 100.0],
+                    [1.0, 0.0, 0.0, 200.0],
+                    [0.0, 0.0, 1.0, 30.0],
+                ],
+            }],
         }
+    }
+
+    #[test]
+    fn a_quest_volume_holds_the_points_of_its_turned_box() {
+        let volume = &sample().volumes[0];
+        assert!(volume.contains([100.0, 200.0, 30.0]), "its centre");
+        assert!(
+            volume.contains([103.9, 202.9, 30.4]),
+            "4 m along its turned x, 3 m along y"
+        );
+        assert!(
+            !volume.contains([102.9, 203.9, 30.0]),
+            "past its turned x half size"
+        );
+        assert!(!volume.contains([100.0, 200.0, 31.0]), "above it");
     }
 
     #[test]

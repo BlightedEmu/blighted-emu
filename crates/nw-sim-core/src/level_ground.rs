@@ -153,7 +153,7 @@ mod tests {
                 half_extents: [5.0, 5.0, 0.5],
             }],
             bodies: vec![Body { geometry: 0, place }],
-            deferred: Vec::new(),
+            ..LevelCollision::default()
         });
         LevelGround::new(FlatGround(TERRAIN_Z), Arc::new(collision))
     }

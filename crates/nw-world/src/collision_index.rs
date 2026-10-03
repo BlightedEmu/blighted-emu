@@ -1023,7 +1023,7 @@ mod tests {
             level: "lv".to_owned(),
             geometries,
             bodies,
-            deferred: Vec::new(),
+            ..LevelCollision::default()
         })
     }
 

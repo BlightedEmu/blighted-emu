@@ -37,6 +37,7 @@ use nw_content::titles::TitleRules;
 use nw_content::tradeskill_xp::{BonusChances, TradeskillCurves};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_sim_core::{EquipLoad, EquipLoadLimits, Position};
+use nw_world::collision::QuestVolume;
 use nw_world::dungeon_scripts::DungeonScripts;
 use nw_world::interact_tags::TagOwner;
 use nw_world::records::{Capital, GatherablePoint, WorldFile};
@@ -626,6 +627,9 @@ pub struct PlayerContent {
     pub crates: CrateLoot,
     /// The interact tags of the level's objects, for `TaskInteract`.
     pub interact_tags: InteractTags,
+    /// The level's quest trigger volumes, for `TaskTriggerArea` (their `m_targetTag` is a place
+    /// the player is in while inside).
+    pub quest_volumes: Vec<QuestVolume>,
     /// The level's zone capital plots: each one's place and raw id, the provider a mission board
     /// in its zone names.
     pub zone_plots: Vec<([f32; 3], [u8; MISSION_BOARD_ID_LEN])>,
@@ -990,6 +994,7 @@ impl PlayerContent {
                     .map(|slice| (slice.id, slice.variant.as_str())),
             ),
             interact_tags: level_interact_tags(tables, level),
+            quest_volumes: Vec::new(),
             zone_plots: zone_plots(level),
             stations: level.stations.clone(),
             structure_costs: StructureCosts::from_tables(tables),

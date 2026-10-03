@@ -110,6 +110,7 @@ mod tests {
                 origin: [10.0, 0.0, 0.0],
                 bodies: vec![Body { geometry: 0, place }],
             }],
+            volumes: Vec::new(),
         }
     }
 

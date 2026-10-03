@@ -844,11 +844,15 @@ fn kind_of(row: &TaskRow) -> TaskKind {
                 .as_deref()
                 .is_some_and(|kind| kind.eq_ignore_ascii_case(LEAVE_AREA_TYPE));
             let known_volume = matches!(area, Some(TriggerArea::Volume(_)));
+            // Without a location or a tutorial volume, the area is its POI, else the level's
+            // quest volume of its tag ([`nw_world::collision::QuestVolume`]: the sim counts the
+            // player in that tag while inside).
+            let poi = (!leave).then(|| filled(&row.poi_tag)).flatten();
             TaskKind::TriggerArea {
                 area,
                 leave,
-                place: (location.is_none() && !known_volume && !leave)
-                    .then(|| filled(&row.poi_tag))
+                place: (location.is_none() && !known_volume)
+                    .then(|| poi.or_else(|| filled(&row.target_tag)))
                     .flatten(),
             }
         }
@@ -1460,10 +1464,12 @@ impl ObjectiveRun {
                     .held
                     .iter()
                     .any(|(id, _, worn)| *worn && id.eq_ignore_ascii_case(item)),
-                TaskKind::GoToPoi(tag)
-                | TaskKind::TriggerArea {
-                    place: Some(tag), ..
-                } => inside(tag) == Some(true),
+                TaskKind::GoToPoi(tag) => inside(tag) == Some(true),
+                TaskKind::TriggerArea {
+                    place: Some(tag),
+                    leave,
+                    ..
+                } => inside(tag) == Some(!*leave),
                 TaskKind::ExitPoi(tag) => inside(tag) == Some(false),
                 TaskKind::HasAchievement(achievement) => {
                     facts.achieved.is_some_and(|achieved| achieved(achievement))
@@ -1949,6 +1955,39 @@ pub(crate) mod tests {
         assert!(!run.finished());
         run.tick(2 * STAY_MS);
         assert!(run.finished(), "a whole stay ends it");
+    }
+
+    #[test]
+    fn an_area_of_a_level_volume_counts_inside_it_and_a_leave_outside_it() {
+        let rows = vec![
+            container("Root", "ConsecutiveTaskContainer", &["Enter", "Leave"]),
+            TaskRow {
+                target_tag: Some("99F_StealBoat_GoToCauseway".to_owned()),
+                ..row("Enter", "TaskTriggerArea")
+            },
+            TaskRow {
+                target_tag: Some("12A_LeaveLochnir".to_owned()),
+                trigger_area_type: Some(LEAVE_AREA_TYPE.to_owned()),
+                ..row("Leave", "TaskTriggerArea")
+            },
+        ];
+        let tree = Arc::new(TaskBook::new(rows).tree("Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        let facts = |places| Facts {
+            held: &[],
+            places: Some(places),
+            achieved: None,
+        };
+        run.sync(&facts(&["12a_leavelochnir"]), 0);
+        assert!(!run.is_done("Enter"), "not in the causeway volume");
+        run.sync(
+            &facts(&["99F_StealBoat_GoToCauseway", "12A_LeaveLochnir"]),
+            0,
+        );
+        assert!(run.is_done("Enter"), "in its volume");
+        assert!(!run.is_done("Leave"), "still in Lochnir");
+        run.sync(&facts(&[]), 0);
+        assert!(run.finished(), "out of Lochnir");
     }
 
     /// A mission's tasks at its place: a kill and an item from containers there.

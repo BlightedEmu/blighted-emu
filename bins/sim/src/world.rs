@@ -2589,7 +2589,15 @@ impl SimWorld {
             if let Some(player) = player {
                 let carried = player.gear.as_ref().map(Gear::carried).unwrap_or_default();
                 let held = held_items(&carried);
-                let places = quest_objects::places(&self.content.poi_tags, &player.territories);
+                let mut places = quest_objects::places(&self.content.poi_tags, &player.territories);
+                let at = [position.x, position.y, position.z];
+                places.extend(
+                    self.content
+                        .quest_volumes
+                        .iter()
+                        .filter(|volume| volume.contains(at))
+                        .map(|volume| volume.tag.as_str()),
+                );
                 let rules = &self.achievement_rules;
                 let achieved = |id: &str| player.flow.has_achievement(rules, id);
                 let facts = Facts {
@@ -10432,7 +10440,7 @@ mod tests {
                 half_extents: [DECK_HALF_M, DECK_HALF_M, DECK_HALF_THICKNESS_M],
             }],
             bodies: vec![Body { geometry: 0, place }],
-            deferred: Vec::new(),
+            ..LevelCollision::default()
         });
         Arc::new(nw_sim_core::LevelGround::new(
             FlatGround(SHIP_TERRAIN_M),
@@ -10568,6 +10576,7 @@ mod tests {
                 origin: wall,
                 bodies: vec![Body { geometry: 0, place }],
             }],
+            volumes: Vec::new(),
         };
         let mut content = PlayerContent::default();
         content.tutorial_level.assets = vec![AssetEntity {

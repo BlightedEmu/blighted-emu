@@ -40,8 +40,8 @@ use nw_formats::rnr::{RNR_EXTENSION, RnrError, Shape, ShapeKind, parse_rnr};
 use nw_oodle::KrakenDecompressor;
 use nw_world::capitals::parse_capitals;
 use nw_world::collision::{
-    Affine, Body, DeferredSlice, Geometry, IDENTITY_AFFINE, LevelCollision, collision_file_path,
-    compose, hull_planes, place_of,
+    Affine, Body, DeferredSlice, Geometry, IDENTITY_AFFINE, LevelCollision, QuestVolume,
+    collision_file_path, compose, hull_planes, place_of,
 };
 use nw_world::collision_index::CollisionIndex;
 
@@ -122,6 +122,14 @@ pub(crate) mod types {
     /// `QueryShapeBox` (`m_box`).
     pub const QUERY_SHAPE_BOX: [u8; 16] =
         *b"\xc6\x65\x1a\x66\x23\xd4\x45\x08\xb4\xad\x18\x0c\x51\x66\x55\xa8";
+    /// `ObjectiveDetectionVolumeComponent` (`{544D4993-2EC6-4E33-AA92-7B3701981ACD}`,
+    /// `FUN_1439f8530`): `m_targetTag`, the `TargetTag` of a `TaskTriggerArea`.
+    pub const OBJECTIVE_DETECTION_VOLUME: [u8; 16] =
+        *b"\x54\x4d\x49\x93\x2e\xc6\x4e\x33\xaa\x92\x7b\x37\x01\x98\x1a\xcd";
+    /// `DetectionVolumeComponent` (`{41BC3BB3-EF30-41E4-B751-12C4EAB97C0E}`,
+    /// `FUN_141581680`): its query shapes (`m_shape`).
+    pub const DETECTION_VOLUME: [u8; 16] =
+        *b"\x41\xbc\x3b\xb3\xef\x30\x41\xe4\xb7\x51\x12\xc4\xea\xb9\x7c\x0e";
     /// `Javelin::VariationDataComponent` (`{4A2D9C0A-B147-4186-A9E0-5805B610D3CC}` in the
     /// client's reflection, `FUN_1442dbfb0`).
     pub const VARIATION_DATA: [u8; 16] =
@@ -355,6 +363,8 @@ struct SliceSolids {
     inactive: usize,
     /// The slice's variation data component, when it has one.
     variation: Option<Variation>,
+    /// Each quest trigger volume: its tag, its place in the slice and its shape.
+    volumes: Vec<(String, Affine, ShapeSource)>,
 }
 
 /// A slice's `VariationDataComponent`: its variation table and what each column changes.
@@ -390,6 +400,10 @@ struct SliceEntity {
     mesh: Option<AssetKey>,
     spawn: Option<(AssetKey, bool)>,
     variation: Option<Variation>,
+    /// Its `ObjectiveDetectionVolumeComponent`'s `m_targetTag`.
+    volume_tag: Option<String>,
+    /// Its `DetectionVolumeComponent`'s first query shape and offset.
+    detection: Option<(Element, [f32; AXES])>,
 }
 
 /// A `GameRigidBodyComponent`'s configuration.
@@ -400,6 +414,10 @@ struct RigidBody {
     shape: Option<Element>,
     centre: [f32; AXES],
 }
+
+/// The name CRC of a `DetectionVolumeComponent`'s shape offset (its text is Unknown; a vector,
+/// 0 in the volumes seen).
+const DETECTION_OFFSET_NAME: u32 = 0x0a63_b9da;
 
 /// Name CRCs of the fields read here.
 struct Names {
@@ -427,6 +445,9 @@ struct Names {
     entity_id: u32,
     binding_entity: u32,
     binding_action: u32,
+    target_tag: u32,
+    detection_shape: u32,
+    detection_offset: u32,
 }
 
 impl Names {
@@ -456,6 +477,9 @@ impl Names {
             entity_id: lowercase_crc32("EntityId"),
             binding_entity: lowercase_crc32("m_entity"),
             binding_action: lowercase_crc32("m_action"),
+            target_tag: lowercase_crc32("m_targetTag"),
+            detection_shape: lowercase_crc32("m_shape"),
+            detection_offset: DETECTION_OFFSET_NAME,
         }
     }
 }
@@ -550,6 +574,23 @@ fn read_component(component: &Element, names: &Names, entity: &mut SliceEntity) 
                 .and_then(|id| id.as_u64().ok());
         }
         types::VARIATION_DATA => entity.variation = Some(variation_of(component, names)),
+        types::OBJECTIVE_DETECTION_VOLUME => {
+            entity.volume_tag = descendant(component, names.target_tag)
+                .and_then(|tag| tag.as_string().ok())
+                .map(|tag| tag.trim().to_owned())
+                .filter(|tag| !tag.is_empty());
+        }
+        types::DETECTION_VOLUME => {
+            let shape = component
+                .child(names.detection_shape)
+                .and_then(|shapes| shapes.children.first())
+                .cloned();
+            let offset = component
+                .child(names.detection_offset)
+                .and_then(|offset| offset.as_vec3().ok())
+                .unwrap_or([0.0; AXES]);
+            entity.detection = shape.map(|shape| (shape, offset));
+        }
         types::GAME_RIGID_BODY => {
             let Some(config) = component.child(names.configuration) else {
                 return;
@@ -597,6 +638,18 @@ fn read_component(component: &Element, names: &Names, entity: &mut SliceEntity) 
     }
 }
 
+/// The first element named `name` under `element`, depth first (the `m_targetTag` of an
+/// `ObjectiveDetectionVolumeComponent` sits in its base class's data).
+fn descendant(element: &Element, name: u32) -> Option<&Element> {
+    element.children.iter().find_map(|child| {
+        if child.name_crc == Some(name) {
+            Some(child)
+        } else {
+            descendant(child, name)
+        }
+    })
+}
+
 /// The first non-null `m_sliceAsset` under `element`.
 fn slice_asset_in(element: &Element, names: &Names) -> Option<AssetKey> {
     element.children.iter().find_map(|child| {
@@ -621,6 +674,12 @@ fn slice_solids(root: &Element, names: &Names, solid_filters: &HashSet<String>) 
             solids.variation.clone_from(&entity.variation);
         }
         let place = entity.place.unwrap_or(IDENTITY_AFFINE);
+        if let (Some(tag), Some((shape, offset))) = (&entity.volume_tag, &entity.detection)
+            && !entity.inactive
+            && let Some(shape) = query_shape(shape, *offset, names)
+        {
+            solids.volumes.push((tag.clone(), place, shape));
+        }
         if let Some((slice, on_initialize)) = entity.spawn {
             solids.spawns.push(Spawn {
                 place,
@@ -1004,6 +1063,8 @@ fn flatten_shapes(shape: &Shape, parent: &Affine, out: &mut Vec<(Affine, Geometr
 pub struct CollisionReport {
     /// The level.
     pub level: String,
+    /// Its quest trigger volumes.
+    pub volumes: usize,
     /// The file written.
     pub path: PathBuf,
     /// Its size in bytes.
@@ -1094,6 +1155,7 @@ pub fn build_level_collision(
     let mut placements = level_placements(index, level)?;
     let mut solids_by_slice: HashMap<AssetKey, SliceSolids> = HashMap::new();
     let mut placed_solids: Vec<PlacedSolid> = Vec::new();
+    let mut volumes: Vec<QuestVolume> = Vec::new();
     let mut deferred_slices: Vec<(AssetKey, [f32; AXES])> = Vec::new();
     let mut report = CollisionReport {
         level: level.to_owned(),
@@ -1153,6 +1215,18 @@ pub fn build_level_collision(
                     None => report.shapeless_entities += 1,
                 }
             }
+            if pending.deferred.is_none() {
+                for (tag, place, shape) in &solids.volumes {
+                    let ShapeSource::Own(shape, local) = shape else {
+                        continue;
+                    };
+                    volumes.push(QuestVolume {
+                        tag: tag.clone(),
+                        shape: shape.clone(),
+                        place: compose(&compose(&pending.place, place), local),
+                    });
+                }
+            }
             if pending.depth >= MAX_SPAWN_DEPTH {
                 continue;
             }
@@ -1184,14 +1258,18 @@ pub fn build_level_collision(
         .iter()
         .filter(|(_, _, deferred)| deferred.is_none())
         .count();
-    let collision = place_solids(
-        index,
-        &catalog,
-        level,
-        &placed_solids,
-        &deferred_slices,
-        &mut report,
-    )?;
+    report.volumes = volumes.len();
+    let collision = LevelCollision {
+        volumes,
+        ..place_solids(
+            index,
+            &catalog,
+            level,
+            &placed_solids,
+            &deferred_slices,
+            &mut report,
+        )?
+    };
     let path = collision_file_path(out_dir, client_build, level);
     collision.save(&path, client_build)?;
     let reloaded = LevelCollision::load(&path, client_build)?;
@@ -1542,6 +1620,7 @@ fn place_solids(
         geometries,
         bodies,
         deferred,
+        volumes: Vec::new(),
     })
 }
 

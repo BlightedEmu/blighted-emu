@@ -1143,7 +1143,7 @@ mod tests {
                 geometry: 0,
                 place: IDENTITY_AFFINE,
             }],
-            deferred: Vec::new(),
+            ..LevelCollision::default()
         });
         crate::LevelGround::new(
             crate::test_support::FlatGround(SHIP_TERRAIN_M),
@@ -1190,7 +1190,7 @@ mod tests {
                 geometry: 0,
                 place: BEACH_BLOCK,
             }],
-            deferred: Vec::new(),
+            ..LevelCollision::default()
         });
         crate::LevelGround::new(
             crate::test_support::FlatGround(BEACH_SAND_M),

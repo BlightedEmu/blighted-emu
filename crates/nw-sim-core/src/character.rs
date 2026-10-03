@@ -2511,7 +2511,7 @@ mod tests {
                 half_extents: [HALF_WIDTH_M, HALF_DEPTH_M, height / 2.0],
             }],
             bodies: vec![Body { geometry: 0, place }],
-            deferred: Vec::new(),
+            ..LevelCollision::default()
         });
         crate::LevelGround::new(
             crate::test_support::FlatGround(0.0),

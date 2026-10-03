@@ -118,6 +118,7 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
     let level_collision =
         LevelCollision::load(&collision_path, &build).map_err(RunError::Collision)?;
     let deferred = level_collision.deferred.clone();
+    let quest_volumes = level_collision.volumes.clone();
     let collision = Arc::new(CollisionIndex::new(LevelCollision {
         deferred: Vec::new(),
         ..level_collision
@@ -285,6 +286,8 @@ pub fn serve(config_path: &Path) -> Result<(), RunError> {
         assets = content.asset_solids.solid_assets(),
         "tutorial asset entities with solids"
     );
+    content.quest_volumes = quest_volumes;
+    tracing::info!(volumes = content.quest_volumes.len(), "level quest volumes");
     let content = Arc::new(content);
     tracing::info!(
         disabled_items = content.disabled_items.len(),
