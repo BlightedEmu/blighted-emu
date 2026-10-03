@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-//! The quests of a character (admin studio spec section 6.3): the active run and the finished
-//! objectives. `sim` saves them; the director loads them at a join. The run is the sim's own
+//! The quests of a character (admin studio spec section 6.3): the running quests and the
+//! finished objectives. `sim` saves them; the director loads them at a join. The run is the sim's own
 //! value, kept as JSON.
 //!
 //! Each save carries the time its state was taken; an older state never overwrites a newer one.
@@ -19,8 +19,8 @@ const DONE: &str = "done";
 /// A character's quests.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SavedQuests {
-    /// The active objective and its run.
-    pub active: Option<(String, serde_json::Value)>,
+    /// The running objectives and their runs.
+    pub active: Vec<(String, serde_json::Value)>,
     /// The finished objectives, sorted.
     pub done: Vec<String>,
 }
@@ -54,7 +54,7 @@ pub async fn character_quests(
     let mut quests = SavedQuests::default();
     for (objective, state, run) in rows {
         match (state.as_str(), run) {
-            (ACTIVE, Some(run)) => quests.active = Some((objective, run)),
+            (ACTIVE, Some(run)) => quests.active.push((objective, run)),
             _ => quests.done.push(objective),
         }
     }
@@ -67,8 +67,8 @@ pub async fn character_quests(
 /// # Errors
 ///
 /// Returns [`DbError::NoSuchCharacter`] when the world has no such character, and
-/// [`DbError::Database`] for a state a table constraint refuses (the active objective also in
-/// `done`).
+/// [`DbError::Database`] for a state a table constraint refuses (an active objective also in
+/// `done`, or twice).
 pub async fn save_character_quests(
     world: &PgPool,
     character_id: Uuid,
@@ -134,10 +134,17 @@ mod tests {
 
     fn quests() -> SavedQuests {
         SavedQuests {
-            active: Some((
-                "13_Wolves".to_owned(),
-                serde_json::json!({"tasks": ["Idle"], "listed": [], "tracker_version": 4}),
-            )),
+            // By objective id, as a load returns them.
+            active: vec![
+                (
+                    "1225_0101_truffles".to_owned(),
+                    serde_json::json!({"tasks": ["Idle"], "listed": [], "tracker_version": 4}),
+                ),
+                (
+                    "13_Wolves".to_owned(),
+                    serde_json::json!({"tasks": ["Idle"], "listed": [], "tracker_version": 4}),
+                ),
+            ],
             done: vec!["01_Tutorial".to_owned(), "12_GetOffBeach".to_owned()],
         }
     }

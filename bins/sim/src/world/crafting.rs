@@ -664,7 +664,7 @@ impl SimWorld {
 
     /// The crafts whose time came at `now_ms` end: their stacks and fee are taken, the output
     /// goes into the bag, the client gets the crafts made and an idle update, each craft fires
-    /// the recipe's game event, and the player's quest takes the craft. A craft whose stacks or
+    /// the recipe's game event, and the player's quests take the craft. A craft whose stacks or
     /// coins are gone by then makes nothing and gets an idle update.
     pub(super) fn crafts_due(&mut self, now_ms: u64) {
         let (due, later): (Vec<_>, Vec<_>) = std::mem::take(&mut self.crafts)

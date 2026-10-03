@@ -7,6 +7,7 @@ pub mod collision;
 pub mod collision_index;
 pub mod dungeon_scripts;
 pub mod height;
+pub mod interact_tags;
 pub mod level_script;
 pub mod map_tiles;
 pub mod metadata;

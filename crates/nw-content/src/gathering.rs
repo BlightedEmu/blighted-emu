@@ -259,7 +259,7 @@ impl ToolEfficiencies {
 /// The low bits of a crate's facet entity that its capital's GUID does not give (loot note
 /// 2026-09-18: retail requests differ from the GUID key in them by 0 to 7; their meaning is
 /// Unknown).
-const FACET_FREE_BITS: u64 = 0b111;
+pub(crate) const FACET_FREE_BITS: u64 = 0b111;
 /// Hex digits of a GUID.
 const GUID_HEX_DIGITS: usize = 32;
 /// The GUID text's separator.
@@ -329,7 +329,7 @@ pub struct CrateLoot {
 }
 
 /// The key of a capital `guid` (text, with or without dashes); `None` for another text.
-fn capital_key(guid: &str) -> Option<u64> {
+pub(crate) fn capital_key(guid: &str) -> Option<u64> {
     let digits: String = guid.chars().filter(|c| *c != GUID_SEPARATOR).collect();
     if digits.len() != GUID_HEX_DIGITS {
         return None;

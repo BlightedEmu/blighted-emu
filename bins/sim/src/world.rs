@@ -148,7 +148,7 @@ use crate::login::{
 };
 use crate::mob_ai::SpawnAi;
 use crate::mobs::{MobAttackIntent, MobChanges, Mobs};
-use crate::objectives::{Effect, Event, Facts, ObjectiveRun};
+use crate::objectives::{Effect, Event, Facts, ObjectiveRun, TaskProgress};
 use crate::player_content::{
     MobLooks, OPEN_WORLD_OBJECTIVE, PlayerContent, QuestDef, QuestObjects, TUTORIAL_OBJECTIVE,
     TUTORIAL_SWORD,
@@ -616,6 +616,9 @@ struct Player {
     /// each input until it ends the interaction, and retail answers each one once (retail
     /// 2026-09-18: one 3743 for a talk the client held 20 s; ours answered all 667 inputs).
     last_interaction: Option<u64>,
+    /// The open-world interaction it runs and the interact tags of its object, from its start
+    /// to the client's end of it (`TaskInteract`).
+    open_interaction: Option<(u64, Vec<String>)>,
     /// Its client asks for an interaction in its inputs: the interaction ends at the first input
     /// without one (retail gives a gather's put-away weapon back then, [`Stow::Gather`]).
     interacting: bool,
@@ -820,8 +823,8 @@ pub struct SimWorld {
     achievement_rules: AchievementRules,
     /// Tutorial sims only: the tutorial of each player, by entity number.
     tutorials: HashMap<u64, Tutorial>,
-    /// Open-world sims: the active quest of each player, by entity number.
-    quests: HashMap<u64, ActiveQuest>,
+    /// Open-world sims: the running quests of each player, by entity number.
+    quests: HashMap<u64, Vec<ActiveQuest>>,
     /// The time of the last tick, for the quest runs that a save takes between ticks.
     last_now_ms: u64,
     /// The scripts of the level and their runs.
@@ -884,7 +887,7 @@ pub struct SimWorld {
     server_ms: u64,
 }
 
-/// The quest a player runs.
+/// A quest a player runs.
 #[derive(Debug)]
 struct ActiveQuest {
     def: QuestDef,
@@ -900,9 +903,12 @@ pub enum QuestRefusal {
     /// The content has no such objective, or its root task is missing.
     #[error("no such quest")]
     NoQuest,
-    /// The player runs a quest or the tutorial.
-    #[error("the player already runs a quest")]
+    /// The player runs this quest already, or the tutorial.
+    #[error("the player already runs this quest or the tutorial")]
     Active,
+    /// The journal holds as many quests of its kind as the kind's limit.
+    #[error("the journal holds the most quests of this kind")]
+    Full,
     /// The player finished it and it is not repeatable.
     #[error("the player finished this quest")]
     Done,
@@ -1194,8 +1200,10 @@ impl SimWorld {
         }
         if admit.login && self.is_tutorial() {
             self.start_tutorial(admit.entity, now_ms);
-        } else if let Some((objective, run)) = &admit.quests.active {
-            self.resume_quest(admit.entity, objective, run, now_ms);
+        } else {
+            for (objective, run) in &admit.quests.active {
+                self.resume_quest(admit.entity, objective, run, now_ms);
+            }
         }
         Ok(login)
     }
@@ -1348,8 +1356,10 @@ impl SimWorld {
             if let Err(refusal) = self.start_quest(offer.entity, OPEN_WORLD_OBJECTIVE, now_ms) {
                 tracing::debug!(player = offer.entity, ?refusal, "no open-world quest");
             }
-        } else if let Some((objective, run)) = &offer.quests.active {
-            self.resume_quest(offer.entity, objective, run, now_ms);
+        } else {
+            for (objective, run) in &offer.quests.active {
+                self.resume_quest(offer.entity, objective, run, now_ms);
+            }
         }
         Ok(level_change)
     }
@@ -2160,34 +2170,104 @@ impl SimWorld {
         }
     }
 
-    /// Gives the quest tracker of player `number` its tutorial's or its quest's task list; a
-    /// quest that finished is completed, unless it waits for its turn-in at its NPC (retail: the
+    /// The running quests of player `number`.
+    fn quests_of_player(&self, number: u64) -> &[ActiveQuest] {
+        self.quests.get(&number).map_or(&[][..], Vec::as_slice)
+    }
+
+    /// The journal of player `entity`'s client, made when it has none yet: its lists go on above
+    /// the ones the client has, after the objectives the player finished.
+    fn journal_of(player: &mut Player) -> &mut QuestTracker {
+        let number = player.number;
+        let shown = player.tracker_shown();
+        let pin = player.auto_pin;
+        let done: Vec<&str> = player.done_quests.iter().map(String::as_str).collect();
+        let fresh = QuestTracker::new(number)
+            .after(&done)
+            .above(shown)
+            .with_auto_pin(pin);
+        player.quest.get_or_insert(fresh)
+    }
+
+    /// Gives the journal of player `number` its tutorial's or its quests' task lists; a quest
+    /// that finished is completed, unless it waits for its turn-in at its NPC (retail: the
     /// client asks to complete it, 794, when the player talks to the NPC).
     fn update_quest_tracker(&mut self, number: u64) {
         let Some(entity) = self.player_by_number(number) else {
             return;
         };
-        let (tasks, finished) = if let Some(tutorial) = self.tutorials.get(&number) {
-            (tutorial.progress(), tutorial.finished())
-        } else if let Some(quest) = self.quests.get(&number) {
-            let waits = quest.def.turn_in.is_some();
-            (quest.run.progress(), quest.run.finished() && !waits)
-        } else {
+        let lists: Vec<(String, Vec<TaskProgress>, bool)> =
+            if let Some(tutorial) = self.tutorials.get(&number) {
+                vec![(
+                    TUTORIAL_OBJECTIVE.to_owned(),
+                    tutorial.progress(),
+                    tutorial.finished(),
+                )]
+            } else {
+                self.quests_of_player(number)
+                    .iter()
+                    .map(|quest| {
+                        let waits = quest.def.turn_in.is_some();
+                        (
+                            quest.def.id.clone(),
+                            quest.run.progress(),
+                            quest.run.finished() && !waits,
+                        )
+                    })
+                    .collect()
+            };
+        if lists.is_empty() {
             return;
-        };
-        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            player
-                .quest
-                .get_or_insert_with(|| QuestTracker::new(TUTORIAL_OBJECTIVE, number))
-                .update(tasks, finished);
         }
-        if finished && self.quests.contains_key(&number) {
-            self.complete_quest(number);
+        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
+            let journal = Self::journal_of(&mut player);
+            for (objective, tasks, finished) in &lists {
+                journal.update(objective, tasks.clone(), *finished);
+            }
+        }
+        if self.tutorials.contains_key(&number) {
+            return;
+        }
+        for (objective, _, finished) in &lists {
+            if *finished {
+                self.complete_quest(number, objective);
+            }
         }
     }
 
-    /// Starts quest `objective` for player `number` (admin studio spec section 6.3): one active
-    /// quest at a time, and a finished one only again when it is repeatable.
+    /// Player `number` accepts quest `objective` at an NPC (3772): it starts when the journal
+    /// holds fewer quests of its kind than the kind's limit (`javelin.objectives-max-*`, the
+    /// client checks the same limit before it asks). A quest the game starts by itself, as the
+    /// next step of a chain, goes through [`SimWorld::start_quest`] and is never refused by a
+    /// limit, so a full journal cannot break a chain.
+    pub(crate) fn accept_quest(
+        &mut self,
+        number: u64,
+        objective: &str,
+        now_ms: u64,
+    ) -> Result<(), QuestRefusal> {
+        let def = self
+            .content
+            .quests
+            .quest(objective)
+            .ok_or(QuestRefusal::NoQuest)?;
+        if let Some(group) = def.limit_group {
+            let limit = self.content.gameplay.objective_limits.limit(group);
+            let running = self
+                .quests_of_player(number)
+                .iter()
+                .filter(|quest| quest.def.limit_group == Some(group))
+                .count();
+            if u64::try_from(running).unwrap_or(u64::MAX) >= limit {
+                return Err(QuestRefusal::Full);
+            }
+        }
+        self.start_quest(number, objective, now_ms)
+    }
+
+    /// Starts quest `objective` for player `number` (admin studio spec section 6.3) next to the
+    /// quests the player runs: not while the tutorial runs, not twice at once, and a finished one
+    /// only again when it is repeatable.
     pub(crate) fn start_quest(
         &mut self,
         number: u64,
@@ -2202,7 +2282,11 @@ impl SimWorld {
             .quests
             .quest(objective)
             .ok_or(QuestRefusal::NoQuest)?;
-        if self.quests.contains_key(&number) || self.tutorials.contains_key(&number) {
+        let running = self
+            .quests_of_player(number)
+            .iter()
+            .any(|quest| quest.def.id.eq_ignore_ascii_case(&def.id));
+        if running || self.tutorials.contains_key(&number) {
             return Err(QuestRefusal::Active);
         }
         let done = self
@@ -2214,42 +2298,39 @@ impl SimWorld {
             return Err(QuestRefusal::Done);
         }
         let (run, effects) = ObjectiveRun::start(Arc::clone(&def.tree), now_ms);
-        // A repeated quest leaves the done list while it runs: the database keeps one row per
-        // objective, active or done.
-        let done: Vec<String> = done
-            .into_iter()
-            .filter(|id| !id.eq_ignore_ascii_case(&def.id))
-            .collect();
-        let finished: Vec<&str> = done.iter().map(String::as_str).collect();
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            // The new lists go on above the ones the client has from the quest before.
-            let shown = player.tracker_shown();
-            let pin = player.auto_pin;
-            player.quest = Some(
-                QuestTracker::new(&def.id, number)
-                    .after(&finished, number)
-                    .above(shown)
-                    .with_auto_pin(pin),
-            );
-            player.done_quests.clone_from(&done);
+            Self::journal_of(&mut player);
+            // A repeated quest leaves the done list while it runs: the database keeps one row
+            // per objective, active or done.
+            player
+                .done_quests
+                .retain(|id| !id.eq_ignore_ascii_case(&def.id));
             player.quests_unsaved = true;
         }
-        self.quests.insert(number, ActiveQuest { def, run });
+        let id = def.id.clone();
+        self.quests
+            .entry(number)
+            .or_default()
+            .push(ActiveQuest { def, run });
         self.quest_effects(number, effects, now_ms);
-        let tasks = self.quests.get(&number).map(|quest| quest.run.progress());
+        let tasks = self
+            .quests_of_player(number)
+            .iter()
+            .find(|quest| quest.def.id == id)
+            .map(|quest| quest.run.progress());
         if let Some(tasks) = tasks
             && let Some(mut player) = self.world.get_mut::<Player>(entity)
-            && let Some(tracker) = player.quest.as_mut()
+            && let Some(journal) = player.quest.as_mut()
         {
-            tracker.accept(tasks);
+            journal.accept(&id, tasks);
         }
         self.update_quest_tracker(number);
         Ok(())
     }
 
     /// Goes on with quest `objective`'s run `run` of player `number`, who came from another sim or
-    /// logged in again: its tracker's lists go on above the versions the client has. A run that
-    /// no longer fits the quest's tree (a design change) is dropped.
+    /// logged in again: the first own card on this sim sends it. A run that no longer fits the
+    /// quest's tree (a design change) is dropped.
     fn resume_quest(&mut self, number: u64, objective: &str, run: &QuestRun, now_ms: u64) {
         let Some(def) = self.content.quests.quest(objective) else {
             tracing::warn!(
@@ -2271,35 +2352,40 @@ impl SimWorld {
             return;
         };
         let tasks = quest.progress();
-        // A finished quest's end states went out from the other sim; its tracker stays empty. One
-        // that waits for its turn-in goes on waiting.
+        // A finished quest's end states went out from the other sim; it does not join the
+        // journal. One that waits for its turn-in goes on waiting.
         let finished = quest.finished() && def.turn_in.is_none();
         let id = def.id.clone();
-        self.quests.insert(number, ActiveQuest { def, run: quest });
+        self.quests
+            .entry(number)
+            .or_default()
+            .push(ActiveQuest { def, run: quest });
         if finished {
-            self.complete_quest(number);
+            self.complete_quest(number, &id);
             return;
         }
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            let done: Vec<&str> = player.done_quests.iter().map(String::as_str).collect();
-            let mut tracker = QuestTracker::new(&id, number)
-                .after(&done, number)
-                .above(player.tracker_shown())
-                .with_auto_pin(player.auto_pin);
-            tracker.update(tasks, false);
-            // The first own card on this sim sends the whole quest; nothing more is due.
-            while tracker.take_change().is_some() {}
-            player.quest = Some(tracker);
+            Self::journal_of(&mut player).resume(&id, tasks);
         }
     }
 
-    /// Ends the finished active quest of player `number`: it joins the done list, its
+    /// Ends the finished quest `objective` of player `number`: it joins the done list, its
     /// achievement is set, and its rewards go to the player: the coins and experience of its
     /// success game event, and its items into the bag.
-    fn complete_quest(&mut self, number: u64) {
-        let Some(quest) = self.quests.remove(&number) else {
+    fn complete_quest(&mut self, number: u64, objective: &str) {
+        let Some(quests) = self.quests.get_mut(&number) else {
             return;
         };
+        let Some(position) = quests
+            .iter()
+            .position(|quest| quest.def.id.eq_ignore_ascii_case(objective))
+        else {
+            return;
+        };
+        let quest = quests.remove(position);
+        if quests.is_empty() {
+            self.quests.remove(&number);
+        }
         let reward = quest
             .def
             .success_event
@@ -2343,12 +2429,15 @@ impl SimWorld {
         self.give_loot(number, items, self.last_now_ms);
     }
 
-    /// Feeds game event `event` to the quest of player `number`.
+    /// Feeds game event `event` to the quests of player `number`.
     fn quest_event(&mut self, number: u64, event: Event<'_>, now_ms: u64) {
-        let Some(quest) = self.quests.get_mut(&number) else {
+        let Some(quests) = self.quests.get_mut(&number) else {
             return;
         };
-        let effects = quest.run.event(event, now_ms);
+        let effects: Vec<Effect> = quests
+            .iter_mut()
+            .flat_map(|quest| quest.run.event(event, now_ms))
+            .collect();
         self.mark_quests_unsaved(number);
         self.quest_effects(number, effects, now_ms);
     }
@@ -2361,8 +2450,9 @@ impl SimWorld {
         }
     }
 
-    /// Carries out the `effects` of player `number`'s quest: achievements are set or cleared (a
-    /// set one is an event of the quest again), items removed, game events fired.
+    /// Carries out the `effects` of player `number`'s quests: achievements are set or cleared (a
+    /// set one is an event of every quest of the player again), items removed, game events
+    /// fired.
     fn quest_effects(&mut self, number: u64, effects: Vec<Effect>, now_ms: u64) {
         let Some(entity) = self.player_by_number(number) else {
             return;
@@ -2394,11 +2484,13 @@ impl SimWorld {
             for event in fired {
                 self.fire_game_event(number, &event, now_ms);
             }
-            let Some(quest) = self.quests.get_mut(&number) else {
+            let Some(quests) = self.quests.get_mut(&number) else {
                 return;
             };
             for id in set {
-                pending.extend(quest.run.event(Event::AchievementSet(&id), now_ms));
+                for quest in quests.iter_mut() {
+                    pending.extend(quest.run.event(Event::AchievementSet(&id), now_ms));
+                }
             }
         }
     }
@@ -2411,28 +2503,36 @@ impl SimWorld {
                 .player_by_number(number)
                 .and_then(|entity| self.world.get::<Body>(entity))
                 .map(|body| body.motion.position());
-            let (Some(position), Some(quest)) = (position, self.quests.get_mut(&number)) else {
+            let Some(position) = position else {
                 continue;
             };
-            let mut effects = quest.run.tick(now_ms);
-            effects.extend(quest.run.event(Event::Moved(position), now_ms));
+            let player = self
+                .player_by_number(number)
+                .and_then(|entity| self.world.get::<Player>(entity));
+            let Some(quests) = self.quests.get_mut(&number) else {
+                continue;
+            };
+            let mut effects = Vec::new();
+            for quest in quests.iter_mut() {
+                effects.extend(quest.run.tick(now_ms));
+                effects.extend(quest.run.event(Event::Moved(position), now_ms));
+            }
             // What the player holds, where it is and its achievements meet the tasks, also those
             // that start later.
-            if let Some(player) = self
-                .player_by_number(number)
-                .and_then(|entity| self.world.get::<Player>(entity))
-                && let Some(quest) = self.quests.get_mut(&number)
-            {
+            if let Some(player) = player {
                 let carried = player.gear.as_ref().map(Gear::carried).unwrap_or_default();
+                let held = held_items(&carried);
                 let places = quest_objects::places(&self.content.poi_tags, &player.territories);
                 let rules = &self.achievement_rules;
                 let achieved = |id: &str| player.flow.has_achievement(rules, id);
                 let facts = Facts {
-                    held: &held_items(&carried),
+                    held: &held,
                     places: Some(&places),
                     achieved: Some(&achieved),
                 };
-                effects.extend(quest.run.sync(&facts, now_ms));
+                for quest in quests.iter_mut() {
+                    effects.extend(quest.run.sync(&facts, now_ms));
+                }
             }
             if !effects.is_empty() {
                 self.mark_quests_unsaved(number);
@@ -2799,6 +2899,28 @@ impl SimWorld {
         }
     }
 
+    /// The client of player `entity` ended interaction `interaction` at `now_ms`: each interact
+    /// tag of its object counts for the player's `TaskInteract` tasks (retail: the vault step
+    /// was done 49 ms after the storage interaction ended).
+    fn interaction_ended(&mut self, entity: Entity, interaction: u64, now_ms: u64) {
+        let Some(mut player) = self.world.get_mut::<Player>(entity) else {
+            return;
+        };
+        let number = player.number;
+        let Some((open, tags)) = player.open_interaction.take() else {
+            return;
+        };
+        if open != interaction {
+            player.open_interaction = Some((open, tags));
+            return;
+        }
+        for tag in &tags {
+            tracing::debug!(player = number, tag, "interact tag");
+            self.quest_event(number, Event::Interacted(tag), now_ms);
+        }
+        self.update_quest_tracker(number);
+    }
+
     /// Whether this sim runs the tutorial.
     fn is_tutorial(&self) -> bool {
         self.settings.level == TUTORIAL_LEVEL
@@ -2841,6 +2963,9 @@ impl SimWorld {
             if player.last_interaction.replace(request.interaction) == Some(request.interaction) {
                 return;
             }
+            let tags = self.content.interact_tags.of(request.target_entity);
+            player.open_interaction =
+                (!tags.is_empty()).then(|| (request.interaction, tags.to_vec()));
             self.mount_interaction(entity, now_ms);
             match request.kind {
                 TALK_KIND => self.talk(entity, number, request),
@@ -2920,6 +3045,7 @@ impl SimWorld {
         };
         match &message {
             ClientFacetMsg::CancelInteraction { interaction, .. } => {
+                self.interaction_ended(entity, *interaction, now_ms);
                 self.cancel_gather(entity, *interaction);
                 self.give_weapon_back(entity, Stow::Gather, now_ms);
                 self.close_container(entity);
@@ -3817,6 +3943,7 @@ impl SimWorld {
                     game_master: arrival.game_master,
                     station: None,
                     last_interaction: None,
+                    open_interaction: None,
                     interacting: false,
                     territories: Vec::new(),
                     travel: travel::TravelState::of(arrival.progression.travel.clone()),
@@ -4058,13 +4185,20 @@ fn departure_of(
     }
 }
 
-/// The quests of `player` to save or carry: its active run (from `quests`, at `now_ms`) and its
-/// done list.
-fn quests_of(quests: &HashMap<u64, ActiveQuest>, now_ms: u64, player: &Player) -> PlayerQuests {
+/// The quests of `player` to save or carry: its running quests (from `quests`, at `now_ms`) and
+/// its done list.
+fn quests_of(
+    quests: &HashMap<u64, Vec<ActiveQuest>>,
+    now_ms: u64,
+    player: &Player,
+) -> PlayerQuests {
     PlayerQuests {
         active: quests
             .get(&player.number)
-            .map(|quest| (quest.def.id.clone(), quest.run.export(now_ms))),
+            .into_iter()
+            .flatten()
+            .map(|quest| (quest.def.id.clone(), quest.run.export(now_ms)))
+            .collect(),
         done: player.done_quests.clone(),
         tracker_version: player.tracker_shown(),
     }
@@ -7272,7 +7406,10 @@ mod tests {
         );
         facet(&mut world, accept(SKINNING_KNIFE), now);
         assert_eq!(
-            world.quests.get(&1).map(|quest| quest.def.id.as_str()),
+            world
+                .quests_of_player(1)
+                .first()
+                .map(|quest| quest.def.id.as_str()),
             Some(SKINNING_KNIFE)
         );
         assert!(has(&world, "SwapActive_01_AelstromMB_01"), "its first task");
@@ -7325,8 +7462,8 @@ mod tests {
         step(&mut world, &mut now, TICK_MS);
         assert!(
             world
-                .quests
-                .get(&1)
+                .quests_of_player(1)
+                .first()
                 .is_some_and(|quest| quest.run.finished()),
             "the knife ends the tasks"
         );
@@ -7588,8 +7725,8 @@ mod tests {
         };
         let done = |world: &SimWorld, task: &str| {
             world
-                .quests
-                .get(&1)
+                .quests_of_player(1)
+                .first()
                 .is_some_and(|quest| quest.run.is_done(task))
         };
         let holds = |world: &SimWorld, item: &str| -> u32 {
@@ -7643,7 +7780,11 @@ mod tests {
         let press = |counter| nw_messages::ClientInputMsg::attack(here, counter).records;
         world.swing_at_quest_objects(&who, &press(FIRST_PRESS), at);
         world.swing_at_quest_objects(&who, &press(FIRST_PRESS), at + TICK_MS);
-        assert!(world.quests[&1].run.counts_game_event(NODULE_EVENT));
+        assert!(
+            world.quests_of_player(1)[0]
+                .run
+                .counts_game_event(NODULE_EVENT)
+        );
         assert!(!done(&world, "Nodules"), "one swing so far");
         let (hit, at) = step(&mut world, SWING_GAP_MS);
         let hit = messages_to(&hit, 1);
@@ -7689,12 +7830,15 @@ mod tests {
 
         let (_, at) = step(&mut world, TICK_MS);
         assert!(done(&world, "LeaveTrigger"), "far from the area");
-        assert!(!world.quests[&1].run.finished(), "still at the wreck");
+        assert!(
+            !world.quests_of_player(1)[0].run.finished(),
+            "still at the wreck"
+        );
         world
             .facet_message(&who, territory(false), at)
             .expect("facet");
         let (_, at) = step(&mut world, TICK_MS);
-        assert!(world.quests[&1].run.finished());
+        assert!(world.quests_of_player(1)[0].run.finished());
 
         // The turn-in takes the treasure back and refreshes the schedule.
         let complete = ClientFacetMsg::CompleteObjective {
@@ -9412,10 +9556,36 @@ mod tests {
     /// The timer of the test quests' one task, in seconds.
     const QUEST_SECONDS: f64 = 1.0;
     const QUEST_TIMER_MS: u64 = 1_000;
+    /// Side quests (`Type` `Journey`).
+    const SIDE_QUEST: &str = "Q_Truffles";
+    const OTHER_SIDE_QUEST: &str = "Q_Honey";
+    const JOURNEY: &str = "Journey";
+    /// A quest whose only task is a storage interact (the vault step of `12A_MSQ_03`).
+    const VAULT_QUEST: &str = "Q_Vault";
+    const STORAGE_TAG: &str = "SettlementStorage";
+    /// The retail Monarch's Bluffs settlement capital and the facet entity its storage
+    /// interaction names (vault capture 2026-09-27).
+    const SETTLEMENT_GUID: &str = "f7763200-249e-87c4-1784-526151dd3c56";
+    const SETTLEMENT_FACET: u64 = 0xE0F2_6061_7543_BB93;
+    const STORAGE_INTERACTION: u64 = 0x4007_a812_6cc6_f492;
 
     /// A world with the test kits, two one-timer quests (one repeatable, both giving flint) and
     /// one player wearing its kit.
     fn quest_world() -> SimWorld {
+        quest_world_with(nw_content::gameplay_config::GameplayConfig::default())
+    }
+
+    /// The quest world with the remote config keys `gameplay`.
+    fn quest_world_with(gameplay: nw_content::gameplay_config::GameplayConfig) -> SimWorld {
+        quest_world_of(gameplay, nw_content::interact_tags::InteractTags::default())
+    }
+
+    /// The quest world with the remote config keys `gameplay` and the level objects' interact
+    /// tags `interact_tags`.
+    fn quest_world_of(
+        gameplay: nw_content::gameplay_config::GameplayConfig,
+        interact_tags: nw_content::interact_tags::InteractTags,
+    ) -> SimWorld {
         use crate::objectives::{TaskBook, TaskRow};
         use crate::player_content::{ObjectiveRow, QuestBook};
         let task = |id: &str, kind: &str, children: &[&str]| TaskRow {
@@ -9433,14 +9603,26 @@ mod tests {
             repeatable,
             ..ObjectiveRow::default()
         };
+        let side = |id: &str| ObjectiveRow {
+            kind: JOURNEY.to_owned(),
+            ..objective(id, "q_root", false)
+        };
         let quests = QuestBook::build(
             [
                 objective(QUEST, "q_root", false),
                 objective(REPEATABLE_QUEST, "q_root", true),
+                side(SIDE_QUEST),
+                side(OTHER_SIDE_QUEST),
+                objective(VAULT_QUEST, "q_vault_root", false),
             ],
             TaskBook::new(vec![
                 task("q_root", "ConsecutiveTaskContainer", &["q_wait"]),
                 task("q_wait", "TaskTimer", &[]),
+                task("q_vault_root", "ConsecutiveTaskContainer", &["q_vault"]),
+                TaskRow {
+                    interact_tag: Some(STORAGE_TAG.to_owned()),
+                    ..task("q_vault", "TaskInteract", &[])
+                },
             ]),
         );
         let mut combat = test_combat();
@@ -9454,6 +9636,8 @@ mod tests {
             Arc::new(PlayerContent {
                 kits: gear::tests::kits(),
                 quests,
+                gameplay,
+                interact_tags,
                 ..PlayerContent::default()
             }),
         );
@@ -9486,17 +9670,15 @@ mod tests {
         );
         assert_eq!(world.start_quest(1, "q_fetchflint", NOW), Ok(()));
         assert_eq!(
-            world.start_quest(1, REPEATABLE_QUEST, NOW),
-            Err(QuestRefusal::Active)
+            world.start_quest(1, QUEST, NOW),
+            Err(QuestRefusal::Active),
+            "not twice at once"
         );
         let saved = world.positions()[0]
             .quests
             .clone()
             .expect("a start is saved");
-        assert_eq!(
-            saved.active.as_ref().map(|(id, _)| id.as_str()),
-            Some(QUEST)
-        );
+        assert_eq!(saved.active.first().map(|(id, _)| id.as_str()), Some(QUEST));
         assert_eq!(world.positions()[0].quests, None, "taken once");
         world.tick_quests(NOW + QUEST_TIMER_MS);
         assert_eq!(flint_of(&mut world), 2, "the reward is in the bag");
@@ -9504,10 +9686,95 @@ mod tests {
             .quests
             .clone()
             .expect("the end is saved");
-        assert_eq!(done.active, None);
+        assert!(done.active.is_empty());
         assert_eq!(done.done, [QUEST]);
         assert_eq!(world.start_quest(1, QUEST, NOW), Err(QuestRefusal::Done));
         assert_eq!(world.start_quest(1, REPEATABLE_QUEST, NOW), Ok(()));
+    }
+
+    #[test]
+    fn a_player_runs_many_quests_and_each_ends_on_its_own() {
+        let mut world = quest_world();
+        world.start_quest(1, QUEST, NOW).expect("main");
+        world.accept_quest(1, SIDE_QUEST, NOW).expect("side");
+        world
+            .accept_quest(1, OTHER_SIDE_QUEST, NOW)
+            .expect("other side");
+        let saved = world.positions()[0].quests.clone().expect("saved");
+        let running: Vec<&str> = saved.active.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(running, [QUEST, SIDE_QUEST, OTHER_SIDE_QUEST]);
+        world.tick_quests(NOW + QUEST_TIMER_MS);
+        assert_eq!(flint_of(&mut world), 6, "three rewards");
+        let done = world.positions()[0].quests.clone().expect("the ends");
+        assert!(done.active.is_empty());
+        assert_eq!(done.done.len(), 3);
+    }
+
+    #[test]
+    fn a_full_journal_refuses_an_accept_but_never_a_chain_start() {
+        let layer = serde_json::json!({"javelin": {"objectives-max-journey": 1}});
+        let stack =
+            nw_content::gameplay_config::KeyStack::merge([layer.as_object().expect("object")]);
+        let mut world = quest_world_with(
+            nw_content::gameplay_config::GameplayConfig::from_stack(&stack).expect("keys"),
+        );
+        world
+            .accept_quest(1, SIDE_QUEST, NOW)
+            .expect("the first side quest");
+        assert_eq!(
+            world.accept_quest(1, OTHER_SIDE_QUEST, NOW),
+            Err(QuestRefusal::Full),
+            "a second Journey is over the limit of 1"
+        );
+        assert_eq!(
+            world.accept_quest(1, QUEST, NOW),
+            Ok(()),
+            "a quest of another kind has its own limit"
+        );
+        assert_eq!(
+            world.start_quest(1, OTHER_SIDE_QUEST, NOW),
+            Ok(()),
+            "the next step of a chain starts even with a full journal"
+        );
+    }
+
+    #[test]
+    fn a_storage_interact_ends_the_vault_step_when_the_interaction_ends() {
+        let storage = [STORAGE_TAG.to_owned()];
+        let tags = nw_content::interact_tags::InteractTags::build(
+            &HashMap::new(),
+            [(SETTLEMENT_GUID, None, storage.as_slice())],
+            [],
+        );
+        let mut world =
+            quest_world_of(nw_content::gameplay_config::GameplayConfig::default(), tags);
+        world.start_quest(1, VAULT_QUEST, NOW).expect("start");
+        let who = connection(1);
+        let request = InteractionRequest {
+            target: [0; nw_messages::wire::RAW_ID_LEN],
+            target_entity: SETTLEMENT_FACET,
+            interaction: STORAGE_INTERACTION,
+            kind: item_calls::OPEN_STORAGE_KIND,
+            gatherable: None,
+        };
+        world.interact(&who, request, b"@ui_global_storage", NOW);
+        assert_eq!(
+            world.quests_of_player(1).len(),
+            1,
+            "the step waits for the interaction's end"
+        );
+        let cancel = ClientFacetMsg::CancelInteraction {
+            header: nw_messages::FacetHeader::of(0, 1),
+            target: [0; nw_messages::wire::RAW_ID_LEN],
+            target_entity: SETTLEMENT_FACET,
+            interaction: STORAGE_INTERACTION,
+        };
+        world.facet_message(&who, cancel, NOW).expect("cancel");
+        assert!(
+            world.quests_of_player(1).is_empty(),
+            "the vault step ended the quest"
+        );
+        assert_eq!(flint_of(&mut world), 2, "its reward");
     }
 
     #[test]
@@ -9522,7 +9789,7 @@ mod tests {
             .and_then(|departure| departure.quests)
             .expect("quests");
         assert_eq!(
-            saved.active.map(|(id, _)| id).as_deref(),
+            saved.active.first().map(|(id, _)| id.as_str()),
             Some(REPEATABLE_QUEST)
         );
         assert!(
@@ -9549,20 +9816,20 @@ mod tests {
             .departures()
             .pop()
             .and_then(|departure| departure.quests)
-            .and_then(|quests| quests.active)
+            .and_then(|quests| quests.active.into_iter().next())
             .expect("the run goes on");
-        let (id, run) = saved.active.clone().expect("active");
+        let (id, run) = saved.active.first().cloned().expect("active");
         assert_eq!((resumed.0, resumed.1.tasks), (id, run.tasks));
         world.leave(&connection(1)).expect("left");
-        let (_, run) = saved.active.clone().expect("active");
+        let (_, run) = saved.active.first().cloned().expect("active");
         admit.quests = PlayerQuests {
-            active: Some((
+            active: vec![(
                 QUEST.to_owned(),
                 QuestRun {
                     tasks: Vec::new(),
                     ..run
                 },
-            )),
+            )],
             ..PlayerQuests::default()
         };
         world.admit(&admit, NOW, SERVER_TIME).expect("admit");
@@ -9570,7 +9837,7 @@ mod tests {
             .departures()
             .pop()
             .and_then(|departure| departure.quests);
-        assert_eq!(dropped.and_then(|quests| quests.active), None);
+        assert!(dropped.is_none_or(|quests| quests.active.is_empty()));
     }
 
     #[test]

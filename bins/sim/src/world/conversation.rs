@@ -59,7 +59,7 @@ impl SimWorld {
             tracing::debug!(player = number, quest = %def.id, "accept of a quest not offered");
             return;
         }
-        match self.start_quest(number, &def.id, now_ms) {
+        match self.accept_quest(number, &def.id, now_ms) {
             Ok(()) => tracing::info!(player = number, quest = %def.id, "quest accepted"),
             Err(refusal) => {
                 tracing::debug!(player = number, quest = %def.id, %refusal, "accept refused");
@@ -68,7 +68,7 @@ impl SimWorld {
     }
 
     /// Player `number` (`entity`) turns in the quest whose lowercase id has the CRC-32
-    /// `objective`: when it is the player's active quest and its tasks are done, the tracker
+    /// `objective`: when it is one of the player's running quests and its tasks are done, the tracker
     /// shows it completed, the player gets its rewards and gives back the items it brought, and
     /// its game mode schedule is refreshed (6426; retail 2026-09-18: 27 ms after each 794). The
     /// client asks only at the quest's NPC (`NpcDestinationId`); the 794 names no NPC, only the
@@ -78,9 +78,9 @@ impl SimWorld {
     /// `InteractOverride_Radius`) are not checked against a retail turn-in yet.
     pub(super) fn turn_in(&mut self, entity: Entity, number: u64, objective: u32) {
         let Some(quest) = self
-            .quests
-            .get(&number)
-            .filter(|quest| lowercase_crc32(&quest.def.id) == objective)
+            .quests_of_player(number)
+            .iter()
+            .find(|quest| lowercase_crc32(&quest.def.id) == objective)
         else {
             tracing::debug!(player = number, objective, "turn-in of a quest not active");
             return;
@@ -90,16 +90,17 @@ impl SimWorld {
             return;
         }
         let tasks = quest.run.progress();
+        let id = quest.def.id.clone();
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            if let Some(tracker) = player.quest.as_mut() {
-                tracker.update(tasks, true);
+            if let Some(journal) = player.quest.as_mut() {
+                journal.update(&id, tasks, true);
             }
             let refreshed = ServerMessage::GameModeSchedulerRefreshed(
                 GameModeSchedulerRefreshedMsg::to(number),
             );
             send_now(&mut self.combat_messages, &player.connection, &[refreshed]);
         }
-        self.complete_quest(number);
+        self.complete_quest(number, &id);
     }
 }
 

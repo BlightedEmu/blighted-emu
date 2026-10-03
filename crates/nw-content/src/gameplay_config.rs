@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::{Map, Value};
 
 use crate::datatable_overrides::{DatatableOverride, DatatableOverrideError};
+use crate::objective_limits::ObjectiveLimits;
 
 /// Separates the parts of a dotted key.
 const KEY_SEPARATOR: char = '.';
@@ -187,7 +188,7 @@ impl KeyStack {
         self.typed(key, "true or false", Value::as_bool)
     }
 
-    fn unsigned(&self, key: &'static str) -> Result<Option<u64>, GameplayConfigError> {
+    pub(crate) fn unsigned(&self, key: &'static str) -> Result<Option<u64>, GameplayConfigError> {
         self.typed(key, "a whole number of at least 0", Value::as_u64)
     }
 
@@ -489,6 +490,8 @@ pub struct GameplayConfig {
     pub item_durability_loss: Option<bool>,
     /// The fast travel cost and housing cost keys.
     pub fast_travel_costs: FastTravelCostKeys,
+    /// `javelin.objectives-max-*`: the journal limit of each objective kind.
+    pub objective_limits: ObjectiveLimits,
 }
 
 impl GameplayConfig {
@@ -603,6 +606,7 @@ impl GameplayConfig {
                 second_house_multiplier: stack.number(keys::SECOND_HOUSE_COST_MULTIPLIER)?,
                 third_house_multiplier: stack.number(keys::THIRD_HOUSE_COST_MULTIPLIER)?,
             },
+            objective_limits: ObjectiveLimits::from_stack(stack)?,
         })
     }
 

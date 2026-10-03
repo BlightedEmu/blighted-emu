@@ -1882,11 +1882,15 @@ impl Loop {
 /// The quests as the database stores them: the run as JSON.
 fn saved_quests(quests: &PlayerQuests) -> SavedQuests {
     SavedQuests {
-        active: quests.active.as_ref().and_then(|(objective, run)| {
-            serde_json::to_value(run)
-                .ok()
-                .map(|run| (objective.clone(), run))
-        }),
+        active: quests
+            .active
+            .iter()
+            .filter_map(|(objective, run)| {
+                serde_json::to_value(run)
+                    .ok()
+                    .map(|run| (objective.clone(), run))
+            })
+            .collect(),
         done: quests.done.clone(),
     }
 }
@@ -3103,7 +3107,7 @@ mod tests {
             assert_eq!(
                 character_quests(db, ada.1).await.expect("load"),
                 Some(SavedQuests {
-                    active: None,
+                    active: Vec::new(),
                     done: vec![DONE_QUEST.to_owned()],
                 })
             );

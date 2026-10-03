@@ -327,10 +327,12 @@ async fn is_game_master(ranks: Option<&PgPool>, account: Uuid) -> bool {
     }
 }
 
-/// The saved quests as a sim runs them; an active run that no longer reads is dropped.
+/// The saved quests as a sim runs them; a running quest whose run no longer reads is dropped.
 fn player_quests(saved: SavedQuests) -> PlayerQuests {
-    let active =
-        saved.active.and_then(
+    let active = saved
+        .active
+        .into_iter()
+        .filter_map(
             |(objective, run)| match serde_json::from_value::<QuestRun>(run) {
                 Ok(run) => Some((objective, run)),
                 Err(error) => {
@@ -338,7 +340,8 @@ fn player_quests(saved: SavedQuests) -> PlayerQuests {
                     None
                 }
             },
-        );
+        )
+        .collect();
     PlayerQuests {
         active,
         done: saved.done,
@@ -548,19 +551,19 @@ mod tests {
             listed: vec![0],
         };
         let good = player_quests(SavedQuests {
-            active: Some((
+            active: vec![(
                 "12_GetOffBeach".to_owned(),
                 serde_json::to_value(&run).expect("json"),
-            )),
+            )],
             done: vec!["01_SoleSurvivor2".to_owned()],
         });
-        assert_eq!(good.active, Some(("12_GetOffBeach".to_owned(), run)));
+        assert_eq!(good.active, [("12_GetOffBeach".to_owned(), run)]);
         assert_eq!(good.done, ["01_SoleSurvivor2"]);
         let bad = player_quests(SavedQuests {
-            active: Some(("Q".to_owned(), serde_json::json!({"tasks": "no"}))),
+            active: vec![("Q".to_owned(), serde_json::json!({"tasks": "no"}))],
             done: Vec::new(),
         });
-        assert_eq!(bad.active, None);
+        assert!(bad.active.is_empty());
     }
 
     #[test]

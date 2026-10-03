@@ -429,8 +429,9 @@ pub struct HandoffOffer {
 /// A player's quests (admin studio spec section 6.3), as a join or a handoff carries them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayerQuests {
-    /// The active objective (its id) and its run.
-    pub active: Option<(String, QuestRun)>,
+    /// The running objectives (their ids) and their runs: in the order they started, or by id
+    /// after a load.
+    pub active: Vec<(String, QuestRun)>,
     /// The ids of the finished objectives.
     pub done: Vec<String>,
     /// The version of the newest quest tracker lists the client has; the next sim's lists go on
@@ -1373,7 +1374,7 @@ mod tests {
             drawn_weapon: Some(25),
             active_weapon: Some(25),
             quests: PlayerQuests {
-                active: Some((
+                active: vec![(
                     "12_GetOffBeach".to_owned(),
                     QuestRun {
                         tasks: vec![
@@ -1386,7 +1387,7 @@ mod tests {
                         ],
                         listed: vec![0, 1],
                     },
-                )),
+                )],
                 done: vec!["01_SoleSurvivor2".to_owned()],
                 tracker_version: 7,
             },

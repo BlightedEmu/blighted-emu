@@ -6,16 +6,21 @@ cceb47c..a5b59b7 on main.
 ## What was built
 
 - `QuestBook`: every objective of the content (after the design merge), its tree built from one
-  task index when it starts. A player runs one quest at a time (the tracker of the
-  objectives-state note shows one) and keeps a list of finished objectives.
+  task index when it starts. A player runs many quests at once and keeps a list of finished
+  objectives. **Later finding.** At first a player ran one quest at a time; that refused every
+  side quest while a main story quest ran. Now each objective `Type` has the client's journal
+  limit (`javelin.objectives-max-*`, client defaults from build 25810808: Journey 30, Mission
+  30, MainStoryQuest 20, ...); finding `2026-10-02-quest-journal-limits` in the local notes.
 - Start: from the GM page (`/api/gm/start-quest`, game master rank; the live page's "Start
-  quest" for the selected player). A player in the tutorial, or with an active quest, is refused;
+  quest" for the selected player). A player in the tutorial, or one who runs that quest, is
+  refused;
   a done quest starts again only when `Repeatable`. A player that leaves the tutorial gets the
   tutorial on its done list and starts `12_GetOffBeach`, as before.
 - Completion: the tracker sends the retail end states, the objective joins the done list, and
   `ItemRewardName` x `ItemRewardQty` goes into the bag.
-- Saves: the world database keeps the active run and the done list (`character_quest`,
-  `world/0005_character_quests.sql`); the director sends them with each join, a handoff carries
+- Saves: the world database keeps the running quests and the done list (`character_quest`,
+  `world/0005_character_quests.sql`; one active row per running quest since
+  `world/0023_character_many_quests.sql`); the director sends them with each join, a handoff carries
   them, and the sim saves them when they change and when the player leaves, with the time taken
   (an older state loses). A saved run that no longer fits the quest's tree is dropped with a
   warning.

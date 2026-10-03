@@ -15,6 +15,7 @@ use nw_formats::heightmap::{HeightmapError, parse_heightmap};
 use nw_formats::objectstream::{Element, ObjectStreamError, lowercase_crc32, parse_object_stream};
 use nw_world::capitals::parse_capitals;
 use nw_world::height::{VERIFIED_MOUNTAIN_HEIGHTS, rescaled_sample};
+use nw_world::interact_tags::{InteractTagged, TagOwner, interact_tags_of};
 use nw_world::metadata::{MetadataError, MetadataRecords, SkipCounts, read_metadata};
 use nw_world::records::{
     HeightGrid, LevelInfo, PatrolPath, RecordCounts, Region, SpawnAi, WorldFile,
@@ -451,10 +452,15 @@ pub fn run_world(
         .collect();
     let mut stations = HashMap::new();
     let mut plots = HashMap::new();
+    let mut slice_tags = HashMap::new();
     source.for_each_entry(
         |path| slice_files.contains(path),
         |path, bytes| {
             let root = stream_of(path, &bytes)?;
+            let tags = interact_tags_of(&root);
+            if !tags.is_empty() {
+                slice_tags.insert(path.to_owned(), tags);
+            }
             if let Some(station) = StationSlice::of(&root) {
                 stations.insert(path.to_owned(), station);
             }
@@ -467,11 +473,13 @@ pub fn run_world(
     let CapitalSlices {
         teleporters,
         spawners,
+        interact_tags: capital_tags,
     } = capital_slices(source, &built)?;
     for (world, _) in &mut built {
         add_spawner_paths(world, &spawners);
         world.stations = stations_of(&world.spawned, &stations);
         world.plots = plots_of(&world.spawned, &plots);
+        world.interact_tags = interact_tags(world, &capital_tags, &slice_tags);
         world.teleporters = world
             .capitals
             .iter()
@@ -500,6 +508,8 @@ struct CapitalSlices {
     teleporters: HashMap<AssetKey, TeleporterSlice>,
     /// The spawner slices with waypoints.
     spawners: HashMap<AssetKey, SpawnerSlice>,
+    /// The interact tags of the slices that hold any.
+    interact_tags: HashMap<AssetKey, Vec<String>>,
 }
 
 /// The largest difference on each axis between a spawner capital and its level vitals spawn, m
@@ -580,10 +590,37 @@ fn capital_slices(
             if let Some(spawner) = SpawnerSlice::of(&root) {
                 slices.spawners.insert(keys_by_path[path], spawner);
             }
+            let tags = interact_tags_of(&root);
+            if !tags.is_empty() {
+                slices.interact_tags.insert(keys_by_path[path], tags);
+            }
             Ok::<(), ToolError>(())
         },
     )?;
     Ok(slices)
+}
+
+/// The capitals (their slices' tags by asset id, `capital_tags`) and spawned slices (by pak path,
+/// `slice_tags`) of `world` whose slices hold interact tags.
+fn interact_tags(
+    world: &WorldFile,
+    capital_tags: &HashMap<AssetKey, Vec<String>>,
+    slice_tags: &HashMap<String, Vec<String>>,
+) -> Vec<InteractTagged> {
+    let capitals = world.capitals.iter().filter_map(|capital| {
+        let tags = capital_tags.get(&capital_asset(&capital.slice_asset_id)?)?;
+        Some(InteractTagged {
+            owner: TagOwner::Capital(capital.id.clone()),
+            tags: tags.clone(),
+        })
+    });
+    let spawned = world.spawned.iter().filter_map(|slice| {
+        Some(InteractTagged {
+            owner: TagOwner::Spawned(slice.id),
+            tags: slice_tags.get(&slice_file(&slice.slice))?.clone(),
+        })
+    });
+    capitals.chain(spawned).collect()
 }
 
 /// The spawned slices whose `.dynamicslice` is a house plot of `plots` (house type by pak path).

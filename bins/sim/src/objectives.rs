@@ -477,6 +477,11 @@ enum TaskKind {
     /// Done after `count` game events of this id (`TaskGameEvent` with a `KillEnemyType`: the
     /// gathers of a quest object).
     GameEvent { event: String, count: u32 },
+    /// Done after `count` interacts with an object whose interact tag is `tag` (`TaskInteract`;
+    /// client: "When a player performs interact that has an InteractTag that matches this
+    /// string, we will increment progress"). Retail: the vault step of `12A_MSQ_03` was done 49
+    /// ms after the storage interaction ended (vault capture 2026-09-27, 57.548 s and 57.597 s).
+    Interact { tag: String, count: u32 },
     /// A task type this server does not run: done at once, so the tree goes on.
     Unsupported,
 }
@@ -547,6 +552,8 @@ pub struct TaskRow {
     /// `FailOnCondition`. On a `TaskHaveAndReturnItems` with no `ItemName`, this is the weapon
     /// drop the task belongs to (`2hGreatSwordDropT2` on the greatsword take).
     pub fail_on_condition: Option<String>,
+    /// `InteractTag`.
+    pub interact_tag: Option<String>,
 }
 
 /// Every task row with an index by lowercase task id, made once for the trees of many
@@ -604,6 +611,7 @@ pub fn task_rows(tables: &Tables) -> Vec<TaskRow> {
             poi_tag: row.poi_tag.clone(),
             trigger_area_type: row.trigger_area_type.clone(),
             fail_on_condition: row.fail_on_condition.clone(),
+            interact_tag: row.interact_tag.clone(),
         })
         .collect()
 }
@@ -779,6 +787,9 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "taskgotopoitag" => filled(&row.poi_tag).map_or(TaskKind::Unsupported, TaskKind::GoToPoi),
         "taskexitpoitag" => filled(&row.poi_tag).map_or(TaskKind::Unsupported, TaskKind::ExitPoi),
         "taskequipitem" => TaskKind::EquipItem(item()),
+        "taskinteract" => filled(&row.interact_tag).map_or(TaskKind::Unsupported, |tag| {
+            TaskKind::Interact { tag, count }
+        }),
         "taskconversationtopic" => {
             let topic = filled(&row.ui_screen_tag).unwrap_or_else(|| row.task_id.clone());
             TaskKind::ConversationTopic(lowercase_crc32(&topic))
@@ -925,6 +936,8 @@ pub enum Event<'a> {
     /// The game event of this id happened for the player: the gather of a quest object, or one
     /// that a task fired.
     GameEvent(&'a str),
+    /// The player ended an interact with an object that has this interact tag.
+    Interacted(&'a str),
 }
 
 /// What the player is now, for the tasks done while it is so.
@@ -1204,7 +1217,8 @@ impl ObjectiveRun {
                         TaskKind::KillContribution { count, .. }
                         | TaskKind::HaveItems { count, .. }
                         | TaskKind::GatherItems { count, .. }
-                        | TaskKind::GameEvent { count, .. },
+                        | TaskKind::GameEvent { count, .. }
+                        | TaskKind::Interact { count, .. },
                         TaskState::Done,
                     ) => *count,
                     (_, TaskState::Active { progress, .. }) => progress,
@@ -1392,6 +1406,9 @@ impl ObjectiveRun {
                     },
                     Event::GameEvent(seen),
                 ) => (wanted.eq_ignore_ascii_case(seen), 1, *count),
+                (TaskKind::Interact { tag, count }, Event::Interacted(seen)) => {
+                    (tag.eq_ignore_ascii_case(seen), 1, *count)
+                }
                 _ => (false, 1, 1),
             };
             if !matches {

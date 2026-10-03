@@ -300,9 +300,10 @@ impl SimWorld {
             return;
         };
         let number = player.number;
-        let Some(quest) = self.quests.get(&number) else {
+        let quests = self.quests_of_player(number);
+        if quests.is_empty() {
             return;
-        };
+        }
         let target = self
             .content
             .quest_objects
@@ -313,7 +314,10 @@ impl SimWorld {
                     .get(&index)
                     .and_then(|(_, until)| *until)
                     .is_some_and(|until| now_ms < until);
-                !broken && quest.run.counts_game_event(&object.event)
+                !broken
+                    && quests
+                        .iter()
+                        .any(|quest| quest.run.counts_game_event(&object.event))
             })
             .map(|(index, object)| {
                 let known = object.id.zip(object.loot_tag);

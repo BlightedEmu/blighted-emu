@@ -578,7 +578,7 @@ impl SimWorld {
         EventScale::gather(modifier)
     }
 
-    /// The items the quest of player `number` drops for its gather of `gatherable`: the corpse
+    /// The items the quests of player `number` drop for its gather of `gatherable`: the corpse
     /// of `mob` it skinned, or a quest object. One of each waiting gather task's item whose
     /// enemy the mob is, or whose gatherable the object is, at the task's chance.
     fn quest_drops(
@@ -587,10 +587,11 @@ impl SimWorld {
         mob: Option<u64>,
         gatherable: &str,
     ) -> Vec<(String, u32)> {
-        let Some(quest) = self.quests.get(&number) else {
+        let quests = self.quests_of_player(number);
+        if quests.is_empty() {
             return Vec::new();
-        };
-        let drops = match mob {
+        }
+        let drops: Vec<(String, u32)> = match mob {
             Some(mob) => {
                 let Some((vitals_id, categories)) = self
                     .mobs
@@ -599,9 +600,15 @@ impl SimWorld {
                 else {
                     return Vec::new();
                 };
-                quest.run.quest_drops(vitals_id, categories)
+                quests
+                    .iter()
+                    .flat_map(|quest| quest.run.quest_drops(vitals_id, categories))
+                    .collect()
             }
-            None => quest.run.gather_drops(gatherable),
+            None => quests
+                .iter()
+                .flat_map(|quest| quest.run.gather_drops(gatherable))
+                .collect(),
         };
         drops
             .into_iter()

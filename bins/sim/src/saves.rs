@@ -25,7 +25,7 @@ pub struct ItemSave {
 /// The quests of a character to save, with the Unix time they were taken.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuestSave {
-    /// The active run and the finished objectives.
+    /// The running quests and the finished objectives.
     pub quests: PlayerQuests,
     /// Unix milliseconds when the state was taken: a save of an older state never overwrites
     /// a newer one.

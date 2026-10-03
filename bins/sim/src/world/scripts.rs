@@ -743,9 +743,9 @@ impl SimWorld {
     /// Where objective `objective` stands for player `number`.
     fn quest_state_of(&mut self, number: u64, objective: &str) -> QuestWanted {
         if self
-            .quests
-            .get(&number)
-            .is_some_and(|quest| quest.def.id.eq_ignore_ascii_case(objective))
+            .quests_of_player(number)
+            .iter()
+            .any(|quest| quest.def.id.eq_ignore_ascii_case(objective))
         {
             return QuestWanted::Active;
         }

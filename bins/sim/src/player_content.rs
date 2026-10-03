@@ -12,6 +12,7 @@ use nw_content::fishing::FishingRules;
 use nw_content::gameplay_config::GameplayConfig;
 use nw_content::gathering::{CrateLoot, CrateVariant, GatherRules, Gatherables, ToolEfficiencies};
 use nw_content::instances::InstanceCatalog;
+use nw_content::interact_tags::{InteractTags, variant_tags};
 use nw_content::item_repair::GearScoreUpgrades;
 use nw_content::item_rolls::ItemRolls;
 use nw_content::item_rules::ItemRules;
@@ -23,6 +24,7 @@ use nw_content::meta_achievements::MetaAchievementRules;
 use nw_content::mounts::MountRules;
 use nw_content::music::MusicRules;
 use nw_content::mutations::MutationCatalog;
+use nw_content::objective_limits::ObjectiveLimitGroup;
 use nw_content::poi_tags::PoiTags;
 use nw_content::progression::Progression;
 use nw_content::rewards::{EventGrants, KillExperience, Rewards};
@@ -35,6 +37,7 @@ use nw_content::tradeskill_xp::{BonusChances, TradeskillCurves};
 use nw_formats::objectstream::lowercase_crc32;
 use nw_sim_core::{EquipLoad, EquipLoadLimits, Position};
 use nw_world::dungeon_scripts::DungeonScripts;
+use nw_world::interact_tags::TagOwner;
 use nw_world::records::{Capital, GatherablePoint, WorldFile};
 use nw_world::stations::CraftingStation;
 use std::collections::{HashMap, HashSet};
@@ -91,6 +94,8 @@ pub struct QuestDef {
     pub turn_in: Option<String>,
     /// `SuccessGameEventID`: the game event whose reward the completion gives.
     pub success_event: Option<String>,
+    /// The journal limit its `Type` counts against; `None`: no limit.
+    pub limit_group: Option<ObjectiveLimitGroup>,
 }
 
 /// The `Objectives` cells a quest needs.
@@ -114,6 +119,8 @@ pub struct ObjectiveRow {
     pub turn_in: Option<String>,
     /// `SuccessGameEventID`.
     pub success_event: Option<String>,
+    /// `Type`.
+    pub kind: String,
 }
 
 /// Every objective by lowercase id and by the CRC-32 of that id, with the task rows to build
@@ -149,6 +156,7 @@ impl QuestBook {
                     achievement: cell(row.achievement_id.as_ref()),
                     turn_in: cell(row.npc_destination_id.as_ref()),
                     success_event: cell(row.success_game_event_id.as_ref()),
+                    kind: row.r#type.clone(),
                 }),
             TaskBook::new(rows),
         )
@@ -202,6 +210,7 @@ impl QuestBook {
             achievement: row.achievement.clone(),
             turn_in: row.turn_in.clone(),
             success_event: row.success_event.clone(),
+            limit_group: ObjectiveLimitGroup::of_type(&row.kind),
         })
     }
 }
@@ -444,6 +453,8 @@ pub struct PlayerContent {
     pub mob_loot: MobLoot,
     /// The loot table of each loot crate of the level.
     pub crates: CrateLoot,
+    /// The interact tags of the level's objects, for `TaskInteract`.
+    pub interact_tags: InteractTags,
     /// The level's crafting stations.
     pub stations: Vec<CraftingStation>,
     /// The resources each structure blueprint costs, for the stations' committed resources.
@@ -582,6 +593,43 @@ pub struct QuestObject {
     /// entry in the player's loot tracker (Observed: `io_msq_grace_corruptednodule_1`,
     /// `0x8d40_a880`, on the retail nodules' entries).
     pub loot_tag: Option<u32>,
+}
+
+/// The interact tags of `level`'s capitals and spawned slices: their slices' tags and their
+/// gatherable variants' `InteractTag` (`tables`).
+fn level_interact_tags(tables: &Tables, level: &WorldFile) -> InteractTags {
+    let mut capital_tags = HashMap::new();
+    let mut spawned_tags = HashMap::new();
+    for tagged in &level.interact_tags {
+        match &tagged.owner {
+            TagOwner::Capital(guid) => {
+                capital_tags.insert(guid.as_str(), tagged.tags.as_slice());
+            }
+            TagOwner::Spawned(id) => {
+                spawned_tags.insert(*id, tagged.tags.as_slice());
+            }
+        }
+    }
+    InteractTags::build(
+        &variant_tags(tables),
+        level.capitals.iter().map(|capital| {
+            (
+                capital.id.as_str(),
+                capital.variant_name.as_deref(),
+                capital_tags
+                    .get(capital.id.as_str())
+                    .copied()
+                    .unwrap_or(&[]),
+            )
+        }),
+        level.spawned.iter().map(|slice| {
+            (
+                slice.id,
+                slice.variant.as_str(),
+                spawned_tags.get(&slice.id).copied().unwrap_or(&[]),
+            )
+        }),
+    )
 }
 
 /// The largest difference on each axis between a quest object's point and the capital on it, m
@@ -746,6 +794,7 @@ impl PlayerContent {
                     .iter()
                     .map(|slice| (slice.id, slice.variant.as_str())),
             ),
+            interact_tags: level_interact_tags(tables, level),
             stations: level.stations.clone(),
             structure_costs: StructureCosts::from_tables(tables),
             player_loot_levels: PlayerLootLevels::from_tables(tables),

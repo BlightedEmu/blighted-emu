@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
+use crate::interact_tags::InteractTagged;
 use crate::slice_data::SpawnedSlice;
 use crate::stations::CraftingStation;
 use crate::travel_slices::{HousingPlot, Teleporter};
@@ -52,6 +53,8 @@ pub struct WorldFile {
     pub plots: Vec<HousingPlot>,
     /// The teleporters among the capitals.
     pub teleporters: Vec<Teleporter>,
+    /// The capitals and spawned slices whose slices hold interact tags.
+    pub interact_tags: Vec<InteractTagged>,
 }
 
 /// What an awake mob does without a target.
