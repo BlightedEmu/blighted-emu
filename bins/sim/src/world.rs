@@ -23,13 +23,13 @@ use bevy_ecs::entity::Entity;
 use bevy_ecs::world::World;
 use nw_bus::{
     Admit, BusId, CarriedItem, CellTable, ConnectionRef, Ghost, HandoffOffer, ItemPlace,
-    MOB_STATES, MobGhost, PlayerGhost, PlayerInventory, PlayerProgression, PlayerQuests, Point,
-    QuestRun, ScriptLogLine, SimSlot, SnapMob, SnapPlayer,
+    MOB_STATES, MissionTake, MobGhost, PlayerGhost, PlayerInventory, PlayerProgression,
+    PlayerQuests, Point, QuestRun, ScriptLogLine, SimSlot, SnapMob, SnapPlayer,
 };
 use nw_content::mutations::MutationCatalog;
 use nw_messages::client_input::{
     CRAFTING_STATION_KIND, GATHER_KIND, LOOT_KIND, LORE_KIND, REVIVE_PLAYER_KIND, TALK_KIND,
-    TRIGGER_KIND, WATER_GATHER_KIND,
+    TOWN_BOARD_KIND, TRIGGER_KIND, WATER_GATHER_KIND,
 };
 use nw_messages::entity_ids::IdHolder;
 use nw_messages::items::{FIRST_VERSION, FullList};
@@ -84,6 +84,7 @@ mod level_flow;
 mod loot_bag;
 mod members;
 mod meta_achievements;
+mod missions;
 mod mob_timeline;
 mod mob_trail;
 mod mount;
@@ -129,7 +130,7 @@ use members::{
     remote_group,
 };
 use mob_timeline::{Animations, MobPose, MobTimelines, TreeEntry, TreePose, animations_of};
-use quest_tracker::QuestTracker;
+use quest_tracker::{JournalRecord, QuestTracker};
 use replica::{RemoteCandidate, Replica, ReplicaSource};
 use slots::Slots;
 use stamina::Stamina;
@@ -619,6 +620,10 @@ struct Player {
     /// The open-world interaction it runs and the interact tags of its object, from its start
     /// to the client's end of it (`TaskInteract`).
     open_interaction: Option<(u64, Vec<String>)>,
+    /// The raw id of the mission board it opened last.
+    open_board: Option<[u8; nw_bus::MISSION_BOARD_ID_LEN]>,
+    /// The version of its objective interactor's mission list.
+    board_version: u64,
     /// Its client asks for an interaction in its inputs: the interaction ends at the first input
     /// without one (retail gives a gather's put-away weapon back then, [`Stow::Gather`]).
     interacting: bool,
@@ -892,6 +897,17 @@ pub struct SimWorld {
 struct ActiveQuest {
     def: QuestDef,
     run: ObjectiveRun,
+    /// A mission's take.
+    take: Option<MissionTake>,
+}
+
+/// The journal record of quest `def`, taken as `take` when it is a mission.
+fn record_of(def: &QuestDef, take: Option<MissionTake>) -> JournalRecord {
+    JournalRecord {
+        mission: def.mission.unwrap_or_default(),
+        take,
+        ..JournalRecord::of(&def.wire_objective)
+    }
 }
 
 /// Why a quest did not start.
@@ -2244,6 +2260,7 @@ impl SimWorld {
         &mut self,
         number: u64,
         objective: &str,
+        take: Option<MissionTake>,
         now_ms: u64,
     ) -> Result<(), QuestRefusal> {
         let def = self
@@ -2262,16 +2279,28 @@ impl SimWorld {
                 return Err(QuestRefusal::Full);
             }
         }
-        self.start_quest(number, objective, now_ms)
+        self.begin_quest(number, objective, take, now_ms)
     }
 
-    /// Starts quest `objective` for player `number` (admin studio spec section 6.3) next to the
-    /// quests the player runs: not while the tutorial runs, not twice at once, and a finished one
-    /// only again when it is repeatable.
+    /// Starts quest `objective` for player `number`, as [`SimWorld::begin_quest`] without a
+    /// mission take.
     pub(crate) fn start_quest(
         &mut self,
         number: u64,
         objective: &str,
+        now_ms: u64,
+    ) -> Result<(), QuestRefusal> {
+        self.begin_quest(number, objective, None, now_ms)
+    }
+
+    /// Starts quest or mission `objective` (a mission taken as `take`) for player `number` (admin studio spec section 6.3) next to the
+    /// quests the player runs: not while the tutorial runs, not twice at once, and a finished one
+    /// only again when it is repeatable.
+    fn begin_quest(
+        &mut self,
+        number: u64,
+        objective: &str,
+        take: Option<MissionTake>,
         now_ms: u64,
     ) -> Result<(), QuestRefusal> {
         let entity = self
@@ -2308,10 +2337,11 @@ impl SimWorld {
             player.quests_unsaved = true;
         }
         let id = def.id.clone();
+        let record = record_of(&def, take);
         self.quests
             .entry(number)
             .or_default()
-            .push(ActiveQuest { def, run });
+            .push(ActiveQuest { def, run, take });
         self.quest_effects(number, effects, now_ms);
         let tasks = self
             .quests_of_player(number)
@@ -2322,7 +2352,7 @@ impl SimWorld {
             && let Some(mut player) = self.world.get_mut::<Player>(entity)
             && let Some(journal) = player.quest.as_mut()
         {
-            journal.accept(&id, tasks);
+            journal.accept(&id, record, tasks);
         }
         self.update_quest_tracker(number);
         Ok(())
@@ -2356,16 +2386,18 @@ impl SimWorld {
         // journal. One that waits for its turn-in goes on waiting.
         let finished = quest.finished() && def.turn_in.is_none();
         let id = def.id.clone();
-        self.quests
-            .entry(number)
-            .or_default()
-            .push(ActiveQuest { def, run: quest });
+        let record = record_of(&def, run.mission);
+        self.quests.entry(number).or_default().push(ActiveQuest {
+            def,
+            run: quest,
+            take: run.mission,
+        });
         if finished {
             self.complete_quest(number, &id);
             return;
         }
         if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            Self::journal_of(&mut player).resume(&id, tasks);
+            Self::journal_of(&mut player).resume(&id, record, tasks);
         }
     }
 
@@ -2431,11 +2463,32 @@ impl SimWorld {
 
     /// Feeds game event `event` to the quests of player `number`.
     fn quest_event(&mut self, number: u64, event: Event<'_>, now_ms: u64) {
+        self.quest_event_where(number, |_| true, event, now_ms);
+    }
+
+    /// Feeds game event `event` to quest `objective` of player `number` only.
+    fn quest_event_for(&mut self, number: u64, objective: &str, event: Event<'_>, now_ms: u64) {
+        self.quest_event_where(
+            number,
+            |quest| quest.def.id.eq_ignore_ascii_case(objective),
+            event,
+            now_ms,
+        );
+    }
+
+    fn quest_event_where(
+        &mut self,
+        number: u64,
+        wanted: impl Fn(&ActiveQuest) -> bool,
+        event: Event<'_>,
+        now_ms: u64,
+    ) {
         let Some(quests) = self.quests.get_mut(&number) else {
             return;
         };
         let effects: Vec<Effect> = quests
             .iter_mut()
+            .filter(|quest| wanted(quest))
             .flat_map(|quest| quest.run.event(event, now_ms))
             .collect();
         self.mark_quests_unsaved(number);
@@ -2969,6 +3022,7 @@ impl SimWorld {
             self.mount_interaction(entity, now_ms);
             match request.kind {
                 TALK_KIND => self.talk(entity, number, request),
+                TOWN_BOARD_KIND => self.open_board(entity, number, request, name),
                 CRAFTING_STATION_KIND => self.open_station(entity, number, request),
                 LORE_KIND => self.read_lore(entity, number, request, name, now_ms),
                 GATHER_KIND => self.gather_open_world(entity, number, request, name, now_ms),
@@ -3944,6 +3998,8 @@ impl SimWorld {
                     station: None,
                     last_interaction: None,
                     open_interaction: None,
+                    open_board: None,
+                    board_version: 0,
                     interacting: false,
                     territories: Vec::new(),
                     travel: travel::TravelState::of(arrival.progression.travel.clone()),
@@ -4197,7 +4253,13 @@ fn quests_of(
             .get(&player.number)
             .into_iter()
             .flatten()
-            .map(|quest| (quest.def.id.clone(), quest.run.export(now_ms)))
+            .map(|quest| {
+                let run = QuestRun {
+                    mission: quest.take,
+                    ..quest.run.export(now_ms)
+                };
+                (quest.def.id.clone(), run)
+            })
             .collect(),
         done: player.done_quests.clone(),
         tracker_version: player.tracker_shown(),
@@ -9568,6 +9630,16 @@ mod tests {
     const SETTLEMENT_GUID: &str = "f7763200-249e-87c4-1784-526151dd3c56";
     const SETTLEMENT_FACET: u64 = 0xE0F2_6061_7543_BB93;
     const STORAGE_INTERACTION: u64 = 0x4007_a812_6cc6_f492;
+    /// A town board mission (retail 3819 of `CookingProjectId_1_FishingSalmonLargeT1_1`) on the
+    /// template `CM_procurer_acquire_X_items`, here with flint.
+    const MISSION: &str = "CookingProjectId_1_FishingSalmonLargeT1_1";
+    const MISSION_CRC: u32 = 0x469e_c58c;
+    const MISSION_TEMPLATE: &str = "CM_procurer_acquire_X_items";
+    const MISSION_TERRITORY: u16 = 16;
+    const MISSION_FLINT: u32 = 3;
+    /// The retail town board's raw id (board capture 2026-06-13).
+    const BOARD: [u8; nw_messages::wire::RAW_ID_LEN] =
+        [75, 101, 126, 26, 104, 224, 108, 159, 0, 0, 0, 0, 0, 0, 0, 0];
 
     /// A world with the test kits, two one-timer quests (one repeatable, both giving flint) and
     /// one player wearing its kit.
@@ -9614,6 +9686,12 @@ mod tests {
                 side(SIDE_QUEST),
                 side(OTHER_SIDE_QUEST),
                 objective(VAULT_QUEST, "q_vault_root", false),
+                ObjectiveRow {
+                    id: MISSION_TEMPLATE.to_owned(),
+                    root: "m_root".to_owned(),
+                    kind: "Mission".to_owned(),
+                    ..ObjectiveRow::default()
+                },
             ],
             TaskBook::new(vec![
                 task("q_root", "ConsecutiveTaskContainer", &["q_wait"]),
@@ -9623,8 +9701,29 @@ mod tests {
                     interact_tag: Some(STORAGE_TAG.to_owned()),
                     ..task("q_vault", "TaskInteract", &[])
                 },
+                task(
+                    "m_root",
+                    "ConsecutiveTaskContainer",
+                    &["m_have", "m_return"],
+                ),
+                TaskRow {
+                    target_qty: Some(1),
+                    ..task("m_have", "TaskHaveAndReturnItems", &[])
+                },
+                TaskRow {
+                    interact_tag: Some("ReturnToGiver".to_owned()),
+                    ..task("m_return", "TaskInteract", &[])
+                },
             ]),
-        );
+        )
+        .with_missions([crate::player_content::MissionRow {
+            id: MISSION.to_owned(),
+            objective: MISSION_TEMPLATE.to_owned(),
+            territory: MISSION_TERRITORY,
+            items: Some(gear::tests::FLINT.to_owned()),
+            items_count: Some(i64::from(MISSION_FLINT)),
+            ..crate::player_content::MissionRow::default()
+        }]);
         let mut combat = test_combat();
         combat.spawns = Vec::new().into();
         let mut world = SimWorld::new(
@@ -9696,9 +9795,9 @@ mod tests {
     fn a_player_runs_many_quests_and_each_ends_on_its_own() {
         let mut world = quest_world();
         world.start_quest(1, QUEST, NOW).expect("main");
-        world.accept_quest(1, SIDE_QUEST, NOW).expect("side");
+        world.accept_quest(1, SIDE_QUEST, None, NOW).expect("side");
         world
-            .accept_quest(1, OTHER_SIDE_QUEST, NOW)
+            .accept_quest(1, OTHER_SIDE_QUEST, None, NOW)
             .expect("other side");
         let saved = world.positions()[0].quests.clone().expect("saved");
         let running: Vec<&str> = saved.active.iter().map(|(id, _)| id.as_str()).collect();
@@ -9719,15 +9818,15 @@ mod tests {
             nw_content::gameplay_config::GameplayConfig::from_stack(&stack).expect("keys"),
         );
         world
-            .accept_quest(1, SIDE_QUEST, NOW)
+            .accept_quest(1, SIDE_QUEST, None, NOW)
             .expect("the first side quest");
         assert_eq!(
-            world.accept_quest(1, OTHER_SIDE_QUEST, NOW),
+            world.accept_quest(1, OTHER_SIDE_QUEST, None, NOW),
             Err(QuestRefusal::Full),
             "a second Journey is over the limit of 1"
         );
         assert_eq!(
-            world.accept_quest(1, QUEST, NOW),
+            world.accept_quest(1, QUEST, None, NOW),
             Ok(()),
             "a quest of another kind has its own limit"
         );
@@ -9775,6 +9874,68 @@ mod tests {
             "the vault step ended the quest"
         );
         assert_eq!(flint_of(&mut world), 2, "its reward");
+    }
+
+    #[test]
+    fn a_town_board_mission_runs_its_template_and_ends_at_its_turn_in() {
+        use nw_messages::{FacetHeader, ObjectiveInteractorClientMsg};
+        let mut world = quest_world();
+        let who = connection(1);
+        let board = InteractionRequest {
+            target: BOARD,
+            target_entity: nw_messages::facet_of_raw_id(&BOARD),
+            interaction: STORAGE_INTERACTION,
+            kind: nw_messages::client_input::TOWN_BOARD_KIND,
+            gatherable: None,
+        };
+        world.interact(&who, board, b"@ui_territory_board_town_project", NOW);
+        let take = ObjectiveInteractorClientMsg::SelectCommunityGoal {
+            header: FacetHeader::of(0, 1),
+            mission: MISSION_CRC,
+            project: 0,
+        };
+        world.board_call(&who, take, NOW);
+        let running: Vec<&str> = world
+            .quests_of_player(1)
+            .iter()
+            .map(|quest| quest.def.id.as_str())
+            .collect();
+        assert_eq!(running, [MISSION], "the mission runs under its own id");
+        let entity = world.player_by_number(1).expect("player");
+        let record = world
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.quest.as_ref().map(QuestTracker::first_state))
+            .and_then(|state| state.active)
+            .and_then(|active| active.elements.first().cloned())
+            .expect("the record");
+        assert_eq!(
+            record.objective,
+            nw_formats::objectstream::lowercase_crc32(MISSION_TEMPLATE)
+        );
+        assert_eq!(record.mission, MISSION_CRC);
+        assert_eq!(record.destination, BOARD);
+        assert_eq!(record.origin_territory, MISSION_TERRITORY);
+        assert!(record.accept_time > 0);
+        world.give_loot(1, vec![(gear::tests::FLINT.to_owned(), MISSION_FLINT)], NOW);
+        world.tick_quests(NOW);
+        let instance = world
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| {
+                player
+                    .quest
+                    .as_ref()
+                    .map(|journal| journal.instance(MISSION))
+            })
+            .expect("instance");
+        let turn_in = ObjectiveInteractorClientMsg::CompleteObjective {
+            header: FacetHeader::of(0, 1),
+            instance,
+        };
+        world.board_call(&who, turn_in, NOW);
+        assert!(world.quests_of_player(1).is_empty(), "the turn-in ends it");
+        assert_eq!(flint_of(&mut world), 0, "its items go back");
     }
 
     #[test]

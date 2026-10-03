@@ -30,11 +30,11 @@ pub use message::{
     GHOST_VISIBLE_ITEMS, GatewayOutput, Ghost, GhostItem, GhostMount, GhostSlayer, GhostSlotChange,
     GhostUpperSlots, Ghosts, HandoffMessage, HandoffOffer, HandoffReply, Heartbeat, Hit,
     HomeRecord, HousingItem, InputBatch, ItemLookState, ItemPlace, ItemState, Join, JoinReply,
-    LootLimitCount, MAX_BATCH_BYTES, MAX_BUS_MESSAGE_BYTES, MAX_GHOST_BYTES, MOB_ENTITY_BASE,
-    MOUNT_DYE_LEN, MobGhost, OutputBatch, OwnedHome, PlacedCamp, PlayerGhost, PlayerInventory,
-    PlayerMounts, PlayerMusic, PlayerProgression, PlayerQuests, PlayerTravel, Point, QuestRun,
-    QuestTask, ResumeOf, SavedLoadout, SimHeartbeat, SimInput, SimSlot, StoredItem, StoredPoint,
-    decode, encode, heartbeat_silence, split_batches,
+    LootLimitCount, MAX_BATCH_BYTES, MAX_BUS_MESSAGE_BYTES, MAX_GHOST_BYTES, MISSION_BOARD_ID_LEN,
+    MOB_ENTITY_BASE, MOUNT_DYE_LEN, MissionTake, MobGhost, OutputBatch, OwnedHome, PlacedCamp,
+    PlayerGhost, PlayerInventory, PlayerMounts, PlayerMusic, PlayerProgression, PlayerQuests,
+    PlayerTravel, Point, QuestRun, QuestTask, ResumeOf, SavedLoadout, SimHeartbeat, SimInput,
+    SimSlot, StoredItem, StoredPoint, decode, encode, heartbeat_silence, split_batches,
 };
 pub use publisher::Publisher;
 pub use snapshot::{

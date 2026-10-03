@@ -2,6 +2,7 @@
 //! The content a sim needs for its players besides combat: the starter kit of each archetype
 //! pick, the bit of each achievement, the look of each mob prefab, and the quests.
 
+use nw_bus::MISSION_BOARD_ID_LEN;
 use nw_content::charms::ItemNames;
 use nw_content::chest_lockouts::ChestLockouts;
 use nw_content::crafting::{Recipes, StructureCosts};
@@ -96,6 +97,10 @@ pub struct QuestDef {
     pub success_event: Option<String>,
     /// The journal limit its `Type` counts against; `None`: no limit.
     pub limit_group: Option<ObjectiveLimitGroup>,
+    /// The `ObjectiveID` the client's journal record names: the id, or a mission's template.
+    pub wire_objective: String,
+    /// A mission's CRC-32 of its lowercase `MissionID` (the record's `m_missionId`).
+    pub mission: Option<u32>,
 }
 
 /// The `Objectives` cells a quest needs.
@@ -123,14 +128,121 @@ pub struct ObjectiveRow {
     pub kind: String,
 }
 
-/// Every objective by lowercase id and by the CRC-32 of that id, with the task rows to build
-/// their trees.
+/// One `MissionData` row (finding "mission board"): an objective template (`ObjectiveID`)
+/// filled in with the mission's values. The client takes a town board mission by the CRC-32
+/// of its lowercase `MissionID` (3819).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MissionRow {
+    /// `MissionID`.
+    pub id: String,
+    /// `ObjectiveID`: the template.
+    pub objective: String,
+    /// `AvailableTerritoryID`: the record's `m_originTerritoryId` (Inferred: retail
+    /// `FM_C_16_*` missions had 16, `FM_98_03_*` 3).
+    pub territory: u16,
+    /// `SuccessGameEventIdOverride`.
+    pub success_event: Option<String>,
+    /// `TaskHaveAndReturnItemsOverride`.
+    pub items: Option<String>,
+    /// `TaskHaveAndReturnItemsQtyOverride`.
+    pub items_count: Option<i64>,
+    /// `TaskHaveAndReturnItemsItemsDropVCOverride`: the enemy that drops the items.
+    pub items_drop_enemy: Option<String>,
+    /// `TaskHaveAndReturnItemsDropProbabilityOverride`.
+    pub items_drop_percent: Option<i64>,
+    /// `TaskKillContributionOverride`.
+    pub kill: Option<String>,
+    /// `TaskKillContributionQtyOverride`.
+    pub kill_count: Option<i64>,
+    /// `POITagOverride`: the place of its tasks that enforce a location.
+    pub place: Option<String>,
+    /// `TaskHaveAndReturnChestDropProbabilityOverride`: the chance a container in its place
+    /// drops its items.
+    pub chest_percent: Option<i64>,
+}
+
+impl MissionRow {
+    /// The mission's value of template task `row`; `None` when the mission changes nothing in
+    /// it. Item tasks take its items, count, drops and container chance; kill tasks its enemy
+    /// and count; a task that enforces its location takes the mission's place.
+    fn override_of(&self, row: &TaskRow) -> Option<TaskRow> {
+        let placed = TaskRow {
+            poi_tag: if row.enforce_location {
+                self.place.clone().or(row.poi_tag.clone())
+            } else {
+                row.poi_tag.clone()
+            },
+            ..row.clone()
+        };
+        let row = &placed;
+        match row.kind.to_ascii_lowercase().as_str() {
+            "taskhaveandreturnitems" | "taskgatherandreturnitems" | "taskhaveitems" => {
+                let items = self.items.clone()?;
+                Some(TaskRow {
+                    item_name: Some(items),
+                    target_qty: self.items_count.or(row.target_qty),
+                    item_drop_vc: self.items_drop_enemy.clone().or(row.item_drop_vc.clone()),
+                    item_drop_probability: self.items_drop_percent.or(row.item_drop_probability),
+                    chest_drop_probability: self.chest_percent.or(row.chest_drop_probability),
+                    returned_on_turn_in: true,
+                    ..row.clone()
+                })
+            }
+            "taskkillcontribution" => Some(TaskRow {
+                kill_enemy_type: Some(self.kill.clone()?),
+                target_qty: self.kill_count.or(row.target_qty),
+                ..row.clone()
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// The missions of `tables`: the enabled rows with a mission id and a template.
+fn mission_rows(tables: &Tables) -> Vec<MissionRow> {
+    tables
+        .mission_data
+        .iter()
+        .flat_map(|table| &table.rows)
+        .filter(|row| row.enabled != Some(false))
+        .filter(|row| !row.mission_id.is_empty() && !row.objective_id.is_empty())
+        .map(|row| MissionRow {
+            id: row.mission_id.clone(),
+            objective: row.objective_id.clone(),
+            territory: row
+                .available_territory_id
+                .as_deref()
+                .and_then(|territory| territory.trim().parse().ok())
+                .unwrap_or_default(),
+            success_event: Some(row.success_game_event_id_override.clone())
+                .filter(|event| !event.is_empty()),
+            items: cell(row.task_have_and_return_items_override.as_ref()),
+            items_count: row.task_have_and_return_items_qty_override,
+            items_drop_enemy: cell(
+                row.task_have_and_return_items_items_drop_vc_override
+                    .as_ref(),
+            ),
+            items_drop_percent: row.task_have_and_return_items_drop_probability_override,
+            kill: cell(row.task_kill_contribution_override.as_ref()),
+            kill_count: row.task_kill_contribution_qty_override,
+            place: cell(row.poi_tag_override.as_ref()),
+            chest_percent: row.task_have_and_return_chest_drop_probability_override,
+        })
+        .collect()
+}
+
+/// Every objective and mission by lowercase id and by the CRC-32 of that id, with the task rows
+/// to build their trees.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct QuestBook {
     tasks: TaskBook,
     objectives: HashMap<String, ObjectiveRow>,
     /// The lowercase id of each objective by its CRC-32 (the client names quests so: 3772, 794).
     by_crc: HashMap<u32, String>,
+    /// The missions by lowercase `MissionID`.
+    missions: HashMap<String, MissionRow>,
+    /// The lowercase id of each mission by its CRC-32 (3819).
+    mission_by_crc: HashMap<u32, String>,
 }
 
 /// A cell that is empty or missing as `None`.
@@ -160,6 +272,28 @@ impl QuestBook {
                 }),
             TaskBook::new(rows),
         )
+        .with_missions(mission_rows(tables))
+    }
+
+    /// The same book with the missions `missions`; the first row of an id wins.
+    pub fn with_missions(mut self, missions: impl IntoIterator<Item = MissionRow>) -> Self {
+        for mission in missions {
+            let id = mission.id.to_lowercase();
+            self.mission_by_crc.insert(lowercase_crc32(&id), id.clone());
+            self.missions.entry(id).or_insert(mission);
+        }
+        self
+    }
+
+    /// Mission `id` (any case).
+    pub fn mission(&self, id: &str) -> Option<&MissionRow> {
+        self.missions.get(&id.to_lowercase())
+    }
+
+    /// The id of the mission whose lowercase `MissionID` has the CRC-32 `crc`.
+    pub fn mission_id_by_crc(&self, crc: u32) -> Option<&str> {
+        let id = self.mission_by_crc.get(&crc)?;
+        self.missions.get(id).map(|mission| mission.id.as_str())
     }
 
     /// The book of `objectives` over `tasks`; the first row of an id wins.
@@ -176,6 +310,8 @@ impl QuestBook {
             tasks,
             objectives: by_id,
             by_crc,
+            missions: HashMap::new(),
+            mission_by_crc: HashMap::new(),
         }
     }
 
@@ -184,11 +320,36 @@ impl QuestBook {
         self.quest(self.by_crc.get(&crc)?)
     }
 
-    /// The quest of objective `id` (any case); `None` when there is no such objective or its
-    /// root task is not a task row.
+    /// The quest of objective or mission `id` (any case); `None` when there is no such one or
+    /// its root task is not a task row. A mission runs its template's tree with its own values,
+    /// under its own id, and gives its own success event.
     pub fn quest(&self, id: &str) -> Option<QuestDef> {
-        let row = self.objectives.get(&id.to_lowercase())?;
-        let tree = self.tasks.tree(&row.root)?;
+        let lower = id.to_lowercase();
+        if let Some(mission) = self.missions.get(&lower) {
+            let template = self.objectives.get(&mission.objective.to_lowercase())?;
+            let tree = self
+                .tasks
+                .tree_with(&template.root, |row| mission.override_of(row))?;
+            return Some(QuestDef {
+                id: mission.id.clone(),
+                tree: Arc::new(tree),
+                success_event: mission
+                    .success_event
+                    .clone()
+                    .or_else(|| template.success_event.clone()),
+                mission: Some(lowercase_crc32(&lower)),
+                // A board offers a mission again after its refresh (Inferred: retail boards
+                // offer new missions every half hour).
+                repeatable: true,
+                ..self.def_of(template, self.tasks.tree(&template.root)?)
+            });
+        }
+        let row = self.objectives.get(&lower)?;
+        Some(self.def_of(row, self.tasks.tree(&row.root)?))
+    }
+
+    /// The quest of objective `row` with its tree `tree`.
+    fn def_of(&self, row: &ObjectiveRow, tree: ObjectiveTree) -> QuestDef {
         let reward = row
             .reward_item
             .as_ref()
@@ -201,7 +362,7 @@ impl QuestBook {
                     .unwrap_or(1);
                 (item.clone(), quantity)
             });
-        Some(QuestDef {
+        QuestDef {
             id: row.id.clone(),
             tree: Arc::new(tree),
             reward,
@@ -211,7 +372,9 @@ impl QuestBook {
             turn_in: row.turn_in.clone(),
             success_event: row.success_event.clone(),
             limit_group: ObjectiveLimitGroup::of_type(&row.kind),
-        })
+            wire_objective: row.id.clone(),
+            mission: None,
+        }
     }
 }
 
@@ -455,6 +618,9 @@ pub struct PlayerContent {
     pub crates: CrateLoot,
     /// The interact tags of the level's objects, for `TaskInteract`.
     pub interact_tags: InteractTags,
+    /// The level's zone capital plots: each one's place and raw id, the provider a mission board
+    /// in its zone names.
+    pub zone_plots: Vec<([f32; 3], [u8; MISSION_BOARD_ID_LEN])>,
     /// The level's crafting stations.
     pub stations: Vec<CraftingStation>,
     /// The resources each structure blueprint costs, for the stations' committed resources.
@@ -593,6 +759,27 @@ pub struct QuestObject {
     /// entry in the player's loot tracker (Observed: `io_msq_grace_corruptednodule_1`,
     /// `0x8d40_a880`, on the retail nodules' entries).
     pub loot_tag: Option<u32>,
+}
+
+/// The slices of the zone capital plots (`Darkness/Zone_CapitalPlot_SouthWindsward`), one per
+/// zone.
+const ZONE_PLOT_SLICE: &str = "zone_capitalplot";
+
+/// The zone capital plots of `level`: each one's place and raw id (its capital key's bytes, low
+/// byte first, then zeros). Observed: both retail board captures (2026-06-13, the Windsward town
+/// board and faction representative) named `Zone_CapitalPlot_SouthWindsward` as the provider.
+fn zone_plots(level: &WorldFile) -> Vec<([f32; 3], [u8; MISSION_BOARD_ID_LEN])> {
+    level
+        .capitals
+        .iter()
+        .filter(|capital| capital.slice_name.to_lowercase().contains(ZONE_PLOT_SLICE))
+        .filter_map(|capital| {
+            let mut id = [0; MISSION_BOARD_ID_LEN];
+            let key = capital_id(&capital.id)?.to_le_bytes();
+            id[..key.len()].copy_from_slice(&key);
+            Some((capital.position, id))
+        })
+        .collect()
 }
 
 /// The interact tags of `level`'s capitals and spawned slices: their slices' tags and their
@@ -795,6 +982,7 @@ impl PlayerContent {
                     .map(|slice| (slice.id, slice.variant.as_str())),
             ),
             interact_tags: level_interact_tags(tables, level),
+            zone_plots: zone_plots(level),
             stations: level.stations.clone(),
             structure_costs: StructureCosts::from_tables(tables),
             player_loot_levels: PlayerLootLevels::from_tables(tables),

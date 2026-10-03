@@ -59,7 +59,7 @@ impl SimWorld {
             tracing::debug!(player = number, quest = %def.id, "accept of a quest not offered");
             return;
         }
-        match self.accept_quest(number, &def.id, now_ms) {
+        match self.accept_quest(number, &def.id, None, now_ms) {
             Ok(()) => tracing::info!(player = number, quest = %def.id, "quest accepted"),
             Err(refusal) => {
                 tracing::debug!(player = number, quest = %def.id, %refusal, "accept refused");

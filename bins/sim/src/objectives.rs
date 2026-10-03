@@ -435,12 +435,26 @@ enum TaskKind {
         /// Urda) was entered by another path than retail's, away from its retail place.
         place: Option<String>,
     },
-    /// Done after `count` kills of mobs of the type.
-    KillContribution { enemy: String, count: u32 },
+    /// Done after `count` kills of mobs of the type; with a `place` (a `POITag`), only kills
+    /// while the player is in it count (`EnforceLocationRequirement`).
+    KillContribution {
+        enemy: String,
+        count: u32,
+        place: Option<String>,
+    },
     /// Done when the player gets the item; without one, when it loots a container.
     HaveItem(Option<String>),
-    /// Done when the player holds `count` of the item, in the bag or worn (`TaskHaveItems`).
-    HaveItems { item: String, count: u32 },
+    /// Done when the player holds `count` of the item, in the bag or worn (`TaskHaveItems`, and
+    /// a mission's `TaskHaveAndReturnItems`); `returned`: the items go back at the turn-in.
+    /// While it waits, `drop` drops the item from a skinned corpse or a quest object, and a
+    /// container the player opens in its `chest`'s place drops it at the chest's chance.
+    HaveItems {
+        item: String,
+        count: u32,
+        returned: bool,
+        drop: Option<QuestDrop>,
+        chest: Option<ChestDrop>,
+    },
     /// Done after the player gathered `count` of the item; a corpse of `drop`'s enemy that the
     /// player skins, or a quest object of `drop`'s gatherable that it gathers, drops it while it
     /// waits (`TaskGatherItems`). The turn-in takes a `returned` item back
@@ -484,6 +498,16 @@ enum TaskKind {
     Interact { tag: String, count: u32 },
     /// A task type this server does not run: done at once, so the tree goes on.
     Unsupported,
+}
+
+/// The item a mission task adds when the player opens a container (a loot crate) in its place
+/// (`ChestDropProbability`, a mission's `TaskHaveAndReturnChestDropProbabilityOverride`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChestDrop {
+    /// Its chance in percent.
+    percent: u32,
+    /// The `POITag` the container must be in; `None`: anywhere.
+    place: Option<String>,
 }
 
 /// The item a gather task adds when the player skins a corpse of its enemy or gathers a quest
@@ -554,6 +578,13 @@ pub struct TaskRow {
     pub fail_on_condition: Option<String>,
     /// `InteractTag`.
     pub interact_tag: Option<String>,
+    /// A mission's task whose items go back at the turn-in (`MissionData` overrides; retail: two
+    /// item changes 31 to 35 ms after each 2461 turn-in, board capture 2026-06-13).
+    pub returned_on_turn_in: bool,
+    /// `ChestDropProbability`.
+    pub chest_drop_probability: Option<i64>,
+    /// `EnforceLocationRequirement`: the task counts only in its `POITag`.
+    pub enforce_location: bool,
 }
 
 /// Every task row with an index by lowercase task id, made once for the trees of many
@@ -577,11 +608,41 @@ impl TaskBook {
 
     /// The tree under task `root`, as [`ObjectiveTree::build`].
     pub fn tree(&self, root: &str) -> Option<ObjectiveTree> {
+        self.tree_with(root, |_| None)
+    }
+
+    fn row(&self, id: &str) -> Option<&TaskRow> {
+        self.by_id
+            .get(&id.to_lowercase())
+            .and_then(|index| self.rows.get(*index))
+    }
+
+    /// The tree under task `root` with each row that `changed` gives a new value for replaced
+    /// by it (a mission's overrides of its objective template).
+    pub fn tree_with(
+        &self,
+        root: &str,
+        changed: impl Fn(&TaskRow) -> Option<TaskRow>,
+    ) -> Option<ObjectiveTree> {
+        let mut replaced = HashMap::new();
+        let mut pending = vec![root.to_lowercase()];
+        while let Some(id) = pending.pop() {
+            let Some(row) = self.row(&id) else {
+                continue;
+            };
+            if replaced.contains_key(&id) {
+                continue;
+            }
+            pending.extend(row.sub_tasks.iter().map(|child| child.to_lowercase()));
+            replaced.insert(id, changed(row));
+        }
         ObjectiveTree::build_with(
             &|id| {
-                self.by_id
-                    .get(&id.to_lowercase())
-                    .and_then(|index| self.rows.get(*index))
+                let id = id.to_lowercase();
+                match replaced.get(&id) {
+                    Some(Some(row)) => Some(row),
+                    _ => self.row(&id),
+                }
             },
             root,
         )
@@ -612,6 +673,9 @@ pub fn task_rows(tables: &Tables) -> Vec<TaskRow> {
             trigger_area_type: row.trigger_area_type.clone(),
             fail_on_condition: row.fail_on_condition.clone(),
             interact_tag: row.interact_tag.clone(),
+            returned_on_turn_in: false,
+            chest_drop_probability: row.chest_drop_probability,
+            enforce_location: row.enforce_location_requirement.unwrap_or_default(),
         })
         .collect()
 }
@@ -710,16 +774,20 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         .unwrap_or(1)
         .max(1);
     let filled = |cell: &Option<String>| cell.clone().filter(|text| !text.is_empty());
-    let gather = |returned| TaskKind::GatherItems {
-        item: item(),
-        count,
-        drop: filled(&row.item_drop_vc).map(|enemy| QuestDrop {
+    let drop = || {
+        filled(&row.item_drop_vc).map(|enemy| QuestDrop {
             enemy,
             percent: row
                 .item_drop_probability
                 .and_then(|percent| u32::try_from(percent).ok())
                 .unwrap_or(ALWAYS_PERCENT),
-        }),
+        })
+    };
+    let place = || row.enforce_location.then(|| filled(&row.poi_tag)).flatten();
+    let gather = |returned| TaskKind::GatherItems {
+        item: item(),
+        count,
+        drop: drop(),
         returned,
     };
     match row.kind.to_ascii_lowercase().as_str() {
@@ -759,11 +827,31 @@ fn kind_of(row: &TaskRow) -> TaskKind {
         "taskkillcontribution" => TaskKind::KillContribution {
             enemy: row.kill_enemy_type.clone().unwrap_or_default(),
             count,
+            place: place(),
         },
+        "taskhaveandreturnitems" if row.returned_on_turn_in => {
+            have_item_of(row).map_or(TaskKind::Unsupported, |item| TaskKind::HaveItems {
+                item,
+                count,
+                returned: true,
+                drop: drop(),
+                chest: row
+                    .chest_drop_probability
+                    .and_then(|percent| u32::try_from(percent).ok())
+                    .filter(|percent| *percent > 0)
+                    .map(|percent| ChestDrop {
+                        percent,
+                        place: place(),
+                    }),
+            })
+        }
         "taskhaveandreturnitems" => TaskKind::HaveItem(have_item_of(row)),
         "taskhaveitems" => TaskKind::HaveItems {
             item: item(),
             count,
+            returned: false,
+            drop: None,
+            chest: None,
         },
         "taskgatheritems" => gather(false),
         "taskgatherandreturnitems" => gather(true),
@@ -882,6 +970,12 @@ impl ObjectiveTree {
             .iter()
             .filter_map(|task| match &task.kind {
                 TaskKind::GatherItems {
+                    item,
+                    count,
+                    returned: true,
+                    ..
+                }
+                | TaskKind::HaveItems {
                     item,
                     count,
                     returned: true,
@@ -1012,6 +1106,9 @@ pub struct ObjectiveRun {
     /// The tasks with progress, in the order they first had it (retail keeps an entry's place
     /// and adds new ones at the end).
     listed: Vec<usize>,
+    /// The lowercase `POITag`s the player was in at the last [`ObjectiveRun::sync`]; `None`
+    /// before one that knew them.
+    places: Option<Vec<String>>,
 }
 
 /// Whether `enemy` names a mob of `vitals_id` and `categories`: one of its categories or its
@@ -1088,6 +1185,7 @@ impl ObjectiveRun {
             tree,
             states,
             listed: Vec::new(),
+            places: None,
         };
         let mut effects = Vec::new();
         if !run.states.is_empty() {
@@ -1116,6 +1214,7 @@ impl ObjectiveRun {
                 .iter()
                 .filter_map(|index| u32::try_from(*index).ok())
                 .collect(),
+            mission: None,
         }
     }
 
@@ -1153,6 +1252,7 @@ impl ObjectiveRun {
             tree,
             states,
             listed,
+            places: None,
         })
     }
 
@@ -1256,6 +1356,9 @@ impl ObjectiveRun {
     /// (beach-ruins-chest note: the chest's potions taken before `ChestDiscovery`), nor would a
     /// lore note it read before.
     pub fn sync(&mut self, facts: &Facts<'_>, now_ms: u64) -> Vec<Effect> {
+        if let Some(places) = facts.places {
+            self.places = Some(places.iter().map(|place| place.to_lowercase()).collect());
+        }
         let mut effects = Vec::new();
         for index in 0..self.states.len() {
             let TaskState::Active { progress, due_ms } = self.states[index] else {
@@ -1277,7 +1380,7 @@ impl ObjectiveRun {
             let tree = Arc::clone(&self.tree);
             let met = match &tree.tasks[index].kind {
                 TaskKind::HaveItem(Some(item)) => holds(item) > 0,
-                TaskKind::HaveItems { item, count } => {
+                TaskKind::HaveItems { item, count, .. } => {
                     let holding = holds(item);
                     if holding < *count && holding != progress {
                         self.states[index] = TaskState::Active {
@@ -1321,15 +1424,16 @@ impl ObjectiveRun {
         self.drops(|drop| drop.enemy.eq_ignore_ascii_case(gatherable))
     }
 
-    /// The items of the waiting gather tasks whose drop `drops`, with their chances.
+    /// The items of the waiting gather and item tasks whose drop `drops`, with their chances.
     fn drops(&self, drops: impl Fn(&QuestDrop) -> bool) -> Vec<(String, u32)> {
-        self.tree
-            .tasks
-            .iter()
-            .zip(&self.states)
-            .filter(|(_, state)| matches!(state, TaskState::Active { .. }))
-            .filter_map(|(task, _)| match &task.kind {
+        self.waiting()
+            .filter_map(|kind| match kind {
                 TaskKind::GatherItems {
+                    item,
+                    drop: Some(drop),
+                    ..
+                }
+                | TaskKind::HaveItems {
                     item,
                     drop: Some(drop),
                     ..
@@ -1337,6 +1441,41 @@ impl ObjectiveRun {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The items the waiting item tasks drop for a container the player opens (a loot crate)
+    /// where it is now: each item and its chance in percent.
+    pub fn chest_drops(&self) -> Vec<(String, u32)> {
+        self.waiting()
+            .filter_map(|kind| match kind {
+                TaskKind::HaveItems {
+                    item,
+                    chest: Some(chest),
+                    ..
+                } if self.is_in(chest.place.as_deref()) => Some((item.clone(), chest.percent)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The kinds of the tasks that run.
+    fn waiting(&self) -> impl Iterator<Item = &TaskKind> {
+        self.tree
+            .tasks
+            .iter()
+            .zip(&self.states)
+            .filter(|(_, state)| matches!(state, TaskState::Active { .. }))
+            .map(|(task, _)| &task.kind)
+    }
+
+    /// Whether the player is in `place` (a `POITag`; `None`: anywhere). Without a known place
+    /// a place task does not count.
+    fn is_in(&self, place: Option<&str>) -> bool {
+        place.is_none_or(|place| {
+            self.places
+                .as_ref()
+                .is_some_and(|places| places.iter().any(|known| known.eq_ignore_ascii_case(place)))
+        })
     }
 
     /// Lists task `index` in the tracker once it has progress.
@@ -1368,12 +1507,20 @@ impl ObjectiveRun {
                     (*id == seen, 1, 1)
                 }
                 (
-                    TaskKind::KillContribution { enemy, count },
+                    TaskKind::KillContribution {
+                        enemy,
+                        count,
+                        place,
+                    },
                     Event::Killed {
                         vitals_id,
                         categories,
                     },
-                ) => (kills_count(enemy, vitals_id, categories), 1, *count),
+                ) => (
+                    kills_count(enemy, vitals_id, categories) && self.is_in(place.as_deref()),
+                    1,
+                    *count,
+                ),
                 (
                     TaskKind::TriggerArea {
                         area: Some(area),
@@ -1631,6 +1778,57 @@ pub(crate) mod tests {
             sub_tasks: children.iter().map(|child| (*child).to_owned()).collect(),
             ..row(task_id, kind)
         }
+    }
+
+    /// A mission's tasks at its place: a kill and an item from containers there.
+    fn placed_rows() -> Vec<TaskRow> {
+        const PLACE: &str = "AE_Elite_50119";
+        vec![
+            container("Root", "SimpleTaskContainer", &["Kill", "Items"]),
+            TaskRow {
+                kill_enemy_type: Some("Wolf".to_owned()),
+                poi_tag: Some(PLACE.to_owned()),
+                enforce_location: true,
+                ..row("Kill", "TaskKillContribution")
+            },
+            TaskRow {
+                item_name: Some("FastenersT4".to_owned()),
+                poi_tag: Some(PLACE.to_owned()),
+                enforce_location: true,
+                chest_drop_probability: Some(100),
+                returned_on_turn_in: true,
+                ..row("Items", "TaskHaveAndReturnItems")
+            },
+        ]
+    }
+
+    #[test]
+    fn a_placed_task_counts_only_in_its_place() {
+        let book = TaskBook::new(placed_rows());
+        let tree = Arc::new(book.tree("Root").expect("tree"));
+        let (mut run, _) = ObjectiveRun::start(tree, 0);
+        let wolf = Event::Killed {
+            vitals_id: "Wolf_Grey",
+            categories: &[],
+        };
+        let outside: [&str; 0] = [];
+        let facts = |places| Facts {
+            held: &[],
+            places: Some(places),
+            achieved: None,
+        };
+        run.sync(&facts(&outside), 0);
+        run.event(wolf, 0);
+        assert!(
+            !run.is_done("Kill"),
+            "a kill outside the place does not count"
+        );
+        assert!(run.chest_drops().is_empty(), "no container drop outside");
+        run.sync(&facts(&["ae_elite_50119"]), 0);
+        assert_eq!(run.chest_drops(), [("FastenersT4".to_owned(), 100)]);
+        run.event(wolf, 0);
+        assert!(run.is_done("Kill"), "inside it counts");
+        assert_eq!(run.tree.returned_items(), [("FastenersT4".to_owned(), 1)]);
     }
 
     /// A small tree in the shape of the tutorial's start: an unlock, a video start, a timer then

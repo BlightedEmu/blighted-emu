@@ -549,6 +549,7 @@ mod tests {
         let run = QuestRun {
             tasks: vec![nw_bus::QuestTask::Done],
             listed: vec![0],
+            mission: None,
         };
         let good = player_quests(SavedQuests {
             active: vec![(

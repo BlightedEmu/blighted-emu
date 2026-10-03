@@ -181,6 +181,9 @@ pub const LOOT_KIND: u8 = 28;
 pub const CRAFTING_STATION_KIND: u8 = 20;
 /// The interaction kind of a talk to an NPC (beach-quests note: Aelstrom and Urda).
 pub const TALK_KIND: u8 = 63;
+/// The interaction kind of a town project board (retail board capture 2026-06-13: name
+/// `@ui_territory_board_town_project`).
+pub const TOWN_BOARD_KIND: u8 = 51;
 /// The interaction kind of a revive of a downed player (the client's `InteractionUIActions`
 /// value 30, `RevivePlayer`, registered by `FUN_1435eaa20`).
 pub const REVIVE_PLAYER_KIND: u8 = 30;

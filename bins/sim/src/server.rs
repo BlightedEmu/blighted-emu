@@ -44,9 +44,10 @@ use nw_messages::guild_lookup::REQUEST_GET_GUILDS_TYPE_INDEX;
 use nw_messages::social::SocialCall;
 use nw_messages::{
     BodyCodec, ClientFacetMsg, ClientInputMsg, ConversationClientMsg, GmClientMsg, InputRecord,
-    LookupRequest, MetaAchievementRequest, MountClientMsg, PointsClientMsg,
-    RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX, RequestRespawnMsg,
-    SPREADSHOT_REQUEST_TYPE_INDEX, SetTitleRequest, SpreadshotRequestMsg, TravelClientMsg,
+    LookupRequest, MetaAchievementRequest, MountClientMsg, ObjectiveInteractorClientMsg,
+    PointsClientMsg, RECEIVE_INPUT_FROM_CLIENT_TYPE_INDEX, REQUEST_RESPAWN_TYPE_INDEX,
+    RequestRespawnMsg, SPREADSHOT_REQUEST_TYPE_INDEX, SetTitleRequest, SpreadshotRequestMsg,
+    TravelClientMsg,
 };
 use nw_messages::{
     ClientOptionMsg, GuildsRequest, ItemCallMsg, ItemRepairMsg, KickClientMsg, PlayerDataRequest,
@@ -759,6 +760,14 @@ impl Loop {
                     Ok(call) => self
                         .world
                         .conversation_call(connection, call, self.now_ms()),
+                    Err(error) => bad_call(index, &error, &envelope.body),
+                }
+            }
+            Some(index)
+                if let Some(call) = ObjectiveInteractorClientMsg::decode(index, &envelope.body) =>
+            {
+                match call {
+                    Ok(call) => self.world.board_call(connection, call, self.now_ms()),
                     Err(error) => bad_call(index, &error, &envelope.body),
                 }
             }

@@ -473,7 +473,7 @@ impl SimWorld {
         let hints = rolled.gear_scores.clone();
         let mut loot = self.limit_loot(gather.number, rolled);
         self.send_loot_limits(gather.number, LimitsSent::Changed);
-        loot.extend(self.quest_drops(gather.number, gather.mob, &gather.gatherable.id));
+        loot.extend(self.quest_drops(gather.number, gather.mob, &gather.gatherable));
         match gather.mob {
             Some(mob) => {
                 self.skinned.insert(mob, now_ms);
@@ -579,13 +579,14 @@ impl SimWorld {
     }
 
     /// The items the quests of player `number` drop for its gather of `gatherable`: the corpse
-    /// of `mob` it skinned, or a quest object. One of each waiting gather task's item whose
-    /// enemy the mob is, or whose gatherable the object is, at the task's chance.
+    /// of `mob` it skinned, a quest object, or a container. One of each waiting task's item whose
+    /// enemy the mob is, or whose gatherable the object is, or that a container in the player's
+    /// place drops, at the task's chance.
     fn quest_drops(
         &mut self,
         number: u64,
         mob: Option<u64>,
-        gatherable: &str,
+        gatherable: &Gatherable,
     ) -> Vec<(String, u32)> {
         let quests = self.quests_of_player(number);
         if quests.is_empty() {
@@ -605,9 +606,13 @@ impl SimWorld {
                     .flat_map(|quest| quest.run.quest_drops(vitals_id, categories))
                     .collect()
             }
+            None if gatherable.loot_container => quests
+                .iter()
+                .flat_map(|quest| quest.run.chest_drops())
+                .collect(),
             None => quests
                 .iter()
-                .flat_map(|quest| quest.run.gather_drops(gatherable))
+                .flat_map(|quest| quest.run.gather_drops(&gatherable.id))
                 .collect(),
         };
         drops

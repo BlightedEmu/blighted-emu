@@ -13,6 +13,7 @@
 
 use std::collections::VecDeque;
 
+use nw_bus::MissionTake;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::items::FullList;
 use nw_messages::{
@@ -42,11 +43,35 @@ fn instance_of(objective: &str, player: u64) -> u64 {
     high.max(1)
 }
 
+/// What the journal record of an objective names besides its instance: the objective (a
+/// mission's template), and a mission's id and take.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct JournalRecord {
+    /// CRC-32 of the lowercase `ObjectiveID`.
+    pub objective: u32,
+    /// CRC-32 of the lowercase `MissionID`; 0 for a quest.
+    pub mission: u32,
+    /// The mission's take.
+    pub take: Option<MissionTake>,
+}
+
+impl JournalRecord {
+    /// The record of quest `objective` (its id).
+    pub fn of(objective: &str) -> Self {
+        Self {
+            objective: lowercase_crc32(objective),
+            ..Self::default()
+        }
+    }
+}
+
 /// One objective of the journal.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Entry {
-    /// CRC-32 of the lowercase objective id.
-    objective: u32,
+    /// CRC-32 of the lowercase id of the quest or mission it runs.
+    key: u32,
+    /// What its record names.
+    record: JournalRecord,
     /// The player's instance of the objective: the same on every call for a player, never 0.
     instance: u64,
     /// Its task list of the newest state.
@@ -110,7 +135,12 @@ impl QuestTracker {
     /// Whether objective `objective` (its id) runs in the journal.
     pub(super) fn has(&self, objective: &str) -> bool {
         let crc = lowercase_crc32(objective);
-        self.entries.iter().any(|entry| entry.objective == crc)
+        self.entries.iter().any(|entry| entry.key == crc)
+    }
+
+    /// The instance of quest or mission `objective` (its id) for this player.
+    pub(super) fn instance(&self, objective: &str) -> u64 {
+        instance_of(objective, self.player)
     }
 
     fn list<T>(&self, elements: Vec<T>) -> Option<FullList<T>> {
@@ -131,7 +161,19 @@ impl QuestTracker {
     fn records(&self) -> Vec<ObjectiveRecord> {
         self.entries
             .iter()
-            .map(|entry| ObjectiveRecord::available(entry.objective, entry.instance))
+            .map(|entry| {
+                let record = ObjectiveRecord::available(entry.record.objective, entry.instance);
+                match entry.record.take {
+                    Some(take) => ObjectiveRecord {
+                        mission: entry.record.mission,
+                        destination: take.board,
+                        accept_time: take.accepted_ns,
+                        origin_territory: take.territory,
+                        ..record
+                    },
+                    None => record,
+                }
+            })
             .collect()
     }
 
@@ -208,14 +250,20 @@ impl QuestTracker {
         self
     }
 
-    /// Objective `objective` (its id) goes on from another sim or a save with the task list
-    /// `tasks`, tracked; the first own card sends it.
-    pub(super) fn resume(&mut self, objective: &str, tasks: Vec<TaskProgress>) {
+    /// Objective `objective` (its id), with record `record`, goes on from another sim or a save
+    /// with the task list `tasks`, tracked; the first own card sends it.
+    pub(super) fn resume(
+        &mut self,
+        objective: &str,
+        record: JournalRecord,
+        tasks: Vec<TaskProgress>,
+    ) {
         if self.has(objective) {
             return;
         }
         self.entries.push(Entry {
-            objective: lowercase_crc32(objective),
+            key: lowercase_crc32(objective),
+            record,
             instance: instance_of(objective, self.player),
             tasks,
             tracked: true,
@@ -227,18 +275,25 @@ impl QuestTracker {
     /// version (retail reply to a 3772; without the active record the journal shows nothing,
     /// live 2026-09-18). A client that turned every auto-pin flag off gets it active and not
     /// tracked. A repeatable objective that ran before leaves the completed list while it runs.
-    pub(super) fn accept(&mut self, objective: &str, tasks: Vec<TaskProgress>) {
+    pub(super) fn accept(
+        &mut self,
+        objective: &str,
+        record: JournalRecord,
+        tasks: Vec<TaskProgress>,
+    ) {
         let tracked = self.auto_pin;
         let crc = lowercase_crc32(objective);
         let instance = instance_of(objective, self.player);
         self.completed.retain(|done| *done != instance);
-        match self.entries.iter_mut().find(|entry| entry.objective == crc) {
+        match self.entries.iter_mut().find(|entry| entry.key == crc) {
             Some(entry) => {
+                entry.record = record;
                 entry.tasks = tasks;
                 entry.tracked = tracked;
             }
             None => self.entries.push(Entry {
-                objective: crc,
+                key: crc,
+                record,
                 instance,
                 tasks,
                 tracked,
@@ -256,7 +311,7 @@ impl QuestTracker {
     /// tutorial).
     pub(super) fn update(&mut self, objective: &str, tasks: Vec<TaskProgress>, finished: bool) {
         let crc = lowercase_crc32(objective);
-        let position = match self.entries.iter().position(|entry| entry.objective == crc) {
+        let position = match self.entries.iter().position(|entry| entry.key == crc) {
             Some(position) => position,
             None => {
                 let instance = instance_of(objective, self.player);
@@ -264,7 +319,8 @@ impl QuestTracker {
                     return;
                 }
                 self.entries.push(Entry {
-                    objective: crc,
+                    key: crc,
+                    record: JournalRecord::of(objective),
                     instance,
                     tasks: Vec::new(),
                     tracked: true,
@@ -341,7 +397,11 @@ mod tests {
         let mut tracker = QuestTracker::new(PLAYER)
             .after(&[TUTORIAL])
             .above(OLD_VERSION);
-        tracker.accept(SKINNING_KNIFE, vec![task(0, 0, false)]);
+        tracker.accept(
+            SKINNING_KNIFE,
+            JournalRecord::of(SKINNING_KNIFE),
+            vec![task(0, 0, false)],
+        );
         let states: Vec<_> = std::iter::from_fn(|| tracker.take_change()).collect();
         assert_eq!(states.len(), ACCEPT_REPEATS);
         let state = &states[0];
@@ -371,8 +431,16 @@ mod tests {
     #[test]
     fn a_second_quest_joins_the_lists_and_the_first_stays() {
         let mut tracker = QuestTracker::new(PLAYER);
-        tracker.accept(SKINNING_KNIFE, vec![task(0, 0, false)]);
-        tracker.accept(TRUFFLES, vec![task(0, 0, false), task(1, 0, false)]);
+        tracker.accept(
+            SKINNING_KNIFE,
+            JournalRecord::of(SKINNING_KNIFE),
+            vec![task(0, 0, false)],
+        );
+        tracker.accept(
+            TRUFFLES,
+            JournalRecord::of(TRUFFLES),
+            vec![task(0, 0, false), task(1, 0, false)],
+        );
         let last = std::iter::from_fn(|| tracker.take_change())
             .last()
             .expect("the second accept");
@@ -442,7 +510,11 @@ mod tests {
     #[test]
     fn the_first_card_drops_the_older_queued_states() {
         let mut tracker = QuestTracker::new(PLAYER);
-        tracker.accept(TUTORIAL, vec![task(0, 0, false)]);
+        tracker.accept(
+            TUTORIAL,
+            JournalRecord::of(TUTORIAL),
+            vec![task(0, 0, false)],
+        );
         tracker.update(TUTORIAL, vec![task(0, 1, true), task(1, 0, false)], false);
         let card = tracker.take_first_state();
         assert_eq!(
@@ -571,7 +643,11 @@ mod tests {
     fn an_accept_with_auto_pin_off_is_not_tracked() {
         let mut tracker = QuestTracker::new(PLAYER);
         tracker.set_auto_pin(false);
-        tracker.accept(TUTORIAL, vec![task(1, 0, false)]);
+        tracker.accept(
+            TUTORIAL,
+            JournalRecord::of(TUTORIAL),
+            vec![task(1, 0, false)],
+        );
         let accepted = tracker.take_change().expect("accepted");
         assert_eq!(
             accepted.tracked.map(|list| list.elements),
@@ -583,9 +659,17 @@ mod tests {
     #[test]
     fn a_repeated_quest_runs_and_ends_again() {
         let mut tracker = QuestTracker::new(PLAYER);
-        tracker.accept(TRUFFLES, vec![task(0, 0, false)]);
+        tracker.accept(
+            TRUFFLES,
+            JournalRecord::of(TRUFFLES),
+            vec![task(0, 0, false)],
+        );
         tracker.update(TRUFFLES, vec![task(0, 1, true)], true);
-        tracker.accept(TRUFFLES, vec![task(0, 0, false)]);
+        tracker.accept(
+            TRUFFLES,
+            JournalRecord::of(TRUFFLES),
+            vec![task(0, 0, false)],
+        );
         assert!(tracker.has(TRUFFLES), "it runs again");
         while tracker.take_change().is_some() {}
         tracker.update(TRUFFLES, vec![task(0, 1, true)], true);
@@ -598,8 +682,16 @@ mod tests {
     #[test]
     fn a_resumed_quest_goes_out_with_the_first_card_only() {
         let mut tracker = QuestTracker::new(PLAYER);
-        tracker.resume(TRUFFLES, vec![task(0, 1, false)]);
-        tracker.resume(TRUFFLES, vec![task(0, 1, false)]);
+        tracker.resume(
+            TRUFFLES,
+            JournalRecord::of(TRUFFLES),
+            vec![task(0, 1, false)],
+        );
+        tracker.resume(
+            TRUFFLES,
+            JournalRecord::of(TRUFFLES),
+            vec![task(0, 1, false)],
+        );
         assert_eq!(tracker.take_change(), None, "nothing queued");
         let card = tracker.take_first_state();
         assert_eq!(

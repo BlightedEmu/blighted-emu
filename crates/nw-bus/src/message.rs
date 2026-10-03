@@ -679,7 +679,26 @@ pub struct QuestRun {
     pub tasks: Vec<QuestTask>,
     /// The tasks with progress (their tree index), in the order they first had it.
     pub listed: Vec<u32>,
+    /// A mission's take; `None` for a quest.
+    #[serde(default)]
+    pub mission: Option<MissionTake>,
 }
+
+/// Where and when a player took a mission: what its journal record names (finding "mission
+/// board": retail `m_destinationOverride` = the board's id, `m_acceptTime`,
+/// `m_originTerritoryId`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissionTake {
+    /// The raw id of the board it was taken at.
+    pub board: [u8; MISSION_BOARD_ID_LEN],
+    /// When it was taken: ns since 1970-01-01.
+    pub accepted_ns: u64,
+    /// The territory id the record names.
+    pub territory: u16,
+}
+
+/// Bytes of a board's raw id.
+pub const MISSION_BOARD_ID_LEN: usize = 16;
 
 /// The state of one task of a [`QuestRun`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1386,6 +1405,11 @@ mod tests {
                             QuestTask::Idle,
                         ],
                         listed: vec![0, 1],
+                        mission: Some(MissionTake {
+                            board: [0x81; MISSION_BOARD_ID_LEN],
+                            accepted_ns: 1_798_761_600_000_000_000,
+                            territory: 300,
+                        }),
                     },
                 )],
                 done: vec!["01_SoleSurvivor2".to_owned()],
