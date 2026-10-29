@@ -155,6 +155,7 @@
 
   <h2>Done list</h2>
   <ul class="done">
+    <li>✅ Mob lunges follow the ground; mobs far from home stay awake and their trees leash them home (DoesLeash) (not committed, 2026-10-29).</li>
     <li>✅ Janszoon fights: his tree gets its difficulty tier from his slice, and mob attacks take their hits from the weapon's animation database when the body's has none (450 creatures carry one) (not committed, 2026-10-29).</li>
     <li>✅ Crafting: no "Crafting attempt failed" message; verified live on the skinning knife (not committed, 2026-10-29).</li>
     <li>✅ Mobs walk around a rock or crate that blocks their straight way (Janszoon, Bridget); a target behind one solid counts as reachable (not committed, 2026-10-29).</li>
@@ -257,7 +258,7 @@ const AREAS = [
     name: "Mobs",
     features: [
       ["Spawns and health", 90, "tests", "99.3% of creature records explained.", "A few odd records."],
-      ["Mob AI", 65, "live", "1,075 behavior trees from Server.pak. Thorpe fight fixed. Mob paths stop at walls and climb at most 0.6 m a step.", "Janszoon tree is a stand-in; he now attacks (difficulty tier and weapon hits fixed, live check needed). Anchor toss missing. Terrain cookies now in our ground; mobs walk around rocks and crates."],
+      ["Mob AI", 65, "live", "1,075 behavior trees from Server.pak. Thorpe fight fixed. Mob paths stop at walls and climb at most 0.6 m a step.", "Janszoon tree is a stand-in; he now attacks, his charge follows the slope and he leashes home (live check needed). Anchor toss missing (retail rule Unknown). Terrain cookies now in our ground; mobs walk around rocks and crates."],
       ["Mob animations", 85, "tests", "736 of 747 creature assets.", "11 assets."],
       ["Patrols and waypoints", 70, "tests", "12,858 spawns get waypoint paths.", "Live check."],
       ["Corpses", 85, "tests", "Retail times per creature. Skinned corpses go after 5.5 s.", "Boar times vary in retail."],
