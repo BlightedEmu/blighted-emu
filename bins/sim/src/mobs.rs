@@ -2714,6 +2714,49 @@ mod retail_tests {
         );
     }
 
+    #[test]
+    fn janszoon_fights_a_player_in_front_of_him() {
+        // Live 2026-10-29: First Mate Janszoon took a combat stance next to the player and never
+        // swung (retail newchar: `Attack_Far_2H_Axe_01`, `Attack_Close_2H_Axe_04`). His slice's
+        // `DifficultyTier` picks his attack tree; his weapon's database holds the hits.
+        const JANSZOON_ID: &str = "Corrupted_Sailor_StarterBeach_Named_00";
+        const JANSZOON: &str = "7214ec6831b058f2a3b60f9b5c285e6c";
+        const FIGHT_MS: u64 = 20_000;
+        let mut mobs = retail_mobs(
+            vec![spawn_at(SPAWN_X, JANSZOON_ID, TEST_LEVEL)],
+            &[(JANSZOON_ID, asset(JANSZOON))],
+        );
+        let player = Seen {
+            entity: PLAYER,
+            position: Position {
+                y: super::tests::ROW_Y + 2.0,
+                ..player_at(SPAWN_X).position
+            },
+        };
+        // His damage table's rows of the great axe attacks
+        // (`javelindata_damagetable_damned_firstmate`).
+        const AXE_ROW_PREFIX: &str = "Damned_2H_GreatAxe_Melee_";
+        let mut rows = Vec::new();
+        let mut fragments = Vec::new();
+        let mut serial = None;
+        for now in (0..FIGHT_MS).step_by(TICK_MS as usize) {
+            rows.extend(
+                mobs.tick(&[player], now, &Flat, 1)
+                    .into_iter()
+                    .filter_map(|hit| hit.strike.map(|strike| (strike.table, strike.row))),
+            );
+            played(&mobs, mob_entity(0), &mut serial, &mut fragments);
+        }
+        assert_eq!(mobs.target(mob_entity(0)), Some(PLAYER), "{fragments:?}");
+        assert!(!rows.is_empty(), "{fragments:?}");
+        assert!(
+            rows.iter()
+                .all(|(table, row)| table == "DamnedFirstMateDamageTable"
+                    && row.starts_with(AXE_ROW_PREFIX)),
+            "{rows:?}"
+        );
+    }
+
     /// Run with `cargo test --release -p sim --features local-data hundred_thousand -- --ignored
     /// --nocapture`. The layout: 100,000 mobs on a square of 10 km (32 m apart) and 10,000
     /// players spread on it (100 m apart), as on the open world map (14 km): each player has a

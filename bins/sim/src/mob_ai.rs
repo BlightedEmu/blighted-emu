@@ -49,6 +49,7 @@ use nw_ai::rng::Rng48;
 use nw_ai::value::{Blackboard, KeyId, NameId, Param, Value};
 use nw_content::container::ContainerError;
 use nw_content::mob_prefabs::ASSET_ID_LEN;
+use nw_sim_core::character::STEP_UP_M;
 use nw_sim_core::{Ground, Mover, Position, Seen, Steering, Threat, yaw_gap, yaw_toward};
 use nw_world::WorldFile;
 use nw_world::records::{AiBehaviour, AiProfile, PathMode, PatrolPath};
@@ -69,6 +70,24 @@ const FLOOR_STEP_M: f32 = 0.5;
 /// A body this near the floor under it stands on that floor (our engineering limit: a floor
 /// check's step).
 const ON_FLOOR_M: f32 = 0.5;
+/// The most a mob's feet rise in one floor check step (Observed: the highest rise of a retail
+/// mob between two of its places was 0.58 m over the beach captures; ours climbed 1.36 m in
+/// 0.21 m onto a solid, live 2026-10-29 18:29:39.797, mob ground height note).
+const MAX_STEP_RISE_M: f32 = 0.6;
+/// The turns, nearest first, a mob tries when its straight way meets a wall, a climb or an edge:
+/// it walks around the solid (Inferred: retail mobs follow the level's navigation mesh around
+/// rocks and crates; ours has none, live 2026-10-29: Janszoon stood blocked by a rock 2 m from
+/// his spawn and never reached the player).
+const DETOUR_TURNS_DEG: [f64; 6] = [30.0, -30.0, 60.0, -60.0, 90.0, -90.0];
+/// The longest first leg of a way around a solid (our engineering limit: about a rock's size).
+const DETOUR_LEG_M: f32 = 4.0;
+/// The slice config param that gives the engine key `Difficulty_Tier` (Inferred: Janszoon's
+/// slice, `corrupted_sailor_starterbeach_named_00`, sets `DifficultyTier` 1 and no
+/// `Difficulty_Tier`; his great axeman trees attack only at a tier, and tier 1 picks the
+/// `Damned_GreatAxeman_Medium_AttackTree`, which holds the two attacks he used in the retail
+/// newchar run, `Attack_Close_2H_Axe_04` and `Attack_Far_2H_Axe_01`. Without it he only strafed,
+/// live 2026-10-29).
+const DIFFICULTY_TIER_PARAM: &str = "DifficultyTier";
 /// `Target_Vitals_State` and `Vitals_State` of a living entity (see the module notes).
 const ALIVE_VITALS_STATE: i64 = 4;
 /// `Health_Percent` is 0 to 100 (module notes).
@@ -604,8 +623,10 @@ pub fn height_after_move(ground: &dyn Ground, to: Position) -> f32 {
 /// the body stands as [`height_after_move`] puts it (on the floor near its height; where the
 /// level has no height or its ground lies far below, it keeps its height), and the rise between
 /// two steps must stay within
-/// `max_slope_deg` (the slice's `m_maxSlope`; no limit without one). `None` when the line is too
-/// steep, or when a body standing on a floor would step off an edge more than
+/// `max_slope_deg` (the slice's `m_maxSlope`; no limit without one) and below
+/// [`MAX_STEP_RISE_M`], and no wall may stand at knee height between two steps. `None` when the
+/// line is too steep, climbs too high, meets a wall, or when a body standing on a floor would
+/// step off an edge more than
 /// [`MAX_STEP_DOWN_M`] high: kept at its height it walked on in the air (live
 /// login-world-entry-01: boars off the wreck's deck 3.7 to 12.1 m above the floor for up to 84
 /// s; retail newchar: no body more than 3 m over the floor for longer than a jump). The server has no navigation mesh (the level `.bai` files are not read, their format
@@ -648,9 +669,56 @@ pub fn floor_line(
         if max_rise.is_some_and(|rise| run > 0.0 && (z - last.z).abs() / run > rise) {
             return None;
         }
-        last = Position { x, y, z };
+        if z - last.z > MAX_STEP_RISE_M {
+            return None;
+        }
+        // A wall at knee height stops the line, as it stops a pushed body (mob ground height
+        // note: 13 of 14,548 live mob moves went into a solid, one 4 times next to a crate).
+        let knee = |at: Position| Position {
+            z: at.z + STEP_UP_M,
+            ..at
+        };
+        let stand = Position { x, y, z };
+        if ground.blocked(knee(last), knee(stand)) {
+            return None;
+        }
+        last = stand;
     }
     Some(last)
+}
+
+/// The end of a move from `from` toward `to` over the floors ([`floor_line`]); when the straight
+/// line is blocked, the move of the same length along the nearest turn of [`DETOUR_TURNS_DEG`]
+/// that is free.
+fn floor_move(
+    ground: &dyn Ground,
+    from: Position,
+    to: Position,
+    max_slope_deg: Option<f32>,
+) -> Option<Position> {
+    floor_line(ground, from, to, max_slope_deg).or_else(|| {
+        let length = from.horizontal_distance(to);
+        let toward = yaw_toward(from, to);
+        DETOUR_TURNS_DEG.iter().find_map(|degrees| {
+            let side = ahead(from, turned(toward, *degrees), length);
+            floor_line(ground, from, side, max_slope_deg)
+        })
+    })
+}
+
+/// Whether a mob at `from` reaches `to` over the floors: straight, or around one solid through a
+/// side point along a turn of [`DETOUR_TURNS_DEG`] at most [`DETOUR_LEG_M`] away.
+fn reaches(ground: &dyn Ground, from: Position, to: Position, max_slope_deg: Option<f32>) -> bool {
+    floor_line(ground, from, to, max_slope_deg).is_some() || {
+        let leg = from.horizontal_distance(to).min(DETOUR_LEG_M);
+        let toward = yaw_toward(from, to);
+        DETOUR_TURNS_DEG.iter().any(|degrees| {
+            let side = ahead(from, turned(toward, *degrees), leg);
+            floor_line(ground, from, side, max_slope_deg)
+                .and_then(|side| floor_line(ground, side, to, max_slope_deg))
+                .is_some()
+        })
+    }
 }
 
 /// The yaw of `facing` turned by `degrees` (a positive angle turns west, as the yaw does).
@@ -926,7 +994,7 @@ impl MindState {
             let position = self.manual.unwrap_or(player.position);
             let distance_m = position.horizontal_distance(at);
             let gap = yaw_gap(self.yaw, yaw_toward(at, position));
-            let reachable = floor_line(around.ground, at, position, max_slope).is_some();
+            let reachable = reaches(around.ground, at, position, max_slope);
             if reachable {
                 self.reachable_ms = Some(around.now_ms);
             }
@@ -1019,8 +1087,8 @@ impl MindState {
         self.task_slot = Some(slot);
     }
 
-    /// A CAGE task starts: what it shows, its turn, and the damage windows of the fragment entry
-    /// the mob plays (its `CAGE-Damage` clips: start and `DamageTableRow`; the reach comes from
+    /// A CAGE task starts: what it shows, its turn, and the damage windows of the fragment entries
+    /// the mob plays, its body's and its weapon's (their `CAGE-Damage` clips: start and `DamageTableRow`; the reach comes from
     /// the clip's shape and the entry's `Homing`, see [`window_reach`]).
     #[allow(
         clippy::too_many_arguments,
@@ -1047,18 +1115,28 @@ impl MindState {
             // and 1683 ms for 77 to 107 degrees, trace finding a).
             self.turn = done_at_ms.map(|end| (now_ms, end, self.yaw));
         }
-        let Some(variant) = cage.variant(&|tag| tags.contains(&tag)) else {
-            return;
+        let has_tag = |tag| tags.contains(&tag);
+        // The weapon's `WeaponContext` scope plays the fragment from the weapon's database
+        // beside the body. Its windows count only when the body's entry has no `CAGE-Damage`
+        // clip (Inferred: 449 tasks hold damage clips in both, mostly the same count, as one hit
+        // written twice; Janszoon's axe hits are only in the weapon's database).
+        let body = cage
+            .variant(&has_tag)
+            .map_or(&[][..], |variant| &variant.windows[..]);
+        let weapon = cage
+            .weapon_variant(&has_tag)
+            .map_or(&[][..], |variant| &variant.windows[..]);
+        let is_damage = |window: &&ProcWindow| Some(window.kind) == ai.names.damage_clip;
+        let windows = if body.iter().any(|window| is_damage(&window)) {
+            body
+        } else {
+            weapon
         };
-        let homing = variant
-            .windows
+        let homing = body
             .iter()
+            .chain(weapon)
             .find(|window| Some(window.kind) == ai.names.homing_clip);
-        for window in variant
-            .windows
-            .iter()
-            .filter(|window| Some(window.kind) == ai.names.damage_clip)
-        {
+        for window in windows.iter().filter(is_damage) {
             let Some(row) = param_of(window, ai.names.damage_row) else {
                 continue;
             };
@@ -1162,7 +1240,7 @@ impl MindState {
                 }
             },
         };
-        let outcome = match floor_line(ground, *at, mover.position, max_slope) {
+        let outcome = match floor_move(ground, *at, mover.position, max_slope) {
             Some(on_floor) => {
                 *at = Position {
                     z: height_after_move(ground, on_floor),
@@ -1865,6 +1943,14 @@ impl World for View<'_> {
                 Value::Float(state.route.as_ref()?.task()?.duration_s[1])
             }
             EngineKey::WaypointAlign => Value::Bool(state.route.as_ref()?.task()?.align),
+            EngineKey::DifficultyTier => {
+                let tier = self
+                    .ai
+                    .config_number(state.archetype, DIFFICULTY_TIER_PARAM)?;
+                // A tier of 0 to 3.
+                #[allow(clippy::cast_possible_truncation, reason = "a tier of 0 to 3")]
+                Value::Int(tier.round() as i64)
+            }
             _ => return None,
         })
     }
@@ -2309,7 +2395,15 @@ mod tests {
             None,
             "a 63 degree ramp is too steep"
         );
-        assert!(floor_line(&Ramp { rise: 2.0 }, START, east(10.0), None).is_some());
+        assert!(
+            floor_line(&Ramp { rise: 1.0 }, START, east(10.0), None).is_some(),
+            "without a slope limit a 45 degree ramp rises 0.5 m a step"
+        );
+        assert_eq!(
+            floor_line(&Ramp { rise: 2.0 }, START, east(10.0), None),
+            None,
+            "1 m a step is over the retail climb"
+        );
         let deck = Position {
             z: GROUND_Z + MAX_STEP_DOWN_M + 1.0,
             ..START
@@ -2343,6 +2437,83 @@ mod tests {
                 GROUND_Z
             })
         }
+    }
+
+    /// Flat ground with a wall across the line from 2 m to 3 m east of [`START`].
+    struct Wall;
+
+    impl Ground for Wall {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(GROUND_Z)
+        }
+
+        fn blocked(&self, from: Position, to: Position) -> bool {
+            let near = from.x.min(to.x) - START.x;
+            let far = from.x.max(to.x) - START.x;
+            far >= 2.0 && near <= 3.0
+        }
+    }
+
+    #[test]
+    fn a_line_stops_at_a_wall() {
+        // Live 2026-10-29: mobs walked into rock and a crate; the line tested the floor only.
+        assert!(
+            floor_line(&Wall, START, east(1.5), None).is_some(),
+            "short of it"
+        );
+        assert_eq!(
+            floor_line(&Wall, START, east(5.0), None),
+            None,
+            "through it"
+        );
+    }
+
+    /// Flat ground with a rock from 2 m to 3 m east of [`START`], [`ROCK_HALF_WIDTH_M`] to each
+    /// side of the line.
+    struct Rock;
+
+    const ROCK_HALF_WIDTH_M: f32 = 1.5;
+
+    impl Ground for Rock {
+        fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+            Some(GROUND_Z)
+        }
+
+        fn blocked(&self, from: Position, to: Position) -> bool {
+            let near = from.x.min(to.x) - START.x;
+            let far = from.x.max(to.x) - START.x;
+            let beside = |at: Position| (at.y - START.y).abs() <= ROCK_HALF_WIDTH_M;
+            far >= 2.0 && near <= 3.0 && beside(from) && beside(to)
+        }
+    }
+
+    #[test]
+    fn a_target_behind_a_rock_is_reached_around_it() {
+        // Live 2026-10-29: Janszoon stood blocked by a rock 2 m from his spawn.
+        assert_eq!(floor_line(&Rock, START, east(5.0), None), None, "straight");
+        assert!(reaches(&Rock, START, east(5.0), None), "around it");
+        assert!(
+            !reaches(&Wall, START, east(5.0), None),
+            "a long wall stays a wall"
+        );
+    }
+
+    #[test]
+    fn a_move_into_a_rock_turns_along_it() {
+        const STEP_M: f32 = 0.5;
+        let before = east(1.75);
+        let into = east(1.75 + STEP_M);
+        let moved = floor_move(&Rock, before, into, None).expect("a free turn");
+        assert!(moved.x - START.x < 2.0, "not into the rock");
+        assert!(
+            (moved.horizontal_distance(before) - STEP_M).abs() < 0.01,
+            "the same step length"
+        );
+        assert_eq!(
+            floor_move(&Rock, START, east(1.0), None),
+            Some(east(1.0)),
+            "straight"
+        );
     }
 
     #[test]
