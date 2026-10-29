@@ -15,7 +15,7 @@
     }
   </script>
 </head>
-<body>
+<body class="live3d-page">
   <nav class="rail" aria-label="Pages">
     <a href="/">Home</a>
     <a href="/live">Live</a>
@@ -42,9 +42,10 @@
       <canvas id="scene" class="map"></canvas>
     </section>
     <p class="muted">
-      Mouse: drag to orbit, wheel to zoom.
-      Keys: <kbd>R</kbd> re-centres on the player.
-      Capsules: red = mob, blue = player, grey = bot. Lines: attacker → target.
+      Left-drag turns, right-drag moves, wheel zooms. Click a player to follow them.
+      <kbd>R</kbd> puts the camera back behind the followed player.
+      Yellow = followed player, blue = player, grey = bot, red = mob, faded = dead.
+      Lines: attacker → target. Blue sheet = the sea.
     </p>
   </main>
   <script type="module" src="/web/live3d.js"></script>

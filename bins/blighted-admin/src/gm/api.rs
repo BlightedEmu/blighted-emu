@@ -1129,6 +1129,7 @@ mod tests {
                     entity: GM_MOB,
                     x: 1.0,
                     y: 2.0,
+                    z: 3.0,
                     state: 1,
                     health: 1,
                     max_health: 1,

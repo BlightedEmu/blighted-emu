@@ -126,6 +126,8 @@ pub struct MobView {
     pub x: f32,
     /// North.
     pub y: f32,
+    /// Up.
+    pub z: f32,
     /// State, in mob state order.
     pub state: u8,
     /// Current health.
@@ -535,6 +537,7 @@ impl LiveState {
                         sim: sim.to_string(),
                         x: mob.x,
                         y: mob.y,
+                        z: mob.z,
                         state: mob.state,
                         health: mob.health,
                         max_health: mob.max_health,
@@ -662,6 +665,7 @@ mod tests {
             entity,
             x: 1.0,
             y: 2.0,
+            z: 3.0,
             state: 2,
             health: 10,
             max_health: 20,

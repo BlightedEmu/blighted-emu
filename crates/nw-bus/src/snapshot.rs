@@ -45,6 +45,8 @@ pub struct SnapMob {
     pub x: f32,
     /// North, in metres.
     pub y: f32,
+    /// Up, in metres.
+    pub z: f32,
     /// The state, in `MobState` order.
     pub state: u8,
     /// Current health.
@@ -141,6 +143,7 @@ mod tests {
             entity: u64::MAX - entity,
             x: f32::MAX,
             y: f32::MAX,
+            z: f32::MAX,
             state: u8::MAX,
             health: u32::MAX,
             max_health: u32::MAX,

@@ -393,6 +393,9 @@ summary.section-head:hover h2 { color: var(--accent); }
 /* Map ---------------------------------------------------------------------------------------- */
 .map-page .work { height: 100vh; }
 .map-page .chart { flex: 1; margin: 16px var(--gutter) var(--gutter); }
+.live3d-page .work { height: 100vh; }
+.live3d-page .chart { flex: 1; margin: 8px var(--gutter) 8px; }
+.live3d-page #scene { width: 100%; height: 100%; display: block; }
 
 /* Capture viewer ----------------------------------------------------------------------------- */
 .viewer-page .work { height: 100vh; }
