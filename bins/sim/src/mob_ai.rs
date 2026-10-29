@@ -88,6 +88,17 @@ const DETOUR_LEG_M: f32 = 4.0;
 /// newchar run, `Attack_Close_2H_Axe_04` and `Attack_Far_2H_Axe_01`. Without it he only strafed,
 /// live 2026-10-29).
 const DIFFICULTY_TIER_PARAM: &str = "DifficultyTier";
+/// The tree fact that turns on `DistanceLeash` (with `Leash_Opt_Out` 0). Neither the client's
+/// engine key table nor a slice sets it; the server engine does (Inferred: every retail reset of
+/// the beach and Steal the Boat captures plays `DistanceLeash`'s `Combat_Fidget` then
+/// `Reset_Move`, the dynasty mobs 61 to 73 m from where they started, past their
+/// `CombatLeashDistance`). A mob starts with it true unless its slice config sets it. Without it
+/// no tree mob ever walked home (live 2026-10-29: Janszoon stood 51 m from his spawn, past his
+/// 45 m leash).
+const DOES_LEASH_KEY: &str = "DoesLeash";
+/// The slice config param that gives the engine key `Leash_Opt_Out` (a dungeon mob's opt-out of
+/// the leash); 0 without one.
+const LEASH_OPT_OUT_PARAM: &str = "Leash_Opt_Out";
 /// `Target_Vitals_State` and `Vitals_State` of a living entity (see the module notes).
 const ALIVE_VITALS_STATE: i64 = 4;
 /// `Health_Percent` is 0 to 100 (module notes).
@@ -1309,6 +1320,13 @@ impl TreeMind {
             return None;
         }
         let mut brain = Brain::new(&ai.runtime, archetype, seed).ok()?;
+        if let Some(key) = ai.data().key(DOES_LEASH_KEY)
+            && ai
+                .arch(archetype)
+                .is_none_or(|arch| arch.config_value(key).is_none())
+        {
+            brain.set_fact(key, Value::Bool(true));
+        }
         if let Some(overrides) = spawn_ai {
             for (key, value) in &overrides.facts {
                 brain.set_fact(*key, *value);
@@ -1943,6 +1961,15 @@ impl World for View<'_> {
                 Value::Float(state.route.as_ref()?.task()?.duration_s[1])
             }
             EngineKey::WaypointAlign => Value::Bool(state.route.as_ref()?.task()?.align),
+            EngineKey::LeashOptOut => {
+                let opt_out = self
+                    .ai
+                    .config_number(state.archetype, LEASH_OPT_OUT_PARAM)
+                    .unwrap_or(0.0);
+                // An opt-out of 0 or 1.
+                #[allow(clippy::cast_possible_truncation, reason = "an opt-out of 0 or 1")]
+                Value::Int(opt_out.round() as i64)
+            }
             EngineKey::DifficultyTier => {
                 let tier = self
                     .ai

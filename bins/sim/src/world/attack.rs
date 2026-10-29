@@ -2156,7 +2156,10 @@ impl SimWorld {
         let (from, facing) = if turn(aim, toward).abs() <= reach.lunge_turn_rad {
             let stop_m = capsule.radius_m + PLAYER_CAPSULE.radius_m + LUNGE_GAP_M;
             let lunge_m = (body.horizontal_distance(at) - stop_m).clamp(0.0, reach.lunge_max_m);
-            let from = self.mobs.lunge(intent.mob, body, lunge_m).unwrap_or(at);
+            let from = self
+                .mobs
+                .lunge_over(intent.mob, body, lunge_m, &*self.ground)
+                .unwrap_or(at);
             (from, toward)
         } else {
             (at, aim)

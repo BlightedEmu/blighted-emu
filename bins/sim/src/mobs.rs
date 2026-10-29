@@ -40,9 +40,16 @@ pub use nw_world::records::VitalsSpawn;
 
 use crate::combat::CombatSettings;
 use crate::mob_ai::{
-    COMBAT_LEASH_KEY, MobAi, Shown, SpawnAi, Strike, Surroundings, TreeMind, height_after_move,
+    COMBAT_LEASH_KEY, MobAi, Shown, SpawnAi, Strike, Surroundings, TreeMind, floor_line,
+    height_after_move,
 };
 
+/// A mob farther than this from its spawn does not fall asleep: its tree walks it home first
+/// (Observed: a retail beach corrupted sailor 29 m from where it started walked home with
+/// `Reset_Move` while the player was 75 m away; live 2026-10-29: Janszoon fell asleep 51 m
+/// from his spawn when the player left and stood there). Our engineering limit: past the beach
+/// mobs' 6 m `WanderDistanceMax`.
+const AWAY_FROM_HOME_M: f32 = 10.0;
 /// A player scans for mobs to wake again after moving this far (about 2 s of running); far less
 /// than the wake radius, so a mob wakes before the player can reach it.
 pub const WAKE_RESCAN_M: f32 = 10.0;
@@ -886,6 +893,36 @@ impl Mobs {
         Some(mob.position)
     }
 
+    /// Mob `entity` lunges as [`Self::lunge`] over `ground`: its feet follow the floor and a wall
+    /// or a step too high stops the lunge where it started (live 2026-10-29: Janszoon's charge
+    /// up the slope at La Roussette ran half under the ground, the lunge kept his start height).
+    /// A paced mob keeps its height, as its chase does.
+    pub fn lunge_over(
+        &mut self,
+        entity: u64,
+        to: Position,
+        max_m: f32,
+        ground: &dyn Ground,
+    ) -> Option<Position> {
+        let index = spawn_index(entity)?;
+        let from = self.live.get(&index)?.position;
+        let end = self.lunge(entity, to, max_m)?;
+        if self
+            .personal
+            .get(&index)
+            .is_some_and(|personal| personal.pace.is_some())
+        {
+            return Some(end);
+        }
+        let landed = floor_line(ground, from, end, None).map_or(from, |on_floor| Position {
+            z: height_after_move(ground, on_floor),
+            ..on_floor
+        });
+        let mob = self.live.get_mut(&index)?;
+        mob.position = landed;
+        Some(landed)
+    }
+
     /// The combat leash of the slice of `spawn`; no limit without one.
     fn leash_of(&self, spawn: &VitalsSpawn) -> f32 {
         self.archetype(spawn, None)
@@ -1186,9 +1223,18 @@ impl Mobs {
     }
 
     /// Mob `index`, alone this tick (no player near, no target), falls asleep after the sleep
-    /// time since a player was last near it; personal, GM and patrolling mobs never sleep.
+    /// time since a player was last near it; personal, GM and patrolling mobs never sleep, and a
+    /// living mob stays awake while it is more than [`AWAY_FROM_HOME_M`] from its spawn, so its
+    /// tree walks it home.
     fn sleep_if_alone(&mut self, index: u32, now_ms: u64) {
-        let stays = self.personal.contains_key(&index)
+        let away = self.live.get(&index).is_some_and(|mob| {
+            mob.dead_since_ms.is_none()
+                && self.spawn_of(index).is_some_and(|spawn| {
+                    mob.position.horizontal_distance(position_of(spawn)) > AWAY_FROM_HOME_M
+                })
+        });
+        let stays = away
+            || self.personal.contains_key(&index)
             || self.gm.contains_key(&index)
             || self.patrols(index);
         if stays {
@@ -1521,6 +1567,7 @@ impl Mobs {
                     entity: mob_entity(index),
                     x: mob.position.x,
                     y: mob.position.y,
+                    z: mob.position.z,
                     state: state_index(state),
                     health: mob.health.current(),
                     max_health: mob.health.max(),
@@ -1836,6 +1883,35 @@ mod tests {
         mobs.bury(entity);
         assert_eq!(mobs.corpses().count(), 0);
         assert!(!mobs.awake_states().any(|(mob, ..)| mob == entity));
+    }
+
+    /// Ground that rises [`SLOPE_RISE`] metres per metre east of [`SPAWN_X`].
+    struct Slope;
+
+    const SLOPE_RISE: f32 = 0.3;
+
+    impl Ground for Slope {
+        fn height_at(&self, x: f32, _: f32) -> Option<f32> {
+            Some(HEIGHT + (x - SPAWN_X) * SLOPE_RISE)
+        }
+    }
+
+    #[test]
+    fn a_lunge_up_a_slope_lands_on_the_slope() {
+        // Live 2026-10-29: Janszoon's charge up the slope ran half under the ground.
+        const LUNGE_M: f32 = 3.0;
+        let mut mobs = mobs(vec![spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL)]);
+        mobs.set_cells(every);
+        let target = player_at(SPAWN_X + 2.0 * LUNGE_M).position;
+        let landed = mobs
+            .lunge_over(mob_entity(0), target, LUNGE_M, &Slope)
+            .expect("lunged");
+        assert!((landed.x - (SPAWN_X + LUNGE_M)).abs() < 1e-3, "{landed:?}");
+        assert!(
+            (landed.z - Slope.height_at(landed.x, landed.y).expect("ground")).abs() < 1e-3,
+            "on the slope: {landed:?}"
+        );
+        assert_eq!(at(&mobs, 0), landed);
     }
 
     #[test]
@@ -2266,6 +2342,28 @@ mod tests {
             .into_iter()
             .find(|(state, _)| *state == MobState::Asleep);
         assert_eq!(awake, Some((MobState::Asleep, 3)));
+    }
+
+    #[test]
+    fn a_mob_away_from_home_does_not_fall_asleep() {
+        const AWAY_M: f32 = 30.0;
+        let mut mobs = mobs(vec![
+            spawn_at(SPAWN_X, TEST_MOB, TEST_LEVEL),
+            spawn_at(SPAWN_X + FAR_M, TEST_MOB, TEST_LEVEL),
+        ]);
+        mobs.set_cells(every);
+        tick(
+            &mut mobs,
+            &[player_at(SPAWN_X), player_at(SPAWN_X + FAR_M)],
+            0,
+        );
+        mobs.get_mut(mob_entity(1)).expect("mob").position.x += AWAY_M;
+        let sleep_ms = test_combat().sleep_after_ms;
+        let next_tick_ms = sleep_ms + crate::mob_ai::RETAIL_AI_RATES.idle_interval_ms;
+        let nobody = [player_at(FAR_M * 4.0)];
+        run(&mut mobs, &nobody, TICK_MS, next_tick_ms + TICK_MS);
+        assert_eq!(mobs.state(mob_entity(0)), Some(MobState::Asleep), "at home");
+        assert_ne!(mobs.state(mob_entity(1)), Some(MobState::Asleep), "away");
     }
 
     #[test]
@@ -2755,6 +2853,91 @@ mod retail_tests {
                     && row.starts_with(AXE_ROW_PREFIX)),
             "{rows:?}"
         );
+    }
+
+    #[test]
+    fn janszoon_walks_home_after_the_player_leaves() {
+        // Live 2026-10-29: after the player got away, Janszoon stayed where the fight ended.
+        const JANSZOON_ID: &str = "Corrupted_Sailor_StarterBeach_Named_00";
+        const JANSZOON: &str = "7214ec6831b058f2a3b60f9b5c285e6c";
+        const AGGRO_MS: u64 = 3_000;
+        const FIGHT_MS: u64 = 10_000;
+        const AWAY_MS: u64 = 40_000;
+        /// The player runs this far from his spawn and he follows.
+        const DRAWN_M: f32 = 15.0;
+        let mut mobs = retail_mobs(
+            vec![spawn_at(SPAWN_X, JANSZOON_ID, TEST_LEVEL)],
+            &[(JANSZOON_ID, asset(JANSZOON))],
+        );
+        let spawn = at(&mobs, 0);
+        let player_at_x = |x: f32| Seen {
+            entity: PLAYER,
+            position: Position {
+                x,
+                y: super::tests::ROW_Y + 2.0,
+                z: HEIGHT,
+            },
+        };
+        let mut fragments = Vec::new();
+        let mut serial = None;
+        for now in (0..FIGHT_MS).step_by(TICK_MS as usize) {
+            let x = if now < AGGRO_MS {
+                SPAWN_X
+            } else {
+                SPAWN_X + DRAWN_M
+            };
+            mobs.tick(&[player_at_x(x)], now, &Flat, 1);
+            played(&mobs, mob_entity(0), &mut serial, &mut fragments);
+        }
+        let drawn = at(&mobs, 0).horizontal_distance(spawn);
+        for now in (FIGHT_MS..FIGHT_MS + AWAY_MS).step_by(TICK_MS as usize) {
+            mobs.tick(&[], now, &Flat, 1);
+            played(&mobs, mob_entity(0), &mut serial, &mut fragments);
+        }
+        let home = at(&mobs, 0).horizontal_distance(spawn);
+        assert!(drawn > 2.0, "the fight drew him off: {drawn} {fragments:?}");
+        assert!(home < 2.0, "home: {home} m from spawn; {fragments:?}");
+    }
+
+    #[test]
+    fn janszoon_leashes_home_past_his_combat_leash() {
+        // Live 2026-10-29: Janszoon chased the player 51 m from his spawn (his
+        // `CombatLeashDistance` is 45 m) and stayed there.
+        const JANSZOON_ID: &str = "Corrupted_Sailor_StarterBeach_Named_00";
+        const JANSZOON: &str = "7214ec6831b058f2a3b60f9b5c285e6c";
+        const AGGRO_MS: u64 = 3_000;
+        const RUN_MS: u64 = 60_000;
+        /// Past his 45 m leash.
+        const FAR_M: f32 = 60.0;
+        let mut mobs = retail_mobs(
+            vec![spawn_at(SPAWN_X, JANSZOON_ID, TEST_LEVEL)],
+            &[(JANSZOON_ID, asset(JANSZOON))],
+        );
+        let spawn = at(&mobs, 0);
+        let player_at_x = |x: f32| Seen {
+            entity: PLAYER,
+            position: Position {
+                x,
+                y: super::tests::ROW_Y + 2.0,
+                z: HEIGHT,
+            },
+        };
+        let mut farthest: f32 = 0.0;
+        let mut fragments = Vec::new();
+        let mut serial = None;
+        for now in (0..AGGRO_MS + RUN_MS).step_by(TICK_MS as usize) {
+            let x = if now < AGGRO_MS {
+                SPAWN_X
+            } else {
+                SPAWN_X + FAR_M
+            };
+            mobs.tick(&[player_at_x(x)], now, &Flat, 1);
+            farthest = farthest.max(at(&mobs, 0).horizontal_distance(spawn));
+            played(&mobs, mob_entity(0), &mut serial, &mut fragments);
+        }
+        let home = at(&mobs, 0).horizontal_distance(spawn);
+        assert!(farthest > 20.0, "he chased: {farthest}; {fragments:?}");
+        assert!(home < 2.0, "home: {home} m from spawn; {fragments:?}");
     }
 
     /// Run with `cargo test --release -p sim --features local-data hundred_thousand -- --ignored
