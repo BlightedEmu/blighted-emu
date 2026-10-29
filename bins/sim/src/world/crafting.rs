@@ -29,7 +29,7 @@ use nw_content::perks::PERK_SLOTS;
 use nw_content::tradeskill_xp::bonus_crafts;
 use nw_formats::objectstream::lowercase_crc32;
 use nw_messages::facet::component;
-use nw_messages::items::FIRST_VERSION;
+use nw_messages::items::{FIRST_VERSION, SYNC_CRAFT_USED, SYNC_CRAFTED};
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     BuildableControllerState, BuildableGridState, BundleGroup, BundleMember, CommittedResource,
@@ -371,6 +371,7 @@ impl SimWorld {
             .extra_members
             .push(interactor_target(request.target_entity));
         player.station = Some(station.station_type.clone());
+        player.station_interaction = Some(request.interaction);
     }
 
     /// Player `number` (`entity`) crafts `crafts` of the recipe whose lowercase id has the CRC-32
@@ -653,7 +654,7 @@ impl SimWorld {
             return Err(CraftRefusal::Ingredient);
         }
         for (item, quantity, _) in taken {
-            gear.take(item, *quantity);
+            gear.take_as(item, *quantity, SYNC_CRAFT_USED);
         }
         if fee > 0 {
             player.coins -= u64::from(fee);
@@ -694,11 +695,11 @@ impl SimWorld {
                             )
                         })
                         .collect();
-                    self.give_rolled(craft.number, &craft.item, rolled, now_ms);
+                    self.give_rolled(craft.number, &craft.item, rolled, SYNC_CRAFTED, now_ms);
                 }
                 None => {
                     let made = vec![(craft.item.clone(), craft.quantity)];
-                    self.give_loot(craft.number, made, now_ms);
+                    self.give_loot_as(craft.number, made, SYNC_CRAFTED, now_ms);
                 }
             }
             // Retail sends the item change (7048) and the bundle of the made items before these
@@ -748,13 +749,25 @@ impl SimWorld {
         bonus_crafts(chance + rank_bonus, crafts, &mut |below| dice.below(below))
     }
 
-    /// Player `number` (`entity`) closes the crafting window with a request of header `header`
-    /// (2999): it leaves the station and gets an idle update.
-    pub(super) fn close_station(&mut self, entity: Entity, number: u64, header: FacetHeader) {
-        if let Some(mut player) = self.world.get_mut::<Player>(entity) {
-            player.station = None;
-        }
+    /// The client of player `number` (`entity`) cancels its craft with a request of header
+    /// `header` (2999): it gets an idle update and stays at its station. Retail clients send it
+    /// 18 to 26 ms after each craft's answer; the server answers with one more idle update, and
+    /// the player crafts again at the same station (`12-2_skinningknife`: three crafts, each
+    /// followed by a 2999, with no new interaction; live 2026-10-29: a station closed here
+    /// refused every next craft).
+    pub(super) fn craft_cancelled(&mut self, entity: Entity, number: u64, header: FacetHeader) {
         self.send_idle(entity, answer_header(Some(header), number));
+    }
+
+    /// The interaction `interaction` of player `entity` ends: when it opened the player's
+    /// station, the player leaves the station.
+    pub(super) fn leave_station(&mut self, entity: Entity, interaction: u64) {
+        if let Some(mut player) = self.world.get_mut::<Player>(entity)
+            && player.station_interaction == Some(interaction)
+        {
+            player.station = None;
+            player.station_interaction = None;
+        }
     }
 
     fn send_idle(&mut self, entity: Entity, header: FacetHeader) {
@@ -1136,12 +1149,38 @@ mod tests {
         let answers = craft_answers(&mut world);
         assert_eq!(answers.len(), 2, "crafted, then idle");
         assert!(answers.iter().all(|answer| answer.header == REQUEST));
-        world.close_station(entity, NUMBER, REQUEST);
+        world.craft_cancelled(entity, NUMBER, REQUEST);
         assert_eq!(
             craft_answers(&mut world),
             [CraftProgressMsg::idle(REQUEST)],
-            "the close (2999) is answered at its own header"
+            "the cancel (2999) is answered at its own header"
         );
+        assert!(
+            world
+                .world
+                .get::<Player>(entity)
+                .is_some_and(|player| player.station.is_some()),
+            "retail crafts again at the same station after the cancel"
+        );
+    }
+
+    #[test]
+    fn the_end_of_the_stations_interaction_leaves_the_station() {
+        const OPENED_WITH: u64 = 5;
+        let (mut world, entity) = at_the_smelter(ORE_PER_CRAFT, COINS);
+        let station = |world: &SimWorld| {
+            world
+                .world
+                .get::<Player>(entity)
+                .and_then(|player| player.station.clone())
+        };
+        if let Some(mut player) = world.world.get_mut::<Player>(entity) {
+            player.station_interaction = Some(OPENED_WITH);
+        }
+        world.leave_station(entity, OPENED_WITH + 1);
+        assert!(station(&world).is_some(), "another interaction ended");
+        world.leave_station(entity, OPENED_WITH);
+        assert_eq!(station(&world), None, "the station's own interaction ended");
     }
 
     #[test]
@@ -1173,6 +1212,45 @@ mod tests {
             .expect("the craft answer");
         assert!(item_change < crafted, "the items first, then the answer");
         assert!(world.after_bundles.is_empty(), "sent with the tick");
+    }
+
+    #[test]
+    fn a_crafts_bag_records_mark_the_used_and_the_made_stacks() {
+        // Retail Basic Needs (1790514751716 ms): the flint and the wood the knife used went out
+        // with sync reason 2, the knife with 3; other reasons left the live client saying
+        // "Crafting attempt failed" (2026-10-29).
+        use nw_messages::items::{SYNC_CRAFT_USED, SYNC_CRAFTED};
+        use nw_messages::list_delta::ReplicatedList;
+        let (mut world, entity) = at_the_smelter(ORE_PER_CRAFT * 2, COINS);
+        world.craft(
+            entity,
+            NUMBER,
+            lowercase_crc32(INGOT),
+            1,
+            FEE_PER_CRAFT,
+            &[],
+            &CraftChoice::default(),
+            NOW,
+        );
+        world.crafts_due(NOW + CRAFT_MS);
+        let index_of = |id: &str| world.content.kits.item(id).expect("item").item_index;
+        let gear = world
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref())
+            .expect("gear")
+            .states();
+        let Some(ReplicatedList::Full(bag)) = gear.bag.items else {
+            panic!("a full bag list");
+        };
+        let reason_of = |id: &str| {
+            bag.elements
+                .iter()
+                .find(|record| record.item_index == index_of(id))
+                .map(|record| record.sync_reason)
+        };
+        assert_eq!(reason_of(ORE), Some(SYNC_CRAFT_USED), "the ore left");
+        assert_eq!(reason_of(INGOT), Some(SYNC_CRAFTED), "the ingot made");
     }
 
     #[test]

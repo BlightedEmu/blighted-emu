@@ -16,6 +16,7 @@ use nw_bus::{ItemLookState, ItemState, PlayerInventory, SavedLoadout, StoredItem
 use nw_content::item_rolls::RolledItem;
 use nw_content::starter::{KitItem, StarterKits};
 use nw_messages::item_calls::{LOCATION_BAG, LOCATIONS_BY_KEY, loadout_status};
+use nw_messages::items::SYNC_MOVED;
 use nw_messages::paperdoll::Loadout;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{GearExtras, GearItem, ItemLook, OpenContainer};
@@ -367,6 +368,11 @@ impl Gear {
             loadouts,
             loadout_panel_open: self.holdings.panel_open,
             open_container: self.open_container(),
+            bag_reasons: self
+                .bag
+                .iter()
+                .map(|stack| stack.as_ref().map_or(SYNC_MOVED, |stack| stack.reason))
+                .collect(),
         }
     }
 
@@ -406,6 +412,12 @@ impl Gear {
     /// Puts `stack` into the first free bag slot, a new one when none is free; whether the bag
     /// had room.
     pub(super) fn put_in_bag(&mut self, stack: Stack) -> bool {
+        self.put_in_bag_as(stack, SYNC_MOVED)
+    }
+
+    /// [`Gear::put_in_bag`] for a change of sync reason `reason`.
+    pub(super) fn put_in_bag_as(&mut self, mut stack: Stack, reason: u8) -> bool {
+        stack.reason = reason;
         put_in(&mut self.bag, stack).is_some()
     }
 
@@ -824,7 +836,7 @@ impl Gear {
         let mut all = true;
         for (item, quantity, rolled) in taken {
             all &= match rolled {
-                Some(rolled) => self.add_rolled(kits, item, *quantity, rolled),
+                Some(rolled) => self.add_rolled(kits, item, *quantity, rolled, SYNC_MOVED),
                 None => self.add(item, *quantity),
             };
         }

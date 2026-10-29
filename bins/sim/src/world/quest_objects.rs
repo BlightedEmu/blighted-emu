@@ -25,6 +25,7 @@ use nw_sim_core::Position;
 use super::attack::counter_is_newer;
 use super::crafting::{CARD_COMPONENT, gde_ref_of};
 use super::slots::Slot;
+use super::statics::object_broken;
 use super::{Body, Player, SimWorld, gather_answer, send_now};
 use crate::objectives::Event;
 use crate::player_content::QuestObjects;
@@ -372,6 +373,9 @@ impl SimWorld {
                 version,
             );
             player.extra_members.push(tracked);
+            let broken = object_broken(id, player.gathers);
+            player.extra_members.push(broken);
+            player.gathers = player.gathers.saturating_add(1);
         }
         tracing::info!(player = number, object = index, %event, "quest object broken");
         self.quest_event(number, Event::GameEvent(&event), now_ms);

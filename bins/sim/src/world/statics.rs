@@ -347,6 +347,27 @@ pub(super) fn chest_gather_ended(facet: u64, gather: u32) -> BundleMember {
     }
 }
 
+/// The own member when the player breaks the quest object of facet entity `facet` after
+/// `gather` gathers (retail `12-5_survivors` 1790515520732 ms: with the loot tracker's broken
+/// entry, the player's gather state names the nodule and counts on; status, amount, efficiency
+/// and gathering are not sent).
+pub(super) fn object_broken(facet: u64, gather: u32) -> BundleMember {
+    let count = gather.saturating_add(1).saturating_mul(STATES_PER_GATHER);
+    BundleMember {
+        component: GATHERING_COMPONENT,
+        state: MemberState::Gathering(GatheringState {
+            status: None,
+            amount_remaining: None,
+            efficiency: None,
+            gatherer_count: None,
+            gather_ref_count: Some(count),
+            is_gathering: None,
+            gatherable: Some(facet),
+            sync_ref_count: Some(count),
+        }),
+    }
+}
+
 /// The record of `item` in a loot container's slot `slot` (retail: quantity 1, sync reason
 /// [`SYNC_CONTAINER`], the slot as the counter) with its fixed perks (retail: the Destroyer
 /// weapons carry wire perk 1203, `PerkID_StatSwap_BaseDamage`).

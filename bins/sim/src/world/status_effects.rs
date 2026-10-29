@@ -287,6 +287,14 @@ impl StatusEffects {
         true
     }
 
+    /// When the held effect `crc` ends (server ms); `None` when it is not held or has no end.
+    pub(super) fn ends_ms(&self, crc: u32) -> Option<u64> {
+        self.held
+            .iter()
+            .find(|held| held.crc == crc)
+            .and_then(|held| held.ends_ms)
+    }
+
     /// Adds the effect named `id` (a `StatusID`) of potency `potency`, applied by `source`, at
     /// server time `now_ms` ([`Self::add`]); `false` for an id the data does not have.
     pub(super) fn add_by_id(
@@ -590,8 +598,19 @@ impl SimWorld {
             duration_ms: consumable.duration_override_ms,
             hit_amount: 0.0,
         };
+        let number = player.number;
         for crc in &consumable.status_effects {
-            player.status_effects.add(rules, *crc, application, now_ms);
+            let added = player.status_effects.add(rules, *crc, application, now_ms);
+            let ends_ms = player.status_effects.ends_ms(*crc);
+            tracing::debug!(
+                player = number,
+                consumable = %consumable.id,
+                effect = rules.get(*crc).map_or("", |rule| rule.id.as_str()),
+                added,
+                now_ms,
+                ?ends_ms,
+                "consumable effect"
+            );
         }
     }
 

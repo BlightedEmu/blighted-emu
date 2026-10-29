@@ -51,6 +51,15 @@ const MS_PER_SECOND: u64 = 1_000;
 /// The quantity of a move that takes the whole stack (retail 1838 and 2801: 0).
 const ALL_OF_THE_STACK: u32 = 0;
 
+/// Where a used item comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UsedFrom {
+    /// This bag slot (the item call `UseItem`).
+    Bag(u32),
+    /// This paperdoll slot (a quick slot key in the input).
+    Worn(u32),
+}
+
 /// A vitals change of a used consumable that repeats.
 #[derive(Debug, Clone, PartialEq)]
 struct Running {
@@ -369,12 +378,9 @@ impl SimWorld {
         send_now(&mut self.combat_messages, &player.connection, &[message]);
     }
 
-    /// Player `number` (`entity`) uses the item of bag slot `bag_slot` at `now_ms`: a
-    /// consumable whose cooldown does not run, which its class does not disable and that the
-    /// fight allows, takes one of the stack (`ConsumeOnUse`), starts its cooldown, changes the
-    /// vitals by its status effects and plays the visual script of each that has one.
+    /// Player `number` (`entity`) uses the item of bag slot `bag_slot` at `now_ms`
+    /// ([`SimWorld::consume`]).
     fn use_item(&mut self, entity: Entity, number: u64, bag_slot: u32, now_ms: u64) {
-        let content = Arc::clone(&self.content);
         let Some(item_id) = self
             .world
             .get::<Player>(entity)
@@ -384,6 +390,23 @@ impl SimWorld {
             tracing::debug!(player = number, bag_slot, "use of an empty bag slot");
             return;
         };
+        self.consume(entity, number, &item_id, UsedFrom::Bag(bag_slot), now_ms);
+    }
+
+    /// Player `number` (`entity`) uses its item `item_id` from `from` at `now_ms`: a
+    /// consumable whose cooldown does not run, which its class does not disable and that the
+    /// fight allows, takes one of the stack (`ConsumeOnUse`), starts its cooldown, changes the
+    /// vitals by its status effects and plays the visual script of each that has one.
+    pub(super) fn consume(
+        &mut self,
+        entity: Entity,
+        number: u64,
+        item_id: &str,
+        from: UsedFrom,
+        now_ms: u64,
+    ) {
+        let content = Arc::clone(&self.content);
+        let item_id = item_id.to_owned();
         if content.is_item_disabled(&item_id) {
             tracing::debug!(player = number, item = %item_id, "use: the item's class is disabled");
             return;
@@ -414,10 +437,10 @@ impl SimWorld {
             return;
         }
         let taken = !consumes
-            || player
-                .gear
-                .as_mut()
-                .is_some_and(|gear| gear.take_from_slot(bag_slot, 1));
+            || player.gear.as_mut().is_some_and(|gear| match from {
+                UsedFrom::Bag(bag_slot) => gear.take_from_slot(bag_slot, 1),
+                UsedFrom::Worn(slot_id) => gear.use_one(slot_id).is_some(),
+            });
         if !taken {
             return;
         }
@@ -848,6 +871,7 @@ mod tests {
                     cooldown_id: Some("SurvivalPotion".to_owned()),
                     cooldown_s: Some(COOLDOWN_S),
                     disabled_in_combat: false,
+                    use_tag: None,
                 }],
                 effects: vec![EffectRow {
                     status_id: "PotionHeal".to_owned(),

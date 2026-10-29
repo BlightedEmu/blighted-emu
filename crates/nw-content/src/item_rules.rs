@@ -87,6 +87,9 @@ pub struct Consumable {
     pub potency: f64,
     /// `DurationOverrides`: how long the effects it adds last, when set.
     pub duration_override_ms: Option<u64>,
+    /// `MannequinTag`: the item use its user plays (`Eat` for food, `Potion`); the use takes
+    /// effect at that use's moment of the user's stance.
+    pub use_tag: Option<String>,
 }
 
 /// One `StatusEffectData` row, as the consumables need it.
@@ -129,6 +132,8 @@ pub struct ConsumableRow {
     pub cooldown_s: Option<u32>,
     /// `DisableUseInCombat`.
     pub disabled_in_combat: bool,
+    /// `MannequinTag`: the item use its user plays (`Eat`, `Potion`).
+    pub use_tag: Option<String>,
 }
 
 /// One `MasterItemDefinitions` row, as the rules need it.
@@ -189,6 +194,7 @@ impl ItemRuleSource {
                         .cooldown_duration
                         .and_then(|seconds| u32::try_from(seconds).ok()),
                     disabled_in_combat: row.disable_use_in_combat.unwrap_or(false),
+                    use_tag: row.mannequin_tag.clone().filter(|tag| !tag.is_empty()),
                 })
                 .collect(),
             effects: tables
@@ -271,6 +277,7 @@ impl ItemRules {
                     potency,
                     duration_override_ms: duration_override
                         .map(|seconds| (seconds * MS_PER_SECOND).round() as u64),
+                    use_tag: row.use_tag.clone(),
                 };
                 (row.id.to_lowercase(), consumable)
             })
@@ -404,6 +411,7 @@ mod tests {
             cooldown_id: None,
             cooldown_s: None,
             disabled_in_combat: false,
+            use_tag: None,
         }
     }
 

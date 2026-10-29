@@ -6,10 +6,11 @@
 
 use nw_bus::{CarriedItem, ItemPlace};
 use nw_content::starter::{EquipSlot, KitItem, StarterKits};
+use nw_messages::items::SYNC_MOVED;
 use nw_messages::paperdoll::slot;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
-    EquippedItem, GearItem, Hands, ItemLook, LoadedAmmo, PlayerGear, STARTER_BAG_SLOTS,
+    EquippedItem, GearItem, Hands, ItemLook, LoadedAmmo, NS_PER_MS, PlayerGear, STARTER_BAG_SLOTS,
     is_visible_slot,
 };
 use uuid::Uuid;
@@ -31,20 +32,17 @@ const FIRST_GEAR_VERSION: u64 = 3;
 const ATTACH_MS: u64 = 331;
 /// The main-hand options whose ammo the paperdoll carries (owner children 8 and 9).
 const AMMO_OPTIONS: usize = 2;
-/// Milliseconds from 1970-01-01 to 2000-01-01, the server clock's start.
-const UNIX_MS_AT_2000: u64 = 946_684_800_000;
 /// The largest stack quantity: the world database stores it as an `INTEGER`.
 pub(crate) const MAX_STACK_QUANTITY: u32 = i32::MAX as u32;
-/// Nanoseconds per millisecond.
-const NS_PER_MS: u64 = 1_000_000;
 /// The main-hand option selected at login (retail first paperdoll: active map slots 24 and 27).
 const FIRST_ACTIVE_OPTION: u32 = slot::MAIN_HAND_OPTION_1;
 
-/// The ns since 1970-01-01 at server time `server_ms` (ms since 2000-01-01): the time of a
-/// loaded-ammo state (client-gates note: retail Unix time in ns).
+/// The ns since 1970-01-01 at server time `server_ms` (ms since
+/// [`crate::server::SERVER_EPOCH_UNIX_MS`]): retail sends Unix time in ns for a loaded-ammo state
+/// (client-gates note), a loot right and a status effect's end.
 pub(super) const fn unix_ns(server_ms: u64) -> u64 {
     server_ms
-        .saturating_add(UNIX_MS_AT_2000)
+        .saturating_add(crate::server::SERVER_EPOCH_UNIX_MS)
         .saturating_mul(NS_PER_MS)
 }
 
@@ -121,6 +119,9 @@ struct Stack {
     /// Its perk ids in slot order, as it keeps them over saves and handoffs (`item.perks` holds
     /// their wire indexes).
     perks: Vec<String>,
+    /// The sync reason of its bag record: the reason of its last change in the bag (retail
+    /// marks a craft's stacks, [`nw_messages::items::SYNC_CRAFTED`]).
+    reason: u8,
 }
 
 /// Why an equip request was refused.
@@ -845,6 +846,12 @@ impl Gear {
     /// Takes `quantity` of `item_id` (any case) out of the bag, emptying the slots of stacks it
     /// uses up; whether the bag held that many (it changes nothing when not).
     pub(super) fn take(&mut self, item_id: &str, quantity: u32) -> bool {
+        self.take_as(item_id, quantity, SYNC_MOVED)
+    }
+
+    /// [`Gear::take`] for a change of sync reason `reason` (a craft's
+    /// [`nw_messages::items::SYNC_CRAFT_USED`]): each stack it takes from shows it.
+    pub(in crate::world) fn take_as(&mut self, item_id: &str, quantity: u32, reason: u8) -> bool {
         if self.bag_count(item_id) < quantity {
             return false;
         }
@@ -861,6 +868,7 @@ impl Gear {
             };
             let taken = left.min(stack.item.quantity);
             stack.item.quantity -= taken;
+            stack.reason = reason;
             left -= taken;
             if stack.item.quantity == 0 {
                 *entry = None;
@@ -933,6 +941,12 @@ impl Gear {
     /// rest as new stacks in the first free slots, new slots when none is free (retail bags grew
     /// to 406 slots); whether all of it fit.
     pub(super) fn add(&mut self, item: &KitItem, quantity: u32) -> bool {
+        self.add_as(item, quantity, SYNC_MOVED)
+    }
+
+    /// [`Gear::add`] for a change of sync reason `reason` (a craft's
+    /// [`nw_messages::items::SYNC_CRAFTED`]): each stack it adds to or makes shows it.
+    pub(in crate::world) fn add_as(&mut self, item: &KitItem, quantity: u32, reason: u8) -> bool {
         if quantity == 0 {
             return false;
         }
@@ -948,13 +962,16 @@ impl Gear {
             .filter(|stack| stack.item_id == item.item_id)
         {
             let added = limit.saturating_sub(stack.item.quantity).min(left);
-            stack.item.quantity += added;
+            if added > 0 {
+                stack.item.quantity += added;
+                stack.reason = reason;
+            }
             left -= added;
         }
         while left > 0 {
             let part = left.min(limit);
             let new = self.new_stack(item, part);
-            if !self.put_in_bag(new) {
+            if !self.put_in_bag_as(new, reason) {
                 break;
             }
             left -= part;
@@ -1048,6 +1065,7 @@ fn stack(character: Uuid, item: &KitItem, quantity: u32) -> Stack {
         key: None,
         max_stack: item.max_stack,
         perks: item.perk_ids.clone(),
+        reason: SYNC_MOVED,
     }
 }
 

@@ -23,6 +23,7 @@ use nw_content::gathering::Gatherable;
 use nw_content::loot::{LootContext, loot_level};
 use nw_content::tradeskill_xp::NEUTRAL_MODIFIER;
 use nw_formats::objectstream::lowercase_crc32;
+use nw_messages::items::SYNC_MOVED;
 use nw_messages::wire::RAW_ID_LEN;
 use nw_messages::{
     BundleGroup, BundleMember, GatherableControllerState, GdeMetadataReplicatedState,
@@ -686,6 +687,17 @@ impl SimWorld {
     /// Puts rolled `loot` into the bag of player `number`; each item that fits is an event of
     /// its quest. An item with no master row, or that does not fit, is lost with a log line.
     pub(super) fn give_loot(&mut self, number: u64, loot: Vec<(String, u32)>, now_ms: u64) {
+        self.give_loot_as(number, loot, SYNC_MOVED, now_ms);
+    }
+
+    /// [`SimWorld::give_loot`] for a bag change of sync reason `reason` (a craft's output).
+    pub(super) fn give_loot_as(
+        &mut self,
+        number: u64,
+        loot: Vec<(String, u32)>,
+        reason: u8,
+        now_ms: u64,
+    ) {
         let Some(entity) = self.player_by_number(number) else {
             return;
         };
@@ -699,7 +711,7 @@ impl SimWorld {
                 let added = player
                     .gear
                     .as_mut()
-                    .is_some_and(|gear| gear.add(item, quantity));
+                    .is_some_and(|gear| gear.add_as(item, quantity, reason));
                 if added {
                     tracing::debug!(player = number, item = %item_id, quantity, "looted");
                     gained.push((item_id, quantity));
@@ -720,19 +732,31 @@ impl SimWorld {
         }
     }
 
-    /// The client of player `entity` ends interaction `interaction`: a gather that still runs
-    /// stops without a harvest (the own gather state done, as retail sends it after a cancel);
+    /// The client of player `entity` ends interaction `interaction` at `now_ms`: a gather that
+    /// still runs stops without a harvest, unless its end time has come (then it ends with its
+    /// harvest) (the own gather state done, as retail sends it after a cancel);
     /// after a gather's own end the client's cancel is its acknowledgement and changes nothing.
     /// Both get the gatherable's 2724, as retail sends it (loot note: after 98 of 126 retail
     /// cancels of a running gather and 1,561 of 3,042 after the end; why not after the others
     /// is Unknown).
-    pub(super) fn cancel_gather(&mut self, entity: Entity, interaction: u64) {
+    pub(super) fn cancel_gather(&mut self, entity: Entity, interaction: u64, now_ms: u64) {
         let Some(number) = self.world.get::<Player>(entity).map(|player| player.number) else {
             return;
         };
-        let running = self.open_gathers.iter().position(|gather| {
+        let mut running = self.open_gathers.iter().position(|gather| {
             gather.number == number && gather.request.interaction == interaction
         });
+        // A cancel at or after the gather's end time comes as the client's own end, before the
+        // tick that ends it here: the gather ends, it is not stopped, and the cancel is its
+        // acknowledgement (live 2026-10-29: the watchtower crate's 2,541 ms gather got its
+        // cancel at 2,571 ms and gave nothing).
+        if let Some(at) = running
+            && now_ms >= self.open_gathers[at].end_ms
+        {
+            let gather = self.open_gathers.remove(at);
+            self.end_gather(&gather, now_ms);
+            running = None;
+        }
         let request = match running {
             Some(at) => {
                 let gather = self.open_gathers.remove(at);
@@ -1182,6 +1206,26 @@ mod tests {
             mining(&world, entity),
             64,
             "Gather_MiningT1 under a neutral multiplier"
+        );
+    }
+
+    #[test]
+    fn a_cancel_at_the_gathers_end_time_ends_it_with_its_harvest() {
+        // Live 2026-10-29: the watchtower crate's cancel came 30 ms after its end time, before
+        // the tick that ends it, and the crate gave nothing.
+        let (mut world, entity) = admitted();
+        world.gather_open_world(entity, NUMBER, request(1, 0x11, VEIN), &[], NOW);
+        let end_ms = world.open_gathers.first().expect("the gather runs").end_ms;
+        world.cancel_gather(entity, 1, end_ms - 1);
+        assert_eq!(world.open_gathers.len(), 0, "stopped before its end");
+        assert_eq!(mining(&world, entity), 0, "no harvest before its end");
+        world.gather_open_world(entity, NUMBER, request(2, 0x12, VEIN), &[], NOW);
+        let end_ms = world.open_gathers.first().expect("the gather runs").end_ms;
+        world.cancel_gather(entity, 2, end_ms);
+        assert!(world.open_gathers.is_empty());
+        assert!(
+            mining(&world, entity) > 0,
+            "the harvest of a gather whose time came"
         );
     }
 

@@ -123,6 +123,9 @@ min_respawn_ms = 2000
 seed = 1
 # The u32 of a mob spawn card AssetId (Azoth catalog field note: always 2).
 asset_sub_id = 2
+# Times each mob type's LootDropChance (the share of kills whose loot table rolls), at most a
+# sure drop. 1.0 is the game data's chance (retail); 2.0 doubles the kills that drop loot.
+loot_drop_multiplier = 1.0
 
 # How often a mob's behavior tree runs (retail ALC state rates of the newchar capture
 # 2026-09-18, trace finding c; the rate of the states is Inferred equal to the AI tick rate):

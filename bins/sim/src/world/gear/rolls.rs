@@ -17,6 +17,7 @@ impl Gear {
         item: &KitItem,
         quantity: u32,
         rolled: &RolledItem,
+        reason: u8,
     ) -> bool {
         if quantity == 0 {
             return false;
@@ -24,7 +25,7 @@ impl Gear {
         let mut stack = self.new_stack(item, quantity.min(MAX_STACK_QUANTITY));
         stack.item.gear_score = rolled.gear_score;
         stack.set_perks(kits, rolled.perks.clone());
-        let added = self.put_in_bag(stack);
+        let added = self.put_in_bag_as(stack, reason);
         if added {
             self.changed = true;
             self.unsaved = true;
@@ -37,6 +38,7 @@ impl Gear {
 mod tests {
     use super::super::tests::{BACKSTORY, CHARACTER, FLINT, kits};
     use super::*;
+    use nw_messages::items::SYNC_MOVED;
 
     const ROLLED_GEAR_SCORE: u32 = 425;
     const PERK: &str = "PerkID_Weapon_DmgCrit";
@@ -50,9 +52,9 @@ mod tests {
             gear_score: ROLLED_GEAR_SCORE,
             perks: vec![PERK.to_owned()],
         };
-        assert!(gear.add_rolled(&kits, &flint, 1, &rolled));
-        assert!(gear.add_rolled(&kits, &flint, 1, &rolled));
-        assert!(!gear.add_rolled(&kits, &flint, 0, &rolled));
+        assert!(gear.add_rolled(&kits, &flint, 1, &rolled, SYNC_MOVED));
+        assert!(gear.add_rolled(&kits, &flint, 1, &rolled, SYNC_MOVED));
+        assert!(!gear.add_rolled(&kits, &flint, 0, &rolled, SYNC_MOVED));
         let stacks: Vec<_> = gear
             .bag
             .iter()

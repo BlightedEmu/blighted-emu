@@ -1019,19 +1019,38 @@ impl SimWorld {
             .partition(|(_, at)| now_ms >= *at);
         self.drinks = later;
         for (number, _) in due {
-            self.drink(number, server_ms);
+            self.drink(number, now_ms, server_ms);
         }
     }
 
-    /// The player `number` drinks the potion of its quick slot 1, unless the slot is empty, holds
-    /// a disabled item (`javelin.disabled-item-classes`) or no healing item, or the item's
-    /// cooldown runs (xp-potion-exit note, section 2.5): one less
-    /// in the slot, the cooldown, the heal (`health` + `health share` x max, at most to the max)
-    /// and the heal's visual script.
-    fn drink(&mut self, number: u64, server_ms: u64) {
+    /// The player `number` uses the item of its quick slot 1 at `now_ms`. A healing potion is
+    /// drunk unless the slot is empty, holds a disabled item (`javelin.disabled-item-classes`),
+    /// or the item's cooldown runs (xp-potion-exit note, section 2.5): one less in the slot, the
+    /// cooldown, the heal (`health` + `health share` x max, at most to the max) and the heal's
+    /// visual script. Another consumable (food: live 2026-10-29, the light ration gave no buff
+    /// from the quick slot) is used as from the bag ([`SimWorld::consume`]).
+    fn drink(&mut self, number: u64, now_ms: u64, server_ms: u64) {
         let Some(entity) = self.player_by_number(number) else {
             return;
         };
+        let worn = self
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref()?.worn_item(slot::QUICK_SLOT_1))
+            .map(str::to_owned);
+        // Food and other consumables that do not heal at once take effect as a use from the bag.
+        if let Some(item) = worn
+            && self.combat.data.heal_of_item(&item).is_none()
+        {
+            self.consume(
+                entity,
+                number,
+                &item,
+                super::item_calls::UsedFrom::Worn(slot::QUICK_SLOT_1),
+                now_ms,
+            );
+            return;
+        }
         let data = Arc::clone(&self.combat.data);
         let Some(mut player) = self.world.get_mut::<Player>(entity) else {
             return;
@@ -1497,14 +1516,15 @@ impl SimWorld {
         swimming: bool,
         now_ms: u64,
     ) {
-        let data = Arc::clone(&self.combat.data);
         let stance = self.hand_stance(entity).cloned();
+        // A potion takes effect at its stance's `Potion` use (333 ms), food at `Eat` (1,000 ms).
         let drink_ms = self
             .world
             .get::<Player>(entity)
             .and_then(|player| player.gear.as_ref()?.worn_item(slot::QUICK_SLOT_1))
-            .and_then(|item| data.heal_of_item(item))
-            .and_then(|heal| stance.as_ref()?.use_effect_ms(&heal.use_tag));
+            .and_then(|item| self.content.item_rules.consumable(item))
+            .and_then(|consumable| consumable.use_tag.as_deref())
+            .and_then(|tag| stance.as_ref()?.use_effect_ms(tag));
         let Some(mut vitals) = self.world.get_mut::<Vitals>(entity) else {
             return;
         };
@@ -5191,6 +5211,71 @@ mod tests {
     }
 
     #[test]
+    fn food_in_the_quick_slot_is_eaten_as_from_the_bag() {
+        // Live 2026-10-29: the light ration (`FoodHealthRecoveryT1`, `MannequinTag` `Eat`, no
+        // heal) in quick slot 1 gave no buff and stayed. Here flint stands in for the food.
+        use nw_content::item_rules::{
+            ConsumableRow, EffectRow, ItemRuleRow, ItemRuleSource, ItemRules,
+        };
+        const FOOD: &str = gear::tests::FLINT;
+        const RATIONS: u32 = 2;
+        let mut world = fight_at(MOB_X);
+        Arc::make_mut(&mut world.content).item_rules = ItemRules::build(ItemRuleSource {
+            items: vec![ItemRuleRow {
+                item_id: FOOD.to_owned(),
+                stats_ref: None,
+                consume_on_use: true,
+                not_droppable: false,
+                nonremovable: false,
+            }],
+            consumables: vec![ConsumableRow {
+                id: FOOD.to_owned(),
+                add_status_effects: Some("FoodRecoveryT1".to_owned()),
+                potency: Some(1.0),
+                duration_override_s: Some(0.0),
+                cooldown_id: None,
+                cooldown_s: None,
+                disabled_in_combat: false,
+                use_tag: Some("Eat".to_owned()),
+            }],
+            effects: vec![EffectRow {
+                status_id: "FoodRecoveryT1".to_owned(),
+                base_duration_s: Some(1_200.0),
+                tick_s: Some(2.0),
+                delay_s: None,
+                health: Some(10.0),
+                health_share: Some(0.0),
+                stamina: None,
+                remove_on_death: true,
+                has_fx: false,
+            }],
+        });
+        let kits = gear::tests::kits();
+        let mut gear = Gear::starter(&kits, gear::tests::CHARACTER, Some(gear::tests::BACKSTORY))
+            .expect("gear");
+        gear.renew(
+            kits.item(FOOD).expect("food"),
+            RATIONS,
+            slot::QUICK_SLOT_1,
+            0,
+        );
+        let entity = world.by_connection[&connection(1)];
+        world.world.get_mut::<Player>(entity).expect("player").gear = Some(gear);
+        world.drink(1, NOW, SERVER_TIME);
+        let rations: u32 = world
+            .world
+            .get::<Player>(entity)
+            .and_then(|player| player.gear.as_ref())
+            .map(Gear::carried)
+            .unwrap_or_default()
+            .iter()
+            .filter(|stack| stack.item_id == FOOD)
+            .map(|stack| stack.quantity)
+            .sum();
+        assert_eq!(rations, RATIONS - 1, "one ration eaten");
+    }
+
+    #[test]
     fn a_potion_of_a_disabled_class_is_not_drunk() {
         const HEAL_EFFECT: &str = "TestHeal";
         const POTIONS: u32 = 2;
@@ -5227,7 +5312,7 @@ mod tests {
             );
             let entity = world.by_connection[&connection(1)];
             world.world.get_mut::<Player>(entity).expect("player").gear = Some(gear);
-            world.drink(1, SERVER_TIME);
+            world.drink(1, NOW, SERVER_TIME);
             let potions: u32 = world
                 .world
                 .get::<Player>(entity)

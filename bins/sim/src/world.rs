@@ -611,8 +611,11 @@ struct Player {
     level_sent: Option<u32>,
     /// Whether its account has the game master rank: the sim takes its client's GM messages.
     game_master: bool,
-    /// The crafting station it uses, from its interaction with one until it closes it.
+    /// The crafting station it uses and the interaction it opened it with, until that
+    /// interaction ends.
     station: Option<String>,
+    /// The interaction that opened [`Player::station`].
+    station_interaction: Option<u64>,
     /// The last open-world interaction its client asked for: the client repeats the request in
     /// each input until it ends the interaction, and retail answers each one once (retail
     /// 2026-09-18: one 3743 for a talk the client held 20 s; ours answered all 667 inputs).
@@ -3189,6 +3192,7 @@ impl SimWorld {
             ClientFacetMsg::CancelInteraction { interaction, .. } => {
                 self.interaction_ended(entity, *interaction, now_ms);
                 self.cancel_gather(entity, *interaction, now_ms);
+                self.leave_station(entity, *interaction);
                 self.give_weapon_back(entity, Stow::Gather, now_ms);
                 self.close_container(entity);
                 return Ok(());
@@ -3241,7 +3245,7 @@ impl SimWorld {
                 return Ok(());
             }
             ClientFacetMsg::CancelCrafting { header } => {
-                self.close_station(entity, number, *header);
+                self.craft_cancelled(entity, number, *header);
                 return Ok(());
             }
             ClientFacetMsg::InitiateSalvage {
@@ -4084,6 +4088,7 @@ impl SimWorld {
                     level_sent: None,
                     game_master: arrival.game_master,
                     station: None,
+                    station_interaction: None,
                     last_interaction: None,
                     open_interaction: None,
                     open_board: None,
@@ -7964,6 +7969,20 @@ mod tests {
             Some((nw_messages::LOOT_QUEST_OBJECT, lowercase_crc32(NODULE_LOOT))),
             "the break lists it in the loot tracker"
         );
+        let names_the_nodule = world
+            .world
+            .get::<Player>(entity)
+            .expect("player")
+            .extra_members
+            .iter()
+            .any(|member| {
+                matches!(&member.state, MemberState::Gathering(state)
+                    if state.gatherable == Some(NODULE_ID) && state.status.is_none())
+            });
+        assert!(
+            names_the_nodule,
+            "retail 12-5: the break's gather state names the nodule"
+        );
         let (_, at) = step(&mut world, SWING_GAP_MS);
         world.shoot_at_quest_objects(&who, at);
         assert!(!done(&world, "Nodules"), "broken until it grows back");
@@ -9326,7 +9345,7 @@ mod tests {
     /// and the flint's count, which ends a week after the test's server time.
     fn saved_progression() -> PlayerProgression {
         const ACHIEVEMENT_BIT: u32 = 15_317;
-        let counted_ns = loot_bag::unix_ns(SERVER_TIME);
+        let counted_ns = gear::unix_ns(SERVER_TIME);
         let week_ns = u64::try_from(WEEKLY_EXPIRE_S).expect("week") * NS_PER_SECOND;
         // Still ahead of this server time, so arrival keeps the saved refresh.
         let refresh_ns = counted_ns + week_ns;
@@ -9532,18 +9551,25 @@ mod tests {
             rows: loot_rows(TABLE, &[(gear::tests::POTION, "0")]),
             bucket_items: Vec::new(),
         });
-        let mut world = loot_world_at(TABLE, tables, Some(DROP_CHANCE));
-        let entity = world.by_connection[&connection(1)];
-        for _ in 0..KILLS {
-            world.drop_loot(crate::mobs::mob_entity(0), 1, NOW);
-            if let Some(mut player) = world.world.get_mut::<Player>(entity) {
-                player.extra_members.clear();
+        // The config's loot drop multiplier: 1.0 keeps the data's chance, 2.0 doubles it.
+        for multiplier in [1.0, 2.0] {
+            let mut world = loot_world_at(TABLE, tables.clone(), Some(DROP_CHANCE));
+            world.combat.loot_drop_multiplier = multiplier;
+            let entity = world.by_connection[&connection(1)];
+            for _ in 0..KILLS {
+                world.drop_loot(crate::mobs::mob_entity(0), 1, NOW);
+                if let Some(mut player) = world.world.get_mut::<Player>(entity) {
+                    player.extra_members.clear();
+                }
             }
+            let (bags, owned) = world.bags.counts();
+            assert_eq!(bags, KILLS as usize, "every kill still drops a bag");
+            let rate = owned as f64 / f64::from(KILLS);
+            assert!(
+                (rate - DROP_CHANCE * multiplier).abs() <= MAX_GAP,
+                "multiplier {multiplier}: {rate}"
+            );
         }
-        let (bags, owned) = world.bags.counts();
-        assert_eq!(bags, KILLS as usize, "every kill still drops a bag");
-        let rate = owned as f64 / f64::from(KILLS);
-        assert!((rate - DROP_CHANCE).abs() <= MAX_GAP, "{rate}");
     }
 
     #[test]

@@ -32,6 +32,13 @@ pub const SYNC_MOVED: u8 = 6;
 pub const SYNC_REMOVED: u8 = 5;
 /// Sync reason of an owned item at login (type 5437).
 pub const SYNC_OWNED: u8 = 17;
+/// Sync reason of a bag stack that a craft used (retail `12-2_skinningknife`, 1790514751716 ms:
+/// the flint and the wood of the skinning knife; `12-3_boarfeast`: the meat of the rations).
+pub const SYNC_CRAFT_USED: u8 = 2;
+/// Sync reason of a bag stack that a craft made (retail, same bundles: the skinning knife, the
+/// 2 light rations). With another reason the live client said "Crafting attempt failed" after
+/// each good craft and cancelled it (2026-10-29 play test).
+pub const SYNC_CRAFTED: u8 = 3;
 /// Item flags bit 0: bound to the character.
 pub const ITEM_BOUND: u8 = 0x01;
 /// Item flags bit 1: locked by its owner (retail 2549 set it and cleared it: flags 1 to 3 and

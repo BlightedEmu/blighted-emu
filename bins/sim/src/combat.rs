@@ -163,6 +163,8 @@ pub struct CombatSettings {
     pub seed: u64,
     /// The `u32` of a mob's spawn card `AssetId` (M6-B spec section 5.4).
     pub asset_sub_id: u32,
+    /// Times a mob type's `LootDropChance` ([`crate::config::CombatConfig::loot_drop_multiplier`]).
+    pub loot_drop_multiplier: f64,
 }
 
 /// Hand-made combat rows for tests (feature `test-util`).

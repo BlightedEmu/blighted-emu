@@ -183,6 +183,23 @@ fn container_records(items: &[Option<GearItem>], sync_reason: u8) -> Vec<ItemRec
         .collect()
 }
 
+/// The records of the bag `bag`, each with its slot's reason of `reasons` (else moved in).
+fn bag_records(bag: &[Option<GearItem>], reasons: &[u8]) -> Vec<ItemRecord> {
+    (0_u16..)
+        .zip(bag)
+        .map(|(container_slot, item)| match item {
+            Some(item) => {
+                let reason = reasons
+                    .get(usize::from(container_slot))
+                    .copied()
+                    .unwrap_or(SYNC_MOVED_IN);
+                record(item, reason, Some(container_slot))
+            }
+            None => ItemRecord::EMPTY_SLOT,
+        })
+        .collect()
+}
+
 /// A container shown in the player's second container: a storage chest it uses, or a bag of
 /// dropped items it opened (retail open-world `storage_open_deposit_withdraw_transfer` and
 /// `item_actions`: the chest's items with transfer allowed, the bag's items).
@@ -213,6 +230,10 @@ pub struct GearExtras {
     pub loadout_panel_open: bool,
     /// The container in the second container, when one was opened.
     pub open_container: Option<OpenContainer>,
+    /// The sync reason of each bag slot's record: the reason of its last change (a craft's
+    /// [`crate::items::SYNC_CRAFT_USED`] or [`crate::items::SYNC_CRAFTED`]); a slot past its end
+    /// is an item moved in.
+    pub bag_reasons: Vec<u8>,
 }
 
 /// The weapon a player holds and the ammo of its first two main-hand options (client-gates
@@ -448,7 +469,7 @@ impl PlayerGear {
         Self {
             paperdoll,
             bag: ContainerState {
-                items: Some(list(version, container_records(bag, SYNC_MOVED_IN))),
+                items: Some(list(version, bag_records(bag, &extras.bag_reasons))),
                 bonus_max_encumbrance: Some(0),
                 was_emptied: Some(bag.iter().all(Option::is_none)),
                 ..ContainerState::default()

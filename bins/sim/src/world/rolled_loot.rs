@@ -11,6 +11,8 @@ use std::sync::Arc;
 use nw_content::item_rolls::RolledItem;
 use nw_content::loot::DropGearScore;
 
+use nw_messages::items::SYNC_MOVED;
+
 use super::{Player, SimWorld};
 use crate::objectives::Event;
 
@@ -78,17 +80,19 @@ impl SimWorld {
         }
         self.give_loot(number, plain, now_ms);
         for (item_id, rolls) in rolled {
-            self.give_rolled(number, &item_id, rolls, now_ms);
+            self.give_rolled(number, &item_id, rolls, SYNC_MOVED, now_ms);
         }
     }
 
     /// Player `number` gets one item `item_id` per entry of `rolled`, each with its gear score
-    /// and perks, at `now_ms`; its quest counts the items that fit its bag.
+    /// and perks, in a bag change of sync reason `reason`, at `now_ms`; its quest counts the
+    /// items that fit its bag.
     pub(super) fn give_rolled(
         &mut self,
         number: u64,
         item_id: &str,
         rolled: Vec<RolledItem>,
+        reason: u8,
         now_ms: u64,
     ) {
         let Some(entity) = self.player_by_number(number) else {
@@ -104,7 +108,7 @@ impl SimWorld {
             && let Some(gear) = player.gear.as_mut()
         {
             for roll in &rolled {
-                if gear.add_rolled(&content.kits, item, 1, roll) {
+                if gear.add_rolled(&content.kits, item, 1, roll, reason) {
                     gained += 1;
                 } else {
                     tracing::info!(player = number, item = %item_id, "rolled item lost: a full bag");

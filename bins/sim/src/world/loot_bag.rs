@@ -40,6 +40,7 @@ use nw_sim_core::Position;
 use uuid::Uuid;
 
 use super::gathering::{GATHER_ACCEPTED, GATHER_BUSY};
+use super::gear::unix_ns;
 use super::slots::Slot;
 use super::statics::interactor_target;
 use super::{Player, SimWorld, gather_answer, send_now};
@@ -47,6 +48,8 @@ use super::{Player, SimWorld, gather_answer, send_now};
 /// First slot key of a loot bag: its serial is added. Keys are never sent; they stay above every
 /// player and mob number and below the gather nodes.
 pub(super) const BAG_ENTITY_BASE: u64 = 1 << 38;
+/// A chance that always hits: a mob type without a `LootDropChance` rolls at every kill.
+const SURE_CHANCE: f64 = 1.0;
 /// Names the bag ids this server makes.
 const BAG_ID_NAMESPACE: u64 = 0x6c6f_6f74_6261_6773;
 
@@ -455,13 +458,6 @@ pub(super) enum LimitsSent {
     Changed,
     /// With the spawn of a login or a level change, when it has counts.
     Spawn,
-}
-
-/// Unix nanoseconds of server time `server_ms` (ms since [`crate::server::SERVER_EPOCH_UNIX_MS`]).
-pub(super) const fn unix_ns(server_ms: u64) -> u64 {
-    server_ms
-        .saturating_add(crate::server::SERVER_EPOCH_UNIX_MS)
-        .saturating_mul(nw_messages::NS_PER_MS)
 }
 
 impl PlayerLoot {
@@ -885,9 +881,10 @@ impl SimWorld {
         let context = self.loot_context(killer, Some((mob, &tags)), &reached);
         let dice = &mut self.dice;
         let mut below = |below| dice.below(below);
-        let rolls_table = drop
-            .chance
-            .is_none_or(|chance| chance_hit(chance, &mut below));
+        // A type without a chance rolls at every kill: a sure chance before the multiplier.
+        let chance = (drop.chance.unwrap_or(SURE_CHANCE) * self.combat.loot_drop_multiplier)
+            .clamp(0.0, SURE_CHANCE);
+        let rolls_table = chance >= SURE_CHANCE || chance_hit(chance, &mut below);
         let rolled = if rolls_table {
             content.loot.roll(&drop.table, context, &mut below)
         } else {
