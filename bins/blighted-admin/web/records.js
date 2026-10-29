@@ -320,6 +320,10 @@ document.getElementById('search').addEventListener('submit', (event) => {
   event.preventDefault();
   search().catch(fail);
 });
+elements.kind.addEventListener('change', () => {
+  elements.query.value = '';
+  search().catch(fail);
+});
 document.getElementById('save').addEventListener('click', () => save(false).catch(fail));
 document.getElementById('save-new').addEventListener('click', () => save(true).catch(fail));
 document.getElementById('remove').addEventListener('click', () => remove().catch(fail));
@@ -335,5 +339,7 @@ const start = new URL(window.location.href).searchParams;
 if (start.get(KIND_PARAMETER) && start.get(ID_PARAMETER)) {
   elements.kind.value = start.get(KIND_PARAMETER);
   openRecord(start.get(KIND_PARAMETER), start.get(ID_PARAMETER)).catch(fail);
+} else {
+  say('Loading all records of this kind. The first load reads the client data and takes a few seconds.');
+  search().catch(fail);
 }
-say('Search for a record. The first search reads the client data and takes a few seconds.');
