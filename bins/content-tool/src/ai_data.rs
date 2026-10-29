@@ -1199,9 +1199,20 @@ pub fn build_ai_data(
             }
         }
     }
+    // The animation database of each slice's main-hand weapon (its creature row's).
+    let weapon_adbs: HashMap<String, String> = creatures
+        .iter()
+        .filter_map(|row| {
+            Some((
+                row.slice.to_lowercase(),
+                row.weapon_animation_database.clone()?,
+            ))
+        })
+        .collect();
     let adb_paths: HashSet<String> = slices
         .values()
         .filter_map(|slice| slice.animation_database.clone())
+        .chain(weapon_adbs.values().cloned())
         .collect();
     let adb_bytes = read_entries(source, &adb_paths)?;
     let mut adbs: HashMap<String, (Vec<AdbEntry>, AnimDatabase)> = HashMap::new();
@@ -1248,23 +1259,28 @@ pub fn build_ai_data(
         unknown_fragments: BTreeMap::new(),
     };
     let mut grids: Vec<Grid> = Vec::new();
-    let mut grid_index: HashMap<(String, Option<String>), u32> = HashMap::new();
+    let mut grid_index: HashMap<(String, Option<String>, Option<String>), u32> = HashMap::new();
     let mut archetypes: Vec<Archetype> = Vec::new();
     let mut archetype_of_slice: HashMap<String, u32> = HashMap::new();
     for (path, slice) in &slices {
+        let weapon_adb = weapon_adbs.get(path);
         let grid = match &slice.grid {
             Some(grid) if grid_lists_by_path.contains_key(grid) => {
-                let key = (grid.clone(), slice.animation_database.clone());
+                let key = (
+                    grid.clone(),
+                    slice.animation_database.clone(),
+                    weapon_adb.cloned(),
+                );
                 match grid_index.get(&key) {
                     Some(index) => Some(*index),
                     None => {
-                        let adb = slice
-                            .animation_database
-                            .as_deref()
-                            .and_then(|path| Some((path, adbs.get(path)?)));
                         let named = &grid_lists_by_path[grid];
-                        let GridIndex { tasks, actions } =
-                            builder.grid(&mut decoder, &named.paths, adb);
+                        let GridIndex { tasks, actions } = builder.grid(
+                            &mut decoder,
+                            &named.paths,
+                            database(&adbs, slice.animation_database.as_deref()),
+                            database(&adbs, weapon_adb.map(String::as_str)),
+                        );
                         let mut first_alias: BTreeMap<NameId, NameId> = BTreeMap::new();
                         for (action, alias) in &named.aliases {
                             let action = decoder.intern(action);
@@ -1451,6 +1467,15 @@ pub fn build_ai_data(
     Ok((data, report))
 }
 
+/// The parsed animation database at `path` among `adbs`, with its path.
+fn database<'a>(
+    adbs: &'a HashMap<String, (Vec<AdbEntry>, AnimDatabase)>,
+    path: Option<&'a str>,
+) -> Option<(&'a str, &'a (Vec<AdbEntry>, AnimDatabase))> {
+    let path = path?;
+    Some((path, adbs.get(path)?))
+}
+
 /// The CAGE actions built so far, shared by the grids (equal actions are stored once).
 struct CageBuilder<'a> {
     lists: &'a HashMap<String, ParsedList>,
@@ -1469,6 +1494,7 @@ impl CageBuilder<'_> {
         decoder: &mut TreeDecoder,
         list_paths: &[String],
         adb: Option<(&str, &(Vec<AdbEntry>, AnimDatabase))>,
+        weapon_adb: Option<(&str, &(Vec<AdbEntry>, AnimDatabase))>,
     ) -> GridIndex {
         let mut tasks: BTreeMap<NameId, u32> = BTreeMap::new();
         let mut names: BTreeMap<NameId, u32> = BTreeMap::new();
@@ -1482,7 +1508,7 @@ impl CageBuilder<'_> {
             };
             let list = decoder.intern(list_path);
             for action in actions {
-                let cage = self.action(decoder, list, action, conditions, adb);
+                let cage = self.action(decoder, list, action, conditions, adb, weapon_adb);
                 let name = cage.action;
                 let key = serde_json::to_vec(&cage).unwrap_or_default();
                 let index = match self.index.get(&key) {
@@ -1513,6 +1539,7 @@ impl CageBuilder<'_> {
         action: &ListAction,
         conditions: &[(String, Condition)],
         adb: Option<(&str, &(Vec<AdbEntry>, AnimDatabase))>,
+        weapon_adb: Option<(&str, &(Vec<AdbEntry>, AnimDatabase))>,
     ) -> CageAction {
         let completion = action
             .completion
@@ -1530,10 +1557,41 @@ impl CageBuilder<'_> {
                     })
                     .collect(),
             });
+        let variants = self.variants(decoder, &action.fragment, adb);
+        let weapon_variants = self.variants(decoder, &action.fragment, weapon_adb);
+        CageAction {
+            list,
+            action: decoder.intern(&action.name),
+            fragment: decoder.intern(&action.fragment),
+            completion,
+            tags: action
+                .tags
+                .iter()
+                .map(|(tag, on_enter, on_exit, delay_s)| TagActivity {
+                    tag: decoder.intern(tag),
+                    on_enter: *on_enter,
+                    on_exit: *on_exit,
+                    delay_s: *delay_s,
+                })
+                .collect(),
+            motion_multiplier: action.motion_multiplier,
+            facing: action.facing,
+            variants,
+            weapon_variants,
+        }
+    }
+
+    /// The entries of `fragment` in the animation database `adb`, with their procedural clips.
+    fn variants(
+        &mut self,
+        decoder: &mut TreeDecoder,
+        fragment: &str,
+        adb: Option<(&str, &(Vec<AdbEntry>, AnimDatabase))>,
+    ) -> Vec<FragmentVariant> {
         let mut variants = Vec::new();
         if let Some((adb_path, (entries, clips))) = adb {
             for (entry, procedural) in entries.iter().zip(&clips.fragments) {
-                if procedural.name != action.fragment {
+                if procedural.name != fragment {
                     continue;
                 }
                 let length = fragment_length(entry, self.lengths).unwrap_or_else(|_| {
@@ -1572,25 +1630,7 @@ impl CageBuilder<'_> {
                 });
             }
         }
-        CageAction {
-            list,
-            action: decoder.intern(&action.name),
-            fragment: decoder.intern(&action.fragment),
-            completion,
-            tags: action
-                .tags
-                .iter()
-                .map(|(tag, on_enter, on_exit, delay_s)| TagActivity {
-                    tag: decoder.intern(tag),
-                    on_enter: *on_enter,
-                    on_exit: *on_exit,
-                    delay_s: *delay_s,
-                })
-                .collect(),
-            motion_multiplier: action.motion_multiplier,
-            facing: action.facing,
-            variants,
-        }
+        variants
     }
 }
 

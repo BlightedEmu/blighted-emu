@@ -342,14 +342,46 @@ fn main_hand_in(all: &[&Element]) -> Option<String> {
     })
 }
 
-/// The `MannequinTag` tags of each item's weapon row (by lowercase item id): the master item's
+/// What a creature's main-hand weapon gives its Mannequin.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WeaponLook {
+    /// The weapon row's `MannequinTag` tags.
+    pub tags: Vec<String>,
+    /// The weapon row's `AnimDbPath` (lowercase): the animation database its `WeaponContext`
+    /// scope plays the creature's fragments from.
+    pub animation_database: Option<String>,
+}
+
+/// The weapon look of each item's weapon row (by lowercase item id): the master item's
 /// `ItemStatsRef` names its weapon row.
-pub fn weapon_tags(tables: &Tables) -> HashMap<String, Vec<String>> {
-    let weapon_tags: HashMap<String, &str> = tables
+pub fn item_weapons(tables: &Tables) -> HashMap<String, WeaponLook> {
+    let looks: HashMap<String, WeaponLook> = tables
         .weapon_item_definitions
         .iter()
         .flat_map(|table| &table.rows)
-        .filter_map(|row| Some((row.weapon_id.to_lowercase(), row.mannequin_tag.as_deref()?)))
+        .map(|row| {
+            let tags = row
+                .mannequin_tag
+                .as_deref()
+                .unwrap_or_default()
+                .split(MANNEQUIN_TAG_SEPARATOR)
+                .map(str::trim)
+                .filter(|tag| !tag.is_empty())
+                .map(str::to_owned)
+                .collect();
+            let animation_database = row
+                .anim_db_path
+                .as_deref()
+                .filter(|path| !path.is_empty())
+                .map(str::to_lowercase);
+            (
+                row.weapon_id.to_lowercase(),
+                WeaponLook {
+                    tags,
+                    animation_database,
+                },
+            )
+        })
         .collect();
     tables
         .master_item_definitions
@@ -357,15 +389,7 @@ pub fn weapon_tags(tables: &Tables) -> HashMap<String, Vec<String>> {
         .flat_map(|table| &table.rows)
         .filter_map(|row| {
             let stats = row.item_stats_ref.as_deref()?.to_lowercase();
-            let tags = weapon_tags.get(&stats)?;
-            Some((
-                row.item_id.to_lowercase(),
-                tags.split(MANNEQUIN_TAG_SEPARATOR)
-                    .map(str::trim)
-                    .filter(|tag| !tag.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
-            ))
+            Some((row.item_id.to_lowercase(), looks.get(&stats)?.clone()))
         })
         .collect()
 }
@@ -513,7 +537,7 @@ pub fn build_rows(
         .filter(|name| !name.is_empty())
         .collect();
     let lengths = ClipLengths::read(source, game_dir, &clip_names)?;
-    let weapons = weapon_tags(tables);
+    let weapons = item_weapons(tables);
     let mut rows = Vec::new();
     for asset in &assets {
         let name = hex::encode(asset);
@@ -548,12 +572,12 @@ pub fn build_rows(
             }
         };
         let mut default_tags = mannequin.default_tags.clone();
-        if let Some(weapon) = mannequin
+        let weapon = mannequin
             .main_hand
             .as_ref()
-            .and_then(|item| weapons.get(&item.to_lowercase()))
-        {
-            default_tags.extend(weapon.iter().cloned());
+            .and_then(|item| weapons.get(&item.to_lowercase()));
+        if let Some(weapon) = weapon {
+            default_tags.extend(weapon.tags.iter().cloned());
         }
         let fragment_ticks = mannequin
             .animation_database
@@ -575,6 +599,7 @@ pub fn build_rows(
             fragment_ticks,
             collider_radius_mm: mannequin.collider_radius_mm,
             skinnable: mannequin.skinnable,
+            weapon_animation_database: weapon.and_then(|weapon| weapon.animation_database.clone()),
         });
     }
     rows.sort_by(|left, right| left.asset.cmp(&right.asset));

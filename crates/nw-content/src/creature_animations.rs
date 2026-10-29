@@ -81,6 +81,12 @@ pub struct CreatureRow {
     /// ([`crate::corpse_times::corpse_ms`]). `false` in a table from before this field.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skinnable: bool,
+    /// The animation database (lowercase pak path) of its main-hand weapon's `WeaponContext`
+    /// scope: the weapon row's `AnimDbPath` (Observed: Janszoon's `Corrupted_First_Mate_2hAnchor`
+    /// names `npc_damned_2h_axeanims.adb`, which holds the `CAGE-Damage` clips of his axe attacks;
+    /// his own `npc_damned_anims.adb` holds none). `None` without one, or in an older table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weapon_animation_database: Option<String>,
 }
 
 /// One creature's animation names.
@@ -303,6 +309,7 @@ mod tests {
             ]),
             collider_radius_mm: Some(500),
             skinnable: true,
+            weapon_animation_database: None,
         }
     }
 

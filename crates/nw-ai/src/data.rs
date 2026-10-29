@@ -22,7 +22,7 @@ pub const AI_DATA_SPEC: ContainerSpec = ContainerSpec {
     schema_hash: SCHEMA_VERSION,
 };
 /// Raised when the body layout changes.
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const FILE_PREFIX: &str = "ai-data-";
 const FILE_SUFFIX: &str = ".bin";
 
@@ -305,22 +305,39 @@ pub struct CageAction {
     pub facing: Option<FacingMode>,
     /// The fragment's entries in the creature's animation database.
     pub variants: Vec<FragmentVariant>,
+    /// The fragment's entries in its main-hand weapon's animation database, which the weapon's
+    /// `WeaponContext` scope plays beside the body (Observed: the `CAGE-Damage` clips of the
+    /// damned axe attacks are only in `npc_damned_2h_axeanims.adb`, the weapon rows'
+    /// `AnimDbPath`).
+    pub weapon_variants: Vec<FragmentVariant>,
+}
+
+/// The entry of `variants` Mannequin plays for a mob with the tags `has_tag` says it has: of the
+/// entries without fragment tags whose every tag the mob has, the one with the most tags, the
+/// first on a tie (as `nw_formats::mannequin::AnimDatabase::best`).
+fn best_variant<'a>(
+    variants: &'a [FragmentVariant],
+    has_tag: &impl Fn(NameId) -> bool,
+) -> Option<&'a FragmentVariant> {
+    variants
+        .iter()
+        .filter(|variant| variant.frag_tags.is_empty() && variant.tags.iter().all(|t| has_tag(*t)))
+        .fold(None, |best: Option<&FragmentVariant>, variant| match best {
+            Some(best) if best.tags.len() >= variant.tags.len() => Some(best),
+            _ => Some(variant),
+        })
 }
 
 impl CageAction {
-    /// The entry Mannequin plays for a mob with the tags `has_tag` says it has: of the entries
-    /// without fragment tags whose every tag the mob has, the one with the most tags, the first
-    /// on a tie (as `nw_formats::mannequin::AnimDatabase::best`).
+    /// The entry of the creature's database Mannequin plays for a mob with the tags `has_tag`
+    /// says it has ([`best_variant`]).
     pub fn variant(&self, has_tag: &impl Fn(NameId) -> bool) -> Option<&FragmentVariant> {
-        self.variants
-            .iter()
-            .filter(|variant| {
-                variant.frag_tags.is_empty() && variant.tags.iter().all(|t| has_tag(*t))
-            })
-            .fold(None, |best: Option<&FragmentVariant>, variant| match best {
-                Some(best) if best.tags.len() >= variant.tags.len() => Some(best),
-                _ => Some(variant),
-            })
+        best_variant(&self.variants, has_tag)
+    }
+
+    /// The entry of the weapon's database its `WeaponContext` scope plays ([`best_variant`]).
+    pub fn weapon_variant(&self, has_tag: &impl Fn(NameId) -> bool) -> Option<&FragmentVariant> {
+        best_variant(&self.weapon_variants, has_tag)
     }
 
     /// Seconds from the start until the tree is told the action is done: the fragment length
@@ -550,6 +567,7 @@ mod tests {
                     windows: Vec::new(),
                 },
             ],
+            weapon_variants: Vec::new(),
         }
     }
 

@@ -143,6 +143,7 @@ impl Build {
                 length,
                 windows,
             }],
+            weapon_variants: Vec::new(),
         });
         let index = (self.data.cage_actions.len() - 1) as u32;
         self.tasks.push((name, index));

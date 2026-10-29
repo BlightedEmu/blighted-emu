@@ -1233,6 +1233,7 @@ mod tests {
             fragment_ticks: std::collections::BTreeMap::new(),
             collider_radius_mm: None,
             skinnable: false,
+            weapon_animation_database: None,
         };
         let table = CreatureAnimations::of_rows(vec![row]).expect("table");
         Animations::of(&ASSET, table.get(&ASSET).expect("row")).expect("animations")

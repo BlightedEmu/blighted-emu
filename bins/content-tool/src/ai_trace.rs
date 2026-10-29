@@ -972,6 +972,7 @@ mod tests {
             fragment_ticks: BTreeMap::new(),
             collider_radius_mm: None,
             skinnable: false,
+            weapon_animation_database: None,
         }]
     }
 
