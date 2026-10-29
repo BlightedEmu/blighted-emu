@@ -98,7 +98,7 @@
 <body>
 <main>
   <h1>Blighted New World Emulator: Progress</h1>
-  <p class="sub">Status on 2026-10-29. Client build 25810808. Last commit <code>01bc7e5b</code>.</p>
+  <p class="sub">Status on 2026-10-29. Client build 25810808. Last commit <code>c3145c83</code>.</p>
 
   <div class="cards" id="summary"></div>
 
@@ -129,8 +129,8 @@
       <div class="why">A player now runs many quests. Each quest type has the client's own journal limit (side quests 30, town board and faction missions 30, main story 20, community goals 50, and more; proven from the client code). A quest the game starts by itself, the next step of a chain, has no limit. Check live: accept Truffle Fever (Hapless Howe) while the main story quest runs, gather its 5 truffles (fixed 2026-10-03: a quest object that is also a loot container gave no quest item; 346 of the 381 item steps that drop from an object hit this), then its herbs and berries (they count only when gathered). Also fixed: kill and drop steps that name a spawner's category (<code>Barbary_Lion_16BS12</code>) or its group (<code>Periville</code>) never counted; steps with an unknown source went from 368 to 11 (faction, season and event steps). Also check the new steps live: the stones of Bridge into the Past (Weaver's Fen) and the staff ritual of Arcana Aligned (Elysian Wilds). Notes: <code>local-data/findings/2026-10-02-quest-journal-limits.md</code>.</div></li>
     <li><strong>Bring in the quests of the captures: quest step types.</strong>
       <div class="why">695 of 2,147 quests used only step types the server ran. Done: <code>TaskInteract</code> for quest objects and town buildings (an interact with a matching tag, counted when the interaction ends, as the retail vault step); main story quests with only known steps went from 238 to 263. Done: the town board (take, the mission's own items, kills and place, turn-in; proven from a retail capture). Faction boards (and <code>TaskDie</code>, used only by PvP faction missions) need the faction join first. Done: <code>TaskGameMode</code> (on entry), <code>TaskGiveItem</code>, <code>TaskGiveAndTakeItem</code>. Fully supported now: side quests 508 of 528, main story 349 of 358, housing quests 14 of 22, town projects 12 of 12. Done: <code>PatrolTask</code>, and the level's quest trigger volumes (772 from the level data, sized as retail). Done: <code>TaskHaveLevel</code>, <code>TaskConversationState</code> (a talk with its NPC, proven from a retail capture), <code>TaskRequireGatherItems</code> (only a real gather counts, as Truffle Fever), <code>TaskGatherCyclicState</code> (turned stones and staff rituals, proven from two retail captures; done <code>StayActive</code> steps now show as retail), <code>TaskTemporaryUnlockAchievement</code> (on while the quest runs), <code>TaskCraftMultipleRecipes</code>. Fixed: map pins with no game event ended their step group at once and skipped the real step (enter a trial, a portal); they now wait. Done: <code>TaskObjective</code> (starts and tracks another quest: weapon quest chains), <code>TaskUseItems</code>, <code>TaskGoToTerritory</code> and its point-of-interest form. Next: <code>TaskQuickCourse</code> (39, mount races and time trials), trigger areas of other levels (20), fishing steps (4 quests), then songs and slayer scripts (3 each). List: <code>local-data/findings/2026-10-02-quest-gaps.tsv</code>; notes: <code>local-data/findings/2026-10-02-task-interact.md</code>.</div></li>
-    <li><strong>Live check of the craft message fix.</strong>
-      <div class="why">The Demon Storm turn-in works live. Craft: the "Crafting attempt failed" message should be gone. Notes: <code>local-data/findings/2026-10-01-beach-playtest-notes.md</code>.</div></li>
+    <li><strong>Live check of the beach play test 2 fixes (not committed).</strong>
+      <div class="why">Fixed from the 2026-10-29 play test: the "Crafting attempt failed" message (a craft now marks its used and made bag stacks with retail's reasons 2 and 3); food from the quick slot gives its buff; the watchtower crate gives loot (a cancel at the gather's end no longer stops it); growths get retail's break gather state (explosion still to see); mobs no longer walk into walls or climb more than 0.6 m in a step. Not bugs: crewmate loot (about 1 kill in 25, as retail); a config multiplier now scales it (<code>[combat] loot_drop_multiplier</code>, 1.0 = retail). Live test 3: crafting no longer fails over and over (retail keeps the station after the client's craft cancel). Live test 4: the skinning knife crafts with no error message (verified). Ground: the level's terrain cookies (height stamps the client puts on its terrain) are now in our terrain, so La Roussette, the Satisfaction wreck and Janszoon's spot match retail (retail player feet on our ground: 62 % to 83 % at La Roussette). Still open: hits from behind (our reach matches retail; what the client draws is Unknown), the road float on the way to Hapless Howe, the skip potions (no retail capture). Notes: <code>local-data/findings/2026-10-03-beach-playtest-notes.md</code>.</div></li>
     <li><strong>Close the new player bugs (tutorial and starting beach).</strong>
       <div class="why">Every new player goes through both. The tutorial is the <code>ftue_v2</code> level (ship, quick time event, sailors, legionnaires, corruption, Damned Commander). The starting beach is open world. Open on the beach (play test 2026-10-01, 18 issues): player hits that miss (boars, Janszoon, mariners), bosses whose melee does no damage, mobs that swing from 3 to 4.5 m, mobs sunk in the ground or stuck in walls (Janszoon, the cave), a mob back to full health, debuffs shown as 10,957 days, no food buff, no fall damage, the watchtower crate gives nothing, growths with no break effect, deck boars not asleep, Janszoon anchor toss. Level not yet checked: temple door wall.</div></li>
     <li><strong>Make own movement match retail (to-do <code>t1</code>).</strong>
@@ -155,6 +155,10 @@
 
   <h2>Done list</h2>
   <ul class="done">
+    <li>✅ Janszoon fights: his tree gets its difficulty tier from his slice, and mob attacks take their hits from the weapon's animation database when the body's has none (450 creatures carry one) (not committed, 2026-10-29).</li>
+    <li>✅ Crafting: no "Crafting attempt failed" message; verified live on the skinning knife (not committed, 2026-10-29).</li>
+    <li>✅ Mobs walk around a rock or crate that blocks their straight way (Janszoon, Bridget); a target behind one solid counts as reachable (not committed, 2026-10-29).</li>
+    <li>✅ Terrain cookies: the 5,244 height stamps of the open world's capitals are put into our terrain; retail player feet on our ground 586,786 → 615,209 samples in 34 captures (not committed, 2026-10-29).</li>
     <li>✅ Admin live 3D map: /live3d orbits a selected player, shows terrain and every player and mob inside the 150 m render radius with name, HP and target lines (<code>01bc7e5b</code>, 2026-10-29).</li>
     <li>✅ Records page lists all entries on load and reloads when you change kind (<code>8ff0e1da</code>, 2026-10-29).</li>
     <li>✅ <strong>M0</strong> Project setup, licences, checks, Docker infrastructure.</li>
@@ -253,7 +257,7 @@ const AREAS = [
     name: "Mobs",
     features: [
       ["Spawns and health", 90, "tests", "99.3% of creature records explained.", "A few odd records."],
-      ["Mob AI", 65, "live", "1,075 behavior trees from Server.pak. Thorpe fight fixed.", "Janszoon tree is a stand-in. Anchor toss missing."],
+      ["Mob AI", 65, "live", "1,075 behavior trees from Server.pak. Thorpe fight fixed. Mob paths stop at walls and climb at most 0.6 m a step.", "Janszoon tree is a stand-in; he now attacks (difficulty tier and weapon hits fixed, live check needed). Anchor toss missing. Terrain cookies now in our ground; mobs walk around rocks and crates."],
       ["Mob animations", 85, "tests", "736 of 747 creature assets.", "11 assets."],
       ["Patrols and waypoints", 70, "tests", "12,858 spawns get waypoint paths.", "Live check."],
       ["Corpses", 85, "tests", "Retail times per creature. Skinned corpses go after 5.5 s.", "Boar times vary in retail."],
@@ -263,7 +267,7 @@ const AREAS = [
     name: "New player: tutorial and starting beach",
     features: [
       ["Tutorial flow (ftue_v2 level)", 80, "live", "Ship, quick time event, sailors, legionnaires, corruption, Thorpe, journal.", "Temple door and growth explode (level not yet checked)."],
-      ["Starting beach (open world)", 70, "live", "Beach quests 12-1 to 12-9 played live up to the Demon Storm turn-in; lock, skinning, crafting, crates, cutscenes, journal auto pin.", "18 issues of the 2026-10-01 play test (misses, boss damage, sunk mobs, buffs, crates); the Demon Storm fix needs a live check."],
+      ["Starting beach (open world)", 70, "live", "Beach quests 12-1 to 12-9 played live up to the Demon Storm turn-in; lock, skinning, crafting, crates, cutscenes, journal auto pin. Play test 2 (2026-10-29) reached Janszoon.", "Play test 2 fixes need a live check; hits from behind; the terrain cookie fix at La Roussette and the Satisfaction wreck needs a live check."],
       ["Journal auto pin", 100, "live", "You confirmed it live (c21828b).", "Nothing."],
       ["Tutorial skip and class gear", 85, "tests", "Skip completes Soul Survivor, gives class bag.", "Live check."],
     ],
@@ -286,7 +290,7 @@ const AREAS = [
       ["Inventory, gear, paperdoll", 75, "live", "Inventory, slots, gear versions.", "Gear score rules, some item calls."],
       ["Loot drops", 75, "tests", "Retail loot tables, drop chance, one bag per kill.", "Live check outside the tutorial."],
       ["Gathering and skinning", 65, "live", "Skinning, nodules, gatherables.", "Tool levels and node respawn, live."],
-      ["Crafting", 65, "live", "Campfire, recipes, craft answers (now after the item change, as retail).", "Live check of the craft message fix; higher stations and refining."],
+      ["Crafting", 70, "tests", "Campfire, recipes, craft answers after the item change, and the bag reasons of a craft (2 used, 3 made) as retail.", "Live check that the failed message is gone; higher stations and refining."],
       ["Fishing", 50, "tests", "Fishing code, one live run.", "Result of the live run: Unknown."],
       ["Repair, salvage, transmog, dyes", 40, "code", "Code exists.", "Not checked."],
       ["Shops and coins", 50, "code", "Coins state, shop code.", "Not checked live."],
