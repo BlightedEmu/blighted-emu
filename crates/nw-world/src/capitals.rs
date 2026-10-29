@@ -4,7 +4,17 @@
 
 use serde::Deserialize;
 
+use crate::height::TerrainCookie;
 use crate::records::Capital;
+
+/// The capitals of one file and the terrain cookies among them.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CapitalsRead {
+    /// Every capital of the file.
+    pub capitals: Vec<Capital>,
+    /// The `cookie` of each capital that has one, at the capital's position.
+    pub cookies: Vec<TerrainCookie>,
+}
 
 #[derive(Deserialize)]
 struct CapitalsFile {
@@ -22,6 +32,19 @@ struct CapitalJson {
     slice_name: String,
     variant_name: Option<String>,
     slice_asset_id: String,
+    cookie: Option<CookieJson>,
+}
+
+/// A capital's `cookie`. A missing key reads as the client's default (`FUN_1469b55c0`): 0.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CookieJson {
+    #[serde(default)]
+    inner_radius: f32,
+    #[serde(default)]
+    outer_radius: f32,
+    #[serde(default)]
+    max_height_blend: f32,
 }
 
 #[derive(Deserialize)]
@@ -41,17 +64,30 @@ struct QuaternionJson {
 
 /// Reads the capitals of one `*.capitals.json` file.
 pub fn parse_capitals(bytes: &[u8]) -> Result<Vec<Capital>, serde_json::Error> {
+    parse_capitals_and_cookies(bytes).map(|read| read.capitals)
+}
+
+/// Reads the capitals of one `*.capitals.json` file and their terrain cookies.
+pub fn parse_capitals_and_cookies(bytes: &[u8]) -> Result<CapitalsRead, serde_json::Error> {
     let file: CapitalsFile = serde_json::from_slice(bytes)?;
-    Ok(file
-        .capitals
-        .into_iter()
-        .map(|capital| Capital {
+    let mut read = CapitalsRead::default();
+    for capital in file.capitals {
+        let position = [
+            capital.world_position.x,
+            capital.world_position.y,
+            capital.world_position.z,
+        ];
+        if let Some(cookie) = capital.cookie {
+            read.cookies.push(TerrainCookie {
+                center: position,
+                inner_radius: cookie.inner_radius,
+                outer_radius: cookie.outer_radius,
+                max_height_blend: cookie.max_height_blend,
+            });
+        }
+        read.capitals.push(Capital {
             id: capital.id,
-            position: [
-                capital.world_position.x,
-                capital.world_position.y,
-                capital.world_position.z,
-            ],
+            position,
             rotation: [
                 capital.rotation.x,
                 capital.rotation.y,
@@ -62,8 +98,9 @@ pub fn parse_capitals(bytes: &[u8]) -> Result<Vec<Capital>, serde_json::Error> {
             slice_name: capital.slice_name,
             variant_name: capital.variant_name,
             slice_asset_id: capital.slice_asset_id,
-        })
-        .collect())
+        });
+    }
+    Ok(read)
 }
 
 #[cfg(test)]
@@ -84,6 +121,12 @@ mod tests {
         "id": "a", "worldPosition": {"x": 1, "y": 2, "z": 3},
         "rotation": {"x": 0, "y": 0, "z": 0, "w": 1},
         "footprint": {"type": "Rectangle", "id": "b", "width": 4, "height": 5},
+        "sliceName": "<PLOT>", "sliceAssetId": "{00000000-0000-0000-0000-000000000000}:0"
+    }]}"#;
+    const COOKIE: &str = r#"{"Capitals": [{
+        "id": "c", "worldPosition": {"x": 7049.9, "y": 3094.4, "z": 45.0},
+        "rotation": {"x": 0, "y": 0, "z": 0, "w": 1},
+        "cookie": {"outerRadius": 27.0, "maxHeightBlend": 1.0, "edgeNoise": 0.1},
         "sliceName": "<PLOT>", "sliceAssetId": "{00000000-0000-0000-0000-000000000000}:0"
     }]}"#;
     const MISSING_ID: &str = r#"{"Capitals": [{
@@ -115,6 +158,27 @@ mod tests {
         assert_eq!(capital.position, [1.0, 2.0, 3.0]);
         assert_eq!(capital.scale, None);
         assert_eq!(capital.variant_name, None);
+    }
+
+    #[test]
+    fn a_cookie_is_read_at_its_capitals_place_with_the_clients_defaults() {
+        let read = parse_capitals_and_cookies(COOKIE.as_bytes()).unwrap();
+        assert_eq!(read.capitals.len(), 1);
+        assert_eq!(
+            read.cookies,
+            [TerrainCookie {
+                center: [7049.9, 3094.4, 45.0],
+                inner_radius: 0.0,
+                outer_radius: 27.0,
+                max_height_blend: 1.0,
+            }]
+        );
+        assert!(
+            parse_capitals_and_cookies(FULL.as_bytes())
+                .unwrap()
+                .cookies
+                .is_empty()
+        );
     }
 
     #[test]

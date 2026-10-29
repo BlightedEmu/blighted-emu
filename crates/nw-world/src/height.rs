@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //! Ground height from region heightmaps (M1b spec section 5).
 
-use crate::records::{HeightGrid, WorldFile};
+use std::collections::HashMap;
+
+use crate::records::{HeightGrid, Position, WorldFile};
 
 /// Raw heightmap units per metre where `mountainHeight` is [`TERRAIN_MOUNTAIN_HEIGHT`].
 pub const HEIGHT_UNITS_PER_METRE: f64 = 32.0;
@@ -19,6 +21,50 @@ pub const VERIFIED_MOUNTAIN_HEIGHTS: [f32; 2] = [FTUE_MOUNTAIN_HEIGHT, TERRAIN_M
 /// `mountain_height` metres.
 pub fn rescaled_sample(raw: u16, mountain_height: f32) -> u16 {
     (f32::from(raw) * mountain_height / TERRAIN_MOUNTAIN_HEIGHT).round() as u16
+}
+
+/// A capital's terrain `cookie`: the client raises or lowers the terrain around the capital to its
+/// height. The client reads it in `FUN_1469b55c0` and the console variable
+/// `coat_terrainDebugCookies` shows it; the region heightmaps do not hold it (Observed: retail
+/// player feet inside the cookies of `monarchsbluffs_starterbeach`, `brghtwd_a01_brackwater_props`
+/// and others stand at the cookie's height, not on the heightmap).
+///
+/// The blend (Inferred, fitted to 7,000 retail player samples of 34 captures in 13 zones; the
+/// client's blend function is not found): full at most `inner_radius` from the centre, a
+/// smoothstep down to none at `outer_radius`, times `max_height_blend`. Where cookies overlap,
+/// the one with the greatest weight sets the height. The client's `edgeNoise`,
+/// `edgeNoiseFeatureSize` and `groundNoiseScale` noise is not modelled.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TerrainCookie {
+    /// The capital's position; its z is the height the cookie blends to.
+    pub center: Position,
+    /// Distance in metres of full blend.
+    pub inner_radius: f32,
+    /// Distance in metres where the blend ends.
+    pub outer_radius: f32,
+    /// The blend at full weight, 0 to 1.
+    pub max_height_blend: f32,
+}
+
+impl TerrainCookie {
+    /// The share of the cookie's height at `distance` metres from its centre.
+    pub fn weight_at(&self, distance: f64) -> f64 {
+        let (inner, outer) = (f64::from(self.inner_radius), f64::from(self.outer_radius));
+        let falloff = if distance <= inner {
+            1.0
+        } else if distance >= outer {
+            0.0
+        } else {
+            let t = (distance - inner) / (outer - inner);
+            1.0 - t * t * (3.0 - 2.0 * t)
+        };
+        falloff * f64::from(self.max_height_blend)
+    }
+
+    /// The farthest distance with a weight.
+    fn reach(&self) -> f64 {
+        f64::from(self.inner_radius.max(self.outer_radius))
+    }
 }
 
 impl HeightGrid {
@@ -71,6 +117,84 @@ impl WorldFile {
             + sample(column0 + 1.0, row0 + 1.0)? * column_weight * row_weight;
         Some((blended / HEIGHT_UNITS_PER_METRE) as f32)
     }
+
+    /// Puts `cookies` into the height samples of every region, as the client shows its terrain:
+    /// each sample takes the height of the cookie with the greatest weight over it.
+    pub fn stamp_cookies(&mut self, cookies: &[TerrainCookie]) {
+        if !self.level.has_terrain {
+            return;
+        }
+        let size = f64::from(self.level.region_size);
+        for region in &mut self.regions {
+            let Some(grid) = region.heights.as_mut() else {
+                continue;
+            };
+            let Some(edge) = grid.edge() else {
+                continue;
+            };
+            let samples_per_metre = edge as f64 / size;
+            let last_sample = (edge - 1) as f64;
+            let (origin_x, origin_y) = (f64::from(region.x) * size, f64::from(region.y) * size);
+            let mut strongest: HashMap<usize, (f64, f64)> = HashMap::new();
+            for cookie in cookies {
+                let (center_x, center_y) =
+                    (f64::from(cookie.center[0]), f64::from(cookie.center[1]));
+                let reach = cookie.reach();
+                let (Some(columns), Some(rows)) = (
+                    sample_span(center_x - origin_x, reach, samples_per_metre, last_sample),
+                    sample_span(
+                        origin_y + size - center_y - size / edge as f64,
+                        reach,
+                        samples_per_metre,
+                        last_sample,
+                    ),
+                ) else {
+                    continue;
+                };
+                for row in rows {
+                    let y = origin_y + (last_sample - row as f64) / samples_per_metre;
+                    for column in columns.clone() {
+                        let x = origin_x + column as f64 / samples_per_metre;
+                        let weight = cookie.weight_at((x - center_x).hypot(y - center_y));
+                        if weight <= 0.0 {
+                            continue;
+                        }
+                        let stamp = (weight, f64::from(cookie.center[2]));
+                        strongest
+                            .entry(row * edge + column)
+                            .and_modify(|best| {
+                                if weight > best.0 {
+                                    *best = stamp;
+                                }
+                            })
+                            .or_insert(stamp);
+                    }
+                }
+            }
+            for (index, (weight, height)) in strongest {
+                let sample = &mut grid.samples[index];
+                let raw = f64::from(*sample);
+                let target = height * HEIGHT_UNITS_PER_METRE;
+                *sample = (raw + weight * (target - raw))
+                    .round()
+                    .clamp(0.0, f64::from(u16::MAX)) as u16;
+            }
+        }
+    }
+}
+
+/// The sample indices within `reach` metres of `local` metres along one axis of a grid; `None`
+/// when no sample is that near.
+fn sample_span(
+    local: f64,
+    reach: f64,
+    samples_per_metre: f64,
+    last_sample: f64,
+) -> Option<std::ops::RangeInclusive<usize>> {
+    let first = ((local - reach) * samples_per_metre).floor();
+    let last = ((local + reach) * samples_per_metre).ceil();
+    (last >= 0.0 && first <= last_sample)
+        .then(|| first.max(0.0) as usize..=last.min(last_sample) as usize)
 }
 
 #[cfg(test)]
@@ -173,6 +297,99 @@ mod tests {
             samples: vec![0; 2],
         };
         assert_eq!(world(Some(grid), true).height_at(ORIGIN_X, 0.0), None);
+    }
+
+    /// A cookie at local (100, 100) of the test region, 10 m high, full to 5 m, none from 25 m.
+    const COOKIE_LOCAL: f32 = 100.0;
+    const COOKIE_HEIGHT: f32 = 10.0;
+    const INNER_RADIUS: f32 = 5.0;
+    const OUTER_RADIUS: f32 = 25.0;
+    /// Halfway between the radii, where the smoothstep gives half the weight.
+    const HALFWAY: f32 = 15.0;
+
+    fn flat_world() -> WorldFile {
+        world(
+            Some(HeightGrid {
+                samples: vec![0; HEIGHTMAP_SIZE * HEIGHTMAP_SIZE],
+            }),
+            true,
+        )
+    }
+
+    fn cookie(offset: f32, height: f32, inner: f32, outer: f32, blend: f32) -> TerrainCookie {
+        TerrainCookie {
+            center: [ORIGIN_X + COOKIE_LOCAL + offset, COOKIE_LOCAL, height],
+            inner_radius: inner,
+            outer_radius: outer,
+            max_height_blend: blend,
+        }
+    }
+
+    fn height_east_of_the_cookie(world: &WorldFile, distance: f32) -> Option<f32> {
+        world.height_at(ORIGIN_X + COOKIE_LOCAL + distance, COOKIE_LOCAL)
+    }
+
+    #[test]
+    fn a_cookie_sets_its_height_inside_and_blends_out_to_its_outer_radius() {
+        let mut world = flat_world();
+        world.stamp_cookies(&[cookie(0.0, COOKIE_HEIGHT, INNER_RADIUS, OUTER_RADIUS, 1.0)]);
+        assert_eq!(height_east_of_the_cookie(&world, 0.0), Some(COOKIE_HEIGHT));
+        assert_eq!(
+            height_east_of_the_cookie(&world, INNER_RADIUS),
+            Some(COOKIE_HEIGHT)
+        );
+        assert_eq!(
+            height_east_of_the_cookie(&world, HALFWAY),
+            Some(COOKIE_HEIGHT / 2.0)
+        );
+        assert_eq!(height_east_of_the_cookie(&world, OUTER_RADIUS), Some(0.0));
+        assert_eq!(world.height_at(ORIGIN_X, 0.0), Some(0.0));
+    }
+
+    #[test]
+    fn the_max_height_blend_scales_the_cookie() {
+        const HALF_BLEND: f32 = 0.5;
+        let mut world = flat_world();
+        world.stamp_cookies(&[cookie(
+            0.0,
+            COOKIE_HEIGHT,
+            INNER_RADIUS,
+            OUTER_RADIUS,
+            HALF_BLEND,
+        )]);
+        assert_eq!(
+            height_east_of_the_cookie(&world, 0.0),
+            Some(COOKIE_HEIGHT * HALF_BLEND)
+        );
+    }
+
+    #[test]
+    fn where_cookies_overlap_the_strongest_sets_the_height() {
+        const SECOND_OFFSET: f32 = 12.0;
+        const SECOND_HEIGHT: f32 = 20.0;
+        const SECOND_OUTER: f32 = 10.0;
+        /// Inside the first cookie's inner radius, near the second one's outer edge.
+        const NEAR_FIRST: f32 = 4.0;
+        let mut world = flat_world();
+        world.stamp_cookies(&[
+            cookie(0.0, COOKIE_HEIGHT, INNER_RADIUS, OUTER_RADIUS, 1.0),
+            cookie(SECOND_OFFSET, SECOND_HEIGHT, 0.0, SECOND_OUTER, 1.0),
+        ]);
+        assert_eq!(
+            height_east_of_the_cookie(&world, SECOND_OFFSET),
+            Some(SECOND_HEIGHT)
+        );
+        assert_eq!(
+            height_east_of_the_cookie(&world, NEAR_FIRST),
+            Some(COOKIE_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn a_level_without_terrain_takes_no_cookies() {
+        let mut world = world(Some(linear_grid()), false);
+        world.stamp_cookies(&[cookie(0.0, COOKIE_HEIGHT, INNER_RADIUS, OUTER_RADIUS, 1.0)]);
+        assert_eq!(world.regions[0].heights, Some(linear_grid()));
     }
 
     #[test]

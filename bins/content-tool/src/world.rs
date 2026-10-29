@@ -13,7 +13,7 @@ use nw_formats::asset_catalog::{ASSET_CATALOG_ENTRY, AssetCatalogError, paths_of
 use nw_formats::azcs::{AzcsError, decode_azcs, is_azcs};
 use nw_formats::heightmap::{HeightmapError, parse_heightmap};
 use nw_formats::objectstream::{Element, ObjectStreamError, lowercase_crc32, parse_object_stream};
-use nw_world::capitals::parse_capitals;
+use nw_world::capitals::parse_capitals_and_cookies;
 use nw_world::height::{VERIFIED_MOUNTAIN_HEIGHTS, rescaled_sample};
 use nw_world::interact_tags::{InteractTagged, TagOwner, interact_tags_of};
 use nw_world::metadata::{MetadataError, MetadataRecords, SkipCounts, read_metadata};
@@ -325,7 +325,8 @@ pub fn parse_region_folder(folder: &str) -> Option<(u32, u32)> {
     Some((x.parse().ok()?, y.parse().ok()?))
 }
 
-/// Builds the world of one level from its files (M1b spec section 6).
+/// Builds the world of one level from its files (M1b spec section 6). The capitals' terrain
+/// cookies are put into the region heights ([`WorldFile::stamp_cookies`]).
 pub fn build_level(
     level: &str,
     files: &LevelFiles,
@@ -375,16 +376,17 @@ pub fn build_level(
         read_metadata_file(level, path, &files[path], &mut records, &mut skipped)?;
     }
     let mut capitals = Vec::new();
+    let mut cookies = Vec::new();
     for (path, bytes) in files
         .iter()
         .filter(|(path, _)| path.ends_with(CAPITALS_EXTENSION))
     {
-        capitals.extend(
-            parse_capitals(bytes).map_err(|source| WorldBuildError::Json {
-                path: entry_path(level, path),
-                source,
-            })?,
-        );
+        let read = parse_capitals_and_cookies(bytes).map_err(|source| WorldBuildError::Json {
+            path: entry_path(level, path),
+            source,
+        })?;
+        capitals.extend(read.capitals);
+        cookies.extend(read.cookies);
     }
     let mut spawners = SliceSpawners::default();
     for (path, bytes) in files
@@ -420,6 +422,7 @@ pub fn build_level(
         spawned,
         ..WorldFile::default()
     };
+    world.stamp_cookies(&cookies);
     world.fill_point_keys();
     Ok((world, skipped))
 }
@@ -1084,6 +1087,23 @@ mod tests {
             Some((f64::from(RAW_HEIGHT) / HEIGHT_UNITS_PER_METRE) as f32)
         );
         assert_eq!(skipped, SkipCounts::default());
+    }
+
+    #[test]
+    fn a_capitals_cookie_sets_the_built_terrain_height() {
+        const COOKIE_CAPITALS: &[u8] = br#"{"Capitals": [{"id": "a",
+            "worldPosition": {"x": 2100, "y": 100, "z": 10}, "rotation": {"x": 0, "y": 0, "z": 0, "w": 1},
+            "cookie": {"innerRadius": 5.0, "outerRadius": 20.0, "maxHeightBlend": 1.0},
+            "sliceName": "<PLOT>", "sliceAssetId": "b"}]}"#;
+        const COOKIE_HEIGHT: f32 = 10.0;
+        let mut files = terrain_level();
+        files.insert(CAPITALS_FILE.to_owned(), COOKIE_CAPITALS.to_vec());
+        let (world, _) = build_level(LEVEL, &files).unwrap();
+        assert_eq!(world.height_at(2100.0, 100.0), Some(COOKIE_HEIGHT));
+        assert_eq!(
+            world.height_at(2050.0, 10.0),
+            Some((f64::from(RAW_HEIGHT) / HEIGHT_UNITS_PER_METRE) as f32)
+        );
     }
 
     #[test]
