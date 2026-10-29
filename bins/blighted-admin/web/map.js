@@ -27,7 +27,9 @@ const WHEEL_STEP = 1.2;
 const BUTTON_STEP = 2;
 /** A fitted box fills this share of the canvas less, so the corner tools cover no land. */
 const FIT_MARGIN = 1.25;
-const PICK_PX = 8;
+const PICK_PX = 12;
+/** A press becomes a drag only past this distance from where it started; less is a click. */
+const DRAG_START_PX = 6;
 const POINT_RADIUS_PX = 4;
 const SPAWN_RADIUS_PX = 3;
 const PATH_WIDTH_PX = 2;
@@ -189,7 +191,7 @@ export class WorldMap {
     new ResizeObserver(() => this.resize()).observe(this.canvas);
     let drag = null;
     this.canvas.addEventListener('pointerdown', (event) => {
-      drag = { x: event.offsetX, y: event.offsetY, moved: false };
+      drag = { startX: event.offsetX, startY: event.offsetY, x: event.offsetX, y: event.offsetY, moved: false };
       this.canvas.setPointerCapture(event.pointerId);
     });
     this.canvas.addEventListener('pointermove', (event) => {
@@ -197,11 +199,12 @@ export class WorldMap {
       if (!drag) {
         return;
       }
+      if (!drag.moved && Math.hypot(event.offsetX - drag.startX, event.offsetY - drag.startY) <= DRAG_START_PX) {
+        return;
+      }
+      drag.moved = true;
       const dx = event.offsetX - drag.x;
       const dy = event.offsetY - drag.y;
-      if (Math.abs(dx) + Math.abs(dy) > 2) {
-        drag.moved = true;
-      }
       this.view = {
         ...this.view,
         centerX: this.view.centerX - dx * this.view.metresPerPixel,
@@ -209,10 +212,8 @@ export class WorldMap {
       };
       drag.x = event.offsetX;
       drag.y = event.offsetY;
-      if (drag.moved) {
-        this.followKey = null;
-        this.fitBox = null;
-      }
+      this.followKey = null;
+      this.fitBox = null;
       this.changed();
     });
     this.canvas.addEventListener('pointerup', (event) => {
