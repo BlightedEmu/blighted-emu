@@ -4,16 +4,25 @@
 //! closes) and `GET /api/live/view` (one view). Without a `[live]` section both are 404.
 
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::get;
 use futures_util::{StreamExt, stream};
+use serde::Deserialize;
 use tokio::time::MissedTickBehavior;
 
+use crate::live::state::RENDER_RADIUS_M;
 use crate::live::{Live, lock};
 use crate::server::AppState;
+
+/// Query parameters of the stream and one-view routes.
+#[derive(Debug, Default, Deserialize)]
+pub struct StreamParams {
+    /// When set, the player's render-radius square filters the view.
+    pub focus: Option<u64>,
+}
 
 /// The server-sent events route.
 pub const STREAM_ROUTE: &str = "/api/live/stream";
@@ -41,14 +50,19 @@ async fn script_log(State(state): State<AppState>) -> Response {
     }
 }
 
-async fn one_view(State(state): State<AppState>) -> Response {
+async fn one_view(State(state): State<AppState>, Query(params): Query<StreamParams>) -> Response {
     match &state.live {
-        Some(live) => Json(lock(&live.state).view()).into_response(),
+        Some(live) => {
+            Json(lock(&live.state).view_focused(params.focus, RENDER_RADIUS_M)).into_response()
+        }
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 
-async fn stream_views(State(state): State<AppState>) -> Response {
+async fn stream_views(
+    State(state): State<AppState>,
+    Query(params): Query<StreamParams>,
+) -> Response {
     let Some(Live {
         state,
         state_interval,
@@ -58,14 +72,18 @@ async fn stream_views(State(state): State<AppState>) -> Response {
     else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    let focus = params.focus;
     let mut timer = tokio::time::interval(state_interval);
     timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let events = stream::unfold((timer, state), |(mut timer, state)| async move {
-        timer.tick().await;
-        let view = lock(&state).view();
-        let event = Event::default().event(STATE_EVENT).json_data(view);
-        Some((event, (timer, state)))
-    });
+    let events = stream::unfold(
+        (timer, state, focus),
+        |(mut timer, state, focus)| async move {
+            timer.tick().await;
+            let view = lock(&state).view_focused(focus, RENDER_RADIUS_M);
+            let event = Event::default().event(STATE_EVENT).json_data(view);
+            Some((event, (timer, state, focus)))
+        },
+    );
     let closed = async move {
         if closing.wait_for(|closing| *closing).await.is_err() {
             // Nobody can close the server any more: the stream runs until the page leaves.

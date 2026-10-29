@@ -39,6 +39,9 @@ const INDEX: &str = "index.html";
 const LIVE_PAGE: &str = "live.html";
 /// The live page.
 pub const LIVE_PAGE_ROUTE: &str = "/live";
+const LIVE3D_PAGE: &str = "live3d.html";
+/// The live 3D map page.
+pub const LIVE3D_PAGE_ROUTE: &str = "/live3d";
 const STUDIO_PAGE: &str = "studio.html";
 const LOGIN_PAGE: &str = "login.html";
 const GM_PAGE: &str = "gm.html";
@@ -127,6 +130,10 @@ pub fn router(state: AppState) -> Router {
             get(|| web_file(UrlPath(LIVE_PAGE.to_owned()))),
         )
         .route(
+            LIVE3D_PAGE_ROUTE,
+            get(|| web_file(UrlPath(LIVE3D_PAGE.to_owned()))),
+        )
+        .route(
             STUDIO_PAGE_ROUTE,
             get(|| web_file(UrlPath(STUDIO_PAGE.to_owned()))),
         )
@@ -153,6 +160,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/world/relief/{level}/{row}/{column}", get(relief))
         .route("/api/world/spawns", get(spawns))
         .route(HEIGHT_ROUTE, get(ground_height))
+        .route(HEIGHT_GRID_ROUTE, get(height_grid))
         .route("/api/captures/sessions", get(sessions))
         .route("/api/captures/types/{idx}", get(type_label))
         .merge(capture_routes())
@@ -216,6 +224,16 @@ async fn relief(
 /// Ground height at `?x=&y=` (metres): `{ "z": metres }`, `null` off the terrain.
 pub const HEIGHT_ROUTE: &str = "/api/world/height";
 
+/// Ground heights on a square grid at `?x=&y=&half=&step=` (metres): `{ x0, y0, step, size,
+/// heights: [[z|null; size]; size] }`. A size over [`HEIGHT_GRID_MAX_SIZE`], a step under
+/// [`HEIGHT_GRID_MIN_STEP_M`], a non-positive `half` or `step`, or an edge that is not finite
+/// gets a 400.
+pub const HEIGHT_GRID_ROUTE: &str = "/api/world/height-grid";
+/// Most grid cells per side: a 512 x 512 grid at 4 bytes a cell is a 1 MiB payload at most.
+pub const HEIGHT_GRID_MAX_SIZE: u32 = 512;
+/// Smallest step between two height samples, in metres.
+pub const HEIGHT_GRID_MIN_STEP_M: f32 = 0.5;
+
 #[derive(Debug, Deserialize)]
 struct HeightParams {
     x: f32,
@@ -230,6 +248,73 @@ struct HeightView {
 async fn ground_height(State(state): State<AppState>, Query(at): Query<HeightParams>) -> Response {
     Json(HeightView {
         z: state.world.get().ground_height(at.x, at.y),
+    })
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct HeightGridParams {
+    x: f32,
+    y: f32,
+    half: f32,
+    step: f32,
+}
+
+#[derive(Debug, Serialize)]
+struct HeightGridView {
+    x0: f32,
+    y0: f32,
+    step: f32,
+    size: u32,
+    heights: Vec<Vec<Option<f32>>>,
+}
+
+async fn height_grid(
+    State(state): State<AppState>,
+    Query(params): Query<HeightGridParams>,
+) -> Response {
+    let edges = [params.x, params.y, params.half, params.step];
+    if !edges.iter().all(|edge| edge.is_finite()) {
+        return (StatusCode::BAD_REQUEST, "edges must be finite").into_response();
+    }
+    if params.half <= 0.0 || params.step <= 0.0 {
+        return (StatusCode::BAD_REQUEST, "half and step must be positive").into_response();
+    }
+    if params.step < HEIGHT_GRID_MIN_STEP_M {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("step must be at least {HEIGHT_GRID_MIN_STEP_M} metres"),
+        )
+            .into_response();
+    }
+    let samples_per_side = ((params.half * 2.0) / params.step).floor() as u32 + 1;
+    if samples_per_side > HEIGHT_GRID_MAX_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            format!("grid side must be at most {HEIGHT_GRID_MAX_SIZE}"),
+        )
+            .into_response();
+    }
+    let world = state.world.get();
+    let x0 = params.x - params.half;
+    let y0 = params.y - params.half;
+    let heights: Vec<Vec<Option<f32>>> = (0..samples_per_side)
+        .map(|row| {
+            (0..samples_per_side)
+                .map(|column| {
+                    let sx = x0 + (column as f32) * params.step;
+                    let sy = y0 + (row as f32) * params.step;
+                    world.ground_height(sx, sy)
+                })
+                .collect()
+        })
+        .collect();
+    Json(HeightGridView {
+        x0,
+        y0,
+        step: params.step,
+        size: samples_per_side,
+        heights,
     })
     .into_response()
 }

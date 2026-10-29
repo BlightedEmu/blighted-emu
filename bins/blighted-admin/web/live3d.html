@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live 3D · Blighted Emu</title>
+  <link rel="stylesheet" href="/web/style.css">
+  <script src="/web/theme.js"></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/web/three.module.min.js",
+        "three/addons/controls/OrbitControls.js": "/web/OrbitControls.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <nav class="rail" aria-label="Pages">
+    <a href="/">Home</a>
+    <a href="/live">Live</a>
+    <a href="/live3d" aria-current="page">Live 3D</a>
+    <a href="/studio">Studio</a>
+    <a href="/records">Records</a>
+    <a href="/scripts">Scripts</a>
+    <a href="/todo">To-do</a>
+    <a href="/gm">GM</a>
+    <a href="/web/map.html">Map</a>
+    <a href="/web/captures.html">Captures</a>
+    <button type="button" class="theme" id="theme"></button>
+  </nav>
+  <main class="work">
+    <header class="masthead">
+      <h1>Blighted Emu <span>· Live 3D</span></h1>
+      <div class="end">
+        <label for="player">Player</label>
+        <select id="player" aria-label="Player"></select>
+        <span class="status" id="status" role="status"></span>
+      </div>
+    </header>
+    <section class="chart" aria-label="Live 3D view">
+      <canvas id="scene" class="map"></canvas>
+    </section>
+    <p class="muted">
+      Mouse: drag to orbit, wheel to zoom.
+      Keys: <kbd>R</kbd> re-centres on the player.
+      Capsules: red = mob, blue = player, grey = bot. Lines: attacker → target.
+    </p>
+  </main>
+  <script type="module" src="/web/live3d.js"></script>
+</body>
+</html>

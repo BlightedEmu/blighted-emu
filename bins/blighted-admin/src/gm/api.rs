@@ -1109,6 +1109,9 @@ mod tests {
             z: 3.0,
             dead: false,
             frozen: false,
+            health: 0,
+            max_health: 0,
+            target_entity: None,
         }
     }
 
@@ -1129,6 +1132,7 @@ mod tests {
                     state: 1,
                     health: 1,
                     max_health: 1,
+                    target_entity: None,
                 }],
                 mob_counts: None,
             });

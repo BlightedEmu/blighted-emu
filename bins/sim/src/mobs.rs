@@ -1524,6 +1524,7 @@ impl Mobs {
                     state: state_index(state),
                     health: mob.health.current(),
                     max_health: mob.health.max(),
+                    target_entity: mob.target(),
                 }
             })
             .collect();

@@ -1975,6 +1975,9 @@ impl SimWorld {
                     z: at.z,
                     dead: vitals.health.is_dead(),
                     frozen: player.frozen,
+                    health: vitals.health.current(),
+                    max_health: vitals.health.max(),
+                    target_entity: None,
                 }
             })
             .collect();
@@ -3185,7 +3188,7 @@ impl SimWorld {
         match &message {
             ClientFacetMsg::CancelInteraction { interaction, .. } => {
                 self.interaction_ended(entity, *interaction, now_ms);
-                self.cancel_gather(entity, *interaction);
+                self.cancel_gather(entity, *interaction, now_ms);
                 self.give_weapon_back(entity, Stow::Gather, now_ms);
                 self.close_container(entity);
                 return Ok(());

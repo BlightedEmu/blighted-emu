@@ -56,6 +56,10 @@ pub fn asset(name: &str) -> Option<Asset> {
         "todo-model.js" => (JS, include_str!("../web/todo-model.js")),
         "captures.html" => (HTML, include_str!("../web/captures.html")),
         "captures.js" => (JS, include_str!("../web/captures.js")),
+        "live3d.html" => (HTML, include_str!("../web/live3d.html")),
+        "live3d.js" => (JS, include_str!("../web/live3d.js")),
+        "three.module.min.js" => (JS, include_str!("../web/vendor/three/three.module.min.js")),
+        "OrbitControls.js" => (JS, include_str!("../web/vendor/three/OrbitControls.js")),
         _ => return None,
     };
     Some(Asset { content_type, body })

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::id::BusId;
 
 /// Most players and mobs together in one part: a full part stays well below one bus message.
-pub const SNAPSHOT_PART_ENTITIES: usize = 20_000;
+pub const SNAPSHOT_PART_ENTITIES: usize = 15_000;
 /// Mob states, in `MobState` order: asleep, idle, chase, attack, return, dead.
 pub const MOB_STATES: usize = 6;
 
@@ -28,6 +28,12 @@ pub struct SnapPlayer {
     pub dead: bool,
     /// The player is frozen for a handoff.
     pub frozen: bool,
+    /// Current health.
+    pub health: u32,
+    /// Max health.
+    pub max_health: u32,
+    /// The entity number the player is attacking, when in a fight.
+    pub target_entity: Option<u64>,
 }
 
 /// One awake mob of a snapshot.
@@ -45,6 +51,8 @@ pub struct SnapMob {
     pub health: u32,
     /// Max health.
     pub max_health: u32,
+    /// The entity number the mob is attacking, when in a fight.
+    pub target_entity: Option<u64>,
 }
 
 /// One part of a sim's snapshot.
@@ -122,6 +130,9 @@ mod tests {
             z: f32::MAX,
             dead: true,
             frozen: true,
+            health: u32::MAX,
+            max_health: u32::MAX,
+            target_entity: Some(u64::MAX),
         }
     }
 
@@ -133,13 +144,16 @@ mod tests {
             state: u8::MAX,
             health: u32::MAX,
             max_health: u32::MAX,
+            target_entity: Some(u64::MAX),
         }
     }
 
     #[test]
     fn snapshot_parts_cut_at_the_limit() {
-        let players = (0..25_000).map(player).collect();
-        let mobs = (0..20_000).map(mob).collect();
+        let total_players = SNAPSHOT_PART_ENTITIES + SNAPSHOT_PART_ENTITIES / 2;
+        let total_mobs = SNAPSHOT_PART_ENTITIES + SNAPSHOT_PART_ENTITIES / 2;
+        let players = (0..total_players as u64).map(player).collect();
+        let mobs = (0..total_mobs as u64).map(mob).collect();
         let parts = snapshot_parts(sim(), TIME_MS, players, mobs, COUNTS);
         assert_eq!(parts.len(), 3);
         assert!(
@@ -154,9 +168,15 @@ mod tests {
         assert_eq!(parts[0].players.len(), SNAPSHOT_PART_ENTITIES);
         assert_eq!(
             (parts[1].players.len(), parts[1].awake_mobs.len()),
-            (5_000, 15_000)
+            (
+                total_players - SNAPSHOT_PART_ENTITIES,
+                SNAPSHOT_PART_ENTITIES - (total_players - SNAPSHOT_PART_ENTITIES)
+            )
         );
-        assert_eq!(parts[2].awake_mobs.len(), 5_000);
+        assert_eq!(
+            parts[2].awake_mobs.len(),
+            total_mobs - (SNAPSHOT_PART_ENTITIES - (total_players - SNAPSHOT_PART_ENTITIES))
+        );
         assert_eq!(parts[0].mob_counts, Some(COUNTS));
         assert!(parts[1..].iter().all(|part| part.mob_counts.is_none()));
     }

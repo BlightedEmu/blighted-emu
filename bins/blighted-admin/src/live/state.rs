@@ -107,6 +107,12 @@ pub struct PlayerView {
     pub dead: bool,
     /// Frozen for a handoff.
     pub frozen: bool,
+    /// Current health.
+    pub health: u32,
+    /// Max health.
+    pub max_health: u32,
+    /// The entity number the player is attacking, when in a fight.
+    pub target_entity: Option<u64>,
 }
 
 /// One awake mob of a shown snapshot.
@@ -126,6 +132,8 @@ pub struct MobView {
     pub health: u32,
     /// Max health.
     pub max_health: u32,
+    /// The entity number the mob is attacking, when in a fight.
+    pub target_entity: Option<u64>,
 }
 
 /// One event.
@@ -512,6 +520,9 @@ impl LiveState {
                         z: player.z,
                         dead: player.dead,
                         frozen: player.frozen,
+                        health: player.health,
+                        max_health: player.max_health,
+                        target_entity: player.target_entity,
                     })
                 })
                 .collect(),
@@ -527,6 +538,7 @@ impl LiveState {
                         state: mob.state,
                         health: mob.health,
                         max_health: mob.max_health,
+                        target_entity: mob.target_entity,
                     })
                 })
                 .collect(),
@@ -534,6 +546,38 @@ impl LiveState {
             tick_budget_ms: ONE_TICK_SECONDS * MS_PER_SECOND,
         }
     }
+
+    /// The view for the page, with players and mobs filtered to those inside `radius_m` of the
+    /// `focus` player. `None` focus returns the unfiltered view. A `focus` id that is not a known
+    /// player returns a view with empty `players` and `mobs` and every other field unchanged.
+    pub fn view_focused(&self, focus: Option<u64>, radius_m: f32) -> LiveView {
+        let mut view = self.view();
+        let Some(focus) = focus else {
+            return view;
+        };
+        let Some([cx, cy, _cz]) = self.player_position(focus) else {
+            view.players.clear();
+            view.mobs.clear();
+            return view;
+        };
+        let radius_sq = radius_m * radius_m;
+        view.players
+            .retain(|p| squared_horizontal_distance(cx, cy, p.x, p.y) <= radius_sq);
+        view.mobs
+            .retain(|m| squared_horizontal_distance(cx, cy, m.x, m.y) <= radius_sq);
+        view
+    }
+}
+
+/// The sim's render radius in metres: how far around a player other players and mobs show on
+/// the live 3D view. Matches the retail client's awareness radius for players and mobs.
+pub const RENDER_RADIUS_M: f32 = 150.0;
+
+/// The squared horizontal distance between two points, in square metres.
+fn squared_horizontal_distance(x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    let dx = x1 - x2;
+    let dy = y1 - y2;
+    dx * dx + dy * dy
 }
 
 /// The average and the 99th percentile tick time of a scrape change, in milliseconds; `None`
@@ -607,6 +651,9 @@ mod tests {
             z: 3.0,
             dead: false,
             frozen: false,
+            health: 0,
+            max_health: 0,
+            target_entity: None,
         }
     }
 
@@ -618,6 +665,7 @@ mod tests {
             state: 2,
             health: 10,
             max_health: 20,
+            target_entity: None,
         }
     }
 
