@@ -49,6 +49,8 @@ pub const MESSAGE_RESERVED: [u8; MESSAGE_RESERVED_LEN] = [0; MESSAGE_RESERVED_LE
 const MESSAGE_RESERVED_LEN: usize = 5;
 /// `trailer` of every retail chat message (726 of 726).
 pub const MESSAGE_TRAILER: u8 = 3;
+/// `platform` of the retail system line (the 1886 of a war declaration).
+pub const SYSTEM_LINE_PLATFORM: u32 = 1;
 /// `duration` of every retail 1866 and 1629 (15 of 15): no end.
 pub const MUTE_FOREVER: u32 = u32::MAX;
 /// Bytes of one item link (all 8 retail links, in 4 messages).
@@ -197,6 +199,26 @@ pub struct ChatMessage {
 }
 
 impl ChatMessage {
+    /// A server line on `channel` with no sender, laid out as the retail system line (the 1886
+    /// of a war declaration).
+    pub fn system(channel: ChatChannel, body: String) -> Self {
+        Self {
+            sender_id: String::new(),
+            sender_name: String::new(),
+            sender_kind: SENDER_KIND,
+            recipient_name: String::new(),
+            channel: channel.wire(),
+            body,
+            filtered_body: String::new(),
+            reserved: MESSAGE_RESERVED,
+            links: Vec::new(),
+            platform: SYSTEM_LINE_PLATFORM,
+            platform_id: String::new(),
+            flag: false,
+            trailer: MESSAGE_TRAILER,
+        }
+    }
+
     pub(crate) fn read(reader: &mut Reader<'_>) -> Result<Self, MessageError> {
         Ok(Self {
             sender_id: read_text(reader)?,
@@ -649,5 +671,9 @@ mod tests {
         assert!(!message.flag);
         assert_eq!(parameters.len(), 3);
         assert_eq!(parameters[1], (0xf951_eee8, "@WeaversFen".to_owned()));
+        assert_eq!(
+            message,
+            ChatMessage::system(ChatChannel::War, message.body.clone())
+        );
     }
 }

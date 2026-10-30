@@ -77,7 +77,8 @@ use crate::stats::stat_updates;
 use crate::world::economy::{EconomyResult, run_job};
 use crate::world::send_now;
 use crate::world::{
-    Departure, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
+    Departure, GmChat, HandoffEnd, HandoffStart, MoveError, Outgoing, SimWorld, WorldSettings,
+    answer_lines,
 };
 use nw_world::script::LevelDesign;
 
@@ -832,12 +833,24 @@ impl Loop {
                 }
             }
             Some(index) if SocialCall::is_call(index) => {
-                if let Some(character) = self.world.character_of(connection) {
-                    self.pending_social.push(SocialInput::Call {
-                        character,
-                        type_index: index,
-                        body: envelope.body.clone(),
-                    });
+                match self
+                    .world
+                    .gm_chat(connection, index, &envelope.body, self.now_ms())
+                {
+                    Some(GmChat::Answered) => {}
+                    Some(GmChat::Kick(entity)) => {
+                        let reply = self.kick(entity);
+                        self.world.answer_gm_chat(connection, answer_lines(reply));
+                    }
+                    None => {
+                        if let Some(character) = self.world.character_of(connection) {
+                            self.pending_social.push(SocialInput::Call {
+                                character,
+                                type_index: index,
+                                body: envelope.body.clone(),
+                            });
+                        }
+                    }
                 }
             }
             Some(index) if let Some(call) = GameModeClientMsg::decode(index, &envelope.body) => {

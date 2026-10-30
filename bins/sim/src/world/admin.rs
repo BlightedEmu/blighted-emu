@@ -29,7 +29,12 @@ impl SimWorld {
     /// Carries out `command` at `now_ms`. A target this sim does not own gives
     /// [`AdminReply::NotMine`]. `Kick` is the server's: here it is refused.
     pub fn admin(&mut self, command: &AdminCommand, now_ms: u64) -> AdminReply {
-        match &command.action {
+        self.admin_action(&command.action, now_ms)
+    }
+
+    /// Carries out `action` at `now_ms`, as [`SimWorld::admin`].
+    pub(super) fn admin_action(&mut self, action: &AdminAction, now_ms: u64) -> AdminReply {
+        match action {
             AdminAction::TeleportPlayer { entity, to } => {
                 self.teleport_player(*entity, *to, now_ms)
             }

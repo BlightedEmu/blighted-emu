@@ -73,6 +73,7 @@ mod fishing;
 mod game_mode;
 mod gathering;
 mod gear;
+mod gm_chat;
 mod gm_client;
 mod hit_shape;
 pub(crate) mod instances;
@@ -140,6 +141,7 @@ use statics::{
 };
 
 pub use attack::{AttackKeys, INPUT_RECORD_MS, KeyAttack};
+pub use gm_chat::{GmChat, answer_lines};
 
 use attack::{PendingMobSwing, PlayerSwing, Vitals};
 

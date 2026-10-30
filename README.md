@@ -413,9 +413,32 @@ blighted-admin revoke-rank ada
 
 Five wrong passwords in 10 minutes lock a name for 15 minutes. The session cookie is `HttpOnly`, `Secure` and `SameSite=Strict`, and lasts 12 hours. In server mode the design routes (Check, Apply) and bot batches are refused: design work happens on a team member's own PC and reaches the server through git.
 
-GM commands go to the sim that owns the target, found from the sim snapshots and the cell table, and wait up to 5 s for its answer. Every command (and every login) writes a row to the audit log. On the live page, select a player or bot for: **Teleport** to a point or to another player, **Heal**, **Kill**, **God on/off**, **Kick**, **Give/Take** an item, **Set level** and **Give XP**, **Weapon mastery** (set the rank of one weapon or of all, or give one weapon mastery experience; levels and ranks are the ones the game shows), and **Set coins**. Experience and coins are saved with the progression (world migration 0006), weapon masteries too (0007), and the attribute and weapon points a player spends in the game (0008). The **GM mobs** form spawns up to 50 mobs of a vitals id at a point (right-click the map to fill x and y); they stay awake and respawn until a GM despawns them. The GM page (`/gm`) shows the audit log (a head admin sees all rows, others their own), bans and unbans by login name, and, for head admins, the ranks. Kick needs the CSR rank, rank changes the head admin rank, everything else the game master rank. There is no chat command or mute command in the admin tools yet.
+GM commands go to the sim that owns the target, found from the sim snapshots and the cell table, and wait up to 5 s for its answer. Every command (and every login) writes a row to the audit log. On the live page, select a player or bot for: **Teleport** to a point or to another player, **Heal**, **Kill**, **God on/off**, **Kick**, **Give/Take** an item, **Set level** and **Give XP**, **Weapon mastery** (set the rank of one weapon or of all, or give one weapon mastery experience; levels and ranks are the ones the game shows), and **Set coins**. Experience and coins are saved with the progression (world migration 0006), weapon masteries too (0007), and the attribute and weapon points a player spends in the game (0008). The **GM mobs** form spawns up to 50 mobs of a vitals id at a point (right-click the map to fill x and y); they stay awake and respawn until a GM despawns them. The GM page (`/gm`) shows the audit log (a head admin sees all rows, others their own), bans and unbans by login name, and, for head admins, the ranks. Kick needs the CSR rank, rank changes the head admin rank, everything else the game master rank. The admin tools have no mute command yet.
 
 **GM mode in the game client.** An account with the `game_master` rank (or higher) gets the client's own GM mode at login: `world-director` reads the rank from the `[global_database]` of `config/world-director.toml` (leave the section out to give no account GM rights), and `rep-gateway` sets flag byte 1 of the registration response. With `r_DisplayInfo 1` the client shows "GM Client Enabled". The sim then takes the client's GM calls (set level, set coins, change or set a weapon mastery rank, debug teleport) from that account only, and logs and refuses them from every other account. See `docs/re/2026-09-18-progression-and-gm-mode.md`.
+
+**GM chat commands.** The client has no menu or console command for its GM calls, so a game master types commands in chat instead. A line that starts with `!`, on any channel, from an account with the `game_master` rank (or higher) goes to the sim and never reaches the other players. The sim runs it as the admin action of the same name and answers in the System channel, seen only by the sender. From an account without the rank, the line is ordinary chat. A command acts on the sender, or on the player named by one more word at the end (only a player on the same sim). Levels and ranks are the ones the game shows; coins are the raw number, as on the live page. Mastery ids are `CategoricalProgressionData` ids such as `GreatSwordAbilityTable`.
+
+| Command | What it does |
+|---|---|
+| `!help` | Lists the commands |
+| `!where [player]` | Says x, y and z |
+| `!level <level> [player]` | Sets the level |
+| `!xp <amount> [player]` | Gives experience |
+| `!coins <amount> [player]` | Sets the coins |
+| `!mastery <mastery id\|all> <rank> [player]` | Sets the rank of one weapon mastery, or of all of them |
+| `!masteryxp <mastery id> <amount> [player]` | Gives weapon mastery experience |
+| `!heal [player]` / `!kill [player]` | Fills or takes all health (heal also revives) |
+| `!god <on\|off> [player]` | Turns damage off or on |
+| `!kick <player>` | Saves the player and closes its connection |
+| `!give <item id> <quantity> [player]` / `!take <item id> [player]` | Puts items in the bag, or takes every stack of one item |
+| `!quest <objective id> [player]` | Starts a quest |
+| `!tp <x> <y> <z> [player]` / `!tp <player>` | Teleports to a point, or the sender to a player |
+| `!spawn <vitals id> <level> <count>` | Spawns GM mobs around the sender (at most 50) |
+| `!despawn` | Removes every GM mob of the sim |
+| `!event <start\|stop> <event id>` / `!events` | Starts an event at the sender, stops one, or lists the running ones |
+
+Chat commands skip the admin site's audit log. The sim logs each line and its answer (`GM chat command`, `GM chat answer`).
 
 `LIVE_STACK_INSTANCE=2 just live` starts a second test world next to the first: every port moves up by 100 (admin on 9280), with its own world id and bot names.
 
