@@ -98,7 +98,7 @@
 <body>
 <main>
   <h1>Blighted New World Emulator: Progress</h1>
-  <p class="sub">Status on 2026-10-29. Client build 25810808. Last commit <code>c3145c83</code>.</p>
+  <p class="sub">Status on 2026-10-29. Client build 25810808. Last commit <code>bb1c164e</code>.</p>
 
   <div class="cards" id="summary"></div>
 
@@ -121,6 +121,8 @@
 
   <h2>What to do next (in order)</h2>
   <ol class="next">
+    <li><strong>Live check of the GM chat commands.</strong>
+      <div class="why">Give your account the <code>game_master</code> rank, log in, and type <code>!help</code>, <code>!level 60</code>, <code>!coins 1000</code> and <code>!where</code> in chat. The answer comes as a System chat line that only you see. If the client does not show it, move the answer to the whisper channel. The command list is in the README under "GM chat commands".</div></li>
     <li><strong>Check the target lock pick on retail.</strong>
       <div class="why">On our server the first lock takes the nearest mob inside a small circle around the crosshair, not the mob under the crosshair. The client code works that way (<code>FUN_142c8b350</code>), so it is likely normal. To check on retail: stand near 2 mobs close together, aim at the farther one, lock. Also check: after a reconnect, does lock still work (flag 4, weapon swap range 0 were seen after gdb reconnects)? Notes: <code>local-data/findings/2026-10-01-client-lock-and-actor-state-map.md</code>.</div></li>
     <li><strong>Record retail captures of the systems that have none.</strong>
@@ -229,7 +231,7 @@ const AREAS = [
       ["Gateway and registration (M3)", 100, "live", "DTLS and registration with the real client.", "Nothing."],
       ["Many sims and handoff (M5)", 90, "bots", "1,000 bots cross cell borders.", "Real clients crossing cell borders: Unknown."],
       ["Database saves", 80, "tests", "Accounts, characters, items, progression, quests, notifications.", "Saves of the systems below that are not done."],
-      ["Admin tools", 85, "tests", "Live panel, studio, GM commands, drop simulator, script editor.", "Pages for systems that are not done."],
+      ["Admin tools", 85, "tests", "Live panel, studio, GM commands, drop simulator, script editor. GM chat commands in the game (<code>!help</code>).", "Pages for systems that are not done. GM chat commands: not checked live; whether the client shows our System chat line is Unknown."],
       ["Server status page", 10, "code", "The admin live panel reads the metrics of every server (admins only).", "A public page: players online per world, round trip time per player, healthy or unhealthy (over 2000 ms or a server part that does not answer). Same checks as the client's canary metrics (docs/re/2026-10-02-client-metrics-and-canary.md)."],
     ],
   },
