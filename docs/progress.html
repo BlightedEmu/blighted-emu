@@ -98,7 +98,7 @@
 <body>
 <main>
   <h1>Blighted New World Emulator: Progress</h1>
-  <p class="sub">Status on 2026-10-29. Client build 25810808. Last commit <code>bb1c164e</code>.</p>
+  <p class="sub">Status on 2026-10-30. Client build 25810808. Last commit <code>4ea518d8</code>.</p>
 
   <div class="cards" id="summary"></div>
 
@@ -134,7 +134,7 @@
     <li><strong>Live check of the beach play test 2 fixes (not committed).</strong>
       <div class="why">Fixed from the 2026-10-29 play test: the "Crafting attempt failed" message (a craft now marks its used and made bag stacks with retail's reasons 2 and 3); food from the quick slot gives its buff; the watchtower crate gives loot (a cancel at the gather's end no longer stops it); growths get retail's break gather state (explosion still to see); mobs no longer walk into walls or climb more than 0.6 m in a step. Not bugs: crewmate loot (about 1 kill in 25, as retail); a config multiplier now scales it (<code>[combat] loot_drop_multiplier</code>, 1.0 = retail). Live test 3: crafting no longer fails over and over (retail keeps the station after the client's craft cancel). Live test 4: the skinning knife crafts with no error message (verified). Ground: the level's terrain cookies (height stamps the client puts on its terrain) are now in our terrain, so La Roussette, the Satisfaction wreck and Janszoon's spot match retail (retail player feet on our ground: 62 % to 83 % at La Roussette). Still open: hits from behind (our reach matches retail; what the client draws is Unknown), the road float on the way to Hapless Howe, the skip potions (no retail capture). Notes: <code>local-data/findings/2026-10-03-beach-playtest-notes.md</code>.</div></li>
     <li><strong>Close the new player bugs (tutorial and starting beach).</strong>
-      <div class="why">Every new player goes through both. The tutorial is the <code>ftue_v2</code> level (ship, quick time event, sailors, legionnaires, corruption, Damned Commander). The starting beach is open world. Open on the beach (play test 2026-10-01, 18 issues): player hits that miss (boars, Janszoon, mariners), bosses whose melee does no damage, mobs that swing from 3 to 4.5 m, mobs sunk in the ground or stuck in walls (Janszoon, the cave), a mob back to full health, debuffs shown as 10,957 days, no food buff, no fall damage, the watchtower crate gives nothing, growths with no break effect, deck boars not asleep, Janszoon anchor toss. Level not yet checked: temple door wall.</div></li>
+      <div class="why">Every new player goes through both. The tutorial is the <code>ftue_v2</code> level (ship, quick time event, sailors, legionnaires, corruption, Damned Commander). The starting beach is open world. Open on the beach (play test 2026-10-01, 18 issues): player hits that miss (boars, Janszoon, mariners), bosses whose melee does no damage, mobs that swing from 3 to 4.5 m, mobs sunk in the ground or stuck in walls (Janszoon, the cave), a mob back to full health, debuffs shown as 10,957 days, no food buff, no fall damage, the watchtower crate gives nothing, growths with no break effect, deck boars not asleep. Level not yet checked: temple door wall.</div></li>
     <li><strong>Make own movement match retail (to-do <code>t1</code>).</strong>
       <div class="why">The server body is still off from the client: median 0.156 m in the open world, 0.219 m in the tutorial. Small drifts cause missed hits and bad walls.</div></li>
     <li><strong>Make the first open world hours work.</strong>
@@ -157,12 +157,14 @@
 
   <h2>Done list</h2>
   <ul class="done">
-    <li>✅ Mobs walk home after a lost fight on slopes: a distance check beyond its height limit now counts as far (Janszoon stood 37 m out, 2.3 m below his spawn) (not committed, 2026-10-29).</li>
-    <li>✅ Mob lunges follow the ground; mobs far from home stay awake and their trees leash them home (DoesLeash) (not committed, 2026-10-29).</li>
-    <li>✅ Janszoon fights: his tree gets its difficulty tier from his slice, and mob attacks take their hits from the weapon's animation database when the body's has none (450 creatures carry one) (not committed, 2026-10-29).</li>
+    <li>✅ Janszoon throws his anchor: his missing tree is built from the great axeman's tree and the undead officer's toss (6 to 10 m, 6 to 9 s cooldown; Inferred from the retail throw at 8.7 m); the toss hits with his table's <code>Anchor_Toss_Windup</code> row (<code>4ea518d8</code>, 2026-10-30).</li>
+    <li>✅ Janszoon aggro and leash tests on the real beach ground: he aggroes on a player in his face and keeps a player 10 m away; the sim logs each mob target change (<code>7e2193e1</code>, 2026-10-30).</li>
+    <li>✅ Mobs walk home after a lost fight on slopes: a distance check beyond its height limit now counts as far (Janszoon stood 37 m out, 2.3 m below his spawn) (<code>972b150a</code>, 2026-10-29).</li>
+    <li>✅ Mob lunges follow the ground; mobs far from home stay awake and their trees leash them home (DoesLeash) (<code>3f6696dd</code>, 2026-10-29).</li>
+    <li>✅ Janszoon fights: his tree gets its difficulty tier from his slice, and mob attacks take their hits from the weapon's animation database when the body's has none (450 creatures carry one) (<code>d33f65d1</code>, <code>6f76390f</code>, 2026-10-29).</li>
     <li>✅ Crafting: no "Crafting attempt failed" message; verified live on the skinning knife (not committed, 2026-10-29).</li>
-    <li>✅ Mobs walk around a rock or crate that blocks their straight way (Janszoon, Bridget); a target behind one solid counts as reachable (not committed, 2026-10-29).</li>
-    <li>✅ Terrain cookies: the 5,244 height stamps of the open world's capitals are put into our terrain; retail player feet on our ground 586,786 → 615,209 samples in 34 captures (not committed, 2026-10-29).</li>
+    <li>✅ Mobs walk around a rock or crate that blocks their straight way (Janszoon, Bridget); a target behind one solid counts as reachable (<code>6f76390f</code>, 2026-10-29).</li>
+    <li>✅ Terrain cookies: the 5,244 height stamps of the open world's capitals are put into our terrain; retail player feet on our ground 586,786 → 615,209 samples in 34 captures (<code>4c1a219f</code>, 2026-10-29).</li>
     <li>✅ Admin live 3D map: /live3d orbits a selected player, shows terrain and every player and mob inside the 150 m render radius with name, HP and target lines (<code>01bc7e5b</code>, 2026-10-29).</li>
     <li>✅ Admin live 3D map rework: the map is no longer mirrored (north was drawn south), the in-game map picture lies on the ground, the sea shows at its level, mobs stand at their real height (the sim snapshot now sends mob z), markers glide between updates, the camera follows the player and a click follows another player; the Live map takes a click with up to 6 px of hand movement (was 2 px) (not committed, 2026-10-29).</li>
     <li>✅ Records page lists all entries on load and reloads when you change kind (<code>8ff0e1da</code>, 2026-10-29).</li>
@@ -262,7 +264,7 @@ const AREAS = [
     name: "Mobs",
     features: [
       ["Spawns and health", 90, "tests", "99.3% of creature records explained.", "A few odd records."],
-      ["Mob AI", 65, "live", "1,075 behavior trees from Server.pak. Thorpe fight fixed. Mob paths stop at walls and climb at most 0.6 m a step.", "Janszoon tree is a stand-in; he now attacks, his charge follows the slope and he leashes home (live check needed). Anchor toss missing (retail rule Unknown). Terrain cookies now in our ground; mobs walk around rocks and crates."],
+      ["Mob AI", 65, "live", "1,075 behavior trees from Server.pak. Thorpe fight fixed. Mob paths stop at walls and climb at most 0.6 m a step.", "Janszoon tree is built from held trees; he attacks, throws his anchor at 6 to 10 m (Inferred), his charge follows the slope and he leashes home (live check needed). Terrain cookies now in our ground; mobs walk around rocks and crates."],
       ["Mob animations", 85, "tests", "736 of 747 creature assets.", "11 assets."],
       ["Patrols and waypoints", 70, "tests", "12,858 spawns get waypoint paths.", "Live check."],
       ["Corpses", 85, "tests", "Retail times per creature. Skinned corpses go after 5.5 s.", "Boar times vary in retail."],
