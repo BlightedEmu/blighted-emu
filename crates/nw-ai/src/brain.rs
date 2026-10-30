@@ -1171,9 +1171,13 @@ impl<'a, W: World> Ctx<'a, '_, W> {
     }
 
     /// `DistanceCondition`: the left operand is a position, the right a distance; the distance
-    /// is the horizontal one from the mob, and the height difference minus `VerticalOffset` must
-    /// stay within `VerticalThreshold` (Inferred from the field names; the client logs "Left
-    /// operand cannot resolve to Vector3" and "Right operand cannot resolve to float").
+    /// is the horizontal one from the mob (the client logs "Left operand cannot resolve to
+    /// Vector3" and "Right operand cannot resolve to float"). A point whose height difference
+    /// minus `VerticalOffset` is beyond `VerticalThreshold` is out of reach whatever its
+    /// horizontal distance: a "farther" test (`GreaterThan`, `GreaterThanOrEqual`, `NotEqual`)
+    /// holds for it and a "nearer" one does not (Inferred: `ResetToHome`'s `CheckDistanceLeash`,
+    /// `Spawn_Pos GreaterThan 1.0` with a 2 m threshold, held false for Janszoon 37 m from his
+    /// spawn and 2.3 m below it, so he never walked home, live 2026-10-29).
     fn distance_holds(
         &self,
         group: &ConditionGroup,
@@ -1203,10 +1207,13 @@ impl<'a, W: World> Ctx<'a, '_, W> {
             let dy = f64::from(point[1] - own[1]);
             let rise = f64::from(point[2] - own[2]) - offset;
             let within = threshold.is_none_or(|limit| rise.abs() <= limit);
-            within
-                && condition
+            if within {
+                condition
                     .op
                     .compare(Value::Float(dx.hypot(dy) as f32), right)
+            } else {
+                condition.op.is_farther()
+            }
         };
         if group.any {
             group.conditions.is_empty() || group.conditions.iter().any(check)

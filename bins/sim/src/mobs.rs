@@ -2936,8 +2936,129 @@ mod retail_tests {
             played(&mobs, mob_entity(0), &mut serial, &mut fragments);
         }
         let home = at(&mobs, 0).horizontal_distance(spawn);
-        assert!(farthest > 20.0, "he chased: {farthest}; {fragments:?}");
+        assert!(
+            farthest > 45.0,
+            "he chased past his leash: {farthest}; {fragments:?}"
+        );
         assert!(home < 2.0, "home: {home} m from spawn; {fragments:?}");
+    }
+
+    #[test]
+    fn janszoon_walks_home_after_a_chase_past_his_leash() {
+        // Live 2026-10-29 (run 6): Janszoon chased the running player to 46.8 m from his spawn
+        // (his `CombatLeashDistance` is 45 m), the player got away, and he stood there 5 minutes.
+        const JANSZOON_ID: &str = "Corrupted_Sailor_StarterBeach_Named_00";
+        const JANSZOON: &str = "7214ec6831b058f2a3b60f9b5c285e6c";
+        const AGGRO_MS: u64 = 3_000;
+        /// The player runs away at about the run speed until this time, then is gone.
+        const RUN_UNTIL_MS: u64 = 16_000;
+        const AFTER_MS: u64 = 60_000;
+        const PLAYER_SPEED_MPS: f32 = 4.5;
+        let mut mobs = retail_mobs(
+            vec![spawn_at(SPAWN_X, JANSZOON_ID, TEST_LEVEL)],
+            &[(JANSZOON_ID, asset(JANSZOON))],
+        );
+        let spawn = at(&mobs, 0);
+        let mut farthest: f32 = 0.0;
+        let mut fragments = Vec::new();
+        let mut serial = None;
+        for now in (0..RUN_UNTIL_MS + AFTER_MS).step_by(TICK_MS as usize) {
+            // Seconds of a test run.
+            #[allow(clippy::cast_precision_loss)]
+            let run_s = now.saturating_sub(AGGRO_MS) as f32 / 1_000.0;
+            let player = Seen {
+                entity: PLAYER,
+                position: Position {
+                    x: SPAWN_X + PLAYER_SPEED_MPS * run_s,
+                    y: super::tests::ROW_Y + 2.0,
+                    z: HEIGHT,
+                },
+            };
+            let seen: &[Seen] = if now < RUN_UNTIL_MS { &[player] } else { &[] };
+            mobs.tick(seen, now, &Flat, 1);
+            farthest = farthest.max(at(&mobs, 0).horizontal_distance(spawn));
+            played(&mobs, mob_entity(0), &mut serial, &mut fragments);
+        }
+        let home = at(&mobs, 0).horizontal_distance(spawn);
+        assert!(farthest > 20.0, "he chased: {farthest}; {fragments:?}");
+        assert!(
+            home < 2.0,
+            "home: {home} m from spawn, farthest {farthest}; {fragments:?}"
+        );
+    }
+
+    #[test]
+    fn janszoon_walks_home_over_la_roussette_after_a_chase() {
+        // Live 2026-10-29 (run 6), on the real ground: Janszoon chased the player from his spawn
+        // toward (7086, 3179) and stood where the chase ended: his spawn is 2.3 m above that
+        // place, beyond `ResetToHome`'s 2 m vertical threshold.
+        use nw_sim_core::LevelGround;
+        use nw_world::WorldFile;
+        use nw_world::collision::LevelCollision;
+        use nw_world::collision_index::CollisionIndex;
+        const JANSZOON_ID: &str = "Corrupted_Sailor_StarterBeach_Named_00";
+        const JANSZOON: &str = "7214ec6831b058f2a3b60f9b5c285e6c";
+        const LEVEL: &str = "newworld_vitaeeterna";
+        const SPAWN: [f32; 3] = [7056.03, 3137.94, 41.63];
+        const AWAY: [f32; 2] = [7086.0, 3179.0];
+        const AGGRO_MS: u64 = 3_000;
+        const RUN_UNTIL_MS: u64 = 16_000;
+        const AFTER_MS: u64 = 60_000;
+        const PLAYER_SPEED_MPS: f32 = 4.5;
+        let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
+        let content = repo().join("local-data/content");
+        let world = WorldFile::load(
+            &nw_world::world_file::world_file_path(&content, &build, LEVEL),
+            &build,
+        )
+        .expect("world file");
+        let collision = LevelCollision::load(
+            &content.join(format!("collision-{build}-{LEVEL}.bin")),
+            &build,
+        )
+        .expect("collision file");
+        let index = Arc::new(CollisionIndex::new(LevelCollision {
+            deferred: Vec::new(),
+            ..collision
+        }));
+        let ground = LevelGround::new(Arc::new(world), index);
+        let spawn = VitalsSpawn {
+            vitals_id: lowercase_crc32(JANSZOON_ID),
+            level: TEST_LEVEL,
+            position: SPAWN,
+            ..VitalsSpawn::default()
+        };
+        let mut mobs = retail_mobs(vec![spawn], &[(JANSZOON_ID, asset(JANSZOON))]);
+        let home = at(&mobs, 0);
+        let (dx, dy) = (AWAY[0] - SPAWN[0], AWAY[1] - SPAWN[1]);
+        let length = dx.hypot(dy);
+        let mut farthest: f32 = 0.0;
+        let mut fragments = Vec::new();
+        let mut serial = None;
+        for now in (0..RUN_UNTIL_MS + AFTER_MS).step_by(TICK_MS as usize) {
+            // Seconds of a test run.
+            #[allow(clippy::cast_precision_loss)]
+            let run_m = 2.0 + PLAYER_SPEED_MPS * now.saturating_sub(AGGRO_MS) as f32 / 1_000.0;
+            let (x, y) = (
+                SPAWN[0] + dx / length * run_m,
+                SPAWN[1] + dy / length * run_m,
+            );
+            let z = ground.height_at(x, y).unwrap_or(SPAWN[2]);
+            let player = Seen {
+                entity: PLAYER,
+                position: Position { x, y, z },
+            };
+            let seen: &[Seen] = if now < RUN_UNTIL_MS { &[player] } else { &[] };
+            mobs.tick(seen, now, &ground, 1);
+            farthest = farthest.max(at(&mobs, 0).horizontal_distance(home));
+            played(&mobs, mob_entity(0), &mut serial, &mut fragments);
+        }
+        let back = at(&mobs, 0).horizontal_distance(home);
+        assert!(farthest > 20.0, "he chased: {farthest}; {fragments:?}");
+        assert!(
+            back < 2.0,
+            "home: {back} m from spawn, farthest {farthest}; {fragments:?}"
+        );
     }
 
     /// Run with `cargo test --release -p sim --features local-data hundred_thousand -- --ignored
