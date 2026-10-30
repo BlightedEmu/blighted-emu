@@ -26,6 +26,7 @@ mod own_replay;
 pub mod player_attacks;
 pub mod roads;
 pub mod source;
+pub mod stand_in_trees;
 pub mod water;
 pub mod world;
 

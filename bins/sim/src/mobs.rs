@@ -5,12 +5,12 @@
 //!
 //! Each mob's mind is the game's own (behavior-tree study 2026-09-18):
 //! - a mob whose creature slice names a tree Server.pak has runs that tree
-//!   ([`crate::mob_ai::TreeMind`]);
+//!   ([`crate::mob_ai::TreeMind`]); so does the beach first mate, whose missing tree the AI data
+//!   builds from held trees (`content_tool::stand_in_trees`);
 //! - the three tutorial mobs whose trees Server.pak lacks (FTUE club sailor, FTUE legionnaire,
 //!   tutorial Thorpe; study section 4.1) fight with the paces measured from the retail tutorial
 //!   (`nw_sim_core::ChaseBrain`, set by the tutorial's encounter script);
-//! - any other mob has no tree and no measured script: it stands at its spawn (for example the
-//!   beach first mate, whose `damned_firstmate_2h_anchor_basebehavior` is not in Server.pak).
+//! - any other mob has no tree and no measured script: it stands at its spawn.
 //!
 //! Only awake mobs think. Each tick, the mobs within the wake radius of a player wake; an awake
 //! mob without a target and with no player within the wake radius for the sleep time falls
@@ -3097,19 +3097,25 @@ mod retail_tests {
     }
 
     /// Ticks Janszoon from `from_ms` to `to_ms` with `player` (none when `None`), recording
-    /// the fragments he plays.
+    /// the fragments he plays; the damage rows (table, row) of his hits.
     fn run_janszoon(
         mobs: &mut Mobs,
         ground: &RealGround,
         player: impl Fn(&Mobs) -> Option<Seen>,
         (from_ms, to_ms): (u64, u64),
         trace: &mut (Option<u32>, Vec<String>),
-    ) {
+    ) -> Vec<(String, String)> {
+        let mut rows = Vec::new();
         for now in (from_ms..to_ms).step_by(TICK_MS as usize) {
             let seen: Vec<Seen> = player(mobs).into_iter().collect();
-            mobs.tick(&seen, now, ground, 1);
+            rows.extend(
+                mobs.tick(&seen, now, ground, 1)
+                    .into_iter()
+                    .filter_map(|hit| hit.strike.map(|strike| (strike.table, strike.row))),
+            );
             played(mobs, mob_entity(0), &mut trace.0, &mut trace.1);
         }
+        rows
     }
 
     /// The ambient vision of his slice: a 120 degree cone of 5 m.
@@ -3136,6 +3142,41 @@ mod retail_tests {
                 trace.1
             );
         }
+    }
+
+    #[test]
+    fn janszoon_throws_his_anchor_at_a_player_who_backs_off() {
+        // Retail newchar capture 1246273 ms: Janszoon threw his anchor (`Officer_AnchorToss`)
+        // at the player 8.7 m away; the stand-in tree had none (live 2026-10-30).
+        const TOSS: &str = "Officer_AnchorToss";
+        const RETAIL_TOSS_M: f32 = 8.7;
+        const THROW_WITHIN_MS: u64 = 10_000;
+        let (mut mobs, ground) = janszoon_on_real_ground();
+        let mut trace = (None, Vec::new());
+        let close = in_front_of_janszoon(&mobs, &ground, JANSZOON_IN_FACE_M);
+        run_janszoon(
+            &mut mobs,
+            &ground,
+            |_| Some(close),
+            (0, JANSZOON_AGGRO_MS),
+            &mut trace,
+        );
+        assert_eq!(mobs.target(mob_entity(0)), Some(PLAYER), "{:?}", trace.1);
+        let away = in_front_of_janszoon(&mobs, &ground, RETAIL_TOSS_M);
+        let window = (JANSZOON_AGGRO_MS, JANSZOON_AGGRO_MS + THROW_WITHIN_MS);
+        let rows = run_janszoon(&mut mobs, &ground, |_| Some(away), window, &mut trace);
+        assert!(
+            trace.1.iter().any(|fragment| fragment == TOSS),
+            "{:?}",
+            trace.1
+        );
+        // His own damage table holds the toss's row.
+        assert!(
+            rows.iter()
+                .any(|(table, row)| table == "DamnedFirstMateDamageTable"
+                    && row == "Anchor_Toss_Windup"),
+            "{rows:?}"
+        );
     }
 
     #[test]
