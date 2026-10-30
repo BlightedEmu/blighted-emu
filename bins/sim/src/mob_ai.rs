@@ -938,6 +938,13 @@ impl MindState {
         }
     }
 
+    /// Whether the mob is in a leash reset (it walks home and sees no player).
+    fn resetting(&self, ai: &MobAi) -> bool {
+        self.statuses.iter().any(|status| {
+            Some(*status) == ai.names.reset || Some(*status) == ai.names.reset_no_heal
+        })
+    }
+
     /// Picks the target (the targeting profile's curve formula is Unknown, study section 3.2;
     /// this rule is Inferred): a mob in a leash reset has none (it walks home); a target is kept
     /// while it is within the combat vision distance, and while locked
@@ -952,10 +959,7 @@ impl MindState {
         around: &Surroundings<'_>,
     ) -> Perceived {
         let combat = self.vision(ai, true);
-        let resetting = self.statuses.iter().any(|status| {
-            Some(*status) == ai.names.reset || Some(*status) == ai.names.reset_no_heal
-        });
-        let seen: &[Seen] = if resetting { &[] } else { around.seen };
+        let seen: &[Seen] = if self.resetting(ai) { &[] } else { around.seen };
         let in_combat_range = |player: &Seen| {
             combat.is_none_or(|(_, distance)| player.position.horizontal_distance(at) <= distance)
         };
@@ -1554,6 +1558,8 @@ impl TreeMind {
         let had = self.state.target;
         let passive = self.passive(ai);
         let perceived = self.state.perceive(ai, *at, passive, around);
+        self.log_target_change(ai, had, *at);
+        let perceived_target = self.state.target;
         if had.is_none() {
             thought.acquired = self.state.target;
         }
@@ -1584,6 +1590,7 @@ impl TreeMind {
         self.state.picks = picks;
         thought.ticked = true;
         self.apply(ai, *at, now_ms, out, &mut thought);
+        self.log_target_change(ai, perceived_target, *at);
         let activity = if self.state.target.is_some() {
             Activity::Combat
         } else if self.state.motion.is_some() {
@@ -1593,6 +1600,22 @@ impl TreeMind {
         };
         self.state.next_tick_ms = now_ms + ai.rates.interval_ms(activity, perceived.nearest_m);
         thought
+    }
+
+    /// Logs a change of the target from `from` (the live check of aggro and leash).
+    fn log_target_change(&self, ai: &MobAi, from: Option<u64>, at: Position) {
+        if self.state.target != from {
+            tracing::debug!(
+                archetype = self.state.archetype,
+                from = ?from,
+                to = ?self.state.target,
+                resetting = self.state.resetting(ai),
+                x = at.x,
+                y = at.y,
+                z = at.z,
+                "mob target changed"
+            );
+        }
     }
 
     /// The steering of a navigation config of the archetype, or of the node's own fields.

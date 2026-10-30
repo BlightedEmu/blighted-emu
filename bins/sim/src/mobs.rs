@@ -2987,11 +2987,14 @@ mod retail_tests {
         );
     }
 
-    #[test]
-    fn janszoon_walks_home_over_la_roussette_after_a_chase() {
-        // Live 2026-10-29 (run 6), on the real ground: Janszoon chased the player from his spawn
-        // toward (7086, 3179) and stood where the chase ended: his spawn is 2.3 m above that
-        // place, beyond `ResetToHome`'s 2 m vertical threshold.
+    /// Janszoon's spawn on the beach of the real level (live 2026-10-29).
+    const JANSZOON_SPAWN: [f32; 3] = [7056.03, 3137.94, 41.63];
+
+    /// The real ground of Janszoon's level.
+    type RealGround = nw_sim_core::LevelGround<Arc<nw_world::WorldFile>>;
+
+    /// Janszoon at his beach spawn and the real ground of his level.
+    fn janszoon_on_real_ground() -> (Mobs, RealGround) {
         use nw_sim_core::LevelGround;
         use nw_world::WorldFile;
         use nw_world::collision::LevelCollision;
@@ -2999,12 +3002,6 @@ mod retail_tests {
         const JANSZOON_ID: &str = "Corrupted_Sailor_StarterBeach_Named_00";
         const JANSZOON: &str = "7214ec6831b058f2a3b60f9b5c285e6c";
         const LEVEL: &str = "newworld_vitaeeterna";
-        const SPAWN: [f32; 3] = [7056.03, 3137.94, 41.63];
-        const AWAY: [f32; 2] = [7086.0, 3179.0];
-        const AGGRO_MS: u64 = 3_000;
-        const RUN_UNTIL_MS: u64 = 16_000;
-        const AFTER_MS: u64 = 60_000;
-        const PLAYER_SPEED_MPS: f32 = 4.5;
         let build = load_client_build(&repo().join(CLIENT_BUILD_CONFIG)).expect("client build");
         let content = repo().join("local-data/content");
         let world = WorldFile::load(
@@ -3021,33 +3018,55 @@ mod retail_tests {
             deferred: Vec::new(),
             ..collision
         }));
-        let ground = LevelGround::new(Arc::new(world), index);
         let spawn = VitalsSpawn {
             vitals_id: lowercase_crc32(JANSZOON_ID),
             level: TEST_LEVEL,
-            position: SPAWN,
+            position: JANSZOON_SPAWN,
             ..VitalsSpawn::default()
         };
-        let mut mobs = retail_mobs(vec![spawn], &[(JANSZOON_ID, asset(JANSZOON))]);
+        (
+            retail_mobs(vec![spawn], &[(JANSZOON_ID, asset(JANSZOON))]),
+            LevelGround::new(Arc::new(world), index),
+        )
+    }
+
+    /// A player on the real ground at `distance_m` from Janszoon's spawn, toward `bearing_rad`.
+    fn player_near_janszoon(ground: &RealGround, distance_m: f32, bearing_rad: f32) -> Seen {
+        let x = JANSZOON_SPAWN[0] + distance_m * bearing_rad.cos();
+        let y = JANSZOON_SPAWN[1] + distance_m * bearing_rad.sin();
+        Seen {
+            entity: PLAYER,
+            position: Position {
+                x,
+                y,
+                z: ground.height_at(x, y).unwrap_or(JANSZOON_SPAWN[2]),
+            },
+        }
+    }
+
+    #[test]
+    fn janszoon_walks_home_over_la_roussette_after_a_chase() {
+        // Live 2026-10-29 (run 6), on the real ground: Janszoon chased the player from his spawn
+        // toward (7086, 3179) and stood where the chase ended: his spawn is 2.3 m above that
+        // place, beyond `ResetToHome`'s 2 m vertical threshold.
+        const AWAY: [f32; 2] = [7086.0, 3179.0];
+        const AGGRO_MS: u64 = 3_000;
+        const RUN_UNTIL_MS: u64 = 16_000;
+        const AFTER_MS: u64 = 60_000;
+        const PLAYER_SPEED_MPS: f32 = 4.5;
+        const FIRST_STEP_M: f32 = 2.0;
+        let (mut mobs, ground) = janszoon_on_real_ground();
         let home = at(&mobs, 0);
-        let (dx, dy) = (AWAY[0] - SPAWN[0], AWAY[1] - SPAWN[1]);
-        let length = dx.hypot(dy);
+        let bearing = (AWAY[1] - JANSZOON_SPAWN[1]).atan2(AWAY[0] - JANSZOON_SPAWN[0]);
         let mut farthest: f32 = 0.0;
         let mut fragments = Vec::new();
         let mut serial = None;
         for now in (0..RUN_UNTIL_MS + AFTER_MS).step_by(TICK_MS as usize) {
             // Seconds of a test run.
             #[allow(clippy::cast_precision_loss)]
-            let run_m = 2.0 + PLAYER_SPEED_MPS * now.saturating_sub(AGGRO_MS) as f32 / 1_000.0;
-            let (x, y) = (
-                SPAWN[0] + dx / length * run_m,
-                SPAWN[1] + dy / length * run_m,
-            );
-            let z = ground.height_at(x, y).unwrap_or(SPAWN[2]);
-            let player = Seen {
-                entity: PLAYER,
-                position: Position { x, y, z },
-            };
+            let run_m =
+                FIRST_STEP_M + PLAYER_SPEED_MPS * now.saturating_sub(AGGRO_MS) as f32 / 1_000.0;
+            let player = player_near_janszoon(&ground, run_m, bearing);
             let seen: &[Seen] = if now < RUN_UNTIL_MS { &[player] } else { &[] };
             mobs.tick(seen, now, &ground, 1);
             farthest = farthest.max(at(&mobs, 0).horizontal_distance(home));
@@ -3059,6 +3078,128 @@ mod retail_tests {
             back < 2.0,
             "home: {back} m from spawn, farthest {farthest}; {fragments:?}"
         );
+    }
+
+    /// A player on the real ground `distance_m` in front of Janszoon (yaw 0 faces +y).
+    fn in_front_of_janszoon(mobs: &Mobs, ground: &RealGround, distance_m: f32) -> Seen {
+        let here = at(mobs, 0);
+        let yaw = mobs.tree(mob_entity(0)).expect("tree mob").yaw();
+        let x = here.x - distance_m * yaw.sin();
+        let y = here.y + distance_m * yaw.cos();
+        Seen {
+            entity: PLAYER,
+            position: Position {
+                x,
+                y,
+                z: ground.height_at(x, y).unwrap_or(here.z),
+            },
+        }
+    }
+
+    /// Ticks Janszoon from `from_ms` to `to_ms` with `player` (none when `None`), recording
+    /// the fragments he plays.
+    fn run_janszoon(
+        mobs: &mut Mobs,
+        ground: &RealGround,
+        player: impl Fn(&Mobs) -> Option<Seen>,
+        (from_ms, to_ms): (u64, u64),
+        trace: &mut (Option<u32>, Vec<String>),
+    ) {
+        for now in (from_ms..to_ms).step_by(TICK_MS as usize) {
+            let seen: Vec<Seen> = player(mobs).into_iter().collect();
+            mobs.tick(&seen, now, ground, 1);
+            played(mobs, mob_entity(0), &mut trace.0, &mut trace.1);
+        }
+    }
+
+    /// The ambient vision of his slice: a 120 degree cone of 5 m.
+    const JANSZOON_IN_FACE_M: f32 = 1.5;
+    /// How long he may take to aggro on a player in his face (his tree evaluates each second).
+    const JANSZOON_AGGRO_MS: u64 = 3_000;
+
+    #[test]
+    fn janszoon_aggroes_on_a_player_in_his_face_on_the_beach() {
+        // Live 2026-10-30: the player stood right in front of Janszoon and he did not aggro.
+        // He wanders near his spawn while alone; the player steps in front of him at each time.
+        const ALONE_MS: [u64; 4] = [0, 10_000, 20_000, 40_000];
+        for alone_ms in ALONE_MS {
+            let (mut mobs, ground) = janszoon_on_real_ground();
+            let mut trace = (None, Vec::new());
+            run_janszoon(&mut mobs, &ground, |_| None, (0, alone_ms), &mut trace);
+            let player = in_front_of_janszoon(&mobs, &ground, JANSZOON_IN_FACE_M);
+            let window = (alone_ms, alone_ms + JANSZOON_AGGRO_MS);
+            run_janszoon(&mut mobs, &ground, |_| Some(player), window, &mut trace);
+            assert_eq!(
+                mobs.target(mob_entity(0)),
+                Some(PLAYER),
+                "alone {alone_ms} ms: {:?}",
+                trace.1
+            );
+        }
+    }
+
+    #[test]
+    fn janszoon_keeps_a_player_ten_meters_away_and_aggroes_again_later() {
+        // Live 2026-10-30: the player backed off about 10 yards and Janszoon gave up and ran
+        // home (his combat leash is 45 m); later he did not aggro on the player in his face.
+        const BACKED_OFF_M: f32 = 10.0;
+        const HOLD_MS: u64 = 15_000;
+        const GONE_MS: u64 = 60_000;
+        const BEARINGS: u16 = 8;
+        for step in 0..BEARINGS {
+            let bearing = std::f32::consts::TAU * f32::from(step) / f32::from(BEARINGS);
+            let (mut mobs, ground) = janszoon_on_real_ground();
+            let mut trace = (None, Vec::new());
+            let close = in_front_of_janszoon(&mobs, &ground, JANSZOON_IN_FACE_M);
+            run_janszoon(
+                &mut mobs,
+                &ground,
+                |_| Some(close),
+                (0, JANSZOON_AGGRO_MS),
+                &mut trace,
+            );
+            assert_eq!(mobs.target(mob_entity(0)), Some(PLAYER), "{:?}", trace.1);
+            let away = player_near_janszoon(&ground, BACKED_OFF_M, bearing);
+            let mut now = JANSZOON_AGGRO_MS;
+            while now < JANSZOON_AGGRO_MS + HOLD_MS {
+                run_janszoon(
+                    &mut mobs,
+                    &ground,
+                    |_| Some(away),
+                    (now, now + TICK_MS),
+                    &mut trace,
+                );
+                now += TICK_MS;
+                assert_eq!(
+                    mobs.target(mob_entity(0)),
+                    Some(PLAYER),
+                    "bearing {bearing}, {now} ms: {:?}",
+                    trace.1
+                );
+            }
+            run_janszoon(
+                &mut mobs,
+                &ground,
+                |_| None,
+                (now, now + GONE_MS),
+                &mut trace,
+            );
+            now += GONE_MS;
+            let window = (now, now + JANSZOON_AGGRO_MS);
+            run_janszoon(
+                &mut mobs,
+                &ground,
+                |mobs| Some(in_front_of_janszoon(mobs, &ground, JANSZOON_IN_FACE_M)),
+                window,
+                &mut trace,
+            );
+            assert_eq!(
+                mobs.target(mob_entity(0)),
+                Some(PLAYER),
+                "bearing {bearing}, back in his face: {:?}",
+                trace.1
+            );
+        }
     }
 
     /// Run with `cargo test --release -p sim --features local-data hundred_thousand -- --ignored
