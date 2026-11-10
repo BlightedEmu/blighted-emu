@@ -5,15 +5,20 @@
 //!
 //! **Observed.** Matched against the `UiItemClass` of the items each retail call moved:
 //! 74 `UI_Consumable`, 86 `UI_Alchemy`, 90 `UI_Refining`, 92 `UI_Smelting`,
-//! 94 `UI_Leatherworking`, 95 `UI_Weaving`. In the client's `eItemClass` name table
-//! (`eItemClass_UI_Weapon` at index 63 to `eItemClass_UI_Catacombs` at 97) a number is its
-//! name's index plus [`NAME_INDEX_OFFSET`] for every match but `UI_Alchemy` (index 76, number
-//! 86). **Best guess:** the offset holds up to [`LAST_LOW_NUMBER`] and from
-//! [`FIRST_HIGH_NUMBER`] on (71 `UI_Weapon` and 72 `UI_Armor` follow it); the numbers between
-//! are not known except 86, and match no class (needs live check).
+//! 94 `UI_Leatherworking`, 95 `UI_Weaving`; 71 `UI_Weapon` and 72 `UI_Armor` (live).
+//!
+//! The other numbers are from the client (build 25810808). It registers each `eItemClass` name
+//! with a function of its own, and those functions lie in the order of the numbers, one every
+//! 1120 bytes from `eItemClass_FoodForHorse` to `eItemClass_LootContainer` (`UI_Weapon` at
+//! 0x144c7e1e0, `UI_Dye` at 0x144c81200, `UI_Alchemy` at 0x144c82380). That order gives all 8
+//! observed numbers. It is not the order of the client's name strings, which has `UI_Cooking`,
+//! `UI_Furniture`, `UI_OutpostRush` and `UI_Alchemy` before `UI_Bait` and `UI_Dye`: a table in
+//! string order left the "move all" and "take all" of 75 to 89 without a class (live
+//! 2026-11-10: the dye section sent 82, the cooking section 83, and nothing moved).
+//! `eItemClass_UI_Catacombs` has no function in that run; its number is Unknown.
 
-/// The `UiItemClass` names in the client's `eItemClass` order, from index [`FIRST_UI_INDEX`].
-const UI_NAMES: [&str; 35] = [
+/// The `UiItemClass` names in the order of their numbers, from [`FIRST_NUMBER`].
+const UI_NAMES: [&str; 34] = [
     "UI_Weapon",
     "UI_Armor",
     "UI_Ammo",
@@ -24,12 +29,12 @@ const UI_NAMES: [&str; 35] = [
     "UI_Augments",
     "UI_Lore",
     "UI_RepairKit",
+    "UI_Bait",
+    "UI_Dye",
     "UI_Cooking",
     "UI_Furniture",
     "UI_OutpostRush",
     "UI_Alchemy",
-    "UI_Bait",
-    "UI_Dye",
     "UI_TuningOrbs",
     "UI_Quest",
     "UI_JewelCrafting",
@@ -48,30 +53,13 @@ const UI_NAMES: [&str; 35] = [
     "UI_Runes",
     "UI_MountItem",
     "UI_PatternItem",
-    "UI_Catacombs",
 ];
-/// The `eItemClass` index of the first UI class (`eItemClass_UI_Weapon`).
-const FIRST_UI_INDEX: u64 = 63;
-/// A wire number is its name's index plus this (Observed in 7 of 8 matches).
-const NAME_INDEX_OFFSET: u64 = 8;
-/// The highest number below the unsettled range.
-const LAST_LOW_NUMBER: u64 = 74;
-/// The lowest number above the unsettled range.
-const FIRST_HIGH_NUMBER: u64 = 90;
-/// The one number of the unsettled range that a retail call settled.
-const ALCHEMY_NUMBER: u64 = 86;
-/// The class [`ALCHEMY_NUMBER`] names.
-const ALCHEMY_NAME: &str = "UI_Alchemy";
+/// The number of the first UI class (`eItemClass_UI_Weapon`).
+const FIRST_NUMBER: u64 = 71;
 
 /// The `UiItemClass` name of wire number `number`; `None` for a number no class is known for.
 pub fn ui_item_class(number: u64) -> Option<&'static str> {
-    if number == ALCHEMY_NUMBER {
-        return Some(ALCHEMY_NAME);
-    }
-    if number > LAST_LOW_NUMBER && number < FIRST_HIGH_NUMBER {
-        return None;
-    }
-    let index = number.checked_sub(NAME_INDEX_OFFSET + FIRST_UI_INDEX)?;
+    let index = number.checked_sub(FIRST_NUMBER)?;
     UI_NAMES.get(usize::try_from(index).ok()?).copied()
 }
 
@@ -100,11 +88,19 @@ mod tests {
             (94, "UI_Leatherworking"),
             (95, "UI_Weaving"),
         ] {
-            assert_eq!(ui_item_class(number), Some(name), "{number}");
+            assert_eq!(ui_item_class(number), Some(name), "retail {number}");
         }
-        assert_eq!(ui_item_class(80), None, "unsettled");
+        for (number, name) in [
+            (75, "UI_CraftingModifiers"),
+            (82, "UI_Dye"),
+            (83, "UI_Cooking"),
+            (98, "UI_BasicFood"),
+            (104, "UI_PatternItem"),
+        ] {
+            assert_eq!(ui_item_class(number), Some(name), "client {number}");
+        }
         assert_eq!(ui_item_class(70), None, "below the UI classes");
-        assert_eq!(ui_item_class(200), None);
+        assert_eq!(ui_item_class(105), None, "above the UI classes");
         assert!(is_of_ui_class(Some("ui_weapon"), 71));
         assert!(!is_of_ui_class(None, 71));
     }
