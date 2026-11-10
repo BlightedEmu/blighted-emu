@@ -18,6 +18,27 @@ const TOOL_REQUIRED: &str = "ToolRequired";
 const BY_HAND: &str = "None";
 /// Milliseconds per second.
 const MS_PER_SECOND: f64 = 1_000.0;
+/// The tradeskills of the gatherables whose node entity holds its gatherable controller in bundle
+/// slot 3 and its interact in slot 4: every card of the 110 kinds of these tradeskills in 2,265
+/// retail ledgers (scan of 2026-11-10).
+const PLANT_LAYOUT_TRADESKILLS: [&str; 3] = ["Harvesting", "Logging", "Mining"];
+/// The gatherables of no such tradeskill whose every retail card had the same slots (the same
+/// scan). Doors, locks, banners and cannons of no tradeskill had other slots, and some changed
+/// them from one placement to the next (the Fire Cannon of `12A_MSQ_08_DestroyRune`: controller
+/// slot 2, interact slot 6).
+const PLANT_LAYOUT_OTHERS: [&str; 11] = [
+    "0508_HeartDevice",
+    "AzothWater",
+    "CesspoolLarge",
+    "CesspoolMedium",
+    "CesspoolSmall",
+    "GuanoLarge",
+    "GuanoSmall",
+    "HoneyLarge",
+    "HoneyMedium",
+    "NutSmall",
+    "SingleStone",
+];
 
 /// One gatherable of `javelindata_gatherables`.
 #[derive(Debug, Clone, PartialEq)]
@@ -55,6 +76,19 @@ impl Gatherable {
     /// It is a corpse to skin (`Tradeskill` Skinning).
     pub fn skinning(&self) -> bool {
         self.tradeskill.as_deref() == Some(SKINNING)
+    }
+
+    /// Its node entity has the gatherable controller in bundle slot 3 and the interact in slot 4,
+    /// so the server can send its node state. A client crashed when a state went into a slot
+    /// that held another class (2026-11-10, the Fire Cannon); the server sends none for the
+    /// others, and the client keeps its own.
+    pub fn plant_layout(&self) -> bool {
+        self.tradeskill
+            .as_deref()
+            .is_some_and(|tradeskill| PLANT_LAYOUT_TRADESKILLS.contains(&tradeskill))
+            || PLANT_LAYOUT_OTHERS
+                .iter()
+                .any(|id| id.eq_ignore_ascii_case(&self.id))
     }
 }
 
@@ -563,6 +597,33 @@ impl CrateLoot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn gatherable_of(id: &str, tradeskill: Option<&str>) -> Gatherable {
+        Gatherable {
+            id: id.to_owned(),
+            gather_ms: 0,
+            respawn_ms: (0, 0),
+            loot_table: None,
+            loot_container: false,
+            tradeskill: tradeskill.map(str::to_owned),
+            tool_required: false,
+            by_hand: true,
+            game_event: None,
+        }
+    }
+
+    #[test]
+    fn only_gatherables_of_the_plant_slots_have_the_plant_layout() {
+        assert!(gatherable_of("HempT1", Some("Harvesting")).plant_layout());
+        assert!(gatherable_of("IronVeinFinishSmall", Some("Mining")).plant_layout());
+        assert!(gatherable_of("honeylarge", Some("None")).plant_layout(), "any case");
+        assert!(
+            !gatherable_of("Gimmick_BreakingWallsCannon_Vignette", Some("None")).plant_layout(),
+            "the Fire Cannon has its controller in slot 2"
+        );
+        assert!(!gatherable_of("17dw_DoorLarge", None).plant_layout());
+        assert!(!gatherable_of("16BS_AncientGlyphLock", Some("AzothStaff")).plant_layout());
+    }
 
     #[test]
     fn a_gatherable_is_found_by_the_crc_of_its_lowercase_id() {

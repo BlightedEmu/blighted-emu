@@ -229,7 +229,7 @@ impl SimWorld {
             (Some(mob), _) => self.start_skinning(mob, number),
             (None, Some((point, at))) => self
                 .nodes
-                .start(request.target, point, at, number)
+                .start(request.target, point, at, number, gatherable.plant_layout())
                 .map_err(|busy| tracing::debug!(player = number, ?busy, "gather refused")),
             (None, None) => Err(()),
         };
@@ -876,6 +876,8 @@ struct Node {
     gatherer: Option<u64>,
     /// When it grows back, while it is depleted.
     respawn_at_ms: Option<u64>,
+    /// Its state goes to the players near it ([`Gatherable::plant_layout`]).
+    sent: bool,
     /// Counts its state changes, so each player gets each one once.
     version: u32,
 }
@@ -945,13 +947,14 @@ impl Nodes {
     /// Player `player` starts to gather node `gde_ref`, the level's gatherable point `point` at
     /// `position`; refused while another player gathers it, while it is depleted, and when the
     /// point and the node id do not name the same node they named first (a new id cannot skip a
-    /// depleted node).
+    /// depleted node). `sent`: its state goes to the players near it.
     pub(super) fn start(
         &mut self,
         gde_ref: [u8; RAW_ID_LEN],
         point: usize,
         position: Position,
         player: u64,
+        sent: bool,
     ) -> Result<(), NodeBusy> {
         let index = match (self.by_ref.get(&gde_ref), self.by_point.get(&point)) {
             (Some(by_ref), Some(by_point)) if by_ref == by_point => *by_ref,
@@ -961,6 +964,7 @@ impl Nodes {
                     position,
                     gatherer: None,
                     respawn_at_ms: None,
+                    sent,
                     version: 0,
                 });
                 let index = self.nodes.len() - 1;
@@ -1052,7 +1056,7 @@ impl Nodes {
         (0_u64..)
             .zip(&self.nodes)
             .filter(move |(_, node)| {
-                node.version > 0 && node.position.horizontal_distance(position) <= radius_m
+                node.sent && node.version > 0 && node.position.horizontal_distance(position) <= radius_m
             })
             .map(|(index, _)| GATHERABLE_ENTITY_BASE + index)
     }
@@ -1099,6 +1103,8 @@ pub(crate) mod tests {
     const FLINT: [u8; RAW_ID_LEN] = [0x5b; RAW_ID_LEN];
     /// The level point of the flint node.
     const FLINT_POINT: usize = 0;
+    /// The node state of the test nodes goes to the players near them.
+    const SENT: bool = true;
     /// The interest radius of the test views.
     const RADIUS_M: f32 = 100.0;
     const AT: Position = Position {
@@ -1120,27 +1126,46 @@ pub(crate) mod tests {
     fn a_level_point_keeps_the_node_id_it_first_had() {
         const OTHER: [u8; RAW_ID_LEN] = [0x6c; RAW_ID_LEN];
         let mut nodes = Nodes::default();
-        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER), Ok(()));
+        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT), Ok(()));
         nodes.deplete(&FLINT, RESPAWN_AT_MS);
         assert_eq!(
-            nodes.start(OTHER, FLINT_POINT, AT, PLAYER),
+            nodes.start(OTHER, FLINT_POINT, AT, PLAYER, SENT),
             Err(NodeBusy::OtherNode),
             "a new id does not skip the depleted node"
         );
         assert_eq!(
-            nodes.start(FLINT, FLINT_POINT + 1, AT, PLAYER),
+            nodes.start(FLINT, FLINT_POINT + 1, AT, PLAYER, SENT),
             Err(NodeBusy::OtherNode),
             "the id of one node does not gather another"
         );
-        assert_eq!(nodes.start(OTHER, FLINT_POINT + 1, AT, PLAYER), Ok(()));
+        assert_eq!(nodes.start(OTHER, FLINT_POINT + 1, AT, PLAYER, SENT), Ok(()));
+    }
+
+    #[test]
+    fn a_node_of_another_layout_is_never_sent() {
+        let mut nodes = Nodes::default();
+        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER, false), Ok(()));
+        nodes.deplete(&FLINT, RESPAWN_AT_MS);
+        assert_eq!(
+            nodes.start(FLINT, FLINT_POINT, AT, PLAYER, false),
+            Err(NodeBusy::Depleted),
+            "the server still keeps it depleted"
+        );
+        assert_eq!(
+            nodes.numbers_near(AT, RADIUS_M).count(),
+            0,
+            "no card for a node whose slots the server does not know"
+        );
+        nodes.tick(RESPAWN_AT_MS);
+        assert_eq!(nodes.numbers_near(AT, RADIUS_M).count(), 0, "nor after it grows back");
     }
 
     #[test]
     fn a_node_is_gathered_once_until_it_grows_back() {
         let mut nodes = Nodes::default();
-        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER), Ok(()));
+        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT), Ok(()));
         assert_eq!(
-            nodes.start(FLINT, FLINT_POINT, AT, PLAYER + 1),
+            nodes.start(FLINT, FLINT_POINT, AT, PLAYER + 1, SENT),
             Err(NodeBusy::Gathered)
         );
         assert_eq!(
@@ -1150,7 +1175,7 @@ pub(crate) mod tests {
         );
         nodes.deplete(&FLINT, RESPAWN_AT_MS);
         assert_eq!(
-            nodes.start(FLINT, FLINT_POINT, AT, PLAYER),
+            nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT),
             Err(NodeBusy::Depleted)
         );
         let number = GATHERABLE_ENTITY_BASE;
@@ -1170,17 +1195,17 @@ pub(crate) mod tests {
         assert_eq!(nodes.group(number, kept, &mut sent), None, "sent once");
         nodes.tick(RESPAWN_AT_MS - 1);
         assert_eq!(
-            nodes.start(FLINT, FLINT_POINT, AT, PLAYER),
+            nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT),
             Err(NodeBusy::Depleted)
         );
         nodes.tick(RESPAWN_AT_MS);
         let grown = nodes.group(number, kept, &mut sent).expect("change");
         assert_eq!(grown.members.len(), 2, "the states without the card");
         assert_eq!(state_of(&grown), Some(HEALTHY));
-        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER + 1), Ok(()));
+        assert_eq!(nodes.start(FLINT, FLINT_POINT, AT, PLAYER + 1, SENT), Ok(()));
         nodes.release(&FLINT);
         assert_eq!(
-            nodes.start(FLINT, FLINT_POINT, AT, PLAYER),
+            nodes.start(FLINT, FLINT_POINT, AT, PLAYER, SENT),
             Ok(()),
             "a cancel frees it"
         );
@@ -1727,7 +1752,7 @@ pub(crate) mod tests {
         let player = world.world.get::<Player>(entity).expect("player");
         assert!(player.loot.opened(&target), "the opener's tracker holds it");
         assert_eq!(
-            world.nodes.start(target, FLINT_POINT, AT, PLAYER),
+            world.nodes.start(target, FLINT_POINT, AT, PLAYER, SENT),
             Ok(()),
             "the chest is not depleted for others"
         );
