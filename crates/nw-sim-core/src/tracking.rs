@@ -566,22 +566,34 @@ impl TrackedBody {
             position.x = before.x + dx * share;
             position.y = before.y + dy * share;
         }
+        let seen_at = Position {
+            z: seen.at.z,
+            ..position
+        };
+        let walking_height = last_seen.is_none_or(|last| {
+            (last.z - seen.at.z) / input.character.dt_s <= walking_descent_mps()
+        });
         if self.character.is_jumping() {
-            // A jump keeps its own height; the camera only moves it on the ground plane.
-            self.character.place(position);
+            if self.on_lacking_floor
+                && walking_height
+                && self.character.is_past_jump_top()
+                && position.z <= seen.at.z
+            {
+                // A jump from a floor the level lacks comes down on that floor: the physics
+                // knows no floor there and would bring the body down to the level's floor under
+                // it, a fall the client never made.
+                self.character.land_at(seen_at);
+            } else {
+                // A jump keeps its own height; the camera only moves it on the ground plane.
+                self.character.place(position);
+            }
         } else {
-            let seen_at = Position {
-                z: seen.at.z,
-                ..position
-            };
-            let walking_height = last_seen.is_none_or(|last| {
-                (last.z - seen.at.z) / input.character.dt_s <= walking_descent_mps()
-            });
             // An action moves the camera's body off the body's height (run 14: 0.55 m under
             // the deck; run 19: 1.5 m, past the step-up search, and the body went down through
             // the deck to the sea). The floor is searched from the higher of the two bodies'
             // feet, and a body on a floor the level lacks keeps its own height in an action.
-            let held = std::mem::take(&mut self.on_lacking_floor) && acting;
+            let was_on_lacking_floor = std::mem::take(&mut self.on_lacking_floor);
+            let held = was_on_lacking_floor && acting;
             let height = if held { position.z } else { seen.at.z };
             // A rider's camera sits on the saddle, about 2 m above a walker's: its height picks
             // no floor and gives the body none (replay of retail Hermit's Rally: with it the
@@ -609,6 +621,16 @@ impl TrackedBody {
                         ..position
                     });
                     self.on_lacking_floor = true;
+                }
+                // Its client left a floor the level lacks and comes down faster than a walk:
+                // the body falls from there by the physics (its landing is the fall damage's
+                // drop), and does not go to the level's floor in one record.
+                Some(floor)
+                    if was_on_lacking_floor
+                        && !falling
+                        && position.z - floor > CAMERA_FLOOR_SPREAD_M =>
+                {
+                    self.character.fall_from(position);
                 }
                 Some(floor) if !falling || position.z <= floor => {
                     position.z = floor;
@@ -1155,6 +1177,99 @@ mod tests {
             "it landed: {:?}",
             body.position()
         );
+    }
+
+    #[test]
+    fn a_client_that_runs_off_a_floor_the_level_lacks_falls_by_the_physics() {
+        // The client stands on a wall that the server's level does not have (a town building
+        // spawned by a card) and runs off it. The body went to the ground in one record, on a
+        // floor the whole time, so its landing had no drop and no fall damage (live 2026-11-10).
+        /// The least of the wall's height that the body's fall covers: its first part follows
+        /// the camera down until the camera sinks faster than a walk.
+        const LEAST_FALL_M: f32 = LEDGE_M - 3.0;
+        let top = Position {
+            z: GROUND_Z + LEDGE_M,
+            ..start()
+        };
+        let mut body = TrackedBody::new(top);
+        let mut client = Character::new(top);
+        let mut fall_top: Option<f32> = None;
+        for _ in 0..120 {
+            client.step(
+                CharacterInput {
+                    intent: Intent {
+                        forward: 1,
+                        ..Intent::default()
+                    },
+                    yaw: 0.0,
+                    dt_s: DT,
+                },
+                &Ledge,
+                SEA,
+            );
+            let tracked = body.record(
+                input(1, view_of(client.position(), BOOM, client.velocity())),
+                &Flat,
+                SEA,
+            );
+            if !tracked.on_floor {
+                fall_top = Some(fall_top.map_or(tracked.position.z, |top| {
+                    top.max(tracked.position.z)
+                }));
+            }
+        }
+        let landed = body.position();
+        assert!((landed.z - GROUND_Z).abs() < 1e-3, "it landed: {landed:?}");
+        let fall_top = fall_top.expect("the body fell");
+        assert!(
+            fall_top - landed.z > LEAST_FALL_M,
+            "the fall has its height: from {fall_top} to {}",
+            landed.z
+        );
+    }
+
+    #[test]
+    fn a_jump_on_a_floor_the_level_lacks_comes_down_on_that_floor() {
+        let top = Position {
+            z: GROUND_Z + LEDGE_M,
+            ..start()
+        };
+        let keys = |jump: bool| CharacterInput {
+            intent: Intent {
+                jump,
+                ..Intent::default()
+            },
+            yaw: 0.0,
+            dt_s: DT,
+        };
+        /// A ground at the wall's height everywhere: the client's own floor.
+        struct Wall;
+        impl Ground for Wall {
+            fn height_at(&self, _: f32, _: f32) -> Option<f32> {
+                Some(GROUND_Z + LEDGE_M)
+            }
+        }
+        let mut body = TrackedBody::new(top);
+        let mut client = Character::new(top);
+        let mut lowest = top.z;
+        for record in 0..80 {
+            let jump = record == 10;
+            client.step(keys(jump), &Wall, SEA);
+            let tracked = body.record(
+                TrackInput {
+                    character: keys(jump),
+                    ..input(0, view_of(client.position(), BOOM, client.velocity()))
+                },
+                &Flat,
+                SEA,
+            );
+            lowest = lowest.min(tracked.position.z);
+        }
+        assert!(
+            top.z - lowest < CAMERA_FLOOR_SPREAD_M,
+            "the body stayed on the wall: lowest {lowest}"
+        );
+        assert!(body.is_grounded(), "it landed on the wall");
     }
 
     /// Stairs: a floor that rises 0.25 m per 0.5 m north of [`start`], over the flat ground.

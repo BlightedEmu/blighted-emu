@@ -928,6 +928,11 @@ impl Character {
         )
     }
 
+    /// Whether it comes down in a jump: past the top of it.
+    pub fn is_past_jump_top(&self) -> bool {
+        matches!(self.vertical, Vertical::Jumping(rise) if rise < 0.0)
+    }
+
     /// Whether it stands on a floor: not in a jump and not falling.
     pub const fn is_grounded(&self) -> bool {
         matches!(self.vertical, Vertical::Grounded)
